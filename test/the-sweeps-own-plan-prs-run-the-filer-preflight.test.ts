@@ -273,3 +273,43 @@ test("W1-T5405: the uninjected preflight materializes the rung's real commit and
   assert.ok(!checks.includes("tree"), "the commit was materialized, not skipped");
   assert.equal(repo.git("worktree", "list").split("\n").length, 1, "the preflight's own tree and the rung's worktree are both removed");
 });
+
+// ── a preflight check that ran out of its load-scaled budget ─────────────────────────────────────
+
+const TIMED_OUT: PlanPrPreflightResult = {
+  ok: true,
+  failures: [],
+  unreadable: [],
+  timedOut: [{ check: "proof-discrimination", firstLine: "timed out after 9 ms (its budget scales with host load) — no verdict" }],
+};
+
+test("a timed-out preflight on the refusal-amendment rung pushes nothing, records the timeout, and is asked again next pass", async () => {
+  const f = effectsFixture(amendmentRoot(), TIMED_OUT);
+  appendLedger(f.ledger, { run_id: RUN, task_id: TASK, step: "verdict", verdict: "no_pr", report_excerpt: REFUSAL, ts: VERDICT_TS });
+
+  await withLiveWritesAllowed(() => runSweep([], sweepDeps(f)));
+
+  assert.equal(f.preflightCalls.length, 1, "no base probe: a timeout is no refusal to attribute to main");
+  assert.deepEqual(f.pushes, [], "a timed-out preflight pushes nothing");
+  assert.equal(f.creates().length, 0);
+  const timedOut = rows(f.ledger).filter((r) => r.step === "plan_pr.preflight_timed_out");
+  assert.deepEqual(timedOut.map((r) => [r.lane, r.timed_out]), [["refusal_amendment", TIMED_OUT.timedOut]], "recorded as a timeout");
+  assert.equal(rows(f.ledger).filter((r) => r.step === REFUSAL_AMENDMENT_STEP).length, 0, "no outcome settles the source run");
+
+  await withLiveWritesAllowed(() => runSweep([], sweepDeps(f)));
+  assert.equal(f.preflightCalls.length, 2, "the next pass asks again");
+});
+
+test("a timed-out preflight on the plan-repair rung pushes nothing, records the timeout, and spends no strike", async () => {
+  const f = effectsFixture(repairRoot(), TIMED_OUT);
+
+  const result = await withLiveWritesAllowed(() => f.effects.dispatchPlanOnlyRepair!(stalePr(), PROOF));
+
+  assert.equal(result, true);
+  assert.deepEqual(f.pushes, [], "a timed-out preflight pushes nothing");
+  assert.equal(f.creates().length, 0);
+  assert.deepEqual(f.removed, f.worktrees, "the worktree is still disposed");
+  const timedOut = rows(f.ledger).filter((r) => r.step === "plan_pr.preflight_timed_out");
+  assert.deepEqual(timedOut.map((r) => [r.lane, r.task_id, r.timed_out]), [["plan_repair", TASK, TIMED_OUT.timedOut]]);
+  assert.equal(priorPlanRepairStrikesFromLedger(stalePr(), rows(f.ledger)), 0, "a timeout spends no MAX_PLAN_REPAIR_STRIKES strike");
+});

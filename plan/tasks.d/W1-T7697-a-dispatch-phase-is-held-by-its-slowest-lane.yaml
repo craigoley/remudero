@@ -1,0 +1,87 @@
+- id: W1-T7697
+  title: "A DISPATCH PHASE IS HELD BY ITS SLOWEST LANE — on 2026-10-10 one 66-min implement worker plus a pre-open repair held a freshness restart decided at 11:04 until 12:16:48, and two of three lanes sat idle ~75 min with no run.start, because a run yields to a pending restart only at its CI wait"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — a pending restart and a slow lane must not idle the other lanes
+  band_meaning: span
+  origin: "operator session 2026-10-10: core daemon ledger 10:53-12:16Z, lane 1 W1-T5866"
+  plan_refs: [W1-T5761, W1-T6274, W1-T5308, W1-T3793, W1-T5345, W1-T4416, W1-T4662, W1-T147]
+  files: [src/lib/daemon.ts, src/run-task.ts, test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-10 in the core daemon's ledger. Lane 1 ran W1-T5866 from 10:53Z. Its implement
+    worker ran 66 min, the harness pre-open gate then failed, and a repair worker (implement.preopen_continued)
+    started. A freshness restart was decided at 11:04Z and executed only at 12:16:48Z. Two of the three lanes
+    sat idle for about 75 min, and no run.start happened from 10:53Z until after 12:16Z.
+    READ on origin/main dbca9031a, three mechanisms combine:
+      - src/lib/daemon.ts runLanePool resolves only when EVERY lane settles, so the dispatch phase (and the
+        tick, and the restart that waits on it) ends with its slowest lane.
+      - refillLane closes refill once the phase is older than DISPATCH_PHASE_REFILL_BOUND_MS (a fixed
+        20 min, W1-T5761, reason "phase bound"), and once a freshness restart is latched it closes with
+        "stale code" (W1-T6274, both in refillLane and actOnDispatchFreshness). Every freed lane after
+        that idles until the slowest lane settles.
+      - src/run-task.ts yields to a pending restart only at an external wait: the first CI poll's
+        externalWaitFreshness / handOffAtPrOpen and the externalWaitRecycle polls (run.freshness_handoff,
+        W1-T3793, W1-T5345). A run still inside its worker, its pre-open gate repair (the
+        `gate.kind === "fail"` spawn after runPreopenGate) or a wip-checkpoint resume (judgeCheckpointStop)
+        never sees the restart, so the drain lasts as long as the remaining worker time.
+    So fleet throughput is set by the slowest lane: one long run idles every other lane for the rest of
+    its life once either closure fires.
+    RELATED, already merged: W1-T5308 (freshness age pressure: a long pool no longer starves the
+    freshness CHECK, but the restart it decides still waits on the pool), W1-T6274 (a draining daemon
+    dispatches no new run; this task must keep that safety), #10510 (adaptive WIP bound: the governor
+    follows flow and headroom; reuse its style of signal, not a new constant). #10638 (restart-waiting
+    ledger rows) was in flight at filing; if merged, its rows are the observability for this change.
+    OVERLAP. lint-plan reports W1-T147 (the overnight chaos drill) as sharing src/lib/daemon.ts and src/run-task.ts.
+    That is the whole-file surface only: W1-T147 injects faults and checks recovery rows, and does not touch
+    lane refill or run yield boundaries, so neither shard supersedes the other.
+  design: |
+    Operator ruling: no hard thresholds. Nothing below may add a new fixed cap; a bound must be derived from
+    observed data and degrade gracefully.
+    1. A run yields at its NEXT SAFE BOUNDARY when a restart is pending, not only at its CI wait. Thread the
+       same pending-restart reading the CI wait uses (externalWaitFreshness / externalWaitRecycle, or one
+       predicate built from them) to the boundaries between workers in runTask: before the pre-open gate
+       repair spawn, before each wip-checkpoint resume, and at any other point where the worker is not running
+       and the work is on disk. At such a boundary, commit/push what the worker left (the existing harness
+       checkpoint path) so the next daemon resumes the branch, log run.freshness_handoff with a `waiting_on`
+       naming the boundary (e.g. "preopen_gate", "checkpoint"), and return verdict handed_off with reason
+       freshness_yield, exactly as the CI-wait handoff does (W1-T4662: a yield is a handoff, not a transient
+       failure, so refill and the attempt count treat it as today).
+    2. Freed lanes are not idled by one slow sibling. Replace the fixed DISPATCH_PHASE_REFILL_BOUND_MS
+       closure with an adaptive one: derive the phase's refill bound from observed run lengths (e.g. the recent
+       run.start-to-verdict distribution, or the in-flight lanes' own ages against it), so a phase keeps
+       refilling while its slow lane is an outlier and the tick's top still runs on a cadence the fleet
+       measured. Keep a documented fallback when there is no history. Alternatively (the implementer chooses,
+       and the PR body says which), let the tick's top run while lanes are in flight so the phase no longer
+       needs a bound at all.
+    3. A latched restart drains quickly, and does not idle lanes for a lane that cannot yield. With (1) in
+       place, every lane reaches a yield boundary within one worker turn. If a sibling still cannot yield,
+       a freed lane may keep refilling on the old code until the restart is actually ready (every other lane
+       settled or yielded); a refill admitted that way must itself yield at its first safe boundary. Keep
+       W1-T6274's guarantee for the common case: once all in-flight lanes can yield, no new run starts.
+    Tests (new file test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts, `test(` titles verbatim as
+    in the proofs below). Drive runTask with injected spawn/gate seams for (1), and runLanePool/refillLane
+    through runDaemon with a fake clock for (2). One scenario test replays 10-10's shape: three lanes, lane 1's
+    worker runs 66 fake minutes and then its pre-open gate fails, with a restart decided at minute 11. Assert
+    lane 1 hands off at the pre-open gate with no repair spawn, and lanes 2-3 are refilled past the old 20 min
+    mark while lane 1 runs.
+  acceptance:
+    - claim: "a run with a pending restart yields at its pre-open gate failure instead of spawning a repair worker"
+      proof: 'grep: test("W1-T7697: a run with a restart pending yields at its pre-open gate" in test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts'
+    - claim: "a run with a pending restart yields at a wip checkpoint instead of resuming its worker"
+      proof: 'grep: test("W1-T7697: a run with a restart pending yields at a checkpoint resume" in test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts'
+    - claim: "freed lanes keep refilling past the old fixed 20 min bound while one slow lane holds the phase"
+      proof: 'grep: test("W1-T7697: freed lanes keep refilling while one slow lane holds the phase" in test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts'
+    - claim: "the refill bound follows observed run lengths, so two different histories give two different bounds"
+      proof: 'grep: test("W1-T7697: the refill bound follows observed run lengths" in test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts'
+  falsifier: |
+    Leave runTask yielding only at its CI wait: the pre-open gate test sees a repair spawn and no handoff, and
+    the checkpoint test sees a resumed worker. Leave the fixed 20 min closure in refillLane: the slow-lane test
+    sees freed lanes held with reason "phase bound" at minute 20, and the history test reads the same bound
+    for both histories.
