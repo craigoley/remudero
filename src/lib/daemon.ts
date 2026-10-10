@@ -2837,6 +2837,8 @@ export async function runDaemon(
   // the moment it returns; each completed pass is queued once and consumed, in order, by the next tick.
   let backgroundSweep: Promise<void> | undefined;
   let repositoryMaintenanceTimer: ReturnType<typeof setInterval> | undefined;
+  let dueRungsTimer: ReturnType<typeof setInterval> | undefined;
+  let dueRungsStopped = false;
   let repositoryMaintenanceStopped = false;
   let repositoryMaintenanceQueueBusy = false;
   let repositoryMaintenanceLaneCount = () => 0;
@@ -3153,6 +3155,8 @@ export async function runDaemon(
   };
   const summary = async (stopReason: DaemonStopReason, stopDetail?: string): Promise<DaemonSummary> => {
     repositoryMaintenanceStopped = true;
+    dueRungsStopped = true;
+    if (dueRungsTimer) clearInterval(dueRungsTimer);
     if (repositoryMaintenanceTimer) clearInterval(repositoryMaintenanceTimer);
     if (pauseReview.clock) await stopPauseReviewClock();
     prActionPumpRef.stop();
@@ -3667,6 +3671,428 @@ export async function runDaemon(
     repositoryMaintenanceTimer = setInterval(repositoryMaintenanceTick, pollIntervalMs);
   };
 
+  // W1-T7690 — the wall-clock-due rungs also run on their own timer: measured 2026-10-10, a freed
+  // measurement slot waited 18+ minutes for a cycle that was inside dispatch. The outer cycle keeps its call
+  // (ordering consumers unchanged); both callers share one single-flight slot per rung, and only each
+  // rung's own policy bound paces it.
+  let ledgerCompactionDecision: LedgerCompactionDecision | undefined;
+  type RungSteps<R> = Generator<unknown, R, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  /** Steps YIELD each promise they would await: the outer cycle drives them in its own frame (the old inline
+   *  await timing, which the inter-phase review clock's stop ordering needs); the timer uses this. */
+  const driveRungSteps = async <R>(steps: RungSteps<R>): Promise<R> => {
+    let value: unknown;
+    let error: unknown;
+    let threw = false;
+    for (;;) {
+      const step = threw ? steps.throw(error) : steps.next(value);
+      if (step.done) return step.value;
+      try {
+        value = await step.value;
+        threw = false;
+      } catch (e) {
+        log("daemon.due_rungs.step_rejected", { error: String((e as Error)?.message ?? e) });
+        error = e;
+        threw = true;
+      }
+    }
+  };
+  /** One rung's single-flight slot. `begin` is the outer cycle's claim; `start` is the timer's. */
+  const rungFlight = <R>(steps: () => RungSteps<R>, idle: R) => {
+    let current: Promise<R> | undefined;
+    return {
+      steps,
+      joined: (): Promise<R> | undefined => current,
+      begin: (): ((result?: R) => void) => {
+        let done!: (result: R) => void;
+        const slot = new Promise<R>((resolve) => { done = resolve; });
+        current = slot;
+        return (result = idle) => { if (current === slot) current = undefined; done(result); };
+      },
+      start: (): Promise<R> => {
+        if (current) return current;
+        const run = driveRungSteps(steps());
+        current = run;
+        const clear = (): void => { if (current === run) current = undefined; };
+        run.then(clear, clear);
+        return run;
+      },
+    };
+  };
+  const readOnlyRungs = rungFlight(function* (): RungSteps<void> {
+    // Measurement cadence: "is this system getting better". Same once-per-iteration cadence; the check's
+    // own policy-data bound throttles the actual run, so most ticks decide not to fire at no cost.
+    // Best-effort, and a fired run never gates dispatch, fails a check or changes a verdict (W1-T1259).
+    if (deps.checkMeasurementCadence) {
+      let decision: MeasurementCadenceDecision | undefined;
+      try {
+        decision = deps.checkMeasurementCadence();
+      } catch (e) {
+        log("measurement_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      const cadenceChild = deps.measurementCadenceChild;
+      if (cadenceChild && !detachedActionInFlight("measurement-cadence") && (decision?.fire || cadenceChild.pending())) {
+        startMeasurementCadenceChild(cadenceChild, decision?.fire === true, decision?.reason, log);
+      } else if (decision?.fire) {
+        // W1-T4034: the cadence runs detached so the sweep keeps its turn. Review admission happens
+        // only inside a sweep pass and a sweep pass only happens once per daemon iteration, so an
+        // inline await here cost the review lane this cadence's whole duration — measured
+        // 2026-09-22, its verify-human leg alone ran 8m38s inside a 21.5-minute iteration in which
+        // no sweep ran and two already-green PRs waited 42 and 29 minutes for a 21-second review.
+        // Nothing downstream reads the result (best-effort by contract, W1-T1259), so the await
+        // bought the loop nothing. Same shape as `ci-learning` below, guard included.
+        if ((deps.runMeasurementCadence || cadenceChild) && detachedActionInFlight("measurement-cadence")) {
+          log("measurement_cadence.already_detached", {
+            reason: decision.reason,
+            refusal: "measurement-cadence action already in flight",
+            flow: "the cadence runs detached so the sweep keeps its turn",
+          });
+        } else {
+          log("measurement_cadence.fired", { reason: decision.reason });
+          if (deps.runMeasurementCadence) {
+            try {
+              const work = deps.runMeasurementCadence();
+              detachSweepAction(
+                work
+                  .then((result) => {
+                    // The row is DERIVED from the result's own keys rather than hand-enumerated here, because a
+                    // hand-enumerated row silently drops every member added after it — which is how three fields reached
+                    // zero occurrences in this file (W1-T2502).
+                    log("measurement_cadence.ran", buildMeasurementCadenceRow(result));
+                  })
+                  .catch((e) => {
+                    log("measurement_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
+                  }),
+                { actionKind: "measurement-cadence", taskId: "DAEMON" },
+              );
+              log("measurement_cadence.detached", {
+                reason: decision.reason,
+                flow: "the cadence runs detached so the sweep keeps its turn",
+              });
+            } catch (e) {
+              // A SYNCHRONOUS throw from the hook itself, before any promise exists to detach.
+              log("measurement_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
+            }
+          }
+        }
+      } else if (decision) {
+        log("measurement_cadence.skipped", { reason: decision.reason });
+      }
+    }
+
+    // Digest cadence, separate from the measurement block above: its own policy row, its own marker
+    // file, the same tick discipline and the same best-effort contract (W1-T2277).
+    if (deps.checkDigestCadence) {
+      let digestDecision: MeasurementCadenceDecision | undefined;
+      try {
+        digestDecision = deps.checkDigestCadence();
+      } catch (e) {
+        log("digest_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      if (digestDecision?.fire) {
+        log("digest_cadence.fired", { reason: digestDecision.reason });
+        if (deps.runDigestCadence) {
+          try {
+            const result = (yield deps.runDigestCadence()) as Awaited<ReturnType<NonNullable<typeof deps.runDigestCadence>>>;
+            log("digest_cadence.ran", { channel: result.channelName, delivered: result.delivered });
+          } catch (e) {
+            log("digest_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
+          }
+        }
+      } else if (digestDecision) {
+        log("digest_cadence.skipped", { reason: digestDecision.reason });
+      }
+    }
+
+    // W1-T3368 — THE SELF-HEALING RUNG. Same tick discipline and best-effort contract as the two
+    // cadences above, but different in kind: it REMOVES a condition rather than reporting one. One
+    // bounded pass on CORPUS PRESSURE; the incident and sizing are in `ledger-compaction-rung.ts`.
+    //
+    // THE REASON IS CARRIED FROM THE DECISION THAT PRODUCED THE OUTCOME, never re-derived here.
+    ledgerCompactionDecision = undefined;
+    if (deps.checkLedgerCompaction) {
+      try {
+        ledgerCompactionDecision = deps.checkLedgerCompaction();
+      } catch (e) {
+        log("ledger_compaction.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      if (ledgerCompactionDecision?.fire) {
+        log("ledger_compaction.fired", { reason: ledgerCompactionDecision.reason });
+        if (deps.runLedgerCompaction) {
+          try {
+            const outcome = (yield deps.runLedgerCompaction()) as Awaited<ReturnType<NonNullable<typeof deps.runLedgerCompaction>>>;
+            if (outcome === undefined) {
+              // A pass that found nothing eligible is a RESULT, not a failure: the corpus is over the
+              // bound but every archive is inside the age floor. Saying so keeps "nothing to merge"
+              // distinguishable from "the run broke", which an absent row would not.
+              log("ledger_compaction.nothing_eligible", { reason: ledgerCompactionDecision.reason });
+            } else {
+              log("ledger_compaction.ran", {
+                reason: ledgerCompactionDecision.reason,
+                source_count: outcome.sourceCount,
+                rows_written: outcome.rowsWritten,
+                duplicates_collapsed: outcome.duplicatesCollapsed,
+                archive_name: outcome.archiveName,
+              });
+            }
+          } catch (e) {
+            log("ledger_compaction.run_failed", {
+              reason: ledgerCompactionDecision.reason,
+              error: String((e as Error)?.message ?? e),
+            });
+          }
+        }
+      } else if (ledgerCompactionDecision) {
+        log("ledger_compaction.skipped", { reason: ledgerCompactionDecision.reason });
+      }
+    }
+
+    if (deps.checkBenchmarkCohort) {
+      let due = false;
+      try { due = deps.checkBenchmarkCohort(); }
+      catch (e) { log("benchmark_cohort.check_failed", { error: String((e as Error)?.message ?? e) }); }
+      if (due && deps.runBenchmarkCohortPass) {
+        if (detachedActionInFlight("benchmark-cohort")) {
+          log("benchmark_cohort.already_detached");
+        } else {
+          try {
+            const work = deps.runBenchmarkCohortPass();
+            detachSweepAction(work.then((result) => {
+              log("benchmark_cohort.ran", {
+                state: result.state,
+                scanned_sources: result.scannedSources,
+                pending_sources: result.pendingSources,
+                tail_pending_bytes: result.tailPendingBytes ?? 0,
+                reason: result.snapshot.reason,
+                source_bytes: result.snapshot.pressure.sourceBytes,
+                checkpoint_bytes: result.checkpointBytes,
+                dimension_cardinality: result.snapshot.pressure.dimensionCardinality,
+                rebuilt_partitions: result.snapshot.pressure.rebuiltPartitions,
+              });
+            }).catch((e) => {
+              log("benchmark_cohort.run_failed", { error: String((e as Error)?.message ?? e) });
+            }), { actionKind: "benchmark-cohort", taskId: "DAEMON" });
+            log("benchmark_cohort.detached");
+          } catch (e) {
+            log("benchmark_cohort.run_failed", { error: String((e as Error)?.message ?? e) });
+          }
+        }
+      }
+    }
+
+    // W1-T3997: CI learning is detached so it cannot block queue reconciliation; its registry
+    // records bounded abandonment and releases the cadence fire on unreadable corpus.
+    if (deps.checkCiLearningCadence) {
+      let ciLearningDecision: MeasurementCadenceDecision | undefined;
+      try {
+        ciLearningDecision = deps.checkCiLearningCadence();
+      } catch (e) {
+        log("ci_learning_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      if (ciLearningDecision?.fire) {
+        if (deps.runCiLearningCadence && detachedActionInFlight("ci-learning")) {
+          log("ci_learning_cadence.already_detached", {
+            reason: ciLearningDecision.reason,
+            refusal: "ci-learning action already in flight",
+          });
+        } else {
+          log("ci_learning_cadence.fired", { reason: ciLearningDecision.reason });
+          if (deps.runCiLearningCadence) {
+            const reason = ciLearningDecision.reason;
+            try {
+              const work = deps.runCiLearningCadence();
+              detachSweepAction(
+                work
+                  .then((result) => {
+                    // The UNREADABLE count rides the row: a partial window must never read as a clean one (P48).
+                    log("ci_learning_cadence.ran", {
+                      status: result.status,
+                      window_complete: result.windowComplete ?? true,
+                      unreadable_prs: result.unreadablePrCount ?? 0,
+                      drafts: result.draftCount,
+                      excluded: result.excludedCount,
+                      unreadable: result.unreadableCount,
+                      filed: result.filedCount,
+                      skipped: result.skippedCount,
+                      refused: result.refusedCount,
+                      lesson_recurrences: result.lessonRecurrences,
+                    });
+                  })
+                  .catch((e) => {
+                    log("ci_learning_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
+                  }),
+                { actionKind: "ci-learning", taskId: "DAEMON" },
+              );
+              log("ci_learning_cadence.detached", { reason });
+            } catch (e) {
+              // Keep the cadence rung best-effort even for a legacy/injected runner that throws
+              // before it can return its promise. Production reaches its first await at the corpus read.
+              log("ci_learning_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
+            }
+          }
+        }
+      } else if (ciLearningDecision) {
+        log("ci_learning_cadence.skipped", { reason: ciLearningDecision.reason });
+      }
+    }
+
+    // Board review: the rung whose unit is the whole open board. Same shape and best-effort contract as the
+    // two cadences above, on its own policy row and marker file. The ledger rows below are part of the fix:
+    // board-review.ts has no log hook of its own, so before this block a fire wrote no row at all
+    // (W1-T2304). Retired ids are logged on BOTH branches, because reconciliation is tied to the check, not
+    // to the fire (W1-T2464). Forensics: docs/forensics/daemon.md.
+    if (deps.checkBoardReview) {
+      let boardDecision: (BoardReviewCadenceDecision & { retiredProposalIds?: string[] }) | undefined;
+      try {
+        yield deps.prefetchBoardReview?.();
+        boardDecision = deps.checkBoardReview();
+      } catch (e) {
+        log("board_review.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      if (boardDecision?.fire) {
+        log("board_review.fired", { reason: boardDecision.reason, retiredProposalIds: boardDecision.retiredProposalIds ?? [] });
+        if (deps.runBoardReview) {
+          try {
+            const report = (yield deps.runBoardReview()) as Awaited<ReturnType<NonNullable<typeof deps.runBoardReview>>>;
+            log("board_review.ran", {
+              oldestOpenAgeHours: report.oldestOpenAgeHours,
+              redCount: report.redCount,
+              unhandledEscalationCount: report.unhandledEscalationCount,
+              itemsConsidered: report.itemsConsidered,
+              proposals: report.proposalIds.length,
+              proposalIds: report.proposalIds,
+              retired: (boardDecision.retiredProposalIds ?? []).length,
+              retiredProposalIds: boardDecision.retiredProposalIds ?? [],
+            });
+          } catch (e) {
+            log("board_review.run_failed", { error: String((e as Error)?.message ?? e) });
+          }
+        }
+      } else if (boardDecision) {
+        log("board_review.skipped", { reason: boardDecision.reason, retiredProposalIds: boardDecision.retiredProposalIds ?? [] });
+      }
+    }
+  }, undefined);
+  /** Resolves true when a fleet-control hold says the tick must not go on (the old `continue`). */
+  const intakeRungs = rungFlight(function* (): RungSteps<boolean> {
+    // Intake cadence: one scheduler over the hand-run repository intake verbs. These rungs can
+    // poll GitHub, write feedback, draft proposals or dispatch workers, so they sit behind the
+    // same tick-wide governors as retro/auto-triage/wipe-test instead of the read-only cadence
+    // block above. Best-effort: a failed rung costs one ledger row and the tick continues.
+    if (deps.checkIntakeRungs) {
+      let decisions: readonly IntakeRungDecision[] | undefined;
+      try {
+        decisions = deps.checkIntakeRungs();
+      } catch (e) {
+        log("intake_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      for (const decision of decisions ?? []) {
+        if (decision.fire) {
+          const hold = holdWorkerAdmission("intake");
+          if (hold) {
+            log("intake_cadence.held", { rung: decision.rung, reason: hold.reason });
+            return true;
+          }
+          log("intake_cadence.fired", { rung: decision.rung, reason: decision.reason });
+          if (decision.rung === "codeqlQuality" && (deps.opportunityOutcomes || deps.knowledgeGardener)) {
+            try {
+              const outcomePorts = deps.opportunityOutcomes ?? ((yield openOpportunityOutcomePorts({ ...deps.knowledgeGardener!, prState: undefined })) as Awaited<ReturnType<typeof openOpportunityOutcomePorts>>);
+              const outcomes = (yield reconcileOpportunityOutcomesAsync(outcomePorts)) as Awaited<ReturnType<typeof reconcileOpportunityOutcomesAsync>>;
+              log("opportunity_outcomes.reconciled", { outcomes });
+            } catch (error) {
+              log("opportunity_outcomes.failed", { reason: String(error) });
+            }
+          }
+          if (decision.rung === "codeqlQuality" && (deps.opportunityIntake || deps.knowledgeGardener)) {
+            try {
+              const intakePorts = deps.opportunityIntake ?? ((yield openOpportunityIntakePorts({ ...deps.knowledgeGardener!, prState: undefined })) as Awaited<ReturnType<typeof openOpportunityIntakePorts>>);
+              const result = (yield runOpportunityIntake(intakePorts)) as Awaited<ReturnType<typeof runOpportunityIntake>>;
+              log("opportunity_intake.ran", { ...result, rung: decision.rung });
+            } catch (error) {
+              log("opportunity_intake.failed", { reason: String(error) });
+            }
+          } else if (deps.runIntakeRung) {
+            try {
+              log("intake_cadence.ran", (yield deps.runIntakeRung(decision)) as Awaited<ReturnType<NonNullable<typeof deps.runIntakeRung>>>);
+            } catch (e) {
+              log("intake_cadence.run_failed", { rung: decision.rung, error: String((e as Error)?.message ?? e) });
+            }
+          }
+        } else {
+          log("intake_cadence.skipped", { rung: decision.rung, reason: decision.reason });
+        }
+      }
+    }
+    return false;
+  }, false);
+  const wipeTestRung = rungFlight(function* (): RungSteps<boolean> {
+    // Wipe-test cadence: a policy-gated falsifier pulse. It spends like retro/auto-triage, so it
+    // sits after the tick-wide dispatch governors; it has its own marker, so no sibling cadence can
+    // throttle it. The pair core writes `wipetest.pair` on measurement; this block writes the rung's
+    // fired/skipped/refused clock evidence (W1-T2659).
+    if (deps.checkWipeTestCadence) {
+      let decision: WipeTestCadenceDecision | undefined;
+      try {
+        decision = deps.checkWipeTestCadence();
+      } catch (e) {
+        log("wipetest.cadence.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      if (decision?.fire) {
+        const hold = holdWorkerAdmission("wipe-test");
+        if (hold) {
+          log("wipetest.cadence.held", { reason: hold.reason, seq: decision.seq, subject: decision.subject.id });
+          return true;
+        }
+        log("wipetest.cadence.fired", {
+          reason: decision.reason,
+          seq: decision.seq,
+          subject: decision.subject.id,
+          selected_shards: decision.subject.selectedShards ?? [],
+          factor: decision.factor,
+        });
+        if (deps.runWipeTestCadence) {
+          try {
+            const result = (yield deps.runWipeTestCadence(decision)) as Awaited<ReturnType<NonNullable<typeof deps.runWipeTestCadence>>>;
+            if (result.status === "refused") {
+              log("wipetest.cadence.refused", {
+                reason: result.reason ?? "wipe-test cadence refused",
+                seq: result.seq,
+                subject: result.subject.id,
+                factor: result.factor,
+              });
+            }
+          } catch (e) {
+            log("wipetest.cadence.refused", {
+              reason: String((e as Error)?.message ?? e),
+              seq: decision.seq,
+              subject: decision.subject.id,
+              factor: decision.factor,
+            });
+          }
+        }
+      } else if (decision) {
+        log("wipetest.cadence.skipped", { reason: decision.reason });
+      }
+    }
+    return false;
+  }, false);
+  // The spending rungs (intake, wipe-test) sit behind the tick-wide governors (headroom, cost, WIP), so the
+  // timer may look at them only after the outer cycle has passed those governors this tick.
+  let spendGatesOpen = false;
+  const dueRungsTick = (): void => {
+    if (dueRungsStopped) return;
+    const looks: Promise<unknown>[] = [readOnlyRungs.start()];
+    if (spendGatesOpen) looks.push(intakeRungs.start(), wipeTestRung.start());
+    void Promise.all(looks).catch((e) => {
+      log("daemon.due_rungs.failed", { error: String((e as Error)?.message ?? e) });
+    });
+  };
+  const startDueRungsTimer = (): void => {
+    if (dueRungsTimer || dueRungsStopped) return;
+    dueRungsTimer = setInterval(dueRungsTick, Math.max(1, pollIntervalMs));
+    dueRungsTimer.unref();
+  };
+
+  // W1-T7126: retain the memory-sample cadence across loop ticks.
   const tickMemory = { sampled: false };
   for (;;) {
     // The liveness tick: the one row this loop writes unconditionally, every iteration, on every path below.
@@ -3679,6 +4105,7 @@ export async function runDaemon(
     if (tickMemory.sampled) startMemoryReadAfterRow(deps, log);
     const tickStartedAtMs = daemonClock.now();
     idleLaneTickCause = undefined;
+    spendGatesOpen = false;
 
     if (opts.max !== undefined && attempted.length >= opts.max) {
       return summary("max_reached", `${opts.max} task(s)`);
@@ -4016,6 +4443,7 @@ export async function runDaemon(
       for (const cadence of BOOT_GATED_CADENCES) if (deps[cadence]) deferBootCadence(cadence);
       await bootGateOpened;
     }
+    startDueRungsTimer();
     const cadencesStartedAtMs = daemonClock.now();
     // Orphan sweep, on the same once-per-iteration cadence as the reconciler above; boot already runs it
     // once. Best-effort: a process-listing hiccup costs one logged tick (W1-T117 part ii).
@@ -4058,256 +4486,26 @@ export async function runDaemon(
       }
     }
 
-    // Measurement cadence: "is this system getting better". Same once-per-iteration cadence; the check's
-    // own policy-data bound throttles the actual run, so most ticks decide not to fire at no cost.
-    // Best-effort, and a fired run never gates dispatch, fails a check or changes a verdict (W1-T1259).
-    if (deps.checkMeasurementCadence) {
-      let decision: MeasurementCadenceDecision | undefined;
-      try {
-        decision = deps.checkMeasurementCadence();
-      } catch (e) {
-        log("measurement_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
-      }
-      const cadenceChild = deps.measurementCadenceChild;
-      if (cadenceChild && !detachedActionInFlight("measurement-cadence") && (decision?.fire || cadenceChild.pending())) {
-        startMeasurementCadenceChild(cadenceChild, decision?.fire === true, decision?.reason, log);
-      } else if (decision?.fire) {
-        // W1-T4034: the cadence runs detached so the sweep keeps its turn. Review admission happens
-        // only inside a sweep pass and a sweep pass only happens once per daemon iteration, so an
-        // inline await here cost the review lane this cadence's whole duration — measured
-        // 2026-09-22, its verify-human leg alone ran 8m38s inside a 21.5-minute iteration in which
-        // no sweep ran and two already-green PRs waited 42 and 29 minutes for a 21-second review.
-        // Nothing downstream reads the result (best-effort by contract, W1-T1259), so the await
-        // bought the loop nothing. Same shape as `ci-learning` below, guard included.
-        if ((deps.runMeasurementCadence || cadenceChild) && detachedActionInFlight("measurement-cadence")) {
-          log("measurement_cadence.already_detached", {
-            reason: decision.reason,
-            refusal: "measurement-cadence action already in flight",
-            flow: "the cadence runs detached so the sweep keeps its turn",
-          });
-        } else {
-          log("measurement_cadence.fired", { reason: decision.reason });
-          if (deps.runMeasurementCadence) {
-            try {
-              const work = deps.runMeasurementCadence();
-              detachSweepAction(
-                work
-                  .then((result) => {
-                    // The row is DERIVED from the result's own keys rather than hand-enumerated here, because a
-                    // hand-enumerated row silently drops every member added after it — which is how three fields reached
-                    // zero occurrences in this file (W1-T2502).
-                    log("measurement_cadence.ran", buildMeasurementCadenceRow(result));
-                  })
-                  .catch((e) => {
-                    log("measurement_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
-                  }),
-                { actionKind: "measurement-cadence", taskId: "DAEMON" },
-              );
-              log("measurement_cadence.detached", {
-                reason: decision.reason,
-                flow: "the cadence runs detached so the sweep keeps its turn",
-              });
-            } catch (e) {
-              // A SYNCHRONOUS throw from the hook itself, before any promise exists to detach.
-              log("measurement_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
-            }
+    {
+      const running = readOnlyRungs.joined();
+      if (running) await running;
+      else {
+        const release = readOnlyRungs.begin();
+        let outcome: Awaited<ReturnType<typeof readOnlyRungs.start>> | undefined;
+        try {
+          const steps = readOnlyRungs.steps();
+          let value: unknown;
+          let error: unknown;
+          let threw = false;
+          for (;;) {
+            const step = threw ? steps.throw(error) : steps.next(value);
+            if (step.done) { outcome = step.value; break; }
+            try { value = await step.value; threw = false; } catch (e) { log("daemon.due_rungs.step_rejected", { error: String((e as Error)?.message ?? e) }); error = e; threw = true; }
           }
+        } finally {
+          release(outcome);
         }
-      } else if (decision) {
-        log("measurement_cadence.skipped", { reason: decision.reason });
-      }
-    }
-
-    // Digest cadence, separate from the measurement block above: its own policy row, its own marker
-    // file, the same tick discipline and the same best-effort contract (W1-T2277).
-    if (deps.checkDigestCadence) {
-      let digestDecision: MeasurementCadenceDecision | undefined;
-      try {
-        digestDecision = deps.checkDigestCadence();
-      } catch (e) {
-        log("digest_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
-      }
-      if (digestDecision?.fire) {
-        log("digest_cadence.fired", { reason: digestDecision.reason });
-        if (deps.runDigestCadence) {
-          try {
-            const result = await deps.runDigestCadence();
-            log("digest_cadence.ran", { channel: result.channelName, delivered: result.delivered });
-          } catch (e) {
-            log("digest_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
-          }
-        }
-      } else if (digestDecision) {
-        log("digest_cadence.skipped", { reason: digestDecision.reason });
-      }
-    }
-
-    // W1-T3368 — THE SELF-HEALING RUNG. Same tick discipline and best-effort contract as the two
-    // cadences above, but different in kind: it REMOVES a condition rather than reporting one. One
-    // bounded pass on CORPUS PRESSURE; the incident and sizing are in `ledger-compaction-rung.ts`.
-    //
-    // THE REASON IS CARRIED FROM THE DECISION THAT PRODUCED THE OUTCOME, never re-derived here.
-    let ledgerCompactionDecision: LedgerCompactionDecision | undefined;
-    if (deps.checkLedgerCompaction) {
-      try {
-        ledgerCompactionDecision = deps.checkLedgerCompaction();
-      } catch (e) {
-        log("ledger_compaction.check_failed", { error: String((e as Error)?.message ?? e) });
-      }
-      if (ledgerCompactionDecision?.fire) {
-        log("ledger_compaction.fired", { reason: ledgerCompactionDecision.reason });
-        if (deps.runLedgerCompaction) {
-          try {
-            const outcome = await deps.runLedgerCompaction();
-            if (outcome === undefined) {
-              // A pass that found nothing eligible is a RESULT, not a failure: the corpus is over the
-              // bound but every archive is inside the age floor. Saying so keeps "nothing to merge"
-              // distinguishable from "the run broke", which an absent row would not.
-              log("ledger_compaction.nothing_eligible", { reason: ledgerCompactionDecision.reason });
-            } else {
-              log("ledger_compaction.ran", {
-                reason: ledgerCompactionDecision.reason,
-                source_count: outcome.sourceCount,
-                rows_written: outcome.rowsWritten,
-                duplicates_collapsed: outcome.duplicatesCollapsed,
-                archive_name: outcome.archiveName,
-              });
-            }
-          } catch (e) {
-            log("ledger_compaction.run_failed", {
-              reason: ledgerCompactionDecision.reason,
-              error: String((e as Error)?.message ?? e),
-            });
-          }
-        }
-      } else if (ledgerCompactionDecision) {
-        log("ledger_compaction.skipped", { reason: ledgerCompactionDecision.reason });
-      }
-    }
-
-    if (deps.checkBenchmarkCohort) {
-      let due = false;
-      try { due = deps.checkBenchmarkCohort(); }
-      catch (e) { log("benchmark_cohort.check_failed", { error: String((e as Error)?.message ?? e) }); }
-      if (due && deps.runBenchmarkCohortPass) {
-        if (detachedActionInFlight("benchmark-cohort")) {
-          log("benchmark_cohort.already_detached");
-        } else {
-          try {
-            const work = deps.runBenchmarkCohortPass();
-            detachSweepAction(work.then((result) => {
-              log("benchmark_cohort.ran", {
-                state: result.state,
-                scanned_sources: result.scannedSources,
-                pending_sources: result.pendingSources,
-                tail_pending_bytes: result.tailPendingBytes ?? 0,
-                reason: result.snapshot.reason,
-                source_bytes: result.snapshot.pressure.sourceBytes,
-                checkpoint_bytes: result.checkpointBytes,
-                dimension_cardinality: result.snapshot.pressure.dimensionCardinality,
-                rebuilt_partitions: result.snapshot.pressure.rebuiltPartitions,
-              });
-            }).catch((e) => {
-              log("benchmark_cohort.run_failed", { error: String((e as Error)?.message ?? e) });
-            }), { actionKind: "benchmark-cohort", taskId: "DAEMON" });
-            log("benchmark_cohort.detached");
-          } catch (e) {
-            log("benchmark_cohort.run_failed", { error: String((e as Error)?.message ?? e) });
-          }
-        }
-      }
-    }
-
-    // W1-T3997: CI learning is detached so it cannot block queue reconciliation; its registry
-    // records bounded abandonment and releases the cadence fire on unreadable corpus.
-    if (deps.checkCiLearningCadence) {
-      let ciLearningDecision: MeasurementCadenceDecision | undefined;
-      try {
-        ciLearningDecision = deps.checkCiLearningCadence();
-      } catch (e) {
-        log("ci_learning_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
-      }
-      if (ciLearningDecision?.fire) {
-        if (deps.runCiLearningCadence && detachedActionInFlight("ci-learning")) {
-          log("ci_learning_cadence.already_detached", {
-            reason: ciLearningDecision.reason,
-            refusal: "ci-learning action already in flight",
-          });
-        } else {
-          log("ci_learning_cadence.fired", { reason: ciLearningDecision.reason });
-          if (deps.runCiLearningCadence) {
-            const reason = ciLearningDecision.reason;
-            try {
-              const work = deps.runCiLearningCadence();
-              detachSweepAction(
-                work
-                  .then((result) => {
-                    // The UNREADABLE count rides the row: a partial window must never read as a clean one (P48).
-                    log("ci_learning_cadence.ran", {
-                      status: result.status,
-                      window_complete: result.windowComplete ?? true,
-                      unreadable_prs: result.unreadablePrCount ?? 0,
-                      drafts: result.draftCount,
-                      excluded: result.excludedCount,
-                      unreadable: result.unreadableCount,
-                      filed: result.filedCount,
-                      skipped: result.skippedCount,
-                      refused: result.refusedCount,
-                      lesson_recurrences: result.lessonRecurrences,
-                    });
-                  })
-                  .catch((e) => {
-                    log("ci_learning_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
-                  }),
-                { actionKind: "ci-learning", taskId: "DAEMON" },
-              );
-              log("ci_learning_cadence.detached", { reason });
-            } catch (e) {
-              // Keep the cadence rung best-effort even for a legacy/injected runner that throws
-              // before it can return its promise. Production reaches its first await at the corpus read.
-              log("ci_learning_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
-            }
-          }
-        }
-      } else if (ciLearningDecision) {
-        log("ci_learning_cadence.skipped", { reason: ciLearningDecision.reason });
-      }
-    }
-
-    // Board review: the rung whose unit is the whole open board. Same shape and best-effort contract as the
-    // two cadences above, on its own policy row and marker file. The ledger rows below are part of the fix:
-    // board-review.ts has no log hook of its own, so before this block a fire wrote no row at all
-    // (W1-T2304). Retired ids are logged on BOTH branches, because reconciliation is tied to the check, not
-    // to the fire (W1-T2464). Forensics: docs/forensics/daemon.md.
-    if (deps.checkBoardReview) {
-      let boardDecision: (BoardReviewCadenceDecision & { retiredProposalIds?: string[] }) | undefined;
-      try {
-        await deps.prefetchBoardReview?.();
-        boardDecision = deps.checkBoardReview();
-      } catch (e) {
-        log("board_review.check_failed", { error: String((e as Error)?.message ?? e) });
-      }
-      if (boardDecision?.fire) {
-        log("board_review.fired", { reason: boardDecision.reason, retiredProposalIds: boardDecision.retiredProposalIds ?? [] });
-        if (deps.runBoardReview) {
-          try {
-            const report = await deps.runBoardReview();
-            log("board_review.ran", {
-              oldestOpenAgeHours: report.oldestOpenAgeHours,
-              redCount: report.redCount,
-              unhandledEscalationCount: report.unhandledEscalationCount,
-              itemsConsidered: report.itemsConsidered,
-              proposals: report.proposalIds.length,
-              proposalIds: report.proposalIds,
-              retired: (boardDecision.retiredProposalIds ?? []).length,
-              retiredProposalIds: boardDecision.retiredProposalIds ?? [],
-            });
-          } catch (e) {
-            log("board_review.run_failed", { error: String((e as Error)?.message ?? e) });
-          }
-        }
-      } else if (boardDecision) {
-        log("board_review.skipped", { reason: boardDecision.reason, retiredProposalIds: boardDecision.retiredProposalIds ?? [] });
+        outcome;
       }
     }
     const msInCadences = Math.max(0, daemonClock.now() - cadencesStartedAtMs);
@@ -4530,52 +4728,31 @@ export async function runDaemon(
       continue;
     }
 
-    // Intake cadence: one scheduler over the hand-run repository intake verbs. These rungs can
-    // poll GitHub, write feedback, draft proposals or dispatch workers, so they sit behind the
-    // same tick-wide governors as retro/auto-triage/wipe-test instead of the read-only cadence
-    // block above. Best-effort: a failed rung costs one ledger row and the tick continues.
-    if (deps.checkIntakeRungs) {
-      let decisions: readonly IntakeRungDecision[] | undefined;
-      try {
-        decisions = deps.checkIntakeRungs();
-      } catch (e) {
-        log("intake_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
-      }
-      for (const decision of decisions ?? []) {
-        if (decision.fire) {
-          const hold = holdWorkerAdmission("intake");
-          if (hold) {
-            log("intake_cadence.held", { rung: decision.rung, reason: hold.reason });
-            continue;
+    spendGatesOpen = true;
+    let intakeHeld = false;
+    {
+      const running = intakeRungs.joined();
+      if (running) intakeHeld = await running;
+      else {
+        const release = intakeRungs.begin();
+        let outcome: Awaited<ReturnType<typeof intakeRungs.start>> | undefined;
+        try {
+          const steps = intakeRungs.steps();
+          let value: unknown;
+          let error: unknown;
+          let threw = false;
+          for (;;) {
+            const step = threw ? steps.throw(error) : steps.next(value);
+            if (step.done) { outcome = step.value; break; }
+            try { value = await step.value; threw = false; } catch (e) { log("daemon.due_rungs.step_rejected", { error: String((e as Error)?.message ?? e) }); error = e; threw = true; }
           }
-          log("intake_cadence.fired", { rung: decision.rung, reason: decision.reason });
-          if (decision.rung === "codeqlQuality" && (deps.opportunityOutcomes || deps.knowledgeGardener)) {
-            try {
-              const outcomes = await reconcileOpportunityOutcomesAsync(deps.opportunityOutcomes ?? await openOpportunityOutcomePorts({ ...deps.knowledgeGardener!, prState: undefined }));
-              log("opportunity_outcomes.reconciled", { outcomes });
-            } catch (error) {
-              log("opportunity_outcomes.failed", { reason: String(error) });
-            }
-          }
-          if (decision.rung === "codeqlQuality" && (deps.opportunityIntake || deps.knowledgeGardener)) {
-            try {
-              const result = await runOpportunityIntake(deps.opportunityIntake ?? await openOpportunityIntakePorts({ ...deps.knowledgeGardener!, prState: undefined }));
-              log("opportunity_intake.ran", { ...result, rung: decision.rung });
-            } catch (error) {
-              log("opportunity_intake.failed", { reason: String(error) });
-            }
-          } else if (deps.runIntakeRung) {
-            try {
-              log("intake_cadence.ran", await deps.runIntakeRung(decision));
-            } catch (e) {
-              log("intake_cadence.run_failed", { rung: decision.rung, error: String((e as Error)?.message ?? e) });
-            }
-          }
-        } else {
-          log("intake_cadence.skipped", { rung: decision.rung, reason: decision.reason });
+        } finally {
+          release(outcome);
         }
+        intakeHeld = outcome;
       }
     }
+    if (intakeHeld) continue;
 
     // Retro cadence trigger, evaluated once per tick after headroom — an automated retro spawns a real run,
     // the same class of spend headroom exists to gate — and before the dispatch pick. There is deliberately
@@ -4649,54 +4826,30 @@ export async function runDaemon(
       }
     }
 
-    // Wipe-test cadence: a policy-gated falsifier pulse. It spends like retro/auto-triage, so it
-    // sits after the tick-wide dispatch governors; it has its own marker, so no sibling cadence can
-    // throttle it. The pair core writes `wipetest.pair` on measurement; this block writes the rung's
-    // fired/skipped/refused clock evidence (W1-T2659).
-    if (deps.checkWipeTestCadence) {
-      let decision: WipeTestCadenceDecision | undefined;
-      try {
-        decision = deps.checkWipeTestCadence();
-      } catch (e) {
-        log("wipetest.cadence.check_failed", { error: String((e as Error)?.message ?? e) });
-      }
-      if (decision?.fire) {
-        const hold = holdWorkerAdmission("wipe-test");
-        if (hold) {
-          log("wipetest.cadence.held", { reason: hold.reason, seq: decision.seq, subject: decision.subject.id });
-          continue;
-        }
-        log("wipetest.cadence.fired", {
-          reason: decision.reason,
-          seq: decision.seq,
-          subject: decision.subject.id,
-          selected_shards: decision.subject.selectedShards ?? [],
-          factor: decision.factor,
-        });
-        if (deps.runWipeTestCadence) {
-          try {
-            const result = await deps.runWipeTestCadence(decision);
-            if (result.status === "refused") {
-              log("wipetest.cadence.refused", {
-                reason: result.reason ?? "wipe-test cadence refused",
-                seq: result.seq,
-                subject: result.subject.id,
-                factor: result.factor,
-              });
-            }
-          } catch (e) {
-            log("wipetest.cadence.refused", {
-              reason: String((e as Error)?.message ?? e),
-              seq: decision.seq,
-              subject: decision.subject.id,
-              factor: decision.factor,
-            });
+    let wipeTestHeld = false;
+    {
+      const running = wipeTestRung.joined();
+      if (running) wipeTestHeld = await running;
+      else {
+        const release = wipeTestRung.begin();
+        let outcome: Awaited<ReturnType<typeof wipeTestRung.start>> | undefined;
+        try {
+          const steps = wipeTestRung.steps();
+          let value: unknown;
+          let error: unknown;
+          let threw = false;
+          for (;;) {
+            const step = threw ? steps.throw(error) : steps.next(value);
+            if (step.done) { outcome = step.value; break; }
+            try { value = await step.value; threw = false; } catch (e) { log("daemon.due_rungs.step_rejected", { error: String((e as Error)?.message ?? e) }); error = e; threw = true; }
           }
+        } finally {
+          release(outcome);
         }
-      } else if (decision) {
-        log("wipetest.cadence.skipped", { reason: decision.reason });
+        wipeTestHeld = outcome;
       }
     }
+    if (wipeTestHeld) continue;
 
     // Console "run" kick: a queued-row Run dispatches that task by id this cycle, ahead of the ordinary
     // ordering but still through the normal gate. A kicked id that is unknown, already merged, or refused
