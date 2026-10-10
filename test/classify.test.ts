@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildFixProgressInput, type FixProgressJudge } from "../src/lib/fix-progress-judge.js";
+import { buildFixProgressInput, type FixProgressInput, type FixProgressJudge } from "../src/lib/fix-progress-judge.js";
 import {
   judgeCappedRepair,
   DIAGNOSE_AT_STRIKES,
@@ -467,5 +467,145 @@ test("retry judgment escalates its loop and holds an unavailable response", asyn
     assert.equal(result.outcome, verdict === "unavailable" ? "held" : verdict === "escalate" ? "gave_up" : "success");
     if (verdict === "escalate") assert.match(result.reason!, /same patch forever/);
     if (verdict === "change-approach") assert.match(approach!, /reproduce with the real fixture/);
+  }
+});
+
+test("capped repair asks at the body boundary and judges only an adopted plan rung", async () => {
+  const base = input();
+  for (const fixture of [
+    { body: 2, plan: 0, capable: true, site: "capped-body", spent: 2, ceiling: 2, kind: "repair_body" },
+    { body: 5, plan: 0, capable: true, site: "capped-body", spent: 5, ceiling: 2, kind: "repair_body" },
+    { body: 5, plan: 1, capable: true, site: "plan-repair", spent: 1, ceiling: 2, kind: "repair_plan_shard" },
+    { body: 5, plan: 7, capable: true, site: "plan-repair", spent: 7, ceiling: 2, kind: "repair_plan_shard" },
+    { body: 5, plan: 7, capable: false, site: "capped-body", spent: 5, ceiling: 2, kind: "repair_body" },
+  ]) {
+    const facts: FixProgressInput[] = [];
+    const logs: unknown[] = [];
+    const result = await judgeCappedRepair({ bodyStrikes: fixture.body, planRepairStrikes: fixture.plan }, 2, {
+      input: base, planRepairCapable: fixture.capable,
+      judge: async value => { facts.push(value); return { verdict: "continue", reason: "fresh evidence" }; },
+      log: (step, fields) => logs.push({ step, ...fields }),
+    });
+    const parkedReason = `${fixture.site}: ${fixture.spent} prior repairs`;
+    assert.deepEqual(facts, [{ ...base, strikesSpent: fixture.spent,
+      formerCeiling: fixture.ceiling, parkedReason }]);
+    assert.deepEqual(result, { kind: fixture.kind, reason: "fresh evidence",
+      progress: { verdict: "continue", reason: "fresh evidence" } });
+    assert.deepEqual(logs, [{ step: "fix.progress_judged", site: fixture.site,
+      pr_number: base.prNumber, head_sha: base.headSha, former_ceiling: fixture.ceiling,
+      parked_reason: parkedReason, round_count: base.rounds.length, signals: base.signals,
+      verdict: "continue", reason: "fresh evidence" }]);
+  }
+  const untouched = await judgeCappedRepair({ bodyStrikes: 1, planRepairStrikes: 7 }, 2, {
+    input: base, planRepairCapable: true,
+    judge: async () => { assert.fail("a body repair below its threshold needs no judgment"); },
+    log: () => assert.fail("no judgment was made"),
+  });
+  assert.deepEqual(untouched, { kind: "repair_body" });
+});
+
+test("capped repair preserves approach, hold reason and the full escalation reason", async () => {
+  for (const planRepairCapable of [false, true]) {
+    for (const verdict of [
+      { verdict: "change-approach", approach: "use the real fixture", reason: "different evidence" } as const,
+      { verdict: "escalate", loop: "identical patch", reason: "unchanged failure" } as const,
+      undefined,
+    ]) {
+      const progress = verdict ?? { verdict: "unavailable", reason: "absent or unparseable fix progress verdict; re-ask next pass" };
+      const result = await judgeCappedRepair({ bodyStrikes: 6, planRepairStrikes: 4 }, 3, {
+        input: input(), planRepairCapable, judge: async () => verdict,
+      });
+      assert.deepEqual(result, {
+        kind: verdict === undefined ? "hold" : verdict.verdict === "escalate" ? "give_up"
+          : planRepairCapable ? "repair_plan_shard" : "repair_body",
+        reason: verdict?.verdict === "escalate" ? "fix progress loop: identical patch — unchanged failure" : progress.reason,
+        progress,
+      });
+    }
+  }
+});
+
+test("retry judge receives the observed counts, history, identity and diagnosis for each remedy", async () => {
+  for (const transient of [false, true]) {
+    const base = { ...input(), operatorAnswer: "keep investigating" };
+    const text = transient ? "ECONNRESET" : "test failed";
+    const count = transient ? 4 : 3;
+    const facts: FixProgressInput[] = [];
+    const logs: { step: string; fields?: Record<string, unknown> }[] = [];
+    const sleeps: number[] = [];
+    let attempts = 0;
+    const result = await runDiagnoseThenRetry({
+      progressInput: base,
+      attempt: async () => { attempts++; return { success: false, evidence: { text } }; },
+      diagnose: async () => ({ text: "inspect the assertion" }),
+      fixProgressJudge: async value => { facts.push(value); return { verdict: "escalate", loop: "same failure", reason: "no new evidence" }; },
+      log: (step, fields) => logs.push({ step, fields }),
+      sleep: async ms => { sleeps.push(ms); },
+    });
+    const site = transient ? "transient-retry" : "diagnose-retry";
+    const reason = transient ? "transient retries exhausted (3)" : "strikes exhausted (2); diagnosis: inspect the assertion";
+    const expected = buildFixProgressInput({ taskId: base.taskId, prNumber: base.prNumber,
+      headSha: base.headSha, currentRed: [text], operatorAnswer: base.operatorAnswer,
+      ledger: Array.from({ length: count }, (_, i) => [
+        { task_id: base.taskId, step: "fix.dispatch", round_id: String(i + 1), ci_failures: [text] },
+        { task_id: base.taskId, step: "fix.done", round_id: String(i + 1), subtype: "failure" },
+      ]).flat(),
+    });
+    expected.strikesSpent = count;
+    expected.formerCeiling = transient ? 3 : 2;
+    expected.parkedReason = `${site}: ${reason}`;
+    assert.deepEqual(facts, [expected]);
+    assert.equal(attempts, count);
+    assert.deepEqual(result, { outcome: "gave_up", strikes: transient ? 0 : count,
+      transientRetries: transient ? count : 0, diagnosed: !transient, attempts: count,
+      reason: "fix progress loop: same failure — no new evidence" });
+    assert.deepEqual(sleeps, transient ? [1000, 2000, 4000] : [1000]);
+    assert.deepEqual(logs.filter(row => row.step === "fix.progress_judged"), [{ step: "fix.progress_judged",
+      fields: { site, parked_reason: expected.parkedReason, former_ceiling: expected.formerCeiling,
+        round_count: count, signals: expected.signals, verdict: "escalate", loop: "same failure", reason: "no new evidence" } }]);
+    assert.deepEqual(logs.at(-1), { step: "retry.exhausted", fields: { attempts: count,
+      reason: result.reason, strikes: result.strikes, transient_retries: result.transientRetries } });
+  }
+});
+
+test("retry judge falls back to subtype or unknown evidence and holds with exact counters", async () => {
+  for (const evidence of [{ subtype: "error_max_turns" }, {}]) {
+    let attempts = 0;
+    const facts: FixProgressInput[] = [];
+    const result = await runDiagnoseThenRetry({
+      attempt: async () => { attempts++; return { success: false, evidence }; },
+      diagnose: async () => ({ text: "" }),
+      fixProgressJudge: async value => { facts.push(value); return undefined; },
+    });
+    assert.deepEqual(result, { outcome: "held", strikes: 3, transientRetries: 0, diagnosed: true, attempts: 3,
+      reason: "absent or unparseable fix progress verdict; re-ask next pass" });
+    assert.equal(attempts, 3);
+    assert.equal(facts.length, 1);
+    assert.equal(facts[0].taskId, "retry");
+    assert.equal(facts[0].headSha, "uncommitted");
+    assert.deepEqual(facts[0].currentRed, [evidence.subtype ?? "unknown failure"]);
+    assert.deepEqual(facts[0].rounds.map(round => round.redBefore), Array(3).fill(facts[0].currentRed));
+    assert.equal(facts[0].parkedReason, "diagnose-retry: strikes exhausted (2)");
+  }
+});
+
+test("judge-admitted retries keep their backoff and pass an approach without a prior diagnosis", async () => {
+  for (const changed of [false, true]) {
+    let attempts = 0;
+    const findings: (string | undefined)[] = [];
+    const sleeps: number[] = [];
+    const result = await runDiagnoseThenRetry({
+      attempt: async value => { findings.push(value); return ++attempts === 5
+        ? { success: true } : { success: false, evidence: { text: "ECONNRESET" } }; },
+      diagnose: async () => { assert.fail("transient retries do not diagnose"); },
+      sleep: async ms => { sleeps.push(ms); },
+      fixProgressJudge: async () => changed
+        ? { verdict: "change-approach", approach: "try another endpoint", reason: "new route" }
+        : { verdict: "continue", reason: "network recovering" },
+    });
+    assert.deepEqual(result, { outcome: "success", strikes: 0, transientRetries: 4, diagnosed: false, attempts: 5 });
+    assert.deepEqual(sleeps, [1000, 2000, 4000, 8000]);
+    assert.deepEqual(findings, [undefined, undefined, undefined, undefined,
+      changed ? "\nApproach: try another endpoint" : undefined]);
   }
 });
