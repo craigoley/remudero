@@ -2530,7 +2530,7 @@ export function buildSweepEffects(
   const effects = buildSweepEffectsFromLib({
     reproduceFailingTestsOnMainImpl: buildBaseReproductionProbe(deps.config, reviewRepoDir, deps.ledgerPath, deps.log),
     repoRoot,
-    localRepoName: resolveOwnerRepo().repo,
+    localRepoName: deps.localRepoName ?? resolveOwnerRepo().repo,
     nowMsImpl: Date.now,
     updateBranchImpl: updateBranchViaGh,
     captureRepairFeedbackImpl: (filing) => captureRepairFeedbackWithPriorVerdict(repoRoot, filing, deps.log),
@@ -42038,6 +42038,30 @@ function unmetFromLedger(lines: Array<Record<string, unknown>>, taskId: string, 
 }
 
 /**
+ * The failing review's own summary for THIS PR's CURRENT head — the `failure_reason` (`verdict.summary`)
+ * the latest exact-head `review.posted` row carries, the text {@link OpenPrView.reviewSummary} promises.
+ * Until this producer the field was hard-coded `undefined`, so `namesRule15Refusal`/`namesUnsatisfiableGate`
+ * (lib/sweep.ts) could never see the reviewer's real reason. Same scan and PR matcher as
+ * {@link unmetFromLedger}, but HEAD-SCOPED: a summary posted for an older head never describes this one.
+ * The latest exact-head row wins, so a later success (or a row with no summary) yields `undefined`.
+ */
+export function reviewSummaryFromLedger(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  key: string | undefined,
+  prUrl: string,
+  headSha: string,
+): string | undefined {
+  let summary: string | undefined;
+  for (const line of lines) {
+    if (line.step !== "review.posted" || line.head_sha !== headSha || !reviewRowNamesPr(line, key, prUrl)) continue;
+    const verdict = line.decision_verdict as { summary?: unknown } | null | undefined;
+    const text = typeof line.failure_reason === "string" ? line.failure_reason : verdict?.summary;
+    summary = line.state === "failure" && typeof text === "string" && text !== "" ? text : undefined;
+  }
+  return summary;
+}
+
+/**
  * W1-T923's producer: recover a GATE failure's named remedy for a task/PR from the ledger — the
  * SAME `review.posted` scan {@link unmetFromLedger} runs above, but reading it for the shape
  * that function's OWN result leaves empty: a failing review whose `unmet_criteria` came back
@@ -42831,7 +42855,7 @@ function* openPrViewSteps(
       // schema. This is the producer `test/producer-completeness.test.ts` demands; without it
       // `selectUpdateBranchTarget`'s draft exclusion would be permanently inert in production.
       isDraft: pr.isDraft,
-      reviewSummary: undefined,
+      reviewSummary: reviewState === "failure" ? reviewSummaryFromLedger(ledger, reviewLedgerKey, pr.url, pr.headRefOid) : undefined,
       // W1-T100/W1-T2599: ci-log fix evidence for the ordinary red aggregate, or for a red
       // REQUIRED child already visible while that aggregate is still pending.
       ciFailures,
@@ -47386,7 +47410,10 @@ export async function fixCommand(
   // this command builds, so the one `buildSweepEffects` call site of the four that no test drives
   // stayed unexercised while the other three were graded. Omitted, it is `routeFix` and the
   // behaviour is byte-identical.
-  deps: { config?: Config; fetch?: GhApiFetcher; route?: typeof routeFix } = {},
+  //
+  // `self` is the checkout's owner/repo, otherwise read from `origin`. A sandboxed checkout has no
+  // origin remote, so a test that drives this verb end to end must be able to name the slug itself.
+  deps: { config?: Config; fetch?: GhApiFetcher; route?: typeof routeFix; self?: { owner: string; repo: string } } = {},
 ): Promise<number> {
   const prArg = rest[0];
   // W1-T4077: `--requested` is the console's "Fix now". The operator asking for a fix IS the decision to try
@@ -47404,7 +47431,7 @@ export async function fixCommand(
 
   const config = deps.config ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
-  const self = resolveOwnerRepo();
+  const self = deps.self ?? resolveOwnerRepo();
   const repo = flagValue(rest, "--repo") ?? self.repo;
   const owner = self.owner;
   const runId = `FIX-${Date.now()}`;
@@ -47471,7 +47498,7 @@ export async function fixCommand(
     createdAt: raw.createdAt,
     headSha: raw.headRefOid,
     autoMergeArmed: raw.autoMergeRequest != null,
-    reviewSummary: undefined,
+    reviewSummary: reviewState === "failure" ? reviewSummaryFromLedger(ledger, reviewLedgerKeyFor(taskId, raw.number), raw.url, raw.headRefOid) : undefined,
     // W1-T100: the ci-log fix mode's input — see buildOpenPrViews.
     ciFailures: checksState === "red" ? fetchCiFailures(owner, repo, raw.statusCheckRollup) : undefined,
     redRequiredChecks,
@@ -47496,6 +47523,8 @@ export async function fixCommand(
     plan: plan,
     log: log,
     policy: DEFAULT_SWEEP_POLICY,
+    // Already resolved above (or injected): do not make buildSweepEffects read origin a second time.
+    localRepoName: self.repo,
   });
   const { outcome, reason } = await (deps.route ?? routeFix)(
     raw.state,
