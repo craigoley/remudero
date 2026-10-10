@@ -353,9 +353,10 @@ test("W1-T4004: disabled policy never invokes the production executor", async ()
   try {
     const { effects, calls } = buildProductionExecutor(root);
     const { deps, fixed } = sweepDeps(root, effects.repairRecordableRatchet!);
-    await runSweep([ratchetPr()], deps, DEFAULT_SWEEP_POLICY);
+    // The shipped row is ON since the operator ruling of 2026-10-10; the disabled arm is pinned explicitly.
+    await runSweep([ratchetPr()], deps, { ...DEFAULT_SWEEP_POLICY, recordableRatchetRepairEnabled: false });
 
-    assert.equal(calls.ghReads, 0, "the false shipped policy must not even start the branch-write executor");
+    assert.equal(calls.ghReads, 0, "a false policy must not even start the branch-write executor");
     assert.deepEqual(calls.generators, []);
     assert.deepEqual(calls.pushes, []);
     assert.deepEqual(fixed, [4004]);

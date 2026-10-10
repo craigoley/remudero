@@ -118,7 +118,7 @@ test("W1-T5032: a worker strike plus an amendment identity row still dispatches 
   assert.equal(summary.actions[0]!.acted, true);
 });
 
-test("W1-T5032: a real worker dispatch still counts toward the cap", async () => {
+test("W1-T5032: real worker dispatches count toward the judge's history while amendment identities do not", async () => {
   const lp = ledgerPath();
   for (let i = 1; i <= DEFAULT_SWEEP_POLICY.strikeCap; i++) {
     appendLedger(lp, { run_id: "SWEEP-0", task_id: TASK, step: "fix.dispatch", strike: i, head_sha: HEAD });
@@ -127,11 +127,27 @@ test("W1-T5032: a real worker dispatch still counts toward the cap", async () =>
   const lines = readLedgerLines(lp);
   assert.equal(priorStrikesFor(lines, TASK, "keyword_only", HEAD), DEFAULT_SWEEP_POLICY.strikeCap);
   const deps = fakeDeps(lp);
+  let judgments = 0;
+  deps.fixProgressJudge = async input => {
+    judgments++;
+    assert.equal(input.rounds.length, DEFAULT_SWEEP_POLICY.strikeCap);
+    assert.equal(input.rounds.some(round => round.id === "k"), false);
+    return undefined;
+  };
   const summary = await runSweep([pr({ priorStrikes: 0 })], deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(judgments, 1);
   assert.equal(deps.fixed.length, 0);
   assert.equal(summary.actions[0]!.acted, false);
   const rows = readLedgerLines(lp).filter((l) => l.step === "sweep.disposed" && l.pr_number === 5032);
-  assert.match(String(rows[rows.length - 1]?.stand_down_reason), /fix strikes exhausted under the claim \(2\/2\)/);
+  assert.match(String(rows[rows.length - 1]?.stand_down_reason), /absent or unparseable fix progress verdict/);
+  deps.fixProgressJudge = async input => {
+    judgments++;
+    assert.equal(input.rounds.length, DEFAULT_SWEEP_POLICY.strikeCap);
+    return { verdict: "continue", reason: "a new reproduction is available" };
+  };
+  await runSweep([pr({ priorStrikes: 0 })], deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(judgments, 2, "an unavailable verdict is asked again next pass");
+  assert.equal(deps.fixed.length, 1, "worker count remains evidence rather than a fixed stop");
 });
 
 test("W1-T5032: the identity row is still written and resolved by its key", () => {

@@ -1,0 +1,117 @@
+- id: W1-T7724
+  title: "AN UNCERTAIN RISK JUDGMENT IS RE-JUDGED WITH THE DIFF BEFORE IT ESCALATES — PR #10339 (W1-T7092) had a review PASS and green checks, and the handed-off-head judge still opened issue #10670 at low risk / confidence 0.60 \"on the change's description/files alone, no diff was read\"; the only release is an operator arming by hand, so a low-risk change stalls until a human acts"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — the evidence the risk judge rests an escalation on
+  band_meaning: span
+  origin: "operator ruling 2026-10-10: tiered risk judgment (PR #10339 / W1-T7092, issue #10670, hand-merged by the operator)"
+  plan_refs: [W1-T454, W1-T970, W1-T5403, W1-T5523, W1-T5911, W1-T1031, W1-T2284, W1-T4050, W1-T100]
+  files: [src/lib/risk-judge.ts, src/lib/sweep.ts, src/run-task.ts, test/an-uncertain-risk-judgment-is-re-judged-with-the-diff.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-10. PR #10339 (W1-T7092) carried remudero-review success and green required checks. The sweep's
+    handed-off-head risk judge (W1-T5403) returned `low` at confidence 0.60, below the 0.70 threshold, and opened
+    issue #10670: "risk judge ESCALATED a handed-off head (low, confidence 0.60) ... on the change's
+    description/files alone, no diff was read". Nothing in the fleet could release it. The operator merged it by hand.
+    CURRENT BEHAVIOUR, read on origin/main bb4e73dec:
+      - src/lib/risk-judge.ts:808 planRiskJudgeAction escalates every verdict below the threshold
+        (src/lib/risk-judge.ts:822, `verdict.confidence < threshold`), whatever the risk label. The threshold is
+        src/lib/risk-judge.ts:687 DEFAULT_CONFIDENCE_THRESHOLD, carried live as plan/policy.yaml risk.confidenceThreshold
+        (W1-T4050).
+      - The judge never sees the diff, by design. src/lib/risk-judge.ts:528 tells it "YOU ARE NOT SHOWN A DIFF (W1-T454)",
+        and src/lib/risk-judge.ts:795 evidenceQualifiedReason prefixes every reason with "on the change's
+        description/files alone, no diff was read". W1-T454 chose honesty over evidence because a full patch is the
+        largest prompt in the pipeline on the cheapest mount. W1-T1031 added a bounded line-count view
+        (src/lib/risk-judge.ts:86 RiskJudgeChangeView, capped at src/lib/risk-judge.ts:165), which is still not a diff.
+        W1-T2284 measured the cost of that: on a fix, the description IS the bug report.
+      - The patch is already fetched and thrown away. src/run-task.ts:5495 changeViewArgs reads REST
+        `pulls/<n>/files`, whose rows carry each file's `patch`. src/run-task.ts:5503 changeViewFromRows keeps only
+        filename/additions/deletions. So the diff needs no new GitHub read.
+      - src/lib/risk-judge.ts:1002 runRiskJudge makes ONE judgment and writes ONE `risk_judge.decision` row
+        (src/lib/risk-judge.ts:1020). That row has no field saying what evidence the verdict rested on.
+      - src/lib/sweep.ts:11974 riskJudgeHandedOffHead (W1-T5403, run off the pass by W1-T5523) and the in-run call at
+        src/run-task.ts:20778 both go through runRiskJudge. An escalation writes `risk_judge.escalated`, which W1-T970
+        turns into a durable sha-keyed refusal.
+      - The only release for a refused head is a person. src/lib/sweep.ts:4558 handArmAfterEscalation looks for a
+        non-fleet arm or enqueue after the escalation, and src/lib/sweep.ts:15134 records it as
+        src/lib/sweep.ts:4547 RISK_OVERRIDE_OBSERVED_STEP (W1-T5911).
+    So a change the judge calls low risk, but cannot be sure of from a title, always waits for the operator. The
+    evidence that would settle it is already in the response the judge's caller fetched.
+    OVERLAP. lint-plan reports W1-T100 (route blocked_ci to the ci-log fix path) as sharing src/lib/sweep.ts and
+    src/run-task.ts. The overlap is the whole-file surface only. W1-T100 routes a red PR to the fix rung. This task
+    touches only the risk judge's tiering and the wiring that hands it the change view's patch. Neither shard
+    supersedes the other.
+  design: |
+    A TIERED JUDGMENT, WITH NO FIXED CAP. The description tier stays first and cheap. The diff tier runs only when
+    the description tier is unsure.
+    1. TIER 1, DESCRIPTION (today's call, unchanged). Act on its verdict as today when:
+         - it is `high` at any confidence, or carries a STOP gate consequence: ESCALATE, exactly as today;
+         - it is `low` and confident (at or above the threshold) and not borderline: PROCEED unattended, as today;
+         - the judge is unavailable: today's availability handling, unchanged.
+       Any other verdict is UNCERTAIN: a `low` verdict below the threshold, or a borderline `low` verdict just above
+       it. The width of the borderline band is a live policy value beside risk.confidenceThreshold in
+       plan/policy.yaml (the existing parseRiskPolicy row shape), never a literal in code. Its default may be zero.
+    2. TIER 2, DIFF. An uncertain verdict is judged again with the change's actual patch. runRiskJudge takes an
+       optional diff source on its deps. When it is wired, an uncertain tier-1 verdict calls the judge a second time
+       with the diff in the input. The tier-2 prompt says the diff IS shown, and which files were shown in full
+       or summarised. The tier-2 verdict decides:
+         - `low` and confident: PROCEED unattended. No issue is filed and no risk_judge.escalated row is written.
+         - still uncertain, or `high`: ESCALATE. The issue and the reason name the diff tier ("judged on the diff:
+           N files in full, K summarised"), never "no diff was read".
+       When no diff source is wired, or the diff cannot be read, the tier-1 verdict stands and escalates as today.
+       The reason names the unread diff and why it could not be read. An unreadable diff is never treated as a
+       confident proceed.
+    3. THE DIFF IS BOUNDED ADAPTIVELY. The bound comes from the judge mount's own input budget (a seam the caller
+       supplies, defaulting to the resolved mount's context size minus the rendered tier-1 prompt), not from a
+       fixed byte or file count. A patch inside the budget is shown whole. A larger patch gives each file a share
+       of the budget: source files before tests, the largest changes first. A file that does not fit its share,
+       or whose REST row has no `patch` (GitHub omits very large ones), is SUMMARISED deterministically: path,
+       added and deleted counts, and its hunk headers. The prompt lists every summarised file. The
+       evidence-qualified reason (src/lib/risk-judge.ts:795) gets a diff-tier form that states the true basis, so
+       the W1-T454 honesty guarantee holds on both tiers.
+    4. THE SOURCE IS THE READ ALREADY MADE. changeViewFromRows (src/run-task.ts:5503) keeps each row's `patch` on the
+       change view, and the diff tier reads it from there. handedOffHeadRiskJudge (src/run-task.ts:2682) and the
+       in-run caller (src/run-task.ts:20778) wire it. Neither adds a GitHub call, because the gh read budget is the
+       fleet's scarcest resource.
+    5. THE LEDGER RECORDS WHICH TIER DECIDED. Every `risk_judge.decision` row carries `evidence_tier:
+       "description" | "diff"`. A diff-tier decision also records the tier-1 verdict and confidence it replaced,
+       and the files shown in full versus summarised. Tier 2 writes ONE decision row, the deciding one, so the
+       sweep's handedOffHeadAwaitingJudgment and W1-T970's riskRefused read exactly one decision per head, as
+       today. The tier-1 judgment it superseded rides on that row. The spend collector covers both calls.
+    SCOPE NOTE. A `high` verdict keeps escalating on the description alone, per the approved design. Re-judging an
+    uncertain HIGH verdict with the diff is not in this task. W1-T5911's hand-arm override, W1-T970's durable
+    refusal and W1-T5523's off-pass pool are unchanged. This task only reduces how many heads reach them.
+    Tests go in the new file test/an-uncertain-risk-judgment-is-re-judged-with-the-diff.test.ts, with `test(` titles
+    verbatim as in the proofs below. test/risk-judge.test.ts, test/risk-judge-evidence-grammar.test.ts,
+    test/risk-judge-change-view.test.ts and test/the-sweep-runs-the-risk-judge-on-a-handed-off-head.test.ts must stay green.
+  acceptance:
+    - claim: "an uncertain low-risk description verdict is judged a second time with the diff in the input"
+      proof: 'grep: test("W1-T7724: an uncertain low-risk verdict is re-judged with the diff" in test/an-uncertain-risk-judgment-is-re-judged-with-the-diff.test.ts'
+    - claim: "a confident low-risk verdict on the diff proceeds unattended, with no issue and no escalated row"
+      proof: 'grep: test("W1-T7724: a confident low-risk verdict on the diff proceeds unattended" in test/an-uncertain-risk-judgment-is-re-judged-with-the-diff.test.ts'
+    - claim: "a verdict still uncertain with the diff escalates, and its reason names the diff tier rather than no diff read"
+      proof: 'grep: test("W1-T7724: a verdict still uncertain with the diff escalates on the diff tier" in test/an-uncertain-risk-judgment-is-re-judged-with-the-diff.test.ts'
+    - claim: "a high-risk description verdict escalates as today, with no diff re-judgment"
+      proof: 'grep: test("W1-T7724: a high-risk description verdict escalates without a diff re-judgment" in test/an-uncertain-risk-judgment-is-re-judged-with-the-diff.test.ts'
+    - claim: "a confident low-risk description verdict proceeds as today without reading the diff"
+      proof: 'grep: test("W1-T7724: a confident low-risk description verdict proceeds without the diff" in test/an-uncertain-risk-judgment-is-re-judged-with-the-diff.test.ts'
+    - claim: "the decision row records which evidence tier decided, description or diff"
+      proof: 'grep: test("W1-T7724: the decision row records the evidence tier that decided" in test/an-uncertain-risk-judgment-is-re-judged-with-the-diff.test.ts'
+    - claim: "the diff bound follows the supplied input budget, and a file over its share is summarised and listed"
+      proof: 'grep: test("W1-T7724: the diff is bounded by the input budget and a large diff is summarised" in test/an-uncertain-risk-judgment-is-re-judged-with-the-diff.test.ts'
+    - claim: "the change view keeps each REST row's patch, so the diff tier needs no new GitHub read"
+      proof: 'grep: test("W1-T7724: the change view keeps the patch the files read already returned" in test/an-uncertain-risk-judgment-is-re-judged-with-the-diff.test.ts'
+    - claim: "an unreadable diff keeps the description verdict and escalates as today, naming the unread diff"
+      proof: 'grep: test("W1-T7724: an unreadable diff escalates as today and names why" in test/an-uncertain-risk-judgment-is-re-judged-with-the-diff.test.ts'
+  falsifier: |
+    Leave planRiskJudgeAction as the only decision: the re-judge test sees one judge call and an escalation at low /
+    0.60, which is #10339's outcome. Drop the patch in changeViewFromRows: the change-view test finds no patch, and the
+    diff tier has nothing to show. Keep evidenceQualifiedReason's single form: the diff-tier escalation still says "no
+    diff was read". Omit evidence_tier from the decision row: the ledger test finds no tier. Fall back to proceed when
+    the diff is unreadable: the unreadable-diff test sees a proceed where today escalates.

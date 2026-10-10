@@ -2532,6 +2532,12 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
       "population walk",
   ),
   refusedForPredicate(
+    "test/a-stale-dirty-fix-owner-is-preserved-and-reclaimed.test.ts",
+    "a",
+    "its `git ls-files --unmerged` call inspects one synthetic fix-owner fixture repo, not the tracked src/ population; " +
+      "the `src/` text is import paths, and the suite asserts owner-recovery behavior rather than a property of every src file",
+  ),
+  refusedForPredicate(
     "test/an-active-learning-is-reachable-by-some-file.test.ts",
     "a",
     "W1-T4240's reachability census. Its `git ls-files` enumerates every tracked path as the MATCH DOMAIN for the learnings " +

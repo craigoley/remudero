@@ -4,6 +4,7 @@ import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { fixedClock, systemClock } from "./clock.js";
+import { checkoutHeadStamp } from "./checkout-head.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec, Outcome } from "./gardener.js";
 import { gateFireRatesPath, type GateFireRate, type GateFireRateReport } from "./gate-fire-rate.js";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -412,7 +413,7 @@ export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes, sources: 
     review: { demote: "demoting a required gate stops it blocking merges, which is a judgement call." },
     decision: ["defuse"],
     cheapFingerprint: () => {
-      const head = execFileSync("git", ["-C", deps.repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      const head = checkoutHeadStamp(deps.repoRoot, clock);
       const report = gateFireRatesPath(deps.stateDir);
       return `${head}:${existsSync(report) ? readFileSync(report, "utf8").length : 0}:${clock.iso().slice(0, 10)}`;
     },

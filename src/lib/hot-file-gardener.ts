@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "nod
 import { basename, join, relative } from "node:path";
 
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { checkoutHeadStamp } from "./checkout-head.js";
 import {
   PR_URL_RE,
   ciFrictionRecencyWeight,
@@ -354,7 +355,7 @@ export function hotFileGardenSpec(
     landingRefusal: machineShardLandingGuard(deps),
     classes: HOT_FILE_REMEDIES,
     cheapFingerprint: () => {
-      const head = spawnSync("git", ["-C", deps.repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+      const head = checkoutHeadStamp(deps.repoRoot, clock);
       const live = ledgerLivePath(deps.stateDir);
       const liveStat = existsSync(live) ? statSync(live) : undefined;
       const liveStamp = liveStat ? `${liveStat.ino}:${liveStat.mode}` : "absent";

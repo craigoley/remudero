@@ -133,7 +133,7 @@ test("proofSandboxArgv mounts the checkout, its git dirs and its install, and no
   assert.throws(() => proofSandboxArgv({ cwd: "/", home }), ProofSandboxUnavailableError);
 });
 
-test("the shared git config is masked by an empty file in the throwaway HOME, never by an unreadable /dev/null", () => {
+test("the shared git config is masked by a file in the throwaway HOME, never by an unreadable /dev/null", () => {
   // bwrap mounts binds nodev: a /dev/null over a file reads as EACCES, and git refuses an unreadable config outright.
   const root = makeTempDir("t6124-config-mask");
   const common = join(root, "managed", ".git");
@@ -150,7 +150,8 @@ test("the shared git config is masked by an empty file in the throwaway HOME, ne
   const first = maskOf(proofSandboxArgv({ cwd, home, env: {} }));
   assert.ok(first !== undefined && first !== "/dev/null", "the config is masked by a regular file");
   assert.ok(first!.startsWith(`${real(home)}/`), "the mask lives in the throwaway HOME its caller removes");
-  assert.equal(readFileSync(first!, "utf8"), "", "the mask is EMPTY: git reads no remote and no error");
+  assert.equal(readFileSync(first!, "utf8"), '[remote "origin"]\n\turl = "https://github.com/o/r"\n',
+    "the mask carries ONLY the credential-free origin url: git reads it and no token");
   assert.equal(maskOf(proofSandboxArgv({ cwd, home, env: {} })), first, "a second argv for the same HOME reuses its mask");
   const fileHome = join(root, "home-is-a-file");
   writeFileSync(fileHome, "");
@@ -327,7 +328,7 @@ test("on Linux with bwrap, a proof cannot read the App key or the daemon's HOME"
   assert.equal(readFileSync(key, "utf8"), "fixture key, not a real one\n", "control: the key exists outside the sandbox");
 });
 
-test("on Linux with bwrap, a proof's git runs in a review worktree and reads no remote from the shared config", async (t) => {
+test("on Linux with bwrap, a proof's git runs in a review worktree and reads only a credential-free origin", async (t) => {
   const status = probeProofSandbox();
   if (status.mode !== "bwrap") {
     if (process.platform === "darwin") assert.match(status.reason, /Linux-only/, "macOS degrades, by name");
@@ -348,6 +349,7 @@ test("on Linux with bwrap, a proof's git runs in a review worktree and reads no 
   const seen = JSON.parse(await defaultProofSpawner(process.execPath, ["-e", probe], cwd, 30_000)) as Record<string, { status: number; out: string }>;
   assert.equal(seen.head.status, 0, `git rev-parse must run in the sandboxed worktree: ${seen.head.out}`);
   assert.equal(seen.status.status, 0, `git status must run in the sandboxed worktree: ${seen.status.out}`);
-  assert.notEqual(seen.url.status, 0, "the shared config's token-bearing remote is not readable");
-  assert.doesNotMatch(seen.url.out, /fixture/, "no part of the remote URL reaches the proof");
+  assert.equal(seen.url.status, 0, `the origin url is readable, as in CI's checkout: ${seen.url.out}`);
+  assert.equal(seen.url.out, "https://github.com/o/r", "only the credential-free origin url reaches the proof");
+  assert.doesNotMatch(seen.url.out, /fixture/, "no credential from the remote URL reaches the proof");
 });

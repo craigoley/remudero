@@ -1,0 +1,78 @@
+- id: W1-T7747
+  title: "THE SWEEP'S EFFECTS CALL GITHUB OFF THE DAEMON LOOP — `buildSweepEffects` still reaches `gh` through the synchronous `ghJson`/`ghExec`, including the armed-idle direct merge through `mergeDirectViaRest`, although `mergeDirectViaRestAsync` and `ghJsonAsync` exist: on 2026-10-10 `ghExecFile` held the loop 13 times (worst 5.1 s) and `mergeDirectViaRest` up to 2.7 s"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the transport the sweep's effects use for GitHub; it includes a merge write
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-10: core daemon loop-stall investigation (daemon.loop_lag 07:50-09:57Z), operator asked for flow improvements"
+  plan_refs: [W1-T5284, W1-T5492, W1-T5615, W1-T6591, W1-T5689, W1-T1255, W1-T7734, W1-T7735]
+  files: [src/lib/sweep.ts, src/lib/arm-auto-merge.ts, test/the-sweep-effects-call-github-off-the-daemon-loop.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-10 on the core daemon. Between 07:50 and 09:57Z it logged 10 `daemon.loop_lag` stalls.
+    Among the 171 `sync_spawn_top` entries:
+    - `ghExecFile` (src/lib/github-transport.ts:153, `execFileSync` at :155): 13 entries, worst 5.1 s;
+    - `mergeDirectViaRest` (src/lib/arm-auto-merge.ts:414, sync exec at :422): worst 2.7 s.
+    `ghExecFile` is the shared leaf under `ghExec`/`ghJson`, so the entries do not say who called it (W1-T7745 fixes
+    that). This task takes the callers the loop can be shown to reach today.
+
+    READ on origin/main 4e1831b94. `buildSweepEffects` (src/lib/sweep.ts:1834-4458) defaults
+    `ghJsonForBuild = ghJson` (:1970) and names it on 23 lines. They fall into three groups.
+    (1) THE ARM PATH. `arm`'s armed-idle deps (:2349-2366) spread `realArmDepsAsync` and then override three
+        of its members with SYNC ones:
+        - `headSha` via `readArmHeadShaRest` over `ghJsonForBuild` at :2353-2354;
+        - `mergeQueue` via `baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild)` at :2362, although
+          `baseBranchRequiresMergeQueueAsync` exists (arm-auto-merge.ts:752). The effect-level `mergeQueue`
+          at :3971 is the same call;
+        - `mergeDirect` via `mergeDirectViaRest(prUrl, ... ghExec([...args, "-f", "sha=<head>"]))` at :2365.
+        `stackPrerequisite` at :2474 is also sync, via `stackPrerequisiteFromRest(..., ghJsonForBuild, ...)`.
+    (2) DIRECT CALLS, made in the effect body:
+        - the ratified-ratchet live head read at :2159;
+        - `dispatchPlanGateRound` at :3014, :3052 and :3054;
+        - `dispatchFix` at :3139, wrapped in `Promise.resolve` but still synchronous;
+        - :3850 and :3978;
+        - :4412, :4417, :4421, :4431 and :4432.
+    (3) THE SYNC READER HANDED AS A SEAM to a sync callee in another module: :2601, :4011, :4065, :4249, :4322
+        and :4394 (`probeExistingPlanPr`, `createPlanPrRest`, a `readJson` seam).
+    `mergeDirectViaRestAsync` (arm-auto-merge.ts:428) exists, but its default exec is the raw `execFilePromise`.
+    It skips the transport's sentinel-token refusal and its default timeout, and it has no head-SHA pin.
+
+    SHARED SURFACE ONLY: W1-T7734 and W1-T7735 (queued) also name src/lib/sweep.ts. They change when the sweep
+    re-reads a PR and when it refreshes a branch, not which transport its effects use. No task in this filing
+    batch edits sweep.ts, so this one has no depends_on.
+  design: |
+    1. Every site in groups (1) and (2) awaits the async transport (`ghJsonAsync`, `ghTextAsync`), with the
+       same argv and the same outcomes. That includes the decline reasons `live_head_unreadable` and the
+       armed-idle "no longer open and armed at the observed head" refusal. The injectable `ghJsonImpl` seam
+       gets an async sibling, so tests still inject.
+       Group (3) is NOT in scope, because each one needs its callee module made async. List those sites in the
+       PR body as follow-ups.
+    2. The armed-idle `mergeDirect` uses `mergeDirectViaRestAsync` through the async transport, and keeps the
+       `-f sha=<observed head>` pin. A moved head still refuses the merge on GitHub's side (W1-T5492).
+    3. `mergeDirectViaRestAsync`'s default exec goes through the gh transport, so the sentinel-token refusal and
+       the default timeout apply to it as they do to the sync form.
+    4. Any `ghExecFile` caller that W1-T7745's attribution later names outside `buildSweepEffects` is filed as its own
+       task, not folded in here.
+  acceptance:
+    - claim: "the armed-idle direct merge awaits the async transport, pins the observed head SHA, and makes no synchronous spawn"
+      proof: 'grep: test("W1-T7747: the armed-idle direct merge awaits the async transport with the head sha pinned and no sync spawn" in test/the-sweep-effects-call-github-off-the-daemon-loop.test.ts'
+    - claim: "the armed-idle head and merge-queue reads await the async transport with sync spawns trapped"
+      proof: 'grep: test("W1-T7747: the armed-idle head and merge-queue reads await the async transport with sync spawns trapped" in test/the-sweep-effects-call-github-off-the-daemon-loop.test.ts'
+    - claim: "the plan-gate round, the fix dispatch, the stack prerequisite and the ratchet live-head read reach gh with sync spawns trapped"
+      proof: 'grep: test("W1-T7747: the sweep effects reach gh for plan-gate, fix dispatch, stack prerequisite and ratchet head with sync spawns trapped" in test/the-sweep-effects-call-github-off-the-daemon-loop.test.ts'
+    - claim: "no direct ghJsonForBuild or ghExec call remains in buildSweepEffects outside the seam-passing sites"
+      proof: 'grep: test("W1-T7747: buildSweepEffects makes no direct sync gh call outside the seam-passing sites" in test/the-sweep-effects-call-github-off-the-daemon-loop.test.ts'
+    - claim: "mergeDirectViaRestAsync refuses a sentinel GH_TOKEN as the sync transport does"
+      proof: 'grep: test("W1-T7747: mergeDirectViaRestAsync refuses a sentinel GH_TOKEN like the sync transport" in test/the-sweep-effects-call-github-off-the-daemon-loop.test.ts'
+  falsifier: |
+    Trap `execFileSync`, `spawnSync` and `execSync` to throw (the `syncBuiltinESMExports` swap
+    `startReadPlaneTelemetry` uses). Today's `ghJsonForBuild` and `mergeDirectViaRest` calls then throw, and
+    the first three tests fail. Leave `mergeDirectViaRestAsync` on raw `execFilePromise`: a sentinel token
+    reaches the fake gh, and the fourth test fails. Leave any group (1) or (2) site on `ghJsonForBuild`: the fifth
+    test names it.

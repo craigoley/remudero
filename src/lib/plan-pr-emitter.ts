@@ -16,11 +16,11 @@
 
 import type { AcceptanceCriterion } from "./plan.js";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { acceptanceBlockDiagnostics, acceptanceHeaderLine, parseAcceptanceBlock, parseWhitelistedProof } from "./review.js";
@@ -37,7 +37,8 @@ import type { GhApiFetcher } from "./open-prs-rest.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
 import { RmdError } from "./errors.js";
 import { isTaskShardName } from "./task-shard-name.js";
-import { budgetedSpawn, inTreeCheckBudgetMs, killBudgetLeftovers } from "./in-tree-budget.js";
+import { budgetedSpawn, inTreeCheckBudgetMs, killBudgetLeftovers, waitForProcessGroupExit } from "./in-tree-budget.js";
+import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 
 const PLAN_TASK_SHARD_PREFIX = ["plan", "tasks.d"].join("/") + "/";
 
@@ -478,6 +479,8 @@ export type PlanPrPreflightCheck = "tree" | "lint-plan" | "task-id-existence" | 
 export interface PlanPrPreflightFinding {
   check: PlanPrPreflightCheck;
   firstLine: string;
+  lines?: string[];
+  task_ids?: string[];
 }
 export interface PlanPrPreflightResult {
   ok: boolean;
@@ -577,10 +580,30 @@ const defaultPreflightChecksAsync = {
 };
 export type PlanPrPreflightAsyncChecks = Partial<typeof defaultPreflightChecksAsync> & { budgetMs?: () => number };
 
+const DIAGNOSTIC_LINE = /^(?:not ok |REFUSES\b|FAILED\b|✗|task-id-existence: FAILED\b|lint-plan-precheck:[^\n]*\bREFUSES\b)/;
+const outputLines = (output: string): string[] => output.split("\n").map((l) => l.trim()).filter(Boolean);
 function firstLineOf(output: string, status: number | null): string {
-  const lines = output.split("\n").map((l) => l.trim()).filter(Boolean);
-  const diagnosticLine = /^(?:not ok |REFUSES\b|FAILED\b|✗|task-id-existence: FAILED\b|lint-plan-precheck:[^\n]*\bREFUSES\b)/;
-  return lines.find((l) => diagnosticLine.test(l)) ?? lines[0] ?? `exited ${status}`;
+  const lines = outputLines(output);
+  return lines.find((l) => DIAGNOSTIC_LINE.test(l)) ?? lines[0] ?? `exited ${status}`;
+}
+
+export const FAILURE_DETAIL_CHARS = 4000;
+const REFUSED_TASK_ROW = /^✗ ([A-Z][A-Z0-9]*-T[0-9]+[A-Za-z]?):/;
+
+function redFinding(check: PlanPrPreflightCheck, output: string, status: number | null): PlanPrPreflightFinding {
+  const firstLine = firstLineOf(output, status);
+  const all = outputLines(output);
+  const from = all.slice(Math.max(0, all.indexOf(firstLine)));
+  const lines: string[] = [];
+  let used = 0;
+  for (const line of from) {
+    if (lines.length > 0 && used + line.length > FAILURE_DETAIL_CHARS) break;
+    lines.push(line);
+    used += line.length;
+  }
+  if (lines.length < from.length) lines.push(`… ${from.length - lines.length} more line(s)`);
+  const taskIds = [...new Set(all.flatMap((l) => REFUSED_TASK_ROW.exec(l)?.[1] ?? []))];
+  return { check, firstLine, ...(lines.length > 1 ? { lines } : {}), ...(taskIds.length > 0 ? { task_ids: taskIds } : {}) };
 }
 
 function parsedShardProofs(text: string, opts?: { uniqueKeys: false }): string[] | undefined {
@@ -703,7 +726,8 @@ function preflightTally() {
         return;
       }
       if (reading.status === 0) return;
-      (reading.status === 1 ? failures : unreadable).push({ check, firstLine: firstLineOf(reading.output, reading.status) });
+      if (reading.status === 1) failures.push(redFinding(check, reading.output, reading.status));
+      else unreadable.push({ check, firstLine: firstLineOf(reading.output, reading.status) });
     },
     result: (): PlanPrPreflightResult => ({ ok: failures.length === 0, failures, unreadable, ...(timedOut.length > 0 ? { timedOut } : {}) }),
   };
@@ -780,6 +804,43 @@ function borrowNodeModules(repoDir: string, tree: string): void {
   if (existsSync(join(repoDir, "node_modules"))) symlinkSync(join(repoDir, "node_modules"), join(tree, "node_modules"));
 }
 
+function dropOrphanedWorktreeAdmin(tree: string, realTree: string, gitCommonDir: string): void {
+  const dotGit = join(tree, ".git");
+  if (!existsSync(dotGit)) return;
+  const pointer = readFileSync(dotGit, "utf8").match(/^gitdir:\s*(.+)\s*$/);
+  if (!pointer) return;
+  const admin = resolve(dirname(dotGit), pointer[1]!);
+  const common = realpathSync(gitCommonDir);
+  const adminRoot = realpathSync(join(common, "worktrees"));
+  const adminReal = realpathSync(admin);
+  if (adminReal === adminRoot || !adminReal.startsWith(`${adminRoot}${sep}`) || !lstatSync(admin).isDirectory()) return;
+  const backLink = join(adminReal, "gitdir");
+  if (!existsSync(backLink)) return;
+  const recordedTree = resolve(dirname(backLink), readFileSync(backLink, "utf8").trim());
+  const expectedTree = join(realTree, ".git");
+  if (existsSync(recordedTree) && realpathSync(recordedTree) === realpathSync(expectedTree)) rmSync(adminReal, { recursive: true, force: true });
+}
+
+function cleanupErrorText(error: unknown): string {
+  const value = error as { message?: unknown; stderr?: unknown };
+  return `${String(value?.message ?? error)}\n${String(value?.stderr ?? "")}`;
+}
+
+function canonicalWorktreePath(path: string): string {
+  const absolute = resolve(path);
+  try {
+    return realpathSync(absolute);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    try {
+      return join(realpathSync(dirname(absolute)), basename(absolute));
+    } catch (parentError) {
+      if ((parentError as NodeJS.ErrnoException).code !== "ENOENT") throw parentError;
+      return absolute;
+    }
+  }
+}
+
 /** {@link planPrPreflight} on a commit no checkout has at HEAD (feedback-landing's `commit-tree` sha): a detached
  *  worktree of it is materialized beside `repoDir`, borrows its node_modules, and is removed after. */
 export function planPrPreflightAtCommit(
@@ -790,6 +851,7 @@ export function planPrPreflightAtCommit(
 ): PlanPrPreflightResult {
   const parent = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-pr-preflight-`));
   const tree = join(parent, "tree");
+  const realTree = join(realpathSync(parent), "tree");
   const budgetMs = (checks.budgetMs ?? (() => inTreeCheckBudgetMs()))();
   try {
     try {
@@ -800,7 +862,11 @@ export function planPrPreflightAtCommit(
     borrowNodeModules(repoDir, tree);
     return planPrPreflight({ cwd: tree, ...pr }, checks);
   } finally {
-    spawnSync("git", ["-C", repoDir, "worktree", "remove", "--force", "--force", tree], { stdio: "pipe" }); // twice: a killed add leaves it locked
+    const removed = spawnSync("git", ["-C", repoDir, "worktree", "remove", "--force", "--force", realTree], { stdio: "pipe" }); // twice: a killed add leaves it locked
+    if (removed.status !== 0 && existsSync(join(tree, ".git"))) {
+      const common = hostWorktreeGit(repoDir, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim();
+      dropOrphanedWorktreeAdmin(tree, realTree, common);
+    }
     rmSync(parent, { recursive: true, force: true });
   }
 }
@@ -814,20 +880,62 @@ export async function planPrPreflightAtCommitAsync(
 ): Promise<PlanPrPreflightResult> {
   const parent = await mkdtemp(join(tmpdir(), `${RMD_TMP_PREFIX}plan-pr-preflight-`));
   const tree = join(parent, "tree");
+  const realTree = join(realpathSync(parent), "tree");
   const budgetMs = (checks.budgetMs ?? (() => inTreeCheckBudgetMs()))();
+  let leaveTreeForSafety = false;
   try {
     const add = execFileAsync("git", ["-C", repoDir, "worktree", "add", "--detach", "--quiet", tree, commitSha], budgetedSpawn(budgetMs));
     try {
       await add;
     } catch (e) {
-      return treeNotMaterialized(commitSha, e, budgetMs, add.child.pid); // failed or killed: it names which
+      const result = treeNotMaterialized(commitSha, e, budgetMs, add.child.pid); // failed or killed: it names which
+      if (result.timedOut !== undefined && !(await waitForProcessGroupExit(add.child.pid))) {
+        leaveTreeForSafety = true;
+        throw new Error(`timed-out plan-PR checkout still has live processes; leaving its worktree for safety: ${tree}`);
+      }
+      return result;
     }
     borrowNodeModules(repoDir, tree);
     return await planPrPreflightAsync({ cwd: tree, ...pr }, checks);
   } finally {
-    await runChildAsync("git", ["-C", repoDir, "worktree", "remove", "--force", "--force", tree], repoDir);
-    await rm(parent, { recursive: true, force: true });
+    if (!leaveTreeForSafety) {
+      await removeTemporaryWorktree(repoDir, tree);
+      await rm(parent, { recursive: true, force: true });
+    }
   }
+}
+
+async function removeTemporaryWorktree(repoDir: string, tree: string): Promise<void> {
+  if (!existsSync(join(repoDir, ".git"))) return; // test/minimal trees with no Git metadata cannot own a registration
+  const target = canonicalWorktreePath(tree);
+  const registered = (output: string) => output.split("\n").some((line) => line.startsWith("worktree ") && canonicalWorktreePath(line.slice("worktree ".length)) === target);
+  let listed: string;
+  try {
+    listed = await hostWorktreeGitAsync(repoDir, ["worktree", "list", "--porcelain"]);
+  } catch (error) {
+    if (!existsSync(join(tree, ".git")) && /not a git repository/i.test(cleanupErrorText(error))) return;
+    throw new Error(`could not verify plan-PR worktree cleanup: ${cleanupErrorText(error).trim()}`);
+  }
+  if (!registered(listed)) return;
+  let lastRemovalFailure: string | undefined;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await hostWorktreeGitAsync(repoDir, ["worktree", "remove", "--force", "--force", target]);
+      lastRemovalFailure = undefined;
+    } catch (error) {
+      const reason = cleanupErrorText(error);
+      lastRemovalFailure = reason;
+    }
+    listed = await hostWorktreeGitAsync(repoDir, ["worktree", "list", "--porcelain"]);
+    if (!registered(listed)) return;
+    if (attempt < 2) await new Promise<void>((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+  }
+  const common = await hostWorktreeGitAsync(repoDir, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  dropOrphanedWorktreeAdmin(tree, target, common.trim());
+  listed = await hostWorktreeGitAsync(repoDir, ["worktree", "list", "--porcelain"]);
+  if (!registered(listed)) return;
+  const detail = lastRemovalFailure === undefined ? "" : `; last removal error: ${lastRemovalFailure}`;
+  throw new Error(`plan-PR worktree remains registered after cleanup attempts: ${tree}${detail}`);
 }
 
 /** Ledger a preflight verdict for one lane — `plan_pr.preflight_unreadable` when a check could not run, `_refused`
@@ -838,7 +946,8 @@ export function planPrPreflightAllows(
 ): boolean {
   if (result.unreadable.length > 0) ctx.log?.("plan_pr.preflight_unreadable", { lane: ctx.lane, branch: ctx.branch, unreadable: result.unreadable });
   if (!result.ok) {
-    ctx.log?.("plan_pr.preflight_refused", { lane: ctx.lane, branch: ctx.branch, failures: result.failures });
+    const taskIds = [...new Set(result.failures.flatMap((f) => f.task_ids ?? []))];
+    ctx.log?.("plan_pr.preflight_refused", { lane: ctx.lane, branch: ctx.branch, ...(taskIds.length > 0 ? { task_ids: taskIds } : {}), failures: result.failures });
     return false;
   }
   if (result.timedOut === undefined) return true;

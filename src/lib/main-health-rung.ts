@@ -101,10 +101,98 @@ interface RunHistoryCache {
   key: string;
   readAtMs: number;
   history: MainHealthRunHistoryEntry[];
-  jobsByRunId: Map<number, RollupCheckEntry[]>;
-  /** W1-T6023: main's newest first-parent shas from this head, read once a fallback is needed. */
-  recentShas?: ReadonlySet<string>;
+  /** Keyed `<runId>#<attempt>`: a re-run of a completed run is a new attempt with its own jobs. */
+  jobsByRunId: Map<string, RollupCheckEntry[]>;
+  /** W1-T6023: main's newest first-parent commits from this head, read once a fallback is needed. */
+  recentShas?: MainFirstParentWindow;
 }
+
+/** W1-T6023 — main's newest first-parent commits from its head, as {@link readMainFirstParentWindow}
+ *  reads them. */
+export interface MainFirstParentWindow {
+  /** Newest first: the head at index 0, each next entry its first parent. */
+  readonly order: readonly string[];
+  readonly shas: ReadonlySet<string>;
+  /** Each commit's committer time. Main squash-merges, so this is when the merge landed. */
+  readonly committedAtMs: ReadonlyMap<string, number>;
+}
+
+/** How old the evidence that decided main's state is. `head`: main's own head decided. `fresh`: an
+ *  older commit decided, and the oldest merge since it has waited no longer than main's own observed
+ *  evidence latency. `stale`: it has waited longer. `unmeasured`: a commit time or a latency sample
+ *  was missing, so no age can be claimed either way. */
+export type MainEvidenceFreshness = "head" | "fresh" | "stale" | "unmeasured";
+
+export interface MainEvidenceAge {
+  readonly freshness: MainEvidenceFreshness;
+  /** First-parent commits between main's head and the deciding commit; 0 when the head decided. */
+  readonly depth: number;
+  /** The oldest merge after the deciding commit: the longest-waiting merge with no evidence. */
+  readonly oldestUnverifiedSha?: string;
+  /** How long that merge has waited for evidence. */
+  readonly lagMs?: number;
+  /** The longest wait main's own evidence-bearing runs show: see {@link mainEvidenceAge}. */
+  readonly latencyBoundMs?: number;
+  /** The median gap between consecutive first-parent merges in the window. Reported, so a reader can
+   *  turn the lag into merges; the verdict is made in time, which the merge cadence cannot move. */
+  readonly mergeCadenceMs?: number;
+}
+
+function timeMs(value: string | undefined): number | undefined {
+  const ms = value === undefined ? Number.NaN : Date.parse(value);
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+function medianGapMs(window: MainFirstParentWindow): number | undefined {
+  const times = window.order.map((sha) => window.committedAtMs.get(sha)).filter((t): t is number => t !== undefined);
+  const gaps = times.slice(1).map((t, i) => times[i]! - t).filter((gap) => gap >= 0).sort((a, b) => a - b);
+  return gaps.length === 0 ? undefined : gaps[Math.floor(gaps.length / 2)];
+}
+
+/**
+ * PRIMARY CONTROL — how old main's deciding evidence may be before a green reads `stale`, derived
+ * from main's own runs, never a fixed number. Main's push runs share one concurrency group: a merge
+ * landing just after a run started waits for that run and then for its own (or a later merge's),
+ * so a healthy merge waits up to two run lengths for evidence. The bound is the larger of twice the
+ * longest observed run (start to completion) and the longest observed merge-to-verdict wait, over
+ * every completed, non-cancelled run of an evidence-bearing workflow whose head sits in the window.
+ * The oldest merge after the deciding commit waiting longer than that is outside anything main's
+ * pipeline has been seen to do: its evidence stopped arriving, so the old green is not reported.
+ */
+export function mainEvidenceAge(
+  decidedBySha: string,
+  window: MainFirstParentWindow,
+  history: readonly MainHealthRunHistoryEntry[],
+  evidenceWorkflows: ReadonlySet<string>,
+  nowMs: number,
+): MainEvidenceAge {
+  // A sha outside the window never decides (W1-T6023), so -1 is only a caller's mistake: unmeasured.
+  const depth = window.order.indexOf(decidedBySha);
+  if (depth <= 0) return { freshness: depth === 0 ? "head" : "unmeasured", depth: Math.max(depth, 0) };
+  const mergeCadenceMs = medianGapMs(window);
+  const oldestUnverifiedSha = window.order[depth - 1]!;
+  const mergedAtMs = window.committedAtMs.get(oldestUnverifiedSha);
+  let longestRunMs = 0;
+  let longestWaitMs = 0;
+  for (const run of mainHealthFallbackCandidates(history)) {
+    if (!evidenceWorkflows.has(run.workflowName ?? "")) continue;
+    const completedMs = timeMs(run.completedAt);
+    if (completedMs === undefined) continue;
+    const startedMs = timeMs(run.startedAt);
+    if (startedMs !== undefined && completedMs >= startedMs) longestRunMs = Math.max(longestRunMs, completedMs - startedMs);
+    const committedMs = window.committedAtMs.get(run.headSha);
+    if (committedMs !== undefined && completedMs >= committedMs) longestWaitMs = Math.max(longestWaitMs, completedMs - committedMs);
+  }
+  const latencyBoundMs = Math.max(2 * longestRunMs, longestWaitMs);
+  const base = { depth, oldestUnverifiedSha, ...(mergeCadenceMs !== undefined ? { mergeCadenceMs } : {}) };
+  if (mergedAtMs === undefined || latencyBoundMs <= 0) {
+    return { ...base, freshness: "unmeasured", ...(latencyBoundMs > 0 ? { latencyBoundMs } : {}) };
+  }
+  const lagMs = Math.max(0, nowMs - mergedAtMs);
+  return { ...base, freshness: lagMs > latencyBoundMs ? "stale" : "fresh", lagMs, latencyBoundMs };
+}
+
+const minutes = (ms: number): string => `${Math.round(ms / 60_000)} min`;
 
 export interface MainHealthRungDeps {
   /** Every read is awaited: production passes the async `gh` transport, because a sync `ghJson`
@@ -391,6 +479,10 @@ interface WorkflowRunHistoryResponse {
     status?: unknown;
     conclusion?: unknown;
     html_url?: unknown;
+    run_attempt?: unknown;
+    created_at?: unknown;
+    run_started_at?: unknown;
+    updated_at?: unknown;
     pull_requests?: ReadonlyArray<{ number?: unknown; html_url?: unknown; url?: unknown }>;
   }>;
 }
@@ -428,9 +520,13 @@ function mainPushRunHistoryFromResponse(response: WorkflowRunHistoryResponse): M
         headSha: run.head_sha,
         ...(typeof run.name === "string" ? { workflowName: run.name } : {}),
         ...(typeof run.id === "number" ? { runId: run.id } : {}),
+        ...(typeof run.run_attempt === "number" ? { runAttempt: run.run_attempt } : {}),
         ...(typeof run.conclusion === "string" ? { conclusion: run.conclusion } : {}),
         ...(typeof run.html_url === "string" ? { url: run.html_url } : {}),
         ...(pullRequests.length > 0 ? { pullRequests } : {}),
+        ...(typeof run.created_at === "string" ? { createdAt: run.created_at } : {}),
+        ...(typeof run.run_started_at === "string" ? { startedAt: run.run_started_at } : {}),
+        ...(typeof run.updated_at === "string" ? { completedAt: run.updated_at } : {}),
       };
     })
     .filter((run): run is MainHealthRunHistoryEntry => run !== undefined);
@@ -439,6 +535,7 @@ function mainPushRunHistoryFromResponse(response: WorkflowRunHistoryResponse): M
 interface FirstParentCommit {
   sha?: unknown;
   parents?: ReadonlyArray<{ sha?: unknown }>;
+  commit?: { committer?: { date?: unknown } };
 }
 
 /** W1-T6023 — main's newest {@link MAIN_HEALTH_FALLBACK_WINDOW_COMMITS} first-parent shas, `headSha`
@@ -450,20 +547,29 @@ async function readMainFirstParentWindow(
   repo: string,
   headSha: string,
   fetch: GhApiFetcher,
-): Promise<ReadonlySet<string>> {
+): Promise<MainFirstParentWindow> {
   const page = await fetch(["api", `repos/${owner}/${repo}/commits?sha=${headSha}&per_page=100`]);
   if (!Array.isArray(page)) throw new Error("GitHub's commit list for main's head was not a list");
-  const parentOf = new Map<string, unknown>(
-    (page as FirstParentCommit[]).map((commit) => [String(commit?.sha), commit?.parents?.[0]?.sha]),
-  );
+  const commits = page as FirstParentCommit[];
+  const parentOf = new Map<string, unknown>(commits.map((commit) => [String(commit?.sha), commit?.parents?.[0]?.sha]));
   if (!parentOf.has(headSha)) throw new Error(`GitHub's commit list did not hold main's head ${headSha}`);
-  const window = new Set<string>();
+  const committedAtByCommit = new Map<string, number>();
+  for (const commit of commits) {
+    const at = typeof commit?.commit?.committer?.date === "string" ? timeMs(commit.commit.committer.date) : undefined;
+    if (at !== undefined) committedAtByCommit.set(String(commit.sha), at);
+  }
+  const order: string[] = [];
+  const shas = new Set<string>();
+  const committedAtMs = new Map<string, number>();
   let at: unknown = headSha;
-  while (typeof at === "string" && parentOf.has(at) && window.size < MAIN_HEALTH_FALLBACK_WINDOW_COMMITS) {
-    window.add(at);
+  while (typeof at === "string" && parentOf.has(at) && !shas.has(at) && order.length < MAIN_HEALTH_FALLBACK_WINDOW_COMMITS) {
+    order.push(at);
+    shas.add(at);
+    const when = committedAtByCommit.get(at);
+    if (when !== undefined) committedAtMs.set(at, when);
     at = parentOf.get(at);
   }
-  return window;
+  return { order, shas, committedAtMs };
 }
 
 interface WorkflowJobsResponse {
@@ -571,6 +677,12 @@ export function buildMainHealthRung(
   let inFlight: Promise<void> | undefined;
   let runHistoryCache: RunHistoryCache | undefined;
   let metPrCache: { sha: string; lookup: MetPrLookup } | undefined;
+  // Which push workflows carry ci-gate's required checks, learned from the jobs pages read below and
+  // kept across heads: CodeQL, Semgrep, Scorecard and main-tripwire finish minutes before CI, so
+  // they crowd the newest completed history, and each one read costs a jobs read. A workflow is
+  // passed over only once a run of it with jobs held no required check, and never once one did.
+  // Keyed by the required set, so a changed ci-gate list relearns from scratch.
+  let workflowEvidence: { required: string; carries: Set<string>; carriesNone: Set<string> } | undefined;
   const mergeReader = deps.mergeReader ?? restMergeReader(owner, repo, deps.fetch);
   const readPrFiles =
     deps.readPrFiles ??
@@ -853,18 +965,32 @@ export function buildMainHealthRung(
           };
         }
       }
+      // The walk back: main's head concluded nothing genuine (no required check yet, still pending,
+      // cancelled by the next push, or every one skipped or known-vacuous on a plan-only merge), so
+      // the NEWEST main commit whose completed run genuinely executed a required check decides. Runs
+      // whose required jobs were themselves skipped, vacuous or cancelled are walked past, never
+      // allowed to decide. The window (W1-T6023) bounds how far back; nothing else does.
+      let evidenceAge: MainEvidenceAge | undefined;
+      let walkedPast = 0;
+      const headReason = observation.reason;
       if (runHistory && recentShas && mainHealthHeadInconclusive(observation)) {
-        const { runs, skipped } = mainHealthFallbackRuns(runHistory, recentShas);
-        let decided = false;
+        const requiredKey = [...required].sort().join(",");
+        if (workflowEvidence?.required !== requiredKey) workflowEvidence = { required: requiredKey, carries: new Set(), carriesNone: new Set() };
+        const learned = workflowEvidence;
+        const { runs, skipped } = mainHealthFallbackRuns(runHistory, recentShas.shas, Number.POSITIVE_INFINITY);
+        let decidedBy: MainHealthRunHistoryEntry | undefined;
         for (const run of runs) {
+          const workflow = run.workflowName;
+          if (workflow !== undefined && learned.carriesNone.has(workflow) && !learned.carries.has(workflow)) continue;
+          const jobsKey = `${run.runId}#${run.runAttempt ?? 1}`;
           let jobs: RollupCheckEntry[];
           try {
             jobs =
-              runHistoryCache?.jobsByRunId.get(run.runId!) ??
+              runHistoryCache?.jobsByRunId.get(jobsKey) ??
               rollupFromJobs(
                 (await deps.fetch(["api", `repos/${owner}/${repo}/actions/runs/${run.runId}/jobs?per_page=100`])) as WorkflowJobsResponse,
               );
-            runHistoryCache?.jobsByRunId.set(run.runId!, jobs);
+            runHistoryCache?.jobsByRunId.set(jobsKey, jobs);
           } catch (error) {
             deps.log("main.health.completed_run_unreadable", {
               branch,
@@ -875,18 +1001,48 @@ export function buildMainHealthRung(
             });
             break;
           }
-          if (judgedRollup(jobs, required).length === 0) continue;
+          if (judgedRollup(jobs, required).length === 0) {
+            if (workflow !== undefined && jobs.length > 0) learned.carriesNone.add(workflow);
+            continue;
+          }
+          if (workflow !== undefined) learned.carries.add(workflow);
           const fallback = mainHealthFromRollup(sha, jobs, judgedAgainst, undefined, judging);
+          if (fallback.state === "undetermined") {
+            walkedPast += 1;
+            continue;
+          }
+          const evidenceWorkflows = new Set([...learned.carries, run.workflowName ?? ""]);
+          evidenceAge = mainEvidenceAge(run.headSha, recentShas, runHistory, evidenceWorkflows, startedAtMs);
+          const where = evidenceAge.depth > 0 ? `, ${evidenceAge.depth} first-parent commit(s) behind the head` : "";
           observation = {
             ...fallback,
-            reason: `main's head has no completed required run; the latest completed main run (${run.headSha}) decides: ${fallback.reason}`,
+            reason:
+              `main's head carries no genuine evidence (${headReason}); the latest completed main run (${run.headSha}) ` +
+              `decides, the newest main commit with genuine evidence${where}: ${fallback.reason}`,
           };
+          if (fallback.state === "green" && evidenceAge.freshness === "stale") {
+            const cadence = evidenceAge.mergeCadenceMs !== undefined ? ` at a median ${minutes(evidenceAge.mergeCadenceMs)} between merges` : "";
+            observation = {
+              ...observation,
+              state: "stale",
+              reason:
+                `${observation.reason} — but stale, not green: merge ${evidenceAge.oldestUnverifiedSha} has waited ` +
+                `${minutes(evidenceAge.lagMs!)} for evidence, longer than main's own runs have ever taken to deliver it ` +
+                `(${minutes(evidenceAge.latencyBoundMs!)}), with ${evidenceAge.depth} merge(s) unverified${cadence}`,
+            };
+          }
           decidedBySha = run.headSha;
           evidenceRollup = jobs;
-          decided = true;
+          decidedBy = run;
           break;
         }
-        if (!decided && skipped.length > 0) {
+        if (!decidedBy && walkedPast > 0) {
+          observation = {
+            ...observation,
+            reason: `${observation.reason}; walked past ${walkedPast} completed main run(s) whose required checks were all skipped, vacuous or cancelled`,
+          };
+        }
+        if (!decidedBy && skipped.length > 0) {
           observation = {
             ...observation,
             reason:
@@ -897,7 +1053,7 @@ export function buildMainHealthRung(
       }
       // W1-T5490 (a): a failed guard workflow reads main red even beside green required checks.
       const { runs: guardFailures, skipped: skippedGuards } = runHistory && recentShas
-        ? failedMainGuardRuns(runHistory, recentShas)
+        ? failedMainGuardRuns(runHistory, recentShas.shas)
         : { runs: [], skipped: [] };
       if (skippedGuards.length > 0) {
         observation = {
@@ -959,6 +1115,16 @@ export function buildMainHealthRung(
         failing_checks: observation.failingChecks,
         observed_checks: observedChecks,
         decided_by_sha: decidedBySha,
+        ...(evidenceAge
+          ? {
+              evidence_depth: evidenceAge.depth,
+              evidence_freshness: evidenceAge.freshness,
+              ...(evidenceAge.lagMs !== undefined ? { evidence_lag_ms: evidenceAge.lagMs } : {}),
+              ...(evidenceAge.latencyBoundMs !== undefined ? { evidence_latency_bound_ms: evidenceAge.latencyBoundMs } : {}),
+              ...(evidenceAge.mergeCadenceMs !== undefined ? { merge_cadence_ms: evidenceAge.mergeCadenceMs } : {}),
+            }
+          : decidedBySha === sha && observation.state !== "undetermined" ? { evidence_depth: 0, evidence_freshness: "head" } : {}),
+        ...(walkedPast > 0 ? { walked_past_runs: walkedPast } : {}),
         pending_checks: observation.pendingChecks,
         non_evidence_checks: observation.nonEvidenceChecks,
         judged_against: required.size > 0 ? "ci-gate-required" : "all-checks",

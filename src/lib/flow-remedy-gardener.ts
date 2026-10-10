@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { checkoutHeadStamp } from "./checkout-head.js";
 import { ciFrictionRecordVerdict, ciFrictionRecencyWeight, gitCiFrictionOwnerSearch, type CiFrictionPlanState } from "./ci-friction-gardener.js";
 import { CI_FRICTION_EFFECT_MAX_WINDOW_MS, CI_FRICTION_ESCALATE_RUNG, type CiFrictionRemedyTask, type OwnerSearch, type RemedyEffect } from "./ci-friction-remedy.js";
 import type { Escalation } from "./escalate.js";
@@ -334,6 +335,7 @@ export interface LadderSpecInput {
   kind: LadderKind;
   sources: Pick<FlowGardenSources, "mintTaskId" | "ownerSearch" | "draftShard" | "escalate">;
   inventory: () => Inventory;
+  inventoryAsync?: () => Promise<Inventory>;
   /** The pacing bucket the cheap fingerprint carries; the flow ladder re-reads hourly, the fix-lane ladder daily. */
   bucket?: (clock: Clock) => number;
   /** Called once per pass with the scorecard the pass is about to log (the fix-lane garden writes its report here). */
@@ -348,13 +350,14 @@ export function ladderGardenSpec(deps: GardenerDeps, input: LadderSpecInput): Ga
   return {
     name: kind.name, landingRefusal: machineShardLandingGuard(deps, sources.ownerSearch?.fileExists), classes: ["draft"], review: { draft: "a remedy task is a judgement call for the machine-filing judge or a person" },
     cheapFingerprint: () => {
-      const head = execFileSync("git", ["-C", deps.repoRoot, "rev-parse", "HEAD"], { encoding: "utf8", timeout: 60_000 }).trim();
+      const head = checkoutHeadStamp(deps.repoRoot, clock);
       const archives = ledgerRotationEntries(readdirSync(deps.stateDir), deps.stateDir).map(e => {
         const s = statSync(e.path); return `${basename(e.path)}:${s.size}:${s.mtimeMs}:${s.ctimeMs}:${s.mode}`;
       }).join("|");
       return `${head}:${bucket(clock)}:${archives}`;
     },
     inventory: input.inventory,
+    ...(input.inventoryAsync ? { inventoryAsync: input.inventoryAsync } : {}),
     unfinished: inv => inv.next !== undefined,
     fingerprint: inv => `${inv.candidates.map(p => `${p.key}:${p.hours}`).join(",")}|${inv.next?.origin ?? ""}`,
     candidates: inv => inv.next ? [inv.next] : [],

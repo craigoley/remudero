@@ -190,5 +190,5 @@ test("W1-T4351: main's latest run is the LAST well-formed main.health.observed r
     mainObserved(MAIN_GREEN, "green", "not-an-array"),
     { step: "main.health.observed", sha: 7, state: "red" },
   ]);
-  assert.deepEqual(latest, { sha: MAIN_GREEN, state: "green", failingChecks: [] });
+  assert.deepEqual(latest, { sha: MAIN_GREEN, decidedBySha: MAIN_GREEN, state: "green", failingChecks: [] });
 });
