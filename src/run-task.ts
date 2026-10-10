@@ -1,4 +1,5 @@
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
+import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-update.js";
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
   loadCapabilityInspectionSource, readInspectionJson } from "./lib/capability-inspection.js";
 import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration, type ReadGeneration } from "./lib/read-plane.js";
@@ -5375,16 +5376,21 @@ function ownerRepoFromPrUrl(prUrl: string): { owner: string; repo: string } | un
  * an honest reuse, not a bypass; a dedicated label is a one-line follow-up once that file is in
  * scope for some other task.
  */
-export async function updateBranchViaGh(pr: ArmedStalledPr): Promise<UpdateBranchOutcome> {
+export async function updateBranchViaGh(pr: ArmedStalledPr, record?: BranchUpdateRecorder): Promise<UpdateBranchOutcome> {
   assertLiveWriteAllowed("gh-pr-merge", `requesting the update-branch REST endpoint on ${pr.prUrl}`);
   const ownerRepo = ownerRepoFromPrUrl(pr.prUrl);
   if (!ownerRepo) return "error";
+  const fields = { repo: `${ownerRepo.owner}/${ownerRepo.repo}`, prNumber: pr.prNumber,
+    via: `sweep:${pr.updateReason ?? "refresh"}`, expectedHeadSha: pr.headSha };
   try {
     ghExec(ghUpdateBranchArgv(ownerRepo.owner, ownerRepo.repo, pr.prNumber, pr.headSha), { stdio: "pipe" });
+    recordBranchUpdate({ ...fields, outcome: "updated" }, record);
     return "updated";
   } catch (e) {
     const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
-    return classifyUpdateBranchFailure(msg);
+    const outcome = classifyUpdateBranchFailure(msg);
+    recordBranchUpdate({ ...fields, outcome, error: msg }, record);
+    return outcome;
   }
 }
 
@@ -10074,13 +10080,19 @@ export function ghUpdateBranch(
   repo: string,
   prNumber: number,
   exec: typeof execFileSync = execFileSync,
+  via = "fix-rung",
+  record?: BranchUpdateRecorder,
 ): { ok: boolean; error?: string } {
   assertLiveWriteAllowed("gh-pr-update-branch", `updating the base of ${owner}/${repo}#${prNumber}`);
+  const fields = { repo: `${owner}/${repo}`, prNumber, via };
   try {
     exec("gh", ghUpdateBranchArgv(owner, repo, prNumber), { stdio: "pipe" });
+    recordBranchUpdate({ ...fields, outcome: "updated" }, record);
     return { ok: true };
   } catch (e) {
-    return { ok: false, error: String((e as Error)?.message ?? e) };
+    const error = String((e as Error)?.message ?? e);
+    recordBranchUpdate({ ...fields, outcome: "error", error }, record);
+    return { ok: false, error };
   }
 }
 
