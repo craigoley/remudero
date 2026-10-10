@@ -148,18 +148,41 @@ export function defaultProofRunnerAsync(
  *  repair (Rule 15 bars the worker). `branch-gap`: anything else, which a later build of the task can close. */
 export type PrOpenRefusalClass = "stale-proof" | "branch-gap";
 
+/** A `branch-gap` refusal whose only defect is a filed proof that ran and failed: the body is otherwise
+ *  fully checked, so the opener can still open the finished work with that proof named as its fix target. */
+export interface FailingProofAtOpen {
+  proof: string;
+  detail: string;
+  checkedBody: string;
+}
+
 export class PrOpenRefusedError extends RmdError {
   constructor(
     readonly refusalClass: PrOpenRefusalClass,
     reason: string,
+    readonly failingProof?: FailingProofAtOpen,
   ) {
     super("plan", GENERIC_EXIT_CODE, `openPullRequestChecked: ${reason}`, { refusalClass });
     this.name = "PrOpenRefusedError";
   }
 }
 
-function reject(reason: string, refusalClass: PrOpenRefusalClass = "branch-gap"): never {
-  throw new PrOpenRefusedError(refusalClass, reason);
+function reject(reason: string, refusalClass: PrOpenRefusalClass = "branch-gap", failingProof?: FailingProofAtOpen): never {
+  throw new PrOpenRefusedError(refusalClass, reason, failingProof);
+}
+
+/** The checked body with the failing proof named as the PR's fix target, placed before the task trailer so the
+ *  trailer stays the body's last paragraph. A built branch is opened red rather than stranded with no PR. */
+export function bodyWithFailingProofAtOpen(failing: FailingProofAtOpen): string {
+  const detail = failing.detail.length > 1500 ? `${failing.detail.slice(0, 1500)}…` : failing.detail;
+  const note =
+    `## Pre-open proof failure\n\nThe filed proof \`${failing.proof}\` did not pass when this PR was opened. ` +
+    "The build is opened rather than stranded, so the fix lane takes this proof as its target.\n\n" +
+    (detail ? `\`\`\`\n${detail}\n\`\`\`` : "(no output)");
+  const body = failing.checkedBody.trimEnd();
+  const trailer = /\n\nRemudero-Task: [^\n]+$/.exec(body);
+  if (!trailer) return `${body}\n\n${note}`;
+  return `${body.slice(0, trailer.index)}\n\n${note}${trailer[0]}`;
 }
 
 /** Where a refused open leaves the branch: already pushed, so it is named in the ledger rather than stranded. */
@@ -321,9 +344,11 @@ export function openPullRequestChecked(
     const result = runProof(proof, mergeBase, repoRoot, target);
     if (proofFailed(result)) {
       const detail = [result.error, result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+      const stale = /\bexecuted_stale\b/.test(detail);
       return reject(
         `${taskId} proof did not pass against merge base (${proof})${detail ? `: ${detail}` : `: exit ${result.status ?? result.signal ?? "unknown"}`}`,
-        /\bexecuted_stale\b/.test(detail) ? "stale-proof" : "branch-gap",
+        stale ? "stale-proof" : "branch-gap",
+        stale ? undefined : { proof, detail, checkedBody },
       );
     }
   }

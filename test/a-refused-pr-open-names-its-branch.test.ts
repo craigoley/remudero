@@ -18,7 +18,7 @@ import type { IssueGateway } from "../src/lib/escalate.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { loadPlan } from "../src/lib/plan.js";
-import { openPullRequestChecked, PrOpenRefusedError, recordRefusedPrOpen } from "../src/lib/pr-open.js";
+import { bodyWithFailingProofAtOpen, openPullRequestChecked, PrOpenRefusedError, recordRefusedPrOpen } from "../src/lib/pr-open.js";
 import type { GitHub } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { WorkerResult, spawnWorker } from "../src/lib/worker.js";
@@ -136,9 +136,13 @@ function originBranches(origin: string): Map<string, string> {
   return new Map(out.split("\n").filter(Boolean).map((line) => line.split(" ") as [string, string]));
 }
 
-test("a refused pr open names the pushed branch and its head in the ledger instead of stranding it", async () => {
+// 2026-10-09: a branch-gap refusal still stranded the finished work — W1-T7243's build pushed, refused at open on
+// one failing proof, and sat with no PR for hours until an operator found it (#10551). The open now goes ahead
+// with the failing proof named as the PR's fix target, so the sweep, fix lane and progress judge take it.
+test("a build whose filed proof fails at open opens its PR with that proof named instead of stranding the branch", async () => {
   const fx = buildRun("grep: NEVER_WRITTEN_MARK in README.md");
   try {
+    const created: string[][] = [];
     const result = await withLiveWritesAllowed(() =>
       runTask(TASK_ID, {
         skipGitSync: true,
@@ -148,33 +152,24 @@ test("a refused pr open names the pushed branch and its head in the ledger inste
         spawn: committingSpawn,
         containmentExec: holdingContainmentExec,
         isolationExec: cleanIsolationExec,
+        otherOpenPrReader: async () => [],
+        prCreateExec: (_command, args) => {
+          created.push(args);
+          return "";
+        },
       }),
     );
-    assert.equal(result.verdict, "failed", "a refusal is a verdict, not a thrown run");
-
     const ledger = readLedger(fx.root);
-    assert.equal(ledger.filter((row) => row.step === "run.error").length, 0, "no bare run.error hides the branch");
-    const refused = ledger.filter((row) => row.step === "pr.open_refused");
-    assert.equal(refused.length, 1, "exactly one refusal row");
-    const branch = String(refused[0]?.branch);
-    assert.match(branch, new RegExp(`^run-${TASK_ID}-\\d+$`));
-    assert.equal(refused[0]?.refusal_class, "branch-gap");
-
-    const onOrigin = originBranches(fx.origin);
-    assert.equal(onOrigin.get(branch), refused[0]?.head_sha, "the recorded head IS the branch's tip on origin");
-    const ahead = execFileSync("git", ["--git-dir", fx.origin, "rev-list", "--count", `main..${branch}`], { encoding: "utf8" }).trim();
-    assert.ok(Number(ahead) >= 1, "the recorded branch carries the worker's commit");
-    for (const name of onOrigin.keys()) {
-      if (name === "main" || !name.startsWith("run-")) continue;
-      assert.equal(name, branch, `every pushed run branch is the recorded one, found ${name}`);
-    }
-
-    const verdicts = ledger.filter((row) => row.step === "verdict");
-    assert.equal(verdicts.length, 1);
-    assert.equal(verdicts[0]?.stage, "pr_open.refused");
-    assert.equal(verdicts[0]?.branch, branch);
-    assert.equal(verdicts[0]?.cause, "base-proof-refused");
-    assert.equal(ledger.filter((row) => row.step === "pr.open_refused.escalated").length, 0, "a branch gap is left to re-dispatch");
+    assert.equal(ledger.filter((row) => row.step === "pr.open_refused").length, 0, "a failing proof no longer refuses the open");
+    const opened = ledger.filter((row) => row.step === "pr.opened_with_failing_proof");
+    assert.equal(opened.length, 1, "the open names the failing proof");
+    assert.equal(opened[0]?.proof, "grep: NEVER_WRITTEN_MARK in README.md");
+    assert.equal(created.length, 1, "the PR create ran for the built branch");
+    const body = created[0]?.find((arg) => arg.startsWith("body=")) ?? "";
+    assert.match(body, /## Pre-open proof failure/);
+    assert.match(body, /NEVER_WRITTEN_MARK/);
+    assert.match(body, /Remudero-Task: W1-T990071/, "the checked body still carries the task trailer");
+    assert.notEqual(result.verdict, "merged");
   } finally {
     fx.cleanup();
   }
@@ -285,4 +280,41 @@ test("a worktree that cannot be removed is ledgered and never replaces the refus
     throw new Error("fixture: worktree is busy");
   });
   assert.deepEqual(rows, [{ step: "worktree.remove.error", extra: { on: "pr_open.refused", error: "fixture: worktree is busy" } }]);
+});
+
+test("a branch-gap proof refusal carries the checked body and the failing proof; a stale-proof one carries neither", () => {
+  const repo = gitRepo({ kind: "refused-open-carry" });
+  try {
+    mkdirSync(join(repo.dir, "plan"), { recursive: true });
+    writeFileSync(join(repo.dir, "plan", "tasks.yaml"), planFor("grep: NEVER_WRITTEN_MARK in README.md"));
+    writeFileSync(join(repo.dir, "README.md"), "seed\n");
+    repo.git("add", "-A");
+    repo.git("commit", "-q", "-m", "seed");
+    repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+    const refusalFor = (stdout: string): PrOpenRefusedError => {
+      try {
+        openPullRequestChecked("", `run-${TASK_ID}-1`, repo.dir, "origin/main", () => ({ status: 5, stdout, stderr: "" }));
+      } catch (err) {
+        assert.ok(err instanceof PrOpenRefusedError);
+        return err;
+      }
+      return assert.fail("the opener must refuse");
+    };
+    const gap = refusalFor("verdict:    fail\ncause:      absent");
+    assert.equal(gap.failingProof?.proof, "grep: NEVER_WRITTEN_MARK in README.md");
+    assert.match(gap.failingProof?.checkedBody ?? "", /Remudero-Task: W1-T990071/);
+    assert.equal(refusalFor("discrimination: executed_stale — matches BOTH head and base").failingProof, undefined);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("the failing-proof note sits before the task trailer so the trailer stays last", () => {
+  const body = bodyWithFailingProofAtOpen({
+    proof: "grep: X in y",
+    detail: "verdict: fail",
+    checkedBody: "Intro\n\n## Acceptance\n\n- c | grep: X in y\n\nRemudero-Task: W1-T1",
+  });
+  assert.ok(body.indexOf("## Pre-open proof failure") < body.indexOf("Remudero-Task: W1-T1"));
+  assert.match(body, /Remudero-Task: W1-T1$/);
 });

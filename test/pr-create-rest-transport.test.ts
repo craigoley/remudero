@@ -268,7 +268,7 @@ test("STRUCTURAL: every one of the four run-task.ts call sites still passes an e
   // Implement builds through the awaited variant, so its proofs never spawnSync on the loop (W1-T6034).
   const callSites = [
     ...src.matchAll(
-      /ghPrCreateFillCommand(?:Async)?\(worktreePath,\s*owner,\s*(?:task\.repo|repo),\s*branch,\s*(lastCommitSubject\(worktreePath\)|branchPrTitle\(worktreePath\)|commitMessage\.split\("\\n"\)\[0\])(?:,\s*planPrBody)?\)/g,
+      /ghPrCreateFillCommand(?:Async)?\(worktreePath,\s*owner,\s*(?:task\.repo|repo),\s*branch,\s*(lastCommitSubject\(worktreePath\)|branchPrTitle\(worktreePath\)|commitMessage\.split\("\\n"\)\[0\])(?:,\s*planPrBody|,\s*undefined,\s*true)?\)/g,
     ),
   ];
   assert.equal(callSites.length, 4, "exactly implement, retro, triage and plan build a create argv");
