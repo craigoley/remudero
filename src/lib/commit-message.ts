@@ -519,8 +519,6 @@ export function commitlintStep(
 /**
  * Step 2/3 — `tsc -p tsconfig.json --noEmit`, the same invocation CI's `ci` job runs. `npm test`
  * strips types via `tsx` without checking them, so a green test run is not a compile (PR #477).
- * Incremental where tsc can write its buildinfo: inside a worker sandbox the git dir is read-only,
- * so the buildinfo moves to the worktree rather than failing TS5033 (typecheck-run.ts).
  */
 export function typecheckStep(
   repoRoot: string,
