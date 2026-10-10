@@ -276,6 +276,11 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
   }
 }
 
+/** The title of the test a flake incident's fix adds: both of its proofs name it. Plain words, so it is its own BRE. */
+export function flakeIncidentTestTitle(taskId: string): string {
+  return `${taskId} pins the cause of the intermittent failure`;
+}
+
 async function fileIncident(
   deps: GardenerDeps, sources: FlakeIncidentSources,
   incident: { origin: string; file: string; title: string; evidence: Evidence; prs: number[] },
@@ -294,9 +299,15 @@ async function fileIncident(
       files: [file],
       cost: prs.length,
       // #10298: never `grep: <id> in <file>` — only a comment carries the id, and review caps a comment-only match.
+      // 2026-10-10: a `unit test:` proof alone on a test-only record is proof-test-only-discrimination, which
+      // lint-plan --base blocks once the judge releases it to verify: auto, so every incident went to a person.
+      // The grep reads the pinning test's own `test(` line, code the fix must add, which misses at base.
       acceptance: [{
         claim: `the cause of ${subject}'s intermittent failure is fixed in ${file}, pinned by a test that forces the failing order`,
-        proof: `unit test: ${taskId} pins the cause of the intermittent failure`,
+        proof: `unit test: ${flakeIncidentTestTitle(taskId)}`,
+      }, {
+        claim: `the test that pins the cause is added to ${file}, beside the test that failed`,
+        proof: `grep: test("${flakeIncidentTestTitle(taskId)}" in ${file}`,
       }],
       note: `Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The SRE ruling of 2026-09-23 is that a CI flake is an incident.`,
       rationale: [

@@ -478,6 +478,8 @@ export type PlanPrPreflightCheck = "tree" | "lint-plan" | "task-id-existence" | 
 export interface PlanPrPreflightFinding {
   check: PlanPrPreflightCheck;
   firstLine: string;
+  lines?: string[];
+  task_ids?: string[];
 }
 export interface PlanPrPreflightResult {
   ok: boolean;
@@ -577,10 +579,30 @@ const defaultPreflightChecksAsync = {
 };
 export type PlanPrPreflightAsyncChecks = Partial<typeof defaultPreflightChecksAsync> & { budgetMs?: () => number };
 
+const DIAGNOSTIC_LINE = /^(?:not ok |REFUSES\b|FAILED\b|✗|task-id-existence: FAILED\b|lint-plan-precheck:[^\n]*\bREFUSES\b)/;
+const outputLines = (output: string): string[] => output.split("\n").map((l) => l.trim()).filter(Boolean);
 function firstLineOf(output: string, status: number | null): string {
-  const lines = output.split("\n").map((l) => l.trim()).filter(Boolean);
-  const diagnosticLine = /^(?:not ok |REFUSES\b|FAILED\b|✗|task-id-existence: FAILED\b|lint-plan-precheck:[^\n]*\bREFUSES\b)/;
-  return lines.find((l) => diagnosticLine.test(l)) ?? lines[0] ?? `exited ${status}`;
+  const lines = outputLines(output);
+  return lines.find((l) => DIAGNOSTIC_LINE.test(l)) ?? lines[0] ?? `exited ${status}`;
+}
+
+export const FAILURE_DETAIL_CHARS = 4000;
+const REFUSED_TASK_ROW = /^✗ ([A-Z][A-Z0-9]*-T[0-9]+[A-Za-z]?):/;
+
+function redFinding(check: PlanPrPreflightCheck, output: string, status: number | null): PlanPrPreflightFinding {
+  const firstLine = firstLineOf(output, status);
+  const all = outputLines(output);
+  const from = all.slice(Math.max(0, all.indexOf(firstLine)));
+  const lines: string[] = [];
+  let used = 0;
+  for (const line of from) {
+    if (lines.length > 0 && used + line.length > FAILURE_DETAIL_CHARS) break;
+    lines.push(line);
+    used += line.length;
+  }
+  if (lines.length < from.length) lines.push(`… ${from.length - lines.length} more line(s)`);
+  const taskIds = [...new Set(all.flatMap((l) => REFUSED_TASK_ROW.exec(l)?.[1] ?? []))];
+  return { check, firstLine, ...(lines.length > 1 ? { lines } : {}), ...(taskIds.length > 0 ? { task_ids: taskIds } : {}) };
 }
 
 function parsedShardProofs(text: string, opts?: { uniqueKeys: false }): string[] | undefined {
@@ -703,7 +725,8 @@ function preflightTally() {
         return;
       }
       if (reading.status === 0) return;
-      (reading.status === 1 ? failures : unreadable).push({ check, firstLine: firstLineOf(reading.output, reading.status) });
+      if (reading.status === 1) failures.push(redFinding(check, reading.output, reading.status));
+      else unreadable.push({ check, firstLine: firstLineOf(reading.output, reading.status) });
     },
     result: (): PlanPrPreflightResult => ({ ok: failures.length === 0, failures, unreadable, ...(timedOut.length > 0 ? { timedOut } : {}) }),
   };
@@ -850,7 +873,8 @@ export function planPrPreflightAllows(
 ): boolean {
   if (result.unreadable.length > 0) ctx.log?.("plan_pr.preflight_unreadable", { lane: ctx.lane, branch: ctx.branch, unreadable: result.unreadable });
   if (!result.ok) {
-    ctx.log?.("plan_pr.preflight_refused", { lane: ctx.lane, branch: ctx.branch, failures: result.failures });
+    const taskIds = [...new Set(result.failures.flatMap((f) => f.task_ids ?? []))];
+    ctx.log?.("plan_pr.preflight_refused", { lane: ctx.lane, branch: ctx.branch, ...(taskIds.length > 0 ? { task_ids: taskIds } : {}), failures: result.failures });
     return false;
   }
   if (result.timedOut === undefined) return true;
