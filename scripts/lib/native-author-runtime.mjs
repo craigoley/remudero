@@ -61,9 +61,12 @@ export function readRuntimeProfile(root, path, expected, now = Date.now()) {
     throw new Error('runtime profile: invalid measured concurrency');
   }
   const artifacts = {};
+  if (profile.artifacts?.length !== 4) throw new Error('runtime profile: missing closed capture');
   for (const row of profile.artifacts ?? []) {
-    if (artifacts[row.name]) throw new Error('runtime profile: duplicate artifact');
-    const file = artifactPath(root, row.path), bytes = readFileSync(file);
+    if (!['stdout', 'stderr', 'native', 'durations'].includes(row.name) || Object.hasOwn(artifacts, row.name)) throw new Error('runtime profile: duplicate or unexpected artifact');
+    const file = artifactPath(root, row.path);
+    if (lstatSync(file).size > 100 * 1024 * 1024) throw new Error('runtime profile: oversized capture artifact');
+    const bytes = readFileSync(file);
     if (bytes.length !== row.bytes || digest(bytes) !== row.sha256) throw new Error('runtime profile: artifact hash mismatch');
     artifacts[row.name] = bytes.toString('utf8');
   }
@@ -93,6 +96,19 @@ export function readRuntimeProfile(root, path, expected, now = Date.now()) {
     throw new Error('runtime profile: incomplete physical sample durations');
   }
   return profile;
+}
+
+/** Complete default author timing remains a separate, source-bound diagnostic artifact. */
+export function closedDurationEvidence(root, path, expectedFiles, bindings) {
+  const file = artifactPath(root, path);
+  if (lstatSync(file).size > 2 * 1024 * 1024) throw new Error('runtime durations: oversized evidence');
+  const bytes = readFileSync(file), evidence = JSON.parse(bytes);
+  if (evidence.version !== 1 || JSON.stringify(Object.keys(evidence.files ?? {}).sort()) !==
+      JSON.stringify([...expectedFiles].sort()) || Object.values(evidence.files ?? {}).some((ms) => !Number.isFinite(ms) || ms <= 0)) {
+    throw new Error('runtime durations: incomplete physical file-wrapper evidence');
+  }
+  return { state: 'complete', path, bytes: bytes.length, sha256: digest(bytes), bindings,
+    physicalFiles: expectedFiles.length, limits: 'Closed native wrapper durations, not a promoted runtime baseline, calibrated parallel scaling, resource peak or additional test assurance.' };
 }
 
 const quantile = (values, fraction) => {

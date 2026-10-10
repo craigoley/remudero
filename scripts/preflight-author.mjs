@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Author-time feedback, not a substitute for the required hosted full-suite/coverage verdict.
 import { spawnSync } from 'node:child_process';
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { affectedSelectionOrFull, changedSymbols, readAffectedSuitesInput, symbollessSourceFiles }
   from '../src/lib/affected-suites.ts';
@@ -11,7 +11,7 @@ import { listTestFiles } from './test-tier-manifest.mjs';
 import { isMainModule, parseArgv } from './lib/argv.mjs';
 import { REPO_ROOT } from './lib/repo-root.mjs';
 import { captureStepSync, AUTHOR_OUTPUT_LIMIT_BYTES, AUTHOR_STEP_RUNTIME_MS } from './lib/author-step-capture.mjs';
-import { AUTHOR_SHUTDOWN_RESERVE_MS, runtimeBindings, readRuntimeProfile, runtimeDeadlineFit } from './lib/native-author-runtime.mjs';
+import { AUTHOR_SHUTDOWN_RESERVE_MS, runtimeBindings, readRuntimeProfile, runtimeDeadlineFit, closedDurationEvidence } from './lib/native-author-runtime.mjs';
 
 export function authorEnvironment(parent) {
   const env = { ...parent, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: '' };
@@ -260,13 +260,27 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
             // The host-wide test slot, a load-derived concurrency (never above the old 4) and nice (test-slot.ts).
             slot.refresh();
-            const durationArgs = deadline === undefined ? [] : ['--test-reporter-destination=stdout',
+            const hasDurationReporter = existsSync(join(root, 'scripts/test-duration-reporter.mjs'));
+            const durationArgs = !hasDurationReporter ? [] : ['--test-reporter-destination=stdout',
               `--test-reporter=${join(root, 'scripts/test-duration-reporter.mjs')}`,
               `--test-reporter-destination=${join(diagnosticsRoot, 'durations.json')}`];
             const child = lowPriorityCommand(process.execPath, testRunArgv(['--test', '--test-reporter=tap', ...durationArgs,
               '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...receipt.suites], Math.min(4, slot.concurrency)));
             const tests = runStep('affected-tests', child.args, child.file);
             report('affected-tests', tests, completeTestResult(tests));
+            receipt.runtimeEvidence = { state: 'not-collected', reason: 'duration reporter unavailable in this root' };
+            if (hasDurationReporter) {
+              if (!completeTestResult(tests)) receipt.runtimeEvidence = { state: 'incomplete', reason: 'affected-tests did not complete successfully' };
+              else {
+                try {
+                  receipt.runtimeEvidence = closedDurationEvidence(root, relative(root, join(diagnosticsRoot, 'durations.json')),
+                    receipt.suites, runtimeBindings(root, receipt.headSha, authorEnvironment(process.env)));
+                } catch (error) {
+                  // Timing is diagnostic, never author assurance or a zero-cost success estimate.
+                  receipt.runtimeEvidence = { state: 'unavailable', reason: error.message };
+                }
+              }
+            }
           } else {
             receipt.affectedTestsNotRunReason = 'static-preflight did not succeed; see its native outcome';
             console.log('affected-tests: NOT RUN — static-preflight did not succeed; selected floor retained in the receipt');

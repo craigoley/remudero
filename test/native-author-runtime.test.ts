@@ -3,7 +3,6 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
-import { gitRepo } from './helpers/git-repo.js';
 
 const runtime = await import(pathToFileURL(join(process.cwd(), 'scripts/lib/native-author-runtime.mjs')).href);
 const manifest = { version: 1, thresholdMs: 10_000, files: { 'test/a.test.ts': 1000, 'test/b.test.ts': 3000 } };
@@ -55,6 +54,19 @@ test('native runtime profile rereads real closed evidence and rejects stale, cor
     { concurrency: 0 }, { artifacts: [] }, { samples: [] }, { files: {} },
   ]) { rewrite({ ...parsed, ...change }); assert.throws(() => runtime.readRuntimeProfile(f.dir, observed.path, bindings)); }
   rewrite(parsed);
+  const durations = parsed.artifacts.find((row: { name: string }) => row.name === 'durations');
+  assert.equal(runtime.closedDurationEvidence(f.dir, durations.path, parsed.samples, bindings).state, 'complete');
+  assert.throws(() => runtime.closedDurationEvidence(f.dir, durations.path, ['test/a.test.ts'], bindings), /incomplete physical/);
+  const nativeRow = parsed.artifacts.find((row: { name: string }) => row.name === 'native');
+  const nativePath = join(f.dir, nativeRow.path), nativeOriginal = readFileSync(nativePath, 'utf8');
+  for (const change of [{ status: 1 }, { signal: 'SIGTERM' }, { error: { code: 'fixture-error' } },
+    { outputComplete: false }, { observedBytes: 0 }, { storedBytes: 0 }]) {
+    const text = JSON.stringify({ ...JSON.parse(nativeOriginal), ...change }); writeFileSync(nativePath, text);
+    rewrite({ ...parsed, artifacts: parsed.artifacts.map((row: { name: string }) => row.name !== 'native' ? row :
+      { ...row, bytes: Buffer.byteLength(text), sha256: runtime.digest(text) }) });
+    assert.throws(() => runtime.readRuntimeProfile(f.dir, observed.path, bindings), /incomplete or unsuccessful/);
+  }
+  writeFileSync(nativePath, nativeOriginal); rewrite(parsed);
   assert.throws(() => runtime.readRuntimeProfile(f.dir, observed.path, { ...bindings, head: 'f'.repeat(40) }), /binding mismatch/);
   const stdout = parsed.artifacts.find((row: { name: string }) => row.name === 'stdout');
   writeFileSync(join(f.dir, stdout.path), 'truncated');

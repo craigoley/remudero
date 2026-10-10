@@ -57,3 +57,34 @@ References: [pip secure installs](https://pip.pypa.io/en/stable/topics/secure-in
 [Peewee's pinned build requirements](https://github.com/coleifer/peewee/blob/3.18.3/pyproject.toml),
 [Peewee's supported source-build switch](https://github.com/coleifer/peewee/blob/3.18.3/setup.py),
 and [Semgrep licensing](https://semgrep.dev/docs/licensing/).
+
+## Deadline-aware native author validation
+
+The local author gate still runs its verified affected selection (including full fallback)
+and all default static checks. It does not replace hosted coverage, security, review or merge.
+Normal author runs now save compact file-wrapper durations beside their native logs; a
+missing, incomplete or unreadable timing artifact is explicit and is never priced as zero.
+Timing observations are not automatically promoted into the committed duration ledger.
+
+For a bounded heavy run, commit first and run
+`node --import tsx scripts/calibrate-author-runtime.mjs` on the native target. It takes a
+real host-wide slot, retains niceness, samples 32 physical files across the duration ledger
+(all files when fewer exist), and keeps complete native/TAP/hash evidence under `coverage/`.
+The sample includes the ledger's expensive tail. A failed or interrupted sample is not a profile.
+
+Use the returned profile path with
+`node --import tsx scripts/preflight-author.mjs --deadline <fixed-ISO-time> --runtime-profile <path>`.
+The gate checks the exact source, corpus, lock/setup hashes, Node/V8/tsx, platform and
+nonsecret environment fingerprint, then independently rereads every closed sample artifact.
+Stale/future, corrupt, incomplete or mismatched profiles cannot price admission.
+
+After acquiring the actual slot, fit the conservative sample-calibrated estimate, static
+reserve and shutdown reserve into the remaining deadline. Recheck after static validation.
+Unknown files retain explicit positive costs. A non-fitting or unslotted run refuses before
+the expensive phase and releases only its own slot; it never increases concurrency, evicts
+workers, shrinks the test set, bypasses gates or silently extends the deadline. Phase capture
+limits follow the remaining window. A sample estimate is not full-corpus calibration or a
+completion promise; completed full-run durations provide later, separately governed evidence.
+
+The operator-approved 60-minute ready-heavy escalation SLA is a separate scheduler follow-up,
+not this execution deadline. No live scheduler policy or default author deadline changes here.

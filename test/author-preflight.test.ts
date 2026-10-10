@@ -35,6 +35,7 @@ test('author deadline admission refuses a too-small real slot budget before star
   const passed = JSON.parse(readFileSync(join(f.dir, 'coverage/preflight-author.json'), 'utf8'));
   assert.equal(passed.verdict, 'passed'); assert.equal(passed.runtimeAdmission.stage, 'before-tests');
   assert.equal(passed.runtimeAdmission.fits, true); assert.equal(passed.steps.at(-1).testSummary.fail, 0);
+  assert.equal(passed.runtimeEvidence.state, 'complete'); assert.equal(passed.runtimeEvidence.physicalFiles, 2);
   assert.equal(existsSync(join(f.dir, 'coverage/static-started')), true);
 });
 
@@ -76,6 +77,7 @@ test('author preflight runs real affected tests without coverage and records exa
   assert.equal(receipt.headSha, f.git('rev-parse', 'HEAD'));
   assert.equal(receipt.baseSha, f.git('rev-parse', 'main'));
   assert.equal(receipt.selection, 'affected-narrow');
+  assert.equal(receipt.runtimeEvidence.state, 'not-collected');
   assert.deepEqual(receipt.suites, ['test/leaf.test.ts']);
   assert.deepEqual(receipt.steps.map((s: { ok: boolean }) => s.ok), [true, true, true]);
   assert.deepEqual(receipt.gitHistory, { state: 'complete' });
