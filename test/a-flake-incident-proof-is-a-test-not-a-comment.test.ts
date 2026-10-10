@@ -42,7 +42,9 @@ test("a filed flake incident proves its fix with a test titled by the task id, n
   assert.equal(landed.length, 1);
   const shard = readFileSync(join(root, landed[0]!.paths[0]!), "utf8");
   const proofs = [...shard.matchAll(/proof: "?(.*?)"?$/gm)].map((m) => m[1]!);
-  assert.equal(proofs.length, 1, shard);
+  // 2026-10-10: a second criterion greps the pinning test's own `test(` line, so the record discriminates at verify: auto.
+  assert.equal(proofs.length, 2, shard);
   assert.match(proofs[0]!, /^unit test: W1-T9884 /, "the proof is a test the fix adds, named by the task id");
-  assert.doesNotMatch(proofs[0]!, /^grep: W1-T9884 in /, "a bare id grep is satisfied only by a comment");
+  assert.match(proofs[1]!, /^grep: test\(\\?"W1-T9884 /, "the grep reads the test's own line, which a comment cannot satisfy");
+  for (const proof of proofs) assert.doesNotMatch(proof, /^grep: W1-T9884 in /, "a bare id grep is satisfied only by a comment");
 });
