@@ -1029,6 +1029,7 @@ import {
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
 import { clockFromDateFn, clockFromMillisFn, fixedClock, systemClock, type Clock } from "./lib/clock.js";
+import { observeContributorAdmission, type AdmissionObserver } from "./lib/contributor-admission.js";
 import {
   VERIFY_HUMAN_JUDGED_STEP,
   judgeVerifyHumanShard,
@@ -21957,6 +21958,7 @@ export function repairRetroChangesetClaim(
  * be a brand-new, never-invoked-under-test line this same gate would then flag).
  */
 interface ReviewCommandDeps {
+  contributorAdmission?: AdmissionObserver;
   fetchView?: (args: string[]) => unknown;
   loadConfig?: () => Config;
   materialize?: typeof materializeReviewWorktree;
@@ -22459,6 +22461,8 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   const runId = `review-PR${view.number}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: reviewKey, step, lane: "review", ...extra });
+  await (deps.contributorAdmission ?? ((target, action) => observeContributorAdmission(config.contributorAdmission, target, action, log)))
+    ({ owner, repo, prNumber: view.number, headSha: view.headRefOid }, "review");
   const reviewSubject = resolveReviewSubjectCheckout({
     config,
     rest,
@@ -22884,6 +22888,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
  * `which claude`, which does not exist on a CI runner.
  */
 export interface DepReviewDeps {
+  contributorAdmission?: AdmissionObserver;
   clock?: Clock;
   gh?: (args: string[]) => unknown;
   prDiff?: (prUrl: string) => string;
@@ -22997,10 +23002,13 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     author?: { login?: string };
     statusCheckRollup?: RollupEntry[];
   };
+  const config = deps.config ?? loadConfig();
+  await (deps.contributorAdmission ?? ((target, action) => observeContributorAdmission(config.contributorAdmission, target, action,
+    (step, fields) => appendLedger(ledgerPathFor(config), { run_id: `dep-admission-PR${view.number}`, task_id: `dep-review-PR${view.number}`, step, ...fields }))))
+    ({ owner, repo, prNumber: view.number, headSha: view.headRefOid }, "review");
   const diff = (deps.prDiff ?? ((u: string) => ghExec(["pr", "diff", u], { encoding: "utf8", maxBuffer: 1 << 26 })))(view.url);
   const inputDigest = reviewInputDigest(view.headRefOid, view.body ?? "", DEP_REVIEW_ENGINE_REVISION);
 
-  const config = deps.config ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
   const clock = deps.clock ?? systemClock;
   const runId = `dep-review-PR${view.number}-${clock.now()}`;
@@ -47751,7 +47759,7 @@ export async function fixCommand(
   //
   // `self` is the checkout's owner/repo, otherwise read from `origin`. A sandboxed checkout has no
   // origin remote, so a test that drives this verb end to end must be able to name the slug itself.
-  deps: { config?: Config; fetch?: GhApiFetcher; route?: typeof routeFix; self?: { owner: string; repo: string } } = {},
+  deps: { config?: Config; fetch?: GhApiFetcher; route?: typeof routeFix; self?: { owner: string; repo: string }; contributorAdmission?: AdmissionObserver } = {},
 ): Promise<number> {
   const prArg = rest[0];
   // W1-T4077: `--requested` is the console's "Fix now". The operator asking for a fix IS the decision to try
@@ -47776,6 +47784,8 @@ export async function fixCommand(
   const operatorRequested = rest.includes("--requested");
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "FIX", step, lane: "fix", ...extra });
+  await (deps.contributorAdmission ?? ((target, action) => observeContributorAdmission(config.contributorAdmission, target, action, log)))
+    ({ owner, repo, prNumber }, "repair");
 
   let raw: RawOpenPr & { state?: string };
   try {

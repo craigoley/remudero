@@ -66,6 +66,7 @@ import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec } from "./git-push.js";
 import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
+import { observeContributorAdmission, type AdmissionObserver } from "./contributor-admission.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
 import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
 import { reclaimStaleLock } from "./fs-race-safe.js";
@@ -1347,6 +1348,7 @@ export type PlanScopedFixRoundInput = {
 };
 
 export interface BuildSweepEffectsDeps {
+  contributorAdmissionImpl?: AdmissionObserver;
   /** W1-T7096: the daemon and CLI entrypoints ask the production LLM progress judge; a caller that
    *  sets nothing (a fixture) keeps the former fixed bound as an explicit stand-in. */
   productionProgressJudge?: boolean;
@@ -1993,6 +1995,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     });
   if (deps.reviewRunner) reviewRunner = deps.reviewRunner;
 
+  const admission: AdmissionObserver = deps.contributorAdmissionImpl ?? ((target, action) =>
+    observeContributorAdmission(config.contributorAdmission, target, action, log));
+  const observePr = (pr: OpenPrView, action: Parameters<AdmissionObserver>[1]): Promise<void> =>
+    admission({ owner, repo, prNumber: pr.prNumber, headSha: pr.headSha }, action);
+
   const repoDir = repo === localRepoName ? entrypointRepoRoot : join(config.root, "repos", repo);
   // W1-T4460 (design ii): the real default reads this repo's OWN plan fresh off disk, swallowing a
   // read failure (an unreadable plan on this one opportunistic re-read is never this dispatch's
@@ -2341,6 +2348,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // cannot happen from this adapter but keeps every existing fake/test that returns a plain
     // `ArmOutcome` string compiling and behaving exactly as before) is returned unchanged.
     arm: async (pr, mode) => {
+      await observePr(pr, "auto-merge");
       if (repoMode === "shadow") {
         log("automerge.shadow_refused", {
           pr_url: pr.prUrl,
@@ -2515,6 +2523,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // the DECISION is read back off the dep-review.decided ledger line it just
     // wrote — the outcome drives the sweep's terminal-vs-hold dedup.
     depReview: async (pr) => {
+      await observePr(pr, "review");
       await depReviewCommand(String(pr.prNumber), ["--repo", repo]);
       const decided = readLedgerLines(ledgerPath)
         .filter((l) => l.step === "dep-review.decided" && l.task_id === `dep-review-PR${pr.prNumber}`)
@@ -2548,6 +2557,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // `sweep.disposed` line — this is a MORE SPECIFIC sibling record, not a
     // replacement for it.
     postReview: async (pr, mode = { kind: "full-review" }) => {
+      await observePr(pr, "review");
       log("sweep.post_review.attempt", {
         pr_number: pr.prNumber,
         pr_url: pr.prUrl,
@@ -3077,6 +3087,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     },
 
     dispatchFix: async (pr, evidence, onPhase) => {
+      await observePr(pr, "repair");
       let worktreePath = "";
       let keepWorktree = false;
       // W1-T2609: released in the SAME `finally` below that cleans up `worktreePath` — held for
@@ -4312,6 +4323,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // line for an Architect instead of rewriting it, editing no `claim:`/`proof:`/`satisfied_by:`
     // field. Stable per-task branch name: a second dispatch before the first PR lands DEDUPES.
     dispatchPlanOnlyRepair: async (pr, evidence) => {
+      await observePr(pr, "repair");
       const taskId = pr.taskId;
       const proof0 = evidence.proofs[0];
       if (!taskId || !proof0) return;
