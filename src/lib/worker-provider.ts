@@ -44,6 +44,7 @@ import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWind
 import type { ModelApproval } from "./config-schema.js";
 import { hasUsableTypecheckBuildInfo, installedTypescriptVersion, seedFromCanonical, TYPECHECK_BUILDINFO_NAME } from "./typecheck-buildinfo.js";
 import { acquireTestSlotAsync } from "./test-slot.js";
+import { codexTestSlotArgs } from "./typecheck-command.js";
 import { selectFromRoutingPool, type RoutingPoolDecision, type RoutingPoolRequest, type RoutingPoolSnapshot } from "./model-pool.js";
 import {
   spawnDetachedGroup,
@@ -2576,6 +2577,8 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
     ...shared,
     ...(disposableReview ? [] : ["--sandbox", readOnly ? "read-only" : "workspace-write"]),
     ...(readOnly || disposableReview ? [] : ["-c", "sandbox_workspace_write.network_access=true"]),
+    // A model's own `npm run typecheck` takes the host-wide slot like the harness's checks (typecheck-command.ts).
+    ...(readOnly || disposableReview ? [] : codexTestSlotArgs()),
     "-C", args.cwd,
     "-",
   ];
