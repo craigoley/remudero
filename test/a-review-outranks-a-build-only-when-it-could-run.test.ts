@@ -6,7 +6,7 @@
  * reordered.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -42,7 +42,7 @@ import {
   type ShadowMemoryPorts,
 } from "../src/lib/host-memory-shadow.js";
 import type { LedgerLine } from "../src/lib/ledger.js";
-import { publishLightPassReviewDemand, type OpenPrView } from "../src/lib/sweep.js";
+import { memoryCapacityEscalation, publishLightPassReviewDemand, type OpenPrView } from "../src/lib/sweep.js";
 import { DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
 import { createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs } from "../src/lib/worker.js";
 import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
@@ -401,6 +401,132 @@ test("the sweep publishes its eligible review demand", () => {
     assert.deepEqual([r.instance, r.eligible, r.laneReady, r.oldestEligibleSince, r.stale], ["here", 2, 1, new Date(NOW).toISOString(), false]);
   } finally {
     resetHostMemoryPriorityStateForTests();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── failure arms: each one a named, deduplicated diagnostic and never a throw ───────────────────────────────────
+
+test("a demand row that cannot be published is one deduplicated diagnostic and the sweep proceeds", () => {
+  resetHostMemoryPriorityStateForTests();
+  try {
+    const events: Array<Record<string, unknown>> = [];
+    const instance = () => ({ name: "here", hostUnique: true });
+    const demandRow = { eligible: 1, laneReady: 1, oldestEligibleSince: null };
+    const failing = (error: unknown) => ({
+      instance, clock: fixedClock(NOW), root: "/r/here", location: () => ({ dir: "/unused", scope: "host" as const }),
+      write: () => { throw error; }, log: (e: Record<string, unknown>) => void events.push(e),
+    });
+    assert.equal(publishReviewDemand(demandRow, failing(new Error("disk full"))), undefined);
+    assert.equal(publishReviewDemand(demandRow, failing(new Error("disk full"))), undefined, "a repeat is not logged again");
+    assert.deepEqual(events, [{ event: "memory_budget.review_demand_error", op: "publish", reason: "disk full" }]);
+    assert.equal(publishReviewDemand(demandRow, failing(Object.assign(new Error("denied"), { code: "EACCES" }))), undefined);
+    assert.deepEqual(events.at(-1), { event: "memory_budget.review_demand_error", op: "publish", reason: "EACCES" }, "an errno names itself");
+    assert.equal(events.length, 2);
+
+    // The diagnostic of a diagnostic: a log sink that itself throws must not reach the sweep.
+    let logged = 0;
+    const exploding = { ...failing(new Error("log sink is broken too")), log: () => { logged += 1; throw new Error("log down"); } };
+    assert.equal(publishReviewDemand(demandRow, exploding), undefined);
+    assert.equal(logged, 1);
+  } finally {
+    resetHostMemoryPriorityStateForTests();
+  }
+});
+
+test("an unreadable demand directory and torn or foreign rows are named, counted and left in place", () => {
+  resetHostMemoryPriorityStateForTests();
+  try {
+    const events: Array<Record<string, unknown>> = [];
+    const log = (e: Record<string, unknown>) => void events.push(e);
+    const location = () => ({ dir: "/unused", scope: "host" as const });
+    const denied = readReviewDemand({
+      location, clock: fixedClock(NOW), log,
+      list: () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); },
+    });
+    assert.deepEqual(denied, { state: "unreadable", reason: "EACCES", rows: [], unreadableRows: 0 });
+    assert.deepEqual(events, [{ event: "memory_budget.review_demand_error", op: "list", reason: "EACCES" }]);
+
+    const good = { ...row(), stale: undefined, ageMs: undefined };
+    const files: Record<string, string> = {
+      "good.json": JSON.stringify(good),
+      "foreign.json": JSON.stringify({ schema: 2, instance: "x" }),
+      "torn.json": "{\"schema\": 1, \"inst",
+    };
+    const reading = readReviewDemand({
+      location, clock: fixedClock(NOW), log,
+      list: () => [...Object.keys(files), "notes.txt"],
+      read: (path) => files[path.split("/").at(-1)!]!,
+    });
+    assert.equal(reading.state, "present");
+    assert.deepEqual(reading.rows.map((r) => [r.instance, r.stale]), [["other", false]], "the good row is kept");
+    assert.equal(reading.unreadableRows, 2, "the foreign and the torn row are counted, not read as healthy");
+  } finally {
+    resetHostMemoryPriorityStateForTests();
+  }
+});
+
+test("a failing demand read or diagnostic write is a named shadow error and never a yield or a throw", () => {
+  resetShadowMemoryStateForTests();
+  resetHostMemoryPriorityStateForTests();
+  try {
+    const rows: LedgerLine[] = [];
+    const broken = recordShadowMemoryVerdict(START, ports(NOW, {
+      rows,
+      readReviewDemand: () => { throw new Error("demand exploded"); },
+    }));
+    assert.equal(broken.kind, "recorded");
+    const shadow = rows.find((r) => r.step === "memory_budget.shadow")!;
+    assert.equal(shadow.would_yield_to_review, false, "an unread demand is never a yield");
+    assert.deepEqual(shadow.review_priority, { yield: false, why: "demand-unread", detail: "priority:demand exploded" });
+    const named = rows.filter((r) => r.step === "memory_budget.shadow_error");
+    assert.deepEqual(named.map((r) => r.reason), ["priority:demand exploded"]);
+
+    resetShadowMemoryStateForTests();
+    const pressured = files(8192, { "/proc/pressure/memory": "some avg10=50.00 avg60=40.00 avg300=1 total=1\n" });
+    const kept: LedgerLine[] = [];
+    const outcome = recordShadowMemoryVerdict(START, ports(NOW, {
+      rows: kept,
+      readFile: pressured,
+      readReviewDemand: () => demand([]),
+      write: (_path, line) => {
+        if (line.step === "memory_budget.deferral_summary") throw new Error("sink full");
+        kept.push(line);
+      },
+    }));
+    assert.equal(outcome.kind, "recorded");
+    assert.equal(outcome.kind === "recorded" && outcome.written, true, "the verdict itself was written");
+    assert.deepEqual(kept.filter((r) => r.step === "memory_budget.shadow_error").map((r) => r.reason), ["diagnostics:sink full"]);
+  } finally {
+    resetShadowMemoryStateForTests();
+    resetHostMemoryPriorityStateForTests();
+  }
+});
+
+test("the production capacity escalation is built only with a repo identity and outside the test runner, and delivers through tryEscalate", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-capacity-escalation-"));
+  const ledgerPath = join(dir, "state", "ledger.jsonl");
+  const deps = { ledgerPath, runId: "sweep-x", readerAgreement: { owner: "o", repo: "r" } as never };
+  const saved = process.env.NODE_TEST_CONTEXT;
+  try {
+    process.env.NODE_TEST_CONTEXT = saved ?? "child-v8";
+    assert.equal(memoryCapacityEscalation(deps), undefined, "under the test runner there is no live escalation");
+    delete process.env.NODE_TEST_CONTEXT;
+    assert.equal(memoryCapacityEscalation({ ledgerPath, runId: "sweep-x" }), undefined, "no repo identity, no escalation");
+    const escalate = memoryCapacityEscalation(deps);
+    assert.equal(typeof escalate, "function");
+    process.env.NODE_TEST_CONTEXT = saved ?? "child-v8";
+    // A decision with no lever has no option to offer: tryEscalate refuses it before any GitHub call, ledgers the
+    // refusal, and the production closure reports "not delivered" instead of throwing.
+    const decision: CapacityDecision = { scenario: "serve-steady", shortfallMib: 2048, shortfallGb: 2, samples: 12, levers: [] };
+    assert.equal(escalate!(decision), null);
+    const failed = readFileSync(ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>)
+      .find((r) => r.step === "escalation.failed");
+    assert.ok(failed, "the undelivered escalation is ledgered, not silent");
+    assert.deepEqual([failed.task_id, failed.class, failed.run_id], ["MEMORY-CAPACITY-serve-steady", "MANUAL", "sweep-x"]);
+  } finally {
+    if (saved !== undefined) process.env.NODE_TEST_CONTEXT = saved;
+    else delete process.env.NODE_TEST_CONTEXT;
     rmSync(dir, { recursive: true, force: true });
   }
 });
