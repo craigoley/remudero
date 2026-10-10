@@ -15,6 +15,7 @@ import {
   type SweepPolicy,
 } from "./helpers/sweep-test.js";
 import { readLedgerLines, type GitHub } from "../src/lib/status.js";
+import { makeTempDir } from "../src/lib/tmp.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { runDrain, type DrainDeps, type DrainSummary, type MergedSet } from "../src/lib/drain.js";
@@ -668,4 +669,81 @@ test("W1-T321: runDaemon IDLES (never dispatches) while checkQueueGovernor defer
   assert.equal(summary.stopReason, "stopped");
   assert.deepEqual(dispatched, ["A"], "exactly one dispatch, only AFTER the governor stopped deferring");
   assert.ok(governorCalls >= 3, "the governor must be re-consulted on every idle tick, not cached past the first defer");
+});
+
+// Operator ruling 2026-10-09: "I hate hard ceilings" — the drain gate admits above the base WIP limit once the owned PRs
+// are parked (moved here from the adaptive-WIP suite so that suite need not import run-task).
+const WIP_BASE_LIMIT = 10;
+const WIP_NOW = Date.parse("2026-10-09T22:00:00.000Z");
+const wipDisposed = (pr: number, blocker: string, ageMin: number) => ({
+  ts: new Date(WIP_NOW - 60_000).toISOString(), step: "sweep.disposed", pr_number: pr, blocker,
+  blocker_age_ms: ageMin * 60_000,
+});
+
+test("the wired drain gate ledgers admission above the base limit when its owned PRs are stuck", async () => {
+  const root = makeTempDir("adaptive-wip-drain");
+  const planPath = join(root, "tasks.yaml");
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const owned = WIP_BASE_LIMIT + 2;
+  const github: GitHub = {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+    listOpenHeadBranches: () => Array.from({ length: owned }, (_, i) => ({
+      number: i + 1, url: `https://github.com/o/r/pull/${i + 1}`, state: "OPEN",
+      headRefName: `run-W1-T${i + 1}-1791586243048`,
+    })),
+  };
+  try {
+    mkdirSync(join(root, "state"));
+    writeFileSync(planPath, "[]\n");
+    let gate: DrainDeps["checkQueueGovernor"];
+    const code = await drainCommand([], {
+      config: { claudeBin: "/bin/true", root } as Config,
+      planPath,
+      skipGitSync: true,
+      githubFactory: () => github,
+      notifyChannel: { send: () => true } as never,
+      now: () => WIP_NOW,
+      runDrain: async (_plan, deps): Promise<DrainSummary> => {
+        deps.refreshMerged();
+        gate = deps.checkQueueGovernor;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, resumeCommand: "rmd drain" };
+      },
+    });
+    assert.equal(code, 0);
+    assert.ok(gate);
+
+    const blocked = gate();
+    assert.equal(blocked?.deferred, true, "without blocker evidence, all owned PRs still occupy slots");
+    for (let pr = 1; pr <= owned; pr++) {
+      writeFileSync(ledgerPath, JSON.stringify(wipDisposed(pr, "operator-hold", 1)) + "\n", { flag: "a" });
+    }
+
+    assert.equal(gate(), undefined, "the same above-base board is admitted once its PRs are parked");
+    const lines = readLedgerLines(ledgerPath);
+    const admitted = lines.filter((line) => line.step === "dispatch_admitted_adaptive_wip");
+    assert.equal(admitted.length, 1, "the real gate writes one admission row");
+    assert.equal(admitted[0].run_id, lines.find((line) => line.step === "drain.start")?.run_id);
+    assert.equal(admitted[0].task_id, "GOVERNOR");
+    assert.equal(admitted[0].observed_open_count, owned);
+    assert.equal(admitted[0].base_wip_limit, DEFAULT_SWEEP_POLICY.wipLimit);
+    assert.equal(admitted[0].stuck_owned_count, owned);
+    assert.equal(admitted[0].tier, "under_limit");
+    assert.equal(admitted[0].trailing_merged_count, 0);
+    assert.equal(admitted[0].trailing_opened_count, 0);
+    // The real headroom reader reads /proc/meminfo: readable on the Linux host and CI, absent on a Mac. Either way the
+    // row must say which, never a silent number.
+    if (admitted[0].headroom_unread === false) {
+      assert.equal(admitted[0].headroom_error, null);
+      assert.equal(typeof admitted[0].headroom_fraction, "number");
+    } else {
+      assert.equal(admitted[0].headroom_unread, true);
+      assert.equal(typeof admitted[0].headroom_error, "string", "an unread headroom names its error");
+    }
+    assert.ok(Number(admitted[0].wip_limit) <= DEFAULT_SWEEP_POLICY.wipLimit);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
