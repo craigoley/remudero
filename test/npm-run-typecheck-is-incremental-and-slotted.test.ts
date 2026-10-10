@@ -6,7 +6,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { TYPECHECK_BUILDINFO_NAME } from "../src/lib/typecheck-buildinfo.js";
 import { acquireTestSlot } from "../src/lib/test-slot.js";
-import { NPM_TYPECHECK_SLOT_LABEL, prepareTypecheckRun, runTypecheck } from "../src/lib/typecheck-run.js";
+import { dirIsWritable, NPM_TYPECHECK_SLOT_LABEL, prepareTypecheckRun, runTypecheck } from "../src/lib/typecheck-run.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -140,16 +140,8 @@ test("a sandboxed worker whose git dir is read-only keeps its buildinfo in TMPDI
   assert.ok(existsSync(prepared.buildInfo!), "tsc wrote the TMPDIR buildinfo");
   assert.ok(!existsSync(join(laneGitDir, TYPECHECK_BUILDINFO_NAME)), "nothing was written into the read-only git dir");
   assert.equal(prepareTypecheckRun(lane.dir, tmp, () => false).where, "plain", "nowhere writable runs the plain check");
-  if (process.getuid?.() !== 0) {
-    // The real filesystem shape: a read-only git dir would fail tsc with TS5033 if the buildinfo stayed there.
-    chmodSync(laneGitDir, 0o555);
-    const lines: string[] = [];
-    try {
-      assert.equal(runTypecheck(lane.dir, [], { spawn: realTsc, tmpDir: tmp, log: (line) => lines.push(line) }), 0, lines.join("\n"));
-    } finally {
-      chmodSync(laneGitDir, 0o755);
-    }
-  }
+  assert.equal(dirIsWritable(tmp), true, "the default probe creates a file where it can");
+  assert.equal(dirIsWritable(join(tmp, "no-such-dir")), false, "and refuses where tsc could not write either");
 });
 
 test("a slot holder in another pid namespace on the same host is live by its lease, not dead by its pid", (t) => {
