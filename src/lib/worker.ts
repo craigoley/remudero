@@ -126,8 +126,10 @@ import {
   type WorkerHomeReapResult,
   type WorkerKeychainSummary,
 } from "./worker-home.js";
-import { openMemoryReservation, type HostMemoryLedgerOptions, type MemoryReservationHandle, type WorkerClass } from "./host-memory-ledger.js";
-import { recordShadowMemoryVerdict, type ShadowMemoryPorts } from "./host-memory-shadow.js";
+import { awaitMemoryAdmission, type AdmissionPorts } from "./host-memory-admission.js";
+import { openLearnedReservation, type LearnedReservation, type LearnedReservationDeps } from "./host-memory-learning.js";
+import type { HostMemoryLedgerOptions, MemoryReservationHandle, WorkerClass } from "./host-memory-ledger.js";
+import { recordShadowMemoryVerdict } from "./host-memory-shadow.js";
 import {
   buildContainedSpawnFn,
   spawnDetachedGroup,
@@ -1073,7 +1075,7 @@ export interface SpawnWorkerArgs {
   /** The class the host memory ledger records (W1-T7093). Omitted: derived, or recorded as "unclassified". */
   workerClass?: WorkerClass;
   /** Test seam for the counterfactual host-memory verdict (W1-T7094). Omitted: the process-installed sink and real reads. */
-  memoryShadow?: Partial<ShadowMemoryPorts>;
+  memoryShadow?: Partial<AdmissionPorts>;
   /** Enables the implement lane's read-only rule lookup, with a ledger sink for every call. */
   ruleLookup?: {
     onPulled: (id: string, status: "found" | "missing" | "error") => void;
@@ -2068,6 +2070,8 @@ export interface WorkerOccupancyReservation {
   workerClass?: WorkerClass;
   root?: string;
   ledger?: HostMemoryLedgerOptions;
+  /** The learned-estimate store and the tree sampler (host-memory-learning.ts). Default: the shared ones. */
+  learning?: Omit<LearnedReservationDeps, "ledger">;
 }
 
 function claimWorkerOccupancy(): () => void {
@@ -2080,10 +2084,14 @@ function claimWorkerOccupancy(): () => void {
   };
 }
 
-/** The host memory reservation a claim opens beside its counter. `openMemoryReservation` never throws, and its
- * `releaseOccupancy` never throws either, so neither the claim nor its release can fail on the ledger's account. */
-function openOccupancyReservation(reservation: WorkerOccupancyReservation): MemoryReservationHandle {
-  return openMemoryReservation({ workerClass: reservation.workerClass ?? "unclassified", root: reservation.root }, reservation.ledger);
+/** The host memory reservation a claim opens beside its counter, at its class's LEARNED estimate; its tree's peak is
+ * recorded when the occupancy ends. It never throws, and its `releaseOccupancy` never throws either, so neither the claim
+ * nor its release can fail on the ledger's account. */
+function openOccupancyReservation(reservation: WorkerOccupancyReservation): LearnedReservation {
+  return openLearnedReservation(
+    { workerClass: reservation.workerClass ?? "unclassified", ...(reservation.root ? { root: reservation.root } : {}) },
+    { ...reservation.learning, ...(reservation.ledger ? { ledger: reservation.ledger } : {}) },
+  );
 }
 
 /** The class a spawn records when its caller names none: a disposable review sandbox is a review, a spawn carrying the
@@ -2290,6 +2298,15 @@ function sonnetRefusedBeforeTransport(result: WorkerResult): boolean {
 }
 
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
+  // The ENFORCE mode of the host memory budget: under the shipped "shadow" mode this returns at once and changes
+  // nothing; under "enforce" (an operator ruling in plan/policy.yaml) it waits, tiered and in priority order, while the
+  // start would not fit. It never throws, and an error admits the start (host-memory-admission.ts).
+  await awaitMemoryAdmission({
+    workerClass: workerClassOf(args),
+    root: () => (args.config ?? loadConfig()).root,
+    ...(args.runId ? { runId: args.runId } : {}),
+    ...(args.taskId ? { taskId: args.taskId } : {}),
+  }, args.memoryShadow);
   const releaseWorkerOccupancy = claimWorkerOccupancy();
   const memoryReservation = openOccupancyReservation({ workerClass: workerClassOf(args), root: args.config?.root });
   const boundContainment = reservationBoundContainment(args.containment, memoryReservation);
@@ -2311,6 +2328,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     taskId: args.taskId,
     workerClass: workerClassOf(args),
     reservationId: memoryReservation.id,
+    estimateMib: memoryReservation.estimateMib,
     root: config.root,
   }, args.memoryShadow);
   // HOISTED ABOVE PROVIDER SELECTION so the Codex branch cannot return past the HOME redirection the Claude path has had
