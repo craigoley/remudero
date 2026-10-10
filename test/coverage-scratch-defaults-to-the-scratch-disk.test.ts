@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { tmpdir } from "node:os";
 import { test } from "node:test";
 
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
@@ -17,7 +16,9 @@ interface Fixture { repo: string; state: string; scratch: string; seen: string[]
 /** Two directories standing in for the state volume (TMPDIR) and the scratch root; free space and
  *  device identity are injected, so no expectation depends on the host's real disks. */
 function withFixture(body: (f: Fixture) => void): void {
-  const base = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}5-`));
+  // Under /tmp, not tmpdir(): macOS's per-user TMPDIR is too long for the coverage scratch guard,
+  // which would move the TMPDIR-derived scratch to /tmp and off the fixture's fake volumes.
+  const base = mkdtempSync(join("/tmp", `${RMD_TMP_PREFIX}5-`));
   const previousTmp = process.env.TMPDIR;
   const repo = join(base, "repo");
   const state = join(base, "st");
