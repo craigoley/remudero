@@ -164,7 +164,7 @@ test("a body proof whose check-proof times out holds the push even beside a proo
   }
 });
 
-test("a tree whose checkout is killed at its budget is held, not pushed unchecked, and leaves no worktree registered", async () => {
+test("a checkout killed after materialization waits for its process group and deregisters the worktree", async () => {
   const repo = hungTree();
   try {
     const head = repo.git("rev-parse", "HEAD");
