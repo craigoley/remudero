@@ -3583,20 +3583,14 @@ export async function runDaemon(
     repositoryMaintenanceTimer = setInterval(repositoryMaintenanceTick, pollIntervalMs);
   };
 
-  // W1-T7690 — THE WALL-CLOCK-DUE RUNGS. Each of these is a wall-clock decision (a minInterval, a rolling
-  // cap or an age bound), so it is evaluated on its OWN timer rather than only when the outer cycle comes
-  // round: observed 2026-10-10, the measurement cadence's slot freed at 06:26:40Z and no cycle looked at it
-  // for 18+ minutes, because the cycle was inside dispatch. The outer cycle still calls the same function at
-  // its old position (its ordering consumers — the retro's ledger-pressure deferral, the admission holds —
-  // are unchanged), and BOTH callers go through one single-flight, so a timer look that lands while a look
-  // is already running joins it instead of starting a second. Detached rungs keep their own
-  // `detachedActionInFlight(<kind>)` refusal. No cadence cap is added: each rung's own policy bound is the
-  // only pacing, and every look writes the same `<rung>.skipped` / `.fired` rows.
+  // W1-T7690 — the wall-clock-due rungs also run on their own timer: measured 2026-10-10, a freed
+  // measurement slot waited 18+ minutes for a cycle that was inside dispatch. The outer cycle keeps its call
+  // (ordering consumers unchanged); both callers share one single-flight slot per rung, and only each
+  // rung's own policy bound paces it.
   let ledgerCompactionDecision: LedgerCompactionDecision | undefined;
   type RungSteps<R> = Generator<unknown, R, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
-  /** A rung's steps are a generator that YIELDS each promise it would await. The outer cycle drives them in
-   *  its OWN frame (so its await timing is exactly the old inline one, which the inter-phase review clock's
-   *  stop ordering depends on), and the timer drives them from `driveRungSteps`. */
+  /** Steps YIELD each promise they would await: the outer cycle drives them in its own frame (the old inline
+   *  await timing, which the inter-phase review clock's stop ordering needs); the timer uses this. */
   const driveRungSteps = async <R>(steps: RungSteps<R>): Promise<R> => {
     let value: unknown;
     let error: unknown;
