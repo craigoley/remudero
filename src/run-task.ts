@@ -1,6 +1,6 @@
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
 import { judgeFixProgress,
-  type FixProgressJudge, type FixProgressVerdict } from "./lib/fix-progress-judge.js";
+  type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "./lib/fix-progress-judge.js";
 import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-update.js";
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
   loadCapabilityInspectionSource, readInspectionJson } from "./lib/capability-inspection.js";
@@ -13175,6 +13175,9 @@ export async function runFixRung(opts: {
         strike_cap: opts.strikeCap,
         unmet_count: unmet.length,
         unmet_claims: unmet.map((criterion) => criterion.claim),
+        // The progress judge compares these across rounds: a FIXED round followed by the same
+        // reviewer-side output is a reviewer-only failure, not a worker that needs another try.
+        ...(reviewerProofFailures(unmet).length > 0 ? { reviewer_proof_failures: reviewerProofFailures(unmet) } : {}),
         round,
         mode: fixMode,
         verdict_regime: verdictRegime,
@@ -42046,6 +42049,8 @@ function unmetFromLedger(lines: Array<Record<string, unknown>>, taskId: string, 
     reason: reasons[i] ?? "",
     // Legacy ledger rows can lack this required live-verdict field (W1-T5020).
     proof_exec: proofContext.get(claim)?.proof_exec as CriterionVerdict["proof_exec"],
+    ...(typeof proofContext.get(claim)?.proofFailureOutput === "string"
+      ? { proofFailureOutput: proofContext.get(claim)!.proofFailureOutput } : {}),
     refusal: refusals.get(claim),
   }));
 }
