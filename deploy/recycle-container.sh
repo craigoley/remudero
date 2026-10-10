@@ -1758,6 +1758,31 @@ if ! cleanup_leftover_smoke "before the smoke"; then
   clear_own_pause "recycle-container: pause removed — the refusal above must not leave the fleet paused" >&2
   exit 1
 fi
+# READ 2026-10-10 04:27–04:44Z: core pulled, then drained 17 min for a worker; meanwhile the site
+# instance recycled twice, moved the shared tag and ran section 8's `docker image prune -af`, which
+# removes EVERY image no container references. Core's pulled, now untagged image was reclaimed and
+# its smoke failed with docker's bare "No such image". So the pulled id is proven to still exist
+# before the smoke spends its timeout on a ghost: an image gone during the drain gets ONE re-pull
+# of the same ref (whatever it now resolves to), then a refusal that names the cause.
+if ! docker image inspect "${PULLED_IMAGE_ID}" >/dev/null 2>&1; then
+  echo "recycle-container: pulled image ${PULLED_IMAGE_ID} is gone after the wait; re-pulling ${REF} once" >&2
+  REPULLED_IMAGE_ID=""
+  if docker pull "${REF}" >/dev/null 2>&1; then
+    REPULLED_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${REF}" 2>/dev/null || true)"
+  fi
+  if [ -z "${REPULLED_IMAGE_ID}" ]; then
+    echo "recycle-container: REFUSING — the pulled image ${PULLED_IMAGE_ID} was removed during the drain" >&2
+    echo "  (another instance's image reclaim, or an operator prune) and the re-pull of ${REF} failed." >&2
+    echo "  ${CONTAINER_NAME} is untouched and STILL RUNNING on its current image." >&2
+    clear_own_pause "recycle-container: pause removed — the refusal above must not leave the fleet paused" >&2
+    exit 1
+  fi
+  for i in "${!SMOKE_ARGS[@]}"; do
+    if [ "${SMOKE_ARGS[$i]}" = "${PULLED_IMAGE_ID}" ]; then SMOKE_ARGS[i]="${REPULLED_IMAGE_ID}"; fi
+  done
+  PULLED_IMAGE_ID="${REPULLED_IMAGE_ID}"
+  echo "recycle-container: re-pulled image id ${PULLED_IMAGE_ID}"
+fi
 echo "recycle-container: worker smoke — one real worker query on ${PULLED_IMAGE_ID} (bounded ${SMOKE_TIMEOUT_S}s)"
 set +e
 SMOKE_OUTPUT="$("${SMOKE_TIMEOUT_CMD[@]+"${SMOKE_TIMEOUT_CMD[@]}"}" docker container run "${SMOKE_ARGS[@]}" 2>&1)"
