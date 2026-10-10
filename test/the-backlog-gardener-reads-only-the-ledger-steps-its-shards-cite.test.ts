@@ -87,7 +87,7 @@ test("the-backlog-gardener-reads-only-the-ledger-steps-its-shards-cite.test.ts: 
   const rec = recordingReader();
   const filtered = backlog.backlogGardenSpec(f.garden, f.overrides, rec.reader).inventory();
   assert.equal(rec.calls.length, 1, "one bounded union read per pass");
-  assert.deepEqual([...(rec.calls[0]?.step ?? [])].sort(), [CLASS_VALUE_STEP, "merge.refused", "pr.opened"]);
+  assert.deepEqual([...(rec.calls[0]?.step ?? [])].sort(), [CLASS_VALUE_STEP, "merge.refused", "pr.open_satisfied_by_main", "pr.opened"]);
   assert.equal(rec.calls[0]?.refuseIncomplete, true, "a bounded read still refuses an incomplete union");
   const kept = new Set(rec.returned.map((r) => r.step));
   assert.deepEqual([...kept].sort(), [CLASS_VALUE_STEP, "merge.refused", "pr.opened"], "rows of uncited steps are never materialised");
@@ -115,13 +115,14 @@ test("a plan whose shards cite no step reads only the class-value step, and noth
   writeLedger([{ step: "heartbeat.tick", ts: "2026-10-01T11:00:00.000Z" }], { dir: quiet.stateDir });
   const rec = recordingReader();
   backlog.backlogGardenSpec(quiet.garden, quiet.overrides, rec.reader).inventory();
-  assert.deepEqual(rec.calls.map((c) => c?.step), [[CLASS_VALUE_STEP]]);
+  assert.deepEqual(rec.calls.map((c) => c?.step), [[CLASS_VALUE_STEP, "pr.open_satisfied_by_main"]]);
   assert.deepEqual(rec.returned, []);
 
   const owned = fixture(t, [task("W1-T5", { priority: 1, rationale: "Observed merge.refused." })]);
   const none = recordingReader();
   const inv = backlog.backlogGardenSpec(owned.garden, owned.overrides, none.reader).inventory();
-  assert.equal(none.calls.length, 0, "no examinable shard reads no ledger at all");
+  // An operator-prioritized shard is never examined: only its satisfied-by-main evidence is read, never its cited step.
+  assert.deepEqual(none.calls.map((c) => c?.step), [["pr.open_satisfied_by_main"]], "no examinable shard reads only the satisfied-by-main step");
   assert.deepEqual(inv.candidates, []);
 });
 

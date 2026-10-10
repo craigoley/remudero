@@ -20111,7 +20111,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
         const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
         const issues = opts.prOpenRefusalIssues ?? ghIssueGateway(owner, task.repo);
-        const issueUrl = recordRefusedPrOpen(err, { taskId, branch, headSha }, log, { issues, ledgerPath, runId });
+        const changedFiles = refusedBranchChangedFiles(worktreePath);
+        const issueUrl = recordRefusedPrOpen(err, { taskId, branch, headSha, changedFiles, declaredFiles: task.files }, log, { issues, ledgerPath, runId });
         reclaimRunWorktree(repoDir, worktreePath, "pr_open.refused", log);
         log("verdict", {
           verdict: "failed",
@@ -27106,6 +27107,16 @@ export function hostWorktreeGitAtTopLevel(dir: string, args: string[], opts: Hos
       if (!(error instanceof WorktreePointerRefusedError) || error.observed !== "<absent>" || dirname(at) === at) throw error;
     }
   }
+}
+
+/** The files a refused run branch changed since its merge base with origin/main, or undefined when either read
+ *  fails: an unreadable diff keeps the refusal's escalation rather than guessing the build changed only tests. */
+export function refusedBranchChangedFiles(worktreePath: string): string[] | undefined {
+  const base = hostWorktreeGitResult(worktreePath, ["merge-base", "origin/main", "HEAD"]);
+  if (base.status !== 0 || base.stdout.trim() === "") return undefined;
+  const diff = hostWorktreeGitResult(worktreePath, ["diff", "--name-only", base.stdout.trim(), "HEAD"]);
+  if (diff.status !== 0) return undefined;
+  return diff.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
 }
 
 export function hostWorktreeGitResult(worktreePath: string, args: string[]): { status: number | null; stdout: string; stderr: string } {
