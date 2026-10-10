@@ -5,8 +5,8 @@
 // test/retro-marker-atomic.test.ts LPT handed shard 1 first started only at its alphabetical
 // turn, and the committed instrumented ledger was written once (W1-T5923) and never again.
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -52,7 +52,13 @@ function coverageStepRun(): string {
 
 const names = (count: number, prefix = "suite") => Array.from({ length: count }, (_, i) => `${prefix}-${String(i).padStart(2, "0")}.test.ts`);
 
-test("W1-T4071: the coverage command writes duration evidence for every selected file", () => {
+function explicitCoverageEnvironment(parent: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const { NODE_TEST_CONTEXT: _omitted, ...env } = parent;
+  if (env.NODE_V8_COVERAGE === "") delete env.NODE_V8_COVERAGE;
+  return env;
+}
+
+test("W1-T4071: the coverage command writes duration evidence for every selected file under author and instrumented environments", () => {
   const run = coverageStepRun();
   // The selection is recorded beside the evidence, both under coverage/, from the same command.
   assert.match(run, /--test-reporter=\.\/scripts\/test-duration-reporter\.mjs --test-reporter-destination=coverage\/test-durations\.json/);
@@ -72,15 +78,49 @@ test("W1-T4071: the coverage command writes duration evidence for every selected
     assert.ok(selection.files.length >= 3, `the shard must select files, got ${selection.files.length}`);
     assert.deepEqual(selection.files, picked.stdout.trim().split("\n"));
 
-    const { NODE_TEST_CONTEXT: _omitted, ...env } = process.env;
-    execFileSync(process.execPath, [
-      "--experimental-test-coverage", "--test", "--test-reporter=tap", "--test-reporter-destination=stdout",
-      `--test-reporter=${REPORTER}`, "--test-reporter-destination=durations.json", ...selection.files,
-    ], { cwd: root, env, stdio: "pipe" });
-    const evidence = JSON.parse(readFileSync(join(root, "durations.json"), "utf8")) as { files: Record<string, number> };
-    assert.deepEqual(Object.keys(evidence.files).sort(), [...selection.files].sort());
+    for (const [kind, coverage] of [["blank", ""], ["absent", undefined], ["instrumented", join(root, "v8")]] as const) {
+      const parent = { ...process.env, NODE_V8_COVERAGE: coverage };
+      if (coverage === undefined) delete parent.NODE_V8_COVERAGE;
+      const destination = `durations-${kind}.json`;
+      const result = spawnSync(process.execPath, [
+        "--experimental-test-coverage", "--test", "--test-reporter=tap", "--test-reporter-destination=stdout",
+        `--test-reporter=${REPORTER}`, `--test-reporter-destination=${destination}`, ...selection.files,
+      ], { cwd: root, env: explicitCoverageEnvironment(parent), encoding: "utf8", timeout: 10_000 });
+      const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+      assert.equal(result.error, undefined, `${kind}: ${result.error?.message ?? ""}\n${output}`);
+      assert.equal(result.signal, null, `${kind}: ${output}`);
+      assert.equal(result.status, 0, `${kind}: ${output}`);
+      assert.match(output, new RegExp(`^# tests ${selection.files.length}$`, "m"));
+      assert.match(output, new RegExp(`^# pass ${selection.files.length}$`, "m"));
+      assert.match(output, /^# fail 0$/m);
+      const evidence = JSON.parse(readFileSync(join(root, destination), "utf8")) as { files: Record<string, number> };
+      assert.deepEqual(Object.keys(evidence.files).sort(), [...selection.files].sort(), kind);
+      if (coverage) {
+        const profiles = readdirSync(coverage, { withFileTypes: true })
+          .filter(entry => entry.isFile() && /^coverage-.*\.json$/.test(entry.name));
+        assert.ok(profiles.length > 0, "a real inherited destination must still collect coverage");
+        for (const profile of profiles) {
+          const raw = JSON.parse(readFileSync(join(coverage, profile.name), "utf8")) as { result: unknown[] };
+          assert.ok(Array.isArray(raw.result) && raw.result.length > 0, profile.name);
+        }
+      }
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4071: explicit coverage removes only an inherited blank and preserves a real destination without mutating its parent", () => {
+  for (const coverage of ["", undefined, "/owned/coverage"]) {
+    const parent: NodeJS.ProcessEnv = { NODE_TEST_CONTEXT: "child", KEEP: "present" };
+    if (coverage !== undefined) parent.NODE_V8_COVERAGE = coverage;
+    const original = { ...parent };
+    const env = explicitCoverageEnvironment(Object.freeze(parent));
+    assert.equal(env.NODE_TEST_CONTEXT, undefined);
+    assert.equal(env.NODE_V8_COVERAGE, coverage || undefined);
+    assert.equal(Object.hasOwn(env, "NODE_V8_COVERAGE"), Boolean(coverage));
+    assert.equal(env.KEEP, "present");
+    assert.deepEqual(parent, original);
   }
 });
 
