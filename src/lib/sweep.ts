@@ -17195,6 +17195,87 @@ export async function runSweep(
   return summary;
 }
 
+let lightPassReadyRefreshInFlight = false;
+
+export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-overlap refresh, once per light pass
+  openPrs: readonly OpenPrView[],
+  deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "mergeQueue" | "readActionsStatusSummary" |
+    "readPrFileSource" | "behindMainByPr" | "baseChangedFilesByPr" | "inFlightTaskIds" | "now" | "readLedger" |
+    "appendLine" | "dryRun">,
+  policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+): Promise<number | undefined> {
+  const updateBranch = deps.updateBranch;
+  if (deps.dryRun || !updateBranch || deps.baseChangedFilesByPr === undefined || lightPassReadyRefreshInFlight) return undefined;
+  lightPassReadyRefreshInFlight = true;
+  try {
+    const appendLine = deps.appendLine ?? appendLedger;
+    const now = clockFromMillisFn(deps.now).now();
+    const ledgerLines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+    const spentHeads = new Set<string>();
+    for (const l of ledgerLines) {
+      if (l.step === "sweep.update_branch.attempted" || l.step === "sweep.ci_timeout_refresh.attempted") {
+        spentHeads.add(`${String(l.pr_number)}@${String(l.head_sha)}`);
+      }
+    }
+    const behindMainByPr = deps.behindMainByPr ?? new Map<number, number>();
+    const select = (ready: ReadyRefreshFacts): ArmedStalledPr[] =>
+      openPrsBehindMain(openPrs, behindMainByPr, policy, new Set(), deps.baseChangedFilesByPr, ready)
+        .filter((c) => c.updateReason === "ready-overlap");
+    const facts: ReadyRefreshFacts = { spentHeads, readSource: deps.readPrFileSource };
+    let candidates = select(facts);
+    if (candidates.length === 0) return undefined;
+    if (deps.readActionsStatusSummary !== undefined) {
+      const incident = await Promise.resolve().then(() => deps.readActionsStatusSummary!())
+        .then((s) => classifyActionsIncident(s), (error) => unreadableActionsIncident(error));
+      if (actionsIncidentHoldDecision(incident, undefined, now) === "hold") return undefined;
+    }
+    const mergeQueue = deps.mergeQueue;
+    if (mergeQueue) {
+      candidates = candidates.filter((c) => {
+        let queued: boolean;
+        try {
+          queued = mergeQueue(c.prUrl) === true;
+        } catch {
+          queued = false; // an unread queue is "no queue", as in the full sweep
+        }
+        if (queued && !ledgerLines.some((l) => l.step === "sweep.update_branch.skipped_queue" &&
+          l.pr_number === c.prNumber && l.head_sha === c.headSha)) {
+          appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: c.taskId ?? "SWEEP",
+            step: "sweep.update_branch.skipped_queue", pr_number: c.prNumber, head_sha: c.headSha,
+            ...(c.behindBy === undefined ? {} : { behind_by: c.behindBy }), source: "light_pass" });
+        }
+        return !queued;
+      });
+    }
+    const byNumber = new Map(openPrs.map((pr) => [pr.prNumber, pr]));
+    const inFlight = deps.inFlightTaskIds ?? new Set<string>();
+    const eligible = candidates.filter((c) => {
+      const view = byNumber.get(c.prNumber)!;
+      const runTaskId = taskIdFromRunBranch(view.headRefName);
+      return view.checksState !== "pending" && (runTaskId === undefined || !inFlight.has(runTaskId));
+    });
+    const winner = oldestActivityFirst(eligible.map((c) => byNumber.get(c.prNumber)!), now);
+    const target = eligible.find((c) => c.prNumber === winner?.prNumber);
+    if (!target) return undefined;
+    const row = {
+      run_id: deps.runId, task_id: target.taskId ?? "SWEEP", pr_number: target.prNumber, pr_url: target.prUrl,
+      head_sha: target.headSha, ...(target.behindBy === undefined ? {} : { behind_by: target.behindBy }),
+      update_reason: target.updateReason,
+      ...(target.matchingBaseFiles === undefined ? {} : { matching_base_files: target.matchingBaseFiles }),
+      source: "light_pass",
+    };
+    appendLine(deps.ledgerPath, { ...row, step: "sweep.update_branch.attempted" });
+    try {
+      appendLine(deps.ledgerPath, { ...row, step: `sweep.update_branch.${await updateBranch(target)}` });
+    } catch (e) {
+      appendLine(deps.ledgerPath, { ...row, step: "sweep.update_branch.error", error: String((e as Error)?.message ?? e) });
+    }
+    return target.prNumber;
+  } finally {
+    lightPassReadyRefreshInFlight = false;
+  }
+}
+
 /**
  * W1-T463 — THE DIAGNOSIS FOR "a light sweep ticks every 60s and a PR still sat green and unreviewed
  * for ~15 minutes". `runSweep`'s loop is SEQUENTIAL and `postReview` materializes a worktree and
