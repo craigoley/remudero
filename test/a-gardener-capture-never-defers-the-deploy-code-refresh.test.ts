@@ -76,27 +76,26 @@ function gardenerHandoff(root: string, prefix: string, origin: string): string {
   return feedbackEntryPath(root, id);
 }
 
-const HANDOFFS = [
-  { kind: "disk", prefix: "host-resource", origin: incidentOrigin("Remudero", "state") },
-  { kind: "io", prefix: "host-io", origin: ioIncidentOrigin("Remudero", "sda") },
-  { kind: "memory", prefix: "host-mem", origin: memoryIncidentOrigin("Remudero", "rmd-daemon") },
-];
-const MEMORY = HANDOFFS[2];
+const DISK = { prefix: "host-resource", origin: incidentOrigin("Remudero", "state") };
+const IO = { prefix: "host-io", origin: ioIncidentOrigin("Remudero", "sda") };
+const MEMORY = { prefix: "host-mem", origin: memoryIncidentOrigin("Remudero", "rmd-daemon") };
 
-for (const h of HANDOFFS) {
-  test(`a ${h.kind} gardener handoff's capture never makes deploy_code_clean defer, and survives it`, (t) => {
-    const host = daemonHost(t);
-    const path = gardenerHandoff(host.daemon.dir, h.prefix, h.origin);
-    const bytes = readFileSync(path, "utf8");
-    // Precondition: the capture really is untracked in the checkout the watchdog reads.
-    assert.match(host.daemon.git("status", "--porcelain", "--untracked-files=all"), new RegExp(`^\\?\\? plan/feedback/${h.prefix}-[0-9a-f]{16}\\.yaml$`));
-    const r = host.clean();
-    assert.doesNotMatch(r.stderr, /local edits/, r.stderr);
-    assert.equal(r.status, 0, r.stderr);
-    assert.ok(existsSync(path), "the capture is never discarded");
-    assert.equal(readFileSync(path, "utf8"), bytes, "the capture's bytes are untouched");
-  });
+function assertCaptureNeverDefers(t: TestContext, h: { prefix: string; origin: string }): void {
+  const host = daemonHost(t);
+  const path = gardenerHandoff(host.daemon.dir, h.prefix, h.origin);
+  const bytes = readFileSync(path, "utf8");
+  // Precondition: the capture really is untracked in the checkout the watchdog reads.
+  assert.match(host.daemon.git("status", "--porcelain", "--untracked-files=all"), new RegExp(`^\\?\\? plan/feedback/${h.prefix}-[0-9a-f]{16}\\.yaml$`));
+  const r = host.clean();
+  assert.doesNotMatch(r.stderr, /local edits/, r.stderr);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(existsSync(path), "the capture is never discarded");
+  assert.equal(readFileSync(path, "utf8"), bytes, "the capture's bytes are untouched");
 }
+
+test("a disk gardener handoff's capture never makes deploy_code_clean defer, and survives it", (t) => assertCaptureNeverDefers(t, DISK));
+test("a io gardener handoff's capture never makes deploy_code_clean defer, and survives it", (t) => assertCaptureNeverDefers(t, IO));
+test("a memory gardener handoff's capture never makes deploy_code_clean defer, and survives it", (t) => assertCaptureNeverDefers(t, MEMORY));
 
 test("with a capture in the inbox, the refresh's ff-only merge still advances and keeps the capture", (t) => {
   const host = daemonHost(t);
