@@ -19,7 +19,7 @@
  * write loses one sample. Nothing here delays, refuses or alters work.
  */
 
-import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -163,19 +163,13 @@ function instanceFile(opts: PeakStoreOptions): string {
   return join(storeDir(opts), `${name}.ndjson`);
 }
 
-/** The last `maxBytes` of a file, starting at a whole line. */
+/** The last `maxBytes` of a file, starting at a whole line. A store file is compacted near PEAK_COMPACT_BYTES, so the
+ *  whole-file read this slices is bounded by it. */
 export function readFileTail(path: string, maxBytes: number): string {
-  const fd = openSync(path, "r");
-  try {
-    const size = fstatSync(fd).size;
-    const length = Math.min(size, maxBytes);
-    const buf = Buffer.alloc(length);
-    readSync(fd, buf, 0, length, size - length);
-    const text = buf.toString("utf8");
-    return length < size ? text.slice(text.indexOf("\n") + 1) : text;
-  } finally {
-    closeSync(fd);
-  }
+  const buf = readFileSync(path);
+  if (buf.length <= maxBytes) return buf.toString("utf8");
+  const text = buf.subarray(buf.length - maxBytes).toString("utf8");
+  return text.slice(text.indexOf("\n") + 1);
 }
 
 function parseSamples(text: string): PeakSample[] {
@@ -218,7 +212,7 @@ export function recordPeak(workerClass: WorkerClass, peakMib: number, opts: Peak
     });
     append(path, lineOf({ workerClass, peakMib, at }));
     cachedEstimates.delete(workerClass);
-    const size = (opts.size ?? ((target: string) => fstatSize(target)))(path);
+    const size = (opts.size ?? ((target: string) => statSync(target).size))(path);
     if (size > PEAK_COMPACT_BYTES) {
       const kept = compactSamples(parseSamples((opts.readTail ?? readFileTail)(path, PEAK_COMPACT_BYTES)), ESTIMATE_LEARNING.keepPerClass);
       (opts.rewrite ?? ((target: string, content: string) => void writeAtomic(target, content)))(path, kept.map(lineOf).join(""));
@@ -227,15 +221,6 @@ export function recordPeak(workerClass: WorkerClass, peakMib: number, opts: Peak
   } catch (error) {
     recordError(opts, "record", error);
     return false;
-  }
-}
-
-function fstatSize(path: string): number {
-  const fd = openSync(path, "r");
-  try {
-    return fstatSync(fd).size;
-  } finally {
-    closeSync(fd);
   }
 }
 
