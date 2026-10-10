@@ -11,11 +11,13 @@
  * never kills them, each case waits them out and then reads green, which is exactly the silent pass this refuses.
  */
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { waitForProcessGroupExit } from "../src/lib/in-tree-budget.js";
 import * as emitter from "../src/lib/plan-pr-emitter.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
 
@@ -86,6 +88,24 @@ test("the budget is the policy's proof guard stretched by host load per core, ne
   };
   assert.equal(inTreeCheckBudgetMs({ cores: 2, load1: 4 }, unreadablePolicy), 120_000, "an unreadable policy still bounds it, at its 60 s floor");
   assert.ok(inTreeCheckBudgetMs() >= 60_000, "the real policy and host give at least the policy floor");
+});
+
+test("process-group teardown polls while a detached child is still alive", async () => {
+  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { detached: true, stdio: "ignore" });
+  assert.ok(child.pid);
+  const pgid = child.pid;
+  child.unref();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      child.once("spawn", resolve);
+      child.once("error", reject);
+    });
+    const exited = waitForProcessGroupExit(pgid, 5_000);
+    process.kill(-pgid, "SIGKILL");
+    assert.equal(await exited, true, "after at least one live-group probe and poll, teardown observes ESRCH");
+  } finally {
+    try { process.kill(-pgid, "SIGKILL"); } catch { /* the group already exited */ }
+  }
 });
 
 test("a hung in-tree check leg is killed at its budget with everything it started, and recorded as timed out: never a pass, never a red", async () => {
