@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -24,3 +24,14 @@
     CI runs: 38051864963, 38052693240, 38053177582, 38053594710.
     Retry outcomes: 0 recovered on retry, 4 also failed on retry (the case that reds a PR).
     Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.88
+    reasons:
+      - "The declared files list names only one test file, test/new-work-is-ordered-by-cost-of-delay.test.ts. That points to a test-only fix for a flaky test, with no source, config, CI, or policy files."
+      - "The task description and acceptance criteria describe fixing an intermittent test failure and adding a pinning test. They don't mention secrets, auth, deletion, merge or deploy policy, or any irreversible action. They also don't ask for an operator decision."
+      - "The gates state is clean. The author class is machine, and the flake-incident family has 7 merged and 0 declined tasks (Beta mean 0.89). The task's own PR still has to pass CI and review."
+      - "No actual change view was supplied, so I can't confirm the real touched files match the declared one. The acceptance criteria are concrete and checkable (a unit test and a grep), so the result can be verified."
+    judged_at: "2026-10-10T20:34:10.046Z"
+    pin: "ab4277732203346534ba36315cb322beef10d2017a8402c086b06ccd55b741a3"
