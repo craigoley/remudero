@@ -396,6 +396,14 @@ deploy_code_clean() {
     echo "rmd-relaunch: deploy code -- status unreadable; deferring." >&2
     return 1
   fi
+  # An UNTRACKED plan/feedback/ file is a daemon capture (gardener handoffs, captureFeedback) in
+  # the feedback-landing lane's inbox: the lane lands it and removes the copy once origin/main
+  # holds its bytes. It is not an edit -- deferring on it froze core's code at one sha (2026-10-10).
+  # It stays safe: nothing here discards it, and ff-only refuses to overwrite an untracked file.
+  if ! edits="$(printf '%s\n' "$edits" | awk 'index($0, "?? plan/feedback/") != 1 && NF')"; then
+    echo "rmd-relaunch: deploy code -- status unfilterable; deferring." >&2
+    return 1
+  fi
   if [ -n "$edits" ]; then
     echo "rmd-relaunch: deploy code -- local edits; deferring without discarding them." >&2
     return 1
