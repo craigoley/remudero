@@ -2560,6 +2560,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         ghRunImpl("gh", ["pr", "close", pr.prUrl, "--comment", `Closed by rmd sweep: ${reason}`]);
       } catch (e) {
         log("sweep.close.error", { pr_number: pr.prNumber, error: String((e as Error)?.message ?? e) });
+        throw e;
       }
     },
 
@@ -4341,8 +4342,21 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
     },
     readPlanRepairFacts: (pr) => {
-      const row = ghJsonForBuild(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as { user?: { login?: string }; title?: string };
-      return { authorLogin: row?.user?.login, title: row?.title };
+      const pulls = `repos/${owner}/${repo}/pulls/${pr.prNumber}`;
+      const row = ghJsonForBuild(["api", pulls]) as {
+        user?: { login?: string }; title?: string; head?: { sha?: string; ref?: string };
+      };
+      const facts: PlanRepairFacts = { authorLogin: row?.user?.login, title: row?.title };
+      if (!gardenRecordRefusalCandidate(pr) || row?.head?.sha !== pr.headSha || row.head.ref !== pr.headRefName) return facts;
+      const files = ghJsonForBuild(["api", `${pulls}/files?per_page=2`]) as { filename: string; status: string }[];
+      if (!Array.isArray(files) || files.length !== 1 || files[0]?.status !== "added" ||
+          !/^plan\/tasks\.d\/[^/]+\.ya?ml$/.test(files[0].filename)) return facts;
+      const path = files[0].filename;
+      const source = ghJsonForBuild(["api", `repos/${owner}/${repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${pr.headSha}`]) as
+        { content?: string; encoding?: string };
+      if (source?.encoding !== "base64" || typeof source.content !== "string") return facts;
+      facts.gardenRecordRefusal = gardenRecordRefusalFromSource(pr, Buffer.from(source.content, "base64").toString("utf8"));
+      return facts;
     },
     repairPlanPr: async (pr, decision) => {
       const pulls = `repos/${owner}/${repo}/pulls/${pr.prNumber}`;
@@ -7809,6 +7823,39 @@ export function isFleetAppAuthor(login: string | undefined): boolean {
 export interface PlanRepairFacts {
   authorLogin?: string;
   title?: string;
+  gardenRecordRefusal?: string;
+}
+
+const GARDEN_PLAN_HEAD_RE = /^(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|scout)-garden-\d+$/;
+
+function gardenRecordRefusalCandidate(pr: OpenPrView): boolean {
+  const names = [...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map(f => f.name)]
+    .filter(name => name !== "ci-gate");
+  return pr.isPlanFiling === true && isBlockedCi(pr) && GARDEN_PLAN_HEAD_RE.test(pr.headRefName ?? "") &&
+    names.length > 0 && names.every(name => name === "lint-plan") &&
+    (pr.cancelledRequiredChecks?.length ?? 0) === 0 &&
+    (pr.ciFailures ?? []).every(f => (f.sha === undefined || f.sha === pr.headSha) &&
+      (f.conclusion === undefined || f.conclusion === "FAILURE"));
+}
+
+function gardenRecordRefusalFromSource(pr: OpenPrView, source: string): string | undefined {
+  const records = parseYaml(source) as { id?: unknown; author_class?: unknown }[] | undefined;
+  if (!Array.isArray(records) || records.length !== 1 || records[0]?.author_class !== "machine" ||
+      typeof records[0].id !== "string") return undefined;
+  const id = records[0].id;
+  const refusals: string[] = [];
+  let ownRecord = false;
+  for (const line of (pr.ciFailures ?? []).filter(f => f.name === "lint-plan").flatMap(f => f.logTail.split("\n"))) {
+    const header = /✗ ([^: ]+):/.exec(line);
+    if (header) {
+      if (header[1] !== id || !/\d+ violation\(s\)/.test(line)) return undefined;
+      ownRecord = true;
+    } else if (ownRecord) {
+      const refusal = /\[([^\]]+)\] (.+)/.exec(line);
+      if (refusal) refusals.push(`[${refusal[1]}] ${refusal[2]}`);
+    }
+  }
+  return refusals.length ? `${id}: ${refusals.join("; ")}` : undefined;
 }
 
 export type PlanRepairDecision =
@@ -13410,6 +13457,7 @@ export async function runSweep(
   // W1-T5349 — the plan-repair rung's once-per-head record, folded once per pass.
   const planRepairHistory = planRepairHistoryFromLedger(ledgerLines);
   const planRoundFacts = new Map<number, PlanRepairFacts>();
+  const gardenRecordRefusals = new Map<number, string>();
   const tryPlanRepair = async (pr: OpenPrView): Promise<{ repaired: boolean; reason: string }> => {
     const notRepaired = { repaired: false, reason: "" };
     if (!deps.readPlanRepairFacts || !deps.repairPlanPr) return notRepaired;
@@ -13417,7 +13465,7 @@ export async function runSweep(
     let facts: PlanRepairFacts = {};
     if (isMachineLanePlanHead(pr.headRefName)) {
       try {
-        facts = await deps.readPlanRepairFacts(pr);
+        facts = planRoundFacts.get(pr.prNumber) ?? await deps.readPlanRepairFacts(pr);
         planRoundFacts.set(pr.prNumber, facts);
       } catch (e) {
         appendLine(deps.ledgerPath, { ...row, step: `${PLAN_REPAIR_STEP}.read_error`, error: String((e as Error)?.message ?? e) });
@@ -14082,7 +14130,7 @@ export async function runSweep(
       ...blockerFields(blocker, priorBlockerByPr.get(pr.prNumber), now, planRepairCapable),
       ...(blockerReadFailure ? { blocker_read_error: blockerReadFailure.reason } : {}),
     };
-    if (armOutcome !== "armed" && armOutcome !== "direct-merged") {
+    if (armOutcome !== "armed" && armOutcome !== "direct-merged" && !gardenRecordRefusals.has(pr.prNumber)) {
       const repairStarted = acted && spent !== false && (disposition === "conflicted" || disposition === "blocked-fixable");
       await reportStuckStage(pr, blockerRow, repairStarted, standDownReason);
     }
@@ -14120,7 +14168,7 @@ export async function runSweep(
     }
 
     // Preview writes nothing; unchanged contradictory reviews checkpoint only when backoff is due.
-    if (!deps.dryRun && !quietContradictoryRows.has(index)) {
+    if (!deps.dryRun && !quietContradictoryRows.has(index) && !(deduped && gardenRecordRefusals.has(pr.prNumber))) {
       // W1-T2345 — this PASS's own repeat-streak figures, computed once per PR earlier in the walk
       // and read back by `index`, so all four call sites carry it with no signature change.
       const repeat = repeatMeta.get(index);
@@ -14209,6 +14257,19 @@ export async function runSweep(
     // `undefined` on a lazy-recompute miss and a conflicted PR (zero check runs, by construction)
     // fell through to the checks-none rules meant for a genuinely mergeable-but-quiet head.
     let { pr, inherited: inheritedMergeState } = withInheritedMergeState(openPrs[prIndex], ledgerLines);
+    const priorGardenClose = ledgerLines.findLast(row => row.step === "sweep.disposed" &&
+      row.pr_number === pr.prNumber && row.disposition === "stale" && row.acted === true &&
+      typeof row.garden_record_refusal === "string");
+    if (priorGardenClose) gardenRecordRefusals.set(pr.prNumber, String(priorGardenClose.garden_record_refusal));
+    else if (gardenRecordRefusalCandidate(pr) && deps.readPlanRepairFacts) {
+      try {
+        const facts = await deps.readPlanRepairFacts(pr);
+        planRoundFacts.set(pr.prNumber, facts);
+        if (facts.gardenRecordRefusal !== undefined) gardenRecordRefusals.set(pr.prNumber, facts.gardenRecordRefusal);
+      } catch (error) {
+        log("sweep.garden_record.read_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: String(error) });
+      }
+    }
     // W1-T6052: an old pending snapshot is not proof CI is still running. The arm reader
     // proves every required context on a fresh head; only that exact open head can clear it.
     if (pr.checksState === "pending" &&
@@ -14291,7 +14352,11 @@ export async function runSweep(
       reviewVerdictDelivered: prior.reviewDelivered.has(reviewOutcomeKeyForPr(pr)),
       mergeabilityUnknownPasses: unknownWaits?.headSha === pr.headSha ? unknownWaits.passes : 0,
     };
-    const derived = postReviewFailureHistoryDisposition(dispositionView, prior, policy, now) ??
+    const gardenRecordRefusal = gardenRecordRefusals.get(pr.prNumber);
+    const derived = gardenRecordRefusal !== undefined
+      ? { disposition: "stale" as const, blocker: "other" as const,
+        reason: `garden plan PR refused its own machine record — ${gardenRecordRefusal}; closing so the gardener can file again on its next pass` }
+      : postReviewFailureHistoryDisposition(dispositionView, prior, policy, now) ??
       deriveDisposition(dispositionView, policy, now, dispositionFacts);
     ruleBlockerByIndex.set(prIndex, derived.blocker);
     let { disposition, reason } = derived;
@@ -14876,6 +14941,7 @@ export async function runSweep(
     let extraDisposedFields: Record<string, unknown> | undefined = queueMembership === undefined ? undefined
       : { queue_membership: typeof queueMembership === "string" ? queueMembership : "unreadable" };
     if (emptyDiffSupersession) extraDisposedFields = { ...extraDisposedFields, empty_diff_superseded: true };
+    if (gardenRecordRefusal !== undefined) extraDisposedFields = { ...extraDisposedFields, garden_record_refusal: gardenRecordRefusal };
     let contradictoryEscalated = false;
     // W1-T254 — PER-PR THROW CONTAINMENT: a thrown action used to propagate straight out of
     // `runSweep` as one unattributed error, aborting the WHOLE pass. Named here and ledgered on
@@ -16627,7 +16693,7 @@ export async function runSweep(
   // just reported and, when the dep is wired, requests GitHub update it. Never a loop, and a
   // conflict is REPORTED and skipped rather than retried this pass.
   if (!deps.dryRun && deps.updateBranch) {
-    const refreshPrs = openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber && pr.prNumber !== baseRedRefreshPr && !ladderUpdatedPrs.has(pr.prNumber));
+    const refreshPrs = openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber && pr.prNumber !== baseRedRefreshPr && !ladderUpdatedPrs.has(pr.prNumber) && !gardenRecordRefusals.has(pr.prNumber));
     const behindMainByPr = deps.behindMainByPr ?? new Map<number, number>();
     // W1-T6022: the ready refresh stands down in an Actions incident and spends one update per (PR, head).
     // The status is read only when a ready PR sits under the distance gate, so a pass with none spends no read.
