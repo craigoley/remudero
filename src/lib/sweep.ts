@@ -6738,17 +6738,30 @@ function isMainGuardRun(run: MainHealthRunHistoryEntry): boolean {
   return run.workflowName !== undefined && MAIN_GUARD_WORKFLOWS.has(run.workflowName);
 }
 
-/** The latest real verdict of each {@link MAIN_GUARD_WORKFLOWS} member, newest-first history in,
- *  only the failed ones out. A newer success supersedes an older failure; a cancelled run never does. */
-export function failedMainGuardRuns(history: readonly MainHealthRunHistoryEntry[]): MainHealthRunHistoryEntry[] {
+export function mainGuardFailureCandidates(history: readonly MainHealthRunHistoryEntry[]): MainHealthRunHistoryEntry[] {
+  return history.filter((run) => isMainGuardRun(run) && mainRunIsVerdict(run) && mainHealthFailureConclusion(run.conclusion));
+}
+
+/** The newest in-window guard verdict decides; older verdicts are returned separately as skipped.
+ *  A newer in-window success supersedes an older failure; a cancelled run never does. W1-T6077. */
+export function failedMainGuardRuns(
+  history: readonly MainHealthRunHistoryEntry[],
+  recentShas: ReadonlySet<string>,
+): { runs: MainHealthRunHistoryEntry[]; skipped: MainHealthRunHistoryEntry[] } {
   const decided = new Set<string>();
   const failed: MainHealthRunHistoryEntry[] = [];
+  const skipped: MainHealthRunHistoryEntry[] = [];
   for (const run of history) {
-    if (!isMainGuardRun(run) || decided.has(run.workflowName!) || !mainRunIsVerdict(run)) continue;
+    if (!isMainGuardRun(run) || !mainRunIsVerdict(run)) continue;
+    if (!recentShas.has(run.headSha)) {
+      skipped.push(run);
+      continue;
+    }
+    if (decided.has(run.workflowName!)) continue;
     decided.add(run.workflowName!);
     if (mainHealthFailureConclusion(run.conclusion)) failed.push(run);
   }
-  return failed;
+  return { runs: failed, skipped };
 }
 
 /** W1-T6023 — PRIMARY CONTROL: how many of main's newest first-parent commits (the head included)
