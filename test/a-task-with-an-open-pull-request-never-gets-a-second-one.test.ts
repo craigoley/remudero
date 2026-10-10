@@ -104,7 +104,7 @@ const committingSpawn = (() => {
 })() as unknown as typeof spawnWorker;
 
 function row(number: number, ref: string, body = ""): RestPullRow {
-  return { number, html_url: `https://github.com/acme/remudero/pull/${number}`, state: "open", updated_at: "2026-10-02T22:32:31Z", head: { ref }, body };
+  return { number, html_url: `https://github.com/acme/remudero/pull/${number}`, state: "open", updated_at: "2026-10-02T22:32:31Z", head: { ref }, body }; // expiring-fixture: exempt -- the open-PR guard matches by branch and trailer, never by age; 5/5 pass with this stamp aged to 2026-08-01 at the real clock
 }
 
 /** Drive the real implement path with `reader` as the open-PR list; returns the ledger rows and the create calls. */
