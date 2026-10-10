@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -138,6 +138,7 @@ async function drive(f: Fixture, opts: {
 test("W1-T7719: a dead dirty owner on a stale head is preserved and reclaimed", async () => {
   const f = fixture();
   try {
+    const canonicalOwnerPath = realpathSync(f.ownerPath);
     const snapshot = capture(f);
     assert.equal(snapshot.treeState, "untracked_dirty");
     assert.equal(snapshot.localSha, f.localSha);
@@ -154,7 +155,7 @@ test("W1-T7719: a dead dirty owner on a stale head is preserved and reclaimed", 
     assert.equal(row.pr_number, PR);
     assert.equal(row.task_id, TASK);
     assert.equal(row.branch, BRANCH);
-    assert.equal(row.worktree_path, f.ownerPath);
+    assert.equal(row.worktree_path, canonicalOwnerPath);
     assert.equal(row.local_sha_prefix, f.localSha.slice(0, 12));
     assert.equal(row.head_sha, f.head);
     assert.ok(String(row.preserved_path).startsWith(join(f.root, "recovery", "fix-owner", BRANCH)));
