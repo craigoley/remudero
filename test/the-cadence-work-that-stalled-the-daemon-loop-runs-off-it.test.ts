@@ -42,6 +42,12 @@ const ROWS = [
   { number: 8880, html_url: "https://github.com/o/r/pull/8880", updated_at: isoHoursAgo(1), created_at: isoHoursAgo(1), head: { ref: "run-c", sha: "c".repeat(40) } },
 ];
 
+void test("W1-T5481: REST fixture ages stay relative to this run's clock", () => {
+  const hour = 60 * 60 * 1000;
+  assert.deepEqual(ROWS.map((row) => Date.parse(row.updated_at)), [NOW.getTime() - hour, NOW.getTime() - hour, NOW.getTime() - hour]);
+  assert.deepEqual(ROWS.map((row) => Date.parse(row.created_at)), [15, 2, 1].map((hours) => NOW.getTime() - hours * hour));
+});
+
 /** An async `gh api` reader over {@link ROWS}: each answer lands a few ms later, as a real spawn does. */
 function slowReader(reads: string[]) {
   return async (args: string[]): Promise<unknown> => {
