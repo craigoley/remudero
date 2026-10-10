@@ -1746,6 +1746,7 @@ import {
   inFlightReviewCount,
 } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
+import { applyDaemonMemoryPolicy, createDaemonMemoryGovernor, readDaemonMemoryPolicy } from "./lib/daemon-memory-policy.js";
 import { workerThreads, type TrackedWorker } from "./lib/worker-heaps.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
@@ -38176,8 +38177,17 @@ export async function daemonCommand(
     startGithubAppRefresh?: typeof startInstallationTokenRefresh;
     gitCredentialMint?: ScopedTokenMint;
     ciJudgeIo?: CiJudgeIo;
+    /** The entry's GC tuning (daemon-memory-policy.ts). Production applies it to this process; a test
+     *  injects a recorder so the call is observed without retuning the test runner's own V8. */
+    applyMemoryPolicy?: typeof applyDaemonMemoryPolicy;
   } = {},
 ): Promise<number> {
+  // 2026-10-10: FIRST, BEFORE ANYTHING ALLOCATES. Keep the heap a fixed multiple of what survives each
+  // collection instead of letting garbage reach ~4x the live set under the 8 GB ceiling, and take that
+  // ceiling out of the NODE_OPTIONS every child inherits. Never fatal: a malformed policy row boots on
+  // the defaults and names itself on the daemon.memory_policy row below.
+  const memoryPolicyRead = readDaemonMemoryPolicy(policyPath(deps.repoRoot ?? repoRoot));
+  const memoryPolicyApplied = (deps.applyMemoryPolicy ?? applyDaemonMemoryPolicy)(memoryPolicyRead.policy);
   // W1-T2697: mark THIS process as the daemon BEFORE anything below can append a ledger row —
   // every `appendLedger` call this process makes (in-process, e.g. a wired sweep tick) from here
   // on reports `actor: "daemon"` rather than the operator-shell default. See
@@ -38289,6 +38299,13 @@ export async function daemonCommand(
   const kickCiJudge = ciJudgeIo && singleFlightCiJudge(() => judgeCiEscalation(productionCiJudgePorts({
     owner: self.owner, repo: self.repo, repoRoot: effectiveRepoRoot, stateDir: join(config.root, "state"), log, ...ciJudgeIo,
   })), log);
+  log("daemon.memory_policy", {
+    ...memoryPolicyApplied,
+    tighten_share: memoryPolicyRead.policy.tightenShare,
+    restart_share: memoryPolicyRead.policy.restartShare,
+    heap_size_limit: getHeapStatistics().heap_size_limit,
+    ...(memoryPolicyRead.error ? { policy_error: memoryPolicyRead.error } : {}),
+  });
   log("daemon.target", {
     repo: target.repo,
     gateway: `${target.owner}/${target.repo}`,
@@ -38965,6 +38982,7 @@ export async function daemonCommand(
         }) : undefined,
         readLoopTelemetry: loopTelemetry.sample,
         readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha, { generation: runId }),
+        memoryGovernor: createDaemonMemoryGovernor({ policy: memoryPolicyRead.policy }),
         lastStepBeforeBlock: () => lastReadPlaneStep,
         idleStarvedSupervised: process.env.RMD_IDLE_STARVED_SUPERVISED === "1" && !target.isSelf && !flagValue(rest, "--plan"),
         confirmedOpenPrCount: boardOpenPrCount.readConfirmed,
