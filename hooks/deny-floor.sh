@@ -731,6 +731,418 @@ if [ "$confine_file_tools" -eq 1 ]; then
   fi
 fi
 
+# 16) HOUSE RULES THE PROMPTS DID NOT HOLD (operator ruling 2026-10-10). OBSERVED 2026-10-10, in one day and
+#    despite every prompt naming them: `git stash` twice, `--no-verify` once, and `pkill -f` sent over
+#    `ssh remudero` once, to a host that is READ-ONLY for sessions. Prose did not bind them; this does.
+#    Each refusal names the house rule and the safe alternative:
+#      stash      `git stash` in any form except the read-only `git stash list` / `git stash show`.
+#      no-verify  `--no-verify` (or its abbreviation `--no-veri[f]`) on `git commit`, `git push` and
+#                 `git merge`; `-n` inside a `git commit` short cluster; and any `core.hooksPath` override:
+#                 `git -c core.hooksPath=...`, `--config-env`, a `GIT_CONFIG_*` assignment, `git config`
+#                 setting it to anything but `hooks` (the one value .claude/hooks/session-start.sh sets),
+#                 unsetting it, or removing the `core` section. `git push -n` is --dry-run, not
+#                 --no-verify, and stays allowed.
+#      host       destructive process control sent to the fleet host over `ssh remudero`: in the remote
+#                 command, a `sh -c`/`docker exec` body inside it, a heredoc or here-string fed to it, or a
+#                 script echoed into it through a pipe. kill/pkill/killall (`kill -0` and `kill -l` are
+#                 probes and pass), docker restart/stop/kill/rm/rmi/down/prune/pause, systemctl
+#                 restart/stop/kill, rm with -r/-f, and `git worktree prune`. Read-only queries pass.
+#    PARSED, NOT GREPPED: `hr_tokens` splits the command quote-aware into simple commands, and each is judged
+#    at its PROGRAM position (through env assignments, sudo, env, nohup, timeout, nice, xargs). A grep, an
+#    echo, a commit message or a PR body that only NAMES a refused shape is never refused; a `bash -c`,
+#    `sh -c` or `eval` body is judged like the command itself. Bash tool calls only, and inert without jq.
+#    Still a tripwire (file header): a verb assembled indirectly (`$verb`), a script file copied to the host
+#    first, or the host reached by another name or address escapes it.
+#    OPERATOR OVERRIDE, A CHOICE ON THE RECORD: `RMD_HOUSE_RULE_OVERRIDE=<stash|no-verify|host>[,...]` in the
+#    ENVIRONMENT THE SESSION WAS LAUNCHED WITH; the overridden refusal is still printed to stderr. Agents never
+#    set it. Unlike RMD_GH_COOLDOWN_S it is deliberately NOT read from the command text: an inline
+#    `RMD_HOUSE_RULE_OVERRIDE=stash git stash` is refused like any other stash, because the agent typing the
+#    command is exactly who must not hold the override.
+hr_tokens() {  # stdin: shell text -> one simple command per line, as <sep>US<word>US<word>...; <sep> is `|`
+  # after a pipe, else `-`. Quotes are removed and a quoted word stays whole. A heredoc body rides on its
+  # command as one word prefixed with \036; a newline inside a word or body is encoded as \035.
+  awk '
+    function endtok() { if (have) { seg = seg US tok; segn++ } tok = ""; have = 0 }
+    function flush(nsep) { endtok(); if (segn) out[++no] = sep seg; seg = ""; segn = 0; sep = nsep }
+    function emit(   k) { for (k = 1; k <= no; k++) print out[k]; no = 0 }
+    function attach(b) { if (segn || have) { seg = seg US HB b; segn++ } else if (no) out[no] = out[no] US HB b }
+    BEGIN { US = "\037"; HB = "\036"; NL = "\035"; q = ""; tok = ""; have = 0; seg = ""; segn = 0; sep = "-"; no = 0; nh = 0; hi = 0; body = "" }
+    {
+      L = $0
+      if (hi) {
+        line = L; if (htab[hi]) sub(/^\t+/, "", line)
+        if (line == hword[hi]) {
+          attach(body); body = ""
+          if (++hi > nh) { hi = 0; nh = 0; if (q == "") emit() }
+        } else body = body (body == "" ? "" : NL) L
+        next
+      }
+      r = L
+      while ((p = match(r, /<<-?[ \t]*[\047"\\]*[A-Za-z_][A-Za-z0-9_]*/)) > 0) {
+        if (p > 1 && substr(r, p - 1, 1) == "<") { r = substr(r, p + RLENGTH); continue }
+        w = substr(r, p, RLENGTH); t = (w ~ /^<<-/); sub(/^<<-?[ \t]*[\047"\\]*/, "", w)
+        hword[++nh] = w; htab[nh] = t
+        r = substr(r, p + RLENGTH)
+      }
+      n = length(L); cont = 0
+      for (i = 1; i <= n; i++) {
+        c = substr(L, i, 1)
+        if (q == "\047") { if (c == "\047") q = ""; else tok = tok c; continue }
+        if (q == "\"") {
+          if (c == "\\" && i < n && substr(L, i + 1, 1) ~ /[\\"$`]/) { tok = tok substr(L, i + 1, 1); i++; continue }
+          if (c == "\"") q = ""; else tok = tok c
+          continue
+        }
+        if (c == "\\") { if (i == n) { cont = 1; break } tok = tok substr(L, i + 1, 1); have = 1; i++; continue }
+        if (c == "\047" || c == "\"") { q = c; have = 1; continue }
+        if (c == " " || c == "\t") { endtok(); continue }
+        if (c == "#" && !have) break
+        if (substr(L, i, 3) == "<<<") { endtok(); tok = "<<<"; have = 1; endtok(); i += 2; continue }
+        if (substr(L, i, 2) == "<<") {
+          endtok(); tok = "<<"; have = 1; endtok()
+          j = i + 2; if (substr(L, j, 1) == "-") j++
+          while (substr(L, j, 1) ~ /[ \t]/) j++
+          while (j <= n && substr(L, j, 1) !~ /[ \t;&|()<>]/) j++
+          i = j - 1; continue
+        }
+        if (c == ">" && substr(L, i + 1, 1) == "&") { tok = tok ">&"; have = 1; i++; continue }
+        if (c == "&" && substr(L, i + 1, 1) == ">") { tok = tok "&>"; have = 1; i++; continue }
+        if (c == "$" && substr(L, i + 1, 1) == "(") { flush("-"); i++; continue }
+        if (c == "|") { if (substr(L, i + 1, 1) == "|") { flush("-"); i++ } else flush("|"); continue }
+        if (c == ";" || c == "&" || c == "(" || c == ")" || c == "`") { if (c == "&" && substr(L, i + 1, 1) == "&") i++; flush("-"); continue }
+        tok = tok c; have = 1
+      }
+      if (q != "") tok = tok NL
+      else if (cont) endtok()
+      else flush("-")
+      if (nh) hi = 1
+      else if (q == "" && !cont) emit()
+    }
+    END { flush("-"); emit() }'
+}
+HR_STASH="git stash (house rule: never stash: a stash lives outside every branch, is invisible to every other session sharing this clone, and is lost when its worktree is reaped). Commit by explicit path instead (git add <path> && git commit), or copy the file aside (cp <file> <scratch>/) to prove a falsifier, then copy it back. The read-only \`git stash list\` and \`git stash show\` still run."
+HR_NOVERIFY="git commit/push/merge with --no-verify, or \`git commit -n\` (house rule: never --no-verify: the hooks are this repo's gates). Fix what the hook reports, then commit or push again."
+HR_HOOKSPATH="a core.hooksPath override (house rule: never bypass the hooks: pointing core.hooksPath anywhere but \`hooks\` disarms pre-commit, commit-msg and pre-push). Fix what the hook reports; the only value this repo sets is \`git config core.hooksPath hooks\`."
+HR_HOST="the fleet host is READ-ONLY for sessions (house rule)"
+hr_override="${RMD_HOUSE_RULE_OVERRIDE-}"
+hr_refuse() {  # $1 = rule (stash|no-verify|host), $2 = message. deny exits; an override records and returns.
+  case ",$hr_override," in
+    *",$1,"*)
+      printf 'deny-floor: house rule "%s" OVERRIDDEN by RMD_HOUSE_RULE_OVERRIDE (an operator choice on the record): %s\n' "$1" "$2" >&2
+      return 0 ;;
+  esac
+  deny "$2"
+}
+hr_host_refuse() {  # $1 = the destructive command as parsed
+  hr_refuse host "destructive process control sent to the fleet host over ssh (\`$1\`): $HR_HOST. Read-only queries (ps, docker ps/inspect/logs, systemctl status, journalctl, cat, ls) still run. Report to the operator with the exact command you would have run, and stop."
+}
+hr_is_hookspath() {  # config keys are case-insensitive
+  case "$1" in [cC][oO][rR][eE].[hH][oO][oO][kK][sS][pP][aA][tT][hH]) return 0 ;; esac
+  return 1
+}
+hr_decode() { printf '%s' "${1//$'\035'/$'\n'}"; }
+hr_rest() {  # the words t[i..] of the caller's segment, space-joined (heredoc bodies left out)
+  local k="$i" s=""
+  while [ "$k" -lt "$n" ]; do
+    case "${t[$k]}" in $'\036'*) ;; *) s="$s ${t[$k]}" ;; esac
+    k=$((k + 1))
+  done
+  printf '%s' "${s# }"
+}
+hr_skipopts() {  # step the caller's i past the wrapper word at t[i] and its options; $1 = options taking a value
+  i=$((i + 1))
+  while [ "$i" -lt "$n" ]; do
+    case "${t[$i]}" in
+      --) i=$((i + 1)); break ;;
+      -*) case " $1 " in *" ${t[$i]} "*) i=$((i + 2)) ;; *) i=$((i + 1)) ;; esac ;;
+      *) break ;;
+    esac
+  done
+  return 0
+}
+hr_check() {  # $1 = shell text, $2 = local|host, $3 = depth
+  local hr_line hr_prev=""
+  [ "$3" -le 4 ] || return 0
+  while IFS= read -r hr_line; do
+    hr_segment "$hr_line" "$hr_prev" "$2" "$3"
+    hr_prev="$hr_line"
+  done < <(printf '%s\n' "$1" | hr_tokens)
+  return 0
+}
+hr_git_c() {  # one `git -c key[=value]`
+  local key="${1%%=*}" val=""
+  case "$1" in *=*) val="${1#*=}" ;; esac
+  if hr_is_hookspath "$key" && [ "$val" != hooks ]; then hr_refuse no-verify "$HR_HOOKSPATH"; fi
+  return 0
+}
+hr_git_noverify() {  # $1 = commit|merge|push; the caller's t[i..] are the subcommand's words
+  local w k c vals
+  case "$1" in
+    commit) vals=" -m -F -C -c -t --message --file --reuse-message --reedit-message --template --author --date --cleanup --fixup --squash --trailer --pathspec-from-file " ;;
+    merge) vals=" -m -F -s -X --message --file --strategy --strategy-option --cleanup --into-name " ;;
+    *) vals=" -o --repo --push-option --receive-pack --exec " ;;
+  esac
+  while [ "$i" -lt "$n" ]; do
+    w="${t[$i]}"
+    i=$((i + 1))
+    case "$vals" in *" $w "*) i=$((i + 1)); continue ;; esac
+    case "$w" in
+      --) break ;;
+      '<<<') i=$((i + 1)) ;;
+      --no-veri|--no-verif|--no-verify) hr_refuse no-verify "$HR_NOVERIFY" ;;
+      --*) ;;
+      -?*)
+        [ "$1" = commit ] || continue
+        k=1
+        while [ "$k" -lt "${#w}" ]; do
+          c="${w:$k:1}"
+          k=$((k + 1))
+          case "$c" in
+            n) hr_refuse no-verify "$HR_NOVERIFY" ;;
+            m|F|C|c|t) if [ "$k" -ge "${#w}" ]; then i=$((i + 1)); fi; break ;;
+            S|u) break ;;
+          esac
+        done ;;
+    esac
+  done
+  return 0
+}
+hr_git_config() {  # the caller's t[i..] are `git config`'s words
+  local w verb="" key=0 read=0 unset=0 val="" have_val=0
+  while [ "$i" -lt "$n" ]; do
+    w="${t[$i]}"
+    i=$((i + 1))
+    case "$w" in
+      $'\036'*) ;;
+      --get|--get-all|--get-regexp|--get-urlmatch|-l|--list) read=1 ;;
+      --unset|--unset-all) unset=1 ;;
+      --remove-section|--rename-section)
+        case "${t[$i]-}" in [cC][oO][rR][eE]) hr_refuse no-verify "$HR_HOOKSPATH" ;; esac
+        i=$((i + 1)) ;;
+      -f|--file|--blob|--type|--default|--comment|--value|-t) i=$((i + 1)) ;;
+      -*) ;;
+      *)
+        if [ -z "$verb" ] && [ "$key" -eq 0 ]; then
+          case "$w" in
+            get|list) verb="$w"; read=1; continue ;;
+            set|unset|edit|rename-section|remove-section) verb="$w"; continue ;;
+          esac
+        fi
+        case "$verb" in
+          rename-section|remove-section)
+            case "$w" in [cC][oO][rR][eE]) hr_refuse no-verify "$HR_HOOKSPATH" ;; esac
+            return 0 ;;
+        esac
+        if [ "$key" -eq 0 ]; then
+          hr_is_hookspath "$w" || return 0
+          key=1
+        elif [ "$have_val" -eq 0 ]; then
+          val="$w"; have_val=1
+        fi ;;
+    esac
+  done
+  [ "$key" -eq 1 ] || return 0
+  [ "$read" -eq 0 ] || return 0
+  if [ "$unset" -eq 1 ] || [ "$verb" = unset ]; then hr_refuse no-verify "$HR_HOOKSPATH"; return 0; fi
+  [ "$have_val" -eq 1 ] || return 0
+  if [ "$val" != hooks ]; then hr_refuse no-verify "$HR_HOOKSPATH"; fi
+  return 0
+}
+hr_git() {  # $1 = mode, $2 = depth; the caller's t[i..] are git's words after the program
+  local w sub="" pos=""
+  while [ "$i" -lt "$n" ]; do
+    w="${t[$i]}"
+    i=$((i + 1))
+    case "$w" in
+      -c) hr_git_c "${t[$i]-}"; i=$((i + 1)) ;;
+      --config-env) w="${t[$i]-}"; if hr_is_hookspath "${w%%=*}"; then hr_refuse no-verify "$HR_HOOKSPATH"; fi; i=$((i + 1)) ;;
+      --config-env=*) w="${w#--config-env=}"; if hr_is_hookspath "${w%%=*}"; then hr_refuse no-verify "$HR_HOOKSPATH"; fi ;;
+      -C|--git-dir|--work-tree|--namespace|--super-prefix) i=$((i + 1)) ;;
+      -*) ;;
+      *) sub="$w"; break ;;
+    esac
+  done
+  case "$sub" in
+    stash) case "${t[$i]-}" in list|show) ;; *) hr_refuse stash "$HR_STASH" ;; esac ;;
+    commit|merge|push) hr_git_noverify "$sub" ;;
+    config) hr_git_config ;;
+    worktree)
+      if [ "$1" = host ]; then
+        while [ "$i" -lt "$n" ]; do
+          case "${t[$i]}" in -*) i=$((i + 1)) ;; *) pos="${t[$i]}"; break ;; esac
+        done
+        if [ "$pos" = prune ]; then hr_host_refuse "git worktree prune"; fi
+      fi ;;
+  esac
+  return 0
+}
+hr_ssh() {  # $1 = depth, $2 = the previous segment; the caller's t[i..] are ssh's words
+  local w k c dest="" host remote="" j
+  local -a p
+  while [ "$i" -lt "$n" ]; do
+    w="${t[$i]}"
+    i=$((i + 1))
+    case "$w" in
+      --) ;;
+      -?*)
+        k=1
+        while [ "$k" -lt "${#w}" ]; do
+          c="${w:$k:1}"
+          k=$((k + 1))
+          case "$c" in [BbcDEeFIiJLlmOoPpQRSWw]) if [ "$k" -ge "${#w}" ]; then i=$((i + 1)); fi; break ;; esac
+        done ;;
+      *) dest="$w"; break ;;
+    esac
+  done
+  host="${dest#ssh://}"; host="${host##*@}"; host="${host%%:*}"
+  [ "$host" = remudero ] || return 0
+  while [ "$i" -lt "$n" ]; do
+    w="${t[$i]}"
+    i=$((i + 1))
+    case "$w" in
+      $'\036'*) hr_check "$(hr_decode "${w#?}")" host $(( $1 + 1 )) ;;
+      '<<') ;;
+      '<<<') hr_check "$(hr_decode "${t[$i]-}")" host $(( $1 + 1 )); i=$((i + 1)) ;;
+      '<'|'>'|'>>'|[0-9]'>'|[0-9]'>>'|'&>') i=$((i + 1)) ;;
+      '<'*|'>'*|[0-9]'>'*|'&>'*) ;;
+      *) remote="$remote $w" ;;
+    esac
+  done
+  if [ -n "$remote" ]; then hr_check "$(hr_decode "$remote")" host $(( $1 + 1 )); fi
+  case "${t[0]}" in
+    '|')
+      [ -n "$2" ] || return 0
+      IFS=$'\037' read -r -a p <<< "$2"
+      j=1
+      while [ "$j" -lt "${#p[@]}" ]; do
+        w="${p[$j]}"
+        hr_check "$(hr_decode "${w#$'\036'}")" host $(( $1 + 1 ))
+        j=$((j + 1))
+      done ;;
+  esac
+  return 0
+}
+hr_docker() {  # $1 = depth; host mode only; the caller's t[i..] are docker's words
+  local w sub="" sub2=""
+  while [ "$i" -lt "$n" ]; do
+    w="${t[$i]}"
+    i=$((i + 1))
+    case "$w" in
+      -H|--host|--context|-c|--config|-l|--log-level) i=$((i + 1)) ;;
+      -*) ;;
+      *) sub="$w"; break ;;
+    esac
+  done
+  case "$sub" in
+    container|compose|image|volume|network|system|builder|buildx)
+      while [ "$i" -lt "$n" ]; do
+        w="${t[$i]}"
+        i=$((i + 1))
+        case "$w" in
+          -f|--file|-p|--project-name|--profile|--env-file|--project-directory) i=$((i + 1)) ;;
+          -*) ;;
+          *) sub2="$w"; break ;;
+        esac
+      done ;;
+    *) sub2="$sub"; sub="" ;;
+  esac
+  case "$sub2" in
+    restart|stop|kill|rm|rmi|down|prune|pause|remove) hr_host_refuse "docker ${sub:+$sub }$sub2" ;;
+    exec)
+      while [ "$i" -lt "$n" ]; do
+        w="${t[$i]}"
+        i=$((i + 1))
+        case "$w" in
+          -e|--env|--env-file|-u|--user|-w|--workdir|--detach-keys|--index) i=$((i + 1)) ;;
+          -*) ;;
+          *) break ;;
+        esac
+      done
+      hr_check "$(hr_decode "$(hr_rest)")" host $(( $1 + 1 )) ;;
+  esac
+  return 0
+}
+hr_segment() {  # $1 = one hr_tokens line, $2 = the previous line, $3 = local|host, $4 = depth
+  local -a t
+  local n i=1 w prog k c
+  IFS=$'\037' read -r -a t <<< "$1"
+  n=${#t[@]}
+  for w in "${t[@]}"; do
+    case "$w" in
+      GIT_CONFIG*=*[cC][oO][rR][eE].[hH][oO][oO][kK][sS][pP][aA][tT][hH]*) hr_refuse no-verify "$HR_HOOKSPATH" ;;
+    esac
+  done
+  while [ "$i" -lt "$n" ]; do
+    case "${t[$i]}" in
+      [A-Za-z_]*=*|do|then|else|elif|if|while|until|'!'|'{'|time|nohup|exec|command|builtin) i=$((i + 1)) ;;
+      sudo|*/sudo) hr_skipopts "-u -g -h -p -C -D -r -t -U -T" ;;
+      env|*/env) hr_skipopts "-u -C -S" ;;
+      nice|*/nice) hr_skipopts "-n" ;;
+      timeout|*/timeout) hr_skipopts "-s -k --signal --kill-after"; i=$((i + 1)) ;;
+      xargs|*/xargs) hr_skipopts "-I -n -P -L -d -a -E -s --max-args --max-procs --max-lines --delimiter --arg-file" ;;
+      *) break ;;
+    esac
+  done
+  [ "$i" -lt "$n" ] || return 0
+  prog="${t[$i]##*/}"
+  i=$((i + 1))
+  case "$prog" in
+    git) hr_git "$3" "$4" ;;
+    ssh) hr_ssh "$4" "$2" ;;
+    bash|sh|zsh|dash|ksh)
+      while [ "$i" -lt "$n" ]; do
+        w="${t[$i]}"
+        i=$((i + 1))
+        case "$w" in
+          $'\036'*) hr_check "$(hr_decode "${w#?}")" "$3" $(( $4 + 1 )) ;;
+          '<<<') hr_check "$(hr_decode "${t[$i]-}")" "$3" $(( $4 + 1 )); i=$((i + 1)) ;;
+          --*) ;;
+          -*c*) hr_check "$(hr_decode "${t[$i]-}")" "$3" $(( $4 + 1 )); i=$((i + 1)) ;;
+        esac
+      done ;;
+    eval) hr_check "$(hr_decode "$(hr_rest)")" "$3" $(( $4 + 1 )) ;;
+  esac
+  [ "$3" = host ] || return 0
+  case "$prog" in
+    kill) case "${t[$i]-}" in -0|-l|-L) ;; *) hr_host_refuse "kill $(hr_rest)" ;; esac ;;
+    pkill|killall) hr_host_refuse "$prog $(hr_rest)" ;;
+    docker) hr_docker "$4" ;;
+    systemctl)
+      while [ "$i" -lt "$n" ]; do
+        w="${t[$i]}"
+        i=$((i + 1))
+        case "$w" in
+          -H|--host|-M|--machine|-p|--property|-t|--type|-s|--signal|-n|--lines|-o|--output|--state) i=$((i + 1)) ;;
+          -*) ;;
+          restart|stop|kill|try-restart|reload-or-restart|try-reload-or-restart|condrestart) hr_host_refuse "systemctl $w"; break ;;
+          *) break ;;
+        esac
+      done ;;
+    rm)
+      k="$i"
+      while [ "$k" -lt "$n" ]; do
+        w="${t[$k]}"
+        k=$((k + 1))
+        case "$w" in
+          --) break ;;
+          --recursive|--force) hr_host_refuse "rm $w"; break ;;
+          --*) ;;
+          -*[rRf]*) hr_host_refuse "rm $w"; break ;;
+        esac
+      done ;;
+  esac
+  return 0
+}
+hr_tool=""
+[ "$have_jq" -eq 1 ] && hr_tool="$(printf '%s' "$input" | jq -r '.tool_name // ""')"
+case "$hr_tool" in
+  apply_patch|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob) ;;
+  *)
+    if [ "$have_jq" -eq 1 ]; then
+      case "$cmd" in *git*|*ssh*|*GIT_CONFIG*) hr_check "$cmd" local 0 ;; esac
+    fi ;;
+esac
+
 # 10) READ-SHAPED `gh` CALLS, TOO CLOSE TOGETHER (W1-T3275 — THE SECONDARY LIMIT COUNTS CADENCE).
 #    Rule 6 refuses the SHAPE of a poll — loop keyword + wait + `gh`. That is not how the budget
 #    gets burned. MEASURED 2026-09-09: a session tripped the secondary limit TWICE with no loop
