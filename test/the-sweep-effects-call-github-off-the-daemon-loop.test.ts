@@ -91,7 +91,7 @@ async function armedIdleDeps(t: TestContext, deps: Partial<Parameters<typeof bui
     ...deps,
     armImpl: async (_prUrl, _taskId, armDeps) => {
       captured = armDeps as ArmDeps<true>;
-      return "armed";
+      return "armed" as const;
     },
   });
   await effects.arm!(view(), "armed-idle");

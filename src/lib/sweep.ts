@@ -4031,12 +4031,12 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         prFileSources.set(key, Buffer.from(file.content, "base64").toString("utf8"));
         return prFileSources.get(key);
       };
-      // unread: the ready arm names it ready-unknown, never "no overlap"
       const unread = (_error: unknown): undefined => undefined;
       let answer: unknown;
       try {
         answer = ghAwaitForBuild(["api", `repos/${owner}/${repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${pr.headSha}`]);
       } catch (error) {
+        // unread: the ready arm names it ready-unknown, never "no overlap"
         return unread(error);
       }
       return answer instanceof Promise ? answer.then(keep, unread) : keep(answer);
