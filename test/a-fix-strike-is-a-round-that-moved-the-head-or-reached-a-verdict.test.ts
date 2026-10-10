@@ -36,7 +36,9 @@ function view(rows: Row[]): sweep.OpenPrView {
   };
 }
 
-async function underClaim(rows: Row[], seedDispatch = false) {
+async function underClaim(rows: Row[], seedDispatch = false,
+  judge: NonNullable<sweep.SweepDeps["fixProgressJudge"]> = async () => ({ verdict: "continue", reason: "fixture permits another round" }),
+) {
   const ledgerPath = join(mkdtempSync(join(tmpdir(), "rmd-outcome-strikes-")), "ledger.ndjson");
   if (seedDispatch) appendLedger(ledgerPath, { run_id: "old-sweep", task_id: TASK, step: "sweep.disposed", head_sha: HEAD, pr_number: 8868, disposition: "blocked-fixable", acted: true, red_checks: ["ci"] });
   for (const row of rows) appendLedger(ledgerPath, { run_id: "fixture", task_id: TASK, step: String(row.step), ...row });
@@ -44,6 +46,7 @@ async function underClaim(rows: Row[], seedDispatch = false) {
   const stale = { ...view([]), priorStrikes: 0 };
   const result = await sweep.runSweep([stale], {
     ledgerPath, runId: "fixture-sweep", now: () => Date.now(),
+    fixProgressJudge: judge,
     arm: () => {}, close: () => {}, escalate: () => {},
     dispatchFix: () => { dispatched++; },
   }, sweep.DEFAULT_SWEEP_POLICY);
@@ -57,8 +60,15 @@ test("W1-T5542: refused rounds are never strikes and both readers agree", async 
     assert.equal(priorStrikesFor(rows, TASK, "executed", HEAD), 0);
     const disposition = sweep.deriveDisposition(view(rows));
     assert.equal(disposition.disposition, "blocked-ambiguous");
-    const claimed = await underClaim(rows);
-    assert.equal(claimed.dispatched, 0, "the stale view cannot authorize a third refused round");
+    let judgments = 0;
+    const claimed = await underClaim(rows, false, async input => {
+      judgments++;
+      assert.equal(input.strikesSpent, 0);
+      assert.equal(input.signals.refusedRounds, 2);
+      return { verdict: "escalate", loop: "refused twice with identical evidence", reason: REASON };
+    });
+    assert.equal(judgments, 1, "the fresh ledger supplies the refusals despite the stale view");
+    assert.equal(claimed.dispatched, 0, "the judge's named loop prevents another refused round");
     assert.match(String(claimed.disposed?.stand_down_reason), /refused twice/);
     assert.equal(sweep.fixRoundTally(rows, TASK, HEAD).strikes, 0);
   }
@@ -66,10 +76,20 @@ test("W1-T5542: refused rounds are never strikes and both readers agree", async 
   assert.equal(single.dispatched, 1, "one refusal earns one retry");
 });
 
-test("W1-T5542: incomplete legacy history preserves the cap while identified rounds need outcomes", async () => {
+test("W1-T5542: incomplete legacy history reaches the judge while identified rounds need outcomes", async () => {
   const legacy = [1, 2].map((strike) => ({ task_id: TASK, step: "fix.dispatch", strike, head_sha: HEAD, verdict_regime: "executed" }));
   assert.equal(priorStrikesFor(legacy, TASK, "executed", HEAD), 2);
-  assert.equal((await underClaim(legacy)).dispatched, 0, "missing historical receipts cannot re-open an exhausted cap");
+  let judgments = 0;
+  const heldLegacy = await underClaim(legacy, false, async input => {
+    judgments++;
+    assert.equal(input.strikesSpent, 2);
+    assert.equal(input.rounds.length, 2);
+    assert.equal(input.signals.incompleteRounds, 2);
+    return undefined;
+  });
+  assert.equal(judgments, 1);
+  assert.equal(heldLegacy.dispatched, 0, "an unavailable judgment holds incomplete legacy evidence");
+  assert.match(String(heldLegacy.disposed?.stand_down_reason), /absent or unparseable fix progress verdict/);
   assert.equal(sweep.fixRoundTally(legacy, TASK, "other-head").strikes, 0);
   assert.equal(sweep.fixRoundTally(legacy.map((row) => ({ ...row, verdict_regime: "keyword_only" })), TASK, HEAD, "executed").strikes, 0);
   assert.equal(sweep.fixRoundTally(legacy.map((row) => ({ ...row, kind: "proof_amendment" })), TASK, HEAD).strikes, 0);
@@ -100,7 +120,17 @@ test("W1-T5542: a round that moved the head or reached a verdict is one strike",
   const second = [...round("r2"), { task_id: TASK, step: "fix.review", strike: 1, round_id: "r2" }];
   const two = [...first, ...second];
   assert.equal(sweep.fixRoundTally(two, TASK, HEAD).strikes, 2, "strike numbers may repeat across invocations");
-  assert.equal((await underClaim(two)).dispatched, 0);
+  let judgments = 0;
+  const stopped = await underClaim(two, false, async input => {
+    judgments++;
+    assert.equal(input.strikesSpent, 2);
+    assert.equal(input.rounds.length, 2);
+    return { verdict: "escalate", loop: "two completed rounds repeat the red", reason: "no new evidence" };
+  });
+  assert.equal(judgments, 1);
+  assert.equal(stopped.dispatched, 0);
+  assert.match(String(stopped.disposed?.stand_down_reason), /two completed rounds repeat the red/);
+  assert.equal((await underClaim(two)).dispatched, 1, "the same tally permits another round when the judge continues");
   const interleaved = [first[0], second[0], second[1], second[2], first[1], first[1]];
   assert.equal(sweep.fixRoundTally(interleaved, TASK, HEAD).strikes, 2, "round identity survives interleaving and duplicate receipts");
   const legacy = [...round(undefined, REASON), ...round(undefined), { task_id: TASK, step: "fix.review", strike: 1 }];
@@ -137,7 +167,14 @@ test("W1-T5542: the 8868 ledger shape never renders an overshoot", async () => {
   const disposition = sweep.deriveDisposition(view(rows));
   assert.doesNotMatch(disposition.reason, /3\/2/);
   assert.match(disposition.reason, /refused twice/);
-  assert.equal((await underClaim(rows)).dispatched, 0);
+  const held = await underClaim(rows, false, async input => {
+    assert.equal(input.strikesSpent, 0);
+    assert.equal(input.signals.refusedRounds, 3);
+    return { verdict: "escalate", loop: "refused twice and then repeated again", reason: REASON };
+  });
+  assert.equal(held.dispatched, 0);
+  assert.match(String(held.disposed?.stand_down_reason), /refused twice and then repeated again/);
+  assert.doesNotMatch(String(held.disposed?.stand_down_reason), /3\/2/);
 });
 
 test("W1-T5542: amnesty and identity exclusions apply to both readers", async () => {

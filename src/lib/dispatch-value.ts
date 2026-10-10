@@ -58,6 +58,24 @@ export type DispatchValueCalibration =
     }
   | { kind: "refused"; reasons: readonly string[] };
 
+const sortedByJson = new WeakSet<ReadonlyArray<Record<string, unknown>>>();
+
+/**
+ * `rows` ordered by each row's `JSON.stringify` under `localeCompare` — the evidence order calibration has
+ * always used — with each row serialised ONCE. The comparator used to serialise both rows on every comparison:
+ * ~2 n log n serialisations, about 2 GB of strings per sort over the fleet's 61,803 evidence rows (2026-10-10).
+ * The comparisons are the same, so the order is the same. The result is frozen and remembered as sorted, so
+ * {@link buildDispatchValueContext} does not sort it again.
+ */
+export function sortRowsByJson(rows: ReadonlyArray<Record<string, unknown>>): ReadonlyArray<Record<string, unknown>> {
+  if (sortedByJson.has(rows)) return rows;
+  const keyed = rows.map((row) => ({ row, key: JSON.stringify(row) }));
+  keyed.sort((a, b) => a.key.localeCompare(b.key));
+  const sorted = Object.freeze(keyed.map(({ row }) => row));
+  sortedByJson.add(sorted);
+  return sorted;
+}
+
 /** The ledger steps {@link estimateClassValues} reads, for the command layer's union filter. */
 export const DISPATCH_VALUE_LEDGER_STEPS = ["run.start", "verdict", "verdict.merged"] as const;
 
@@ -272,7 +290,7 @@ export function buildDispatchValueContext(
   snapshot?: CostOfDelaySnapshot,
 ): DispatchValueCalibration {
   if (!unionComplete) return { kind: "refused", reasons: ["incomplete-union"] };
-  if (snapshot) rows = [...rows].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  if (snapshot) rows = sortRowsByJson(rows);
   const { byClass, fleet } = estimateClassValues(rows, nowMs);
   const estimates = new Map(byClass);
   const refusals: string[] = [];

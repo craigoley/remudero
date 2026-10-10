@@ -1855,7 +1855,9 @@ function originUrlFromGitConfig(text: string): string | undefined {
   for (const raw of lines) {
     const line = raw.trim();
     if (line === "" || line.startsWith("#") || line.startsWith(";")) continue;
-    const section = /^\[\s*([A-Za-z][A-Za-z0-9-]*)(?:\s+(?:"((?:\\.|[^"])*)"|([A-Za-z0-9.-]+)))?\s*\]$/.exec(line);
+    // Keep the quoted subsection alternatives disjoint: a backslash belongs only to `\\.`.
+    // Letting `[^\"]` also consume `\\` makes malformed long sections exponentially backtrack.
+    const section = /^\[\s*([A-Za-z][A-Za-z0-9-]*)(?:\s+(?:"((?:[^"\\]|\\.)*)"|([A-Za-z0-9.-]+)))?\s*\]$/.exec(line);
     const dotted = /^\[\s*([A-Za-z][A-Za-z0-9-]*)\.([A-Za-z0-9.-]+)\s*\]$/.exec(line);
     if (line.startsWith("[") && !section && !dotted) return undefined;
     if (section || dotted) {

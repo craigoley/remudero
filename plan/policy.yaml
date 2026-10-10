@@ -1649,3 +1649,33 @@ risk:
   verifyHumanReleaseEnabled:
     value: true
     origin: "net-new"
+
+# THE DAEMON'S HEAP GROWTH AND MEMORY-PRESSURE SHARES, read at daemon entry by
+# src/lib/daemon-memory-policy.ts's `readDaemonMemoryPolicy` (OPTIONAL: absent rows read as the
+# defaults below; NOT threaded through src/lib/policy.ts's `validatePolicy`, exactly like `risk:`).
+#
+# MEASURED 2026-10-10 on the core host: the daemon's live set was 0.6-0.9 GB while V8, under the
+# container's 8 GB heap ceiling, let garbage reach ~4x that before a major GC; RSS sat at 4.1-4.5 GB
+# with 1-3 GB more in swap. `heapGrowingPercent` fixes the next collection at (1 + value/100) times
+# what survived the last one: 50 measured a 45% lower peak heap for ~14% less synthetic throughput.
+#
+# The two shares are of the daemon's RSS+swap against the container's own memory.high (else
+# memory.max), read from the cgroup every tick. Between them the growth percent falls linearly
+# toward 10; at `restartShare` with 10 already in force the daemon drains and restarts at a tick
+# boundary. Both scale with whatever budget the container is given; neither is a byte count.
+daemonMemory:
+  heapGrowingPercent:
+    value: 50
+    origin: "net-new"
+    min: 10
+    max: 300
+  tightenShare:
+    value: 0.3
+    origin: "net-new"
+    min: 0.05
+    max: 0.95
+  restartShare:
+    value: 0.5
+    origin: "net-new"
+    min: 0.1
+    max: 1
