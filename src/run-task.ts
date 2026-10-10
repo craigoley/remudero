@@ -6224,7 +6224,7 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
       const candidate = { ...metadata, body: repairedBody };
       const verdict = await preflight(worktreePath, pr.headSha, candidate);
       if (!acceptanceAuthorTimeCheck(repairedBody).ok || !filingSelfCreditCheck(repairedBody, introduced).ok) return refuse("the repaired filing body fails author-time acceptance", verdict);
-      if (verdict.ok && verdict.unreadable.length === 0) {
+      if (verdict.ok && verdict.unreadable.length === 0 && verdict.timedOut === undefined) {
         await deps.updateMetadata(candidate);
         return { outcome: "metadata-repaired", headSha: pr.headSha, preflight: verdict };
       }
@@ -6262,7 +6262,8 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
       sha = git(["rev-parse", "HEAD"]).trim();
     } else if (metadata.title === input.title && metadata.body === input.body) return refuse("the worker changed nothing");
     const verdict = await preflight(worktreePath, sha, metadata);
-    if (!verdict.ok || verdict.unreadable.length) return refuse((verdict.failures[0] ?? verdict.unreadable[0])!.firstLine, verdict);
+    // A check that ran out of its budget has no verdict, so it holds the push like an unreadable one.
+    if (!verdict.ok || verdict.unreadable.length || verdict.timedOut) return refuse((verdict.failures[0] ?? verdict.unreadable[0] ?? verdict.timedOut?.[0])!.firstLine, verdict);
     if (metadata.title !== input.title || metadata.body !== input.body) await deps.updateMetadata(metadata);
     if (sha === pr.headSha) {
       deps.log("fix.done", { ...roundFields(), subtype: "success" });
