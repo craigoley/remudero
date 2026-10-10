@@ -457,7 +457,7 @@ DEPLOY_LOGIC_PATHS=(deploy/ bin/ src/lib/deployer.ts src/lib/action-reconciliati
 # install head moved on every merge, so the tree stayed one merge behind for 80+ min); only the
 # deploy-logic paths must match, which keeps W1-T4917's "deploy code never older than it deploys".
 deploy_code_busy_handoff() {
-  local code="$STATE_DIR/remudero" install_head daemon_head rc=0
+  local container="${1:-}" code="$STATE_DIR/remudero" install_head daemon_head rc=0
   [ "${DEPLOY_CODE_BUSY:-0}" = 1 ] || return 1
   deploy_code_clean || return 1
   if ! install_head="$(GIT_OPTIONAL_LOCKS=0 git -C "$CHECKOUT" rev-parse HEAD 2>/dev/null)" || [ -z "$install_head" ] ||
@@ -466,6 +466,7 @@ deploy_code_busy_handoff() {
     return 1
   fi
   if GIT_OPTIONAL_LOCKS=0 git -C "$code" merge-base --is-ancestor "$install_head" "$daemon_head" 2>/dev/null; then
+    rm -f "$STATE_DIR/state/deploy-logic-lag" 2>/dev/null || true
     echo "rmd-relaunch: deploy code -- busy; daemon tree ${daemon_head} contains install head ${install_head}, asking deploy-run anyway."
     return 0
   fi
@@ -474,13 +475,52 @@ deploy_code_busy_handoff() {
   GIT_OPTIONAL_LOCKS=0 git -C "$code" diff --quiet "$daemon_head" "$install_head" -- "${DEPLOY_LOGIC_PATHS[@]}" 2>/dev/null || rc=$?
   if [ "$rc" -eq 1 ]; then
     echo "rmd-relaunch: deploy code -- busy, and daemon tree ${daemon_head} lacks install head ${install_head}'s deploy logic (${DEPLOY_LOGIC_PATHS[*]}); deferring." >&2
+    deploy_logic_lag_pressure "$container" "$daemon_head"
     return 1
   fi
   if [ "$rc" -ne 0 ]; then
     echo "rmd-relaunch: deploy code -- busy, and daemon tree ${daemon_head} vs install head ${install_head}: deploy logic unreadable (git diff exit ${rc}); deferring." >&2
     return 1
   fi
+  rm -f "$STATE_DIR/state/deploy-logic-lag" 2>/dev/null || true
   echo "rmd-relaunch: deploy code -- busy; daemon tree ${daemon_head} carries install head ${install_head}'s deploy logic, asking deploy-run anyway."
+}
+
+# 2026-10-10 -- THE DEFERRAL ABOVE HAD NO AGE. While workers ran and the daemon tree lacked the
+# install head's deploy logic, every tick deferred, forever; core sat at bf5aea42e from 04:18Z
+# until 06:03Z. It caught up only because the daemon's OWN freshness restart got there: its age
+# pressure (DEPLOY_RESTART_SCORE_THRESHOLD 18 per DEPLOY_RESTART_RATE_CEILING_MS, an hour) decided
+# "drain and restart" at 05:00Z, then waited out its in-flight lanes (45 min), a bounded sweep and a
+# bounded drain. That path is the right one and normally wins -- but nothing here noticed if it
+# never did. So the lag now accrues PRESSURE on the same scale, keyed to the daemon tree's HEAD:
+#   below two horizons (36) -- defer; one horizon is the daemon's own restart decision, one its drain.
+#   at or above           -- hand the daemon to recycle-container.sh's pause-and-drain swap from the
+#                            INSTALL checkout (the current deploy logic, never the lagging tree's), as
+#                            W1-T6249/W1-T6282 do for a busy image recycle. It waits out the workers;
+#                            the replacement boots onto origin/main. A refusal retries after
+#                            WATCHDOG_RECYCLE_GAP_S, and pressure keeps growing until the tree moves.
+# Any move of the daemon tree's HEAD -- its own restart, an idle fast-forward -- resets the clock.
+deploy_logic_lag_pressure() {
+  local container="$1" daemon_head="$2" mark="$STATE_DIR/state/deploy-logic-lag" now since="" head="" pressure
+  now="$(date -u +%s)"
+  { read -r since head < "$mark"; } 2>/dev/null || true
+  case "$since" in ''|*[!0-9]*) since="" ;; esac
+  if [ -z "$since" ] || [ "$head" != "$daemon_head" ] || [ "$since" -gt "$now" ]; then
+    since="$now"
+    mkdir -p "$STATE_DIR/state" 2>/dev/null || true
+    printf '%s %s\n' "$since" "$daemon_head" > "$mark" 2>/dev/null || true
+  fi
+  pressure=$(( (now - since) * 18 / 3600 ))
+  if [ "$pressure" -lt 36 ]; then
+    echo "rmd-relaunch: deploy code -- deploy-logic lag $((now - since))s at ${daemon_head}, pressure ${pressure} < 36; the daemon's own freshness restart has it." >&2
+    return 0
+  fi
+  if [ -z "$container" ] || ! declare -F watchdog_recycle >/dev/null; then
+    echo "rmd-relaunch: deploy code -- deploy-logic lag $((now - since))s, pressure ${pressure} >= 36, but no recycle path is wired; deferring." >&2
+    return 0
+  fi
+  watchdog_recycle "$container" "deploy code" \
+    "deploy-logic lag $((now - since))s at ${daemon_head}, pressure ${pressure} >= 36: the daemon never restarted onto it" || true
 }
 DEPLOY_CODE_REFRESH
 }
@@ -541,13 +581,23 @@ note_progress_verdict() {
 
 # Returns 0 only when it RAN recycle-container.sh, so the caller ends the tick on one action.
 recycle_on_verdict() {
-  local container="$1" now last out rc script="$CHECKOUT/deploy/recycle-container.sh" result reason args=() envs=() age
+  local age
   [ "$PROGRESS_ACTION" = "recycle" ] || return 1
+  # W1-T6597: the verdict rides along, so the recycle may prove a FROZEN daemon owns what blocks it.
+  age="$(printf '%s\n' "$PROGRESS_VERDICT" | sed -n 's/.*"progressAgeMs":\([0-9]*\).*/\1/p' | head -n 1)"
+  watchdog_recycle "$1" "progress-watchdog" "${PROGRESS_STATE}" "${PROGRESS_STATE} progressAgeMs=${age:-unknown}"
+}
+
+# One recycle-container.sh run, shared by every rung that hands the daemon to its pause-and-drain
+# swap: $2 names the caller, $3 the reason it logs, $4 an RMD_RECYCLE_VERDICT (empty = none).
+# Returns 0 only when it RAN the script.
+watchdog_recycle() {
+  local container="$1" who="$2" why="$3" verdict="${4:-}" now last out rc script="$CHECKOUT/deploy/recycle-container.sh" result reason args=() envs=()
   now="$(date -u +%s)"
   last="$(cat "$WATCHDOG_RECYCLE_AT" 2>/dev/null || true)"
   case "$last" in ''|*[!0-9]*) last="" ;; esac
   if [ -n "$last" ] && [ "$((now - last))" -lt "$WATCHDOG_RECYCLE_GAP_S" ]; then
-    echo "rmd-relaunch: progress-watchdog -- a recycle ran $((now - last))s ago; at most one per ${WATCHDOG_RECYCLE_GAP_S}s."
+    echo "rmd-relaunch: ${who} -- a recycle ran $((now - last))s ago; at most one per ${WATCHDOG_RECYCLE_GAP_S}s."
     return 1
   fi
   # STAMPED BEFORE THE ATTEMPT: a refusal is retried on a later tick, never in this one. W1-T6598:
@@ -557,10 +607,8 @@ recycle_on_verdict() {
   printf '%s\n' "$now" > "$WATCHDOG_RECYCLE_AT" 2>/dev/null || true
   [ -n "$INSTANCE_NAME" ] && args=(--instance "$INSTANCE_NAME")
   [ -n "$INSTANCE_REGISTRY" ] && envs=(RMD_INSTANCE_REGISTRY="$INSTANCE_REGISTRY")
-  # W1-T6597: the verdict rides along, so the recycle may prove a FROZEN daemon owns what blocks it.
-  age="$(printf '%s\n' "$PROGRESS_VERDICT" | sed -n 's/.*"progressAgeMs":\([0-9]*\).*/\1/p' | head -n 1)"
-  envs+=(RMD_RECYCLE_VERDICT="${PROGRESS_STATE} progressAgeMs=${age:-unknown}")
-  echo "rmd-relaunch: progress-watchdog -- ${PROGRESS_STATE}; recycling $container via $script."
+  [ -z "$verdict" ] || envs+=(RMD_RECYCLE_VERDICT="$verdict")
+  echo "rmd-relaunch: ${who} -- ${why}; recycling $container via $script."
   if [ ! -f "$script" ]; then
     out="recycle-container.sh missing at $script"; rc=127
   elif out="$(env ${envs[@]+"${envs[@]}"} RMD_STATE_DIR="$STATE_DIR" RMD_DAEMON_CONTAINER="$container" \
@@ -1049,7 +1097,7 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
     # Refresh the source CLI before loading it; standalone executable entrypoints own their
     # runtime and retain the supervisor invocation without requiring a source checkout.
     if [ -f "\$STATE_DIR/remudero/src/run-task.ts" ]; then
-      refresh_deploy_code '${CONTAINER_NAME}' || deploy_code_busy_handoff || exit 0
+      refresh_deploy_code '${CONTAINER_NAME}' || deploy_code_busy_handoff '${CONTAINER_NAME}' || exit 0
     fi
     echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
     # W1-T4267: deploy-run reads resourcePolicyDrift for THIS container (named at install time --

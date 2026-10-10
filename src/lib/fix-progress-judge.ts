@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 export const FIX_BUDGET_JUDGE_SITES = [
   { name: "diagnose-retry", file: "src/lib/classify.ts", formerCeiling: 2 },
   { name: "transient-retry", file: "src/lib/classify.ts", formerCeiling: 3 },
@@ -25,7 +27,14 @@ export interface FixProgressRound {
   diffStat?: unknown;
   diffDigest?: string;
   completed: boolean;
+  /** The reviewer-side proof failures this round was dispatched against ({@link reviewerProofFailures}). */
+  reviewerFailures?: ReviewerProofFailure[];
+  /** The same, read from the first `review.posted` row after this round completed. */
+  reviewAfter?: ReviewerProofFailure[];
 }
+
+/** One reviewer `executed_fail` proof, identified by its claim and a digest of its recorded output. */
+export interface ReviewerProofFailure { claim: string; digest: string; excerpt?: string }
 
 export interface FixProgressInput {
   taskId?: string;
@@ -39,7 +48,12 @@ export interface FixProgressInput {
   formerCeiling?: number;
   parkedReason?: string;
   signals: { noOpRounds: number; identicalRedSets: number; identicalDiffs: number;
-    oscillating: boolean; refusedRounds: number; incompleteRounds: number };
+    oscillating: boolean; refusedRounds: number; incompleteRounds: number;
+    /** Rounds whose worker reported FIXED, after which the reviewer failed the same proof with the same output.
+     *  Another identical fix round cannot help; a fresh-sandbox re-review or an escalation carrying the excerpt can. */
+    reviewerOnlyFailurePersists: number };
+  /** The excerpts behind {@link signals.reviewerOnlyFailurePersists}, for the escalation to carry. */
+  persistentReviewerFailures?: ReviewerProofFailure[];
 }
 
 export type FixProgressVerdict =
@@ -50,6 +64,37 @@ export type FixProgressJudge = (input: FixProgressInput) => Promise<FixProgressV
 export type FixProgressResult = FixProgressVerdict | { verdict: "unavailable"; reason: string };
 
 const sorted = (values: string[]) => [...new Set(values)].sort();
+
+/** Digest a recorded proof output so two runs of one failure compare equal: timings and counts vary between runs. */
+export function reviewerFailureDigest(output: string): string {
+  return createHash("sha256").update(output.replace(/\d+(?:\.\d+)?/g, "N")).digest("hex").slice(0, 16);
+}
+
+/** The `fix.dispatch` row's record of the reviewer-side failures a round was sent to fix. */
+export function reviewerProofFailures(
+  criteria: readonly { claim: string; proof_exec?: string; proofFailureOutput?: string }[],
+): ReviewerProofFailure[] {
+  return criteria.flatMap((c) => c.proof_exec === "executed_fail" && typeof c.proofFailureOutput === "string"
+    ? [{ claim: c.claim, digest: reviewerFailureDigest(c.proofFailureOutput) }] : []);
+}
+
+function failuresOfDispatch(row: Record<string, unknown>): ReviewerProofFailure[] | undefined {
+  if (!Array.isArray(row.reviewer_proof_failures)) return undefined;
+  return row.reviewer_proof_failures.flatMap((f: unknown) => {
+    const r = f && typeof f === "object" ? f as Record<string, unknown> : {};
+    return typeof r.claim === "string" && typeof r.digest === "string" ? [{ claim: r.claim, digest: r.digest }] : [];
+  });
+}
+
+function failuresOfReview(row: Record<string, unknown>): ReviewerProofFailure[] {
+  const criteria = (row.decision_verdict as { criteria?: unknown } | null | undefined)?.criteria;
+  if (!Array.isArray(criteria)) return [];
+  return criteria.flatMap((c: unknown) => {
+    const v = c && typeof c === "object" ? c as Record<string, unknown> : {};
+    return typeof v.claim === "string" && v.proof_exec === "executed_fail" && typeof v.proofFailureOutput === "string"
+      ? [{ claim: v.claim, digest: reviewerFailureDigest(v.proofFailureOutput), excerpt: v.proofFailureOutput }] : [];
+  });
+}
 const stringValue = (value: unknown): string | undefined => typeof value === "string" ? value : undefined;
 const redSet = (row: Record<string, unknown>): string[] => row.mode === "merge-conflict" && Array.isArray(row.conflicted_files)
   ? sorted(row.conflicted_files.filter((p): p is string => typeof p === "string").map(p => `conflict:${p}`))
@@ -91,9 +136,13 @@ export function buildFixProgressInput(facts: {
     if (row.step === "fix.dispatch" || row.step === "fix.retrigger") {
       if (id && byId.has(id)) continue;
       const round: FixProgressRound = { id: id ?? `legacy:${index}`, dispatchedHead: stringValue(row.head_sha),
-        redBefore: redSet(row), diffStat: row.diff_stat ?? row.diffstat, diffDigest: stringValue(row.diff_digest), completed: false };
+        redBefore: redSet(row), diffStat: row.diff_stat ?? row.diffstat, diffDigest: stringValue(row.diff_digest), completed: false,
+        reviewerFailures: failuresOfDispatch(row) };
       rounds.push(round);
       if (id) byId.set(id, round);
+    } else if (row.step === "review.posted") {
+      const failures = failuresOfReview(row);
+      for (const round of rounds) if (round.completed && round.reviewAfter === undefined) round.reviewAfter = failures;
     } else if (row.step === "fix.done" || row.step === "fix.commit_refused") {
       const round = id ? byId.get(id) : rounds.findLast(r => !r.completed &&
         (row.head_sha === undefined || r.dispatchedHead === row.head_sha));
@@ -122,10 +171,21 @@ export function buildFixProgressInput(facts: {
     oscillating: rounds.length >= 2 && same(currentRed, rounds.at(-2)!.redBefore) && !same(currentRed, rounds.at(-1)!.redBefore),
     refusedRounds: rounds.filter(r => r.refusal !== undefined || r.subtype === "commit_refused").length,
     incompleteRounds: rounds.filter(r => !r.completed).length,
+    reviewerOnlyFailurePersists: 0,
   };
+  const persistentReviewerFailures: ReviewerProofFailure[] = [];
+  for (const round of rounds) {
+    if (round.fixOutcome !== "FIXED" || !round.reviewerFailures || !round.reviewAfter) continue;
+    const repeated = round.reviewAfter.filter(after =>
+      round.reviewerFailures!.some(before => before.claim === after.claim && before.digest === after.digest));
+    if (repeated.length === 0) continue;
+    signals.reviewerOnlyFailurePersists += 1;
+    persistentReviewerFailures.push(...repeated);
+  }
   return { taskId: facts.taskId, prNumber: facts.prNumber, headSha: facts.headSha,
     strikesSpent: facts.strikesSpent ?? 0, currentRed, rounds,
-    operatorAnswer: facts.operatorAnswer, formerCeiling: facts.formerCeiling, parkedReason: facts.parkedReason, signals };
+    operatorAnswer: facts.operatorAnswer, formerCeiling: facts.formerCeiling, parkedReason: facts.parkedReason, signals,
+    ...(persistentReviewerFailures.length > 0 ? { persistentReviewerFailures } : {}) };
 }
 
 export function parseFixProgressVerdict(text: string): FixProgressVerdict | undefined {

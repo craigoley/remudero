@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-09: backlog survey ('Any tasks that are in the backlog, high value, will improve automated flow or self improvement?')"
   plan_refs: [W1-T2910, W1-T3565, W1-T3978, W1-T4413, W1-T4597, W1-T6593]
   files: [src/lib/status.ts, test/a-failed-run-latch-re-offers-when-its-evidence-changes.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

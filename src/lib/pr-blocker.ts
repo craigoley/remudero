@@ -29,6 +29,9 @@ export interface BlockerFacts {
   ownRed?: boolean;
   /** A green, reviewed PR an operator merge hold stands over (W1-T1000002): it is waiting on a person, not on arming. */
   operatorHold?: boolean;
+  /** A fix dispatch the backstop holds at this head after escalating: no lane can move it, so it is
+   *  escalated — never the `conflict-rebase` or `fix-lane` owner that is not going to act (#10551). */
+  dispatchHeld?: boolean;
 }
 
 export function finalBlocker(ruleBlocker: PrBlocker, facts: BlockerFacts): PrBlocker {
@@ -37,6 +40,7 @@ export function finalBlocker(ruleBlocker: PrBlocker, facts: BlockerFacts): PrBlo
   if (facts.reviewerEvidenceUnreadable) return "other";
   if (facts.planProofUnrunnable) return "plan-proof-unrunnable";
   if (facts.strikesExhausted) return "strikes-exhausted";
+  if (facts.dispatchHeld) return "escalated";
   if (facts.ownRed) return "own-red";
   if (facts.mergeable && facts.operatorHold) return "operator-hold";
   if (facts.mergeable) return facts.autoMergeArmed ? "armed-idle" : "awaiting-arm";

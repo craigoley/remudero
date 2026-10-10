@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 8 (12 janitor_ineffective rows blamed transcripts/state), re-measured"
   plan_refs: [W1-T5710, W1-T5549]
   files: [src/lib/host-resource-gardener.ts, test/disk-growth-is-blamed-only-on-a-consumer-on-that-disk.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

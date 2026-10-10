@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, rmd-test-home-<pid>-* still leaks per worker"
   plan_refs: [W1-T5624, W1-T5550]
   files: [test/setup/tmp-hygiene.ts, test/a-worker-thread-mints-no-test-home.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

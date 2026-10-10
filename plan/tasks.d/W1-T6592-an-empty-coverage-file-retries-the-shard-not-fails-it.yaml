@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: PR #10132 coverage-shard (7/8) red attribution"
   plan_refs: [W1-T4398, W1-T3207]
   files: [scripts/test-with-retry.mjs, test/an-empty-coverage-file-retries-the-shard-not-fails-it.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

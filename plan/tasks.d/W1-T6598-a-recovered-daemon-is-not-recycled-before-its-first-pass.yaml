@@ -12,7 +12,7 @@
   note: "reservation hand-off: run-unfiled-1791494514106 -> run-unfiled-1791497410700"
   plan_refs: [W1-T5688, W1-T5687, W1-T5651]
   files: [src/lib/progress-watchdog.ts, deploy/install-host-units.sh, test/fixtures/azure-host-units/rmd-relaunch.sh, test/a-recovered-daemon-is-not-recycled-before-its-first-pass.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

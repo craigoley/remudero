@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: follow-up dropped from W1-T5955's build"
   plan_refs: [W1-T5955, W1-T5920]
   files: [src/run-task.ts, test/a-flake-rerun-releases-its-branch-claim-before-its-ci-wait.test.ts]
-  status: queued
+  status: merged
   priority: 2 # operator-2026-10-09: fix lane: the flake rerun path still holds its branch claim across the CI wait (runFixRung rerun-once)
   attempts: 0
   rationale: |

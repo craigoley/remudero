@@ -402,6 +402,9 @@ export interface CriterionVerdict {
   proof_exec: ProofExecOutcome;
   /** The bounded runner diagnostic when `proof_exec` is `cannot_evaluate`. */
   loadError?: string;
+  /** The reviewer sandbox's own output for an `executed_fail` proof ({@link proofFailureExcerpt}): command, exit
+   *  status and output tail. #10555's fix rounds saw only `reason` and could not reproduce a reviewer-only red. */
+  proofFailureOutput?: string;
   /** See {@link ProofSkipReason}. Absent when the proof executed. */
   proof_skip?: ProofSkipReason;
   /** `met` as computed by the mechanical floor, BEFORE any semantic downgrade (W1-T178). Optional so the
@@ -828,6 +831,8 @@ export interface WhitelistedProof {
   diffTestFiles?: readonly string[];
   /** Bounded diagnostic from a runner whose test files failed to load. */
   loadError?: string;
+  /** The default executor's bounded excerpt of a run it graded `"fail"` — {@link proofFailureExcerpt}. */
+  failureOutput?: string;
 }
 
 const TEST_PATH_RE = /\btest\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?\b/;
@@ -1567,7 +1572,7 @@ export interface ProofExecutionDeps {
 // CONSUMERS), floored at load by policy.ts's `numberField`, so a retune is a reviewed plan PR rather than a code edit
 // and `loadDefaultPolicy` self-locates the file. Drift against a source literal is structurally unreachable, so
 // test/policy.test.ts drops its drift assertion. TRAP: 30s truncated a name-filtered whole-suite run (W1-T112 round 4).
-function defaultProofTimeoutMs(): number {
+export function defaultProofTimeoutMs(): number {
   return loadDefaultPolicy().values.proofTimeoutMs;
 }
 const npmCiPrimed = new Set<string>();
@@ -2887,10 +2892,16 @@ export function execWhitelistedProof(
     assertGrepTargetsInsideCheckout(args, cwd);
     assertGrepTargetIsFile(args, cwd); // R-12: same placement, same reason — a refusal, not an outcome
   }
+  delete whitelisted.failureOutput;
+  const recordFailure = (status: number, stdout: string, stderr = ""): "fail" => {
+    whitelisted.failureOutput = proofFailureExcerpt(whitelisted.command, args, status, stdout, stderr);
+    return "fail";
+  };
   try {
     const stdout = spawn(whitelisted.command, args, cwd, timeoutMs);
     if (whitelisted.nameFiltered) {
       const outcome = vitestNameFiltered ? vitestNameFilteredOutcome(stdout) : nameFilteredOutcome(stdout);
+      if (outcome === "fail") return recordFailure(0, stdout);
       if (outcome === "cannot-load" && !deps.loadRetried) {
         recordLoadError(whitelisted, stdout);
         (deps.refreshToolchain ?? refreshProofToolchain)(cwd);
@@ -2910,7 +2921,7 @@ export function execWhitelistedProof(
     const dialectPath = dialectGrepTargetPath(whitelisted);
     if (whitelisted.kind === "grep" && dialectPath !== undefined && dialectGrepSelfLineFilteringApplies(dialectPath)) {
       whitelisted.matchedLines = dialectGrepMatchedLinesExcludingSelfLine(whitelisted.args[2]!, dialectPath, stdout);
-      return whitelisted.matchedLines.length > 0 ? "pass" : "fail";
+      return whitelisted.matchedLines.length > 0 ? "pass" : recordFailure(0, stdout);
     }
     if (whitelisted.kind === "grep" && dialectPath !== undefined) {
       whitelisted.matchedLines = dialectGrepOutputLines(stdout);
@@ -2939,7 +2950,7 @@ export function execWhitelistedProof(
         recordLoadError(whitelisted, `${stdout}\n${stderr}`);
         throw new ProofCannotLoadError(whitelisted.loadError!, `${stdout}\n${stderr}`);
       }
-      return outcome;
+      return outcome === "fail" ? recordFailure(err.status, stdout, stderr) : outcome;
     }
     // grep exit 2 means it could not even LOOK — a renamed or missing target, a read error — distinct from exit 1's
     // "looked, found nothing" (W1-T219, recon R-13(iv)). Only the latter is evidence of absence.
@@ -2961,8 +2972,32 @@ export function execWhitelistedProof(
       const wrapperName = pureTestNeverExecutedWrapperName(stdout);
       if (wrapperName !== undefined) throw new PureProofNeverExecutedError(wrapperName, stdout);
     }
-    return "fail"; // a single-file/grep proof's own nonzero exit is a genuine fail
+    // a single-file/grep proof's own nonzero exit is a genuine fail
+    return recordFailure(err.status, outputText(err.stdout), outputText(err.stderr));
   }
+}
+
+function outputText(value: string | Buffer | null | undefined): string {
+  return typeof value === "string" ? value : (value?.toString("utf8") ?? "");
+}
+
+/** Lines and characters a {@link proofFailureExcerpt} keeps: the tail, where node's `not ok` and summary sit. */
+export const PROOF_FAILURE_EXCERPT_LINES = 40;
+export const PROOF_FAILURE_EXCERPT_CHARS = 3000;
+
+/** A failed proof's bounded, reproducible record: the argv, the exit status, and the last
+ *  {@link PROOF_FAILURE_EXCERPT_LINES} lines of stdout then stderr. It rides the verdict into the
+ *  `review.posted` row and the reviewer-unmet fix prompt, so a fix worker sees what the reviewer saw. */
+export function proofFailureExcerpt(command: string, args: readonly string[], status: number, stdout: string, stderr = ""): string {
+  const argv = [command, ...args].join(" ");
+  const lines = [stdout, stderr].join("\n").split("\n").map((line) => line.trimEnd()).filter((line) => line !== "");
+  const tail = lines.slice(-PROOF_FAILURE_EXCERPT_LINES).join("\n");
+  const kept = tail.length > PROOF_FAILURE_EXCERPT_CHARS ? `…${tail.slice(-PROOF_FAILURE_EXCERPT_CHARS)}` : tail;
+  return [
+    `$ ${argv.length > 400 ? `${argv.slice(0, 400)}…` : argv}`,
+    `exit ${status}`,
+    kept === "" ? "(no output)" : kept,
+  ].join("\n");
 }
 
 /** Run the review's external work asynchronously, then use the existing verdict classifier. */
@@ -3607,6 +3642,7 @@ export function judgeCriterion(
   // the report keyword-claimed it (kills W1-T51). `exec_error` degrades to the keyword floor: never a silent hard-fail.
   let proofExec: ProofExecOutcome = "not_executable";
   let loadError: string | undefined;
+  let proofFailureOutput: string | undefined;
   // W1-DH: WHY a criterion did not execute. `proof_exec: "not_executable"` alone conflates a proof that never PARSED
   // with one that parsed and named nothing, and a CAPPED 0/N looked identical either way.
   let proofSkip: ProofSkipReason | undefined;
@@ -3797,6 +3833,7 @@ export function judgeCriterion(
             proofExec = "executed_fail";
             met = false;
             reason = `proof executed and FAILED on the PR head (${whitelisted.kind}: ${whitelisted.label}) — overrides any keyword coverage`;
+            proofFailureOutput = whitelisted.failureOutput;
           }
         } catch (e) {
           if (e instanceof ProofCannotLoadError) {
@@ -3891,7 +3928,10 @@ export function judgeCriterion(
     }
   }
 
-  return { ...base, met, reason, proof_exec: proofExec, proof_skip: proofSkip, ...(loadError ? { loadError } : {}), floorMet, holdout: !!criterion.holdout };
+  return {
+    ...base, met, reason, proof_exec: proofExec, proof_skip: proofSkip, ...(loadError ? { loadError } : {}),
+    ...(proofExec === "executed_fail" && proofFailureOutput ? { proofFailureOutput } : {}), floorMet, holdout: !!criterion.holdout,
+  };
 }
 
 /** The slice of {@link Task} the merged-claim audit needs — just enough to name a finding without importing all of
@@ -5052,7 +5092,7 @@ export async function judgeReviewAsync(
   if (!evidence.headCheckoutDir) return judgeReview(criteria, evidence);
   const unsandboxedBefore = unsandboxedProofSpawns;
   type Observation =
-    | { outcome: ReturnType<ProofExecutor>; matchedLines?: string[]; loadError?: string }
+    | { outcome: ReturnType<ProofExecutor>; matchedLines?: string[]; loadError?: string; failureOutput?: string }
     | { error: unknown };
   const observed = new Map<string, Observation>();
   const keyOf = (w: WhitelistedProof, cwd: string) => JSON.stringify([cwd, w.command, [...w.args]]);
@@ -5069,6 +5109,7 @@ export async function judgeReviewAsync(
         if ("error" in prior) throw prior.error;
         whitelisted.matchedLines = prior.matchedLines;
         whitelisted.loadError = prior.loadError;
+        whitelisted.failureOutput = prior.failureOutput;
         return prior.outcome;
       }
       pending.set(key, { whitelisted, cwd });
@@ -5079,7 +5120,9 @@ export async function judgeReviewAsync(
     for (const [key, { whitelisted, cwd }] of pending) {
       try {
         const outcome = await asyncExec(whitelisted, cwd);
-        observed.set(key, { outcome, matchedLines: whitelisted.matchedLines, loadError: whitelisted.loadError });
+        observed.set(key, {
+          outcome, matchedLines: whitelisted.matchedLines, loadError: whitelisted.loadError, failureOutput: whitelisted.failureOutput,
+        });
       } catch (error) {
         // Preserve this exact proof error for the next deterministic verdict fold.
         observed.set(key, { error });
@@ -7819,6 +7862,9 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
     "weighs, not rule logic, same shape as scripts/test-tier-manifest.json above",
   // ── verified non-instrument: ops/dev tooling with no CI-gate role ──
   "scripts/check.mjs": "local dev convenience (`npm run check`), never invoked by any CI workflow",
+  "scripts/typecheck.mjs":
+    "local dev/worker convenience (`npm run typecheck`, and `npm run check`'s tsc), never invoked by any CI workflow — " +
+    "CI's ci job runs its own `npx tsc -p tsconfig.json --noEmit`, so no edit to this wrapper changes what a gate measures",
   "scripts/test-duration-reporter.mjs":
     "VERIFIED NON-INSTRUMENT (W1-T5923) — a node --test reporter that only writes per-file durations; the " +
     "coverage shard names it to record instrumented timings for the shard split, never reads them back, and " +

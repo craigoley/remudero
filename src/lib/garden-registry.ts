@@ -54,6 +54,8 @@ export const REGISTERED_GARDEN_NAMES = [
   // W1-T5904: the daily flow report, which files a PR stage that slowed past its baseline.
   "flow",
   "flow-remedy",
+  // W1-T7421: the fix lane's own defects, clustered once a UTC day and drafted as one remedy per class.
+  "fix-lane",
 ] as const;
 
 export type RegisteredGardenName = (typeof REGISTERED_GARDEN_NAMES)[number];
@@ -136,7 +138,7 @@ export function gardenSchedule(name: RegisteredGardenName): GardenSchedule {
   }
   if (name === "overseer") return { intervalFor: (i) => Math.max(i, OVERSEER_MIN_INTERVAL_MS), minIntervalMs: 0, hourly: false };
   if (name === "scout") return { intervalFor: (i) => Math.max(i, SCOUT_MIN_INTERVAL_MS), minIntervalMs: 0, hourly: false };
-  if (name === "flow") return { intervalFor: (i) => Math.max(i, FLOW_DUE_PROBE_INTERVAL_MS), minIntervalMs: 0, hourly: false };
+  if (name === "flow" || name === "fix-lane") return { intervalFor: (i) => Math.max(i, FLOW_DUE_PROBE_INTERVAL_MS), minIntervalMs: 0, hourly: false };
   return { intervalFor: sameInterval, minIntervalMs: 0, hourly: name === "test" };
 }
 

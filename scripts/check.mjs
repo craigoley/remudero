@@ -25,8 +25,8 @@
 // container"). Refusing is safer than defaulting.
 import { spawnSync } from "node:child_process";
 import { statSync } from "node:fs";
-import { resolve } from "node:path";
-import { prepareWorktreeTypecheck } from "../src/lib/typecheck-buildinfo.ts";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const targets = process.argv.slice(2).filter((arg) => arg !== "" && arg !== "--").map((arg) => resolve(arg));
 
@@ -75,9 +75,10 @@ const testCode = run(
   ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--", ...targets],
 );
 
-// Incremental against this checkout's own buildinfo (seeded from the canonical checkout's): the same
-// diagnostics at about half the peak memory of a cold check (src/lib/typecheck-buildinfo.ts).
-const tscCode = run("tsc --noEmit (whole project, as of NOW)", "npx", ["--no-install", "tsc", ...prepareWorktreeTypecheck(process.cwd()).args]);
+// Through `npm run typecheck`'s own wrapper: incremental against this checkout's buildinfo (seeded from the canonical
+// checkout's), and a cold check waits for a host test slot — the same diagnostics as plain tsc (src/lib/typecheck-run.ts).
+const typecheckScript = resolve(dirname(fileURLToPath(import.meta.url)), "typecheck.mjs");
+const tscCode = run("tsc --noEmit (whole project, as of NOW)", "node", ["--import", "tsx", typecheckScript]);
 
 console.log(
   [

@@ -1,6 +1,6 @@
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
 import { judgeFixProgress,
-  type FixProgressJudge, type FixProgressVerdict } from "./lib/fix-progress-judge.js";
+  type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "./lib/fix-progress-judge.js";
 import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-update.js";
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
   loadCapabilityInspectionSource, readInspectionJson } from "./lib/capability-inspection.js";
@@ -206,6 +206,7 @@ import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
 import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
+import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputs, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, evidenceCoveragePassDue, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
@@ -303,7 +304,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "scout"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "fix-lane", "scout"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -625,6 +626,7 @@ import {
 } from "./lib/feedback.js";
 import {
   ciLearningMergedOrigins,
+  ciLearningMergedOriginsAsync,
   ciLearningPendingOrigins,
   findPendingLandingPr,
   landCiLearningShards,
@@ -969,6 +971,7 @@ import {
 } from "./lib/retro-subprocess.js";
 import { regenerateOrientation } from "./lib/orientation.js";
 import {
+  bodyWithFailingProofAtOpen,
   filedTaskIdFromRunBranch,
   openPullRequestChecked,
   openPullRequestCheckedAsync,
@@ -1371,7 +1374,7 @@ import {
 } from "./lib/learnings.js";
 import type { LearningEntry, LearningsIndex, RuleHeadline } from "./lib/learnings.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
-import { certainStaleProofs, isDialectGrepProof } from "./lib/proof-base-stale.js";
+import { certainStaleProofs, grepOnlyBaseTargets, isDialectGrepProof, materialiseBaseGrepTree, type BaseGrepTreeReaders } from "./lib/proof-base-stale.js";
 import { loadOperatorNotesForTask, renderOperatorNotes, appendOperatorNote } from "./lib/operator-notes.js";
 import { applyOperatorMergeHold, parseOperatorMergeHoldArgs } from "./lib/operator-merge-hold.js";
 import {
@@ -2459,9 +2462,7 @@ export function buildSweepEffects(
         deps.log("sweep.review_reuse_discrimination_error", { pr_number: pr.prNumber, head_sha: pr.headSha, reason });
         fallbackReason = reason;
       } finally {
-        if (baseProof?.baseIsCheckout && baseProof.baseCheckoutDir !== undefined) {
-          removeBaseProofWorktree(reviewRepoDir, baseProof.baseCheckoutDir, deps.worktreeRemoveImpl);
-        }
+        releaseBaseProofDir(reviewRepoDir, baseProof, deps.worktreeRemoveImpl);
         if (worktreePath !== undefined) {
           try {
             (deps.worktreeRemoveImpl ?? worktreeRemove)(reviewRepoDir, worktreePath);
@@ -2529,7 +2530,7 @@ export function buildSweepEffects(
   const effects = buildSweepEffectsFromLib({
     reproduceFailingTestsOnMainImpl: buildBaseReproductionProbe(deps.config, reviewRepoDir, deps.ledgerPath, deps.log),
     repoRoot,
-    localRepoName: resolveOwnerRepo().repo,
+    localRepoName: deps.localRepoName ?? resolveOwnerRepo().repo,
     nowMsImpl: Date.now,
     updateBranchImpl: updateBranchViaGh,
     captureRepairFeedbackImpl: (filing) => captureRepairFeedbackWithPriorVerdict(repoRoot, filing, deps.log),
@@ -4576,9 +4577,24 @@ export async function ghPrCreateFillCommandAsync(
   branch: string,
   title?: string,
   runProofAsync?: AsyncOpenPullRequestProofRunner,
+  /** A finished build whose only defect is a failing filed proof is opened with that proof named, never stranded. */
+  openOnFailingProof = false,
 ): Promise<PrCreateCommand> {
   const draft = draftPrCreate(worktreePath, owner, repo, branch, title);
-  const checkedBody = await openPullRequestCheckedAsync(draft.body, branch, worktreePath, "origin/main", runProofAsync, { owner, repo });
+  let checkedBody: string;
+  try {
+    checkedBody = await openPullRequestCheckedAsync(draft.body, branch, worktreePath, "origin/main", runProofAsync, { owner, repo });
+  } catch (err) {
+    if (!openOnFailingProof || !(err instanceof PrOpenRefusedError) || err.failingProof === undefined) throw err;
+    const opened: PrCreateDiagnostic = {
+      step: "pr.opened_with_failing_proof",
+      extra: { branch, proof: err.failingProof.proof, refusal_class: err.refusalClass },
+    };
+    return withDiagnostics(
+      prCreateArgv(worktreePath, owner, repo, branch, draft.title, bodyWithFailingProofAtOpen(err.failingProof)),
+      [...draft.diagnostics, opened],
+    );
+  }
   return withDiagnostics(prCreateArgv(worktreePath, owner, repo, branch, draft.title, checkedBody), draft.diagnostics);
 }
 
@@ -6207,7 +6223,7 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
       const candidate = { ...metadata, body: repairedBody };
       const verdict = await preflight(worktreePath, pr.headSha, candidate);
       if (!acceptanceAuthorTimeCheck(repairedBody).ok || !filingSelfCreditCheck(repairedBody, introduced).ok) return refuse("the repaired filing body fails author-time acceptance", verdict);
-      if (verdict.ok && verdict.unreadable.length === 0) {
+      if (verdict.ok && verdict.unreadable.length === 0 && verdict.timedOut === undefined) {
         await deps.updateMetadata(candidate);
         return { outcome: "metadata-repaired", headSha: pr.headSha, preflight: verdict };
       }
@@ -6245,7 +6261,8 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
       sha = git(["rev-parse", "HEAD"]).trim();
     } else if (metadata.title === input.title && metadata.body === input.body) return refuse("the worker changed nothing");
     const verdict = await preflight(worktreePath, sha, metadata);
-    if (!verdict.ok || verdict.unreadable.length) return refuse((verdict.failures[0] ?? verdict.unreadable[0])!.firstLine, verdict);
+    // A check that ran out of its budget has no verdict, so it holds the push like an unreadable one.
+    if (!verdict.ok || verdict.unreadable.length || verdict.timedOut) return refuse((verdict.failures[0] ?? verdict.unreadable[0] ?? verdict.timedOut?.[0])!.firstLine, verdict);
     if (metadata.title !== input.title || metadata.body !== input.body) await deps.updateMetadata(metadata);
     if (sha === pr.headSha) {
       deps.log("fix.done", { ...roundFields(), subtype: "success" });
@@ -13176,6 +13193,9 @@ export async function runFixRung(opts: {
         strike_cap: opts.strikeCap,
         unmet_count: unmet.length,
         unmet_claims: unmet.map((criterion) => criterion.claim),
+        // The progress judge compares these across rounds: a FIXED round followed by the same
+        // reviewer-side output is a reviewer-only failure, not a worker that needs another try.
+        ...(reviewerProofFailures(unmet).length > 0 ? { reviewer_proof_failures: reviewerProofFailures(unmet) } : {}),
         round,
         mode: fixMode,
         verdict_regime: verdictRegime,
@@ -14381,8 +14401,8 @@ export function withPlanClaims(
  * cannot exempt a live worktree/GitHub write, and running it for real just to cover these lines
  * would spend an actual amendment PR on a test run. `io` mirrors {@link buildProofAmendmentWritePorts}'s
  * override surface (every field defaults to the real implementation, so production is unchanged)
- * plus the two boundaries (proposal parsing, the merge-base proof directory build) this function
- * itself calls before ports are even built. `requestProofAmendment` ITSELF stays a direct, literal
+ * plus the boundaries (proposal parsing, the merge-base proof directory build and its teardown) this
+ * function itself calls around the ports. `requestProofAmendment` ITSELF stays a direct, literal
  * call — never behind its own override — because this task's own acceptance criteria grep for
  * that exact call site in this file's source text; every write it makes still goes through the
  * injected ports above, so nothing it does escapes this function's own fakes. Best-effort: any
@@ -14423,14 +14443,18 @@ export function dispatchProofAmendmentWrite(
     assertLiveWriteAllowedFn?: typeof assertLiveWriteAllowed;
     parseProofAmendmentProposalFn?: typeof parseProofAmendmentProposal;
     buildBaseProofDirFn?: typeof buildBaseProofDir;
+    /** Deregisters the merge-base worktree the build cut from the head checkout; defaults to the leaf it was cut through. */
+    removeBaseWorktreeFn?: (repoDir: string, worktreePath: string) => void;
   } = {},
 ): void {
   const {
     gitFn,
     parseProofAmendmentProposalFn = parseProofAmendmentProposal,
     buildBaseProofDirFn = buildBaseProofDir,
+    removeBaseWorktreeFn = (repoDir: string, worktreePath: string) => void hostWorktreeGit(repoDir, ["worktree", "remove", "--force", worktreePath]),
     ...portsIo
   } = io;
+  let baseProof: BaseProofDir | undefined;
   try {
     const prMatch = params.prUrl.match(/\/pull\/(\d+)/);
     const prNumber = prMatch ? Number(prMatch[1]) : undefined;
@@ -14441,7 +14465,7 @@ export function dispatchProofAmendmentWrite(
     if (prNumber === undefined || proposal.length === 0) return;
     const { owner, repo, headCheckoutDir } = params.reviewBase;
     const ledgerLinesNow = params.getLedgerLinesNow();
-    const baseProof = buildBaseProofDirFn(
+    baseProof = buildBaseProofDirFn(
       proposal.map((p) => ({ proof: p.newProof })),
       headCheckoutDir,
     );
@@ -14478,7 +14502,8 @@ export function dispatchProofAmendmentWrite(
         headSha: params.priorHeadSha,
         currentHeadSha: params.priorHeadSha,
         headCwd: headCheckoutDir,
-        baseCwd: baseProof.baseIsCheckout ? baseProof.baseCheckoutDir : undefined,
+        // A grep tree is a complete base for the grep-only proposal it was built from.
+        baseCwd: baseProof.baseIsCheckout || baseProof.baseIsGrepTree ? baseProof.baseCheckoutDir : undefined,
       },
       writePorts,
     );
@@ -14490,6 +14515,9 @@ export function dispatchProofAmendmentWrite(
     });
   } catch (e) {
     params.log("proof_amendment.error", { error: String((e as Error)?.message ?? e) });
+  } finally {
+    // Every exit path: a `unit test:` proposal's worktree is deregistered, a grep tree deleted.
+    releaseBaseProofDir(params.reviewBase.headCheckoutDir, baseProof, removeBaseWorktreeFn);
   }
 }
 
@@ -16151,6 +16179,7 @@ interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   /** W1-T5520: test seams for the sibling-PR check and the REST create; production reads `ghJsonAsync` and `execFileSync`. */
   otherOpenPrReader?: OpenPrJsonReader;
   prCreateExec?: Parameters<typeof runGhPrCreate>[4];
+  prOpenProofRunner?: AsyncOpenPullRequestProofRunner;
   spawnWallClockBoundMs?: number;
   workerRuleHeadlinesEnabled?: boolean;
   worktreeBaseDeps?: Parameters<typeof worktreeAdd>[4];
@@ -17151,6 +17180,7 @@ async function runTask(
     /** W1-T5520: test seams for the sibling-PR check and the REST create; production reads `ghJsonAsync` and `execFileSync`. */
     otherOpenPrReader?: OpenPrJsonReader;
     prCreateExec?: Parameters<typeof runGhPrCreate>[4];
+    prOpenProofRunner?: AsyncOpenPullRequestProofRunner;
     instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
     pairedTrial?: Partial<PairedTrialInput>;
     pairedTrialHost?: "daemon";
@@ -20135,7 +20165,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
       try {
         // W1-T6034: the filed proofs run as awaited children, off the daemon loop.
-        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, branchPrTitle(worktreePath));
+        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, branchPrTitle(worktreePath), opts.prOpenProofRunner, true);
       } catch (err) {
         if (!(err instanceof PrOpenRefusedError)) throw err;
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
@@ -21084,6 +21114,10 @@ export interface BaseProofDir {
   baseIsCheckout: boolean;
   /** (W1-T5528) Set only on the `detachedAsync` path: the base probe's checkout still in flight. */
   pendingCheckout?: Promise<void>;
+  /** True when every proof was a house-dialect `grep:` and `baseCheckoutDir` holds exactly the merge-base
+   *  bytes at each target and nothing else ({@link materialiseBaseGrepTree}), never a checkout. A complete
+   *  base for THOSE proofs; teardown is a plain delete ({@link releaseBaseProofDir}). */
+  baseIsGrepTree?: boolean;
   baseWorktreeFailure?: string;
   /** (W1-T3190) Exactly the `test/**` paths COPIED in above, so `classifyBaseProofOutcome` reads
    *  the same set the copy used: a `grep:` naming one would otherwise find the copy and read as
@@ -21110,6 +21144,11 @@ export interface BaseProofDir {
  * `ensureDeps` (review.ts) only when a `unit test:` proof actually runs there — a `grep:`-only
  * review pays for the checkout and never for an install. Teardown is the CALLER's (the same
  * `withMaterializedWorktree` that removes the head; `rmd check-proof` removes its own).
+ *
+ * A `grep:`-ONLY REVIEW CHECKS NOTHING OUT. Every proof a house-dialect grep ⇒ the base is a GREP TREE
+ * ({@link materialiseBaseGrepTree}): exactly the merge-base bytes at each target, read through the leaf,
+ * and nothing else, so the same `grep -arn` sees the same input. `baseIsGrepTree` marks it; a target a
+ * plain-file tree cannot reproduce (a symlink or submodule on its path) falls through to the worktree.
  *
  * THE BLOB PATH IS THE FALLBACK, ONLY when the worktree cannot be created (a checkout that is not a
  * git repo, a base object the repo does not hold, disk): `grep:` proofs are still checked against
@@ -21150,6 +21189,8 @@ export function buildBaseProofDir(
     /** (W1-T3098) Copies one file from the head checkout into the base worktree, creating parent
      *  directories as needed. Injected by tests to observe/force failure; real callers omit it. */
     copyFile?: (src: string, dest: string) => void;
+    /** The grep tree's own git readers ({@link materialiseBaseGrepTree}); injected by tests only. */
+    grepTree?: Omit<BaseGrepTreeReaders, "showBlob">;
   } = {},
 ): BaseProofDir {
   const detachedArgs = (path: string, revision: string) => ["worktree", "add", "--detach", path, revision];
@@ -21228,6 +21269,26 @@ export function buildBaseProofDir(
   if (!base) return noBase;
 
   const dir = makeDir();
+  // A review whose every proof is a `grep:` reads the base blobs it names and checks nothing out: the
+  // grep reads one path, and a checkout of the whole tree for it was observed taking 66 minutes on a loaded host.
+  const grepTargets = grepOnlyBaseTargets(criteria);
+  if (grepTargets !== undefined) {
+    const tree = materialiseBaseGrepTree(headCheckoutDir, base, grepTargets, dir, { ...deps.grepTree, showBlob: deps.showBlob });
+    if (tree.needsCheckout.length === 0) {
+      // (W1-T3190) The same ADDED set the worktree path copies, so a grep naming a test file this diff adds
+      // still classifies `discriminates`; nothing is copied, since no test re-runs in a grep tree.
+      let added: string[] = [];
+      try {
+        if (grepTargets.some((t) => t.startsWith("test/"))) added = changedTestFiles(headCheckoutDir, base);
+      } catch {
+        // `git diff` broke: no added file is known, which is the pre-W1-T3098 reading and never a false stale.
+      }
+      return { baseCheckoutDir: dir, baseUnreadablePaths: new Set(tree.unreadable), baseIsCheckout: false, baseIsGrepTree: true, addedTestFiles: new Set(added) };
+    }
+    // A symlink or submodule on the way to a target: only a real checkout resolves it, into an empty dir.
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(dir, { recursive: true });
+  }
   let worktreeFailure: string;
   try {
     addWorktree(headCheckoutDir, dir, base);
@@ -22541,11 +22602,11 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // on EVERY exit path, including a throw from runReview itself — never just
   // the success path, which would reproduce the W1-T175 leak class. (R-11) The
   // base worktree is torn down by the SAME helper, as the outer scope, so the
-  // head goes first and the base follows on every exit path too; a blob-only
-  // fallback dir is not a worktree and is left to the boot sweep (src/lib/tmp.ts)
-  // exactly as before.
+  // head goes first and the base follows on every exit path too; a grep tree is
+  // deleted there the same way, and a blob-only fallback dir is not a worktree and
+  // is left to the boot sweep (src/lib/tmp.ts) exactly as before.
   const verdict = await withMaterialized(
-    baseProof?.baseIsCheckout ? baseProof.baseCheckoutDir : undefined,
+    baseProof?.baseIsCheckout || baseProof?.baseIsGrepTree ? baseProof.baseCheckoutDir : undefined,
     subjectRepoDir,
     () =>
       withMaterialized(worktreePath, subjectRepoDir, () => whileWorkerRunLive(runId, () =>
@@ -22594,6 +22655,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           openTaskIds,
         })),
       ),
+    baseProof?.baseIsGrepTree ? (_repo, tree) => rmSync(tree, { recursive: true, force: true }) : undefined,
   );
 
   // A final review decision is immutable, but GitHub's commit status is last-write-wins. A stale
@@ -24130,9 +24192,7 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
       );
     });
   } finally {
-    if (built?.baseIsCheckout && built.baseCheckoutDir !== undefined) {
-      removeBaseProofWorktree(process.cwd(), built.baseCheckoutDir, baseRemoveWorktree);
-    }
+    releaseBaseProofDir(process.cwd(), built, baseRemoveWorktree);
   }
 
   // design (iv)/(v): a stale criterion ends the "OK" verdict — the summary states how many of N
@@ -26638,19 +26698,24 @@ export function checkProofCommand(
   try {
     return compareAgainstBase(built);
   } finally {
-    // (R-11) A worktree this verb added is this verb's to remove — the reviewer's `withMaterializedWorktree`
-    // does the same for its own. A blob-fallback dir is not a worktree; the boot sweep reaps it.
-    if (built.baseIsCheckout && built.baseCheckoutDir !== undefined) {
-      removeBaseProofWorktree(process.cwd(), built.baseCheckoutDir, removeWorktree);
-    }
+    // (R-11) A worktree or grep tree this verb built is this verb's to remove — the reviewer's
+    // `withMaterializedWorktree` does the same for its own. A blob-fallback dir is left to the boot sweep.
+    releaseBaseProofDir(process.cwd(), built, removeWorktree);
   }
 
   function compareAgainstBase(base: BaseProofDir): number {
     const { baseCheckoutDir, baseUnreadablePaths } = base;
     // grepTargetPath (mirrors grepProofTargetPath, review.ts, unexported) was already resolved
     // above, before the W1-T387 collapse — reused here rather than re-derived a second time.
+    // A grep tree holds a target only when the base had it and the read succeeded, so a missing one
+    // reads exactly as the blob path's absent or unreadable blob does.
+    const grepTreeLacksTarget =
+      base.baseIsGrepTree === true &&
+      grepTargetPath !== undefined &&
+      !base.addedTestFiles.has(grepTargetPath) &&
+      !existsSync(join(baseCheckoutDir!, grepTargetPath));
 
-    if (baseCheckoutDir === undefined) {
+    if (baseCheckoutDir === undefined || grepTreeLacksTarget) {
       if (grepTargetPath !== undefined && baseUnreadablePaths.has(grepTargetPath)) {
         console.log(
           `base:       UNREADABLE — \`git show ${baseRef}:${grepTargetPath}\` failed to read; the base\n` +
@@ -26750,6 +26815,18 @@ export function checkProofCommand(
     console.log("discrimination: discriminates — head and base disagree; this proof tells done from not-done.");
     return headExit;
   }
+}
+
+/** Release what {@link buildBaseProofDir} built: a worktree is deregistered, a grep tree deleted, both through
+ *  {@link removeBaseProofWorktree}'s best-effort teardown. A blob-fallback dir is left to the boot sweep, as before. */
+function releaseBaseProofDir(
+  repoDir: string,
+  base: BaseProofDir | undefined,
+  removeWorktree?: (repoDir: string, worktreePath: string) => void,
+): void {
+  if (base?.baseCheckoutDir === undefined) return;
+  if (base.baseIsCheckout) removeBaseProofWorktree(repoDir, base.baseCheckoutDir, removeWorktree);
+  else if (base.baseIsGrepTree === true) removeBaseProofWorktree(repoDir, base.baseCheckoutDir, (_repo, tree) => rmSync(tree, { recursive: true, force: true }));
 }
 
 /**
@@ -32633,11 +32710,17 @@ export function netStateAdvisorySectionFor(repoRoot: string): string {
  * function already had before this task, so an isolated caller (this function's direct unit
  * tests below) keeps working unchanged.
  */
-export function planHealthSweepSectionFor(repoRoot: string, isMerged?: (task: Task) => boolean): string {
-  try {
+export function planHealthSweepSectionFor(
+  repoRoot: string,
+  isMerged?: (task: Task) => boolean,
+  loadTasks: () => Task[] | undefined = () => {
     const tasksYamlPath = join(repoRoot, "plan", "tasks.yaml");
-    if (!existsSync(tasksYamlPath)) return "";
-    const { tasks } = loadPlan(tasksYamlPath);
+    return existsSync(tasksYamlPath) ? loadPlan(tasksYamlPath).tasks : undefined;
+  },
+): string {
+  try {
+    const tasks = loadTasks();
+    if (tasks === undefined) return "";
     const report = planHealthSweep(
       tasks,
       () => ({
@@ -32896,6 +32979,7 @@ export function readPlanCoherenceInputs(root: string): {
 async function retroCommand(
   rest: string[],
   opts: {
+    repoRoot?: string;
     /** Injectable worker-spawn (mirrors {@link runTask}'s `opts.spawn`) — lets a test drive
      *  the retro success path (through the atomic marker-advance, W1-T242) without a real
      *  Architect spawn. Default: the real {@link spawnWorker}. */
@@ -32949,6 +33033,7 @@ async function retroCommand(
   } = {},
 ): Promise<number> {
   const dryRun = rest.includes("--dry-run");
+  const checkoutRoot = opts.repoRoot ?? repoRoot;
   const spawn = opts.spawn ?? ledgeredNonDispatchSpawn("retro");
   const config = loadConfig();
   const ledgerPath = ledgerPathFor(config);
@@ -32968,7 +33053,7 @@ async function retroCommand(
     if (refresh.ready) await refresh.ready;
   }
   const markerPath = join(config.root, "state", "last-retro.json");
-  const learningsPath = join(repoRoot, "LEARNINGS.md");
+  const learningsPath = join(checkoutRoot, "LEARNINGS.md");
   // W1-T242: a corrupt-but-present marker (e.g. a torn write from a crash, or a manual
   // edit) MUST NOT be silently treated as "no marker" — that would replay the whole
   // already-consumed run window and double-count SHIPPED/learnings. resolveMarkerForGather
@@ -33017,7 +33102,7 @@ async function retroCommand(
   // (every failure verdict reports unmapped, LOUDLY, in the render) rather than
   // aborting the retro; a PRESENT-but-malformed file fails closed (loadMastMapping
   // throws MastMappingError), same discipline as a corrupt marker below.
-  const mastMappingPath = join(repoRoot, "plan", "mast-mapping.yaml");
+  const mastMappingPath = join(checkoutRoot, "plan", "mast-mapping.yaml");
   const mastMapping: MastMapping = existsSync(mastMappingPath) ? loadMastMapping(mastMappingPath) : { rows: [] };
   // owner/repo: still needed below (repo clone, orientation's own gateway, PR create) —
   // retroShippedGithubGateway() resolves its OWN copy internally for the SHIPPED union.
@@ -33040,16 +33125,23 @@ async function retroCommand(
   // a proposal's indented (a)/(b)/(c) continuation bullets). Best-effort: a read/parse
   // hiccup degrades to "no dedup source" (every followup mints) rather than aborting
   // the retro — the SAME non-fatal discipline the mast-mapping/orientation reads use.
-  const openTaskTitles = tryReadFollowupTitles("tasks", () => {
-    const tasksYamlPath = join(repoRoot, "plan", "tasks.yaml");
-    return existsSync(tasksYamlPath) ? loadPlan(tasksYamlPath).tasks.map((t) => t.title) : [];
-  });
-  const openTaskClasses = tryReadFollowupTitles("classes", () => {
-    const tasksYamlPath = join(repoRoot, "plan", "tasks.yaml");
-    return existsSync(tasksYamlPath) ? loadPlan(tasksYamlPath).tasks.filter((t) => t.status !== "merged" && t.status !== "done").map((t) => deriveTaskClass(t)) : [];
-  });
+  let gatherPlanRead: { plan: ReturnType<typeof loadPlan> | undefined } | { error: unknown };
+  try {
+    const tasksYamlPath = join(checkoutRoot, "plan", "tasks.yaml");
+    gatherPlanRead = { plan: existsSync(tasksYamlPath) ? loadPlan(tasksYamlPath) : undefined };
+  } catch (error) {
+    gatherPlanRead = { error: error };
+  }
+  const readGatherPlan = (): ReturnType<typeof loadPlan> | undefined => {
+    if ("error" in gatherPlanRead) throw gatherPlanRead.error;
+    return gatherPlanRead.plan;
+  };
+  const openTaskTitles = tryReadFollowupTitles("tasks", () =>
+    readGatherPlan()?.tasks.map((t) => t.title) ?? []);
+  const openTaskClasses = tryReadFollowupTitles("classes", () =>
+    readGatherPlan()?.tasks.filter((t) => t.status !== "merged" && t.status !== "done").map((t) => deriveTaskClass(t)) ?? []);
   const openProposalLines = tryReadFollowupTitles("proposals", () => {
-    const masterPlanPath = join(repoRoot, "MASTER-PLAN.md");
+    const masterPlanPath = join(checkoutRoot, "MASTER-PLAN.md");
     const masterPlanMd = existsSync(masterPlanPath) ? readFileSync(masterPlanPath, "utf8") : "";
     const lines = masterPlanMd.match(/^-\s+(?:\*\*)?(?:★\s*)?P\d+[A-Za-z]?\b.*$/gm) ?? [];
     // DEGRADE LOUDLY (W1-T132's discipline): a non-trivial MASTER-PLAN.md yielding
@@ -33067,7 +33159,7 @@ async function retroCommand(
   // ratifies) is wired live rather than shipping as an inert, never-called
   // organ. loadMounts throws on a bad/absent table — same fail-closed
   // discipline every other mounts.yaml read in this file already has.
-  const mountsTable = loadMounts(mountsPath(repoRoot));
+  const mountsTable = loadMounts(mountsPath(checkoutRoot));
   const gather = buildGather({
     ledgerNdjson,
     followupLedgerNdjson,
@@ -33085,7 +33177,7 @@ async function retroCommand(
     // the rung answers the fourteen-cycle monolith-vs-shard question by MEASUREMENT on every
     // `rmd retro` cycle instead of rendering `unexamined`. Reads THIS checkout's plan (repoRoot),
     // the same tree `openTaskTitles` above already loads.
-    planCoherence: readPlanCoherenceInputs(repoRoot),
+    planCoherence: readPlanCoherenceInputs(checkoutRoot),
     now: Date.now(),
   });
   // W1-T111 (P25 iv): the approve/reframe rate is telemetry, not decoration — the field's
@@ -33097,7 +33189,7 @@ async function retroCommand(
   // checkout (this repo's own working tree, `repoRoot` — never a PR diff). Best-effort + silent
   // on failure, the SAME non-fatal discipline `openProposalLines`/`openTaskTitles` above already
   // follow: a read/scan hiccup degrades to "nothing to advise" rather than aborting the retro.
-  const netStateAdvisorySection = netStateAdvisorySectionFor(repoRoot);
+  const netStateAdvisorySection = netStateAdvisorySectionFor(checkoutRoot);
   // W1-T367: a single batched `projectPlan` pass over the SAME `repoRoot`/plan/tasks.yaml the
   // plan-health sweep reads below, so its "already shipped" skip is decided the SAME way the
   // dispatch path decides it — never the decorative yaml `status:` field (MEASURED: 248/359
@@ -33123,9 +33215,8 @@ async function retroCommand(
   // file or a throwing scan retires NOTHING, which is the direction that cannot lose work.
   let followupReferentRead: FollowupReferentRead = { kind: "unreadable" };
   try {
-    const planHealthPlanPath = join(repoRoot, "plan", "tasks.yaml");
-    if (existsSync(planHealthPlanPath)) {
-      const planHealthPlan = loadPlan(planHealthPlanPath);
+    const planHealthPlan = readGatherPlan();
+    if (planHealthPlan) {
       const planHealthProjection = projectPlan(
         planHealthPlan,
         { ledgerPath, github: opts.github ?? buildBatchedGithub(owner, repo) },
@@ -33134,7 +33225,7 @@ async function retroCommand(
       followupReferentRead = {
         kind: "ok",
         merged: new Set([...planHealthProjection].filter(([, v]) => v.merged).map(([id]) => id)),
-        mergedPrs: mergedPullRequestNumbers(repoRoot),
+        mergedPrs: mergedPullRequestNumbers(checkoutRoot),
       };
       isTaskMerged = (task) => planHealthProjection.get(task.id)?.merged ?? false;
       planStateResolver = (taskId) => {
@@ -33151,11 +33242,11 @@ async function retroCommand(
   // MASTER-PLAN.md asserts unbuilt against the SAME merge resolver above — a BLOCKING
   // contradiction (design (iv): outranks the plan-health sweep below for KICK ORDER purposes),
   // so it is concatenated ahead of that advisory floor.
-  const planStateTruthSection = planStateTruthSectionFor(repoRoot, planStateResolver);
+  const planStateTruthSection = planStateTruthSectionFor(checkoutRoot, planStateResolver);
   // W1-T358 (Standing rule 20): the plan-health sweep re-grades the OPEN queue against
   // every standing rule the linter encodes — rides EVERY retro report (dry-run and real
   // alike), same as the net-state advisory section above.
-  const planHealthSection = planHealthSweepSectionFor(repoRoot, isTaskMerged);
+  const planHealthSection = planHealthSweepSectionFor(checkoutRoot, isTaskMerged, () => readGatherPlan()?.tasks);
   const reportWithoutPromotion =
     [
       renderGather(gather),
@@ -36613,8 +36704,8 @@ export function buildCiLearningCadenceRunner(deps: {
   gh?: LandCiLearningShardsOptions["gh"];
   planOrigins?: string[];
   pendingOrigins?: typeof ciLearningPendingOrigins;
-  mergedOrigins?: (checkoutRoot: string) => string[];
-  mintTaskId?: (filingBranch?: string) => string;
+  mergedOrigins?: (checkoutRoot: string) => string[] | Promise<string[]>;
+  mintTaskId?: ((filingBranch?: string) => string) & { async?: (filingBranch: string) => Promise<string> };
   recordFire?: (root: string, at: Date) => void;
   recordAttempt?: (root: string, at: Date) => void;
   windowDays?: number;
@@ -36640,7 +36731,7 @@ export function buildCiLearningCadenceRunner(deps: {
     const planOrigins = deps.planOrigins ?? ciLearningPlanOrigins(deps.checkoutRoot);
     const pendingOrigins = (deps.pendingOrigins ?? ciLearningPendingOrigins)(deps.root, deps.checkoutRoot);
     // W1-T4190: and what origin/main already holds, so a merged finding never takes a draft slot.
-    const mergedOrigins = (deps.mergedOrigins ?? ciLearningMergedOrigins)(deps.checkoutRoot);
+    const mergedOrigins = await (deps.mergedOrigins ?? ciLearningMergedOriginsAsync)(deps.checkoutRoot);
     const idempotencyOrigins = [...new Set([...planOrigins, ...pendingOrigins, ...mergedOrigins])];
     const result = mintCiLearningShards(corpus, idempotencyOrigins);
     const filedLessons = deps.loadLessons ? deps.loadLessons() : readFiledCiLessons(join(deps.checkoutRoot, "plan", "tasks.d"));
@@ -36670,6 +36761,7 @@ export function buildCiLearningCadenceRunner(deps: {
           : await (deps.landShards ?? landCiLearningShardsAsync)(result.drafts, deps.checkoutRoot, {
               stateRoot: deps.root,
               mintTaskId,
+              mintTaskIdAsync: mintTaskId.async,
               planOrigins: idempotencyOrigins,
               renderShard: ciLearningShardYaml,
               recordVerdict: ciLearningRecordVerdict,
@@ -37568,6 +37660,15 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "flow-remedy": {
       const d = deps("flow-remedy", raiseDuplicate);
       return gardenPass(flowGardenSpec(d, {
+        owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot, log),
+        escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log }),
+      }), d);
+    }
+    // W1-T7421: the fix lane's own defects (operator interventions, unstated or refused rounds, FIXED-but-red heads)
+    // are clustered and priced once a UTC day; the top class is drafted as ONE remedy through the flow ladder.
+    case "fix-lane": {
+      const d = deps("fix-lane", raiseDuplicate);
+      return gardenPass(fixLaneGardenSpec(d, {
         owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot, log),
         escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log }),
       }), d);
@@ -40786,7 +40887,7 @@ export async function serveCommand(
     // an unconfigured install, identity is never consulted, exactly as before.
     identity,
     log,
-    consoleSnapshots: { dir: join(config.root, "state", "console-snapshots"), prewarmPaths: ["/v1/operator-activity", "/v1/action-results"] },
+    consoleSnapshots: { dir: join(config.root, "state", "console-snapshots") },
     projectionWorker: consoleProjectionWorker(),
     readModel: deps.buildBatchedGithub ? {} : { slowLane: { inbox: { root: repoRoot, planPath, ledgerPath, inboxRoot: config.root, repository: `${self.owner}/${self.repo}` },
       accountUsage: { ledgerPath, root: config.root, accountFilePath: resolveAccountFilePath(undefined) } } },
@@ -42043,8 +42144,34 @@ function unmetFromLedger(lines: Array<Record<string, unknown>>, taskId: string, 
     reason: reasons[i] ?? "",
     // Legacy ledger rows can lack this required live-verdict field (W1-T5020).
     proof_exec: proofContext.get(claim)?.proof_exec as CriterionVerdict["proof_exec"],
+    ...(typeof proofContext.get(claim)?.proofFailureOutput === "string"
+      ? { proofFailureOutput: proofContext.get(claim)!.proofFailureOutput } : {}),
     refusal: refusals.get(claim),
   }));
+}
+
+/**
+ * The failing review's own summary for THIS PR's CURRENT head — the `failure_reason` (`verdict.summary`)
+ * the latest exact-head `review.posted` row carries, the text {@link OpenPrView.reviewSummary} promises.
+ * Until this producer the field was hard-coded `undefined`, so `namesRule15Refusal`/`namesUnsatisfiableGate`
+ * (lib/sweep.ts) could never see the reviewer's real reason. Same scan and PR matcher as
+ * {@link unmetFromLedger}, but HEAD-SCOPED: a summary posted for an older head never describes this one.
+ * The latest exact-head row wins, so a later success (or a row with no summary) yields `undefined`.
+ */
+export function reviewSummaryFromLedger(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  key: string | undefined,
+  prUrl: string,
+  headSha: string,
+): string | undefined {
+  let summary: string | undefined;
+  for (const line of lines) {
+    if (line.step !== "review.posted" || line.head_sha !== headSha || !reviewRowNamesPr(line, key, prUrl)) continue;
+    const verdict = line.decision_verdict as { summary?: unknown } | null | undefined;
+    const text = typeof line.failure_reason === "string" ? line.failure_reason : verdict?.summary;
+    summary = line.state === "failure" && typeof text === "string" && text !== "" ? text : undefined;
+  }
+  return summary;
 }
 
 /**
@@ -42841,7 +42968,7 @@ function* openPrViewSteps(
       // schema. This is the producer `test/producer-completeness.test.ts` demands; without it
       // `selectUpdateBranchTarget`'s draft exclusion would be permanently inert in production.
       isDraft: pr.isDraft,
-      reviewSummary: undefined,
+      reviewSummary: reviewState === "failure" ? reviewSummaryFromLedger(ledger, reviewLedgerKey, pr.url, pr.headRefOid) : undefined,
       // W1-T100/W1-T2599: ci-log fix evidence for the ordinary red aggregate, or for a red
       // REQUIRED child already visible while that aggregate is still pending.
       ciFailures,
@@ -47402,7 +47529,10 @@ export async function fixCommand(
   // this command builds, so the one `buildSweepEffects` call site of the four that no test drives
   // stayed unexercised while the other three were graded. Omitted, it is `routeFix` and the
   // behaviour is byte-identical.
-  deps: { config?: Config; fetch?: GhApiFetcher; route?: typeof routeFix } = {},
+  //
+  // `self` is the checkout's owner/repo, otherwise read from `origin`. A sandboxed checkout has no
+  // origin remote, so a test that drives this verb end to end must be able to name the slug itself.
+  deps: { config?: Config; fetch?: GhApiFetcher; route?: typeof routeFix; self?: { owner: string; repo: string } } = {},
 ): Promise<number> {
   const prArg = rest[0];
   // W1-T4077: `--requested` is the console's "Fix now". The operator asking for a fix IS the decision to try
@@ -47420,7 +47550,7 @@ export async function fixCommand(
 
   const config = deps.config ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
-  const self = resolveOwnerRepo();
+  const self = deps.self ?? resolveOwnerRepo();
   const repo = flagValue(rest, "--repo") ?? self.repo;
   const owner = self.owner;
   const runId = `FIX-${Date.now()}`;
@@ -47487,7 +47617,7 @@ export async function fixCommand(
     createdAt: raw.createdAt,
     headSha: raw.headRefOid,
     autoMergeArmed: raw.autoMergeRequest != null,
-    reviewSummary: undefined,
+    reviewSummary: reviewState === "failure" ? reviewSummaryFromLedger(ledger, reviewLedgerKeyFor(taskId, raw.number), raw.url, raw.headRefOid) : undefined,
     // W1-T100: the ci-log fix mode's input — see buildOpenPrViews.
     ciFailures: checksState === "red" ? fetchCiFailures(owner, repo, raw.statusCheckRollup) : undefined,
     redRequiredChecks,
@@ -47512,6 +47642,8 @@ export async function fixCommand(
     plan: plan,
     log: log,
     policy: DEFAULT_SWEEP_POLICY,
+    // Already resolved above (or injected): do not make buildSweepEffects read origin a second time.
+    localRepoName: self.repo,
   });
   const { outcome, reason } = await (deps.route ?? routeFix)(
     raw.state,

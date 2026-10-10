@@ -1569,10 +1569,12 @@ reclaim_dead_inflight_locks() {
 #       last STALL_BOUND_S — read from a ledger tail that provably reaches back past the bound.
 # With both, the daemon's own inflight locks MOVE to inflight/reclaimed with a reason naming the
 # verdict and the holder's worktree, and its direct lane-less children stop counting as busy.
-# Worktrees, worker homes and logs are never touched. A failed clause is named once and the wait
-# below runs exactly as without a verdict; a lock naming any other pid is never touched.
+# Worktrees, worker homes and logs are never touched. A failed clause is named and the wait below
+# runs exactly as without a verdict — but the proof is RE-EVALUATED on the drain wait's polls (see
+# evaluate_frozen_daemon_proof below); a lock naming any other pid is never touched.
 FROZEN_DAEMON_CHILDREN=" "
 STALL_PROOF_FAILED=""
+STALL_PROOF_ROW_TS=""
 
 epoch_to_iso() {
   date -u -d "@$1" +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -r "$1" +%Y-%m-%dT%H:%M:%S 2>/dev/null || true
@@ -1632,7 +1634,9 @@ reclaim_frozen_daemon_holdings() {
     [ -z "${cutoff}" ] || activity="$(pid_ledger_activity "${dpid}" "${cutoff}")"
     case "${activity}" in
       frozen) : ;;
-      "row "*) STALL_PROOF_FAILED="clause (b): pid ${dpid} wrote a ledger row at ${activity#row }, inside the ${STALL_BOUND_S}s stall bound" ;;
+      "row "*)
+        STALL_PROOF_ROW_TS="${activity#row }"
+        STALL_PROOF_FAILED="clause (b): pid ${dpid} wrote a ledger row at ${activity#row }, inside the ${STALL_BOUND_S}s stall bound" ;;
       *) STALL_PROOF_FAILED="clause (b): the ledger read does not reach back ${STALL_BOUND_S}s (${activity}), so no row from pid ${dpid} proves nothing" ;;
     esac
   fi
@@ -1721,10 +1725,52 @@ WORKERS
   printf '%s' "${max}"
 }
 
-if [ "${RECYCLE_VERDICT_STATE}" = "STALLED" ]; then
-  reclaim_frozen_daemon_holdings
-fi
+# ── THE FROZEN-DAEMON PROOF IS RE-EVALUATED ON THE DRAIN WAIT'S POLLS, NOT ONCE AT ITS START ──────
+#
+# OBSERVED 2026-10-10: the core daemon froze at 08:22:50Z with its main thread blocked in sync git.
+# The watchdog's STALLED recycle ran this proof ONCE, at 08:25:14Z — the daemon's newest row was then
+# 2.4 min old, so clause (b) failed, its own codex workers and claude-sdk child counted as busy, and
+# the script sat in the WAIT_SECONDS drain without asking again. While that oneshot is activating the
+# watchdog timer does not fire, so nothing else could notice the daemon stayed frozen.
+#
+# Each poll may now re-run the SAME proof, reclaim_frozen_daemon_holdings above, so a daemon that is
+# frozen at the start, freezes during the wait, or stays frozen is recognised once it has been silent
+# past STALL_BOUND_S. The cadence is ADAPTIVE, read from the evidence, never a new fixed cap:
+#   - clause (b) named the daemon's newest row: the answer cannot change until that row ages past the
+#     bound, so the next re-check is scheduled for exactly then (one tail read per bound, not per poll);
+#   - any other failed clause (no readable holder, a ledger tail that does not reach back): re-checked
+#     on a back-off that doubles from POLL_INTERVAL_S, so an unchanging answer costs ever less I/O.
+# Once proven, the holdings are reclaimed exactly once and the proof is not re-run.
+STALL_PROOF_HELD=""
+STALL_RECHECK_AT_S=0
+STALL_RECHECK_BACKOFF_S=0
 
+evaluate_frozen_daemon_proof() {
+  local now row_epoch
+  [ "${RECYCLE_VERDICT_STATE}" = "STALLED" ] || return 0
+  [ -z "${STALL_PROOF_HELD}" ] || return 0
+  now="$(date -u +%s)"
+  [ "${now}" -ge "${STALL_RECHECK_AT_S}" ] 2>/dev/null || return 0
+  STALL_PROOF_FAILED=""
+  STALL_PROOF_ROW_TS=""
+  reclaim_frozen_daemon_holdings
+  if [ -z "${STALL_PROOF_FAILED}" ]; then
+    STALL_PROOF_HELD=1
+    return 0
+  fi
+  row_epoch=""
+  [ -z "${STALL_PROOF_ROW_TS}" ] || row_epoch="$(epoch_of_started_at "${STALL_PROOF_ROW_TS}")"
+  if [ -n "${row_epoch}" ]; then
+    STALL_RECHECK_BACKOFF_S=0
+    STALL_RECHECK_AT_S=$((row_epoch + STALL_BOUND_S + 1))
+  else
+    STALL_RECHECK_BACKOFF_S=$((STALL_RECHECK_BACKOFF_S > 0 ? STALL_RECHECK_BACKOFF_S * 2 : POLL_INTERVAL_S))
+    STALL_RECHECK_AT_S=$((now + STALL_RECHECK_BACKOFF_S))
+  fi
+  echo "  the frozen-daemon proof is re-checked on the drain wait's polls — next at or after epoch ${STALL_RECHECK_AT_S}" >&2
+}
+
+evaluate_frozen_daemon_proof
 waited=0
 while :; do
   reclaim_dead_inflight_locks
@@ -1810,6 +1856,7 @@ WORKERS
   echo "recycle-container: ${n} lane-holding + ${lane_less_busy} lane-less worker(s) still in flight, waited ${waited}s/${WAIT_SECONDS}s — polling"
   sleep "${POLL_INTERVAL_S}"
   waited=$((waited + POLL_INTERVAL_S))
+  evaluate_frozen_daemon_proof
 done
 
 COMMISSION_PHASE="smoke"
