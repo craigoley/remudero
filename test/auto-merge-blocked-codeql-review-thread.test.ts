@@ -459,29 +459,43 @@ test("the scanner diagnostic is size-bounded and the repair evidence never asks 
 });
 
 test("the repair shares the fix rung's hold, claim, host admission and detached wait", async () => {
-  const pr = blockedPr();
   const held = sweepDeps([], { workerAdmissionHold: () => "fleet hold: paused" });
-  await runSweep([pr], held.deps, DEFAULT_SWEEP_POLICY);
+  await runSweep([blockedPr()], held.deps, DEFAULT_SWEEP_POLICY);
   assert.equal(held.rec.dispatched.length, 0);
   assert.equal(held.rec.rows.some((row) => row.step === CODEQL_BLOCKER_DISPATCH_STEP), false, "no key is spent on a hold");
 
   const strikes = Array.from({ length: DEFAULT_SWEEP_POLICY.strikeCap }, () => ({ step: "fix.dispatch", task_id: TASK, head_sha: HEAD }));
-  const claimed = sweepDeps([], { readLedger: () => strikes });
-  await runSweep([pr], claimed.deps, DEFAULT_SWEEP_POLICY);
+  let judgments = 0;
+  const claimed = sweepDeps(strikes, { fixProgressJudge: async input => {
+    judgments++;
+    assert.equal(input.strikesSpent, DEFAULT_SWEEP_POLICY.strikeCap);
+    assert.equal(input.rounds.length, DEFAULT_SWEEP_POLICY.strikeCap);
+    return undefined;
+  } });
+  await runSweep([blockedPr()], claimed.deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(judgments, 1);
   assert.equal(claimed.rec.dispatched.length, 0);
-  assert.match(String(claimed.rec.rows.find((row) => row.step === "sweep.disposed")?.stand_down_reason), /strikes exhausted under the claim/);
+  assert.match(String(claimed.rec.rows.find((row) => row.step === "sweep.disposed")?.stand_down_reason), /absent or unparseable fix progress verdict/);
+  claimed.deps.fixProgressJudge = async () => {
+    judgments++;
+    return { verdict: "change-approach", approach: "reproduce the scanner finding", reason: "new fixture" };
+  };
+  await runSweep([blockedPr()], claimed.deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(judgments, 2);
+  assert.equal(claimed.rec.dispatched.length, 1);
+  assert.equal(claimed.rec.dispatched[0]?.progressApproach, "reproduce the scanner finding");
 
   const refused = sweepDeps([], { claimFixAdmission: () => ({ admitted: false, reason: "host slots full" }) });
-  await runSweep([pr], refused.deps, DEFAULT_SWEEP_POLICY);
+  await runSweep([blockedPr()], refused.deps, DEFAULT_SWEEP_POLICY);
   assert.equal(refused.rec.dispatched.length, 0);
   assert.equal(refused.rec.rows.find((row) => row.step === "sweep.disposed")?.stand_down_reason, "host slots full");
 
   const detached = sweepDeps([], { detachFixWait: true });
-  await runSweep([pr], detached.deps, DEFAULT_SWEEP_POLICY);
+  await runSweep([blockedPr()], detached.deps, DEFAULT_SWEEP_POLICY);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(detached.rec.dispatched.length, 1);
 
   const unspent = sweepDeps([], { dispatchFix: () => false });
-  await runSweep([pr], unspent.deps, DEFAULT_SWEEP_POLICY);
+  await runSweep([blockedPr()], unspent.deps, DEFAULT_SWEEP_POLICY);
   assert.equal(unspent.rec.rows.find((row) => row.step === "sweep.disposed")?.spent, false);
 });

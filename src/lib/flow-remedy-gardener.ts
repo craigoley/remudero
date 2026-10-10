@@ -335,6 +335,7 @@ export interface LadderSpecInput {
   kind: LadderKind;
   sources: Pick<FlowGardenSources, "mintTaskId" | "ownerSearch" | "draftShard" | "escalate">;
   inventory: () => Inventory;
+  inventoryAsync?: () => Promise<Inventory>;
   /** The pacing bucket the cheap fingerprint carries; the flow ladder re-reads hourly, the fix-lane ladder daily. */
   bucket?: (clock: Clock) => number;
   /** Called once per pass with the scorecard the pass is about to log (the fix-lane garden writes its report here). */
@@ -356,6 +357,7 @@ export function ladderGardenSpec(deps: GardenerDeps, input: LadderSpecInput): Ga
       return `${head}:${bucket(clock)}:${archives}`;
     },
     inventory: input.inventory,
+    ...(input.inventoryAsync ? { inventoryAsync: input.inventoryAsync } : {}),
     unfinished: inv => inv.next !== undefined,
     fingerprint: inv => `${inv.candidates.map(p => `${p.key}:${p.hours}`).join(",")}|${inv.next?.origin ?? ""}`,
     candidates: inv => inv.next ? [inv.next] : [],

@@ -1,0 +1,64 @@
+- id: W1-T7729
+  title: "DAEMON CHILDREN RUN A PRECOMPILED ENTRY, NOT TSX — tsx keys its transform cache on the absolute path, so every fresh worktree's child starts cold (519 MB and 474 cache writes against 284 MB warm), about 700 MB/h of cache churn that an esbuild bundle (173-182 MB, no tsx, no cache writes) would end"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-10: core memory follow-up to the machine-judge re-landing loop (#10678)"
+  plan_refs: [W1-T7728, W1-T5724, W1-T3176]
+  files: [docs/adr/0006-precompiled-daemon-child-entries.md, docs/adr/README.md, docs/docs-index.json, scripts/build-child-entries.mjs, deploy/Dockerfile, test/a-daemon-child-entry-is-precompiled.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-10 (operator session, core memory work):
+    - An esbuild bundle of src/run-task.ts loads at 173-182 MB, with no tsx loader and no cache writes.
+    - tsx keys its cache on the absolute source path, so a child in a fresh worktree is always cold. Proven: 519 MB
+      and 474 cache writes cold, against 284 MB warm, for the same source.
+    - The daemon cuts a fresh worktree per garden pass, preflight and build, so the cold path is the common one:
+      about 700 MB/h of path-keyed tsx cache writes.
+    Children run the tree's own entry: src/lib/plan-pr-emitter.ts runInTree spawns
+    `node --import tsx src/run-task.ts ...` with cwd set to the worktree. Any bundle must therefore be keyed to the
+    source it was built from, never assumed current.
+    RELATED, NOT DUPLICATES: W1-T5724 (iii) would point a persistent tsx cache at one directory for boot, but a
+    cache keyed on the absolute path still misses in every new worktree. W1-T3176 (blocked) is the console's build
+    artifact, not daemon children.
+    BLOCKERS (origin/main 8d58dc58b):
+    - 42 src modules derive paths from `import.meta.url` (`grep -rln "import\.meta\.url" src`). A bundle collapses
+      every one of them to the bundle's own URL, so repo-root, script and worker paths would resolve wrongly.
+    - The read-plane worker thread loads src/run-task.ts itself as its entry (run-task.ts, "W1-T4075: a read-plane
+      worker thread loads this module as its entry"), and read-model-worker.ts / read-model-slow-lane.ts start
+      workers from `new URL(import.meta.url)`. A bundled parent needs worker entries that still resolve.
+  design: |
+    DELIVERABLE: a design record plus the build step in the image. No spawn site switches to a bundle in this task.
+    1. docs/adr/0006-precompiled-daemon-child-entries.md (from docs/adr/template.md), indexed in docs/adr/README.md
+       and docs/docs-index.json. It must decide:
+       - which child entries are bundled first: check-proof after W1-T7728's narrow entry, then the garden and
+         preflight children;
+       - how each of the 42 import.meta.url modules resolves its paths under a bundle, e.g. an injected
+         source-root constant, or by keeping that module external;
+       - how worker-thread entries (the read plane, read models, slow lane) are emitted and located;
+       - how a bundle is keyed to the source tree it was built from (a content hash of src/ and the lockfile), so a
+         worktree on a newer main never runs a stale bundle; and the fallback to tsx when no matching bundle exists;
+       - the follow-up tasks it files.
+    2. scripts/build-child-entries.mjs builds the chosen entries with the esbuild that tsx already installs. It
+       writes each bundle beside a manifest naming the source hash it was built from.
+    3. deploy/Dockerfile runs the build after `COPY . .`, so the image ships bundles for its own source. The image
+       build is the operator's baked path (acr-build.yml), so the step must fail the build loudly when a bundle
+       cannot be produced.
+    Check the baked runtime inputs (src/lib/baked-runtime-inputs.ts, acr-build.yml's path list) and state in the ADR
+    whether the new script belongs there.
+  acceptance:
+    - claim: "the design record states the decision for bundled daemon child entries"
+      proof: "grep: ## Decision in docs/adr/0006-precompiled-daemon-child-entries.md"
+    - claim: "the image build runs the child-entry build after copying the source"
+      proof: 'grep: test("W1-T7729: the image runs the child-entry build after it copies the source" in test/a-daemon-child-entry-is-precompiled.test.ts'
+    - claim: "the build emits a bundle per declared entry with a manifest naming the source hash it was built from, and a changed source no longer matches it"
+      proof: 'grep: test("W1-T7729: a child-entry bundle records its source hash and a changed source no longer matches it" in test/a-daemon-child-entry-is-precompiled.test.ts'
+  falsifier: |
+    Build without the manifest's source hash, or let a bundle match a tree whose src/ changed: the test's second
+    tree reads as current and the third criterion fails.

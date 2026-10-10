@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import type { Config } from "../src/lib/config.js";
+import { ghJsonAsync } from "../src/lib/github-transport.js";
 import type { Plan } from "../src/lib/plan.js";
 import { renderFixPrompt } from "../src/lib/prompt-render.js";
 import type { PlanCriteriaAtHeadResult } from "../src/lib/review.js";
@@ -110,7 +111,7 @@ async function dispatch(opts: {
       spawnWallClockBoundMsOverride: 1,
       reclaimWorkerImpl: () => {},
       disarmImpl: () => undefined,
-      readJsonImpl: async () => ({}),
+      readJsonImpl: async (args: string[]) => args[0] === "pr" ? ghJsonAsync(args) : {},
       updatePrBodyImpl: async () => {},
       registeredWorktreeOwnerImpl: () => undefined,
       registeredOwnerRecovery: { capture: () => undefined, remove: () => undefined },

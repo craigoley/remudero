@@ -1,0 +1,57 @@
+- id: W1-T7728
+  title: "A CHECK-PROOF CHILD LOADS A NARROW ENTRY, NOT RUN-TASK.TS — every check-proof child imports all of src/run-task.ts (474 modules, 283-317 MB warm and 380-535 MB cold) when its real dependency set is about 52 modules (93 MB warm, 168 MB cold)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-10: core memory follow-up to the machine-judge re-landing loop (#10678)"
+  files: [src/lib/check-proof.ts, src/check-proof-main.ts, src/run-task.ts, src/lib/plan-pr-emitter.ts, src/lib/pr-open.ts, src/lib/worktree-sites.ts, scripts/proof-discrimination-gate.mjs, test/a-check-proof-child-loads-a-narrow-entry.test.ts, test/base-blob-read-failure.test.ts, test/base-proof-dir-is-a-checkout.test.ts, test/check-proof-declines-on-a-parity-that-no-longer-holds.test.ts, test/check-proof-executor-parity.test.ts, test/check-proof-grep-cause.test.ts, test/grep-zero-cause.test.ts, test/preexisting-proof-hits-wiring.test.ts, test/worktree-creation-census.test.ts, test/a-capped-proof-repair-amends-the-plan-not-the-pr-body.test.ts, test/the-base-proof-worktree-is-removed-through-the-hardened-git-leaf.test.ts, test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts, test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  note: "Sequenced after #10677 (fix(base-proof), merged 2026-10-10 at f36a6af18), which edits removeBaseProofWorktree and the git-site census tables this task moves. #10677 was built on a run-unfiled branch and has no task id, so depends_on cannot name it; build on an origin/main that contains f36a6af18."
+  rationale: |
+    MEASURED 2026-10-10 (operator session, core memory work). A check-proof child is spawned as
+    `node --import tsx src/run-task.ts check-proof <proof> --base <ref>`, so it loads the whole CLI module graph:
+    474 modules, 283-317 MB RSS warm and 380-535 MB cold. The code it runs needs about 52 modules, which load at
+    93 MB warm and 168 MB cold. The plan-PR preflight alone runs one child per body proof: the machine-judge
+    landing loop fixed by #10678 ran six per pass.
+    SPAWN SITES at origin/main 8d58dc58b:
+    - src/run-task.ts proof-repair refusal (`checkProofStatus`, spawnSync) and the review-time stale-proof scan (spawn);
+    - src/lib/plan-pr-emitter.ts `checkProofArgv` (RUN_TASK_ENTRY), used by runInTree / runInTreeAsync;
+    - src/lib/pr-open.ts `proofArgs` (through the rmd launcher);
+    - scripts/proof-discrimination-gate.mjs (CI's proof-discrimination job).
+    WHAT MOVES (src/run-task.ts at 8d58dc58b): checkProofCommand (420 lines), buildBaseProofDir (173 lines plus a
+    44-line doc comment), releaseBaseProofDir, removeBaseProofWorktree and hostWorktreeGitAtTopLevel, plus the
+    private helpers only they use: about 830 lines in all.
+  design: |
+    1. Move those functions and their private helpers into src/lib/check-proof.ts. src/run-task.ts re-exports
+       them, so its importers and the `check-proof` command-table row keep working unchanged.
+    2. Add src/check-proof-main.ts, a slim CLI entry that calls checkProofCommand(process.argv.slice(2)) and exits
+       with its code. Its static import graph must never reach src/run-task.ts.
+    3. Export one argv builder from src/lib/check-proof.ts, checkProofChildArgv(proof, base), and use it at every
+       spawn site above, so the entry is named in one place.
+    CONSTRAINTS:
+    - The comment-load ratchet (scripts/comment-load-ratchet.mjs, MAX_ADDED_BLOCK_LINES = 25) refuses any newly
+      added comment block over 25 lines, and a moved doc comment counts as added. buildBaseProofDir's 44-line
+      block, and any other block over 25 lines, must be compressed or split when it moves.
+    - 13 test files couple to this source text or its location in src/run-task.ts: grep-on-source assertions,
+      `import ... from src/run-task.ts` subprocess scripts, the git-site census tables (`RUN_TASK_WIDENED_SITES`,
+      `WIDENED_SITE_EXCEPTIONS`, `HARNESS_SITES`) and the worktree-site table in src/lib/worktree-sites.ts. They
+      are declared in files:. Re-run `grep -lE 'checkProofCommand|buildBaseProofDir|releaseBaseProofDir|removeBaseProofWorktree|hostWorktreeGitAtTopLevel' test/`
+      before building. Repoint each one at the new module; never delete an assertion to make the move pass.
+    - Sequenced after #10677 (see note).
+  acceptance:
+    - claim: "the narrow check-proof entry's static import graph never reaches src/run-task.ts"
+      proof: 'grep: test("W1-T7728: the narrow check-proof entry never imports the run-task module" in test/a-check-proof-child-loads-a-narrow-entry.test.ts'
+    - claim: "the narrow entry returns the same verdict and exit code as rmd check-proof for a passing, a failing and a stale proof"
+      proof: 'grep: test("W1-T7728: the narrow entry and rmd check-proof agree on verdict and exit code" in test/a-check-proof-child-loads-a-narrow-entry.test.ts'
+    - claim: "the plan-PR preflight spawns its check-proof children through the shared argv builder"
+      proof: "grep: checkProofChildArgv( in src/lib/plan-pr-emitter.ts"
+  falsifier: |
+    Leave any import from src/lib/check-proof.ts or src/check-proof-main.ts that reaches src/run-task.ts: the
+    import-graph walk finds it and the first test fails. Keep `src/run-task.ts` in checkProofArgv: the grep reads 0.
