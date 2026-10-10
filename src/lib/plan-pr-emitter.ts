@@ -780,9 +780,6 @@ function borrowNodeModules(repoDir: string, tree: string): void {
   if (existsSync(join(repoDir, "node_modules"))) symlinkSync(join(repoDir, "node_modules"), join(tree, "node_modules"));
 }
 
-/** A `git worktree add` killed at its budget can stop before it writes the tree's HEAD; `worktree remove --force
- *  --force` then refuses ("validation failed") and the registration outlives the tree. Drop only this tree's own
- *  admin dir — the one its `.git` file names, and whose `gitdir` names it back. Never a prune: other entries are not ours. */
 function dropOrphanedWorktreeAdmin(tree: string, realTree: string): void {
   const dotGit = join(tree, ".git");
   if (!existsSync(dotGit)) return;
@@ -813,7 +810,7 @@ export function planPrPreflightAtCommit(
     return planPrPreflight({ cwd: tree, ...pr }, checks);
   } finally {
     const removed = spawnSync("git", ["-C", repoDir, "worktree", "remove", "--force", "--force", tree], { stdio: "pipe" }); // twice: a killed add leaves it locked
-    if (removed.status !== 0) dropOrphanedWorktreeAdmin(tree, realTree);
+    if (removed.status !== 0) dropOrphanedWorktreeAdmin(tree, realTree); // killed before HEAD: remove refuses, so drop our own admin dir
     rmSync(parent, { recursive: true, force: true });
   }
 }
