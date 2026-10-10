@@ -20,7 +20,7 @@ import {
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { resolvePauseTarget } from "../src/lib/pause-target.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
 
 // W1-T7727 — core, site and console run ONE checkout against ONE origin, each from its own state root.
 // `rmd pause` used to push the fleet-wide refs/rmd-pause/hold, so pausing core for a serve window held
@@ -60,6 +60,10 @@ function makeFixture(registry?: (dir: string) => string): Fixture {
   const origin = gitRepo({ bare: true, kind: "instance-pause-origin" }).dir;
   const shared = gitRepo({ cloneFrom: origin, kind: "instance-pause-checkout" });
   const checkout = shared.dir;
+  // Production's mintAnchor shells commit-tree itself, outside the helper's per-call identity env.
+  // Give this fixture repo its own identity so that path needs no host/global git configuration.
+  shared.git("config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);
+  shared.git("config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email);
   const registryPath = daemonInstanceRegistryPath(checkout);
   mkdirSync(dirname(registryPath), { recursive: true });
   writeFileSync(registryPath, registry ? registry(dir) : registryText(dir));
@@ -207,6 +211,7 @@ test("W1-T7727: an existing fleet-wide hold is honored, survives an instance res
   // A hold set the pre-W1-T7727 way (the shared ref, with its attributed anchor) by another operator.
   const legacy = withLiveWritesAllowed(() => requestFleetPause(realSharedPauseGitDeps(fx.checkout), "another operator's hold"));
   assert.equal(legacy.pushed, true);
+  assert.notEqual(sharedRefOnOrigin(fx), "", "the real bare origin actually contains the hold; a success-shaped result alone is not a control");
   assert.deepEqual(await heldInstances(fx), [...INSTANCES], "every instance honors the fleet-wide hold, as before");
 
   const resumed = rmd(fx, "core", "resume");
@@ -224,6 +229,37 @@ test("W1-T7727: an existing fleet-wide hold is honored, survives an instance res
   assert.equal(explicit.status, 0, explicit.out);
   assert.deepEqual(await heldInstances(fx), [...INSTANCES], "--fleet is the explicit way to hold every instance");
   for (const name of INSTANCES) assert.equal(existsSync(pauseFilePath(fx.root(name))), false, "--fleet writes no instance flag");
+});
+
+test("W1-T7727: a failed fleet anchor never clears an existing shared hold", async (t) => {
+  const fx = makeFixture();
+  const held = withLiveWritesAllowed(() => requestFleetPause(realSharedPauseGitDeps(fx.checkout), "another operator's hold"));
+  assert.equal(held.pushed, true);
+  const before = sharedRefOnOrigin(fx);
+  assert.notEqual(before, "", "positive control: the existing hold is present on the actual bare origin");
+  const failedMint = realSharedPauseGitDeps(fx.checkout);
+  t.mock.method(failedMint, "mintAnchor", () => "");
+  const failed = withLiveWritesAllowed(() => requestFleetPause(failedMint, "a hold whose anchor could not be created"));
+  assert.equal(sharedRefOnOrigin(fx), before, "Git's empty-source delete syntax must never reach the existing hold");
+  assert.equal(failed.pushed, false, "a failed anchor is refused, not reported as a successful pause");
+  assert.deepEqual(await heldInstances(fx), [...INSTANCES]);
+});
+
+test("W1-T7727: the real CLI refuses a rejected fleet hold update without claiming an existing hold is absent", async () => {
+  const fx = makeFixture();
+  const held = withLiveWritesAllowed(() => requestFleetPause(realSharedPauseGitDeps(fx.checkout), "another operator's hold"));
+  assert.equal(held.pushed, true);
+  const before = sharedRefOnOrigin(fx);
+  assert.notEqual(before, "", "positive control: the actual origin holds the legacy pause");
+  // A second parentless anchor is not a fast-forward of the existing hold. This actual bare
+  // origin rejects that update; the CLI must not turn a rejected write into an absence claim.
+  const result = rmd(fx, "core", "pause", "--fleet", "--reason", "a rejected replacement hold");
+  assert.notEqual(result.status, 0, result.out);
+  assert.match(result.out, /non-fast-forward/, "positive control: the actual origin refused the update");
+  assert.match(result.out, /did not report success.*does NOT certify the fleet-wide hold state/);
+  assert.doesNotMatch(result.out, /NOTHING is held/);
+  assert.equal(sharedRefOnOrigin(fx), before, "the existing hold remains byte-for-byte intact");
+  assert.deepEqual(await heldInstances(fx), [...INSTANCES]);
 });
 
 test("W1-T7727: a missing configured root refuses pause and resume without recreating state", () => {

@@ -572,6 +572,8 @@ function parseSharedPauseAnchor(stdout: string): SharedPauseAnchorInfo | null {
  *  through to `deps.mintAnchor` — see {@link SharedPauseMintInfo}. */
 export function writeSharedPause(deps: SharedPauseGitDeps, info?: SharedPauseMintInfo): boolean {
   const anchor = deps.mintAnchor(info);
+  // An empty source in <source>:<ref> is Git's delete syntax, not a pause.
+  if (anchor.trim() === "") return false;
   return deps.run(["push", "origin", `${anchor}:${sharedPauseRef()}`]).status === 0;
 }
 

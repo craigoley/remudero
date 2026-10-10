@@ -48061,7 +48061,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
       requested_by_pid: process.pid,
     });
     if (!result.pushed) {
-      console.error(`### rmd pause --fleet — the push of ${sharedPauseRef()} did not land; NOTHING is held.`);
+      console.error(`### rmd pause --fleet — the push of ${sharedPauseRef()} did not report success; this result does NOT certify the fleet-wide hold state.`);
       return 1;
     }
     console.log(

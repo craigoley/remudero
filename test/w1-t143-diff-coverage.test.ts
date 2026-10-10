@@ -27,6 +27,7 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 import { daemonCommand, depReviewCommand, main } from "../src/run-task.js";
 import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
+import { GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
 
 /** A throwaway HOME + `config.json` pointing `config.root` at a fresh temp dir — the
  *  SAME shape test/daemon-observability.test.ts and test/serve-command-boot.test.ts
@@ -113,7 +114,7 @@ async function withPushRecorded<T>(fn: (pushes: () => string[]) => Promise<T>): 
   writeFileSync(log, "");
   const binDir = fakeBin("git", `#!/bin/sh
 case " $* " in *" push "*) echo "$*" >> "${log}"; exit 0;; esac
-exec "${realGit}" "$@"
+exec "${realGit}" -c user.name="${GIT_REPO_FIXTURE_IDENTITY.name}" -c user.email="${GIT_REPO_FIXTURE_IDENTITY.email}" "$@"
 `);
   const oldPath = process.env.PATH;
   process.env.PATH = `${binDir}:${oldPath}`;
@@ -143,6 +144,8 @@ test("main(): `rmd stop` with nothing running is a warned no-op (ledgers fleet.s
 
 /** W1-T7727: a registry declaring `core` at `root`, so `rmd pause`/`resume` resolve their target the way the CLI does. */
 function withInstanceRegistry<T>(root: string, fn: () => Promise<T>): Promise<T> {
+  // These are positive pause/resume fixtures: their declared instance must already be reachable.
+  mkdirSync(root, { recursive: true });
   const dir = mkdtempSync(join(tmpdir(), "rmd-t143-registry-"));
   const path = join(dir, "daemon-instances.yaml");
   writeFileSync(path, `instances:\n  core:\n    repo: remudero\n    github_repo: fixture/remudero\n    state_dir: ${root}\n`);
@@ -189,6 +192,7 @@ test("main(): `rmd pause --fleet` pushes the fleet-wide hold + ledgers fleet.pau
       assert.match(ledger, /"step":"fleet\.pause"/);
       assert.match(ledger, /"scope":"fleet"/);
       assert.equal(pushes().length, 1, "the shared-hold push reached the stub, not an origin");
+      assert.match(pushes()[0]!, /[0-9a-f]{40}:refs\/rmd-pause\/hold$/, "the positive pause pushes a real anchor, never a delete source");
       assert.match(pushes()[0]!, /refs\/rmd-pause\/hold$/);
     });
   } finally {
