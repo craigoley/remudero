@@ -7,10 +7,12 @@ import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { gardenLedgerBucket, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
 import { readMainHistory, type MainCommit } from "./hot-file-gardener.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { machineShardLandingRefusal, reparkStaleRuling } from "./machine-filing.js";
 import { planCheapFingerprint, planInventory, planShards, retirementCandidates, type PlanInventory } from "./plan-gardener.js";
 import { PR_OPEN_SATISFIED_BY_MAIN_STEP } from "./pr-open.js";
-import type { Task } from "./plan.js";
+import { parseTasksFromYaml, type Task } from "./plan.js";
 import { deriveTaskClass } from "./task-class.js";
+import { lintTask } from "./task-linter.js";
 
 /** W1-T4941: evidence-backed placement of the queue's unprioritized tasks. */
 export type BacklogClass = "place" | "retire";
@@ -233,11 +235,55 @@ export function applyBacklogActions(root: string, shards: ReadonlyMap<string, st
       next = next.replace(DECLARED_PRIORITY_LINE, "");
       next = next.replace(/^ {2}status: queued[ \t]*$/m, `  status: blocked\n  retirement: ${action.disposition.retirement}\n  # backlog gardener: retirement evidence=${action.evidence.signature}`);
     }
+    // A band or retirement edits a pinned field (`priority`); a judged machine record goes back to the judge.
+    next = reparkStaleRuling(next, rel);
     if (next === text) continue;
     writeFileSync(path, next);
     paths.push(rel);
   }
   return paths.sort();
+}
+
+/**
+ * What lint-plan and the shard census (test/every-shard-on-main-is-lintable.test.ts) would refuse in a backlog
+ * landing, checked before its PR is drafted: #10474's machine-filing admission and lint for machine records, and
+ * for every record in a landed shard, a blocking lint violation its copy in `deps.repoRoot` did not carry.
+ * 2026-10-10: four landings in a row were refused by the plan-PR preflight on machine-author-verify and the census.
+ */
+export function backlogLandingGuard(deps: Pick<GardenerDeps, "repoRoot" | "landingRefusal">): (root: string, paths: readonly string[]) => string | undefined {
+  if (deps.landingRefusal) return deps.landingRefusal;
+  const parse = (dir: string, rel: string): Task[] | Error => {
+    try {
+      return existsSync(join(dir, rel)) ? parseTasksFromYaml(readFileSync(join(dir, rel), "utf8"), rel) : [];
+    } catch (e) {
+      // Not erased: the caller compares it with the base copy and refuses a shard only this landing broke.
+      return e as Error;
+    }
+  };
+  return (root, paths) => {
+    const reasons: string[] = [];
+    const blocks = (task: Task | undefined): Map<string, string> => new Map((task === undefined ? [] : lintTask(task, { moduleExists: (p) => existsSync(join(root, p)) }).violations)
+      .filter((v) => v.severity === "block").map((v) => [v.check, v.message]));
+    for (const rel of paths.filter((p) => /(^|\/)tasks\.d\/[^/]+\.ya?ml$/.test(p) && existsSync(join(root, p)))) {
+      const head = parse(root, rel);
+      const base = parse(deps.repoRoot, rel);
+      // Only what this change introduces: a shard that already failed to load is not this landing's doing.
+      if (head instanceof Error) {
+        if (!(base instanceof Error)) reasons.push(`${rel}: does not load: ${head.message}`);
+        continue;
+      }
+      if (head.some((t) => t.author_class === "machine")) {
+        const machine = machineShardLandingRefusal(root, [rel], (p) => existsSync(join(deps.repoRoot, p)));
+        if (machine !== undefined) reasons.push(machine);
+      }
+      for (const task of head) {
+        if (task.author_class === "machine") continue; // linted whole, with admission, above
+        const had = blocks(base instanceof Error ? undefined : base.find((b) => b.id === task.id));
+        for (const [check, message] of blocks(task)) if (!had.has(check)) reasons.push(`${rel}: ${task.id}: ${check}: ${message}`);
+      }
+    }
+    return reasons.length > 0 ? reasons.join("; ") : undefined;
+  };
 }
 
 export function backlogGardenSpec(
@@ -261,6 +307,7 @@ export function backlogGardenSpec(
     name: "backlog",
     classes: BACKLOG_CLASSES,
     review: { place: "priority placement is a judgement call.", retire: "retirement is a judgement call." },
+    landingRefusal: backlogLandingGuard(deps),
     cheapFingerprint: () => `${planCheapFingerprint(deps.repoRoot, deps.stateDir)}:${gardenLedgerBucket(deps.clock ?? systemClock)}`,
     inventory: () => backlogInventory(sources),
     fingerprint: (i) => i.candidates.map((a) => `${a.target}:${a.evidence.signature}`).join("|") + `:${i.mergeBudget}`,

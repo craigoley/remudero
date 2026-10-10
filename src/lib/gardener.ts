@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -56,6 +57,8 @@ export interface GardenState<C extends string> {
   pendingRecordedAt?: string;
   /** The current streak of passes whose filing threw, which defers the next attempt ({@link gardenFilingRetryAt}). */
   filingFailures?: { count: number; lastAt: string; reason: string };
+  /** The bytes of the last drafted change a guard or the plan-PR preflight refused: never landed again. */
+  refusedLanding?: { digest: string; at: string };
   /** Ids of overseer effect verdicts already folded into `classes` (newest last), so a replay credits once. */
   foldedEffects?: string[];
   /** Legacy verdicts have no ordered watermark, so their receipts must not age out. */
@@ -563,7 +566,7 @@ function gardenStateFault(parsed: unknown): string | undefined {
   for (const [name, c] of Object.entries(parsed.classes)) {
     if (!isRecord(c) || !isCount(c.alpha) || !isCount(c.beta)) return `class \`${name}\` has no numeric alpha and beta`;
   }
-  const { pending, lastPass, lastCheap, filingFailures, foldedEffects, foldedLegacyEffects, foldedEffectThrough } = parsed;
+  const { pending, lastPass, lastCheap, filingFailures, refusedLanding, foldedEffects, foldedLegacyEffects, foldedEffectThrough } = parsed;
   if (pending !== undefined) {
     if (!isRecord(pending) || typeof pending.prUrl !== "string") return "`pending` has no PR url";
     if (typeof pending.actionClass !== "string" || !(pending.actionClass in parsed.classes)) return "`pending` names a class the record does not hold";
@@ -574,6 +577,7 @@ function gardenStateFault(parsed: unknown): string | undefined {
   if (lastPass !== undefined && (!isRecord(lastPass) || typeof lastPass.fingerprint !== "string" || (lastPass.landed !== undefined && typeof lastPass.landed !== "string"))) return "`lastPass` is not a fingerprint";
   if (lastCheap !== undefined && typeof lastCheap !== "string") return "`lastCheap` is not a string";
   if (filingFailures !== undefined && (!isRecord(filingFailures) || !isCount(filingFailures.count) || typeof filingFailures.lastAt !== "string" || typeof filingFailures.reason !== "string")) return "`filingFailures` is malformed";
+  if (refusedLanding !== undefined && (!isRecord(refusedLanding) || typeof refusedLanding.digest !== "string" || typeof refusedLanding.at !== "string")) return "`refusedLanding` is malformed";
   if (foldedEffects !== undefined && (!Array.isArray(foldedEffects) || foldedEffects.some((id) => typeof id !== "string"))) return "`foldedEffects` is not a list of ids";
   if (foldedLegacyEffects !== undefined && (!Array.isArray(foldedLegacyEffects) || foldedLegacyEffects.some((id) => typeof id !== "string"))) return "`foldedLegacyEffects` is not a list of ids";
   if (foldedEffectThrough !== undefined && (!Number.isSafeInteger(foldedEffectThrough) || (foldedEffectThrough as number) < 0)) return "`foldedEffectThrough` is not a sequence";
@@ -881,7 +885,7 @@ function gardenFilingEscalation(name: string,failures: NonNullable<GardenState<s
     class: "BLOCKED",
     taskId: `${name}-gardener`,
     summary: `the ${name} gardener's filing has failed ${failures.count} times in a row`,
-    detail: `Each pass had work, but opening its PR threw, so nothing landed. Latest reason:\n\n${failures.reason}\n\nIt keeps retrying with a doubling wait; the ledger's \`${name}.garden_filing_failed\` rows carry each attempt.`,
+    detail: `Each pass had work, but nothing landed: opening its PR failed, or a guard or the plan-PR preflight refused the draft. Latest reason:\n\n${failures.reason}\n\nIt keeps retrying with a doubling wait and never lands a refused draft's bytes again; the ledger's \`${name}.garden_filing_failed\` and \`${name}.landing_repeat_skipped\` rows carry each attempt.`,
     options: [
       { label: "fix-filing", detail: "repair what the latest reason names; the next retry then lands on its own" },
       { label: "switch-off", detail: `touch state/${name.toUpperCase()}_OFF-<class> to stop the class` },
@@ -1092,8 +1096,12 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
       try {
         // A spec's apply only writes the tree; landing and disposal stay with the pass, awaited or not.
         const landing = spec.apply(ws as unknown as W, plan, scorecard);
+        const digest = landing && landingDigest(ws.root, landing.paths);
+        // 2026-10-10: the backlog lane re-drafted one refused change every ~20 min (17:17-18:09Z), each a new
+        // worktree and a full plan-PR preflight. Bytes once refused are never landed again; a new draft is.
+        if (digest && digest === state.refusedLanding?.digest) throw new GardenLandingRefusedError(digest, "repeat", `the drafted change is byte-identical to the one refused at ${state.refusedLanding.at}`);
         const refused = landing && spec.landingRefusal?.(ws.root, landing.paths);
-        if (refused) throw new Error(`${spec.name} gardener: drafted shard failed lint-plan's machine-filing admission (${refused})`);
+        if (refused) throw new GardenLandingRefusedError(digest!, "guard", `${spec.name} gardener: drafted shard failed lint-plan's machine-filing admission (${refused})`);
         if (landing) {
           let lint: MergedPlanLintFailure | undefined;
           try {
@@ -1110,6 +1118,7 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
           }
           const why = spec.review?.[acting];
           prUrl = yield* step(() => ws.land(why ? { ...landing, body: judgedByOutcomeNote(spec.name, acting, why) + landing.body } : landing));
+          if (prUrl === undefined) throw new GardenLandingRefusedError(digest!, "not_opened", `${spec.name} gardener: the landing's PR did not open (plan_pr.preflight_refused or _timed_out names why)`);
         }
       } finally {
         yield* step(() => ws.dispose());
@@ -1119,8 +1128,11 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
       // the doubling wait elapses, and a streak is raised to a person instead of going silent.
       const reason = String((e as Error)?.message ?? e);
       const failures = { count: (state.filingFailures?.count ?? 0) + 1, lastAt: clock.iso(), reason };
-      writeAtomic(statePath, JSON.stringify({ ...state, filingFailures: failures }, null, 2) + "\n");
-      deps.log(`${spec.name}.garden_filing_failed`, { attempt: failures.count, reason, retry_after_ms: gardenFilingRetryAt(failures)! - clock.now() });
+      const refusal = e instanceof GardenLandingRefusedError ? e : undefined;
+      // A repeat keeps the first refusal's time; only a newly refused draft replaces it.
+      const refusedLanding = refusal?.outcome === "repeat" ? state.refusedLanding : refusal ? { digest: refusal.digest, at: clock.iso() } : state.refusedLanding;
+      writeAtomic(statePath, JSON.stringify({ ...state, filingFailures: failures, refusedLanding }, null, 2) + "\n");
+      deps.log(`${spec.name}.${refusal?.outcome === "repeat" ? "landing_repeat_skipped" : "garden_filing_failed"}`, { attempt: failures.count, reason, retry_after_ms: gardenFilingRetryAt(failures)! - clock.now(), ...(refusal ? { refusal: refusal.outcome, digest: refusal.digest } : {}) });
       if (failures.count === GARDEN_FILING_ESCALATE_AT && deps.escalate) {
         deps.log(`${spec.name}.garden_filing_escalated`, { attempt: failures.count, issue_url: deps.escalate(gardenFilingEscalation(spec.name, failures)) });
       }
@@ -1138,6 +1150,21 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
   const lastPass = prUrl ? { fingerprint, landed: prUrl } : { fingerprint };
   writeAtomic(statePath, JSON.stringify({ ...state, pending, pendingRecordedAt, lastCheap: cheap, lastPass, filingFailures: undefined }, null, 2) + "\n");
   return { ran: true, plan, prUrl, scorecard };
+}
+
+/** A drafted landing that was not landed: a guard refused it, its PR did not open, or it repeats refused bytes. */
+export class GardenLandingRefusedError extends RmdError {
+  constructor(readonly digest: string, readonly outcome: "guard" | "not_opened" | "repeat", message: string) {
+    super("gardener", GENERIC_EXIT_CODE, message, { digest, outcome });
+    this.name = "GardenLandingRefusedError";
+  }
+}
+
+/** The drafted change's identity: each landed path and its bytes in the checkout (absent reads as absent). */
+export function landingDigest(root: string, paths: readonly string[]): string {
+  const h = createHash("sha256");
+  for (const p of [...paths].sort()) h.update(`${p}\0${existsSync(join(root, p)) ? readFileSync(join(root, p), "utf8") : "\u0001absent"}\0`);
+  return h.digest("hex");
 }
 
 /** Run passes on their own timer beside the main loop, never two at once. */

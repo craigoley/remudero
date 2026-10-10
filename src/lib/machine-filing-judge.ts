@@ -43,7 +43,7 @@ import {
   type RiskJudgeVerdict,
   type RiskPolicy,
 } from "./risk-judge.js";
-import { deterministicEscalation, UNPRICED_PRIORITY } from "./machine-filing.js";
+import { deterministicEscalation, UNPRICED_PRIORITY, withoutRulingBlock } from "./machine-filing.js";
 import { lintTask, promoteIntroducedPlanOnlyDiagnostics, rulingVerifyViolation, taskRulingPin, type LintViolation } from "./task-linter.js";
 
 /** The operator's escalation rule, handed to the judge verbatim in its gates state. */
@@ -214,22 +214,6 @@ export async function judgeMachineShard(
 }
 
 const q = (v: string): string => JSON.stringify(v);
-
-/** Drop an existing `risk_ruling:` block from a single-record shard's text. */
-function withoutRulingBlock(lines: string[]): string[] {
-  const out: string[] = [];
-  let inBlock = false;
-  for (const line of lines) {
-    if (/^ {2}risk_ruling:\s*$/.test(line)) {
-      inBlock = true;
-      continue;
-    }
-    if (inBlock && (line.trim() === "" || /^ {4}/.test(line))) continue;
-    inBlock = false;
-    out.push(line);
-  }
-  return out;
-}
 
 /** A shard's text without its `risk_ruling` block's `judged_at:` line: an operator release is stamped
  *  afresh every pass, so only this line may differ from the ruling main carries (W1-T5406). */

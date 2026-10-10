@@ -12,6 +12,9 @@ import { readLedgerLines } from "./status.js";
 import { baseReproductionFiles } from "./base-reproduction.js";
 import {
   CHECK_REQUEUE_STEP,
+  CI_MATRIX_AGGREGATORS,
+  RATIFIED_BASELINE_RATCHET_REPAIRS,
+  type RatifiedBaselineRatchetScript,
   classifyCiInfrastructureFailure,
   dedupeRollupByLatestAttempt,
   enrichMainHealthObservation,
@@ -219,6 +222,8 @@ export interface MainHealthRungDeps {
   readPrFiles?: (prNumber: number) => readonly string[] | undefined | Promise<readonly string[] | undefined>;
   /** W1-T6403: the PR openers of the red-main repair lane. Absent, a red main only escalates. */
   repair?: MainRepairLane;
+  /** One failing check's job log, reduced by {@link mainCeilingLogReducer}; undefined when unread. */
+  readCeilingVerdict?: (check: RollupCheckEntry) => MainCeilingLogVerdict | undefined | Promise<MainCeilingLogVerdict | undefined>;
 }
 
 type Awaitable<T> = T | Promise<T>;
@@ -265,6 +270,21 @@ export type MainRepairRevertOutcome =
   | { readonly prUrl: string }
   | { readonly refused: string; readonly conflictPaths?: readonly string[] };
 
+/** A red main that crossed only ratified ceilings: which writers record it, and what main read. */
+export interface MainRatchetRecordRequest {
+  readonly branch: string;
+  readonly headSha: string;
+  readonly scripts: readonly RatifiedBaselineRatchetScript[];
+  readonly gates: readonly string[];
+}
+
+/** The PR this lane opened, an open PR that already records it (so the lane stands down), or why
+ *  neither -- a declined record hands the red back to the fix-then-revert path. */
+export type MainRatchetRecordOutcome =
+  | { readonly opened: string }
+  | { readonly standing: string }
+  | { readonly declined: string };
+
 export interface MainRepairPr {
   readonly state: "open" | "closed" | "merged";
   readonly headSha?: string;
@@ -275,6 +295,9 @@ export interface MainRepairPr {
 export interface MainRepairLane {
   openFixPr(request: MainRepairFixRequest): Awaitable<string | undefined>;
   openRevertPr(request: MainRepairRevertRequest): Awaitable<MainRepairRevertOutcome>;
+  /** The recorded-baseline PR for a red that is only a ratified ceiling. Absent, such a red takes
+   *  the fix-then-revert path like any other. */
+  recordRatchet?(request: MainRatchetRecordRequest): Awaitable<MainRatchetRecordOutcome>;
   readPr?(prUrl: string): Awaitable<MainRepairPr>;
   closePr?(prUrl: string, comment: string): Awaitable<void>;
 }
@@ -327,6 +350,82 @@ function pullNumberOf(prUrl: string): string {
   const n = /\/pull\/(\d+)/.exec(prUrl)?.[1];
   if (!n) throw new Error(`not a pull request url: ${prUrl}`);
   return n;
+}
+
+/** What one failing `ci-shard` job log says about main's own ceilings: the main-ceiling-drift gates
+ *  it named BLOCKED, and the failed-test count of the last test summary printed before them
+ *  (absent when the log printed no summary, which is never read as "no test failed"). */
+export interface MainCeilingLogVerdict {
+  readonly blockedGates: readonly string[];
+  readonly testsFailed?: number;
+}
+
+const ACTIONS_TIMESTAMP = /^\d{4}-\d\d-\d\dT[\d:.]+Z ?/;
+const MAIN_CEILING_BLOCKED = /^main-ceiling-drift: (\S+) BLOCKED on main itself\s*$/;
+const MAIN_CEILING_GROUP = /^##\[group\]main-ceiling-drift:/;
+const TEST_SUMMARY_FAIL = /^(?:#|ℹ) fail (\d+)\s*$/;
+
+/** Reads a job log line by line, so the core daemon never holds a whole shard log in memory. */
+export function mainCeilingLogReducer(): { push(line: string): void; finish(): MainCeilingLogVerdict } {
+  const blocked: string[] = [];
+  let testsFailed: number | undefined;
+  let inCeilings = false;
+  return {
+    push(raw) {
+      const line = raw.replace(ACTIONS_TIMESTAMP, "");
+      if (MAIN_CEILING_GROUP.test(line)) inCeilings = true;
+      const gate = MAIN_CEILING_BLOCKED.exec(line)?.[1];
+      if (gate !== undefined && !blocked.includes(gate)) blocked.push(gate);
+      // A retry prints a second summary after the first; the last one before the ceilings decides.
+      const fail = inCeilings ? undefined : TEST_SUMMARY_FAIL.exec(line)?.[1];
+      if (fail !== undefined) testsFailed = Number(fail);
+    },
+    finish: () => ({ blockedGates: [...blocked], ...(testsFailed !== undefined ? { testsFailed } : {}) }),
+  };
+}
+
+/** The ratified baseline writer whose no-record signal is the main-ceiling-drift gate `gate`. */
+export function ratifiedRatchetForMainGate(gate: string): RatifiedBaselineRatchetScript | undefined {
+  return (Object.keys(RATIFIED_BASELINE_RATCHET_REPAIRS) as RatifiedBaselineRatchetScript[]).find(
+    (script) => RATIFIED_BASELINE_RATCHET_REPAIRS[script].signalScript === gate,
+  );
+}
+
+/** A red main the fleet may record its way out of, or the reason it may not. */
+export type MainRatchetRedVerdict =
+  | { readonly kind: "ratchet-only"; readonly scripts: readonly RatifiedBaselineRatchetScript[]; readonly gates: readonly string[] }
+  | { readonly kind: "not-ratchet"; readonly reason: string };
+
+const CI_SHARD_MATRIX = CI_MATRIX_AGGREGATORS.find((entry) => entry.aggregator === "ci")!;
+
+/**
+ * Main is red ONLY because it crossed a ceiling the operator ratified for unattended recording
+ * (W1-T4004's registry): every failing check is the `ci` shard matrix or its aggregator, and every
+ * failing shard's own log names only ratified ceiling gates BLOCKED beside a test summary of zero
+ * failures. Anything else -- a guard workflow, a failed test, an unratified gate such as a learnings
+ * budget, an unread log -- is `not-ratchet`, and the ordinary repair lane keeps the red.
+ */
+export function classifyMainRatchetRed(
+  failingChecks: readonly string[],
+  verdicts: ReadonlyMap<string, MainCeilingLogVerdict | undefined>,
+): MainRatchetRedVerdict {
+  const shards = failingChecks.filter((name) => CI_SHARD_MATRIX.constituent.test(name));
+  const others = failingChecks.filter((name) => name !== CI_SHARD_MATRIX.aggregator && !shards.includes(name));
+  if (others.length > 0) return { kind: "not-ratchet", reason: `failing outside the ci shard matrix: ${others.join(", ")}` };
+  if (shards.length === 0) return { kind: "not-ratchet", reason: "no failing ci shard names what failed" };
+  const gates: string[] = [];
+  for (const shard of shards) {
+    const verdict = verdicts.get(shard);
+    if (!verdict) return { kind: "not-ratchet", reason: `${shard}'s log was not read` };
+    if (verdict.testsFailed === undefined) return { kind: "not-ratchet", reason: `${shard}'s log printed no test summary` };
+    if (verdict.testsFailed > 0) return { kind: "not-ratchet", reason: `${shard} failed ${verdict.testsFailed} test(s)` };
+    if (verdict.blockedGates.length === 0) return { kind: "not-ratchet", reason: `${shard} failed with no failed test and no ceiling named` };
+    for (const gate of verdict.blockedGates) if (!gates.includes(gate)) gates.push(gate);
+  }
+  const unratified = gates.filter((gate) => ratifiedRatchetForMainGate(gate) === undefined);
+  if (unratified.length > 0) return { kind: "not-ratchet", reason: `ceiling(s) not ratified for recording: ${unratified.join(", ")}` };
+  const scripts = [...new Set(gates.map((gate) => ratifiedRatchetForMainGate(gate)!))].sort();
+  return { kind: "ratchet-only", scripts, gates: [...gates].sort() };
 }
 
 /** PRIMARY CONTROL: characters of the failing checks' log tails a fix worker is handed. */
@@ -700,6 +799,12 @@ export function buildMainHealthRung(
   let repairsMayBeActive = true;
   const fixInFlight = new Set<string>();
   const fixProgress = new Map<string, { marker: string; ticks: number; sinceMs: number }>();
+  // The recorded-baseline repair of a ratchet-only red: the one open PR that owns it (this lane's
+  // own, or one already open that records it), the red the opener declined, and the PRs it opened.
+  let ratchetInFlight = false;
+  let ratchetPrUrl: string | undefined;
+  let ratchetDeclinedSignature: string | undefined;
+  const ratchetOpened = new Set<string>();
   const repairRow = (step: string, fields: Record<string, unknown>): void => {
     appendLedger(deps.ledgerPath, { run_id: deps.runId, task_id: MAIN_HEALTH_TASK_ID, step, surface: "main", ...fields });
     repairsMayBeActive = true;
@@ -855,6 +960,90 @@ export function buildMainHealthRung(
       reason: observation.reason,
     });
     return true;
+  };
+  /**
+   * A red that is only a ratified ceiling is recorded, not fixed by a worker or reverted: the gate's
+   * own remedy is a baseline PR, and the fenced writer produces it. True while that PR (or an open one
+   * that already records the ceiling) owns this red; false hands the red to the fix-then-revert path.
+   */
+  const recordRatchetRed = async (
+    lane: MainRepairLane,
+    signature: string,
+    sha: string,
+    branch: string,
+    failingNames: readonly string[],
+    evidenceRollup: readonly RollupCheckEntry[],
+  ): Promise<boolean> => {
+    if (!lane.recordRatchet || !deps.readCeilingVerdict || signature === ratchetDeclinedSignature) return false;
+    if (ratchetInFlight) return true;
+    if (ratchetPrUrl) {
+      const pr = await readRepairPr(ratchetPrUrl);
+      if (!pr || pr.state === "open") return true;
+      ratchetPrUrl = undefined;
+    }
+    const verdicts = new Map<string, MainCeilingLogVerdict | undefined>();
+    const matrixOnly = failingNames.every((name) => name === CI_SHARD_MATRIX.aggregator || CI_SHARD_MATRIX.constituent.test(name));
+    const latest = matrixOnly ? dedupeRollupByLatestAttempt([...evidenceRollup]) : [];
+    for (const name of failingNames.filter((n) => matrixOnly && CI_SHARD_MATRIX.constituent.test(n))) {
+      const entry = latest.find((check) => (check.name ?? check.context) === name);
+      try {
+        verdicts.set(name, entry ? await deps.readCeilingVerdict(entry) : undefined);
+      } catch (error) {
+        deps.log("main.repair.ratchet_log_unreadable", { head_sha: sha, check_name: name, error: String((error as Error)?.message ?? error) });
+      }
+    }
+    const verdict = classifyMainRatchetRed(failingNames, verdicts);
+    if (verdict.kind === "not-ratchet") {
+      deps.log("main.repair.ratchet_not_applicable", { head_sha: sha, reason: verdict.reason });
+      return false;
+    }
+    ratchetInFlight = true;
+    repairRow("main.repair.ratchet_dispatched", { head_sha: sha, scripts: verdict.scripts, gates: verdict.gates });
+    const decline = (reason: string): void => {
+      ratchetDeclinedSignature = signature;
+      repairRow("main.repair.ratchet_declined", { head_sha: sha, reason });
+    };
+    void Promise.resolve()
+      .then(() => lane.recordRatchet!({ branch, headSha: sha, scripts: verdict.scripts, gates: verdict.gates }))
+      .then(
+        (outcome) => {
+          if ("opened" in outcome) {
+            ratchetPrUrl = outcome.opened;
+            ratchetOpened.add(outcome.opened);
+            repairRow("main.repair.ratchet_opened", { head_sha: sha, pr_url: outcome.opened });
+          } else if ("standing" in outcome) {
+            ratchetPrUrl = outcome.standing;
+            repairRow("main.repair.ratchet_standing", { head_sha: sha, pr_url: outcome.standing });
+          } else {
+            decline(outcome.declined);
+          }
+        },
+        (error) => decline(String((error as Error)?.message ?? error)),
+      )
+      .catch((error) => deps.log("main.repair.error", { head_sha: sha, error: String((error as Error)?.message ?? error) }))
+      .finally(() => {
+        ratchetInFlight = false;
+      });
+    return true;
+  };
+  /** Main is green on its own head: a recorded-baseline PR this lane opened and that is still open is
+   *  now redundant -- it would lower a ceiling main no longer crosses -- so it is closed. */
+  const resolveRatchetRecords = async (sha: string): Promise<void> => {
+    ratchetDeclinedSignature = undefined;
+    ratchetPrUrl = undefined;
+    for (const url of [...ratchetOpened]) {
+      const pr = await readRepairPr(url);
+      if (!pr) continue;
+      if (pr.state === "open") {
+        await closeRepairPr(
+          url,
+          `Closed by the red-main repair lane: \`${owner}/${repo}\` is green on its own head \`${sha}\` without this ` +
+            "recorded baseline, so recording it now would only move a ceiling main no longer crosses.",
+        );
+      }
+      repairRow("main.repair.ratchet_resolved", { head_sha: sha, pr_url: url, by: pr.state === "merged" ? "record" : "other" });
+      ratchetOpened.delete(url);
+    }
   };
   /** Main is green on its own head: every open repair is resolved, and its still-open PRs closed. */
   const resolveRepairs = async (sha: string): Promise<void> => {
@@ -1140,6 +1329,14 @@ export function buildMainHealthRung(
           lastSuccessfulObservationAtMs = startedAtMs;
           return;
         }
+        // A red that is only a ratified ceiling is recorded by a baseline PR before any worker is spent.
+        if (
+          deps.repair &&
+          (await recordRatchetRed(deps.repair, signature, sha, branch, [...observation.failingChecks, ...advisoryFailing], evidenceRollup))
+        ) {
+          lastSuccessfulObservationAtMs = startedAtMs;
+          return;
+        }
         // W1-T6403: the same red the lane already owns re-reads no CI log; it only advances the repair.
         if (signature === repairedSignature && deps.repair) {
           if (await repairRedMain(deps.repair, observation, sha, branch, [], startedAtMs)) {
@@ -1281,7 +1478,10 @@ export function buildMainHealthRung(
         lastSuccessfulObservationAtMs = startedAtMs;
         return;
       }
-      if (deps.repair && decidedBySha === sha) await resolveRepairs(sha);
+      if (deps.repair && decidedBySha === sha) {
+        await resolveRepairs(sha);
+        await resolveRatchetRecords(sha);
+      }
       const signature = `${observation.state}:${sha}`;
       if (signature === resolvedSignature) {
         lastSuccessfulObservationAtMs = startedAtMs;
