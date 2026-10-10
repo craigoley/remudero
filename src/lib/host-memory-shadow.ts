@@ -6,9 +6,10 @@
  * would have protected serve, and what throughput it would cost, is unknown. This module answers "would this start
  * have fit?" for each start that HAPPENED, so enforcement can be ruled on from measurements rather than guesses.
  *
- * SHADOW ONLY. The verdict is computed after the start is committed, synchronously, inside try/catch, and its result is
- * never read by the caller. There is no enforce, block or defer path here, and the policy mode accepts only "off" or
- * "shadow"; a later enforcement task must add its own mode with operator approval.
+ * THE VERDICT NEVER GATES ITS OWN START. It is computed after the start is committed, synchronously, inside try/catch,
+ * and its result is never read by the caller. The policy mode is "off", "shadow" or "enforce"; the shipped mode is
+ * "shadow". Under "enforce" a SEPARATE call before the start (host-memory-admission.ts) evaluates the same snapshot and
+ * may wait; switching to it is an operator ruling, made by editing plan/policy.yaml.
  *
  * NO DOUBLE COUNT. A worker tree's resident memory is already inside MemAvailable and the container's memory.current,
  * so a reservation counts only its UNREALIZED part: max(0, estimate - the tree's current rss+swap).
@@ -18,14 +19,15 @@
  * never read as zero reservations. File reads are bounded (a ledger tail, a capped process count).
  */
 
-import { closeSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
-import { basename, join } from "node:path";
+import { closeSync, fstatSync, openSync, readFileSync, readSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 import { systemClock, type Clock } from "./clock.js";
 import { sampleCgroupMemory } from "./daemon-memory-telemetry.js";
 import {
   DEFAULT_ESTIMATE_MIB,
+  defaultInstance,
   parseProcStat,
   readMemoryLedger,
   type EstimateSource,
@@ -46,7 +48,8 @@ import {
   type ReviewDemandReading,
   type YieldDecision,
 } from "./host-memory-priority.js";
-import type { LedgerLine } from "./ledger.js";
+import { classEstimate } from "./host-memory-learning.js";
+import { DAEMON_PID_ENV, type LedgerLine } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { installPolicyPath } from "./policy.js";
 
@@ -60,8 +63,8 @@ export const SHADOW_SHORTFALL_DECISION_STEP = "memory_budget.capacity_decision";
 
 // ── policy ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The ONLY modes. Nothing in this module can enforce, so no third value is accepted. */
-export const SHADOW_MODES = ["off", "shadow"] as const;
+/** The ONLY modes. "enforce" is acted on by host-memory-admission.ts, before a start; this module only records. */
+export const SHADOW_MODES = ["off", "shadow", "enforce"] as const;
 export type ShadowMode = (typeof SHADOW_MODES)[number];
 /** Every threshold is a proposal, to be calibrated from shadow rows — never a ruling. */
 export const HOST_MEMORY_BUDGET_ORIGIN = "proposal";
@@ -109,7 +112,7 @@ function proposalOrigin(path: string, row: Record<string, unknown>): void {
   }
 }
 
-/** Validate `sweep.hostMemoryBudget`. The mode accepts only "off" or "shadow"; anything else (e.g. "enforce") throws. */
+/** Validate `sweep.hostMemoryBudget`. The mode accepts only "off", "shadow" or "enforce"; anything else throws. */
 export function parseHostMemoryBudgetPolicy(raw: unknown): HostMemoryBudgetPolicy {
   const base = "sweep.hostMemoryBudget";
   const block = mapping(base, raw);
@@ -117,7 +120,7 @@ export function parseHostMemoryBudgetPolicy(raw: unknown): HostMemoryBudgetPolic
   proposalOrigin(`${base}.mode`, modeRow);
   if (!SHADOW_MODES.includes(modeRow.value as ShadowMode)) {
     throw new Error(
-      `policy.yaml: '${base}.mode' accepts only "off" or "shadow", got ${JSON.stringify(modeRow.value)}.`,
+      `policy.yaml: '${base}.mode' accepts only "off", "shadow" or "enforce", got ${JSON.stringify(modeRow.value)}.`,
     );
   }
   const out: Partial<HostMemoryBudgetPolicy> = { mode: modeRow.value as ShadowMode };
@@ -171,19 +174,26 @@ export interface ShadowEntryInput {
   resident: { mib: number; complete: boolean; reason?: string } | { unread: string };
   /** Since the reservation opened. W1-T7095 reads it to tell a review started since its demand row was published. */
   ageMs?: number;
+  /** Its work has ended: what its tree still holds is resident, and it can claim nothing more. */
+  occupancyReleased?: boolean;
 }
 
 export interface ShadowInputs {
   memAvailable: { mib: number } | { unread: string };
   swapIn: { pagesPerSec: number } | { unmeasured: string };
   psi: { someAvg10: number; someAvg60: number; fullAvg10?: number; fullAvg60?: number } | { unread: string };
-  container: { currentMib: number; maxMib: number | null } | { unread: string };
+  /** `highMib` is memory.high (reclaim and throttling begin there); `reclaimableMib` is inactive_file, page cache the
+   *  kernel drops before it swaps anonymous memory. Both are optional, and absent means not subtracted. */
+  container: { currentMib: number; maxMib: number | null; highMib?: number | null; reclaimableMib?: number } | { unread: string };
   ledger: { state: ShadowLedgerState; reason?: string };
   entries: ShadowEntryInput[];
   /** The start this verdict is about. Its own reservation is counted even when the ledger could not show it. */
   start: { reservationId?: string; workerClass: WorkerClass; estimateMib: number };
-  daemonGrowth: Array<{ instance: string; samples: number; growthMib?: number; reason?: string }>;
+  /** `own` marks this container's daemon, whose growth also counts against the container ceiling. */
+  daemonGrowth: Array<{ instance: string; samples: number; growthMib?: number; reason?: string; basis?: string; own?: boolean }>;
   serve: { scenario: ServeScenario; basis: string };
+  /** The learned review estimate, for the counterfactual review (W1-T7095). Absent: the class default. */
+  reviewEstimateMib?: number;
 }
 
 export interface ShadowUncertainty {
@@ -212,6 +222,10 @@ export interface ShadowVerdict {
     containerCurrentMib: number | null;
     containerMaxMib: number | null;
     containerHeadroomMib: number | null;
+    /** min(memory.max, memory.high): where this container's reclaim begins. */
+    containerCeilingMib: number | null;
+    /** memory.current less reclaimable page cache: the memory the ceiling is measured against. */
+    containerWorkingSetMib: number | null;
     containerReserveMib: number;
     /** Container memory no reservation's resident tree accounts for: gardens, measurement children, read-model threads. */
     unreservedContainerMib: number | null;
@@ -248,13 +262,14 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       resident = entry.resident.mib;
       if (!entry.resident.complete) widen("tree-partial", margin, `${entry.id}: ${entry.resident.reason ?? "partial"}`);
     }
-    const share = Math.max(0, entry.estimateMib - resident);
+    // A released occupancy's tree can only shrink: its resident memory is already measured, so it claims nothing more.
+    const share = entry.occupancyReleased ? 0 : Math.max(0, entry.estimateMib - resident);
     unrealized += share;
     if (entry.status === "owned") {
       unrealizedOwn += share;
       residentOwn += resident;
     }
-    if (entry.estimateSource.kind === "default-unmeasured") widen("unmeasured-estimate", margin, entry.id);
+    if (entry.estimateSource.kind === "default-unmeasured" && !entry.occupancyReleased) widen("unmeasured-estimate", margin, entry.id);
     if (entry.status === "uncertain") widen("uncertain-entry", margin, entry.id);
     if (entry.walkComplete === false) widen("incomplete-walk", margin, entry.id);
   }
@@ -268,9 +283,12 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
   }
 
   let daemonGrowth = 0;
+  let ownDaemonGrowth = 0;
   for (const growth of inputs.daemonGrowth) {
-    if (growth.growthMib !== undefined) daemonGrowth += growth.growthMib;
-    else widen("daemon-growth-unmeasured", policy.daemonGrowthUnmeasuredMib,
+    if (growth.growthMib !== undefined) {
+      daemonGrowth += growth.growthMib;
+      if (growth.own) ownDaemonGrowth += growth.growthMib;
+    } else widen("daemon-growth-unmeasured", policy.daemonGrowthUnmeasuredMib,
       `${growth.instance}: ${growth.reason ?? `${growth.samples} sample(s)`}`);
   }
 
@@ -292,12 +310,17 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
   let containerCurrent: number | null = null;
   let containerMax: number | null = null;
   let containerHeadroom: number | null = null;
+  let containerCeiling: number | null = null;
+  let containerWorkingSet: number | null = null;
   if ("unread" in inputs.container) widen("container-unread", margin, inputs.container.unread);
   else {
     containerCurrent = inputs.container.currentMib;
     containerMax = inputs.container.maxMib;
-    if (containerMax !== null) {
-      containerHeadroom = containerMax - containerCurrent - unrealizedOwn;
+    const limits = [containerMax, inputs.container.highMib ?? null].filter((v): v is number => v !== null);
+    containerWorkingSet = Math.max(0, containerCurrent - (inputs.container.reclaimableMib ?? 0));
+    if (limits.length > 0) {
+      containerCeiling = Math.min(...limits);
+      containerHeadroom = containerCeiling - containerWorkingSet - unrealizedOwn - ownDaemonGrowth;
       if (containerHeadroom < policy.containerReserveMib) reasons.add("container-ceiling");
     }
   }
@@ -338,6 +361,8 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       containerCurrentMib: containerCurrent,
       containerMaxMib: containerMax,
       containerHeadroomMib: containerHeadroom,
+      containerCeilingMib: containerCeiling,
+      containerWorkingSetMib: containerWorkingSet,
       containerReserveMib: policy.containerReserveMib,
       unreservedContainerMib: unreserved,
       unreservedContainerShare: unreserved === null || !containerCurrent ? null : unreserved / containerCurrent,
@@ -367,7 +392,7 @@ export function counterfactualReviewVerdict(inputs: ShadowInputs, policy: HostMe
   return evaluateShadowMemory({
     ...inputs,
     entries,
-    start: { workerClass: "review", estimateMib: DEFAULT_ESTIMATE_MIB.review },
+    start: { workerClass: "review", estimateMib: inputs.reviewEstimateMib ?? DEFAULT_ESTIMATE_MIB.review },
   }, policy);
 }
 
@@ -416,7 +441,7 @@ export interface ShadowStart {
   reservationId?: string;
   /** Default: the ledger's unmeasured class estimate, which is what the start's reservation recorded. */
   estimateMib?: number;
-  /** The state root: its basename is the instance, and its ledger holds daemon.alive and serve rows. */
+  /** The state root: the ledger names its instance (see `instance`), and its ledger holds daemon.alive and serve rows. */
   root: string;
 }
 
@@ -433,6 +458,14 @@ export interface ShadowMemoryPorts {
   readReviewDemand: () => ReviewDemandReading;
   priorityPolicy: () => HostMemoryPriorityPolicy;
   stderr: (line: string) => void;
+  /** This state root's instance name, AS THE LEDGER NAMES IT (the host-side mount), so its own entries read as its own. */
+  instance: (root: string) => string;
+  /** The daemon main process's pid, whose /proc status measures its growth. Undefined: none known to this process. */
+  daemonPid: () => number | undefined;
+  /** The state directory's names, for the newest rotation stamp (how far back the live ledger's own rows reach). */
+  listStateDir: (dir: string) => string[];
+  /** A class's learned estimate (host-memory-learning.ts). */
+  estimate: (workerClass: WorkerClass) => number;
 }
 
 let installedSink: ShadowMemoryPorts["write"];
@@ -489,7 +522,8 @@ export function defaultReadTail(path: string, maxBytes: number): string {
   }
 }
 
-function defaultPorts(): ShadowMemoryPorts {
+/** The real ports: /proc, cgroup, the shared ledger and the installed row sink. */
+export function defaultShadowMemoryPorts(): ShadowMemoryPorts {
   return {
     clock: systemClock,
     nowNs: () => process.hrtime.bigint(),
@@ -501,6 +535,13 @@ function defaultPorts(): ShadowMemoryPorts {
     stderr: (line) => console.error(line),
     readReviewDemand: () => readReviewDemand(),
     priorityPolicy: () => HOST_MEMORY_PRIORITY_PROPOSAL,
+    instance: (root) => defaultInstance(root).name,
+    daemonPid: () => {
+      const pid = Number(process.env[DAEMON_PID_ENV]);
+      return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
+    },
+    listStateDir: (dir) => readdirSync(dir),
+    estimate: (workerClass) => classEstimate(workerClass).estimateMib,
   };
 }
 
@@ -566,7 +607,28 @@ function readContainer(read: ShadowMemoryPorts["readFile"]): ShadowInputs["conta
   return {
     currentMib: cg.cg_memory_current_bytes / MIB,
     maxMib: cg.cg_memory_max_bytes === null ? null : cg.cg_memory_max_bytes / MIB,
+    ...containerReclaim(read),
   };
+}
+
+/** memory.high and inactive_file. Either one unreadable is simply absent: the ceiling stays memory.max and nothing is
+ *  subtracted, which can only make the verdict stricter. */
+function containerReclaim(read: ShadowMemoryPorts["readFile"]): { highMib?: number | null; reclaimableMib?: number } {
+  const out: { highMib?: number | null; reclaimableMib?: number } = {};
+  try {
+    const high = read("/sys/fs/cgroup/memory.high").trim();
+    if (high === "max") out.highMib = null;
+    else if (/^\d+$/.test(high)) out.highMib = Number(high) / MIB;
+  } catch (error) {
+    void error; // No memory.high (cgroup v1, or none set): the ceiling is memory.max alone.
+  }
+  try {
+    const bytes = /^inactive_file (\d+)$/m.exec(read("/sys/fs/cgroup/memory.stat"))?.[1];
+    if (bytes !== undefined) out.reclaimableMib = Number(bytes) / MIB;
+  } catch (error) {
+    void error; // Unreadable memory.stat: page cache is counted as used, never subtracted on a guess.
+  }
+  return out;
 }
 
 /** The ledger reading, with a held lock or an errno carried as a named state — never an empty, healthy ledger. */
@@ -621,7 +683,7 @@ function treeResident(
 
 interface TailRow { step: string; at: number; bytes?: number }
 
-function readTailRows(ports: ShadowMemoryPorts, root: string): { rows: TailRow[] } | { unread: string } {
+function readTailRows(ports: ShadowMemoryPorts, root: string): { rows: TailRow[]; earliestMs?: number } | { unread: string } {
   let text: string;
   try {
     text = ports.readTail(join(root, "state", LEDGER_FILENAME), LEDGER_TAIL_BYTES);
@@ -630,6 +692,8 @@ function readTailRows(ports: ShadowMemoryPorts, root: string): { rows: TailRow[]
     return { unread: reason };
   }
   const rows: TailRow[] = [];
+  const first = /^\{"ts":"([^"]+)"/m.exec(text)?.[1];
+  const earliestMs = first === undefined ? undefined : Date.parse(first);
   for (const line of text.split("\n")) {
     if (!line.includes("\"daemon.alive\"") && !line.includes("\"serve.")) continue;
     try {
@@ -643,7 +707,40 @@ function readTailRows(ports: ShadowMemoryPorts, root: string): { rows: TailRow[]
       void error; // A torn tail line: skipped, it is one heartbeat among many.
     }
   }
-  return { rows: rows.sort((a, b) => a.at - b.at) };
+  return { rows: rows.sort((a, b) => a.at - b.at), ...(Number.isFinite(earliestMs) ? { earliestMs } : {}) };
+}
+
+const ROTATION_STAMP = /^ledger\.(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z\.ndjson(?:\.gz)?$/;
+
+/** The newest rotation stamp in the state directory: rows older than it at the head of the live ledger were CARRIED
+ *  over a rotation, so they say nothing about what the ledger saw before it. Undefined when unreadable or none. */
+export function newestRotationMs(names: readonly string[]): number | undefined {
+  let newest: number | undefined;
+  for (const name of names) {
+    const m = ROTATION_STAMP.exec(name);
+    if (!m) continue;
+    const at = Date.parse(`${m[1]}T${m[2]}:${m[3]}:${m[4]}.${m[5]}Z`);
+    if (Number.isFinite(at) && (newest === undefined || at > newest)) newest = at;
+  }
+  return newest;
+}
+
+/**
+ * How long, up to now, the ledger tail covers CONTIGUOUSLY: since the later of its first row and the newest rotation.
+ * A live ledger begins with rows carried over the last rotation, whose old stamps would otherwise fake a long window.
+ */
+export function tailCoverageMs(earliestMs: number | undefined, rotationMs: number | undefined, now: number): number | undefined {
+  if (earliestMs === undefined) return undefined;
+  return Math.max(0, now - Math.max(earliestMs, rotationMs ?? earliestMs));
+}
+
+/** The daemon main process's growth allowance from its own /proc status: VmHWM, the resident peak it has already
+ *  reached, less VmRSS now. Undefined when the status is unreadable. */
+export function daemonGrowthFromStatus(status: string): { growthMib: number; peakMib: number; residentMib: number } | undefined {
+  const hwm = /^VmHWM:\s+(\d+)\s+kB/m.exec(status)?.[1];
+  const rss = /^VmRSS:\s+(\d+)\s+kB/m.exec(status)?.[1];
+  if (hwm === undefined || rss === undefined) return undefined;
+  return { growthMib: Math.max(0, Number(hwm) - Number(rss)) / 1024, peakMib: Number(hwm) / 1024, residentMib: Number(rss) / 1024 };
 }
 
 /** max - current main-process rss+swap over the last hour, or "unmeasured" with too few rows. */
@@ -654,10 +751,20 @@ export function daemonGrowthOf(rows: readonly TailRow[], now: number, minSamples
   return { samples: recent.length, growthMib: Math.max(0, peak - recent.at(-1)!.bytes!) / MIB };
 }
 
-/** The serve scenario read from serve's own rows in the ledger tail. */
-export function serveScenarioOf(rows: readonly TailRow[], now: number): ShadowInputs["serve"] {
+/**
+ * The serve scenario read from serve's own rows in the ledger tail (serve shares its daemon's state root). With no serve
+ * row at all, serve is STOPPED once the tail covers more than three serve.memory periods; a shorter window (a fresh
+ * rotation) cannot tell stopped from not-yet-written, and says unknown.
+ */
+export function serveScenarioOf(rows: readonly TailRow[], now: number, coverageMs?: number): ShadowInputs["serve"] {
   const serve = rows.filter((r) => r.step.startsWith("serve."));
-  if (serve.length === 0) return { scenario: "unknown", basis: "no serve rows in the ledger tail" };
+  if (serve.length === 0) {
+    if (coverageMs !== undefined && coverageMs > SERVE_SILENT_AFTER_MS) {
+      return { scenario: "serve-stopped", basis: `no serve rows in ${Math.round(coverageMs / 1000)}s of ledger` };
+    }
+    const covered = coverageMs === undefined ? "" : ` (it covers ${Math.round(coverageMs / 1000)}s)`;
+    return { scenario: "unknown", basis: `no serve rows in the ledger tail${covered}` };
+  }
   const transitions = serve.filter((r) => SERVE_OPEN.has(r.step) || SERVE_CLOSE.has(r.step));
   const lastTransition = transitions.at(-1);
   if (lastTransition && SERVE_OPEN.has(lastTransition.step) && now - lastTransition.at <= COLD_START_OPEN_MAX_MS) {
@@ -685,12 +792,11 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
     walkComplete: entry.walkComplete,
     resident: treeResident(ports.readFile, entry.path, budget),
     ageMs: entry.ageMs,
+    ...(entry.occupancyReleased ? { occupancyReleased: true } : {}),
   }));
-  const instance = basename(start.root);
+  const instance = instanceOf(ports, start.root);
   const tail = readTailRows(ports, start.root);
-  const own = "unread" in tail
-    ? { instance, samples: 0, reason: `ledger tail unreadable: ${tail.unread}` }
-    : { instance, ...daemonGrowthOf(tail.rows, now, policy.daemonGrowthMinSamples) };
+  const own = { ...ownDaemonGrowth(ports, tail, now, policy), instance, own: true };
   // Another instance's heartbeats live in its own ledger, out of reach from here: named, never assumed flat.
   const others = [...new Set(entries.map((e) => e.owner.split("@")[0]!))].filter((name) => name !== instance)
     .map((name) => ({ instance: name, samples: 0, reason: "its daemon.alive rows are not readable from this instance" }));
@@ -704,11 +810,73 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
     start: {
       ...(start.reservationId ? { reservationId: start.reservationId } : {}),
       workerClass: start.workerClass,
-      estimateMib: start.estimateMib ?? DEFAULT_ESTIMATE_MIB[start.workerClass],
+      estimateMib: start.estimateMib ?? estimateOf(ports, start.workerClass),
     },
     daemonGrowth: [own, ...others],
-    serve: "unread" in tail ? { scenario: "unknown", basis: `ledger tail unreadable: ${tail.unread}` } : serveScenarioOf(tail.rows, now),
+    serve: "unread" in tail
+      ? { scenario: "unknown", basis: `ledger tail unreadable: ${tail.unread}` }
+      : serveScenarioOf(tail.rows, now, tailCoverageMs(tail.earliestMs, rotationOf(ports, start.root), now)),
+    reviewEstimateMib: estimateOf(ports, "review"),
   };
+}
+
+function instanceOf(ports: ShadowMemoryPorts, root: string): string {
+  try {
+    return ports.instance(root);
+  } catch (error) {
+    void error; // An unreadable mount table: the root's own name, as the ledger itself falls back.
+    return root.split("/").filter(Boolean).at(-1) ?? root;
+  }
+}
+
+function estimateOf(ports: ShadowMemoryPorts, workerClass: WorkerClass): number {
+  try {
+    return ports.estimate(workerClass);
+  } catch (error) {
+    void error; // An unreadable estimate store: the class default, which is the learned estimate's own prior.
+    return DEFAULT_ESTIMATE_MIB[workerClass];
+  }
+}
+
+function rotationOf(ports: ShadowMemoryPorts, root: string): number | undefined {
+  try {
+    return newestRotationMs(ports.listStateDir(join(root, "state")));
+  } catch (error) {
+    void error; // Unlistable: the tail's own first row bounds the window, which can only lengthen what it claims.
+    return undefined;
+  }
+}
+
+/** This instance's daemon growth: measured from the daemon's /proc status when its pid is known and readable, else from
+ *  the daemon.alive rows in the tail, else unmeasured with the reasons for both. */
+function ownDaemonGrowth(
+  ports: ShadowMemoryPorts,
+  tail: ReturnType<typeof readTailRows>,
+  now: number,
+  policy: HostMemoryBudgetPolicy,
+): { samples: number; growthMib?: number; reason?: string; basis?: string } {
+  let procReason: string;
+  const pid = ports.daemonPid();
+  if (pid === undefined) procReason = "no daemon pid in this process";
+  else {
+    try {
+      const measured = daemonGrowthFromStatus(ports.readFile(`/proc/${pid}/status`));
+      if (measured) {
+        return {
+          samples: 1, growthMib: measured.growthMib,
+          basis: `proc ${pid}: VmHWM ${Math.round(measured.peakMib)} MiB - VmRSS ${Math.round(measured.residentMib)} MiB`,
+        };
+      }
+      procReason = `proc ${pid}: no VmHWM/VmRSS`;
+    } catch (error) {
+      // The pid exited or /proc is unreadable: named below, and the row series is tried instead.
+      procReason = `proc ${pid}: ${reasonOf(error)}`;
+    }
+  }
+  if ("unread" in tail) return { samples: 0, reason: `${procReason}; ledger tail unreadable: ${tail.unread}` };
+  const rows = daemonGrowthOf(tail.rows, now, policy.daemonGrowthMinSamples);
+  if (rows.growthMib !== undefined) return { ...rows, basis: "daemon.alive rows" };
+  return { ...rows, reason: `${procReason}; ${rows.reason}` };
 }
 
 // ── the recorder: never in the path ───────────────────────────────────────────────────────────────────────────────
@@ -750,7 +918,7 @@ function reviewPriorityOf(
 ): YieldDecision {
   try {
     return wouldYieldToReview({
-      start: { instance: basename(start.root), workerClass: start.workerClass, waitingSinceMs },
+      start: { instance: instanceOf(ports, start.root), workerClass: start.workerClass, waitingSinceMs },
       demand: start.workerClass === "review" ? { state: "present", rows: [], unreadableRows: 0 } : ports.readReviewDemand(),
       reservations: inputs.entries,
       reviewVerdict: (withStart) => counterfactualReviewVerdict(inputs, policy, withStart),
@@ -778,7 +946,7 @@ function recordDiagnostics(
   ledgerPath: string,
   waitMs: number,
 ): void {
-  const instance = basename(start.root);
+  const instance = instanceOf(ports, start.root);
   try {
     for (const reason of verdict.reasons) {
       if (!deferrals.observe({ workerClass: start.workerClass, instance, reason, waitMs }).first) continue;
@@ -822,13 +990,13 @@ export function recordShadowMemoryVerdict(start: ShadowStart, overrides: Partial
   let ports: ShadowMemoryPorts | undefined;
   const ledgerPath = join(start.root ?? ".", "state", LEDGER_FILENAME);
   try {
-    ports = { ...defaultPorts(), ...overrides };
+    ports = { ...defaultShadowMemoryPorts(), ...overrides };
     if (!ports.write) return { kind: "no-sink" };
     const startedNs = ports.nowNs();
     const policy = ports.policy();
     if (policy.mode === "off") return { kind: "off" };
     const inputs = gatherShadowInputs(start, ports, policy);
-    const instance = basename(start.root);
+    const instance = instanceOf(ports, start.root);
     const now = ports.clock.now();
     const waitKey = `${instance}\u0000${start.workerClass}`;
     const waitingSinceMs = wouldWaitSince.get(waitKey) ?? now;
@@ -851,7 +1019,7 @@ export function recordShadowMemoryVerdict(start: ShadowStart, overrides: Partial
         cascades_modelled: false,
         mode: policy.mode,
         worker_class: start.workerClass,
-        instance: basename(start.root),
+        instance,
         reservation_id: start.reservationId ?? null,
         scenario: verdict.scenario,
         scenario_basis: inputs.serve.basis,

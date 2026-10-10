@@ -148,6 +148,8 @@ export function markLedgerProcessActor(actor: "daemon" | "service" | "host_autom
  *  {@link markDaemonProcessActor}. Nothing else ever sets this. */
 const DAEMON_PROCESS_ACTOR_ENV = "REMUDERO_DAEMON_PROCESS";
 
+export const DAEMON_PID_ENV = "REMUDERO_DAEMON_PID";
+
 /** Mark THIS process as the daemon. Call once, at the top of `daemonCommand` (run-task.ts),
  *  before its first `appendLedger` call. Every ledger row this process (or anything it calls
  *  in-process, e.g. a wired sweep tick) writes from here on reports `actor: "daemon"` — UNLESS
@@ -156,6 +158,7 @@ const DAEMON_PROCESS_ACTOR_ENV = "REMUDERO_DAEMON_PROCESS";
 export function markDaemonProcessActor(): void {
   markLedgerProcessActor("daemon");
   process.env[DAEMON_PROCESS_ACTOR_ENV] = "1";
+  process.env[DAEMON_PID_ENV] = String(process.pid); // children read the daemon's /proc growth (host-memory-shadow.ts)
 }
 
 /**

@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { daemonOwnedProcess, openLearnedReservation } from "./host-memory-learning.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
@@ -528,10 +529,14 @@ export function createPrePushSandboxRunner(cwd: string, {
   };
 }
 
-/** Runs `run` with `gate.env.HOME` a fresh empty directory, removed once `run` (or the promise it returns) settles. */
+/** Runs `run` with a fresh empty `gate.env.HOME` (and, in the daemon, a push-gate memory reservation) until it settles. */
 function withGateHome<T>(gate: PrePushGate, run: (env: NodeJS.ProcessEnv) => T): T {
   const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}prepush-home-`));
-  const cleanup = () => rmSync(home, { recursive: true, force: true });
+  const reservation = daemonOwnedProcess() ? openLearnedReservation({ workerClass: "push-gate" }) : undefined;
+  const cleanup = () => {
+    rmSync(home, { recursive: true, force: true });
+    reservation?.releaseOccupancy();
+  };
   let settlesLater = false;
   try {
     const result = run({ ...gate.env, HOME: home });
