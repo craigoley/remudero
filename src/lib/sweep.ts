@@ -7800,7 +7800,11 @@ export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[
   let latest: MainLatestRun | undefined;
   for (const line of lines) {
     if (line.step !== "main.health.observed" || typeof line.sha !== "string" || typeof line.state !== "string") continue;
-    const failing = Array.isArray(line.failing_checks) ? line.failing_checks.filter((n): n is string => typeof n === "string") : [];
+    // A failing check outside ci-gate's required set (a shard under a required aggregate) is still
+    // one main's run fails: the census below names it, so the failing list must too, or a PR red on
+    // that very shard reads as a check main "ran green" and is sent to a fix worker.
+    const failing = [...new Set([line.failing_checks, line.advisory_failing_checks]
+      .flatMap((list) => (Array.isArray(list) ? list.filter((n): n is string => typeof n === "string") : [])))];
     latest = {
       sha: line.sha, state: line.state, failingChecks: failing,
       ...(Array.isArray(line.observed_checks)
@@ -16065,7 +16069,9 @@ export async function runSweep(
                   ? `base red: ${baseRed.check} was held while main was red; main is green, but this pass's one branch refresh is spent or unwired — no fix dispatched`
                   : mainLatestRun?.state === "red" && mainLatestRun.observedChecks !== undefined && !mainLatestRun.observedChecks.includes(baseRed.check)
                     ? `base red: ${baseRed.check} is absent from main's latest run (${mainSha}), and main is red — no fix dispatched, the branch refreshes once main is green`
-                    : `base red: ${baseRed.check} also fails on main's latest run (${mainSha}) — not this diff's; no fix dispatched, the branch refreshes once main is green`;
+                    : mainLatestRun?.state === "red"
+                      ? `base red: ${baseRed.check} also fails on main's latest run (${mainSha}) — not this diff's; no fix dispatched, the branch refreshes once main is green`
+                      : `base red: ${baseRed.check} was held while main was red; main is ${mainLatestRun?.state ?? "unread"} at ${mainSha}, not yet green — no fix dispatched, the branch refreshes once main is green`;
                 break;
               }
               // W1-T4586 — A LIVE RUN FOR THIS HEAD SUPERSEDES ITS RED. Runs on one head share the
