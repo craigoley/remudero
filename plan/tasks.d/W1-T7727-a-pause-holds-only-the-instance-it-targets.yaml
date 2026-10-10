@@ -59,9 +59,11 @@
          from this process.
        - Inside a daemon container, config.root is not the host path the registry records, so a pause there refuses;
          the operator runs `rmd pause --instance <name>` on the host.
-       - No flag: config.root must match exactly one declared instance via instanceForStateRoot.
-       - Anything else REFUSES, exit non-zero, before any write: an unreadable registry, an unknown or retired name, zero or
+       - No flag: config.root must be reachable and match exactly one declared instance via instanceForStateRoot.
+       - Anything else REFUSES, exit non-zero, before any pause/resume control write: an unreadable registry, an unknown or retired name, zero or
          several matches, an unreachable state_dir, or `--instance` combined with `--fleet`. The refusal names what was tried.
+       - Preserve the existing cli.invoked audit in an already reachable configured root; it is not a control write.
+         For pause/resume only, invocation auditing must not recreate an absent configured root before target validation.
        - Never inferred from cwd, repository, hostname or pid.
     2. `rmd pause [--instance <name>] [--reason <text>]` writes ONLY the target's `<state_dir>/state/PAUSE`, through the
        existing requestPause with no git deps.
@@ -93,10 +95,12 @@
        - pause-hold-is-attributable names `rmd resume --fleet` as the remedy;
        - cli-reference's drift fixture tracks the new resume syntax.
   acceptance:
-    - claim: "pausing one instance through the real CLI leaves every other instance sharing its checkout and origin unpaused, resuming one leaves another's hold standing, and an ambiguous target writes nothing"
+    - claim: "pausing one instance through the real CLI leaves every other instance sharing its checkout and origin unpaused, resuming one leaves another's hold standing, and an ambiguous target makes no control writes"
       proof: 'grep: test("W1-T7727: a pause through the real CLI holds only the instance it targets" in test/a-pause-holds-only-the-instance-it-targets.test.ts'
     - claim: "the CLI resolves its pause target through the new resolver"
       proof: 'grep: resolvePauseTarget( in src/run-task.ts'
+    - claim: "pause and resume refuse an absent configured root without recreating state"
+      proof: 'unit test: W1-T7727: a missing configured root refuses pause and resume without recreating state'
   falsifier: |
     Restore the old propagation (requestPause called with the real shared git deps from pauseCommand). The isolation test then
     finds refs/rmd-pause/hold on the fixture's bare origin, and the site, console and wild-trails instances' production
