@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-10: the measurement cadence was due at 06:26:40Z and no cycle evaluated it for 18+ minutes"
   plan_refs: [W1-T4998, W1-T5114, W1-T5723]
   files: [src/lib/daemon.ts, test/wall-clock-due-rungs-do-not-wait-on-the-outer-cycle.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

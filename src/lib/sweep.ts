@@ -6744,10 +6744,17 @@ export function mainHealthFailingTestTitles(
   };
 }
 
+/** A run that concluded red about the tree. A CANCELLED (or skipped, or stale) run concluded nothing,
+ *  so it is never the first red: 63 of main's newest 100 CI runs on 2026-10-10 were cancelled while
+ *  pending, and counting them named a new innocent "offending merge" on every pass. */
+function mainRunConcludedRed(run: MainHealthRunHistoryEntry): boolean {
+  return mainRunIsVerdict(run) && mainHealthFailureConclusion(run.conclusion);
+}
+
 export function mainHealthFirstRedCommitFromRunHistory(
   history: readonly MainHealthRunHistoryEntry[],
 ): MainHealthFirstRedCommit | "window-exhausted" | undefined {
-  if (!history.some((run) => mainHealthFailureConclusion(run.conclusion))) return undefined;
+  if (!history.some(mainRunConcludedRed)) return undefined;
   if (!history.some((run) => mainHealthSuccessConclusion(run.conclusion))) return "window-exhausted";
   let greenSha: string | undefined;
   for (const run of [...history].reverse()) {
@@ -6755,7 +6762,7 @@ export function mainHealthFirstRedCommitFromRunHistory(
       greenSha = run.headSha;
       continue;
     }
-    if (greenSha && mainHealthFailureConclusion(run.conclusion)) {
+    if (greenSha && mainRunConcludedRed(run)) {
       const [pullRequest] = run.pullRequests ?? [];
       return {
         headSha: run.headSha,

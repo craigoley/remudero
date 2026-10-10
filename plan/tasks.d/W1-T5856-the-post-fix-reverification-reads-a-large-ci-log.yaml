@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5836 (#9300) builder's follow-up"
   plan_refs: [W1-T5836, W1-T5283]
   files: [src/run-task.ts, test/the-post-fix-reverification-reads-a-large-ci-log.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-09: coverage critical path after W1-T4071 (#10522)"
   plan_refs: [W1-T4071, W1-T5902, W1-T6173, W1-T6086]
   files: [src/run-task.ts, test/retro-marker-atomic.test.ts, scripts/test-tier-manifest.json, test/the-retro-gather-parses-its-plan-once.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
