@@ -214,6 +214,12 @@ export const DEFAULT_SWEEP_RETRIGGER_INTERVAL_MS = 20 * 60_000;
 /** BACKSTOP: stop refill prolonging one tick indefinitely; admitted lanes still finish (W1-T5761). */
 export const DISPATCH_PHASE_REFILL_BOUND_MS = 20 * 60_000;
 
+/** A decided restart waits for every in-flight lane, silently: 2026-10-10 it waited 60+ min with no row. Name the
+ *  wait at once, then at doubling intervals (1, 2, 4, 8… polls), so a long wait stays visible without a row a poll. */
+function freshnessRestartWaitReportDue(waitedMs: number, reported: number, pollIntervalMs: number): boolean {
+  return reported === 0 || waitedMs >= pollIntervalMs * 2 ** reported;
+}
+
 /** W1-T5720 — BACKSTOP: the longest tick 1's cadences and the garden fan-out wait, from boot, for the
  *  first full pass. That pass's own 559 s bound normally opens the gate first, so this fires never. */
 export const BOOT_CADENCE_GATE_BOUND_MS = 10 * 60_000;
@@ -964,8 +970,10 @@ export interface DaemonDeps {
   readLoopTelemetry?: (() => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number;
     sync_spawn_top?: unknown[] }) & { peek?: () => unknown };
   /** W1-T6782: flat, payload-free memory fields (`sampleDaemonMemory`, daemon-memory-telemetry.ts)
-   *  spread into the existing `daemon.alive` row. A throw is carried as `mem_telemetry`, never lost. */
-  readMemoryTelemetry?: () => Record<string, unknown>;
+   *  spread into the existing `daemon.alive` row. A throw is carried as `mem_telemetry`, never lost.
+   *  W1-T7092: `afterRow` starts the worker-thread heap read once the row is written; the tick never
+   *  awaits it, and the NEXT row's fields carry what it found. */
+  readMemoryTelemetry?: (() => Record<string, unknown>) & { afterRow?: () => void };
   lastStepBeforeBlock?: () => string | undefined;
   /** Rebind daemon-owned sweep/projection closures when the live plan reloads. */
   onPlanReload?: (plan: Plan) => void;
@@ -1521,6 +1529,15 @@ function readMemoryTelemetrySafely(deps: Pick<DaemonDeps, "readMemoryTelemetry">
   }
 }
 
+/** W1-T7092: start the thread heap read only AFTER `daemon.alive` is written, never awaited. */
+function startMemoryReadAfterRow(deps: Pick<DaemonDeps, "readMemoryTelemetry">, log: (step: string, extra?: Record<string, unknown>) => void): void {
+  try {
+    deps.readMemoryTelemetry?.afterRow?.();
+  } catch (e) {
+    log("daemon.memory_read_failed", { error: String((e as Error)?.message ?? e).slice(0, 160) });
+  }
+}
+
 function peekSyncSpawnTop(deps: Pick<DaemonDeps, "readLoopTelemetry">): unknown {
   try { return deps.readLoopTelemetry?.peek?.(); } catch { return undefined; /* Reason: observability only. */ }
 }
@@ -2016,6 +2033,7 @@ function startInFlightTicker(
             ...(holdSeen !== undefined ? { pause_seen: holdSeen } : {}),
             ...(diskHeadroom?.freeBytes !== undefined ? { disk_free_bytes: diskHeadroom.freeBytes } : {}),
           });
+          startMemoryReadAfterRow(deps, log);
           // W1-T7093: the reservation tree must be refreshed by the real recurring heartbeat,
           // not merely by worker start/release calls. Best-effort, after the liveness row so a
           // slow or failed ledger walk cannot erase this tick's heartbeat.
@@ -5165,6 +5183,12 @@ export async function runDaemon(
     const inFlightTasks = new Set<Task>(admitted);
     let refillClosed: string | undefined;
     let inFlightFreshness: Extract<DaemonFreshness, { stale: true }> | undefined;
+    const restartWait = { decidedAtMs: 0, reported: 0 };
+    const laneStartedAtMs = new Map(admitted.map((t) => [t.id, dispatchPhaseStartedAtMs]));
+    const latchRestart = (freshness: Extract<DaemonFreshness, { stale: true }>): void => {
+      if (!inFlightFreshness) restartWait.decidedAtMs = daemonClock.now();
+      inFlightFreshness ??= freshness;
+    };
     // W1-T5282: a lane's refill is synchronous and cannot await a fetch, so with an awaited reader it reads the
     // latest reading settled since this tick began: the admission read above, then each dispatch tick's.
     let settledFreshness = selfFreshness;
@@ -5187,7 +5211,7 @@ export async function runDaemon(
       const freshnessAction = freshness?.stale ? decideFreshness(freshness, true) : undefined;
       // W1-T6274: a restart decided here holds every later refill this phase and ends it in the freshness stop.
       if (freshnessAction === "restart" && freshness?.stale) {
-        inFlightFreshness ??= freshness;
+        latchRestart(freshness);
         refillClosed ??= "stale code";
       }
       let reason =
@@ -5241,6 +5265,7 @@ export async function runDaemon(
           snapshots.push(nextSnapshot!);
           passIds.add(next.id);
           inFlightTasks.add(next);
+          laneStartedAtMs.set(next.id, daemonClock.now());
           log("dispatch.lane_refilled", { lane, finished_task: finished.id, next_task: next.id });
           log("daemon.iteration", { task: next.id, attempted: attempted.length + 1, max: opts.max ?? null });
           attempted.push(next.id);
@@ -5277,11 +5302,28 @@ export async function runDaemon(
       settledFreshness = freshness;
       logNotStaleFreshness(freshness);
       if (freshness.stale && decideFreshness(freshness, true) === "restart") {
-        inFlightFreshness = freshness;
+        latchRestart(freshness);
         refillClosed = "stale code";
       }
     };
+    // The restart runs once every lane below settles; until then each due tick names the lanes it waits on.
+    const reportRestartWait = (decided: Extract<DaemonFreshness, { stale: true }>): void => {
+      const nowMs = daemonClock.now();
+      const waitedMs = Math.max(0, nowMs - restartWait.decidedAtMs);
+      if (!freshnessRestartWaitReportDue(waitedMs, restartWait.reported, pollIntervalMs)) return;
+      restartWait.reported++;
+      log("daemon.freshness_restart_waiting", {
+        waiting_on: "in_flight_lanes",
+        waited_ms: waitedMs,
+        lanes: [...inFlightTasks].map((t) => ({ task: t.id, age_ms: Math.max(0, nowMs - (laneStartedAtMs.get(t.id) ?? nowMs)) })),
+        refill_held: refillClosed ?? null,
+        report: restartWait.reported,
+        old_sha: decided.oldSha,
+        new_sha: decided.newSha,
+      });
+    };
     const onDispatchTick = deps.checkFreshness ? (): void | Promise<void> => {
+      if (inFlightFreshness && inFlightTasks.size > 0) return reportRestartWait(inFlightFreshness);
       if (inFlightFreshness || inFlightTasks.size === 0 || deps.checkPause?.()) return;
       const read = deps.checkFreshness!();
       if (!isPendingFreshness(read)) return actOnDispatchFreshness(read);

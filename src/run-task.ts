@@ -1046,6 +1046,7 @@ import {
 import { EMPTY_RELEASE_AUDIT_STATE, releaseAutomatedShard, runReleaseAudit, type ReleaseAuditState } from "./lib/verify-human-release.js";
 import { censusHandRuns } from "./lib/hand-run-census.js";
 import { gunzipSync } from "node:zlib";
+import { getHeapStatistics } from "node:v8";
 import {
   ledgerRotationEntries,
   resolveLedgerUnion,
@@ -1745,7 +1746,8 @@ import {
   type FixRoundBranchClaim,
   inFlightReviewCount,
 } from "./lib/sweep.js";
-import { sampleDaemonMemory } from "./lib/daemon-memory-telemetry.js";
+import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
+import { workerThreads, type TrackedWorker } from "./lib/worker-heaps.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
 export {
@@ -38109,13 +38111,28 @@ export function orphanSweepRunActive(
     liveInflightRuns(inflightDir, isPidAlive).some((r) => r.runId === runId || r.runId.startsWith(`${runId}:fix-claim:`));
 }
 
-/** W1-T6782: sample the daemon's live memory and workload on each existing heartbeat. */
-export function daemonMemoryTelemetryReader(bootHeadSha: string | undefined): () => Record<string, unknown> {
-  return () => ({ ...sampleDaemonMemory({
-    heapStatistics: v8HeapStatistics,
-    workload: () => ({ active_workers: activeWorkerCount(), in_flight_reviews: inFlightReviewCount() }),
-    bootHeadSha,
-  }) });
+/** W1-T6782: sample the daemon's live memory and workload on each existing heartbeat. W1-T7092: each
+ *  row also carries every worker thread's heap, by creation site, role, thread id and daemon
+ *  generation, from request rounds `afterRow` starts once the row is written (never awaited; at most
+ *  one unresolved request per thread). `liveThreads` is a test seam. */
+export function daemonMemoryTelemetryReader(
+  bootHeadSha: string | undefined,
+  opts: { generation?: string; liveThreads?: () => readonly TrackedWorker[] } = {},
+): (() => Record<string, unknown>) & { afterRow: () => void } {
+  const threadHeaps = workerHeapReadings({
+    live: opts.liveThreads ?? workerThreads().live,
+    mainHeap: getHeapStatistics,
+    ...(opts.generation ? { generation: opts.generation } : {}),
+  });
+  const read = (): Record<string, unknown> => {
+    const memory = sampleDaemonMemory({
+      heapStatistics: v8HeapStatistics,
+      workload: () => ({ active_workers: activeWorkerCount(), in_flight_reviews: inFlightReviewCount() }),
+      bootHeadSha,
+    });
+    return { ...memory, ...threadHeaps.fields(memory) };
+  };
+  return Object.assign(read, { afterRow: () => threadHeaps.refresh() });
 }
 
 export async function daemonCommand(
@@ -38194,6 +38211,9 @@ export async function daemonCommand(
   // `deriveLedgerActor`'s doc (src/lib/ledger.ts) for why a worker this daemon later spawns is
   // still `"worker"` despite inheriting this same env marker.
   markDaemonProcessActor();
+  // W1-T7092: subscribe the worker-heaps registry before anything below can spawn a thread, exactly
+  // as serve does, so daemon.alive can size every worker isolate by its spawn site.
+  workerThreads();
 
   // FAIL LOUD on junk args BEFORE any spawn/lock — `rmd daemon install --dry-run` silently
   // ran the daemon (draining W1-T15) because `install`/`--dry-run` were ignored. daemon
@@ -38971,7 +38991,7 @@ export async function daemonCommand(
           ledgerPath, statusPath, log,
         }) : undefined,
         readLoopTelemetry: loopTelemetry.sample,
-        readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha),
+        readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha, { generation: runId }),
         lastStepBeforeBlock: () => lastReadPlaneStep,
         idleStarvedSupervised: process.env.RMD_IDLE_STARVED_SUPERVISED === "1" && !target.isSelf && !flagValue(rest, "--plan"),
         confirmedOpenPrCount: boardOpenPrCount.readConfirmed,
@@ -42810,6 +42830,8 @@ function* openPrViewSteps(
     const fileObservation = planFilingFiles.get(pr.number);
     const observedFiles = fileObservation?.state === "complete" ? fileObservation.paths : undefined;
     const reviewLedgerKey = reviewLedgerKeyFor(taskId, pr.number);
+    // W1-T5866: the fix lane's rows for a run-unfiled PR are written under `PR-<n>` (fixRungTaskFor), so its strikes are READ there.
+    const fixLedgerKey = taskId === undefined ? undefined : reviewLedgerKey;
     const inputDigest = reviewInputDigest(pr.headRefOid, pr.body ?? "");
     const peers = isSupersessionOwnerTaskId(taskId) ? (byTask.get(taskId) ?? []) : [];
     const newest = peers.length ? Math.max(...peers) : pr.number;
@@ -42922,13 +42944,13 @@ function* openPrViewSteps(
       instrumentEntangled: instrumentEntanglement === undefined ? undefined : true,
       instrumentEntanglementPaths: instrumentEntanglement,
       previousInstrumentEntanglementPaths: previousInstrumentEntanglement,
-      priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId), pr.headRefOid),
-      repeatedFixRefusal: fixRoundTally(ledger, taskId, pr.headRefOid).repeatedRefusal,
-      fixRefusalsAtHead: fixRoundTally(ledger, taskId, pr.headRefOid).refusals.length,
+      priorStrikes: priorStrikesFor(ledger, fixLedgerKey, currentStrikeRegimeFor(ledger, fixLedgerKey), pr.headRefOid),
+      repeatedFixRefusal: fixRoundTally(ledger, fixLedgerKey, pr.headRefOid).repeatedRefusal,
+      fixRefusalsAtHead: fixRoundTally(ledger, fixLedgerKey, pr.headRefOid).refusals.length,
       // W1-T7096: initialized at the canonical OpenPrView producer, then populated only by
       // runSweep after its progress judge rules on the exact exhausted head.
       progressEscalation: undefined,
-      strikeHistory: deriveStrikeHistory(ledger, taskId, pr.headRefOid),
+      strikeHistory: deriveStrikeHistory(ledger, fixLedgerKey, pr.headRefOid),
       supersededBy,
       // W1-T2794 — DECLARED HERE, STAMPED LATER, and the two are not the same thing. The real
       // writer is `projectMergedTaskCandidates` (lib/sweep.ts), which runs AFTER this producer

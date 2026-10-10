@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { PR_TERMINAL_STEP } from "./ledger-carry.js";
 
 export const FIX_BUDGET_JUDGE_SITES = [
   { name: "diagnose-retry", file: "src/lib/classify.ts", formerCeiling: 2 },
@@ -31,7 +32,12 @@ export interface FixProgressRound {
   reviewerFailures?: ReviewerProofFailure[];
   /** The same, read from the first `review.posted` row after this round completed. */
   reviewAfter?: ReviewerProofFailure[];
+  /** The scope amendment this round opened instead of a commit, and where it stands now. */
+  scopeAmendment?: ScopeAmendmentState;
 }
+
+/** A NEEDS_SCOPE round's amendment PR: `pending` until a `pr.terminal` row names it merged or closed. */
+export interface ScopeAmendmentState { number?: number; state: "pending" | "merged" | "closed" | "refused" }
 
 /** One reviewer `executed_fail` proof, identified by its claim and a digest of its recorded output. */
 export interface ReviewerProofFailure { claim: string; digest: string; excerpt?: string }
@@ -51,7 +57,11 @@ export interface FixProgressInput {
     oscillating: boolean; refusedRounds: number; incompleteRounds: number;
     /** Rounds whose worker reported FIXED, after which the reviewer failed the same proof with the same output.
      *  Another identical fix round cannot help; a fresh-sandbox re-review or an escalation carrying the excerpt can. */
-    reviewerOnlyFailurePersists: number };
+    reviewerOnlyFailurePersists: number;
+    /** Rounds whose scope amendment merged: the paths they lacked are now in scope, so the next round can act. */
+    scopeAmendmentsMerged?: number;
+    /** Rounds whose scope amendment is still open: a wait on that PR, not a failed attempt. */
+    scopeAmendmentsPending?: number };
   /** The excerpts behind {@link signals.reviewerOnlyFailurePersists}, for the escalation to carry. */
   persistentReviewerFailures?: ReviewerProofFailure[];
 }
@@ -125,6 +135,11 @@ export function buildFixProgressInput(facts: {
 }): FixProgressInput {
   const rounds: FixProgressRound[] = [];
   const byId = new Map<string, FixProgressRound>();
+  // An amendment PR's `pr.terminal` row carries task "SWEEP" and its own number, so it is read before the task filter.
+  const terminal = new Map<number, string>();
+  for (const row of facts.ledger) {
+    if (row.step === PR_TERMINAL_STEP && typeof row.state === "string") terminal.set(Number(row.pr_number), row.state);
+  }
   for (const [index, row] of facts.ledger.entries()) {
     const rowPr = rowPrNumber(row);
     if (facts.taskId !== undefined ? row.task_id !== facts.taskId : rowPr !== facts.prNumber) continue;
@@ -140,6 +155,13 @@ export function buildFixProgressInput(facts: {
         reviewerFailures: failuresOfDispatch(row) };
       rounds.push(round);
       if (id) byId.set(id, round);
+    } else if (row.step === "fix.scope_amendment") {
+      const round = rounds.at(-1);
+      if (!round) continue;
+      const n = Number(row.amendmentNumber ?? row.amendment_number);
+      const number = Number.isSafeInteger(n) && n > 0 ? n : round.scopeAmendment?.number;
+      const refused = row.outcome === "refused" || row.kind === "refused";
+      round.scopeAmendment = { number, state: refused ? "refused" : "pending" };
     } else if (row.step === "review.posted") {
       const failures = failuresOfReview(row);
       for (const round of rounds) if (round.completed && round.reviewAfter === undefined) round.reviewAfter = failures;
@@ -159,13 +181,21 @@ export function buildFixProgressInput(facts: {
       }
     }
   }
+  for (const round of rounds) {
+    const number = round.scopeAmendment?.number;
+    const state = number === undefined ? undefined : terminal.get(number);
+    if (state === "merged" || state === "closed") round.scopeAmendment = { number, state };
+  }
+  // A round that opened a scope amendment moved the task forward through the plan, not the branch: while the
+  // amendment is open it is a wait, and once merged the next round can do what this one could not.
+  const awaitedOrLanded = (r: FixProgressRound) => r.scopeAmendment?.state === "pending" || r.scopeAmendment?.state === "merged";
   const currentRed = sorted(facts.currentRed);
   for (const [index, round] of rounds.entries()) {
     if (round.completed && round.redAfter === undefined) round.redAfter = rounds[index + 1]?.redBefore ?? currentRed;
   }
   const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
   const signals: FixProgressInput["signals"] = {
-    noOpRounds: rounds.filter(r => r.completed && (!r.pushedHead || r.pushedHead === r.dispatchedHead)).length,
+    noOpRounds: rounds.filter(r => r.completed && !awaitedOrLanded(r) && (!r.pushedHead || r.pushedHead === r.dispatchedHead)).length,
     identicalRedSets: rounds.filter(r => r.redAfter !== undefined && same(r.redBefore, r.redAfter)).length,
     identicalDiffs: rounds.filter((r, i) => i > 0 && r.diffDigest !== undefined && r.diffDigest === rounds[i - 1].diffDigest).length,
     oscillating: rounds.length >= 2 && same(currentRed, rounds.at(-2)!.redBefore) && !same(currentRed, rounds.at(-1)!.redBefore),
@@ -173,6 +203,11 @@ export function buildFixProgressInput(facts: {
     incompleteRounds: rounds.filter(r => !r.completed).length,
     reviewerOnlyFailurePersists: 0,
   };
+  // Present only when non-zero, so a PR with no amendment keeps the input key an earlier escalation was filed under.
+  const merged = rounds.filter(r => r.scopeAmendment?.state === "merged").length;
+  const pending = rounds.filter(r => r.scopeAmendment?.state === "pending").length;
+  if (merged > 0) signals.scopeAmendmentsMerged = merged;
+  if (pending > 0) signals.scopeAmendmentsPending = pending;
   const persistentReviewerFailures: ReviewerProofFailure[] = [];
   for (const round of rounds) {
     if (round.fixOutcome !== "FIXED" || !round.reviewerFailures || !round.reviewAfter) continue;

@@ -132,6 +132,29 @@ describe("test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts", 
     assert.match(String(judgment?.parked_reason), /plan-repair/);
   });
 
+  test("an unfiled PR judges its own strike history and records its own budget-site identity", async () => {
+    const rows: Record<string, unknown>[] = Array.from({ length: 2 }, (_, i) => [
+      { task_id: "PR-7243", pr_number: 7243, step: "fix.dispatch", round_id: String(i), head_sha: "head", ci_failures: ["ci"] },
+      { task_id: "PR-7243", pr_number: 7243, step: "fix.done", round_id: String(i), head_sha: "head", subtype: "success" },
+    ]).flat();
+    const judgments: Parameters<FixProgressJudge>[0][] = [];
+    const f = fixture(rows, async facts => {
+      judgments.push(facts);
+      return undefined;
+    });
+    await runSweep([pr({ taskId: "unfiled", headRefName: "run-unfiled-123", priorStrikes: 2 })], f.deps);
+    assert.equal(judgments.length, 1);
+    assert.equal(judgments[0].taskId, "PR-7243");
+    assert.equal(judgments[0].strikesSpent, 2);
+    assert.equal(judgments[0].rounds.length, 2);
+    assert.equal(judgments[0].formerCeiling, 2);
+    const judgment = rows.find(row => row.step === "fix.progress_judged");
+    assert.equal(judgment?.task_id, "PR-7243");
+    assert.equal(judgment?.site, "fix-strike");
+    assert.equal(judgment?.former_ceiling, 2);
+    assert.deepEqual(f.fixed, []);
+  });
+
   test("a capped body continues its own remedy before any plan repair has been tried", async () => {
     const criterion = { claim: "claim", proof: "unit test: proof", met: true, reason: "keyword floor", proof_exec: "not_executable" };
     const rows: Record<string, unknown>[] = [{ task_id: "W1-T7243", step: "review.posted", pr_url: pr().prUrl,
