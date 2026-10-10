@@ -199,3 +199,10 @@ test("the fix-lane garden is registered, scheduled daily and branch-named like e
   assert.equal(GARDEN_BRANCH_RE.test("fix-lane-garden-x"), false);
   assert.equal(gardenSchedule("fix-lane").intervalFor(60_000), 60 * 60_000, "an hourly due probe finds the new UTC day");
 });
+
+test("a PR node whose author or commit author is unreadable is unknown, never an empty intervention list", () => {
+  assert.throws(() => interventionsFromPullRequest(40, {}, 0), /author unreadable/);
+  assert.throws(() => interventionsFromPullRequest(41, { author: { login: "remudero-fleet" }, commits: { nodes: [{ commit: { oid: "9999999999", committedDate: iso(-1), author: null } }] } }, 0),
+    /author unreadable/);
+  assert.deepEqual(interventionsFromPullRequest(42, { author: null }, 0), [], "a deleted account's PR is not a fleet PR");
+});

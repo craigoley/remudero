@@ -16,7 +16,7 @@
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { systemClock } from "./clock.js";
+import { fixedClock, systemClock } from "./clock.js";
 import type { CiFrictionPlanState } from "./ci-friction-gardener.js";
 import type { OwnerSearch } from "./ci-friction-remedy.js";
 import type { Escalation } from "./escalate.js";
@@ -227,14 +227,20 @@ export function interventionsFromPullRequest(pr: number, node: unknown, sinceMs:
     commits?: { nodes?: Array<{ commit?: { oid?: string; committedDate?: string; author?: { name?: string; user?: { login?: string } | null } | null } }> };
     timelineItems?: { nodes?: Array<{ createdAt?: string; actor?: { login?: string } | null }> };
   };
-  if (!isFleetActor(n.author?.login)) return [];
+  // A null author is a deleted account (not the fleet); an author the answer does not carry at all is unreadable, not "someone else".
+  const author = n.author === null ? "ghost" : n.author?.login;
+  if (author === undefined) throw new Error(`fix-lane PR #${pr} author unreadable`);
+  if (!isFleetActor(author)) return [];
   const out: OperatorIntervention[] = [];
   for (const c of n.commits?.nodes ?? []) {
     const commit = c.commit;
     const at = Date.parse(commit?.committedDate ?? "");
     if (!commit || !Number.isFinite(at) || at < sinceMs) continue;
-    const who = commit.author?.user?.login ?? commit.author?.name ?? "unknown";
-    if (!isFleetActor(who) && !isFleetActor(commit.author?.name)) out.push({ pr, at: commit.committedDate!, kind: "push", actor: who, detail: `commit ${String(commit.oid).slice(0, 9)} pushed to a fleet PR` });
+    const login = commit.author?.user?.login;
+    const name = commit.author?.name;
+    const who = login ?? name;
+    if (who === undefined) throw new Error(`fix-lane PR #${pr} commit ${String(commit.oid)} author unreadable`);
+    if (!isFleetActor(login) && !isFleetActor(name)) out.push({ pr, at: commit.committedDate!, kind: "push", actor: who, detail: `commit ${String(commit.oid).slice(0, 9)} pushed to a fleet PR` });
   }
   if (n.state === "CLOSED") for (const e of n.timelineItems?.nodes ?? []) {
     const at = Date.parse(e.createdAt ?? "");
@@ -254,10 +260,12 @@ export function readOperatorInterventions(sources: Pick<FixLaneSources, "owner" 
       const query = `query { repository(owner:${JSON.stringify(sources.owner)}, name:${JSON.stringify(sources.repo)}) { ${batch.map(pr =>
         `p${pr}:pullRequest(number:${pr}) { author { login } state commits(last:100) { nodes { commit { oid committedDate author { name user { login } } } } } timelineItems(itemTypes:[CLOSED_EVENT], last:5) { nodes { ... on ClosedEvent { createdAt actor { login } } } } }`).join(" ")} } }`;
       const body = JSON.parse(ghExec(["api", "graphql", "-f", `query=${query}`], { encoding: "utf8" }));
-      if (body.errors || !body.data?.repository) throw new Error("fix-lane PR interventions unreadable: GraphQL errors or no repository");
+      const repository = body.data === undefined || body.data === null ? undefined : body.data.repository;
+      if (body.errors || repository === undefined || repository === null) throw new Error("fix-lane PR interventions unreadable: GraphQL errors or no repository");
       for (const pr of batch) {
-        if (!body.data.repository[`p${pr}`]) throw new Error(`fix-lane PR #${pr} missing from the GraphQL answer`);
-        found.push(...interventionsFromPullRequest(pr, body.data.repository[`p${pr}`], sinceMs));
+        const node = repository[`p${pr}`];
+        if (node === undefined || node === null) throw new Error(`fix-lane PR #${pr} missing from the GraphQL answer`);
+        found.push(...interventionsFromPullRequest(pr, node, sinceMs));
       }
     }
     const listed = JSON.parse(ghExec(["pr", "list", "--repo", `${sources.owner}/${sources.repo}`, "--state", "all", "--limit", "100",
@@ -275,7 +283,7 @@ export function readOperatorInterventions(sources: Pick<FixLaneSources, "owner" 
 
 function summaryOf(inv: FixLaneInventory, now: number): string {
   const read = inv.interventions.read;
-  const lines = [`# Fix-lane report — ${new Date(now).toISOString()}`, "",
+  const lines = [`# Fix-lane report — ${fixedClock(now).iso()}`, "",
     read.ok ? `Operator interventions in the window: ${inv.interventions.total} (target 0).` : `Operator interventions: UNKNOWN — ${read.reason}`, "",
     "| class | PR-hours | PRs | interventions | remedy |", "|---|---|---|---|---|"];
   for (const p of inv.priced) {
