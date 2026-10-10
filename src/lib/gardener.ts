@@ -1,4 +1,6 @@
-import { existsSync, lstatSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { systemClock, type Clock } from "./clock.js";
@@ -6,6 +8,7 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import type { Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { runStepsAsync, runStepsSync, step, type StepEffect, type Steps } from "./git-push.js";
+import { parseTasksFromYaml } from "./plan.js";
 import { sampleBeta, seededRandom } from "./knowledge-value.js";
 
 /**
@@ -300,6 +303,81 @@ export interface GardenerDeps<W extends GardenCheckout = GardenCheckout, P exten
   /** Stands in for a shard filer's landing guard (machine-filing.ts's `machineShardLandingGuard`): a
    *  fixture sets it to land a shape lint-plan refuses, to test what follows a landing. Production never does. */
   landingRefusal?: (root: string, paths: readonly string[]) => string | undefined;
+  /** W1-T5457: lints the plan change on top of FRESH origin/main just before it lands; a fixture injects it.
+   *  Absent, {@link freshMergedPlanLint} fetches and merges for real. */
+  mergedPlanLint?: (root: string, paths: readonly string[]) => MergedPlanLintFailure | undefined;
+}
+
+/** The first plan file whose merged result would not load, and why. */
+export interface MergedPlanLintFailure {
+  file: string;
+  message: string;
+}
+
+const isPlanShard = (p: string): boolean => p.startsWith("plan/") && (p.endsWith(".yaml") || p.endsWith(".yml"));
+
+/** W1-T5457: lint the plan as it would stand once `changes` (path -> merged text) land on `base` (path -> text
+ *  of fresh origin/main's plan blobs). Pure. Only plan/ yaml paths are checked: a parse or duplicate-key
+ *  error in a changed file, or a task id a changed file now shares with another file, is the first failure. */
+export function lintMergedPlanChange(input: { base: Record<string, string>; changes: Record<string, string> }): MergedPlanLintFailure | undefined {
+  const merged: Record<string, string> = { ...input.base };
+  const checked = Object.keys(input.changes).filter((p) => isPlanShard(p));
+  for (const p of checked) merged[p] = input.changes[p]!;
+  const owner = new Map<string, string>();
+  for (const file of Object.keys(merged).filter((p) => isPlanShard(p)).sort()) {
+    let ids: string[];
+    try {
+      ids = parseTasksFromYaml(merged[file]!, file).map((t) => t.id);
+    } catch (e) {
+      // A file this change did not touch that is already broken on main is not this change's doing.
+      if (!checked.includes(file)) continue;
+      return { file, message: String((e as Error)?.message ?? e) };
+    }
+    for (const id of ids) {
+      const earlier = owner.get(id);
+      if (earlier !== undefined && earlier !== file && (checked.includes(file) || checked.includes(earlier))) {
+        return { file, message: `duplicate task id '${id}' (${file} collides with ${earlier})` };
+      }
+      owner.set(id, file);
+    }
+  }
+  return undefined;
+}
+
+/** W1-T5457: the real landing lint — fetch origin/main now, three-way merge each plan path this change
+ *  touches (ancestor = the checkout's HEAD, ours = fresh main, theirs = the working file), and lint the
+ *  result. A path outside plan/ costs nothing. */
+export function freshMergedPlanLint(root: string, paths: readonly string[]): MergedPlanLintFailure | undefined {
+  const planPaths = paths.filter((p) => isPlanShard(p));
+  if (planPaths.length === 0) return undefined;
+  const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26 });
+  const show = (ref: string, p: string): string | undefined => {
+    const r = spawnSync("git", ["-C", root, "show", `${ref}:${p}`], { encoding: "utf8", maxBuffer: 1 << 26 });
+    return r.status === 0 ? r.stdout : undefined;
+  };
+  git("fetch", "-q", "origin", "main");
+  const base: Record<string, string> = {};
+  for (const p of git("ls-tree", "-r", "--name-only", "origin/main", "--", "plan/").split("\n").filter((f) => isPlanShard(f))) base[p] = show("origin/main", p) ?? "";
+  const changes: Record<string, string> = {};
+  const dir = mkdtempSync(join(tmpdir(), "rmd-merged-plan-lint-"));
+  try {
+    for (const p of planPaths) {
+      const theirs = readFileSync(join(root, p), "utf8");
+      const ours = base[p];
+      const ancestor = show("HEAD", p);
+      if (ours === undefined || ancestor === undefined || ours === ancestor) {
+        changes[p] = theirs;
+        continue;
+      }
+      const f = (n: string, text: string) => (writeFileSync(join(dir, n), text), join(dir, n));
+      const r = spawnSync("git", ["merge-file", "-p", f("ours", ours), f("ancestor", ancestor), f("theirs", theirs)], { encoding: "utf8", maxBuffer: 1 << 26 });
+      if (r.status !== 0) return { file: p, message: r.status === null ? "git merge-file failed" : "merge conflict against fresh origin/main" };
+      changes[p] = r.stdout;
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  return lintMergedPlanChange({ base, changes });
 }
 
 export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout> {
@@ -901,6 +979,18 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
         const refused = landing && spec.landingRefusal?.(ws.root, landing.paths);
         if (refused) throw new Error(`${spec.name} gardener: drafted shard failed lint-plan's machine-filing admission (${refused})`);
         if (landing) {
+          let lint: MergedPlanLintFailure | undefined;
+          try {
+            lint = (deps.mergedPlanLint ?? freshMergedPlanLint)(ws.root, landing.paths);
+          } catch (e) {
+            deps.log(`${spec.name}.landing_lint_skipped`, { reason: String((e as Error)?.message ?? e) });
+          }
+          if (lint) {
+            // The check working, not a filing failure: no streak, no fingerprint — the next pass rebuilds on fresh main.
+            deps.log(`${spec.name}.landing_refused`, { file: lint.file, message: lint.message });
+            deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: plan.acting, actions: plan.actions.length, pr_url: null, awaiting: state.pending?.prUrl ?? null, landing_refused: true });
+            return { ran: true, plan, scorecard };
+          }
           const why = spec.review?.[acting];
           prUrl = yield* step(() => ws.land(why ? { ...landing, body: judgedByOutcomeNote(spec.name, acting, why) + landing.body } : landing));
         }

@@ -1,0 +1,80 @@
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { GARDEN_FILING_ESCALATE_AT, freshMergedPlanLint, gardenStatePath, lintMergedPlanChange, runGarden, type GardenAction, type GardenSpec, type GardenerDeps } from "../src/lib/gardener.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+
+const task = (id: string, extra = "") => `- id: ${id}\n  title: t\n  repo: remudero\n  type: implement\n  verify: auto\n${extra}`;
+const SHARD = "plan/tasks.d/W1-T1-a.yaml";
+const BASE = { [SHARD]: task("W1-T1", "  priority: 2\n") };
+
+test("W1-T5457: a change that parses alone but duplicates a key against fresh main is refused", () => {
+  // The change parses alone; layered on main's record it carries `priority` twice.
+  const changes = { [SHARD]: task("W1-T1", "  priority: 2\n  priority: 3\n") };
+  const refused = lintMergedPlanChange({ base: BASE, changes });
+  assert.equal(refused?.file, SHARD);
+  assert.match(refused?.message ?? "", /priority|duplicate/i);
+  const twin = lintMergedPlanChange({ base: BASE, changes: { "plan/tasks.d/W1-T2-b.yaml": task("W1-T1") } });
+  assert.match(twin?.message ?? "", /duplicate task id 'W1-T1'/);
+});
+
+test("W1-T5457: a clean change lands unchanged", () => {
+  const changes = { "plan/tasks.d/W1-T2-b.yaml": task("W1-T2") };
+  assert.equal(lintMergedPlanChange({ base: BASE, changes }), undefined);
+  assert.equal(lintMergedPlanChange({ base: BASE, changes: { [SHARD]: task("W1-T1", "  priority: 1\n") } }), undefined);
+});
+
+function harness(t: { after: (fn: () => void) => void }, lint: GardenerDeps["mergedPlanLint"]) {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}landing-lint-`));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, "state"));
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const landed: string[] = [];
+  const spec: GardenSpec<"a", null, GardenAction<"a">, { root: string; land: () => string; dispose: () => void }> = {
+    name: "probe",
+    classes: ["a"],
+    cheapFingerprint: () => "c",
+    inventory: () => null,
+    fingerprint: () => "f",
+    candidates: () => [{ class: "a", target: "t", reason: "r" }],
+    scorecard: () => ({}),
+    apply: () => ({ paths: [SHARD], title: "chore(plan): t", body: "b" }),
+  };
+  const deps = {
+    stateDir: join(dir, "state"),
+    repoRoot: dir,
+    openWorkspace: () => ({ root: dir, land: () => (landed.push("x"), "https://github.com/o/r/pull/1"), dispose: () => {} }),
+    log: (step: string, extra?: Record<string, unknown>) => void rows.push({ step, extra }),
+    mergedPlanLint: lint,
+  } as unknown as GardenerDeps<{ root: string; land: () => string; dispose: () => void }>;
+  return { dir, rows, landed, run: () => runGarden(spec as never, deps as never) };
+}
+
+test("W1-T5457: a refused landing is ledgered and is not a filing failure", (t) => {
+  const h = harness(t, () => ({ file: SHARD, message: "duplicate key priority" }));
+  for (let i = 0; i < GARDEN_FILING_ESCALATE_AT + 1; i++) h.run();
+  assert.deepEqual(h.landed, [], "nothing landed");
+  const refused = h.rows.filter((r) => r.step === "probe.landing_refused");
+  assert.ok(refused.length >= 1, "ledgered as landing_refused");
+  assert.equal(refused[0]!.extra?.file, SHARD);
+  assert.equal(h.rows.filter((r) => r.step === "probe.garden_filing_failed").length, 0, "not a filing failure");
+  let state: { filingFailures?: unknown; lastPass?: unknown } = {};
+  try {
+    state = JSON.parse(readFileSync(gardenStatePath(join(h.dir, "state"), "probe"), "utf8"));
+  } catch {
+    /* no state file: no streak either */
+  }
+  assert.equal(state.filingFailures, undefined);
+  assert.equal(state.lastPass, undefined, "no fingerprint recorded, so the next pass rebuilds on fresh main");
+});
+
+test("W1-T5457: a path outside the plan is not checked", (t) => {
+  const outside = { "src/lib/x.ts": "this: is: not [yaml", "docs/a.md": "- id: a\n  id: b\n" };
+  assert.equal(lintMergedPlanChange({ base: BASE, changes: outside }), undefined);
+  // The real landing lint touches no git for a source-only landing (the root here is not a repository).
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}landing-lint-src-`));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  assert.equal(freshMergedPlanLint(dir, ["src/lib/x.ts", "docs/a.md"]), undefined);
+});
