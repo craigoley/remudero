@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 6 and addendum (#8: go live only when median src module reach <= 30%); replaces the report's largest-SCC ratchet, since the real import graph has no cycle"
   plan_refs: [W1-T5701, W1-T4404, W1-T2895, W1-T5705]
   files: [src/lib/affected-suites.ts, scripts/affected-reach-baseline.json, test/the-affected-suite-reach-ratchet.test.ts, "package.json", "scripts/census-precheck.mjs", "src/lib/ci-parity.ts"]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

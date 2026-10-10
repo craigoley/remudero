@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: root-causing the stuck-PR board; operator ruling on red-main repair"
   plan_refs: [W1-T5490, W1-T5519, W1-T5806, W1-T5843, W1-T6024, W1-T90, W1-T1033, W1-T2204]
   files: [src/lib/main-health-rung.ts, src/run-task.ts, test/a-red-main-repairs-itself-fix-pr-then-revert-pr.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

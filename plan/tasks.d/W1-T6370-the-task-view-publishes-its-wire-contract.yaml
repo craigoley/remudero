@@ -12,7 +12,7 @@
   origin: "operator-authorized daemon follow-ups, 2026-10-08; console admission and phase-four contract audit"
   plan_refs: [W1-T5048, "console CONSOLE-T99"]
   files: [openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/task-view-wire-contract.test.ts, "src/lib/serve.ts"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at e4835d9c0 on 2026-10-08: src/lib/task-view.ts defines TASK_VIEW_VERSION=1 and

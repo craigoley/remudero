@@ -6,7 +6,7 @@
   verify: auto
   priority: 2.5
   risk: low
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "selector-shadow-miss:test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts"

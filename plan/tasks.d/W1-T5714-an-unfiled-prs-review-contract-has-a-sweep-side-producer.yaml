@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 9, the review subject"
   plan_refs: [W1-T5713, W1-T3704, W1-T3901, W1-T2299, W1-T2851]
   files: [src/run-task.ts, src/lib/review.ts, test/an-unfiled-prs-review-contract-has-a-sweep-side-producer.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

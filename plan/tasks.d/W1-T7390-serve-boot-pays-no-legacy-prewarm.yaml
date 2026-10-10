@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-09: Azure-host performance follow-up to #10348 (serve handoff spacing)"
   plan_refs: [W1-T5050, W1-T5052, W1-T4454]
   files: [src/run-task.ts, src/lib/serve.ts, src/lib/console-snapshot-cache.ts, test/serve-boot-pays-no-legacy-prewarm.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

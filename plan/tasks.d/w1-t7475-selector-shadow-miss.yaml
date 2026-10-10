@@ -6,7 +6,7 @@
   verify: auto
   priority: 2.5
   risk: low
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "selector-shadow-miss:test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts"
