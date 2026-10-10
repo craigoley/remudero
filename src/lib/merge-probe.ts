@@ -60,6 +60,8 @@ export async function probeMerge(input: { headSha: string; mainSha: string; git:
 }
 
 /** PR numbers a `Stacked on #N` line names, as data only. */
+const dirtyFirst = (pr: OpenPrView): number => (pr.mergeableState === "dirty" ? 0 : 1);
+
 export function stackedOnNumbers(body: string | undefined): number[] {
   const line = (body ?? "").split(/\r?\n/).find((candidate) => /^\s*(?:[-*]\s+)?(?:\*\*)?Stacked on\b/i.test(candidate));
   return line ? [...new Set([...line.matchAll(/#(\d+)/g)].map((m) => Number(m[1])))] : [];
@@ -102,7 +104,9 @@ export async function probeOpenPrMerges(
     );
     const targets = eligible
       .filter((pr) => !seen.has(`${pr.headSha}:${mainSha}`))
-      .sort((a, b) => a.lastActivityAt.localeCompare(b.lastActivityAt) || a.prNumber - b.prNumber)
+      // A PR GitHub already reads as dirty is the one whose conflict evidence the sweep is waiting on,
+      // so it takes a slot before clean-looking PRs that merely changed since the last main.
+      .sort((a, b) => dirtyFirst(a) - dirtyFirst(b) || a.lastActivityAt.localeCompare(b.lastActivityAt) || a.prNumber - b.prNumber)
       .slice(0, opts.limit ?? MERGE_PROBE_LIMIT);
     for (const pr of targets) {
       await git(["fetch", "--no-tags", "--quiet", "origin", `refs/pull/${pr.prNumber}/head`]);
