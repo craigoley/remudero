@@ -17166,10 +17166,25 @@ export async function runSweepLightPass(
   const readLedger = deps.readLedger ?? readLedgerLines;
   const selectionLedgerLines = readLedger(deps.ledgerPath);
   const selectionPrior = priorActionsFromLedger(selectionLedgerLines);
+  const freshnessBackoffs = new Set<string>();
+  for (const pr of openPrs) {
+    const key = reviewOutcomeKeyForPr(pr);
+    const refusal = selectionPrior.reviewFreshnessRefusals.get(key);
+    // A due unreadable-source probe must still reach runSweep's recovery path.
+    const probe = refusal?.probe?.loadedCodeSha === deps.reviewerCodeRecovery?.loadedCodeSha
+      ? refusal?.probe : undefined;
+    const probeDue = refusal?.freshness === "unreadable" && deps.reviewerCodeRecovery?.loadedCodeSha &&
+      refusal.attemptedAt !== undefined &&
+      now - (probe?.attemptedAt ?? refusal.attemptedAt) >=
+        Math.min(probe?.backoffMinutes ?? UNREADABLE_REVIEWER_BACKOFF_MINUTES, policy.pendingCeilingMinutes) * 60_000;
+    if (!probeDue && reviewerCodeFreshnessBackoffReason(selectionPrior.reviewFreshnessRefusals,
+      key, policy, now, deps.reviewerCodeRecovery) !== undefined) freshnessBackoffs.add(key);
+  }
   const outcomes: ReviewAdmissionOutcomes = {
     delivered: selectionPrior.reviewDelivered,
     refused: selectionPrior.reviewRefused,
     retryableThrows: selectionPrior.reviewRetryableThrows,
+    freshnessBackoffs,
   };
   observeReviewEligibility(openPrs, deps, policy, now, selectionLedgerLines, outcomes, "light");
   const queueDepth = reviewAdmissionQueueDepth(openPrs, policy, now, outcomes);
@@ -17340,6 +17355,7 @@ export interface ReviewAdmissionOutcomes {
   refused: ReadonlySet<string>;
   /** W1-T2753: optional for compatibility with callers predating timed throw backoff. */
   retryableThrows?: ReadonlyMap<string, number | undefined>;
+  freshnessBackoffs?: ReadonlySet<string>;
 }
 
 const EMPTY_RETRYABLE_REVIEW_THROWS = new Map<string, number | undefined>();
@@ -17360,6 +17376,7 @@ function reviewAdmissionOutcomeKnown(
   return (
     outcomes.delivered.has(key) ||
     outcomes.refused.has(key) ||
+    outcomes.freshnessBackoffs?.has(key) === true ||
     retryableReviewThrowBackoffReason(outcomes.retryableThrows ?? EMPTY_RETRYABLE_REVIEW_THROWS, key, policy, now) !==
       undefined
   );
