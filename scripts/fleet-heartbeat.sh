@@ -900,6 +900,129 @@ ${_io_readers}"
 fi
 [ -n "$IO_LINES" ] || IO_LINES="io_source=unreadable"
 
+# ── probe: each daemon container's memory.high and the tuner's last word (deltas between beats) ──
+# WHY: deploy/memory-high-tuner.sh (#10486) moves each daemon's memory.high, visible until now only in
+# archived ledger rows and the launcher journal. On 2026-10-10 core sat AT its ceiling (8379 MiB = 95%
+# of its 8820 MiB memory.max) still refaulting ~1 GB of page cache per 5 min. Per daemon container:
+#   mem_<c>_high_mib / _max_mib       the live cgroup memory.high and memory.max (`max` = no limit)
+#   mem_<c>_policy_high_mib           the policy floor: the tuner's recorded policy_mib, else the
+#                                     launch annotation (no learned value existed at launch), with
+#                                     mem_<c>_policy_source naming which
+#   mem_<c>_current_mib / _anon_mib / _file_mib    memory.current and memory.stat anon / file
+#   mem_<c>_high_events_delta         memory.events `high` over the beat (mem_interval_s)
+#   mem_<c>_refault_file_pages_delta  memory.stat workingset_refault_file over the beat (pages)
+#   mem_<c>_tuner_action/_reason/_ts  the tuner's last adjustment, from
+#                                     <config.root>/state/memory-high-tuned-<c>.json, else the
+#                                     latest ledger row; `none` when it has never adjusted.
+# A first beat, a recycled container (new cgroup, counters from zero) or a counter that went
+# backwards publishes `unknown` for the deltas; any unreadable file publishes `unknown`. Never 0.
+#
+# READ-ONLY AND CHEAP: one `docker ps`, one `docker inspect`, a few small cgroup files per container
+# and one bounded tail of the ledger. Nothing walks a filesystem.
+#
+# Seams for the fixtures: RMD_CGROUP_ROOT, RMD_HEARTBEAT_DOCKER.
+MEM_CGROUP_ROOT="${RMD_CGROUP_ROOT:-/sys/fs/cgroup}"
+MEM_STATE_FILE="${RMD_ROOT}/state/heartbeat-mem.txt"
+MEM_LINES=""
+MEM_RUNTIME="${RMD_HEARTBEAT_DOCKER:-docker}"
+MEM_CONTAINERS="$("$MEM_RUNTIME" ps --no-trunc --format '{{.ID}} {{.Names}}' 2>/dev/null | awk 'NF == 2 && $2 ~ /^remudero-.*daemon$/')" || MEM_CONTAINERS=""
+if [ -n "$MEM_CONTAINERS" ]; then
+  # name -> the MemoryHigh annotation the launcher started it with ("uint64 <bytes>").
+  # shellcheck disable=SC2046 # one argument per container name, by design
+  MEM_ANNOTATIONS="$("$MEM_RUNTIME" inspect $(printf '%s\n' "$MEM_CONTAINERS" | awk '{print $2}') \
+    --format '{{.Name}} {{index .HostConfig.Annotations "org.systemd.property.MemoryHigh"}}' 2>/dev/null)" || MEM_ANNOTATIONS=""
+  MEM_PREV_EPOCH=""; MEM_PREV=""
+  if [ -r "$MEM_STATE_FILE" ]; then
+    MEM_PREV_EPOCH="$(awk '$1 == "epoch" {print $2; exit}' "$MEM_STATE_FILE" 2>/dev/null)"
+    MEM_PREV="$(awk '$1 == "cg"' "$MEM_STATE_FILE" 2>/dev/null)"
+  fi
+  MEM_DT=""
+  case "$MEM_PREV_EPOCH" in ''|*[!0-9]*) : ;; *) [ "$NOW_EPOCH" -gt "$MEM_PREV_EPOCH" ] && MEM_DT=$((NOW_EPOCH - MEM_PREV_EPOCH)) ;; esac
+  MEM_SNAPSHOT="epoch ${NOW_EPOCH}"
+  mem_mib() { case "$1" in max) printf 'max' ;; ''|*[!0-9]*) printf 'unknown' ;; *) printf '%s' $(($1 / 1048576)) ;; esac; }
+  mem_num() { case "$1" in ''|*[!0-9]*) printf 'unknown' ;; *) printf '%s' "$1" ;; esac; }
+  mem_one_line() { printf '%s' "$1" | tr '\n\r' '  ' | cut -c1-400; }
+  while read -r _mem_id _mem_name; do
+    [ -n "$_mem_name" ] || continue
+    _mem_cg=""
+    for _d in "$MEM_CGROUP_ROOT/system.slice/docker-${_mem_id}.scope" "$MEM_CGROUP_ROOT/docker/${_mem_id}"; do
+      [ -r "$_d/memory.high" ] && { _mem_cg="$_d"; break; }
+    done
+    _mem_high=""; _mem_max=""; _mem_cur=""; _mem_anon=""; _mem_file=""; _mem_ev=""; _mem_rf=""
+    if [ -n "$_mem_cg" ]; then
+      _mem_high="$(cat "$_mem_cg/memory.high" 2>/dev/null)"
+      _mem_max="$(cat "$_mem_cg/memory.max" 2>/dev/null)"
+      _mem_cur="$(cat "$_mem_cg/memory.current" 2>/dev/null)"
+      _mem_ev="$(awk '$1 == "high" {print $2; exit}' "$_mem_cg/memory.events" 2>/dev/null)"
+      read -r _mem_anon _mem_file _mem_rf <<EOF_MEM_STAT
+$(awk '$1 == "anon" {a = $2} $1 == "file" {f = $2} $1 == "workingset_refault_file" {r = $2}
+       END {print (a == "" ? "-" : a), (f == "" ? "-" : f), (r == "" ? "-" : r)}' "$_mem_cg/memory.stat" 2>/dev/null)
+EOF_MEM_STAT
+    fi
+    _mem_ev="$(mem_num "$_mem_ev")"; _mem_rf="$(mem_num "$_mem_rf")"
+    MEM_LINES="${MEM_LINES}
+mem_${_mem_name}_high_mib=$(mem_mib "$_mem_high")
+mem_${_mem_name}_max_mib=$(mem_mib "$_mem_max")
+mem_${_mem_name}_current_mib=$(mem_mib "$_mem_cur")
+mem_${_mem_name}_anon_mib=$(mem_mib "$_mem_anon")
+mem_${_mem_name}_file_mib=$(mem_mib "$_mem_file")"
+    # Deltas only against the SAME container id: a recycle starts its counters from zero.
+    _mem_dev="unknown"; _mem_drf="unknown"
+    _mem_prev_line="$(printf '%s\n' "$MEM_PREV" | awk -v n="$_mem_name" -v id="$_mem_id" '$2 == n && $3 == id {print; exit}')"
+    if [ -n "$MEM_DT" ] && [ -n "$_mem_prev_line" ]; then
+      read -r _ _ _ _mem_pev _mem_prf <<EOF_MEM_PREV
+$_mem_prev_line
+EOF_MEM_PREV
+      if [ "$_mem_ev" != unknown ] && [ "$(mem_num "$_mem_pev")" != unknown ] && [ "$_mem_ev" -ge "$_mem_pev" ]; then _mem_dev=$((_mem_ev - _mem_pev)); fi
+      if [ "$_mem_rf" != unknown ] && [ "$(mem_num "$_mem_prf")" != unknown ] && [ "$_mem_rf" -ge "$_mem_prf" ]; then _mem_drf=$((_mem_rf - _mem_prf)); fi
+    fi
+    [ "$_mem_ev" != unknown ] && [ "$_mem_rf" != unknown ] && MEM_SNAPSHOT="${MEM_SNAPSHOT}
+cg ${_mem_name} ${_mem_id} ${_mem_ev} ${_mem_rf}"
+    # The tuner's word: its state file first (written with every adjustment), else the latest ledger row.
+    _mem_tuned="${RMD_ROOT}/state/memory-high-tuned-${_mem_name}.json"
+    _mem_policy="unknown"; _mem_policy_src="unknown"; _mem_act="none"; _mem_why="none"; _mem_ts="none"
+    if [ -r "$_mem_tuned" ] && grep -q "\"container\":\"${_mem_name}\"" "$_mem_tuned" 2>/dev/null; then
+      _mem_policy="$(mem_num "$(sed -n 's/.*"policy_mib":\([0-9][0-9]*\).*/\1/p' "$_mem_tuned" 2>/dev/null | head -n 1)")"
+      [ "$_mem_policy" = unknown ] || _mem_policy_src="tuned_state"
+      _mem_ts="$(sed -n 's/.*"updated_at":"\([^"]*\)".*/\1/p' "$_mem_tuned" 2>/dev/null | head -n 1)"
+      _mem_why="$(sed -n 's/.*"reason":"\([^"]*\)".*/\1/p' "$_mem_tuned" 2>/dev/null | head -n 1)"
+      # mht_record writes the reason as "<action>: <why>".
+      case "$_mem_why" in grow:*|shrink:*|restore:*|floor:*) _mem_act="${_mem_why%%:*}"; _mem_why="${_mem_why#*: }" ;; *) _mem_act="unknown" ;; esac
+    elif [ -r "$LEDGER" ]; then
+      _mem_row="$(tail -c 4000000 "$LEDGER" 2>/dev/null | grep -F '"step":"host.memory_high.adjusted"' | grep -F "\"container\":\"${_mem_name}\"" | tail -n 1)"
+      if [ -n "$_mem_row" ]; then
+        _mem_act="$(printf '%s' "$_mem_row" | sed -n 's/.*"action":"\([a-z]*\)".*/\1/p')"; [ -n "$_mem_act" ] || _mem_act="unknown"
+        _mem_ts="$(printf '%s' "$_mem_row" | sed -n 's/^{"ts":"\([^"]*\)".*/\1/p')"
+        _mem_why="$(printf '%s' "$_mem_row" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p')"
+        _mem_policy="$(mem_num "$(printf '%s' "$_mem_row" | sed -n 's/.*"policy_mib":\([0-9][0-9]*\).*/\1/p')")"
+        [ "$_mem_policy" = unknown ] || _mem_policy_src="ledger"
+      fi
+    fi
+    if [ "$_mem_policy" = unknown ]; then
+      # Never tuned: the launcher started it at the policy value, which rides as its annotation.
+      _mem_ann="$(printf '%s\n' "$MEM_ANNOTATIONS" | awk -v n="/${_mem_name}" '$1 == n && $NF ~ /^[0-9]+$/ {print $NF; exit}')"
+      if [ -n "$_mem_ann" ]; then _mem_policy="$(mem_mib "$_mem_ann")"; _mem_policy_src="launch_annotation"; fi
+    fi
+    MEM_LINES="${MEM_LINES}
+mem_${_mem_name}_policy_high_mib=${_mem_policy}
+mem_${_mem_name}_policy_source=${_mem_policy_src}
+mem_${_mem_name}_high_events_delta=${_mem_dev}
+mem_${_mem_name}_refault_file_pages_delta=${_mem_drf}
+mem_${_mem_name}_tuner_action=${_mem_act}
+mem_${_mem_name}_tuner_ts=${_mem_ts:-unknown}
+mem_${_mem_name}_tuner_reason=$(mem_one_line "${_mem_why:-unknown}")"
+  done <<EOF_MEM_CONTAINERS
+$MEM_CONTAINERS
+EOF_MEM_CONTAINERS
+  MEM_LINES="mem_containers=$(printf '%s\n' "$MEM_CONTAINERS" | awk '{print $2}' | paste -sd, -)
+mem_interval_s=${MEM_DT:-unknown}${MEM_LINES}"
+  if [ "${RMD_HEARTBEAT_DRY_RUN:-}" != "1" ]; then
+    mkdir -p "$(dirname "$MEM_STATE_FILE")" 2>/dev/null && printf '%s\n' "$MEM_SNAPSHOT" > "${MEM_STATE_FILE}.tmp.$$" 2>/dev/null &&
+      mv -f "${MEM_STATE_FILE}.tmp.$$" "$MEM_STATE_FILE" 2>/dev/null
+  fi
+fi
+[ -n "$MEM_LINES" ] || MEM_LINES="mem_source=unreadable"
+
 LEDGER_BYTES="unknown"
 if [ -r "$LEDGER" ]; then
   LEDGER_BYTES="$(wc -c < "$LEDGER" 2>/dev/null | tr -d ' ')"
@@ -1249,6 +1372,10 @@ fi
 # Device pressure is APPENDED: absent device keys mean nothing was measured, never an idle disk.
 PAYLOAD="${PAYLOAD}
 ${IO_LINES}"
+
+# Memory is APPENDED the same way: absent mem_ keys mean nothing was measured, never an idle cgroup.
+PAYLOAD="${PAYLOAD}
+${MEM_LINES}"
 
 # The subject line IS the phone-readable answer — it is what shows on the branch listing without
 # opening anything. Both verdicts ride in it, because the two failures it separates (a dead
