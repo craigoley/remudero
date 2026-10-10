@@ -88,6 +88,17 @@ function droppableCacheBytes(read: (path: string) => string): number {
   }
 }
 
+/** One `node --test` file child's expected peak. OBSERVED 2026-10-10 in the core daemon container: a worker's
+ *  default-concurrency run held 7–8 file children at 300–570 MB RSS each, 2.8 GB for the tree. An estimate, not a limit. */
+export const TEST_FILE_PEAK_BYTES = 512 * 1024 ** 2;
+
+/** How many test files `headroom` holds at once at `perFileBytes` each: at least one, uncapped here (the CPU-derived
+ *  count caps it where it applies). Undefined with no reading (macOS): memory then sizes nothing. */
+export function memoryTestConcurrency(headroom: number | undefined, perFileBytes: number = TEST_FILE_PEAK_BYTES): number | undefined {
+  if (headroom === undefined || !Number.isFinite(headroom) || !(perFileBytes > 0)) return undefined;
+  return Math.max(1, Math.floor(headroom / perFileBytes));
+}
+
 /** Host load facts, injectable so a test fixes them. */
 export interface HostLoad {
   cores: number;
@@ -338,6 +349,10 @@ export interface TestSlotOptions {
   /** This run's expected peak (bytes). Set, a slot opens to it only while the memory headroom holds it plus every
    *  other live holder's named peak; unset, memory sizes nothing (today's count-only admission). */
   memoryBytes?: number;
+  /** A test run's per-file peak (bytes). Set, the run is sized by memory too: its concurrency is the smaller of the
+   *  CPU-derived count and what the headroom, less the live holders' named peaks, holds at this much per file; its
+   *  record names concurrency × this as its peak, and a slot opens to it while the headroom holds one file beside them. */
+  perFileBytes?: number;
   /** The host's memory headroom in bytes; default {@link readMemoryHeadroom}. */
   memoryHeadroom?: () => number | undefined;
 }
@@ -419,6 +434,14 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
   const pollMs = opts.pollMs ?? TEST_SLOT_POLL_MS;
   const startedAt = clock.now();
   const startedIso = clock.iso();
+  const headroomOf = opts.memoryHeadroom ?? readMemoryHeadroom;
+  /** The CPU-derived concurrency, lowered to what the headroom less `reservedBytes` holds when the run names a per-file peak. */
+  const sized = (reservedBytes = 0): number => {
+    const cpu = testRunConcurrency(load(), slots);
+    if (opts.perFileBytes === undefined) return cpu;
+    const headroom = headroomOf();
+    return Math.min(cpu, memoryTestConcurrency(headroom === undefined ? undefined : headroom - reservedBytes, opts.perFileBytes) ?? cpu);
+  };
   const unslotted = (outcome: TestSlotLease["outcome"], concurrency: number, note: string): TestSlotLease => ({
     outcome, concurrency, waitedMs: clock.now() - startedAt, note, refresh: () => {}, release: () => {},
   });
@@ -431,22 +454,23 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
     if ((statSync(dir).mode & 0o777) !== 0o777 && statSync(dir).uid === process.getuid?.()) chmodSync(dir, 0o777);
   } catch (error) {
     // Uncoordinated is still a run: the named slot_unavailable outcome, never a refusal.
-    const concurrency = testRunConcurrency(load(), slots);
+    const concurrency = sized();
     return unslotted("slot_unavailable", concurrency,
       `test slot UNAVAILABLE (${dir}: ${String((error as Error)?.message ?? error)}); ran unslotted at --test-concurrency=${concurrency}`);
   }
   const ownerNonce = randomUUID();
   const processStart = testSlotProcessFacts(opts.pid ?? process.pid)?.start;
   let concurrency = 1;
+  /** The peak this run's record names: its own estimate, or its per-file peak at the concurrency it was granted. */
+  const ownPeak = (): number | undefined => opts.memoryBytes ?? (opts.perFileBytes === undefined ? undefined : concurrency * opts.perFileBytes);
   const record = (): TestSlotHolder => ({
     pid: opts.pid ?? process.pid, host: host(), bootId: bootId(), startedAt: startedIso,
     heartbeatAt: clock.iso(), label, ownerNonce, processStart, concurrency, pidNs: pidNamespace(),
-    ...(opts.memoryBytes === undefined ? {} : { memoryBytes: opts.memoryBytes }),
+    ...(ownPeak() === undefined ? {} : { memoryBytes: ownPeak() }),
   });
   const mib = (bytes: number): number => Math.round(bytes / 1024 ** 2);
-  /** Why slot `slot` stays closed to this run on memory (its own record not counted), or undefined when it may take it. */
-  const memoryShort = (slot: number): string | undefined => {
-    if (opts.memoryBytes === undefined) return undefined;
+  /** The other slots' records (slot `slot`'s own never counted). */
+  const othersThan = (slot: number): (TestSlotHolder | null)[] => {
     const others: (TestSlotHolder | null)[] = [];
     for (let j = 1; j <= slots; j += 1) {
       if (j === slot) continue;
@@ -456,9 +480,18 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
         // No record in slot j: nobody there to make room for.
       }
     }
+    return others;
+  };
+  const namedPeaks = (others: (TestSlotHolder | null)[]): number => others.reduce((sum, held) => sum + (held?.memoryBytes ?? 0), 0);
+  /** Why slot `slot` stays closed to this run on memory (its own record not counted), or undefined when it may take it. */
+  const memoryShort = (slot: number): string | undefined => {
+    // A sized test run needs room for one file: it shrinks its concurrency to whatever more the headroom holds.
+    const own = opts.memoryBytes ?? opts.perFileBytes;
+    if (own === undefined) return undefined;
+    const others = othersThan(slot);
     if (others.length === 0) return undefined;
-    const headroom = (opts.memoryHeadroom ?? readMemoryHeadroom)();
-    const need = others.reduce((sum, held) => sum + (held?.memoryBytes ?? 0), opts.memoryBytes);
+    const headroom = headroomOf();
+    const need = namedPeaks(others) + own;
     if (headroom === undefined || headroom >= need) return undefined;
     return `memory headroom ${mib(headroom)} MiB < ${mib(need)} MiB for this run and the live holders' peaks`;
   };
@@ -467,7 +500,7 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
     return yield* waitForSlot();
   } catch (error) {
     // Uncoordinated is still a run: the named slot_unavailable outcome, never a refusal.
-    const concurrency = testRunConcurrency(load(), slots);
+    const concurrency = sized();
     return unslotted("slot_unavailable", concurrency,
       `test slot UNAVAILABLE (${dir}: ${String((error as Error)?.message ?? error)}); ran unslotted at --test-concurrency=${concurrency}`);
   }
@@ -485,7 +518,7 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
             break;
           }
           try {
-            concurrency = testRunConcurrency(load(), slots);
+            concurrency = opts.perFileBytes === undefined ? testRunConcurrency(load(), slots) : sized(namedPeaks(othersThan(i)));
             writeFileSync(path, JSON.stringify(record()), { flag: "wx", mode: 0o666 });
             const waitedMs = clock.now() - startedAt;
             if (announced) log(JSON.stringify({ step: "test_slot.acquired", label, slot: i, waitedMs, dir }));

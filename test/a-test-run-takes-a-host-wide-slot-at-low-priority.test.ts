@@ -102,7 +102,8 @@ test("coverage shard argv carries an explicit --test-concurrency below the host 
   const dir = slotDir();
   const { calls, spawn } = coverageSpawn();
   try {
-    const result = runCoverage(root, spawn, { dir, slots: 2, load: IDLE_8_CORES, binaryExists: NO_PRIORITY_BINARIES, log: () => {} });
+    // No memory reading: this pins the CPU-derived count (memory sizing is a-worker-test-run-is-sized-by-memory-headroom).
+    const result = runCoverage(root, spawn, { dir, slots: 2, load: IDLE_8_CORES, memoryHeadroom: () => undefined, binaryExists: NO_PRIORITY_BINARIES, log: () => {} });
     assert.equal(result.ok, true, result.detail);
     const shards = calls.filter(isShard);
     assert.equal(shards.length, ciParity.CI_COVERAGE_SHARD_COUNT, "every coverage shard must be inspected");
