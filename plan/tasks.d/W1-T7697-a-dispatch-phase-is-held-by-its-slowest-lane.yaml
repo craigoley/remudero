@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-10: core daemon ledger 10:53-12:16Z, lane 1 W1-T5866"
   plan_refs: [W1-T5761, W1-T6274, W1-T5308, W1-T3793, W1-T5345, W1-T4416, W1-T4662, W1-T147]
   files: [src/lib/daemon.ts, src/run-task.ts, test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

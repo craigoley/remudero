@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-10: core ledger, PR #10551 (W1-T7243) sweep.fix.checkout_claim_declined rows; design approved by the operator 2026-10-10"
   plan_refs: [W1-T6355, W1-T6362, W1-T5974, W1-T3822, W1-T4196, W1-T7243, W1-T100]
   files: [src/run-task.ts, src/lib/sweep.ts, test/a-stale-dirty-fix-owner-is-preserved-and-reclaimed.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

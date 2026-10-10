@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-09: idle instances produce no memory samples, so site and console baselines are unmeasured"
   plan_refs: [W1-T6782, W1-T7092, W1-T1274, W1-T2744, W1-T147]
   files: [src/lib/daemon.ts, test/an-idle-daemon-still-says-what-its-memory-is.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
