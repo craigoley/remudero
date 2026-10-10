@@ -23,7 +23,7 @@ function lane() {
   const base = repo.git("rev-parse", "HEAD");
   const wt = repo.addWorktree(join(repo.dir, "worktrees", `run-${RUN}`), `run-${RUN}`);
   const gitdir = wt.git("rev-parse", "--absolute-git-dir");
-  writeFileSync(`${wt.dir}.base`, `${base}\ngitdir: ${gitdir}\n`);
+  writeFileSync(join(repo.dir, "worktrees", `run-${RUN}.base`), `${base}\ngitdir: ${gitdir}\n`);
   return { repo, wt, base };
 }
 
