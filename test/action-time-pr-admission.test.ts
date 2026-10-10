@@ -4,7 +4,9 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { classifyContribution, observeContributorAdmission, observeContributorAdmissionSync, readAdmissionRest, readAdmissionRestAsync, type AdmissionSettings, type AdmissionRead } from "../src/lib/contributor-admission.js";
+import { classifyContribution, readAdmissionRest, readAdmissionRestAsync, type AdmissionSettings, type AdmissionRead } from "../src/lib/contributor-admission.js";
+import { observeContributorAdmission, observeContributorAdmissionSync } from "../src/lib/arm-auto-merge.js";
+import { clockFromMillisFn } from "../src/lib/clock.js";
 import { validateConfigShape } from "../src/lib/config-schema.js";
 import { buildSweepEffects, reviewCommand, depReviewCommand, fixCommand } from "../src/run-task.js";
 import { attemptArmAsync, armAutoMergeAtOpenAsync, armAutoMergeDetailedAsync, realArmDeps, realArmDepsAsync } from "../src/lib/arm-auto-merge.js";
@@ -69,7 +71,7 @@ test("W1-T7753: direct and sweep PR actions share fresh admission", async () => 
 test("W1-T7753: owner override and scoped trusted flows do not require another reviewer", async () => {
   for (const [id, type, reason] of [[1, "User", "owner"], [2, "Bot", "scoped-service"]] as const) {
     const records: Record<string, unknown>[] = [];
-    await observeContributorAdmission(settings, target, "auto-merge", (_step, fields) => records.push(fields), async () => ({ status: 200, body: row(id, type) }), () => 10);
+    await observeContributorAdmission(settings, target, "auto-merge", (_step, fields) => records.push(fields), async () => ({ status: 200, body: row(id, type) }), clockFromMillisFn(() => 10));
     assert.equal(records[0].outcome, "trusted");
     assert.equal(records[0].reason, reason);
     assert.equal(records[0].mode, "shadow");
@@ -81,9 +83,9 @@ test("W1-T7753: owner override and scoped trusted flows do not require another r
 test("W1-T7753: stale admission is isolated to its PR and head", async () => {
   const records: Record<string, unknown>[] = [];
   let reads = 0;
-  await observeContributorAdmission(settings, target, "review", (_step, fields) => records.push(fields), async () => ({ status: 200, body: row(1, "User", ++reads === 1 ? sha : "b".repeat(40)) }), () => 10);
+  await observeContributorAdmission(settings, target, "review", (_step, fields) => records.push(fields), async () => ({ status: 200, body: row(1, "User", ++reads === 1 ? sha : "b".repeat(40)) }), clockFromMillisFn(() => 10));
   assert.equal(records[0].reason, "head-changed");
-  await observeContributorAdmission(settings, target, "review", (_step, fields) => records.push(fields), async () => ({ status: 200, body: row() }), () => 10);
+  await observeContributorAdmission(settings, target, "review", (_step, fields) => records.push(fields), async () => ({ status: 200, body: row() }), clockFromMillisFn(() => 10));
   assert.equal(records[1].outcome, "trusted");
   assert.notEqual(records[0].receiptKey, records[1].receiptKey);
 });
@@ -110,13 +112,13 @@ test("membership 404 requires a numeric identity-bound positive control; outages
       : path === "user" ? { status: 200, body: { id: 1, login: "operator", type: "User" } }
       : path.endsWith("/operator") && capable ? { status: 200, body: { state: "active", user: { id: 1 }, organization: { id: 9 } } }
       : { status: 404, body: {} };
-    await observeContributorAdmission(settings, target, "review", (_s, f) => records.push(f), read, () => 10);
+    await observeContributorAdmission(settings, target, "review", (_s, f) => records.push(f), read, clockFromMillisFn(() => 10));
     assert.equal(records[0].outcome, capable ? "confirmed-external" : "unknown");
   }
   const records: Record<string, unknown>[] = [];
-  await observeContributorAdmission(settings, target, "repair", (_s, f) => records.push(f), async () => { throw Error("timeout"); }, () => 10);
+  await observeContributorAdmission(settings, target, "repair", (_s, f) => records.push(f), async () => { throw Error("timeout"); }, clockFromMillisFn(() => 10));
   assert.equal(records[0].reason, "origin-unreadable");
-  await observeContributorAdmission(settings, target, "repair", (_s, f) => records.push(f), async () => ({ status: 200, body: { number: 42, head: { sha }, base: { repo: { id: 3 } } } }), () => 10);
+  await observeContributorAdmission(settings, target, "repair", (_s, f) => records.push(f), async () => ({ status: 200, body: { number: 42, head: { sha }, base: { repo: { id: 3 } } } }), clockFromMillisFn(() => 10));
   assert.equal(records[1].outcome, "unknown");
 });
 
@@ -149,7 +151,7 @@ test("membership cache is positive-only, expires, and never caches PR heads or o
     memberships++;
     return { status: 200, body: { user: { id: 8 }, organization: { id: 9 }, state: "active" } };
   };
-  const run = (s = policy) => observeContributorAdmission(s, target, "review", (_s, f) => records.push(f), read, () => now);
+  const run = (s = policy) => observeContributorAdmission(s, target, "review", (_s, f) => records.push(f), read, clockFromMillisFn(() => now));
   await run(); await run();
   assert.equal(memberships, 1); assert.equal(pulls, 4);
   now = 111; await run(); assert.equal(memberships, 2);
@@ -160,8 +162,8 @@ test("membership cache is positive-only, expires, and never caches PR heads or o
     const s = { ...policy, policy: { ...policy.policy, version: `negative-${state}` } };
     const negative: AdmissionRead = (path) => path.includes("/pulls/") ? { status: 200, body: row(8) }
       : (++count, { status: 200, body: { user: { id: 8 }, organization: { id: 9 }, state } });
-    await observeContributorAdmission(s, target, "review", () => {}, negative, () => now);
-    await observeContributorAdmission(s, target, "review", () => {}, negative, () => now);
+    await observeContributorAdmission(s, target, "review", () => {}, negative, clockFromMillisFn(() => now));
+    await observeContributorAdmission(s, target, "review", () => {}, negative, clockFromMillisFn(() => now));
     assert.equal(count, 2);
   }
 });
@@ -183,24 +185,24 @@ test("action-time reconciliation names invalid, changed, stale and unreadable co
       const response = ++count === 1 ? scenario.first : scenario.second;
       if (response instanceof Error) throw response;
       return response ?? { status: 200, body: row() };
-    }, () => 10);
+    }, clockFromMillisFn(() => 10));
     assert.equal(reason, scenario.reason);
   }
   for (const bad of [{ ...settings, mode: "enforce" }, { ...settings, organizations: [{ id: 9, login: "bad/namespace" }] }]) {
     let reason: unknown;
-    await observeContributorAdmission(bad as AdmissionSettings, target, "review", (_s, f) => { reason = f.reason; }, () => assert.fail("invalid settings never read"), () => 10);
+    await observeContributorAdmission(bad as AdmissionSettings, target, "review", (_s, f) => { reason = f.reason; }, () => assert.fail("invalid settings never read"), clockFromMillisFn(() => 10));
     assert.equal(reason, "invalid-action-config");
   }
   let now = 0;
   let reason: unknown;
-  await observeContributorAdmission(settings, target, "review", (_s, f) => { reason = f.reason; }, () => { now += 101; return { status: 200, body: row() }; }, () => now);
+  await observeContributorAdmission(settings, target, "review", (_s, f) => { reason = f.reason; }, () => { now += 101; return { status: 200, body: row() }; }, clockFromMillisFn(() => now));
   assert.equal(reason, "stale-action-evidence");
   const mutable = structuredClone(settings);
   let count = 0;
   await observeContributorAdmission(mutable, target, "review", (_s, f) => { reason = f.reason; }, () => {
     if (++count === 2) mutable.policy.version = "v2";
     return { status: 200, body: row() };
-  }, () => 10);
+  }, clockFromMillisFn(() => 10));
   assert.equal(reason, "policy-changed");
 });
 
@@ -211,7 +213,7 @@ test("membership namespace mismatches and read errors never admit or close a PR"
       if (path.includes("/pulls/")) return { status: 200, body: row(8) };
       if (response instanceof Error) throw response;
       return response;
-    }, () => 10);
+    }, clockFromMillisFn(() => 10));
     assert.equal(outcome, "unknown");
   }
 });

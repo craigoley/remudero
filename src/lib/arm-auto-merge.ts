@@ -23,7 +23,7 @@
  * decomposition step that lifts those shared REST readings into their own lib module could then
  * have both run-task.ts and this file import the ONE copy; noted as a follow-up, not done here.
  */
-import { systemClock } from "./clock.js";
+import { systemClock, type Clock } from "./clock.js";
 import { createHash } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
@@ -46,7 +46,8 @@ import {
 } from "./plan-pr-merge-safety.js";
 import { readLedgerLines } from "./status.js";
 import { ghExec, ghJsonAsync, ghTextAsync } from "./github-transport.js";
-import { classifyContribution, contributorAdmissionSteps, readAdmissionRest, readAdmissionRestAsync, type AdmissionRead } from "./contributor-admission.js";
+import { classifyContribution, contributorAdmissionSteps, readAdmissionRest, readAdmissionRestAsync,
+  type AdmissionRead, type AdmissionSettings, type AdmissionTarget, type AdmissionAction, type AdmissionRecord } from "./contributor-admission.js";
 import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
 import {
   ghJson,
@@ -695,10 +696,29 @@ function* armAdmissionSteps(prUrl: string, head: string | undefined, getConfig: 
   if (!target) return;
   let config: Config;
   try { config = getConfig(); }
-  catch { console.log("contributor_admission.shadow: config-unavailable; existing arm gates unchanged"); return; }
+  catch {
+    // Unavailable config cannot opt into shadow reads or replace an existing quality gate.
+    console.log("contributor_admission.shadow: config-unavailable; existing arm gates unchanged"); return;
+  }
   yield* contributorAdmissionSteps(config.contributorAdmission, { ...target, headSha: head }, "auto-merge",
     (event, fields) => console.log(`${event} ${JSON.stringify(fields)}`), read, undefined,
     (...args) => classifyContribution(...args));
+}
+
+// Drivers live at this existing effect boundary, not in the origin mapper: importing git-push
+// from contributor-admission closes a review -> open-prs-rest -> origin-mapper import ring.
+export async function observeContributorAdmission(
+  settings: AdmissionSettings | undefined, target: AdmissionTarget, action: AdmissionAction, log: AdmissionRecord,
+  read: AdmissionRead = readAdmissionRestAsync, clock?: Pick<Clock, "now">,
+): Promise<void> {
+  await runStepsAsync(contributorAdmissionSteps(settings, target, action, log, read, clock));
+}
+
+export function observeContributorAdmissionSync(
+  settings: AdmissionSettings | undefined, target: AdmissionTarget, action: AdmissionAction, log: AdmissionRecord,
+  read: AdmissionRead = readAdmissionRest, classify?: typeof classifyContribution,
+): void {
+  runStepsSync(contributorAdmissionSteps(settings, target, action, log, read, undefined, classify));
 }
 
 /** W1-T5748 — the merge-safety readings, with git run in the repo clone the merge probe uses. */

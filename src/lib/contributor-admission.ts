@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
-import { systemClock } from "./clock.js";
+import { systemClock, type Clock } from "./clock.js";
 import { ghExec, ghTextAsync, splitGhHeaderBlock } from "./github-transport.js";
-import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
 
 export interface ContributionActor { id?: number; type?: string; login?: string }
 export interface ContributionRepository { id?: number; fullName?: string }
@@ -56,7 +55,8 @@ export interface AdmissionTarget { owner: string; repo: string; prNumber: number
 export interface AdmissionResponse { status: number; body: unknown }
 export type AdmissionRead = (path: string) => AdmissionResponse | Promise<AdmissionResponse>;
 export type AdmissionObserver = (target: AdmissionTarget, action: AdmissionAction) => Promise<void>;
-type AdmissionRecord = (step: string, fields: Record<string, unknown>) => void;
+export type AdmissionRecord = (step: string, fields: Record<string, unknown>) => void;
+type AdmissionSteps = Generator<() => unknown, void, unknown>;
 
 // Positive membership only, policy-scoped and bounded. PR origins and negative/unknown reads
 // are NEVER cached; each action re-reads the PR, including after a membership round trip.
@@ -68,7 +68,10 @@ function admissionResponse(text: string): AdmissionResponse {
   const status = /^HTTP\/\S+ (\d{3})/m.exec(headers);
   if (!status) return { status: 0, body: undefined };
   try { return { status: Number(status[1]), body: JSON.parse(body) }; }
-  catch { return { status: 0, body: undefined }; } // malformed response is unreadable, not a negative identity
+  catch {
+    // Malformed response is unreadable, not a negative identity.
+    return { status: 0, body: undefined };
+  }
 }
 
 function failedAdmissionResponse(error: unknown): AdmissionResponse {
@@ -80,12 +83,18 @@ function failedAdmissionResponse(error: unknown): AdmissionResponse {
 
 export function readAdmissionRest(path: string): AdmissionResponse {
   try { return admissionResponse(ghExec(["api", path, "-i"], { encoding: "utf8", timeout: ADMISSION_READ_TIMEOUT_MS, maxBuffer: 1 << 20 })); }
-  catch (error) { return failedAdmissionResponse(error); }
+  catch (error) {
+    // Preserve an HTTP response from the failed child; absent response bytes remain unreadable.
+    return failedAdmissionResponse(error);
+  }
 }
 
 export async function readAdmissionRestAsync(path: string): Promise<AdmissionResponse> {
   try { return admissionResponse(await ghTextAsync(["api", path, "-i"], { timeout: ADMISSION_READ_TIMEOUT_MS, maxBuffer: 1 << 20 })); }
-  catch (error) { return failedAdmissionResponse(error); }
+  catch (error) {
+    // Preserve the same HTTP/transport distinction on the daemon's asynchronous transport.
+    return failedAdmissionResponse(error);
+  }
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -94,10 +103,11 @@ function record(value: unknown): Record<string, unknown> {
 
 export function* contributorAdmissionSteps(
   settings: AdmissionSettings | undefined, target: AdmissionTarget, action: AdmissionAction,
-  log: AdmissionRecord, read: AdmissionRead, now: () => number = () => systemClock.now(),
+  log: AdmissionRecord, read: AdmissionRead, clock: Pick<Clock, "now"> = systemClock,
   classify: typeof classifyContribution = classifyContribution,
-): Steps<void> {
+): AdmissionSteps {
   if (settings === undefined) return;
+  const now = () => clock.now();
   const snapshot = JSON.stringify(settings);
   const started = now();
   let subject: AdmissionSubject = { repositoryId: settings.repositoryId, prNumber: target.prNumber,
@@ -118,8 +128,11 @@ export function* contributorAdmissionSteps(
   }
   const path = `repos/${target.owner}/${target.repo}/pulls/${target.prNumber}`;
   let response: AdmissionResponse;
-  try { response = yield* step(() => read(path)); }
-  catch { finish("origin-unreadable"); return; }
+  try { response = yield* admissionReadStep(read, path); }
+  catch {
+    // This PR's origin read failed; shadow observation records unknown and does not refuse effects.
+    finish("origin-unreadable"); return;
+  }
   if (response.status !== 200) { finish("origin-unreadable"); return; }
   const pull = record(response.body);
   const head = record(pull.head);
@@ -139,24 +152,27 @@ export function* contributorAdmissionSteps(
       verifiedMembers.delete(key);
       let state: MembershipEvidence["state"] = "unknown";
       try {
-        const membership = yield* step(() => read(`orgs/${namespace.login}/memberships/${actor.login}`));
+        const membership = yield* admissionReadStep(read, `orgs/${namespace.login}/memberships/${actor.login}`);
         const body = record(membership.body);
         if (membership.status === 200 && record(body.user).id === actor.id && record(body.organization).id === organizationId) {
           if (body.state === "active") state = "member";
           else if (body.state === "pending") state = "not-member";
         } else if (membership.status === 404) {
           // Same credential, fresh positive control: unauthorized/hidden org 404s remain unknown.
-          const viewer = yield* step(() => read("user"));
+          const viewer = yield* admissionReadStep(read, "user");
           const principal = record(viewer.body);
           if (viewer.status === 200 && validId(principal.id as number) && typeof principal.login === "string"
             && /^[A-Za-z0-9-]+$/.test(principal.login)) {
-            const control = yield* step(() => read(`orgs/${namespace.login}/memberships/${principal.login}`));
+            const control = yield* admissionReadStep(read, `orgs/${namespace.login}/memberships/${principal.login}`);
             const proof = record(control.body);
             if (control.status === 200 && proof.state === "active" && record(proof.user).id === principal.id
               && record(proof.organization).id === organizationId) state = "not-member";
           }
         }
-      } catch { state = "unknown"; } // read outage cannot become non-membership or block another PR
+      } catch {
+        // Read outage cannot become non-membership or block another PR; evidence stays unknown.
+        state = "unknown";
+      }
       const evidence: MembershipEvidence = { actorId: actor.id, organizationId, state, observedAtMs: now() };
       memberships.push(evidence);
       if (state === "member") {
@@ -165,8 +181,11 @@ export function* contributorAdmissionSteps(
       }
     }
   }
-  try { response = yield* step(() => read(path)); }
-  catch { finish("origin-recheck-unreadable"); return; }
+  try { response = yield* admissionReadStep(read, path); }
+  catch {
+    // A failed recheck invalidates this observation, never a prior trusted result on another PR.
+    finish("origin-recheck-unreadable"); return;
+  }
   const current = record(response.body);
   if (response.status !== 200) { finish("origin-recheck-unreadable"); return; }
   if (record(current.head).sha !== subject.headSha) { finish("head-changed"); return; }
@@ -179,18 +198,8 @@ export function* contributorAdmissionSteps(
   finish();
 }
 
-export async function observeContributorAdmission(
-  settings: AdmissionSettings | undefined, target: AdmissionTarget, action: AdmissionAction, log: AdmissionRecord,
-  read: AdmissionRead = readAdmissionRestAsync, now?: () => number,
-): Promise<void> {
-  await runStepsAsync(contributorAdmissionSteps(settings, target, action, log, read, now));
-}
-
-export function observeContributorAdmissionSync(
-  settings: AdmissionSettings | undefined, target: AdmissionTarget, action: AdmissionAction, log: AdmissionRecord,
-  read: AdmissionRead = readAdmissionRest, classify?: typeof classifyContribution,
-): void {
-  runStepsSync(contributorAdmissionSteps(settings, target, action, log, read, undefined, classify));
+function* admissionReadStep(read: AdmissionRead, path: string): Generator<() => unknown, AdmissionResponse, unknown> {
+  return (yield () => read(path)) as AdmissionResponse;
 }
 
 /** Authenticated REST evidence only. An absent field stays absent; a deleted repo stays null.

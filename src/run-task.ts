@@ -1029,7 +1029,8 @@ import {
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
 import { clockFromDateFn, clockFromMillisFn, fixedClock, systemClock, type Clock } from "./lib/clock.js";
-import { observeContributorAdmission, type AdmissionObserver } from "./lib/contributor-admission.js";
+import type { AdmissionObserver } from "./lib/contributor-admission.js";
+import { observeContributorAdmission } from "./lib/arm-auto-merge.js";
 import {
   VERIFY_HUMAN_JUDGED_STEP,
   judgeVerifyHumanShard,
