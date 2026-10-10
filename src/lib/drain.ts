@@ -1401,6 +1401,9 @@ export interface DrainDeps extends TaskPreconditionOptions {
    *  `refreshMerged` read, including PRs not attributable to a task on current main, never a second
    *  GitHub read. Sizes only the multi-lane path alongside `DrainOpts.wipLimit`. */
   openPrCount?: () => number;
+  /** The reading behind `checkQueueGovernor`'s most recent ADMISSION (undefined after a deferral or
+   *  before any consultation). Present, it sizes the lane budget — see `LaneBudgetInput.queueAdmission`. */
+  readQueueAdmission?: () => QueueAdmissionReading | undefined;
 }
 
 /** The drain loop. Deterministic, with no LLM decisions. Each iteration: re-derive status, check
@@ -1847,7 +1850,15 @@ export interface LaneBudgetInput {
   wipLimit?: number;
   /** The current observed open-PR count — the governor's other input. */
   openPrCount?: number;
+  /** The queue governor's own ADMITTING reading this pass, when the wiring exposes it. Present, it
+   *  sizes the budget instead of the static `wipLimit`/`openPrCount` pair: the governor admits against
+   *  its adaptive bound less stuck PRs (#10510), so the static pair could size an admitted pass to zero
+   *  and idle every lane behind a governor that said yes (measured 2026-10-10 13:38-14:01Z). */
+  queueAdmission?: QueueAdmissionReading;
 }
+
+/** The fields of an admitting {@link QueueGovernorResult} that size a lane pass. */
+export type QueueAdmissionReading = Pick<QueueGovernorResult, "wipLimit" | "observedOpenCount" | "stuckOwnedCount" | "tier" | "baseWipLimit">;
 
 /** THE GOVERNOR IS THE CEILING, NOT A SUGGESTION: how many tasks a pass may dispatch this tick —
  *  `min(laneCount, wipLimit - openPrCount)`, floored at 0. Omitting either governor input leaves it
@@ -1855,9 +1866,29 @@ export interface LaneBudgetInput {
  *  guard here carries. Pure, no I/O, never negative. */
 export function laneDispatchBudget(input: LaneBudgetInput): number {
   const lanes = Math.max(0, input.laneCount);
+  const admitted = input.queueAdmission;
+  if (admitted) {
+    // The `draining` tier admits ONE lane over the bound, never zero (W1-T4465 design (ii)).
+    if (admitted.tier === "draining") return Math.min(lanes, 1);
+    const counted = admitted.observedOpenCount - (admitted.stuckOwnedCount ?? 0);
+    return Math.min(lanes, Math.max(0, admitted.wipLimit - counted));
+  }
   if (input.wipLimit === undefined || input.openPrCount === undefined) return lanes;
   const headroom = Math.max(0, input.wipLimit - input.openPrCount);
   return Math.min(lanes, headroom);
+}
+
+/** The `dispatch.wip_deferred` fields naming WHICH reading sized the pass to zero. Empty without an
+ *  admission, so an un-wired site's row stays byte-identical to before. */
+export function wipDeferredAdmissionFields(admitted: QueueAdmissionReading | undefined): Record<string, unknown> {
+  if (!admitted) return {};
+  return {
+    budget_source: "queue_governor_admission",
+    admitted_wip_limit: admitted.wipLimit,
+    admitted_open_count: admitted.observedOpenCount,
+    stuck_owned_count: admitted.stuckOwnedCount ?? 0,
+    tier: admitted.tier ?? null,
+  };
 }
 
 /** W1-T5529 — one PASS-LEVEL cost or queue reading, in either drain loop. A throw is logged with the
@@ -2083,13 +2114,15 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     }
 
     const openCount = deps.openPrCount?.();
-    const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: openCount });
+    const queueAdmission = deps.readQueueAdmission?.();
+    const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: openCount, queueAdmission });
     const passSize = Math.min(budget, max - attempted.length);
     if (passSize <= 0) {
       log("dispatch.wip_deferred", {
         lane_count: laneCount,
         wip_limit: opts.wipLimit ?? null,
         observed_open_count: openCount ?? null,
+        ...wipDeferredAdmissionFields(queueAdmission),
       });
       return summary(
         "wip_deferred",

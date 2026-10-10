@@ -34941,8 +34941,10 @@ function queueGovernorGateFor(
   runId: string,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
   now: () => number = Date.now,
-): () => QueueGovernorResult | undefined {
-  return () => {
+): QueueGovernorGate {
+  let admission: QueueGovernorResult | undefined;
+  const gate = (): QueueGovernorResult | undefined => {
+    admission = undefined;
     const { owned, foreign, ownedPrNumbers } = openPrOwnership();
     const lines = readLedgerLines(ledgerPath);
     const nowMs = now();
@@ -34960,6 +34962,7 @@ function queueGovernorGateFor(
       headroomFraction: adaptive.headroomFraction,
     });
     if (!result.deferred) {
+      admission = result;
       if (owned >= policy.wipLimit) {
         appendLedger(ledgerPath, {
           run_id: runId, task_id: "GOVERNOR", step: "dispatch_admitted_adaptive_wip",
@@ -34974,7 +34977,12 @@ function queueGovernorGateFor(
     logQueueGovernorDeferral(result, appendLedger, ledgerPath, runId);
     return result;
   };
+  return Object.assign(gate, { readAdmission: () => admission });
 }
+
+/** The queue gate plus the reading behind its latest admission, which sizes the lane budget so a
+ *  pass the adaptive bound admits is never sized to zero against the static `wipLimit`. */
+type QueueGovernorGate = (() => QueueGovernorResult | undefined) & { readAdmission: () => QueueGovernorResult | undefined };
 
 /** W1-T3144 — bridge the complete open-board observation already made inside `projectPlan` to the
  * dispatch governor. Gateways without the optional batch method retain the historical projection
@@ -35650,6 +35658,7 @@ async function drainCommand(
     return projected;
   });
   const openPrCount = () => openPrOwnership().owned;
+  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now);
   if (dryRun) {
     const merged = refreshMerged();
     if (opts.curated) {
@@ -35840,7 +35849,8 @@ async function drainCommand(
         // 23-open-PR incident): the SAME batch the W1-T172 lanes budget's `openPrCount` closure
         // already reads (below), split by ownership (W1-T4465 design (i)) — never a second
         // GitHub read path — see queueGovernorGateFor's doc.
-        checkQueueGovernor: queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now),
+        checkQueueGovernor: queueGate,
+        readQueueAdmission: queueGate.readAdmission,
         // HOST MEMORY FLOOR (W1-T5347 wires W1-T1038's memoryGovernorGateFor): a fresh
         // /proc/meminfo reading per consultation, so the per-lane re-check sees each lane's cost.
         // Holds NEW implement dispatch only — never a running worker or a review.
@@ -38495,6 +38505,7 @@ export async function daemonCommand(
     return projected;
   });
   const openPrCount = () => openPrOwnership().owned;
+  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now);
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
     // W1-T253: drain.max from the SAME loaded policy `opts` above already threaded, never
@@ -39054,7 +39065,8 @@ export async function daemonCommand(
         // WIP CEILING (W1-T321 wires checkQueueGovernor's own predicate, sweep.ts, the W1-T121
         // 23-open-PR incident): the SAME batch `openPrCount` reads just above, split by ownership
         // (W1-T4465 design (i)) — never a second GitHub read path — see queueGovernorGateFor's doc.
-        checkQueueGovernor: queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now),
+        checkQueueGovernor: queueGate,
+        readQueueAdmission: queueGate.readAdmission,
         // HOST MEMORY FLOOR (W1-T5347 wires W1-T1038's memoryGovernorGateFor): a fresh
         // /proc/meminfo reading per consultation, so the per-lane re-check sees each lane's cost.
         // Holds NEW implement dispatch only — never a running worker or a review.
