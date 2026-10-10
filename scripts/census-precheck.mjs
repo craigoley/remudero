@@ -309,10 +309,26 @@ function isSide(side) {
   return Boolean(side) && Array.isArray(side.candidates) && Array.isArray(side.gaps);
 }
 
+/** A `[ "pattern", ... ];` array literal of plain strings, or [] for any other shape. */
+function branchSurfacePatterns(scanner) {
+  if (scanner.scan() !== SyntaxKind.OpenBracketToken) return [];
+  const patterns = [];
+  let token = scanner.scan();
+  while (token !== SyntaxKind.CloseBracketToken) {
+    if (token !== SyntaxKind.StringLiteral || scanner.isUnterminated()) return [];
+    patterns.push(scanner.getTokenValue());
+    token = scanner.scan();
+    if (token === SyntaxKind.CommaToken) token = scanner.scan();
+    else if (token !== SyntaxKind.CloseBracketToken) return [];
+  }
+  return [SyntaxKind.SemicolonToken, SyntaxKind.EndOfFile].includes(scanner.scan()) ? patterns : [];
+}
+
 // W1-T6237: read only literal entries and string concatenations; never import the branch reviewer.
-function branchInstrumentExclusions(text) {
+// `name` is INSTRUMENT_SURFACE_EXCLUSIONS ({ path: reason } as a Map) or INSTRUMENT_SURFACE ([pattern] as an array).
+function branchInstrumentDeclaration(text, name) {
   const scanner = createScanner(true, undefined, text ?? "");
-  const empty = () => new Map();
+  const empty = () => (name === "INSTRUMENT_SURFACE" ? [] : new Map());
   const scan = () => {
     const start = scanner.getTokenEnd();
     const next = scanner.scan();
@@ -337,10 +353,11 @@ function branchInstrumentExclusions(text) {
       continue;
     }
     if (token !== SyntaxKind.ExportKeyword || scanner.scan() !== SyntaxKind.ConstKeyword ||
-        scanner.scan() !== SyntaxKind.Identifier || scanner.getTokenValue() !== "INSTRUMENT_SURFACE_EXCLUSIONS") continue;
+        scanner.scan() !== SyntaxKind.Identifier || scanner.getTokenValue() !== name) continue;
     while ((token = scanner.scan()) !== SyntaxKind.EqualsToken) {
       if (token === SyntaxKind.EndOfFile || token === SyntaxKind.SemicolonToken) return empty();
     }
+    if (name === "INSTRUMENT_SURFACE") return branchSurfacePatterns(scanner);
     if (scanner.scan() !== SyntaxKind.OpenBraceToken) return empty();
     const exclusions = new Map();
     token = scanner.scan();
@@ -418,11 +435,24 @@ export function evaluateInstrumentSurface(input) {
     return { violations: [], unmeasured: "the derivation found no candidates at all, which is a failed read, not a clean tree" };
   }
   const carried = new Set(measured.base.gaps);
-  const exclusions = branchInstrumentExclusions(input.readHead?.("src/lib/review.ts"));
+  const review = input.readHead?.("src/lib/review.ts");
+  const exclusions = branchInstrumentDeclaration(review, "INSTRUMENT_SURFACE_EXCLUSIONS");
+  // A branch DECLARING its new script an instrument only widens what CI scrutinises, so it is honored too.
+  const declared = branchInstrumentDeclaration(review, "INSTRUMENT_SURFACE").flatMap((p) => {
+    try {
+      return [new RegExp(p)];
+    } catch {
+      return [];
+    }
+  });
   const violations = measured.head.gaps
     .filter((path) => !carried.has(path))
     .sort()
     .filter((path) => {
+      if (declared.some((re) => re.test(path))) {
+        input.reportExcused?.(`instrument-surface: ${path} declared an instrument by this branch (CI and review judge it)`);
+        return false;
+      }
       if (!exclusions.get(path)?.trim()) return true;
       input.reportExcused?.(`instrument-surface: ${path} excused by this branch (CI and review judge the reason)`);
       return false;
