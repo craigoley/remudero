@@ -5,11 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 // Namespace reads, never named imports: at a base without this task the suite must still LOAD and
 // fail subtest by subtest, which is what makes the proof discriminate.
-import * as sweepModule from "../src/lib/sweep.js";
+import * as sweepModule from "./helpers/sweep-test.js";
 import * as restModule from "../src/lib/open-prs-rest.js";
 import * as riskModule from "../src/lib/risk-judge.js";
 import * as runTaskModule from "../src/run-task.js";
-import type { CodeScanningJudgment, OpenPrView, SweepDeps } from "../src/lib/sweep.js";
+import type { CodeScanningJudgment, OpenPrView, SweepDeps } from "./helpers/sweep-test.js";
 import type { RiskJudgeVerdict } from "../src/lib/risk-judge.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import type { Plan, Task } from "../src/lib/plan.js";

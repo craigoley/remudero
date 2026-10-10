@@ -31,7 +31,7 @@ import {
   resetTrackedDirtyFixOwner,
   type BuildSweepEffectsDeps,
 } from "../src/run-task.js";
-import { DEFAULT_SWEEP_POLICY, FIX_CLAIM_DECLINE_BACKSTOP, runSweep, type OpenPrView } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, FIX_CLAIM_DECLINE_BACKSTOP, runSweep, type OpenPrView } from "./helpers/sweep-test.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -131,6 +131,7 @@ interface Opts {
   claim?: "clear" | "occupied";
   preserveStaged?: (repoDir: string, ownerPath: string, branch: string, localSha: string) => string;
   ledgerPath?: string;
+  readPreservedOwnerPatchImpl?: BuildSweepEffectsDeps["readPreservedOwnerPatchImpl"];
 }
 
 /** The real sweep effects over the real owner; only the capture's remote head and censuses are pinned. */
@@ -150,6 +151,7 @@ function effectsFor(f: Fixture, head: string, logs: Log[], order: string[], opts
     policy: DEFAULT_SWEEP_POLICY,
     spawnImpl: (async () => WORKER) as never,
     registeredWorktreeOwnerImpl: (repoDir: string, branchRef: string) => registeredFixWorktreeOwner(repoDir, branchRef),
+    ...(opts.readPreservedOwnerPatchImpl ? { readPreservedOwnerPatchImpl: opts.readPreservedOwnerPatchImpl } : {}),
     registeredOwnerRecovery: {
       capture: () =>
         captureRegisteredFixOwnerSnapshot(
@@ -332,6 +334,32 @@ test("W1-T6362: a failed preserve at the current head is still declined by name,
     assert.equal(steps(logs, "fix.dispatch").length, 0);
     assert.equal(status(f.ownerPath), before, "the owner is untouched");
     assert.equal(registeredFixWorktreeOwner(f.repoDir, `refs/heads/${f.branch}`), realpathOf(f.ownerPath));
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T6434: a prior-partial-work read that throws is logged by name and the round still dispatches", async () => {
+  const f = fixture("1791480000004");
+  try {
+    const prHead = f.ownerSha;
+    const logs: Log[] = [];
+    const order: string[] = [];
+    const readPreservedOwnerPatchImpl = () => {
+      throw Object.assign(new Error("EACCES: permission denied, open 'ledger.ndjson'"), { code: "EACCES" });
+    };
+    await withGh(f, prHead, async () =>
+      effectsFor(f, prHead, logs, order, { readPreservedOwnerPatchImpl }).dispatchFix(
+        view(prHead) as never,
+        { unmetCriteria: [], ciFailures: [{ name: "ci", logTail: "red" }] } as never,
+      ),
+    );
+    const unreadable = steps(logs, "sweep.fix.prior_partial_work_unreadable");
+    assert.equal(unreadable.length, 1, "the failed read is named once");
+    assert.equal(unreadable[0].extra?.pr_number, PR);
+    assert.equal(unreadable[0].extra?.head_sha, prHead);
+    assert.match(String(unreadable[0].extra?.reason), /EACCES/, "the reason carries the read's own error");
+    assert.equal(steps(logs, "fix.dispatch").length, 1, "the round dispatches without prior partial work");
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }

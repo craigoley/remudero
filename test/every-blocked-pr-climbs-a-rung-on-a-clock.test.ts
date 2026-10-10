@@ -13,7 +13,7 @@ import {
 import {
   buildSweepEffects, DEFAULT_SWEEP_POLICY, DISPOSITION_RULES, postReviewFailureHistoryDisposition,
   runSweep, type OpenPrView, type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const MIN = 60_000;

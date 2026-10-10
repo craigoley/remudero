@@ -40,7 +40,7 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";

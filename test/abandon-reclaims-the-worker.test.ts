@@ -48,7 +48,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS } from "../src/lib/policy.js";
-import { reclaimAbandonedWorker, runFixRung, type FixRungOutcome } from "../src/run-task.js";
+import { reclaimAbandonedWorker, runFixRung, type FixRungOutcome } from "./helpers/run-task-test.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";

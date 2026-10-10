@@ -32,7 +32,7 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 /*
  * W1-T3980 — core PR #7495 (2026-09-27): every required context green, `mergeable: true`, auto-merge
@@ -397,8 +397,12 @@ test("no alert, a non-candidate PR, a foreign branch and an exhausted budget eac
   assert.match(deriveDisposition(foreign, DEFAULT_SWEEP_POLICY, NOW).reason, /foreign-branch/);
   assert.equal(repairableCodeqlBlocker(blockedPr({ taskId: undefined })), undefined);
 
-  const exhausted = blockedPr({ priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap });
+  // W1-T7096 (ruling 2026-10-09: "an llm judge should determine if more fix attempts should be made"): the count makes
+  // a judgment DUE; the strikes-exhausted route is taken once the progress judge rules the rounds a loop.
+  const exhausted = blockedPr({ priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap, progressEscalation: { loop: "fix rounds repeat without progress", reason: "the progress judge ruled the rounds a loop", judged: true } });
   assert.notEqual(repairableCodeqlBlocker(exhausted), undefined);
+  assert.equal(deriveDisposition(blockedPr({ priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap }), DEFAULT_SWEEP_POLICY, NOW).disposition,
+    "blocked-fixable", "an unjudged repair at the former ceiling is a judgment due, not a closed route");
   const result = deriveDisposition(exhausted, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(result.disposition, "blocked-ambiguous");
   assert.match(result.reason, /exhausted: fix strikes/);

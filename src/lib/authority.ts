@@ -538,6 +538,31 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
       "W1-T4386: fires only after its precheck holds, at most once per PR head sha, and only on a live governor " +
       "verdict — the daemon holds every runbook in shadow until W1-T4390's governor lands.",
   },
+  // ── src/lib/head-rehome.ts ───────────────────────────────────────────────────────────────
+  {
+    id: "head-rehome-open-replacement-pr",
+    action: "create a conforming run-<task>-<epoch> branch ref at the same head sha and open a replacement PR from it",
+    module: "src/lib/head-rehome.ts",
+    symbol: "createHeadRehomePorts(...).openReplacement",
+    boundary: "gh-pr-create",
+    gate: "sweep-rung",
+    ledgerSteps: ["pr.rehome.started", "pr.rehomed", "pr.rehome.refused"],
+    verb: "rmd drain (sweep head-identity re-home rung)",
+    note:
+      "W1-T7448: fires only when head-identity-gate is the PR's sole red; refuses when other reds are present, " +
+      "reuses an already-opened replacement, and creates the branch ref at the original head sha (no new content).",
+  },
+  {
+    id: "head-rehome-close-original-pr",
+    action: "comment on and close the original non-conforming PR once its replacement exists",
+    module: "src/lib/head-rehome.ts",
+    symbol: "createHeadRehomePorts(...).closeOriginal",
+    boundary: "gh-pr-close",
+    gate: "sweep-rung",
+    ledgerSteps: ["pr.rehomed"],
+    verb: "rmd drain (sweep head-identity re-home rung)",
+    note: "W1-T7448: runs only after the replacement PR is confirmed; the original's head sha is verified unchanged first.",
+  },
   // ── src/lib/panel-actions.ts ─────────────────────────────────────────────────────────────
   {
     id: "issue-close-panel-action",
