@@ -626,6 +626,7 @@ import {
 } from "./lib/feedback.js";
 import {
   ciLearningMergedOrigins,
+  ciLearningMergedOriginsAsync,
   ciLearningPendingOrigins,
   findPendingLandingPr,
   landCiLearningShards,
@@ -36590,8 +36591,8 @@ export function buildCiLearningCadenceRunner(deps: {
   gh?: LandCiLearningShardsOptions["gh"];
   planOrigins?: string[];
   pendingOrigins?: typeof ciLearningPendingOrigins;
-  mergedOrigins?: (checkoutRoot: string) => string[];
-  mintTaskId?: (filingBranch?: string) => string;
+  mergedOrigins?: (checkoutRoot: string) => string[] | Promise<string[]>;
+  mintTaskId?: ((filingBranch?: string) => string) & { async?: (filingBranch: string) => Promise<string> };
   recordFire?: (root: string, at: Date) => void;
   recordAttempt?: (root: string, at: Date) => void;
   windowDays?: number;
@@ -36617,7 +36618,7 @@ export function buildCiLearningCadenceRunner(deps: {
     const planOrigins = deps.planOrigins ?? ciLearningPlanOrigins(deps.checkoutRoot);
     const pendingOrigins = (deps.pendingOrigins ?? ciLearningPendingOrigins)(deps.root, deps.checkoutRoot);
     // W1-T4190: and what origin/main already holds, so a merged finding never takes a draft slot.
-    const mergedOrigins = (deps.mergedOrigins ?? ciLearningMergedOrigins)(deps.checkoutRoot);
+    const mergedOrigins = await (deps.mergedOrigins ?? ciLearningMergedOriginsAsync)(deps.checkoutRoot);
     const idempotencyOrigins = [...new Set([...planOrigins, ...pendingOrigins, ...mergedOrigins])];
     const result = mintCiLearningShards(corpus, idempotencyOrigins);
     const filedLessons = deps.loadLessons ? deps.loadLessons() : readFiledCiLessons(join(deps.checkoutRoot, "plan", "tasks.d"));
@@ -36647,6 +36648,7 @@ export function buildCiLearningCadenceRunner(deps: {
           : await (deps.landShards ?? landCiLearningShardsAsync)(result.drafts, deps.checkoutRoot, {
               stateRoot: deps.root,
               mintTaskId,
+              mintTaskIdAsync: mintTaskId.async,
               planOrigins: idempotencyOrigins,
               renderShard: ciLearningShardYaml,
               recordVerdict: ciLearningRecordVerdict,

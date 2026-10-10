@@ -9,9 +9,9 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
 import { createConnection } from "node:net";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import type { Config } from "../src/lib/config.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
@@ -218,6 +218,8 @@ async function driveDaemon(armed: boolean, damageSocketOnStop = false): Promise<
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
+    // A damaged socket outlives shutdown; where the state root is too deep, its dir sits in /tmp.
+    rmSync(dirname(socketPath), { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   }
 }
@@ -424,7 +426,8 @@ test("a worker git credential request mints a repo-scoped token on demand", asyn
 
     const workerEnv = Object.values(captured.env ?? {}).join("\n");
     assert.equal(workerEnv.includes("scoped-token-"), false, "the worker env holds no scoped token value");
-    for (const file of [...filesUnder(cwd), ...filesUnder(join(scratch, "state"))].filter((f) => !f.endsWith(".sock"))) {
+    const stateFiles = [join(scratch, "state"), dirname(socket.socketPath)].filter((dir) => existsSync(dir)).flatMap(filesUnder);
+    for (const file of [...filesUnder(cwd), ...stateFiles].filter((f) => !f.endsWith(".sock"))) {
       assert.equal(readFileSync(file, "utf8").includes("scoped-token-"), false, `${file} must hold no token`);
     }
   } finally {
@@ -607,18 +610,46 @@ test("a failed daemon socket ledger write stays visible and does not kill the so
 });
 
 test("a thread that cannot bind reports startup failure and leaves no worker socket", async () => {
-  const stateDir = join(scratchDir("bind-failure"), "x".repeat(110));
+  const stateDir = scratchDir("bind-failure");
   const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  // A non-empty directory holds the socket's name: the thread can neither clear nor bind it.
+  const socketPath = daemonGitCredentialSocketPath(stateDir);
+  mkdirSync(join(socketPath, "occupied"), { recursive: true });
   try {
     const socket = await startDaemonGitCredentialSocket({
       ready: Promise.resolve(), stateDir, log: (step, fields) => rows.push({ step, fields }),
     });
     assert.equal(socket, undefined);
     assert.ok(rows.some((row) => row.step === "boundary.request" && String(row.fields.reason).includes("did not start")));
-    assert.equal(existsSync(daemonGitCredentialSocketPath(stateDir)), false);
+    assert.equal(statSync(socketPath).isSocket(), false, "no socket was left at the path");
   } finally {
-    rmSync(join(stateDir, ".."), { recursive: true, force: true });
+    rmSync(dirname(socketPath), { recursive: true, force: true });
+    rmSync(stateDir, { recursive: true, force: true });
   }
+});
+
+test("a state dir too deep for a unix socket path binds the daemon's git credential socket in a short owned /tmp dir", async () => {
+  // Built under /tmp, so it is past sun_path's limit (104 bytes on macOS, 108 on Linux) on every host.
+  const holder = mkdtempSync(join("/tmp", `${RMD_TMP_PREFIX}gc-deep-`));
+  const stateDir = join(holder, "x".repeat(110), "state");
+  const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  const socket = await startDaemonGitCredentialSocket({
+    ready: Promise.resolve(), stateDir, log: (step, fields) => rows.push({ step, fields }),
+    mint: async () => ({ ok: true, token: "scoped-token-deep" }),
+  });
+  try {
+    assert.ok(socket, `the socket started: ${JSON.stringify(rows)}`);
+    assert.ok(Buffer.byteLength(socket.socketPath) < 104, `the path fits sun_path: ${socket.socketPath}`);
+    assert.equal(dirname(dirname(socket.socketPath)), realpathSync("/tmp"), "it binds under the short /tmp root");
+    assert.equal(socket.socketPath, daemonGitCredentialSocketPath(stateDir), "the path is the one the daemon names");
+    const dir = lstatSync(dirname(socket.socketPath));
+    assert.ok(dir.isDirectory() && (dir.mode & 0o777) === 0o700, "a private directory, not a link");
+    assert.match(await socketRoundTrip(socket.socketPath, "protocol=https\nhost=github.com\npath=acme/widgets.git\n\n"), /^password=scoped-token-deep$/m);
+  } finally {
+    await socket?.close();
+    rmSync(holder, { recursive: true, force: true });
+  }
+  assert.equal(existsSync(dirname(socket!.socketPath)), false, "closing removes the short dir as well as the socket");
 });
 
 test("a daemon socket thread's failed message refuses startup and removes its socket path", async () => {
@@ -655,6 +686,7 @@ test("a startup failure also reports a failed socket cleanup", async () => {
     assert.ok(rows.some((row) => String(row.fields.reason).includes("git credential socket did not start")));
     assert.ok(rows.some((row) => String(row.fields.reason).includes("socket did not close: Error: close unavailable")));
   } finally {
+    rmSync(dirname(daemonGitCredentialSocketPath(stateDir)), { recursive: true, force: true });
     rmSync(stateDir, { recursive: true, force: true });
   }
 });

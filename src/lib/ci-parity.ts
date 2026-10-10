@@ -13,6 +13,7 @@ import { systemClock } from "./clock.js";
 import { resolveHostPole, type HostPole } from "./host-parity.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
+import { shortPathWhenTooLong } from "./short-path-root.js";
 import { acquireTestSlot, lowPriorityCommand, testRunArgv, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
 // W1-T3099: the judge's own two primitives, imported rather than re-derived.
 import { criterionFieldTampered, planOnlyDiff } from "./review.js";
@@ -801,18 +802,20 @@ function changedFilesListPath(repoRoot: string, spawn: PreflightSpawn): string {
  *  callers (coverage-ratchet and {@link runPreflightCoverage}), so the expensive invocation cannot
  *  drift the way a hand-copied argv does.
  *  Why: docs/forensics/ci-parity.md. */
-export function coverageScratchDir(repoRoot: string): string {
+export function coverageScratchDir(repoRoot: string, sameVolume: (a: string, b: string) => boolean = sameDevice): string {
   const name = `rmd-c-${createHash("sha256").update(realpathSync(repoRoot)).digest("hex").slice(0, 12)}`;
   // A nested gate inherits TMPDIR from its caller. Find the same volume root even then.
   let base = resolve(tmpdir());
   try { base = realpathSync(base); } catch { /* The caller's unresolved TMPDIR is refused below. */ }
   for (let path = base; path !== dirname(path); path = dirname(path)) {
-    if (basename(path) === name) {
-      base = dirname(path);
-      break;
-    }
+    if (basename(path) === name) return join(dirname(path), name);
   }
-  return join(base, name);
+  // The shard children's TMPDIR is this scratch, and their fixtures bind unix sockets beneath it,
+  // hence MAX_COVERAGE_SCRATCH_PATH. A TMPDIR too long for that (macOS's per-user one) takes the
+  // short /tmp alias of the SAME volume, so the volume and its free-space reserve are unchanged;
+  // one on another volume, or that does not resolve, keeps its base and the length guard refuses it.
+  return shortPathWhenTooLong(join(base, name), (root) => join(root, name),
+    (path) => path.length <= MAX_COVERAGE_SCRATCH_PATH, (root) => sameVolume(root, base));
 }
 
 /** Where a coverage run may put its scratch besides the TMPDIR volume (W1-T5709). */
@@ -850,7 +853,7 @@ function chooseCoverageScratch(
   freeBytes: (path: string) => number,
   policy: CoverageScratchPolicy,
 ): CoverageScratchChoice {
-  const tmpDir = coverageScratchDir(repoRoot);
+  const tmpDir = coverageScratchDir(repoRoot, policy.sameVolume ?? sameDevice);
   const tmpBase = dirname(tmpDir);
   let root = policy.root === undefined ? resolveCoverageScratchRoot() : policy.root ?? undefined;
   if (root !== undefined) {
