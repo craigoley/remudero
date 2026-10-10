@@ -393,13 +393,17 @@ function isHotFileRemedyProposal(task: Task): boolean {
   return hot !== undefined && files[0] === hot && files.slice(1).every((f) => NEW_TEST_FILE.test(f) || f === ".gitattributes");
 }
 
+/** The origins of the draft -> measure -> escalate ladder (flow-remedy-gardener.ts's LadderKind prefixes): the flow
+ *  gardener's blocker remedies and, W1-T7421, the fix-lane gardener's defect-class remedies share one admitted shape. */
+const LADDER_REMEDY_ORIGINS = ["flow-blocker:", "fix-lane:"] as const;
+
 function isFlowBlockerRemedyShape(task: Task): boolean {
   const files = task.files ?? [];
   return (
     task.author_class === "machine" &&
     task.status !== "blocked" &&
     (task.depends_on ?? []).length === 0 &&
-    task.origin?.startsWith("flow-blocker:") === true &&
+    LADDER_REMEDY_ORIGINS.some((prefix) => task.origin?.startsWith(prefix) === true) &&
     files.some((f) => /^(src|scripts)\//.test(f)) &&
     files.every((f) => /^(src|scripts)\//.test(f) || NEW_TEST_FILE.test(f))
   );
