@@ -7909,7 +7909,7 @@ export interface PlanRepairFacts {
   gardenRecordRefusal?: string;
 }
 
-const GARDEN_PLAN_HEAD_RE = /^(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|scout)-garden-\d+$/;
+const GARDEN_PLAN_HEAD_RE = /^(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout)-garden-\d+$/;
 
 function gardenRecordRefusalCandidate(pr: OpenPrView): boolean {
   const names = [...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map(f => f.name)]
