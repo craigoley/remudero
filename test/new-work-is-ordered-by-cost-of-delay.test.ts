@@ -10,7 +10,8 @@ import { join } from "node:path";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const DAY = 86_400_000;
-const NOW = Date.parse("2026-10-04T12:00:00Z");
+// Freeze one run-relative clock; this suite also exercises the real-clock selection reader's 7-day window.
+const NOW = Date.now();
 const task = (id: string, over: Partial<Task> = {}): Task => ({
   id, title: id, repo: "remudero", depends_on: [], files: ["src/a.ts"],
   type: "implement", verify: "auto", risk: "high", status: "queued", attempts: 0, ...over,
