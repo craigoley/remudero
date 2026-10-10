@@ -15,6 +15,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const RECYCLER = join(REPO_ROOT, "deploy", "recycle-container.sh");
@@ -319,7 +320,7 @@ test("a hung effective-author probe is bounded and reported as timed out", () =>
     STUB_PROBE: "hang",
     RMD_RECYCLE_AUTHOR_PROBE_TIMEOUT_S: "2",
   });
-  assert.ok(Date.now() - started < 25_000, "the probe bound holds well under the stub's 30s hang");
+  assertWallClockBound(Date.now() - started, 25_000, "the probe bound holds well under the stub's 30s hang");
   assertFailedReceipt(fx, run, "verify-identity", /docker logs rmd-target-daemon/);
   assert.match(run.stderr, /effective-author probe from \S+ timed out within 2s/);
 });
