@@ -27,7 +27,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -171,13 +171,14 @@ test("W1-T460 (1): a genuinely-absent base path is still swallowed — no unread
     { "src/app.ts": "export const unrelated = 1;\n", "src/brand-new.ts": "export function freshThing() {}\n" },
   );
   try {
-    // REAL default deps: real merge-base, real worktree (R-11) — and, forced onto the blob fallback
-    // below, real `git show` and its real absence error. Both shapes must read absence as absence.
+    // REAL default deps: real merge-base, real base reads (a grep-only review's base is a grep tree, no
+    // worktree) — and, forced onto the blob fallback below by a `unit test:` sibling whose worktree is
+    // refused, real `git show` and its real absence error. Every shape must read absence as absence.
     const built = buildBaseProofDir([{ proof: "grep: freshThing in src/brand-new.ts" }], head);
-    assert.equal(built.baseIsCheckout, true);
-    assert.deepEqual([...built.baseUnreadablePaths], [], "a checkout at the base simply lacks the file — never a read failure");
-    execFileSync("git", ["-C", head, "worktree", "remove", "--force", built.baseCheckoutDir!], { stdio: "pipe" });
-    const fallback = buildBaseProofDir([{ proof: "grep: freshThing in src/brand-new.ts" }], head, {
+    assert.equal(built.baseIsGrepTree, true);
+    assert.equal(existsSync(join(built.baseCheckoutDir!, "src/brand-new.ts")), false, "the base tree simply lacks the file");
+    assert.deepEqual([...built.baseUnreadablePaths], [], "a base that lacks the file is never a read failure");
+    const fallback = buildBaseProofDir([{ proof: "grep: freshThing in src/brand-new.ts" }, { proof: "unit test: test/x.test.ts" }], head, {
       addWorktree: () => {
         throw new Error("worktree refused by the fixture");
       },
@@ -420,12 +421,14 @@ test("W1-T460 (5): the production showBlob pipes git's stderr — a review over 
       script,
       `import { buildBaseProofDir } from ${JSON.stringify(join(REPO_ROOT, "src", "run-task.ts"))};\n` +
         `import { execFileSync } from "node:child_process";\n` +
-        // (R-11) The real default path adds a WORKTREE, so `git show` never runs for it; the
-        // fallback — forced by a throwing `addWorktree` — is where the piped `git show` lives now.
+        // A grep-only review's real default path is the grep tree, whose `ls-tree` reads pipe too; the
+        // blob fallback — forced by a `unit test:` sibling and a throwing `addWorktree` — is where the
+        // piped `git show` lives.
+        `import { existsSync } from "node:fs";\n` +
+        `import { join } from "node:path";\n` +
         `const real = buildBaseProofDir([{ proof: "grep: freshThing in src/brand-new.ts" }], ${JSON.stringify(head)});\n` +
-        `execFileSync("git", ["-C", ${JSON.stringify(head)}, "worktree", "remove", "--force", real.baseCheckoutDir], { stdio: "pipe" });\n` +
-        `const built = buildBaseProofDir([{ proof: "grep: freshThing in src/brand-new.ts" }], ${JSON.stringify(head)}, { addWorktree: () => { throw new Error("worktree refused by the fixture"); } });\n` +
-        `process.stdout.write(JSON.stringify({ checkout: real.baseIsCheckout, dir: built.baseCheckoutDir === undefined, unreadable: [...built.baseUnreadablePaths] }));\n`,
+        `const built = buildBaseProofDir([{ proof: "grep: freshThing in src/brand-new.ts" }, { proof: "unit test: test/x.test.ts" }], ${JSON.stringify(head)}, { addWorktree: () => { throw new Error("worktree refused by the fixture"); } });\n` +
+        `process.stdout.write(JSON.stringify({ grepTree: real.baseIsGrepTree, absent: !existsSync(join(real.baseCheckoutDir, "src/brand-new.ts")), dir: built.baseCheckoutDir === undefined, unreadable: [...real.baseUnreadablePaths, ...built.baseUnreadablePaths] }));\n`,
     );
     // NODE_V8_COVERAGE is stripped from the child: it exists to observe git's STDERR, and a
     // coverage report merged from a process that LOADS the module graph without exercising it
@@ -441,7 +444,7 @@ test("W1-T460 (5): the production showBlob pipes git's stderr — a review over 
     assert.equal(r.status, 0, `child failed: ${r.stderr}`);
     assert.doesNotMatch(r.stderr, /fatal:/, "git's absence message must not surface on a PASSING review");
     // …and silencing it did not break the classification the fix depends on.
-    assert.deepEqual(JSON.parse(r.stdout), { checkout: true, dir: true, unreadable: [] }, "absence is still swallowed, still not a read failure");
+    assert.deepEqual(JSON.parse(r.stdout), { grepTree: true, absent: true, dir: true, unreadable: [] }, "absence is still swallowed, still not a read failure");
   } finally {
     rmSync(head, { recursive: true, force: true });
     rmSync(dirname(script), { recursive: true, force: true });

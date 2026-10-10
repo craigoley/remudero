@@ -68,7 +68,7 @@ setInterval(() => {}, 1000);
 
 function pull(number: number, state: string): BoardPrRest {
   return { number, url: `https://github.com/o/r/pull/${number}`, state, headRefName: `run-W1-T${number}-1`, headRefOid: "a".repeat(40),
-    body: `Remudero-Task: W1-T${number}`, autoMergeRequest: null, title: `pull ${number}`, updatedAt: "2026-10-01T00:00:00.000Z" };
+    body: `Remudero-Task: W1-T${number}`, autoMergeRequest: null, title: `pull ${number}`, updatedAt: "2026-10-01T00:00:00.000Z" }; // expiring-fixture: exempt -- the lane runs on this suite's shared manual clock; 4/4 pass with Date.now shifted +8d and +30d and with this stamp aged to 2026-07-01
 }
 
 /** Every `gh` this process spawns, answered offline: the lane's old gateway listed pulls and issues through it. */
