@@ -3641,12 +3641,9 @@ export async function runDaemon(
     // IT DOES NOT FIX THE LEAK and must not be read as fixing it. The growth is still there and
     // still unexplained; this only stops it costing a crash and 120 seconds each time.
     //
-    // 2026-10-10: THE FRACTION OF V8'S LIMIT NEVER FIRED. 75% of 8.4 GB is 6.3 GB of the main isolate
-    // alone, while the daemon sat at 4.1-4.5 GB RSS plus 1-3 GB of swap in an 8.6 GiB container. The
-    // governor (daemon-memory-policy.ts) reads what the container is charged: RSS plus swap as a share
-    // of its own memory.high, else memory.max. It tightens V8's growth factor first, in proportion,
-    // and backs off when the share falls; it asks for a restart only when the tightest factor did not
-    // bring the share down. The V8 fraction stays as the backstop for a host with no cgroup budget.
+    // 2026-10-10: the V8 fraction never fired (75% of 8.4 GB of one isolate, at 4.5 GB RSS + 3 GB swap).
+    // The governor (daemon-memory-policy.ts) judges RSS+swap against the cgroup budget: tighten first,
+    // restart only past the tightest factor. The V8 fraction stays as the backstop with no budget.
     const memoryStep = memoryGovernor.step();
     if (memoryStep.changed) {
       log("daemon.memory_pressure", {
