@@ -1,0 +1,49 @@
+- id: W1-T7620
+  title: "WALL-CLOCK-DUE RUNGS DO NOT WAIT ON THE DAEMON'S OUTER CYCLE — measurement, digest, compaction, ci_learning, board_review, intake and wipetest are evaluated only inside the outer cycle's cadence block, so a rung that came due waits 20 min to 2 h for a cycle to reach it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium
+  band_meaning: span
+  origin: "operator session 2026-10-10: the measurement cadence was due at 06:26:40Z and no cycle evaluated it for 18+ minutes"
+  plan_refs: [W1-T4998, W1-T5114, W1-T5723]
+  files: [src/lib/daemon.ts, test/wall-clock-due-rungs-do-not-wait-on-the-outer-cycle.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-10 on the fleet host (core state, read-only). The measurement cadence's rolling-24h
+    maxPerDay slot freed at 06:26:40Z (fires 06:26:40, 06:57:54, 18:39:00, 18:47:00 on 10-09; the double count
+    is #10540). The daemon (boot 06:05:59Z, 2ca6d5bbc) last ran the cadence block at 06:10:53Z:
+    measurement_cadence.skipped "daily cap reached (4/4)", then digest/ledger_compaction/ci_learning/board_review/
+    intake/wipetest, then daemon.tick_phases at 06:11:26 (ms_to_admission 326620), then daemon.iteration at
+    06:11:39, which dispatched W1-T7095, W1-T7390 and W1-T6134. At 06:45Z the next cycle had not yet reached
+    orphan_sweep or the cadence block, although background sweep, garden and fleet_lane rows landed every minute.
+    The surviving measurement_cadence.skipped rows overnight are 02:13:46, 04:17:09, 04:28:19, 04:49:27 and
+    06:10:53, i.e. the block ran 11 min to 2 h apart, including across the 04:21Z and 06:03/06:05Z reboots.
+    MECHANISM: every due check sits in the outer cycle between `cadencesStartedAtMs` (src/lib/daemon.ts:3884)
+    and the admission: measurement :3929, digest :3988, ledger compaction :4016, ci_learning :4088,
+    board_review :4147, intake rungs :4399, wipetest :4518. Each is a wall-clock decision (minInterval,
+    a rolling cap or an age bound), but it is evaluated only when the cycle comes round, so its effective interval
+    is its own interval plus up to one whole cycle. This is the same coupling the 2026-10-01 dispatch-throughput
+    hunt found for admission (W1-T4998, #8202: admission waited behind the sweep; W1-T5114: gardener passes on
+    the loop) and the 2026-09-30 measurement of a 15–20 min tick (1–2 admission chances per ~40 min).
+  design: |
+    Evaluate the wall-clock due checks on their own timer, or from the background sweep loop, rather than in the
+    outer cycle's cadence block, so a rung that comes due is evaluated within a short poll of its due time.
+    Keep each rung single-flight: reuse the existing `detachedActionInFlight(<kind>)` guards, so a timer tick
+    never starts a second run of a rung that is still in flight, and leave each rung's own policy bounds
+    (minInterval, maxPerDay, age bounds) as the only pacing. Add no fixed cadence cap or new threshold. The
+    outer cycle keeps its admission work; it no longer hosts the due checks. Each evaluation still writes the
+    same `<rung>.skipped` / `.fired` rows, so the ledger shows when each check ran.
+  acceptance:
+    - claim: "a due rung is evaluated while the outer cycle is still busy dispatching"
+      proof: 'grep: test("W1-T7620: a due measurement cadence fires while the outer cycle is blocked" in test/wall-clock-due-rungs-do-not-wait-on-the-outer-cycle.test.ts'
+    - claim: "a rung still in flight is not started again by the timer"
+      proof: 'grep: test("W1-T7620: the due timer never starts a second run of an in-flight rung" in test/wall-clock-due-rungs-do-not-wait-on-the-outer-cycle.test.ts'
+  falsifier: |
+    Leave the due checks inside the outer cycle: with runOne held unresolved past a rung's due time, the fixture
+    sees no `<rung>.fired` row until the cycle completes, and the first test fails.
