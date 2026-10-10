@@ -236,6 +236,20 @@ test("file admission is first-come, keeps a floor of one, and ignores a dead sib
   past.release();
 });
 
+test("the default sibling RSS reader uses VmRSS when readable and leaves the full peak reserved when unreadable", async (t) => {
+  const dir = scratch(t, "admit-rss");
+  const readablePid = process.ppid;
+  const unreadablePid = Number.MAX_SAFE_INTEGER;
+  ticket(dir, 1, readablePid, "running");
+  ticket(dir, 2, unreadablePid, "running");
+  const admission = await admitTestFile(child(dir, {
+    rss: undefined, // Use procRss: a live parent on Linux, or the documented no-/proc fallback elsewhere.
+    facts: (pid) => ({ start: `s${pid}`, parent: 100 }),
+  }));
+  assert.equal(admission.outcome, "admitted", "even when one sibling cannot be measured, admission remains conservative and proceeds with headroom");
+  admission.release();
+});
+
 test("only a node --test runner's own file child queues: no reading, no runner context, or a non-runner parent run at once", async (t) => {
   const dir = scratch(t, "admit-skip");
   const never = async () => assert.fail("never waits");
