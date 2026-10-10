@@ -104,3 +104,11 @@ test("proofMaskedGitConfig is empty when the shared config names no usable origi
     return path;
   }
 });
+
+test("a malformed long quoted section is rejected without exponential backtracking", () => {
+  const path = join(makeTempDir("origin-mask-long-section"), "config");
+  writeFileSync(path, `[remote "${"\\!".repeat(20_000)}]\nurl = https://example.test/repo.git\n`);
+  const started = performance.now();
+  assert.equal(review.proofMaskedGitConfig(path), "");
+  assert.ok(performance.now() - started < 1_000, "malformed quoted input stays linear-time");
+});
