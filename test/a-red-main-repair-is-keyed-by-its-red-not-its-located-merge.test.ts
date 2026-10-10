@@ -268,6 +268,31 @@ test(
 );
 
 test(
+  "red-main repair: a shard log that cannot be read is named, and the red is still repaired on its failing checks",
+  inScratchDir(async (ledgerPath) => {
+    const w = world();
+    const lane = fakeLane();
+    const logged: Array<[string, Record<string, unknown> | undefined]> = [];
+    const daemon = rig(w, lane, ledgerPath, {
+      log: (step, extra) => logged.push([step, extra]),
+      readCiFailures: (rollup) => {
+        if ((rollup ?? []).some((entry) => entry.name === SHARD)) throw new Error("HTTP 502 on the shard's job log");
+        return [{ name: "ci", conclusion: "FAILURE", logTail: AGGREGATOR_LOG }];
+      },
+    });
+    streak(w, CULPRIT, 0);
+    await daemon.observe();
+    assert.equal(lane.fixes.length, 1);
+    const unreadable = logged.filter(([step]) => step === "main.repair.shard_log_unreadable");
+    assert.equal(unreadable.length, 1);
+    assert.match(String(unreadable[0]![1]?.error), /HTTP 502 on the shard's job log/);
+    const [row] = rowsOf(ledgerPath, "main.repair.located");
+    assert.deepEqual(row?.red_checks, ["ci", "ci-shard"]);
+    assert.deepEqual(row?.red_detail, [], "the aggregator's log was read, and names no gate or test");
+  }),
+);
+
+test(
   "red-main repair: an attempt that ended without a PR asks the fix-progress judge, never re-dispatches by rote",
   inScratchDir(async (ledgerPath) => {
     const w = world();
