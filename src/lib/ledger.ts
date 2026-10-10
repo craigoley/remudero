@@ -703,6 +703,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "fix.commit_refused",
   // W1-T4207: `lastCommitRefusalPromptLines` (run-task.ts) reads its `subtype` to name the last refused paths.
   "fix.done",
+  "fix.progress_judged", // the sweep labels each judged PR from its newest judgement; rotated away, the label reverts to the stale strike ratio.
   "fix.needs_design", // W1-T5532: preserve the explicit hand-off for the next fix-lane decision.
   "fix.scope_amendment", // W1-T5534: runFixRung and lookupIdentity resume pending amendments after rotation.
   "fix.resolved",
@@ -760,6 +761,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // impl-DF: the idle rung's reason tally. A HUMAN reads it to tell "starved of work" from
   // "everything filtered"; it is emitted only on change, so rotation would drop a long idle's cause.
   "daemon.idle_reasons",
+  // W1-T4939: `rmd status` sums these hourly (and restart-flushed partial) rows over the last 24 hours. The
+  // daemon restarts on merges, so each row is scarce and a rotation that archived it loses the account.
+  "lane.idle_summary",
   "sweep.post_fix_redriven",
   "sweep.stale_red_redrive.released",
   "sweep.strike_ladder.refreshed",
