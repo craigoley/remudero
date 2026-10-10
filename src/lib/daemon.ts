@@ -214,6 +214,12 @@ export const DEFAULT_SWEEP_RETRIGGER_INTERVAL_MS = 20 * 60_000;
 /** BACKSTOP: stop refill prolonging one tick indefinitely; admitted lanes still finish (W1-T5761). */
 export const DISPATCH_PHASE_REFILL_BOUND_MS = 20 * 60_000;
 
+/** A decided restart waits for every in-flight lane, silently: 2026-10-10 it waited 60+ min with no row. Name the
+ *  wait at once, then at doubling intervals (1, 2, 4, 8… polls), so a long wait stays visible without a row a poll. */
+function freshnessRestartWaitReportDue(waitedMs: number, reported: number, pollIntervalMs: number): boolean {
+  return reported === 0 || waitedMs >= pollIntervalMs * 2 ** reported;
+}
+
 /** W1-T5720 — BACKSTOP: the longest tick 1's cadences and the garden fan-out wait, from boot, for the
  *  first full pass. That pass's own 559 s bound normally opens the gate first, so this fires never. */
 export const BOOT_CADENCE_GATE_BOUND_MS = 10 * 60_000;
@@ -5177,6 +5183,12 @@ export async function runDaemon(
     const inFlightTasks = new Set<Task>(admitted);
     let refillClosed: string | undefined;
     let inFlightFreshness: Extract<DaemonFreshness, { stale: true }> | undefined;
+    const restartWait = { decidedAtMs: 0, reported: 0 };
+    const laneStartedAtMs = new Map(admitted.map((t) => [t.id, dispatchPhaseStartedAtMs]));
+    const latchRestart = (freshness: Extract<DaemonFreshness, { stale: true }>): void => {
+      if (!inFlightFreshness) restartWait.decidedAtMs = daemonClock.now();
+      inFlightFreshness ??= freshness;
+    };
     // W1-T5282: a lane's refill is synchronous and cannot await a fetch, so with an awaited reader it reads the
     // latest reading settled since this tick began: the admission read above, then each dispatch tick's.
     let settledFreshness = selfFreshness;
@@ -5199,7 +5211,7 @@ export async function runDaemon(
       const freshnessAction = freshness?.stale ? decideFreshness(freshness, true) : undefined;
       // W1-T6274: a restart decided here holds every later refill this phase and ends it in the freshness stop.
       if (freshnessAction === "restart" && freshness?.stale) {
-        inFlightFreshness ??= freshness;
+        latchRestart(freshness);
         refillClosed ??= "stale code";
       }
       let reason =
@@ -5253,6 +5265,7 @@ export async function runDaemon(
           snapshots.push(nextSnapshot!);
           passIds.add(next.id);
           inFlightTasks.add(next);
+          laneStartedAtMs.set(next.id, daemonClock.now());
           log("dispatch.lane_refilled", { lane, finished_task: finished.id, next_task: next.id });
           log("daemon.iteration", { task: next.id, attempted: attempted.length + 1, max: opts.max ?? null });
           attempted.push(next.id);
@@ -5289,11 +5302,28 @@ export async function runDaemon(
       settledFreshness = freshness;
       logNotStaleFreshness(freshness);
       if (freshness.stale && decideFreshness(freshness, true) === "restart") {
-        inFlightFreshness = freshness;
+        latchRestart(freshness);
         refillClosed = "stale code";
       }
     };
+    // The restart runs once every lane below settles; until then each due tick names the lanes it waits on.
+    const reportRestartWait = (decided: Extract<DaemonFreshness, { stale: true }>): void => {
+      const nowMs = daemonClock.now();
+      const waitedMs = Math.max(0, nowMs - restartWait.decidedAtMs);
+      if (!freshnessRestartWaitReportDue(waitedMs, restartWait.reported, pollIntervalMs)) return;
+      restartWait.reported++;
+      log("daemon.freshness_restart_waiting", {
+        waiting_on: "in_flight_lanes",
+        waited_ms: waitedMs,
+        lanes: [...inFlightTasks].map((t) => ({ task: t.id, age_ms: Math.max(0, nowMs - (laneStartedAtMs.get(t.id) ?? nowMs)) })),
+        refill_held: refillClosed ?? null,
+        report: restartWait.reported,
+        old_sha: decided.oldSha,
+        new_sha: decided.newSha,
+      });
+    };
     const onDispatchTick = deps.checkFreshness ? (): void | Promise<void> => {
+      if (inFlightFreshness && inFlightTasks.size > 0) return reportRestartWait(inFlightFreshness);
       if (inFlightFreshness || inFlightTasks.size === 0 || deps.checkPause?.()) return;
       const read = deps.checkFreshness!();
       if (!isPendingFreshness(read)) return actOnDispatchFreshness(read);
