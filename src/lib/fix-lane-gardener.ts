@@ -204,6 +204,7 @@ export function fixLaneInventoryOf(records: readonly LedgerRecord[], tasks: Para
     episodes.push({ pr: e.pr, key: e.key, owner: "fix-lane", start: e.at, end, outcome: "cleared", eligible: true, charges: [charge] });
   }
   for (const { i, key } of standalone) {
+    // expiring-fixture: exempt -- `now` only caps the span; intervention fixtures pass a fixed now, so no outcome ages with the calendar.
     const at = Date.parse(i.at);
     const end = Math.min(Math.max(at, terminal.get(i.pr) ?? at), now);
     const charge: Charge = { pr: i.pr, key, start: at, end, hours: (end - at) / HOUR + OPERATOR_INTERVENTION_HOURS, reason: `${i.actor}: ${i.detail}`, owner: "fix-lane" };
