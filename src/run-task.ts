@@ -1,5 +1,5 @@
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
-import { buildFixProgressInput, judgeFixProgress,
+import { judgeFixProgress,
   type FixProgressJudge, type FixProgressVerdict } from "./lib/fix-progress-judge.js";
 import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-update.js";
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
@@ -221,7 +221,8 @@ import { realThreadDecider, registryThreadItems, type ThreadDecisionContext } fr
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
-import { checkpointRemaining, isWipSubject, prTitleFromBranchCommits, renderContinuationPrompt } from "./lib/unfinished-checkpoint.js";
+import { checkpointRemaining, isWipSubject, judgeCheckpointStop, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
+import { PREOPEN_GATE_STEP, renderPreopenGatePrompt, runPreopenGate, type PreopenGateResult } from "./lib/preopen-gate.js";
 import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
 import {
@@ -1623,6 +1624,8 @@ import {
   fixDispatchBudget,
   fixLedgerRowsForHead,
   fixRoundTally,
+  buildFixProgressInput,
+  flakeClaimsForHead,
   isBlockedCi,
   listRetirableEscalationIssues,
   logCostGovernorDeferral,
@@ -1645,6 +1648,7 @@ import {
   runPostFixReverification,
   runSweep,
   runSweepLightPass,
+  runLightPassReadyRefresh,
   withFullSweepRepairAdmission,
   redQualityGateNames,
   stillRedRequiredNames,
@@ -12676,6 +12680,7 @@ export async function runFixRung(opts: {
     // worker-visible unmet set the fix rung actually dispatches (W1-T166).
     const priorHeadSha = review.headSha;
     const roundLedger = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
+    const refutedFlake = flakeClaimsForHead(roundLedger, opts.taskId, priorHeadSha, prNumber).length > 0;
     const pendingScope = roundLedger.findLast((row) => row.step === "fix.scope_amendment" &&
       row.task_id === opts.taskId && row.pr_number === prNumber && row.head_sha === priorHeadSha &&
       ["created", "resumed", "branch_update_requested"].includes(String(row.outcome)));
@@ -12778,6 +12783,7 @@ export async function runFixRung(opts: {
         // read one shared value, never two independently derived ones.
         reachableRemedyFiles,
       }),
+      ...(refutedFlake ? [`this red reproduced on a rerun at ${priorHeadSha}; it is not a flake. Make a real fix; another FLAKE outcome will be recorded as a no-op without a rerun.`] : []),
       ...(proofRepairRound && proofDiscriminationNow
         ? proofRepairPromptLines({ proofs: proofDiscriminationNow.proofs, stageable: proofRepairStageable })
         : []),
@@ -13224,10 +13230,16 @@ export async function runFixRung(opts: {
       });
     }
     const fixClaimFields: Record<string, unknown> = {};
+    // W1-T6003: a claim released before this round's fix.done (the flake path's CI wait) is still named on it.
+    let releasedClaimId: string | undefined;
+    const releaseRoundClaim = (): void => {
+      releasedClaimId ??= deps.branchClaim?.id();
+      deps.branchClaim?.release();
+    };
     const logFixDoneRow = (pushedHeadSha?: string, subtype?: string) => deps.log("fix.done", {
       ...fixReceipt.ledgerFields(fixResult), // W1-T4613: FIRST, so every field this row already carried keeps its value
       round_id: roundId,
-      ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() } : {}),
+      ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() ?? releasedClaimId } : {}),
       fix_outcome: fixOutcome?.kind ?? "unstated",
       ...fixClaimFields,
       head_sha: priorHeadSha,
@@ -13255,7 +13267,7 @@ export async function runFixRung(opts: {
     // W1-T5955: the round ends here, so its branch claim does too; the CI wait holds none.
     const logFixDone = (pushedHeadSha?: string, subtype?: string): void => {
       logFixDoneRow(pushedHeadSha, subtype);
-      deps.branchClaim?.release();
+      releaseRoundClaim();
     };
 
     // W1-T3079: archive this worker's transcript — see the "Worker transcript archive" section
@@ -13318,6 +13330,12 @@ export async function runFixRung(opts: {
         reason: verified ? "worker-base-red-verified" : "base-red claim refuted" };
     }
     if (fixAction.kind === "rerun-once") {
+      if (refutedFlake) {
+        fixClaimFields.flake_claim = "repeated";
+        logFixDone();
+        return { outcome: "stood_down", review, strikes: strikes - 1, retriggers,
+          reason: "flake claim repeated after refutation — no-op round" };
+      }
       const spent = requeuedCheckKeysFromLedger((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))());
       const failures = priorCiFailures ?? [];
       let requeued = failures.length > 0 && !!priorHeadSha;
@@ -13342,6 +13360,8 @@ export async function runFixRung(opts: {
           deps.log("fix.flake_requeue_failed", { head_sha: priorHeadSha, check_name: failure.name, reason: String(error) });
         }
       }
+      // W1-T6003: the requeues are posted, so the round's branch work is done; its CI wait holds no claim.
+      releaseRoundClaim();
       let green = false;
       if (requeued) {
         try {
@@ -16089,6 +16109,8 @@ interface ProbeAdmissionOptions {
 interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   /** W1-T7096: set only by the drain and the CLI — the fix rung then asks the production judge. */
   productionProgressJudge?: boolean;
+  /** Test seam for the pre-open fast gate; production runs `runPreopenGate`, an injected spawn skips it. */
+  preopenGate?: (worktreePath: string) => Promise<PreopenGateResult>;
   instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
   armAdhocLaneReap?: boolean;
   binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
@@ -19629,9 +19651,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       if (resumeFail) return resumeFail;
     }
 
-    // A worker that stops on a `wip:` checkpoint tip has not finished (#10482): resume it once.
-    const tipSubject = lastCommitSubject(worktreePath);
-    if (tipSubject !== undefined && isWipSubject(tipSubject) && !parseReport(fullText(impl))?.prUrl) {
+    // A worker that stops on a `wip:` checkpoint tip has not finished (#10482): resume it. The first
+    // stop always resumes; whether a later stop resumes again is the progress judge's call (W1-T7096).
+    const checkpointStops: CheckpointStop[] = [];
+    let checkpointJudge: FixProgressJudge | undefined;
+    for (;;) {
+      const tipSubject = lastCommitSubject(worktreePath);
+      if (tipSubject === undefined || !isWipSubject(tipSubject) || parseReport(fullText(impl))?.prUrl) break;
       let tipBody = "";
       try {
         tipBody = hostWorktreeGit(worktreePath, ["log", "-1", "--format=%b"]);
@@ -19641,6 +19667,14 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       }
       const remaining = checkpointRemaining(tipBody);
       log("implement.unfinished", { subject: tipSubject, remaining: remaining ?? null });
+      checkpointStops.push({ round: checkpointStops.length + 1, subject: tipSubject, remaining });
+      const decision = await judgeCheckpointStop(checkpointStops, {
+        readHead: () => hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]),
+        makeJudge: () => (checkpointJudge ??= opts.productionProgressJudge === true || !spawnInjected
+          ? productionFixProgressJudge({ cwd: worktreePath, settingsFile }) : undefined),
+      });
+      log("implement.checkpoint_judged", { stop: checkpointStops.length, resume: decision.resume, by: decision.by, reason: decision.reason });
+      if (!decision.resume) break;
       impl = account(
         await spawn({
           cwd: worktreePath,
@@ -19663,6 +19697,38 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       log("implement.continued", { session_id: impl.sessionId, cost_usd: impl.costUsd, num_turns: impl.numTurns, subtype: impl.subtype, ...workerLedgerFields(impl) });
       const continueFail = failOnWorkerError(impl, "implement.continued");
       if (continueFail) return continueFail;
+    }
+
+    // The harness runs the fast gate itself before opening the PR; a failing step goes back to the worker once.
+    const preopenGate = opts.preopenGate ?? (spawnInjected ? undefined : (path: string) => runPreopenGate(path));
+    if (preopenGate !== undefined && !parseReport(fullText(impl))?.prUrl) {
+      const gate = await preopenGate(worktreePath);
+      log(PREOPEN_GATE_STEP, { result: gate.kind, failed: gate.kind === "fail" ? gate.failedSteps : [], duration_ms: gate.durationMs,
+        ...(gate.kind === "unmeasured" ? { reason: gate.reason } : {}) });
+      if (gate.kind === "fail") {
+        impl = account(
+          await spawn({
+            cwd: worktreePath,
+            permissionMode: "bypassPermissions",
+            settingsFile,
+            resumeSessionId: impl.sessionId,
+            model: implementMount.model,
+            mountProvider: implementMount.provider,
+            effort: implementMount.effort,
+            maxTurns: implementMount.maxTurns,
+            maxBudgetUsd: budgetUsd,
+            config: implementConfig,
+            tools: implementTools === undefined ? undefined : [...implementTools],
+            ...(ruleLookup === undefined ? {} : { ruleLookup }),
+            ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
+            ...cashTrialSpawn,
+            prompt: renderPreopenGatePrompt(gate.failedSteps, harnessOwnsGit),
+          }),
+        );
+        log("implement.preopen_continued", { session_id: impl.sessionId, cost_usd: impl.costUsd, num_turns: impl.numTurns, subtype: impl.subtype, ...workerLedgerFields(impl) });
+        const gateFail = failOnWorkerError(impl, "implement.preopen_continued");
+        if (gateFail) return gateFail;
+      }
     }
 
     // ── QUESTION contract (non-blocking) — log, don't stall (§2).
@@ -20072,7 +20138,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
         const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
         const issues = opts.prOpenRefusalIssues ?? ghIssueGateway(owner, task.repo);
-        const issueUrl = recordRefusedPrOpen(err, { taskId, branch, headSha }, log, { issues, ledgerPath, runId });
+        const changedFiles = refusedBranchChangedFiles(worktreePath);
+        const issueUrl = recordRefusedPrOpen(err, { taskId, branch, headSha, changedFiles, declaredFiles: task.files }, log, { issues, ledgerPath, runId });
         reclaimRunWorktree(repoDir, worktreePath, "pr_open.refused", log);
         log("verdict", {
           verdict: "failed",
@@ -27067,6 +27134,16 @@ export function hostWorktreeGitAtTopLevel(dir: string, args: string[], opts: Hos
       if (!(error instanceof WorktreePointerRefusedError) || error.observed !== "<absent>" || dirname(at) === at) throw error;
     }
   }
+}
+
+/** The files a refused run branch changed since its merge base with origin/main, or undefined when either read
+ *  fails: an unreadable diff keeps the refusal's escalation rather than guessing the build changed only tests. */
+export function refusedBranchChangedFiles(worktreePath: string): string[] | undefined {
+  const base = hostWorktreeGitResult(worktreePath, ["merge-base", "origin/main", "HEAD"]);
+  if (base.status !== 0 || base.stdout.trim() === "") return undefined;
+  const diff = hostWorktreeGitResult(worktreePath, ["diff", "--name-only", base.stdout.trim(), "HEAD"]);
+  if (diff.status !== 0) return undefined;
+  return diff.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
 }
 
 export function hostWorktreeGitResult(worktreePath: string, args: string[]): { status: number | null; stdout: string; stderr: string } {
@@ -47069,9 +47146,25 @@ export function buildSweepLightHook(
       // `fixRungAllowed` is false — can never spend a fix-rung strike. Every other open PR
       // (including a `blocked-fixable` PR with a genuine, non-cancelled failure) stays in the
       // batch below, gated by `fixRungAllowed` exactly as before this task.
-      const requeueOnlyPrs = reviewOnly ? [] : openPrs.filter((pr) => blockedFixableIsRequeueOnly(pr));
+      // W1-T7214: a ready PR main moved under is refreshed HERE, once over the whole snapshot (never
+      // per PR — W1-T528), before either batch below can arm it on the base main has left. Only a
+      // ready PR is probed, so a pass with none spends no compare read. The refreshed PR sits out
+      // this pass: its snapshot names the head the update just replaced.
+      let readyRefreshed: number | undefined;
+      const readyPrs = reviewOnly ? [] : openPrs.filter((pr) =>
+        pr.isDraft !== true && pr.checksState === "green" && pr.reviewState === "success");
+      if (readyPrs.length > 0) {
+        const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
+        const behindMainByPr = buildBehindMainByPr(owner, repo, readyPrs, undefined, undefined, baseChangedFilesByPr);
+        readyRefreshed = await runLightPassReadyRefresh(openPrs, {
+          ...effects, ledgerPath, runId, behindMainByPr, baseChangedFilesByPr,
+          inFlightTaskIds: new Set(inFlightTaskIdsFrom(join(config.root, "state", "inflight"))),
+        }, DEFAULT_SWEEP_POLICY);
+      }
+      const passPrs = readyRefreshed === undefined ? openPrs : openPrs.filter((pr) => pr.prNumber !== readyRefreshed);
+      const requeueOnlyPrs = reviewOnly ? [] : passPrs.filter((pr) => blockedFixableIsRequeueOnly(pr));
       const requeueOnlyPrNumbers = new Set(requeueOnlyPrs.map((pr) => pr.prNumber));
-      const restPrs = requeueOnlyPrNumbers.size === 0 ? openPrs : openPrs.filter((pr) => !requeueOnlyPrNumbers.has(pr.prNumber));
+      const restPrs = requeueOnlyPrNumbers.size === 0 ? passPrs : passPrs.filter((pr) => !requeueOnlyPrNumbers.has(pr.prNumber));
       const passes: Array<Promise<unknown>> = [
         // UNCHANGED FROM BEFORE THIS TASK when `requeueOnlyPrs` is empty (the overwhelming
         // common case — cancellations were measured at ~7% of `coverage-ratchet` runs): `restPrs`
@@ -47102,7 +47195,8 @@ export function buildSweepLightHook(
             // one tick, exactly the N+(N-1)+…+1 cost this shard exists to prevent. `updateBranch`
             // joins dispatchFix/close/escalate/depReview/arm on the list that stands down here
             // until the NEXT FULL sweep (`sweepCommand`/the daemon poll rung, both of which call
-            // `runSweep` ONCE over the whole set) picks it back up.
+            // `runSweep` ONCE over the whole set) picks it back up. W1-T7214: the one exception, a
+            // ready-overlap refresh, runs ONCE above (`runLightPassReadyRefresh`), never through this fan-out.
             updateBranch: undefined,
           },
           DEFAULT_SWEEP_POLICY,

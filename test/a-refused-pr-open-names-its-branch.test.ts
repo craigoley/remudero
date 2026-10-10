@@ -345,3 +345,134 @@ test("the failing-proof note sits before the task trailer so the trailer stays l
   assert.ok(body.indexOf("## Pre-open proof failure") < body.indexOf("Remudero-Task: W1-T1"));
   assert.match(body, /Remudero-Task: W1-T1$/);
 });
+
+test("a stale proof on a test-only build records it as satisfied by main instead of escalating", () => {
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const issues: IssueGateway = {
+    create: () => assert.fail("a build that found nothing to change must not open an issue"),
+  };
+  const url = recordRefusedPrOpen(
+    new PrOpenRefusedError("stale-proof", "W1-T1 proof did not pass against merge base (unit test: x): executed_stale"),
+    { taskId: "W1-T1", branch: "run-W1-T1-1", headSha: "b".repeat(40), changedFiles: ["test/x.test.ts"] },
+    (step, extra) => rows.push({ step, extra }),
+    { issues, ledgerPath: join(tmpdir(), "unused-ledger.ndjson"), runId: "W1-T1-1" },
+  );
+  assert.equal(url, null);
+  assert.deepEqual(rows.map((row) => row.step), ["pr.open_refused", "pr.open_satisfied_by_main"]);
+  assert.equal(rows[1]?.extra?.task_id, "W1-T1");
+  assert.deepEqual(rows[1]?.extra?.changed_files, ["test/x.test.ts"]);
+});
+
+test("a stale proof on a build that touched source, or whose diff could not be read, still escalates", () => {
+  for (const changedFiles of [["test/x.test.ts", "src/x.ts"], undefined, []]) {
+    let raised = 0;
+    const issues: IssueGateway = {
+      create: () => {
+        raised += 1;
+        return "https://github.com/acme/remudero/issues/9";
+      },
+      listOpen: () => [],
+      ensureLabel: () => true,
+    };
+    const rows: string[] = [];
+    recordRefusedPrOpen(
+      new PrOpenRefusedError("stale-proof", "W1-T1 proof did not pass against merge base (unit test: x): executed_stale"),
+      { taskId: "W1-T1", branch: "run-W1-T1-1", headSha: "c".repeat(40), changedFiles },
+      (step) => rows.push(step),
+      { issues, ledgerPath: join(tmpdir(), "unused-ledger.ndjson"), runId: "W1-T1-1" },
+    );
+    assert.equal(raised, 1, `escalates for ${JSON.stringify(changedFiles)}`);
+    assert.ok(!rows.includes("pr.open_satisfied_by_main"));
+  }
+});
+
+const testOnlySpawn: typeof spawnWorker = (() => {
+  let calls = 0;
+  return async (args: { cwd: string }) => {
+    calls += 1;
+    if (calls % 2 === 1) return workerResult({ text: "RECON REPORT\nOBSERVED: fixture\n" });
+    mkdirSync(join(args.cwd, "test"), { recursive: true });
+    writeFileSync(join(args.cwd, "test", "a-regression.test.ts"), "// the behaviour already ships\n");
+    execFileSync("git", ["-C", args.cwd, "add", "test/a-regression.test.ts"]);
+    execFileSync("git", ["-C", args.cwd, "-c", "user.email=w@remudero.invalid", "-c", "user.name=w", "commit", "-qm", "test: pin the shipped behaviour"]);
+    return workerResult({ text: "REPORT\nnothing to change; committed a regression test\n" });
+  };
+})() as unknown as typeof spawnWorker;
+
+test("a run whose test-only build meets a stale proof is retired as satisfied by main, not escalated", async () => {
+  const fx = buildRun("grep: seed in README.md");
+  try {
+    const issues: IssueGateway = {
+      create: () => assert.fail("no escalation for a build that found nothing to change"),
+      listOpen: () => [],
+      ensureLabel: () => true,
+    };
+    const plan = loadPlan(fx.planPath);
+    const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+    const ctx: RunTaskContext = {
+      config: fx.config,
+      fetchPrBodyFn: async () => {
+        throw new Error("PR body fetch is unreachable in this fixture");
+      },
+      github: OFFLINE_GITHUB,
+      isMerged: () => false,
+      ledgerPath: join(fx.root, "state", "ledger.ndjson"),
+      log: (step, extra) => rows.push({ step, extra }),
+      openTaskIds: new Set([TASK_ID]),
+      opts: { containmentExec: holdingContainmentExec, isolationExec: cleanIsolationExec, prOpenRefusalIssues: issues },
+      owner: "acme",
+      plan,
+      planPath: fx.planPath,
+      recordDecisionFn: () => ({ landed: false, files: [] }),
+      repoRoot: REPO_ROOT,
+      runId: `${TASK_ID}-1`,
+      runReviewFn: async () => {
+        throw new Error("review is unreachable in this fixture");
+      },
+      say: () => {},
+      spawn: testOnlySpawn,
+      task: plan.byId.get(TASK_ID)!,
+      taskId: TASK_ID,
+      workerStateSensor: { observer: () => {}, startPolling: () => () => {}, setRunawayBound: () => {} },
+    };
+    await withLiveWritesAllowed(() => runTaskBody(ctx));
+    const satisfied = rows.find((row) => row.step === "pr.open_satisfied_by_main")?.extra ?? {};
+    assert.deepEqual(satisfied.changed_files, ["test/a-regression.test.ts"]);
+    assert.equal(satisfied.task_id, TASK_ID);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("a guard task whose test-only build meets a stale proof is never retired, and is routed to a proof amendment", () => {
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const created: Array<{ title: string; body: string }> = [];
+  const issues: IssueGateway = {
+    create: (title, body) => {
+      created.push({ title, body });
+      return "https://github.com/acme/remudero/issues/11";
+    },
+    listOpen: () => [],
+    ensureLabel: () => true,
+  };
+  recordRefusedPrOpen(
+    new PrOpenRefusedError("stale-proof", "W1-T2 proof did not pass against merge base (unit test: guard): executed_stale"),
+    {
+      taskId: "W1-T2",
+      branch: "run-W1-T2-1",
+      headSha: "e".repeat(40),
+      changedFiles: ["test/a-guard.test.ts"],
+      declaredFiles: ["test/a-guard.test.ts"],
+    },
+    (step, extra) => rows.push({ step, extra }),
+    { issues, ledgerPath: join(tmpdir(), "unused-ledger.ndjson"), runId: "W1-T2-1" },
+  );
+  const steps = rows.map((row) => row.step);
+  assert.ok(!steps.includes("pr.open_satisfied_by_main"), "a guard is never retired as satisfied by main");
+  assert.ok(steps.includes("pr.open_guard_proof_amendment"), "its proof is flagged for amendment");
+  const amendment = rows.find((row) => row.step === "pr.open_guard_proof_amendment")?.extra ?? {};
+  assert.deepEqual(amendment.proposed_proofs, ["grep: test( in test/a-guard.test.ts"]);
+  assert.equal(created.length, 1, "the escalation still carries the decision");
+  assert.match(created[0]!.body, /GUARD task/);
+  assert.match(created[0]!.body, /grep: test\( in test\/a-guard\.test\.ts/);
+});

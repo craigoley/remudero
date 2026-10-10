@@ -190,6 +190,25 @@ export interface RefusedPrOpenBranch {
   taskId: string;
   branch: string;
   headSha: string;
+  /** The files the branch changed since its merge base, or undefined when they could not be read. */
+  changedFiles?: readonly string[];
+  /** The task's declared `files:`. A guard task declares only tests: the test IS its deliverable. */
+  declaredFiles?: readonly string[];
+}
+
+/** A diff that changes something and only under `test/`: a build that found nothing to change in the code. */
+export function isTestOnlyDiff(files: readonly string[] | undefined): boolean {
+  return files !== undefined && files.length > 0 && files.every((f) => f.startsWith("test/"));
+}
+
+/** The ledger step a stale proof on a test-only build writes instead of an escalation; the backlog
+ *  gardener reads it to retire the task as already satisfied by main. */
+export const PR_OPEN_SATISFIED_BY_MAIN_STEP = "pr.open_satisfied_by_main";
+
+/** A head-only grep proof that a guard's new test file exists: it matches at the head and the file is
+ *  absent at the merge base, so it discriminates where the guard's own test cannot. */
+export function guardFileProof(testFile: string): string {
+  return `grep: test( in ${testFile}`;
 }
 
 /**
@@ -211,6 +230,22 @@ export function recordRefusedPrOpen(
     reason: err.message,
   });
   if (err.refusalClass !== "stale-proof") return null;
+  // A test-only build whose proof already passes at the merge base found nothing to change: main
+  // already ships the behaviour. That is evidence for retiring the task, not a human decision.
+  // A GUARD task declares only tests: its regression test IS the deliverable and passes on a main that
+  // has not regressed. Retiring it would throw the guard away, so its proof is amended instead.
+  const guardTask = isTestOnlyDiff(at.declaredFiles);
+  const newTests = guardTask ? (at.changedFiles ?? []).filter((f) => f.startsWith("test/")) : [];
+  if (isTestOnlyDiff(at.changedFiles) && !guardTask) {
+    log(PR_OPEN_SATISFIED_BY_MAIN_STEP, {
+      task_id: at.taskId,
+      branch: at.branch,
+      head_sha: at.headSha,
+      changed_files: [...(at.changedFiles ?? [])],
+      reason: err.message,
+    });
+    return null;
+  }
   const blocked: Escalation = {
     class: "BLOCKED",
     taskId: at.taskId,
@@ -229,8 +264,20 @@ export function recordRefusedPrOpen(
       { label: "retire-task", detail: `retire ${at.taskId} if the proof shows the work is already on main.` },
     ],
     recommendation: "amend-proof",
+    ...(newTests.length > 0
+      ? {
+          detail:
+            `The run pushed branch \`${at.branch}\` (head ${at.headSha}), then the PR opener refused it:\n\n${err.message}\n\n` +
+            `${at.taskId} is a GUARD task: it declares only tests, so its regression test passes on a main that has not ` +
+            `regressed. Do not retire it. Amend its proof to a head-only check that the guard exists, then open a PR from ${at.branch}:\n\n` +
+            newTests.map((f) => `- \`${guardFileProof(f)}\``).join("\n"),
+        }
+      : {}),
     consequence: `${at.branch} stays PR-less and ${at.taskId} is refused again on every rebuild.`,
   };
+  if (newTests.length > 0) {
+    log("pr.open_guard_proof_amendment", { task_id: at.taskId, branch: at.branch, head_sha: at.headSha, proposed_proofs: newTests.map(guardFileProof) });
+  }
   const issueUrl = tryEscalate(blocked, escalation);
   log("pr.open_refused.escalated", { branch: at.branch, issue_url: issueUrl });
   return issueUrl;
