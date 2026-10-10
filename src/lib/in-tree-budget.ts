@@ -52,6 +52,7 @@ export async function waitForProcessGroupExit(pgid: number | undefined, timeoutM
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "ESRCH") return true;
+      // ESRCH proves exit; EPERM means the group still exists, and other probe failures are not proof, so fail closed.
       if (code !== "EPERM") return false;
     }
     if (Date.now() >= deadline) return false;
