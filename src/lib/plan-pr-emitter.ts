@@ -80,7 +80,6 @@ export function renderAcceptanceBlock(criteria: AcceptanceCriterion[]): string {
  * Repair `body`'s Acceptance block only when {@link bodyNeedsAcceptanceRepair} calls it defective — a
  * healthy block, even a differently-formatted one, is never touched. Otherwise demote the defective header
  * (if any) and append a rendered fallback block built from `fallbackCriteria`, so the result parses judgeably.
- *
  * `bodyNeedsAcceptanceRepair` checks more than "zero criteria parsed": a wrapped or truncated bullet can
  * still parse to one criterion with a real proof, which used to read as healthy even though every bullet
  * after it was silently discarded (W1-T2316; `truncatedAtBullet`, from
@@ -102,19 +101,11 @@ export function bodyNeedsAcceptanceRepair(body: string): boolean {
 export const SUPERSEDED_HEADER_SUFFIX = " (superseded — unparseable, see the repaired block below)";
 
 /**
- * W1-T3038 — RECOVER BEFORE YOU REPLACE.
- *
- * MEASURED: a body carrying FOUR real criteria written `- <claim> — unit test: <title>` went in and
- * ONE placeholder came out, silently. An em dash is not a separator, so each bullet parsed with an
- * empty proof, `bodyNeedsAcceptanceRepair` called the body defective, and the fallback displaced
- * the author's own criteria — which were one character from correct the whole time.
- *
- * `emDashSeparatedProof` (body-repair.ts, W1-T3028) already knew how to split those bullets; it
- * fed the DIAGNOSER and nothing else, so the REPAIR could not use what the report had worked out.
- * That is the gap this closes: the fallback is for a body with nothing recoverable in it, not for
- * one whose criteria merely need their separator fixed.
- *
- * Returns `[]` when nothing is recoverable, which is exactly when the fallback is right.
+ * W1-T3038 — RECOVER BEFORE YOU REPLACE. MEASURED: FOUR real criteria written `- <claim> — unit test:
+ * <title>` came out as ONE placeholder, silently: an em dash is not a separator, so each bullet parsed with
+ * an empty proof and the fallback displaced criteria that were one character from correct. Splitting them
+ * (`emDashSeparatedProof`, body-repair.ts, W1-T3028) fed only the DIAGNOSER; the fallback is for a body with
+ * nothing recoverable, not one whose separator merely needs fixing. `[]` means exactly that.
  */
 export function recoverableCriteria(body: string): AcceptanceCriterion[] {
   const out: AcceptanceCriterion[] = [];
@@ -175,7 +166,6 @@ export function filingAcceptanceCriteria(taskIds: string[], files: string[]): Ac
   // proof_exec 0/1 and cannot arm. MEASURED 2026-09-11: every open ratification PR on the board was
   // refused this way — #5122, #5123, #5124, #5125 — so `rmd approve` was structurally incapable of
   // opening a PR that could land, and each one had to be repaired by hand.
-  //
   // A `grep:` ON THE FILED SHARD DOES RESOLVE, and the header's old objection does not apply to it.
   // That objection — "a filing PR cannot cite the filed task's own acceptance criteria, the task
   // does not exist in the checkout review resolves against" — is about citing the task's OWN
@@ -807,7 +797,11 @@ function cleanupErrorText(error: unknown): string {
 function canonicalWorktreePath(path: string): string {
   const absolute = resolve(path);
   try { return realpathSync(absolute); } catch {
-    try { return join(realpathSync(dirname(absolute)), basename(absolute)); } catch { return absolute; }
+    // The path itself is gone (a removed worktree): canonicalise its parent instead.
+    try { return join(realpathSync(dirname(absolute)), basename(absolute)); } catch {
+      // Parent gone too: the lexical absolute path is the only comparable form left.
+      return absolute;
+    }
   }
 }
 
