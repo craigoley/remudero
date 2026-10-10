@@ -80,8 +80,8 @@ usage:
   rmd fix <pr-number> [--repo <name>]   # Operator verb for the fix rung: dispatch the same rung `rmd sweep` uses.
   rmd wipe-test <task-id> [--factor learnings|recon|rules] [--repo remudero-sandbox] [--allow-non-sandbox]   # P12 A/B harness: run a sandbox task twice, ledger the deltas for one factor.
   rmd stop [--reason <text>]   # Fleet control: one-shot halt of the running drain; auto-clears when it ends.
-  rmd pause [--reason <text>]   # Fleet control: persistent drain-and-hold until `rmd resume`.
-  rmd resume   # Fleet control: clear PAUSE (and any STOP); spawns resume.
+  rmd pause [--instance <name>] [--reason <text>] | rmd pause --fleet [--reason <text>]   # Fleet control: persistent drain-and-hold of ONE instance until `rmd resume`; --fleet holds every instance.
+  rmd resume [--instance <name>] | rmd resume --fleet   # Fleet control: clear ONE instance's PAUSE (and any STOP); --fleet clears the fleet-wide hold.
   rmd away [on|off]   # Set/show operator presence; batches escalations into a recap while away.
   rmd correct <task-id> --pr <n> [--reason <text>]   # Sanctioned operator-correction writer: name a task's true merged PR.
   rmd release <task-id> --reason <text>   # Release a halted task's dispatch circuit breaker; dispatchable next tick.
@@ -783,23 +783,23 @@ fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run end
 
 ### `rmd pause`
 
-Fleet control: persistent drain-and-hold until `rmd resume`.
+Fleet control: persistent drain-and-hold of ONE instance until `rmd resume`; --fleet holds every instance.
 
 ```
-rmd pause [--reason <text>]
+rmd pause [--instance <name>] [--reason <text>] | rmd pause --fleet [--reason <text>]
 ```
 
-fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.
+fleet control: PERSISTENT drain-and-hold of ONE instance — the one --instance names, else the instance whose registry state_dir is this config.root; an unresolvable target refuses before writing. In-flight completes, no new spawns; survives across runs until `rmd resume`. --fleet is the separate, explicit fleet-wide hold (refs/rmd-pause/hold), cleared only by `rmd resume --fleet`.
 
 ### `rmd resume`
 
-Fleet control: clear PAUSE (and any STOP); spawns resume.
+Fleet control: clear ONE instance's PAUSE (and any STOP); --fleet clears the fleet-wide hold.
 
 ```
-rmd resume
+rmd resume [--instance <name>] | rmd resume --fleet
 ```
 
-fleet control: clear PAUSE (and any STOP); spawns resume
+fleet control: clear the targeted instance's PAUSE (and any STOP), resolved as `rmd pause` resolves it; never deletes the fleet-wide hold, which only `rmd resume --fleet` clears
 
 ### `rmd away`
 
