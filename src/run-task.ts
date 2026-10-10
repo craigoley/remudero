@@ -2529,7 +2529,7 @@ export function buildSweepEffects(
   const effects = buildSweepEffectsFromLib({
     reproduceFailingTestsOnMainImpl: buildBaseReproductionProbe(deps.config, reviewRepoDir, deps.ledgerPath, deps.log),
     repoRoot,
-    localRepoName: resolveOwnerRepo().repo,
+    localRepoName: deps.localRepoName ?? resolveOwnerRepo().repo,
     nowMsImpl: Date.now,
     updateBranchImpl: updateBranchViaGh,
     captureRepairFeedbackImpl: (filing) => captureRepairFeedbackWithPriorVerdict(repoRoot, filing, deps.log),
@@ -47408,7 +47408,10 @@ export async function fixCommand(
   // this command builds, so the one `buildSweepEffects` call site of the four that no test drives
   // stayed unexercised while the other three were graded. Omitted, it is `routeFix` and the
   // behaviour is byte-identical.
-  deps: { config?: Config; fetch?: GhApiFetcher; route?: typeof routeFix } = {},
+  //
+  // `self` is the checkout's owner/repo, otherwise read from `origin`. A sandboxed checkout has no
+  // origin remote, so a test that drives this verb end to end must be able to name the slug itself.
+  deps: { config?: Config; fetch?: GhApiFetcher; route?: typeof routeFix; self?: { owner: string; repo: string } } = {},
 ): Promise<number> {
   const prArg = rest[0];
   // W1-T4077: `--requested` is the console's "Fix now". The operator asking for a fix IS the decision to try
@@ -47426,7 +47429,7 @@ export async function fixCommand(
 
   const config = deps.config ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
-  const self = resolveOwnerRepo();
+  const self = deps.self ?? resolveOwnerRepo();
   const repo = flagValue(rest, "--repo") ?? self.repo;
   const owner = self.owner;
   const runId = `FIX-${Date.now()}`;
@@ -47518,6 +47521,8 @@ export async function fixCommand(
     plan: plan,
     log: log,
     policy: DEFAULT_SWEEP_POLICY,
+    // Already resolved above (or injected): do not make buildSweepEffects read origin a second time.
+    localRepoName: self.repo,
   });
   const { outcome, reason } = await (deps.route ?? routeFix)(
     raw.state,

@@ -114,6 +114,8 @@ test("rmd fix hands the router the reviewer's own summary for the current head",
     const routed: OpenPrView[] = [];
     await runTask.fixCommand([String(PR_NUMBER)], {
       config: { root, claudeBin: "/bin/true" } as Config,
+      // The reviewer's sandbox checkout has no origin remote, so name the slug instead of reading it.
+      self: { owner: "craigoley", repo: "remudero" },
       fetch: fetchFor(HEAD),
       route: async (_state, pr) => {
         routed.push(pr);
