@@ -185,7 +185,7 @@
     "test/a-duplicate-task-id-never-takes-a-daemon-down.test.ts": 5000,
     "test/a-durable-plan-filing-credit-is-revalidated.test.ts": 410,
     "test/a-durable-trailer-credit-saved-before-the-diff-refusal-is-revalidated.test.ts": 500,
-    "test/a-duration-adoption-waits-for-the-noise-to-settle.test.ts": 720,
+    "test/a-duration-adoption-waits-for-the-noise-to-settle.test.ts": 5000,
     "test/a-fact-shows-its-freshness.test.ts": 498,
     "test/a-fail-summary-names-the-blocker-not-the-advisory.test.ts": 490,
     "test/a-failed-gate-setup-fails-every-gate-it-reports.test.ts": 1300,
