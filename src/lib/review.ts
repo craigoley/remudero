@@ -1823,19 +1823,69 @@ export function credentialFreeOriginUrl(url: string): string | undefined {
   return url.replace(/^[^@/:]+@(?=[^/:]+:)/, ""); // scp-like `user@host:path`, or a local path left as it is
 }
 
+function gitQuotedValue(raw: string): string | undefined {
+  const value = raw.trimStart();
+  if (!value.startsWith('"')) {
+    let end = value.length;
+    for (let i = 0; i < value.length; i++) {
+      if ((value[i] === "#" || value[i] === ";") && (i === 0 || /\s/.test(value[i - 1]!))) { end = i; break; }
+    }
+    return value.slice(0, end).trimEnd();
+  }
+  let out = "";
+  for (let i = 1; i < value.length; i++) {
+    const ch = value[i]!;
+    if (ch === '"') return /^[\s]*(?:[#;].*)?$/.test(value.slice(i + 1)) ? out : undefined;
+    if (ch !== "\\") { out += ch; continue; }
+    const escaped = value[++i];
+    if (escaped === undefined) return undefined;
+    if (escaped === "n") out += "\n";
+    else if (escaped === "t") out += "\t";
+    else if (escaped === "b") out += "\b";
+    else if (escaped === "\\" || escaped === '"') out += escaped;
+    else return undefined;
+  }
+  return undefined;
+}
+
+function originUrlFromGitConfig(text: string): string | undefined {
+  const lines = text.replace(/\\\r?\n[ \t]*/g, "").split(/\r?\n/);
+  let inOrigin = false;
+  const values: string[] = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#") || line.startsWith(";")) continue;
+    const section = /^\[\s*([A-Za-z][A-Za-z0-9-]*)(?:\s+(?:"((?:\\.|[^"])*)"|([A-Za-z0-9.-]+)))?\s*\]$/.exec(line);
+    const dotted = /^\[\s*([A-Za-z][A-Za-z0-9-]*)\.([A-Za-z0-9.-]+)\s*\]$/.exec(line);
+    if (line.startsWith("[") && !section && !dotted) return undefined;
+    if (section || dotted) {
+      const name = (section?.[1] ?? dotted?.[1] ?? "").toLowerCase();
+      const subsection = section?.[2]?.replace(/\\([\\"])/g, "$1") ?? section?.[3] ?? dotted?.[2] ?? "";
+      inOrigin = name === "remote" && subsection === "origin";
+      continue;
+    }
+    if (!inOrigin) continue;
+    const entry = /^([A-Za-z][A-Za-z0-9-]*)\s*(?:=\s*(.*))?$/.exec(line);
+    if (entry?.[1]?.toLowerCase() !== "url") continue;
+    const value = gitQuotedValue(entry[2] ?? "");
+    if (value === undefined) return undefined;
+    values.push(value);
+  }
+  return values.length === 1 ? values[0] : undefined;
+}
+
 /** The masked git config a proof sandbox binds over the shared one: `[remote "origin"] url = …` with
  *  {@link credentialFreeOriginUrl}'s url, and nothing else — or EMPTY when the shared config names no usable origin.
  *  Read with `--file` and no `--includes`, so an included file never contributes. */
 export function proofMaskedGitConfig(sharedConfig: string): string {
-  let raw: string;
+  let config: string;
   try {
-    raw = execFileSync("git", ["config", "--file", sharedConfig, "--get", "remote.origin.url"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    config = readFileSync(sharedConfig, "utf8");
   } catch {
-    return ""; // no origin (git exits 1) or an unreadable config: the proof sees no remote, as before this mask
+    return ""; // unreadable config: the proof sees no remote, as before this mask
   }
+  const raw = originUrlFromGitConfig(config);
+  if (raw === undefined) return "";
   const url = credentialFreeOriginUrl(raw);
   if (url === undefined) return "";
   return `[remote "origin"]\n\turl = "${url.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"\n`;

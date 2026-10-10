@@ -86,9 +86,21 @@ test("proofMaskedGitConfig is empty when the shared config names no usable origi
   const bad = join(root, "bad");
   writeFileSync(bad, '[remote "origin"]\n\turl = "https://fixture-secret@github.com:badport/o/r"\n');
   assert.equal(review.proofMaskedGitConfig(bad), "", "an unparseable origin: the proof sees no remote");
+  const unrelated = join(root, "unrelated");
+  writeFileSync(unrelated, '[remote "origin"]\n\turl = https://github.com/o/r\n[core]\n\turl = https://fixture-secret/ignored\n');
+  assert.equal(readUrl(writeMask(unrelated)), "https://github.com/o/r", "a later section cannot replace the origin");
+  const repeated = join(root, "repeated");
+  writeFileSync(repeated, '[remote "origin"]\n\turl = https://github.com/o/r\n\turl = https://fixture-secret/other\n');
+  assert.equal(review.proofMaskedGitConfig(repeated), "", "an ambiguous origin is not guessed");
   const odd = join(root, "odd");
   writeFileSync(odd, '[remote "origin"]\n\turl = "/srv/git/a\\"b\\\\c;d#e.git"\n');
   const mask = join(root, "mask");
   writeFileSync(mask, review.proofMaskedGitConfig(odd));
   assert.equal(readUrl(mask), '/srv/git/a"b\\c;d#e.git', "quotes, backslashes and comment characters round-trip");
+
+  function writeMask(config: string): string {
+    const path = join(root, "unrelated-mask");
+    writeFileSync(path, review.proofMaskedGitConfig(config));
+    return path;
+  }
 });
