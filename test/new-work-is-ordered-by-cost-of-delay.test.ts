@@ -245,7 +245,7 @@ test("W1-T4064: command snapshot is clock-free and unreadable inputs log once pe
   assert.equal(logs.filter(row => row.step === "dispatch.cost_of_delay.fallback").length, 4, "a new failure after recovery is a new transition");
 });
 
-test("W1-T4064: the daemon reads filing dates from the plan path it was given", async () => {
+async function daemonReadsFilingDates(clockSkewMs: number) {
   const repo = gitRepo({ kind: "cost-of-delay-daemon" });
   // daemonCommand's boot rung sweeps tmpdir() for rmd-* dirs older than 24 h by Date.now() against REAL
   // mtimes, and this fixture's repo is itself an rmd-* dir there: under a +1 day clock the daemon deleted the
@@ -276,12 +276,17 @@ test("W1-T4064: the daemon reads filing dates from the plan path it was given", 
     process.env.HOME = home;
     process.env.TMPDIR = privateTmp;
     let context: ReturnType<typeof dispatchValueContextForSelection>;
-    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+    const realNow = Date.now;
+    if (clockSkewMs) Date.now = () => realNow() + clockSkewMs;
+    let code: number;
+    try {
+      code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
       runDaemon: async (daemonPlan, deps): Promise<DaemonSummary> => {
         context = deps.buildDispatchValueContext?.(daemonPlan, () => false);
         return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
       },
-    });
+      });
+    } finally { Date.now = realNow; }
     assert.equal(code, 0);
     const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
     assert.equal(context?.costOfDelayFallback, undefined, `a readable plan history is not a fallback: ${rows.split("\n").filter(l => l.includes("cost_of_delay")).join("\n")}`);
@@ -293,4 +298,15 @@ test("W1-T4064: the daemon reads filing dates from the plan path it was given", 
     else process.env.TMPDIR = oldTmp;
     repo.cleanup();
   }
+}
+
+test("W1-T4064: the daemon reads filing dates from the plan path it was given", async () => {
+  await daemonReadsFilingDates(0);
+});
+
+// The intermittent failure: the daemon's boot temp sweep deletes rmd-* dirs older than 24 h by Date.now()
+// against real mtimes, so once the clock sat a day past the fixture repo's mtime it deleted the plan the
+// daemon was handed (ENOENT -> filing-history-unreadable). Force that order with the clock two days ahead.
+test("W1-T7799 pins the cause of the intermittent failure", async () => {
+  await daemonReadsFilingDates(2 * DAY);
 });
