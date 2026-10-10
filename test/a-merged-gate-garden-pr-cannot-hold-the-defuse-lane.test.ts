@@ -118,7 +118,7 @@ test("W1-T5825: a pending held by the code before this fix is stamped once and r
   assert.deepEqual(released.plan?.acting, ["defuse"], "a fingerprint recorded while held is not trusted once the hold ends");
 });
 
-test("W1-T5825: a pending whose tally moves is judged as before and never released", async () => {
+test("W1-T5825: a pending whose tally is conclusive is credited without a release", async () => {
   const credited = await heldGarden();
   await credited.pass(HELD_AT);
   credited.tally({ trials: 857, successes: 851 });
@@ -127,14 +127,29 @@ test("W1-T5825: a pending whose tally moves is judged as before and never releas
   assert.deepEqual(credited.step("gate.gardener_judged").map((r) => r.extra?.verdict), ["credit"]);
   assert.deepEqual(credited.read().classes.refresh, { alpha: 4, beta: 1 });
   assert.equal(credited.step("gate.pending_released").length, 0);
-  // Two new trials are too few to judge, but they are trials: past the bound it still waits.
+});
+
+test("W1-T7393: an inconclusive gate tally waits until the bound then frees the defuse lane", async () => {
   const moving = await heldGarden();
   await moving.pass(HELD_AT);
   moving.tally({ trials: 659, successes: 653 });
-  const late = await moving.pass(HELD_AT + 2 * GARDEN_PENDING_RELEASE_MS);
+  const early = await moving.pass(HELD_AT + GARDEN_PENDING_RELEASE_MS - 1);
   assert.equal(moving.read().pending?.prUrl, HELD_PR);
-  assert.deepEqual(late.plan?.actions ?? [], []);
+  assert.equal(early.ran, false);
+  assert.deepEqual(moving.landed, []);
   assert.equal(moving.step("gate.pending_released").length, 0);
+  const late = await moving.pass(HELD_AT + GARDEN_PENDING_RELEASE_MS);
+  assert.deepEqual(moving.step("gate.pending_released").map((r) => r.extra), [{
+    pr_url: HELD_PR, action_class: "refresh", waited_ms: GARDEN_PENDING_RELEASE_MS,
+    bound_ms: GARDEN_PENDING_RELEASE_MS, trials: 2, difference: 1 - FROZEN.successes / FROZEN.trials,
+  }]);
+  assert.deepEqual(moving.read().classes.refresh, { alpha: 3, beta: 1 });
+  assert.equal(moving.step("gate.gardener_judged").length, 0);
+  assert.deepEqual(late.plan?.acting, ["defuse"]);
+  assert.deepEqual(late.plan?.actions.map((a) => a.target), [`expiring-fixture:${FILE}`]);
+  assert.equal(late.prUrl, DEFUSE_PR);
+  assert.equal(moving.read().pending?.prUrl, DEFUSE_PR);
+  assert.equal(moving.step("gate_garden.defuse_filed").length, 1);
 });
 
 test("W1-T5825: a merged defuse PR is settled by its decision, never by the tally", async () => {
