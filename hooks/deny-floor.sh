@@ -845,6 +845,131 @@ hr_skipopts() {  # step the caller's i past the wrapper word at t[i] and its opt
   done
   return 0
 }
+hr_env_split_words() {  # split env -S text into literal argv words without interpreting shell separators or expansions
+  local input="$1" len pos=0 ch next quote="" word="" have=0 out="" us=$'\037'
+  len=${#input}
+  while [ "$pos" -lt "$len" ]; do
+    ch="${input:$pos:1}"
+    if [ "$quote" = "'" ]; then
+      if [ "$ch" = "'" ]; then quote=""; else word="$word$ch"; have=1; fi
+      pos=$((pos + 1))
+      continue
+    fi
+    if [ "$quote" = '"' ]; then
+      case "$ch" in
+        '"') quote="" ;;
+        \\)
+          if [ $((pos + 1)) -lt "$len" ]; then
+            next="${input:$((pos + 1)):1}"
+            case "$next" in '"'|\\) word="$word$next"; pos=$((pos + 1)) ;; *) word="$word$ch" ;; esac
+          else word="$word$ch"; fi ;;
+        *) word="$word$ch" ;;
+      esac
+      have=1
+      pos=$((pos + 1))
+      continue
+    fi
+    case "$ch" in
+      ' '|$'\t'|$'\n')
+        if [ "$have" -eq 1 ]; then out="${out}${word}${us}"; word=""; have=0; fi ;;
+      "'"|'"') quote="$ch"; have=1 ;;
+      \\)
+        if [ $((pos + 1)) -ge "$len" ]; then return 1; fi
+        next="${input:$((pos + 1)):1}"
+        case "$next" in
+          c) pos=$len; continue ;;
+          _) word="$word " ;;
+          *) word="$word$next" ;;
+        esac
+        have=1
+        pos=$((pos + 1)) ;;
+      *) word="$word$ch"; have=1 ;;
+    esac
+    pos=$((pos + 1))
+  done
+  [ -z "$quote" ] || return 1
+  if [ "$have" -eq 1 ]; then out="${out}${word}${us}"; fi
+  printf '%s' "$out"
+}
+hr_env_check() {  # inspect env argv, expanding split-string options as literal argv
+  local previous="$1" mode="$2" depth="$3" j w encoded split_arg rounds=0 command_line us=$'\037'
+  local -a argv=() split=()
+  for ((j = i + 1; j < n; j++)); do argv+=("${t[$j]}"); done
+
+  # env allows its split-string option before the executable. Expand it in place; the
+  # resulting words are argv, not shell syntax (so a semicolon inside one stays data).
+  j=0
+  while [ "$j" -lt "${#argv[@]}" ]; do
+    w="${argv[$j]}"
+    case "$w" in
+      --) break ;;
+      -u|--unset|-C|--chdir|-P|--path|-a|--argv0) j=$((j + 2)); continue ;;
+      -S|--split-string)
+        [ $((j + 1)) -lt "${#argv[@]}" ] || deny "env -S has no split-string argument; run the command without env -S so the house-rule floor can inspect it"
+        split_arg="${argv[$((j + 1))]}"
+        encoded="$(hr_env_split_words "$split_arg")" || deny "env -S has malformed split-string quoting; run the command without env -S so the house-rule floor can inspect it"
+        split=()
+        if [ -n "$encoded" ]; then IFS=$'\037' read -r -a split <<< "$encoded"; fi
+        argv=("${argv[@]:0:j}" "${split[@]}" "${argv[@]:j+2}")
+        rounds=$((rounds + 1))
+        [ "$rounds" -le 8 ] || deny "env -S nesting exceeds the house-rule parser limit; run the command without nested env -S"
+        continue ;;
+      --split-string=*)
+        split_arg="${w#--split-string=}"
+        encoded="$(hr_env_split_words "$split_arg")" || deny "env --split-string has malformed quoting; run the command without env -S so the house-rule floor can inspect it"
+        split=()
+        if [ -n "$encoded" ]; then IFS=$'\037' read -r -a split <<< "$encoded"; fi
+        argv=("${argv[@]:0:j}" "${split[@]}" "${argv[@]:j+1}")
+        rounds=$((rounds + 1))
+        [ "$rounds" -le 8 ] || deny "env -S nesting exceeds the house-rule parser limit; run the command without nested env -S"
+        continue ;;
+      -S?*)
+        split_arg="${w#-S}"
+        encoded="$(hr_env_split_words "$split_arg")" || deny "env -S has malformed split-string quoting; run the command without env -S so the house-rule floor can inspect it"
+        split=()
+        if [ -n "$encoded" ]; then IFS=$'\037' read -r -a split <<< "$encoded"; fi
+        argv=("${argv[@]:0:j}" "${split[@]}" "${argv[@]:j+1}")
+        rounds=$((rounds + 1))
+        [ "$rounds" -le 8 ] || deny "env -S nesting exceeds the house-rule parser limit; run the command without nested env -S"
+        continue ;;
+      --unset=*|--chdir=*|--path=*|--argv0=*|-u?*|-C?*|-P?*|-a?*|-i|-v|-0|--ignore-environment|--null|--debug|--help|--version|-[iv0]*)
+        j=$((j + 1)); continue ;;
+      [A-Za-z_][A-Za-z0-9_]*=*)
+        j=$((j + 1)); continue ;;
+      *) break ;;
+    esac
+    j=$((j + 1))
+  done
+
+  # Locate env's executable after its own options and NAME=value operands.
+  j=0
+  while [ "$j" -lt "${#argv[@]}" ]; do
+    w="${argv[$j]}"
+    case "$w" in
+      --) j=$((j + 1)); break ;;
+      -u|--unset|-C|--chdir|-P|--path|-a|--argv0) j=$((j + 2)) ;;
+      --unset=*|--chdir=*|--path=*|--argv0=*|-i|--ignore-environment|-0|--null|-v|--debug|--help|--version|-[iv0]*) j=$((j + 1)) ;;
+      -u?*|-C?*|-P?*|-a?*) j=$((j + 1)) ;;
+      [A-Za-z_][A-Za-z0-9_]*=*) j=$((j + 1)) ;;
+      -*) deny "env option '$w' is not recognized by the house-rule parser; run the command without that env option so its executable can be inspected" ;;
+      *) break ;;
+    esac
+  done
+  [ "$j" -lt "${#argv[@]}" ] || return 0
+
+  # Feed a serialized token segment directly: no shell parsing of env's literal argv.
+  command_line="-"
+  w="${argv[$j]}"
+  if [ "${w##*/}" = env ] && [ "$depth" -ge 4 ]; then
+    deny "nested env wrappers exceed the house-rule parser limit; run the command without nested env wrappers"
+  fi
+  while [ "$j" -lt "${#argv[@]}" ]; do
+    command_line="${command_line}${us}${argv[$j]}"
+    j=$((j + 1))
+  done
+  hr_segment "$command_line" "$previous" "$mode" $((depth + 1))
+  return 0
+}
 hr_check() {  # $1 = shell text, $2 = local|host, $3 = depth
   local hr_line hr_prev=""
   [ "$3" -le 4 ] || return 0
@@ -1061,7 +1186,7 @@ hr_segment() {  # $1 = one hr_tokens line, $2 = the previous line, $3 = local|ho
     case "${t[$i]}" in
       [A-Za-z_]*=*|do|then|else|elif|if|while|until|'!'|'{'|time|nohup|exec|command|builtin) i=$((i + 1)) ;;
       sudo|*/sudo) hr_skipopts "-u -g -h -p -C -D -r -t -U -T" ;;
-      env|*/env) hr_skipopts "-u -C -S" ;;
+      env|*/env) hr_env_check "$2" "$3" "$4"; return 0 ;;
       nice|*/nice) hr_skipopts "-n" ;;
       timeout|*/timeout) hr_skipopts "-s -k --signal --kill-after"; i=$((i + 1)) ;;
       xargs|*/xargs) hr_skipopts "-I -n -P -L -d -a -E -s --max-args --max-procs --max-lines --delimiter --arg-file" ;;

@@ -48,6 +48,14 @@ test("house rule: every form of git stash is refused at the floor", () => {
     'bash -c "git stash"',
     "for f in a b; do git stash; done",
     "timeout 10 git stash",
+    "env -S 'git stash'",
+    "env -S'git stash'",
+    "env -i -S 'git stash'",
+    "env --split-string='git stash'",
+    "env -S 'RMD_HOUSE_RULE_OVERRIDE=stash git stash'",
+    "env -S 'git' stash",
+    "env -P /usr/bin git stash",
+    "env -u HOME git stash",
   ];
   for (const command of shapes) assertRefused(command, /house rule: never stash/, /commit by explicit path|copy the file aside/i);
 });
@@ -78,6 +86,7 @@ test("house rule: --no-verify, git commit -n and a core.hooksPath override are r
 test("house rule: destructive process control sent over ssh remudero is refused at the floor", () => {
   for (const command of [
     "ssh remudero 'pkill -f node'",
+    "env -S 'ssh remudero killall node'",
     "ssh remudero killall node",
     "ssh remudero 'kill 4242'",
     "ssh remudero 'pgrep node | xargs kill'",
@@ -93,6 +102,7 @@ test("house rule: destructive process control sent over ssh remudero is refused 
     `ssh remudero "docker exec rmd-core sh -c 'kill 1'"`,
     "ssh remudero bash <<< 'killall node'",
     "ssh remudero bash <<'EOF'\ndocker ps\ndocker restart rmd-core\nEOF",
+    "env -S 'ssh remudero bash' <<'EOF'\nkillall node\nEOF",
     "echo 'docker stop rmd-core' | ssh remudero bash",
     "ssh remudero 'git stash'",
   ]) {
@@ -108,6 +118,10 @@ test("house rule near-misses still run, each beside the refused shape it resembl
   const pairs: [allowed: string, refused: string][] = [
     ["git stash list", "git stash"],
     ["git stash show -p stash@{0}", "git stash pop"],
+    ["env -S 'echo git stash'", "env -S 'git stash'"],
+    ["env -S 'echo x; git stash'", "env -S 'git stash'"],
+    ["env -P /usr/bin echo git stash", "env -P /usr/bin git stash"],
+    ["env -S 'git stash list'", "env -S 'git stash pop'"],
     ["git log --no-verify-foo", "git commit --no-verify -m x"],
     ["git push -n origin HEAD", "git push --no-verify origin HEAD"],
     ["git commit -am 'msg -n here'", "git commit -an -m x"],
@@ -118,6 +132,7 @@ test("house rule near-misses still run, each beside the refused shape it resembl
     ["ssh remudero 'ps aux | grep [n]ode'", "ssh remudero 'pkill -f node'"],
     ["ssh remudero 'ps -eo pid,pcpu,rss,args --sort=-rss | head -20'", "ssh remudero 'kill 4242'"],
     ["ssh remudero 'kill -0 4242'", "ssh remudero 'kill 4242'"],
+    ["env -S 'ssh remudero ps aux'", "env -S 'ssh remudero kill 4242'"],
     [`ssh remudero 'docker ps; docker logs --tail 50 rmd-core; docker inspect -f "{{.State.Status}}" rmd-core'`, "ssh remudero 'docker restart rmd-core'"],
     ["ssh remudero 'systemctl status rmd-daemon'", "ssh remudero 'systemctl restart rmd-daemon'"],
     ["ssh remudero 'git -C ~/Remudero/remudero worktree list'", "ssh remudero 'git -C ~/Remudero/remudero worktree prune'"],
