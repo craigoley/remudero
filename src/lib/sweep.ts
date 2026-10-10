@@ -101,6 +101,7 @@ import {
   buildPlanPrCommitMessage,
   createPlanPrRest,
   PlanPrPreflightRefusedError,
+  PlanPrPreflightTimedOutError,
   planPrPreflightAllows,
   planPrPreflightAtCommitAsync,
   type PlanPrPreflightResult,
@@ -3994,6 +3995,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                 // W1-T5405: a red preflight is ledgered as this source run's outcome, so the next pass does not re-pay it.
                 const verdict = await planPrPreflightImpl(worktreePath, headSha, { title: input.title, body });
                 if (!planPrPreflightAllows(verdict, { lane: "refusal_amendment", branch: input.branch, log })) {
+                  // A check that ran out of its budget is no refusal: `plan_pr.preflight_timed_out` records it,
+                  // and no amendment row settles this source run, so a later pass asks again.
+                  if (verdict.ok) throw new PlanPrPreflightTimedOutError("refusal_amendment", verdict.timedOut ?? []);
                   // W1-T5531: preflight the base alone, so a red main's refusal is retried once main moves.
                   // A probe that cannot run records why and leaves the refusal final, as before W1-T5531.
                   const base: { origin_main_sha?: string; main_red: boolean; main_red_probe_error?: string } = { main_red: false };
@@ -4328,6 +4332,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const verdict = await planPrPreflightImpl(worktreePath, headSha, { title, body });
         const preflightRow = verdict.unreadable.length > 0 ? { preflight_unreadable: verdict.unreadable } : {};
         if (!planPrPreflightAllows(verdict, { lane: "plan_repair", branch })) {
+          // A check that ran out of its budget spends no strike: recorded as such, and the next pass asks again.
+          if (verdict.ok) {
+            log("plan_pr.preflight_timed_out", { lane: "plan_repair", branch, task_id: taskId, timed_out: verdict.timedOut });
+            return true;
+          }
           planRepairLog("preflight_refused", { shard_path: shardRelPath, failures: verdict.failures, ...preflightRow });
           return true;
         }

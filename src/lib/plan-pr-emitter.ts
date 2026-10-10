@@ -37,6 +37,7 @@ import type { GhApiFetcher } from "./open-prs-rest.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
 import { RmdError } from "./errors.js";
 import { isTaskShardName } from "./task-shard-name.js";
+import { budgetedSpawn, inTreeCheckBudgetMs, killBudgetLeftovers } from "./in-tree-budget.js";
 
 const PLAN_TASK_SHARD_PREFIX = ["plan", "tasks.d"].join("/") + "/";
 
@@ -482,12 +483,16 @@ export interface PlanPrPreflightResult {
   ok: boolean;
   failures: PlanPrPreflightFinding[];
   unreadable: PlanPrPreflightFinding[];
+  timedOut?: PlanPrPreflightFinding[]; // killed at their inTreeCheckBudgetMs: no verdict, so the push waits for a later pass
 }
 /** One check's reading: 0 green, 1 red, anything else (null included) could not run. */
 export interface PlanPrPreflightReading {
   status: number | null;
   output: string;
+  timedOutMs?: number; // killed at this budget: `status` is no verdict at all
 }
+export type ProofCheckStatus = number | null | { timedOutMs: number }; // check-proof's exit, or the budget it was killed at
+export { inTreeCheckBudgetMs };
 
 const LINT_PLAN_SCRIPT = "scripts/lint-plan-precheck.mjs";
 const TASK_ID_SCRIPT = "scripts/task-id-existence-check.mjs";
@@ -516,47 +521,61 @@ const taskIdReading = (r: PlanPrPreflightReading): PlanPrPreflightReading =>
 const shardCensusReading = (r: PlanPrPreflightReading): PlanPrPreflightReading =>
   r.status === 1 && !/^# fail [1-9]/m.test(r.output) ? { ...r, status: null } : r; // no `# fail N`: a load error, not a result
 
-/** Run a script the tree itself carries; a tree without it is a check that cannot run. */
-function runInTree(cwd: string, relPath: string, argv: string[]): PlanPrPreflightReading {
+/** Run a script the tree itself carries; a tree without it is a check that cannot run. Killed at `budgetMs`. */
+function runInTree(cwd: string, relPath: string, argv: string[], budgetMs: number): PlanPrPreflightReading {
   if (!existsSync(join(cwd, relPath))) return absentFromTree(relPath);
-  const r = spawnSync(process.execPath, argv, { cwd, encoding: "utf8", maxBuffer: 1 << 26, env: inTreeEnv() });
-  return { status: r.status, output: `${r.stdout ?? ""}\n${r.stderr ?? ""}` };
+  const r = spawnSync(process.execPath, argv, { cwd, encoding: "utf8", maxBuffer: 1 << 26, env: inTreeEnv(), ...budgetedSpawn(budgetMs) });
+  const output = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
+  if ((r.error as NodeJS.ErrnoException | undefined)?.code !== "ETIMEDOUT") return { status: r.status, output };
+  killBudgetLeftovers(r.pid);
+  return { status: null, output, timedOutMs: budgetMs };
 }
 
 const execFileAsync = promisify(execFile);
 /** One awaited child process, read as a {@link PlanPrPreflightReading}: `spawnSync`'s status, never its stall (W1-T5521). */
-async function runChildAsync(file: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv): Promise<PlanPrPreflightReading> {
+async function runChildAsync(file: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv, budgetMs?: number): Promise<PlanPrPreflightReading> {
+  const run = execFileAsync(file, args, { cwd, encoding: "utf8", maxBuffer: 1 << 26, env, ...(budgetMs === undefined ? {} : budgetedSpawn(budgetMs)) });
   try {
-    const r = await execFileAsync(file, args, { cwd, encoding: "utf8", maxBuffer: 1 << 26, env });
+    const r = await run;
     return { status: 0, output: `${r.stdout}\n${r.stderr}` };
   } catch (e) {
     // A numeric code is a non-zero exit; a signal, spawn error or buffer cap is spawnSync's null (could not run).
-    const err = e as { code?: unknown; stdout?: string; stderr?: string };
-    return { status: typeof err.code === "number" ? err.code : null, output: `${err.stdout ?? ""}\n${err.stderr ?? ""}` };
+    const err = e as { code?: unknown; killed?: boolean; stdout?: string; stderr?: string };
+    const output = `${err.stdout ?? ""}\n${err.stderr ?? ""}`;
+    if (budgetMs === undefined || err.killed !== true || err.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") { // killed by node: budget, not buffer
+      return { status: typeof err.code === "number" ? err.code : null, output };
+    }
+    killBudgetLeftovers(run.child.pid);
+    return { status: null, output, timedOutMs: budgetMs };
   }
 }
-async function runInTreeAsync(cwd: string, relPath: string, argv: string[]): Promise<PlanPrPreflightReading> {
+async function runInTreeAsync(cwd: string, relPath: string, argv: string[], budgetMs: number): Promise<PlanPrPreflightReading> {
   if (!existsSync(join(cwd, relPath))) return absentFromTree(relPath);
-  return runChildAsync(process.execPath, argv, cwd, inTreeEnv());
+  return runChildAsync(process.execPath, argv, cwd, inTreeEnv(), budgetMs);
 }
 
-/** The four checks that shell out inside `cwd` (`checkProof` answers check-proof's exit), sync and awaited. */
+const proofCheckStatus = (r: PlanPrPreflightReading): ProofCheckStatus => (r.timedOutMs === undefined ? r.status : { timedOutMs: r.timedOutMs });
+
+/** The four checks that shell out inside `cwd` (`checkProof` answers check-proof's exit), sync and awaited, budgeted. */
 const defaultPreflightChecks = {
-  lintPlan: (cwd: string): PlanPrPreflightReading => runInTree(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV),
-  taskIdExistence: (cwd: string, headRef?: string): PlanPrPreflightReading => taskIdReading(runInTree(cwd, TASK_ID_SCRIPT, taskIdArgv(headRef))),
-  shardCensus: (cwd: string): PlanPrPreflightReading => shardCensusReading(runInTree(cwd, SHARD_CENSUS_TEST, SHARD_CENSUS_ARGV)),
-  checkProof: (cwd: string, proof: string): number | null => runInTree(cwd, RUN_TASK_ENTRY, checkProofArgv(proof)).status,
+  lintPlan: (cwd: string, budgetMs: number): PlanPrPreflightReading => runInTree(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV, budgetMs),
+  taskIdExistence: (cwd: string, headRef: string | undefined, budgetMs: number): PlanPrPreflightReading =>
+    taskIdReading(runInTree(cwd, TASK_ID_SCRIPT, taskIdArgv(headRef), budgetMs)),
+  shardCensus: (cwd: string, budgetMs: number): PlanPrPreflightReading => shardCensusReading(runInTree(cwd, SHARD_CENSUS_TEST, SHARD_CENSUS_ARGV, budgetMs)),
+  checkProof: (cwd: string, proof: string, budgetMs: number): ProofCheckStatus => proofCheckStatus(runInTree(cwd, RUN_TASK_ENTRY, checkProofArgv(proof), budgetMs)),
 };
-/** A test's stand-ins for any of {@link defaultPreflightChecks}. */
-export type PlanPrPreflightChecks = Partial<typeof defaultPreflightChecks>;
+/** A test's stand-ins for any of {@link defaultPreflightChecks}, and for the budget each in-tree check gets. */
+export type PlanPrPreflightChecks = Partial<typeof defaultPreflightChecks> & { budgetMs?: () => number };
 const defaultPreflightChecksAsync = {
-  lintPlan: (cwd: string): Promise<PlanPrPreflightReading> => runInTreeAsync(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV),
-  taskIdExistence: async (cwd: string, headRef?: string): Promise<PlanPrPreflightReading> =>
-    taskIdReading(await runInTreeAsync(cwd, TASK_ID_SCRIPT, taskIdArgv(headRef))),
-  shardCensus: async (cwd: string): Promise<PlanPrPreflightReading> => shardCensusReading(await runInTreeAsync(cwd, SHARD_CENSUS_TEST, SHARD_CENSUS_ARGV)),
-  checkProof: async (cwd: string, proof: string): Promise<number | null> => (await runInTreeAsync(cwd, RUN_TASK_ENTRY, checkProofArgv(proof))).status,
+  lintPlan: (cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> => runInTreeAsync(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV, budgetMs),
+  taskIdExistence: async (cwd: string, headRef: string | undefined, budgetMs: number): Promise<PlanPrPreflightReading> =>
+    taskIdReading(await runInTreeAsync(cwd, TASK_ID_SCRIPT, taskIdArgv(headRef), budgetMs)),
+  shardCensus: async (cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> =>
+    shardCensusReading(await runInTreeAsync(cwd, SHARD_CENSUS_TEST, SHARD_CENSUS_ARGV, budgetMs)),
+  checkProof: async (cwd: string, proof: string, budgetMs: number): Promise<ProofCheckStatus> =>
+    proofCheckStatus(await runInTreeAsync(cwd, RUN_TASK_ENTRY, checkProofArgv(proof), budgetMs)),
 };
-export type PlanPrPreflightAsyncChecks = Partial<typeof defaultPreflightChecksAsync>;
+export type PlanPrPreflightAsyncChecks = Partial<typeof defaultPreflightChecksAsync> & { budgetMs?: () => number };
 
 function firstLineOf(output: string, status: number | null): string {
   const lines = output.split("\n").map((l) => l.trim()).filter(Boolean);
@@ -618,51 +637,75 @@ async function changedShardProofsAsync(cwd: string): Promise<string[] | undefine
 }
 
 const bodyProofsOf = (body: string): Set<string> => new Set(parseAcceptanceBlock(body).map((c) => c.proof.trim()).filter(Boolean));
-function sortBodyProof(proof: string, status: number | null, red: string[], unreadable: string[]): void {
-  if (status === 0) return;
+interface ProofTimeouts {
+  lines: string[];
+  budgetMs?: number;
+}
+function timedOutProof(kind: string, proof: string, status: ProofCheckStatus, timeouts: ProofTimeouts): status is { timedOutMs: number } {
+  if (status === null || typeof status !== "object") return false;
+  timeouts.lines.push(`${kind} proof ${JSON.stringify(proof)} timed out after ${status.timedOutMs} ms`);
+  timeouts.budgetMs = status.timedOutMs;
+  return true;
+}
+function sortBodyProof(proof: string, status: ProofCheckStatus, red: string[], unreadable: string[], timeouts: ProofTimeouts): void {
+  if (status === 0 || timedOutProof("PR-body", proof, status, timeouts)) return;
   if (status !== null && RED_BODY_PROOF_EXIT[status]) red.push(`PR-body proof ${JSON.stringify(proof)} ${RED_BODY_PROOF_EXIT[status]}`);
   else unreadable.push(`PR-body proof ${JSON.stringify(proof)} could not be checked (check-proof exit ${status})`);
 }
-function sortShardProof(proof: string, status: number | null, red: string[]): void {
+function sortShardProof(proof: string, status: ProofCheckStatus, red: string[], timeouts: ProofTimeouts): void {
+  if (timedOutProof("shard", proof, status, timeouts)) return;
   if (status === CHECK_PROOF_STALE_EXIT) red.push(`shard proof ${JSON.stringify(proof)} passes at origin/main too`);
 }
-function discriminationReading(red: string[], unreadable: string[], shardProofList: string[] | undefined): PlanPrPreflightReading {
+function discriminationReading(red: string[], unreadable: string[], timeouts: ProofTimeouts, shardProofList: string[] | undefined): PlanPrPreflightReading {
   if (shardProofList === undefined) unreadable.push("the changed task shards could not be read against origin/main");
   if (red.length > 0) return { status: 1, output: red.join("\n") };
+  if (timeouts.budgetMs !== undefined) return { status: null, output: timeouts.lines.join("\n"), timedOutMs: timeouts.budgetMs }; // undecided: asked again
   return unreadable.length > 0 ? { status: null, output: unreadable.join("\n") } : { status: 0, output: "" };
 }
 
 /** A PR-body proof is red on any non-pass; a shard's only when it passes at origin/main (a filed task fails at head). */
-function proofDiscrimination(cwd: string, body: string, checkProof: (cwd: string, proof: string) => number | null): PlanPrPreflightReading {
+function proofDiscrimination(cwd: string, body: string, checkProof: (cwd: string, proof: string) => ProofCheckStatus): PlanPrPreflightReading {
   const red: string[] = [];
   const unreadable: string[] = [];
-  for (const proof of bodyProofsOf(body)) sortBodyProof(proof, checkProof(cwd, proof), red, unreadable);
+  const timeouts: ProofTimeouts = { lines: [] };
+  for (const proof of bodyProofsOf(body)) sortBodyProof(proof, checkProof(cwd, proof), red, unreadable, timeouts);
   const shardProofList = changedShardProofs(cwd);
-  for (const proof of new Set(shardProofList ?? [])) sortShardProof(proof, checkProof(cwd, proof), red);
-  return discriminationReading(red, unreadable, shardProofList);
+  for (const proof of new Set(shardProofList ?? [])) sortShardProof(proof, checkProof(cwd, proof), red, timeouts);
+  return discriminationReading(red, unreadable, timeouts, shardProofList);
 }
 async function proofDiscriminationAsync(
   cwd: string,
   body: string,
-  checkProof: (cwd: string, proof: string) => Promise<number | null>,
+  checkProof: (cwd: string, proof: string) => Promise<ProofCheckStatus>,
 ): Promise<PlanPrPreflightReading> {
   const red: string[] = [];
   const unreadable: string[] = [];
-  for (const proof of bodyProofsOf(body)) sortBodyProof(proof, await checkProof(cwd, proof), red, unreadable);
+  const timeouts: ProofTimeouts = { lines: [] };
+  for (const proof of bodyProofsOf(body)) sortBodyProof(proof, await checkProof(cwd, proof), red, unreadable, timeouts);
   const shardProofList = await changedShardProofsAsync(cwd);
-  for (const proof of new Set(shardProofList ?? [])) sortShardProof(proof, await checkProof(cwd, proof), red);
-  return discriminationReading(red, unreadable, shardProofList);
+  for (const proof of new Set(shardProofList ?? [])) sortShardProof(proof, await checkProof(cwd, proof), red, timeouts);
+  return discriminationReading(red, unreadable, timeouts, shardProofList);
 }
+
+const timedOutFinding = (check: PlanPrPreflightCheck, budgetMs: number): PlanPrPreflightFinding => ({
+  check,
+  firstLine: `timed out after ${budgetMs} ms (its budget scales with host load) — no verdict; the push waits for a later pass`,
+});
 
 function preflightTally() {
   const failures: PlanPrPreflightFinding[] = [];
   const unreadable: PlanPrPreflightFinding[] = [];
+  const timedOut: PlanPrPreflightFinding[] = [];
   return {
     record(check: PlanPrPreflightCheck, reading: PlanPrPreflightReading): void {
+      if (reading.timedOutMs !== undefined) {
+        timedOut.push(timedOutFinding(check, reading.timedOutMs));
+        return;
+      }
       if (reading.status === 0) return;
       (reading.status === 1 ? failures : unreadable).push({ check, firstLine: firstLineOf(reading.output, reading.status) });
     },
-    result: (): PlanPrPreflightResult => ({ ok: failures.length === 0, failures, unreadable }),
+    result: (): PlanPrPreflightResult => ({ ok: failures.length === 0, failures, unreadable, ...(timedOut.length > 0 ? { timedOut } : {}) }),
   };
 }
 const errorText = (e: unknown): string => String((e as Error)?.message ?? e);
@@ -679,6 +722,7 @@ function prTitleReading(title: string): PlanPrPreflightReading {
  */
 export function planPrPreflight(input: { cwd: string; title: string; body: string; headRef?: string }, checks: PlanPrPreflightChecks = {}): PlanPrPreflightResult {
   const d = { ...defaultPreflightChecks, ...checks };
+  const budgetMs = checks.budgetMs ?? (() => inTreeCheckBudgetMs());
   const tally = preflightTally();
   const read = (check: PlanPrPreflightCheck, run: () => PlanPrPreflightReading): void => {
     let reading: PlanPrPreflightReading;
@@ -689,11 +733,11 @@ export function planPrPreflight(input: { cwd: string; title: string; body: strin
     }
     tally.record(check, reading);
   };
-  read("lint-plan", () => d.lintPlan(input.cwd));
-  read("task-id-existence", () => d.taskIdExistence(input.cwd, input.headRef));
-  read("proof-discrimination", () => proofDiscrimination(input.cwd, input.body, d.checkProof));
+  read("lint-plan", () => d.lintPlan(input.cwd, budgetMs()));
+  read("task-id-existence", () => d.taskIdExistence(input.cwd, input.headRef, budgetMs()));
+  read("proof-discrimination", () => proofDiscrimination(input.cwd, input.body, (cwd, proof) => d.checkProof(cwd, proof, budgetMs())));
   read("pr-title", () => prTitleReading(input.title));
-  read("shard-census", () => d.shardCensus(input.cwd));
+  read("shard-census", () => d.shardCensus(input.cwd, budgetMs()));
   return tally.result();
 }
 
@@ -703,6 +747,7 @@ export async function planPrPreflightAsync(
   checks: PlanPrPreflightAsyncChecks = {},
 ): Promise<PlanPrPreflightResult> {
   const d = { ...defaultPreflightChecksAsync, ...checks };
+  const budgetMs = checks.budgetMs ?? (() => inTreeCheckBudgetMs());
   const tally = preflightTally();
   const read = async (check: PlanPrPreflightCheck, run: () => PlanPrPreflightReading | Promise<PlanPrPreflightReading>): Promise<void> => {
     let reading: PlanPrPreflightReading;
@@ -713,11 +758,11 @@ export async function planPrPreflightAsync(
     }
     tally.record(check, reading);
   };
-  await read("lint-plan", () => d.lintPlan(input.cwd));
-  await read("task-id-existence", () => d.taskIdExistence(input.cwd, input.headRef));
-  await read("proof-discrimination", () => proofDiscriminationAsync(input.cwd, input.body, d.checkProof));
+  await read("lint-plan", () => d.lintPlan(input.cwd, budgetMs()));
+  await read("task-id-existence", () => d.taskIdExistence(input.cwd, input.headRef, budgetMs()));
+  await read("proof-discrimination", () => proofDiscriminationAsync(input.cwd, input.body, (cwd, proof) => d.checkProof(cwd, proof, budgetMs())));
   await read("pr-title", () => prTitleReading(input.title));
-  await read("shard-census", () => d.shardCensus(input.cwd));
+  await read("shard-census", () => d.shardCensus(input.cwd, budgetMs()));
   return tally.result();
 }
 
@@ -725,6 +770,12 @@ const unmaterialized = (commitSha: string, e: unknown): PlanPrPreflightFinding =
   check: "tree",
   firstLine: `${commitSha} could not be materialized: ${firstLineOf(errorText(e), null)}`,
 });
+function treeNotMaterialized(commitSha: string, e: unknown, budgetMs: number, pid = (e as { pid?: number }).pid): PlanPrPreflightResult {
+  const err = e as { code?: unknown; killed?: boolean };
+  if (err.code !== "ETIMEDOUT" && err.killed !== true) return { ok: true, failures: [], unreadable: [unmaterialized(commitSha, e)] }; // never refuses
+  killBudgetLeftovers(pid);
+  return { ok: true, failures: [], unreadable: [], timedOut: [timedOutFinding("tree", budgetMs)] };
+}
 function borrowNodeModules(repoDir: string, tree: string): void {
   if (existsSync(join(repoDir, "node_modules"))) symlinkSync(join(repoDir, "node_modules"), join(tree, "node_modules"));
 }
@@ -739,17 +790,17 @@ export function planPrPreflightAtCommit(
 ): PlanPrPreflightResult {
   const parent = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-pr-preflight-`));
   const tree = join(parent, "tree");
+  const budgetMs = (checks.budgetMs ?? (() => inTreeCheckBudgetMs()))();
   try {
-    execFileSync("git", ["-C", repoDir, "worktree", "add", "--detach", "--quiet", tree, commitSha], { stdio: "pipe" });
-  } catch (e) {
-    rmSync(parent, { recursive: true, force: true });
-    return { ok: true, failures: [], unreadable: [unmaterialized(commitSha, e)] };
-  }
-  try {
+    try {
+      execFileSync("git", ["-C", repoDir, "worktree", "add", "--detach", "--quiet", tree, commitSha], { stdio: "pipe", ...budgetedSpawn(budgetMs) });
+    } catch (e) {
+      return treeNotMaterialized(commitSha, e, budgetMs); // failed or killed: it names which, unreadable or timedOut
+    }
     borrowNodeModules(repoDir, tree);
     return planPrPreflight({ cwd: tree, ...pr }, checks);
   } finally {
-    spawnSync("git", ["-C", repoDir, "worktree", "remove", "--force", tree], { stdio: "pipe" });
+    spawnSync("git", ["-C", repoDir, "worktree", "remove", "--force", "--force", tree], { stdio: "pipe" }); // twice: a killed add leaves it locked
     rmSync(parent, { recursive: true, force: true });
   }
 }
@@ -763,43 +814,56 @@ export async function planPrPreflightAtCommitAsync(
 ): Promise<PlanPrPreflightResult> {
   const parent = await mkdtemp(join(tmpdir(), `${RMD_TMP_PREFIX}plan-pr-preflight-`));
   const tree = join(parent, "tree");
+  const budgetMs = (checks.budgetMs ?? (() => inTreeCheckBudgetMs()))();
   try {
-    await execFileAsync("git", ["-C", repoDir, "worktree", "add", "--detach", "--quiet", tree, commitSha]);
-  } catch (e) {
-    await rm(parent, { recursive: true, force: true });
-    return { ok: true, failures: [], unreadable: [unmaterialized(commitSha, e)] };
-  }
-  try {
+    const add = execFileAsync("git", ["-C", repoDir, "worktree", "add", "--detach", "--quiet", tree, commitSha], budgetedSpawn(budgetMs));
+    try {
+      await add;
+    } catch (e) {
+      return treeNotMaterialized(commitSha, e, budgetMs, add.child.pid); // failed or killed: it names which
+    }
     borrowNodeModules(repoDir, tree);
     return await planPrPreflightAsync({ cwd: tree, ...pr }, checks);
   } finally {
-    await runChildAsync("git", ["-C", repoDir, "worktree", "remove", "--force", tree], repoDir);
+    await runChildAsync("git", ["-C", repoDir, "worktree", "remove", "--force", "--force", tree], repoDir);
     await rm(parent, { recursive: true, force: true });
   }
 }
 
-/** Ledger a preflight verdict for one lane — `plan_pr.preflight_unreadable` when a check could not run,
- *  `plan_pr.preflight_refused { lane, branch, failures }` when one is red — and answer whether to push. */
+/** Ledger a preflight verdict for one lane — `plan_pr.preflight_unreadable` when a check could not run, `_refused`
+ *  when one is red, `_timed_out` when one ran out of its budget (never a pass: asked again) — and answer whether to push. */
 export function planPrPreflightAllows(
   result: PlanPrPreflightResult,
   ctx: { lane: string; branch: string; log?: (step: string, extra?: Record<string, unknown>) => void },
 ): boolean {
   if (result.unreadable.length > 0) ctx.log?.("plan_pr.preflight_unreadable", { lane: ctx.lane, branch: ctx.branch, unreadable: result.unreadable });
-  if (result.ok) return true;
-  ctx.log?.("plan_pr.preflight_refused", { lane: ctx.lane, branch: ctx.branch, failures: result.failures });
+  if (!result.ok) {
+    ctx.log?.("plan_pr.preflight_refused", { lane: ctx.lane, branch: ctx.branch, failures: result.failures });
+    return false;
+  }
+  if (result.timedOut === undefined) return true;
+  ctx.log?.("plan_pr.preflight_timed_out", { lane: ctx.lane, branch: ctx.branch, timed_out: result.timedOut });
   return false;
 }
 
 export class PlanPrPreflightRefusedError extends RmdError {
-  constructor(readonly lane: string, readonly failures: PlanPrPreflightFinding[]) {
-    super("plan", 1, `plan-PR preflight refused the ${lane} push: ${failures.map((f) => `[${f.check}] ${f.firstLine}`).join("; ")}`, { lane, failures });
+  constructor(readonly lane: string, readonly failures: PlanPrPreflightFinding[], verb = "refused") {
+    super("plan", 1, `plan-PR preflight ${verb} the ${lane} push: ${failures.map((f) => `[${f.check}] ${f.firstLine}`).join("; ")}`, { lane, failures });
     this.name = "PlanPrPreflightRefusedError";
+  }
+}
+
+export class PlanPrPreflightTimedOutError extends PlanPrPreflightRefusedError {
+  constructor(lane: string, timedOut: PlanPrPreflightFinding[]) {
+    super(lane, timedOut, "deferred");
+    this.name = "PlanPrPreflightTimedOutError";
   }
 }
 
 /** The throwing form of {@link planPrPreflightAllows}, for a lane whose not-landed outcome is a throw. */
 export function refuseRedPlanPr(result: PlanPrPreflightResult, ctx: Parameters<typeof planPrPreflightAllows>[1]): void {
-  if (!planPrPreflightAllows(result, ctx)) throw new PlanPrPreflightRefusedError(ctx.lane, result.failures);
+  if (planPrPreflightAllows(result, ctx)) return;
+  throw result.ok ? new PlanPrPreflightTimedOutError(ctx.lane, result.timedOut ?? []) : new PlanPrPreflightRefusedError(ctx.lane, result.failures);
 }
 
 // ── 8. Retro changeset-claim reconciliation (W1-T911) ───────────────────────────────────────

@@ -44,7 +44,7 @@ export const RETIER_THRESHOLD = 3;
 export type ManifestEdit = { kind: "row"; key: string; to: number };
 
 export interface TestGardenAction extends GardenAction<TestGardenClass> {
-  /** Always the manifest — the one file every class edits. */
+  /** The duration ledger this action edits. */
   file: string;
   edit: ManifestEdit;
 }
@@ -86,8 +86,24 @@ export async function loadTestManifestProbe(root: string): Promise<TestManifestP
  *  candidate — the artifact-download half of the gap this task's title names ("CI's `--propose`
  *  output lives 7 days as an artifact and is never adopted") is left for a follow-up (see this
  *  task's PR body); this is the ONE path both halves agree on. */
-export function testManifestProposalPath(stateDir: string): string {
-  return join(stateDir, "test-tier-manifest-proposal.json");
+export function testManifestProposalPath(stateDir: string, prefix = TEST_MANIFEST_PROPOSAL_ARTIFACT): string {
+  return join(stateDir, `${prefix}.json`);
+}
+
+interface DurationLedger {
+  manifestPath: string;
+  artifact: string;
+  proposalFile: string;
+  statePrefix: string;
+}
+
+function durationLedgers(fastManifestPath = "scripts/test-tier-manifest.json"): DurationLedger[] {
+  return [
+    { manifestPath: fastManifestPath, artifact: TEST_MANIFEST_PROPOSAL_ARTIFACT,
+      proposalFile: "test-tier-manifest.next.json", statePrefix: TEST_MANIFEST_PROPOSAL_ARTIFACT },
+    { manifestPath: "scripts/test-tier-coverage-manifest.json", artifact: "test-tier-coverage-manifest-proposal",
+      proposalFile: "test-tier-coverage-manifest.next.json", statePrefix: "test-tier-coverage-manifest-proposal" },
+  ];
 }
 
 const rowTarget = (probe: TestManifestProbe, file: string): string => `${probe.DEFAULT_MANIFEST_RELATIVE_PATH}#${file}`;
@@ -266,12 +282,12 @@ export interface TestProposalHistory {
   absent: number[];
 }
 
-export function testManifestProposalHistoryPath(stateDir: string): string {
-  return join(stateDir, "test-tier-manifest-proposal.history.json");
+export function testManifestProposalHistoryPath(stateDir: string, prefix = TEST_MANIFEST_PROPOSAL_ARTIFACT): string {
+  return join(stateDir, `${prefix}.history.json`);
 }
 
-export function readTestProposalHistory(stateDir: string): TestProposalHistory {
-  const text = readFileIfExists(testManifestProposalHistoryPath(stateDir));
+export function readTestProposalHistory(stateDir: string, prefix = TEST_MANIFEST_PROPOSAL_ARTIFACT): TestProposalHistory {
+  const text = readFileIfExists(testManifestProposalHistoryPath(stateDir, prefix));
   if (text === undefined) return { runs: [], absent: [] };
   const parsed = JSON.parse(text) as Partial<TestProposalHistory>;
   return { runs: parsed.runs ?? [], absent: parsed.absent ?? [] };
@@ -288,29 +304,31 @@ export function testGardenInventory(
   repoRoot: string,
   stateDir: string,
   probe: TestManifestProbe,
-  opts: { clock?: Clock; manifestChangedAtMs?: () => number | undefined } = {},
+  opts: { clock?: Clock; manifestChangedAtMs?: (path: string) => number | undefined } = {},
 ): TestGardenInventory {
-  const manifestPath = join(repoRoot, probe.DEFAULT_MANIFEST_RELATIVE_PATH);
-  const committed = probe.loadManifest(manifestPath);
   const testFiles = probe.listTestFiles(repoRoot);
-  const proposalPath = testManifestProposalPath(stateDir);
   // Clamped exactly like `proposalIsMaterial`'s own internal `effectiveShardCount` (test-tier-
   // manifest.mjs): a fixture or an early-life suite with fewer test files than the real CI
   // matrix must not hand `balanceFilesByDuration`/`summarizeShardBalance` more shards than there
   // are files to fill them, which those two functions do not clamp for themselves.
   const shardCount = Math.max(1, Math.min(probe.DEFAULT_CI_SHARD_COUNT, testFiles.length || 1));
-  const history = readTestProposalHistory(stateDir).runs.map((r) => r.files);
-  const observations = history.length > 0 ? history : existsSync(proposalPath) ? [probe.loadManifest(proposalPath).files] : [];
-  const changedAt = observations.length > 0
-    ? (opts.manifestChangedAtMs ?? (() => manifestLastCommitMs(repoRoot, probe.DEFAULT_MANIFEST_RELATIVE_PATH)))()
-    : undefined;
-  const recent = changedAt !== undefined && (opts.clock ?? systemClock).now() - changedAt < DURATION_ADOPTION_CADENCE_MS;
-  return {
-    candidates: [
-      ...durationCandidates(probe, committed, observations, testFiles, shardCount, recent),
-      ...retierFlakerCandidates(stateDir, probe, committed, testFiles),
-    ],
-  };
+  const candidates: TestGardenAction[] = [];
+  for (const ledger of durationLedgers(probe.DEFAULT_MANIFEST_RELATIVE_PATH)) {
+    const committed = probe.loadManifest(join(repoRoot, ledger.manifestPath));
+    const proposalPath = testManifestProposalPath(stateDir, ledger.statePrefix);
+    const history = readTestProposalHistory(stateDir, ledger.statePrefix).runs.map((r) => r.files);
+    const observations = history.length > 0 ? history : existsSync(proposalPath) ? [probe.loadManifest(proposalPath).files] : [];
+    const changedAt = observations.length > 0
+      ? opts.manifestChangedAtMs ? opts.manifestChangedAtMs(ledger.manifestPath) : manifestLastCommitMs(repoRoot, ledger.manifestPath)
+      : undefined;
+    const recent = changedAt !== undefined && (opts.clock ?? systemClock).now() - changedAt < DURATION_ADOPTION_CADENCE_MS;
+    const ledgerProbe = { ...probe, DEFAULT_MANIFEST_RELATIVE_PATH: ledger.manifestPath };
+    candidates.push(...durationCandidates(ledgerProbe, committed, observations, testFiles, shardCount, recent));
+    if (ledger.artifact === TEST_MANIFEST_PROPOSAL_ARTIFACT) {
+      candidates.push(...retierFlakerCandidates(stateDir, probe, committed, testFiles));
+    }
+  }
+  return { candidates };
 }
 
 /** Modification times of the manifest and proposal, and the ledger's hour bucket, so an unchanged pass costs a
@@ -318,25 +336,30 @@ export function testGardenInventory(
 export function testGardenCheapFingerprint(repoRoot: string, stateDir: string, probe: TestManifestProbe, clock: Clock = systemClock): string {
   const mtime = (p: string) => (existsSync(p) ? statSync(p).mtimeMs : 0);
   return [
-    mtime(join(repoRoot, probe.DEFAULT_MANIFEST_RELATIVE_PATH)),
-    mtime(testManifestProposalPath(stateDir)),
+    ...durationLedgers(probe.DEFAULT_MANIFEST_RELATIVE_PATH).flatMap((ledger) => [
+      mtime(join(repoRoot, ledger.manifestPath)),
+      mtime(testManifestProposalPath(stateDir, ledger.statePrefix)),
+    ]),
     gardenLedgerBucket(clock),
   ].join(",");
 }
 
-/** Every action's row, folded into ONE manifest write — the manifest is the record; no separate
+/** Every action's row, folded into one write per manifest — the manifest is the record; no separate
  *  log file duplicates it. */
 export function applyTestGardenActions(root: string, probe: TestManifestProbe, actions: TestGardenAction[]): string[] {
   if (actions.length === 0) return [];
-  const manifestPath = join(root, probe.DEFAULT_MANIFEST_RELATIVE_PATH);
-  const manifest = probe.loadManifest(manifestPath);
-  const files = { ...manifest.files };
-  for (const a of actions) files[a.edit.key] = a.edit.to;
-  probe.writeManifest(manifestPath, { thresholdMs: manifest.thresholdMs, files });
-  return [probe.DEFAULT_MANIFEST_RELATIVE_PATH];
+  const paths = [...new Set(actions.map((a) => a.file))];
+  for (const path of paths) {
+    const manifestPath = join(root, path);
+    const manifest = probe.loadManifest(manifestPath);
+    const files = { ...manifest.files };
+    for (const a of actions) if (a.file === path) files[a.edit.key] = a.edit.to;
+    probe.writeManifest(manifestPath, { thresholdMs: manifest.thresholdMs, files });
+  }
+  return paths;
 }
 
-function prBody(actions: TestGardenAction[], probe: TestManifestProbe): string {
+function prBody(actions: TestGardenAction[]): string {
   // A first adoption moves every measured row at once (2,094 on 2026-09-29): one bullet and one
   // proof per row would overrun GitHub's 65,536-character body limit, so the body names the
   // largest rows and the manifest diff stays the complete record.
@@ -345,7 +368,7 @@ function prBody(actions: TestGardenAction[], probe: TestManifestProbe): string {
   const proofs = largest.slice(0, TEST_GARDEN_PROOF_ROWS)
     .flatMap((a) => [`- claim: ${a.target} records ${a.edit.to}`, `  proof: grep: "${a.edit.key}": ${a.edit.to} in ${a.file}`]);
   return [
-    `The test-suite gardener (W1-T4112) tends ${probe.DEFAULT_MANIFEST_RELATIVE_PATH} from its own measurements and the fleet's flake ledger.`,
+    `The test-suite gardener (W1-T4112) tends ${[...new Set(actions.map((a) => a.file))].join(", ")} from its own measurements and the fleet's flake ledger.`,
     "",
     ...listed.map((a) => `- **${a.class}** \`${a.target}\`: ${a.reason}`),
     ...(actions.length > listed.length ? [`- …and ${actions.length - listed.length} more row(s); the manifest diff is the complete record.`] : []),
@@ -360,13 +383,15 @@ export const TEST_GARDEN_BODY_ROWS = 25;
 export const TEST_GARDEN_PROOF_ROWS = 5;
 
 /** Where the last adopted CI proposal came from, so an unchanged main run is never downloaded twice. */
-export function testManifestProposalSourcePath(stateDir: string): string {
-  return join(stateDir, "test-tier-manifest-proposal.source.json");
+export function testManifestProposalSourcePath(stateDir: string, prefix = TEST_MANIFEST_PROPOSAL_ARTIFACT): string {
+  return join(stateDir, `${prefix}.source.json`);
 }
 
-export type TestProposalFeed =
+type LedgerProposalFeed =
   | { status: "fresh" | "unchanged"; runId: number }
   | { status: "absent"; reason: string; runId?: number };
+
+export type TestProposalFeed = LedgerProposalFeed & { coverage?: LedgerProposalFeed };
 
 /**
  * The adoption half W1-T4112 left for a follow-up: CI's flake-retry-aggregate job builds
@@ -381,7 +406,7 @@ export async function refreshTestManifestProposalAsync(
   repo: string,
   stateDir: string,
   io: { readJson?: (args: string[]) => Promise<unknown>; download?: (args: string[]) => Promise<string> } = {},
-): Promise<TestProposalFeed> {
+): Promise<TestProposalFeed & { coverage: LedgerProposalFeed }> {
   const readJson = io.readJson ?? ghJsonAsync;
   const download = io.download ?? ((args: string[]) => ghTextAsync(args));
   const runs = await readJson(["api", `repos/${owner}/${repo}/actions/workflows/ci.yml/runs?event=push&branch=main&per_page=10`,
@@ -390,27 +415,40 @@ export async function refreshTestManifestProposalAsync(
   const successful = (runs as Array<{ id?: unknown; status?: unknown; conclusion?: unknown }>)
     .filter((r) => r.status === "completed" && r.conclusion === "success" && typeof r.id === "number")
     .map((r) => r.id as number);
+  const [fast, coverage] = durationLedgers();
+  const feed = await refreshLedgerProposalAsync(owner, repo, stateDir, successful, fast!, download);
+  return { ...feed, coverage: await refreshLedgerProposalAsync(owner, repo, stateDir, successful, coverage!, download) };
+}
+
+async function refreshLedgerProposalAsync(
+  owner: string,
+  repo: string,
+  stateDir: string,
+  successful: number[],
+  ledger: DurationLedger,
+  download: (args: string[]) => Promise<string>,
+): Promise<LedgerProposalFeed> {
   if (successful.length === 0) return { status: "absent", reason: "no successful main run among the newest ten" };
-  const history = readTestProposalHistory(stateDir);
+  const history = readTestProposalHistory(stateDir, ledger.statePrefix);
   const remember = (runId: number, proposal: { files: Record<string, number> } | undefined) => {
     if (!proposal) history.absent = [...history.absent.filter((id) => successful.includes(id)), runId];
     else history.runs = [...history.runs, { runId, files: proposal.files }].sort((a, b) => a.runId - b.runId).slice(-DURATION_WINDOW_RUNS);
-    writeAtomic(testManifestProposalHistoryPath(stateDir), JSON.stringify(history) + "\n");
+    writeAtomic(testManifestProposalHistoryPath(stateDir, ledger.statePrefix), JSON.stringify(history) + "\n");
   };
   const runId = successful[0]!;
-  const sourcePath = testManifestProposalSourcePath(stateDir);
+  const sourcePath = testManifestProposalSourcePath(stateDir, ledger.statePrefix);
   const source = readFileIfExists(sourcePath);
-  let feed: TestProposalFeed;
+  let feed: LedgerProposalFeed;
   if (source !== undefined && (JSON.parse(source) as { runId?: number }).runId === runId) {
-    feed = existsSync(testManifestProposalPath(stateDir)) ? { status: "unchanged", runId } : { status: "absent", reason: `run ${runId} published no proposal`, runId };
+    feed = existsSync(testManifestProposalPath(stateDir, ledger.statePrefix)) ? { status: "unchanged", runId } : { status: "absent", reason: `run ${runId} published no proposal`, runId };
   } else {
-    const fetched = await fetchRunProposalAsync(owner, repo, stateDir, runId, download);
+    const fetched = await fetchRunProposalAsync(owner, repo, stateDir, runId, download, ledger);
     remember(runId, fetched?.proposal);
     if (!fetched) {
       writeAtomic(sourcePath, JSON.stringify({ runId, artifact: "absent" }) + "\n");
       feed = { status: "absent", reason: `run ${runId} published no proposal`, runId };
     } else {
-      writeAtomic(testManifestProposalPath(stateDir), fetched.text);
+      writeAtomic(testManifestProposalPath(stateDir, ledger.statePrefix), fetched.text);
       writeAtomic(sourcePath, JSON.stringify({ runId }) + "\n");
       feed = { status: "fresh", runId };
     }
@@ -419,7 +457,7 @@ export async function refreshTestManifestProposalAsync(
   for (const older of successful) {
     if (history.runs.some((r) => r.runId === older) || history.absent.includes(older)) continue;
     if (history.runs.length >= DURATION_WINDOW_RUNS && older < history.runs[0]!.runId) break;
-    remember(older, (await fetchRunProposalAsync(owner, repo, stateDir, older, download))?.proposal);
+    remember(older, (await fetchRunProposalAsync(owner, repo, stateDir, older, download, ledger))?.proposal);
   }
   return feed;
 }
@@ -432,11 +470,12 @@ async function fetchRunProposalAsync(
   stateDir: string,
   runId: number,
   download: (args: string[]) => Promise<string>,
+  ledger: DurationLedger,
 ): Promise<{ text: string; proposal: { thresholdMs: number; files: Record<string, number> } } | undefined> {
-  const dir = join(stateDir, "test-tier-manifest-proposal.download");
+  const dir = join(stateDir, `${ledger.statePrefix}.download`);
   rmSync(dir, { recursive: true, force: true });
   try {
-    await download(["run", "download", String(runId), "--repo", `${owner}/${repo}`, "--name", TEST_MANIFEST_PROPOSAL_ARTIFACT, "--dir", dir]);
+    await download(["run", "download", String(runId), "--repo", `${owner}/${repo}`, "--name", ledger.artifact, "--dir", dir]);
   } catch (error) {
     const detail = `${String((error as Error).message)} ${String((error as { stderr?: string }).stderr ?? "")}`;
     // A run with no duration evidence uploads no proposal; the caller records it so it is not asked
@@ -444,7 +483,7 @@ async function fetchRunProposalAsync(
     if (!/no valid artifacts found|no artifact matches/i.test(detail)) throw error;
     return undefined;
   }
-  const text = readFileSync(join(dir, "test-tier-manifest.next.json"), "utf8");
+  const text = readFileSync(join(dir, ledger.proposalFile), "utf8");
   const proposal = JSON.parse(text) as { thresholdMs?: unknown; files?: unknown };
   if (typeof proposal.thresholdMs !== "number" || !proposal.files || typeof proposal.files !== "object" ||
       Object.values(proposal.files).some((ms) => typeof ms !== "number")) {
@@ -527,7 +566,7 @@ export function testGardenSpec(deps: GardenerDeps, probe: TestManifestProbe): Ga
       return {
         paths,
         title: `chore(test): the test gardener proposes to ${plan.acting[0]} ${plan.actions.length} manifest row(s)`,
-        body: prBody(plan.actions, probe),
+        body: prBody(plan.actions),
       };
     },
   };
