@@ -253,7 +253,12 @@ test("W1-T4064: the daemon reads filing dates from the plan path it was given", 
     mkdirSync(join(root, "state"), { recursive: true });
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
     writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
-    writeFileSync(join(root, "state", "ledger.ndjson"), history.map(row => JSON.stringify(row)).join("\n") + "\n");
+    // The plan's filing date is the fixture commit's real committer time, and the daemon reads `now`
+    // as the newest of the ledger and filing times. Rows pinned to the fixed NOW age out of the
+    // 7-day value window once the wall clock passes NOW + 6 days, so carry them to the real clock.
+    const shift = Date.now() - NOW;
+    const liveHistory = history.map(row => ({ ...row, ts: new Date(Date.parse(String(row.ts)) + shift).toISOString() }));
+    writeFileSync(join(root, "state", "ledger.ndjson"), liveHistory.map(row => JSON.stringify(row)).join("\n") + "\n");
     mkdirSync(join(repo.dir, "plan"));
     const planPath = join(repo.dir, "plan/tasks.yaml");
     const entry = (id: string) =>
