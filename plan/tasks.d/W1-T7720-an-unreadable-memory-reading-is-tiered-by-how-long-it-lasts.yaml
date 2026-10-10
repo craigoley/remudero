@@ -1,0 +1,80 @@
+- id: W1-T7720
+  title: "AN UNREADABLE MEMORY READING IS TIERED BY HOW LONG IT LASTS — a transient read failure of the host memory probe or the reservation store keeps dispatching and writes a ledger row; a sustained one holds new dispatch and escalates; the line between them is derived from observed recovery times, never a fixed cap"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — what dispatch does while memory cannot be read
+  band_meaning: span
+  origin: "operator ruling 2026-10-10: tiered unreadable-memory-ledger rule"
+  plan_refs: [W1-T5347, W1-T5404, W1-T1038, W1-T7093, W1-T7094]
+  files: [src/lib/dispatch-governor.ts, src/lib/drain.ts, src/lib/host-memory-ledger.ts, src/run-task.ts, test/an-unreadable-memory-reading-is-tiered-by-how-long-it-lasts.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 2026-10-10. When the host memory reading or the host memory reservation store
+    cannot be read, the answer depends on how long the failure lasts. A short failure that recovers keeps
+    dispatching and leaves a ledger row. A failure that lasts holds new dispatch and escalates. The line
+    between the two must adapt to what this fleet has observed. It must not be a hard cap.
+    CURRENT BEHAVIOUR, read on origin/main f76df1f45:
+      - src/lib/dispatch-governor.ts checkDispatchGovernors (the `memoryGoverned = deps.checkMemoryGovernor?.()`
+        try/catch, about line 101-110) catches a throw from the memory governor and DISCARDS it. No ledger row
+        is written, and dispatch is admitted. The function's own doc says "UNREADABLE PERMITS" (W1-T1038 design (ii)).
+        A failure of any length is invisible and fails open forever.
+      - src/lib/drain.ts (the W1-T5404 HOST MEMORY FLOOR block, about line 1626-1633) does the same, but logs
+        `drain.memory_governor.unreadable` and then dispatches. It also fails open forever.
+      - src/lib/host-memory-ledger.ts readMemoryLedger reports the reservation store as state "unreadable" (the
+        sentinel arms at about line 349-371, and the listing arms at about line 716-721 and 797-801), and it
+        holds owner reservations (W1-T7093). test/a-missing-memory-ledger-never-reads-as-empty.test.ts pins
+        "never reads as empty". The only consumer of that state is src/lib/host-memory-shadow.ts
+        evaluateShadowMemory (the `widen("ledger-<state>", ...)` call, about line 219). That consumer is SHADOW ONLY
+        (W1-T7094), so a store that stays unreadable changes no dispatch decision and reaches no operator.
+    So neither tier exists today. A short hiccup is silent in the daemon. A failure that never recovers still
+    dispatches at full width, which is exactly when the memory floor (W1-T5347) is blind.
+    RELATED, already merged: W1-T5347 / W1-T5404 (memory floor wired to dispatch and drain), W1-T7093
+    (a missing ledger never reads as empty), W1-T7094 (the shadow verdict). This task keeps all of them. In
+    particular, a transient failure must NOT become the fail-closed `{kind: "unreadable"}` arm cost/queue use.
+    That would turn a /proc hiccup into a 100% outage, which is the reason W1-T1038 chose fail-open.
+  design: |
+    Operator ruling: no hard thresholds. Nothing below may add a fixed count or fixed duration as the cut.
+    1. ONE STREAK TRACKER per source ("probe" = checkMemoryGovernor, "store" = readMemoryLedger state
+       unreadable). It records when the current unreadable streak started, and it clears on the first good
+       read. Each streak start and each recovery writes a ledger row (for example `memory_read.unreadable` with
+       source, error and streak_started_at, and `memory_read.recovered` with source and duration_ms). The
+       daemon path (dispatch-governor.ts) and the drain path (drain.ts) both use the same tracker.
+    2. TRANSIENT TIER: while the streak is younger than the sustained bound, dispatch proceeds exactly as
+       today (fail open). The only new effect is the ledger row from (1).
+    3. SUSTAINED TIER: once the streak is older than the sustained bound, the governor returns a hold. Add a
+       new verdict kind, or extend the memory arm, and name the source and the streak age. New dispatch is
+       deferred, the sweep is untouched, and in-flight runs continue. Raise ONE escalation per streak through
+       the existing escalation path (src/lib/escalate.ts), deduplicated by streak start, never one per tick.
+       Recovery releases the hold and writes the recovered row.
+    4. ADAPTIVE BOUND: derive the sustained bound from the durations of past recovered streaks in the ledger
+       (the `memory_read.recovered` rows from (1)). For example, use a high percentile of observed recovery
+       times scaled by a margin. Then a fleet whose hiccups last seconds holds sooner than one whose hiccups
+       last a tick. With too little history, use a documented fallback derived from the daemon's own tick
+       cadence (a small multiple of the observed tick interval), and never a literal minute count. The ledger
+       row and the hold reason name the bound in force and its basis ("history n=…" or "fallback: tick cadence").
+    Tests go in the new file test/an-unreadable-memory-reading-is-tiered-by-how-long-it-lasts.test.ts, with `test(`
+    titles verbatim as in the proofs below. Drive checkDispatchGovernors and the drain memory block with a fake
+    clock and a throwing governor or a store whose readMemoryLedger reports unreadable.
+    test/a-missing-memory-ledger-never-reads-as-empty.test.ts and test/dispatch-memory-governor.test.ts must stay green.
+  acceptance:
+    - claim: "a short unreadable streak keeps dispatching and writes a ledger row"
+      proof: 'grep: test("W1-T7720: a transient unreadable memory reading admits dispatch and writes a ledger row" in test/an-unreadable-memory-reading-is-tiered-by-how-long-it-lasts.test.ts'
+    - claim: "a sustained unreadable streak holds new dispatch and escalates once per streak"
+      proof: 'grep: test("W1-T7720: a sustained unreadable memory reading holds dispatch and escalates once" in test/an-unreadable-memory-reading-is-tiered-by-how-long-it-lasts.test.ts'
+    - claim: "an unreadable reservation store is tiered the same way as a throwing memory probe"
+      proof: 'grep: test("W1-T7720: an unreadable reservation store is tiered like the memory probe" in test/an-unreadable-memory-reading-is-tiered-by-how-long-it-lasts.test.ts'
+    - claim: "the sustained bound follows observed recovery times, so two histories give two bounds"
+      proof: 'grep: test("W1-T7720: the sustained bound follows observed recovery times" in test/an-unreadable-memory-reading-is-tiered-by-how-long-it-lasts.test.ts'
+    - claim: "recovery releases the hold and records the streak duration"
+      proof: 'grep: test("W1-T7720: recovery releases the hold and records the streak duration" in test/an-unreadable-memory-reading-is-tiered-by-how-long-it-lasts.test.ts'
+  falsifier: |
+    Leave the catch in checkDispatchGovernors discarding the error: the transient test finds no ledger row,
+    and the sustained test sees dispatch admitted with no escalation. Replace the derived bound with a literal
+    constant: the history test reads the same bound for two different recovery histories. Never clear the
+    streak on a good read: the recovery test sees the hold persist.
