@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import { test, type TestContext } from "node:test";
-import { acquireTestSlot } from "../src/lib/test-slot.js";
+import { acquireTestSlot, readPidNamespace } from "../src/lib/test-slot.js";
 import { codexTestSlotArgs, planTypecheckCommand, runTypecheckCommand, typecheckBuildInfoFor } from "../src/lib/typecheck-command.js";
 import { spawnCodexWorker } from "../src/lib/worker-provider.js";
 import type { ContainedSpawnOptions } from "../src/lib/worker-containment.js";
@@ -159,6 +159,8 @@ test("a slot holder in another pid namespace on the same host is aged by its lea
     assert.equal(record.pidNamespace, "pid:[4026531836]");
     assert.equal(record.leaseMs, 300_000);
     lease.release();
+    assert.equal(readPidNamespace(join(dir, "no-such-ns")), undefined, "no /proc: no namespace, so the pid probe stays the rung");
+    if (process.platform === "linux") assert.match(readPidNamespace() ?? "", /^pid:\[\d+\]$/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
