@@ -51,6 +51,8 @@ import {
   nextRunnable,
   runnableCandidates,
   laneDispatchBudget,
+  wipDeferredAdmissionFields,
+  type QueueAdmissionReading,
   type MergedSet,
   type NextRunnableOpts,
   runBranchTaskIds,
@@ -1073,6 +1075,9 @@ export interface DaemonDeps {
    *  builds for `checkQueueGovernor`, never a second read path. Consulted only at two or more lanes.
    *  Optional — omitted, a wide batch is bounded by `laneCount` alone (W1-T343). */
   openPrCount?: () => number;
+  /** The reading behind `checkQueueGovernor`'s most recent ADMISSION; present, it sizes the lane budget
+   *  in place of `wipLimit`/`openPrCount` — see `LaneBudgetInput.queueAdmission` (drain.ts). */
+  readQueueAdmission?: () => QueueAdmissionReading | undefined;
   /** Read current /usage; `undefined` ⇒ unavailable (headroom check is skipped). */
   /** May return a promise. Widened rather than made async, so every existing synchronous supplier —
    *  the CLI probe and all 60 test fakes — keeps working byte for byte. The contract-supported SDK
@@ -4437,6 +4442,9 @@ export async function runDaemon(
     // tick-wide gate, not the per-dispatch gate a multi-lane batch needs — see the second consultation
     // immediately before the dispatch below (W1-T342). Forensics: docs/forensics/daemon.md.
     const tickGovernor = checkDispatchGovernors(deps, dailyCostCeilingUsd);
+    // The reading behind that admission sizes this tick's lanes, so the budget cannot refuse what the
+    // governor's adaptive bound just admitted (2026-10-10: admitted at 14, sized to 0 against 10).
+    const tickQueueAdmission = deps.readQueueAdmission?.();
     if (tickGovernor) {
       logTickPhases();
       ticks++;
@@ -4797,7 +4805,7 @@ export async function runDaemon(
       const budget =
         laneCount <= 1
           ? laneCount
-          : laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.() });
+          : laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: tickQueueAdmission });
       if (laneCount >= 2 && budget <= 0) {
         // Mirrors `runDrainLanes`' own WIP-deferred row: runnable work may exist, held back by the governor
         // rather than absent, which is distinct from an ordinary idle tick. Never reached at one lane.
@@ -4805,6 +4813,7 @@ export async function runDaemon(
           lane_count: laneCount,
           wip_limit: opts.wipLimit ?? null,
           observed_open_count: deps.openPrCount?.() ?? null,
+          ...wipDeferredAdmissionFields(tickQueueAdmission),
         });
       }
       const candidates = runnableCandidates(planForBatch, isMerged, budget, dispatchOpts);
@@ -5264,7 +5273,9 @@ export async function runDaemon(
         let next: Task | undefined;
         let nextSnapshot: { plan: Plan; isMerged: MergedSet } | undefined;
         const decide = (snapshot: { plan: Plan; isMerged: MergedSet }): void => {
-          const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.() });
+          const budget = laneDispatchBudget({
+            laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: deps.readQueueAdmission?.(),
+          });
           const runBranchState = runBranchStateFrom(runBranchListing, deps.readOrphanRunBranchEvidence?.());
           const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? laneCount : 0, {
             ...dispatchOpts,
