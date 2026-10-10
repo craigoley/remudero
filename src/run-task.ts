@@ -1648,6 +1648,7 @@ import {
   runPostFixReverification,
   runSweep,
   runSweepLightPass,
+  runLightPassReadyRefresh,
   withFullSweepRepairAdmission,
   redQualityGateNames,
   stillRedRequiredNames,
@@ -13215,10 +13216,16 @@ export async function runFixRung(opts: {
       });
     }
     const fixClaimFields: Record<string, unknown> = {};
+    // W1-T6003: a claim released before this round's fix.done (the flake path's CI wait) is still named on it.
+    let releasedClaimId: string | undefined;
+    const releaseRoundClaim = (): void => {
+      releasedClaimId ??= deps.branchClaim?.id();
+      deps.branchClaim?.release();
+    };
     const logFixDoneRow = (pushedHeadSha?: string, subtype?: string) => deps.log("fix.done", {
       ...fixReceipt.ledgerFields(fixResult), // W1-T4613: FIRST, so every field this row already carried keeps its value
       round_id: roundId,
-      ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() } : {}),
+      ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() ?? releasedClaimId } : {}),
       fix_outcome: fixOutcome?.kind ?? "unstated",
       ...fixClaimFields,
       head_sha: priorHeadSha,
@@ -13246,7 +13253,7 @@ export async function runFixRung(opts: {
     // W1-T5955: the round ends here, so its branch claim does too; the CI wait holds none.
     const logFixDone = (pushedHeadSha?: string, subtype?: string): void => {
       logFixDoneRow(pushedHeadSha, subtype);
-      deps.branchClaim?.release();
+      releaseRoundClaim();
     };
 
     // W1-T3079: archive this worker's transcript — see the "Worker transcript archive" section
@@ -13339,6 +13346,8 @@ export async function runFixRung(opts: {
           deps.log("fix.flake_requeue_failed", { head_sha: priorHeadSha, check_name: failure.name, reason: String(error) });
         }
       }
+      // W1-T6003: the requeues are posted, so the round's branch work is done; its CI wait holds no claim.
+      releaseRoundClaim();
       let green = false;
       if (requeued) {
         try {
@@ -47139,9 +47148,25 @@ export function buildSweepLightHook(
       // `fixRungAllowed` is false — can never spend a fix-rung strike. Every other open PR
       // (including a `blocked-fixable` PR with a genuine, non-cancelled failure) stays in the
       // batch below, gated by `fixRungAllowed` exactly as before this task.
-      const requeueOnlyPrs = reviewOnly ? [] : openPrs.filter((pr) => blockedFixableIsRequeueOnly(pr));
+      // W1-T7214: a ready PR main moved under is refreshed HERE, once over the whole snapshot (never
+      // per PR — W1-T528), before either batch below can arm it on the base main has left. Only a
+      // ready PR is probed, so a pass with none spends no compare read. The refreshed PR sits out
+      // this pass: its snapshot names the head the update just replaced.
+      let readyRefreshed: number | undefined;
+      const readyPrs = reviewOnly ? [] : openPrs.filter((pr) =>
+        pr.isDraft !== true && pr.checksState === "green" && pr.reviewState === "success");
+      if (readyPrs.length > 0) {
+        const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
+        const behindMainByPr = buildBehindMainByPr(owner, repo, readyPrs, undefined, undefined, baseChangedFilesByPr);
+        readyRefreshed = await runLightPassReadyRefresh(openPrs, {
+          ...effects, ledgerPath, runId, behindMainByPr, baseChangedFilesByPr,
+          inFlightTaskIds: new Set(inFlightTaskIdsFrom(join(config.root, "state", "inflight"))),
+        }, DEFAULT_SWEEP_POLICY);
+      }
+      const passPrs = readyRefreshed === undefined ? openPrs : openPrs.filter((pr) => pr.prNumber !== readyRefreshed);
+      const requeueOnlyPrs = reviewOnly ? [] : passPrs.filter((pr) => blockedFixableIsRequeueOnly(pr));
       const requeueOnlyPrNumbers = new Set(requeueOnlyPrs.map((pr) => pr.prNumber));
-      const restPrs = requeueOnlyPrNumbers.size === 0 ? openPrs : openPrs.filter((pr) => !requeueOnlyPrNumbers.has(pr.prNumber));
+      const restPrs = requeueOnlyPrNumbers.size === 0 ? passPrs : passPrs.filter((pr) => !requeueOnlyPrNumbers.has(pr.prNumber));
       const passes: Array<Promise<unknown>> = [
         // UNCHANGED FROM BEFORE THIS TASK when `requeueOnlyPrs` is empty (the overwhelming
         // common case — cancellations were measured at ~7% of `coverage-ratchet` runs): `restPrs`
@@ -47172,7 +47197,8 @@ export function buildSweepLightHook(
             // one tick, exactly the N+(N-1)+…+1 cost this shard exists to prevent. `updateBranch`
             // joins dispatchFix/close/escalate/depReview/arm on the list that stands down here
             // until the NEXT FULL sweep (`sweepCommand`/the daemon poll rung, both of which call
-            // `runSweep` ONCE over the whole set) picks it back up.
+            // `runSweep` ONCE over the whole set) picks it back up. W1-T7214: the one exception, a
+            // ready-overlap refresh, runs ONCE above (`runLightPassReadyRefresh`), never through this fan-out.
             updateBranch: undefined,
           },
           DEFAULT_SWEEP_POLICY,
