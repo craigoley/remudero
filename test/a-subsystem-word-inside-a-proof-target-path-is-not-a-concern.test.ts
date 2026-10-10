@@ -53,6 +53,16 @@ test("a flake filing for a test file whose path names the daemon passes sizing",
   assert.deepEqual([...subsystemsOf(filed)], ["a-daemon-that-cannot-hold-its-heap-says-so"], "one concern: the flaky test file");
   assert.equal(sizingViolation(filed), undefined);
   assert.deepEqual(lintTask(filed).violations.filter((v) => v.check === "sizing"), []);
+
+  // Filtering a declared path must not hide a subsystem that the claim names in prose. Keep this
+  // guard inside the discriminating filing test: at the merge base the filing itself is refused,
+  // while this regression assertion still proves that genuine daemon prose counts at the head.
+  const prose = record({
+    files: [TEST_FILE],
+    acceptance: [{ claim: `the daemon reports the flaky behavior in ${TEST_FILE}`, proof: `grep: flaky behavior in ${TEST_FILE}` }],
+  });
+  assert.deepEqual([...subsystemsOf(prose)].sort(), ["a-daemon-that-cannot-hold-its-heap-says-so", "daemon"]);
+  assert.equal(sizingViolation(prose)?.severity, "block", "real subsystem prose remains a sizing concern");
 });
 
 test("a prose claim naming two subsystems still fails sizing, path or no path", () => {
