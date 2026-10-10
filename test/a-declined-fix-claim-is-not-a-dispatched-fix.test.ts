@@ -44,7 +44,8 @@ const HEAD = "83175eb0aa";
 const OLD_HEAD = "81c30d80bb";
 const NEW_HEAD = "f00dfacecc";
 const BRANCH = "run-W1-T5285-1791200000000";
-const OWNER = "/fleet/worktrees/run-W1-T5285-1791200000000";
+// A REAL directory: the backstop holds only while the declined owner worktree still exists (#10551).
+const OWNER = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}run-W1-T5285-`));
 const UNMET = [{ claim: "a criterion", proof: "unit test: x", met: false, reason: "not done", proof_exec: "not_executable" as const }];
 const DECLINED_AT_HEAD = /fix already dispatched for this head/;
 
