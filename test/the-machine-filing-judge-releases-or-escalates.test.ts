@@ -605,7 +605,8 @@ test("rmd approve becomes a pinned operator ruling that no ledger rotation can s
 });
 
 test("a record the rewrite refuses is settled until it changes and not re-judged every pass", async () => {
-  const text = machineShard("W1-T9120").replace("  verify: human\n", "  verify: human # parked\n");
+  // A verify value on its own continuation line is valid YAML the rewrite cannot place (a trailing comment no longer is).
+  const text = machineShard("W1-T9120").replace("  verify: human\n", "  verify:\n    human\n");
   const root = planDir({ "W1-T9120-x.yaml": text });
   try {
     let asked = 0;
