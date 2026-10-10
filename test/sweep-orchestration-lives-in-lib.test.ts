@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { logArmAttribution } from "../src/lib/arm-auto-merge.js";
 import type { Config } from "../src/lib/config.js";
+import { ghJsonAsync } from "../src/lib/github-transport.js";
 import type { Plan } from "../src/lib/plan.js";
 import {
   buildSweepEffects as buildLibSweepEffects,
@@ -115,7 +116,7 @@ function baseDeps(root: string, overrides: Partial<BuildSweepEffectsDeps> = {}):
     spawnWallClockBoundMsOverride: 1,
     reclaimWorkerImpl: () => {},
     disarmImpl: () => undefined,
-    readJsonImpl: async () => ({}),
+    readJsonImpl: async args => args[0] === "pr" ? ghJsonAsync(args) : {},
     updatePrBodyImpl: async () => {},
     registeredWorktreeOwnerImpl: () => undefined,
     registeredOwnerRecovery: { capture: () => undefined, remove: () => undefined },
@@ -201,7 +202,7 @@ test("W1-T2890: dispatchFix moved to lib wires owner recovery and fix-rung adapt
   const shim = ghShim(
     [
       {
-        when: "pr view https://github.com/craigoley/remudero/pull/2890 --json headRefName,headRefOid,body",
+        when: "pr view https://github.com/craigoley/remudero/pull/2890 --json headRefName,headRefOid,body,files",
         stdout: JSON.stringify({ headRefName: "run-W1-T2890-1789022939729", headRefOid: "remote123456789", body: "" }),
       },
       {
@@ -317,7 +318,7 @@ test("W1-T2890: dispatchFix moved to lib preserves diverged owner refs before re
   const shim = ghShim(
     [
       {
-        when: "pr view https://github.com/craigoley/remudero/pull/2890 --json headRefName,headRefOid,body",
+        when: "pr view https://github.com/craigoley/remudero/pull/2890 --json headRefName,headRefOid,body,files",
         stdout: JSON.stringify({ headRefName: "run-W1-T2890-1789022939729", headRefOid: "remote123456789", body: "" }),
       },
     ],
@@ -393,7 +394,7 @@ test("W1-T2890: dispatchFix moved to lib names unreadable owner salvage identity
   const shim = ghShim(
     [
       {
-        when: "pr view https://github.com/craigoley/remudero/pull/2890 --json headRefName,headRefOid,body",
+        when: "pr view https://github.com/craigoley/remudero/pull/2890 --json headRefName,headRefOid,body,files",
         stdout: JSON.stringify({ headRefName: "run-W1-T2890-1789022939729", headRefOid: "remote123456789", body: "" }),
       },
     ],

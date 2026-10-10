@@ -365,7 +365,7 @@ test("MUTANT: the read is wired ONCE, and ABOVE every verdict branch that reclai
   // is the earliest of those (its body is defined further up the file, which is why the call site
   // and not the removal string is the landmark), and `no_pr` is the one these fixtures take.
   const readAt = src.indexOf(call);
-  const errorBranch = src.indexOf('const implFail = failOnWorkerError(impl, "implement")');
+  const errorBranch = src.indexOf('const implFail = failOnWorkerError(impl, "implement", driverResult.reason)');
   const noPrRemoval = src.indexOf('log("worktree.remove", { on: "no_pr" })');
   assert.ok(errorBranch > 0 && noPrRemoval > 0, "both landmarks must still be findable, or this proves nothing");
   assert.ok(readAt > 0 && readAt < errorBranch, "the read must precede the worker-error verdict branch");
