@@ -9,7 +9,7 @@ import { gitRepo } from "./helpers/git-repo.js";
 import { renderFixPrompt } from "../src/lib/prompt-render.js";
 import type { WorkerResult, SpawnWorkerArgs } from "../src/lib/worker.js";
 // @ts-ignore executable census module has no declaration file.
-import { main, readCensusSnapshot } from "../scripts/census-precheck.mjs";
+import { CENSUS_SNAPSHOT_ROOTS, main, readCensusSnapshot } from "../scripts/census-precheck.mjs";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const REACH = "test/the-affected-suite-reach-ratchet.test.ts";
@@ -49,6 +49,45 @@ function run(file: string, args: string[], env: NodeJS.ProcessEnv) {
   assert.equal(result.signal, null);
   return { status: result.status, text: result.stdout + result.stderr };
 }
+
+test("a CommonJS probe loads the harness snapshot functions without git or async-module errors", () => {
+  const f = fixture();
+  const script = join(f.root, "probe.cts");
+  const tracked = [...CENSUS_SNAPSHOT_ROOTS.map((dir: string) => `${dir}/input.ts`),
+    "package.json", ".dependency-cruiser.cjs"];
+  writeFileSync(script, [
+    `const harness = require(${JSON.stringify(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)))});`,
+    `const root = ${JSON.stringify(f.root)};`,
+    `const tracked = ${JSON.stringify([...tracked, "unrelated/ignored.ts"])};`,
+    `const snapshot = harness.writeFixCensusSnapshot(root, () => {}, (_root, args) => {`,
+    `  if (args[0] === "rev-parse") return args[1] === "HEAD" ? "head-sha" : "main-sha";`,
+    `  if (args[0] === "merge-base") return "base-sha";`,
+    `  if (args[0] === ${JSON.stringify(["ls", "files"].join("-"))}) return tracked.join("\\n");`,
+    `  if (args[0] === "ls-tree") return "";`,
+    `  throw new Error("unexpected snapshot read: " + args.join(" "));`,
+    `});`,
+    `if (!snapshot) throw new Error("snapshot was not written");`,
+    `const calls = [];`,
+    `const checked = harness.checkFixCensusSnapshot(root, snapshot, () => {}, (_file, args, opts) => {`,
+    `  calls.push({ args, snapshot: opts.env.RMD_CENSUS_SNAPSHOT });`,
+    `  return { status: 0, stdout: "# tests 4\\n# pass 4\\n# fail 0\\n", stderr: "" };`,
+    `});`,
+    `process.stdout.write(JSON.stringify({ snapshot, checked, calls }));`,
+  ].join("\n"));
+  const result = spawnSync(process.execPath, ["--import", "tsx", script],
+    { cwd: ROOT, env: f.env, encoding: "utf8", timeout: 60_000 });
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.deepEqual(output.checked, {});
+  assert.deepEqual(readCensusSnapshot(output.snapshot).headPaths, tracked);
+  assert.equal(statSync(output.snapshot).mode & 0o777, 0o444);
+  assert.equal(output.calls.length, 2);
+  assert.ok(output.calls.every((call: { snapshot: string }) => call.snapshot === output.snapshot));
+  assert.ok(output.calls[0].args[0].endsWith("scripts/census-precheck.mjs"));
+  assert.equal(output.calls[1].args.at(-1), REACH);
+});
 
 test("test/a-fix-round-checks-its-edits-from-a-harness-git-snapshot.test.ts: no git on PATH, edited census inputs and a new importer are refused", () => {
   const f = fixture();

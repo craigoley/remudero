@@ -40,8 +40,9 @@ import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { censusSatisfiedTasks } from "../scripts/satisfied-task-census.mjs";
-// @ts-expect-error executable census module has no declaration file.
-import { CENSUS_SNAPSHOT_ENV, CENSUS_SNAPSHOT_ROOTS } from "../scripts/census-precheck.mjs";
+// Import the root list without census-precheck's async scheduler initialization (CJS probes load this CLI).
+// @ts-expect-error executable comment-load module has no declaration file.
+import { MEASURED_ROOTS } from "../scripts/comment-load-ratchet.mjs";
 import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
@@ -17636,6 +17637,8 @@ export function censusPushRefusal(err: unknown): CensusPushRefusal | undefined {
 
 const CENSUS_BASELINE_FILES = ["scripts/clock-signature-baseline.json", "scripts/comment-load-baseline.json", "scripts/fixture-copy-baseline.json"];
 const CENSUS_PUSH_CHECK = "pre-push census-precheck";
+const CENSUS_SNAPSHOT_ENV = "RMD_CENSUS_SNAPSHOT";
+const CENSUS_SNAPSHOT_ROOTS = [...MEASURED_ROOTS, "test", "plan"];
 const COVERAGE_PUSH_CHECK = "pre-push coverage-precheck";
 const MERGED_TYPECHECK_PUSH_CHECK = "merged-tree-typecheck";
 const CENSUS_PUSH_NEVER_BYPASS =
