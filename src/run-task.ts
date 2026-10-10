@@ -44,7 +44,7 @@ import { censusSatisfiedTasks } from "../scripts/satisfied-task-census.mjs";
 // Import the root list without census-precheck's async scheduler initialization (CJS probes load this CLI).
 // @ts-expect-error executable comment-load module has no declaration file.
 import { MEASURED_ROOTS } from "../scripts/comment-load-ratchet.mjs";
-import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -2553,6 +2553,8 @@ export function buildSweepEffects(
       preserveTrackedDirty: preserveOrDiscardFixOwnerResidue,
       preserveStagedResidue: preserveStagedFixOwnerResidue,
       preserveUntracked: preserveAndClearUntrackedFixOwner,
+      preserveStaleDirty: preserveStaleDirtyFixOwner,
+      clearStaleDirty: clearStaleDirtyFixOwner,
       resetTrackedDirty: (_repoDir: string, ownerPath: string, _branch: string, localSha: string) =>
         resetTrackedDirtyFixOwner(ownerPath, localSha),
     },
@@ -44028,13 +44030,14 @@ export interface RegisteredFixOwnerSnapshot {
   pathState: RegisteredFixOwnerSignal;
   attachmentState: "exact" | "detached_or_other" | "unknown";
   /** W1-T6355: `untracked_only` is untracked paths with NO tracked change and no interrupted operation;
-   *  `untracked_dirty` is untracked paths beside tracked work, which always stays declined. */
+   *  `untracked_dirty` is untracked paths beside tracked work; W1-T7719 recovers dead stale owners. */
   treeState: "clean" | "tracked_dirty" | "untracked_dirty" | "untracked_only" | "unknown";
   remoteState: "exact" | "changed" | "unknown";
   historyState: "contained" | "ahead" | "diverged" | "unknown";
   claimState: "clear" | "occupied" | "unknown";
   processState: "clear" | "occupied" | "unknown";
   ageMs: number | null;
+  idleBoundMs?: number | null;
   localSha: string | null;
   remoteSha: string | null;
   processProbeReason?: string;
@@ -44048,6 +44051,7 @@ export type RegisteredFixOwnerRecoveryDecision =
         | "publish-ahead"
         | "preserve-diverged"
         | "preserve-tracked-dirty"
+        | "preserve-stale-dirty"
         | "preserve-untracked-dirty";
     }
   | {
@@ -44076,7 +44080,16 @@ export function decideRegisteredFixOwnerRecovery(
   if (snapshot.attachmentState === "detached_or_other")
     return { kind: "keep", reason: "detached_or_wrong_branch" };
   if (snapshot.attachmentState !== "exact") return { kind: "keep", reason: "branch_probe_unreadable" };
-  if (snapshot.treeState === "untracked_dirty") return { kind: "keep", reason: "dirty_worktree" };
+  if (snapshot.treeState === "untracked_dirty") {
+    return snapshot.remoteState === "exact" && snapshot.historyState !== "unknown" &&
+      snapshot.localSha && snapshot.remoteSha && snapshot.localSha !== snapshot.remoteSha &&
+      snapshot.claimState === "clear" && snapshot.processState === "clear" &&
+      snapshot.ageMs !== null && Number.isFinite(snapshot.ageMs) &&
+      snapshot.idleBoundMs != null && Number.isFinite(snapshot.idleBoundMs) && snapshot.idleBoundMs > 0 &&
+      snapshot.ageMs > snapshot.idleBoundMs
+      ? { kind: "preserve-stale-dirty" }
+      : { kind: "keep", reason: "dirty_worktree" };
+  }
   if (snapshot.treeState !== "clean" && snapshot.treeState !== "tracked_dirty" && snapshot.treeState !== "untracked_only")
     return { kind: "keep", reason: "tree_probe_unreadable" };
   if (snapshot.remoteState === "changed") return { kind: "keep", reason: "remote_head_changed" };
@@ -44181,6 +44194,7 @@ export interface CaptureRegisteredFixOwnerDeps {
    *  mint a second one -- W1-T2894's ceiling only falls when siblings share (W1-T3744). */
   treesMatch?: (patchTree: string, ownerTree: string) => boolean;
   matchesDirtyRecovery?: (repoDir: string, recoveryRef: string, localSha: string, tree: string) => boolean;
+  saveRecoveryFile?: (path: string, content: string) => void;
 }
 
 export function readRegisteredFixOwnerClaim(
@@ -44209,6 +44223,7 @@ export function captureRegisteredFixOwnerSnapshot(
     inflightDir: string;
     claimKey: string;
     claimRoundEnded?: (claimRunId: string) => boolean;
+    idleBoundMs?: number | null;
   },
   deps: CaptureRegisteredFixOwnerDeps = {},
 ): RegisteredFixOwnerSnapshot {
@@ -44222,6 +44237,7 @@ export function captureRegisteredFixOwnerSnapshot(
     claimState: "unknown",
     processState: "unknown",
     ageMs: null,
+    idleBoundMs: args.idleBoundMs,
     localSha: null,
     remoteSha: args.observedRemoteSha ?? null,
   };
@@ -44266,8 +44282,6 @@ export function captureRegisteredFixOwnerSnapshot(
   } catch (e) {
     return { ...snapshot, error: String(e) };
   }
-  if (snapshot.treeState === "untracked_dirty") return snapshot;
-
   if (!args.observedRemoteSha) return snapshot;
   snapshot.remoteState = args.observedRemoteSha === args.expectedRemoteSha ? "exact" : "changed";
   if (snapshot.remoteState !== "exact") return snapshot;
@@ -44539,6 +44553,66 @@ export function preserveAndClearUntrackedFixOwner(
   const recoveryRef = preserveTrackedDirtyPatch(repoDir, ownerPath, branch, localSha, patch, deps);
   hostWorktreeGit(ownerPath, ["clean", "-fd"]);
   return recoveryRef;
+}
+
+/** W1-T7719: keep index, worktree and untracked patches outside the worktree janitors' roots. */
+export function preserveStaleDirtyFixOwner(
+  root: string,
+  repoDir: string,
+  ownerPath: string,
+  branch: string,
+  localSha: string,
+  deps: CaptureRegisteredFixOwnerDeps = {},
+): string {
+  const gitOut = (args: string[]) => hostWorktreeGit(ownerPath, args, { maxBuffer: 1 << 26 });
+  const observedHead = gitOut(["rev-parse", "HEAD"]).trim();
+  if (observedHead !== localSha) throw new Error(`dirty owner HEAD changed: expected ${localSha}, observed ${observedHead}`);
+  if (gitOut(["diff", "--cached", "--name-only", "--diff-filter=U", "-z"]))
+    throw new Error("dirty owner index has unresolved stages");
+  const untracked = gitOut(["ls-files", "--others", "--exclude-standard", "-z"]);
+  const indexPatch = gitOut(["diff", "--cached", "--binary", localSha]);
+  const worktreePatch = gitOut(["diff", "--binary"]);
+  const emptyTree = hostWorktreeGit(ownerPath, ["mktree"], { input: "" }).trim();
+  let untrackedPatch = "";
+  temporaryIndexTree(ownerPath, localSha, (env) => {
+    hostWorktreeGit(ownerPath, ["read-tree", "--empty"], { env });
+    for (const path of nulPaths(untracked)) {
+      const absolute = join(ownerPath, path);
+      const stat = lstatSync(absolute);
+      const blob = stat.isSymbolicLink()
+        ? hostWorktreeGit(ownerPath, ["hash-object", "-w", "--stdin"], { input: readlinkSync(absolute) }).trim()
+        : hostWorktreeGit(ownerPath, ["hash-object", "--no-filters", "-w", "--", path]).trim();
+      const mode = stat.isSymbolicLink() ? "120000" : stat.mode & 0o111 ? "100755" : "100644";
+      hostWorktreeGit(ownerPath, ["update-index", "--add", "--cacheinfo", mode, blob, path], { env });
+    }
+    untrackedPatch = hostWorktreeGit(ownerPath, ["diff", "--cached", "--binary", emptyTree], { env, maxBuffer: 1 << 26 });
+  });
+  if (!untracked || !untrackedPatch) throw new Error("dirty owner untracked state is empty");
+  const recoveryRef = preserveFixHead(repoDir, branch, localSha);
+  const recoveryRoot = join(root, "recovery");
+  const parent = join(root, "recovery", "fix-owner", branch);
+  mkdirSync(parent, { recursive: true });
+  writeFileSync(join(recoveryRoot, ".rmd-scratch-keep"), "W1-T7719: preserved fix-owner state\n", { flush: true });
+  const savedPath = mkdtempSync(join(parent, `${localSha}-${(deps.now ?? Date.now)()}-`));
+  const save = deps.saveRecoveryFile ?? ((path: string, content: string) => writeFileSync(path, content, { flag: "wx", flush: true }));
+  for (const [name, content] of [
+    ["index.patch", indexPatch], ["worktree.patch", worktreePatch],
+    ["untracked.patch", untrackedPatch], ["untracked.paths", untracked], ["head.ref", `${recoveryRef}\n`],
+  ]) {
+    const path = join(savedPath, name);
+    save(path, content);
+    if (!readFileSync(path).equals(Buffer.from(content))) throw new Error(`saved owner state did not verify: ${name}`);
+  }
+  for (const path of [savedPath, parent, dirname(parent), recoveryRoot, root]) {
+    const directory = openSync(path, "r");
+    try { fsyncSync(directory); } finally { closeSync(directory); }
+  }
+  return savedPath;
+}
+
+export function clearStaleDirtyFixOwner(ownerPath: string, localSha: string): void {
+  resetTrackedDirtyFixOwner(ownerPath, localSha);
+  hostWorktreeGit(ownerPath, ["clean", "-fd"]);
 }
 
 function preserveFixHead(repoDir: string, branch: string, localSha: string): string {

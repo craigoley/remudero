@@ -766,6 +766,12 @@ export function evaluateAdmittedCensusSuites({ changed, loadMembers, runSuites, 
 
 export const PRECHECK_PARITY_BASELINE = "scripts/census-precheck-parity-baseline.json";
 
+/** Explicit pre-push proof runs that are rostered but are not admitted census populations. */
+export const PRECHECK_ADDITIONAL_RUNS = [
+  // W1-T7719: listRuleSuites includes this rostered proof, so pre-push asks it directly as well.
+  { testFile: "test/a-stale-dirty-fix-owner-is-preserved-and-reclaimed.test.ts", script: "test:fix-owner-recovery" },
+];
+
 /** Every census suite this script asks before the push, and how: `modeled` names the check that asks its
  *  question here, `run` an npm script that runs it. test/every-ci-census-is-asked-before-the-push.test.ts
  *  fails on a CI census on neither this nor the shrink-only baseline above (W1-T5616). */
@@ -793,6 +799,7 @@ export const PRECHECK_PARITY = {
   "test/authority-ratchet.test.ts": { run: "census:authority" },
   "test/no-shallowing-of-the-canonical-checkout.test.ts": { run: "census:no-shallowing" },
   "test/no-draft-pull-request-ever-sits-on-the-board.test.ts": { run: "census:no-draft-pr" },
+  ...Object.fromEntries(PRECHECK_ADDITIONAL_RUNS.map((m) => [m.testFile, { run: m.script }])),
   ...Object.fromEntries(PRECHECK_TRIGGERED_SUITES.map((m) => [m.testFile, { run: m.script }])),
 };
 

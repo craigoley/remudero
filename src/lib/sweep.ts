@@ -1170,6 +1170,8 @@ export interface RegisteredFixOwnerRecoveryDeps {
   resetTrackedDirty?: SweepRuntimeFn;
   /** W1-T6355: preserves, then clears, an ended run's untracked-only owner; returns its recovery ref. */
   preserveUntracked?: SweepRuntimeFn;
+  preserveStaleDirty?: SweepRuntimeFn;
+  clearStaleDirty?: SweepRuntimeFn;
 }
 
 export interface FixOwnerResidue {
@@ -3254,6 +3256,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               inflightDir,
               claimKey: fixBranchClaimKey(owner, repo, realBranch),
               claimRoundEnded: roundEnded,
+              idleBoundMs: registeredFixOwnerIdleBoundMs(readLedgerLines(ledgerPath)), // ledger-read-intent: live
             });
           } catch (e) {
             return declineClaim({
@@ -3287,8 +3290,33 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             });
           }
           let preservedRecoveryRef: string | undefined;
+          let preservedPath: string | undefined;
           let residue: FixOwnerResidue | undefined;
-          if (recovery.kind === "preserve-tracked-dirty") {
+          if (recovery.kind === "preserve-stale-dirty") {
+            const localSha = snapshot.localSha!;
+            const fields = {
+              pr_number: pr.prNumber, task_id: task.id, branch: realBranch,
+              worktree_path: snapshot.path, local_sha_prefix: localSha.slice(0, 12), head_sha: pr.headSha,
+            };
+            try {
+              preservedPath = (registeredOwnerRecovery.preserveStaleDirty ?? requiredSweepRuntime("registeredOwnerRecovery.preserveStaleDirty"))(
+                config.root, repoDir, registeredOwner, realBranch, localSha,
+              );
+              if (typeof preservedPath !== "string" || !preservedPath) throw new Error("preserved path is missing");
+            } catch (e) {
+              return declineClaim({ ...fields, reason: "registered_worktree_owner",
+                owner_recovery_reason: "owner_stale_dirty_preserve_failed",
+                error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP) });
+            }
+            log("sweep.fix.checkout_owner_stale_dirty_preserved", { ...fields, preserved_path: preservedPath });
+            try {
+              (registeredOwnerRecovery.clearStaleDirty ?? requiredSweepRuntime("registeredOwnerRecovery.clearStaleDirty"))(registeredOwner, localSha);
+            } catch (e) {
+              return declineClaim({ ...fields, reason: "registered_worktree_owner",
+                owner_recovery_reason: "owner_stale_dirty_reset_failed", preserved_path: preservedPath,
+                error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP) });
+            }
+          } else if (recovery.kind === "preserve-tracked-dirty") {
             const localSha = snapshot.localSha;
             if (!localSha) {
               return declineClaim({
@@ -3584,6 +3612,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               local_contained_by_remote: snapshot.historyState === "contained",
               recovery_ref: preservedRecoveryRef?.slice(0, 512),
               residue_discarded: residue !== undefined && residue.refusal === undefined,
+              preserved_path: preservedPath,
               no_live_claim: snapshot.claimState === "clear",
               no_process_cwd: snapshot.processState === "clear",
             },
@@ -10542,6 +10571,20 @@ export function fixRoundClaimId(runId: string, prNumber: number, nowMs: number):
  *  a thrown round needs no row, its `finally` releases the claim. */
 export function fixRoundClaimEnded(ledgerPath: string, claimRunId: string): boolean {
   return readLedgerLines(ledgerPath).some((row) => row.step === "fix.done" && row.branch_claim_run_id === claimRunId); // ledger-read-intent: live
+}
+
+/** W1-T7719: nearest-rank p95 of live-ledger claim-to-end spans; no history means no reclaim. */
+export function registeredFixOwnerIdleBoundMs(lines: ReadonlyArray<Record<string, unknown>>): number | null {
+  const spans: number[] = [];
+  for (const row of lines) {
+    if (row.step !== "fix.done" || typeof row.branch_claim_run_id !== "string" || typeof row.ts !== "string") continue;
+    const claim = /:fix-claim:\d+:(\d+)$/.exec(row.branch_claim_run_id);
+    if (!claim) continue;
+    const span = Date.parse(row.ts) - Number(claim[1]);
+    if (Number.isFinite(span) && span > 0) spans.push(span);
+  }
+  spans.sort((a, b) => a - b);
+  return spans.length === 0 ? null : spans[Math.ceil(spans.length * 0.95) - 1]!;
 }
 
 /** W1-T6434 — the diff excerpt a next fix round is shown from a preserved patch, in characters.
