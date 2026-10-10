@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-08: root-causing the stuck-PR board"
   plan_refs: [W1-T6024, W1-T2671, W1-T5696, W1-T78, W1-T5900, W1-T6353]
   files: [src/lib/sweep.ts, test/a-red-pr-first-takes-the-main-that-already-fixed-it.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

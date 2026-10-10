@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-05: found while building W1-T5676"
   plan_refs: [W1-T5676, W1-T3408]
   files: [test/fast-gate-admits-the-census-class.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

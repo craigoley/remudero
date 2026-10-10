@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, one compare per pass per un-hydrated laddered PR"
   plan_refs: [W1-T5635, W1-T5536, W1-T5630]
   files: [src/lib/sweep.ts, test/the-strike-ladder-reads-a-heads-merge-base-once.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

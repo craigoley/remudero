@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: watch log 15:41Z, follow-up audit (research/audit/followups.md) item 42"
   plan_refs: [W1-T5616, W1-T5617, W1-T5692, W1-T5693]
   files: [scripts/census-precheck.mjs, scripts/census-precheck-parity-baseline.json, test/every-ci-script-ratchet-has-a-pre-push-verdict.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

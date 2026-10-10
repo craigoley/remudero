@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5864 (#9322) builder's follow-up 1"
   plan_refs: [W1-T5864, W1-T4458]
   files: [src/run-task.ts, test/a-refused-merge-start-escalates-in-the-same-rung.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

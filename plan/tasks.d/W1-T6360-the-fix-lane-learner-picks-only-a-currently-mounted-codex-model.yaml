@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: Sol 6.1 adoption audit (operator: 'we should add Sol 6.1 everywhere')"
   plan_refs: [W1-T6028]
   files: [src/lib/worker.ts, src/lib/fix-routing-learner.ts, test/the-fix-lane-learner-picks-only-a-currently-mounted-codex-model.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-09: #10250 and #10441 sat in zero-strike base refreshes on src/lib/affected-suites.ts until a hand fix"
   plan_refs: [W1-T2671, W1-T2782, W1-T2789]
   files: [src/lib/sweep.ts, src/run-task.ts, test/a-diff-coverage-red-on-the-prs-own-lines-takes-a-strike-not-a-refresh.test.ts]
-  status: queued
+  status: merged
   priority: 1 # operator-2026-10-09: fix-lane loop: #10250 and #10441 sat in zero-strike base refreshes until hand commits; flow value above the serve prewarm
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 1, the sync-spawn census"
   plan_refs: [W1-T5650, W1-T5282, W1-T5284, W1-T4970, W1-T5436, W1-T5481, W1-T5620]
   files: [test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
