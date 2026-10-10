@@ -896,8 +896,7 @@ hr_env_check() {  # inspect env argv, expanding split-string options as literal 
   local -a argv=() split=()
   for ((j = i + 1; j < n; j++)); do argv+=("${t[$j]}"); done
 
-  # env allows its split-string option before the executable. Expand it in place; the
-  # resulting words are argv, not shell syntax (so a semicolon inside one stays data).
+  # Expand env's split-string option in place; semicolons in its words stay argv data.
   j=0
   while [ "$j" -lt "${#argv[@]}" ]; do
     w="${argv[$j]}"
@@ -941,7 +940,6 @@ hr_env_check() {  # inspect env argv, expanding split-string options as literal 
     j=$((j + 1))
   done
 
-  # Locate env's executable after its own options and NAME=value operands.
   j=0
   while [ "$j" -lt "${#argv[@]}" ]; do
     w="${argv[$j]}"
@@ -957,7 +955,6 @@ hr_env_check() {  # inspect env argv, expanding split-string options as literal 
   done
   [ "$j" -lt "${#argv[@]}" ] || return 0
 
-  # Feed a serialized token segment directly: no shell parsing of env's literal argv.
   command_line="-"
   w="${argv[$j]}"
   if [ "${w##*/}" = env ] && [ "$depth" -ge 4 ]; then
