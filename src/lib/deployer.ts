@@ -1521,13 +1521,14 @@ export interface PersistingRefusal {
 /** Stable key for "the same refusal": digits and whitespace are normalised so a changing worker
  *  count or timestamp inside the message does not read as a different reason. */
 export function refusalReasonKey(message: string): string {
-  const norm = message.replace(/\d+/g, "#").replace(/\s+/g, " ").trim().toLowerCase();
+  const reason = message.split(/\r?\n/).filter((line) => !/^\s*smoke-output\|/.test(line)).join("\n");
+  const norm = reason.replace(/\d+/g, "#").replace(/\s+/g, " ").trim().toLowerCase();
   return createHash("sha256").update(norm).digest("hex").slice(0, 10);
 }
 
 /** The refusal's own remedy: a line it labels as one, else its last non-empty line. */
 export function refusalRemedyLine(message: string): string {
-  const lines = message.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+  const lines = message.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith("smoke-output|"));
   const labelled = lines.find((l) => /^(remedy|fix|to fix|next|hint|run|re-?run|declared)\b/i.test(l));
   return labelled ?? lines[lines.length - 1] ?? "(the refusal carried no message)";
 }
