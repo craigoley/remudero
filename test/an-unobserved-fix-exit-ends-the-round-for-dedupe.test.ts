@@ -33,3 +33,25 @@ test("a fresh dispatch after the unobserved exit is the live rung again", () => 
     { task_id: TASK, step: "fix.dispatch", mode: "review", head_sha: HEAD, strike: 2, round_id: "r2" }];
   assert.equal(fixRungStalledWithoutNewHead(lines, TASK), false);
 });
+
+// The sibling: a worker that EXITED WITH AN ERROR CODE and pushed nothing leaves the same shape —
+// a fix.done and no review, push or stand-down — so its head was deduped forever too.
+function errorExitRound(over: Record<string, unknown> = {}): Array<Record<string, unknown>> {
+  return [
+    { task_id: TASK, step: "fix.dispatch", mode: "review", head_sha: HEAD, strike: 1, round_id: "r1" },
+    { task_id: TASK, step: "fix.done", round_id: "r1", head_sha: HEAD, strike: 1, subtype: "error_during_execution",
+      worker_exit: "exit", worker_exit_code: 1, fix_outcome: "unstated", ...over },
+  ];
+}
+
+test("a fix round whose worker exited with an error code and pushed nothing no longer dedups its head", () => {
+  assert.equal(fixRungStalledWithoutNewHead(errorExitRound(), TASK), true);
+  assert.equal(fixRungStalledWithoutNewHead(errorExitRound({ pushed_head_sha: HEAD }), TASK), true,
+    "a pushed head equal to the dispatched one moved nothing");
+});
+
+test("an error-coded exit that pushed a new head, or a clean exit code 0, is not read as an ended round", () => {
+  const moved = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c";
+  assert.equal(fixRungStalledWithoutNewHead(errorExitRound({ pushed_head_sha: moved }), TASK), false);
+  assert.equal(fixRungStalledWithoutNewHead(errorExitRound({ worker_exit_code: 0, subtype: "success" }), TASK), false);
+});
