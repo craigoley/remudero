@@ -25,3 +25,11 @@
     - PR #9557: 0.08 PR-hours — plan-only PR is red on task-id-existence, remudero-review — the code-fix lane cannot stage outside a plan filing, so no fix is dispatched; the plan violation needs a plan repair
     - PR #10175: 0.04 PR-hours — plan-only PR is red on task-id-existence, remudero-review — the code-fix lane cannot stage outside a plan filing, so no fix is dispatched; the plan violation needs a plan repair
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.84
+    reasons:
+      - "high-risk verdict at confidence 0.84 — on the change's description/files alone, no diff was read — The acceptance requires automatic clearance of task-id-existence and remudero-review blockers, but the supplied record does not describe the corrective action or how existing review requirements are preserved.; on the change's description/files alone, no diff was read — The declared files identify a blocker implementation and a test; with no remediation detail or bounded actual-change view, whether this changes review policy cannot be verified from what is shown, meeting the stated escalation criterion."
+    judged_at: "2026-10-10T16:35:21.693Z"
+    pin: "d3de06f27f54c8428b6cdcf817f3949f276bff2541d35ab6fc492a4f3e2dac04"
