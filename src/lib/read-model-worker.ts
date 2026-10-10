@@ -1103,7 +1103,9 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     if (comparator?.db !== home.db) {
       comparator = { db: home.db, shadow: createViewShadow({
         clock, log, store: fileShadowStore(viewShadowPath(opts.stateDir), home.db, home.lease),
-        evidence: (input) => readShadowEvidence(slots.flatMap((slot) => (slot.db ? [slot.db] : [])), input),
+        evidence: (input) => readShadowEvidence(slots
+          .filter((slot) => input.instance === null || slot.instance.name === input.instance)
+          .flatMap((slot) => (slot.db ? [slot.db] : [])), input),
       }) };
     }
     return comparator.shadow;
