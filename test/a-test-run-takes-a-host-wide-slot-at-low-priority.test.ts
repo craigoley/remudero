@@ -197,6 +197,10 @@ test("the host-wide test slot lives on the shared scratch mount, not the contain
   const root = fixtureRoot();
   const dir = slotDir();
   const saved = process.env[TEST_SLOT_DIR_ENV];
+  const savedParent = process.env.RMD_TEST_SLOT_PARENT;
+  // A deliberate private configured directory must not be suppressed by the
+  // enclosing author's production admission claim. Never touch its on-disk lease.
+  delete process.env.RMD_TEST_SLOT_PARENT;
   process.env[TEST_SLOT_DIR_ENV] = dir;
   const seen: string[][] = [];
   const { spawn } = coverageSpawn(() => seen.push(readdirSync(dir)));
@@ -207,6 +211,8 @@ test("the host-wide test slot lives on the shared scratch mount, not the contain
     for (const entries of seen) assert.ok(entries.some((e) => /^slot-\d+\.json$/.test(e)), "each shard runs holding a slot in the shared dir");
     assert.match(result.detail, new RegExp(`host-wide test slot 1/\\d+ \\(configured: ${dir}\\)`));
   } finally {
+    if (savedParent === undefined) delete process.env.RMD_TEST_SLOT_PARENT;
+    else process.env.RMD_TEST_SLOT_PARENT = savedParent;
     if (saved === undefined) delete process.env[TEST_SLOT_DIR_ENV];
     else process.env[TEST_SLOT_DIR_ENV] = saved;
     cleanup(root, dir, ciParity.coverageScratchDir(root));

@@ -119,7 +119,17 @@ test('author static priority wrapping retains failure and never starts affected 
   assert.match(receipt.affectedTestsNotRunReason, /static-preflight did not succeed/);
 });
 
-test('author static admission holds one real slot from static preflight through affected tests', () => {
+test('author static admission holds one real slot from static preflight through affected tests', (t) => {
+  // This fixture starts its OWN author: the enclosing real author's admission is
+  // not the fixture's cheap census or its private test-slot directory.
+  const keys = ['RMD_TEST_SLOT_PARENT', 'RMD_TEST_SLOT_DIR'] as const;
+  const saved = keys.map(key => [key, process.env[key]] as const);
+  for (const key of keys) delete process.env[key];
+  t.after(() => {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
   const f = fixture();
   const slotModule = pathToFileURL(join(ROOT, 'src/lib/test-slot.ts')).href;
   writeFileSync(join(f.root, 'scripts/census-precheck.mjs'), `
