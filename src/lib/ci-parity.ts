@@ -38,6 +38,8 @@ const WORKER_CONTAINMENT_URL = new URL("./worker-containment.ts", import.meta.ur
 export const CI_COVERAGE_SHARD_COUNT = 8;
 const COVERAGE_FREE_RESERVE_BYTES = 20 * 1024 ** 3;
 const MAX_COVERAGE_SCRATCH_PATH = 60;
+/** The short root a too-long TMPDIR's scratch moves to when both sit on one volume. */
+const SHORT_SCRATCH_ROOT = "/tmp";
 /** The host's scratch mount, the default scratch root when it is a mount (deploy/scratch-mounts.sh). */
 const HOST_SCRATCH_ROOT = "/mnt/scratch";
 const SCRATCH_ROOT_ENV_NAME = "RMD_SCRATCH_ROOT";
@@ -801,18 +803,28 @@ function changedFilesListPath(repoRoot: string, spawn: PreflightSpawn): string {
  *  callers (coverage-ratchet and {@link runPreflightCoverage}), so the expensive invocation cannot
  *  drift the way a hand-copied argv does.
  *  Why: docs/forensics/ci-parity.md. */
-export function coverageScratchDir(repoRoot: string): string {
+export function coverageScratchDir(repoRoot: string, sameVolume: (a: string, b: string) => boolean = sameDevice): string {
   const name = `rmd-c-${createHash("sha256").update(realpathSync(repoRoot)).digest("hex").slice(0, 12)}`;
   // A nested gate inherits TMPDIR from its caller. Find the same volume root even then.
   let base = resolve(tmpdir());
   try { base = realpathSync(base); } catch { /* The caller's unresolved TMPDIR is refused below. */ }
   for (let path = base; path !== dirname(path); path = dirname(path)) {
-    if (basename(path) === name) {
-      base = dirname(path);
-      break;
-    }
+    if (basename(path) === name) return join(dirname(path), name);
   }
-  return join(base, name);
+  return join(shortCoverageScratchBase(base, name, sameVolume), name);
+}
+
+/** The shard children's TMPDIR is this scratch, and their fixtures bind unix sockets beneath it
+ *  (sun_path holds 104 bytes on macOS, 108 on Linux), hence {@link MAX_COVERAGE_SCRATCH_PATH}. A
+ *  TMPDIR too long for that — macOS's per-user /private/var/folders/<..>/T is ~50 characters
+ *  before the scratch name — takes the short /tmp alias of the SAME volume instead, so the
+ *  volume and its free-space reserve are unchanged. A long TMPDIR on another volume (or one
+ *  that does not resolve) keeps its own base, and the length guard still refuses it. */
+function shortCoverageScratchBase(base: string, name: string, sameVolume: (a: string, b: string) => boolean): string {
+  // An absent /tmp cannot be stat'ed, so the real device check also keeps the long base then.
+  if (join(base, name).length <= MAX_COVERAGE_SCRATCH_PATH || !sameVolume(SHORT_SCRATCH_ROOT, base)) return base;
+  const short = realpathSync(SHORT_SCRATCH_ROOT);
+  return join(short, name).length <= MAX_COVERAGE_SCRATCH_PATH ? short : base;
 }
 
 /** Where a coverage run may put its scratch besides the TMPDIR volume (W1-T5709). */
@@ -850,7 +862,7 @@ function chooseCoverageScratch(
   freeBytes: (path: string) => number,
   policy: CoverageScratchPolicy,
 ): CoverageScratchChoice {
-  const tmpDir = coverageScratchDir(repoRoot);
+  const tmpDir = coverageScratchDir(repoRoot, policy.sameVolume ?? sameDevice);
   const tmpBase = dirname(tmpDir);
   let root = policy.root === undefined ? resolveCoverageScratchRoot() : policy.root ?? undefined;
   if (root !== undefined) {
