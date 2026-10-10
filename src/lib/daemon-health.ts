@@ -95,11 +95,11 @@ export function deriveLastPoll(
 /** Minimal shape {@link readDiskFreeBytes} needs off a `statfs` result — real `fs.statfsSync`
  *  returns more fields; only these two are consulted. */
 export interface StatfsLike {
-  bavail: number;
-  bsize: number;
+  bavail: number | bigint;
+  bsize: number | bigint;
   /** Total blocks. Optional so an existing caller's two-field fixture still satisfies the shape;
    *  {@link readDiskTotalBytes} returns `undefined` without it rather than inventing a size. */
-  blocks?: number;
+  blocks?: number | bigint;
 }
 
 /**
@@ -121,18 +121,32 @@ function readStatfs(path: string, statfs: (path: string) => StatfsLike): StatfsL
   }
 }
 
-export function readDiskFreeBytes(path: string, statfs: (path: string) => StatfsLike = statfsSync): number | undefined {
+function nativeStatfs(path: string): StatfsLike {
+  return statfsSync(path, { bigint: true });
+}
+
+/** Convert only validated integers; privileged free blocks never stand in for user-available blocks. */
+function diskBlockBytes(blocks: number | bigint | undefined, size: number | bigint): number | undefined {
+  if (blocks === undefined || (typeof blocks === "number" && !Number.isSafeInteger(blocks)) ||
+      (typeof size === "number" && !Number.isSafeInteger(size))) return undefined;
+  const count = BigInt(blocks), blockSize = BigInt(size);
+  if (count < 0n || blockSize <= 0n) return undefined;
+  const bytes = count * blockSize;
+  return bytes > BigInt(Number.MAX_SAFE_INTEGER) ? undefined : Number(bytes);
+}
+
+export function readDiskFreeBytes(path: string, statfs: (path: string) => StatfsLike = nativeStatfs): number | undefined {
   const stat = readStatfs(path, statfs);
-  return stat === undefined ? undefined : stat.bavail * stat.bsize;
+  return stat === undefined ? undefined : diskBlockBytes(stat.bavail, stat.bsize);
 }
 
 /** Total volume size — `blocks * bsize` — the denominator a PROPORTIONAL headroom threshold needs.
  *  Same injectable `statfs` and same fail-soft contract as {@link readDiskFreeBytes}: `undefined`
  *  when unreadable or when the shape carries no `blocks`, never a fabricated size, because a wrong
  *  denominator would move a threshold rather than skip one. */
-export function readDiskTotalBytes(path: string, statfs: (path: string) => StatfsLike = statfsSync): number | undefined {
+export function readDiskTotalBytes(path: string, statfs: (path: string) => StatfsLike = nativeStatfs): number | undefined {
   const stat = readStatfs(path, statfs);
-  return stat === undefined || stat.blocks === undefined ? undefined : stat.blocks * stat.bsize;
+  return stat === undefined ? undefined : diskBlockBytes(stat.blocks, stat.bsize);
 }
 
 /**
