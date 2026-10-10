@@ -331,7 +331,7 @@ test("W1-T2594: production ordering records only after ownership/push and before
   // still awaits spawnFixWorkerBounded, so the ordering this test pins is unchanged.
   const fixSpawn = source.indexOf("const spawnOutcome = await withPredecessorTranscriptCopies(fixArgs", fixSnapshot);
   const fixEvidence = source.indexOf("const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath", fixSpawn);
-  const fixPush = source.indexOf("roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? priorHeadSha : undefined)", fixEvidence);
+  const fixPush = source.indexOf("roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundBase.baseSha : undefined)", fixEvidence);
   const fixClaim = source.indexOf("recordHeadProviderAfterPush(", fixPush);
   const fixCi = source.indexOf("deps.waitForCiGreen(opts.prUrl", fixPush);
   assert.ok(

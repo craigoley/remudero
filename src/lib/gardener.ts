@@ -409,7 +409,7 @@ export function readGardenState<C extends string>(path: string, classes: readonl
   return { ...initialGardenState(classes), ...(parsed as GardenState<C>), classes: { ...initialGardenState(classes).classes, ...(parsed as GardenState<C>).classes } };
 }
 
-/** BACKSTOP: how long a merged metric-judged PR may wait for its metric to gain one trial before it is
+/** BACKSTOP: how long a merged metric-judged PR may wait for a conclusive metric before it is
  *  released unjudged. The gate tally only grows on a `measured` report, and #9019 waited a day of
  *  `partial` ones while every other class, defuse included, sat idle (W1-T5825). */
 export const GARDEN_PENDING_RELEASE_MS = 24 * 3_600_000;
@@ -421,10 +421,10 @@ export const GARDEN_DECISION_PENDING_RELEASE_MS = 24 * 3_600_000;
  * Judge the pending class, if any, on its own metric `now`. A closed (unmerged) PR is a debit. After
  * the merge, the success rate SINCE the merge is compared with the rate before the pass; the class is
  * credited or debited only once the difference exceeds one standard error, and otherwise waits. With a
- * `clock`, a merge whose metric gains no trial within {@link GARDEN_PENDING_RELEASE_MS} is `released`:
- * neither credit nor debit, so a silent metric cannot hold every other class.
+ * `clock`, an inconclusive metric after {@link GARDEN_PENDING_RELEASE_MS} is `released`:
+ * neither credit nor debit, so a frozen metric cannot hold every other class.
  */
-export function judgeGardenPending<C extends string>(state: GardenState<C>, now: Outcome, prState: PrState, clock?: Clock): { state: GardenState<C>; verdict: PendingVerdict } {
+export function judgeGardenPending<C extends string>(state: GardenState<C>, now: Outcome, prState: PrState, clock?: Clock): { state: GardenState<C>; verdict: PendingVerdict; trials?: number; difference?: number } {
   const pending = state.pending;
   if (!pending) return { state, verdict: "none" };
   const settle = (credit: boolean): { state: GardenState<C>; verdict: PendingVerdict } => {
@@ -436,19 +436,19 @@ export function judgeGardenPending<C extends string>(state: GardenState<C>, now:
   if (prState !== "merged") return { state, verdict: "waiting" };
   if (!pending.atMerge) return { state: { ...state, pending: { ...pending, atMerge: now, ...(clock ? { mergeSeenAt: clock.iso() } : {}) } }, verdict: "waiting" };
   const trials = now.trials - pending.atMerge.trials;
-  if (trials <= 0) {
-    if (!clock) return { state, verdict: "waiting" };
-    // A merge pinned before the stamp existed is stamped now, so its bound starts at this pass.
-    if (!pending.mergeSeenAt) return { state: { ...state, pending: { ...pending, mergeSeenAt: clock.iso() } }, verdict: "waiting" };
-    if (clock.now() - Date.parse(pending.mergeSeenAt) < GARDEN_PENDING_RELEASE_MS) return { state, verdict: "waiting" };
-    return { state: { ...state, pending: undefined }, verdict: "released" };
-  }
-  const after = (now.successes - pending.atMerge.successes) / trials;
   const before = pending.baseline.trials > 0 ? pending.baseline.successes / pending.baseline.trials : 0.5;
-  const se = Math.sqrt(Math.max(before * (1 - before), 1 / (4 * trials)) / trials);
-  if (after - before > se) return settle(true);
-  if (before - after > se) return settle(false);
-  return { state, verdict: "waiting" };
+  const difference = trials > 0 ? (now.successes - pending.atMerge.successes) / trials - before : undefined;
+  if (difference !== undefined) {
+    const se = Math.sqrt(Math.max(before * (1 - before), 1 / (4 * trials)) / trials);
+    if (difference > se) return settle(true);
+    if (-difference > se) return settle(false);
+  }
+  if (!clock) return { state, verdict: "waiting" };
+  // A merge pinned before the stamp existed is stamped now, so its bound starts at this pass.
+  if (!pending.mergeSeenAt) return { state: { ...state, pending: { ...pending, mergeSeenAt: clock.iso() } }, verdict: "waiting" };
+  if (clock.now() - Date.parse(pending.mergeSeenAt) < GARDEN_PENDING_RELEASE_MS) return { state, verdict: "waiting" };
+  return { state: { ...state, pending: undefined }, verdict: "released",
+    ...(difference !== undefined ? { trials, difference } : {}) };
 }
 
 /** Merges credit and closes debit; with a clock, an overdue open decision PR releases unjudged. */
@@ -870,6 +870,7 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
         waited_ms: clock.now() - Date.parse((decision ? recordedAt : held.mergeSeenAt)!),
         bound_ms: decision ? GARDEN_DECISION_PENDING_RELEASE_MS : GARDEN_PENDING_RELEASE_MS,
         ...(decision ? { reason: `open PR ${held.prUrl} exceeded the decision backstop` } : {}),
+        ...("trials" in judged && "difference" in judged ? { trials: judged.trials, difference: judged.difference } : {}),
       });
     }
   }

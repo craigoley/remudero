@@ -12,7 +12,7 @@
   plan_refs: [W1-T5995, W1-T5348, W1-T5349, W1-T5538]
   files: [src/lib/sweep.ts, test/a-machine-gardener-pr-red-on-its-own-record-is-closed-not-re-escalated.test.ts]
   status: queued
-  priority: 3
+  priority: 2 # operator-2026-10-09: gardener churn: a garden PR red on its own record re-escalates on every head move (3 issues on #9505)
   attempts: 0
   rationale: |
     MEASURED 2026-10-06: #9505 (branch flow-remedy-garden-1791271733067, one file: its W1-T5984 shard) was red on
