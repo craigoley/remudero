@@ -13176,6 +13176,8 @@ export function inFlightReviewCount(): number {
 /** Wait for the reviews in flight NOW to settle, bounded. Reviews admitted after the call are not
  *  awaited, so the drain cannot be extended by new work. Returns how many were still running at the bound. */
 export async function drainInFlightReviews(opts: { boundMs: number }): Promise<number> {
+  // A drain is an exit: a freed lane must not refill behind it. The next light pass reopens refills.
+  lightPassRefillsClosed = true;
   const running = [...inFlightReviewRuns];
   if (running.length === 0) return 0;
   const settled = new Set<Promise<void>>();
@@ -17689,6 +17691,8 @@ const releaseReviewSlot = (): void => {
   reviewSlotWaiters.clear();
 };
 const inFlightNote = (inFlight: number): string => (inFlight > 0 ? `, in-flight ${inFlight}` : "");
+// Closed by `drainInFlightReviews` (an exit), reopened by the next light pass.
+let lightPassRefillsClosed = false;
 
 /** W1-T5931: the one review bound both passes admit under — the width minus every review in flight. */
 export function reviewAdmissionBound(width: number): { bound: number; inFlight: number } {
@@ -17702,6 +17706,7 @@ export async function runSweepLightPass(
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary[]> {
   if (openPrs.length === 0) return [await runSweep([], deps, policy)];
+  lightPassRefillsClosed = false;
   // W1-T526/W1-T2792 — THE QUEUE-ADMISSION RULE. The light pass admits at most the existing
   // `reviewLanes` semantic width, never the old hidden hard-coded one. Every other PR's own
   // `deps.actionable` is wrapped so its disposition is still reconciled and its loss attributable.
@@ -17750,6 +17755,34 @@ export async function runSweepLightPass(
   lightPassPlanFilingReservations += planFilings.length;
   for (const pr of [...spawning, ...planFilings]) lightPassReservedHeads.add(lightPassHeadKey(pr));
   const spawningNumbers = new Set(spawning.map((pr) => pr.prNumber));
+  // The eligible spawning-lane PRs this pass could not admit, oldest first. A lane this pass frees
+  // admits the next of them at once (`refillFreedLanes` below) instead of idling until another pass.
+  const refillTail = selectReviewAdmissions(
+    openPrs.filter((pr) => !spawningNumbers.has(pr.prNumber) && !lightPassReservedHeads.has(lightPassHeadKey(pr))),
+    policy, now, outcomes, openPrs.length,
+  ).spawning;
+  let refillArmed = false;
+  // W1-T2584 parity: provider capacity is account-wide, so a pass whose review met the gh budget
+  // floor refills nothing; its tail re-derives next pass, exactly as a full pass closes admissions.
+  let providerFloorMet = false;
+  const basePostReview = deps.postReview;
+  const passPostReview: SweepDeps["postReview"] = basePostReview && (async (pr, mode) => {
+    try {
+      await basePostReview(pr, mode);
+    } catch (e) {
+      if (e instanceof GhPaceFloorStandDownError) providerFloorMet = true;
+      throw e;
+    }
+  });
+  let refillRunning = false;
+  let refillAgain = false;
+  // Assigned once the fan-out's own controller exists.
+  let refillFreedLanes: () => Promise<void> = async () => {};
+  // Only a lane freed AFTER this pass returns refills: one freed during the fan-out is re-derived by
+  // the next pass, so a pass's own rows always describe the admission it actually made.
+  const onOwnLaneFreed = (): void => {
+    if (refillArmed) void refillFreedLanes();
+  };
   // W1-T5901: ONE ready plan PR per light pass (and per overlapping pass) takes the direct-merge path.
   const planMergeCandidate = lightPassPlanMergeInFlight
     ? undefined
@@ -17766,6 +17799,7 @@ export async function runSweepLightPass(
       else lightPassPlanFilingReservations--;
       lightPassReservedHeads.delete(lightPassHeadKey(pr));
       releaseReviewSlot();
+      if (spawningNumbers.has(pr.prNumber)) onOwnLaneFreed();
     });
   }
   try {
@@ -17858,6 +17892,7 @@ export async function runSweepLightPass(
           ? "one plan PR direct-merges per light pass (W1-T5901) — deferred to full sweep (light pass)" : laneReason?.(d);
       }
       if (spawningNumbers.has(pr.prNumber)) {
+        scopedDeps.postReview = passPostReview;
         scopedDeps.detachReviewWait = (work) => {
           detachedNumbers.add(pr.prNumber);
           void work.finally(releases.get(pr.prNumber)).catch((error) => {
@@ -17872,8 +17907,113 @@ export async function runSweepLightPass(
       });
     }),
   );
+  // THE REFILL. Measured 2026-10-10 on the core daemon: light passes ran 5-12 min apart, a review
+  // took a median 2.2 min, and armed green PRs sat 10-16 min on an absent remudero-review while the
+  // lanes their reviews had held stood empty. A lane this pass frees now admits the next PR of this
+  // pass's own deferred tail at once, under the SAME adaptive width (`effectiveReviewWidth`,
+  // re-read now) and the SAME process-wide bound every pass shares. Each candidate's head is read
+  // live first, so a stale snapshot never reviews a dead head. Only the review lane may act.
+  const append = deps.appendLine ?? appendLedger;
+  const detachedRefills = new Set<number>();
+  const refillDeps = (pr: OpenPrView, release: () => void): SweepDeps => ({
+    ...deps,
+    stuckStagePeers: openPrs,
+    detachFixWait: true,
+    repairAdmissionSurface: "light",
+    repairAdmissionTelemetry: repairAdmission.snapshot,
+    selectAdaptiveReviewWidth: undefined,
+    claimFixAdmission,
+    postReview: passPostReview,
+    actionable: (d) => d === "post-review",
+    standDownReasonFor: (d) => (d === "post-review" ? undefined : "deferred to full sweep (light pass)"),
+    detachReviewWait: (work) => {
+      detachedRefills.add(pr.prNumber);
+      void work.finally(release).catch((error) => {
+        deps.log?.("sweep.post_review.failed", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String(error) });
+      });
+    },
+  });
+  const admitOneRefill = async (): Promise<boolean> => {
+    if (refillTail.length === 0 || providerFloorMet) return false;
+    const nowMs = deps.now ? deps.now() : systemClock.now();
+    const width = effectiveReviewWidth(deps, policy, refillTail.length, nowMs, selectionLedgerLines,
+      (deps.readActiveWorkerCount ?? activeWorkerCount)());
+    const { bound, inFlight } = reviewAdmissionBound(width);
+    if (bound === 0) return false;
+    const next = refillTail.shift();
+    if (next === undefined) return false;
+    const key = lightPassHeadKey(next);
+    if (lightPassReservedHeads.has(key)) return true;
+    // Reserve before the first await, exactly as selection does, so no overlapping pass can race it.
+    lightPassSpawningReservations++;
+    lightPassReservedHeads.add(key);
+    let released = false;
+    const unreserve = (): boolean => {
+      if (released) return false;
+      released = true;
+      lightPassSpawningReservations--;
+      lightPassReservedHeads.delete(key);
+      releaseReviewSlot();
+      return true;
+    };
+    const release = (): void => {
+      if (unreserve()) onOwnLaneFreed();
+    };
+    const row = { run_id: deps.runId, task_id: next.taskId ?? "SWEEP", pr_number: next.prNumber,
+      pr_url: next.prUrl, head_sha: next.headSha, width, in_flight: inFlight, snapshot_age_ms: nowMs - now };
+    let skip: string | undefined;
+    try {
+      const live = deps.readLiveStateAtAct ? await deps.readLiveStateAtAct(next) : undefined;
+      const liveHead = deps.readLiveStateAtAct ? live?.headSha : await deps.readLiveHeadSha?.(next);
+      const terminal = live?.ok === true ? terminalStateReason(live.state) : undefined;
+      if (terminal !== undefined) skip = terminal;
+      else if (liveHead !== undefined && liveHead !== next.headSha) skip = `head moved to ${liveHead.slice(0, 8)}`;
+    } catch (error) {
+      // Not an erasing catch: the error text is carried into `skip`, which the skipped row records.
+      skip = `live head unreadable (${String((error as Error)?.message ?? error)}) — left to the next pass`;
+    }
+    if (skip !== undefined) {
+      append(deps.ledgerPath, { ...row, step: "sweep.review_refill.skipped", reason: skip });
+      unreserve();
+      return true;
+    }
+    try {
+      append(deps.ledgerPath, { ...row, step: "sweep.review_refilled" });
+    } catch (error) {
+      unreserve();
+      throw error;
+    }
+    void runSweep([next], refillDeps(next, release), policy).then(
+      () => { if (!detachedRefills.has(next.prNumber)) release(); },
+      (error) => {
+        release();
+        deps.log?.("sweep.post_review.failed", { pr_number: next.prNumber, head_sha: next.headSha, error: String(error) });
+      },
+    );
+    return true;
+  };
+  refillFreedLanes = async () => {
+    if (refillRunning) {
+      refillAgain = true;
+      return;
+    }
+    refillRunning = true;
+    try {
+      do {
+        refillAgain = false;
+        while (!lightPassRefillsClosed && await admitOneRefill());
+      } while (refillAgain);
+    } catch (error) {
+      // Started unawaited from a lane's release, so a throw here must be named, never unhandled. The
+      // candidate's reservation is already returned; its tail re-derives on the next pass.
+      deps.log?.("sweep.review_refill.failed", { error: String((error as Error)?.message ?? error) });
+    } finally {
+      refillRunning = false;
+    }
+  };
   // Let completed effects release their capacity before a caller starts the next pass.
   if (detachedNumbers.size > 0) await new Promise<void>((resolve) => setImmediate(resolve));
+  refillArmed = true;
   return summaries;
   } finally {
     if (planMergeCandidate) lightPassPlanMergeInFlight = false;
