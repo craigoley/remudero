@@ -37,6 +37,7 @@ function fixture(root = mkdtempSync(join(tmpdir(), "rmd-census-snapshot-"))) {
   mkdirSync(noGit);
   const env: NodeJS.ProcessEnv = { ...process.env, PATH: noGit, [SNAPSHOT_ENV]: snapshot };
   delete env.NODE_TEST_CONTEXT;
+  env.NODE_V8_COVERAGE = undefined;
   return { root, snapshot, env };
 }
 
