@@ -50,7 +50,7 @@ function view(plan: Plan, ledger: Array<Record<string, unknown>>): OpenPrView {
           number: PR_NUMBER,
           html_url: prUrl,
           head: { ref: "run-W1-T4576-1790454708597", sha: "b".repeat(40) },
-          updated_at: "2026-09-26T20:40:00.000Z",
+          updated_at: "2026-09-26T20:40:00.000Z", // expiring-fixture: exempt -- deriveDisposition takes this suite's injected NOW, never the wall clock; 3/3 pass with Date.now shifted +8d and +30d
           body: `Remudero-Task: ${TASK_ID}`,
           auto_merge: null,
           state: "open",

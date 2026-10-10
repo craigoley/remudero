@@ -1572,7 +1572,7 @@ export interface ProofExecutionDeps {
 // CONSUMERS), floored at load by policy.ts's `numberField`, so a retune is a reviewed plan PR rather than a code edit
 // and `loadDefaultPolicy` self-locates the file. Drift against a source literal is structurally unreachable, so
 // test/policy.test.ts drops its drift assertion. TRAP: 30s truncated a name-filtered whole-suite run (W1-T112 round 4).
-function defaultProofTimeoutMs(): number {
+export function defaultProofTimeoutMs(): number {
   return loadDefaultPolicy().values.proofTimeoutMs;
 }
 const npmCiPrimed = new Set<string>();
