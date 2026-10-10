@@ -39,10 +39,9 @@ export function readRoutingQuarantineResolutions(input: unknown, asOf: string, l
 export function resolveRoutingQuarantineRow(
   resolutions: Map<string, RoutingQuarantineResolution>, sourceLabel: string, row: Row, raw: string, asOf: string,
 ): RoutingQuarantineResolution | undefined {
-  const resolution = resolutions.get(`${sourceLabel}:${createHash("sha256").update(raw).digest("hex")}`);
-  if (!resolution || row.step !== "cli.invoked" || typeof row.ts !== "string"
+  if (row.step !== "cli.invoked" || typeof row.ts !== "string"
       || !Number.isFinite(Date.parse(row.ts)) || Date.parse(row.ts) <= Date.parse(asOf) + 5 * 60_000
       || ["selection_assignment_id", "worker_assignment", "tokens", "total_cost_usd", "cost_usd",
         "notional_cost_usd", "billing_mode", "success", "served_model"].some(key => Object.hasOwn(row, key))) return undefined;
-  return resolution;
+  return resolutions.get(`${sourceLabel}:${createHash("sha256").update(raw).digest("hex")}`);
 }

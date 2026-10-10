@@ -6756,16 +6756,26 @@ test("syncPlanFromOrigin: a duplicate id across tasks.yaml and a shard on origin
   assert.throws(() => syncPlanFromOrigin(localDir, "plan/tasks.yaml"), /duplicate task id 'T1'/);
 });
 
-test("syncPlanFromOrigin: the rmd- temp dir (holding tasks.yaml AND tasks.d) is removed even when loadPlan THROWS (duplicate-id fixture)", () => {
+// The listing is of a tmpdir only this call can write to: the shared OS tmp root also holds
+// other suites' in-flight dirs (rmd-plansync-fake-bin-*), which a prefix filter matched (#10578).
+test("syncPlanFromOrigin leaves its own private tmpdir empty even when loadPlan THROWS (duplicate-id fixture)", () => {
   const { originDir, localDir } = gitFixture();
   mkdirSync(join(originDir, "plan", "tasks.d"), { recursive: true });
   writeFileSync(join(originDir, "plan", "tasks.d", "dup.yaml"), "- id: T1\n  title: dup\n  repo: remudero\n  type: implement\n", "utf8");
   execFileSync("git", ["-C", originDir, "add", "."]);
   execFileSync("git", ["-C", originDir, "commit", "--quiet", "-m", "dup"]);
-  const before = readdirSync(tmpdir()).filter((d) => d.startsWith("rmd-plan"));
-  assert.throws(() => syncPlanFromOrigin(localDir, "plan/tasks.yaml"));
-  const after = readdirSync(tmpdir()).filter((d) => d.startsWith("rmd-plan"));
-  assert.deepEqual(after, before, "no rmd-plan temp dir survives a loadPlan failure — cleaned on every exit path");
+  const ownTmp = mkdtempSync(join(tmpdir(), "rmd-plan-sync-own-tmp-"));
+  const priorTmpdir = process.env.TMPDIR;
+  process.env.TMPDIR = ownTmp;
+  try {
+    assert.equal(tmpdir(), ownTmp, "the call under test resolves tmpdir() to the private dir");
+    assert.throws(() => syncPlanFromOrigin(localDir, "plan/tasks.yaml"));
+  } finally {
+    if (priorTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = priorTmpdir;
+  }
+  assert.deepEqual(readdirSync(ownTmp), [], "no temp dir survives a loadPlan failure — cleaned on every exit path");
+  rmSync(ownTmp, { recursive: true, force: true });
 });
 
 // ── W1-T82: `rmd onboard <target-dir> --phase inventory` CLI wrapper ────────────────────
