@@ -1301,7 +1301,9 @@ import { deriveTaskClass, implementRouteClass } from "./lib/task-class.js";
 import { guardZeroStreakRecord } from "./lib/retro-closure.js";
 import {
   buildDispatchValueContext,
+  costOfDelayReadyRow,
   DISPATCH_VALUE_LEDGER_STEPS,
+  filingDatesFromPlanHistory,
   planSeed,
   type DispatchValueContext,
   type CostOfDelaySnapshot,
@@ -34972,14 +34974,7 @@ export function readDispatchFilingSnapshot(
     if (cached?.planTreeSha === planTreeSha) return { kind: "ready", snapshot: cached };
     const relativePlanPath = relative(root, canonicalPlanPath);
     const history = read(root, ["log", "--first-parent", "--reverse", "--format=filing:%ct", "--no-renames", "-p", "--unified=0", "HEAD", "--", relativePlanPath, `${planDir}/tasks.d`]);
-    const filedAtByTaskId = new Map<string, number>();
-    let at = NaN;
-    for (const line of history.split("\n")) {
-      const timestamp = /^filing:(\d+)$/.exec(line);
-      if (timestamp) at = Number(timestamp[1]) * 1000;
-      const id = /^\+\s*(?:-\s*)?id:\s*["']?([A-Z][A-Z0-9]*-T\d+)\b/.exec(line)?.[1];
-      if (id && Number.isFinite(at) && !filedAtByTaskId.has(id)) filedAtByTaskId.set(id, at);
-    }
+    const filedAtByTaskId = filingDatesFromPlanHistory(history);
     if (filedAtByTaskId.size === 0) return { kind: "refused", reasons: ["missing-filing-history"] };
     const snapshot = Object.freeze({ planTreeSha, filedAtByTaskId });
     dispatchFilingCache.set(key, snapshot);
@@ -35047,8 +35042,11 @@ export function dispatchValueContextForSelection(
     fallback(scheduled.reasons, seed);
     return Object.freeze({ ...calibrated.context, costOfDelayFallback: true });
   }
-  if (dispatchFallbackKeys.get(stateDir) !== "ready") log("dispatch.cost_of_delay.ready", { key: "ready", plan_tree_sha: seed });
-  dispatchFallbackKeys.set(stateDir, "ready");
+  // W1-T7534: an open task the filing history cannot date is left unscored, never a whole-queue fallback;
+  // the ready row names those ids once per plan tree so the gap stays visible.
+  const ready = costOfDelayReadyRow(seed, scheduled.context);
+  if (dispatchFallbackKeys.get(stateDir) !== ready.key) log("dispatch.cost_of_delay.ready", ready);
+  dispatchFallbackKeys.set(stateDir, ready.key);
   return scheduled.context;
 }
 
