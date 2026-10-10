@@ -1046,6 +1046,7 @@ import {
 import { EMPTY_RELEASE_AUDIT_STATE, releaseAutomatedShard, runReleaseAudit, type ReleaseAuditState } from "./lib/verify-human-release.js";
 import { censusHandRuns } from "./lib/hand-run-census.js";
 import { gunzipSync } from "node:zlib";
+import { getHeapStatistics } from "node:v8";
 import {
   ledgerRotationEntries,
   resolveLedgerUnion,
@@ -1744,7 +1745,8 @@ import {
   type FixRoundBranchClaim,
   inFlightReviewCount,
 } from "./lib/sweep.js";
-import { sampleDaemonMemory } from "./lib/daemon-memory-telemetry.js";
+import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
+import { workerThreads, type TrackedWorker } from "./lib/worker-heaps.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
 export {
@@ -38082,13 +38084,28 @@ export function orphanSweepRunActive(
     liveInflightRuns(inflightDir, isPidAlive).some((r) => r.runId === runId || r.runId.startsWith(`${runId}:fix-claim:`));
 }
 
-/** W1-T6782: sample the daemon's live memory and workload on each existing heartbeat. */
-export function daemonMemoryTelemetryReader(bootHeadSha: string | undefined): () => Record<string, unknown> {
-  return () => ({ ...sampleDaemonMemory({
-    heapStatistics: v8HeapStatistics,
-    workload: () => ({ active_workers: activeWorkerCount(), in_flight_reviews: inFlightReviewCount() }),
-    bootHeadSha,
-  }) });
+/** W1-T6782: sample the daemon's live memory and workload on each existing heartbeat. W1-T7092: each
+ *  row also carries every worker thread's heap, by creation site, role, thread id and daemon
+ *  generation, from request rounds `afterRow` starts once the row is written (never awaited; at most
+ *  one unresolved request per thread). `liveThreads` is a test seam. */
+export function daemonMemoryTelemetryReader(
+  bootHeadSha: string | undefined,
+  opts: { generation?: string; liveThreads?: () => readonly TrackedWorker[] } = {},
+): (() => Record<string, unknown>) & { afterRow: () => void } {
+  const threadHeaps = workerHeapReadings({
+    live: opts.liveThreads ?? workerThreads().live,
+    mainHeap: getHeapStatistics,
+    ...(opts.generation ? { generation: opts.generation } : {}),
+  });
+  const read = (): Record<string, unknown> => {
+    const memory = sampleDaemonMemory({
+      heapStatistics: v8HeapStatistics,
+      workload: () => ({ active_workers: activeWorkerCount(), in_flight_reviews: inFlightReviewCount() }),
+      bootHeadSha,
+    });
+    return { ...memory, ...threadHeaps.fields(memory) };
+  };
+  return Object.assign(read, { afterRow: () => threadHeaps.refresh() });
 }
 
 export async function daemonCommand(
@@ -38167,6 +38184,9 @@ export async function daemonCommand(
   // `deriveLedgerActor`'s doc (src/lib/ledger.ts) for why a worker this daemon later spawns is
   // still `"worker"` despite inheriting this same env marker.
   markDaemonProcessActor();
+  // W1-T7092: subscribe the worker-heaps registry before anything below can spawn a thread, exactly
+  // as serve does, so daemon.alive can size every worker isolate by its spawn site.
+  workerThreads();
 
   // FAIL LOUD on junk args BEFORE any spawn/lock — `rmd daemon install --dry-run` silently
   // ran the daemon (draining W1-T15) because `install`/`--dry-run` were ignored. daemon
@@ -38944,7 +38964,7 @@ export async function daemonCommand(
           ledgerPath, statusPath, log,
         }) : undefined,
         readLoopTelemetry: loopTelemetry.sample,
-        readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha),
+        readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha, { generation: runId }),
         lastStepBeforeBlock: () => lastReadPlaneStep,
         idleStarvedSupervised: process.env.RMD_IDLE_STARVED_SUPERVISED === "1" && !target.isSelf && !flagValue(rest, "--plan"),
         confirmedOpenPrCount: boardOpenPrCount.readConfirmed,

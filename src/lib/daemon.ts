@@ -964,8 +964,10 @@ export interface DaemonDeps {
   readLoopTelemetry?: (() => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number;
     sync_spawn_top?: unknown[] }) & { peek?: () => unknown };
   /** W1-T6782: flat, payload-free memory fields (`sampleDaemonMemory`, daemon-memory-telemetry.ts)
-   *  spread into the existing `daemon.alive` row. A throw is carried as `mem_telemetry`, never lost. */
-  readMemoryTelemetry?: () => Record<string, unknown>;
+   *  spread into the existing `daemon.alive` row. A throw is carried as `mem_telemetry`, never lost.
+   *  W1-T7092: `afterRow` starts the worker-thread heap read once the row is written; the tick never
+   *  awaits it, and the NEXT row's fields carry what it found. */
+  readMemoryTelemetry?: (() => Record<string, unknown>) & { afterRow?: () => void };
   lastStepBeforeBlock?: () => string | undefined;
   /** Rebind daemon-owned sweep/projection closures when the live plan reloads. */
   onPlanReload?: (plan: Plan) => void;
@@ -1521,6 +1523,15 @@ function readMemoryTelemetrySafely(deps: Pick<DaemonDeps, "readMemoryTelemetry">
   }
 }
 
+/** W1-T7092: start the thread heap read only AFTER `daemon.alive` is written, never awaited. */
+function startMemoryReadAfterRow(deps: Pick<DaemonDeps, "readMemoryTelemetry">, log: (step: string, extra?: Record<string, unknown>) => void): void {
+  try {
+    deps.readMemoryTelemetry?.afterRow?.();
+  } catch (e) {
+    log("daemon.memory_read_failed", { error: String((e as Error)?.message ?? e).slice(0, 160) });
+  }
+}
+
 function peekSyncSpawnTop(deps: Pick<DaemonDeps, "readLoopTelemetry">): unknown {
   try { return deps.readLoopTelemetry?.peek?.(); } catch { return undefined; /* Reason: observability only. */ }
 }
@@ -2016,6 +2027,7 @@ function startInFlightTicker(
             ...(holdSeen !== undefined ? { pause_seen: holdSeen } : {}),
             ...(diskHeadroom?.freeBytes !== undefined ? { disk_free_bytes: diskHeadroom.freeBytes } : {}),
           });
+          startMemoryReadAfterRow(deps, log);
           // W1-T7093: the reservation tree must be refreshed by the real recurring heartbeat,
           // not merely by worker start/release calls. Best-effort, after the liveness row so a
           // slow or failed ledger walk cannot erase this tick's heartbeat.
