@@ -52,7 +52,7 @@ async function idleRows(ticks: number, extra: Partial<DaemonDeps>, events: strin
 }
 
 /** A busy daemon: one dispatch held open across `aliveTicks` ticker sleeps of one poll interval each. */
-async function busyRows(aliveTicks: number, extra: Partial<DaemonDeps>): Promise<Row[]> {
+async function busyRows(aliveTicks: number, extra: Partial<DaemonDeps>, finalSleepShortByMs = 0): Promise<Row[]> {
   let nowMs = Date.parse("2026-10-09T12:00:00.000Z");
   const merged = new Set<string>();
   const rows: Row[] = [];
@@ -66,7 +66,11 @@ async function busyRows(aliveTicks: number, extra: Partial<DaemonDeps>): Promise
       runOne: async (id) => { await gate; merged.add(id); return { taskId: id, runId: id + "-run", merged: true, costUsd: 0.5, verdict: "merged" }; },
       sweepLight: async () => {},
       now: () => new Date(nowMs),
-      sleep: async (ms: number) => { sleeps++; nowMs += ms; if (sleeps >= aliveTicks) release?.(); },
+      sleep: async (ms: number) => {
+        sleeps++;
+        nowMs += ms - (sleeps >= aliveTicks ? finalSleepShortByMs : 0);
+        if (sleeps >= aliveTicks) release?.();
+      },
       log: (step, e = {}) => rows.push({ step, extra: e }),
       ...extra,
     },
@@ -102,7 +106,8 @@ test("an idle loop's daemon.tick carries the memory fields with mem_sample_via t
 });
 
 test("a tick within one poll interval of a sampled daemon.alive carries none", async () => {
-  const rows = await busyRows(3, { readMemoryTelemetry: () => ({ ...MEMORY }) });
+  // Keep the final heartbeat-to-tick gap strictly inside the window; at exactly POLL_MS a new sample is due.
+  const rows = await busyRows(3, { readMemoryTelemetry: () => ({ ...MEMORY }) }, 1);
   const alives = alivesOf(rows);
   assert.ok(alives.length >= 2, `the dispatch wrote its heartbeats (got ${alives.length})`);
   assert.equal(alives.at(-1)?.mem_sample_via, "alive", "the heartbeat names itself as the row that carried the sample");
