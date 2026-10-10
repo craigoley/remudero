@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import { test } from "node:test";
+import { after, before, test } from "node:test";
 
 import * as runTask from "../src/run-task.js";
 import * as review from "../src/lib/review.js";
@@ -25,6 +25,14 @@ import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
 
 const { buildBaseProofDir, checkProofCommand, CHECK_PROOF_EXIT } = runTask;
 type BaseProofDir = runTask.BaseProofDir;
+
+// The subject here is WHAT BYTES the base tree holds, not how the reviewer isolates the grep child. The real
+// executor wraps every proof child in bubblewrap when it can start, and a bwrap-in-bwrap host (the reviewer's own
+// sandbox) binds a worktree control's gitdir differently from a plain blob tree, so the same grep could answer
+// differently for a reason that has nothing to do with the base. Pin the executor to run its grep directly, on
+// every host, so the control and the blob tree meet the same spawn.
+before(() => review.setProofSandboxForTests({ mode: "unsandboxed", reason: "pinned: this suite compares base trees, not sandboxes" }));
+after(() => review.setProofSandboxForTests());
 
 const NEEDLE = "needle_7f3a";
 /** Bytes a UTF-8 decode would rewrite (0xff, 0xfe) around a NUL, on the line the grep matches. */
