@@ -13,7 +13,12 @@
  *     never write the same file. Reads are a bounded tail of each file. Compaction keeps the newest samples per class.
  * (3) LEARN. The estimate is a decayed, weighted quantile of the class's peaks. The class default is a PRIOR, a
  *     pseudo-sample that never decays: with no samples the estimate IS the default (and says it is unmeasured); as fresh
- *     samples arrive they outweigh it; if samples stop arriving their weight decays and the prior regains its pull.
+ *     samples arrive they outweigh it; if samples stop arriving their weight decays and the prior regains its pull. The
+ *     same samples also give the class's TYPICAL peak (the median), which the budget sums across live trees while it
+ *     allows only one tree's tail above it (host-memory-shadow.ts).
+ * (4) NEST. A `node --test` runner found inside a sampled tree (a worker's `npm test`, or a hand-typed run) gets its own
+ *     "test" reservation, so the budget sees a test run's spike as it starts, and its peak teaches the test class. The
+ *     enclosing tree's peak leaves the runner's members out, so no process is counted in two classes.
  *
  * BEST-EFFORT: nothing here throws to a caller. A failed read is no samples (the prior, named unmeasured), a failed
  * write loses one sample. Nothing here delays, refuses or alters work.
@@ -40,6 +45,7 @@ import {
   type ProcessListing,
   type WorkerClass,
 } from "./host-memory-ledger.js";
+import { isTestRunnerArgv } from "./test-file-admission.js";
 
 // ── the learning rule (pure) ────────────────────────────────────────────────────────────────────────────────────────
 
@@ -47,6 +53,8 @@ import {
 export const ESTIMATE_LEARNING = {
   /** The quantile a reservation claims: most trees of the class stay under it. */
   quantile: 0.9,
+  /** The quantile the budget treats as a tree's TYPICAL peak: half the class's trees stay under it. */
+  typicalQuantile: 0.5,
   /** A sample's weight halves every this long, so a class whose work changed re-learns within days. */
   halfLifeMs: 24 * 60 * 60_000,
   /** The prior's weight in samples. It never decays: at the 0.9 quantile a prior above every sample holds until about
@@ -73,7 +81,7 @@ export function learnEstimate(
   samples: readonly Pick<PeakSample, "peakMib" | "at">[],
   priorMib: number,
   now: number,
-  params: Pick<typeof ESTIMATE_LEARNING, "quantile" | "halfLifeMs" | "priorWeight"> = ESTIMATE_LEARNING,
+  params: { quantile: number; halfLifeMs: number; priorWeight: number } = ESTIMATE_LEARNING,
 ): LearnedEstimate {
   const usable = samples.filter((s) => Number.isFinite(s.peakMib) && s.peakMib > 0 && Number.isFinite(s.at));
   if (usable.length === 0) return { estimateMib: priorMib, samples: 0 };
@@ -252,21 +260,36 @@ export function readPeakSamples(workerClass: WorkerClass, opts: PeakStoreOptions
   return out;
 }
 
-const cachedEstimates = new Map<WorkerClass, { at: number; estimate: LearnedEstimate }>();
+const cachedEstimates = new Map<WorkerClass, { at: number; estimate: LearnedEstimate; typical: LearnedEstimate }>();
 
 export function resetLearnedEstimateCacheForTests(): void {
   cachedEstimates.clear();
   diagnosticsSeen.clear();
 }
 
-/** The class estimate a reservation claims: learned from every instance's peaks, the class default as its prior. */
-export function classEstimate(workerClass: WorkerClass, opts: PeakStoreOptions = {}): LearnedEstimate {
+function learnedClass(workerClass: WorkerClass, opts: PeakStoreOptions): { estimate: LearnedEstimate; typical: LearnedEstimate } {
   const now = (opts.clock ?? systemClock).now();
   const cached = cachedEstimates.get(workerClass);
-  if (cached && now - cached.at < ESTIMATE_CACHE_MS) return cached.estimate;
-  const estimate = learnEstimate(readPeakSamples(workerClass, opts), DEFAULT_ESTIMATE_MIB[workerClass], now);
-  cachedEstimates.set(workerClass, { at: now, estimate });
-  return estimate;
+  if (cached && now - cached.at < ESTIMATE_CACHE_MS) return cached;
+  const samples = readPeakSamples(workerClass, opts);
+  const prior = DEFAULT_ESTIMATE_MIB[workerClass];
+  const learned = {
+    estimate: learnEstimate(samples, prior, now),
+    typical: learnEstimate(samples, prior, now, { ...ESTIMATE_LEARNING, quantile: ESTIMATE_LEARNING.typicalQuantile }),
+  };
+  cachedEstimates.set(workerClass, { at: now, ...learned });
+  return learned;
+}
+
+/** The class estimate a reservation claims: learned from every instance's peaks, the class default as its prior. */
+export function classEstimate(workerClass: WorkerClass, opts: PeakStoreOptions = {}): LearnedEstimate {
+  return learnedClass(workerClass, opts).estimate;
+}
+
+/** The class's TYPICAL peak, the median of the same samples and prior. With no samples it is the prior, so an unmeasured
+ *  class has no tail above its typical and its whole estimate counts as typical. */
+export function classTypical(workerClass: WorkerClass, opts: PeakStoreOptions = {}): LearnedEstimate {
+  return learnedClass(workerClass, opts).typical;
 }
 
 /** The estimate and the source a reservation records for it. */
@@ -278,6 +301,8 @@ export function estimateSourceOf(estimate: LearnedEstimate): EstimateSource {
 
 /** How often an owner samples its open trees. Each pass is one bounded /proc listing plus one status read per member. */
 export const TREE_SAMPLE_MS = 15_000;
+/** BACKSTOP on the per-process argv memo that spots test runners; past it the memo starts over. */
+const RUNNER_MEMO_MAX = 4_096;
 
 export interface TreeSamplerPorts {
   listProcesses: () => ProcessListing;
@@ -286,10 +311,24 @@ export interface TreeSamplerPorts {
   clearTimer: (timer: unknown) => void;
 }
 
+/** A test run the sampler found inside a tracked tree, ended once the runner's whole tree has exited. */
+export interface NestedTestRun {
+  /** The runner tree's peak in MiB, or undefined when it was never observed. Called once. */
+  finish(peakMib: number | undefined): void;
+}
+
+export interface TrackHooks {
+  /** A `node --test` runner appeared in this tree: open its reservation, or return undefined to leave it in this tree. */
+  onTestRunner?: (pid: number) => NestedTestRun | undefined;
+}
+
 interface Tracked {
   roots: Array<{ pid: number; start: string }>;
   peakMib: number;
   observed: boolean;
+  hooks?: TrackHooks;
+  /** Set on a test run found inside another tree: it ends when its runner's tree has exited. */
+  nested?: NestedTestRun;
 }
 
 function defaultSamplerPorts(): TreeSamplerPorts {
@@ -319,54 +358,156 @@ export function treeMembers(roots: readonly { pid: number; start: string }[], li
 }
 
 export interface TreePeakSampler {
-  track(id: string, pid: number): void;
+  track(id: string, pid: number, hooks?: TrackHooks): void;
   /** Stop tracking `id` after one final sample; the peak in MiB, or undefined when the tree was never observed. */
   finish(id: string): number | undefined;
   sampleNow(): void;
   size(): number;
 }
 
-/** One sampler per process: a timer runs only while some tree is tracked. NEVER throws. */
+/**
+ * One sampler per process: a timer runs only while some tree is tracked. NEVER throws. A `node --test` runner inside a
+ * tree tracked with an `onTestRunner` hook becomes a tracked tree of its own, and the enclosing tree's peak leaves the
+ * runner's members out.
+ */
 export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {}): TreePeakSampler {
   const ports = { ...defaultSamplerPorts(), ...overrides };
   const tracked = new Map<string, Tracked>();
+  /** Per (pid, start): whether its argv is a test runner. Each process's argv is read once. */
+  const runnerMemo = new Map<string, boolean>();
+  /** The runners a hook was already asked about, whatever it answered. */
+  const asked = new Set<string>();
   let timer: unknown;
-  const sampleNow = (): void => {
-    if (tracked.size === 0) return;
-    let listing: ProcessListing;
+  let sampling = false;
+
+  const isRunner = (key: string, pid: number): boolean => {
+    const known = runnerMemo.get(key);
+    if (known !== undefined) return known;
+    let runner = false;
     try {
-      listing = ports.listProcesses();
+      runner = isTestRunnerArgv(ports.readFile(`/proc/${pid}/cmdline`).split("\0"));
     } catch (error) {
-      void error; // An unreadable /proc this pass: the next pass tries again; no sample is invented.
-      return;
+      void error; // Exited or unreadable: nothing proves a runner, so nothing is reserved for it.
     }
-    for (const entry of tracked.values()) {
-      let kb = 0;
-      for (const pid of treeMembers(entry.roots, listing)) {
-        try {
-          kb += Number(/^VmHWM:\s+(\d+)/m.exec(ports.readFile(`/proc/${pid}/status`))?.[1] ?? 0);
-        } catch (error) {
-          void error; // Exited between the listing and the read: it holds nothing now.
-        }
-      }
-      if (kb > 0) {
-        entry.observed = true;
-        entry.peakMib = Math.max(entry.peakMib, kb / 1024);
-      }
+    if (runnerMemo.size >= RUNNER_MEMO_MAX) {
+      runnerMemo.clear();
+      asked.clear();
     }
+    runnerMemo.set(key, runner);
+    return runner;
   };
+
+  const peakOf = (members: readonly number[], skip: ReadonlySet<number>): number => {
+    let kb = 0;
+    for (const pid of members) {
+      if (skip.has(pid)) continue;
+      try {
+        kb += Number(/^VmHWM:\s+(\d+)/m.exec(ports.readFile(`/proc/${pid}/status`))?.[1] ?? 0);
+      } catch (error) {
+        void error; // Exited between the listing and the read: it holds nothing now.
+      }
+    }
+    return kb / 1024;
+  };
+
   const stopIfIdle = (): void => {
     if (tracked.size > 0 || timer === undefined) return;
     ports.clearTimer(timer);
     timer = undefined;
   };
+
+  /**
+   * (1) Hooked trees adopt their new test runners: the OUTERMOST runner of a run (npm test's wrapper, not the
+   * `node --test` it starts) is one run with everything below it. Returns which tracked tree each root (pid:start) is.
+   */
+  const adoptRunners = (listing: ProcessListing, startOf: ReadonlyMap<number, string>): Map<string, string> => {
+    const rootOwner = new Map<string, string>();
+    for (const [id, entry] of tracked) for (const root of entry.roots) rootOwner.set(`${root.pid}:${root.start}`, id);
+    for (const [id, entry] of [...tracked]) {
+      const hook = entry.hooks?.onTestRunner;
+      if (!hook) continue;
+      const inside = new Set<number>();
+      // Breadth-first, so a runner is met before anything it started.
+      for (const pid of treeMembers(entry.roots, listing)) {
+        if (inside.has(pid)) continue;
+        const start = startOf.get(pid) ?? "unknown";
+        const key = `${pid}:${start}`;
+        const owner = rootOwner.get(key);
+        const nestedRoot = owner !== undefined && owner !== id;
+        if (!nestedRoot && !isRunner(key, pid)) continue;
+        for (const member of treeMembers([{ pid, start }], listing)) inside.add(member);
+        if (nestedRoot || asked.has(key)) continue;
+        asked.add(key); // Asked once, whatever the hook answers.
+        let run: NestedTestRun | undefined;
+        try {
+          run = hook(pid);
+        } catch (error) {
+          void error; // No reservation opened: the run stays inside its enclosing tree's measure.
+        }
+        if (!run) continue;
+        const nestedId = `${id}>test:${key}`;
+        tracked.set(nestedId, { roots: [{ pid, start }], peakMib: 0, observed: false, nested: run });
+        rootOwner.set(key, nestedId);
+      }
+    }
+    return rootOwner;
+  };
+
+  const sampleNow = (): void => {
+    if (tracked.size === 0 || sampling) return;
+    sampling = true;
+    const ended: Array<{ run: NestedTestRun; peakMib: number | undefined }> = [];
+    try {
+      let listing: ProcessListing;
+      try {
+        listing = ports.listProcesses();
+      } catch (error) {
+        void error; // An unreadable /proc this pass: the next pass tries again; no sample is invented.
+        return;
+      }
+      const startOf = new Map(listing.rows.map((row) => [row.pid, row.start]));
+      const rootOwner = adoptRunners(listing, startOf);
+      // (2) Each tree's peak leaves out the members of every tracked tree rooted inside it, so a process counts once.
+      const members = new Map([...tracked].map(([id, entry]) => [id, treeMembers(entry.roots, listing)]));
+      for (const [id, entry] of tracked) {
+        const own = members.get(id) ?? [];
+        const inner = new Set<number>();
+        for (const pid of own) {
+          const owner = rootOwner.get(`${pid}:${startOf.get(pid)}`);
+          if (owner !== undefined && owner !== id) for (const member of members.get(owner) ?? []) inner.add(member);
+        }
+        const peak = peakOf(own, inner);
+        if (peak > 0) {
+          entry.observed = true;
+          entry.peakMib = Math.max(entry.peakMib, peak);
+        }
+        // (3) A nested run ends once its runner's whole tree has exited.
+        if (entry.nested && own.length === 0) {
+          tracked.delete(id);
+          ended.push({ run: entry.nested, peakMib: entry.observed ? entry.peakMib : undefined });
+        }
+      }
+    } finally {
+      sampling = false;
+    }
+    for (const { run, peakMib } of ended) {
+      try {
+        run.finish(peakMib);
+      } catch (error) {
+        void error; // A failed release is the ledger's to report; the sampler carries on.
+      }
+    }
+    stopIfIdle();
+  };
+
   return {
-    track(id, pid) {
+    track(id, pid, hooks) {
       try {
         const stat = parseProcStat(ports.readFile(`/proc/${pid}/stat`));
         if (!stat || stat.zombie) return;
         const entry = tracked.get(id) ?? { roots: [], peakMib: 0, observed: false };
         entry.roots.push({ pid, start: stat.start });
+        if (hooks) entry.hooks = hooks;
         tracked.set(id, entry);
         sampleNow();
         if (timer === undefined) {
@@ -411,9 +552,35 @@ export interface LearnedReservationOptions {
   sampler?: TreePeakSampler;
 }
 
+/** The ledger reservation and learned peak of one test runner found inside a tracked tree. NEVER throws. */
+function openNestedTestRun(
+  pid: number,
+  context: { root?: string; ledger?: HostMemoryLedgerOptions; store: PeakStoreOptions },
+): NestedTestRun {
+  let estimate: LearnedEstimate = { estimateMib: DEFAULT_ESTIMATE_MIB.test, samples: 0 };
+  try {
+    estimate = classEstimate("test", context.store);
+  } catch (error) {
+    recordError(context.store, "estimate", error);
+  }
+  const handle = openMemoryReservation({
+    workerClass: "test",
+    root: context.root,
+    ...(estimate.samples > 0 ? { measured: { estimateMib: estimate.estimateMib, samples: estimate.samples } } : {}),
+  }, context.ledger);
+  handle.bindRoot(pid);
+  return {
+    finish(peakMib) {
+      if (peakMib !== undefined) recordPeak("test", peakMib, context.store);
+      handle.releaseOccupancy();
+    },
+  };
+}
+
 /**
  * Open a reservation at the class's LEARNED estimate, sample its tree while the work runs, and record the tree's peak
- * when the occupancy ends. NEVER throws: a failure anywhere leaves the ledger's own no-op or default behaviour.
+ * when the occupancy ends. A test runner inside the tree gets its own "test" reservation (module doc, (4)). NEVER throws:
+ * a failure anywhere leaves the ledger's own no-op or default behaviour.
  */
 export function openLearnedReservation(
   input: { workerClass: WorkerClass; root?: string },
@@ -440,6 +607,9 @@ export function openLearnedReservation(
   const sampler = deps.sampler ?? sharedSampler();
   const key = handle.id ?? `untracked-${Math.random().toString(36).slice(2)}`;
   let finished = false;
+  const hooks: TrackHooks | undefined = input.workerClass === "test" ? undefined : {
+    onTestRunner: (pid) => openNestedTestRun(pid, { ...(input.root ? { root: input.root } : {}), ledger: deps.ledger, store }),
+  };
   return {
     id: handle.id,
     workerClass: input.workerClass,
@@ -448,7 +618,7 @@ export function openLearnedReservation(
     bindRoot(pid: number): void {
       handle.bindRoot(pid);
       try {
-        sampler.track(key, pid);
+        sampler.track(key, pid, hooks);
       } catch (error) {
         recordError(store, "track", error);
       }

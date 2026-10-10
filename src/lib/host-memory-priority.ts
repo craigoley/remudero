@@ -48,8 +48,11 @@ export interface HostMemoryPriorityPolicy {
 /** PROPOSALS, to be calibrated from the would-be wait distribution the shadow rows report — never a ruling. */
 export const HOST_MEMORY_PRIORITY_PROPOSAL: HostMemoryPriorityPolicy = {
   origin: HOST_MEMORY_PRIORITY_ORIGIN,
-  // A review, a proof check or a push gate finishes work already admitted; a garden is maintenance that can wait.
-  classWeight: { review: 3, fix: 2, implement: 1, unclassified: 1, advisory: 2, garden: 0.5, "check-proof": 3, "push-gate": 3 },
+  // A review, a proof check or a push gate finishes work already admitted; a garden is maintenance that can wait. A test
+  // run is found inside a running tree, never a start that waits, so its weight only completes the table.
+  classWeight: {
+    review: 3, fix: 2, implement: 1, unclassified: 1, advisory: 2, garden: 0.5, "check-proof": 3, "push-gate": 3, test: 1,
+  },
   agingPerMinute: 0.05,
   demandRefreshBoundMs: 5 * 60_000,
   zeroWorkerShortfallSamples: 6,
