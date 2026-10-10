@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { parse } from "yaml";
 import * as amendments from "../src/lib/proof-amendment.js";
 import type { ProofAmendmentRecord, ProofAmendmentWritePorts } from "../src/lib/proof-amendment.js";
-import { runFixRung } from "../src/run-task.js";
+import { runFixRung } from "./helpers/run-task-test.js";
 import { fixRoundTally } from "../src/lib/sweep.js";
 import type { Config } from "../src/lib/config.js";
 import type { WorkerResult } from "../src/lib/worker.js";
@@ -156,7 +156,7 @@ test("scope amendment failures retain the scope escalation fallback", async () =
     if (mode === "write-failed") f.opts.deps.scopeAmendmentWritePorts = { ...f.p.deps, writeFile: () => { throw new Error("write failed"); } };
     const result = await runFixRung(f.opts);
     assert.equal(result.outcome, "stood_down");
-    assert.equal(f.rows.findLast((row) => row.step === "fix.scope_amendment")?.outcome, "refused");
+    assert.equal(f.rows.findLast((row) => row.step === "fix.scope_amendment")?.outcome, "refused", mode);
     assert.match(String(f.rows.find((row) => row.step === "fix.commit_refused")?.scope_amendment_detail), /src\/absent.ts/);
     assert.equal(f.p.prs.length, 0);
   }

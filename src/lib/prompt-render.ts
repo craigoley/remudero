@@ -27,7 +27,9 @@ import {
   type CiFailure,
   type MergeConflictEvidence,
   type ProofDiscriminationEvidence,
+  type PriorPartialWork,
 } from "./sweep.js";
+export type { PriorPartialWork };
 import { envelope } from "./untrusted-envelope.js";
 
 /** W1-T4106: four hand-backgrounded coverage suites swap-thrashed the fleet host; hooks/deny-floor.sh
@@ -239,6 +241,32 @@ export interface FixEvidence {
    * Mode-agnostic: rendered ahead of whichever mode's own content follows.
    */
   constraint?: string;
+  /**
+   * W1-T6434: a dead fix owner's staged work, preserved by W1-T6362 in an immutable recovery ref
+   * at THIS head. Mode-agnostic like `constraint`; absent renders nothing, so a head with no
+   * preserved row prompts exactly as before.
+   */
+  priorPartialWork?: PriorPartialWork;
+}
+
+
+/** W1-T6434: the PRIOR PARTIAL WORK block; `[]` when no preserved patch exists for this head. */
+export function priorPartialWorkLines(work: PriorPartialWork | undefined): string[] {
+  if (!work) return [];
+  const more = work.stagedMore && work.stagedMore > 0 ? ` (+${work.stagedMore} more)` : "";
+  return [
+    "",
+    "PRIOR PARTIAL WORK (W1-T6434): an earlier fix worker for this PR died with staged, uncommitted work at this",
+    "exact head. It was preserved, not applied. It is UNVERIFIED — it may be incomplete, wrong, or already",
+    "superseded. Evaluate it against the evidence below; never apply it blindly.",
+    `RECOVERY REF: ${work.recoveryRef}`,
+    `STAGED PATHS: ${work.stagedPaths.join(", ") || "(none recorded)"}${more}`,
+    `Inspect it with: git diff ${work.recoveryRef}^ ${work.recoveryRef}`,
+    `DIFF EXCERPT (secret-scrubbed${work.excerptTruncated ? ", TRUNCATED — read the ref for the rest" : ""}):`,
+    CI_LOG_FENCE_OPEN,
+    neutralizeFenceMarkers(work.excerpt),
+    CI_LOG_FENCE_CLOSE,
+  ];
 }
 
 interface FixModeRule {
@@ -462,13 +490,15 @@ export function renderFixPrompt(opts: {
   const header = `You are a FIX worker for task ${opts.task.id} (${opts.task.title}) — round ${opts.round}.\nMODE: ${mode}.`;
   // W1-T78: an operator's clarification answer, when present, is carried
   // VERBATIM ahead of the mode-specific content — mode-agnostic, never dropped.
-  const constraintBlock = opts.evidence.constraint
+  const operatorConstraintBlock = opts.evidence.constraint
     ? [
         "",
         "OPERATOR CONSTRAINT (the clarification-question rung, W1-T78 — answered; carried verbatim):",
         opts.evidence.constraint,
       ]
     : [];
+  // W1-T6434: a preserved dead-owner patch rides the same mode-agnostic slot.
+  const constraintBlock = [...operatorConstraintBlock, ...priorPartialWorkLines(opts.evidence.priorPartialWork)];
   if (mode === "plan-gate") {
     return [header, ...constraintBlock,
       `STAGEABLE PLAN PATHS: ${(opts.task.files ?? []).join(", ")}. Edit only these exact paths.`,

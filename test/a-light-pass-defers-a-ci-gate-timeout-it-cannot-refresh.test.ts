@@ -22,7 +22,7 @@ import {
   type OpenPrView,
   type SweepDeps,
   type UpdateBranchOutcome,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { lightPassActionable } from "../src/run-task.js";
 
 const PR_NUMBER = 9392;

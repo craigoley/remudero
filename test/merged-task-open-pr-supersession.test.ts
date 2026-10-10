@@ -16,7 +16,7 @@ import {
   projectMergedTaskCandidates,
   type CreditCandidate,
   type OpenPrView,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 

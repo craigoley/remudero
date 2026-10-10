@@ -30,7 +30,7 @@ import {
   CI_LOG_DIAGNOSTIC_RE,
   CI_LOG_LINE_PREFIX_RE,
   runFixRung,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import type { CiFailure } from "../src/lib/sweep.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";

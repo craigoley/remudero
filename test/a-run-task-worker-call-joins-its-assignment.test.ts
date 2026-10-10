@@ -27,7 +27,7 @@ import type { GitHub } from "../src/lib/status.js";
 import { spawnVerifyHumanJudgeWorker } from "../src/lib/verify-human-judge.js";
 import type { spawnWorker, SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "../src/lib/worker.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { harnessCommitForShellLessWorker, runFixRung, runTask } from "../src/run-task.js";
+import { harnessCommitForShellLessWorker, runFixRung, runTask } from "./helpers/run-task-test.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 type Row = { step: string } & Record<string, unknown>;

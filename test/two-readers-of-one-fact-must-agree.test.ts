@@ -7,7 +7,7 @@ import { gzipSync } from "node:zlib";
 import { checkReaderAgreement, type ReaderFigures } from "../src/lib/reader-agreement.js";
 import { loadPlanFromYaml } from "../src/lib/plan.js";
 import { ghShim } from "./helpers/gh-shim.js";
-import { runSweep, type SweepDeps } from "../src/lib/sweep.js";
+import { runSweep, type SweepDeps } from "./helpers/sweep-test.js";
 import { buildBatchedGithub } from "../src/lib/status.js";
 
 const figures: ReaderFigures = {

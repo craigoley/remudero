@@ -13,7 +13,7 @@ import { readLedgerLines } from "../src/lib/status.js";
 import type { GitHub } from "../src/lib/status.js";
 import { postReviewStatusGuarded, type PrLifecycleState } from "../src/lib/review.js";
 import { checkReviewerCodeFreshness, SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
-import { reviewCommand, runFixRung, runReview, runTask, type ReviewRunResult } from "../src/run-task.js";
+import { reviewCommand, runFixRung, runReview, runTask, type ReviewRunResult } from "./helpers/run-task-test.js";
 import type { WorkerResult, spawnWorker } from "../src/lib/worker.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { ghShim } from "./helpers/gh-shim.js";

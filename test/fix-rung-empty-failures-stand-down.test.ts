@@ -26,8 +26,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runFixRung } from "../src/run-task.js";
-import type { CiFailure } from "../src/lib/sweep.js";
+import { runFixRung } from "./helpers/run-task-test.js";
+import type { CiFailure } from "./helpers/sweep-test.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";

@@ -19,7 +19,7 @@ import {
   type RollupCheckEntry,
   type StaleCiGateTransition,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { resolveDoctrineForReader } from "../src/lib/learnings.js";
 import { readLedgerLines } from "../src/lib/status.js";
 
