@@ -124,10 +124,13 @@ test("W1-T6353: explicit flake outcomes keep their accounting without a second r
   for (const claim of ["confirmed", "refuted", "requeue_deferred"] as const) {
     const rows = round(`flake-${claim}`).map(row => row.step === "fix.done" ? { ...row, flake_claim: claim } : row);
     const f = fixture(rows);
-    assert.equal(fixRungStalledWithoutNewHead(rows, TASK), claim === "requeue_deferred");
+    assert.equal(fixRungStalledWithoutNewHead(rows, TASK), claim !== "confirmed");
     assert.deepEqual(fixRoundTally(rows, TASK, HEAD).noCommitRounds, []);
     await f.pass();
     assert.deepEqual(f.writes, [], "the explicit flake route already owns the rerun decision");
+    assert.deepEqual(f.dispatched, claim === "confirmed" ? [] : [0],
+      "refuted and deferred claims release the head for a fix without spending a strike");
+    assert.deepEqual(f.escalated, []);
     const mixed = [...rows, ...round("first-no-commit")];
     assert.deepEqual(fixRoundTally(mixed, TASK, HEAD).noCommitRounds, ["first-no-commit"]);
     assert.equal(fixRoundTally(mixed, TASK, HEAD).strikes, 0, "a flake receipt cannot spend the first no-commit retry");
