@@ -14397,8 +14397,8 @@ export function withPlanClaims(
  * cannot exempt a live worktree/GitHub write, and running it for real just to cover these lines
  * would spend an actual amendment PR on a test run. `io` mirrors {@link buildProofAmendmentWritePorts}'s
  * override surface (every field defaults to the real implementation, so production is unchanged)
- * plus the two boundaries (proposal parsing, the merge-base proof directory build) this function
- * itself calls before ports are even built. `requestProofAmendment` ITSELF stays a direct, literal
+ * plus the boundaries (proposal parsing, the merge-base proof directory build and its teardown) this
+ * function itself calls around the ports. `requestProofAmendment` ITSELF stays a direct, literal
  * call — never behind its own override — because this task's own acceptance criteria grep for
  * that exact call site in this file's source text; every write it makes still goes through the
  * injected ports above, so nothing it does escapes this function's own fakes. Best-effort: any
@@ -14439,12 +14439,15 @@ export function dispatchProofAmendmentWrite(
     assertLiveWriteAllowedFn?: typeof assertLiveWriteAllowed;
     parseProofAmendmentProposalFn?: typeof parseProofAmendmentProposal;
     buildBaseProofDirFn?: typeof buildBaseProofDir;
+    /** Deregisters the merge-base worktree the build cut from the head checkout; defaults to the leaf it was cut through. */
+    removeBaseWorktreeFn?: (repoDir: string, worktreePath: string) => void;
   } = {},
 ): void {
   const {
     gitFn,
     parseProofAmendmentProposalFn = parseProofAmendmentProposal,
     buildBaseProofDirFn = buildBaseProofDir,
+    removeBaseWorktreeFn = (repoDir: string, worktreePath: string) => void hostWorktreeGit(repoDir, ["worktree", "remove", "--force", worktreePath]),
     ...portsIo
   } = io;
   let baseProof: BaseProofDir | undefined;
@@ -14509,8 +14512,8 @@ export function dispatchProofAmendmentWrite(
   } catch (e) {
     params.log("proof_amendment.error", { error: String((e as Error)?.message ?? e) });
   } finally {
-    // Only the grep tree, a plain tmp dir: this path's worktree teardown (none) is unchanged.
-    if (baseProof?.baseIsGrepTree === true) releaseBaseProofDir(params.reviewBase.headCheckoutDir, baseProof);
+    // Every exit path: a `unit test:` proposal's worktree is deregistered, a grep tree deleted.
+    releaseBaseProofDir(params.reviewBase.headCheckoutDir, baseProof, removeBaseWorktreeFn);
   }
 }
 
