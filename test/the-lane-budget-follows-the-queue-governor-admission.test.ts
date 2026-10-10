@@ -6,7 +6,12 @@ import { loadPlan, type Plan } from "../src/lib/plan.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { RunResult } from "../src/run-task.js";
 import { daemonCommand } from "../src/run-task.js";
-import { laneDispatchBudget, runDrain, wipDeferredAdmissionFields, type QueueAdmissionReading } from "../src/lib/drain.js";
+import * as drain from "../src/lib/drain.js";
+import { laneDispatchBudget, runDrain, type QueueAdmissionReading } from "../src/lib/drain.js";
+
+// Read through the namespace so this file still LOADS on a tree without the helper and each test fails on its own.
+const wipDeferredAdmissionFields = (admitted: QueueAdmissionReading | undefined): Record<string, unknown> | undefined =>
+  (drain as { wipDeferredAdmissionFields?: (a: QueueAdmissionReading | undefined) => Record<string, unknown> }).wipDeferredAdmissionFields?.(admitted);
 import { runDaemon, type DaemonDeps, type DaemonSummary } from "../src/lib/daemon.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 
