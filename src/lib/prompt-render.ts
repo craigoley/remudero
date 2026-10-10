@@ -898,6 +898,7 @@ export function renderFixPrompt(opts: {
             const findings = (opts.evidence.review?.findings ?? []).filter((f) => f.criterionIndex === c.criterionIndex);
             return [
               `${c.criterionIndex || i + 1}. claim: ${c.claim}\n   proof required: ${c.proof}\n   reviewer verdict: UNMET — ${c.reason}`,
+              ...reviewerProofOutputLines(c),
               ...findings.map((f) => envelope(neutralizeFenceMarkers(
                 `Verified review finding (advisory evidence): ${f.path}:${f.line}\nMechanism: ${f.mechanism}\nRemedy: ${f.remedy ?? "(none supplied)"}`,
               ), "github-pr-comment")),
@@ -936,6 +937,26 @@ export function renderFixPrompt(opts: {
     list,
     ...footer,
   ].join("\n");
+}
+
+/** How the reviewer runs a proof (W1-T6124, lib/review.ts `prepareProofChild`), named so a fix worker can recreate it. */
+export const REVIEWER_PROOF_SANDBOX =
+  "bwrap on Linux with no network (loopback only), a throwaway HOME, an env of only PATH/HOME/GIT_CONFIG_*/" +
+  "GIT_TERMINAL_PROMPT/PLAYWRIGHT_BROWSERS_PATH (no RMD_*, no TMPDIR), a fresh `npm ci --ignore-scripts` checkout " +
+  "of the PR head, and a per-proof timeout";
+
+/** An executed-fail criterion's reviewer-side output, or an explicit statement that none was recorded. #10555: the
+ *  reviewer failed a test that passed for the fix worker, and the fix rounds saw only the reason text. */
+function reviewerProofOutputLines(c: CriterionVerdict): string[] {
+  if (c.proof_exec !== "executed_fail") return [];
+  if (!c.proofFailureOutput) {
+    return ["   reviewer proof output: none was recorded for this failure — rerun the proof yourself before claiming FIXED."];
+  }
+  return [
+    `   This failed in the reviewer's sandbox; reproduce under those conditions (sandbox: ${REVIEWER_PROOF_SANDBOX}).`,
+    `   If it passes for you, the difference is the environment: find it, do not report FIXED on an unchanged run.`,
+    envelope(neutralizeFenceMarkers(c.proofFailureOutput), "ci-log"),
+  ];
 }
 
 /**

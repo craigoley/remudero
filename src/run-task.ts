@@ -1,6 +1,6 @@
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
 import { judgeFixProgress,
-  type FixProgressJudge, type FixProgressVerdict } from "./lib/fix-progress-judge.js";
+  type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "./lib/fix-progress-judge.js";
 import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-update.js";
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
   loadCapabilityInspectionSource, readInspectionJson } from "./lib/capability-inspection.js";
@@ -206,6 +206,7 @@ import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
 import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
+import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputs, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, evidenceCoveragePassDue, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
@@ -303,7 +304,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "scout"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "fix-lane", "scout"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -625,6 +626,7 @@ import {
 } from "./lib/feedback.js";
 import {
   ciLearningMergedOrigins,
+  ciLearningMergedOriginsAsync,
   ciLearningPendingOrigins,
   findPendingLandingPr,
   landCiLearningShards,
@@ -13188,6 +13190,9 @@ export async function runFixRung(opts: {
         strike_cap: opts.strikeCap,
         unmet_count: unmet.length,
         unmet_claims: unmet.map((criterion) => criterion.claim),
+        // The progress judge compares these across rounds: a FIXED round followed by the same
+        // reviewer-side output is a reviewer-only failure, not a worker that needs another try.
+        ...(reviewerProofFailures(unmet).length > 0 ? { reviewer_proof_failures: reviewerProofFailures(unmet) } : {}),
         round,
         mode: fixMode,
         verdict_regime: verdictRegime,
@@ -36604,8 +36609,8 @@ export function buildCiLearningCadenceRunner(deps: {
   gh?: LandCiLearningShardsOptions["gh"];
   planOrigins?: string[];
   pendingOrigins?: typeof ciLearningPendingOrigins;
-  mergedOrigins?: (checkoutRoot: string) => string[];
-  mintTaskId?: (filingBranch?: string) => string;
+  mergedOrigins?: (checkoutRoot: string) => string[] | Promise<string[]>;
+  mintTaskId?: ((filingBranch?: string) => string) & { async?: (filingBranch: string) => Promise<string> };
   recordFire?: (root: string, at: Date) => void;
   recordAttempt?: (root: string, at: Date) => void;
   windowDays?: number;
@@ -36631,7 +36636,7 @@ export function buildCiLearningCadenceRunner(deps: {
     const planOrigins = deps.planOrigins ?? ciLearningPlanOrigins(deps.checkoutRoot);
     const pendingOrigins = (deps.pendingOrigins ?? ciLearningPendingOrigins)(deps.root, deps.checkoutRoot);
     // W1-T4190: and what origin/main already holds, so a merged finding never takes a draft slot.
-    const mergedOrigins = (deps.mergedOrigins ?? ciLearningMergedOrigins)(deps.checkoutRoot);
+    const mergedOrigins = await (deps.mergedOrigins ?? ciLearningMergedOriginsAsync)(deps.checkoutRoot);
     const idempotencyOrigins = [...new Set([...planOrigins, ...pendingOrigins, ...mergedOrigins])];
     const result = mintCiLearningShards(corpus, idempotencyOrigins);
     const filedLessons = deps.loadLessons ? deps.loadLessons() : readFiledCiLessons(join(deps.checkoutRoot, "plan", "tasks.d"));
@@ -36661,6 +36666,7 @@ export function buildCiLearningCadenceRunner(deps: {
           : await (deps.landShards ?? landCiLearningShardsAsync)(result.drafts, deps.checkoutRoot, {
               stateRoot: deps.root,
               mintTaskId,
+              mintTaskIdAsync: mintTaskId.async,
               planOrigins: idempotencyOrigins,
               renderShard: ciLearningShardYaml,
               recordVerdict: ciLearningRecordVerdict,
@@ -37559,6 +37565,15 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "flow-remedy": {
       const d = deps("flow-remedy", raiseDuplicate);
       return gardenPass(flowGardenSpec(d, {
+        owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot, log),
+        escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log }),
+      }), d);
+    }
+    // W1-T7421: the fix lane's own defects (operator interventions, unstated or refused rounds, FIXED-but-red heads)
+    // are clustered and priced once a UTC day; the top class is drafted as ONE remedy through the flow ladder.
+    case "fix-lane": {
+      const d = deps("fix-lane", raiseDuplicate);
+      return gardenPass(fixLaneGardenSpec(d, {
         owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot, log),
         escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log }),
       }), d);
@@ -40777,7 +40792,7 @@ export async function serveCommand(
     // an unconfigured install, identity is never consulted, exactly as before.
     identity,
     log,
-    consoleSnapshots: { dir: join(config.root, "state", "console-snapshots"), prewarmPaths: ["/v1/operator-activity", "/v1/action-results"] },
+    consoleSnapshots: { dir: join(config.root, "state", "console-snapshots") },
     projectionWorker: consoleProjectionWorker(),
     readModel: deps.buildBatchedGithub ? {} : { slowLane: { inbox: { root: repoRoot, planPath, ledgerPath, inboxRoot: config.root, repository: `${self.owner}/${self.repo}` },
       accountUsage: { ledgerPath, root: config.root, accountFilePath: resolveAccountFilePath(undefined) } } },
@@ -42034,6 +42049,8 @@ function unmetFromLedger(lines: Array<Record<string, unknown>>, taskId: string, 
     reason: reasons[i] ?? "",
     // Legacy ledger rows can lack this required live-verdict field (W1-T5020).
     proof_exec: proofContext.get(claim)?.proof_exec as CriterionVerdict["proof_exec"],
+    ...(typeof proofContext.get(claim)?.proofFailureOutput === "string"
+      ? { proofFailureOutput: proofContext.get(claim)!.proofFailureOutput } : {}),
     refusal: refusals.get(claim),
   }));
 }
