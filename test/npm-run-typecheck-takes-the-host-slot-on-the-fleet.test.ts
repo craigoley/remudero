@@ -14,6 +14,7 @@ import { test, type TestContext } from "node:test";
 import { acquireTestSlot, readPidNamespace } from "../src/lib/test-slot.js";
 import { codexTestSlotArgs, planTypecheckCommand, runTypecheckCommand, typecheckBuildInfoFor } from "../src/lib/typecheck-command.js";
 import { spawnCodexWorker } from "../src/lib/worker-provider.js";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import type { ContainedSpawnOptions } from "../src/lib/worker-containment.js";
 
 const REPO = resolve(".");
@@ -90,7 +91,7 @@ test("npm run typecheck inside a caller that already holds the only slot borrows
   const started = Date.now();
   const res = await runPackageScript(fx, fleetEnv(fx, lease.childEnvironment!));
   assert.equal(res.status, 0, res.stderr);
-  assert.ok(Date.now() - started < 30_000, "no wait on its own ancestor's slot");
+  assertWallClockBound(Date.now() - started, 30_000, "no wait on its own ancestor's slot");
   assert.deepEqual(recorded(fx).labels, ["caller-holds-it"], "tsc ran under the caller's slot, and no second record was written");
   assert.deepEqual(recorded(fx).argv.includes("--incremental"), true);
 });
