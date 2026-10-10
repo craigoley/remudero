@@ -1,4 +1,5 @@
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
+import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
 import { connect as connectTcp, createServer as createTcpServer, type Socket, type Server } from "node:net";
 import { Agent as HttpAgent, createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createRequire } from "node:module";
@@ -125,6 +126,7 @@ import {
   type WorkerKeychainSummary,
 } from "./worker-home.js";
 import { openMemoryReservation, type HostMemoryLedgerOptions, type MemoryReservationHandle, type WorkerClass } from "./host-memory-ledger.js";
+import { recordShadowMemoryVerdict, type ShadowMemoryPorts } from "./host-memory-shadow.js";
 import {
   buildContainedSpawnFn,
   spawnDetachedGroup,
@@ -1069,6 +1071,8 @@ export interface SpawnWorkerArgs {
   };
   /** The class the host memory ledger records (W1-T7093). Omitted: derived, or recorded as "unclassified". */
   workerClass?: WorkerClass;
+  /** Test seam for the counterfactual host-memory verdict (W1-T7094). Omitted: the process-installed sink and real reads. */
+  memoryShadow?: Partial<ShadowMemoryPorts>;
   /** Enables the implement lane's read-only rule lookup, with a ledger sink for every call. */
   ruleLookup?: {
     onPulled: (id: string, status: "found" | "missing" | "error") => void;
@@ -2298,6 +2302,16 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // one worker's advisory status read must not switch another's home.
   const realHome = process.env.HOME ?? homedir();
   const config = args.config ?? loadConfig();
+  // W1-T7094: the COUNTERFACTUAL host-memory verdict, taken once the start is committed (slot claimed, reservation open,
+  // settings validated). Synchronous, bounded and non-throwing, and its outcome is deliberately unread: admit, defer and
+  // error start identically. SHADOW ONLY: there is no enforce, block or defer path.
+  recordShadowMemoryVerdict({
+    runId: args.runId,
+    taskId: args.taskId,
+    workerClass: workerClassOf(args),
+    reservationId: memoryReservation.id,
+    root: config.root,
+  }, args.memoryShadow);
   // HOISTED ABOVE PROVIDER SELECTION so the Codex branch cannot return past the HOME redirection the Claude path has had
   // since W1-T18. Below the early return, `codexSpawnEnv` fell back to the operator's real HOME, and a worker shell sourcing
   // an rc file from it re-exported ANTHROPIC_API_KEY past both of Codex's process-boundary exclusions. Computing the path
@@ -3150,6 +3164,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             // Forwarded verbatim, wrapped with the watchdog's observer above when a clock bound is configured. See
             // SpawnWorkerArgs.streamObserver's doc (W1-T942).
             streamObserver,
+            root: config.root,
+            runId: args.runId,
+            taskId: args.taskId,
             // The SAME injected clock the watchdog polls against. Invariant: every `tsMs` this observer sees comes from ONE
             // clock, never a real `Date.now()` racing the watchdog's synthetic one. `undefined` falls back to
             // collectWorkerResult's own `Date.now` (W1-T1045).
@@ -3574,6 +3591,9 @@ export async function collectWorkerResult(
   messages: AsyncIterable<unknown>,
   opts: {
     childEnvKeys: string[];
+    root?: string;
+    runId?: string;
+    taskId?: string;
     stderrChunks?: string[];
     /** Configured input, logged verbatim — defaults to `DEFAULT_MODEL_LABEL`. */
     model?: string;
@@ -3602,6 +3622,8 @@ export async function collectWorkerResult(
   // spawnWorker is local, free setup. No clock injection, because existing tests already drive this loop against near-instant
   // synthetic streams (W1-T477).
   const startedAtMs = Date.now();
+  const toolLineage = createWorkerToolLineage({ provider: "claude", root: opts.root, runId: opts.runId, taskId: opts.taskId });
+  let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
   const blocks: string[] = [];
   const stderrChunks = opts.stderrChunks ?? [];
 
@@ -3637,6 +3659,7 @@ export async function collectWorkerResult(
 
   try {
     for await (const raw of messages) {
+      observeWorkerToolLineage(toolLineage, raw);
       const msg = raw as { type?: string; message?: unknown };
       if (msg.type === "system") {
         // Detect a compaction event LIVE off the SDK's own `compact_boundary` system message, reusing the same detector a
@@ -3765,6 +3788,7 @@ export async function collectWorkerResult(
         );
       }
     }
+    lineageEnd = "stream-ended";
   } catch (err) {
     // No result envelope was seen ⇒ this is a real failure (bad binary, network, aborted spawn), not an error-subtype result.
     // Re-raise it.
@@ -3786,6 +3810,8 @@ export async function collectWorkerResult(
         ...(refusal.resetsAtMs === undefined ? {} : { resetsAtMs: refusal.resetsAtMs }),
       };
     }
+  } finally {
+    toolLineage.finish(lineageEnd);
   }
 
   const finalStopReason = envelopeStopReason ?? assistantStopReason;

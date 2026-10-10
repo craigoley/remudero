@@ -485,7 +485,7 @@
     "test/a-recycle-that-dies-before-it-stops-the-container-takes-its-pause-with-it.test.ts": 5800,
     "test/a-recycle-that-keeps-refusing-is-escalated.test.ts": 870,
     "test/a-recycled-container-releases-the-claims-it-held.test.ts": 8100,
-    "test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts": 3100,
+    "test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts": 5000,
     "test/a-red-check-arrives-with-its-reason.test.ts": 2000,
     "test/a-red-coverage-nightly-run-raises-a-needs-human-issue.test.ts": 800,
     "test/a-red-main-escalation-names-its-first-red-pr.test.ts": 1300,

@@ -557,6 +557,7 @@ export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number
  */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "run.start",
+  "sweep.fix.owner_residue_preserved", // W1-T6434: the next fix round reads the preserved patch it names.
   "automerge.rearmed_after_disarm",
   "automerge.rearm_exhausted",
   "automerge.stale_rollup_refreshed", // W1-T6404: the once-per-PR refresh bound; forgotten, it loops.
