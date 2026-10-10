@@ -3,7 +3,10 @@ import { describe, test } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runFixRung, buildSweepEffects, runPlanScopedFixRound, routeFix } from "./helpers/run-task-test.js";
+import { runFixRung, buildSweepEffects, runPlanScopedFixRound, routeFix,
+  finishTransientRetry, implementAttemptOutcome } from "./helpers/run-task-test.js";
+import { runDiagnoseThenRetry, MAX_STRIKES, MAX_TRANSIENT_RETRIES } from "../src/lib/classify.js";
+import type { WorkerResult } from "../src/lib/worker.js";
 import { buildFixProgressInput, FIX_BUDGET_JUDGE_SITES, type FixProgressJudge } from "../src/lib/fix-progress-judge.js";
 import { judgeSloRebuild, BLOCKER_SLO_MS } from "../src/lib/pr-blocker.js";
 import { systemClock } from "../src/lib/clock.js";
@@ -34,6 +37,109 @@ const input = () => buildFixProgressInput({ taskId: "W1-T7243", prNumber: 7243, 
 const continueJudge: FixProgressJudge = async () => ({ verdict: "continue", reason: "new evidence" });
 
 describe("test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts", () => {
+  test("diagnose and transient retries continue past their former ceilings on the judge's advice", async () => {
+    for (const transient of [false, true]) {
+      for (const changeApproach of [false, true]) {
+        let attempts = 0;
+        const findings: (string | undefined)[] = [];
+        const judged: number[] = [];
+        const ceiling = transient ? MAX_TRANSIENT_RETRIES : MAX_STRIKES;
+        const result = await runDiagnoseThenRetry({
+          attempt: async report => {
+            findings.push(report);
+            return ++attempts === ceiling + 3 ? { success: true }
+              : { success: false, evidence: { text: transient ? "ECONNRESET" : "assertion failed" } };
+          },
+          diagnose: async () => ({ text: "inspect the failed assertion" }),
+          fixProgressJudge: async facts => {
+            assert.equal(facts.formerCeiling, ceiling);
+            assert.match(facts.parkedReason!, transient ? /transient-retry/ : /diagnose-retry/);
+            judged.push(facts.strikesSpent!);
+            return changeApproach ? { verdict: "change-approach", approach: "inspect the next endpoint", reason: "new evidence" }
+              : { verdict: "continue", reason: "new evidence" };
+          },
+        });
+        assert.equal(result.outcome, "success");
+        assert.equal(attempts, ceiling + 3);
+        assert.deepEqual(judged, [ceiling + 1, ceiling + 2]);
+        assert.equal(transient ? result.transientRetries : result.strikes, ceiling + 2);
+        assert.equal(result.exhaustedClass, undefined);
+        if (changeApproach) assert.match(findings.at(-1)!, /inspect the next endpoint/);
+      }
+    }
+  });
+
+  test("a transient judge escalation keeps blocked_transient, the named loop and the actual retry count", async () => {
+    const worker: WorkerResult = {
+      sessionId: "session", costUsd: 0.25, numTurns: 7, text: "", blocks: [], stderr: "",
+      subtype: "success", isError: false, apiError: true, permissionDenials: [], childEnvKeys: [],
+      accountLabel: "transient-account", model: "sonnet", effort: "medium",
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {},
+      compactionEvents: [], qualitySuspect: false,
+    };
+    let judgments = 0;
+    const driver = await runDiagnoseThenRetry({
+      attempt: async () => implementAttemptOutcome(worker),
+      diagnose: async () => { assert.fail("transients do not diagnose"); },
+      fixProgressJudge: async () => ++judgments === 1 ? { verdict: "continue", reason: "try once more" }
+        : { verdict: "escalate", loop: "same provider outage", reason: "no new evidence" },
+    });
+    assert.equal(driver.exhaustedClass, "transient");
+    assert.equal(driver.transientRetries, MAX_TRANSIENT_RETRIES + 2);
+    assert.equal(driver.reason, "fix progress loop: same provider outage — no new evidence");
+    for (const cleanupFails of [false, true]) {
+      const rows: Record<string, unknown>[] = [];
+      const messages: string[] = [];
+      const removed: string[][] = [];
+      const result = finishTransientRetry(driver, {
+        taskId: "W1-T7243", runId: "transient", repoDir: "/repo", worktreePath: "/worktree",
+        costUsd: 0.25, worker, log: (step, fields) => rows.push({ step, ...fields }), say: text => messages.push(text),
+      }, (repo, worktree) => {
+        removed.push([repo, worktree]);
+        if (cleanupFails) throw new Error("cleanup refused");
+      });
+      assert.deepEqual(result, { taskId: "W1-T7243", runId: "transient", merged: false, costUsd: 0.25, verdict: "blocked_transient" });
+      assert.deepEqual(removed, [["/repo", "/worktree"]]);
+      assert.equal(rows[0].step, cleanupFails ? "worktree.remove.error" : "worktree.remove");
+      if (cleanupFails) assert.equal(rows[0].error, "cleanup refused");
+      const verdict = rows.at(-1)!;
+      assert.equal(verdict.verdict, "blocked_transient");
+      assert.equal(verdict.account_label, "transient-account");
+      assert.equal(verdict.billing_mode, "subscription");
+      assert.equal(verdict.num_turns, 7);
+      assert.match(String(verdict.reason), /across 5 retries/);
+      assert.match(String(verdict.reason), /same provider outage/);
+      assert.match(messages[0], /same provider outage/);
+    }
+    const context = { taskId: "W1-T7243", runId: "control", repoDir: "/repo", worktreePath: "/worktree",
+      costUsd: 0.25, worker, log: () => assert.fail("unrelated outcome must not write a transient verdict"),
+      say: () => assert.fail("unrelated outcome must not announce a transient verdict") };
+    const strike = await runDiagnoseThenRetry({
+      attempt: async () => ({ success: false, evidence: { text: "assertion failed" } }),
+      diagnose: async () => ({ text: "inspect the assertion" }),
+      fixProgressJudge: async () => ({ verdict: "escalate", loop: "transient retries exhausted", reason: "this is a code failure" }),
+    });
+    assert.equal(strike.exhaustedClass, "strike");
+    assert.equal(finishTransientRetry(strike, context), undefined);
+    assert.equal(finishTransientRetry({ ...driver, outcome: "held" }, context), undefined);
+    assert.equal(finishTransientRetry({ ...driver, outcome: "success" }, context), undefined);
+  });
+
+  test("transient cleanup uses its production remover and reports a refused worktree", async t => {
+    const root = mkdtempSync(join(tmpdir(), "rmd-budget-cleanup-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const rows: Record<string, unknown>[] = [];
+    const result = finishTransientRetry({ outcome: "gave_up", exhaustedClass: "transient", strikes: 0,
+      transientRetries: 4, attempts: 4, diagnosed: false, reason: "provider outage" }, {
+      taskId: "W1-T7243", runId: "cleanup", repoDir: root, worktreePath: root, costUsd: 0,
+      worker: { subtype: "success", numTurns: 0, childEnvKeys: [] } as unknown as WorkerResult,
+      log: (step, fields) => rows.push({ step, ...fields }), say: () => {},
+    });
+    assert.equal(result?.verdict, "blocked_transient");
+    assert.equal(rows[0].step, "worktree.remove.error");
+    assert.match(String(rows[0].error), /refus|git|live write/i);
+  });
+
   test("a capped PR dispatches its third plan repair past MAX_PLAN_REPAIR_STRIKES", async () => {
     const criterion = { claim: "claim", proof: "unit test: proof", met: true, reason: "keyword floor", proof_exec: "not_executable" };
     const rows: Record<string, unknown>[] = [

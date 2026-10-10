@@ -405,6 +405,8 @@ export interface DiagnoseThenRetryResult {
   diagnosed: boolean;
   attempts: number;
   reason?: string;
+  /** Retry class that exhausted its remedy, independent of the judge's loop description. */
+  exhaustedClass?: FailureClass;
   /**
    * W1-T2515: set ONLY when the loop stopped because the account's usage window is shut. The
    * caller (and, through it, the daemon) needs the stated reset to decide when to resume; a
@@ -516,6 +518,7 @@ export async function runDiagnoseThenRetry(deps: DiagnoseThenRetryDeps): Promise
         diagnosed,
         attempts,
         reason: action.reason,
+        exhaustedClass: cls,
       };
     }
 

@@ -558,6 +558,7 @@ test("retry judge receives the observed counts, history, identity and diagnosis 
     assert.equal(attempts, count);
     assert.deepEqual(result, { outcome: "gave_up", strikes: transient ? 0 : count,
       transientRetries: transient ? count : 0, diagnosed: !transient, attempts: count,
+      exhaustedClass: transient ? "transient" : "strike",
       reason: "fix progress loop: same failure — no new evidence" });
     assert.deepEqual(sleeps, transient ? [1000, 2000, 4000] : [1000]);
     assert.deepEqual(logs.filter(row => row.step === "fix.progress_judged"), [{ step: "fix.progress_judged",

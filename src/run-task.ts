@@ -2887,7 +2887,7 @@ import {
 import {
   classifyFailure,
   runDiagnoseThenRetry,
-  MAX_TRANSIENT_RETRIES,
+  type DiagnoseThenRetryResult,
   type AttemptOutcome,
   type FailureSignal,
 } from "./lib/classify.js";
@@ -14993,6 +14993,36 @@ export function implementAttemptOutcome(r: WorkerResult): AttemptOutcome {
   return { success: true };
 }
 
+/** Finish an exhausted transient remedy without losing its class to the judge's loop text. */
+export function finishTransientRetry(
+  driverResult: DiagnoseThenRetryResult,
+  context: { taskId: string; runId: string; repoDir: string; worktreePath: string; costUsd: number;
+    worker: WorkerResult; log: RunTaskContext["log"]; say: RunTaskContext["say"] },
+  removeWorktree: typeof worktreeRemove = worktreeRemove,
+): RunResult | undefined {
+  if (driverResult.outcome !== "gave_up" || driverResult.exhaustedClass !== "transient") return undefined;
+  const { taskId, runId, repoDir, worktreePath, costUsd, worker, log, say } = context;
+  try {
+    removeWorktree(repoDir, worktreePath);
+    log("worktree.remove", { on: "blocked_transient" });
+  } catch (e) {
+    log("worktree.remove.error", { on: "blocked_transient", error: String((e as Error)?.message ?? e) });
+  }
+  log("verdict", {
+    verdict: "blocked_transient",
+    stage: "implement",
+    subtype: worker.subtype,
+    num_turns: worker.numTurns,
+    cost_usd: costUsd,
+    billing_mode: billingMode(worker.childEnvKeys),
+    account_label: worker.accountLabel,
+    reason: `repeated transient API error across ${driverResult.transientRetries} retries — ${driverResult.reason}`,
+    ...terminalVerdictFields(worker),
+  });
+  say(`verdict: blocked_transient — ${driverResult.reason}`);
+  return { taskId, runId, merged: false, costUsd, verdict: "blocked_transient" };
+}
+
 /**
  * FOLLOW-UP HARVEST (W1-T105, §2 non-blocking, mirrors the QUESTION contract's
  * parse-then-log discipline). Shared by every call site that can carry a worker's
@@ -19330,30 +19360,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       return { taskId, runId, merged: false, costUsd, verdict: "blocked_transient" };
     }
 
-    if (driverResult.outcome === "gave_up" && /transient retries exhausted/i.test(driverResult.reason ?? "")) {
-      // A transient that PERSISTED across the bounded retries: Anthropic-side, not a task
-      // failure and not a no-op. Honest, distinct verdict (NOT failed, NOT no_pr) the daemon
-      // can reason about; it blocks the drain like any non-merged terminal state.
-      try {
-        worktreeRemove(repoDir, worktreePath);
-        log("worktree.remove", { on: "blocked_transient" });
-      } catch (e) {
-        log("worktree.remove.error", { on: "blocked_transient", error: String((e as Error)?.message ?? e) });
-      }
-      log("verdict", {
-        verdict: "blocked_transient",
-        stage: "implement",
-        subtype: impl.subtype,
-        num_turns: impl.numTurns,
-        cost_usd: costUsd,
-        billing_mode: billingMode(impl.childEnvKeys),
-        account_label: impl.accountLabel,
-        reason: `repeated transient API error across ${MAX_TRANSIENT_RETRIES} retries — not a task failure`,
-        ...terminalVerdictFields(impl),
-      });
-      say(`verdict: blocked_transient — repeated transient API error, not a task failure`);
-      return { taskId, runId, merged: false, costUsd, verdict: "blocked_transient" };
-    }
+    const transientVerdict = finishTransientRetry(driverResult, {
+      taskId, runId, repoDir, worktreePath, costUsd, worker: impl, log, say,
+    });
+    if (transientVerdict) return transientVerdict;
     // ── The worker's OWN preflight verdict, surfaced before any verdict branch consumes the run.
     // `rmd preflight` writes `<repoRoot>/coverage/preflight-summary.json` in the worktree it ran
     // in — and that worktree is still on disk here, because every `worktreeRemove` in this
