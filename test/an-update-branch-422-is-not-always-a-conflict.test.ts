@@ -5,11 +5,12 @@
 // a stale read. This suite pins the split verdict, an unknown 422 reading `error`, and each changed
 // caller's handling of the two new outcomes: named on its row, never escalated for the outcome.
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { mock } from "node:test";
 
+import { recordBranchUpdate } from "../src/lib/branch-update.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -95,6 +96,27 @@ test("a refused update-branch request still ledgers its row with the refusal", (
   assert.equal(rows.length, 1);
   assert.equal(rows[0]!.outcome, "error");
   assert.match(String(rows[0]!.error), /merge conflict/);
+});
+
+test("the real default recorder warns, naming the cause, when the ledger row cannot be written", () => {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}branch-update-home-`));
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), "{ not json");
+  const oldHome = process.env.HOME;
+  const warn = mock.method(console, "warn", () => {});
+  try {
+    process.env.HOME = home;
+    // No recorder passed: this runs the real default, whose config read now fails.
+    recordBranchUpdate({ repo: "acme/remudero", prNumber: 11, via: "fix-rung", outcome: "updated" });
+    assert.equal(warn.mock.callCount(), 1, "the failed write is warned about once, never thrown");
+    const message = String(warn.mock.calls[0]!.arguments[0]);
+    assert.match(message, /^branch-update: the branch\.update_requested row could not be written: .+/);
+    assert.match(message, /JSON|json/, "the warning carries the underlying error's message");
+  } finally {
+    warn.mock.restore();
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+  }
 });
 
 // ── W1-T5921's ci-gate-timeout lane ───────────────────────────────────────────────────────────
