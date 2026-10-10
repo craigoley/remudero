@@ -477,45 +477,44 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
       for (let i = 1; i <= slots; i += 1) {
         const path = join(dir, `slot-${i}.json`);
         for (let attempt = 0; attempt < 2; attempt += 1) {
-          const short = existsSync(path) ? undefined : memoryShort(i);
-          if (short !== undefined) {
-            holders.push(short);
-            break;
-          }
+          // A slot memory cannot fill is not written; a dead holder in it is still reclaimed below.
+          const short = memoryShort(i);
           try {
-            concurrency = testRunConcurrency(load(), slots);
-            writeFileSync(path, JSON.stringify(record()), { flag: "wx", mode: 0o666 });
-            const waitedMs = clock.now() - startedAt;
-            if (announced) log(JSON.stringify({ step: "test_slot.acquired", label, slot: i, waitedMs, dir }));
-            let held = true;
-            return {
-              outcome: "acquired", concurrency, waitedMs,
-              ...((opts.pid ?? process.pid) === process.pid && host() === hostname() && processStart ? {
-                childEnvironment: { [TEST_SLOT_PARENT_ENV]: JSON.stringify({ path, pid: process.pid, nonce: ownerNonce, start: processStart, concurrency }),
-                  [TEST_SLOT_DIR_ENV]: dir },
-              } : {}),
-              note: `host-wide test slot ${i}/${slots} (${scope}: ${dir})` +
-                `${announced ? `, after waiting ${Math.round(waitedMs / 1000)}s` : ""}; --test-concurrency=${concurrency}, niced`,
-              refresh: () => {
-                if (held) writeFileSync(path, JSON.stringify({ ...record(), heartbeatAt: clock.iso() }));
-              },
-              release: () => {
-                if (!held) return;
-                held = false;
-                // Only OUR record, compared by bytes+inode at the unlink: a reclaimer's replacement survives.
-                try {
-                  reclaimStaleLock(path, {
-                    parseHolder: parseTestSlotHolder,
-                    isStale: (h) => h.pid === (opts.pid ?? process.pid) && h.host === host() && h.ownerNonce === ownerNonce,
-                    onReclaim: () => {},
-                    onLostReclaim: () => {},
-                  });
-                } catch (error) {
-                  // The run's verdict stands; a record we could not remove ages out by its lease.
-                  log(JSON.stringify({ step: "test_slot.release_failed", label, path, error: String(error) }));
-                }
-              },
-            };
+            if (short === undefined) {
+              concurrency = testRunConcurrency(load(), slots);
+              writeFileSync(path, JSON.stringify(record()), { flag: "wx", mode: 0o666 });
+              const waitedMs = clock.now() - startedAt;
+              if (announced) log(JSON.stringify({ step: "test_slot.acquired", label, slot: i, waitedMs, dir }));
+              let held = true;
+              return {
+                outcome: "acquired", concurrency, waitedMs,
+                ...((opts.pid ?? process.pid) === process.pid && host() === hostname() && processStart ? {
+                  childEnvironment: { [TEST_SLOT_PARENT_ENV]: JSON.stringify({ path, pid: process.pid, nonce: ownerNonce, start: processStart, concurrency }),
+                    [TEST_SLOT_DIR_ENV]: dir },
+                } : {}),
+                note: `host-wide test slot ${i}/${slots} (${scope}: ${dir})` +
+                  `${announced ? `, after waiting ${Math.round(waitedMs / 1000)}s` : ""}; --test-concurrency=${concurrency}, niced`,
+                refresh: () => {
+                  if (held) writeFileSync(path, JSON.stringify({ ...record(), heartbeatAt: clock.iso() }));
+                },
+                release: () => {
+                  if (!held) return;
+                  held = false;
+                  // Only OUR record, compared by bytes+inode at the unlink: a reclaimer's replacement survives.
+                  try {
+                    reclaimStaleLock(path, {
+                      parseHolder: parseTestSlotHolder,
+                      isStale: (h) => h.pid === (opts.pid ?? process.pid) && h.host === host() && h.ownerNonce === ownerNonce,
+                      onReclaim: () => {},
+                      onLostReclaim: () => {},
+                    });
+                  } catch (error) {
+                    // The run's verdict stands; a record we could not remove ages out by its lease.
+                    log(JSON.stringify({ step: "test_slot.release_failed", label, path, error: String(error) }));
+                  }
+                },
+              };
+            }
           } catch (error) {
             // Only "someone holds it" is a slot answer; anything else is the outer slot_unavailable.
             if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
@@ -527,6 +526,10 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
           });
           if (reclaim.outcome === "live") {
             holders.push(`slot ${i}: pid ${reclaim.holder.pid} on ${reclaim.holder.host} (${reclaim.holder.label})`);
+            break;
+          }
+          if (short !== undefined && reclaim.outcome === "missing") {
+            holders.push(short);
             break;
           }
         }

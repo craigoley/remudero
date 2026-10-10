@@ -187,6 +187,16 @@ test("a cold typecheck waits while the memory headroom cannot hold its peak plus
   const nothing = { ...tight, memoryHeadroom: () => 0 };
   assert.equal(runTypecheck(project.dir, [], { spawn: fakeTsc, testSlot: nothing, log: (line) => alone.push(line) }), 0);
   assert.match(alone.join("\n"), /"slot":"acquired"/, "with no other holder the first run always goes");
+
+  // A DEAD costed holder never keeps the pool shut: it is reclaimed even while memory closes the free slot beside it.
+  const filler = acquireTestSlot("suite", { dir: slots, slots: 2, log: () => {} });
+  acquireTestSlot(NPM_TYPECHECK_SLOT_LABEL, { dir: slots, slots: 2, memoryBytes: TYPECHECK_COLD_PEAK_BYTES, pid: 999_999, log: () => {} });
+  filler.release();
+  const revived: string[] = [];
+  const deadPeer = { ...tight, isPidAlive: () => false };
+  assert.equal(runTypecheck(project.dir, [], { spawn: fakeTsc, testSlot: deadPeer, log: (line) => revived.push(line) }), 0);
+  assert.match(revived.join("\n"), /"slot":"acquired"/, revived.join("\n"));
+  assert.deepEqual(during.at(-1)?.map((r) => r.label), [NPM_TYPECHECK_SLOT_LABEL], "the dead record was reclaimed, not waited on");
   assert.deepEqual(heldRecords(slots), []);
 });
 
