@@ -12,7 +12,7 @@
  */
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -202,7 +202,7 @@ function strandRegistration(tree: string): void {
 
 test("a timed-out checkout without admin HEAD deregisters only its own worktree", async () => {
   const repo = gitRepo({ kind: "stranded-preflight-tree" });
-  const neighbour = join(dirname(repo.dir), `${basename(repo.dir)}-neighbour`);
+  const neighbour = join(repo.dir, "neighbour");
   try {
     repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
     const head = repo.git("rev-parse", "HEAD");
@@ -217,7 +217,7 @@ test("a timed-out checkout without admin HEAD deregisters only its own worktree"
     });
     const listed = repo.git("worktree", "list");
     assert.equal(listed.split("\n").length, 2, "async cleanup removes only its stranded registration");
-    assert.match(listed, /-neighbour /);
+    assert.match(listed, /\/neighbour /);
   } finally {
     try { repo.git("worktree", "remove", "--force", neighbour); } catch { /* test fixture cleanup below */ }
     rmSync(neighbour, { recursive: true, force: true });
