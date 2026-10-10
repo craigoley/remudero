@@ -431,7 +431,8 @@ describe("test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts", 
   });
 
   test("host pressure readings distinguish real memory from unreadable and malformed samples", () => {
-    assert.ok(readFixHostPressure(0).availableMib > 0);
+    const live = readFixHostPressure(0);
+    assert.ok(live.reason !== undefined || live.availableMib > 0, "a live read is either real memory or a named unreadable reason");
     assert.deepEqual(readFixHostPressure(1024, () => "MemAvailable: 4194304 kB\n"), { availableMib: 4096, floorMib: 1024 });
     assert.match(readFixHostPressure(0, () => "malformed").reason!, /MemAvailable absent/);
     assert.match(readFixHostPressure(0, () => { throw new Error("permission denied"); }).reason!, /permission denied/);

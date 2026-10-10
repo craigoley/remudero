@@ -29,6 +29,7 @@ import { promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
 import { mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync } from "node:fs/promises";
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
+import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/adaptive-wip.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { fixRoundBaseHead } from "./lib/fix-round-base.js";
 import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapplyPorts } from "./lib/fix-round-reapply.js";
@@ -1590,6 +1591,7 @@ import {
   readyDraftPullRequest,
   DEFAULT_SWEEP_POLICY,
   decideRedBaseRefresh,
+  prAddedLinesFromPullFiles,
   failingSourceFilesFromCiFailures,
   failingTestFilesFromCiFailures,
   projectMergedTaskCandidates,
@@ -2119,7 +2121,8 @@ export function buildBaseReproductionProbe(
     clock?: Clock;
   } = {},
 ): NonNullable<SweepDeps["reproduceFailingTestsOnMain"]> {
-  return (_pr, files, mainSha) => {
+  return (_pr, candidates, mainSha) => {
+    const files = [...new Set(candidates.filter((file) => file.endsWith(".test.ts")))];
     const pending = baseReproductionQueue.then(async () => {
       if (files.length > BASE_REPRODUCTION_MAX_FILES) return Object.assign([], { reason: "too many test files" });
       const results = new Map<string, BaseProbeFile>();
@@ -10142,12 +10145,38 @@ export function redBaseRefreshFactsFromRest(
           .map((file) => (file && typeof file === "object" ? (file as { filename?: unknown }).filename : undefined))
           .filter((filename): filename is string => typeof filename === "string")
       : undefined;
+    const behindBy = typeof compare.ahead_by === "number" ? compare.ahead_by : undefined;
+    // W1-T7445: the PR's OWN added lines, read only when a refresh is still possible (behind, with
+    // a base change) — a refresh merges base lines and can never cover a line the PR itself added.
+    const prAddedLines =
+      behindBy !== undefined && behindBy > 0 && files !== undefined && files.length > 0
+        ? prAddedLinesFromRest(owner, repo, prNumber, fetch)
+        : undefined;
     return {
-      behindBy: typeof compare.ahead_by === "number" ? compare.ahead_by : undefined,
+      behindBy,
       baseChangedFiles: files,
+      ...(prAddedLines !== undefined ? { prAddedLines } : {}),
     };
   } catch {
     return {};
+  }
+}
+
+/** W1-T7445: `GET pulls/{n}/files`, every page, folded into head-side added line numbers per path. */
+function prAddedLinesFromRest(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  fetch: GhApiFetcher,
+): Record<string, number[]> | undefined {
+  try {
+    return prAddedLinesFromPullFiles(
+      fetch(["api", "--paginate", "--slurp", `repos/${owner}/${repo}/pulls/${prNumber}/files?per_page=100`]),
+    );
+  } catch {
+    // Deliberate: a failed PR-files read is UNKNOWN added-line evidence, and undefined is that
+    // documented channel — the decision then keeps today's refresh, never reads it as "added none".
+    return undefined;
   }
 }
 
@@ -11736,6 +11765,10 @@ export async function runFixRung(opts: {
           failing_test_files: decision.failingTestFiles,
           failing_source_files: decision.failingSourceFiles,
           matching_base_files: decision.matchingBaseFiles,
+          // W1-T7445: uncovered lines no refresh can cover; absent when added-line evidence was unreadable.
+          ...(decision.prAddedUncoveredLines !== undefined
+            ? { pr_added_uncovered_lines: decision.prAddedUncoveredLines }
+            : {}),
           refresh: decision.refresh,
         });
         if (decision.refresh) {
@@ -31393,6 +31426,8 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
   successorEscalate?: typeof tryEscalate;
   handRunCensus?: MeasurementCadenceReportOpts["handRunCensus"];
   measurementReport?: typeof runMeasurementCadenceReportAsync;
+  /** False on a restarted child attempt: its run already recorded this fire. */
+  recordFire?: boolean;
 } = {}): {
   checkMeasurementCadence: () => MeasurementCadenceDecision;
   runMeasurementCadence: () => Promise<MeasurementCadenceRunResult>;
@@ -31426,7 +31461,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       // `buildAutoTriageDaemonHooks`'s `runAutoTriage` uses: if the report run throws or the
       // process dies mid-run, the marker has already advanced and the interval/cap bounds still
       // hold, so a failure costs one skipped period rather than an unbounded immediate retry.
-      recordMeasurementCadenceFire(measurementCadenceMarkerPath(root), cadenceClock.date(), 24 * 60 * 60 * 1000);
+      if (deps.recordFire !== false) recordMeasurementCadenceFire(measurementCadenceMarkerPath(root), cadenceClock.date(), 24 * 60 * 60 * 1000);
       const coverageRunId = `MEASUREMENT-CADENCE-${cadenceClock.now()}`;
       const verifyHumanRunId = `VERIFY-HUMAN-CADENCE-${cadenceClock.iso()}`;
       // `repoRoot`, NOT `root` (which is `config.root`, the state volume) — see this function's own
@@ -34610,20 +34645,29 @@ export function dailyCostCeilingReloader(deps: { policy?: Policy; env?: NodeJS.P
  * for why drainage of already-open PRs must never be gated by WIP.
  */
 function queueGovernorGateFor(
-  openPrOwnership: () => { owned: number; foreign: number },
+  openPrOwnership: () => { owned: number; foreign: number; ownedPrNumbers?: readonly number[] },
   ledgerPath: string,
   runId: string,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
   now: () => number = Date.now,
 ): () => QueueGovernorResult | undefined {
   return () => {
-    const { owned, foreign } = openPrOwnership();
-    const flow = deriveQueueGovernorTrailingFlow(readLedgerLines(ledgerPath), now(), policy);
+    const { owned, foreign, ownedPrNumbers } = openPrOwnership();
+    const lines = readLedgerLines(ledgerPath);
+    const nowMs = now();
+    const flow = deriveQueueGovernorTrailingFlow(lines, nowMs, policy);
+    const adaptive = assembleAdaptiveQueueFlow({
+      lines, ownedPrNumbers, nowMs, baseLimit: policy.wipLimit,
+      trailingMergedCount: flow.trailingMergedCount, readHeadroom: () => readMemoryHeadroomFraction(),
+    });
     const result = checkQueueGovernor(owned, policy, {
       pressure: readFixHostPressure(policy.memoryFloorMib),
       foreignOpenCount: foreign,
       trailingMergedCount: flow.trailingMergedCount,
       trailingOpenedCount: flow.trailingOpenedCount,
+      stuckOwnedCount: adaptive.stuckOwnedCount,
+      adaptiveBound: adaptive.adaptiveBound,
+      headroomFraction: adaptive.headroomFraction,
     });
     appendLedger(ledgerPath, { run_id: runId, task_id: "GOVERNOR", step: "dispatch_wip_observed",
       observed_open_count: owned, measured_bound: result.measuredBound, wip_limit: result.wipLimit,
@@ -34631,7 +34675,18 @@ function queueGovernorGateFor(
       pressure_available_mib: result.pressure?.availableMib, pressure_floor_mib: result.pressure?.floorMib,
       pressure_reason: result.pressure?.reason,
       tier: result.tier, deferred: result.deferred });
-    if (!result.deferred) return undefined;
+    if (!result.deferred) {
+      if (owned >= policy.wipLimit) {
+        appendLedger(ledgerPath, {
+          run_id: runId, task_id: "GOVERNOR", step: "dispatch_admitted_adaptive_wip",
+          observed_open_count: owned, base_wip_limit: policy.wipLimit, wip_limit: result.wipLimit,
+          stuck_owned_count: result.stuckOwnedCount ?? 0, headroom_fraction: result.headroomFraction ?? null,
+          headroom_unread: adaptive.headroomUnread, headroom_error: adaptive.headroomError ?? null, trailing_merged_count: flow.trailingMergedCount,
+          trailing_opened_count: flow.trailingOpenedCount, tier: result.tier,
+        });
+      }
+      return undefined;
+    }
     logQueueGovernorDeferral(result, appendLedger, ledgerPath, runId);
     return result;
   };
@@ -34652,7 +34707,7 @@ export function createOpenPrCountObservation(): {
   observe: (openPrs: readonly PrRef[] | undefined) => void;
   read: (projectionCount: () => number) => number;
   readConfirmed: () => number | undefined;
-  readOwnership: (projectionCount: () => number) => { owned: number; foreign: number };
+  readOwnership: (projectionCount: () => number) => { owned: number; foreign: number; ownedPrNumbers?: number[] };
 } {
   let observed = false;
   let openPrs: readonly PrRef[] | undefined;
@@ -34679,9 +34734,8 @@ export function createOpenPrCountObservation(): {
     readOwnership: (projectionCount) => {
       if (!observed) return { owned: projectionCount(), foreign: 0 };
       if (openPrs === undefined) throw new Error("open PR board count is unreadable");
-      let owned = 0;
-      for (const pr of openPrs) if (isFleetOwnedRunBranch(pr.headRefName)) owned++;
-      return { owned, foreign: openPrs.length - owned };
+      const ownedPrNumbers = openPrs.filter((pr) => isFleetOwnedRunBranch(pr.headRefName)).map((pr) => pr.number);
+      return { owned: ownedPrNumbers.length, foreign: openPrs.length - ownedPrNumbers.length, ownedPrNumbers };
     },
   };
 }
