@@ -1,7 +1,7 @@
 - id: W1-T7747
   title: "THE SWEEP'S EFFECTS CALL GITHUB OFF THE DAEMON LOOP — `buildSweepEffects` still reaches `gh` through the synchronous `ghJson`/`ghExec`, including the armed-idle direct merge through `mergeDirectViaRest`, although `mergeDirectViaRestAsync` and `ghJsonAsync` exist: on 2026-10-10 `ghExecFile` held the loop 13 times (worst 5.1 s) and `mergeDirectViaRest` up to 2.7 s"
   repo: remudero
-  depends_on: []
+  depends_on: [W1-T7744]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -10,7 +10,7 @@
   band_meaning: blast-radius
   origin: "operator session 2026-10-10: core daemon loop-stall investigation (daemon.loop_lag 07:50-09:57Z), operator asked for flow improvements"
   plan_refs: [W1-T5284, W1-T5492, W1-T5615, W1-T6591, W1-T5689, W1-T1255, W1-T7734, W1-T7735]
-  files: [src/lib/sweep.ts, src/lib/arm-auto-merge.ts, test/the-sweep-effects-call-github-off-the-daemon-loop.test.ts]
+  files: [src/lib/sweep.ts, src/lib/arm-auto-merge.ts, test/the-sweep-effects-call-github-off-the-daemon-loop.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts]
   status: queued
   priority: 2
   attempts: 0
@@ -43,9 +43,18 @@
     `mergeDirectViaRestAsync` (arm-auto-merge.ts:428) exists, but its default exec is the raw `execFilePromise`.
     It skips the transport's sentinel-token refusal and its default timeout, and it has no head-SHA pin.
 
+    CENSUS ROW (amended 2026-10-10). PR #10753 makes the sync-spawn census in
+    test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts exact: a loop-reachable count BELOW its
+    SYNC_SPAWN_LOOP_BASELINE row fails until the row is lowered, or deleted at 0, in the same PR. So this
+    build lowers the row of every site it converts (`buildSweepEffects`, `mergeDirectViaRest` and the other sites in groups (1) and (2)) in that file, in the same PR.
+    The fix lane refuses to stage an undeclared path (W1-T4207), so the file is in `files:`. If #10753 has
+    not merged when this builds, lowering a row still passes the old census, so the step is correct either way.
+
     SHARED SURFACE ONLY: W1-T7734 and W1-T7735 (queued) also name src/lib/sweep.ts. They change when the sweep
     re-reads a PR and when it refreshes a branch, not which transport its effects use. No task in this filing
-    batch edits sweep.ts, so this one has no depends_on.
+    batch edits sweep.ts.
+
+    SERIALIZED (amended 2026-10-10): depends on W1-T7744, the tail of the W1-T7742 -> W1-T7743 -> W1-T7744 chain. All four tasks now edit test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts, so depending on W1-T7742 alone would still let W1-T7747 run alongside W1-T7743 or W1-T7744. Parallel agents editing one file broke main (#10349 and #10353, 2026-10-09).
   design: |
     1. Every site in groups (1) and (2) awaits the async transport (`ghJsonAsync`, `ghTextAsync`), with the
        same argv and the same outcomes. That includes the decline reasons `live_head_unreadable` and the

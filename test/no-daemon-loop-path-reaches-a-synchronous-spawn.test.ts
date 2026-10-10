@@ -10,9 +10,10 @@
  * Population: every top-level function (declaration or arrow const) whose comment-stripped body calls a
  * synchronous spawn primitive. Reach: the name-based fixed point of test/no-daemon-loop-path-builds-the-
  * unbatched-gateway, seeded from `daemonCommand` (its DaemonDeps literal and the hook builders). Baseline:
- * SYNC_SPAWN_LOOP_BASELINE, {functionName: count} recorded at build time. The census fails only on a
- * reachable name ABSENT from the table or a count ABOVE its row, so the converters (W1-T5282, W1-T5284,
- * W1-T4970, W1-T5672) shrink the population without touching this file.
+ * SYNC_SPAWN_LOOP_BASELINE, {functionName: count} recorded at build time. The census is EXACT, like the
+ * hardened-leaf census: a reachable name ABSENT from the table or a count ABOVE its row fails, and so does a
+ * count BELOW its row — a converter lowers that row (or deletes it at 0) in the same PR, so the table never
+ * holds slack a later regression could silently refill (operator ruling 2026-10-10).
  */
 // @source-text-subject: src/**/*.ts — the claim is a property of EVERY function the loop can reach,
 // including paths no single execution drives; the same shape as test/gh-transport-census.
@@ -24,7 +25,7 @@ import { test } from "node:test";
 /** Loop-reachable functions that still call a synchronous spawn primitive or hand one over as a value,
  *  with the count recorded at build time (2026-10-10, f49ee17d3; re-recorded the same day on e91d490f1
  *  when the handed-over form began to count). A new name, or a count above its row, fails the census;
- *  a count BELOW its row passes, so converting a site never needs an edit here. */
+ *  so does a count BELOW its row: converting a site lowers its row here (or deletes it at 0) in the same PR. */
 const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   applyDefuseActions: 1,
   applyGhReadCadence: 1,
@@ -389,15 +390,31 @@ function population(fns: Fn[]): Map<string, number> {
   return pop;
 }
 
+/** The file holding SYNC_SPAWN_LOOP_BASELINE, named in every shrink refusal so a converter knows where to edit. */
+const BASELINE_FILE = "test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts";
+
+/** Every loop-reachable name whose count differs from its row, with both numbers. EXACT, like the
+ *  hardened-leaf census (test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf): growth is
+ *  refused, and so is shrinkage until the row is lowered (or deleted at 0) in the same PR, so the table
+ *  never holds slack a later regression could refill unseen. A row whose name the loop no longer reaches
+ *  counts 0. */
 function refusals(fns: Fn[], baseline: Readonly<Record<string, number>>): string[] {
   const reach = loopReachable(fns, "daemonCommand");
+  const pop = population(fns);
+  const names = new Set([...pop.keys()].filter((n) => reach.has(n)));
+  for (const n of Object.keys(baseline)) names.add(n);
   const out: string[] = [];
-  for (const [name, count] of [...population(fns)].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
-    if (!reach.has(name)) continue;
-    if (!(name in baseline)) {
+  for (const name of [...names].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
+    const count = reach.has(name) ? pop.get(name) ?? 0 : 0;
+    const row = Object.hasOwn(baseline, name) ? baseline[name]! : undefined;
+    if (row === undefined) {
       out.push(`${name} makes ${count} synchronous spawn call(s) and is reachable from the daemon loop (daemonCommand), but is not in SYNC_SPAWN_LOOP_BASELINE — await an async seam instead`);
-    } else if (count > baseline[name]!) {
-      out.push(`${name} makes ${count} synchronous spawn call(s) on the daemon loop, above its SYNC_SPAWN_LOOP_BASELINE row of ${baseline[name]} — await an async seam instead`);
+    } else if (count > row) {
+      out.push(`${name} makes ${count} synchronous spawn call(s) on the daemon loop, above its SYNC_SPAWN_LOOP_BASELINE row of ${row} — await an async seam instead`);
+    } else if (count < row) {
+      out.push(count === 0
+        ? `${name} makes 0 synchronous spawn call(s) on the daemon loop < row ${row} — delete the \`${name}\` row from SYNC_SPAWN_LOOP_BASELINE (${BASELINE_FILE}) in this PR`
+        : `${name} makes ${count} synchronous spawn call(s) on the daemon loop < row ${row} — lower SYNC_SPAWN_LOOP_BASELINE \`${name}\` to ${count} (${BASELINE_FILE}) in this PR`);
     }
   }
   return out;
@@ -445,10 +462,44 @@ test("unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts �
     assert.equal(syncSpawnCalls({ name: "x", file: "x", body: `  ${call};` }), 0, call);
   }
 
-  // A function the loop does NOT reach may spawn freely (CLI-only), and shrinking a row never fails.
+  // A function the loop does NOT reach may spawn freely (CLI-only).
   const offLoop = [...fns, { name: "someCliOnlyVerb", file: "x", body: 'function someCliOnlyVerb() { execSync("x"); }' }];
   assert.deepEqual(refusals(offLoop, SYNC_SPAWN_LOOP_BASELINE), []);
-  assert.deepEqual(refusals(fns, { ...SYNC_SPAWN_LOOP_BASELINE, syncPlanFromOrigin: 9 }), []);
+});
+
+test("unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts — a count below its row fails and names the row to lower", () => {
+  const fns = topLevelFunctions();
+  // Exact on the real source: no row holds slack today.
+  assert.deepEqual(refusals(fns, SYNC_SPAWN_LOOP_BASELINE), [], "every row equals its loop-reachable count");
+
+  // A slack row (above the real count) is refused, naming the row, its new value and the file to edit.
+  const real = population(fns).get("syncPlanFromOrigin")!;
+  const slack = refusals(fns, { ...SYNC_SPAWN_LOOP_BASELINE, syncPlanFromOrigin: real + 7 });
+  assert.deepEqual(slack, [
+    `syncPlanFromOrigin makes ${real} synchronous spawn call(s) on the daemon loop < row ${real + 7} — lower SYNC_SPAWN_LOOP_BASELINE \`syncPlanFromOrigin\` to ${real} (test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts) in this PR`,
+  ]);
+
+  // A converter that awaits ONE of the real sites, and leaves the row alone, is told to lower it by one.
+  const converted = fns.map((f) =>
+    f.name === "syncPlanFromOrigin" ? { ...f, body: f.body.replace("execFileSync(", "execFileAsync(") } : f,
+  );
+  const lowered = refusals(converted, SYNC_SPAWN_LOOP_BASELINE);
+  assert.equal(lowered.length, 1);
+  assert.match(lowered[0]!, new RegExp(`^syncPlanFromOrigin makes ${real - 1} synchronous spawn call\\(s\\) on the daemon loop < row ${real} — lower SYNC_SPAWN_LOOP_BASELINE \`syncPlanFromOrigin\` to ${real - 1} `));
+
+  // A converter that awaits EVERY site is told to delete the row, not to lower it to 0.
+  const emptied = fns.map((f) =>
+    f.name === "syncPlanFromOrigin" ? { ...f, body: f.body.replace(SYNC_SPAWN_CALL, "noop(").replace(SYNC_SPAWN_VALUE, " noop") } : f,
+  );
+  assert.deepEqual(refusals(emptied, SYNC_SPAWN_LOOP_BASELINE), [
+    `syncPlanFromOrigin makes 0 synchronous spawn call(s) on the daemon loop < row ${real} — delete the \`syncPlanFromOrigin\` row from SYNC_SPAWN_LOOP_BASELINE (test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts) in this PR`,
+  ]);
+
+  // A row whose function the loop no longer reaches counts 0 there, so its row is deleted too.
+  const offLoop = [...fns, { name: "someCliOnlyVerb", file: "x", body: 'function someCliOnlyVerb() { execSync("x"); }' }];
+  assert.deepEqual(refusals(offLoop, { ...SYNC_SPAWN_LOOP_BASELINE, someCliOnlyVerb: 1 }), [
+    "someCliOnlyVerb makes 0 synchronous spawn call(s) on the daemon loop < row 1 — delete the `someCliOnlyVerb` row from SYNC_SPAWN_LOOP_BASELINE (test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts) in this PR",
+  ]);
 });
 
 test("unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts — a sync primitive handed over as a seam default counts", () => {
