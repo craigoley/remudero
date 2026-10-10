@@ -45811,11 +45811,11 @@ export async function sweepPostFixReverification(
   // of a bare `prUrl` string.
   const readCiFailuresImpl =
     opts.readCiFailures ??
-    ((pr: OpenPrView) => {
+    (async (pr: OpenPrView) => {
       const v = ghJson(["pr", "view", pr.prUrl, "--json", "statusCheckRollup"]) as {
         statusCheckRollup?: RollupCheck[];
       };
-      return fetchCiFailures(owner, repo, v.statusCheckRollup);
+      return fetchCiFailuresAsync(owner, repo, v.statusCheckRollup);
     });
 
   const mergedFixPrNumbers = new Set<number>();
