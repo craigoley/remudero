@@ -302,8 +302,10 @@ async function fileIncident(
       // 2026-10-10: a `unit test:` proof alone on a test-only record is proof-test-only-discrimination, which
       // lint-plan --base blocks once the judge releases it to verify: auto, so every incident went to a person.
       // The grep reads the pinning test's own `test(` line, code the fix must add, which misses at base.
+      // 2026-10-10: Rule 19 sizing reads claim text, so the failing test's TITLE stays out of it: "W1-T4064: the
+      // daemon reads filing dates…" read as a second concern. The id names the incident; the rationale quotes the title.
       acceptance: [{
-        claim: `the cause of ${subject}'s intermittent failure is fixed in ${file}, pinned by a test that forces the failing order`,
+        claim: `the cause of the intermittent failure ${taskId} records in ${file} is fixed, pinned by a test that forces the failing order`,
         proof: `unit test: ${flakeIncidentTestTitle(taskId)}`,
       }, {
         claim: `the test that pins the cause is added to ${file}, beside the test that failed`,
