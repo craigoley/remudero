@@ -6675,6 +6675,9 @@ export interface MainHealthRunHistoryEntry {
   readonly workflowName?: string;
   readonly runId?: number;
   readonly conclusion?: string;
+  /** GitHub's run `status` (W1-T7757). A value other than `completed` marks a queued or running run,
+   *  which carries no verdict yet; absent on an entry read without one. */
+  readonly status?: string;
   readonly url?: string;
   readonly pullRequests?: readonly MainHealthPullRequestRef[];
   /** GitHub's `run_attempt`: a re-run of a completed run is a new attempt with its own jobs. */
@@ -6907,20 +6910,31 @@ export function mainHealthFallbackCandidates(history: readonly MainHealthRunHist
   return history.filter((run) => run.runId !== undefined && !isMainGuardRun(run) && mainRunIsVerdict(run));
 }
 
-/** The {@link mainHealthFallbackCandidates} whose jobs may stand in for a head whose own required
- *  runs were cancelled or are still pending: W1-T6023, only a run whose head sha is in `recentShas`
- *  (main's newest {@link MAIN_HEALTH_FALLBACK_WINDOW_COMMITS} first-parent commits). Every other
- *  candidate is returned as `skipped`, newest first, so the caller can name what it passed over. */
-export function mainHealthFallbackRuns(
+/** W1-T7757: a queued or running run. It has no verdict, but its jobs may carry concluded required checks. */
+export function mainRunIsInProgress(run: MainHealthRunHistoryEntry): boolean {
+  return run.status !== undefined && run.status !== "completed" && (run.conclusion ?? "") === "";
+}
+
+/** The runs whose jobs may stand in for a head whose own required runs were cancelled or are still
+ *  pending, in main's FIRST-PARENT order (newest commit first), not run-creation order (W1-T7757):
+ *  every non-guard run that concluded something, plus every queued or running one, because a required
+ *  check concludes per job, before its workflow run does. Runs of one commit keep their history order.
+ *  W1-T6023: only a run whose head sha is in `window` (main's newest
+ *  {@link MAIN_HEALTH_FALLBACK_WINDOW_COMMITS} first-parent commits) may stand in. Every other
+ *  completed candidate is returned as `skipped`, newest first, so the caller can name what it passed over. */
+export function mainHealthWalkRuns(
   history: readonly MainHealthRunHistoryEntry[],
-  recentShas: ReadonlySet<string>,
-  limit: number = MAIN_HEALTH_FALLBACK_RUN_LIMIT,
+  window: { readonly order: readonly string[]; readonly shas: ReadonlySet<string> },
 ): { runs: MainHealthRunHistoryEntry[]; skipped: MainHealthRunHistoryEntry[] } {
-  const candidates = mainHealthFallbackCandidates(history);
-  return {
-    runs: candidates.filter((run) => recentShas.has(run.headSha)).slice(0, limit),
-    skipped: candidates.filter((run) => !recentShas.has(run.headSha)),
-  };
+  const walkable = history.filter(
+    (run) => run.runId !== undefined && !isMainGuardRun(run) && (mainRunIsVerdict(run) || mainRunIsInProgress(run)),
+  );
+  const runs = walkable
+    .map((run, index) => ({ run, index, depth: window.order.indexOf(run.headSha) }))
+    .filter((entry) => window.shas.has(entry.run.headSha))
+    .sort((a, b) => (a.depth === b.depth ? a.index - b.index : a.depth - b.depth))
+    .map((entry) => entry.run);
+  return { runs, skipped: walkable.filter((run) => !window.shas.has(run.headSha) && mainRunIsVerdict(run)) };
 }
 
 /** True when the head's own rollup carries no genuine evidence: no required check yet, one still

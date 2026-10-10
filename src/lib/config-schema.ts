@@ -370,6 +370,7 @@ export interface EnvRegistryEntry {
 
 export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("REMUDERO_CLAUDE_BIN", "Overrides the Claude binary path for worker spawn tests and diagnostics.", ["src/lib/worker.ts"]),
+  envEntry("REMUDERO_DAEMON_PID", "The daemon main process's pid, inherited by its children so they can read the daemon's memory growth.", ["src/lib/ledger.ts", "src/lib/host-memory-shadow.ts"]),
   envEntry("REMUDERO_DAEMON_PROCESS", "Marks this process as the daemon actor for ledger attribution.", ["src/lib/ledger.ts"]),
   envEntry("REMUDERO_DAILY_COST_CEILING_SHARE_USD", "Sets this instance's share of the daily cost ceiling.", ["src/lib/policy.ts", "src/run-task.ts"]),
   envEntry("REMUDERO_INSTANCE_LABEL", "Labels the instance associated with a configured daily cost ceiling share.", ["src/lib/policy.ts"]),

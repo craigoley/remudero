@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-09: 'I don't think 2 fix attempts is enough - an llm judge should determine if more fix attempts should be made or if we're in an endless loop that needs escalated. I hate hard ceilings'"
   plan_refs: [W1-T7096, W1-T3306, W1-T3390, W1-T6353, W1-T5544, W1-T100, W1-T3202, W1-T4465, W1-T121]
   files: [src/lib/fix-progress-judge.ts, src/lib/classify.ts, src/lib/pr-blocker.ts, src/lib/sweep.ts, src/run-task.ts, test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
