@@ -26,7 +26,8 @@ import type { Plan } from "../src/lib/plan.js";
 import type { Policy } from "../src/lib/policy.js";
 import type { BoardItem } from "../src/lib/board-review.js";
 
-const NOW = new Date("2026-10-03T17:00:00Z");
+const NOW = new Date();
+const isoHoursAgo = (hours: number) => new Date(NOW.getTime() - hours * 60 * 60 * 1000).toISOString();
 const POLICY = { values: { boardReview: { enabled: true, minIntervalMinutes: 120, maxPerDay: 6 } } } as unknown as Policy;
 const PLAN: Plan = { tasks: [], byId: new Map() };
 const tick = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -36,9 +37,9 @@ type Hooks = ReturnType<typeof runTask.buildBoardReviewDaemonHooks> & { prefetch
 /** Three open PRs as the REST list returns them: #8869 opened 15 h ago (the age arm), #8876 with a
  *  failing check run, and #8880 whose rollup read fails. */
 const ROWS = [
-  { number: 8869, html_url: "https://github.com/o/r/pull/8869", updated_at: "2026-10-03T16:00:00Z", created_at: "2026-10-03T02:00:00Z", head: { ref: "run-a", sha: "a".repeat(40) } },
-  { number: 8876, html_url: "https://github.com/o/r/pull/8876", updated_at: "2026-10-03T16:00:00Z", created_at: "2026-10-03T15:00:00Z", head: { ref: "run-b", sha: "b".repeat(40) } },
-  { number: 8880, html_url: "https://github.com/o/r/pull/8880", updated_at: "2026-10-03T16:00:00Z", created_at: "2026-10-03T16:00:00Z", head: { ref: "run-c", sha: "c".repeat(40) } },
+  { number: 8869, html_url: "https://github.com/o/r/pull/8869", updated_at: isoHoursAgo(1), created_at: isoHoursAgo(15), head: { ref: "run-a", sha: "a".repeat(40) } },
+  { number: 8876, html_url: "https://github.com/o/r/pull/8876", updated_at: isoHoursAgo(1), created_at: isoHoursAgo(2), head: { ref: "run-b", sha: "b".repeat(40) } },
+  { number: 8880, html_url: "https://github.com/o/r/pull/8880", updated_at: isoHoursAgo(1), created_at: isoHoursAgo(1), head: { ref: "run-c", sha: "c".repeat(40) } },
 ];
 
 /** An async `gh api` reader over {@link ROWS}: each answer lands a few ms later, as a real spawn does. */
