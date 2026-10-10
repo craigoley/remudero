@@ -11,8 +11,8 @@
  * never kills them, each case waits them out and then reads green, which is exactly the silent pass this refuses.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -43,6 +43,23 @@ function hungTree(): GitRepo {
   repo.git("add", "scripts", "src");
   repo.git("commit", "-q", "-m", "chore: hung legs");
   return repo;
+}
+
+function holdPostHook(repo: GitRepo): string {
+  const gitDir = repo.git("rev-parse", "--path-format=absolute", "--git-dir").trim();
+  const hooks = join(gitDir, "hooks");
+  const marker = join(repo.dir, "post-checkout-started");
+  mkdirSync(hooks, { recursive: true });
+  const hook = join(hooks, "post-checkout");
+  writeFileSync(hook, `#!/bin/sh\n: > '${marker}'\nsleep 30\n`);
+  chmodSync(hook, 0o755);
+  return marker;
+}
+
+async function waitForFile(path: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path) && Date.now() < deadline) await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  return existsSync(path);
 }
 
 const PR = { title: "chore(plan): reconcile one shard", body: "## Acceptance\n- the shard reconciles | grep: status in plan/tasks.d/w1-t1.yaml" };
@@ -147,7 +164,7 @@ test("a body proof whose check-proof times out holds the push even beside a proo
   }
 });
 
-test("a tree whose checkout is killed at its budget is held, not pushed unchecked, and leaves no worktree registered", async () => {
+test("a checkout killed after materialization waits for its process group and deregisters the worktree", async () => {
   const repo = hungTree();
   try {
     const head = repo.git("rev-parse", "HEAD");
@@ -158,9 +175,13 @@ test("a tree whose checkout is killed at its budget is held, not pushed unchecke
     assert.deepEqual(sync.timedOut?.map((f) => f.check), ["tree"]);
     assert.equal(emitter.planPrPreflightAllows(sync, { lane: "x", branch: "y" }), false, "before this, an unmaterialized tree pushed with every check skipped");
 
-    const awaited = await emitter.planPrPreflightAtCommitAsync(repo.dir, head, PR, {
-      lintPlan: async () => GREEN, taskIdExistence: async () => GREEN, shardCensus: async () => GREEN, checkProof: async () => 0, budgetMs: () => 1,
+    const marker = holdPostHook(repo);
+    const pending = emitter.planPrPreflightAtCommitAsync(repo.dir, head, PR, {
+      lintPlan: async () => GREEN, taskIdExistence: async () => GREEN, shardCensus: async () => GREEN, checkProof: async () => 0, budgetMs: () => 1_000,
     });
+    const checkoutReachedPostCheckout = await waitForFile(marker, 2_000);
+    const awaited = await pending;
+    assert.ok(checkoutReachedPostCheckout, "the fault hook proves the timed-out checkout was already materialized and registered");
     assert.deepEqual(awaited.timedOut?.map((f) => f.check), ["tree"]);
     assert.equal(repo.git("worktree", "list").split("\n").length, 1, "the killed checkout is deregistered on the way out");
 
@@ -172,30 +193,33 @@ test("a tree whose checkout is killed at its budget is held, not pushed unchecke
   }
 });
 
-/** The state a `git worktree add` killed before it wrote HEAD leaves behind: `worktree remove --force --force` then
- *  refuses ("validation failed") and only the admin dir's own removal deregisters the tree. */
+/** Model the registration Git leaves when `worktree add` is killed before it writes the admin HEAD file: removal then
+ *  refuses validation, and only the reciprocal admin pointer deregisters this tree without touching its neighbour. */
 function strandRegistration(tree: string): void {
   const admin = readFileSync(join(tree, ".git"), "utf8").replace(/^gitdir:\s*/, "").trim();
   rmSync(join(admin, "HEAD"), { force: true });
 }
 
-test("a checkout killed before it wrote HEAD is still deregistered, by its own admin dir and no other", async () => {
+test("a timed-out checkout without admin HEAD deregisters only its own worktree", async () => {
   const repo = gitRepo({ kind: "stranded-preflight-tree" });
-  const neighbour = join(repo.dir, "..", `${basename(repo.dir)}-neighbour`);
+  const neighbour = join(repo.dir, "neighbour");
   try {
     repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
     const head = repo.git("rev-parse", "HEAD");
     repo.git("worktree", "add", "--detach", "--quiet", neighbour, head);
     const strand = (cwd: string) => (strandRegistration(cwd), GREEN);
-    emitter.planPrPreflightAtCommit(repo.dir, head, PR, { lintPlan: strand, taskIdExistence: () => GREEN, shardCensus: () => GREEN, checkProof: () => 0 });
-    assert.equal(repo.git("worktree", "list").split("\n").length, 2, "the stranded tree is deregistered; the neighbour worktree is kept");
+    emitter.planPrPreflightAtCommit(repo.dir, head, PR, {
+      lintPlan: strand, taskIdExistence: () => GREEN, shardCensus: () => GREEN, checkProof: () => 0,
+    });
+    assert.equal(repo.git("worktree", "list").split("\n").length, 2, "sync cleanup preserves the unrelated neighbour");
     await emitter.planPrPreflightAtCommitAsync(repo.dir, head, PR, {
       lintPlan: async (cwd) => strand(cwd), taskIdExistence: async () => GREEN, shardCensus: async () => GREEN, checkProof: async () => 0,
     });
     const listed = repo.git("worktree", "list");
-    assert.equal(listed.split("\n").length, 2, "the awaited path deregisters it too");
-    assert.match(listed, /-neighbour /);
+    assert.equal(listed.split("\n").length, 2, "async cleanup removes only its stranded registration");
+    assert.match(listed, /\/neighbour /);
   } finally {
+    try { repo.git("worktree", "remove", "--force", neighbour); } catch { /* test fixture cleanup below */ }
     rmSync(neighbour, { recursive: true, force: true });
     repo.cleanup();
   }

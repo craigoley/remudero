@@ -164,7 +164,7 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/owner-repo.ts": { count: 3, reason: "CHECKOUT: resolveOwnerRepoAt(Async)/gitFailureReason read a checkout's origin (-C root)" },
   "src/lib/panel-graph.ts": { count: 1, reason: "CHECKOUT: replyRefusal reads the repo root (-C root)" },
   "src/lib/plan-gardener.ts": { count: 4, reason: "CHECKOUT: the plan gardener's origin/main reads at the repo root" },
-  "src/lib/plan-pr-emitter.ts": { count: 9, reason: "CHECKOUT: plan-PR reads in the emitter's cwd and its own preflight worktree (-C repoDir)" },
+  "src/lib/plan-pr-emitter.ts": { count: 8, reason: "CHECKOUT: plan-PR reads in the emitter's cwd and its own preflight worktree (-C repoDir); timeout cleanup uses the hardened leaf" },
   "src/lib/plan-pr-merge-safety.ts": {
     count: 2,
     reason: "CHECKOUT (W1-T6136): arm-auto-merge.ts planMergeSafetyInClone binds planSafetyGitSync/Async to <root>/repos/<repo>",

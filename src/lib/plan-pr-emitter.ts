@@ -16,11 +16,11 @@
 
 import type { AcceptanceCriterion } from "./plan.js";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { acceptanceBlockDiagnostics, acceptanceHeaderLine, parseAcceptanceBlock, parseWhitelistedProof } from "./review.js";
@@ -37,7 +37,8 @@ import type { GhApiFetcher } from "./open-prs-rest.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
 import { RmdError } from "./errors.js";
 import { isTaskShardName } from "./task-shard-name.js";
-import { budgetedSpawn, inTreeCheckBudgetMs, killBudgetLeftovers } from "./in-tree-budget.js";
+import { budgetedSpawn, inTreeCheckBudgetMs, killBudgetLeftovers, waitForProcessGroupExit } from "./in-tree-budget.js";
+import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 
 const PLAN_TASK_SHARD_PREFIX = ["plan", "tasks.d"].join("/") + "/";
 
@@ -780,12 +781,41 @@ function borrowNodeModules(repoDir: string, tree: string): void {
   if (existsSync(join(repoDir, "node_modules"))) symlinkSync(join(repoDir, "node_modules"), join(tree, "node_modules"));
 }
 
-function dropOrphanedWorktreeAdmin(tree: string, realTree: string): void {
+function dropOrphanedWorktreeAdmin(tree: string, realTree: string, gitCommonDir: string): void {
   const dotGit = join(tree, ".git");
   if (!existsSync(dotGit)) return;
-  const admin = readFileSync(dotGit, "utf8").replace(/^gitdir:\s*/, "").trim();
-  const backLink = join(admin, "gitdir");
-  if (existsSync(backLink) && readFileSync(backLink, "utf8").trim() === join(realTree, ".git")) rmSync(admin, { recursive: true, force: true });
+  const pointer = readFileSync(dotGit, "utf8").match(/^gitdir:\s*(.+)\s*$/);
+  if (!pointer) return;
+  const admin = resolve(dirname(dotGit), pointer[1]!);
+  const common = realpathSync(gitCommonDir);
+  const adminRoot = realpathSync(join(common, "worktrees"));
+  const adminReal = realpathSync(admin);
+  if (adminReal === adminRoot || !adminReal.startsWith(`${adminRoot}${sep}`) || !lstatSync(admin).isDirectory()) return;
+  const backLink = join(adminReal, "gitdir");
+  if (!existsSync(backLink)) return;
+  const recordedTree = resolve(dirname(backLink), readFileSync(backLink, "utf8").trim());
+  const expectedTree = join(realTree, ".git");
+  if (existsSync(recordedTree) && realpathSync(recordedTree) === realpathSync(expectedTree)) rmSync(adminReal, { recursive: true, force: true });
+}
+
+function cleanupErrorText(error: unknown): string {
+  const value = error as { message?: unknown; stderr?: unknown };
+  return `${String(value?.message ?? error)}\n${String(value?.stderr ?? "")}`;
+}
+
+function canonicalWorktreePath(path: string): string {
+  const absolute = resolve(path);
+  try {
+    return realpathSync(absolute);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    try {
+      return join(realpathSync(dirname(absolute)), basename(absolute));
+    } catch (parentError) {
+      if ((parentError as NodeJS.ErrnoException).code !== "ENOENT") throw parentError;
+      return absolute;
+    }
+  }
 }
 
 /** {@link planPrPreflight} on a commit no checkout has at HEAD (feedback-landing's `commit-tree` sha): a detached
@@ -809,8 +839,11 @@ export function planPrPreflightAtCommit(
     borrowNodeModules(repoDir, tree);
     return planPrPreflight({ cwd: tree, ...pr }, checks);
   } finally {
-    const removed = spawnSync("git", ["-C", repoDir, "worktree", "remove", "--force", "--force", tree], { stdio: "pipe" }); // twice: a killed add leaves it locked
-    if (removed.status !== 0) dropOrphanedWorktreeAdmin(tree, realTree); // killed before HEAD: remove refuses, so drop our own admin dir
+    const removed = spawnSync("git", ["-C", repoDir, "worktree", "remove", "--force", "--force", realTree], { stdio: "pipe" }); // twice: a killed add leaves it locked
+    if (removed.status !== 0 && existsSync(join(tree, ".git"))) {
+      const common = hostWorktreeGit(repoDir, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim();
+      dropOrphanedWorktreeAdmin(tree, realTree, common);
+    }
     rmSync(parent, { recursive: true, force: true });
   }
 }
@@ -826,20 +859,60 @@ export async function planPrPreflightAtCommitAsync(
   const tree = join(parent, "tree");
   const realTree = join(realpathSync(parent), "tree");
   const budgetMs = (checks.budgetMs ?? (() => inTreeCheckBudgetMs()))();
+  let leaveTreeForSafety = false;
   try {
     const add = execFileAsync("git", ["-C", repoDir, "worktree", "add", "--detach", "--quiet", tree, commitSha], budgetedSpawn(budgetMs));
     try {
       await add;
     } catch (e) {
-      return treeNotMaterialized(commitSha, e, budgetMs, add.child.pid); // failed or killed: it names which
+      const result = treeNotMaterialized(commitSha, e, budgetMs, add.child.pid); // failed or killed: it names which
+      if (result.timedOut !== undefined && !(await waitForProcessGroupExit(add.child.pid))) {
+        leaveTreeForSafety = true;
+        throw new Error(`timed-out plan-PR checkout still has live processes; leaving its worktree for safety: ${tree}`);
+      }
+      return result;
     }
     borrowNodeModules(repoDir, tree);
     return await planPrPreflightAsync({ cwd: tree, ...pr }, checks);
   } finally {
-    const removed = await runChildAsync("git", ["-C", repoDir, "worktree", "remove", "--force", "--force", tree], repoDir);
-    if (removed.status !== 0) dropOrphanedWorktreeAdmin(tree, realTree);
-    await rm(parent, { recursive: true, force: true });
+    if (!leaveTreeForSafety) {
+      await removeTemporaryWorktree(repoDir, tree);
+      await rm(parent, { recursive: true, force: true });
+    }
   }
+}
+
+async function removeTemporaryWorktree(repoDir: string, tree: string): Promise<void> {
+  if (!existsSync(join(repoDir, ".git"))) return; // test/minimal trees with no Git metadata cannot own a registration
+  const target = canonicalWorktreePath(tree);
+  const registered = (output: string) => output.split("\n").some((line) => line.startsWith("worktree ") && canonicalWorktreePath(line.slice("worktree ".length)) === target);
+  let listed: string;
+  try {
+    listed = await hostWorktreeGitAsync(repoDir, ["worktree", "list", "--porcelain"]);
+  } catch (error) {
+    if (!existsSync(join(tree, ".git")) && /not a git repository/i.test(cleanupErrorText(error))) return;
+    throw new Error(`could not verify plan-PR worktree cleanup: ${cleanupErrorText(error).trim()}`);
+  }
+  if (!registered(listed)) return;
+  let lastRemovalFailure: string | undefined;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await hostWorktreeGitAsync(repoDir, ["worktree", "remove", "--force", "--force", target]);
+      lastRemovalFailure = undefined;
+    } catch (error) {
+      const reason = cleanupErrorText(error);
+      lastRemovalFailure = reason;
+    }
+    listed = await hostWorktreeGitAsync(repoDir, ["worktree", "list", "--porcelain"]);
+    if (!registered(listed)) return;
+    if (attempt < 2) await new Promise<void>((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+  }
+  const common = await hostWorktreeGitAsync(repoDir, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  dropOrphanedWorktreeAdmin(tree, target, common.trim());
+  listed = await hostWorktreeGitAsync(repoDir, ["worktree", "list", "--porcelain"]);
+  if (!registered(listed)) return;
+  const detail = lastRemovalFailure === undefined ? "" : `; last removal error: ${lastRemovalFailure}`;
+  throw new Error(`plan-PR worktree remains registered after cleanup attempts: ${tree}${detail}`);
 }
 
 /** Ledger a preflight verdict for one lane — `plan_pr.preflight_unreadable` when a check could not run, `_refused`
