@@ -731,36 +731,21 @@ if [ "$confine_file_tools" -eq 1 ]; then
   fi
 fi
 
-# 16) HOUSE RULES THE PROMPTS DID NOT HOLD (operator ruling 2026-10-10). OBSERVED 2026-10-10, in one day and
-#    despite every prompt naming them: `git stash` twice, `--no-verify` once, and `pkill -f` sent over
-#    `ssh remudero` once, to a host that is READ-ONLY for sessions. Prose did not bind them; this does.
-#    Each refusal names the house rule and the safe alternative:
-#      stash      `git stash` in any form except the read-only `git stash list` / `git stash show`.
-#      no-verify  `--no-verify` (or its abbreviation `--no-veri[f]`) on `git commit`, `git push` and
-#                 `git merge`; `-n` inside a `git commit` short cluster; and any `core.hooksPath` override:
-#                 `git -c core.hooksPath=...`, `--config-env`, a `GIT_CONFIG_*` assignment, `git config`
-#                 setting it to anything but `hooks` (the one value .claude/hooks/session-start.sh sets),
-#                 unsetting it, or removing the `core` section. `git push -n` is --dry-run, not
-#                 --no-verify, and stays allowed.
-#      host       destructive process control sent to the fleet host over `ssh remudero`: in the remote
-#                 command, a `sh -c`/`docker exec` body inside it, a heredoc or here-string fed to it, or a
-#                 script echoed into it through a pipe. kill/pkill/killall (`kill -0` and `kill -l` are
-#                 probes and pass), docker restart/stop/kill/rm/rmi/down/prune/pause, systemctl
-#                 restart/stop/kill, rm with -r/-f, and `git worktree prune`. Read-only queries pass.
-#    PARSED, NOT GREPPED: `hr_tokens` splits the command quote-aware into simple commands, and each is judged
-#    at its PROGRAM position (through env assignments, sudo, env, nohup, timeout, nice, xargs). A grep, an
-#    echo, a commit message or a PR body that only NAMES a refused shape is never refused; a `bash -c`,
-#    `sh -c` or `eval` body is judged like the command itself. Bash tool calls only, and inert without jq.
-#    Still a tripwire (file header): a verb assembled indirectly (`$verb`), a script file copied to the host
-#    first, or the host reached by another name or address escapes it.
-#    OPERATOR OVERRIDE, A CHOICE ON THE RECORD: `RMD_HOUSE_RULE_OVERRIDE=<stash|no-verify|host>[,...]` in the
-#    ENVIRONMENT THE SESSION WAS LAUNCHED WITH; the overridden refusal is still printed to stderr. Agents never
-#    set it. Unlike RMD_GH_COOLDOWN_S it is deliberately NOT read from the command text: an inline
-#    `RMD_HOUSE_RULE_OVERRIDE=stash git stash` is refused like any other stash, because the agent typing the
-#    command is exactly who must not hold the override.
-hr_tokens() {  # stdin: shell text -> one simple command per line, as <sep>US<word>US<word>...; <sep> is `|`
-  # after a pipe, else `-`. Quotes are removed and a quoted word stays whole. A heredoc body rides on its
-  # command as one word prefixed with \036; a newline inside a word or body is encoded as \035.
+# 16) HOUSE RULES THE PROMPTS DID NOT HOLD (operator ruling 2026-10-10: in one day sessions ran `git stash`
+#    twice, `--no-verify` once and `pkill -f` over `ssh remudero` once). Refused, naming rule and alternative:
+#    stash: `git stash` in any form but the read-only `list`/`show`. no-verify: `--no-verify` on commit, push
+#    or merge, `git commit -n`, and any core.hooksPath override (`-c`, `--config-env`, `GIT_CONFIG_*`, or
+#    `git config` setting it to anything but `hooks`, unsetting it, or removing `core`); `git push -n` is
+#    --dry-run and passes. host: kill/pkill/killall (not `kill -0`/`-l`), docker restart/stop/kill/rm/rmi/
+#    down/prune/pause, systemctl restart/stop/kill, rm -r/-f and `git worktree prune` sent to `ssh remudero`,
+#    also via `sh -c`, `docker exec`, a heredoc, a here-string or a pipe into it. Read-only queries pass.
+#    Judged at the PROGRAM position of each quote-aware simple command, so text that only NAMES a shape (a
+#    grep, an echo, a commit message) runs. Bash tool only; inert without jq; a tripwire (file header).
+#    OPERATOR OVERRIDE, A CHOICE ON THE RECORD: RMD_HOUSE_RULE_OVERRIDE=<stash|no-verify|host>[,...] in the
+#    session's LAUNCH environment; agents never set it. Unlike RMD_GH_COOLDOWN_S it is NOT read from the
+#    command text, so an inline assignment is refused: the agent typing it is who must not hold it.
+#    FALSIFIER: test/the-house-rules-are-refused-at-the-floor.test.ts.
+hr_tokens() {  # shell text -> per simple command: <`|` after a pipe, else `-`>\037<word>\037...; heredoc body = \036<body>
   awk '
     function endtok() { if (have) { seg = seg US tok; segn++ } tok = ""; have = 0 }
     function flush(nsep) { endtok(); if (segn) out[++no] = sep seg; seg = ""; segn = 0; sep = nsep }
