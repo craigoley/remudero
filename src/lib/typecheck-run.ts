@@ -9,16 +9,16 @@
  *
  * A SANDBOXED WORKER CANNOT WRITE ITS GIT DIR. Codex's sandbox mounts everything but the worktree and /tmp read-only,
  * and a linked worktree's git dir lives in the canonical checkout, so tsc would fail TS5033 writing the buildinfo there
- * (a false red). Then the buildinfo lives in TMPDIR, keyed by the tree's path, seeded from the git dir's or the
- * canonical checkout's. With nowhere writable at all, the plain check runs.
+ * (a false red). Then the buildinfo lives in the worktree itself, as {@link WORKTREE_BUILDINFO_NAME} (ignored by the
+ * repo's `*.tsbuildinfo` rule, so no diff can carry it), seeded from the git dir's or the canonical checkout's. Not
+ * TMPDIR: a predictable name in a shared temp dir is CodeQL's js/insecure-temporary-file. With nowhere writable at all,
+ * the plain check runs.
  *
  * SAME RESULT AS PLAIN TSC. The diagnostics and the exit code are tsc's own; a buildinfo only changes what is rebuilt,
  * and tsc discards any cached entry whose hash, options or version differ. Extra argv is passed through to tsc.
  */
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { existsSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { acquireTestSlot, type TestSlotLease } from "./test-slot.js";
@@ -36,13 +36,14 @@ import {
 /** The slot label a cold `npm run typecheck` holds while tsc runs. */
 export const NPM_TYPECHECK_SLOT_LABEL = "typecheck:npm";
 
+/** The buildinfo's name in the worktree root when the git dir is not writable. */
+export const WORKTREE_BUILDINFO_NAME = ".rmd-typecheck.tsbuildinfo";
+
 /** Runs tsc with stdio inherited; returns its exit status (null when it was killed or never started). */
 export type TypecheckRunSpawn = (file: string, args: readonly string[], cwd: string) => { status: number | null; error?: Error };
 
 export interface TypecheckRunOptions {
   spawn?: TypecheckRunSpawn;
-  /** Where a tree whose git dir is unwritable keeps its buildinfo; default `os.tmpdir()`. */
-  tmpDir?: string;
   canWrite?: (dir: string) => boolean;
   acquireSlot?: (label: string) => TestSlotLease;
   log?: (line: string) => void;
@@ -70,25 +71,24 @@ export interface PreparedTypecheck {
   args: string[];
   buildInfo?: string;
   seed: SeedOutcome;
-  where: "git-dir" | "tmp" | "plain";
+  where: "git-dir" | "worktree" | "plain";
 }
 
-/** The argv for `root`'s check: its git dir's buildinfo when writable, else a per-tree one in `tmp`, else plain. */
-export function prepareTypecheckRun(root: string, tmp: string = tmpdir(), canWrite: (dir: string) => boolean = dirIsWritable): PreparedTypecheck {
+/** The argv for `root`'s check: its git dir's buildinfo when writable, else one in the worktree root, else plain. */
+export function prepareTypecheckRun(root: string, canWrite: (dir: string) => boolean = dirIsWritable): PreparedTypecheck {
   const own = worktreeBuildInfoPath(root);
   if (own !== undefined && canWrite(dirname(own))) return { ...prepareWorktreeTypecheck(root), where: "git-dir" };
-  if (!canWrite(tmp)) return { args: typecheckArgs(undefined), seed: "no-seed", where: "plain" };
-  const key = createHash("sha1").update(realpathSync(root)).digest("hex").slice(0, 16);
-  const buildInfo = join(tmp, `rmd-typecheck-${key}.tsbuildinfo`);
+  if (!canWrite(root)) return { args: typecheckArgs(undefined), seed: "no-seed", where: "plain" };
+  const buildInfo = join(root, WORKTREE_BUILDINFO_NAME);
   const from = own !== undefined && existsSync(own) ? { root, buildInfo: own } : canonicalBuildInfo(root);
   const seed = from === undefined ? (existsSync(buildInfo) ? "kept" : "no-seed")
     : seedBuildInfo(from, { root, buildInfo }, installedTypescriptVersion(root));
-  return { args: typecheckArgs(buildInfo), buildInfo, seed, where: "tmp" };
+  return { args: typecheckArgs(buildInfo), buildInfo, seed, where: "worktree" };
 }
 
 /** Run the incremental full typecheck of the checkout at `root`, taking a slot only when it would run cold. */
 export function runTypecheck(root: string, extraArgs: readonly string[] = [], opts: TypecheckRunOptions = {}): number {
-  const prepared = prepareTypecheckRun(root, opts.tmpDir, opts.canWrite);
+  const prepared = prepareTypecheckRun(root, opts.canWrite);
   const cold = !hasUsableTypecheckBuildInfo(prepared.buildInfo, installedTypescriptVersion(root));
   const log = opts.log ?? ((line: string) => process.stderr.write(line + "\n"));
   let slot: TestSlotLease | undefined;

@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { TYPECHECK_BUILDINFO_NAME } from "../src/lib/typecheck-buildinfo.js";
 import { acquireTestSlot } from "../src/lib/test-slot.js";
-import { dirIsWritable, NPM_TYPECHECK_SLOT_LABEL, prepareTypecheckRun, runTypecheck } from "../src/lib/typecheck-run.js";
+import { dirIsWritable, NPM_TYPECHECK_SLOT_LABEL, prepareTypecheckRun, runTypecheck, WORKTREE_BUILDINFO_NAME } from "../src/lib/typecheck-run.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -117,31 +117,31 @@ test("a tsc that cannot start is named and exits 127, and the cold slot is still
   assert.deepEqual(heldLabels(slots), []);
 });
 
-test("a sandboxed worker whose git dir is read-only keeps its buildinfo in TMPDIR, and tsc still reports its own result", (t) => {
+test("a sandboxed worker whose git dir is read-only keeps its buildinfo in the worktree, and tsc still reports its own result", (t) => {
   slotEnv(t);
   const tree = project(t);
   const lane = tree.addWorktree(join(realpathSync(dirname(tree.dir)), `${RMD_TMP_PREFIX}npm-typecheck-ro-${process.pid}`), "ro-lane");
   t.after(() => rmSync(lane.dir, { recursive: true, force: true }));
   symlinkSync(join(REPO_ROOT, "node_modules"), join(lane.dir, "node_modules"));
   const laneGitDir = realpathSync(spawnSync("git", ["-C", lane.dir, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).stdout.trim());
-  const tmp = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}npm-typecheck-tmp-`));
-  t.after(() => rmSync(tmp, { recursive: true, force: true }));
-  // Codex's sandbox binds the canonical checkout's git dir read-only; the worktree and TMPDIR stay writable.
+  // Codex's sandbox binds the canonical checkout's git dir read-only; the worktree stays writable.
   const canWrite = (dir: string) => realpathSync(dir) !== laneGitDir;
-  const prepared = prepareTypecheckRun(lane.dir, tmp, canWrite);
-  assert.equal(prepared.where, "tmp");
-  assert.ok(prepared.buildInfo?.startsWith(tmp + "/"), prepared.buildInfo);
+  const prepared = prepareTypecheckRun(lane.dir, canWrite);
+  assert.equal(prepared.where, "worktree");
+  assert.equal(prepared.buildInfo, join(lane.dir, WORKTREE_BUILDINFO_NAME));
   assert.deepEqual(prepared.args, ["-p", "tsconfig.json", "--noEmit", "--incremental", "--tsBuildInfoFile", prepared.buildInfo]);
   const realTsc = (file: string, args: readonly string[], cwd: string) => {
     const r = spawnSync(file, [...args], { cwd, encoding: "utf8" });
     return { status: r.status };
   };
-  assert.equal(runTypecheck(lane.dir, [], { spawn: realTsc, tmpDir: tmp, canWrite, log: () => {} }), 0);
-  assert.ok(existsSync(prepared.buildInfo!), "tsc wrote the TMPDIR buildinfo");
+  assert.equal(runTypecheck(lane.dir, [], { spawn: realTsc, canWrite, log: () => {} }), 0);
+  assert.ok(existsSync(prepared.buildInfo!), "tsc wrote the worktree buildinfo");
   assert.ok(!existsSync(join(laneGitDir, TYPECHECK_BUILDINFO_NAME)), "nothing was written into the read-only git dir");
-  assert.equal(prepareTypecheckRun(lane.dir, tmp, () => false).where, "plain", "nowhere writable runs the plain check");
-  assert.equal(dirIsWritable(tmp), true, "the default probe creates a file where it can");
-  assert.equal(dirIsWritable(join(tmp, "no-such-dir")), false, "and refuses where tsc could not write either");
+  assert.equal(prepareTypecheckRun(lane.dir, () => false).where, "plain", "nowhere writable runs the plain check");
+  assert.equal(dirIsWritable(lane.dir), true, "the default probe creates a file where it can");
+  assert.equal(dirIsWritable(join(lane.dir, "no-such-dir")), false, "and refuses where tsc could not write either");
+  // This repo's own ignore rule keeps the fallback out of every diff.
+  assert.equal(spawnSync("git", ["-C", REPO_ROOT, "check-ignore", "-q", WORKTREE_BUILDINFO_NAME]).status, 0);
 });
 
 test("a slot holder in another pid namespace on the same host is live by its lease, not dead by its pid", (t) => {
