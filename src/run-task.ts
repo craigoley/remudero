@@ -448,6 +448,7 @@ import {
   type StarvationClearedInfo,
   type SweepCycleOutcome,
   priorUnrecognisedResetStrings,
+  pendingWorkerBoundaryHandoffs,
   v8HeapStatistics,
 } from "./lib/daemon.js";
 import { sweepStrandedReviewWorktrees } from "./lib/review-worktree-reclaim.js";
@@ -16953,6 +16954,7 @@ async function runTask(
     config?: Config;
     /** W1-T7096: the drain and the CLI ask the production LLM progress judge in the fix rung. */
     productionProgressJudge?: boolean;
+    preopenGate?: RunTaskBodyOptions["preopenGate"];
     /** Frozen at the executing module boundary by default; trial runners may supply pinned artifacts. */
     benchmarkStackEvidence?: BenchmarkStackEvidence;
     allowStale?: boolean;
@@ -18945,6 +18947,23 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   }
 
   try {
+    const checkpoint = pendingWorkerBoundaryHandoffs(readLedgerRawLines(ledgerPath)).get(taskId);
+    if (checkpoint) {
+      try {
+        const remoteHead = (await hostWorktreeGitAsync(worktreePath, ["ls-remote", "origin", `refs/heads/${checkpoint.branch}`])).trim().split(/\s+/)[0];
+        if (remoteHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved; refusing to replay a different worker's work");
+        await hostWorktreeGitAsync(worktreePath, ["fetch", "origin", checkpoint.branch]);
+        const fetchedHead = (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "FETCH_HEAD"])).trim();
+        if (fetchedHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved during fetch");
+        const commits = (await hostWorktreeGitAsync(worktreePath, ["rev-list", "--reverse", "--no-merges", `origin/main..${checkpoint.headSha}`])).trim();
+        if (commits) await hostWorktreeGitAsync(worktreePath, ["cherry-pick", ...commits.split("\n")]);
+        log("implement.checkpoint_restored", { source_branch: checkpoint.branch, source_head_sha: checkpoint.headSha, branch });
+      } catch (error) {
+        log("verdict", { verdict: "no_pr", reason: "restart_checkpoint_restore_failed", branch,
+          source_branch: checkpoint.branch, detail: String((error as Error)?.message ?? error), cost_usd: costUsd });
+        return { taskId, runId, merged: false, costUsd, verdict: "no_pr" };
+      }
+    }
     // ── Recon (read-only).
     say("recon worker");
     // W1-T37 / MASTER-PLAN §8A Tier 2: the plan is RETRIEVED, not injected — the recon prompt
@@ -19357,6 +19376,33 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     say("implement worker");
     const workerHeadReflogBefore = readWorktreeHeadReflog(worktreePath);
     let impl!: WorkerResult;
+    // W1-T7697: retain disk work before releasing a lane; a failed checkpoint is never a handoff.
+    const yieldAtWorkerBoundary = async (waitingOn: string): Promise<RunResult | undefined> => {
+      const freshness = await opts.externalWaitFreshness?.();
+      const recycle = freshness ? undefined : opts.externalWaitRecycle?.();
+      if (!freshness && !recycle) return undefined;
+      try {
+        if (worktreeHasUncommittedChanges(worktreePath)) {
+          const checkpoint = commitWorkerEdits(worktreePath, task.files ?? [],
+            `wip: yield at ${waitingOn}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume ${waitingOn}\nfailed: none\n\nRemudero-Task: ${taskId}`,
+            {}, task.acceptance);
+          if (!checkpoint.committed || checkpoint.undeclared.length > 0) {
+            throw new Error(`restart checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}`);
+          }
+        }
+        await gitPushRunBranchAsync(worktreePath);
+      } catch (error) {
+        log("verdict", { verdict: "no_pr", reason: "restart_checkpoint_failed", waiting_on: waitingOn,
+          detail: String((error as Error)?.message ?? error), branch, cost_usd: costUsd, ...terminalVerdictFields(impl) });
+        return { taskId, runId, merged: false, costUsd, verdict: "no_pr" };
+      }
+      const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
+      log("run.freshness_handoff", { waiting_on: waitingOn, branch, head_sha: headSha,
+        ...(freshness ? { old_sha: freshness.oldSha, new_sha: freshness.newSha } : { trigger: "recycle", detail: recycle }) });
+      log("verdict", { verdict: "handed_off", reason: "freshness_yield", waiting_on: waitingOn,
+        branch, head_sha: headSha, cost_usd: costUsd, ...terminalVerdictFields(impl) });
+      return { taskId, runId, merged: false, costUsd, verdict: "handed_off" };
+    };
     const attemptImplement = async (findings?: string): Promise<AttemptOutcome> => {
       // The diagnose-informed attempt is the LAST one before the task goes to a human, and it only
       // happens after the implement mount has failed twice: that attempt steps up (operator ruling
@@ -19618,6 +19664,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
             : "ledger-only, " + recordVerdict.band + " risk"
         })`,
       );
+      const boundaryYield = await yieldAtWorkerBoundary("decision");
+      if (boundaryYield) return boundaryYield;
       impl = account(
         // W1-T191: this resumed spawn used to call the real `spawnWorker` directly, bypassing
         // the injectable `spawn` (`opts.spawn ?? spawnWorker`) every OTHER spawn call site in
@@ -19672,6 +19720,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     for (;;) {
       const tipSubject = lastCommitSubject(worktreePath);
       if (tipSubject === undefined || !isWipSubject(tipSubject) || parseReport(fullText(impl))?.prUrl) break;
+      const checkpointYield = await yieldAtWorkerBoundary("checkpoint");
+      if (checkpointYield) return checkpointYield;
       let tipBody = "";
       try {
         tipBody = hostWorktreeGit(worktreePath, ["log", "-1", "--format=%b"]);
@@ -19689,6 +19739,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       });
       log("implement.checkpoint_judged", { stop: checkpointStops.length, resume: decision.resume, by: decision.by, reason: decision.reason });
       if (!decision.resume) break;
+      const judgedYield = await yieldAtWorkerBoundary("checkpoint");
+      if (judgedYield) return judgedYield;
       impl = account(
         await spawn({
           cwd: worktreePath,
@@ -19716,10 +19768,14 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // The harness runs the fast gate itself before opening the PR; a failing step goes back to the worker once.
     const preopenGate = opts.preopenGate ?? (spawnInjected ? undefined : (path: string) => runPreopenGate(path));
     if (preopenGate !== undefined && !parseReport(fullText(impl))?.prUrl) {
+      const workerYield = await yieldAtWorkerBoundary("worker");
+      if (workerYield) return workerYield;
       const gate = await preopenGate(worktreePath);
       log(PREOPEN_GATE_STEP, { result: gate.kind, failed: gate.kind === "fail" ? gate.failedSteps : [], duration_ms: gate.durationMs,
         ...(gate.kind === "unmeasured" ? { reason: gate.reason } : {}) });
       if (gate.kind === "fail") {
+        const preopenYield = await yieldAtWorkerBoundary("preopen_gate");
+        if (preopenYield) return preopenYield;
         impl = account(
           await spawn({
             cwd: worktreePath,
@@ -19743,6 +19799,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         const gateFail = failOnWorkerError(impl, "implement.preopen_continued");
         if (gateFail) return gateFail;
       }
+    }
+
+    if (!parseReport(fullText(impl))?.prUrl) {
+      const workerYield = await yieldAtWorkerBoundary("worker");
+      if (workerYield) return workerYield;
     }
 
     // ── QUESTION contract (non-blocking) — log, don't stall (§2).
