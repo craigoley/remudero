@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFile
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate as flush } from "node:timers/promises";
+import { pathToFileURL } from "node:url";
 import { test, type TestContext } from "node:test";
 import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import * as daemon from "../src/lib/daemon.js";
@@ -132,7 +133,8 @@ async function boundaryRun(t: TestContext, boundary: "preopen_gate" | "checkpoin
       ...options,
       spawn: async (args) => {
         if (++resumedCalls === 1) return worker("RECON REPORT\nOBSERVED: restored checkpoint\n");
-        assert.equal(readFileSync(join(args.cwd, "src/change.ts"), "utf8"), "export const value = 42;\n");
+        const restored = await import(pathToFileURL(join(args.cwd, "src/change.ts")).href);
+        assert.equal(restored.value, 42, "the resumed worker sees the checkpoint's exported value");
         pending = true;
         return worker("REPORT\nPR_URL: https://github.com/acme/remudero/pull/1\n");
       },
@@ -208,7 +210,7 @@ function history(durationMs: number): string[] {
   ];
 }
 
-function phase(durationMs: number, extraDeps: Partial<DaemonDeps> = {}) {
+function phase(durationMs: number, extraDeps: Partial<DaemonDeps> = {}, opts: NonNullable<Parameters<typeof runDaemon>[2]> = {}) {
   const dir = mkdtempSync(join(tmpdir(), "rmd-t7697-phase-"));
   const path = join(dir, "tasks.yaml");
   const ids = "ABCDEFGHIJKLM".split("");
@@ -232,7 +234,7 @@ function phase(durationMs: number, extraDeps: Partial<DaemonDeps> = {}) {
     runOne: (id) => { started.push({ id, age: nowMs - start }); return releases.get(id)!.promise; },
     sleep: () => { const sleep = deferred<void>(); sleeps.push(sleep); return sleep.promise; },
     ...extraDeps,
-  } as DaemonDeps, { laneCount: 3, max: 10 });
+  } as DaemonDeps, { laneCount: 3, max: 10, ...opts });
   return {
     run, started, rows,
     settle: async (id: string, ageMinutes: number) => {
@@ -257,6 +259,30 @@ function phase(durationMs: number, extraDeps: Partial<DaemonDeps> = {}) {
     },
   };
 }
+
+test("lane refill uses the adaptive queue admission and resumes only an exact handoff head", async () => {
+  const receipts = ["D", "E"].map((id) => JSON.stringify({ step: "verdict", task_id: id,
+    verdict: "handed_off", reason: "freshness_yield", branch: `run-${id}-123`, head_sha: stale.oldSha }));
+  let branchReads = 0;
+  const h = phase(5 * minute, {
+    readLedgerLines: () => [...history(5 * minute), ...receipts],
+    openPrCount: () => 10,
+    checkQueueGovernor: () => undefined,
+    readQueueAdmission: () => ({ wipLimit: 14, baseWipLimit: 10, observedOpenCount: 10,
+      stuckOwnedCount: 1, tier: "under_limit" }),
+    readPushedRunBranches: () => branchReads++ === 0 ? "" :
+      `${stale.oldSha}\trefs/heads/run-D-123\n${stale.newSha}\trefs/heads/run-E-123\n`,
+  }, { wipLimit: 10 });
+  try {
+    await flush();
+    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C"]);
+    await h.settle("B", 1);
+    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C", "D"]);
+    await h.settle("C", 2);
+    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C", "D", "F"],
+      "a handoff with a different remote sha still blocks its task");
+  } finally { await h.cleanup(); }
+});
 
 test("W1-T7697: freed lanes keep refilling while one slow lane holds the phase", async () => {
   const h = phase(5 * minute);

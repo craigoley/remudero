@@ -14442,7 +14442,8 @@ export function dispatchProofAmendmentWrite(
     assertLiveWriteAllowedFn?: typeof assertLiveWriteAllowed;
     parseProofAmendmentProposalFn?: typeof parseProofAmendmentProposal;
     buildBaseProofDirFn?: typeof buildBaseProofDir;
-    /** Deregisters the merge-base worktree the build cut from the head checkout; defaults to the leaf it was cut through. */
+    /** Deregisters the merge-base worktree the build cut from the head checkout; defaults to
+     *  {@link releaseBaseProofDir}'s own remover, the hardened leaf it was cut through. */
     removeBaseWorktreeFn?: (repoDir: string, worktreePath: string) => void;
   } = {},
 ): void {
@@ -14450,7 +14451,7 @@ export function dispatchProofAmendmentWrite(
     gitFn,
     parseProofAmendmentProposalFn = parseProofAmendmentProposal,
     buildBaseProofDirFn = buildBaseProofDir,
-    removeBaseWorktreeFn = (repoDir: string, worktreePath: string) => void hostWorktreeGit(repoDir, ["worktree", "remove", "--force", worktreePath]),
+    removeBaseWorktreeFn,
     ...portsIo
   } = io;
   let baseProof: BaseProofDir | undefined;
@@ -26874,13 +26875,14 @@ function releaseBaseProofDir(
 /**
  * (R-11) `rmd check-proof --base`'s own teardown of the merge-base worktree {@link buildBaseProofDir}
  * added for it — best-effort, never masking the verdict already computed, mirroring
- * {@link withMaterializedWorktree}'s teardown handling for the reviewer's head worktree.
+ * {@link withMaterializedWorktree}'s teardown handling for the reviewer's head worktree. The default
+ * removes it through {@link hostWorktreeGit}, the hardened leaf the build added it through, so the
+ * caller's checkout (a PR head, for a proof amendment) is pinned and inherited git variables are dropped.
  */
 function removeBaseProofWorktree(
   repoDir: string,
   worktreePath: string,
-  remove: (repoDir: string, worktreePath: string) => void = (dir, wt) =>
-    execFileSync("git", ["-C", dir, "worktree", "remove", "--force", wt], { stdio: ["ignore", "pipe", "pipe"] }),
+  remove: (repoDir: string, worktreePath: string) => void = (dir, wt) => void hostWorktreeGit(dir, ["worktree", "remove", "--force", wt]),
 ): void {
   try {
     remove(repoDir, worktreePath);
@@ -35000,8 +35002,10 @@ function queueGovernorGateFor(
   runId: string,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
   now: () => number = Date.now,
-): () => QueueGovernorResult | undefined {
-  return () => {
+): QueueGovernorGate {
+  let admission: QueueGovernorResult | undefined;
+  const gate = (): QueueGovernorResult | undefined => {
+    admission = undefined;
     const { owned, foreign, ownedPrNumbers } = openPrOwnership();
     const lines = readLedgerLines(ledgerPath);
     const nowMs = now();
@@ -35019,6 +35023,7 @@ function queueGovernorGateFor(
       headroomFraction: adaptive.headroomFraction,
     });
     if (!result.deferred) {
+      admission = result;
       if (owned >= policy.wipLimit) {
         appendLedger(ledgerPath, {
           run_id: runId, task_id: "GOVERNOR", step: "dispatch_admitted_adaptive_wip",
@@ -35033,7 +35038,12 @@ function queueGovernorGateFor(
     logQueueGovernorDeferral(result, appendLedger, ledgerPath, runId);
     return result;
   };
+  return Object.assign(gate, { readAdmission: () => admission });
 }
+
+/** The queue gate plus the reading behind its latest admission, which sizes the lane budget so a
+ *  pass the adaptive bound admits is never sized to zero against the static `wipLimit`. */
+type QueueGovernorGate = (() => QueueGovernorResult | undefined) & { readAdmission: () => QueueGovernorResult | undefined };
 
 /** W1-T3144 — bridge the complete open-board observation already made inside `projectPlan` to the
  * dispatch governor. Gateways without the optional batch method retain the historical projection
@@ -35709,6 +35719,7 @@ async function drainCommand(
     return projected;
   });
   const openPrCount = () => openPrOwnership().owned;
+  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now);
   if (dryRun) {
     const merged = refreshMerged();
     if (opts.curated) {
@@ -35899,7 +35910,8 @@ async function drainCommand(
         // 23-open-PR incident): the SAME batch the W1-T172 lanes budget's `openPrCount` closure
         // already reads (below), split by ownership (W1-T4465 design (i)) — never a second
         // GitHub read path — see queueGovernorGateFor's doc.
-        checkQueueGovernor: queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now),
+        checkQueueGovernor: queueGate,
+        readQueueAdmission: queueGate.readAdmission,
         // HOST MEMORY FLOOR (W1-T5347 wires W1-T1038's memoryGovernorGateFor): a fresh
         // /proc/meminfo reading per consultation, so the per-lane re-check sees each lane's cost.
         // Holds NEW implement dispatch only — never a running worker or a review.
@@ -38554,6 +38566,7 @@ export async function daemonCommand(
     return projected;
   });
   const openPrCount = () => openPrOwnership().owned;
+  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now);
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
     // W1-T253: drain.max from the SAME loaded policy `opts` above already threaded, never
@@ -39113,7 +39126,8 @@ export async function daemonCommand(
         // WIP CEILING (W1-T321 wires checkQueueGovernor's own predicate, sweep.ts, the W1-T121
         // 23-open-PR incident): the SAME batch `openPrCount` reads just above, split by ownership
         // (W1-T4465 design (i)) — never a second GitHub read path — see queueGovernorGateFor's doc.
-        checkQueueGovernor: queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now),
+        checkQueueGovernor: queueGate,
+        readQueueAdmission: queueGate.readAdmission,
         // HOST MEMORY FLOOR (W1-T5347 wires W1-T1038's memoryGovernorGateFor): a fresh
         // /proc/meminfo reading per consultation, so the per-lane re-check sees each lane's cost.
         // Holds NEW implement dispatch only — never a running worker or a review.
@@ -45948,11 +45962,11 @@ export async function sweepPostFixReverification(
   // of a bare `prUrl` string.
   const readCiFailuresImpl =
     opts.readCiFailures ??
-    ((pr: OpenPrView) => {
+    (async (pr: OpenPrView) => {
       const v = ghJson(["pr", "view", pr.prUrl, "--json", "statusCheckRollup"]) as {
         statusCheckRollup?: RollupCheck[];
       };
-      return fetchCiFailures(owner, repo, v.statusCheckRollup);
+      return fetchCiFailuresAsync(owner, repo, v.statusCheckRollup);
     });
 
   const mergedFixPrNumbers = new Set<number>();

@@ -44,7 +44,7 @@ import {
   type RiskPolicy,
 } from "./risk-judge.js";
 import { deterministicEscalation, UNPRICED_PRIORITY } from "./machine-filing.js";
-import { lintTask, rulingVerifyViolation, taskRulingPin } from "./task-linter.js";
+import { lintTask, promoteIntroducedPlanOnlyDiagnostics, rulingVerifyViolation, taskRulingPin, type LintViolation } from "./task-linter.js";
 
 /** The operator's escalation rule, handed to the judge verbatim in its gates state. */
 export const MACHINE_JUDGE_ESCALATE_ONLY_IF =
@@ -296,9 +296,13 @@ export function renderRuledShard(
   // The pin is taken from `after`, whose pinned fields the block above does not touch, and a
   // `proceed` is written at `verify: auto` while an `escalate` stays `verify: human`: the written
   // pin matches and machine-author-verify clears by construction, so neither is re-checked here.
-  const blocking = (t: Task) => new Set(lintTask(t).violations.filter((v) => v.severity === "block").map((v) => v.check));
-  const had = blocking(before);
-  const added = [...blocking(reparsed)].filter((c) => !had.has(c));
+  // Judged as lint-plan --base judges the landing PR: a warning the flip introduces is promoted to block
+  // on a plan-only diff (W1-T3814). 2026-10-10: proof-test-only-discrimination, a warn at verify: auto
+  // and silent at human, refused every landing the live ledger kept (29) while this read only `severity: block`.
+  const checks = (vs: readonly LintViolation[]) => new Set(vs.filter((v) => v.severity === "block").map((v) => v.check));
+  const base = lintTask(before).violations;
+  const had = checks(base);
+  const added = [...checks(promoteIntroducedPlanOnlyDiagnostics(lintTask(reparsed).violations, base, false))].filter((c) => !had.has(c));
   if (added.length > 0) return { refused: `${reparsed.id}: at verify: auto it fails lint (${added.join(", ")})`, lint: true };
   return { contents };
 }
@@ -394,10 +398,12 @@ export function machineJudgeInputs(repoRoot: string, stateDir: string): string {
 }
 
 /** Whether a pass moved anything: a ruling proceeded, escalated, refused or settled, or a PR opened. Waiting
- *  on a PR, an unavailable judge and a failed landing are not new; the garden's pacing backs off on them. */
+ *  on a PR, an unavailable judge and a failed landing (one whose PR did not open) are not new; pacing backs off. */
 export function machineJudgeFoundWork(report: MachineJudgeReport): boolean {
-  return report.prUrl !== undefined ||
-    [report.proceeded, report.escalated, report.refused, report.settled].some((ids) => ids.length > 0);
+  const unlanded = new Set(report.unlanded);
+  const moved = (ids: readonly string[]) => ids.some((id) => !unlanded.has(id));
+  return report.prUrl !== undefined || moved(report.proceeded) || moved(report.escalated) ||
+    report.refused.length > 0 || report.settled.length > 0;
 }
 
 export interface MachineJudgeReport {
@@ -410,6 +416,7 @@ export interface MachineJudgeReport {
   /** Records whose ruling the landing tree already carries: nothing to land, and not a failure. */
   settled: string[];
   prUrl?: string;
+  unlanded?: string[];
 }
 
 /** The Beta record gardener.ts keeps for a family, summed over its classes. */
@@ -613,6 +620,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
         prUrl: report.prUrl, ids: landed.map((l) => l.id), records: landed,
         repoRoot: dirname(dirname(dirname(ruled[0]!.task.sourcePath!))),
       };
+      else report.unlanded = landed.map((l) => l.id);
       ports.log("machine_judge.landed", { pr_url: report.prUrl ?? null, ids: landed.map((l) => l.id) });
     }
   } finally {
