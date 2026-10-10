@@ -23,3 +23,11 @@
     Source owner: src/lib/pr-blocker.ts. Top five PRs by observed hours, with original blocker reasons:
     - PR #10298: 3.73 PR-hours — capped review still has non-discriminating proofs, but every repair path is exhausted (body 2/2, plan-shard repair 3/2)
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.89
+    reasons:
+      - "high-risk verdict at confidence 0.89 — on the change's description/files alone, no diff was read — The filed plan requires automatic clearance of a review blocker after repair paths are exhausted, but does not specify the remedy or how review requirements will remain satisfied.; on the change's description/files alone, no diff was read — The supplied acceptance proof greps for a test declaration; it does not demonstrate successful repair or discriminating proof behavior. Safe clearance cannot be verified from what is shown, matching the gates' explicit escalation condition."
+    judged_at: "2026-10-09T23:03:18.583Z"
+    pin: "0b711207df8bb240ff517ff93cf85c3d4005828d6a6028835b245859de316408"

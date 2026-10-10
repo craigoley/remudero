@@ -24,7 +24,7 @@
   origin: feedback#fb-1789937186992-270de8
   plan_refs: ["§7B"]
   files: [src/run-task.ts, src/lib/sweep.ts, test/declared-untracked-source-finalize.test.ts, test/dirty-owner-fresh-fix-dispatch.test.ts, test/fix-branch-checkout-serialization.test.ts]
-  priority: 4
+  priority: 2.5 # operator-2026-10-09: fix lane: a declared file left untracked yields a red PR with no repair path
   status: queued
   # backlog gardener: band=4 evidence=e8a07481cfe6385b
   attempts: 0

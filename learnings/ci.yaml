@@ -122,7 +122,8 @@
 
 - id: ci-shard-one-eight-refuses-conflict-markers
   subsystem: ci
-  lifecycle: active
+  # knowledge gardener: retire ci-shard-one-eight-refuses-conflict-markers
+  lifecycle: superseded
   files: ["plan/tasks.d/**", "src/run-task.ts", "hooks/pre-commit", ".github/workflows/ci.yml"]
   fact: >-
     Before committing or pushing a worker repair that resolves a merge conflict, verify the staged

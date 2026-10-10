@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   priority: 2.5
   risk: low
   status: queued
@@ -17,3 +17,13 @@
       proof: "grep: test/status-json-deadline\\.test\\.ts in src/lib/affected-suites.ts"
     - claim: "a regression test selects test/status-json-deadline.test.ts for each recorded edge"
       proof: "grep: test/status-json-deadline\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.92
+    reasons:
+      - "The filed plan specifies a narrow selector repair and regression coverage, with declared files matching those two purposes."
+      - "The supplied scope names no secrets, permissions, deletion, irreversible action, or merge, deploy, infrastructure, or review policy change."
+      - "The family track record reports 8 merged and 0 declined tasks; filing-time gates show no concerning result. No implementation or passing checks are claimed."
+    judged_at: "2026-10-09T23:04:00.414Z"
+    pin: "9e33e18d5da6a1f5b39c96e2ef0a11e9eff6f8aee45a23b6a9802cc1519c9720"

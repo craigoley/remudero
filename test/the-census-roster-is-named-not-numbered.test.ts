@@ -183,6 +183,45 @@ test("runPreflightFast over ONLY the roster's admitted projection passes on a cl
   assert.equal(result.ok, true, "the roster must not itself fail a clean run — only a bound breach can");
 });
 
+test("W1-T6884 pins the cause of the intermittent failure: injected census commands and time tolerate transient runner contention", () => {
+  const target = CENSUS_STEPS[0]!;
+  for (const [retryMs, referenceMs] of [[1000, 1000], [10_000, 5000]]) {
+    let clock = 0;
+    let targetRuns = 0;
+    const calls: string[] = [];
+    const result = runPreflightFast(REPO_ROOT, {
+      steps: CENSUS_STEPS,
+      packageJsonText: JSON.stringify({
+        scripts: Object.fromEntries(CENSUS_STEPS.map((step) => [step.script, "fixture"])),
+      }),
+      spawn: (file, args, opts) => {
+        assert.equal(file, "npm");
+        assert.equal(opts?.cwd, REPO_ROOT);
+        const script = args[2]!;
+        calls.push(script);
+        if (script === target.script) {
+          targetRuns += 1;
+          clock += targetRuns === 1 ? 10_000 : retryMs;
+        } else {
+          clock += targetRuns < 2 ? 1000 : referenceMs;
+        }
+        return { status: 0, stdout: "", stderr: "" };
+      },
+      now: () => clock,
+    });
+    assert.equal(result.ok, true);
+    assert.ok(result.steps.every((step) => step.ok));
+    assert.deepEqual(calls.slice(0, CENSUS_STEPS.length), CENSUS_STEPS.map((step) => step.script));
+    assert.equal(targetRuns, 2, "a transient crossing must be re-measured, never refused immediately");
+    assert.equal(calls.length, CENSUS_STEPS.length + 2, "re-time the target and its reference");
+    assert.equal(calls[CENSUS_STEPS.length], target.script);
+    assert.match(result.steps[0]!.detail, /RE-MEASURED/);
+    assert.ok(result.steps[0]!.detail.includes(`one re-run took ${retryMs}ms`));
+    assert.ok(result.steps[0]!.detail.includes(`re-timed back to back at ${referenceMs}ms`));
+    assert.match(result.steps[0]!.detail, /confirmation margin \(passed\)/);
+  }
+});
+
 test("W1-T6885: the admitted roster still reports command failures and confirmed runaways", () => {
   const target = CENSUS_STEPS[0]!;
   const failed = runPreflightFast(REPO_ROOT, {

@@ -1,17 +1,17 @@
 diff --git a/docs/knowledge-garden-log.md b/docs/knowledge-garden-log.md
 --- a/docs/knowledge-garden-log.md
 +++ b/docs/knowledge-garden-log.md
-@@ -115,0 +116,6 @@
+@@ -121,0 +122,6 @@
 +
-+## Pass 2026-10-09T10:04:45.519Z
++## Pass 2026-10-09T23:05:22.282Z
 +
-+- retire squash-trailer-gate-task-authoring-lane: Workers offered it have rarely used it, compared with other learnings.
++- retire ci-shard-one-eight-refuses-conflict-markers: Workers offered it have rarely used it, compared with other learnings.
 +
-+Learnings used when offered: 25%. Dangling Why pointers: 1.
++Learnings used when offered: 26%. Dangling Why pointers: 1.
 diff --git a/learnings/ci.yaml b/learnings/ci.yaml
 --- a/learnings/ci.yaml
 +++ b/learnings/ci.yaml
-@@ -260,1 +260,2 @@
+@@ -125,1 +125,2 @@
 -  lifecycle: active
-+  # knowledge gardener: retire squash-trailer-gate-task-authoring-lane
++  # knowledge gardener: retire ci-shard-one-eight-refuses-conflict-markers
 +  lifecycle: superseded

@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 4
   status: queued
@@ -18,3 +18,13 @@
       proof: "grep: test/preflight-progress-streaming\\.test\\.ts in src/lib/affected-suites.ts"
     - claim: "a regression test selects test/preflight-progress-streaming.test.ts for each recorded edge"
       proof: "grep: test/preflight-progress-streaming\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.92
+    reasons:
+      - "The filed plan scopes a selector-edge repair and regression coverage to two matching implementation/test files."
+      - "The supplied family track record reports 8 merged and 0 declined tasks, supporting established practice."
+      - "The filing-time gates report no concerning condition, and the stated scope identifies no operator-only decision or escalation-triggering action."
+    judged_at: "2026-10-09T23:04:13.055Z"
+    pin: "a881634b1191b820b1b5676cb1b5407f619173e6d4e23374e9299a685640f521"

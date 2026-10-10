@@ -27,7 +27,42 @@ export interface Fixture {
   archive: string;
   rootfs: string;
   lsofList: string;
+  /** The flock a case runs by hand (a holder of the janitor's lock): the host's, or the port below. */
+  flock: string;
   env: Record<string, string>;
+}
+
+/**
+ * The janitor's whole-pass lock is util-linux `flock -n -E 73 9`, and macOS ships no flock, so on a
+ * Mac every case reached "REFUSE: cannot acquire janitor lock" and exited 2 before judging anything.
+ * Where no flock is on PATH the fixture lends this port instead: the same flock(2) exclusive lock
+ * (perl's flock), in the two forms the suites use, the inherited-descriptor form the script runs and
+ * the file-and-command form a case uses to hold the lock. A host with the real flock keeps using it.
+ */
+const FLOCK_PORT = `#!/usr/bin/env perl
+use strict; use warnings; use Fcntl qw(:flock);
+my ($nb, $conflict) = (0, 1);
+while (@ARGV && $ARGV[0] =~ /^-/) {
+  my $o = shift @ARGV;
+  if ($o eq "-n") { $nb = 1 } elsif ($o eq "-E") { $conflict = shift @ARGV } else { exit 64 }
+}
+my $target = shift @ARGV;
+defined $target or exit 64;
+my $fh;
+if (!@ARGV && $target =~ /^[0-9]+$/) { open($fh, "<&=", $target) or exit 66 }
+else { open($fh, "<", $target) or open($fh, ">>", $target) or exit 66 }
+flock($fh, LOCK_EX | ($nb ? LOCK_NB : 0)) or exit $conflict;
+exit 0 unless @ARGV;
+my $rc = system @ARGV;
+exit($rc == -1 ? 127 : $rc >> 8);
+`;
+
+function hostFlock(bin: string): string | undefined {
+  if (spawnSync("sh", ["-c", "command -v flock"], { encoding: "utf8" }).status === 0) return undefined;
+  const port = join(bin, "flock-port");
+  writeFileSync(port, FLOCK_PORT);
+  chmodSync(port, 0o755);
+  return port;
 }
 
 export function fixture(): Fixture {
@@ -50,10 +85,13 @@ export function fixture(): Fixture {
   writeFileSync(fsid, `#!/usr/bin/env bash\nif [ "$1" = "${rootfs}" ] || [[ "$1" = "${scratch}"* ]]; then echo 1; else echo "\${FAKE_ARCHIVE_FSID:-2}"; fi\n`);
   writeFileSync(join(bin, "docker"), "#!/usr/bin/env bash\nexit 0\n");
   for (const f of [df, lsof, fsid, join(bin, "docker")]) chmodSync(f, 0o755);
+  const port = hostFlock(bin);
 
   return {
     root, home, scratch, archive, rootfs, lsofList,
+    flock: port ?? "flock",
     env: {
+      ...(port === undefined ? {} : { RMD_CLEANUP_FLOCK: port }),
       RMD_CLEANUP_HOME: home,
       RMD_CLEANUP_SCRATCH_ROOTS: "",
       RMD_CLEANUP_SCRATCH_PARENTS: "",

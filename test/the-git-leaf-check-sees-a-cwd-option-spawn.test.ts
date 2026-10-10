@@ -21,6 +21,14 @@ const widenedLeafSiteViolations: NonNullable<typeof census.widenedLeafSiteViolat
 
 const kinds = (source: string) => widenedGitSites(source).map((site) => `${site.kind}@${site.fn ?? "-"}`);
 
+// Planting tests need only their own sites; a live src/ walk races sibling scratch-file cleanup.
+function plantedSources(): Map<string, string> {
+  const allowed = WIDENED_SITE_EXCEPTIONS["src/lib/worker-provider.ts"]!.count;
+  return new Map([
+    ["src/lib/worker-provider.ts", 'run("git", ["status"]);\n'.repeat(allowed)],
+  ]);
+}
+
 test("W1-T6123: the widened count sees a planted cwd-option spawn, a helper call and a positional -C", () => {
   const source = [
     'import { execFileSync, spawnSync as ss } from "node:child_process";',
@@ -85,7 +93,7 @@ test("W1-T6123: the cwd-option git spawns in worker-provider.ts and the known mi
 });
 
 test("W1-T6123: a cwd-option git spawn into a worktree added to a src file fails the census naming that file", () => {
-  const texts = readAll!();
+  const texts = plantedSources();
   const spawn = '\nspawnSync("git", ["status"], { cwd: worktreePath });\n';
   const grown = new Map(texts);
   grown.set("src/lib/worker-provider.ts", `${texts.get("src/lib/worker-provider.ts")}${spawn}`);
@@ -98,9 +106,45 @@ test("W1-T6123: a cwd-option git spawn into a worktree added to a src file fails
 });
 
 test("W1-T6123: a -C argv under a name W1-T6106 never listed fails the census naming its file", () => {
-  const grown = new Map(readAll!());
+  const grown = plantedSources();
   grown.set("src/lib/a-new-file.ts", '\nexecFileSync("git", ["-C", opts.cwd, "commit", "-m", message]);\n');
   assert.deepEqual(widenedLeafSiteViolations(grown), [
     "src/lib/a-new-file.ts: 1 raw git -C/cwd site(s) > 0 — route each through hostWorktreeGit (src/lib/worktree-git.ts) or reason it in WIDENED_SITE_EXCEPTIONS",
   ]);
+});
+
+test("W1-T7273 pins the cause of the intermittent failure", () => {
+  const file = "src/lib/worker-provider.ts";
+  const scratch = "src/lib/vanished-scratch.ts";
+  const live = plantedSources();
+  live.set(scratch, 'run("git", ["status"]);\n');
+  const order: string[] = [];
+  const texts = readAll!(
+    () => {
+      const listed = [...live.keys()];
+      order.push("listed");
+      live.delete(scratch); // force cleanup AFTER listing, BEFORE the read
+      order.push("deleted");
+      return listed;
+    },
+    (path) => {
+      order.push(`read:${path}`);
+      const source = live.get(path);
+      if (source === undefined) {
+        throw Object.assign(new Error(`ENOENT: removed after listing: ${path}`), { code: "ENOENT" });
+      }
+      return source;
+    },
+  );
+  assert.deepEqual(order, ["listed", "deleted", `read:${file}`, `read:${scratch}`]);
+  assert.deepEqual([...texts.keys()], [file]);
+  assert.deepEqual(widenedLeafSiteViolations(texts), []);
+
+  const first = plantedSources();
+  first.set(scratch, 'run("git", ["status"]);\n');
+  assert.equal(widenedLeafSiteViolations(first).length, 1, "control: a sibling site poisons a live population");
+  first.delete(file);
+  const next = plantedSources();
+  assert.deepEqual(widenedLeafSiteViolations(next), [], "the next planting test owns a fresh population");
+  assert.ok(next.has(file), "a previous test's cleanup cannot delete this test's fixture");
 });

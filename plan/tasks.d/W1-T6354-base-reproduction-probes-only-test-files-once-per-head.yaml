@@ -12,7 +12,7 @@
   plan_refs: []
   files: [src/run-task.ts, test/base-reproduction-probes-only-test-files-once-per-head.test.ts]
   status: queued
-  priority: 3
+  priority: 1.5 # operator-2026-10-09: sweep churn: 570 uncached base-reproduction probes (6,097 s of test time) in 21 h, #10296 probed 25x on head 305ae61
   attempts: 0
   rationale: |
     MEASURED 2026-10-08 (core ledger): W1-T6153's sweep.base_reproduction rows at 06:28, 06:48, 07:00, 07:12 and

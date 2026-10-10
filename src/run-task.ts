@@ -1,4 +1,5 @@
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
+import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-update.js";
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
   loadCapabilityInspectionSource, readInspectionJson } from "./lib/capability-inspection.js";
 import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration, type ReadGeneration } from "./lib/read-plane.js";
@@ -28,6 +29,7 @@ import { mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync } from "n
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { fixRoundBaseHead } from "./lib/fix-round-base.js";
+import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapplyPorts } from "./lib/fix-round-reapply.js";
 import { CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
   type BaseChangedFiles, type JobRequeueOutcome } from "./lib/sweep.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor, type GhAsyncExecutor } from "./lib/github-transport.js";
@@ -213,6 +215,7 @@ import { realThreadDecider, registryThreadItems, type ThreadDecisionContext } fr
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
+import { checkpointRemaining, isWipSubject, prTitleFromBranchCommits, renderContinuationPrompt } from "./lib/unfinished-checkpoint.js";
 import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
 import {
@@ -231,6 +234,7 @@ import {
   scopeGuardOutOfScopeFiles,
   type FixEvidence,
   type FixReviewFinding,
+  type PriorPartialWork,
   type FixMode,
 } from "./lib/prompt-render.js";
 export {
@@ -2817,6 +2821,7 @@ export function retroErrorLedgerFields(error: unknown): Record<string, unknown> 
 // src/lib/report-commands.ts, which imports it directly from lib/worker.js.
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 import { sweepMemoryReservations } from "./lib/host-memory-ledger.js";
+import { installShadowMemorySink } from "./lib/host-memory-shadow.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
 // runaway-turns bound below — see `deriveRunawayTurnBound`'s own doc for why this borrows that
 // row rather than inventing a second, duplicate "N times median" knob just because the unit is
@@ -4792,6 +4797,18 @@ export function lastCommitSubject(worktreePath: string): string | undefined {
   }
 }
 
+/** A build PR's title: the branch's newest non-checkpoint subject, never a `wip:` one (#10482). */
+export function branchPrTitle(worktreePath: string): string | undefined {
+  try {
+    const subjects = hostWorktreeGit(worktreePath, ["log", "--format=%s", "origin/main..HEAD"]).split("\n");
+    return prTitleFromBranchCommits(subjects) ?? lastCommitSubject(worktreePath);
+  } catch (e) {
+    // An unreadable range falls back to the tip subject, the pre-#10482 behaviour.
+    void e;
+    return lastCommitSubject(worktreePath);
+  }
+}
+
 /**
  * W1-T1012 (THE FIX IS AT THE WRITE): append the `Remudero-Task: <id>` trailer to the
  * worktree's CURRENT last commit — the record `gh pr merge --squash` actually keeps.
@@ -5359,16 +5376,21 @@ function ownerRepoFromPrUrl(prUrl: string): { owner: string; repo: string } | un
  * an honest reuse, not a bypass; a dedicated label is a one-line follow-up once that file is in
  * scope for some other task.
  */
-export async function updateBranchViaGh(pr: ArmedStalledPr): Promise<UpdateBranchOutcome> {
+export async function updateBranchViaGh(pr: ArmedStalledPr, record?: BranchUpdateRecorder): Promise<UpdateBranchOutcome> {
   assertLiveWriteAllowed("gh-pr-merge", `requesting the update-branch REST endpoint on ${pr.prUrl}`);
   const ownerRepo = ownerRepoFromPrUrl(pr.prUrl);
   if (!ownerRepo) return "error";
+  const fields = { repo: `${ownerRepo.owner}/${ownerRepo.repo}`, prNumber: pr.prNumber,
+    via: `sweep:${pr.updateReason ?? "refresh"}`, expectedHeadSha: pr.headSha };
   try {
     ghExec(ghUpdateBranchArgv(ownerRepo.owner, ownerRepo.repo, pr.prNumber, pr.headSha), { stdio: "pipe" });
+    recordBranchUpdate({ ...fields, outcome: "updated" }, record);
     return "updated";
   } catch (e) {
     const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
-    return classifyUpdateBranchFailure(msg);
+    const outcome = classifyUpdateBranchFailure(msg);
+    recordBranchUpdate({ ...fields, outcome, error: msg }, record);
+    return outcome;
   }
 }
 
@@ -10058,13 +10080,19 @@ export function ghUpdateBranch(
   repo: string,
   prNumber: number,
   exec: typeof execFileSync = execFileSync,
+  via = "fix-rung",
+  record?: BranchUpdateRecorder,
 ): { ok: boolean; error?: string } {
   assertLiveWriteAllowed("gh-pr-update-branch", `updating the base of ${owner}/${repo}#${prNumber}`);
+  const fields = { repo: `${owner}/${repo}`, prNumber, via };
   try {
     exec("gh", ghUpdateBranchArgv(owner, repo, prNumber), { stdio: "pipe" });
+    recordBranchUpdate({ ...fields, outcome: "updated" }, record);
     return { ok: true };
   } catch (e) {
-    return { ok: false, error: String((e as Error)?.message ?? e) };
+    const error = String((e as Error)?.message ?? e);
+    recordBranchUpdate({ ...fields, outcome: "error", error }, record);
+    return { ok: false, error };
   }
 }
 
@@ -10939,6 +10967,9 @@ export async function runFixRung(opts: {
   actionableGateFailures?: ActionableGateFailure[];
   /** W1-T3306: capped-green evidence that makes a same-head PR-body repair actionable. */
   proofDiscrimination?: ProofDiscriminationEvidence;
+  /** W1-T6434: a dead fix owner's preserved patch at the dispatched head (see PriorPartialWork). Offered to
+   *  every strike that still targets that head; once a push moves the head it is no longer shown. */
+  priorPartialWork?: PriorPartialWork;
   deps: {
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
     /** W1-T3868: test seam for the harness-owned commit decision; production uses the shared helper. */
@@ -12457,7 +12488,7 @@ export async function runFixRung(opts: {
     // construction, never a special case. Read again after the push below (`currentCiFailures`,
     // refreshed by `deps.fetchCiFailures`) to see whether the strike that just ran moved anything.
     const priorCiFailures = currentMergeConflict === undefined && noReviewYet ? currentCiFailures ?? [] : undefined;
-    const evidence: FixEvidence =
+    const evidenceBase: FixEvidence =
       currentMergeConflict !== undefined
         ? { mergeConflict: currentMergeConflict, constraint: opts.constraint }
         : noReviewYet
@@ -12486,6 +12517,11 @@ export async function runFixRung(opts: {
             proofDiscrimination: proofDiscriminationNow,
             constraint: opts.constraint,
           };
+    // W1-T6434: only while this strike still targets the head the patch was preserved at.
+    const evidence: FixEvidence =
+      opts.priorPartialWork && priorHeadSha === opts.initialReview.headSha
+        ? { ...evidenceBase, priorPartialWork: opts.priorPartialWork }
+        : evidenceBase;
     const fixMode = deriveFixMode(evidence, PROOF_REPAIR_FIX_MODE_RULES);
     // W1-T3727: WHO HOLDS THIS ROUND'S GIT, read once by BOTH the prompt and the tool bound so
     // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.
@@ -17634,6 +17670,7 @@ export async function pushFixRoundPrechecked(
   ports: CoveragePrecheckPorts = {},
   push: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => void | Promise<void> = pushFixRound,
   priorHeadSha?: string,
+  reapply: { ports?: FixRoundReapplyPorts; attempted?: boolean } = {},
 ): Promise<void> {
   // W1-T5227: a head carrying a conflict marker never leaves the worktree, whoever committed it.
   let markerFiles: string[] = [];
@@ -17651,7 +17688,17 @@ export async function pushFixRoundPrechecked(
   }
   const refusal = coveragePushRefusal(await coveragePrecheck(wt, ports), log, "rung.fix_push");
   if (refusal) throw new FixRoundPushError("run-error", refusal, refusal.text);
-  await push(wt, branch, expectedHeadSha, priorHeadSha);
+  try {
+    await push(wt, branch, expectedHeadSha, priorHeadSha);
+  } catch (error) {
+    // A census refusal is the round's own red; only a leased push the remote outran may be re-applied, once.
+    if (!(error instanceof FixRoundPushError) || error.refusal !== undefined || reapply.attempted ||
+      priorHeadSha === undefined || expectedHeadSha === undefined) throw error;
+    const result = await reapplyFixRoundOnMovedTip({ wt, branch, leaseBaseSha: priorHeadSha, committedSha: expectedHeadSha },
+      reapply.ports ?? realFixRoundReapplyPorts, log);
+    if (!result.reapplied) throw error;
+    await pushFixRoundPrechecked(log, wt, branch, result.mergedHeadSha, ports, push, result.remoteTip, { ...reapply, attempted: true });
+  }
 }
 
 export type CensusPushRungOutcome =
@@ -19202,6 +19249,42 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       if (resumeFail) return resumeFail;
     }
 
+    // A worker that stops on a `wip:` checkpoint tip has not finished (#10482): resume it once.
+    const tipSubject = lastCommitSubject(worktreePath);
+    if (tipSubject !== undefined && isWipSubject(tipSubject) && !parseReport(fullText(impl))?.prUrl) {
+      let tipBody = "";
+      try {
+        tipBody = hostWorktreeGit(worktreePath, ["log", "-1", "--format=%b"]);
+      } catch (e) {
+        // An unreadable body only loses the remaining hint; the resume still runs with a generic prompt.
+        void e;
+      }
+      const remaining = checkpointRemaining(tipBody);
+      log("implement.unfinished", { subject: tipSubject, remaining: remaining ?? null });
+      impl = account(
+        await spawn({
+          cwd: worktreePath,
+          permissionMode: "bypassPermissions",
+          settingsFile,
+          resumeSessionId: impl.sessionId,
+          model: implementMount.model,
+          mountProvider: implementMount.provider,
+          effort: implementMount.effort,
+          maxTurns: implementMount.maxTurns,
+          maxBudgetUsd: budgetUsd,
+          config: implementConfig,
+          tools: implementTools === undefined ? undefined : [...implementTools],
+          ...(ruleLookup === undefined ? {} : { ruleLookup }),
+          ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
+          ...cashTrialSpawn,
+          prompt: renderContinuationPrompt(tipSubject, remaining, harnessOwnsGit),
+        }),
+      );
+      log("implement.continued", { session_id: impl.sessionId, cost_usd: impl.costUsd, num_turns: impl.numTurns, subtype: impl.subtype, ...workerLedgerFields(impl) });
+      const continueFail = failOnWorkerError(impl, "implement.continued");
+      if (continueFail) return continueFail;
+    }
+
     // ── QUESTION contract (non-blocking) — log, don't stall (§2).
     const question = parseQuestion(fullText(impl));
     if (question) {
@@ -19603,7 +19686,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
       try {
         // W1-T6034: the filed proofs run as awaited children, off the daemon loop.
-        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath));
+        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, branchPrTitle(worktreePath));
       } catch (err) {
         if (!(err instanceof PrOpenRefusedError)) throw err;
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
@@ -55008,6 +55091,9 @@ export async function main(
   if (cmd === "serve") markLedgerProcessActor("service");
   else if (cmd === "deploy-run") markLedgerProcessActor("host_automation");
   else if (cmd === "daemon") markDaemonProcessActor();
+  // W1-T7094: every worker start this process makes writes its counterfactual `memory_budget.shadow` row to the
+  // ledger of the root that start names. The recorder never throws and never delays the start; SHADOW ONLY.
+  installShadowMemorySink((path, row) => appendLedger(path, row));
   // W1-T2893: `arg` (== rest[0]) is no longer read here — each HANDLERS entry that needs it
   // (registry.ts's REGISTRY, built above) derives its own from `rest`, since the old flat
   // if-ladder this replaced is gone and this was its only remaining reader in main() itself.

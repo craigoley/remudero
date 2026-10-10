@@ -1,7 +1,7 @@
 // W1-T5904 — the flow gardener measures each PR stage from the ledger and GitHub once a day, compares
 // it with a 7-day baseline per PR class, and files ONE follow-up per stage that slowed past the factor.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -104,6 +104,11 @@ function corpus(over: { planReady?: number[]; codeReady?: number[]; codeTtm?: nu
 function harness(rows: Row[], opts: { clockMs?: number; plan?: () => Array<{ id: string; origin?: string; status?: string; retirement?: string }> } = {}) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}flow-gardener-`));
   mkdirSync(join(root, "state"), { recursive: true });
+  // The stage owners are on main, as the files a follow-up declares must be for lint-plan's admission.
+  for (const owner of ["src/lib/sweep.ts", ".github/workflows/ci.yml"]) {
+    mkdirSync(join(root, owner, ".."), { recursive: true });
+    writeFileSync(join(root, owner), "// fixture\n");
+  }
   const landed: Array<{ paths: string[]; title: string; body: string }> = [];
   const events: Array<{ step: string; extra: Record<string, unknown> }> = [];
   let clockMs = opts.clockMs ?? NOW;
@@ -118,11 +123,6 @@ function harness(rows: Row[], opts: { clockMs?: number; plan?: () => Array<{ id:
       dispose: () => {},
     }),
     log: (step: string, extra: Record<string, unknown> = {}) => { events.push({ step, extra }); },
-    // lint-plan refuses today's flow follow-up (verify: human outside every parked machine shape, a new
-    // test file admission does not allow, and a sizing span its shard name does not own), so the real
-    // landing guard records a filing failure. These cases test what follows a landing, so the guard
-    // stands down here; the refusal is its own defect.
-    landingRefusal: () => undefined,
   };
   let minted = 0;
   const ciReads: string[] = [];
@@ -145,14 +145,12 @@ function harness(rows: Row[], opts: { clockMs?: number; plan?: () => Array<{ id:
   };
 }
 
-test("the flow gardener's real landing guard records a follow-up lint-plan refuses as a filing failure, never a PR", async (t) => {
+test("a follow-up its landing guard refuses is a recorded filing failure, never a PR", async (t) => {
   const h = harness(corpus());
   t.after(h.cleanup);
-  const { landingRefusal: _standDown, ...guarded } = h.deps;
-  await runFlowGardener(guarded, h.sources);
+  await runFlowGardener({ ...h.deps, landingRefusal: () => "refused by the fixture" }, h.sources);
   assert.equal(h.landed.length, 0, "a refused follow-up never opens its PR");
-  assert.match(String(h.steps("flow.filing_failed")[0]?.extra.error), /machine-filing admission/);
-  void _standDown;
+  assert.match(String(h.steps("flow.filing_failed")[0]?.extra.error), /machine-filing admission: refused by the fixture/);
 });
 
 test("over a fixture ledger the flow gardener reports per-class stage p50/p90 and baselines and files one follow-up for a doubled plan ready-to-merged stage naming its three slowest PRs", async (t) => {

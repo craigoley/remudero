@@ -228,3 +228,39 @@ test("a failed scratch directory logs its reason and dispatches without dead tra
     rmSync(fx.root, { recursive: true, force: true });
   }
 });
+
+test("W1-T6434: runFixRung hands a preserved fix-owner patch at this head to the fix worker's prompt", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t6434-wiring-"));
+  const stopped = new Error("fixture stops after observing the worker dispatch");
+  const head = "c".repeat(40);
+  const recoveryRef = `refs/rmd-recovery/fix-dirty/run-W1-T6434-fixture/${head}/${"d".repeat(40)}`;
+  let prompt = "";
+  try {
+    const criterion = { claim: "the fix lands", proof: "unit test: the fix lands", met: false,
+      reason: "still blocked", proof_exec: "not_executable" as const };
+    const mount = { model: "sonnet", effort: "medium", maxTurns: 10, contextBudget: 120000 };
+    await assert.rejects(runFixRung({
+      taskId: "W1-T6434", runId: "W1-T6434-run", task: { id: "W1-T6434", title: "preserved patch", files: ["src/lib/sweep.ts"] },
+      prUrl: "https://github.com/acme/remudero/pull/6434", branch: "run-W1-T6434-1",
+      worktreePath: root, initialSessionId: "", mount, settingsFile: "unused",
+      config: { root } as never, budgetUsd: 1, strikeCap: 1,
+      initialReview: { state: "failure", criteria: [criterion], testTheater: false, summary: "blocked",
+        floorDegraded: false, capped: false, keywordOnly: false, planOnly: false, headSha: head,
+        reviewerOutcome: "failure" },
+      reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: root, reviewerMount: mount },
+      priorPartialWork: { recoveryRef, stagedPaths: ["src/staged-fix.ts"], excerpt: "export const staged = 2;", excerptTruncated: false },
+      deps: {
+        spawn: async (args: SpawnWorkerArgs): Promise<never> => { prompt = args.prompt; throw stopped; },
+        waitForCiGreen: async () => "green", runReview: async () => assert.fail("no review"),
+        push: () => assert.fail("no push"), issues: {} as never, account: (result: unknown) => result,
+        ledgerPath: join(root, "ledger.ndjson"), ledgerLines: () => [],
+        fetchPrBody: async () => "Remudero-Task: W1-T6434",
+        fetchPrDiffFiles: async () => ["src/lib/sweep.ts"], log: () => {}, say: () => {},
+      },
+    } as never), (error) => error === stopped);
+    assert.match(prompt, /PRIOR PARTIAL WORK/);
+    assert.ok(prompt.includes(`RECOVERY REF: ${recoveryRef}`), "the rung carries the preserved patch into the worker prompt");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

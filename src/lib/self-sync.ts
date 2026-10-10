@@ -1,4 +1,5 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -45,6 +46,7 @@ export const SELF_SYNC_GUARD_ENV = "RMD_SELF_SYNC_DONE";
 export { fetchOriginRetryingRefLock, type GitRunner } from "./git-fetch-retry.js";
 import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, killAfterGrace, type AsyncGitRunner, type GitRunner } from "./git-fetch-retry.js";
 import { systemClock, type Clock } from "./clock.js";
+import { isTestRunner } from "./live-write-guard.js";
 
 /** The real {@link AsyncGitRunner}: `git -C <repoDir>` off the loop, killed (SIGTERM, then SIGKILL
  *  after grace) when its bound aborts. Exported for the retro trigger merged-commits read. */
@@ -139,6 +141,13 @@ function alreadySelfSynced(env: NodeJS.ProcessEnv | Record<string, string | unde
   return env[SELF_SYNC_GUARD_ENV] === "1" || process.env[SELF_SYNC_GUARD_ENV] === "1";
 }
 
+const OWN_CHECKOUT = fileURLToPath(new URL("../../", import.meta.url));
+const canonicalPath = (path: string): string => (existsSync(path) ? realpathSync(path) : resolve(path));
+
+export function testRunnerOnItsOwnCheckout(repoDir: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  return isTestRunner(env) && canonicalPath(repoDir) === canonicalPath(OWN_CHECKOUT);
+}
+
 /**
  * The W1-T79 entry-point freshness check. Compares local HEAD to `origin/main` in `repoDir`
  * and reacts per the contract in the module doc above; read-only except on `"synced"` (a real
@@ -161,6 +170,9 @@ export function checkCliFreshness(
   if (isCiEnv(env)) {
     // A CI runner checks out a specific ref, which always reads as "diverged" from origin/main;
     // without this guard every CI invocation would exit 1 on its own normal PR checkout.
+    return { status: "guarded" };
+  }
+  if (deps.git === undefined && testRunnerOnItsOwnCheckout(repoDir)) {
     return { status: "guarded" };
   }
 

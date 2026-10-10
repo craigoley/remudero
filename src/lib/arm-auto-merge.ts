@@ -33,6 +33,7 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { loadConfig, type Config } from "./config.js";
 import { ledgerPathFor } from "./ledger-path.js";
+import { recordBranchUpdate, type BranchUpdateRecorder } from "./branch-update.js";
 import {
   decidePlanPrMergeSafety,
   planPrRefreshesFromLedger,
@@ -342,17 +343,22 @@ export function ghUpdateBranch(
   repo: string,
   prNumber: number,
   exec: typeof execFileSync = execFileSync,
+  record?: BranchUpdateRecorder,
 ): { ok: boolean; error?: string } {
-  return runStepsSync(updateBranchSteps(owner, repo, prNumber, (args) => exec("gh", args, { stdio: "pipe" })));
+  return runStepsSync(updateBranchSteps(owner, repo, prNumber, (args) => exec("gh", args, { stdio: "pipe" }), record));
 }
 
-function* updateBranchSteps(owner: string, repo: string, prNumber: number, exec: RestReader): Steps<{ ok: boolean; error?: string }> {
+function* updateBranchSteps(owner: string, repo: string, prNumber: number, exec: RestReader, record?: BranchUpdateRecorder): Steps<{ ok: boolean; error?: string }> {
   assertLiveWriteAllowed("gh-pr-update-branch", `updating the base of ${owner}/${repo}#${prNumber}`);
+  const fields = { repo: `${owner}/${repo}`, prNumber, via: "arm-direct-merge-preflight" };
   try {
     yield* step(() => exec(ghUpdateBranchArgv(owner, repo, prNumber)));
+    recordBranchUpdate({ ...fields, outcome: "updated" }, record);
     return { ok: true };
   } catch (e) {
-    return { ok: false, error: String((e as Error)?.message ?? e) };
+    const error = String((e as Error)?.message ?? e);
+    recordBranchUpdate({ ...fields, outcome: "error", error }, record);
+    return { ok: false, error };
   }
 }
 

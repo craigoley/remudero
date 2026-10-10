@@ -1,0 +1,53 @@
+- id: W1-T7534
+  title: "ONE UNDATABLE TASK NEVER DISABLES COST-OF-DELAY ORDERING — the filing scan's id regex cannot read a letter-suffixed id such as W1-T12e, and costOfDelayContext refuses the WHOLE fleet's context on that one task, so W1-T4064's stride order has fallen back to priority-then-id on every pass since it merged"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high # Rule 19: one concern — an open task the filing history cannot date is left unscored instead of refusing every task's score
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-09: backlog survey of why high-value tasks sit (core ledger dispatch.cost_of_delay.fallback rows)"
+  plan_refs: [W1-T4064, W1-T3412]
+  files: [src/lib/dispatch-value.ts, src/run-task.ts, test/one-undatable-task-never-disables-cost-of-delay-ordering.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-09 (core ledger /home/craigoleyagent/rmd-state2/state/ledger.ndjson, read-only copy):
+    every `dispatch.cost_of_delay.fallback` row since W1-T4064 merged (#9079, 2026-10-04T13:02Z) carries the
+    same single reason, `W1-T12e:missing-filing-date`: 5 rows on 10-04, 14 on 10-05, 15 on 10-06, 19 on 10-07,
+    16 on 10-08 and 21 on 10-09. No `dispatch.cost_of_delay.ready` row is retained. The stride scheduler has
+    never been live.
+    ORIGIN. src/run-task.ts readDispatchFilingSnapshot dates each id with
+    `/^\+\s*(?:-\s*)?id:\s*["']?([A-Z][A-Z0-9]*-T\d+)\b/`. For `+- id: W1-T12e` the `\d+` stops at "12" and the
+    `\b` between "2" and "e" fails, so the id never enters filedAtByTaskId (checked with node on 2026-10-09).
+    plan/tasks.yaml still declares W1-T12e (verify: human, an open operator drill) and other letter-suffixed ids
+    (W1-T1B, W1-T3B, W1-T9a ...).
+    AMPLIFIER. src/lib/dispatch-value.ts costOfDelayContext walks every open task and returns
+    `{ kind: "refused", reasons: [`${task.id}:missing-filing-date`] }` for the first one it cannot date. One
+    task the scheduler would never dispatch (verify: human) therefore disables ordering for all of them.
+    COST. With `costOfDelayFallback` set, compareDispatch (src/lib/drain.ts) also skips the measured class value
+    and the open-dependent fanout, so inside a priority tier the queue runs in id order: the oldest ids go
+    first, whatever their measured value. On 2026-10-09 the ready queue held 186 dependency-clear tasks
+    (69 at priority 4, 35 at 3, 23 at 2, 16 at 1), so the tie-break decides most of the order.
+  design: |
+    1. Root cause: the filing scan dates every id the plan loader accepts, including a letter-suffixed one.
+       Replace the trailing `\b` with an id pattern that matches the whole token (for example
+       `[A-Z][A-Z0-9]*-T\d+[A-Za-z]*`), so `W1-T12e` is dated from its first `+- id:` line.
+    2. Containment: in costOfDelayContext an open task with no usable filing date gets no cost-of-delay score
+       and no stride pass, and the pass continues for every other task. compareDispatch already orders an
+       unscored task after the scored population of its tier ("Unscored tasks follow the scored population").
+       Ledger the undatable ids once per plan tree on the existing `dispatch.cost_of_delay.ready` row (a field
+       such as `unscored: [...]`), so the gap stays visible without disabling the ordering.
+    The other refusals (`unmeasured-cost`, `unmeasured-score`, an unreadable snapshot) are out of scope.
+  acceptance:
+    - claim: "an open letter-suffixed task id is dated by the filing scan and does not refuse the cost-of-delay context"
+      proof: 'grep: test("W1-T7534: a letter-suffixed task id is dated and the cost-of-delay context is ready" in test/one-undatable-task-never-disables-cost-of-delay-ordering.test.ts'
+    - claim: "an open task with no filing date is left unscored while every other open task keeps its score and stride"
+      proof: 'grep: test("W1-T7534: an undatable open task is unscored and the rest of the queue keeps its stride order" in test/one-undatable-task-never-disables-cost-of-delay-ordering.test.ts'
+  falsifier: |
+    Leave the `\d+\b` regex: the fixture history that files `W1-T12e` returns no filing date for it, and the first
+    test fails. Leave the early `return { kind: "refused" ... missing-filing-date }`: the fixture with one
+    undatable open task beside two datable ones returns `refused`, and the second test fails.

@@ -12,7 +12,7 @@
   plan_refs: [W1-T5955, W1-T5920]
   files: [src/run-task.ts, test/a-flake-rerun-releases-its-branch-claim-before-its-ci-wait.test.ts]
   status: queued
-  priority: 3
+  priority: 2 # operator-2026-10-09: fix lane: the flake rerun path still holds its branch claim across the CI wait (runFixRung rerun-once)
   attempts: 0
   rationale: |
     READ 2026-10-06 on origin/main (src/run-task.ts, runFixRung, `fixAction.kind === "rerun-once"`): after the

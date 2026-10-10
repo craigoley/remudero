@@ -327,3 +327,15 @@ test("W1-T4914: a spawn that throws synchronously is unreadable, never a rejecti
   assert.deepEqual(await git(["rev-parse", "bad\0arg"]), { status: null, stdout: "" });
   assert.equal((await probeMerge({ headSha: "a".repeat(40), mainSha: "b".repeat(40), git })).verdict, "unreadable");
 });
+
+test("a PR GitHub reads as dirty is probed before older clean-looking PRs", async () => {
+  const { git } = mergeTreeGit(MAIN_A, { status: 0, stdout: `${TREE}\n` });
+  const fx = recorder();
+  const prs = [
+    view({ prNumber: 1, headSha: "h1", lastActivityAt: "0001" }),
+    view({ prNumber: 2, headSha: "h2", lastActivityAt: "0002" }),
+    view({ prNumber: 9, headSha: "h9", lastActivityAt: "0009", mergeableState: "dirty" }),
+  ];
+  await probe(prs, fx, { git, limit: 1 });
+  assert.deepEqual(fx.rows.map((r) => r.pr_number), [9]);
+});

@@ -1,4 +1,5 @@
 import { recordCashRequestEffort, type CashRequestEffortCount } from "./cash-request-effort.js";
+import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
 import { CashResponsesConversation } from "./cash-responses.js";
 import { randomUUID } from "node:crypto";
 import { execFile as execFileChild, execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
@@ -1524,6 +1525,8 @@ export async function readCodexRuntime(
     /** Real-time source for the deadline-overrun check. Injected ONLY by tests: a fake clock in
      *  production would defeat the very stall this measurement exists to detect. */
     monotonicNow?: () => number;
+    /** Receives each spawned app-server's exit, so an off-thread probe can let it be reaped before its thread ends. */
+    onChildSpawned?: (exited: Promise<void>) => void;
   },
 ): Promise<CodexRuntimeResult> {
   const spawn = deps.spawn ?? ((command, args, options) => spawnChild(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] }));
@@ -1536,6 +1539,10 @@ export async function readCodexRuntime(
     // A synchronous spawn failure excludes Codex without erasing its reason.
     return codexRuntimeFailure(`app-server spawn failed: ${(error as Error).message}`);
   }
+  deps.onChildSpawned?.(new Promise<void>((exited) => {
+    child.once("exit", () => exited());
+    child.once("error", () => exited());
+  }));
 
   return new Promise<CodexRuntimeResult>((resolve) => {
     let settled = false;
@@ -1664,7 +1671,7 @@ function codexCapacityHedgeDelay(timeoutMs: number): number {
 export async function readCodexRuntimeWithTimeoutHedge(
   config: Config,
   bin: string,
-  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & { clock: Pick<Clock, "now"> },
+  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & { clock: Pick<Clock, "now">; onChildSpawned?: (exited: Promise<void>) => void },
 ): Promise<CodexRuntimeResult> {
   const timeoutMs = deps.timeoutMs ?? 10_000;
   const hedgeDelayMs = codexCapacityHedgeDelay(timeoutMs);
@@ -1755,6 +1762,31 @@ export async function readCodexRuntimeWithTimeoutHedge(
       hedgeTimer = setTimeout(startHedge, remainingHedgeDelayMs);
     }
   });
+}
+
+/** Upper bound on waiting for a SIGKILLed app-server to exit before a probe thread reports. */
+export const CODEX_PROBE_REAP_GRACE_MS = 2_000;
+
+/**
+ * The off-thread probe's read. A child spawned on a worker thread is reaped by that thread's event
+ * loop, so the probe must not report (and be terminated) while a killed app-server is still
+ * unreaped: otherwise the dead child stays a zombie of the daemon process.
+ */
+export async function readCodexRuntimeAwaitingReap(
+  config: Config,
+  bin: string,
+  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & { clock: Pick<Clock, "now"> },
+  graceMs = CODEX_PROBE_REAP_GRACE_MS,
+): Promise<CodexRuntimeResult> {
+  const exits: Promise<void>[] = [];
+  const result = await readCodexRuntimeWithTimeoutHedge(config, bin, { ...deps, onChildSpawned: (exited) => exits.push(exited) });
+  let grace: NodeJS.Timeout | undefined;
+  await Promise.race([
+    Promise.all(exits),
+    new Promise<void>((done) => { grace = setTimeout(done, graceMs); }),
+  ]);
+  clearTimeout(grace);
+  return result;
 }
 
 export function readCodexRuntimeOffThread(
@@ -2055,7 +2087,7 @@ class CodexJsonlAccumulator {
     CODEX_EVENT_BYTE_KIND_KEYS.map((key) => [key, 0]),
   ) as Record<CodexEventByteKind, number>;
 
-  constructor(private nowMs: number, private readonly pendingFile?: string) {}
+  constructor(private nowMs: number, private readonly pendingFile?: string, private readonly observeToolLineage?: (raw: unknown) => void) {}
 
   push(chunk: string, nowMs = this.nowMs): void {
     this.nowMs = nowMs;
@@ -2170,12 +2202,14 @@ class CodexJsonlAccumulator {
     try {
       event = JSON.parse(line) as CodexJsonEvent;
     } catch {
+      this.observeToolLineage?.(null);
       this.eventBytes.malformed += Buffer.byteLength(line, "utf8") + 1;
       // Preserve malformed output in the returned error verdict instead of treating it as absence.
       this.errors.push(`unparseable Codex event: ${line.slice(0, 160)}`);
       this.failed = true;
       return;
     }
+    this.observeToolLineage?.(event);
     const eventType = typeof event.type === "string" ? event.type : undefined;
     const itemType = typeof event.item?.type === "string" ? event.item.type : undefined;
     const combined = itemType && eventType ? `${eventType}:${itemType}` : eventType;
@@ -4286,6 +4320,8 @@ export async function spawnFoundryClaudeWorker(
   selection: Pick<OpenWeightModelSelection, "model" | "effort">,
 ): Promise<OpenWeightWorkerResult> {
   const label = selection.model === "claude-haiku-5-5" ? "Haiku" : selection.model === "claude-sonnet-5-5" ? "Sonnet" : "Opus";
+  const toolLineage = createWorkerToolLineage({ provider: "cash-claude", root: config.root, runId: args.runId, taskId: args.taskId });
+  let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
   const clock = args.clock ?? systemClock;
   const startedAt = clock.now();
   let turns = 0;
@@ -4398,7 +4434,9 @@ export async function spawnFoundryClaudeWorker(
       text = payload.content.filter((block) => block.type === "text" && typeof block.text === "string")
         .map((block) => block.text as string).join("\n");
       const calls = payload.content.filter((block) => block.type === "tool_use");
+      for (const call of calls) observeWorkerToolLineage(toolLineage, { type: "tool_use", turnId: requestId, id: call.id, name: call.name });
       if (calls.length === 0) {
+        lineageEnd = "stream-ended";
         if (payload.stop_reason !== "end_turn") throw new Error(`cash ${label} ended without a complete turn (${String(payload.stop_reason)})`);
         if (!text.trim()) throw new Error(`cash ${label} ended with no visible text`);
         return reconcileBoundedProviderAttempt(openWeightResult({
@@ -4421,9 +4459,11 @@ export async function spawnFoundryClaudeWorker(
           result = await executeOpenWeightTool(call.name, call.input as Record<string, unknown>, args.cwd, checkEnv, args.workerHome, args.runCheck,
             { config, runId: args.runId, taskId: args.taskId, clock });
         } catch (error) {
+          observeWorkerToolLineage(toolLineage, { type: "tool_result", turnId: requestId, tool_use_id: call.id, is_error: true });
           // A failed tool invalidates this chain; never turn its error into success.
           throw new Error(`cash ${label} tool ${call.name} failed: ${error instanceof Error ? error.message : String(error)}`);
         }
+        observeWorkerToolLineage(toolLineage, { type: "tool_result", turnId: requestId, tool_use_id: call.id, is_error: false });
         results.push({ type: "tool_result", tool_use_id: call.id, content: JSON.stringify(result) });
       }
       messages.push({ role: "user", content: results });
@@ -4444,6 +4484,8 @@ export async function spawnFoundryClaudeWorker(
       ...(error instanceof OpenWeightDeploymentNotFoundError ? { deploymentAbsent: selection.model } : {}),
       error: error instanceof Error ? error.message : String(error),
     }), args.externalEffect);
+  } finally {
+    toolLineage.finish(lineageEnd);
   }
 }
 
@@ -4469,6 +4511,9 @@ export async function spawnOpenWeightWorker(
   selection: Pick<OpenWeightModelSelection, "model" | "effort">,
 ): Promise<OpenWeightWorkerResult> {
   if (isFoundryClaudeDeployment(selection.model)) return spawnFoundryClaudeWorker(args, config, selection);
+  const toolLineage = createWorkerToolLineage({ provider: selection.model === "gpt-6.1-sol" ? "cash-responses" : "cash-chat",
+    root: config.root, runId: args.runId, taskId: args.taskId });
+  let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
   const clock = args.clock ?? systemClock;
   const startedAt = clock.now();
   let promptTokens = 0;
@@ -4634,6 +4679,7 @@ export async function spawnOpenWeightWorker(
         throw new OpenWeightTruncatedReplyError(String(payload.choices?.[0]?.finish_reason), turnCompletionTokens);
       }
       const calls = Array.isArray(message.tool_calls) ? message.tool_calls as OpenWeightToolCall[] : [];
+      for (const call of calls) observeWorkerToolLineage(toolLineage, { type: "tool_use", turnId: requestId, id: call.id, name: call.function?.name });
       // UNFENCED ONLY WHEN A STRUCTURED REPLY WAS ASKED FOR. A prose lane may legitimately contain a
       // fenced code block as part of its answer, and unwrapping that would corrupt it; a lane that
       // requested `responseFormat` asked for a document, so a fence around the whole reply is a
@@ -4642,6 +4688,7 @@ export async function spawnOpenWeightWorker(
         text = args.responseFormat === undefined ? message.content : openWeightUnfence(message.content);
       }
       if (calls.length === 0) {
+        lineageEnd = "stream-ended";
         return reconcileBoundedProviderAttempt(
           openWeightResult({ model: selection.model, effort: selection.effort, requestEfforts, servedModels, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens, ...(usesResponses ? { actualCostUsd: budgetSettledUsd } : {}), budgetReservedUsd, budgetSettledUsd, webSearchAttempted, webSearchAccepted, webSearchRefused, webSearchUsd }),
           args.externalEffect,
@@ -4656,6 +4703,7 @@ export async function spawnOpenWeightWorker(
           throw new Error("openweight response requested an undeclared tool");
         }
         let content: string;
+        let toolFailed = false;
         try {
           // `web_search` is the one declared tool this process does not execute: the daemon brokers
           // it against a different API, with its own credential, and returns a document only when
@@ -4692,9 +4740,12 @@ export async function spawnOpenWeightWorker(
                 { config, runId: args.runId, taskId: args.taskId, clock },
               ));
         } catch (error) {
+          toolFailed = true;
+          observeWorkerToolLineage(toolLineage, { type: "tool_result", turnId: requestId, tool_use_id: id, is_error: true });
           if (usesResponses) throw new Error(`cash Sol 6.1 tool ${name} failed: ${error instanceof Error ? error.message : String(error)}`);
           content = JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
         }
+        if (!toolFailed) observeWorkerToolLineage(toolLineage, { type: "tool_result", turnId: requestId, tool_use_id: id, is_error: false });
         responses?.toolOutput(id, content);
         messages.push({ role: "tool", tool_call_id: id, content });
       }
@@ -4754,6 +4805,8 @@ export async function spawnOpenWeightWorker(
       }),
       args.externalEffect,
     );
+  } finally {
+    toolLineage.finish(lineageEnd);
   }
 }
 
@@ -4841,7 +4894,9 @@ async function spawnCodexWorkerInPrivateTemp(
 ): Promise<CodexWorkerResult> {
   const bin = resolveCodexBin(config);
   const startedAt = Date.now();
-  const stdout = new CodexJsonlAccumulator(startedAt, join(privateTmpDir, "stdout-pending.jsonl"));
+  const toolLineage = createWorkerToolLineage({ provider: "codex", root: config.root, runId: args.runId, taskId: args.taskId });
+  let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
+  const stdout = new CodexJsonlAccumulator(startedAt, join(privateTmpDir, "stdout-pending.jsonl"), raw => observeWorkerToolLineage(toolLineage, raw));
   const stdoutDecoder = new StringDecoder("utf8");
   let stdoutBytes = 0;
   let stderrBytes = 0;
@@ -4927,6 +4982,7 @@ async function spawnCodexWorkerInPrivateTemp(
     if (timedOut) throw new Error(`Codex worker exceeded the ${args.clockBound?.boundMs}ms clock bound`);
     stdout.push(stdoutDecoder.end());
     const parsed = stdout.finish();
+    lineageEnd = exit.kind === "exit" && exit.code === 0 && !parsed.isError ? "stream-ended" : "interrupted";
     if (parsed.outputTruncation && args.runId) appendLedger(ledgerPathFor(config), {
       run_id: args.runId,
       task_id: args.taskId ?? "unattributed",
@@ -4974,6 +5030,7 @@ async function spawnCodexWorkerInPrivateTemp(
       workerDurationMs: Date.now() - startedAt,
     };
   } finally {
+    toolLineage.finish(lineageEnd);
     if (timer) clearTimeout(timer);
   }
 }

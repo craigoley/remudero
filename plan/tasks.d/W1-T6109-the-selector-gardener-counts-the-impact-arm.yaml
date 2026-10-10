@@ -12,7 +12,7 @@
   plan_refs: [W1-T6083, W1-T4439, W1-T4764, W1-T4406]
   files: [src/lib/selector-shadow-gardener.ts, test/the-selector-gardener-counts-the-impact-arm.test.ts]
   status: queued
-  priority: 3
+  priority: 2 # operator-2026-10-09: self-improvement: the selector gardener still drops the impact arm (no impact field read in selector-shadow-gardener.ts)
   attempts: 0
   rationale: |
     READ 2026-10-06. On the PR #9760 head src/lib/affected-suites.ts's shadow scorer emits

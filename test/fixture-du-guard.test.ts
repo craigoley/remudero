@@ -22,6 +22,20 @@ function fixture(t: TestContext) {
   return { dir, owned, guard, run, calls };
 }
 
+function mountTopology(t: TestContext, fsroot: string) {
+  const dir = makeTempDir("heartbeat-mount-topology"), calls = join(dir, "calls"), envFile = join(dir, "env.sh");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  assert.match(fsroot, /^\/[a-z-]*$/);
+  writeFileSync(envFile, [
+    "findmnt() {",
+    `  printf '%s\\n' "$*" >> '${calls.replace(/'/g, "'\\''")}'`,
+    '  [ "$*" = "-n -o FSROOT -M /mnt/rmd" ] || return 1',
+    `  printf '%s\\n' '${fsroot}'`,
+    "}", "",
+  ].join("\n"));
+  return { env: { BASH_ENV: envFile }, calls: () => readFileSync(calls, "utf8").trim().split("\n") };
+}
+
 test("fixture du guard executes the real leaf only inside its canonical owned namespace", (t) => {
   const f = fixture(t);
   const result = f.run(f.owned);
@@ -110,11 +124,12 @@ test("all heartbeat fixture runners install the native namespace boundary", () =
   assert.doesNotMatch(acr, /"df", "du", "uname"/, "the restricted utility fixture must not replace its guard with an ambient du symlink");
 });
 
-test("heartbeat fixtures measure their real state but never scan a host-wide consumer", () => {
+test("heartbeat fixtures measure their real state but never scan a host-wide consumer", (t) => {
   const harness = readFileSync(fileURLToPath(new URL("./helpers/fleet-heartbeat-harness.ts", import.meta.url)), "utf8");
   assert.match(harness, /installFixtureDuGuard\(binDir, \[dir, rec\]\)/, "guard wiring must exist before executing the real script");
+  const topology = mountTopology(t, "/owned-subdirectory");
   for (const platform of ["Linux", "Darwin"]) {
-    const beat = runBeat({ unameStub: `#!/bin/sh\nprintf '%s\\n' '${platform}'\n` });
+    const beat = runBeat({ env: topology.env, unameStub: `#!/bin/sh\nprintf '%s\\n' '${platform}'\n` });
     assert.equal(beat.status, 0, beat.stderr);
     const field = (name: string) => beat.published.split("\n").find(line => line.startsWith(name + "="))?.slice(name.length + 1);
     assert.match(field("consumer_state_kb") ?? "", /^[0-9]+$/);
@@ -126,5 +141,29 @@ test("heartbeat fixtures measure their real state but never scan a host-wide con
       assert.equal(field("consumer_rmd_kb"), undefined);
       assert.equal(beat.duCalls.some(call => call.requested === "/mnt/rmd"), false);
     }
+  }
+  assert.ok(topology.calls().includes("-n -o FSROOT -M /mnt/rmd"), "the real mount query must reach the controlled subdirectory topology");
+});
+
+test("whole-mount heartbeat fixtures use statfs and retain the guarded fallback when df fails", (t) => {
+  const df = spawnSync("sh", ["-c", "command -p -v df"], { encoding: "utf8", timeout: 10_000 });
+  assert.equal(df.status, 0, df.stderr); assert.match(df.stdout.trim(), /^\//);
+  for (const readable of [true, false]) {
+    const topology = mountTopology(t, "/");
+    const beat = runBeat({
+      env: topology.env,
+      unameStub: "#!/bin/sh\nprintf 'Linux\\n'\n",
+      dfStub: ["#!/bin/sh", 'if [ "$2" = "/mnt/rmd" ]; then', readable
+        ? "  printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/fixture 900000 424242 475758 48%% /mnt/rmd\\n'"
+        : "  exit 1", "else", `  exec '${df.stdout.trim().replace(/'/g, "'\\''")}' "$@"`, "fi", ""].join("\n"),
+    });
+    assert.equal(beat.status, 0, beat.stderr);
+    const field = (name: string) => beat.published.split("\n").find(line => line.startsWith(name + "="))?.slice(name.length + 1);
+    assert.equal(field("consumer_rmd_kb"), readable ? "424242" : "unknown");
+    assert.ok(beat.duCalls.some(call => call.allowed && call.status === 0), "owned leaf sizes still come from native du");
+    const rootWalks = beat.duCalls.filter(call => call.requested === "/mnt/rmd");
+    if (readable) assert.equal(rootWalks.length, 0, "a whole mount must not be walked");
+    else assert.ok(rootWalks.length > 0 && rootWalks.every(call => !call.allowed), "failed statfs cannot open a host-wide walk");
+    assert.ok(topology.calls().includes("-n -o FSROOT -M /mnt/rmd"), "positive mount-query control");
   }
 });

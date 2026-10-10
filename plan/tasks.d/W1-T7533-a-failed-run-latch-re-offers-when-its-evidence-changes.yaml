@@ -1,0 +1,63 @@
+- id: W1-T7533
+  title: "A FAILED RUN'S INDEPENDENT-FAILURE LATCH RE-OFFERS THE TASK WHEN ITS EVIDENCE CHANGES — a `dispatch.blocked_independent` row with verdict `failed` excludes the task until a later run.start, which the exclusion itself prevents, so 32 open tasks (26 at priority 2.5 or better) are blocked forever by one bad run, 17 of them by the fleet-wide 2026-10-07 missing-COMMIT_MESSAGE harness gap"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high # Rule 19: one concern — when a durable independent-failure latch stops excluding its task
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-09: backlog survey ('Any tasks that are in the backlog, high value, will improve automated flow or self improvement?')"
+  plan_refs: [W1-T2910, W1-T3565, W1-T3978, W1-T4413, W1-T4597, W1-T6593]
+  files: [src/lib/status.ts, test/a-failed-run-latch-re-offers-when-its-evidence-changes.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-09 at origin/main: src/lib/status.ts latestIndependentFailureBlock sets `last = "blocked"` on a
+    `dispatch.blocked_independent` row and only a later `run.start` resets it. deriveStatus turns that into
+    `independentFailureBlocked`, and src/lib/drain.ts isDispatchEligible refuses the task on it, so no later
+    run.start can ever come. Earlier tasks carved out exceptions: blocked_illformed (W1-T3565), blocked_inflight
+    (W1-T3979), task_already_merged (W1-T4413), environmental verdicts (W1-T4597), one harness-commit retry
+    (W1-T3978) and a categorized refusal whose contract changed (W1-T6593). A plain `failed` or `no_pr`
+    verdict has no release at all. No plan edit, priority change or merge on main clears it.
+    MEASURED 2026-10-09 (core ledger, read-only copy; ids open on origin/main with no merged run PR): 32 open
+    tasks have a non-environmental blocked_independent row as their last run event: 8 at priority 1, 13 at 2,
+    5 at 2.5 and 6 at 3. By failure:
+      - 17 failed after `implement.harness_commit_refused` "no anchored COMMIT_MESSAGE line in the report", a
+        harness contract gap that hit the whole fleet on 2026-10-07 (W1-T5865, W1-T5866, W1-T5856, W1-T5979,
+        W1-T5996, W1-T6134, W1-T6146, W1-T6160, W1-T6171, W1-T6174, W1-T6179, W1-T5790, W1-T4894, W1-T4940,
+        W1-T4952, W1-T5400, W1-T6153);
+      - 8 failed "proof did not pass against merge base" (W1-T7214, W1-T6117, W1-T5760, W1-T5670, W1-T5675,
+        W1-T5724, W1-T5792, W1-T5455);
+      - 7 have a failed verdict row already compacted (W1-T6044, W1-T4939, W1-T5457, W1-T5840,
+        W1-T5689, W1-T5736, W1-T5902).
+    In the same 24 h, 97 plan tasks started; 58 of them at priority 3. Operator priorities 1 and 2 do not reach
+    the queue head because they are the tasks tried first, and one failure latches each of them.
+    Operator rulings: no hard thresholds; self-healing, tiered responses (memory no-hard-thresholds, 10-09).
+  design: |
+    A non-environmental latch (verdict `failed` or `no_pr`, after any W1-T3978 retry is spent) releases on its
+    own once BOTH hold. No count cap.
+    1. Evidence changed: main has moved since the block. Read this from the ledger as a `verdict.merged` row
+       (any task) dated after the blocking row, or the task's own shard contract revision
+       (preDispatchContractRevision) differing from the one the failed run saw. Without either, a retry would
+       meet the same failure, so it stays latched.
+    2. Spacing: the time since the blocking row is at least a back-off that doubles with each consecutive
+       latch on this task (1 h, 2 h, 4 h, ...). A release that fails again doubles the wait. It never stops
+       re-offering.
+    A release is a re-offer, not a credit. The next dispatch writes run.start, which clears the latch through
+    today's path. Ledger each release once on a `dispatch.independent_block_released` row naming the blocking
+    run_id, the evidence that changed and the back-off served, so the board can tell a re-offer from a first
+    attempt. Environmental verdicts keep W1-T4597's rule. blocked_illformed, blocked_inflight,
+    task_already_merged, W1-T3978 and W1-T6593 keep theirs.
+  acceptance:
+    - claim: "a failed-verdict latch releases once main has moved since the block and the back-off has elapsed"
+      proof: 'grep: test("W1-T7533: a failed latch re-offers its task after main moves and the back-off elapses" in test/a-failed-run-latch-re-offers-when-its-evidence-changes.test.ts'
+    - claim: "without changed evidence, or inside the doubled back-off after a repeat failure, the latch still holds"
+      proof: 'grep: test("W1-T7533: an unchanged base or an unexpired doubled back-off keeps the latch" in test/a-failed-run-latch-re-offers-when-its-evidence-changes.test.ts'
+  falsifier: |
+    Leave latestIndependentFailureBlock returning `last === "blocked"` for a `failed` row with nothing after it
+    but a later `verdict.merged` row and 3 h of ledger time: the first test's task stays independentFailureBlocked
+    and the test fails. Drop the spacing: the second test's task, latched twice with the second block 90 minutes
+    old, is released and the test fails.
