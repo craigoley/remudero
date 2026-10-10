@@ -20077,7 +20077,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
         const issues = opts.prOpenRefusalIssues ?? ghIssueGateway(owner, task.repo);
         const changedFiles = refusedBranchChangedFiles(worktreePath);
-        const issueUrl = recordRefusedPrOpen(err, { taskId, branch, headSha, changedFiles }, log, { issues, ledgerPath, runId });
+        const issueUrl = recordRefusedPrOpen(err, { taskId, branch, headSha, changedFiles, declaredFiles: task.files }, log, { issues, ledgerPath, runId });
         reclaimRunWorktree(repoDir, worktreePath, "pr_open.refused", log);
         log("verdict", {
           verdict: "failed",

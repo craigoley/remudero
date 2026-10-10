@@ -384,3 +384,36 @@ test("a run whose test-only build meets a stale proof is retired as satisfied by
     fx.cleanup();
   }
 });
+
+test("a guard task whose test-only build meets a stale proof is never retired, and is routed to a proof amendment", () => {
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const created: Array<{ title: string; body: string }> = [];
+  const issues: IssueGateway = {
+    create: (title, body) => {
+      created.push({ title, body });
+      return "https://github.com/acme/remudero/issues/11";
+    },
+    listOpen: () => [],
+    ensureLabel: () => true,
+  };
+  recordRefusedPrOpen(
+    new PrOpenRefusedError("stale-proof", "W1-T2 proof did not pass against merge base (unit test: guard): executed_stale"),
+    {
+      taskId: "W1-T2",
+      branch: "run-W1-T2-1",
+      headSha: "e".repeat(40),
+      changedFiles: ["test/a-guard.test.ts"],
+      declaredFiles: ["test/a-guard.test.ts"],
+    },
+    (step, extra) => rows.push({ step, extra }),
+    { issues, ledgerPath: join(tmpdir(), "unused-ledger.ndjson"), runId: "W1-T2-1" },
+  );
+  const steps = rows.map((row) => row.step);
+  assert.ok(!steps.includes("pr.open_satisfied_by_main"), "a guard is never retired as satisfied by main");
+  assert.ok(steps.includes("pr.open_guard_proof_amendment"), "its proof is flagged for amendment");
+  const amendment = rows.find((row) => row.step === "pr.open_guard_proof_amendment")?.extra ?? {};
+  assert.deepEqual(amendment.proposed_proofs, ["grep: test( in test/a-guard.test.ts"]);
+  assert.equal(created.length, 1, "the escalation still carries the decision");
+  assert.match(created[0]!.body, /GUARD task/);
+  assert.match(created[0]!.body, /grep: test\( in test\/a-guard\.test\.ts/);
+});
