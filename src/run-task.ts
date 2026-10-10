@@ -234,6 +234,7 @@ import {
   scopeGuardOutOfScopeFiles,
   type FixEvidence,
   type FixReviewFinding,
+  type PriorPartialWork,
   type FixMode,
 } from "./lib/prompt-render.js";
 export {
@@ -2821,6 +2822,7 @@ export function retroErrorLedgerFields(error: unknown): Record<string, unknown> 
 // src/lib/report-commands.ts, which imports it directly from lib/worker.js.
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 import { sweepMemoryReservations } from "./lib/host-memory-ledger.js";
+import { installShadowMemorySink } from "./lib/host-memory-shadow.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
 // runaway-turns bound below — see `deriveRunawayTurnBound`'s own doc for why this borrows that
 // row rather than inventing a second, duplicate "N times median" knob just because the unit is
@@ -10969,6 +10971,9 @@ export async function runFixRung(opts: {
   actionableGateFailures?: ActionableGateFailure[];
   /** W1-T3306: capped-green evidence that makes a same-head PR-body repair actionable. */
   proofDiscrimination?: ProofDiscriminationEvidence;
+  /** W1-T6434: a dead fix owner's preserved patch at the dispatched head (see PriorPartialWork). Offered to
+   *  every strike that still targets that head; once a push moves the head it is no longer shown. */
+  priorPartialWork?: PriorPartialWork;
   deps: {
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
     fixProgressJudge?: FixProgressJudge;
@@ -12612,7 +12617,7 @@ export async function runFixRung(opts: {
     // construction, never a special case. Read again after the push below (`currentCiFailures`,
     // refreshed by `deps.fetchCiFailures`) to see whether the strike that just ran moved anything.
     const priorCiFailures = currentMergeConflict === undefined && noReviewYet ? currentCiFailures ?? [] : undefined;
-    const evidence: FixEvidence =
+    const evidenceBase: FixEvidence =
       currentMergeConflict !== undefined
         ? { mergeConflict: currentMergeConflict, constraint: progressConstraint() }
         : noReviewYet
@@ -12641,6 +12646,11 @@ export async function runFixRung(opts: {
             proofDiscrimination: proofDiscriminationNow,
             constraint: progressConstraint(),
           };
+    // W1-T6434: only while this strike still targets the head the patch was preserved at.
+    const evidence: FixEvidence =
+      opts.priorPartialWork && priorHeadSha === opts.initialReview.headSha
+        ? { ...evidenceBase, priorPartialWork: opts.priorPartialWork }
+        : evidenceBase;
     const fixMode = deriveFixMode(evidence, PROOF_REPAIR_FIX_MODE_RULES);
     // W1-T3727: WHO HOLDS THIS ROUND'S GIT, read once by BOTH the prompt and the tool bound so
     // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.
@@ -55245,6 +55255,9 @@ export async function main(
   if (cmd === "serve") markLedgerProcessActor("service");
   else if (cmd === "deploy-run") markLedgerProcessActor("host_automation");
   else if (cmd === "daemon") markDaemonProcessActor();
+  // W1-T7094: every worker start this process makes writes its counterfactual `memory_budget.shadow` row to the
+  // ledger of the root that start names. The recorder never throws and never delays the start; SHADOW ONLY.
+  installShadowMemorySink((path, row) => appendLedger(path, row));
   // W1-T2893: `arg` (== rest[0]) is no longer read here — each HANDLERS entry that needs it
   // (registry.ts's REGISTRY, built above) derives its own from `rest`, since the old flat
   // if-ladder this replaced is gone and this was its only remaining reader in main() itself.
