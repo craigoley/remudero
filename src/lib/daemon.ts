@@ -3671,14 +3671,11 @@ export async function runDaemon(
     repositoryMaintenanceTimer = setInterval(repositoryMaintenanceTick, pollIntervalMs);
   };
 
-  // W1-T7690 — the wall-clock-due rungs also run on their own timer: measured 2026-10-10, a freed
-  // measurement slot waited 18+ minutes for a cycle that was inside dispatch. The outer cycle keeps its call
-  // (ordering consumers unchanged); both callers share one single-flight slot per rung, and only each
-  // rung's own policy bound paces it.
+  // W1-T7690: an independent timer prevents due rungs waiting behind dispatch (18+ minutes observed 2026-10-10).
+  // The outer call order stays intact; timer and cycle share one single-flight slot per rung.
   let ledgerCompactionDecision: LedgerCompactionDecision | undefined;
   type RungSteps<R> = Generator<unknown, R, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
-  /** Steps YIELD each promise they would await: the outer cycle drives them in its own frame (the old inline
-   *  await timing, which the inter-phase review clock's stop ordering needs); the timer uses this. */
+  /** Yielded promises preserve outer-cycle await timing; the independent timer drives the same steps. */
   const driveRungSteps = async <R>(steps: RungSteps<R>): Promise<R> => {
     let value: unknown;
     let error: unknown;
@@ -3719,9 +3716,7 @@ export async function runDaemon(
     };
   };
   const readOnlyRungs = rungFlight(function* (): RungSteps<void> {
-    // Measurement cadence: "is this system getting better". Same once-per-iteration cadence; the check's
-    // own policy-data bound throttles the actual run, so most ticks decide not to fire at no cost.
-    // Best-effort, and a fired run never gates dispatch, fails a check or changes a verdict (W1-T1259).
+    // Measurement is once-per-iteration, policy-bounded, and best-effort; it never gates dispatch (W1-T1259).
     if (deps.checkMeasurementCadence) {
       let decision: MeasurementCadenceDecision | undefined;
       try {
@@ -3733,13 +3728,8 @@ export async function runDaemon(
       if (cadenceChild && !detachedActionInFlight("measurement-cadence") && (decision?.fire || cadenceChild.pending())) {
         startMeasurementCadenceChild(cadenceChild, decision?.fire === true, decision?.reason, log);
       } else if (decision?.fire) {
-        // W1-T4034: the cadence runs detached so the sweep keeps its turn. Review admission happens
-        // only inside a sweep pass and a sweep pass only happens once per daemon iteration, so an
-        // inline await here cost the review lane this cadence's whole duration — measured
-        // 2026-09-22, its verify-human leg alone ran 8m38s inside a 21.5-minute iteration in which
-        // no sweep ran and two already-green PRs waited 42 and 29 minutes for a 21-second review.
-        // Nothing downstream reads the result (best-effort by contract, W1-T1259), so the await
-        // bought the loop nothing. Same shape as `ci-learning` below, guard included.
+        // W1-T4034: detach this best-effort result so review admission keeps running; an 8m38s leg
+        // once stalled a 21.5m iteration. Match the guarded `ci-learning` pattern below.
         if ((deps.runMeasurementCadence || cadenceChild) && detachedActionInFlight("measurement-cadence")) {
           log("measurement_cadence.already_detached", {
             reason: decision.reason,
@@ -3754,9 +3744,7 @@ export async function runDaemon(
               detachSweepAction(
                 work
                   .then((result) => {
-                    // The row is DERIVED from the result's own keys rather than hand-enumerated here, because a
-                    // hand-enumerated row silently drops every member added after it — which is how three fields reached
-                    // zero occurrences in this file (W1-T2502).
+                    // Derive the row from result keys; hand-enumeration dropped three fields (W1-T2502).
                     log("measurement_cadence.ran", buildMeasurementCadenceRow(result));
                   })
                   .catch((e) => {
@@ -3779,8 +3767,7 @@ export async function runDaemon(
       }
     }
 
-    // Digest cadence, separate from the measurement block above: its own policy row, its own marker
-    // file, the same tick discipline and the same best-effort contract (W1-T2277).
+    // Digest cadence has its own policy row and marker (W1-T2277).
     if (deps.checkDigestCadence) {
       let digestDecision: MeasurementCadenceDecision | undefined;
       try {
@@ -3803,11 +3790,8 @@ export async function runDaemon(
       }
     }
 
-    // W1-T3368 — THE SELF-HEALING RUNG. Same tick discipline and best-effort contract as the two
-    // cadences above, but different in kind: it REMOVES a condition rather than reporting one. One
-    // bounded pass on CORPUS PRESSURE; the incident and sizing are in `ledger-compaction-rung.ts`.
-    //
-    // THE REASON IS CARRIED FROM THE DECISION THAT PRODUCED THE OUTCOME, never re-derived here.
+    // W1-T3368: bounded, best-effort corpus-pressure repair; sizing is in `ledger-compaction-rung.ts`.
+    // Preserve the reason from the firing decision; never re-derive it here.
     ledgerCompactionDecision = undefined;
     if (deps.checkLedgerCompaction) {
       try {
@@ -3821,9 +3805,7 @@ export async function runDaemon(
           try {
             const outcome = (yield deps.runLedgerCompaction()) as Awaited<ReturnType<NonNullable<typeof deps.runLedgerCompaction>>>;
             if (outcome === undefined) {
-              // A pass that found nothing eligible is a RESULT, not a failure: the corpus is over the
-              // bound but every archive is inside the age floor. Saying so keeps "nothing to merge"
-              // distinguishable from "the run broke", which an absent row would not.
+              // No eligible archive is a result, not a failure; keep it distinct from a broken run.
               log("ledger_compaction.nothing_eligible", { reason: ledgerCompactionDecision.reason });
             } else {
               log("ledger_compaction.ran", {
@@ -3879,8 +3861,7 @@ export async function runDaemon(
       }
     }
 
-    // W1-T3997: CI learning is detached so it cannot block queue reconciliation; its registry
-    // records bounded abandonment and releases the cadence fire on unreadable corpus.
+    // W1-T3997: detached CI learning cannot block reconciliation; its registry bounds abandonment.
     if (deps.checkCiLearningCadence) {
       let ciLearningDecision: MeasurementCadenceDecision | undefined;
       try {
@@ -3924,8 +3905,7 @@ export async function runDaemon(
               );
               log("ci_learning_cadence.detached", { reason });
             } catch (e) {
-              // Keep the cadence rung best-effort even for a legacy/injected runner that throws
-              // before it can return its promise. Production reaches its first await at the corpus read.
+              // Preserve best-effort behavior if an injected runner throws before returning a promise.
               log("ci_learning_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
             }
           }
@@ -3935,11 +3915,8 @@ export async function runDaemon(
       }
     }
 
-    // Board review: the rung whose unit is the whole open board. Same shape and best-effort contract as the
-    // two cadences above, on its own policy row and marker file. The ledger rows below are part of the fix:
-    // board-review.ts has no log hook of its own, so before this block a fire wrote no row at all
-    // (W1-T2304). Retired ids are logged on BOTH branches, because reconciliation is tied to the check, not
-    // to the fire (W1-T2464). Forensics: docs/forensics/daemon.md.
+    // Board review has its own policy row/marker; log fires and skips because board-review.ts has no log hook
+    // (W1-T2304). Retired IDs accompany either outcome (W1-T2464); see docs/forensics/daemon.md.
     if (deps.checkBoardReview) {
       let boardDecision: (BoardReviewCadenceDecision & { retiredProposalIds?: string[] }) | undefined;
       try {
@@ -3974,10 +3951,8 @@ export async function runDaemon(
   }, undefined);
   /** Resolves true when a fleet-control hold says the tick must not go on (the old `continue`). */
   const intakeRungs = rungFlight(function* (): RungSteps<boolean> {
-    // Intake cadence: one scheduler over the hand-run repository intake verbs. These rungs can
-    // poll GitHub, write feedback, draft proposals or dispatch workers, so they sit behind the
-    // same tick-wide governors as retro/auto-triage/wipe-test instead of the read-only cadence
-    // block above. Best-effort: a failed rung costs one ledger row and the tick continues.
+    // Intake rungs can poll, write, draft, or dispatch; gate them behind tick-wide spending governors.
+    // Best-effort failures cost one ledger row, then the tick continues.
     if (deps.checkIntakeRungs) {
       let decisions: readonly IntakeRungDecision[] | undefined;
       try {
@@ -4025,10 +4000,8 @@ export async function runDaemon(
     return false;
   }, false);
   const wipeTestRung = rungFlight(function* (): RungSteps<boolean> {
-    // Wipe-test cadence: a policy-gated falsifier pulse. It spends like retro/auto-triage, so it
-    // sits after the tick-wide dispatch governors; it has its own marker, so no sibling cadence can
-    // throttle it. The pair core writes `wipetest.pair` on measurement; this block writes the rung's
-    // fired/skipped/refused clock evidence (W1-T2659).
+    // Wipe-test is policy-gated and spends like retro/auto-triage; its own marker prevents sibling throttling.
+    // The pair core records measurements; this rung records fired/skipped/refused clock evidence (W1-T2659).
     if (deps.checkWipeTestCadence) {
       let decision: WipeTestCadenceDecision | undefined;
       try {
@@ -4075,8 +4048,7 @@ export async function runDaemon(
     }
     return false;
   }, false);
-  // The spending rungs (intake, wipe-test) sit behind the tick-wide governors (headroom, cost, WIP), so the
-  // timer may look at them only after the outer cycle has passed those governors this tick.
+  // Timer starts spending rungs only after this cycle passes headroom, cost, and WIP governors.
   let spendGatesOpen = false;
   const dueRungsTick = (): void => {
     if (dueRungsStopped) return;
@@ -4092,7 +4064,6 @@ export async function runDaemon(
     dueRungsTimer.unref();
   };
 
-  // W1-T7126: retain the memory-sample cadence across loop ticks.
   const tickMemory = { sampled: false };
   for (;;) {
     // The liveness tick: the one row this loop writes unconditionally, every iteration, on every path below.
