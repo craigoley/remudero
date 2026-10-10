@@ -748,7 +748,7 @@ export function shadowReadiness(view: string, state: ViewShadowState, nowMs: num
 export interface ViewShadowOptions {
   clock?: Clock;
   log: (step: string, extra: Record<string, unknown>) => void;
-  evidence: (input: Parameters<typeof readShadowEvidence>[1] & { view: string }) => ShadowEvidence;
+  evidence: (input: Parameters<typeof readShadowEvidence>[1] & { view: string; instance: string | null }) => ShadowEvidence;
   store?: ShadowStore;
 }
 
@@ -807,7 +807,7 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
       });
       const viewAsOf = body.asOf === null ? null : Date.parse(body.asOf);
       const ev = opts.evidence({
-        view, ids: raw.flatMap((d) => [...d.ids, ...(d.members ? memberEntities(d.members) : []), ...(d.sum ? sumEntities(d.sum) : []),
+        view, instance: new URLSearchParams(key).get("instance"), ids: raw.flatMap((d) => [...d.ids, ...(d.members ? memberEntities(d.members) : []), ...(d.sum ? sumEntities(d.sum) : []),
           ...(d.latest ? [d.latest.legacy, d.latest.view].flatMap((row) => (row === null ? [] : [entityOf(row)])) : [])]), legacyAsOfMs: legacy.asOfMs, viewAsOfMs: Number.isFinite(viewAsOf) ? viewAsOf : null,
         ...(legacy.horizonMs !== undefined ? { legacyHorizonMs: legacy.horizonMs } : {}), ...(legacy.duplicates ? { duplicates: legacy.duplicates } : {}),
         ...(legacy.rows ? { legacyRows: legacy.rows } : {}), ...(legacy.orderRows ? { orderRows: legacy.orderRows } : {}),
