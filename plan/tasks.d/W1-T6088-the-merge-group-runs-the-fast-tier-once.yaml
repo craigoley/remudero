@@ -3,13 +3,14 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human  # a workflow-graph change to required checks: an operator build, as W1-T5940 and W1-T5705 park theirs
+  # a workflow-graph change to required checks: an operator build, as W1-T5940 and W1-T5705 park theirs
+  verify: human
   principles: {tdd: strict}
   budget_usd: 4.00
   risk: high  # Rule 19: one concern — whether ci's fast-tier test step runs on a merge_group SOURCE diff the coverage lane already runs in full
   band_meaning: blast-radius
   origin: "operator session 2026-10-06: test-cost research (research-coverage REPORT, ranked item 7)"
-  plan_refs: [W1-T3207, W1-T4406, W1-T5940, W1-T1041]
+  plan_refs: [W1-T3207, W1-T4406, W1-T5940, W1-T1041, W1-T5705]
   files: [.github/workflows/ci.yml, test/the-merge-group-runs-the-fast-tier-once.test.ts]
   status: queued
   priority: 3
