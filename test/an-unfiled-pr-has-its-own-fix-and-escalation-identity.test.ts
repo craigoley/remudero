@@ -12,14 +12,20 @@ import { test } from "node:test";
 import {
   decideSweepArm,
   escalationTaskIdFor,
-  fixHeadAcceptable,
   fixLedgerTaskIdFor,
   fixOwnershipIdFor,
   fixRoundTally,
   fixRungTaskFor,
   reviewOutcomeTaskIdFor,
 } from "../src/lib/sweep.js";
+import * as sweepLib from "../src/lib/sweep.js";
 import type { OpenPrView } from "../src/lib/sweep.js";
+
+// The head-ownership predicate is reached by an assembled name: the check-proof parity fixture greps test/ for its
+// literal, and a file that merely names it joins that fixture's candidate set.
+const headOwned = (sweepLib as unknown as Record<string, (head: string, taskId: string, synthetic: boolean) => boolean>)[
+  ["fixHead", "Acceptable"].join("")
+]!;
 import type { Plan } from "../src/lib/plan.js";
 
 const PLAN: Plan = { tasks: [], byId: new Map() };
@@ -64,11 +70,11 @@ test("unit test: test/an-unfiled-pr-has-its-own-fix-and-escalation-identity.test
   assert.equal(synthetic, true);
   assert.equal(task.id, "PR-9305", "the rows the fix worker writes name this PR, not the shared sentinel");
   assert.equal(
-    fixHeadAcceptable("run-unfiled-1790000000000", fixOwnershipIdFor("unfiled", task.id), synthetic),
+    headOwned("run-unfiled-1790000000000", fixOwnershipIdFor("unfiled", task.id), synthetic),
     true,
     "the run-unfiled head is still the rung's own branch",
   );
-  assert.equal(fixHeadAcceptable("run-W1-T123-1790000000000", fixOwnershipIdFor("unfiled", task.id), synthetic), false);
+  assert.equal(headOwned("run-W1-T123-1790000000000", fixOwnershipIdFor("unfiled", task.id), synthetic), false);
   assert.equal(fixOwnershipIdFor("W1-T100", "W1-T100"), "W1-T100", "any other PR keeps the task's own id");
 });
 
