@@ -1756,6 +1756,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "escalateCancelledCheck",
   "escalateInfrastructureCheck",
   "readCiGateRollup",
+  "readCiGateRequired", // W1-T5979
   "liveCiRunForHead",
   "reaggregateCiGate",
   "readMainTip",
@@ -1859,6 +1860,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "escalateCancelledCheck"
   | "escalateInfrastructureCheck"
   | "readCiGateRollup"
+  | "readCiGateRequired"
   | "liveCiRunForHead"
   | "reaggregateCiGate"
   | "readMainTip"
@@ -2807,6 +2809,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // `undefined`: `staleCiGateTransition(undefined)` always returns `undefined`, so this lane
     // simply never fires for this PR on this pass, rather than aborting the whole sweep loop over
     // one PR's rollup read.
+    // W1-T5979: a ci-gate timeout's rollup-sourced not-ready list is filtered to this list.
+    readCiGateRequired: () => readCiGateRequiredChecks(repoRoot),
+
     readCiGateRollup: async (pr) => {
       try {
         return await restRollupFor(owner, repo, pr.headSha, readJsonImpl);
@@ -4794,28 +4799,45 @@ export function classifyCiTimeoutNoVerdict(
 }
 
 /** W1-T5934: where a timeout's not-ready list came from. The annotation usually lacks it (the list
- *  is in the job log), so the fresh rollup fills it; an unreadable or unread rollup is named, never "none". */
-export type CiTimeoutNotReadySource = "annotation" | "rollup" | "rollup-unreadable" | "rollup-unread";
+ *  is in the job log), so the fresh rollup fills it; an unreadable or unread rollup is named, never "none".
+ *  W1-T5979: `rollup-required` is that rollup filtered to ci-gate's REQUIRED list, plus each required
+ *  name with no rollup entry; `rollup-required-unreadable` is the unfiltered rollup when that list was
+ *  unreadable. Plain `rollup` remains for a pass that wires no REQUIRED reader. */
+export type CiTimeoutNotReadySource =
+  | "annotation" | "rollup" | "rollup-required" | "rollup-required-unreadable" | "rollup-unreadable" | "rollup-unread";
 
 /** Checks whose latest attempt still waits for a runner. */
 const CI_TIMEOUT_NOT_STARTED = new Set(["QUEUED", "PENDING", "WAITING", "REQUESTED", "EXPECTED"]);
 
+/** W1-T5979: `required` is ci-gate's REQUIRED list ({@link readCiGateRequiredChecks}); an empty one
+ *  is that reader's unreadable answer, never an empty set. A required name with no rollup entry is
+ *  the never-started check the gate waits on, so it is named and listed in `neverRegistered`. */
 export function ciTimeoutNotReadyChecks(
   annotated: readonly string[],
   rollup: readonly RollupCheckEntry[] | "unreadable" | "unread",
-): { names: string[]; source: CiTimeoutNotReadySource } {
+  required?: readonly string[],
+): { names: string[]; source: CiTimeoutNotReadySource; neverRegistered?: string[] } {
   if (annotated.length > 0) return { names: [...annotated], source: "annotation" };
   if (typeof rollup === "string") return { names: [], source: `rollup-${rollup}` };
-  const names = dedupeRollupByLatestAttempt(rollup)
-    .filter((c) => c.context !== REVIEW_CONTEXT && c.name !== REVIEW_CONTEXT && c.name !== CI_GATE_CHECK_NAME)
+  const latest = dedupeRollupByLatestAttempt(rollup)
+    .filter((c) => c.context !== REVIEW_CONTEXT && c.name !== REVIEW_CONTEXT && c.name !== CI_GATE_CHECK_NAME);
+  const queued = latest
     .filter((c) => CI_TIMEOUT_NOT_STARTED.has((c.state ?? c.status ?? "").toUpperCase()))
     .map((c) => c.name ?? c.context ?? "unknown");
-  return { names, source: "rollup" };
+  if (required === undefined) return { names: queued, source: "rollup" };
+  if (required.length === 0) return { names: queued, source: "rollup-required-unreadable" };
+  const wanted = required.filter((n) => n !== REVIEW_CONTEXT && n !== CI_GATE_CHECK_NAME);
+  const registered = new Set(latest.flatMap((c) => [c.name, c.context].filter((n): n is string => !!n)));
+  const neverRegistered = wanted.filter((n) => !registered.has(n));
+  return { names: [...queued.filter((n) => wanted.includes(n)), ...neverRegistered], neverRegistered, source: "rollup-required" };
 }
 
 const CI_TIMEOUT_SOURCE_TEXT: Record<CiTimeoutNotReadySource, string> = {
   annotation: "the gate's annotation",
   rollup: "queued on the fresh rollup",
+  "rollup-required": "queued on the fresh rollup or never registered, among the gate's REQUIRED checks",
+  "rollup-required-unreadable":
+    "queued on the fresh rollup, unfiltered: the gate's REQUIRED list was unreadable, so a never-registered check cannot be named",
   "rollup-unreadable": "the gate's annotation lists none and the fresh rollup was unreadable",
   "rollup-unread": "the gate's annotation lists none and this pass reads no fresh rollup",
 };
@@ -4871,15 +4893,20 @@ async function applyCiTimeoutRefresh(
   rollup: readonly RollupCheckEntry[] | "unreadable" | "unread",
 ): Promise<string> {
   const appendLine = deps.appendLine ?? appendLedger;
-  const notReady = ciTimeoutNotReadyChecks(timeout.notReady, rollup);
-  const named = (notReady.names.length > 0 ? notReady.names : timeout.hung).join(", ") || "(unnamed)";
+  const notReady = ciTimeoutNotReadyChecks(timeout.notReady, rollup, deps.readCiGateRequired?.());
+  const neverRegistered = notReady.neverRegistered ?? [];
+  const labelled = notReady.names.map((n) => (neverRegistered.includes(n) ? `${n} (never registered)` : n));
+  const named = (labelled.length > 0 ? labelled : timeout.hung).join(", ") || "(unnamed)";
   const sourceText = notReady.source === "rollup" && notReady.names.length === 0
     ? "the gate's annotation lists none and the fresh rollup shows none queued"
-    : CI_TIMEOUT_SOURCE_TEXT[notReady.source];
+    : notReady.source === "rollup-required" && notReady.names.length === 0
+      ? "the gate's annotation lists none and the fresh rollup shows no REQUIRED check queued or unregistered"
+      : CI_TIMEOUT_SOURCE_TEXT[notReady.source];
   const head = `ci-gate timed out on never-started check(s) ${named} [not-ready list: ${sourceText}]`;
   const row = {
     run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl,
     head_sha: pr.headSha, not_ready_checks: notReady.names, not_ready_source: notReady.source, hung_checks: timeout.hung,
+    ...(notReady.neverRegistered ? { never_registered_checks: notReady.neverRegistered } : {}),
   };
   const escalate = async (why: string): Promise<string> => {
     const reason = `${head}; no new head is possible: ${why}`;
@@ -11443,6 +11470,9 @@ export interface SweepDeps {
    *  {@link staleCiGateTransition} must compare against a sibling's CURRENT latest attempt. NOT a
    *  field on `OpenPrView`, whose producer literal would be wrong for a freshly-read value. */
   readCiGateRollup?: (pr: OpenPrView) => (RollupCheckEntry[] | undefined) | Promise<RollupCheckEntry[] | undefined>;
+  /** W1-T5979: ci-gate's REQUIRED list, which a timeout's rollup-sourced not-ready list is filtered
+   *  to; `[]` is the reader's unreadable answer. Omitted, that list is the unfiltered rollup. */
+  readCiGateRequired?: () => readonly string[];
   /** W1-T4586: whether another CI run for this PR's head is still queued or in progress. Omitted, the
    *  sweep never waits on one (the behaviour before this field existed). */
   liveCiRunForHead?: (pr: OpenPrView) => boolean | Promise<boolean>;
