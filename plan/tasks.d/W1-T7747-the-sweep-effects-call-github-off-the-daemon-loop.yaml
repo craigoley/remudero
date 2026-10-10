@@ -1,7 +1,7 @@
 - id: W1-T7747
   title: "THE SWEEP'S EFFECTS CALL GITHUB OFF THE DAEMON LOOP — `buildSweepEffects` still reaches `gh` through the synchronous `ghJson`/`ghExec`, including the armed-idle direct merge through `mergeDirectViaRest`, although `mergeDirectViaRestAsync` and `ghJsonAsync` exist: on 2026-10-10 `ghExecFile` held the loop 13 times (worst 5.1 s) and `mergeDirectViaRest` up to 2.7 s"
   repo: remudero
-  depends_on: []
+  depends_on: [W1-T7742]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -52,7 +52,9 @@
 
     SHARED SURFACE ONLY: W1-T7734 and W1-T7735 (queued) also name src/lib/sweep.ts. They change when the sweep
     re-reads a PR and when it refreshes a branch, not which transport its effects use. No task in this filing
-    batch edits sweep.ts, so this one has no depends_on.
+    batch edits sweep.ts.
+
+    SERIALIZED (amended 2026-10-10): depends on W1-T7742 because both now edit test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts, and parallel agents editing one file broke main (#10349 and #10353, 2026-10-09).
   design: |
     1. Every site in groups (1) and (2) awaits the async transport (`ghJsonAsync`, `ghTextAsync`), with the
        same argv and the same outcomes. That includes the decline reasons `live_head_unreadable` and the
