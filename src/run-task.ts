@@ -1085,7 +1085,7 @@ import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportVie
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
-import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
+import { auditLedgerUnion, createIncrementalLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
 import { escalateRepeatingRules, ruleEfficacyReport, type RuleSignature } from "./lib/rule-efficacy.js";
@@ -1314,6 +1314,7 @@ import {
   DISPATCH_VALUE_LEDGER_STEPS,
   filingDatesFromPlanHistory,
   planSeed,
+  sortRowsByJson,
   type DispatchValueContext,
   type CostOfDelaySnapshot,
 } from "./lib/dispatch-value.js";
@@ -35374,6 +35375,12 @@ export function readDispatchFilingSnapshot(
   }
 }
 
+/** The daemon's dispatch-selection union: a repeated selection over an unchanged ledger reads nothing, and a
+ * changed one reads only the live file's new tail and any new rotation (see createIncrementalLedgerUnion). */
+const dispatchSelectionLedgerUnion = createIncrementalLedgerUnion({ holder: "dispatch-value", reducerVersion: "1" });
+/** The sorted evidence of a frozen (cached, so unchanging) union, so an unchanged union is never re-sorted. */
+const dispatchEvidenceByUnion = new WeakMap<ReadonlyArray<Record<string, unknown>>, ReadonlyArray<Record<string, unknown>>>();
+
 /** W1-T4064: the ledger snapshot supplies time and consumed slots; committed history supplies age.
  * Fallbacks are keyed by the unreadable input, persisted in the ledger and deduplicated in-process. */
 export function dispatchValueContextForSelection(
@@ -35382,7 +35389,7 @@ export function dispatchValueContextForSelection(
   stateDir: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   planPath: string,
-  readLedger: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync,
+  readLedger: typeof readLedgerUnionRecordsSync = dispatchSelectionLedgerUnion,
   readFiling: typeof readDispatchFilingSnapshot = readDispatchFilingSnapshot,
 ): DispatchValueContext | undefined {
   const union = readLedger(stateDir, {
@@ -35407,8 +35414,11 @@ export function dispatchValueContextForSelection(
     return undefined;
   }
   const filing = readFiling(planPath);
-  const evidence = union.rows.filter(row => row.step !== "dispatch.cost_of_delay.fallback" && row.step !== "dispatch.cost_of_delay.ready")
-    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  let evidence = dispatchEvidenceByUnion.get(union.rows);
+  if (evidence === undefined) {
+    evidence = sortRowsByJson(union.rows.filter(row => row.step !== "dispatch.cost_of_delay.fallback" && row.step !== "dispatch.cost_of_delay.ready"));
+    if (Object.isFrozen(union.rows)) dispatchEvidenceByUnion.set(union.rows, evidence);
+  }
   const times = evidence.map(row => typeof row.ts === "string" ? Date.parse(row.ts) : NaN).filter(Number.isFinite);
   const filingTimes = filing.kind === "ready" ? [...filing.snapshot.filedAtByTaskId.values()] : [];
   const nowMs = [...times, ...filingTimes].reduce((latest, at) => Math.max(latest, at), 0);
