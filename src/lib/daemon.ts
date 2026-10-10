@@ -1534,6 +1534,37 @@ function readMemoryTelemetrySafely(deps: Pick<DaemonDeps, "readMemoryTelemetry">
   }
 }
 
+/** W1-T7126: when each sampler last rode a row, keyed by the sampler itself, so the main loop's
+ *  `daemon.tick` and every in-flight ticker's `daemon.alive` share one reading with no new parameter. */
+const memorySampledAtMs = new WeakMap<object, number>();
+
+/** W1-T7126: the `daemon.alive` memory sample, stamped so a tick within one poll interval defers to it. */
+function aliveMemorySample(deps: Pick<DaemonDeps, "readMemoryTelemetry">, nowMs: number): Record<string, unknown> {
+  if (!deps.readMemoryTelemetry) return {};
+  memorySampledAtMs.set(deps.readMemoryTelemetry, nowMs);
+  return { ...readMemoryTelemetrySafely(deps), mem_sample_via: "alive" };
+}
+
+/** W1-T7126: an idle daemon writes `daemon.tick` and never `daemon.alive`, so the tick carries the same
+ *  sample, but only when no row has carried one within `pollIntervalMs`. The reference starts at boot, so
+ *  a dispatch's first heartbeat stays the first row to start the thread heap read (W1-T7092). Nothing
+ *  here sleeps, schedules or wakes: a loop that does not iterate leaves a visible gap. */
+function tickMemorySample(
+  deps: Pick<DaemonDeps, "readMemoryTelemetry">, nowMs: number, pollIntervalMs: number, taken: { sampled: boolean },
+): Record<string, unknown> {
+  taken.sampled = false;
+  if (!deps.readMemoryTelemetry) return {};
+  const lastMs = memorySampledAtMs.get(deps.readMemoryTelemetry);
+  if (lastMs === undefined) {
+    memorySampledAtMs.set(deps.readMemoryTelemetry, nowMs);
+    return {};
+  }
+  if (nowMs - lastMs < pollIntervalMs) return {};
+  memorySampledAtMs.set(deps.readMemoryTelemetry, nowMs);
+  taken.sampled = true;
+  return { ...readMemoryTelemetrySafely(deps), mem_sample_via: "tick" };
+}
+
 /** W1-T7092: start the thread heap read only AFTER `daemon.alive` is written, never awaited. */
 function startMemoryReadAfterRow(deps: Pick<DaemonDeps, "readMemoryTelemetry">, log: (step: string, extra?: Record<string, unknown>) => void): void {
   try {
@@ -2029,7 +2060,7 @@ function startInFlightTicker(
           if (diskHeadroom?.verdict === "OK") diskHeadroomLatch.escalated = false;
           log("daemon.alive", {
             ...deps.readLoopTelemetry?.(),
-            ...readMemoryTelemetrySafely(deps),
+            ...aliveMemorySample(deps, daemonClock.now()),
             phase: owner.phase,
             poll_interval_ms: pollIntervalMs,
             // W1-T2744: bounded cardinality on the existing heartbeat, never a promise-poll row.
@@ -3579,13 +3610,16 @@ export async function runDaemon(
     repositoryMaintenanceTimer = setInterval(repositoryMaintenanceTick, pollIntervalMs);
   };
 
+  const tickMemory = { sampled: false };
   for (;;) {
     // The liveness tick: the one row this loop writes unconditionally, every iteration, on every path below.
     // Every other daemon-prefixed step is either boot-time and one-shot, or confined to the three windows the
     // in-flight ticker runs in. Measured: the prefix went silent for 102.5 minutes on 2026-08-23 while the
     // daemon stayed alive, and the freshness judges read a false FAIL. Placed as literally the first statement
-    // of the loop body so no branch below can skip it (W1-T1274).
-    log("daemon.tick", { poll_interval_ms: pollIntervalMs });
+    // of the loop body so no branch below can skip it (W1-T1274). W1-T7126: it carries the memory sample when
+    // no row has within one poll interval; a throwing sampler rides it as mem_telemetry, never escapes it.
+    log("daemon.tick", { poll_interval_ms: pollIntervalMs, ...tickMemorySample(deps, daemonClock.now(), pollIntervalMs, tickMemory) });
+    if (tickMemory.sampled) startMemoryReadAfterRow(deps, log);
     const tickStartedAtMs = daemonClock.now();
     idleLaneTickCause = undefined;
 
