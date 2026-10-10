@@ -1,5 +1,5 @@
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
-import { buildFixProgressInput, judgeFixProgress, parseFixProgressVerdict,
+import { buildFixProgressInput as buildBaseFixProgressInput, judgeFixProgress, parseFixProgressVerdict,
   type FixProgressJudge, type FixProgressVerdict } from "./fix-progress-judge.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
 import { createHeadRehomePorts, headIdentityRed, headRehomePlan, rehomeBody, type HeadRehomePorts } from "./head-rehome.js";
@@ -12413,6 +12413,8 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
       stalled = false;
     } else if (line.step === "fix.done" && line.flake_claim === "requeue_deferred") {
       stalled = true; // W1-T5920: the FLAKE round's requeue never landed — nothing will move this head
+    } else if (line.step === "fix.done" && (line.flake_claim === "refuted" || line.flake_claim === "repeated")) {
+      stalled = true;
     } else if (line.step === "fix.done" && line.flake_claim === undefined && ciHead !== undefined && line.head_sha === ciHead &&
         line.subtype === "success" && (line.pushed_head_sha === undefined || line.pushed_head_sha === ciHead)) {
       stalled = true;
@@ -12424,6 +12426,25 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
   }
   // W1-T1210: no owning `fix.dispatch` row at all ⇒ treated as stalled — see the doc above.
   return stalled || !dispatched;
+}
+
+export function flakeClaimsForHead(lines: readonly Record<string, unknown>[], taskId: string | undefined,
+  headSha: string | undefined, prNumber?: number): Record<string, unknown>[] {
+  if (!taskId || !headSha) return [];
+  return lines.filter(row => row.step === "fix.done" && row.task_id === taskId && row.head_sha === headSha &&
+    (prNumber === undefined || row.pr_number === undefined || row.pr_number === prNumber) &&
+    (row.flake_claim === "refuted" || row.flake_claim === "repeated"));
+}
+
+// W1-T7449: keep flake refutations visible beside the progress judge's no-op and same-red signals.
+export function buildFixProgressInput(facts: Parameters<typeof buildBaseFixProgressInput>[0]) {
+  const claims = flakeClaimsForHead(facts.ledger, facts.taskId, facts.headSha, facts.prNumber);
+  const input = buildBaseFixProgressInput(facts);
+  if (claims.length > 0) input.parkedReason = [input.parkedReason,
+    "flake claimed and refuted on an unchanged red"].filter(Boolean).join("; ");
+  return { ...input, signals: { ...input.signals,
+    refutedFlakeClaims: claims.filter(row => row.flake_claim === "refuted").length,
+    repeatedFlakeClaims: claims.filter(row => row.flake_claim === "repeated").length } };
 }
 
 const METADATA_RED_CHECKS = new Set(["commitlint", "acceptance-author-gate", "proof-discrimination"]);
@@ -12767,6 +12788,10 @@ export function fixRoundTally(
       const count = (reasons.get(reason) ?? 0) + 1;
       reasons.set(reason, count);
       if (count === 2 && tally.repeatedRefusal === undefined) tally.repeatedRefusal = reason;
+      continue;
+    }
+    if (round.done?.flake_claim === "repeated") {
+      tally.noCommitRounds.push(round.id);
       continue;
     }
     if (regime === "executed" && round.dispatch.verdict_regime !== "executed") continue;
@@ -15469,7 +15494,8 @@ export async function runSweep(
               const noCommitRound = fixRoundTally(ledgerLines, pr.taskId, pr.headSha).noCommitRounds.at(-1);
               const rerunAttempted = ledgerLines.some(row => row.step === "sweep.disposed" &&
                 row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.no_commit_rerun_attempted === true);
-              if (noCommitRound !== undefined && !rerunAttempted) {
+              if (noCommitRound !== undefined && !rerunAttempted &&
+                  flakeClaimsForHead(ledgerLines, pr.taskId, pr.headSha, pr.prNumber).length === 0) {
                 acted = false;
                 if (!deps.rerunFailedChecks) {
                   standDownReason = "no-commit CI fix awaits a failed-job rerun gateway";
@@ -16141,6 +16167,9 @@ export async function runSweep(
               // W1-T2379: started either way — only the `await` moves. See `SweepDeps.detachFixWait`.
               // W1-T4459: the attempted red set rides this pass's `sweep.disposed` row.
               extraDisposedFields = { ...extraDisposedFields, red_checks: redCheckNames(pr) };
+              if (flakeClaimsForHead(ledgerLines, pr.taskId, pr.headSha, pr.prNumber).length > 0) {
+                standDownReason = `flake claim refuted at ${pr.headSha} — dispatching a real fix round`;
+              }
               if (deps.detachFixWait) {
                 detachFixDispatch(pr, (onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase)));
                 break;
