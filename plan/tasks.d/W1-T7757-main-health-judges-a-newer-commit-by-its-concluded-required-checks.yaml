@@ -1,0 +1,90 @@
+- id: W1-T7757
+  title: "MAIN HEALTH JUDGES A NEWER COMMIT BY ITS CONCLUDED REQUIRED CHECKS, NOT BY ITS WORKFLOW RUN'S STATUS — at 15:03:50Z on 2026-10-10 main read red from f76df1f45's completed run while the newer 916e5ced0's required `ci` check had concluded green at 15:01:01, because the walk-back keeps only completed workflow runs"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — which first-parent commit's required checks decide main health; it gates the base-red guard and the red-main repair lane
+  band_meaning: span
+  origin: "operator session 2026-10-10: main-red investigation after #10702, operator asked for flow improvements"
+  plan_refs: [W1-T5490, W1-T6023, W1-T6077, W1-T6403, W1-T4472]
+  files: [src/lib/main-health-rung.ts, src/lib/sweep.ts, test/main-health-judges-a-newer-commit-by-its-concluded-required-checks.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-10. CI run 38061454938, the push run for 916e5ced0 (#10668), ran from 14:54 to 15:15Z.
+    Its `ci` required check concluded green at 15:01:01 while the workflow run was still in progress, because
+    other jobs in the run were still going. At 15:03:50Z the main-health rung read main RED, decided by the
+    older completed red run at f76df1f45. A newer commit's required verdict was already in, and the rung
+    could not see it. main then read red for about 14 minutes on evidence a newer commit had already replaced.
+
+    READ on origin/main 688f222c6.
+    - `mainPushRunHistoryFromResponse` (src/lib/main-health-rung.ts:506) drops every run whose `status` is not
+      `completed`, at main-health-rung.ts:512. 916e5ced0's in-progress run never reaches the walk.
+    - The walk-back (main-health-rung.ts:976) iterates `mainHealthFallbackRuns(...)` (main-health-rung.ts:980,
+      defined at src/lib/sweep.ts:6907). Those runs come from `mainHealthFallbackCandidates` (sweep.ts:6899),
+      which keeps only runs with a verdict conclusion. The loop at main-health-rung.ts:982 walks them in
+      run-history order and lets the first run whose jobs `mainHealthFromRollup` judges (main-health-rung.ts:1009)
+      decide. An in-progress run has no conclusion, so it is never a candidate, even when every required job
+      in it has concluded.
+    - The head's own rollup is already judged from check runs, which conclude per job. So this gap hits only
+      the commits between the head and the newest completed run, which is where they pile up. Push runs share
+      one concurrency group (.github/workflows/ci.yml:72), so the newest commit with any concluded job is
+      usually one whose run is still in progress.
+    - #10702 (3de4ed495) added the walk back to the newest commit with genuine evidence and states "a red at the
+      newest-evidence sha means red even while newer heads are pending". This task keeps that rule. It changes
+      which commit counts as newest-evidence: a commit whose required checks have concluded is evidence, whatever
+      its workflow run's status.
+  design: |
+    1. KEEP IN-PROGRESS RUNS IN THE HISTORY, MARKED. `mainPushRunHistoryFromResponse` keeps queued and in-progress
+       runs and carries GitHub's `status` on each entry (a new optional `status` on `MainHealthRunHistoryEntry`).
+       Every existing reader that needs a run verdict keeps seeing completed runs only:
+       - `mainHealthFirstRedCommitFromRunHistory`;
+       - the guard reads (`failedMainGuardRuns`, `mainGuardFailureCandidates`);
+       - `mainEvidenceAge`'s latency samples, because an in-progress run's `updated_at` is not a completion.
+       Filter at those readers or hand them a completed-only view. The builder chooses; the existing tests of
+       those readers must pass unchanged.
+    2. WALK IN FIRST-PARENT ORDER AND JUDGE REQUIRED JOBS, NOT RUN STATUS. The walk-back visits main's first-parent
+       commits newest first (`recentShas.order`), not run-creation order. For each commit it reads the jobs of
+       that commit's runs that carry required checks, completed or not. Then `mainHealthFromRollup` judges the
+       required jobs, as today:
+       - every required job concluded: that commit decides, green or red, exactly as a completed run decides
+         today. The existing walk-past for skipped, vacuous or cancelled required jobs is unchanged.
+       - some required job still running: the commit decides nothing yet. The walk records it as the newest
+         PENDING commit and continues to older evidence.
+    3. PENDING IS NEVER GREEN, AND RED COMES ONLY FROM CONCLUDED REQUIRED CHECKS. When the walk passed a pending
+       commit before reaching older evidence:
+       - older evidence green: main reads `undetermined`, not green and not stale. `MainHealthState` has no
+         `pending` member. Adding one is in scope only if every consumer of `MainHealthState` handles it.
+         `pendingChecks` names the pending commit's running required checks, and the reason opens with
+         "pending" and names both the pending commit and the older green commit as context.
+       - older evidence red: main stays red, per #10702, and the reason names the newer commit still running.
+         A red is always a concluded required check. A running check never decides red.
+         Main merges every few minutes, so some newer run is nearly always going. Downgrading an older red to
+         pending would hide every red main for as long as merges keep landing.
+    4. JOBS CACHE. `runHistoryCache.jobsByRunId` stays keyed `<runId>#<attempt>`, and it caches only a run whose
+       required jobs have all concluded. A pending run's jobs are read again on the next observation. That costs
+       one jobs read per pending run inside the W1-T6023 window, which already bounds the walk.
+
+    NOT IN SCOPE: the head's own rollup path (`mainHealthFromRollup` on the head's check runs), and
+    `withTripwireOverride`. Red-main attribution of cancelled commits is a separate task.
+  acceptance:
+    - claim: "a newer first-parent commit whose required checks concluded green while its workflow run is still in progress decides main green over an older completed red"
+      proof: 'grep: test("W1-T7757: a newer commit whose required checks concluded green outranks an older completed red while its run is still in progress" in test/main-health-judges-a-newer-commit-by-its-concluded-required-checks.test.ts'
+    - claim: "a newer commit whose required checks concluded red decides main red at that commit while its run is still in progress"
+      proof: 'grep: test("W1-T7757: a newer commit whose required checks concluded red decides red at that commit while its run is still in progress" in test/main-health-judges-a-newer-commit-by-its-concluded-required-checks.test.ts'
+    - claim: "a newer commit with required checks still running over older green evidence reads undetermined, never green, and its reason names the pending commit and the older green commit"
+      proof: 'grep: test("W1-T7757: a newer commit with required checks still running reads pending, never green, and names the older evidence" in test/main-health-judges-a-newer-commit-by-its-concluded-required-checks.test.ts'
+    - claim: "a required check still running never decides red, and an older completed red stays red while a newer commit is still running"
+      proof: 'grep: test("W1-T7757: a running required check never decides red, and an older concluded red stays red beside it" in test/main-health-judges-a-newer-commit-by-its-concluded-required-checks.test.ts'
+    - claim: "the 2026-10-10 15:03:50Z shape replays: 916e5ced0 with ci green and its run in progress decides over f76df1f45's completed red"
+      proof: 'grep: test("W1-T7757: the 15:03:50Z replay decides from 916e5ced0, not from the older red at f76df1f45" in test/main-health-judges-a-newer-commit-by-its-concluded-required-checks.test.ts'
+  falsifier: |
+    Restore the `run.status !== "completed"` drop in `mainPushRunHistoryFromResponse`: the in-progress run never reaches
+    the walk, the older completed red decides, and the first, second and fifth tests fail. Treat a running required
+    check as passing: the third test reads green. Let a pending commit replace an older red: the fourth test reads
+    undetermined where it expects red. Walk in run-creation order instead of first-parent order: the replay fixture,
+    whose older red run was created after the newer commit's run began, decides from the wrong commit.
