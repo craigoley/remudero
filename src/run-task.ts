@@ -448,6 +448,7 @@ import {
   type StarvationClearedInfo,
   type SweepCycleOutcome,
   priorUnrecognisedResetStrings,
+  pendingWorkerBoundaryHandoffs,
   v8HeapStatistics,
 } from "./lib/daemon.js";
 import { sweepStrandedReviewWorktrees } from "./lib/review-worktree-reclaim.js";
@@ -1085,7 +1086,7 @@ import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportVie
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
-import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
+import { auditLedgerUnion, createIncrementalLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
 import { escalateRepeatingRules, ruleEfficacyReport, type RuleSignature } from "./lib/rule-efficacy.js";
@@ -1314,6 +1315,7 @@ import {
   DISPATCH_VALUE_LEDGER_STEPS,
   filingDatesFromPlanHistory,
   planSeed,
+  sortRowsByJson,
   type DispatchValueContext,
   type CostOfDelaySnapshot,
 } from "./lib/dispatch-value.js";
@@ -1610,6 +1612,7 @@ import {
   checkCostGovernor,
   checkMemoryGovernor,
   checkQueueGovernor,
+  readFixHostPressure,
   deriveQueueGovernorTrailingFlow,
   isFleetOwnedRunBranch,
   cancelledRequiredCheckNames,
@@ -1746,6 +1749,7 @@ import {
   inFlightReviewCount,
 } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
+import { applyDaemonMemoryPolicy, createDaemonMemoryGovernor, readDaemonMemoryPolicy } from "./lib/daemon-memory-policy.js";
 import { workerThreads, type TrackedWorker } from "./lib/worker-heaps.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
@@ -2901,7 +2905,7 @@ import {
 import {
   classifyFailure,
   runDiagnoseThenRetry,
-  MAX_TRANSIENT_RETRIES,
+  type DiagnoseThenRetryResult,
   type AttemptOutcome,
   type FailureSignal,
 } from "./lib/classify.js";
@@ -6234,7 +6238,7 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
     deps.log("fix.dispatch", { ...roundFields(), verdict_regime: "executed" });
     const report = await deps.spawn(renderFixPrompt({ task: { ...input.task, files }, round: 1, branch: pr.headRefName!,
       harnessCommits: true, evidence: { planGateFindings: [...initial.failures, ...initial.unreadable], ciFailures: pr.ciFailures,
-        constraint: input.lastRefusal } }));
+        constraint: [input.lastRefusal, pr.pendingAnswer?.constraint].filter(Boolean).join("\n\n") || undefined } }));
     if (git(["rev-parse", "HEAD"]).trim() !== pr.headSha) return refuse("the worker moved the plan round head");
     const changed = workerChangedPaths(git(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]));
     const outside = changed.filter((path) => !files.includes(path));
@@ -11564,7 +11568,8 @@ export async function runFixRung(opts: {
     try {
       const decision = await judgeFixProgress(input, progressJudge);
       deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha, site: "rung.parked",
-        parked_reason: parkedReason, round_count: input.rounds.length, signals: input.signals, ...decision });
+        parked_reason: parkedReason, former_ceiling: input.formerCeiling,
+        round_count: input.rounds.length, signals: input.signals, ...decision });
       return decision;
     } finally {
       standInEscalates = false;
@@ -11847,11 +11852,13 @@ export async function runFixRung(opts: {
           : review.criteria.filter(c => !c.met).map(c => `review:${c.claim}`),
         ledger: [...persisted.filter(row => !roundRows.some(local => row.step === local.step &&
           row.round_id === local.round_id && row.head_sha === local.head_sha && row.strike === local.strike)), ...roundRows],
-        operatorAnswer: opts.constraint, formerCeiling: opts.strikeCap,
+        operatorAnswer: opts.constraint, formerCeiling: retriggers >= retriggerCap ? retriggerCap : opts.strikeCap,
         parkedReason: consecutiveMergeRefusalReasons.length > 0
           ? `Consecutive merge refusals:\n${consecutiveMergeRefusalReasons.join("\n")}` : progressRoundReason });
       const decision = await judgeFixProgress(input, progressJudge);
       deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha,
+        site: retriggers >= retriggerCap ? "fix-retrigger" : "fix-strike",
+        parked_reason: input.parkedReason, former_ceiling: input.formerCeiling,
         round_count: input.rounds.length, signals: input.signals, ...decision });
       if (decision.verdict === "unavailable") return { outcome: "handed_off", review, strikes, retriggers, reason: decision.reason };
       if (decision.verdict === "escalate") {
@@ -12894,7 +12901,7 @@ export async function runFixRung(opts: {
     });
     if (roundBase.advanced) deps.log("fix.round_head_advanced", { head_sha: priorHeadSha, round_base_sha: roundBase.baseSha, reason: roundBase.reason });
     const fixRoundStartedAtMs = systemClock.now();
-    const roundId = `${opts.runId}:${attempt}:${fixRoundStartedAtMs}`;
+    const roundId = `${opts.runId}:${attempt + retriggers}:${fixRoundStartedAtMs}`;
     const fixReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs), fixLaneBenchmarkWork(opts.task, deps.ledgerPath),
       { prUrl: opts.prUrl, roundId }, { root: opts.config.root });
     let fixResult: WorkerResult;
@@ -15070,6 +15077,36 @@ export function implementAttemptOutcome(r: WorkerResult): AttemptOutcome {
   return { success: true };
 }
 
+/** Finish an exhausted transient remedy without losing its class to the judge's loop text. */
+export function finishTransientRetry(
+  driverResult: DiagnoseThenRetryResult,
+  context: { taskId: string; runId: string; repoDir: string; worktreePath: string; costUsd: number;
+    worker: WorkerResult; log: RunTaskContext["log"]; say: RunTaskContext["say"] },
+  removeWorktree: typeof worktreeRemove = worktreeRemove,
+): RunResult | undefined {
+  if (driverResult.outcome !== "gave_up" || driverResult.exhaustedClass !== "transient") return undefined;
+  const { taskId, runId, repoDir, worktreePath, costUsd, worker, log, say } = context;
+  try {
+    removeWorktree(repoDir, worktreePath);
+    log("worktree.remove", { on: "blocked_transient" });
+  } catch (e) {
+    log("worktree.remove.error", { on: "blocked_transient", error: String((e as Error)?.message ?? e) });
+  }
+  log("verdict", {
+    verdict: "blocked_transient",
+    stage: "implement",
+    subtype: worker.subtype,
+    num_turns: worker.numTurns,
+    cost_usd: costUsd,
+    billing_mode: billingMode(worker.childEnvKeys),
+    account_label: worker.accountLabel,
+    reason: `repeated transient API error across ${driverResult.transientRetries} retries — ${driverResult.reason}`,
+    ...terminalVerdictFields(worker),
+  });
+  say(`verdict: blocked_transient — ${driverResult.reason}`);
+  return { taskId, runId, merged: false, costUsd, verdict: "blocked_transient" };
+}
+
 /**
  * FOLLOW-UP HARVEST (W1-T105, §2 non-blocking, mirrors the QUESTION contract's
  * parse-then-log discipline). Shared by every call site that can carry a worker's
@@ -16954,6 +16991,7 @@ async function runTask(
     config?: Config;
     /** W1-T7096: the drain and the CLI ask the production LLM progress judge in the fix rung. */
     productionProgressJudge?: boolean;
+    preopenGate?: RunTaskBodyOptions["preopenGate"];
     /** Frozen at the executing module boundary by default; trial runners may supply pinned artifacts. */
     benchmarkStackEvidence?: BenchmarkStackEvidence;
     allowStale?: boolean;
@@ -18448,7 +18486,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
    * and is NEVER retried — dollars are the hard backstop. Any other error is
    * `failed`. Returns null when the result is not an error (caller proceeds).
    */
-  const failOnWorkerError = (r: WorkerResult, stage: string): RunResult | null => {
+  const failOnWorkerError = (r: WorkerResult, stage: string, reason?: string): RunResult | null => {
     const v = workerErrorVerdict(r, costUsd, stage);
     if (!v) return null;
     try {
@@ -18457,7 +18495,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     } catch (e) {
       log("worktree.remove.error", { on: `${stage}.error`, error: String((e as Error)?.message ?? e) });
     }
-    log("verdict", { ...v.ledger, ...terminalVerdictFields(r) });
+    log("verdict", { ...v.ledger, ...terminalVerdictFields(r), ...(reason ? { reason } : {}) });
     say(
       `verdict: ${v.verdict} (${r.subtype}) at ${stage} · ${r.numTurns} turns · notional $${costUsd.toFixed(4)}`,
     );
@@ -18946,6 +18984,23 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   }
 
   try {
+    const checkpoint = pendingWorkerBoundaryHandoffs(readLedgerRawLines(ledgerPath)).get(taskId);
+    if (checkpoint) {
+      try {
+        const remoteHead = (await hostWorktreeGitAsync(worktreePath, ["ls-remote", "origin", `refs/heads/${checkpoint.branch}`])).trim().split(/\s+/)[0];
+        if (remoteHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved; refusing to replay a different worker's work");
+        await hostWorktreeGitAsync(worktreePath, ["fetch", "origin", checkpoint.branch]);
+        const fetchedHead = (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "FETCH_HEAD"])).trim();
+        if (fetchedHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved during fetch");
+        const commits = (await hostWorktreeGitAsync(worktreePath, ["rev-list", "--reverse", "--no-merges", `origin/main..${checkpoint.headSha}`])).trim();
+        if (commits) await hostWorktreeGitAsync(worktreePath, ["cherry-pick", ...commits.split("\n")]);
+        log("implement.checkpoint_restored", { source_branch: checkpoint.branch, source_head_sha: checkpoint.headSha, branch });
+      } catch (error) {
+        log("verdict", { verdict: "no_pr", reason: "restart_checkpoint_restore_failed", branch,
+          source_branch: checkpoint.branch, detail: String((error as Error)?.message ?? error), cost_usd: costUsd });
+        return { taskId, runId, merged: false, costUsd, verdict: "no_pr" };
+      }
+    }
     // ── Recon (read-only).
     say("recon worker");
     // W1-T37 / MASTER-PLAN §8A Tier 2: the plan is RETRIEVED, not injected — the recon prompt
@@ -19358,6 +19413,33 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     say("implement worker");
     const workerHeadReflogBefore = readWorktreeHeadReflog(worktreePath);
     let impl!: WorkerResult;
+    // W1-T7697: retain disk work before releasing a lane; a failed checkpoint is never a handoff.
+    const yieldAtWorkerBoundary = async (waitingOn: string): Promise<RunResult | undefined> => {
+      const freshness = await opts.externalWaitFreshness?.();
+      const recycle = freshness ? undefined : opts.externalWaitRecycle?.();
+      if (!freshness && !recycle) return undefined;
+      try {
+        if (worktreeHasUncommittedChanges(worktreePath)) {
+          const checkpoint = commitWorkerEdits(worktreePath, task.files ?? [],
+            `wip: yield at ${waitingOn}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume ${waitingOn}\nfailed: none\n\nRemudero-Task: ${taskId}`,
+            {}, task.acceptance);
+          if (!checkpoint.committed || checkpoint.undeclared.length > 0) {
+            throw new Error(`restart checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}`);
+          }
+        }
+        await gitPushRunBranchAsync(worktreePath);
+      } catch (error) {
+        log("verdict", { verdict: "no_pr", reason: "restart_checkpoint_failed", waiting_on: waitingOn,
+          detail: String((error as Error)?.message ?? error), branch, cost_usd: costUsd, ...terminalVerdictFields(impl) });
+        return { taskId, runId, merged: false, costUsd, verdict: "no_pr" };
+      }
+      const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
+      log("run.freshness_handoff", { waiting_on: waitingOn, branch, head_sha: headSha,
+        ...(freshness ? { old_sha: freshness.oldSha, new_sha: freshness.newSha } : { trigger: "recycle", detail: recycle }) });
+      log("verdict", { verdict: "handed_off", reason: "freshness_yield", waiting_on: waitingOn,
+        branch, head_sha: headSha, cost_usd: costUsd, ...terminalVerdictFields(impl) });
+      return { taskId, runId, merged: false, costUsd, verdict: "handed_off" };
+    };
     const attemptImplement = async (findings?: string): Promise<AttemptOutcome> => {
       // The diagnose-informed attempt is the LAST one before the task goes to a human, and it only
       // happens after the implement mount has failed twice: that attempt steps up (operator ruling
@@ -19489,6 +19571,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // later. The schedule lives in classify.ts (transientBackoffMs, bounded); this passes only
       // the clock, so a test can drive the whole thing without a real timer.
       driverResult = await runDiagnoseThenRetry({
+        fixProgressJudge: ctx.spawnInjected ? undefined : productionFixProgressJudge({ cwd: worktreePath, settingsFile }),
+        progressInput: buildFixProgressInput({ taskId, headSha: "implement", currentRed: [], ledger: [] }),
         attempt: attemptImplement,
         diagnose: dispatchDiagnose,
         log,
@@ -19502,30 +19586,15 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       driverResult = { outcome: "gave_up", strikes: 0, transientRetries: 0, diagnosed: false, attempts: 1, reason: e.message };
     }
 
-    if (driverResult.outcome === "gave_up" && /transient retries exhausted/i.test(driverResult.reason ?? "")) {
-      // A transient that PERSISTED across the bounded retries: Anthropic-side, not a task
-      // failure and not a no-op. Honest, distinct verdict (NOT failed, NOT no_pr) the daemon
-      // can reason about; it blocks the drain like any non-merged terminal state.
-      try {
-        worktreeRemove(repoDir, worktreePath);
-        log("worktree.remove", { on: "blocked_transient" });
-      } catch (e) {
-        log("worktree.remove.error", { on: "blocked_transient", error: String((e as Error)?.message ?? e) });
-      }
-      log("verdict", {
-        verdict: "blocked_transient",
-        stage: "implement",
-        subtype: impl.subtype,
-        num_turns: impl.numTurns,
-        cost_usd: costUsd,
-        billing_mode: billingMode(impl.childEnvKeys),
-        account_label: impl.accountLabel,
-        reason: `repeated transient API error across ${MAX_TRANSIENT_RETRIES} retries — not a task failure`,
-        ...terminalVerdictFields(impl),
-      });
-      say(`verdict: blocked_transient — repeated transient API error, not a task failure`);
+    if (driverResult.outcome === "held") {
+      log("verdict", { verdict: "blocked_transient", stage: "implement", reason: driverResult.reason });
       return { taskId, runId, merged: false, costUsd, verdict: "blocked_transient" };
     }
+
+    const transientVerdict = finishTransientRetry(driverResult, {
+      taskId, runId, repoDir, worktreePath, costUsd, worker: impl, log, say,
+    });
+    if (transientVerdict) return transientVerdict;
     // ── The worker's OWN preflight verdict, surfaced before any verdict branch consumes the run.
     // `rmd preflight` writes `<repoRoot>/coverage/preflight-summary.json` in the worktree it ran
     // in — and that worktree is still on disk here, because every `worktreeRemove` in this
@@ -19571,7 +19640,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       log("source_size.followup.noop", { reason: "head_unreadable", detail });
     }
 
-    const implFail = failOnWorkerError(impl, "implement");
+    const implFail = failOnWorkerError(impl, "implement", driverResult.reason);
     if (implFail) return implFail;
 
     const fullText = (r: WorkerResult) => workerTranscript(r);
@@ -19619,6 +19688,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
             : "ledger-only, " + recordVerdict.band + " risk"
         })`,
       );
+      const boundaryYield = await yieldAtWorkerBoundary("decision");
+      if (boundaryYield) return boundaryYield;
       impl = account(
         // W1-T191: this resumed spawn used to call the real `spawnWorker` directly, bypassing
         // the injectable `spawn` (`opts.spawn ?? spawnWorker`) every OTHER spawn call site in
@@ -19673,6 +19744,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     for (;;) {
       const tipSubject = lastCommitSubject(worktreePath);
       if (tipSubject === undefined || !isWipSubject(tipSubject) || parseReport(fullText(impl))?.prUrl) break;
+      const checkpointYield = await yieldAtWorkerBoundary("checkpoint");
+      if (checkpointYield) return checkpointYield;
       let tipBody = "";
       try {
         tipBody = hostWorktreeGit(worktreePath, ["log", "-1", "--format=%b"]);
@@ -19690,6 +19763,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       });
       log("implement.checkpoint_judged", { stop: checkpointStops.length, resume: decision.resume, by: decision.by, reason: decision.reason });
       if (!decision.resume) break;
+      const judgedYield = await yieldAtWorkerBoundary("checkpoint");
+      if (judgedYield) return judgedYield;
       impl = account(
         await spawn({
           cwd: worktreePath,
@@ -19717,10 +19792,14 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // The harness runs the fast gate itself before opening the PR; a failing step goes back to the worker once.
     const preopenGate = opts.preopenGate ?? (spawnInjected ? undefined : (path: string) => runPreopenGate(path));
     if (preopenGate !== undefined && !parseReport(fullText(impl))?.prUrl) {
+      const workerYield = await yieldAtWorkerBoundary("worker");
+      if (workerYield) return workerYield;
       const gate = await preopenGate(worktreePath);
       log(PREOPEN_GATE_STEP, { result: gate.kind, failed: gate.kind === "fail" ? gate.failedSteps : [], duration_ms: gate.durationMs,
         ...(gate.kind === "unmeasured" ? { reason: gate.reason } : {}) });
       if (gate.kind === "fail") {
+        const preopenYield = await yieldAtWorkerBoundary("preopen_gate");
+        if (preopenYield) return preopenYield;
         impl = account(
           await spawn({
             cwd: worktreePath,
@@ -19744,6 +19823,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         const gateFail = failOnWorkerError(impl, "implement.preopen_continued");
         if (gateFail) return gateFail;
       }
+    }
+
+    if (!parseReport(fullText(impl))?.prUrl) {
+      const workerYield = await yieldAtWorkerBoundary("worker");
+      if (workerYield) return workerYield;
     }
 
     // ── QUESTION contract (non-blocking) — log, don't stall (§2).
@@ -34929,9 +35013,8 @@ export function dailyCostCeilingReloader(deps: { policy?: Policy; env?: NodeJS.P
  * SAME "the callback does the escalation, the caller only logs its own generic step" split
  * `costGovernorGateFor` already uses.
  *
- * `policy` defaults to `DEFAULT_SWEEP_POLICY` deliberately — the limit VALUE is already a policy
- * row (`plan/policy.yaml`'s `wipLimit`, origin `lifted:src/lib/sweep.ts:257`); retuning it is a
- * separate ruling on separate evidence, out of this task's scope. Never called from `runSweep` or
+ * W1-T7243: production uses trailing throughput and live memory headroom as its bound, and keeps
+ * the nominal policy limit in telemetry. Never called from `runSweep` or
  * any of its deps (arm/dispatchFix/close/escalate) — see `checkQueueGovernor`'s own asymmetry note
  * for why drainage of already-open PRs must never be gated by WIP.
  */
@@ -34941,8 +35024,10 @@ function queueGovernorGateFor(
   runId: string,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
   now: () => number = Date.now,
-): () => QueueGovernorResult | undefined {
-  return () => {
+): QueueGovernorGate {
+  let admission: QueueGovernorResult | undefined;
+  const gate = (): QueueGovernorResult | undefined => {
+    admission = undefined;
     const { owned, foreign, ownedPrNumbers } = openPrOwnership();
     const lines = readLedgerLines(ledgerPath);
     const nowMs = now();
@@ -34952,6 +35037,7 @@ function queueGovernorGateFor(
       trailingMergedCount: flow.trailingMergedCount, readHeadroom: () => readMemoryHeadroomFraction(),
     });
     const result = checkQueueGovernor(owned, policy, {
+      pressure: readFixHostPressure(policy.memoryFloorMib),
       foreignOpenCount: foreign,
       trailingMergedCount: flow.trailingMergedCount,
       trailingOpenedCount: flow.trailingOpenedCount,
@@ -34959,7 +35045,14 @@ function queueGovernorGateFor(
       adaptiveBound: adaptive.adaptiveBound,
       headroomFraction: adaptive.headroomFraction,
     });
+    appendLedger(ledgerPath, { run_id: runId, task_id: "GOVERNOR", step: "dispatch_wip_observed",
+      observed_open_count: owned, measured_bound: result.measuredBound, wip_limit: result.wipLimit,
+      trailing_merged_count: flow.trailingMergedCount, trailing_opened_count: flow.trailingOpenedCount,
+      pressure_available_mib: result.pressure?.availableMib, pressure_floor_mib: result.pressure?.floorMib,
+      pressure_reason: result.pressure?.reason,
+      tier: result.tier, deferred: result.deferred });
     if (!result.deferred) {
+      admission = result;
       if (owned >= policy.wipLimit) {
         appendLedger(ledgerPath, {
           run_id: runId, task_id: "GOVERNOR", step: "dispatch_admitted_adaptive_wip",
@@ -34974,7 +35067,12 @@ function queueGovernorGateFor(
     logQueueGovernorDeferral(result, appendLedger, ledgerPath, runId);
     return result;
   };
+  return Object.assign(gate, { readAdmission: () => admission });
 }
+
+/** The queue gate plus the reading behind its latest admission, which sizes the lane budget so a
+ *  pass the adaptive bound admits is never sized to zero against the static `wipLimit`. */
+type QueueGovernorGate = (() => QueueGovernorResult | undefined) & { readAdmission: () => QueueGovernorResult | undefined };
 
 /** W1-T3144 — bridge the complete open-board observation already made inside `projectPlan` to the
  * dispatch governor. Gateways without the optional batch method retain the historical projection
@@ -35339,6 +35437,12 @@ export function readDispatchFilingSnapshot(
   }
 }
 
+/** The daemon's dispatch-selection union: a repeated selection over an unchanged ledger reads nothing, and a
+ * changed one reads only the live file's new tail and any new rotation (see createIncrementalLedgerUnion). */
+const dispatchSelectionLedgerUnion = createIncrementalLedgerUnion({ holder: "dispatch-value", reducerVersion: "1" });
+/** The sorted evidence of a frozen (cached, so unchanging) union, so an unchanged union is never re-sorted. */
+const dispatchEvidenceByUnion = new WeakMap<ReadonlyArray<Record<string, unknown>>, ReadonlyArray<Record<string, unknown>>>();
+
 /** W1-T4064: the ledger snapshot supplies time and consumed slots; committed history supplies age.
  * Fallbacks are keyed by the unreadable input, persisted in the ledger and deduplicated in-process. */
 export function dispatchValueContextForSelection(
@@ -35347,7 +35451,7 @@ export function dispatchValueContextForSelection(
   stateDir: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   planPath: string,
-  readLedger: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync,
+  readLedger: typeof readLedgerUnionRecordsSync = dispatchSelectionLedgerUnion,
   readFiling: typeof readDispatchFilingSnapshot = readDispatchFilingSnapshot,
 ): DispatchValueContext | undefined {
   const union = readLedger(stateDir, {
@@ -35372,8 +35476,11 @@ export function dispatchValueContextForSelection(
     return undefined;
   }
   const filing = readFiling(planPath);
-  const evidence = union.rows.filter(row => row.step !== "dispatch.cost_of_delay.fallback" && row.step !== "dispatch.cost_of_delay.ready")
-    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  let evidence = dispatchEvidenceByUnion.get(union.rows);
+  if (evidence === undefined) {
+    evidence = sortRowsByJson(union.rows.filter(row => row.step !== "dispatch.cost_of_delay.fallback" && row.step !== "dispatch.cost_of_delay.ready"));
+    if (Object.isFrozen(union.rows)) dispatchEvidenceByUnion.set(union.rows, evidence);
+  }
   const times = evidence.map(row => typeof row.ts === "string" ? Date.parse(row.ts) : NaN).filter(Number.isFinite);
   const filingTimes = filing.kind === "ready" ? [...filing.snapshot.filedAtByTaskId.values()] : [];
   const nowMs = [...times, ...filingTimes].reduce((latest, at) => Math.max(latest, at), 0);
@@ -35650,6 +35757,7 @@ async function drainCommand(
     return projected;
   });
   const openPrCount = () => openPrOwnership().owned;
+  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now);
   if (dryRun) {
     const merged = refreshMerged();
     if (opts.curated) {
@@ -35840,7 +35948,8 @@ async function drainCommand(
         // 23-open-PR incident): the SAME batch the W1-T172 lanes budget's `openPrCount` closure
         // already reads (below), split by ownership (W1-T4465 design (i)) — never a second
         // GitHub read path — see queueGovernorGateFor's doc.
-        checkQueueGovernor: queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now),
+        checkQueueGovernor: queueGate,
+        readQueueAdmission: queueGate.readAdmission,
         // HOST MEMORY FLOOR (W1-T5347 wires W1-T1038's memoryGovernorGateFor): a fresh
         // /proc/meminfo reading per consultation, so the per-lane re-check sees each lane's cost.
         // Holds NEW implement dispatch only — never a running worker or a review.
@@ -38178,8 +38287,17 @@ export async function daemonCommand(
     startGithubAppRefresh?: typeof startInstallationTokenRefresh;
     gitCredentialMint?: ScopedTokenMint;
     ciJudgeIo?: CiJudgeIo;
+    /** The entry's GC tuning (daemon-memory-policy.ts). Production applies it to this process; a test
+     *  injects a recorder so the call is observed without retuning the test runner's own V8. */
+    applyMemoryPolicy?: typeof applyDaemonMemoryPolicy;
   } = {},
 ): Promise<number> {
+  // 2026-10-10: FIRST, BEFORE ANYTHING ALLOCATES. Keep the heap a fixed multiple of what survives each
+  // collection instead of letting garbage reach ~4x the live set under the 8 GB ceiling, and take that
+  // ceiling out of the NODE_OPTIONS every child inherits. Never fatal: a malformed policy row boots on
+  // the defaults and names itself on the daemon.memory_policy row below.
+  const memoryPolicyRead = readDaemonMemoryPolicy(policyPath(deps.repoRoot ?? repoRoot));
+  const memoryPolicyApplied = (deps.applyMemoryPolicy ?? applyDaemonMemoryPolicy)(memoryPolicyRead.policy);
   // W1-T2697: mark THIS process as the daemon BEFORE anything below can append a ledger row —
   // every `appendLedger` call this process makes (in-process, e.g. a wired sweep tick) from here
   // on reports `actor: "daemon"` rather than the operator-shell default. See
@@ -38291,6 +38409,13 @@ export async function daemonCommand(
   const kickCiJudge = ciJudgeIo && singleFlightCiJudge(() => judgeCiEscalation(productionCiJudgePorts({
     owner: self.owner, repo: self.repo, repoRoot: effectiveRepoRoot, stateDir: join(config.root, "state"), log, ...ciJudgeIo,
   })), log);
+  log("daemon.memory_policy", {
+    ...memoryPolicyApplied,
+    tighten_share: memoryPolicyRead.policy.tightenShare,
+    restart_share: memoryPolicyRead.policy.restartShare,
+    heap_size_limit: getHeapStatistics().heap_size_limit,
+    ...(memoryPolicyRead.error ? { policy_error: memoryPolicyRead.error } : {}),
+  });
   log("daemon.target", {
     repo: target.repo,
     gateway: `${target.owner}/${target.repo}`,
@@ -38495,6 +38620,7 @@ export async function daemonCommand(
     return projected;
   });
   const openPrCount = () => openPrOwnership().owned;
+  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now);
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
     // W1-T253: drain.max from the SAME loaded policy `opts` above already threaded, never
@@ -38967,6 +39093,7 @@ export async function daemonCommand(
         }) : undefined,
         readLoopTelemetry: loopTelemetry.sample,
         readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha, { generation: runId }),
+        memoryGovernor: createDaemonMemoryGovernor({ policy: memoryPolicyRead.policy }),
         lastStepBeforeBlock: () => lastReadPlaneStep,
         idleStarvedSupervised: process.env.RMD_IDLE_STARVED_SUPERVISED === "1" && !target.isSelf && !flagValue(rest, "--plan"),
         confirmedOpenPrCount: boardOpenPrCount.readConfirmed,
@@ -39054,7 +39181,8 @@ export async function daemonCommand(
         // WIP CEILING (W1-T321 wires checkQueueGovernor's own predicate, sweep.ts, the W1-T121
         // 23-open-PR incident): the SAME batch `openPrCount` reads just above, split by ownership
         // (W1-T4465 design (i)) — never a second GitHub read path — see queueGovernorGateFor's doc.
-        checkQueueGovernor: queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now),
+        checkQueueGovernor: queueGate,
+        readQueueAdmission: queueGate.readAdmission,
         // HOST MEMORY FLOOR (W1-T5347 wires W1-T1038's memoryGovernorGateFor): a fresh
         // /proc/meminfo reading per consultation, so the per-lane re-check sees each lane's cost.
         // Holds NEW implement dispatch only — never a running worker or a review.
@@ -47435,6 +47563,7 @@ export async function routeFix(
     return { outcome: "refused", reason: terminal };
   }
   const { disposition, reason } = deriveDisposition(pr, policy);
+  let progressDecision: FixProgressVerdict | undefined;
   if (disposition === "blocked-fixable" && (pr.priorStrikes ?? 0) > 0) {
     // W1-T7096 (ruling 2026-10-09): a PR that already spent rounds gets another only when the progress
     // judge says so — never a fixed strike cap. Escalation still renders the operator question.
@@ -47445,9 +47574,11 @@ export async function routeFix(
       strikesSpent: pr.priorStrikes,
       currentRed: isBlockedCi(pr) ? (pr.ciFailures ?? []).map((f) => f.name)
         : pr.unmetCriteria.filter((c) => !c.met).map((c) => `review:${c.claim}`),
-      ledger: [...(deps.ledgerLines?.() ?? [])], formerCeiling: policy.strikeCap });
+      ledger: [...(deps.ledgerLines?.() ?? [])], formerCeiling: policy.strikeCap,
+      parkedReason: "fix-strike: another operator-requested repair after prior rounds" });
     const decision = await judgeFixProgress(input, judge);
-    log("fix.progress_judged", { pr_number: pr.prNumber, head_sha: pr.headSha, prior_strikes: pr.priorStrikes, ...decision });
+    log("fix.progress_judged", { pr_number: pr.prNumber, head_sha: pr.headSha, prior_strikes: pr.priorStrikes,
+      site: "fix-strike", parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, ...decision });
     if (decision.verdict === "unavailable") {
       return { outcome: "refused", reason: `fix progress judge unavailable: ${decision.reason}` };
     }
@@ -47456,6 +47587,7 @@ export async function routeFix(
       await deps.escalate(pr, loopReason, renderClarificationQuestion(pr, loopReason, pr.strikeHistory ?? []));
       return { outcome: "escalated", reason: loopReason };
     }
+    progressDecision = decision;
   }
   if (disposition === "blocked-fixable") {
     // W1-T100: the SAME evidence-shape selection runSweep uses, off the SAME
@@ -47468,14 +47600,16 @@ export async function routeFix(
     // disposition named, instead of discarding it at this exact boundary.
     await deps.dispatchFix(
       pr,
-      isBlockedCi(pr)
+      { ...(progressDecision ? { progressDecision, progressJudge: deps.fixProgressJudge,
+          progressApproach: progressDecision.verdict === "change-approach" ? progressDecision.approach : undefined } : {}),
+        ...(isBlockedCi(pr)
         ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] }
         : {
             unmetCriteria: pr.unmetCriteria,
             actionableGateFailures: pr.actionableGateFailures,
             instrumentEntangled: pr.instrumentEntangled,
             instrumentEntanglementPaths: pr.instrumentEntanglementPaths,
-          },
+          }) },
     );
     return { outcome: "fixed", reason };
   }

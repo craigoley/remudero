@@ -15,6 +15,8 @@
   acceptance:
     - claim: "the cause of test/catch-erasure-ratchet.test.ts's intermittent failure is fixed in test/catch-erasure-ratchet.test.ts, pinned by a test that forces the failing order"
       proof: "unit test: W1-T7532 pins the cause of the intermittent failure"
+    - claim: "the test that pins the cause is added to test/catch-erasure-ratchet.test.ts, beside the test that failed"
+      proof: 'grep: test("W1-T7532 pins the cause of the intermittent failure" in test/catch-erasure-ratchet.test.ts'
   note: "Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The SRE ruling of 2026-09-23 is that a CI flake is an incident."
   rationale: |
     Test: test/catch-erasure-ratchet.test.ts

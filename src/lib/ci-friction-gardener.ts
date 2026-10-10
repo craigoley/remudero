@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import { basename, join, relative } from "node:path";
 
 import { systemClock, type Clock } from "./clock.js";
+import { checkoutHeadStamp } from "./checkout-head.js";
 import type { Escalation } from "./escalate.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
 import { gardenLedgerBucket } from "./gardener.js";
@@ -1200,7 +1201,7 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
     classes: CI_FRICTION_GARDEN_CLASSES,
     review: { draft: "filing a new task from priced friction is a judgement call — the machine-filing judge or a person decides the remedy." },
     cheapFingerprint: () => {
-      const head = execFileSync("git", ["-C", deps.repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      const head = checkoutHeadStamp(deps.repoRoot, clock);
       const live = ledgerLivePath(deps.stateDir);
       const report = gateFireRatesPath(deps.stateDir);
       const fileStamp = (path: string): string => {

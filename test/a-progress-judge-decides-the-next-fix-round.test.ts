@@ -299,10 +299,7 @@ describe("test/a-progress-judge-decides-the-next-fix-round.test.ts", () => {
     assert.equal(args.progressApproach, "reproduce before patching");
     assert.equal(args.progressDecision?.verdict, "change-approach");
   });
-  // MAX_PROOF_REPAIR_REFUSALS_PER_HEAD is W1-T7243's budget (every other fixed repair budget defers to the
-  // judge), not W1-T7096's strike cap: past it the W1-T5544 ladder still hands the PR to its next rung, not
-  // another worker round. W1-T7243 moves this bound under the judge.
-  test("proof-repair refusals beyond the former limit take the ladder's next rung, not another round", async () => {
+  test("proof-repair refusals beyond the former limit carry the judge's new approach into another round", async () => {
     const rows = rounds(true).flatMap((row, i) => i % 2 === 0 ? [row,
       { task_id: TASK, step: "fix.commit_refused", round_id: row.round_id, head_sha: "head-3", reason: "proof did not discriminate" }] : [row]);
     let judged = false;
@@ -317,8 +314,11 @@ describe("test/a-progress-judge-decides-the-next-fix-round.test.ts", () => {
     const proofLog = 'proof-discrimination: FAIL — 1 proof(s) pass at both PR head and merge base (abc123):\n  proof: unit test: stale proof\n  head hits: 1; base hits: 1';
     await runSweep([pr({ ciFailures: [{ name: "proof-discrimination", logTail: proofLog }],
       redRequiredChecks: ["proof-discrimination"], changedFiles: ["src/a.ts"] })], f.deps);
-    assert.equal(judged, false, "the refusal budget is W1-T7243's; this task's judge is not asked here");
-    assert.equal(f.dispatched.length, 0, "no further proof-repair worker round past the former refusal limit");
+    assert.equal(judged, true, "the former refusal limit supplies evidence to the judge");
+    assert.equal(f.dispatched.length, 1, "the judge authorizes another proof-repair worker round");
+    assert.equal((f.dispatched[0] as { progressApproach: string }).progressApproach, "propose a corrected proof");
+    assert.equal(rows.find(row => row.step === "fix.progress_judged")?.former_ceiling, 2);
+    assert.deepEqual(f.escalated, []);
   });
 
   test("real round commit evidence records a diff stat and a patch digest", () => {

@@ -1,4 +1,7 @@
-import { existsSync, lstatSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { systemClock, type Clock } from "./clock.js";
@@ -6,6 +9,8 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import type { Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { runStepsAsync, runStepsSync, step, type StepEffect, type Steps } from "./git-push.js";
+import { parseTasksFromYaml } from "./plan.js";
+import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 import { sampleBeta, seededRandom } from "./knowledge-value.js";
 
 /**
@@ -300,6 +305,193 @@ export interface GardenerDeps<W extends GardenCheckout = GardenCheckout, P exten
   /** Stands in for a shard filer's landing guard (machine-filing.ts's `machineShardLandingGuard`): a
    *  fixture sets it to land a shape lint-plan refuses, to test what follows a landing. Production never does. */
   landingRefusal?: (root: string, paths: readonly string[]) => string | undefined;
+  /** W1-T5457: lints the plan change on top of FRESH origin/main just before it lands; a fixture injects it.
+   *  Absent, {@link freshMergedPlanLint} fetches and merges for real. */
+  mergedPlanLint?: (root: string, paths: readonly string[]) => MergedPlanLintFailure | undefined | Promise<MergedPlanLintFailure | undefined>;
+}
+
+/** The first plan file whose merged result would not load, and why. */
+export interface MergedPlanLintFailure {
+  file: string;
+  message: string;
+}
+
+const isPlanShard = (p: string): boolean => p.startsWith("plan/") && (p.endsWith(".yaml") || p.endsWith(".yml"));
+
+/** W1-T5457: lint the plan as it would stand once `changes` (path -> merged text) land on `base` (path -> text
+ *  of fresh origin/main's plan blobs). Pure. Only plan/ yaml paths are checked: a parse or duplicate-key
+ *  error in a changed file, or a task id a changed file now shares with another file, is the first failure. */
+export function lintMergedPlanChange(input: { base: Record<string, string>; changes: Record<string, string> }): MergedPlanLintFailure | undefined {
+  const merged: Record<string, string> = { ...input.base };
+  const checked = Object.keys(input.changes).filter((p) => isPlanShard(p));
+  for (const p of checked) merged[p] = input.changes[p]!;
+  const owner = new Map<string, string>();
+  for (const file of Object.keys(merged).filter((p) => isPlanShard(p)).sort()) {
+    let ids: string[];
+    try {
+      ids = parseTasksFromYaml(merged[file]!, file).map((t) => t.id);
+    } catch (e) {
+      // A file this change did not touch that is already broken on main is not this change's doing.
+      if (!checked.includes(file)) continue;
+      return { file, message: String((e as Error)?.message ?? e) };
+    }
+    for (const id of ids) {
+      const earlier = owner.get(id);
+      if (earlier !== undefined && earlier !== file && (checked.includes(file) || checked.includes(earlier))) {
+        return { file, message: `duplicate task id '${id}' (${file} collides with ${earlier})` };
+      }
+      owner.set(id, file);
+    }
+  }
+  return undefined;
+}
+
+/** W1-T5457: the real landing lint — fetch origin/main now, three-way merge each plan path this change
+ *  touches (ancestor = the checkout's HEAD, ours = fresh main, theirs = the working file), and lint the
+ *  result. A path outside plan/ costs nothing. */
+export function freshMergedPlanLint(root: string, paths: readonly string[]): MergedPlanLintFailure | undefined {
+  const planPaths = paths.filter((p) => isPlanShard(p));
+  if (planPaths.length === 0) return undefined;
+  const git = (...args: string[]) => hostWorktreeGit(root, args, { maxBuffer: 1 << 26 });
+  const show = (ref: string, p: string): string | undefined => {
+    try {
+      return hostWorktreeGit(root, ["show", `${ref}:${p}`], { maxBuffer: 1 << 26 });
+    } catch {
+      // deliberate: a path absent at that ref is a legitimate "does not exist there", not a failure.
+      return undefined;
+    }
+  };
+  git("fetch", "-q", "origin", "main");
+  const base: Record<string, string> = {};
+  for (const p of git("ls-tree", "-r", "--name-only", "origin/main", "--", "plan/").split("\n").filter((f) => isPlanShard(f))) base[p] = show("origin/main", p) ?? "";
+  const changes: Record<string, string> = {};
+  const dir = mkdtempSync(join(tmpdir(), "rmd-merged-plan-lint-"));
+  try {
+    for (const p of planPaths) {
+      const theirs = readFileSync(join(root, p), "utf8");
+      const ours = base[p];
+      const ancestor = show("HEAD", p);
+      if (ours === undefined || ancestor === undefined || ours === ancestor) {
+        changes[p] = theirs;
+        continue;
+      }
+      const f = (n: string, text: string) => (writeFileSync(join(dir, n), text), join(dir, n));
+      const r = spawnSync("git", ["merge-file", "-p", f("ours", ours), f("ancestor", ancestor), f("theirs", theirs)], { encoding: "utf8", maxBuffer: 1 << 26 });
+      if (r.status !== 0) return { file: p, message: r.status === null ? "git merge-file failed" : "merge conflict against fresh origin/main" };
+      changes[p] = r.stdout;
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  return lintMergedPlanChange({ base, changes });
+}
+
+function tarField(header: Buffer, start: number, length: number): string {
+  const field = header.subarray(start, start + length);
+  const end = field.indexOf(0);
+  return field.subarray(0, end < 0 ? field.length : end).toString("utf8");
+}
+
+function tarOctal(header: Buffer): number {
+  const raw = header.subarray(124, 136).toString("ascii").split("\0", 1)[0]!.trim();
+  if (raw === "") return 0;
+  if (!/^[0-7]+$/.test(raw)) throw new Error("plan archive has an invalid tar size");
+  return Number.parseInt(raw, 8);
+}
+
+function paxPath(data: Buffer): string | undefined {
+  let offset = 0;
+  let path: string | undefined;
+  while (offset < data.length) {
+    const space = data.indexOf(0x20, offset);
+    if (space < 0) throw new Error("plan archive has an invalid pax record");
+    const length = Number(data.subarray(offset, space).toString("ascii"));
+    if (!Number.isSafeInteger(length) || length <= space - offset + 1 || offset + length > data.length) {
+      throw new Error("plan archive has an invalid pax record length");
+    }
+    const record = data.subarray(space + 1, offset + length - 1);
+    const equals = record.indexOf(0x3d);
+    if (equals >= 0 && record.subarray(0, equals).toString("ascii") === "path") path = record.subarray(equals + 1).toString("utf8");
+    offset += length;
+  }
+  return path;
+}
+
+function planFilesFromTar(archive: string): Record<string, string> {
+  const bytes = Buffer.from(archive, "latin1");
+  const files: Record<string, string> = {};
+  let offset = 0;
+  let localPath: string | undefined;
+  let globalPath: string | undefined;
+  while (offset + 512 <= bytes.length) {
+    const header = bytes.subarray(offset, offset + 512);
+    if (header.every((byte) => byte === 0)) break;
+    const size = tarOctal(header);
+    const start = offset + 512;
+    const end = start + size;
+    if (end > bytes.length) throw new Error("plan archive ended inside a tar entry");
+    const type = header[156] === 0 ? "0" : String.fromCharCode(header[156]!);
+    const name = tarField(header, 0, 100);
+    const prefix = tarField(header, 345, 155);
+    const headerPath = prefix ? `${prefix}/${name}` : name;
+    const data = bytes.subarray(start, end);
+    if (type === "x") localPath = paxPath(data);
+    else if (type === "g") globalPath = paxPath(data) ?? globalPath;
+    else if (type === "L") localPath = data.toString("utf8").replace(/\0.*$/s, "");
+    else {
+      const path = localPath ?? globalPath ?? headerPath;
+      localPath = undefined;
+      if ((type === "0" || type === "7") && isPlanShard(path)) files[path] = data.toString("utf8");
+    }
+    offset = start + Math.ceil(size / 512) * 512;
+  }
+  return files;
+}
+
+/** Async default for daemon passes: one fresh archive read, then only changed-path ancestors. */
+export async function freshMergedPlanLintAsync(root: string, paths: readonly string[]): Promise<MergedPlanLintFailure | undefined> {
+  const planPaths = paths.filter((p) => isPlanShard(p));
+  if (planPaths.length === 0) return undefined;
+  const git = (...args: string[]) => hostWorktreeGitAsync(root, args, { maxBuffer: 1 << 26 });
+  await git("fetch", "-q", "origin", "main");
+  const archive = await hostWorktreeGitAsync(root, ["archive", "--format=tar", "origin/main", "plan/"], { encoding: "latin1", maxBuffer: 1 << 28 });
+  const base = planFilesFromTar(archive);
+  const changes: Record<string, string> = {};
+  const dir = await mkdtemp(join(tmpdir(), "rmd-merged-plan-lint-"));
+  try {
+    for (const p of planPaths) {
+      const theirs = await readFile(join(root, p), "utf8");
+      const ours = base[p];
+      let ancestor: string | undefined;
+      try {
+        ancestor = await git("show", `HEAD:${p}`);
+      } catch {
+        // deliberate: a file new in this change has no ancestor at HEAD; that is absence, not failure.
+        ancestor = undefined;
+      }
+      if (ours === undefined || ancestor === undefined || ours === ancestor) {
+        changes[p] = theirs;
+        continue;
+      }
+      const file = async (name: string, text: string): Promise<string> => {
+        const path = join(dir, name);
+        await writeFile(path, text);
+        return path;
+      };
+      const [oursPath, ancestorPath, theirsPath] = await Promise.all([
+        file("ours", ours), file("ancestor", ancestor), file("theirs", theirs),
+      ]);
+      try {
+        changes[p] = await git("merge-file", "-p", oursPath, ancestorPath, theirsPath);
+      } catch {
+        // deliberate: a non-zero merge-file exit means conflict, reported as a lint failure below.
+        return { file: p, message: "merge conflict against fresh origin/main" };
+      }
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+  return lintMergedPlanChange({ base, changes });
 }
 
 export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout> {
@@ -313,6 +505,8 @@ export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W ex
   decision?: readonly C[];
   cheapFingerprint: () => string;
   inventory: () => I;
+  /** Daemon-only inventory work that needs network or another awaited read; sync callers remain fail-closed. */
+  inventoryAsync?: () => Promise<I>;
   fingerprint: (inventory: I) => string;
   /** True when the inventory itself shows the work is still undone (a ci-friction cause no plan task
    *  tracks), so a matching fingerprint from a pass that landed nothing is not trusted as done. */
@@ -768,7 +962,7 @@ export function runGarden<C extends string, I, A extends GardenAction<C>, W exte
   spec: GardenSpec<C, I, A, W>,
   deps: GardenerDeps<W>,
 ): GardenPassResult<C, A> {
-  return runStepsSyncOnly(gardenPassSteps(spec, deps));
+  return runStepsSyncOnly(gardenPassSteps(spec, { ...deps, mergedPlanLint: deps.mergedPlanLint ?? freshMergedPlanLint }));
 }
 
 /** {@link runGarden} with its checkout made, landed and disposed off the event loop (W1-T5740): the
@@ -777,7 +971,7 @@ export function runGardenAsync<C extends string, I, A extends GardenAction<C>, W
   spec: GardenSpec<C, I, A, W>,
   deps: GardenerDeps<W, PrState | Promise<PrState>>,
 ): Promise<GardenPassResult<C, A>> {
-  return runStepsAsync(gardenPassSteps(spec, deps));
+  return runStepsAsync(gardenPassSteps(spec, { ...deps, mergedPlanLint: deps.mergedPlanLint ?? freshMergedPlanLintAsync }));
 }
 
 function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
@@ -845,7 +1039,7 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
   const failurePath = gardenInventoryFailurePath(deps.stateDir, spec.name);
   let inventory: I;
   try {
-    inventory = spec.inventory();
+    inventory = yield* step(() => spec.inventoryAsync?.() ?? spec.inventory());
   } catch (e) {
     const at = clock.iso();
     const streak: GardenInventoryFailure = { cheap, firstAt: failure?.firstAt ?? at, lastAt: at, count: (failure?.count ?? 0) + 1,
@@ -901,6 +1095,19 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
         const refused = landing && spec.landingRefusal?.(ws.root, landing.paths);
         if (refused) throw new Error(`${spec.name} gardener: drafted shard failed lint-plan's machine-filing admission (${refused})`);
         if (landing) {
+          let lint: MergedPlanLintFailure | undefined;
+          try {
+            if (!deps.mergedPlanLint) throw new Error("garden landing lint was not wired by its driver");
+            lint = yield* step(() => deps.mergedPlanLint!(ws.root, landing.paths));
+          } catch (e) {
+            deps.log(`${spec.name}.landing_lint_skipped`, { reason: String((e as Error)?.message ?? e) });
+          }
+          if (lint) {
+            // The check working, not a filing failure: no streak, no fingerprint — the next pass rebuilds on fresh main.
+            deps.log(`${spec.name}.landing_refused`, { file: lint.file, message: lint.message });
+            deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: plan.acting, actions: plan.actions.length, pr_url: null, awaiting: state.pending?.prUrl ?? null, landing_refused: true });
+            return { ran: true, plan, scorecard };
+          }
           const why = spec.review?.[acting];
           prUrl = yield* step(() => ws.land(why ? { ...landing, body: judgedByOutcomeNote(spec.name, acting, why) + landing.body } : landing));
         }
