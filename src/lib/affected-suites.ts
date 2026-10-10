@@ -517,6 +517,16 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(wallClockBound) && files.some((f) => wallClockBoundEdges.includes(f))) {
     pathReaders.push(wallClockBound);
   }
+  // W1-T7766: a coverage shard failed on this suite (run 38063468054, PR #10671) and the narrow selector missed it.
+  const cappedPrRepair = "test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts";
+  const cappedPrRepairEdges = [
+    "src/lib/in-tree-budget.ts",
+    "src/lib/plan-pr-emitter.ts",
+    "test/a-starved-plan-pr-preflight-leg-times-out-and-is-asked-again.test.ts",
+  ];
+  if (input.files.has(cappedPrRepair) && files.some((f) => cappedPrRepairEdges.includes(f))) {
+    pathReaders.push(cappedPrRepair);
+  }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");
   // W1-T6084: the OBSERVED readers and census readers, beside the source-text rules above (which still
