@@ -394,10 +394,12 @@ export function machineJudgeInputs(repoRoot: string, stateDir: string): string {
 }
 
 /** Whether a pass moved anything: a ruling proceeded, escalated, refused or settled, or a PR opened. Waiting
- *  on a PR, an unavailable judge and a failed landing are not new; the garden's pacing backs off on them. */
+ *  on a PR, an unavailable judge and a failed landing (one whose PR did not open) are not new; pacing backs off. */
 export function machineJudgeFoundWork(report: MachineJudgeReport): boolean {
-  return report.prUrl !== undefined ||
-    [report.proceeded, report.escalated, report.refused, report.settled].some((ids) => ids.length > 0);
+  const unlanded = new Set(report.unlanded);
+  const moved = (ids: readonly string[]) => ids.some((id) => !unlanded.has(id));
+  return report.prUrl !== undefined || moved(report.proceeded) || moved(report.escalated) ||
+    report.refused.length > 0 || report.settled.length > 0;
 }
 
 export interface MachineJudgeReport {
@@ -410,6 +412,7 @@ export interface MachineJudgeReport {
   /** Records whose ruling the landing tree already carries: nothing to land, and not a failure. */
   settled: string[];
   prUrl?: string;
+  unlanded?: string[];
 }
 
 /** The Beta record gardener.ts keeps for a family, summed over its classes. */
@@ -613,6 +616,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
         prUrl: report.prUrl, ids: landed.map((l) => l.id), records: landed,
         repoRoot: dirname(dirname(dirname(ruled[0]!.task.sourcePath!))),
       };
+      else report.unlanded = landed.map((l) => l.id);
       ports.log("machine_judge.landed", { pr_url: report.prUrl ?? null, ids: landed.map((l) => l.id) });
     }
   } finally {
