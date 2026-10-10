@@ -269,8 +269,12 @@ export function renderRuledShard(
   if (unknownDep !== undefined) return { refused: `${relPath}: depends_on unknown task '${unknownDep}'` };
   const verify = ruling.action === "proceed" ? "auto" : "human";
   const lines = withoutRulingBlock(text.replace(/\n+$/, "").split("\n"));
-  const verifyAt = lines.findIndex((l) => /^ {2}verify:\s*\S+\s*$/.test(l));
+  // 2026-10-10: `verify: human  # <why>` is valid YAML the plan loads, and W1-T7736 was refused as having no
+  // verify: line. The comment is kept on its own line above, so the rewrite never drops the filer's words.
+  let verifyAt = lines.findIndex((l) => /^ {2}verify:\s*[^\s#]+\s*(#.*)?$/.test(l));
   if (verifyAt < 0) return { refused: `${relPath} has no verify: line` };
+  const comment = /^ {2}verify:\s*[^\s#]+\s*#\s*(.*?)\s*$/.exec(lines[verifyAt]!)?.[1];
+  if (comment) lines.splice(verifyAt++, 0, `  # ${comment}`);
   lines[verifyAt] = `  verify: ${verify}`;
   // Released machine work with no measured cost dispatches mid-queue, never last (2026-09-29).
   const released = shardRecord(text, relPath);
