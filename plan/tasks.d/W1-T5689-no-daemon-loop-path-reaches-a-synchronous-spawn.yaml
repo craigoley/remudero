@@ -42,7 +42,7 @@
     - claim: "the census carries a recorded per-function baseline of loop-reachable synchronous spawns"
       proof: "grep: SYNC_SPAWN_LOOP_BASELINE in test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts"
     - claim: "the census names a fixture function in the loop reach that gains an execFileSync call and passes on the recorded tree"
-      proof: "unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts"
+      proof: "grep: census: the seed and the population are real, so the walk cannot pass vacuously in test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts"
   falsifier: |
     Add `execFileSync("git", ["fetch"])` to a function named in DaemonDeps: the census names it.
     Empty the population scan: the positive control (syncPlanFromOrigin) fails.
