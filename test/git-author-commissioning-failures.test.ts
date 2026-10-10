@@ -330,4 +330,29 @@ test("a failure before the old container is stopped names its phase and says the
   const run = recycle(fx, ["--instance", "target", "--commission-git-author"], commissionEnv);
   assertFailedReceipt(fx, run, "pull", /outgoing container is untouched and still running/);
   assert.deepEqual(run.calls.filter((c) => ["stop", "rm", "run"].includes(c[1])), []);
+  assert.equal(existsSync(join(fx.root, ".local", "state", "remudero", "recycle-container.lock")), false,
+    "an authentication refusal must release the acquired host lock");
+});
+
+test("a commissioning blocked by another host recycle emits one receipt and leaves its holder untouched", () => {
+  const fx = liveTarget();
+  const lock = join(fx.root, "commission.lock");
+  const holder = `${process.pid} sibling\n`;
+  mkdirSync(lock);
+  writeFileSync(join(lock, "holder"), holder);
+  const env = { ...commissionEnv, RMD_RECYCLE_HOST_LOCK: lock, RMD_RECYCLE_LOCK_WAIT_S: "0" };
+  const run = recycle(fx, ["--instance", "target", "--commission-git-author"], env);
+  assertFailedReceipt(fx, run, "pull", /outgoing container is untouched and still running/);
+  assert.equal(run.stderr.split("GIT AUTHOR COMMISSION RECEIPT").length - 1, 1);
+  assert.match(run.stderr, /holds the host recycle lock/);
+  assert.equal(readFileSync(join(lock, "holder"), "utf8"), holder);
+  assert.deepEqual(run.calls.filter((c) => ["pull", "stop", "rm", "run", "container"].includes(c[1])), []);
+  assert.equal(existsSync(join(fx.target.state, "state", "PAUSE")), false);
+  assert.equal(existsSync(join(fx.sibling.state, "state", "PAUSE")), false);
+  assert.equal(git(join(fx.world, fx.target.container, "home"), ["config", "--global", "--get", "user.email"]).stdout, PERSISTED_EMAIL);
+  rmSync(lock, { recursive: true });
+  const retry = recycle(fx, ["--instance", "target", "--commission-git-author"], env);
+  assert.equal(retry.status, 0, retry.out);
+  assert.match(retry.stdout, /outcome=verified phase=verified/);
+  assert.equal(existsSync(lock), false, "a verified commissioning must release its host lock");
 });
