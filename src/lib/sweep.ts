@@ -5893,7 +5893,7 @@ export interface OpenPrView {
    *  next fix dispatch VERBATIM, never a silent guess, and routes the PR to `blocked-fixable` even
    *  at cap, so the answer re-arms the rung rather than immediately re-exhausting it. Wired
    *  end-to-end and tested, but nothing populates it today. */
-  pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean };
+  pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean; spent?: true };
   /** W1-T176 — true when the ledger already carries a refusal for this exact task/PR/head/body
    *  input. It separates a FIRST-SEEN zero-runs required check, which still routes to post-review,
    *  from a SECOND absence for the unchanged input, which escalates. A transient `gh` error
@@ -8892,7 +8892,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     disposition: "blocked-fixable",
     blocker: "review-failed",
     when: (pr, policy) => {
-      if (!pr.pendingAnswer) return false;
+      if (!pr.pendingAnswer || pr.pendingAnswer.spent) return false;
       const reviewShape = pr.reviewState === "failure" && pr.unmetCriteria.length > 0;
       if (!reviewShape && !isBlockedCi(pr)) return false;
       if (pr.progressEscalation === undefined) return true;
@@ -10565,27 +10565,31 @@ export function operatorVerdictEvidence(
   taskId: string,
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
   questionLines: ReadonlyArray<Record<string, unknown>>,
-): { constraint: string; resetStrikeCounter?: boolean } | undefined {
+): { constraint: string; resetStrikeCounter?: boolean; spent?: true } | undefined {
   const parts: string[] = [];
+  const evidenceTimes: string[] = [];
 
   const feedback = lastMatching(ledgerLines, (l) => l.step === "operator_feedback" && l.task_id === taskId);
   const verdict = typeof feedback?.verdict === "string" ? feedback.verdict : undefined;
   const note = typeof feedback?.note === "string" ? feedback.note : undefined;
   if ((verdict === "wrong" || verdict === "needs-follow-up") && note && note.trim() !== "") {
     parts.push(`Operator marked this run "${verdict}": ${note}`);
+    evidenceTimes.push(typeof feedback?.ts === "string" ? feedback.ts : "");
   }
 
-  const answers = [
-    ...new Set(
-      questionLines
-        .filter((l) => l.task === taskId && typeof l.answer === "string" && l.answer.trim() !== "")
-        .map((l) => (l.answer as string).trim()),
-    ),
-  ];
+  const answerLines = questionLines.filter((l) => l.task === taskId && typeof l.answer === "string" && l.answer.trim() !== "");
+  const answers = [...new Set(answerLines.map((l) => (l.answer as string).trim()))];
   if (answers.length === 1) parts.push(answers[0]!);
   else answers.forEach((a, i) => parts.push(`Operator answer ${i + 1} of ${answers.length}: ${a}`));
+  for (const l of answerLines) evidenceTimes.push(typeof l.ts === "string" ? l.ts : "");
 
-  return parts.length > 0 ? { constraint: parts.join("\n\n") } : undefined;
+  if (parts.length === 0) return undefined;
+  // A fix round dispatched after the newest answer already carried it; the answer still steers later rounds as
+  // their constraint, but it must not re-arm the rung on every pass forever.
+  const lastDispatch = lastMatching(ledgerLines, (l) => l.step === "fix.dispatch" && l.task_id === taskId);
+  const newestEvidence = evidenceTimes.reduce((a, b) => (b > a ? b : a), "");
+  const spent = typeof lastDispatch?.ts === "string" && newestEvidence !== "" && lastDispatch.ts > newestEvidence;
+  return spent ? { constraint: parts.join("\n\n"), spent: true } : { constraint: parts.join("\n\n") };
 }
 
 /** The block evidence `dispatchFix` carries, GENERALIZED (W1-T100) from a bare unmet array to the
@@ -13650,7 +13654,7 @@ export async function runSweep(
   try {
     mainRepair = deps.readMainRepair ? await deps.readMainRepair() : undefined;
   } catch (error) {
-    if (!openPrs.some(pr => isFixStrikeExhausted(pr, policy) && !pr.pendingAnswer)) throw error;
+    if (!openPrs.some(pr => isFixStrikeExhausted(pr, policy) && !(pr.pendingAnswer && !pr.pendingAnswer.spent))) throw error;
     log("sweep.strike_ladder.main_read_failed", { reason: String(error) });
   }
   const mainTipSha = mainRepair?.sha ?? (deps.readMainTip ? await deps.readMainTip() : undefined);
@@ -14696,7 +14700,7 @@ export async function runSweep(
       reason = `superseded — this PR's diff against main is empty, so nothing is left to merge (was ${derived.blocker}: ${reason})`;
       disposition = "stale";
     }
-    const strikeLadderDue = deps.strikeLadder !== undefined && disposition === "blocked-ambiguous" && !pr.pendingAnswer &&
+    const strikeLadderDue = deps.strikeLadder !== undefined && disposition === "blocked-ambiguous" && !(pr.pendingAnswer && !pr.pendingAnswer.spent) &&
       selectDispositionRule(dispositionView, policy, now, dispositionFacts).rule?.when === isFixStrikeJudgedExhausted;
     // W1-T5690: a blocked-ambiguous PR whose blocker is older than its SLO and still has an untaken
     // rung takes it, even when the strike rule did not match (owner NONE, awaiting-ci, conflict ...).
@@ -14706,7 +14710,7 @@ export async function runSweep(
       noOp: derived.blocker === "strikes-exhausted" && pr.repeatedFixRefusal !== undefined,
       strikeOwned: strikeLadderDue,
     };
-    const sloLadderDue = deps.strikeLadder !== undefined && disposition === "blocked-ambiguous" && !pr.pendingAnswer &&
+    const sloLadderDue = deps.strikeLadder !== undefined && disposition === "blocked-ambiguous" && !(pr.pendingAnswer && !pr.pendingAnswer.spent) &&
       !deps.dryRun && pr.isPlanFiling !== true &&
       decideSloRung({
         blocker: sloContext.blocker, owner: sloContext.owner, blockerAgeMs: sloContext.ageMs, nowMs: now,
