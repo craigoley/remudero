@@ -131,26 +131,34 @@ test("the refresh backfills the rolling window from every successful main run an
   const stateDir = join(repo.dir, "state");
   mkdirSync(stateDir, { recursive: true });
   const ids = [30, 29, 28, 27, 26, 25, 24, 23, 22, 21];
-  const downloads: number[] = [];
+  const downloads: Array<{ id: number; artifact: string }> = [];
   const io = {
     readJson: async () => [{ id: 31, status: "in_progress", conclusion: null }, ...ids.map((id) => ({ id, status: "completed", conclusion: "success" }))],
     download: async (args: string[]) => {
       const id = Number(args[2]);
-      downloads.push(id);
+      const artifact = args[args.indexOf("--name") + 1]!;
+      assert.ok(["test-tier-manifest-proposal", "test-tier-coverage-manifest-proposal"].includes(artifact));
+      downloads.push({ id, artifact });
       if (id === 28) throw Object.assign(new Error("Command failed"), { stderr: "no artifact matches any of the names or patterns provided" });
       const dir = args[args.indexOf("--dir") + 1]!;
       mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, "test-tier-manifest.next.json"), JSON.stringify({ thresholdMs: 5000, files: { "test/x.test.ts": id } }));
+      writeFileSync(join(dir, artifact.replace("-proposal", ".next.json")), JSON.stringify({ thresholdMs: 5000, files: { "test/x.test.ts": artifact === "test-tier-coverage-manifest-proposal" ? id * 10 : id } }));
       return "";
     },
   };
-  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "fresh", runId: 30 });
+  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "fresh", runId: 30, coverage: { status: "fresh", runId: 30 } });
   const history = readTestProposalHistory(stateDir);
   assert.deepEqual(history.runs.map((r) => r.runId), [23, 24, 25, 26, 27, 29, 30], "the newest seven runs that published a proposal");
   assert.deepEqual(history.absent, [28]);
-  assert.deepEqual(downloads, [30, 29, 28, 27, 26, 25, 24, 23], "stops once the window is full and older runs fall outside it");
-  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "unchanged", runId: 30 });
-  assert.equal(downloads.length, 8, "a held window downloads nothing more");
+  for (const artifact of ["test-tier-manifest-proposal", "test-tier-coverage-manifest-proposal"]) {
+    assert.deepEqual(downloads.filter((d) => d.artifact === artifact).map((d) => d.id), [30, 29, 28, 27, 26, 25, 24, 23], "each ledger stops once its window is full");
+  }
+  const coverageHistory = readTestProposalHistory(stateDir, "test-tier-coverage-manifest-proposal");
+  assert.deepEqual(coverageHistory.runs.map((r) => r.runId), [23, 24, 25, 26, 27, 29, 30]);
+  assert.deepEqual(coverageHistory.runs.map((r) => r.files["test/x.test.ts"]), [230, 240, 250, 260, 270, 290, 300]);
+  assert.deepEqual(coverageHistory.absent, [28]);
+  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "unchanged", runId: 30, coverage: { status: "unchanged", runId: 30 } });
+  assert.equal(downloads.length, 16, "both held windows download nothing more");
   assert.equal(JSON.parse(await import("node:fs").then((fs) => fs.readFileSync(testManifestProposalPath(stateDir), "utf8"))).files["test/x.test.ts"], 30);
 });
 
