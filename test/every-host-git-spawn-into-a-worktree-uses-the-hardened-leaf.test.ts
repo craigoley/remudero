@@ -21,7 +21,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, type Dirent } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { maskLiterals, stripComments } from "../src/lib/test-impact-map.js";
@@ -233,10 +233,22 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   },
 };
 
-function srcFiles(dir = join(REPO, "src")): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+export function srcFiles(
+  dir = join(REPO, "src"),
+  list: (d: string) => Dirent[] = (d) => readdirSync(d, { withFileTypes: true }),
+): string[] {
+  let entries: Dirent[];
+  try {
+    entries = list(dir);
+  } catch (err) {
+    // W1-T7765: a directory that vanishes between its parent's listing and its own is not a site.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return [];
+    throw err;
+  }
+  return entries.flatMap((entry) => {
     const path = join(dir, entry.name);
-    if (entry.isDirectory()) return srcFiles(path);
+    if (entry.isDirectory()) return srcFiles(path, list);
     return entry.isFile() && entry.name.endsWith(".ts") ? [relative(REPO, path)] : [];
   });
 }
@@ -476,5 +488,22 @@ test("W1-T7269: a src file that vanishes between the listing and the read is ski
     () => readAll(() => ["src/lib/x.ts"], () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); }),
     /EACCES/,
     "only a vanished file is tolerated; any other read error still fails the census",
+  );
+});
+
+test("W1-T7765 pins the cause of the intermittent failure", () => {
+  // The listing half of the W1-T7269 race: a scratch directory under src/ that vanishes after its
+  // parent listed it made readdirSync throw ENOENT and red the census on PRs that never touched it.
+  const dirent = (name: string, dir: boolean) => ({ name, isDirectory: () => dir, isFile: () => !dir }) as Dirent;
+  const root = join(REPO, "src");
+  const files = srcFiles(root, (d) => {
+    if (d === root) return [dirent("kept.ts", false), dirent("scratch", true)];
+    throw Object.assign(new Error("ENOENT: no such directory"), { code: "ENOENT" });
+  });
+  assert.deepEqual(files, ["src/kept.ts"]);
+  assert.throws(
+    () => srcFiles(root, () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); }),
+    /EACCES/,
+    "only a vanished directory is tolerated",
   );
 });
