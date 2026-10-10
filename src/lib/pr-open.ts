@@ -167,7 +167,18 @@ export interface RefusedPrOpenBranch {
   taskId: string;
   branch: string;
   headSha: string;
+  /** The files the branch changed since its merge base, or undefined when they could not be read. */
+  changedFiles?: readonly string[];
 }
+
+/** A diff that changes something and only under `test/`: a build that found nothing to change in the code. */
+export function isTestOnlyDiff(files: readonly string[] | undefined): boolean {
+  return files !== undefined && files.length > 0 && files.every((f) => f.startsWith("test/"));
+}
+
+/** The ledger step a stale proof on a test-only build writes instead of an escalation; the backlog
+ *  gardener reads it to retire the task as already satisfied by main. */
+export const PR_OPEN_SATISFIED_BY_MAIN_STEP = "pr.open_satisfied_by_main";
 
 /**
  * The branch a refused open leaves behind is RECORDED, never stranded: both push paths land it on origin before the
@@ -188,6 +199,18 @@ export function recordRefusedPrOpen(
     reason: err.message,
   });
   if (err.refusalClass !== "stale-proof") return null;
+  // A test-only build whose proof already passes at the merge base found nothing to change: main
+  // already ships the behaviour. That is evidence for retiring the task, not a human decision.
+  if (isTestOnlyDiff(at.changedFiles)) {
+    log(PR_OPEN_SATISFIED_BY_MAIN_STEP, {
+      task_id: at.taskId,
+      branch: at.branch,
+      head_sha: at.headSha,
+      changed_files: [...(at.changedFiles ?? [])],
+      reason: err.message,
+    });
+    return null;
+  }
   const blocked: Escalation = {
     class: "BLOCKED",
     taskId: at.taskId,
