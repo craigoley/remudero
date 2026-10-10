@@ -1591,6 +1591,7 @@ import {
   readyDraftPullRequest,
   DEFAULT_SWEEP_POLICY,
   decideRedBaseRefresh,
+  prAddedLinesFromPullFiles,
   failingSourceFilesFromCiFailures,
   failingTestFilesFromCiFailures,
   projectMergedTaskCandidates,
@@ -10143,12 +10144,38 @@ export function redBaseRefreshFactsFromRest(
           .map((file) => (file && typeof file === "object" ? (file as { filename?: unknown }).filename : undefined))
           .filter((filename): filename is string => typeof filename === "string")
       : undefined;
+    const behindBy = typeof compare.ahead_by === "number" ? compare.ahead_by : undefined;
+    // W1-T7445: the PR's OWN added lines, read only when a refresh is still possible (behind, with
+    // a base change) — a refresh merges base lines and can never cover a line the PR itself added.
+    const prAddedLines =
+      behindBy !== undefined && behindBy > 0 && files !== undefined && files.length > 0
+        ? prAddedLinesFromRest(owner, repo, prNumber, fetch)
+        : undefined;
     return {
-      behindBy: typeof compare.ahead_by === "number" ? compare.ahead_by : undefined,
+      behindBy,
       baseChangedFiles: files,
+      ...(prAddedLines !== undefined ? { prAddedLines } : {}),
     };
   } catch {
     return {};
+  }
+}
+
+/** W1-T7445: `GET pulls/{n}/files`, every page, folded into head-side added line numbers per path. */
+function prAddedLinesFromRest(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  fetch: GhApiFetcher,
+): Record<string, number[]> | undefined {
+  try {
+    return prAddedLinesFromPullFiles(
+      fetch(["api", "--paginate", "--slurp", `repos/${owner}/${repo}/pulls/${prNumber}/files?per_page=100`]),
+    );
+  } catch {
+    // Deliberate: a failed PR-files read is UNKNOWN added-line evidence, and undefined is that
+    // documented channel — the decision then keeps today's refresh, never reads it as "added none".
+    return undefined;
   }
 }
 
@@ -11736,6 +11763,10 @@ export async function runFixRung(opts: {
           failing_test_files: decision.failingTestFiles,
           failing_source_files: decision.failingSourceFiles,
           matching_base_files: decision.matchingBaseFiles,
+          // W1-T7445: uncovered lines no refresh can cover; absent when added-line evidence was unreadable.
+          ...(decision.prAddedUncoveredLines !== undefined
+            ? { pr_added_uncovered_lines: decision.prAddedUncoveredLines }
+            : {}),
           refresh: decision.refresh,
         });
         if (decision.refresh) {

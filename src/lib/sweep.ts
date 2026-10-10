@@ -4905,6 +4905,9 @@ async function applyActionsIncidentHold(
 export interface RedBaseRefreshFacts {
   behindBy?: number;
   baseChangedFiles?: string[];
+  /** W1-T7445: head-side line numbers the PR's OWN diff added, keyed by repository path. Undefined
+   *  (whole map, or one path's entry) is an unreadable read or a file with no `patch`, never empty. */
+  prAddedLines?: Record<string, number[]>;
 }
 
 export interface RedBaseRefreshDecision {
@@ -4913,6 +4916,9 @@ export interface RedBaseRefreshDecision {
   failingTestFiles: string[];
   failingSourceFiles: string[];
   matchingBaseFiles: string[];
+  /** W1-T7445: uncovered diff-coverage lines the PR itself added — lines no base refresh can cover.
+   *  Absent when the added-line evidence was unreadable: unknown is not zero. */
+  prAddedUncoveredLines?: number;
 }
 
 /** Extract source paths only from the existing, distinctive diff-coverage report. */
@@ -4935,11 +4941,28 @@ export function decideRedBaseRefresh(
 ): RedBaseRefreshDecision {
   const failingTestFiles = failingTestFilesFromCiFailures(failures);
   const failingSourceFiles = failingSourceFilesFromCiFailures(failures);
+  // W1-T7445: a refresh merges the BASE's lines, never the PR's, so an uncovered line the PR's own
+  // diff added stays uncovered whatever main does. A source path supports a refresh only while at
+  // least one of its uncovered lines is NOT proven PR-added; unreadable added lines prove nothing.
+  const prAddedUncovered = new Set<string>();
+  const refreshableSourceFiles = new Set<string>();
+  for (const pathLine of diffCoverageReport(failures)?.uncovered ?? []) {
+    const match = /^(.*):(\d+)$/.exec(pathLine.replaceAll("\\", "/"));
+    if (!match) continue;
+    const observedPath = match[1]!;
+    const line = Number(match[2]);
+    const addedPath = Object.keys(facts.prAddedLines ?? {}).find((repoPath) =>
+      observedPathMatchesRepositoryPath(observedPath, repoPath),
+    );
+    const added = addedPath === undefined ? undefined : facts.prAddedLines?.[addedPath];
+    if (added?.includes(line)) prAddedUncovered.add(`${addedPath}:${line}`);
+    else refreshableSourceFiles.add(observedPath);
+  }
   const baseChangedFiles = facts.baseChangedFiles;
   const matchingBaseFiles =
     facts.behindBy !== undefined && facts.behindBy > 0 && baseChangedFiles !== undefined
       ? baseChangedFiles.filter((baseFile) =>
-          [...failingTestFiles, ...failingSourceFiles].some((failureFile) =>
+          [...failingTestFiles, ...refreshableSourceFiles].some((failureFile) =>
             observedPathMatchesRepositoryPath(failureFile, baseFile),
           ),
         )
@@ -4950,7 +4973,42 @@ export function decideRedBaseRefresh(
     failingTestFiles,
     failingSourceFiles,
     matchingBaseFiles,
+    ...(facts.prAddedLines !== undefined ? { prAddedUncoveredLines: prAddedUncovered.size } : {}),
   };
+}
+
+/** W1-T7445: the head-side line numbers one unified-diff `patch` adds — each hunk header's `+start`
+ *  advances over context and `+` lines; `-` lines exist only on the base side. Undefined when the
+ *  patch carries no hunk header, so an unparseable patch reads as unknown rather than "adds none". */
+export function addedLinesFromPatch(patch: string): number[] | undefined {
+  const added: number[] = [];
+  let next: number | undefined;
+  for (const raw of patch.split("\n")) {
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
+    if (hunk) {
+      next = Number(hunk[1]);
+      continue;
+    }
+    if (next === undefined || raw.startsWith("-") || raw.startsWith("\\")) continue;
+    if (raw.startsWith("+")) added.push(next);
+    next += 1;
+  }
+  return next === undefined ? undefined : added;
+}
+
+/** W1-T7445: fold `GET pulls/{n}/files` (one page, or `--paginate --slurp`'s array of pages) into
+ *  {@link RedBaseRefreshFacts.prAddedLines}. A file with no parseable `patch` (binary, or past
+ *  GitHub's patch size cap) gets no entry; a response that is not an array is undefined. */
+export function prAddedLinesFromPullFiles(pages: unknown): Record<string, number[]> | undefined {
+  if (!Array.isArray(pages)) return undefined;
+  const added: Record<string, number[]> = {};
+  for (const file of pages.flat()) {
+    const { filename, patch } = (file ?? {}) as { filename?: unknown; patch?: unknown };
+    if (typeof filename !== "string" || typeof patch !== "string") continue;
+    const lines = addedLinesFromPatch(patch);
+    if (lines !== undefined) added[filename] = lines;
+  }
+  return added;
 }
 
 /** The sources {@link CiFailure.logTail} can come from, in preference order. */
