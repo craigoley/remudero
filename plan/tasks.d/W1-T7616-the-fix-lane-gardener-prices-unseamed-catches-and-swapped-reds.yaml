@@ -1,0 +1,48 @@
+- id: W1-T7616
+  title: "THE FIX-LANE GARDENER PRICES TWO MORE DEFECT CLASSES — a coverage red on a catch arm no test can reach, and a fix round that clears red A by creating a census red B the worker could not run"
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — two more defect classes in the fix-lane gardener's class derivation
+  band_meaning: span
+  depends_on: [W1-T7421]
+  origin: "operator ruling 2026-10-09: 'never be left with stuck prs. lean into automated flow and self improvement'; classes found after W1-T7421 was built"
+  plan_refs: [W1-T7421, W1-T7182, W1-T7096, W1-T7243]
+  files: [src/lib/fix-lane-gardener.ts, test/the-fix-lane-gardener-prices-unseamed-catches-and-swapped-reds.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    W1-T7421 (#10523) derives the fix-lane defect classes from the ledger. Two more classes surfaced on 2026-10-09
+    after its build started, and each cost an operator hand fix:
+    UNSEAMED CATCH: #10482's diff-coverage red sat on a catch arm in src/lib/sweep.ts (the prior-partial-work read)
+    that no test could reach because the reader had no injectable seam; no fix round can cover such a line, and
+    the hand fix was a seam plus one test. #10517 hit the same shape (branch-update's default ledger writer).
+    CENSUS SWAP: on #10510 fix round 1 left run-task.ts wiring lines uncovered and round 2 covered them by importing
+    src/run-task.ts into the PR's own test, which the reach ratchet refuses (934 > 933); #10516 traded
+    coverage-shard reds for a census-scheduler import and then an unregistered env var across three heads. Each
+    round fixed one red and created a census or ratchet red the worker could not run locally (W1-T7182 is the
+    harness fix); the gardener should price the swap so its remedy is chosen by evidence.
+  description: |
+    1. In src/lib/fix-lane-gardener.ts's class derivation, add "coverage-unseamed-catch": a diff-coverage red whose
+       uncovered lines all sit inside a catch arm (or a default-parameter implementation) of a function with no
+       injectable seam for that dependency, read from the ci_failures payload and the head's source; evidence names
+       the file:line and the missing seam.
+    2. Add "fix-swapped-red-for-census": consecutive fix rounds on one PR where each round's pushed head clears the
+       previous red set and the next red set is a census or ratchet check (rule-checks, census-precheck, reach
+       ratchet, coverage-session-blanking, env registry) that a fix round cannot run locally; evidence names both
+       red sets and the round ids.
+    3. Both classes are priced and ranked like every other class (no fixed threshold) and flow through W1-T7421's
+       reused flow-remedy ladder.
+  acceptance:
+    - claim: "a fixture ledger with a diff-coverage red on an unseamed catch arm and a round pair that swapped a coverage red for a census red yields both new class keys, priced"
+      proof: 'unit test: test/the-fix-lane-gardener-prices-unseamed-catches-and-swapped-reds.test.ts'
+    - claim: "the gardener names the unseamed-catch class"
+      proof: 'grep: coverage-unseamed-catch in src/lib/fix-lane-gardener.ts'
+    - claim: "the gardener names the census-swap class"
+      proof: 'grep: fix-swapped-red-for-census in src/lib/fix-lane-gardener.ts'
+  falsifier: |
+    Remove either class derivation: the fixture's matching events fall into no class (or a generic refusal class)
+    and the test asserting the named key fails.
