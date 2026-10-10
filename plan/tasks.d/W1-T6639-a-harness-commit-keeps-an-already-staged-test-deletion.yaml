@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-09: isolated reproduction of the #10166 fix-rung stall"
   plan_refs: [W1-T4450, W1-T5227, W1-T3696]
   files: [src/run-task.ts, test/a-harness-commit-keeps-an-already-staged-test-deletion.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

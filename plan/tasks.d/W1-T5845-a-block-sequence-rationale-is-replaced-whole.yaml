@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: found while covering #9230 (W1-T5541) by hand"
   plan_refs: [W1-T5541, W1-T5507]
   files: [src/lib/inbox.ts, test/a-block-sequence-rationale-is-replaced-whole.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: data-disk I/O research (no disk upgrade; move rebuildable I/O to scratch)"
   plan_refs: [W1-T6364, W1-T6361]
   files: [deploy/serve-container.sh, test/serve-generations-live-on-scratch.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

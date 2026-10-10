@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-09: stuck-PR root causes (#10298 duplicate flake incident)"
   plan_refs: [W1-T6406]
   files: [scripts/test-with-retry.mjs, scripts/flake-retry-aggregate.mjs, src/lib/selector-shadow-gardener.ts, test/a-test-title-with-a-comma-is-one-flake-incident.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

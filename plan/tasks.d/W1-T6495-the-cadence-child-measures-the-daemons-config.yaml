@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: W1-T5723 (#10105) coverage fix review"
   plan_refs: [W1-T5723]
   files: [src/measurement-cadence-child.ts, src/lib/measurement-cadence.ts, test/the-cadence-child-measures-the-daemons-config.test.ts, "src/lib/config-schema.ts"]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

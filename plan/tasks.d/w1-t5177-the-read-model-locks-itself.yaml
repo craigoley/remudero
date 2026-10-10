@@ -12,7 +12,7 @@
   note: "reservation hand-off: plan-console-audit-core-1790887256000 -> plan-console-audit-core-1790887256000"
   plan_refs: [W1-T4568]
   files: [src/lib/read-model-db.ts, test/read-model-readers-never-contend-with-the-writer.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED (core ledger union, 84,778 rows, 4,620 read_model.* rows as control): read_model.tick_failed x5 and

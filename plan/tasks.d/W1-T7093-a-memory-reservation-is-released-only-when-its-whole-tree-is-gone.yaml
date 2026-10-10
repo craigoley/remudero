@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-09: host memory capacity outage; operator approved a REPORT-ONLY host-wide budget, enforcement separately"
   plan_refs: [W1-T6782, W1-T6090, W1-T6597, W1-T2931, W1-T3209, W1-T5347, W1-T147]
   files: [src/lib/host-memory-ledger.ts, src/lib/worker.ts, src/lib/daemon.ts, src/run-task.ts, test/a-memory-reservation-is-released-only-when-its-whole-tree-is-gone.test.ts, test/a-missing-memory-ledger-never-reads-as-empty.test.ts, test/daemon-host-memory-reservation-sweep.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

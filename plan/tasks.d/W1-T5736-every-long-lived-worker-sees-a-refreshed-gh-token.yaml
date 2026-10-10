@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: P1 read-plane GH_TOKEN incident (#9156), follow-up audit (research/audit/followups.md) item 87 and section C, #9160 hotfix notes"
   plan_refs: [W1-T4075, W1-T2905, W1-T5284, W1-T5282]
   files: [test/every-long-lived-worker-sees-a-refreshed-gh-token.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

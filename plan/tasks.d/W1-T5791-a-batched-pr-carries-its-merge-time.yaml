@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5649 (#9216) follow-up"
   plan_refs: [W1-T5649, W1-T2509, W1-T3104]
   files: [src/lib/status.ts, src/run-task.ts, test/a-batched-pr-carries-its-merge-time.test.ts, "src/lib/open-prs-rest.ts"]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |
