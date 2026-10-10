@@ -8627,6 +8627,22 @@ export function reviewStatusSupersedesLedgerAttempt(
   return statusAt > ledgerAt;
 }
 
+/** W1-T5840 — W1-T3823's own case, which W1-T5813's `deliveredForInput` cut off: the review claim
+ *  delivered a FAILURE at `failureAtMs`, and GitHub now shows a review status of success posted
+ *  AFTER it (a manual or external success). That contradiction demands one re-review of the input.
+ *  ONCE BY CONSTRUCTION: the re-review's own `review.posted` row is newer than the status, so it
+ *  moves `reviewInputLastAttemptAt` past it (and a delivered success ends the demand), and only a
+ *  status with a NEWER timestamp can contradict the new verdict again. A delivered success, an
+ *  unreadable failure time, or an unreadable status time never demands. */
+export function reviewDeliveredFailureOvertaken(
+  pr: Parameters<typeof reviewStatusSupersedesLedgerAttempt>[0],
+  failureAtMs: number | undefined,
+): boolean {
+  if (failureAtMs === undefined || Number.isNaN(failureAtMs)) return false;
+  if (!reviewStatusSupersedesLedgerAttempt(pr)) return false;
+  return Date.parse(pr.reviewVerdictPostedAt ?? "") > failureAtMs;
+}
+
 /** W1-T3704 — THE REUSE DECISION (design ii-v). A verdict RECORDS what it judged (review.ts); this
  *  decides what a LATER push, orphaning that verdict, is actually owed. Deliberately placed here
  *  and not in review.ts: "the recorded verdict lives with the reviewer and the reuse decision lives
@@ -12237,13 +12253,18 @@ async function codeScanningGateForHead(
   return ruled.ruling === "false_positive" ? { kind: "proceed" } : { kind: "fix", reason: ruled.reason, alerts };
 }
 
-function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorActions {
+function priorActionsFromLedger(
+  lines: Array<Record<string, unknown>>,
+  openPrs?: ReadonlyArray<OpenPrView>,
+): PriorActions {
   const armed = new Set<string>();
   const fixed = new Set<string>();
   const closed = new Set<number>();
   const escalated = new Set<string>();
   const depReviewed = new Set<string>();
   const reviewDelivered = new Set<string>();
+  // W1-T5840 — exact-input keys whose NEWEST delivered verdict is a failure, with its post time.
+  const reviewDeliveredFailureAt = new Map<string, number>();
   const reviewRefused = new Set<string>();
   const reviewRetryableThrows = new Map<string, number | undefined>();
   const reviewFreshnessRefusals = new Map<string, ReviewerCodeFreshnessRefusal>();
@@ -12290,6 +12311,11 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
         );
         if (line.step === "review.posted") {
           reviewDelivered.add(key);
+          if (line.state === "failure") {
+            reviewDeliveredFailureAt.set(key, typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN);
+          } else {
+            reviewDeliveredFailureAt.delete(key);
+          }
         } else if (isPostReviewDiffCeilingRefusal(line.reason)) {
           reviewDiffCeilingRefused.add(key);
           reviewRefused.add(key);
@@ -12412,6 +12438,12 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
     }
   }
   for (const [prHead, taskHead] of voidedFixes) if (!realFixDispatches.has(taskHead)) fixed.delete(prHead);
+  // W1-T5840 — a delivered FAILURE that a newer GitHub success contradicts is not a standing
+  // verdict: release its key so the supersedes demand fires and the claim admits ONE re-review.
+  for (const pr of openPrs ?? []) {
+    const key = reviewOutcomeKeyForPr(pr);
+    if (reviewDeliveredFailureOvertaken(pr, reviewDeliveredFailureAt.get(key))) reviewDelivered.delete(key);
+  }
   return {
     armed,
     fixed,
@@ -13561,7 +13593,7 @@ export async function runSweep(
     if (union.archiveCount === 0 || !union.ok) return { complete: false, lines: [] };
     return { complete: true, lines: parseLedger(union.matches.join("\n")) };
   });
-  const prior = priorActionsFromLedger(ledgerLines);
+  const prior = priorActionsFromLedger(ledgerLines, openPrs);
   const freshnessBackoff = async (
     refusals: ReadonlyMap<string, ReviewerCodeFreshnessRefusal>, pr: OpenPrView,
   ): Promise<string | undefined> => {
@@ -14159,7 +14191,7 @@ export async function runSweep(
     }
     claimedReviewKeys.add(reviewKey);
     try {
-      const fresh = priorActionsFromLedger(readLedger(deps.ledgerPath));
+      const fresh = priorActionsFromLedger(readLedger(deps.ledgerPath), openPrs);
       const delivered = fresh.reviewDelivered.has(reviewKey);
       const durableRefusal = fresh.reviewRefused.has(reviewKey);
       const retryBackoff =
@@ -17339,7 +17371,7 @@ export async function runSweepLightPass(
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLedgerLines;
   const selectionLedgerLines = readLedger(deps.ledgerPath);
-  const selectionPrior = priorActionsFromLedger(selectionLedgerLines);
+  const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs);
   const freshnessBackoffs = new Set<string>();
   for (const pr of openPrs) {
     const key = reviewOutcomeKeyForPr(pr);
