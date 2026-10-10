@@ -1,5 +1,4 @@
-- **Take the cheap candidate a record prices beside a costly one — and name what the costly one
-  now waits for.** SEVEN of the eleven shards ruled on 2026-09-22 had
+- **Take the cheap candidate beside a costly one, and name what the costly one now waits for.** SEVEN of the eleven shards ruled on 2026-09-22 had
   exactly this shape, and in every one the cheap candidate was the right answer for a reason the
   record had already measured and then failed to act on. W1-T1014 offered a GitHub flag the operator
   already owns beside re-running CI on every open PR at 239 CI-hours/day — and the expensive half

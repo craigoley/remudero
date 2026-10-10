@@ -1,35 +1,26 @@
 # remudero — Claude rules
 
-Always-on **workflow** rules that prevent repeated wasted cycles, organized by the question you're
-asking — not by the date you learned it.
+Always-on **workflow** rules, by the question you're asking. Knowledge lives in `learnings/*.yaml`
+(capped by `scripts/learnings-budget-ratchet.mjs`), `plan/`, `MASTER-PLAN.md`, `DECISIONS.md` and
+`LEARNINGS.md`, never here.
 
-**Where knowledge actually lives:** `learnings/*.yaml` (the machine-readable, lifecycle-managed
-store — `scripts/learnings-budget-ratchet.mjs` caps its injectable weight), `plan/` +
-`MASTER-PLAN.md`, `DECISIONS.md`, `LEARNINGS.md`. CLAUDE.md holds only workflow rules; it does not
-restate feature history.
+**Nothing here is a gate**: enforcement is `coverage-ratchet`, `diff-coverage`, `proof-dialect`,
+`lint-plan`, `judgeReview` and `SymlinkInstallRefusal`; a rule needing one gets a filed task.
 
-**Nothing in this file is a gate.** Rules bind readers; enforcement lives in `coverage-ratchet`,
-`diff-coverage`, `proof-dialect`, `lint-plan`, `judgeReview` and `SymlinkInstallRefusal`. When a
-rule needs enforcement, file the task; sharper prose alone cannot close it.
+**THIS FILE IS AN INDEX, AND THE ARROW IS AN INSTRUCTION TO YOU.** **The headline is the whole rule:
+obey it unopened.** Its `→ doctrine/<section>/<rule>.md` body is the evidence; a dangling pointer is
+a BUG (`test/the-doctrine-index-points-at-every-body.test.ts`).
 
-**THIS FILE IS AN INDEX, AND THE ARROW IS AN INSTRUCTION TO YOU.** Each bolded HEADLINE points to
-`→ doctrine/<section>/<rule>.md`. **The headline is the whole rule — obey it without opening
-anything.** Open its body for evidence when applying or doubting it. A dangling pointer is a BUG,
-not permission to skip; `test/the-doctrine-index-points-at-every-body.test.ts` refuses it.
-
-**Maintaining this file:** an INTERACTIVE session loads the index and pays that tax every session;
-a DISPATCHED WORKER never sees it — `spawnWorker` passes `settingSources: []`, the SDK isolation
-mode, which needs `'project'`. Keep it compressed for the lane that pays.
-A NEW RULE IS THREE EDITS: the headline bullet with its pointer here, the body file it names, and
-`npm run agents-md`. Per §8A *compression is a deliverable* — but the 56 pre-migration headlines
-and bodies are FROZEN VERBATIM by `test/fixtures/doctrine-pre-migration-W1-T3323.json`, so a fold
-shortens THIS preamble or a post-migration headline, never one of them. Cite **symbol names, not
-line numbers**. Each rule cites the PR that earned it.
+**Upkeep:** interactive sessions pay per byte; workers never load it (`spawnWorker` passes
+`settingSources: []`). A NEW RULE IS THREE EDITS: the headline bullet with its pointer here, the body
+file it names, and `npm run agents-md`. Compression is a deliverable (§8A), but the 56 pre-migration
+headlines and bodies are FROZEN (`test/fixtures/doctrine-pre-migration-W1-T3323.json`), so fold this
+preamble or a post-migration headline. Cite **symbol names, not line numbers**, and the earning PR.
 
 ## Before you push
 
 - **Run the shipped local gate before your FIRST push, not every commit.** → doctrine/before-you-push/run-the-shipped-local-gate-before-your-first-push-not.md
-- **SUPERSEDES the full-parity first-push obligation: run `node --import tsx scripts/preflight-author.mjs` on the committed tree; required hosted full-suite and coverage checks still gate merge.** → doctrine/before-you-push/author-feedback-is-not-hosted-assurance.md
+- **SUPERSEDES full-parity first push: run `node --import tsx scripts/preflight-author.mjs` on the committed tree; required hosted checks still gate merge.** → doctrine/before-you-push/author-feedback-is-not-hosted-assurance.md
 - **A test run with no `# tests` summary is NOT A RESULT, and a summary over an UNVERIFIED FILE LIST
   is not one either — `node --test` given a ghost path returns a green count, silently. `ls` first.** → doctrine/before-you-push/a-test-run-with-no-summary-is-not-a-result-and-a-summary.md
 
@@ -80,14 +71,17 @@ line numbers**. Each rule cites the PR that earned it.
   `runnableCandidates(plan, isMerged, n)` — not the task a brief or retro names** → doctrine/plan-and-task-hygiene/before-believing-task-x-is-next-confirm-the-frontier-with.md
 - **A contested reservation is never deleted and an unfiled one is never free — the
   LOSER of a race renumbers.** → doctrine/plan-and-task-hygiene/a-contested-reservation-is-never-deleted-and-an-unfiled.md
-- **File a plan task from the OPERATOR CHECKOUT — a session that cannot reserve mints on hope.** → doctrine/plan-and-task-hygiene/file-a-plan-task-from-the-operator-checkout-a-session.md
+- **File a plan task from the OPERATOR CHECKOUT — a session that cannot reserve mints on hope.** → doctrine/plan-and-task-hygiene/file-from-the-operator-checkout.md
 - **`rule15-filing` refuses a plan record in `files:` only when an OUT-OF-PLAN path rides along —
   the record ALONE passes at `verify: auto`.** → doctrine/plan-and-task-hygiene/refuses-a-plan-record-in-only-when-an-out-of-plan-path.md
 - **A shard's `status:` field is not a completion signal — it stays `queued` on tasks that
   shipped.** → doctrine/plan-and-task-hygiene/a-shard-s-field-is-not-a-completion-signal-it-stays-on.md
 - **Decoding rule citations — where each family canonically lives.** → doctrine/plan-and-task-hygiene/decoding-rule-citations-where-each-family-canonically.md
-- **Take the cheap candidate a record prices beside a costly one — and name what the costly one
-  now waits for.** → doctrine/plan-and-task-hygiene/take-the-cheap-candidate-and-name-what-the-expensive-one.md
+- **Take the cheap candidate beside a costly one, and name what the costly one now waits for.** → doctrine/plan-and-task-hygiene/take-the-cheap-candidate.md
+- **Never fan out update-branch after a main fix: protection is non-strict, and each refresh re-runs
+  ~16 min of CI and voids the review.** → doctrine/plan-and-task-hygiene/never-fan-out-update-branch.md
+- **Leave a red fleet PR to the fix lane while a round is due or in flight — hand pushes out-race it
+  and hide its defects.** → doctrine/plan-and-task-hygiene/leave-red-prs-to-the-fix-lane.md
 
 ## CI and merging
 
@@ -103,7 +97,13 @@ line numbers**. Each rule cites the PR that earned it.
 - **A merge to a BAKED path ships nothing until an operator triggers an image rebuild — know which
   half of your diff you are in before you call a merge "shipped."** → doctrine/ci-and-merging/a-merge-to-a-baked-path-ships-nothing-until-an-operator.md
 - **SUPERSEDES THE RULE ABOVE: a baked-path merge ships itself (auto ACR build + recycle); check
-  `docker inspect`.** → doctrine/ci-and-merging/supersedes-the-rule-above-a-baked-path-merge-now-ships-by.md
+  `docker inspect`.** → doctrine/ci-and-merging/a-baked-path-merge-ships-itself.md
+- **PRs green on their own bases can cross a ceiling together: a `# fail 0` main red is a ratchet
+  collision, and main records it (#10724).** → doctrine/ci-and-merging/ratchet-collision.md
+- **Main push runs are cancelled while PENDING, so most main commits never get a CI verdict — never
+  read CANCELLED as red.** → doctrine/ci-and-merging/cancelled-is-not-red.md
+- **Compare a base-red PR's failing check to main's FULL check census, not ci-gate's aggregates, or
+  every shard red is held.** → doctrine/ci-and-merging/base-red-full-census.md
 
 ## Ledger and evidence discipline
 
@@ -146,10 +146,12 @@ line numbers**. Each rule cites the PR that earned it.
   WINDOW.** → doctrine/investigation-discipline/i-a-positive-control-proves-the-query-can-see-its-corpus.md
 - **(j) A CENSUS TEST NAMES NONE OF YOUR SYMBOLS, SO THE CALLER SWEEP ABOVE CANNOT FIND IT** → doctrine/investigation-discipline/j-a-census-test-names-none-of-your-symbols-so-the-caller.md
 - **(k) A RULE 21 protocol run passing `{ baseTask }` ALONE reports THREE INDISTINGUISHABLE ZEROS.** → doctrine/investigation-discipline/k-a-rule-21-protocol-run-passing-alone-reports-three.md
-- **A `catch` that returns a success-shaped literal is making a CLAIM: name the outcomes it collapses, and
-  where two remedies differ, the answer is a third value the caller can see — never a comment asserting the
-  collapse is fine. Reasoning vocabulary (fail-soft, degrade, treat as, unknown) does NOT track correctness.
-  diff-coverage is the gate for NEW conflations, forcing tests per arm and thus naming outcomes.** → doctrine/investigation-discipline/a-catch-that-returns-a-success-shaped-literal-is-making.md
+- **A `catch` returning a success-shaped literal is a CLAIM: name what it collapses, and where remedies
+  differ, return a third value the caller sees.** → doctrine/investigation-discipline/a-catch-that-returns-a-success-shaped-literal-is-making.md
+- **A clock-shifted run failing ENOENT on its own fixture is the boot temp sweep, not a time bomb —
+  use a private TMPDIR.** → doctrine/investigation-discipline/clock-shift-enoent.md
+- **Judge main from its newest commit with genuine evidence — its head alone reads undetermined
+  forever under steady merges.** → doctrine/investigation-discipline/main-genuine-evidence.md
 
 ## Code traps
 
