@@ -24,7 +24,7 @@ import { mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { defaultInstance, type LedgerInstance, type WorkerClass } from "./host-memory-ledger.js";
 import { resolveTestSlotDir } from "./test-slot.js";
@@ -178,7 +178,7 @@ export function publishReviewDemand(demand: ReviewDemand, opts: ReviewDemandOpti
       eligible: Math.max(0, Math.trunc(demand.eligible)),
       laneReady: Math.max(0, Math.min(Math.trunc(demand.laneReady), Math.trunc(demand.eligible))),
       oldestEligibleSince: demand.oldestEligibleSince,
-      publishedAt: new Date(clock.now()).toISOString(),
+      publishedAt: clock.iso(),
       refreshBoundMs: policy.demandRefreshBoundMs,
     };
     const path = join(demandDir(opts), reviewDemandFileName(instance.name));
@@ -251,7 +251,7 @@ export function trackEligibleSince(keys: readonly string[], now: number): string
     eligibleSince.set(key, since);
     oldest = oldest === undefined ? since : Math.min(oldest, since);
   }
-  return oldest === undefined ? null : new Date(oldest).toISOString();
+  return oldest === undefined ? null : fixedClock(oldest).iso();
 }
 
 // ── (2) the counterfactual yield (pure) ──────────────────────────────────────────────────────────────────────────
