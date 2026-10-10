@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-09: Azure-host performance work, follow-up to #10374"
   plan_refs: [W1-T6155, W1-T5658]
   files: [src/lib/test-slot.ts, src/lib/merge-probe.ts, src/lib/commit-message.ts, src/lib/worker-provider.ts, src/lib/typecheck-buildinfo.ts, test/a-cold-fleet-typecheck-waits-for-a-slot.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

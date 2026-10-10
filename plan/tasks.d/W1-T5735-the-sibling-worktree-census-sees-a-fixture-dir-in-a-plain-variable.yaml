@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: follow-up audit (research/audit/followups.md) item 92"
   plan_refs: [W1-T5625, W1-T5550]
   files: [test/no-test-worktree-outlives-its-fixture.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

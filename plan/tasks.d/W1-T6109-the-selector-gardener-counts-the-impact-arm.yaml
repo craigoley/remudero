@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: follow-up found while building W1-T6083 (PR #9760)"
   plan_refs: [W1-T6083, W1-T4439, W1-T4764, W1-T4406]
   files: [src/lib/selector-shadow-gardener.ts, test/the-selector-gardener-counts-the-impact-arm.test.ts]
-  status: queued
+  status: merged
   priority: 2 # operator-2026-10-09: self-improvement: the selector gardener still drops the impact arm (no impact field read in selector-shadow-gardener.ts)
   attempts: 0
   rationale: |

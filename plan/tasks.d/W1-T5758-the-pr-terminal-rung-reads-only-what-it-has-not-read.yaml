@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log 22:55Z, W1-T5318 (#9179) follow-up (a)"
   plan_refs: [W1-T5318, W1-T5689, W1-T5724]
   files: [src/lib/sweep.ts, test/the-pr-terminal-rung-reads-only-what-it-has-not-read.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

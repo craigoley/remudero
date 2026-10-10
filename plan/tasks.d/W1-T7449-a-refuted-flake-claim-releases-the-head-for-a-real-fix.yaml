@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-09: #10400 (W1-T5940) needed a hand fix after the fix lane's FLAKE claim was refuted; ruling 2026-10-09 'an llm judge should determine if more fix attempts should be made or if we're in an endless loop that needs escalated. I hate hard ceilings'"
   plan_refs: [W1-T5920, W1-T6353, W1-T7096, W1-T7243, W1-T1110, W1-T1210, W1-T100]
   files: [src/lib/sweep.ts, src/run-task.ts, test/a-refuted-flake-claim-releases-the-head-for-a-real-fix.test.ts, test/a-job-requeue-refused-while-its-run-is-running-is-retried-not-dropped.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: found while building W1-T5282 (#9161)"
   plan_refs: [W1-T5282, W1-T5746, W1-T5689]
   files: [src/lib/self-sync.ts, test/one-checkouts-freshness-fetches-never-overlap.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

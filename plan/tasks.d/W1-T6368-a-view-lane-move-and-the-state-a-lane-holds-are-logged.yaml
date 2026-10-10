@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: serve CPU and memory plan, the gigabyte-scale memory target (views 1.32 GB, heavy views 1.04 GB at 2026-10-07 23:48Z)"
   plan_refs: [W1-T5885, W1-T6019, W1-T5480, W1-T6191]
   files: [src/lib/read-model-worker.ts, test/a-view-lane-move-and-the-state-a-lane-holds-are-logged.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5749 (#9204) follow-up"
   plan_refs: [W1-T5749, W1-T177, W1-T106]
   files: [src/lib/sweep.ts, src/run-task.ts, test/the-act-time-head-guard-shares-the-dispositions-live-read.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

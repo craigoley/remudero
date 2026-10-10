@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: research/restart/report.md (restart efficiency) P6"
   plan_refs: [W1-T5718, W1-T5720, W1-T5721]
   files: [src/lib/daemon.ts, src/lib/measurement-cadence.ts, test/the-measurement-cadence-runs-out-of-process.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

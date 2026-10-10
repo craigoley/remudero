@@ -16,11 +16,15 @@
  * A SEED CAN ONLY COST TIME, NEVER CHANGE A RESULT: tsc discards any cached entry whose hash, options or version differ.
  * Node builtins only, so it loads directly under Node's type stripping.
  */
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /** The buildinfo's file name inside a checkout's git directory. */
 export const TYPECHECK_BUILDINFO_NAME = "rmd-typecheck.tsbuildinfo";
+
+/** The peak a COLD full check is expected to reach: the memory one typecheck slot asks the host for. OBSERVED
+ *  2026-10-10: two worker `npm run typecheck` runs held 2.4 and 2.2 GB RSS. An estimate of the run, not a limit. */
+export const TYPECHECK_COLD_PEAK_BYTES = 2.5 * 1024 ** 3;
 
 /** The argv tail of the fleet's full type-check. `buildInfo` undefined is the plain, non-incremental check. */
 export function typecheckArgs(buildInfo: string | undefined): string[] {
@@ -185,6 +189,37 @@ export function seedBuildInfo(
   if (existsSync(to.buildInfo)) return "kept";
   const outcome = publishBuildInfo(from, to, tsVersion);
   return outcome === "published" ? "seeded" : outcome;
+}
+
+/** The checkout that holds the install `root`'s `node_modules` resolves to — the fleet's install root — if any. */
+export function modulesOwnerRoot(root: string): string | undefined {
+  try {
+    const real = realpathSync(join(root, "node_modules"));
+    return basename(real) === "node_modules" ? dirname(real) : undefined;
+  } catch {
+    // No node_modules at all: no checkout's check ran against this tree's compiler.
+    return undefined;
+  }
+}
+
+/**
+ * Refresh the seed of the canonical checkout behind `root` from the buildinfo of the checkout whose `node_modules`
+ * `root` links, whenever that one is newer. WHY: the fleet cuts implement worktrees from `<config.root>/repos/<repo>`,
+ * which runs no check of its own, while the checks that write a buildinfo (the sweep's merge probe, whose worktrees hang
+ * off the install root) all write the install root's — so `repos/<repo>` never had a seed and every worker's first
+ * check ran cold (OBSERVED 2026-10-10). Run by the harness as it cuts a worktree, where that git dir is writable.
+ */
+export function refreshCanonicalSeed(root: string): SeedOutcome {
+  const canonical = canonicalBuildInfo(root);
+  const owner = modulesOwnerRoot(root);
+  const donor = owner === undefined ? undefined : worktreeBuildInfoPath(owner);
+  if (canonical === undefined || owner === undefined || donor === undefined || resolve(donor) === resolve(canonical.buildInfo)) return "no-seed";
+  try {
+    if (statSync(canonical.buildInfo).mtimeMs >= statSync(donor).mtimeMs) return "kept";
+  } catch {
+    // One side is absent: a missing seed is published below, a missing donor answers "no-seed" there.
+  }
+  return publishBuildInfo({ root: owner, buildInfo: donor }, canonical, installedTypescriptVersion(root));
 }
 
 /**

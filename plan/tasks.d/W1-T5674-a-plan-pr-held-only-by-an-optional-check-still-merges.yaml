@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, W1-T5615 (#9119) follow-ups"
   plan_refs: [W1-T5615, W1-T5472, W1-T2855]
   files: [src/lib/arm-auto-merge.ts, test/a-plan-pr-held-only-by-an-optional-check-still-merges.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

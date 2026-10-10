@@ -19,7 +19,7 @@
     - test/git-author-commissioning-preservation.test.ts
     - test/git-author-commissioning-failures.test.ts
     - docs/operator-guide.md
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T3454 deliberately preserves a non-empty outgoing container author over conflicting

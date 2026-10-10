@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: W1-T6153 (#10027) ledger trace"
   plan_refs: [W1-T5955]
   files: [src/lib/sweep.ts, test/a-dead-runs-worktree-does-not-block-a-fix-checkout.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

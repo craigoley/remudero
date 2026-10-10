@@ -198,6 +198,14 @@ test("W1-T5543: the plan round pushes only a preflight-clean commit", async () =
   assert.match(renderFixPrompt({ task: good.input.task, branch: pr.headRefName!, round: 1, evidence: { planGateFindings: red.failures, ciFailures: pr.ciFailures } }), /lint-plan/);
 });
 
+test("a plan round whose final preflight ran out of its budget holds the push and names the check that timed out", async () => {
+  const timedOut = roundFixture({ post: { ...clean, timedOut: [{ check: "proof-discrimination", firstLine: "timed out after 9 ms — no verdict" }] } });
+  const result = await runner.runPlanScopedFixRound(timedOut.input);
+  assert.equal(result.outcome, "refused", "a check with no verdict is never a pass");
+  assert.equal(result.reason, "timed out after 9 ms — no verdict");
+  assert.deepEqual(timedOut.pushed, []);
+});
+
 test("W1-T5543: a worker that only corrects the title repairs metadata without a push", async () => {
   const titled = roundFixture({ paths: [], report: "PR_TITLE: chore(plan): corrected title" });
   const result = await runner.runPlanScopedFixRound(titled.input);

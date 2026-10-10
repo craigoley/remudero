@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: stall audit 07:16-11:30Z (#9505)"
   plan_refs: [W1-T5995, W1-T5348, W1-T5349, W1-T5538]
   files: [src/lib/sweep.ts, test/a-machine-gardener-pr-red-on-its-own-record-is-closed-not-re-escalated.test.ts]
-  status: queued
+  status: merged
   priority: 2 # operator-2026-10-09: gardener churn: a garden PR red on its own record re-escalates on every head move (3 issues on #9505)
   attempts: 0
   rationale: |

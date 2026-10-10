@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md addendum defect (CI_COVERAGE_SHARD_COUNT is 4 in ci-parity.ts but ci.yml uses 8)"
   plan_refs: [W1-T5655, W1-T5676, W1-T5709]
   files: [src/lib/ci-parity.ts, test/the-coverage-entry-shards-the-way-ci-does.test.ts, test/the-local-coverage-shard-count-equals-cis.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

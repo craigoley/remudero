@@ -20,7 +20,7 @@
     - test/worker-tool-lineage-outcomes.test.ts
     - test/worker-tool-lineage-redaction.test.ts
     - test/worker-tool-lineage-wiring.test.ts
-  status: queued
+  status: merged
   attempts: 0
   note: |
     Retain the original operator reservation and branch; the refreshed filing preserves its ID.

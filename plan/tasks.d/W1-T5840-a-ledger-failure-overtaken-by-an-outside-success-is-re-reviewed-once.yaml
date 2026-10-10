@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5813 (#9290) builder's follow-up — a real re-review for W1-T3823's case still has no path"
   plan_refs: [W1-T3823, W1-T5813, W1-T230, W1-T3704]
   files: [src/lib/sweep.ts, test/a-ledger-failure-overtaken-by-an-outside-success-is-re-reviewed-once.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

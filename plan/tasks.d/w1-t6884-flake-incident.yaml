@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 2.5
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "flake-incident:test/the-census-roster-is-named-not-numbered.test.ts#runPreflightFast over ONLY the roster's admitted projection passes on a clean HEAD — the roster itself asserts nothing"

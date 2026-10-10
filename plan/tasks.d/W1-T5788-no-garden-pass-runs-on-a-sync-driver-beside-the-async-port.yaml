@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5740 (#9214) follow-up"
   plan_refs: [W1-T5740, W1-T4112, W1-T4095, W1-T5114]
   files: [src/lib/knowledge-gardener.ts, src/lib/test-gardener.ts, src/run-task.ts, test/no-garden-pass-runs-on-a-sync-driver-beside-the-async-port.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

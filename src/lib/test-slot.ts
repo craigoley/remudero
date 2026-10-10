@@ -12,6 +12,9 @@
  * TIERED, SELF-HEALING — never a refusal:
  *   free slot        → run at {@link testRunConcurrency}, niced;
  *   all slots live   → wait (and say so), re-checking every poll;
+ *   memory short     → a run that names its peak waits while the host's memory headroom cannot hold it plus the live
+ *                      holders' named peaks — the CPU-derived count is the most slots, memory decides how many of them
+ *                      are open, and a run with no other holder always goes;
  *   a dead holder    → reclaimed (same host: pid probe; other host/container: boot id, then lease);
  *   wait past bound  → `wait_bound_exceeded`: run UNSLOTTED at concurrency 1 — slow, never deadlocked;
  *   slot dir unusable → `slot_unavailable`: run unslotted at the load-derived concurrency.
@@ -49,6 +52,41 @@ export const TEST_SLOT_WAIT_BOUND_MS = 45 * 60_000;
 export const TEST_SLOT_LEASE_MS = 90 * 60_000;
 const TEST_SLOT_POLL_MS = 5_000;
 const BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id";
+
+/**
+ * Bytes this host can still hand a new process tree before it thrashes: the host's `MemAvailable`, and under a bounded
+ * cgroup v2 (a daemon container) its `memory.high`/`memory.max` less what it cannot drop — the smaller one. Undefined
+ * where neither reads (macOS): memory then closes no slot.
+ */
+export function readMemoryHeadroom(read: (path: string) => string = (path) => readFileSync(path, "utf8")): number | undefined {
+  const readings: number[] = [];
+  try {
+    const kb = /^MemAvailable:\s*(\d+)\s*kB\s*$/m.exec(read("/proc/meminfo"))?.[1];
+    if (kb !== undefined) readings.push(Number(kb) * 1024);
+  } catch {
+    // No /proc (macOS): the host reading is skipped.
+  }
+  try {
+    const current = Number(read("/sys/fs/cgroup/memory.current").trim());
+    const bounds = ["memory.high", "memory.max"].map((name) => Number(read(`/sys/fs/cgroup/${name}`).trim())).filter(Number.isFinite);
+    if (Number.isFinite(current) && bounds.length > 0) readings.push(Math.min(...bounds) - current + droppableCacheBytes(read));
+  } catch {
+    // No cgroup v2 here (a host process, macOS): the host reading alone stands.
+  }
+  return readings.length === 0 ? undefined : Math.min(...readings);
+}
+
+/** Clean, non-shmem page cache the kernel drops before it would OOM; none counted without a readable breakdown. */
+function droppableCacheBytes(read: (path: string) => string): number {
+  try {
+    const stat = read("/sys/fs/cgroup/memory.stat");
+    const field = (name: string): number => Number(new RegExp(`^${name} (\\d+)$`, "m").exec(stat)?.[1] ?? 0);
+    return Math.max(0, field("file") - field("shmem") - field("file_dirty") - field("file_writeback"));
+  } catch {
+    // No breakdown: every charged byte counts as held, the conservative reading.
+    return 0;
+  }
+}
 
 /** Host load facts, injectable so a test fixes them. */
 export interface HostLoad {
@@ -177,6 +215,8 @@ export interface TestSlotHolder {
   concurrency?: number;
   /** The holder's pid namespace (`/proc/self/ns/pid`); a different one makes its pid unprobeable from here. */
   pidNs?: string;
+  /** The peak the holder's run named ({@link TestSlotOptions.memoryBytes}); a later costed run reserves room for it. */
+  memoryBytes?: number;
 }
 
 /** Kernel-derived start identity and parent, including on hosts without /proc. */
@@ -295,6 +335,11 @@ export interface TestSlotOptions {
   log?: (line: string) => void;
   /** Which priority binaries exist, for the caller's {@link lowPriorityCommand}. */
   binaryExists?: BinaryProbe;
+  /** This run's expected peak (bytes). Set, a slot opens to it only while the memory headroom holds it plus every
+   *  other live holder's named peak; unset, memory sizes nothing (today's count-only admission). */
+  memoryBytes?: number;
+  /** The host's memory headroom in bytes; default {@link readMemoryHeadroom}. */
+  memoryHeadroom?: () => number | undefined;
 }
 
 /** A held slot (or the named reason none is held), plus the concurrency the run should use. */
@@ -396,7 +441,27 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
   const record = (): TestSlotHolder => ({
     pid: opts.pid ?? process.pid, host: host(), bootId: bootId(), startedAt: startedIso,
     heartbeatAt: clock.iso(), label, ownerNonce, processStart, concurrency, pidNs: pidNamespace(),
+    ...(opts.memoryBytes === undefined ? {} : { memoryBytes: opts.memoryBytes }),
   });
+  const mib = (bytes: number): number => Math.round(bytes / 1024 ** 2);
+  /** Why slot `slot` stays closed to this run on memory (its own record not counted), or undefined when it may take it. */
+  const memoryShort = (slot: number): string | undefined => {
+    if (opts.memoryBytes === undefined) return undefined;
+    const others: (TestSlotHolder | null)[] = [];
+    for (let j = 1; j <= slots; j += 1) {
+      if (j === slot) continue;
+      try {
+        others.push(parseTestSlotHolder(readFileSync(join(dir, `slot-${j}.json`), "utf8")));
+      } catch {
+        // No record in slot j: nobody there to make room for.
+      }
+    }
+    if (others.length === 0) return undefined;
+    const headroom = (opts.memoryHeadroom ?? readMemoryHeadroom)();
+    const need = others.reduce((sum, held) => sum + (held?.memoryBytes ?? 0), opts.memoryBytes);
+    if (headroom === undefined || headroom >= need) return undefined;
+    return `memory headroom ${mib(headroom)} MiB < ${mib(need)} MiB for this run and the live holders' peaks`;
+  };
   let announced = false;
   try {
     return yield* waitForSlot();
@@ -412,6 +477,13 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
       for (let i = 1; i <= slots; i += 1) {
         const path = join(dir, `slot-${i}.json`);
         for (let attempt = 0; attempt < 2; attempt += 1) {
+          // Memory first, with no existence check: a slot's own record never counts against it, so whenever reclaiming
+          // a dead holder there could open a slot, this passes and the reclaim below runs.
+          const short = memoryShort(i);
+          if (short !== undefined) {
+            if (!holders.includes(short)) holders.push(short);
+            break;
+          }
           try {
             concurrency = testRunConcurrency(load(), slots);
             writeFileSync(path, JSON.stringify(record()), { flag: "wx", mode: 0o666 });

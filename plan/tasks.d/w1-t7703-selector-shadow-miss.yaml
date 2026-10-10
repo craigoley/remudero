@@ -1,0 +1,18 @@
+- id: W1-T7703
+  title: "REPAIR THE SELECTOR EDGE INTO test/new-work-is-ordered-by-cost-of-delay.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/new-work-is-ordered-by-cost-of-delay.test.ts"
+  files: [src/lib/affected-suites.ts, test/the-affected-suite-selector-runs-in-shadow.test.ts]
+  note: "W1-T4439 first observed a narrow miss on coverage run 38051864963 for PR #10627 at 826c886a4bf566348e1bf6e45bcdeeccd9d7e92a: src/lib/test-gardener.ts, test/a-duration-adoption-waits-for-the-noise-to-settle.test.ts, test/the-test-gardener-adopts-the-coverage-duration-ledger.test.ts, test/the-test-suite-tends-itself.test.ts -> test/new-work-is-ordered-by-cost-of-delay.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again. Before adding an edge, reproduce the observed suite failure on the recorded base and head with the same fixture clock; add a selector regression only for a demonstrated dependency. Add a test in test/the-affected-suite-selector-runs-in-shadow.test.ts that selects test/new-work-is-ordered-by-cost-of-delay.test.ts for each confirmed edge: diff-coverage blocks an edge no test exercises. PR #10655 round-1 CI failed twice in the daemon filing-date test with W1-T1070:unmeasured-cost. Static inspection identifies a fixture clock mismatch: NOW is 2026-10-04T12:00:00Z and the cost rows are dated NOW minus one day, while gitRepo commits use real time. dispatchValueContextForSelection takes the latest ledger or filing timestamp; its seven-day cost window excludes those rows after 2026-10-10T12:00:00Z. This plan-only filing cannot repair that test fixture. A separate test repair must align Git author and committer dates with the fixture clock and retain the no-fallback assertion; changing NOW alone only moves the failure boundary. Defer selector edge additions until that repair permits a controlled base/head comparison."
+  acceptance:
+    - claim: "the narrow selector includes test/new-work-is-ordered-by-cost-of-delay.test.ts when this edge is exercised"
+      proof: "grep: test/new-work-is-ordered-by-cost-of-delay\\.test\\.ts in src/lib/affected-suites.ts"
+    - claim: "a regression test selects test/new-work-is-ordered-by-cost-of-delay.test.ts for each recorded edge"
+      proof: "grep: test/new-work-is-ordered-by-cost-of-delay\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"

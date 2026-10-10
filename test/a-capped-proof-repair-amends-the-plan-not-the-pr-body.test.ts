@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { test } from "node:test";
 
 import { gitRepo } from "./helpers/git-repo.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 import {
   findTaskShard,
@@ -607,6 +608,78 @@ test("dispatchProofAmendmentWrite is the whole proof-discrimination arm, extract
     },
   });
   assert.deepEqual(logCalls, [{ step: "proof_amendment.error", extra: { error: "shard lookup exploded" } }]);
+});
+
+// A `unit test:` replacement re-runs code, so its merge-base side is a real `git worktree add --detach`
+// checkout, never a grep tree. The dispatch built it and must release it on every exit path.
+const UNIT_TEST_PROOF = "unit test: test/widget.test.ts";
+
+function unitTestProposalTranscript(): string {
+  return ["PROOF_AMENDMENT:", `1. claim: ${CLAIM}`, `   old_proof: ${OLD_PROOF}`, `   new_proof: ${UNIT_TEST_PROOF}`, ""].join("\n");
+}
+
+/** The stored proof does not byte-match the proposal, so the real dispatch refuses before it executes anything. */
+const UNMATCHED_EVIDENCE: ProofDiscriminationEvidence = {
+  proofs: [{ claim: CLAIM, proof: "a completely different old proof", proofExec: "executed_stale" }],
+};
+
+test("dispatchProofAmendmentWrite removes the merge-base worktree a unit-test proposal checked out, on the refusal and the throw path", () => {
+  const baseDir = "/tmp/rmd-proof-base-fixture/base";
+  const built = (): ReturnType<typeof buildBaseProofDir> => ({
+    baseCheckoutDir: baseDir,
+    baseIsCheckout: true,
+    baseUnreadablePaths: new Set(),
+    addedTestFiles: new Set(),
+  });
+  const shard = () => ({ path: "plan/tasks.d/W1-T3434-FIXTURE.yaml", text: "shard text" });
+  for (const exit of ["refused", "threw"] as const) {
+    const steps: string[] = [];
+    const builtFor: string[][] = [];
+    const removed: Array<[string, string]> = [];
+    dispatchProofAmendmentWrite(
+      baseDispatchParams({ transcriptText: unitTestProposalTranscript(), evidence: UNMATCHED_EVIDENCE, log: (step) => steps.push(step) }),
+      {
+        buildBaseProofDirFn: (criteria) => (builtFor.push(criteria.map((c) => c.proof ?? "")), built()),
+        findShardFn: exit === "threw" ? () => { throw new Error("shard lookup exploded"); } : shard,
+        removeBaseWorktreeFn: (repoDir, worktreePath) => void removed.push([repoDir, worktreePath]),
+      },
+    );
+    assert.deepEqual(builtFor, [[UNIT_TEST_PROOF]], `${exit}: the base was built for the unit test: proposal`);
+    assert.deepEqual(steps, [exit === "threw" ? "proof_amendment.error" : "proof_amendment.requested"], `${exit}: the exit path ran`);
+    assert.deepEqual(removed, [["/tmp/head-checkout", baseDir]], `${exit}: the merge-base worktree is removed from the head checkout`);
+  }
+});
+
+test("a unit-test proposal leaves no merge-base worktree on disk or in the git worktree list after dispatchProofAmendmentWrite", () => {
+  const repo = gitRepo({ kind: "proof-amendment-base" });
+  mkdirSync(join(repo.dir, "src"), { recursive: true });
+  writeFileSync(join(repo.dir, "src", "widget.ts"), "export const renderWidget = () => 1;\n");
+  repo.git("add", "-A");
+  repo.git("commit", "-q", "-m", "base");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  const head = repo.addWorktree(join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}proof-amendment-head-`)), "head"), "feature");
+  head.git("commit", "-q", "--allow-empty", "-m", "head");
+  let built: ReturnType<typeof buildBaseProofDir> | undefined;
+  const steps: string[] = [];
+  dispatchProofAmendmentWrite(
+    baseDispatchParams({
+      transcriptText: unitTestProposalTranscript(),
+      evidence: UNMATCHED_EVIDENCE,
+      reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: head.dir },
+      log: (step) => steps.push(step),
+    }),
+    {
+      // The real builder and the real default teardown: only the build's result is observed.
+      buildBaseProofDirFn: (criteria, headDir) => (built = buildBaseProofDir(criteria, headDir)),
+      findShardFn: () => ({ path: "plan/tasks.d/W1-T3434-FIXTURE.yaml", text: "shard text" }),
+    },
+  );
+  assert.deepEqual(steps, ["proof_amendment.requested"]);
+  assert.equal(built?.baseIsCheckout, true, "the precondition: a real detached worktree was checked out at the merge base");
+  const baseDir = built!.baseCheckoutDir!;
+  assert.equal(existsSync(baseDir), false, `the merge-base worktree ${baseDir} is deleted`);
+  const listed = repo.git("worktree", "list", "--porcelain");
+  assert.equal(listed.includes(basename(baseDir)), false, `git no longer lists the merge-base worktree:\n${listed}`);
 });
 
 test("renderFixPrompt gives a proof-discrimination worker a proposal grammar, not PR-body write instructions", () => {

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-09: read-only daemon memory diagnosis during the serve capacity outage"
   plan_refs: [W1-T3335, W1-T2932, W1-T2744, W1-T5355, W1-T1038, W1-T147]
   files: [src/lib/daemon-memory-telemetry.ts, src/lib/daemon.ts, src/run-task.ts, test/the-daemon-heartbeat-says-what-its-memory-is.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

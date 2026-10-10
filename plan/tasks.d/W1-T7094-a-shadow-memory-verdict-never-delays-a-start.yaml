@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-09: host memory capacity outage; operator approved a REPORT-ONLY host-wide budget, enforcement separately"
   plan_refs: [W1-T7093, W1-T6782, W1-T5347, W1-T2853, W1-T3209]
   files: [src/lib/host-memory-shadow.ts, src/lib/worker.ts, src/run-task.ts, plan/policy.yaml, test/a-shadow-memory-verdict-never-delays-a-start.test.ts, test/a-shadow-verdict-never-waits-on-its-ledger.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

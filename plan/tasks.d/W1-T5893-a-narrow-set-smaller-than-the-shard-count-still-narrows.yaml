@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5705 (#9350) builder's follow-up 3"
   plan_refs: [W1-T5705, W1-T5700, W1-T4395]
   files: [scripts/test-tier-manifest.mjs, test/a-narrow-set-smaller-than-the-shard-count-still-narrows.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

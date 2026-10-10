@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: a wave of BLOCKED 'fix checkout claim declined 3 times' escalations"
   plan_refs: [W1-T5918, W1-T5974, W1-T3822, W1-T76, W1-T100]
   files: [src/run-task.ts, src/lib/sweep.ts, test/a-dead-fix-owners-staged-work-is-preserved-and-its-checkout-reclaimed.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

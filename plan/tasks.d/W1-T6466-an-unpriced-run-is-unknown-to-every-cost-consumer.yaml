@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: #10091 deviation 1, operator approved the follow-up"
   plan_refs: [W1-T5664, W1-T5526]
   files: [src/lib/cost-anomaly.ts, src/lib/config-gardener.ts, src/lib/experiment-promotion.ts, src/lib/retro-closure.ts, scripts/mount-headroom-sweep.mjs, test/an-unpriced-run-is-unknown-to-every-cost-consumer.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

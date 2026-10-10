@@ -7,7 +7,7 @@
   risk: high
   band_meaning: span
   priority: 1.35
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "flow-blocker:review-failed:<n> unmet criterion"

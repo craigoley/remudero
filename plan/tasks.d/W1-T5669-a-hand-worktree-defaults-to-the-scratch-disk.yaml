@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, hand-worktree --parent defaults beside the checkout"
   plan_refs: [W1-T5533]
   files: [src/run-task.ts, src/lib/hand-worktree.ts, docs/cli-reference.md, test/a-hand-worktree-defaults-to-the-scratch-disk.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

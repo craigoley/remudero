@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md addendum defect (worktree machine-judge-garden-1790870097951 fails removal since 10-01)"
   plan_refs: [W1-T5634, W1-T5625]
   files: [src/lib/worker.ts, test/a-worktree-locked-while-initializing-is-reaped.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

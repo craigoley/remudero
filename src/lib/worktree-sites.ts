@@ -194,8 +194,9 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
     file: "src/run-task.ts",
     site: "buildBaseProofDir",
     creates:
-      "a throwaway worktree materialized AT A REVIEW'S MERGE-BASE, detached — the base side every proof " +
-      "is re-run against for the staleness check (R-11)",
+      "a throwaway worktree materialized AT A REVIEW'S MERGE-BASE, detached — the base side a `unit test:` " +
+      "or legacy fenced grep proof is re-run against for the staleness check (R-11); a grep-only review " +
+      "reads its base blobs instead and creates none",
     disposition: {
       kind: "exempt",
       because:

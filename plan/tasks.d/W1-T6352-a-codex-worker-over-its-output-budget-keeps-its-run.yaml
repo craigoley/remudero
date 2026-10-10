@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: W1-T6337 run W1-T6337-1791445377598 verdict failed on bounded_output"
   plan_refs: [W1-T6337]
   files: [src/lib/worker-provider.ts, test/a-codex-worker-over-its-output-budget-keeps-its-run.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

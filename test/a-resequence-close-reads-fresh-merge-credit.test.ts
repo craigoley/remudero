@@ -62,7 +62,7 @@ function producedView(): OpenPrView {
           number: PR_NUMBER,
           html_url: prUrl,
           head: { ref: HEAD_REF, sha: "c".repeat(40) },
-          updated_at: "2026-09-27T15:11:00.000Z",
+          updated_at: "2026-09-27T15:11:00.000Z", // expiring-fixture: exempt -- the sweep runs on this suite's injected now (NOW), never the wall clock; 5/5 pass with Date.now shifted +8d and +30d
           body: `Remudero-Task: ${TASK_ID}`,
           auto_merge: null,
           state: "open",

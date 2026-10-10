@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-09: root-causing fix rounds that push and leave the red (#10300, #10234)"
   plan_refs: [W1-T3727, W1-T6138, W1-T7096]
   files: [scripts/census-precheck.mjs, test/the-affected-suite-reach-ratchet.test.ts, src/run-task.ts, src/lib/prompt-render.ts, test/a-fix-round-checks-its-edits-from-a-harness-git-snapshot.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

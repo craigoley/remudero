@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: data-disk I/O research; operator approved moving rebuildable host data to scratch"
   plan_refs: [W1-T6361]
   files: [deploy/scratch-mounts.sh, test/scratch-mounts.test.ts, test/managed-repos-live-on-scratch.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

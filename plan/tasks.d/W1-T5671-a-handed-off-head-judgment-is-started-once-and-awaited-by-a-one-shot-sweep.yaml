@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, W1-T5523 follow-ups (started twice; one-shot sweep loses it)"
   plan_refs: [W1-T5523, W1-T4063]
   files: [src/lib/sweep.ts, src/run-task.ts, test/a-handed-off-head-judgment-is-started-once-and-awaited-by-a-one-shot-sweep.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

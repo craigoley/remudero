@@ -21,13 +21,14 @@ import { spawnSync } from "node:child_process";
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { acquireTestSlot, type TestSlotLease } from "./test-slot.js";
+import { acquireTestSlot, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
 import {
   canonicalBuildInfo,
   hasUsableTypecheckBuildInfo,
   installedTypescriptVersion,
   prepareWorktreeTypecheck,
   seedBuildInfo,
+  TYPECHECK_COLD_PEAK_BYTES,
   typecheckArgs,
   worktreeBuildInfoPath,
   type SeedOutcome,
@@ -46,6 +47,8 @@ export interface TypecheckRunOptions {
   spawn?: TypecheckRunSpawn;
   canWrite?: (dir: string) => boolean;
   acquireSlot?: (label: string) => TestSlotLease;
+  /** Options for the default slot acquisition; a cold check always names {@link TYPECHECK_COLD_PEAK_BYTES}. */
+  testSlot?: TestSlotOptions;
   log?: (line: string) => void;
 }
 
@@ -94,7 +97,8 @@ export function runTypecheck(root: string, extraArgs: readonly string[] = [], op
   let slot: TestSlotLease | undefined;
   try {
     if (cold) {
-      slot = (opts.acquireSlot ?? acquireTestSlot)(NPM_TYPECHECK_SLOT_LABEL);
+      slot = opts.acquireSlot ? opts.acquireSlot(NPM_TYPECHECK_SLOT_LABEL)
+        : acquireTestSlot(NPM_TYPECHECK_SLOT_LABEL, { memoryBytes: TYPECHECK_COLD_PEAK_BYTES, ...opts.testSlot });
       log(JSON.stringify({ step: "typecheck.cold", where: prepared.where, seed: prepared.seed, slot: slot.outcome, note: slot.note }));
     }
     const res = (opts.spawn ?? inheritSpawn)(join(root, "node_modules", ".bin", "tsc"), [...prepared.args, ...extraArgs], root);

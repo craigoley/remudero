@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: watch log 22:55Z, W1-T5318 (#9179) follow-up (b)"
   plan_refs: [W1-T5318, W1-T5517]
   files: [src/lib/ledger-carry.ts, src/lib/sweep.ts, test/a-reopened-pr-keeps-the-sweep-rows-written-after-its-terminal-row.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

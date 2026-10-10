@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: root-causing #10091 (W1-T5664)"
   plan_refs: [W1-T5664, W1-T2653, W1-T5118]
   files: [src/lib/proof-amendment.ts, src/lib/prompt-render.ts, src/run-task.ts, test/a-fix-round-that-needs-scope-gets-it.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: follow-up audit (research/audit/followups.md) item 90, from #9158 (W1-T5628) review"
   plan_refs: [W1-T5627, W1-T5628, W1-T5525, W1-T5460]
   files: [src/lib/feedback-landing.ts, test/a-landed-capture-stays-visible-until-the-checkout-holds-it.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

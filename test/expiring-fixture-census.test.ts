@@ -685,3 +685,79 @@ test("the freshness-restart fixture is exempt because runSweep judges it against
   assert.equal(r.exempt.length, 1, "it is counted as exempt by its marker, not dropped from the census");
   assert.equal((r.exempt[0] as { file: string }).file, file);
 });
+
+// ── 2026-10-10: THE DERIVED STAMP THE LITERAL SCAN NEVER SAW ─────────────────────────────────────
+//
+// test/new-work-is-ordered-by-cost-of-delay.test.ts pinned `const NOW = Date.parse("2026-10-04…")`
+// and stamped its ledger rows `ts: new Date(NOW - DAY).toISOString()`; the daemon path read them
+// through the 7-day DISPATCH_VALUE_WINDOW_MS against a real git-commit clock, and main went red at
+// 2026-10-10T12:00Z. The census read OK: no ISO literal sat on a field line, and `ts` had no row.
+// The fixture below is a VERBATIM copy of that file's pre-#10656 lines.
+const COST_OF_DELAY_BEFORE_10656 = readFileSync(
+  joinPath(REPO_ROOT, "test/fixtures/expiring-fixture-census/cost-of-delay-before-10656.txt"),
+  "utf8",
+);
+const COST_FILE = "test/new-work-is-ordered-by-cost-of-delay.test.ts";
+const AUTHORED = Date.parse("2026-10-04T12:00:00Z");
+const censusOf = (text: string, now = AUTHORED, readBaseFile?: (p: string) => string | undefined) =>
+  censusExpiringFixtures({ files: [COST_FILE], readFile: () => text, now, thresholdDays: THRESHOLD, readBaseFile });
+
+test("the census flags the pre-#10656 cost-of-delay fixture on the day it was written, naming 2026-10-10", () => {
+  const r = censusOf(COST_OF_DELAY_BEFORE_10656);
+  const lines = r.reported.map((x) => x.line).sort((a, b) => a - b);
+  assert.deepEqual(lines, [19, 20], "both derived `ts` rows are reported, located to their lines");
+  assert.equal(isBlocked({ reported: r.reported }), true, "a crossing the diff introduced blocks");
+  const report = formatReport(r);
+  assert.match(report, /BLOCKED/);
+  assert.match(report, /ts="2026-10-03T12:00:00\.000Z"/, "the derived stamp is printed as the date it resolves to");
+  assert.match(report, /goes red 2026-10-10/, "the day main actually went red");
+  assert.match(report, /DISPATCH_VALUE_WINDOW_MS/, "and the window that judged it is named");
+});
+
+test("a derived-stamp crossing already on the base is inherited, not charged to the diff", () => {
+  const r = censusOf(COST_OF_DELAY_BEFORE_10656, AUTHORED, () => COST_OF_DELAY_BEFORE_10656);
+  assert.equal(r.reported.length, 2);
+  assert.ok(r.reported.every((x) => x.inherited === true));
+  assert.equal(isBlocked({ reported: r.reported }), false);
+});
+
+test("the dispatch-window row reads only a file that reaches the real-clock reader", () => {
+  const unscoped = COST_OF_DELAY_BEFORE_10656.split("\n")
+    .filter((l) => !l.includes("dispatchValueContextForSelection") && !l.includes(".buildDispatchValueContext?.("))
+    .join("\n");
+  const r = censusOf(unscoped);
+  assert.deepEqual(r.reported, [], "a pure-function test with an injected clock is never measured against the window");
+  assert.equal(r.population, 0);
+});
+
+test("a stamp derived from the real clock, or waived with its reason, is not reported", () => {
+  const live = COST_OF_DELAY_BEFORE_10656.replace('const NOW = Date.parse("2026-10-04T12:00:00Z");', "const NOW = Date.now();");
+  assert.deepEqual(censusOf(live).reported, []);
+  const waived = COST_OF_DELAY_BEFORE_10656.replaceAll("  history.push(", `  // ${EXEMPT_MARKER} -- injected clock\n  history.push(`);
+  const r = censusOf(waived);
+  assert.deepEqual(r.reported, []);
+  assert.equal(r.exempt.length, 2);
+});
+
+test("anchor arithmetic resolves units, products and getTime anchors, and skips what it cannot evaluate", () => {
+  const consumer = "dispatchValueContextForSelection\n";
+  const text = [
+    'const T0 = new Date("2026-10-04T00:00:00Z").getTime();',
+    "const HOUR = 60 * 60 * 1000;",
+    "  ts: new Date(T0 - 2 * HOUR + 30_000).toISOString(),",
+    "  ts: new Date(T0 - MYSTERY).toISOString(),",
+    "  ts: new Date(other(T0)).toISOString(),",
+    '  ts: new Date(Date.parse("2026-10-04T00:00:00Z")).toISOString(),',
+  ].join("\n");
+  const r = censusOf(consumer + text, Date.parse("2026-10-04T00:00:00Z"));
+  assert.equal(r.population, 1, "only the evaluable offset is measured -- an unknown unit or a call is skipped, never guessed");
+  assert.equal(r.reported.length, 1);
+  assert.equal(new Date(r.reported[0].expiresAt).toISOString(), "2026-10-10T22:00:30.000Z");
+});
+
+test("derived stamps are opt-in per row: a sweep field derived from an anchor stays unmeasured", () => {
+  const r = censusExpiringFixtures(
+    tree({ "test/a.test.ts": `const T0 = Date.parse("${at(-13 * DAY)}");\n  lastActivityAt: new Date(T0).toISOString(),\n` }),
+  );
+  assert.equal(r.population, 0, "the sweep rows measured 3/3 false positives on derived stamps (runSweep injects its clock)");
+});

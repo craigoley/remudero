@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: watch log, W1-T5629 (#9129) follow-ups"
   plan_refs: [W1-T5629, W1-T5526, W1-T4066]
   files: [src/lib/worker-provider.ts, src/run-task.ts, src/lib/retro.ts, test/a-codex-run-is-priced-at-its-notional-in-the-retro.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

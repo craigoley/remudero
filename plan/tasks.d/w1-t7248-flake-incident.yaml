@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 2.5
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "flake-incident:test/fast-gate-admits-the-census-class.test.ts#real package.json) over ONLY the census entries"

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: #9255 (W1-T5687) docs-claims fix follow-up"
   plan_refs: [W1-T5687, W1-T5688]
   files: [src/run-task.ts, scripts/console-parity-ratchet.mjs, test/the-progress-watchdog-says-it-writes-a-diagnostics-bundle.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

@@ -6,7 +6,7 @@
   verify: auto
   priority: 2.5
   risk: low
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "selector-shadow-miss:test/mkdtemp-allowlist-rekey.test.ts"

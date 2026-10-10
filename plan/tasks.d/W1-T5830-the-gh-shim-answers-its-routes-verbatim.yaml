@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5811 (#9268) hand-build follow-up"
   plan_refs: [W1-T2903, W1-T5811]
   files: [test/helpers/gh-shim.ts, test/the-gh-shim-answers-its-routes-verbatim.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

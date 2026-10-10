@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: fix agent on #9313 (W1-T5660) follow-up"
   plan_refs: [W1-T5660, W1-T5541]
   files: [src/lib/inbox.ts, test/a-draft-may-create-a-new-subdirectory-under-an-existing-top-directory.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

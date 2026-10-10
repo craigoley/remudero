@@ -10,7 +10,7 @@
   depends_on: [W1-T7421]
   origin: "operator ruling 2026-10-09: 'never be left with stuck prs. lean into automated flow and self improvement'; classes found after W1-T7421 was built"
   plan_refs: [W1-T7421, W1-T7182, W1-T7096, W1-T7243]
-  files: [src/lib/fix-lane-gardener.ts, test/the-fix-lane-gardener-prices-unseamed-catches-and-swapped-reds.test.ts]
+  files: [src/lib/fix-lane-gardener.ts, test/the-fix-lane-gardener-prices-unseamed-catches-and-swapped-reds.test.ts, "src/lib/gardener.ts"]
   status: queued
   priority: 1
   attempts: 0

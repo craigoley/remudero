@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: #10108 passed rmd preflight and failed host-capability-fixtures in CI"
   plan_refs: [W1-T5616, W1-T5663, W1-T4108]
   files: [src/lib/ci-parity.ts, test/preflight-runs-the-pre-push-precheck.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

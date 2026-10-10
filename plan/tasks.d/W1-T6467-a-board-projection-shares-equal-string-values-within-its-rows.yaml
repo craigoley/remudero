@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: serve CPU and memory plan; W1-T6369's recon (PR #10118) recommendation"
   plan_refs: [W1-T6369, W1-T6368, W1-T5885]
   files: [src/lib/board-projection.ts, test/a-board-projection-shares-equal-string-values-within-its-rows.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

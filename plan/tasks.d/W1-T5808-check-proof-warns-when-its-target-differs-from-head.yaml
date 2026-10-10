@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-05: #9209 (W1-T5676 rename) failed review twice on a proof check-proof passed"
   plan_refs: [W1-T912, W1-T4590, W1-T2242]
   files: [src/run-task.ts, test/check-proof-warns-when-its-target-differs-from-head.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

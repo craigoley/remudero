@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-09: export gardener's pending metric still reads waiting 36 h after #10045 merged"
   plan_refs: [W1-T4117, W1-T5114]
   files: [src/lib/gardener.ts, test/an-inconclusive-gardener-metric-releases-on-its-clock.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

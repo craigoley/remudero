@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5864 (#9322) builder's follow-up 2 (pre-existing)"
   plan_refs: [W1-T5864, W1-T4458, W1-T3696]
   files: [src/run-task.ts, test/an-unresolved-conflict-outside-the-declared-paths-is-a-named-refusal.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

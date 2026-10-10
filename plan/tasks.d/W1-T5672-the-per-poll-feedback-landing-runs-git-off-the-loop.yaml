@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, sync git fetch/push on the loop beside W1-T5284"
   plan_refs: [W1-T5620, W1-T5284, W1-T5521, W1-T530]
   files: [src/lib/feedback-landing.ts, test/the-per-poll-feedback-landing-runs-git-off-the-loop.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

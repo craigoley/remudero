@@ -399,6 +399,9 @@ export interface HostWorktreeGitOptions {
   input?: string;
   /** Kills the call past this many milliseconds, as `execFileSync`'s own `timeout` does. */
   timeout?: number;
+  /** `latin1` maps each stdout byte to one char, so `Buffer.from(out, "latin1")` is the bytes exactly: a blob read
+   *  must reach its reader as a checkout writes it, and a UTF-8 decode rewrites an invalid sequence. Default utf8. */
+  encoding?: "utf8" | "latin1";
   log?: WorktreeGitLog;
 }
 
@@ -407,7 +410,7 @@ function spawnOptions(pin: PinnedWorktreeGit, opts: HostWorktreeGitOptions, over
     : opts.stdio === "inherit-stdout" ? ["pipe", "inherit", "pipe"] as ["pipe", "inherit", "pipe"]
     : ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"];
   return {
-    encoding: "utf8" as const,
+    encoding: opts.encoding ?? ("utf8" as const),
     env: hostWorktreeGitEnv(pin, opts.env, process.env, overrides),
     stdio,
     ...(opts.maxBuffer === undefined ? {} : { maxBuffer: opts.maxBuffer }),

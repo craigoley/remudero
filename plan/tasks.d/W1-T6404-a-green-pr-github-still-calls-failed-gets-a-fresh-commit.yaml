@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-08: root-causing the stuck-PR board"
   plan_refs: [W1-T5492, W1-T3920, W1-T5694, W1-T528, W1-T5921]
   files: [src/lib/sweep.ts, test/a-green-pr-github-still-calls-failed-gets-a-fresh-commit.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-09: round-6b daemon CPU profile with stacks (lanes/claude/daemon-cpu-round6b.cpuprofile, pid 347149)"
   plan_refs: [W1-T2262, W1-T6590, W1-T6591]
   files: [src/lib/fleet-control.ts, src/run-task.ts, test/the-shared-pause-check-reads-the-remote-off-the-loop.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

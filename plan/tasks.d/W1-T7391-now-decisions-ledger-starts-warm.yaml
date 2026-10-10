@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-09: Azure-host performance work (read-model worker slow_view rows)"
   plan_refs: [W1-T5374]
   files: [src/lib/now-view.ts, test/now-decisions-ledger-starts-warm.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

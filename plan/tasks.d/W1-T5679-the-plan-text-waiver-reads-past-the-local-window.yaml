@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, W1-T5553 (#9124) follow-up, the waiver needs local paths"
   plan_refs: [W1-T5553, W1-T2648]
   files: [src/lib/status.ts, test/the-plan-text-waiver-reads-past-the-local-window.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

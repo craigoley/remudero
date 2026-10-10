@@ -137,12 +137,104 @@ export const AGED_FIELDS = [
     evidence: ["Date.parse(supplied.window.through)", "input.now <= Date.parse(supplied.window.through)"],
     offsetDays: 0,
   },
+  {
+    // W1-T7650-class gap (2026-10-10): a ledger row's `ts` is read inside a TRAILING WINDOW whose
+    // right edge is the real clock. test/new-work-is-ordered-by-cost-of-delay.test.ts stamped its
+    // rows `ts: new Date(NOW - DAY)` off a fixed `NOW`, while `dispatchValueContextForSelection`
+    // takes its `nowMs` from a real `git commit` date -- so every row aged out of the 7-day window
+    // at 2026-10-10T12:00Z and main went red with no diff involved. `ts` is in nearly every ledger
+    // fixture, so this row is SCOPED by `consumers`: only a test file that reaches the real-clock
+    // reader is measured against it. A file that drives the pure function with an injected clock
+    // never names those symbols and is never read here.
+    field: "ts",
+    threshold: "dispatch-value trailing window (DISPATCH_VALUE_WINDOW_MS, 7 days, real-clock right edge)",
+    source: "src/lib/dispatch-value.ts",
+    evidence: ["DISPATCH_VALUE_WINDOW_MS = 7 * 24 * 60 * 60_000", "const since = nowMs - windowMs", "ts >= since"],
+    offsetDays: 7,
+    consumers: ["dispatchValueContextForSelection", ".buildDispatchValueContext?.("],
+    // Its stamps are DERIVED from a file clock anchor, never written as literals -- see
+    // `stampsOnLine`. Opt-in per row: MEASURED 2026-10-10, resolving derived stamps for the sweep
+    // rows above surfaced three new crossings (a-requeue-never-cancels-a-sibling-run,
+    // stacked-child-fix-hold, the-sweep-repairs-a-machine-plan-prs-mechanical-reds) and all three
+    // stayed green with their anchor aged a month back -- `runSweep` takes the injected clock.
+    derived: true,
+  },
 ];
+
+/** True when `row` applies to a file with this text: an unscoped row applies everywhere, a row
+ *  with `consumers` only where the file names one of the real-clock entry points it lists. */
+export function rowAppliesTo(row, text) {
+  return !row.consumers || row.consumers.some((c) => text.includes(c));
+}
 
 /** A row's key, bare, quoted or JSON-escaped inside a string, after a left word boundary, then an
  *  ISO stamp in any quote: `field: "…"`, `"field":"…"`, `\"field\":\"…\"`. */
 function stampRe(field) {
   return new RegExp(`(?:^|[^\\w$])\\\\?["'\u0060]?${field}\\\\?["'\u0060]?\\s*:\\s*\\\\?["'\u0060](\\d{4}-\\d{2}-\\d{2}T[^"'\u0060\\\\]*)`);
+}
+
+// ── THE DERIVED STAMP (2026-10-10) ──────────────────────────────────────────────────────────────
+//
+// `stampRe` reads a stamp only when the ISO literal sits ON the field's line. The bomb that took
+// main red on 2026-10-10 never did: the literal lived ONCE, in a file-level clock anchor
+// (`const NOW = Date.parse("2026-10-04T12:00:00Z")`), and every row was DERIVED from it
+// (`ts: new Date(NOW - DAY).toISOString()`). The literal scan measured zero stamps in that file and
+// reported OK. A derived stamp is the same fixed date with arithmetic in front of it, so it is
+// resolved here and judged exactly like a literal one: same margin, same base attribution, same
+// exemption marker, for every row that sets `derived: true`. An offset the resolver cannot
+// evaluate is skipped, never guessed.
+
+const ANCHOR_RE = /^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::\s*number\s*)?=\s*(?:Date\.parse\(\s*["'\u0060](\d{4}-\d{2}-\d{2}T[^"'\u0060]*)["'\u0060]\s*\)|new Date\(\s*["'\u0060](\d{4}-\d{2}-\d{2}T[^"'\u0060]*)["'\u0060]\s*\)\.getTime\(\))\s*;?\s*$/;
+const UNIT_RE = /^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::\s*number\s*)?=\s*([\d_]+(?:\s*\*\s*[\d_]+)*)\s*;?\s*$/;
+
+/** File-level clock anchors and numeric unit constants (`DAY = 86_400_000`), by name. */
+export function fileClockConstants(text) {
+  const anchors = new Map();
+  const units = new Map();
+  for (const line of text.split("\n")) {
+    const a = ANCHOR_RE.exec(line);
+    if (a) {
+      const ms = Date.parse(a[2] ?? a[3]);
+      if (!Number.isNaN(ms)) anchors.set(a[1], ms);
+      continue;
+    }
+    const u = UNIT_RE.exec(line);
+    if (u) units.set(u[1], u[2].split("*").reduce((acc, n) => acc * Number(n.trim().replace(/_/g, "")), 1));
+  }
+  return { anchors, units };
+}
+
+/** `ANCHOR`, `ANCHOR - DAY`, `ANCHOR - 30 * DAY + 2 * HOUR`, `ANCHOR - 60_000`: the ms value, or
+ *  undefined for anything else (a call, a local, an unknown unit). */
+export function resolveAnchorExpr(expr, { anchors, units }) {
+  const tokens = expr.replace(/\s+/g, "").match(/^([A-Za-z_$][\w$]*)((?:[+-][\w$*]+)*)$/);
+  if (!tokens || !anchors.has(tokens[1])) return undefined;
+  let total = anchors.get(tokens[1]);
+  for (const [, sign, term] of tokens[2].matchAll(/([+-])([\w$*]+)/g)) {
+    let value = 1;
+    for (const factor of term.split("*")) {
+      if (/^[\d_]+$/.test(factor)) value *= Number(factor.replace(/_/g, ""));
+      else if (units.has(factor)) value *= units.get(factor);
+      else return undefined;
+    }
+    total += sign === "-" ? -value : value;
+  }
+  return total;
+}
+
+function derivedStampRe(field) {
+  return new RegExp(`(?:^|[^\\w$])["'\u0060]?${field}["'\u0060]?\\s*:\\s*new Date\\(([^()]+)\\)\\.toISOString\\(\\)`);
+}
+
+/** Every stamp `row` measures on `line`: the literal one, or one derived from a file clock anchor. */
+export function stampsOnLine(line, row, constants) {
+  const literal = stampRe(row.field).exec(line);
+  if (literal) return [literal[1]];
+  if (!row.derived || !constants || constants.anchors.size === 0) return [];
+  const derived = derivedStampRe(row.field).exec(line);
+  if (!derived) return [];
+  const ms = resolveAnchorExpr(derived[1], constants);
+  return ms === undefined ? [] : [new Date(ms).toISOString()];
 }
 
 /** The population ratchet: each file's measured fixture count as captured on W1-T3334.
@@ -373,21 +465,25 @@ export function censusExpiringFixtures({ files, readFile, now, thresholdDays, ma
   let population = 0;
 
   for (const file of files) {
-    const lines = readFile(file).split("\n");
+    const text = readFile(file);
+    const lines = text.split("\n");
+    const constants = fileClockConstants(text);
+    const rows = AGED_FIELDS.filter((row) => rowAppliesTo(row, text));
     for (const [index, line] of lines.entries()) {
-      for (const row of AGED_FIELDS) {
-        // The stamp as it is actually written in a fixture: `field: "2026-08-26T18:15:00Z"`.
-        const m = stampRe(row.field).exec(line);
-        if (!m) continue;
+      for (const row of rows) {
+        // The stamp as it is actually written in a fixture: `field: "2026-08-26T18:15:00Z"`, or
+        // derived from a fixed anchor: `field: new Date(NOW - DAY).toISOString()`.
+        const [stampText] = stampsOnLine(line, row, constants);
+        if (stampText === undefined) continue;
         population += 1;
         populationByFile[file] = (populationByFile[file] ?? 0) + 1;
 
-        const stamp = Date.parse(m[1]);
+        const stamp = Date.parse(stampText);
         if (Number.isNaN(stamp)) continue;
         const expiresAt = stamp + (row.offsetDays === STALE_DAYS_OFFSET ? thresholdDays : row.offsetDays) * MS_PER_DAY;
         const daysLeft = (expiresAt - now) / MS_PER_DAY;
 
-        const record = { file, line: index + 1, field: row.field, threshold: row.threshold, stamp: m[1], expiresAt, daysLeft };
+        const record = { file, line: index + 1, field: row.field, threshold: row.threshold, stamp: stampText, expiresAt, daysLeft };
 
         // The marker may sit on the line itself or on the comment line directly above it.
         const nearby = `${line}\n${index > 0 ? lines[index - 1] : ""}`;
@@ -416,10 +512,10 @@ export function censusExpiringFixtures({ files, readFile, now, thresholdDays, ma
     for (const file of new Set(reported.map((r) => r.file))) {
       const baseText = readBaseFile(file);
       if (baseText === undefined) continue; // absent at base ⇒ every stamp in it is this diff's
+      const baseConstants = fileClockConstants(baseText);
       for (const line of baseText.split("\n")) {
         for (const row of AGED_FIELDS) {
-          const m = stampRe(row.field).exec(line);
-          if (m) inheritedKeys.add(`${file}\u0000${row.field}\u0000${m[1]}`);
+          for (const stampText of stampsOnLine(line, row, baseConstants)) inheritedKeys.add(`${file}\u0000${row.field}\u0000${stampText}`);
         }
       }
     }

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md janitor gaps, follow-up audit (research/audit/followups.md) section B"
   plan_refs: [W1-T3528, W1-T5707, W1-T5709, W1-T5712]
   files: [src/lib/disk-artifact-reclaim.ts, src/lib/config.ts, test/the-artifact-reclaimer-scans-a-disk-that-can-fill.test.ts, "src/lib/config-schema.ts"]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

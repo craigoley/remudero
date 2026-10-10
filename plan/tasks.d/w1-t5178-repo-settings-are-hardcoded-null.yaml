@@ -12,7 +12,7 @@
   note: "reservation hand-off: plan-console-audit-core-1790887256000 -> plan-console-audit-core-1790887256000"
   plan_refs: [W1-T4103, W1-T3783]
   files: [src/lib/repo-dashboard-route.ts, test/repo-settings-report-their-effective-values.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-01 on app.remudero.com/repos/craigoley%2Fremudero/settings: Proof policy, Worker pool size and

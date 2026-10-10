@@ -99,7 +99,7 @@ function sceneFetch(over: {
           number: PR,
           html_url: PR_URL,
           head: { ref: BRANCH, sha: HEAD },
-          updated_at: "2026-09-27T11:00:00.000Z",
+          updated_at: "2026-09-27T11:00:00.000Z", // expiring-fixture: exempt -- aged only against this suite's injected NOW, never the wall clock; 13/13 pass with Date.now shifted +8d and +30d
           body: BODY,
           auto_merge: { merge_method: "squash" },
           draft: false,
@@ -115,7 +115,7 @@ function sceneFetch(over: {
       };
     }
     if (path.endsWith(`/commits/${HEAD}/status`)) {
-      return { statuses: [{ context: "remudero-review", state: "success", created_at: "2026-09-27T10:10:00Z", updated_at: "2026-09-27T10:10:00Z" }] };
+      return { statuses: [{ context: "remudero-review", state: "success", created_at: "2026-09-27T10:10:00Z", updated_at: "2026-09-27T10:10:00Z" }] }; // expiring-fixture: exempt -- aged only against this suite's injected NOW, never the wall clock; 13/13 pass with Date.now shifted +8d and +30d
     }
     if (path.endsWith(`/pulls/${PR}`)) {
       return { mergeable: true, mergeable_state: "blocked", merge_commit_sha: MERGE, head: { sha: HEAD } };

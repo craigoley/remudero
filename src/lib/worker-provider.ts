@@ -42,7 +42,7 @@ import { makeTempDir, withTempDir } from "./tmp.js";
 import { assertModelAllowed, modelAllowed } from "./model-gate.js";
 import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWindow } from "./version-switchback.js";
 import type { ModelApproval } from "./config-schema.js";
-import { hasUsableTypecheckBuildInfo, installedTypescriptVersion, seedFromCanonical, TYPECHECK_BUILDINFO_NAME } from "./typecheck-buildinfo.js";
+import { hasUsableTypecheckBuildInfo, installedTypescriptVersion, seedFromCanonical, TYPECHECK_BUILDINFO_NAME, TYPECHECK_COLD_PEAK_BYTES } from "./typecheck-buildinfo.js";
 import { acquireTestSlotAsync, TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "./test-slot.js";
 import { selectFromRoutingPool, type RoutingPoolDecision, type RoutingPoolRequest, type RoutingPoolSnapshot } from "./model-pool.js";
 import {
@@ -2344,11 +2344,7 @@ function isWithin(root: string, candidate: string): boolean {
  */
 function isGitWorktree(cwd: string): boolean {
   try {
-    return execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim() === "true";
+    return hostWorktreeGit(cwd, ["rev-parse", "--is-inside-work-tree"]).trim() === "true";
   } catch {
     // `git` missing, not a repo, or the probe otherwise failed to prove worktree membership --
     // treat as "not a worktree" so the bypass stays fail-closed on any unproven cwd.
@@ -3762,7 +3758,19 @@ function fullSelection(reason: string): AffectedSelection {
  * since the worktree's own copy is model-writable code this process must not execute.
  * Anything unreadable is a FULL selection naming why — never a narrower guess.
  */
-export function selectOpenWeightUnitTestSuites(cwd: string, spawn: PreflightSpawn = defaultPreflightSpawn): AffectedSelection {
+export function selectOpenWeightUnitTestSuites(cwd: string, spawn: PreflightSpawn = (file, args, opts) => {
+  if (file !== "git") return defaultPreflightSpawn(file, args, opts);
+  try {
+    const stdout = hostWorktreeGit(opts?.cwd ?? cwd, args, {
+      maxBuffer: 64 * 1024 * 1024, env: opts?.env, input: opts?.input,
+    });
+    return { status: 0, stdout, stderr: "" };
+  } catch (error) {
+    const result = error as { status?: number; stdout?: string; stderr?: string };
+    if (typeof result.status !== "number") throw error;
+    return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+  }
+}): AffectedSelection {
   const root = realpathSync(cwd);
   const run = (file: string, args: string[], at = root): string => {
     const r = spawn(file, args, { cwd: at });
@@ -4034,7 +4042,7 @@ async function executeOpenWeightTool(
       const scoped = suites === null ? {} : { suites };
       const slot = args.check === "typecheck" &&
         !hasUsableTypecheckBuildInfo(join(workerHome, TYPECHECK_BUILDINFO_NAME), installedTypescriptVersion(cwd))
-        ? await acquireTestSlotAsync("typecheck:bwrap") : undefined;
+        ? await acquireTestSlotAsync("typecheck:bwrap", { memoryBytes: TYPECHECK_COLD_PEAK_BYTES }) : undefined;
       try {
         const stdout = await (runCheck ?? runOpenWeightCheck)({
           argv,

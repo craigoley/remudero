@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-05: W1-T5748 (#9205) follow-up"
   plan_refs: [W1-T5748, W1-T8, W1-T5373]
   files: [src/lib/sweep.ts, test/a-plan-pr-past-its-refresh-bound-asks-the-operator.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

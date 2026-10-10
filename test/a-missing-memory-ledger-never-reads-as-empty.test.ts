@@ -251,6 +251,9 @@ test("a vanished directory listing keeps owner copies visible and republishes th
 
 test("a failed directory listing reports unreadable storage and retains owner reservations", () => {
   const w = world();
+  // Two readings are compared whole below, and each carries an ageMs off the clock: freeze it, or a
+  // millisecond tick between them reads 0 vs 1 and reddens main (CI run 38050132401).
+  w.deps.clock = fixedClock(Date.now());
   const handle = openMemoryReservation({ workerClass: "review" }, w.deps);
   sweepMemoryReservations(w.deps);
   const before = new Map(w.files);

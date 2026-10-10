@@ -12,7 +12,7 @@
   plan_refs: [W1-T2904, W1-T3302, W1-T3699, W1-T3724, W1-T3207]
   files: [.github/workflows/ci.yml, scripts/test-tier-manifest.mjs, scripts/test-duration-reporter.mjs, test/coverage-durations-self-correct.test.ts, scripts/test-tier-manifest.json]
   priority: 1
-  status: queued
+  status: merged
   # backlog gardener: band=4 evidence=cde6f8297dd9f80a
   attempts: 0
   note: |

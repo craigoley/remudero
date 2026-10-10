@@ -51,12 +51,12 @@ function stepped(): Stepped {
 function pr(number: number, taskId: string, state: string): BoardPrRest {
   return {
     number, url: `https://github.com/o/r/pull/${number}`, state, headRefName: `run-${taskId}-1790000000000`, headRefOid: `sha-${number}`,
-    body: `work\n\nRemudero-Task: ${taskId}`, autoMergeRequest: null, title: `pr ${number}`, updatedAt: "2026-09-30T11:00:00Z",
+    body: `work\n\nRemudero-Task: ${taskId}`, autoMergeRequest: null, title: `pr ${number}`, updatedAt: "2026-09-30T11:00:00Z", // expiring-fixture: exempt -- the now view runs on this suite's injected manual Clock; 9/9 pass with Date.now shifted +8d and +30d
   };
 }
 
 function issue(number: number, state: string): BoardIssueRest {
-  return { number, url: `https://github.com/o/r/issues/${number}`, state, title: `issue ${number}`, updatedAt: "2026-09-30T11:00:00Z" };
+  return { number, url: `https://github.com/o/r/issues/${number}`, state, title: `issue ${number}`, updatedAt: "2026-09-30T11:00:00Z" }; // expiring-fixture: exempt -- the now view runs on this suite's injected manual Clock; 9/9 pass with Date.now shifted +8d and +30d
 }
 
 /** A read-model store for one instance whose ledger dir sits under `home`, so instances can share one state root. */

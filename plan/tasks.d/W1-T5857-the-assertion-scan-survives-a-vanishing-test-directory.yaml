@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5515 (#9299) builder's related-suite run"
   plan_refs: [W1-T5515]
   files: [scripts/assertion-discrimination-check.mjs, test/the-assertion-scan-survives-a-vanishing-test-directory.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

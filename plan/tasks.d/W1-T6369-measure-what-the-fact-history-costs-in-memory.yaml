@@ -13,7 +13,7 @@
   files:
     - plan/tasks.d/W1-T6369-measure-what-the-fact-history-costs-in-memory.yaml
     - docs/recon/fact-history-memory.md
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

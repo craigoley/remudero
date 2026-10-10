@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: 'file the review width follow-up and any others that will improve things'"
   plan_refs: [W1-T5515, W1-T5522, W1-T5705, W1-T5925, W1-T1041, W1-T5941]
   files: [.github/workflows/ci.yml, scripts/test-tier-manifest.mjs, test/the-merge-group-confirms-the-combination-rather-than-repeating-the-pr-run.test.ts]
-  status: queued
+  status: merged
   priority: 1  # operator 2026-10-09: the queue is the only guard that tests the merged combination (#10349 x #10353 broke main ~55 min)
   attempts: 0
   rationale: |

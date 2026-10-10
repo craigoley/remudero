@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: found while building W1-T5284 (#9159)"
   plan_refs: [W1-T5284, W1-T3297]
   files: [src/lib/github-transport.ts, test/an-async-gh-write-is-never-coalesced.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

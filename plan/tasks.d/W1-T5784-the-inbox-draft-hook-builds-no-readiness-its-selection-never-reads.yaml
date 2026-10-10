@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5650 (#9210) follow-up"
   plan_refs: [W1-T5650, W1-T192, W1-T4075]
   files: [src/run-task.ts, src/lib/inbox.ts, test/no-daemon-loop-path-builds-the-unbatched-gateway.test.ts, test/the-inbox-draft-hook-builds-no-readiness-its-selection-never-reads.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

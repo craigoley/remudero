@@ -113,6 +113,7 @@ import { extractTaskTrailerId } from "./review.js";
 import { mapRestPr, singlePrRestArgs, type RestPullRow } from "./open-prs-rest.js";
 import { createGhCallPacer, ghExecFile, ghJson, GH_RATE_LIMIT_BUCKET_UNKNOWN } from "./github-transport.js";
 import { worktreesDir, readWorktreeBase } from "./worker.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { systemClock } from "./clock.js";
 import { buildTaskCaseFile, readTaskCaseLedger, readTaskCaseLedgers, type CaseLedgerRead, type CasePrRead, type CasePrSnapshot, type TaskCaseFile } from "./task-case-file.js";
@@ -459,7 +460,7 @@ export function readCheckoutDepth(cwd: string): { shallow: boolean; commitCount:
 
 function defaultReadWorktreeHead(worktreePath: string): string | undefined {
   try {
-    return execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktreePath, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
   } catch {
     // W1-T2627: `undefined` is the ABSENT reading, not a swallowed failure. A worktree can
     // legitimately have no resolvable HEAD — freshly added and not yet checked out, or its
@@ -473,7 +474,7 @@ function defaultReadWorktreeHead(worktreePath: string): string | undefined {
 
 function defaultIsWorktreeBaseAncestor(worktreePath: string, base: string, head: string): boolean | undefined {
   try {
-    execFileSync("git", ["merge-base", "--is-ancestor", base, head], { cwd: worktreePath, stdio: ["ignore", "pipe", "pipe"] });
+    hostWorktreeGit(worktreePath, ["merge-base", "--is-ancestor", base, head]);
     return true;
   } catch (e) {
     // W1-T2627: `git merge-base --is-ancestor` ANSWERS THROUGH ITS EXIT CODE, so a throw here is

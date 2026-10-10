@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, runConfigGarden builds the async inventory every pass; four steps not in CONFIG_GARDEN_LEDGER_STEPS"
   plan_refs: [W1-T4969, W1-T5474, W1-T5527, W1-T5526, W1-T4113]
   files: [src/lib/gardener.ts, src/lib/config-gardener.ts, test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts, test/a-pending-config-garden-pr-reads-no-inventory.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

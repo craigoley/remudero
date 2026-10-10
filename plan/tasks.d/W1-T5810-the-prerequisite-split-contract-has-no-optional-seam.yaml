@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5779 (#9231) follow-up"
   plan_refs: [W1-T5779, W1-T5809, W1-T2436]
   files: [src/lib/prompt-render.ts, src/run-task.ts, test/prompt-render.test.ts, test/the-prerequisite-split-contract-has-no-optional-seam.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

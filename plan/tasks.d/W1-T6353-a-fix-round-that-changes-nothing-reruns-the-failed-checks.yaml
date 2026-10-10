@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: PR watch, #10012 parked at own-red strike 1/2 from 03:36Z"
   plan_refs: [W1-T2811]
   files: [src/lib/sweep.ts, test/a-fix-round-that-changes-nothing-reruns-the-failed-checks.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

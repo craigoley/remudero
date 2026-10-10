@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5825 (#9283) builder's no-merge-hold report"
   plan_refs: [W1-T5825, W1-T4780]
   files: [src/lib/gardener.ts, test/an-open-decision-judged-garden-pr-is-released-after-the-backstop.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

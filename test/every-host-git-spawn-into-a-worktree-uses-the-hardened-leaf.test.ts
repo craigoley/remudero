@@ -62,6 +62,10 @@ const LEAF_SITES: ReadonlyArray<readonly [string, string]> = [
   ["src/lib/worker.ts", "wireCredentialHelperSocket"],
   ["src/lib/worker.ts", "credentialHelperSocketWired"],
   ["src/lib/worker.ts", "laneWorkKeepReason"],
+  ["src/lib/worker-provider.ts", "isGitWorktree"],
+  ["src/lib/worker-provider.ts", "selectOpenWeightUnitTestSuites"],
+  ["src/lib/report-commands.ts", "defaultReadWorktreeHead"],
+  ["src/lib/report-commands.ts", "defaultIsWorktreeBaseAncestor"],
 ];
 
 /**
@@ -171,10 +175,10 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/replay-harness.ts": { count: 1, reason: "CHECKOUT: sourceGit reads the replay source checkout (-C sourceDir)" },
   "src/lib/repo-location.ts": { count: 1, reason: "CHECKOUT: resolveRepoRoot asks git for a directory's top level (-C dir)" },
   "src/lib/report-commands.ts": {
-    count: 7,
+    count: 5,
     reason:
-      "WORKTREE (follow-up conversion): defaultReadWorktreeHead/defaultIsWorktreeBaseAncestor (cwd: " +
-      "worktreePath); the rest read the repo root",
+      "CHECKOUT (W1-T6134): reportOwnerRepo, readCheckoutDepth (2), statusCommand and " +
+      "learningsExportCommand read the repo root",
   },
   "src/lib/review-findings.ts": { count: 2, reason: "CHECKOUT: fileLine/extractReviewFindings read the review root (-C root)" },
   "src/lib/review-worktree-reclaim.ts": { count: 1, reason: "CHECKOUT (W1-T6122's file): defaultReadRemoteHeadSha reads the managed checkout (-C repoDir)" },
@@ -209,11 +213,10 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/test-impact-map.ts": { count: 2, reason: "CHECKOUT: impactDrift/readImpactArmInput read the repo root (cwd: root)" },
   "src/lib/wipe-test.ts": { count: 2, reason: "CHECKOUT: runWipeTestPair reads its own scratch checkout (-C repoDir)" },
   "src/lib/worker-provider.ts": {
-    count: 7,
+    count: 6,
     reason:
-      "WORKTREE (follow-up conversion, no owner yet): isGitWorktree (cwd), " +
-      "selectOpenWeightUnitTestSuites's 5 run(\"git\", …) into the worker worktree; NOT GIT: codexExecArgs's -C " +
-      "is codex's",
+      "SEAM ARGV (W1-T6134): selectOpenWeightUnitTestSuites's 5 run(\"git\", …) use the leaf " +
+      "in the default spawn; NOT GIT: codexExecArgs's -C is codex's",
   },
   "src/lib/worker.ts": {
     count: 24,

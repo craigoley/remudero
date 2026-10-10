@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 8, one node_modules donor per lockfile"
   plan_refs: [W1-T4933, W1-T5533]
   files: [src/lib/staged-install.ts, test/a-matching-install-is-hard-linked-not-reinstalled.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

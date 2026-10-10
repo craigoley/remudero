@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, lint-plan --base mode misses a sizing violation --all reports"
   plan_refs: [W1-T2525, W1-T2543, W1-T1076, W1-T3086]
   files: [src/lib/task-linter.ts, test/every-lint-pass-sizes-a-shard-by-its-own-slug.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |
