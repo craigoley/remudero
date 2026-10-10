@@ -60,7 +60,12 @@ function facts(prs: readonly OpenPrView[]) {
 
 function harness(
   prs: readonly OpenPrView[],
-  extra: { ledger?: Array<Record<string, unknown>>; status?: string; mergeQueue?: () => boolean } = {},
+  extra: {
+    ledger?: Array<Record<string, unknown>>;
+    status?: string;
+    mergeQueue?: () => boolean;
+    updateBranch?: (target: ArmedStalledPr) => "updated" | Promise<"updated">;
+  } = {},
 ) {
   const updated: ArmedStalledPr[] = [];
   const rows: Array<Record<string, unknown>> = [];
@@ -70,7 +75,7 @@ function harness(
     now: () => NOW,
     readLedger: () => extra.ledger ?? [],
     appendLine: (_path, row) => { rows.push(row); },
-    updateBranch: (target) => { updated.push(target); return "updated"; },
+    updateBranch: (target) => { updated.push(target); return extra.updateBranch?.(target) ?? "updated"; },
     ...(extra.mergeQueue ? { mergeQueue: extra.mergeQueue } : {}),
     ...(extra.status === undefined ? {} : {
       readActionsStatusSummary: async () => ({ components: [{ name: "Actions", status: extra.status! }], incidents: [] }),
@@ -123,6 +128,44 @@ test("W1-T7214: the light refresh shares the full sweep's one update per (PR, he
   assert.equal(await queued.run(), undefined);
   assert.deepEqual(queued.updated, []);
   assert.equal(queued.rows.filter((r) => r.step === "sweep.update_branch.skipped_queue").length, 1);
+});
+
+test("W1-T7214: an unreadable merge queue still refreshes the oldest ready overlap", async () => {
+  let queueReads = 0;
+  const unreadable = harness([NEWER, OLDER], {
+    mergeQueue: () => { queueReads++; throw new Error("queue read unavailable"); },
+  });
+  assert.equal(await unreadable.run(), OLDER.prNumber);
+  assert.equal(queueReads, 2);
+  assert.deepEqual(unreadable.updated.map((c) => c.prNumber), [OLDER.prNumber]);
+  assert.deepEqual(unreadable.rows.map((r) => [r.step, r.pr_number, r.source]), [
+    ["sweep.update_branch.attempted", OLDER.prNumber, "light_pass"],
+    ["sweep.update_branch.updated", OLDER.prNumber, "light_pass"],
+  ]);
+});
+
+test("W1-T7214: a rejected branch update records its error and releases the light refresh", async () => {
+  const failed = harness([OLDER], {
+    updateBranch: async () => { throw new Error("update rejected for stale head"); },
+  });
+  assert.equal(await failed.run(), OLDER.prNumber);
+  assert.deepEqual(failed.updated.map((c) => c.prNumber), [OLDER.prNumber]);
+  assert.deepEqual(failed.rows, ["attempted", "error"].map((outcome) => ({
+    run_id: "LIGHT-W1-T7214",
+    task_id: OLDER.taskId,
+    pr_number: OLDER.prNumber,
+    pr_url: OLDER.prUrl,
+    head_sha: OLDER.headSha,
+    behind_by: 2,
+    update_reason: "ready-overlap",
+    matching_base_files: [FILE],
+    source: "light_pass",
+    step: `sweep.update_branch.${outcome}`,
+    ...(outcome === "error" ? { error: "update rejected for stale head" } : {}),
+  })));
+  const next = harness([NEWER]);
+  assert.equal(await next.run(), NEWER.prNumber);
+  assert.deepEqual(next.updated.map((c) => c.prNumber), [NEWER.prNumber]);
 });
 
 // ── the production light hook wires it ───────────────────────────────────────────────────────────
