@@ -119,3 +119,115 @@ test("W1-T7690: the due timer never starts a second run of an in-flight rung", {
   await daemon;
   await drainDetachedSweepActions();
 });
+
+test("W1-T7690: the independent timer awaits a yielded digest cadence", { timeout: 4_000 }, async () => {
+  const lines: string[] = [];
+  const merged = new Set<string>();
+  let due = false;
+  let digestStarted = false;
+  let releaseRunOne: () => void = () => {};
+  const runOneBlocked = new Promise<void>((resolve) => { releaseRunOne = resolve; });
+  let runOneEntered = false;
+
+  const daemon = runDaemon(fixturePlan(), {
+    refreshMerged: () => (id: string) => merged.has(id),
+    runOne: async (id: string) => { runOneEntered = true; await runOneBlocked; merged.add(id); return result(id); },
+    sleep: async () => {},
+    sweep: async () => {},
+    log: (step: string) => lines.push(step),
+    checkDigestCadence: () => due && !digestStarted
+      ? { fire: true, reason: "digest slot opened" }
+      : { fire: false, reason: "not due" },
+    runDigestCadence: async () => {
+      digestStarted = true;
+      return { text: "digest", channelName: "test", delivered: true };
+    },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any, { max: 1, pollIntervalMs: 10 });
+
+  await until(() => runOneEntered, "the outer cycle to reach dispatch");
+  due = true;
+  await until(() => lines.includes("digest_cadence.ran"), "the yielded digest cadence to resolve");
+  assert.equal(digestStarted, true);
+  assert.equal(runOneEntered && !merged.has("A"), true, "the outer cycle is still blocked while the timer awaits the rung");
+
+  releaseRunOne();
+  await daemon;
+});
+
+test("W1-T7690: a rejected yielded cadence is thrown back into its rung and logged", { timeout: 4_000 }, async () => {
+  const lines: string[] = [];
+  const merged = new Set<string>();
+  let due = false;
+  let digestStarted = false;
+  let releaseRunOne: () => void = () => {};
+  const runOneBlocked = new Promise<void>((resolve) => { releaseRunOne = resolve; });
+  let runOneEntered = false;
+
+  const daemon = runDaemon(fixturePlan(), {
+    refreshMerged: () => (id: string) => merged.has(id),
+    runOne: async (id: string) => { runOneEntered = true; await runOneBlocked; merged.add(id); return result(id); },
+    sleep: async () => {},
+    sweep: async () => {},
+    log: (step: string) => lines.push(step),
+    checkDigestCadence: () => due && !digestStarted
+      ? { fire: true, reason: "digest slot opened" }
+      : { fire: false, reason: "not due" },
+    runDigestCadence: () => {
+      digestStarted = true;
+      return Promise.reject(new Error("channel unavailable"));
+    },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any, { max: 1, pollIntervalMs: 10 });
+
+  await until(() => runOneEntered, "the outer cycle to reach dispatch");
+  due = true;
+  await until(() => lines.includes("digest_cadence.run_failed"), "the rejected cadence to reach its best-effort handler");
+  assert.equal(lines.includes("daemon.due_rungs.step_rejected"), true, "the timer records the rejected yielded promise");
+  assert.equal(digestStarted, true);
+
+  releaseRunOne();
+  await daemon;
+});
+
+test("W1-T7690: the timer contains a rejection even if its diagnostic log throws", { timeout: 4_000 }, async () => {
+  const lines: string[] = [];
+  const merged = new Set<string>();
+  let due = false;
+  let digestStarted = false;
+  let throwStepRejectionLog = true;
+  let releaseRunOne: () => void = () => {};
+  const runOneBlocked = new Promise<void>((resolve) => { releaseRunOne = resolve; });
+  let runOneEntered = false;
+
+  const daemon = runDaemon(fixturePlan(), {
+    refreshMerged: () => (id: string) => merged.has(id),
+    runOne: async (id: string) => { runOneEntered = true; await runOneBlocked; merged.add(id); return result(id); },
+    sleep: async () => {},
+    sweep: async () => {},
+    log: (step: string) => {
+      if (step === "daemon.due_rungs.step_rejected" && throwStepRejectionLog) {
+        throwStepRejectionLog = false;
+        throw new Error("diagnostic sink unavailable");
+      }
+      lines.push(step);
+    },
+    checkDigestCadence: () => due && !digestStarted
+      ? { fire: true, reason: "digest slot opened" }
+      : { fire: false, reason: "not due" },
+    runDigestCadence: () => {
+      digestStarted = true;
+      return Promise.reject(new Error("channel unavailable"));
+    },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any, { max: 1, pollIntervalMs: 10 });
+
+  await until(() => runOneEntered, "the outer cycle to reach dispatch");
+  due = true;
+  await until(() => lines.includes("daemon.due_rungs.failed"), "the timer-level rejection handler");
+  assert.equal(digestStarted, true);
+  assert.equal(runOneEntered && !merged.has("A"), true, "the outer cycle remains alive after the timer failure");
+
+  releaseRunOne();
+  await daemon;
+});
