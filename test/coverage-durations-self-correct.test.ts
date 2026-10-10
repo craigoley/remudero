@@ -54,7 +54,7 @@ const names = (count: number, prefix = "suite") => Array.from({ length: count },
 
 function explicitCoverageEnvironment(parent: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const { NODE_TEST_CONTEXT: _omitted, ...env } = parent;
-  if (env.NODE_V8_COVERAGE === "") delete env.NODE_V8_COVERAGE;
+  if (env.NODE_V8_COVERAGE === "") env.NODE_V8_COVERAGE = undefined;
   return env;
 }
 
@@ -80,7 +80,6 @@ test("W1-T4071: the coverage command writes duration evidence for every selected
 
     for (const [kind, coverage] of [["blank", ""], ["absent", undefined], ["instrumented", join(root, "v8")]] as const) {
       const parent = { ...process.env, NODE_V8_COVERAGE: coverage };
-      if (coverage === undefined) delete parent.NODE_V8_COVERAGE;
       const destination = `durations-${kind}.json`;
       const result = spawnSync(process.execPath, [
         "--experimental-test-coverage", "--test", "--test-reporter=tap", "--test-reporter-destination=stdout",
@@ -118,7 +117,7 @@ test("W1-T4071: explicit coverage removes only an inherited blank and preserves 
     const env = explicitCoverageEnvironment(Object.freeze(parent));
     assert.equal(env.NODE_TEST_CONTEXT, undefined);
     assert.equal(env.NODE_V8_COVERAGE, coverage || undefined);
-    assert.equal(Object.hasOwn(env, "NODE_V8_COVERAGE"), Boolean(coverage));
+    assert.equal(Object.hasOwn(env, "NODE_V8_COVERAGE"), coverage !== undefined);
     assert.equal(env.KEEP, "present");
     assert.deepEqual(parent, original);
   }
