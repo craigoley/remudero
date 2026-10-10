@@ -54961,7 +54961,6 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       }
       /* c8 ignore next 6 -- entering a real task run mutates git/PR state; runTask itself is tested through injectable deps */
       const result = await runTask(arg, {
-        productionProgressJudge: true,
         allowStale: rest.includes("--allow-stale"),
         rerun: rest.includes("--rerun"),
       });

@@ -9,7 +9,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { Config } from "../src/lib/config.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildSweepEffects, observeSweepEffectsWiring, runSweep, DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
+import { buildSweepEffects, isProductionFixProgressJudge, observeSweepEffectsWiring, productionFixProgressJudge, runSweep,
+  DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
 import { buildSweepHook, buildSweepLightHook, fixCommand, formerBoundStandIn } from "../src/run-task.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
@@ -40,6 +41,13 @@ async function withGh<T>(stdout: string, run: (root: string) => Promise<T>): Pro
     rmSync(root, { recursive: true, force: true });
   }
 }
+
+test("W1-T7096: the production-judge identity check distinguishes production, fixture, and absent judges", () => {
+  const fixtureJudge = async () => ({ verdict: "continue" as const, reason: "fixture decision" });
+  assert.equal(isProductionFixProgressJudge(undefined), false);
+  assert.equal(isProductionFixProgressJudge(fixtureJudge), false);
+  assert.equal(isProductionFixProgressJudge(productionFixProgressJudge({ cwd: ".", settingsFile: "settings/worker.json" })), true);
+});
 
 test("W1-T7096: the daemon's full sweep hook wires the production progress judge", async () => {
   const wired = await withGh("[]", (root) => observeWiring(async () => {
