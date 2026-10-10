@@ -7893,6 +7893,8 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // diff touching it changes what those gates measure.
   "^scripts/diff-class\\.mjs$",
   "^scripts/ci-shard-admission\\.mjs$",
+  // 2026-10-10: the flake screen fails ci-shard 1 when a test file the PR adds fails one rerun.
+  "^scripts/flake-screen\\.mjs$",
   "^scripts/expiring-fixture-census\\.mjs$",
   "^scripts/baseline-monotonic-check\\.mjs$", // W1-T2906: refuses a baseline-score regression against origin/main
   "^scripts/gate-monotonic-check\\.mjs$", // W1-T3519: refuses a REQUIRED gate demoted against origin/main

@@ -117,10 +117,10 @@ test("only shard 1 of a pull request screens, and one failed run fails it with a
     assert.match(lines.join("\n"), /no pull-request base/);
     lines.length = 0;
     assert.equal(await flake.main(["--list"], { env: {}, root: repo.dir, log }), 0);
-    assert.deepEqual(lines, [], "a push lists nothing");
+    assert.equal(lines.length, 0, "a push lists nothing");
     const env = { GITHUB_BASE_REF: "main", GITHUB_STEP_SUMMARY: summary };
     assert.equal(await flake.main(["--list"], { env, root: repo.dir, log }), 0);
-    assert.deepEqual(lines, ["test/fresh.test.ts"]);
+    assert.equal(lines.join("\n"), "test/fresh.test.ts");
     lines.length = 0;
     assert.equal(await flake.main(["--shard", "2"], { env, root: repo.dir, log }), 0);
     assert.match(lines.join("\n"), /shard 2 — 1 added test file\(s\); shard 1 screens them/);
