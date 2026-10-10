@@ -55,10 +55,18 @@ test("W1-T4941: an unprioritized task still valid is proposed a priority with it
   assert.match(f.read(parent.id), /backlog gardener: band=2 evidence=/);
 });
 
+/** A proof the merged commit made true: the gardener withdraws only a task whose own proofs hold on main. */
+const SHIPPED = [{ claim: "the merged change ships it", proof: "grep: shipped in src/a.ts" }];
+function ship(root: string): void {
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, "src", "a.ts"), "export const shipped = true;\n");
+}
+
 test("W1-T4941: an overtaken task is proposed for retirement with cited evidence", (t) => {
-  const item = task("W1-T3", { files: ["src/a.ts", "src/b.ts"] });
+  const item = task("W1-T3", { files: ["src/a.ts", "src/b.ts"], acceptance: SHIPPED });
   const sha = "a".repeat(40);
   const f = fixture(t, [item], { history: [{ sha, at: NOW.toISOString(), subject: "fix(core): done (#123)", files: ["src/a.ts", "src/b.ts"] }] });
+  ship(f.root);
   const inv = backlogInventory(f.sources);
   assert.deepEqual(inv.candidates[0]?.disposition, { kind: "retire", retirement: "withdrawn" });
   assert.match(inv.candidates[0]!.reason, new RegExp(sha));
@@ -67,8 +75,9 @@ test("W1-T4941: an overtaken task is proposed for retirement with cited evidence
 });
 
 test("W1-T4941: a retirement proposal proves its new decision on the shard", (t) => {
-  const item = task("W1-T13", { files: ["src/a.ts", "src/b.ts"] });
+  const item = task("W1-T13", { files: ["src/a.ts", "src/b.ts"], acceptance: SHIPPED });
   const f = fixture(t, [item], { history: [{ sha: "a".repeat(40), at: NOW.toISOString(), subject: "fix(core): done (#123)", files: ["src/a.ts", "src/b.ts"] }] });
+  ship(f.root);
   let body = "";
   const deps = {
     stateDir: f.stateDir, repoRoot: f.root, log: () => {}, seed: 1,
