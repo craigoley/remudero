@@ -31415,6 +31415,8 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
   successorEscalate?: typeof tryEscalate;
   handRunCensus?: MeasurementCadenceReportOpts["handRunCensus"];
   measurementReport?: typeof runMeasurementCadenceReportAsync;
+  /** False on a restarted child attempt: its run already recorded this fire. */
+  recordFire?: boolean;
 } = {}): {
   checkMeasurementCadence: () => MeasurementCadenceDecision;
   runMeasurementCadence: () => Promise<MeasurementCadenceRunResult>;
@@ -31448,7 +31450,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       // `buildAutoTriageDaemonHooks`'s `runAutoTriage` uses: if the report run throws or the
       // process dies mid-run, the marker has already advanced and the interval/cap bounds still
       // hold, so a failure costs one skipped period rather than an unbounded immediate retry.
-      recordMeasurementCadenceFire(measurementCadenceMarkerPath(root), cadenceClock.date(), 24 * 60 * 60 * 1000);
+      if (deps.recordFire !== false) recordMeasurementCadenceFire(measurementCadenceMarkerPath(root), cadenceClock.date(), 24 * 60 * 60 * 1000);
       const coverageRunId = `MEASUREMENT-CADENCE-${cadenceClock.now()}`;
       const verifyHumanRunId = `VERIFY-HUMAN-CADENCE-${cadenceClock.iso()}`;
       // `repoRoot`, NOT `root` (which is `config.root`, the state volume) — see this function's own
