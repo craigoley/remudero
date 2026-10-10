@@ -17,6 +17,7 @@ import * as review from "../src/lib/review.js";
 import { resolveOwnerRepoAt } from "../src/lib/owner-repo.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 const TOKEN_URL = "https://x-access-token:fixture-secret@github.com/o/r";
 const real = (p: string) => execFileSync("realpath", [p], { encoding: "utf8" }).trim();
@@ -110,5 +111,5 @@ test("a malformed long quoted section is rejected without exponential backtracki
   writeFileSync(path, `[remote "${"\\!".repeat(20_000)}]\nurl = https://example.test/repo.git\n`);
   const started = performance.now();
   assert.equal(review.proofMaskedGitConfig(path), "");
-  assert.ok(performance.now() - started < 1_000, "malformed quoted input stays linear-time");
+  assertWallClockBound(performance.now() - started, 1_000, "malformed quoted input stays linear-time");
 });
