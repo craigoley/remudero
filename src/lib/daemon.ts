@@ -3602,6 +3602,7 @@ export async function runDaemon(
         value = await step.value;
         threw = false;
       } catch (e) {
+        log("daemon.due_rungs.step_rejected", { error: String((e as Error)?.message ?? e) });
         error = e;
         threw = true;
       }
@@ -4386,7 +4387,7 @@ export async function runDaemon(
           for (;;) {
             const step = threw ? steps.throw(error) : steps.next(value);
             if (step.done) { outcome = step.value; break; }
-            try { value = await step.value; threw = false; } catch (e) { error = e; threw = true; }
+            try { value = await step.value; threw = false; } catch (e) { log("daemon.due_rungs.step_rejected", { error: String((e as Error)?.message ?? e) }); error = e; threw = true; }
           }
         } finally {
           release(outcome);
@@ -4630,7 +4631,7 @@ export async function runDaemon(
           for (;;) {
             const step = threw ? steps.throw(error) : steps.next(value);
             if (step.done) { outcome = step.value; break; }
-            try { value = await step.value; threw = false; } catch (e) { error = e; threw = true; }
+            try { value = await step.value; threw = false; } catch (e) { log("daemon.due_rungs.step_rejected", { error: String((e as Error)?.message ?? e) }); error = e; threw = true; }
           }
         } finally {
           release(outcome);
@@ -4727,7 +4728,7 @@ export async function runDaemon(
           for (;;) {
             const step = threw ? steps.throw(error) : steps.next(value);
             if (step.done) { outcome = step.value; break; }
-            try { value = await step.value; threw = false; } catch (e) { error = e; threw = true; }
+            try { value = await step.value; threw = false; } catch (e) { log("daemon.due_rungs.step_rejected", { error: String((e as Error)?.message ?? e) }); error = e; threw = true; }
           }
         } finally {
           release(outcome);
