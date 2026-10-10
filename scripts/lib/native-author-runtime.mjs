@@ -47,8 +47,10 @@ function readArtifactBytes(root, path, maxBytes, oversizedMessage) {
     throw new Error('runtime profile: evidence must be a regular file under owned coverage');
   }
   const ownedCoverage = realpathSync(coverage);
-  const fd = openSync(absolute, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) |
-    (constants.O_NONBLOCK ?? 0));
+  if (typeof constants.O_NOFOLLOW !== 'number' || typeof constants.O_NONBLOCK !== 'number') {
+    throw new Error('runtime profile: no-follow/nonblocking reads unavailable');
+  }
+  const fd = openSync(absolute, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const opened = fstatSync(fd);
     const canonical = realpathSync(absolute);
@@ -70,6 +72,11 @@ function readArtifactBytes(root, path, maxBytes, oversizedMessage) {
       length += read;
     }
     if (length > maxBytes) throw new Error(oversizedMessage);
+    const after = fstatSync(fd);
+    if (after.size !== opened.size || length !== after.size ||
+        after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) {
+      throw new Error('runtime profile: evidence changed during its descriptor read');
+    }
     return Buffer.concat(chunks, length);
   } finally {
     closeSync(fd);
