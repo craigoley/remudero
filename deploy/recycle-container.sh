@@ -2123,7 +2123,7 @@ EOF_REPLACEMENT_ENV
     fi
     if commission_bounded 30 docker exec --user 1000:1000 "${CONTAINER_NAME}" sh -c 'for n in GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_CONFIG_GLOBAL; do eval "v=\${$n-}"; [ -z "$v" ] || echo "$n"; done' \
       && [ -n "${COMMISSION_PROBE_OUT}" ]; then
-      commission_fail verify-identity "the container environment sets $(printf '%s' "${COMMISSION_PROBE_OUT}" | tr '\n' ' ')which masks the commissioned author." \
+      commission_fail verify-identity "the container environment sets $(printf '%s' "${COMMISSION_PROBE_OUT}" | paste -sd, - | sed 's/,/, /g'), which masks the commissioned author." \
         "remove those variables from the image or launch environment, then re-run the same commissioning command"
     fi
     commission_fail verify-identity "git resolves a different author from ${PROBE_DIR} than the one commissioned." \
