@@ -126,7 +126,7 @@ export const PEAK_COMPACT_BYTES = 1024 * 1024;
 export const ESTIMATE_CACHE_MS = 60_000;
 
 export interface PeakStoreOptions {
-  location?: () => { dir: string };
+  location?: () => { dir: string; scope?: "host" | "local" };
   root?: string;
   instance?: (root: string) => { name: string };
   clock?: Clock;
@@ -154,7 +154,14 @@ function recordError(opts: PeakStoreOptions, op: string, error: unknown): void {
 }
 
 function storeDir(opts: PeakStoreOptions): string {
-  return join((opts.location ?? defaultMemoryLedgerLocation)().dir, PEAK_STORE_SUBDIR);
+  const location = (opts.location ?? defaultMemoryLedgerLocation)();
+  // The local slot fallback lives under the OS temp directory, which is shared across users. Keep
+  // learned inputs out of that namespace; unlike a reservation ledger, they need only be shared
+  // by processes of this user. The host scratch location remains shared across service instances.
+  if (!opts.location && location.scope === "local") {
+    return join(homedir(), ".cache", "remudero", "host-memory", PEAK_STORE_SUBDIR);
+  }
+  return join(location.dir, PEAK_STORE_SUBDIR);
 }
 
 function instanceFile(opts: PeakStoreOptions): string {
@@ -213,15 +220,15 @@ export function recordPeak(workerClass: WorkerClass, peakMib: number, opts: Peak
     const path = instanceFile(opts);
     const at = (opts.clock ?? systemClock).now();
     const append = opts.append ?? ((target: string, line: string) => {
-      mkdirSync(storeDir(opts), { recursive: true });
-      appendFileSync(target, line);
+      mkdirSync(storeDir(opts), { recursive: true, mode: 0o700 });
+      appendFileSync(target, line, { mode: 0o600 });
     });
     append(path, lineOf({ workerClass, peakMib, at }));
     cachedEstimates.delete(workerClass);
     const size = (opts.size ?? ((target: string) => fstatSize(target)))(path);
     if (size > PEAK_COMPACT_BYTES) {
       const kept = compactSamples(parseSamples((opts.readTail ?? readFileTail)(path, PEAK_COMPACT_BYTES)), ESTIMATE_LEARNING.keepPerClass);
-      (opts.rewrite ?? ((target: string, content: string) => void writeAtomic(target, content)))(path, kept.map(lineOf).join(""));
+      (opts.rewrite ?? ((target: string, content: string) => void writeAtomic(target, content, { mode: 0o600 })))(path, kept.map(lineOf).join(""));
     }
     return true;
   } catch (error) {
