@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: PR watch, #10141 held while #10137 waited on it"
   plan_refs: [W1-T5615, W1-T5748]
   files: [src/lib/arm-auto-merge.ts, src/lib/sweep.ts, test/a-green-reviewed-plan-pr-the-sweep-holds-merges.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

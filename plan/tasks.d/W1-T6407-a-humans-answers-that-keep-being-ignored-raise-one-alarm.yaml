@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-08: root-causing the stuck-PR board"
   plan_refs: [W1-T4471, W1-T4676, W1-T6248]
   files: [src/lib/escalation-answers.ts, test/a-humans-answers-that-keep-being-ignored-raise-one-alarm.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

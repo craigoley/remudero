@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: round-5 steady-state daemon CPU profile (lanes/claude/daemon-cpu-round5.cpuprofile, pid 113)"
   plan_refs: [W1-T6259, W1-T6590]
   files: [src/run-task.ts, src/lib/open-prs-rest.ts, test/open-pr-views-read-github-and-git-off-the-loop.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

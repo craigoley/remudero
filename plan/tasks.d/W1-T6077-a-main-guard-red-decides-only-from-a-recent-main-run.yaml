@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: follow-up of #9627 (W1-T6023)"
   plan_refs: [W1-T6023, W1-T5490, W1-T1266, W1-T5630]
   files: [src/lib/sweep.ts, src/lib/main-health-rung.ts, test/a-main-guard-red-decides-only-from-a-recent-main-run.test.ts]
-  status: queued
+  status: merged
   priority: 2 # operator-2026-10-09: merge throughput: a stale main-guard run can still red every PR's base check; failedMainGuardRuns has no recency bound on main
   attempts: 0
   rationale: |

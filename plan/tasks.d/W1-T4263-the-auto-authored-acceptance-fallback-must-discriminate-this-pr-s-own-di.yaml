@@ -12,7 +12,7 @@
   plan_refs: ["W1-T3508", "W1-T1060", "W1-T911"]
   files: [src/run-task.ts, test/acceptance-fallback-diff-anchor.test.ts, test/a-pr-opens-with-a-judgeable-body.test.ts, test/acceptance-gate-body-repair.test.ts, test/retro-acceptance-repair.test.ts]
   priority: 1  # operator 2026-10-09: rmd's own acceptance repair still writes a base-passing proof for a PR that adds no test (#10427/#10439 cover only PRs that add tests)
-  status: queued
+  status: merged
   # backlog gardener: band=4 evidence=a57420002bb6e09c
   attempts: 0
   rationale: |
