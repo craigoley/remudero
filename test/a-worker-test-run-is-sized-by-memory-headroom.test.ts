@@ -263,6 +263,16 @@ test("only a node --test runner's own file child queues: no reading, no runner c
   assert.deepEqual(readdirSync(shared), [], "and nothing is written into it");
 });
 
+test("GitHub Actions test shards bypass the interactive per-file admission wait", async (t) => {
+  const dir = scratch(t, "admit-github-actions");
+  const admission = await admitTestFile(child(dir, {
+    env: { NODE_TEST_CONTEXT: "child-v8", GITHUB_ACTIONS: "true" },
+    headroom: () => assert.fail("GitHub Actions must not enter the interactive memory wait"),
+  }));
+  assert.equal(admission.outcome, "ci-runner");
+  assert.deepEqual(readdirSync(dir), [], "the hosted runner creates no admission ticket");
+});
+
 test("the setup preload every runner child loads awaits file admission before any test file is imported", () => {
   const preload = readFileSync(join(REPO_ROOT, "test", "setup", "tmp-hygiene.ts"), "utf8");
   assert.match(preload, /import \{ admitTestFile \} from "\.\.\/\.\.\/src\/lib\/test-file-admission\.js";/);

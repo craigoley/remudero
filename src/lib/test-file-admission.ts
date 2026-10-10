@@ -71,8 +71,9 @@ export interface TestFileAdmissionOptions {
 }
 
 export interface TestFileAdmission {
+  /** `ci-runner`: GitHub Actions already bounds its sharded test concurrency, so no local admission is needed. */
   /** `unqueued`: the admission directory was unusable, so the file ran without waiting (and said why). */
-  outcome: "not-a-runner-child" | "no-memory-reading" | "admitted" | "unqueued";
+  outcome: "not-a-runner-child" | "ci-runner" | "no-memory-reading" | "admitted" | "unqueued";
   waitedMs: number;
   /** Removes this child's record; safe to call more than once. */
   release(): void;
@@ -108,6 +109,10 @@ export async function admitTestFile(opts: TestFileAdmissionOptions = {}): Promis
   const skip = (outcome: TestFileAdmission["outcome"]): TestFileAdmission => ({ outcome, waitedMs: 0, release: () => {} });
   const env = opts.env ?? process.env;
   if (!/^child/.test(env.NODE_TEST_CONTEXT ?? "")) return skip("not-a-runner-child");
+  // GitHub's CI jobs already split the suite into bounded shards and choose their own test
+  // concurrency. Do not put an unbounded per-file wait in that hosted runner path; keep this
+  // admission gate for interactive/manual runners on memory-constrained Linux hosts.
+  if (env.GITHUB_ACTIONS === "true") return skip("ci-runner");
   const headroom = opts.headroom ?? readMemoryHeadroom;
   if (headroom() === undefined) return skip("no-memory-reading");
   const facts = opts.facts ?? testSlotProcessFacts;
