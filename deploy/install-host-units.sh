@@ -501,7 +501,7 @@ deploy_code_busy_handoff() {
 #                            WATCHDOG_RECYCLE_GAP_S, and pressure keeps growing until the tree moves.
 # Any move of the daemon tree's HEAD -- its own restart, an idle fast-forward -- resets the clock.
 deploy_logic_lag_pressure() {
-  local container="$1" daemon_head="$2" mark="$STATE_DIR/state/deploy-logic-lag" now since head pressure
+  local container="$1" daemon_head="$2" mark="$STATE_DIR/state/deploy-logic-lag" now since="" head="" pressure
   now="$(date -u +%s)"
   { read -r since head < "$mark"; } 2>/dev/null || true
   case "$since" in ''|*[!0-9]*) since="" ;; esac
