@@ -1,5 +1,5 @@
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
-import { buildFixProgressInput, judgeFixProgress,
+import { judgeFixProgress,
   type FixProgressJudge, type FixProgressVerdict } from "./lib/fix-progress-judge.js";
 import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-update.js";
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
@@ -221,7 +221,8 @@ import { realThreadDecider, registryThreadItems, type ThreadDecisionContext } fr
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
-import { checkpointRemaining, isWipSubject, prTitleFromBranchCommits, renderContinuationPrompt } from "./lib/unfinished-checkpoint.js";
+import { checkpointRemaining, isWipSubject, judgeCheckpointStop, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
+import { PREOPEN_GATE_STEP, renderPreopenGatePrompt, runPreopenGate, type PreopenGateResult } from "./lib/preopen-gate.js";
 import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
 import {
@@ -1622,6 +1623,8 @@ import {
   fixDispatchBudget,
   fixLedgerRowsForHead,
   fixRoundTally,
+  buildFixProgressInput,
+  flakeClaimsForHead,
   isBlockedCi,
   listRetirableEscalationIssues,
   logCostGovernorDeferral,
@@ -12661,6 +12664,7 @@ export async function runFixRung(opts: {
     // worker-visible unmet set the fix rung actually dispatches (W1-T166).
     const priorHeadSha = review.headSha;
     const roundLedger = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
+    const refutedFlake = flakeClaimsForHead(roundLedger, opts.taskId, priorHeadSha, prNumber).length > 0;
     const pendingScope = roundLedger.findLast((row) => row.step === "fix.scope_amendment" &&
       row.task_id === opts.taskId && row.pr_number === prNumber && row.head_sha === priorHeadSha &&
       ["created", "resumed", "branch_update_requested"].includes(String(row.outcome)));
@@ -12763,6 +12767,7 @@ export async function runFixRung(opts: {
         // read one shared value, never two independently derived ones.
         reachableRemedyFiles,
       }),
+      ...(refutedFlake ? [`this red reproduced on a rerun at ${priorHeadSha}; it is not a flake. Make a real fix; another FLAKE outcome will be recorded as a no-op without a rerun.`] : []),
       ...(proofRepairRound && proofDiscriminationNow
         ? proofRepairPromptLines({ proofs: proofDiscriminationNow.proofs, stageable: proofRepairStageable })
         : []),
@@ -13303,6 +13308,12 @@ export async function runFixRung(opts: {
         reason: verified ? "worker-base-red-verified" : "base-red claim refuted" };
     }
     if (fixAction.kind === "rerun-once") {
+      if (refutedFlake) {
+        fixClaimFields.flake_claim = "repeated";
+        logFixDone();
+        return { outcome: "stood_down", review, strikes: strikes - 1, retriggers,
+          reason: "flake claim repeated after refutation — no-op round" };
+      }
       const spent = requeuedCheckKeysFromLedger((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))());
       const failures = priorCiFailures ?? [];
       let requeued = failures.length > 0 && !!priorHeadSha;
@@ -16074,6 +16085,8 @@ interface ProbeAdmissionOptions {
 interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   /** W1-T7096: set only by the drain and the CLI — the fix rung then asks the production judge. */
   productionProgressJudge?: boolean;
+  /** Test seam for the pre-open fast gate; production runs `runPreopenGate`, an injected spawn skips it. */
+  preopenGate?: (worktreePath: string) => Promise<PreopenGateResult>;
   instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
   armAdhocLaneReap?: boolean;
   binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
@@ -19612,9 +19625,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       if (resumeFail) return resumeFail;
     }
 
-    // A worker that stops on a `wip:` checkpoint tip has not finished (#10482): resume it once.
-    const tipSubject = lastCommitSubject(worktreePath);
-    if (tipSubject !== undefined && isWipSubject(tipSubject) && !parseReport(fullText(impl))?.prUrl) {
+    // A worker that stops on a `wip:` checkpoint tip has not finished (#10482): resume it. The first
+    // stop always resumes; whether a later stop resumes again is the progress judge's call (W1-T7096).
+    const checkpointStops: CheckpointStop[] = [];
+    let checkpointJudge: FixProgressJudge | undefined;
+    for (;;) {
+      const tipSubject = lastCommitSubject(worktreePath);
+      if (tipSubject === undefined || !isWipSubject(tipSubject) || parseReport(fullText(impl))?.prUrl) break;
       let tipBody = "";
       try {
         tipBody = hostWorktreeGit(worktreePath, ["log", "-1", "--format=%b"]);
@@ -19624,6 +19641,14 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       }
       const remaining = checkpointRemaining(tipBody);
       log("implement.unfinished", { subject: tipSubject, remaining: remaining ?? null });
+      checkpointStops.push({ round: checkpointStops.length + 1, subject: tipSubject, remaining });
+      const decision = await judgeCheckpointStop(checkpointStops, {
+        readHead: () => hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]),
+        makeJudge: () => (checkpointJudge ??= opts.productionProgressJudge === true || !spawnInjected
+          ? productionFixProgressJudge({ cwd: worktreePath, settingsFile }) : undefined),
+      });
+      log("implement.checkpoint_judged", { stop: checkpointStops.length, resume: decision.resume, by: decision.by, reason: decision.reason });
+      if (!decision.resume) break;
       impl = account(
         await spawn({
           cwd: worktreePath,
@@ -19646,6 +19671,38 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       log("implement.continued", { session_id: impl.sessionId, cost_usd: impl.costUsd, num_turns: impl.numTurns, subtype: impl.subtype, ...workerLedgerFields(impl) });
       const continueFail = failOnWorkerError(impl, "implement.continued");
       if (continueFail) return continueFail;
+    }
+
+    // The harness runs the fast gate itself before opening the PR; a failing step goes back to the worker once.
+    const preopenGate = opts.preopenGate ?? (spawnInjected ? undefined : (path: string) => runPreopenGate(path));
+    if (preopenGate !== undefined && !parseReport(fullText(impl))?.prUrl) {
+      const gate = await preopenGate(worktreePath);
+      log(PREOPEN_GATE_STEP, { result: gate.kind, failed: gate.kind === "fail" ? gate.failedSteps : [], duration_ms: gate.durationMs,
+        ...(gate.kind === "unmeasured" ? { reason: gate.reason } : {}) });
+      if (gate.kind === "fail") {
+        impl = account(
+          await spawn({
+            cwd: worktreePath,
+            permissionMode: "bypassPermissions",
+            settingsFile,
+            resumeSessionId: impl.sessionId,
+            model: implementMount.model,
+            mountProvider: implementMount.provider,
+            effort: implementMount.effort,
+            maxTurns: implementMount.maxTurns,
+            maxBudgetUsd: budgetUsd,
+            config: implementConfig,
+            tools: implementTools === undefined ? undefined : [...implementTools],
+            ...(ruleLookup === undefined ? {} : { ruleLookup }),
+            ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
+            ...cashTrialSpawn,
+            prompt: renderPreopenGatePrompt(gate.failedSteps, harnessOwnsGit),
+          }),
+        );
+        log("implement.preopen_continued", { session_id: impl.sessionId, cost_usd: impl.costUsd, num_turns: impl.numTurns, subtype: impl.subtype, ...workerLedgerFields(impl) });
+        const gateFail = failOnWorkerError(impl, "implement.preopen_continued");
+        if (gateFail) return gateFail;
+      }
     }
 
     // ── QUESTION contract (non-blocking) — log, don't stall (§2).
@@ -20055,7 +20112,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
         const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
         const issues = opts.prOpenRefusalIssues ?? ghIssueGateway(owner, task.repo);
-        const issueUrl = recordRefusedPrOpen(err, { taskId, branch, headSha }, log, { issues, ledgerPath, runId });
+        const changedFiles = refusedBranchChangedFiles(worktreePath);
+        const issueUrl = recordRefusedPrOpen(err, { taskId, branch, headSha, changedFiles, declaredFiles: task.files }, log, { issues, ledgerPath, runId });
         reclaimRunWorktree(repoDir, worktreePath, "pr_open.refused", log);
         log("verdict", {
           verdict: "failed",
@@ -27050,6 +27108,16 @@ export function hostWorktreeGitAtTopLevel(dir: string, args: string[], opts: Hos
       if (!(error instanceof WorktreePointerRefusedError) || error.observed !== "<absent>" || dirname(at) === at) throw error;
     }
   }
+}
+
+/** The files a refused run branch changed since its merge base with origin/main, or undefined when either read
+ *  fails: an unreadable diff keeps the refusal's escalation rather than guessing the build changed only tests. */
+export function refusedBranchChangedFiles(worktreePath: string): string[] | undefined {
+  const base = hostWorktreeGitResult(worktreePath, ["merge-base", "origin/main", "HEAD"]);
+  if (base.status !== 0 || base.stdout.trim() === "") return undefined;
+  const diff = hostWorktreeGitResult(worktreePath, ["diff", "--name-only", base.stdout.trim(), "HEAD"]);
+  if (diff.status !== 0) return undefined;
+  return diff.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
 }
 
 export function hostWorktreeGitResult(worktreePath: string, args: string[]): { status: number | null; stdout: string; stderr: string } {
