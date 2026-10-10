@@ -805,8 +805,16 @@ function cleanupErrorText(error: unknown): string {
 
 function canonicalWorktreePath(path: string): string {
   const absolute = resolve(path);
-  try { return realpathSync(absolute); } catch {
-    try { return join(realpathSync(dirname(absolute)), basename(absolute)); } catch { return absolute; }
+  try {
+    return realpathSync(absolute);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    try {
+      return join(realpathSync(dirname(absolute)), basename(absolute));
+    } catch (parentError) {
+      if ((parentError as NodeJS.ErrnoException).code !== "ENOENT") throw parentError;
+      return absolute;
+    }
   }
 }
 
@@ -886,10 +894,15 @@ async function removeTemporaryWorktree(repoDir: string, tree: string): Promise<v
     throw new Error(`could not verify plan-PR worktree cleanup: ${cleanupErrorText(error).trim()}`);
   }
   if (!registered(listed)) return;
+  let lastRemovalFailure: string | undefined;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       await hostWorktreeGitAsync(repoDir, ["worktree", "remove", "--force", "--force", target]);
-    } catch {}
+      lastRemovalFailure = undefined;
+    } catch (error) {
+      const reason = cleanupErrorText(error);
+      lastRemovalFailure = reason;
+    }
     listed = await hostWorktreeGitAsync(repoDir, ["worktree", "list", "--porcelain"]);
     if (!registered(listed)) return;
     if (attempt < 2) await new Promise<void>((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
@@ -898,7 +911,8 @@ async function removeTemporaryWorktree(repoDir: string, tree: string): Promise<v
   dropOrphanedWorktreeAdmin(tree, target, common.trim());
   listed = await hostWorktreeGitAsync(repoDir, ["worktree", "list", "--porcelain"]);
   if (!registered(listed)) return;
-  throw new Error(`plan-PR worktree remains registered after cleanup attempts: ${tree}`);
+  const detail = lastRemovalFailure === undefined ? "" : `; last removal error: ${lastRemovalFailure}`;
+  throw new Error(`plan-PR worktree remains registered after cleanup attempts: ${tree}${detail}`);
 }
 
 /** Ledger a preflight verdict for one lane — `plan_pr.preflight_unreadable` when a check could not run, `_refused`
