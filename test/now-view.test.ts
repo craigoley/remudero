@@ -262,7 +262,7 @@ test("an action's strike count is a structured field", () => {
 function openPr(number: number, taskId: string): BoardPrRest {
   return {
     number, url: `https://github.com/o/r/pull/${number}`, state: "OPEN", headRefName: `run-${taskId}-1790000000000`, headRefOid: `sha-${number}`,
-    body: "work in progress", autoMergeRequest: null, title: `open ${number}`, updatedAt: "2026-09-30T11:00:00Z",
+    body: "work in progress", autoMergeRequest: null, title: `open ${number}`, updatedAt: "2026-09-30T11:00:00Z", // expiring-fixture: exempt -- the now view runs on this suite's injected manual Clock; 43/43 pass with Date.now shifted +8d and +30d
   };
 }
 
