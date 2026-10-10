@@ -155,6 +155,8 @@ import {
   parseWhitelistedProof,
   postedArmFactsFromLedger,
   REVIEW_CONTEXT,
+  reviewLedgerKeyFor,
+  UNFILED_RUN_SENTINEL,
 } from "./review.js";
 import type {
   ArmDecision,
@@ -426,7 +428,29 @@ function assessReviewReuse(
  * visible orphan into an invisible one, which is strictly worse than leaving it alone.
  */
 export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): string {
-  return pr.taskId ?? `PR-${pr.prNumber}`;
+  // W1-T5866: the `unfiled` branch-shape sentinel is every ad-hoc PR's id, never one PR's — it maps to `PR-<n>` here
+  // exactly as it does for the review rows (W1-T5839), so two run-unfiled PRs never share an escalation.
+  return reviewLedgerKeyFor(pr.taskId, pr.prNumber);
+}
+
+/** W1-T5866 — THE KEY THIS PR's FIX-LANE ROWS ARE READ UNDER: {@link escalationTaskIdFor}'s identity, but
+ *  `undefined` stays `undefined` (a PR with no id at all has no strike history to read, as before). A run-unfiled PR
+ *  is `PR-<n>`, so its strikes, refusals and fix claims are its own instead of one `unfiled` budget every ad-hoc PR
+ *  shares. Legacy `unfiled`-keyed rows carry no `pr_url`, so they are not reattributed to any one PR. */
+export function fixLedgerTaskIdFor(pr: { taskId?: string; prNumber: number }): string | undefined {
+  return pr.taskId === undefined ? undefined : reviewLedgerKeyFor(pr.taskId, pr.prNumber);
+}
+
+/** W1-T5866 — the id the fix lane's branch-OWNERSHIP check uses: a run-unfiled PR's own `run-unfiled-<epochMs>` head is
+ *  still owned by the `unfiled` shape even though its rows are keyed `PR-<n>`. Any other PR keeps the task's own id. */
+export function fixOwnershipIdFor(prTaskId: string | undefined, taskId: string): string {
+  return prTaskId === UNFILED_RUN_SENTINEL ? UNFILED_RUN_SENTINEL : taskId;
+}
+
+/** W1-T5866 — the `task_id` a review-outcome / `sweep.review_admitted` row dedups under. A run-unfiled PR is `PR-<n>`
+ *  whether or not this pass classified it a plan filing; a digest-less legacy caller keeps the empty fallback. */
+export function reviewOutcomeTaskIdFor(pr: { taskId?: string; prNumber: number; reviewInputDigest?: string }): string {
+  return pr.reviewInputDigest !== undefined ? reviewLedgerKeyFor(pr.taskId, pr.prNumber) : (pr.taskId ?? "");
 }
 
 /**
@@ -528,7 +552,7 @@ export function fixRungTaskFor(
       // trailer. The fix rung still needs the lane identity to recognize that
       // `run-RETRO-*`/TRIAGE/PLAN/APPROVE is its own head. Restrict this fallback to the four
       // orchestrator lane namespaces; a synthetic PR on `run-W1-T*` remains foreign and refused.
-      id: pr.taskId ?? syntheticLaneId ?? escalationTaskIdFor(pr),
+      id: (pr.taskId === UNFILED_RUN_SENTINEL ? undefined : pr.taskId) ?? syntheticLaneId ?? escalationTaskIdFor(pr),
       title: `PR #${pr.prNumber}`,
       risk: DEFAULT_RISK,
       acceptance: body ? parseAcceptanceBlock(body) : [],
@@ -2137,7 +2161,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // The synthetic-task exception in the ordinary fix rung permits a human-named branch.  This
     // unattended writer does not: it may touch only a fleet run branch that claims this exact
     // task, even when a synthetic task happens to resolve.
-    if (!isDispatchedRunBranch(branch) || !fixHeadAcceptable(branch, task.id, synthetic)) {
+    if (!isDispatchedRunBranch(branch) || !fixHeadAcceptable(branch, fixOwnershipIdFor(pr.taskId, task.id), synthetic)) {
       return decline("unowned_head", { branch, task_id: task.id });
     }
 
@@ -2975,7 +2999,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }
         const paths = await fetchPrDiffFilesViaGh(pr.prUrl);
         const resolved = fixRungTaskForForBuild(plan, { prNumber: pr.prNumber }, live.body, live.head.ref, paths);
-        const task = { ...resolved.task, id: pr.taskId ?? escalationTaskIdFor(pr), files: resolved.task.files.filter(isInPlanScope) };
+        const task = { ...resolved.task, id: escalationTaskIdFor(pr), files: resolved.task.files.filter(isInPlanScope) };
         claim = acquireInflightLock(inflightDir, fixBranchClaimKey(owner, repo, live.head.ref), { run_id: runId });
         const materialized = materializePlanRoundWorktree(config, repoDir, pr.prNumber, pr.headSha);
         if (!materialized.worktreePath) return { outcome: "refused", reason: materialized.failure?.message ?? "the plan head could not be materialized" };
@@ -3143,13 +3167,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           prior_strikes: pr.priorStrikes,
           ...strikeScheduleFor({ task, rates: new Map<string, StrikePassRate>() }),
         });
-        if (!realBranch || !fixHeadAcceptable(realBranch, task.id, synthetic)) {
+        if (!realBranch || !fixHeadAcceptable(realBranch, fixOwnershipIdFor(pr.taskId, task.id), synthetic)) {
           // The guard above is UNCHANGED — this decides nothing, it only explains the decline
           // that already happened. `reason` matches the field `sweep.fix.not_open` already uses
           // for the same purpose (its own value comes from the pure `terminalStateReason`), so
           // this introduces no new telemetry convention; the value is an enumerated token rather
           // than that row's free prose because this one has to aggregate.
-          const reason = uncreditableHeadReason(realBranch, task.id, synthetic);
+          const reason = uncreditableHeadReason(realBranch, fixOwnershipIdFor(pr.taskId, task.id), synthetic);
           const cause = escalationCause(pr.mergeState === "dirty", isBlockedCi(pr));
           log(TERMINAL_UNCREDITABLE_HEAD_STEP, {
             pr_number: pr.prNumber,
@@ -9691,7 +9715,7 @@ export function decideSweepArm(
    *  means the archive corpus was unavailable or incomplete, so the historical fail-open remains. */
   readLedgerUnion?: () => { complete: boolean; lines: ReadonlyArray<Record<string, unknown>> } | undefined,
 ): ArmDecision {
-  const armId = pr.taskId ?? `PR-${pr.prNumber}`;
+  const armId = reviewLedgerKeyFor(pr.taskId, pr.prNumber);
   let facts = postedArmFactsFromLedger(ledgerLines, armId, pr.headSha, pr.prUrl);
   if (!facts && readLedgerUnion) {
     try {
@@ -10754,7 +10778,7 @@ export function proofRepairLadder(
   const amendment = lines.findLast((line) =>
     isProofAmendmentIdentityRow(line) && typeof line.identity_key === "string" && line.identity_key.startsWith(prefix));
   return {
-    refusals: fixRoundTally(lines, pr.taskId, pr.headSha).refusals.length,
+    refusals: fixRoundTally(lines, fixLedgerTaskIdFor(pr), pr.headSha).refusals.length,
     ...(amendment ? { amendmentUrl: String(amendment.amendment_url ?? "") } : {}),
   };
 }
@@ -11639,7 +11663,7 @@ function standDownAlreadyLogged(
 }
 
 function reviewOutcomeKeyForPr(pr: OpenPrView): string {
-  const taskId = pr.reviewInputDigest !== undefined ? (pr.taskId ?? `PR-${pr.prNumber}`) : (pr.taskId ?? "");
+  const taskId = reviewOutcomeTaskIdFor(pr);
   return reviewOutcomeKey(taskId, pr.prUrl, pr.headSha, pr.reviewInputDigest);
 }
 
@@ -12192,8 +12216,8 @@ async function codeScanningGateForHead(
   const head = pr.headSha.slice(0, 7);
   const dispatchedAt = lines.findLastIndex((line) => line.step === CODE_SCANNING_FIX_DISPATCH_STEP && mine(line));
   if (dispatchedAt >= 0) {
-    const pending = !lines.slice(dispatchedAt + 1).some((line) => line.step === "fix.dispatch" && line.task_id === pr.taskId);
-    if (pending || !fixRungStalledWithoutNewHead([...lines], pr.taskId)) {
+    const pending = !lines.slice(dispatchedAt + 1).some((line) => line.step === "fix.dispatch" && line.task_id === fixLedgerTaskIdFor(pr));
+    if (pending || !fixRungStalledWithoutNewHead([...lines], fixLedgerTaskIdFor(pr))) {
       return { kind: "hold", reason: `a code-scanning fix was already dispatched for head ${head} — awaiting its outcome` };
     }
     return { kind: "fix", reason: "the earlier code-scanning fix ended without a new head", alerts };
@@ -13563,12 +13587,12 @@ export async function runSweep(
       const parkedReason = pr.repeatedFixRefusal ??
         (!isFixStrikeExhausted(pr, policy) && pr.reviewState === "failure" && fixRungRepeatsIdenticalFailure(pr)
           ? "fix strike repeated the identical unmet criteria" : undefined);
-      const input = buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
+      const input = buildFixProgressInput({ taskId: fixLedgerTaskIdFor(pr), prNumber: pr.prNumber, headSha: pr.headSha,
         currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")), ...pr.unmetCriteria.map(c => `review:${c.claim}`)],
         ledger: ledgerLines, operatorAnswer: pr.pendingAnswer?.constraint,
         formerCeiling: fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason });
       const result = await judgeFixProgress(input, progressJudge);
-      appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? `PR-${pr.prNumber}`,
+      appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
         step: "fix.progress_judged", pr_number: pr.prNumber, head_sha: pr.headSha, site: "exhaustion",
         round_count: input.rounds.length, signals: input.signals, ...result });
       if (result.verdict === "escalate") {
@@ -14102,7 +14126,7 @@ export async function runSweep(
         if (closed?.ok !== true || closed.state?.toUpperCase() !== "CLOSED" || closed.headSha !== pr.headSha) {
           return hold("close was not confirmed at the expected head; no note written");
         }
-        const refusals = fixRoundTally(strikeLadderRows, pr.taskId, pr.headSha).refusals;
+        const refusals = fixRoundTally(strikeLadderRows, fixLedgerTaskIdFor(pr), pr.headSha).refusals;
         const note = capStrikeLadderNote(
           `${reason}\nClosed PR: ${pr.prUrl}; head: ${pr.headSha}\n` +
           `Failing checks/tests: ${(pr.ciFailures ?? []).map(f => `${f.name}: ${firstFailingTestTitle(f.logTail) ?? "no failing title"}`).join("; ")}\n` +
@@ -14233,7 +14257,7 @@ export async function runSweep(
         dedupe_key: dedupeKey,
         error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
       })),
-      { actionKind: "fix-dispatch", taskId: pr.taskId ?? `PR-${pr.prNumber}` },
+      { actionKind: "fix-dispatch", taskId: escalationTaskIdFor(pr) },
     );
   }
 
@@ -14246,7 +14270,8 @@ export async function runSweep(
     /** W1-T5544: the dispatch is the plan-shard flag (no worker round), so two refused WORKER rounds do not bar it. */
     planFlagRung = false,
   ): { ok: true; release: () => void; run: <T>(fn: () => T | Promise<T>) => Promise<T> } | { ok: false; reason: string } {
-    const fixKey = `${pr.taskId ?? ""}@${pr.headSha}`;
+    const fixTaskId = fixLedgerTaskIdFor(pr);
+    const fixKey = `${fixTaskId ?? ""}@${pr.headSha}`;
     if (inFlightFixKeys.has(fixKey)) {
       return {
         ok: false,
@@ -14258,7 +14283,7 @@ export async function runSweep(
     // caller wrote before this instant is counted here even though this pass's own `ledgerLines`,
     // read before any claim existed, predates it.
     const freshLines = readLedger(deps.ledgerPath);
-    const freshTally = fixRoundTally(freshLines, pr.taskId, pr.headSha);
+    const freshTally = fixRoundTally(freshLines, fixTaskId, pr.headSha);
     // W1-T5542 + W1-T7096: a stale view reaching the claim at (or past) the former ceiling, or on a
     // repeated refusal, was never ruled by the progress judge — refuse it here exactly as before; a PR
     // the judge ruled "continue" this pass (`progressContinue`) is allowed its next round.
@@ -14274,7 +14299,7 @@ export async function runSweep(
       };
     }
     const history = (lines: readonly Record<string, unknown>[]) => JSON.stringify(lines.filter(row =>
-      row.task_id === pr.taskId && ["fix.dispatch", "fix.retrigger", "fix.done", "fix.commit_refused"].includes(String(row.step))));
+      row.task_id === fixTaskId && ["fix.dispatch", "fix.retrigger", "fix.done", "fix.commit_refused"].includes(String(row.step))));
     if (history(freshLines) !== history(ledgerLines)) {
       inFlightFixKeys.delete(fixKey);
       return {
@@ -14809,7 +14834,7 @@ export async function runSweep(
           repair.reason = `plan-scoped round held by worker admission: ${workerAdmissionHoldReason(deps)}`;
         }
         else {
-          const claimed = claimFixDispatch({ ...pr, taskId: pr.taskId ?? escalationTaskIdFor(pr) });
+          const claimed = claimFixDispatch({ ...pr, taskId: escalationTaskIdFor(pr) });
           if (!claimed.ok) {
             repair.reason = claimed.reason;
             if (claimed.reason.includes("refused twice")) {
@@ -14848,7 +14873,7 @@ export async function runSweep(
               appendLine(deps.ledgerPath, { ...row, step: result.outcome === "refused" ? "sweep.plan_round.refused" : "sweep.plan_round.pushed", ...result });
               repair.reason = `plan-scoped round ${result.outcome}${result.reason ? `: ${result.reason}` : ""}`;
             });
-            if (deps.detachFixWait) detachSweepAction(work, { actionKind: "fix-dispatch", taskId: pr.taskId ?? escalationTaskIdFor(pr) });
+            if (deps.detachFixWait) detachSweepAction(work, { actionKind: "fix-dispatch", taskId: escalationTaskIdFor(pr) });
             else await work;
           }
         }
@@ -15121,7 +15146,7 @@ export async function runSweep(
           !metadataRedRuledOut(ledgerLines, pr);
         alreadyDone = metadataRed || emptyDiffReviewFailure(pr)
           ? false
-          : dispatchedThisHead && !fixRungStalledWithoutNewHead(ledgerLines, pr.taskId);
+          : dispatchedThisHead && !fixRungStalledWithoutNewHead(ledgerLines, fixLedgerTaskIdFor(pr));
         if (alreadyDone) {
           dedupStandDownReason =
             `fix already dispatched for this head (${pr.headSha.slice(0, 7)}) — awaiting its outcome ` +
@@ -15359,7 +15384,7 @@ export async function runSweep(
                 if (deps.detachFixWait) {
                   detachSweepAction((onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase)), {
                     actionKind: "fix-dispatch",
-                    taskId: pr.taskId ?? `PR-${pr.prNumber}`,
+                    taskId: escalationTaskIdFor(pr),
                   });
                   break;
                 }
@@ -15516,9 +15541,9 @@ export async function runSweep(
                   standDownReason = unavailable;
                   return false;
                 }
-                const input = buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber,
+                const input = buildFixProgressInput({ taskId: fixLedgerTaskIdFor(pr), prNumber: pr.prNumber,
                   headSha: pr.headSha,
-                  strikesSpent: Math.max(pr.priorStrikes, fixRoundTally(ledgerLines, pr.taskId, pr.headSha).strikes),
+                  strikesSpent: Math.max(pr.priorStrikes, fixRoundTally(ledgerLines, fixLedgerTaskIdFor(pr), pr.headSha).strikes),
                   currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")),
                     ...pr.unmetCriteria.map(c => `review:${c.claim}`),
                     ...(pr.reviewState === "failure" && pr.unmetCriteria.length === 0 ? ["remudero-review"] : [])], ledger: ledgerLines,
@@ -15533,7 +15558,7 @@ export async function runSweep(
                   return false;
                 }
                 const result = await judgeFixProgress(input, progressJudge);
-                appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? `PR-${pr.prNumber}`,
+                appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
                   step: "fix.progress_judged", pr_number: pr.prNumber, head_sha: pr.headSha,
                   input_key: inputKey, round_count: input.rounds.length, signals: input.signals, ...result });
                 if (result.verdict === "unavailable") {
@@ -15587,7 +15612,7 @@ export async function runSweep(
                 standDownReason = incidentHold;
                 break;
               }
-              const noCommitRound = fixRoundTally(ledgerLines, pr.taskId, pr.headSha).noCommitRounds.at(-1);
+              const noCommitRound = fixRoundTally(ledgerLines, fixLedgerTaskIdFor(pr), pr.headSha).noCommitRounds.at(-1);
               const rerunAttempted = ledgerLines.some(row => row.step === "sweep.disposed" &&
                 row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.no_commit_rerun_attempted === true);
               if (noCommitRound !== undefined && !rerunAttempted &&
@@ -15755,7 +15780,7 @@ export async function runSweep(
                 standDownReason = reason;
                 break;
               }
-              if (refusedSameRed && fixRoundTally(ledgerLines, pr.taskId, pr.headSha).refusals.length === 0) {
+              if (refusedSameRed && fixRoundTally(ledgerLines, fixLedgerTaskIdFor(pr), pr.headSha).refusals.length === 0) {
                 progressParkedReason = `fix commit refused at this head and red set (${refusedSameRed.reason}) — incomplete round history`;
                 const waited = ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
                   row.head_sha === pr.headSha && typeof row.stand_down_reason === "string" && row.stand_down_reason.includes("incomplete round history"));
@@ -16252,7 +16277,7 @@ export async function runSweep(
                     fixClaim.run(() => dispatchPlanOnlyRepair(pr, planRepairEvidence)),
                     // Shares "fix-dispatch"'s kind, deliberately: a plan-shard repair and an
                     // ordinary body repair must never race for the SAME task's detached slot.
-                    { actionKind: "fix-dispatch", taskId: pr.taskId ?? `PR-${pr.prNumber}` },
+                    { actionKind: "fix-dispatch", taskId: escalationTaskIdFor(pr) },
                   );
                   break;
                 }
@@ -16958,10 +16983,7 @@ export async function runSweep(
                 // This row is an outcome key, not only a diagnostic. Fully attributed views use
                 // the same task/PR/head/body identity as delivered/refused posts; legacy callers
                 // retain the historical empty-task fallback.
-                task_id:
-                  job.pr.reviewInputDigest !== undefined
-                    ? (job.pr.taskId ?? `PR-${job.pr.prNumber}`)
-                    : (job.pr.taskId ?? ""),
+                task_id: reviewOutcomeTaskIdFor(job.pr),
                 step: "review.post_refused",
                 head_sha: job.pr.headSha,
                 ...(job.pr.reviewInputDigest !== undefined

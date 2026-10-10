@@ -42715,6 +42715,8 @@ function* openPrViewSteps(
     const fileObservation = planFilingFiles.get(pr.number);
     const observedFiles = fileObservation?.state === "complete" ? fileObservation.paths : undefined;
     const reviewLedgerKey = reviewLedgerKeyFor(taskId, pr.number);
+    // W1-T5866: the fix lane's rows for a run-unfiled PR are written under `PR-<n>` (fixRungTaskFor), so its strikes are READ there.
+    const fixLedgerKey = taskId === undefined ? undefined : reviewLedgerKey;
     const inputDigest = reviewInputDigest(pr.headRefOid, pr.body ?? "");
     const peers = isSupersessionOwnerTaskId(taskId) ? (byTask.get(taskId) ?? []) : [];
     const newest = peers.length ? Math.max(...peers) : pr.number;
@@ -42827,13 +42829,13 @@ function* openPrViewSteps(
       instrumentEntangled: instrumentEntanglement === undefined ? undefined : true,
       instrumentEntanglementPaths: instrumentEntanglement,
       previousInstrumentEntanglementPaths: previousInstrumentEntanglement,
-      priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId), pr.headRefOid),
-      repeatedFixRefusal: fixRoundTally(ledger, taskId, pr.headRefOid).repeatedRefusal,
-      fixRefusalsAtHead: fixRoundTally(ledger, taskId, pr.headRefOid).refusals.length,
+      priorStrikes: priorStrikesFor(ledger, fixLedgerKey, currentStrikeRegimeFor(ledger, fixLedgerKey), pr.headRefOid),
+      repeatedFixRefusal: fixRoundTally(ledger, fixLedgerKey, pr.headRefOid).repeatedRefusal,
+      fixRefusalsAtHead: fixRoundTally(ledger, fixLedgerKey, pr.headRefOid).refusals.length,
       // W1-T7096: initialized at the canonical OpenPrView producer, then populated only by
       // runSweep after its progress judge rules on the exact exhausted head.
       progressEscalation: undefined,
-      strikeHistory: deriveStrikeHistory(ledger, taskId, pr.headRefOid),
+      strikeHistory: deriveStrikeHistory(ledger, fixLedgerKey, pr.headRefOid),
       supersededBy,
       // W1-T2794 — DECLARED HERE, STAMPED LATER, and the two are not the same thing. The real
       // writer is `projectMergedTaskCandidates` (lib/sweep.ts), which runs AFTER this producer
