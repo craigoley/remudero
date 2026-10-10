@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import type { Config } from "../src/lib/config.js";
-import { ghLinesAsync } from "../src/lib/github-transport.js";
+import { ghJsonAsync, ghLinesAsync } from "../src/lib/github-transport.js";
 import type { Plan } from "../src/lib/plan.js";
 import { DEFAULT_SWEEP_POLICY, proofDiscriminationEvidenceFromCheckLog, type CiFailure } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -155,7 +155,7 @@ test("W1-T5836: the sweep's wired fix-lane producer reads a 6 MiB job log throug
   try {
     await withGh("sweep", [
       ...logRoutes(logFile),
-      { when: `pr view ${prUrl} --json headRefName,headRefOid,body`, stdout: JSON.stringify({ headRefName: "run-W1-T5836-1791196437555", headRefOid: "head5836", body: "" }) },
+      { when: `pr view ${prUrl} --json headRefName,headRefOid,body,files`, stdout: JSON.stringify({ headRefName: "run-W1-T5836-1791196437555", headRefOid: "head5836", body: "", files: [] }) },
       { when: `pr view ${prUrl} --json statusCheckRollup`, stdout: JSON.stringify({ statusCheckRollup: ROLLUP }) },
     ], async () => {
       // The ENTRYPOINT builder, with every seam but `fetchCiFailuresImpl` faked: that one is the
@@ -182,7 +182,7 @@ test("W1-T5836: the sweep's wired fix-lane producer reads a 6 MiB job log throug
         spawnWallClockBoundMsOverride: 1,
         reclaimWorkerImpl: () => {},
         disarmImpl: () => undefined,
-        readJsonImpl: async () => ({}),
+        readJsonImpl: async (args: string[]) => args[0] === "pr" ? ghJsonAsync(args) : {},
         updatePrBodyImpl: async () => {},
         registeredWorktreeOwnerImpl: () => undefined,
         registeredOwnerRecovery: { capture: () => undefined, remove: () => undefined },
