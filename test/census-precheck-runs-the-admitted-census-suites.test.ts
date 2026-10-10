@@ -258,14 +258,15 @@ test("W1-T5617: every admitted suite is run by census-precheck under its own npm
   const runs = Object.entries(parity)
     .filter(([, e]) => typeof e.run === "string")
     .map(([testFile, e]) => [testFile, e.run]);
-  // W1-T5692: the literal-triggered suites are run under their own npm scripts too, so the run entries are
-  // exactly the admitted members plus PRECHECK_TRIGGERED_SUITES — never an unexplained third source.
+  // W1-T5692: the literal-triggered suites are run under their own npm scripts too. Along with explicitly
+  // registered extras, these are the only run entries beyond the admitted members.
   const triggered = precheck.PRECHECK_TRIGGERED_SUITES as { testFile: string; script: string }[];
-  const expected = [...CENSUS_ADMITTED_MEMBERS, ...triggered].map((m) => [m.testFile, m.script]);
+  const additional = precheck.PRECHECK_ADDITIONAL_RUNS as { testFile: string; script: string }[];
+  const expected = [...CENSUS_ADMITTED_MEMBERS, ...triggered, ...additional].map((m) => [m.testFile, m.script]);
   assert.deepEqual(runs.sort(), expected.sort());
   const baseline = (JSON.parse(readFileSync(join(ROOT, precheck.PRECHECK_PARITY_BASELINE), "utf8")) as { ciOnly: string[] }).ciOnly;
   assert.ok(baseline.length > 0, "the baseline must be read");
-  for (const m of [...CENSUS_ADMITTED_MEMBERS, ...triggered]) {
+  for (const m of [...CENSUS_ADMITTED_MEMBERS, ...triggered, ...additional]) {
     assert.ok(!baseline.includes(m.testFile), `${m.testFile} is run, so it is not CI-only`);
   }
 });
