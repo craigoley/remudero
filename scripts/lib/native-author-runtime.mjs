@@ -16,6 +16,13 @@ export const digest = (bytes) => createHash('sha256').update(bytes).digest('hex'
 export function runtimeBindings(root, head, env = process.env) {
   if (!/^[a-f0-9]{40}$/.test(head)) throw new Error('runtime profile: unresolved source head');
   if (env.NODE_OPTIONS?.trim()) throw new Error('runtime profile: NODE_OPTIONS instrumentation is not modelled');
+  if (sourceHead(root) !== head || execFileSync('git', ['status', '--porcelain'],
+    { cwd: root, encoding: 'utf8', timeout: 10_000 }).trim()) {
+    throw new Error('runtime profile: source/runtime/corpus binding mismatch; committed inputs changed');
+  }
+  const inputTree = execFileSync('git', ['rev-parse', `${head}^{tree}`],
+    { cwd: root, encoding: 'utf8', timeout: 10_000 }).trim();
+  if (!/^[a-f0-9]{40}$/.test(inputTree)) throw new Error('runtime profile: unresolved committed input tree');
   const files = listTestFiles(root).sort();
   const hashes = Object.fromEntries(['.nvmrc', 'package-lock.json', 'test/setup/tmp-hygiene.ts',
     'scripts/test-tier-manifest.json'].map((file) => [file, digest(readFileSync(join(root, file)))]));
@@ -23,7 +30,7 @@ export function runtimeBindings(root, head, env = process.env) {
   const tsx = JSON.parse(readFileSync(join(root, 'node_modules/tsx/package.json'), 'utf8')).version;
   const environmentSha256 = digest(JSON.stringify(Object.fromEntries(['TZ', 'LANG', 'LC_ALL', 'NODE_ENV']
     .map((key) => [key, env[key] ?? null]))));
-  return { head, platform: process.platform, arch: process.arch, node: process.version,
+  return { head, inputTree, platform: process.platform, arch: process.arch, node: process.version,
     host: hostname(), kernel: release(), cores: availableParallelism(), cpuModel: cpus()[0]?.model ?? 'unavailable',
     v8: process.versions.v8, loader: `tsx@${tsx}`, instrumentation: 'none',
     testIsolation: 'process', setup: './test/setup/tmp-hygiene.ts', environmentSha256,
@@ -87,9 +94,20 @@ function readArtifactBytes(root, path, maxBytes, oversizedMessage) {
 export function readRuntimeProfile(root, path, expected, now = Date.now()) {
   const profile = JSON.parse(readArtifactBytes(root, path, 2 * 1024 * 1024,
     'runtime profile: oversized evidence').toString('utf8'));
-  if (profile.format !== RUNTIME_PROFILE_FORMAT || JSON.stringify(profile.bindings) !== JSON.stringify(expected)) {
+  const observed = profile.bindings;
+  if (profile.format !== RUNTIME_PROFILE_FORMAT || !observed ||
+      !/^[a-f0-9]{40}$/.test(observed.head) || !/^[a-f0-9]{40}$/.test(observed.inputTree) ||
+      expected.head !== sourceHead(root) ||
+      JSON.stringify({ ...observed, head: null }) !== JSON.stringify({ ...expected, head: null })) {
     throw new Error('runtime profile: source/runtime/corpus binding mismatch');
   }
+  // Reuse timing only across metadata-only commits. The entire tracked tree remains
+  // an input until a separately proved narrower dependency declaration can replace it.
+  let observedTree;
+  try { observedTree = execFileSync('git', ['rev-parse', `${observed.head}^{tree}`],
+    { cwd: root, encoding: 'utf8', timeout: 10_000 }).trim(); }
+  catch { throw new Error('runtime profile: source/runtime/corpus binding mismatch; observed commit unavailable'); }
+  if (observedTree !== observed.inputTree) throw new Error('runtime profile: source/runtime/corpus binding mismatch; observed inputs differ');
   const age = now - Date.parse(profile.at);
   if (!Number.isFinite(age) || age < 0 || age > RUNTIME_PROFILE_MAX_AGE_MS) throw new Error('runtime profile: stale or future observation');
   if (!Number.isSafeInteger(profile.concurrency) || profile.concurrency < 1 || profile.concurrency > 4) {
@@ -129,7 +147,9 @@ export function readRuntimeProfile(root, path, expected, now = Date.now()) {
         !lstatSync(join(root, file)).isFile() || !Number.isFinite(duration.files[file]) || duration.files[file] <= 0)) {
     throw new Error('runtime profile: incomplete physical sample durations');
   }
-  return profile;
+  return { ...profile, timingCompatibility: { observedHead: observed.head, currentHead: expected.head,
+    inputTree: expected.inputTree, reusedAcrossHeads: observed.head !== expected.head,
+    assurance: 'timing-only; never author PASS' } };
 }
 
 /** Complete default author timing remains a separate, source-bound diagnostic artifact. */
