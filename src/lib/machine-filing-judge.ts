@@ -44,7 +44,7 @@ import {
   type RiskPolicy,
 } from "./risk-judge.js";
 import { deterministicEscalation, UNPRICED_PRIORITY } from "./machine-filing.js";
-import { lintTask, rulingVerifyViolation, taskRulingPin } from "./task-linter.js";
+import { lintTask, promoteIntroducedPlanOnlyDiagnostics, rulingVerifyViolation, taskRulingPin, type LintViolation } from "./task-linter.js";
 
 /** The operator's escalation rule, handed to the judge verbatim in its gates state. */
 export const MACHINE_JUDGE_ESCALATE_ONLY_IF =
@@ -296,9 +296,13 @@ export function renderRuledShard(
   // The pin is taken from `after`, whose pinned fields the block above does not touch, and a
   // `proceed` is written at `verify: auto` while an `escalate` stays `verify: human`: the written
   // pin matches and machine-author-verify clears by construction, so neither is re-checked here.
-  const blocking = (t: Task) => new Set(lintTask(t).violations.filter((v) => v.severity === "block").map((v) => v.check));
-  const had = blocking(before);
-  const added = [...blocking(reparsed)].filter((c) => !had.has(c));
+  // Judged as lint-plan --base judges the landing PR: a warning the flip introduces is promoted to block
+  // on a plan-only diff (W1-T3814). 2026-10-10: proof-test-only-discrimination, a warn at verify: auto
+  // and silent at human, refused every landing the live ledger kept (29) while this read only `severity: block`.
+  const checks = (vs: readonly LintViolation[]) => new Set(vs.filter((v) => v.severity === "block").map((v) => v.check));
+  const base = lintTask(before).violations;
+  const had = checks(base);
+  const added = [...checks(promoteIntroducedPlanOnlyDiagnostics(lintTask(reparsed).violations, base, false))].filter((c) => !had.has(c));
   if (added.length > 0) return { refused: `${reparsed.id}: at verify: auto it fails lint (${added.join(", ")})`, lint: true };
   return { contents };
 }
