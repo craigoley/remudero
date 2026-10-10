@@ -821,15 +821,10 @@ export function coverageScratchDir(repoRoot: string, sameVolume: (a: string, b: 
  *  volume and its free-space reserve are unchanged. A long TMPDIR on another volume (or one
  *  that does not resolve) keeps its own base, and the length guard still refuses it. */
 function shortCoverageScratchBase(base: string, name: string, sameVolume: (a: string, b: string) => boolean): string {
-  if (join(base, name).length <= MAX_COVERAGE_SCRATCH_PATH) return base;
-  let short: string;
-  try {
-    short = realpathSync(SHORT_SCRATCH_ROOT);
-  } catch {
-    // Deliberate: no resolvable short root leaves the long base for the length guard to refuse.
-    return base;
-  }
-  return join(short, name).length <= MAX_COVERAGE_SCRATCH_PATH && sameVolume(short, base) ? short : base;
+  // An absent /tmp cannot be stat'ed, so the real device check also keeps the long base then.
+  if (join(base, name).length <= MAX_COVERAGE_SCRATCH_PATH || !sameVolume(SHORT_SCRATCH_ROOT, base)) return base;
+  const short = realpathSync(SHORT_SCRATCH_ROOT);
+  return join(short, name).length <= MAX_COVERAGE_SCRATCH_PATH ? short : base;
 }
 
 /** Where a coverage run may put its scratch besides the TMPDIR volume (W1-T5709). */
