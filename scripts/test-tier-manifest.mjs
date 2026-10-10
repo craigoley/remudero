@@ -44,6 +44,7 @@
 import { readFileSync, writeFileSync, readdirSync, mkdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { POOL_ISOLATION_FLAG, runShardWithPool } from "./pure-test-pool.mjs";
 import { dirname, isAbsolute, join, posix, relative, resolve, sep, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -780,20 +781,26 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
   const manifest = loadManifest(manifestPath);
   const testFiles = listTestFiles(root);
 
-  const spawnTestFiles = (files) => {
+  // W1-T6085: `pool` appends --experimental-test-isolation=none so the files share ONE process;
+  // `quiet` is a leak-locating re-run whose output and durations nobody wants. A role other than
+  // "rest" writes its durations beside the main file (shard-1.pool.json), because the reporter
+  // rewrites its destination and two children would otherwise erase each other's evidence.
+  const spawnTestFiles = (files, { pool = false, quiet = false, role = "rest" } = {}) => {
     // TAP on stdout always: test-with-retry parses this output, and Node 24 no longer defaults a
     // piped run to TAP. Reporters pair with destinations in order, so the duration reporter follows.
     const testArgs = ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--test-reporter=tap", "--test-reporter-destination=stdout"];
+    if (pool) testArgs.push(POOL_ISOLATION_FLAG);
     const durationOutputRaw = env.RMD_TEST_DURATION_OUTPUT;
-    if (durationOutputRaw) {
-      const durationOutput = resolve(root, durationOutputRaw);
+    if (durationOutputRaw && !quiet) {
+      const resolved = resolve(root, durationOutputRaw);
+      const durationOutput = role === "rest" ? resolved : resolved.replace(/(\.[^./\\]*)?$/, (ext) => `.${role}${ext}`);
       mkdirSync(dirname(durationOutput), { recursive: true });
       testArgs.push(
         `--test-reporter=${resolve(root, "scripts/test-duration-reporter.mjs")}`,
         `--test-reporter-destination=${durationOutput}`,
       );
     }
-    const result = spawn(process.execPath, [...testArgs, ...files], { cwd: root, stdio: "inherit" });
+    const result = spawn(process.execPath, [...testArgs, ...files], { cwd: root, stdio: quiet ? "ignore" : "inherit" });
     return result.status ?? (result.signal ? 1 : 0);
   };
 
@@ -1060,6 +1067,10 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
     if (files.length === 0) {
       console.log(`test-tier-manifest: no ${runTier}-tier test files recorded yet — nothing to run.`);
       return 0;
+    }
+    // W1-T6085: only the fast tier shares processes; a slow file keeps its own child.
+    if (runTier === "fast" && env.RMD_TEST_POOL !== "0") {
+      return runShardWithPool(files, { fast, root, run: spawnTestFiles }).status;
     }
     return spawnTestFiles(files);
   }
