@@ -5066,11 +5066,12 @@ test("W1-T2998 (falsifier): the executor DECLINING costs the PR nothing but a pa
   assert.equal(deps.steps.filter((l) => l.step === "sweep.ratchet_repair_declined").length, 1, "and the decline is visible rather than silent");
 });
 
-test("W1-T2998 (falsifier): DISABLED is the shipped default — no repair is taken, and the reason says so", async () => {
+test("W1-T2998 (falsifier): a DISABLED policy takes no repair, and the reason says so", async () => {
+  // The shipped row is ON since the operator ruling of 2026-10-10; the disabled arm is pinned explicitly.
   const repaired: number[] = [];
   const deps = ratchetDeps({ repairRecordableRatchet: (p2) => { repaired.push(p2.prNumber); return true; } });
-  await runSweep([ratchetRedPr(["comment-load-ratchet"])], deps, DEFAULT_SWEEP_POLICY);
-  assert.deepEqual(repaired, [], "the shipped default must not write to a branch unattended");
+  await runSweep([ratchetRedPr(["comment-load-ratchet"])], deps, { ...DEFAULT_SWEEP_POLICY, recordableRatchetRepairEnabled: false });
+  assert.deepEqual(repaired, [], "a disabled policy must not write to a branch unattended");
   assert.equal(deps.fixed.length, 1);
   const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
   assert.match(String(disposed[0].reason), /RECORDABLE ratchet/);
