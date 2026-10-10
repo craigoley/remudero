@@ -2,33 +2,21 @@
  * lib/daemon-memory-policy.ts — keep the daemon's heap proportional to its live set, keep its heap
  * ceiling out of its children, and judge memory pressure by what the container is charged.
  *
- * MEASURED 2026-10-10 (core host, 14:41-15:41Z, 28 daemon processes over 180 min, not a leak): the
- * daemon's main process held 4.1-4.5 GB RSS of the container's 8.6 GiB while its live set was
- * 0.6-0.9 GB. heap_used sawed up to 3.8-4.0 GB before each major GC dropped it to ~0.7 GB, and the
- * freed V8 pages stayed resident (3-3.9 GB of 256 KB V8 pages against a 0.8 GB heapTotal), then
- * swapped under memory.high (VmSwap 1-3 GB). The cause is V8's growth factor: under the container's
- * `NODE_OPTIONS=--max-old-space-size=8192` it lets garbage reach about four times the live set before
- * collecting. Every child the daemon spawned inherited the same ceiling.
+ * WHY: under the container's `--max-old-space-size=8192`, V8's growth factor let garbage reach about
+ * four times the daemon's 0.6-0.9 GB live set before a major GC (core host census, 2026-10-10).
  *
- * THREE MECHANISMS, ALL PROPORTIONAL:
- *  1. {@link applyDaemonMemoryPolicy} runs first thing at daemon entry. It sets V8's heap growing
- *     factor (`--heap-growing-percent`, which NODE_OPTIONS refuses but `v8.setFlagsFromString`
- *     accepts at runtime), so the next collection comes at a fixed multiple of what survived the last
- *     one. The daemon keeps its own heap ceiling as a backstop; only the slack shrinks.
- *  2. The same call removes `--max-old-space-size` from the NODE_OPTIONS every child inherits, so a
- *     child gets V8's own default, which V8 sizes from the container's memory. Children that need a
- *     specific budget already pass it on their own command line (gardens, the retro, and the
- *     measurement cadence, which takes this process's `heap_size_limit`), and a command-line flag
- *     wins over NODE_OPTIONS either way.
- *  3. {@link createDaemonMemoryGovernor} reads the daemon's RSS plus swap as a share of the
- *     container's memory.high (else memory.max) on every tick. Inside the healthy band it does
- *     nothing. Above `tightenShare` it lowers the growth factor in proportion to how far the share
- *     has climbed, and restores it when the share falls back. Only when the share is still at or
- *     above `restartShare` with the tightest factor already in force does it ask for a restart, which
- *     the loop takes through its tick-boundary drain (daemon.ts), never as a kill.
+ *  1. {@link applyDaemonMemoryPolicy}, first thing at daemon entry, sets `--heap-growing-percent`
+ *     (NODE_OPTIONS refuses it; `v8.setFlagsFromString` accepts it at runtime) and removes
+ *     `--max-old-space-size` from the NODE_OPTIONS children inherit. The daemon keeps its own
+ *     ceiling. A child that needs a budget passes it on its own command line, which wins anyway.
+ *  2. {@link createDaemonMemoryGovernor} reads RSS plus swap as a share of the container's
+ *     memory.high (else memory.max) each tick. Above `tightenShare` it lowers the growth factor in
+ *     proportion and restores it when the share falls. It asks for a restart only when the share
+ *     stays at `restartShare` with the tightest factor already in force; the loop takes that through
+ *     its tick-boundary drain (daemon.ts), never as a kill.
  *
- * UNKNOWN IS NOT PRESSURE. A host with no cgroup budget (a dev Mac, an unlimited container) reads no
- * share, and the loop falls back to the existing fraction of V8's own limit.
+ * TRAP: unknown is not pressure. No cgroup budget (a dev Mac, an unlimited container) reads no
+ * share, and the loop falls back to its fraction of V8's own limit.
  *
  * FALSIFIER: test/the-daemon-heap-stays-proportional-to-its-live-set.test.ts.
  */
