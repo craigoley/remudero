@@ -205,6 +205,16 @@ RUN export npm_config_cache=/tmp/npm-build-cache \
 
 COPY --chown=node:node . .
 
+# ── W1-T7729: daemon child entries ship precompiled for THIS image's own source ──────────────
+# Bundles the declared child entries with the esbuild that tsx already installs (above, `npm ci`),
+# writing dist/child-entries/ plus a manifest naming the source hash. It must follow `COPY . .`,
+# or it bundles no source. Root-owned /app means it runs before `USER node`, then hands dist/ over.
+# A bundle that cannot be produced FAILS THE IMAGE BUILD: this is the operator's baked path.
+# Why: docs/adr/0006-precompiled-daemon-child-entries.md.
+RUN node scripts/build-child-entries.mjs \
+ || { echo "BUILD ASSERTION FAILED (W1-T7729): the daemon child-entry bundles could not be built."; exit 1; } \
+ && chown -R node:node dist
+
 # ── REQ 15: the image must be able to say which commit built it ──────────────────────────────
 # A file, not only a label: the question is asked from inside a running container by an agent with
 # no docker CLI, and `az acr build` strips `.git`. The LABEL stays for host-side readers, and

@@ -50,6 +50,12 @@
       "grepHint": "0005. Apache-2.0, and the core is never relicensed"
     },
     {
+      "path": "docs/adr/0006-precompiled-daemon-child-entries.md",
+      "title": "0006. Run daemon children from a precompiled, source-keyed bundle, not tsx",
+      "summary": "Status: Proposed",
+      "grepHint": "0006. Run daemon children from a precompiled, source-keyed bundle, not tsx"
+    },
+    {
       "path": "docs/adr/README.md",
       "title": "Architecture Decision Records",
       "summary": "MASTER-PLAN §5 TIER 3: ADR discipline for IRREVERSIBLE calls. A short",

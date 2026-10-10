@@ -29,6 +29,7 @@ export const HASHED_ROOT_FILES = Object.freeze(["package-lock.json", "package.js
 const SELF_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 function loadEsbuild(root) {
+  root = resolve(root);
   // Resolve esbuild from the tree being built, then from this script's own tree. tsx depends on
   // esbuild, so `npm ci` (dependencies only) always installs it.
   for (const base of [root, SELF_ROOT]) {
@@ -58,6 +59,7 @@ function listFiles(dir, out = []) {
  * miss in every fresh worktree.
  */
 export function sourceHash(root, esbuildVersion = loadEsbuild(root).version) {
+  root = resolve(root);
   const h = createHash("sha256");
   h.update(`recipe:${RECIPE_VERSION}\0esbuild:${esbuildVersion}\0`);
   const srcDir = join(root, "src");
@@ -123,6 +125,7 @@ function writeAtomic(path, text) {
 
 /** Build every declared entry into `<root>/<outDir>` and write the manifest last. Throws on any failure. */
 export async function buildChildEntries({ root = SELF_ROOT, entries = CHILD_ENTRIES, outDir = OUT_DIR } = {}) {
+  root = resolve(root);
   const esbuild = loadEsbuild(root);
   const bundleDir = resolve(root, outDir);
   mkdirSync(bundleDir, { recursive: true });
@@ -176,6 +179,7 @@ export function readChildEntryManifest(root = SELF_ROOT, outDir = OUT_DIR) {
  * as not current, so a caller falls back to tsx. A bundle is never assumed current.
  */
 export function childEntryIsCurrent(root, name, { outDir = OUT_DIR } = {}) {
+  root = resolve(root);
   const manifest = readChildEntryManifest(root, outDir);
   if (!manifest) return { current: false, reason: "no-manifest" };
   const entry = manifest.entries?.find((e) => e.name === name);
