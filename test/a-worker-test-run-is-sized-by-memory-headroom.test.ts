@@ -6,13 +6,15 @@
 // FIXTURES ONLY: every slot dir and admission dir lives under this test's tmp dirs; no seam reads the real host.
 
 import assert from "node:assert/strict";
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { admitTestFile, isTestRunnerArgv, type TestFileAdmissionOptions } from "../src/lib/test-file-admission.js";
-import { boundedTestArgv, explicitTestConcurrency, NPM_TEST_SLOT_LABEL, runBoundedTest } from "../src/lib/test-run.js";
+import { boundedTestArgv, explicitTestConcurrency, NPM_TEST_SLOT_LABEL, runBoundedTest, type BoundedTestRunOptions } from "../src/lib/test-run.js";
 import { acquireTestSlot, memoryTestConcurrency, TEST_FILE_PEAK_BYTES, type TestSlotLease } from "../src/lib/test-slot.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
@@ -105,6 +107,77 @@ test("npm test's wrapper runs the caller's node --test argv at the lease's concu
   assert.deepEqual(seen, [{ file: process.execPath, args: ["--test", "--test-concurrency=3", ...SUITE.slice(1)], parent: "{}" }]);
 });
 
+test("the default spawn wrapper maps spawn errors to 127 and releases its signal handlers and slot", async () => {
+  const signals = new EventEmitter();
+  const child = new EventEmitter();
+  let released = 0;
+  const lease: TestSlotLease = {
+    outcome: "acquired", concurrency: 1, waitedMs: 0, note: "fixture", childEnvironment: {},
+    refresh: () => {}, release: () => { released += 1; },
+  };
+  const spawnProcess = (() => {
+    queueMicrotask(() => child.emit("error", new Error("fixture spawn failure")));
+    return child as unknown as ChildProcess;
+  }) as NonNullable<BoundedTestRunOptions["spawnProcess"]>;
+  const code = await runBoundedTest(["--test", "fixture.test.ts"], {
+    acquireSlot: async () => lease, spawnProcess,
+    signalSource: signals as unknown as Pick<NodeJS.Process, "on" | "off">,
+    binaryExists: () => false, log: () => {},
+  });
+  assert.equal(code, 127);
+  assert.equal(released, 1);
+  assert.equal(signals.listenerCount("SIGINT"), 0);
+  assert.equal(signals.listenerCount("SIGTERM"), 0);
+  assert.equal(signals.listenerCount("SIGHUP"), 0);
+});
+
+test("the default spawn wrapper preserves a normal child exit code", async () => {
+  const signals = new EventEmitter();
+  const child = new EventEmitter();
+  const lease: TestSlotLease = {
+    outcome: "acquired", concurrency: 1, waitedMs: 0, note: "fixture", childEnvironment: {},
+    refresh: () => {}, release: () => {},
+  };
+  const spawnProcess = (() => {
+    queueMicrotask(() => child.emit("exit", 23, null));
+    return child as unknown as ChildProcess;
+  }) as NonNullable<BoundedTestRunOptions["spawnProcess"]>;
+  const code = await runBoundedTest(["--test", "fixture.test.ts"], {
+    acquireSlot: async () => lease, spawnProcess,
+    signalSource: signals as unknown as Pick<NodeJS.Process, "on" | "off">,
+    binaryExists: () => false, log: () => {},
+  });
+  assert.equal(code, 23);
+  assert.equal(signals.listenerCount("SIGTERM"), 0);
+});
+
+test("the default spawn wrapper forwards termination and maps a signal exit", async () => {
+  const signals = new EventEmitter();
+  let killedWith: NodeJS.Signals | undefined;
+  const child = Object.assign(new EventEmitter(), {
+    kill: (signal: NodeJS.Signals) => { killedWith = signal; return true; },
+  });
+  const lease: TestSlotLease = {
+    outcome: "acquired", concurrency: 1, waitedMs: 0, note: "fixture", childEnvironment: {},
+    refresh: () => {}, release: () => {},
+  };
+  const spawnProcess = (() => {
+    queueMicrotask(() => {
+      signals.emit("SIGTERM");
+      child.emit("exit", null, "SIGTERM");
+    });
+    return child as unknown as ChildProcess;
+  }) as NonNullable<BoundedTestRunOptions["spawnProcess"]>;
+  const code = await runBoundedTest(["--test", "fixture.test.ts"], {
+    acquireSlot: async () => lease, spawnProcess,
+    signalSource: signals as unknown as Pick<NodeJS.Process, "on" | "off">,
+    binaryExists: () => false, log: () => {},
+  });
+  assert.equal(killedWith, "SIGTERM");
+  assert.equal(code, 128 + 15);
+  assert.equal(signals.listenerCount("SIGTERM"), 0);
+});
+
 /** Seams for one file child of runner pid 100: its own pid 201, every process alive with start `s<pid>`. */
 function child(dir: string, over: Partial<TestFileAdmissionOptions> = {}): TestFileAdmissionOptions {
   return {
@@ -170,6 +243,10 @@ test("only a node --test runner's own file child queues: no reading, no runner c
   assert.equal((await admitTestFile(child(dir, { headroom: () => undefined, sleep: never }))).outcome, "no-memory-reading");
   assert.equal((await admitTestFile(child(dir, { isRunner: () => false, sleep: never }))).outcome, "not-a-runner-child",
     "a subprocess a test spawns inherits NODE_TEST_CONTEXT but its parent is the test file, not a runner");
+  const missingRunner = child(dir);
+  delete missingRunner.isRunner;
+  missingRunner.runnerPid = Number.MAX_SAFE_INTEGER;
+  assert.equal((await admitTestFile(missingRunner)).outcome, "not-a-runner-child", "an unreadable /proc parent is not treated as a test runner");
   assert.deepEqual(readdirSync(dir), [], "nothing recorded on a skip");
   assert.equal(isTestRunnerArgv(["node", "--test", "--import", "tsx", "a.test.ts"]), true);
   assert.equal(isTestRunnerArgv(["/usr/local/bin/node", "--test-concurrency=0", "--test-isolation=process", "a.test.ts"]), false,

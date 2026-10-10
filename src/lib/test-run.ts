@@ -53,20 +53,25 @@ export interface BoundedTestRunOptions {
   /** Options for the default slot acquisition; it always names {@link TEST_FILE_PEAK_BYTES} per file. */
   testSlot?: Omit<TestSlotOptions, "sleep">;
   spawn?: BoundedTestSpawn;
+  spawnProcess?: typeof spawnChild;
+  signalSource?: Pick<NodeJS.Process, "on" | "off">;
   binaryExists?: BinaryProbe;
   log?: (line: string) => void;
 }
 
 const SIGNAL_NUMBERS: Record<string, number> = { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 };
 
-const inheritSpawn: BoundedTestSpawn = (file, args, env) => new Promise((resolveRun) => {
-  const child = spawnChild(file, [...args], { stdio: "inherit", env });
+const inheritSpawn = (
+  spawn: typeof spawnChild = spawnChild,
+  signalSource: Pick<NodeJS.Process, "on" | "off"> = process,
+): BoundedTestSpawn => (file, args, env) => new Promise((resolveRun) => {
+  const child = spawn(file, [...args], { stdio: "inherit", env });
   // A Ctrl-C or a timeout's TERM reaches the runner too, so the suite stops with this wrapper rather than outliving it.
   const forward = (signal: NodeJS.Signals) => () => { child.kill(signal); };
   const handlers = (["SIGINT", "SIGTERM", "SIGHUP"] as const).map((signal) => [signal, forward(signal)] as const);
-  for (const [signal, handler] of handlers) process.on(signal, handler);
+  for (const [signal, handler] of handlers) signalSource.on(signal, handler);
   const done = (code: number) => {
-    for (const [signal, handler] of handlers) process.off(signal, handler);
+    for (const [signal, handler] of handlers) signalSource.off(signal, handler);
     resolveRun(code);
   };
   child.on("error", (error) => {
@@ -89,7 +94,9 @@ export async function runBoundedTest(args: readonly string[], opts: BoundedTestR
     const argv = boundedTestArgv(args, slot.concurrency);
     const command = lowPriorityCommand(process.execPath, argv, opts.binaryExists);
     log(JSON.stringify({ step: "test_run.admitted", slot: slot.outcome, priority: command.priority, note: slot.note }));
-    return await (opts.spawn ?? inheritSpawn)(command.file, command.args, { ...process.env, ...slot.childEnvironment });
+    return await (opts.spawn ?? inheritSpawn(opts.spawnProcess, opts.signalSource))(
+      command.file, command.args, { ...process.env, ...slot.childEnvironment },
+    );
   } finally {
     clearInterval(heartbeat);
     slot.release();
