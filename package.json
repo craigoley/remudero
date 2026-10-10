@@ -26,7 +26,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "node --import tsx scripts/typecheck.mjs",
     "check": "node scripts/check.mjs",
     "test": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts \"test/**/*.test.ts\"",
     "test:ci": "node scripts/test-with-retry.mjs node --test --test-reporter=tap --import tsx --import ./test/setup/tmp-hygiene.ts \"test/**/*.test.ts\"",

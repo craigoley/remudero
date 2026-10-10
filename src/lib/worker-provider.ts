@@ -43,7 +43,7 @@ import { assertModelAllowed, modelAllowed } from "./model-gate.js";
 import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWindow } from "./version-switchback.js";
 import type { ModelApproval } from "./config-schema.js";
 import { hasUsableTypecheckBuildInfo, installedTypescriptVersion, seedFromCanonical, TYPECHECK_BUILDINFO_NAME } from "./typecheck-buildinfo.js";
-import { acquireTestSlotAsync } from "./test-slot.js";
+import { acquireTestSlotAsync, TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "./test-slot.js";
 import { selectFromRoutingPool, type RoutingPoolDecision, type RoutingPoolRequest, type RoutingPoolSnapshot } from "./model-pool.js";
 import {
   spawnDetachedGroup,
@@ -2501,6 +2501,23 @@ export function commitCodexWriterEdits(cwd: string, text: string): CodexHarnessC
   }
 }
 
+/**
+ * A Codex WRITER's grant to the host-wide test slot (#10612's src/lib/typecheck-run.ts). Its shell inherits only the
+ * "core" variables and its bwrap binds `/` read-only, so without this a model's own `npm run typecheck` resolves no
+ * {@link TEST_SLOT_DIR_ENV} and falls to a sandbox-local `/tmp/rmd-test-slots` (test-slot.ts `resolveTestSlotDir`):
+ * a cold check that serialises against nothing on the host. Grant the ONE directory (lock records only, no credential,
+ * no git config) and name it, plus the host's slot count, in the shell. Nothing outside the fleet (unset), and nothing
+ * inside a test process, so a suite run in a fleet container builds the same argv as on a Mac.
+ */
+export function codexTestSlotArgs(env: NodeJS.ProcessEnv = process.env): string[] {
+  const dir = env[TEST_SLOT_DIR_ENV];
+  if (!dir || env.NODE_TEST_CONTEXT) return [];
+  const args = ["--add-dir", dir, "-c", `shell_environment_policy.set.${TEST_SLOT_DIR_ENV}=${JSON.stringify(dir)}`];
+  const slots = Number(env[TEST_SLOTS_ENV]);
+  if (Number.isSafeInteger(slots) && slots >= 1) args.push("-c", `shell_environment_policy.set.${TEST_SLOTS_ENV}=${JSON.stringify(String(slots))}`);
+  return args;
+}
+
 function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">): string[] {
   const model = selection?.model ?? config.workerProviders?.codexModel;
   // Never unnamed: with no --model, Codex runs the ACCOUNT default, which is gpt-6-astra (2026-09-22).
@@ -2576,6 +2593,8 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
     ...shared,
     ...(disposableReview ? [] : ["--sandbox", readOnly ? "read-only" : "workspace-write"]),
     ...(readOnly || disposableReview ? [] : ["-c", "sandbox_workspace_write.network_access=true"]),
+    // Writers only: a reader or review runs no typecheck that needs the host slot.
+    ...(readOnly || disposableReview ? [] : codexTestSlotArgs()),
     "-C", args.cwd,
     "-",
   ];

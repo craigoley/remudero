@@ -14,7 +14,7 @@
  * outside the tree (its `node_modules` and git directory included) keeps its absolute location.
  *
  * A SEED CAN ONLY COST TIME, NEVER CHANGE A RESULT: tsc discards any cached entry whose hash, options or version differ.
- * Node builtins only, so `scripts/check.mjs` loads this directly under Node's type stripping.
+ * Node builtins only, so it loads directly under Node's type stripping.
  */
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";

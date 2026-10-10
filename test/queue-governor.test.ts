@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { adaptiveWipBound } from "../src/lib/adaptive-wip.js";
 import {
   DEFAULT_SWEEP_POLICY,
   checkQueueGovernor,
@@ -23,6 +25,7 @@ import { runDaemon, type DaemonDeps, type DaemonSummary } from "../src/lib/daemo
 import { checkDispatchGovernors } from "../src/lib/dispatch-governor.js";
 import type { Config } from "../src/lib/config.js";
 import { createOpenPrCountObservation, drainCommand, daemonCommand } from "../src/run-task.js";
+import { appendGitConfigEnv } from "./setup/no-live-remote.js";
 
 test("idle_starved: only a successful complete board read may prove zero open PRs", () => {
   const board = createOpenPrCountObservation();
@@ -418,19 +421,34 @@ function boardWithUnplannedOpenPrs(count: number, onList?: () => void): GitHub {
  *  `runDrain`'s own loop performs on every tick — so `checkQueueGovernor()` reads a live count. */
 async function captureDrainDepsWithLiveProjection(config: Config, planPath: string, github: GitHub): Promise<DrainDeps> {
   let captured: DrainDeps | undefined;
-  const code = await drainCommand([], {
-    config,
-    planPath,
-    skipGitSync: true,
-    githubFactory: () => github,
-    notifyChannel: { send: () => true } as never,
-    runDrain: async (_plan, deps): Promise<DrainSummary> => {
-      deps.refreshMerged();
-      captured = deps;
-      return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, resumeCommand: "rmd drain" };
-    },
-  });
-  assert.equal(code, 0);
+  // drainCommand reads owner/repo from the checkout's origin before any injected dep is consulted,
+  // and the proof sandbox checks the PR head out with NO origin remote. Give the composition its
+  // own fixture origin through git's env config (appended, never clobbering the sandbox's entries),
+  // then restore every key touched. The repo name matches the plan fixture's `repo: remudero`.
+  const gitConfigIndex = Number.parseInt(process.env.GIT_CONFIG_COUNT ?? "0", 10) || 0;
+  const envKeys = ["GIT_CONFIG_COUNT", `GIT_CONFIG_KEY_${gitConfigIndex}`, `GIT_CONFIG_VALUE_${gitConfigIndex}`];
+  const oldEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
+  appendGitConfigEnv("remote.origin.url", "https://github.com/fixture/remudero.git");
+  try {
+    const code = await drainCommand([], {
+      config,
+      planPath,
+      skipGitSync: true,
+      githubFactory: () => github,
+      notifyChannel: { send: () => true } as never,
+      runDrain: async (_plan, deps): Promise<DrainSummary> => {
+        deps.refreshMerged();
+        captured = deps;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, resumeCommand: "rmd drain" };
+      },
+    });
+    assert.equal(code, 0);
+  } finally {
+    for (const [key, value] of oldEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
   assert.ok(captured);
   return captured;
 }
@@ -444,14 +462,92 @@ test("W1-T321: drainCommand's WIRED checkQueueGovernor reads the REAL open-PR co
     const result = deps.checkQueueGovernor!();
     assert.ok(result, "the REAL wiring — not a hand-built fixture — must defer once the live open-PR count reaches wipLimit");
     assert.equal(result!.observedOpenCount, DEFAULT_SWEEP_POLICY.wipLimit);
-    assert.equal(result!.wipLimit, DEFAULT_SWEEP_POLICY.wipLimit);
+    // The real caller reads host headroom. The nominal policy is stable; the effective
+    // bound is deliberately adaptive and may be lower on a busy Linux host.
+    assert.equal(result!.baseWipLimit, DEFAULT_SWEEP_POLICY.wipLimit);
+    assert.equal(result!.trailingMergedCount, 0);
+    assert.equal(result!.trailingOpenedCount, 0);
+    assert.equal(result!.wipLimit, adaptiveWipBound({
+      baseLimit: DEFAULT_SWEEP_POLICY.wipLimit,
+      trailingMergedCount: 0,
+      headroomFraction: result!.headroomFraction,
+    }));
 
     const afterLog = readLedgerLines(ledgerPath);
     const deferLine = afterLog.find((l) => l.step === "dispatch_deferred_wip");
     assert.ok(deferLine, "the call site itself must write the dispatch_deferred_wip line, not merely return a verdict");
     assert.equal(deferLine!.observed_open_count, DEFAULT_SWEEP_POLICY.wipLimit);
+    assert.equal(deferLine!.base_wip_limit, DEFAULT_SWEEP_POLICY.wipLimit);
+    assert.equal(deferLine!.wip_limit, result!.wipLimit);
+    assert.equal(deferLine!.headroom_fraction, result!.headroomFraction ?? null);
   } finally {
     rmSync(config.root, { recursive: true, force: true });
+  }
+});
+
+/** Run `body` with ONLY `/proc/meminfo` replaced at the built-in fs reader — the very default reader
+ *  the real wiring (`readMemoryHeadroomFraction()`) calls. Every other path stays real. Returns how
+ *  many times the replaced reader was consulted, so a case can prove the wiring actually reached it.
+ *  In-process on purpose: a failure surfaces here as a named assertion rather than a bare child exit. */
+async function withControlledMeminfo(
+  mode: "low" | "healthy" | "unread",
+  body: () => Promise<void>,
+): Promise<number> {
+  const original = fs.readFileSync;
+  let reads = 0;
+  fs.readFileSync = ((path: unknown, ...args: unknown[]) => {
+    if (path !== "/proc/meminfo") return (original as (...a: unknown[]) => unknown)(path, ...args);
+    reads += 1;
+    if (mode === "unread") throw Object.assign(new Error("controlled meminfo unavailable"), { code: "ENOENT" });
+    const text = `MemTotal: 1000000 kB\nMemAvailable: ${mode === "low" ? 270000 : 600000} kB\n`;
+    const opt = args[0] as { encoding?: string } | string | undefined;
+    return typeof opt === "string" || opt?.encoding ? text : Buffer.from(text);
+  }) as typeof fs.readFileSync;
+  syncBuiltinESMExports();
+  try {
+    await body();
+  } finally {
+    fs.readFileSync = original;
+    syncBuiltinESMExports();
+  }
+  return reads;
+}
+
+test("queue governor wiring preserves its base limit while host headroom adjusts the effective bound", async () => {
+  const cases = [
+    { mode: "low", headroom: 0.27, effective: 9 },
+    { mode: "healthy", headroom: 0.6, effective: 10 },
+    { mode: "unread", headroom: undefined, effective: 10 },
+  ] as const;
+  for (const { mode, headroom, effective } of cases) {
+    const config = queueGovernorFixtureConfig();
+    try {
+      const ledgerPath = join(config.root, "state", "ledger.ndjson");
+      const planPath = planWithOpenPrs(DEFAULT_SWEEP_POLICY.wipLimit);
+      const seen: { result?: QueueGovernorResult } = {};
+      const reads = await withControlledMeminfo(mode, async () => {
+        const deps = await captureDrainDepsWithLiveProjection(config, planPath, OPEN_GITHUB);
+        seen.result = deps.checkQueueGovernor!();
+      });
+      const result = seen.result;
+      assert.ok(reads > 0, `${mode}: the real wiring read the controlled default meminfo reader`);
+      assert.ok(result, `${mode}: ${DEFAULT_SWEEP_POLICY.wipLimit} open PRs reach the effective bound and defer`);
+      assert.equal(result.baseWipLimit, DEFAULT_SWEEP_POLICY.wipLimit, `${mode}: the nominal base limit is preserved`);
+      assert.equal(result.observedOpenCount, DEFAULT_SWEEP_POLICY.wipLimit);
+      if (headroom === undefined) assert.equal(result.headroomFraction, undefined, `${mode}: unreadable memory is reported unread`);
+      else assert.ok(Math.abs((result.headroomFraction ?? NaN) - headroom) < 1e-9, `${mode}: headroom ${headroom}, got ${result.headroomFraction}`);
+      assert.equal(result.wipLimit, effective, `${mode}: effective bound`);
+      assert.equal(result.wipLimit, adaptiveWipBound({
+        baseLimit: DEFAULT_SWEEP_POLICY.wipLimit, trailingMergedCount: 0, headroomFraction: result.headroomFraction,
+      }));
+      const deferLine = readLedgerLines(ledgerPath).find((l) => l.step === "dispatch_deferred_wip");
+      assert.ok(deferLine, `${mode}: the call site ledgers the deferral`);
+      assert.equal(deferLine.base_wip_limit, DEFAULT_SWEEP_POLICY.wipLimit);
+      assert.equal(deferLine.wip_limit, effective);
+      assert.equal(deferLine.headroom_fraction, result.headroomFraction ?? null);
+    } finally {
+      rmSync(config.root, { recursive: true, force: true });
+    }
   }
 });
 

@@ -97,7 +97,8 @@ function writeStubs(dir: string): void {
     "    shift 2",
     '    if [ "$1" = "ps" ]; then',
     '      case "$3" in',
-    '        pid,etimes,args) cat "$STUB_REC/ps-workers" 2>/dev/null ;;',
+    // A LIVING daemon, when the test asks for one: every worker census appends a fresh row from it.
+    '        pid,etimes,args) [ -z "${STUB_PULSE_LEDGER:-}" ] || printf \'{"ts":"%s","actor_pid":%s,"step":"daemon.pulse"}\\n\' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$STUB_PULSE_PID" >> "$STUB_PULSE_LEDGER"; cat "$STUB_REC/ps-workers" 2>/dev/null ;;',
     '        pid,ppid) cat "$STUB_REC/ps-ppid" 2>/dev/null ;;',
     "      esac",
     "      exit 0",
@@ -169,7 +170,7 @@ function fleet(daemonRowAgoMs: number): Fleet {
   return { state, lockPath, worktree, workerHome };
 }
 
-function runRecycle(f: Fleet, verdict: string | undefined, waitS: number): Run {
+function runRecycle(f: Fleet, verdict: string | undefined, waitS: number, extraEnv: NodeJS.ProcessEnv = {}): Run {
   const dir = mkdtempSync(join(tmpdir(), "rmd-frozen-stub-"));
   const rec = mkdtempSync(join(tmpdir(), "rmd-frozen-rec-"));
   writeStubs(dir);
@@ -194,6 +195,7 @@ function runRecycle(f: Fleet, verdict: string | undefined, waitS: number): Run {
   delete env.RMD_RECYCLE_VERDICT;
   delete env.RMD_RECYCLE_STALL_BOUND_S;
   if (verdict !== undefined) env.RMD_RECYCLE_VERDICT = verdict;
+  Object.assign(env, extraEnv);
   const r = spawnSync("bash", [SCRIPT], { encoding: "utf8", cwd: REPO_ROOT, env });
   let calls: Call[] = [];
   try {
@@ -283,6 +285,44 @@ test("(iii) a recycle without a STALLED verdict behaves as before: waited for an
   const other = runRecycle(g, "PROGRESSING progressAgeMs=60000", 2);
   assert.equal(other.status, 1);
   assert.ok(existsSync(g.lockPath), "a non-STALLED verdict reclaims nothing");
+});
+
+test("(iv) a daemon whose newest row is inside the bound when the drain starts, and which then stays frozen, is recognised on a later poll and its holdings reclaimed", () => {
+  // OBSERVED 2026-10-10: the daemon froze at 08:22:50Z; the STALLED recycle checked ONCE at
+  // 08:25:14Z (row 2.4 min old), failed clause (b), and then waited the full drain on the frozen
+  // daemon's own children without asking again. Scaled down: a 4s bound, the row 1s old at start.
+  const f = fleet(1_000);
+  const run = runRecycle(f, STALLED, 20, { RMD_RECYCLE_STALL_BOUND_S: "4" });
+
+  assert.equal(run.status, 0, `the proof must be re-evaluated during the wait and pass once the row ages out: ${run.stderr}`);
+  assert.match(run.stdout, /1 lane-holding \+ 1 lane-less worker\(s\) still in flight, waited 0s\/20s — polling/, "the first check fails and the drain waits");
+  assert.match(run.stderr, /frozen-daemon ownership NOT proven, clause \(b\)/, "the first check names the clause that failed");
+  assert.match(run.stderr, /wrote no ledger row in 4s: FROZEN/, "a later poll proves the daemon frozen");
+  assert.match(run.stdout, /no in-flight workers — safe to proceed/);
+  assert.doesNotMatch(run.stderr, /REFUSING/, "it does not sit out the whole drain");
+  assert.ok(!existsSync(f.lockPath), "the frozen daemon's lock leaves the blocking set");
+  const reclaimedDir = join(f.state, "state", "inflight", "reclaimed");
+  assert.equal(readdirSync(reclaimedDir).filter((n) => n.startsWith(LOCK_NAME) && !n.endsWith(".reason")).length, 1, "moved exactly once, never deleted");
+  assert.ok(existsSync(join(f.worktree, "half-merged.ts")), "the worktree is kept");
+  assert.equal(run.calls.filter(isStop).length, 1, "the container is stopped through the ordinary path");
+});
+
+test("(iv) re-evaluating on each poll never reclaims from a daemon that keeps writing rows through the wait", () => {
+  // The same short bound, but the daemon is ALIVE: every worker census the script runs appends a
+  // fresh row from pid 110, so each re-check finds a row inside the bound and the wait refuses.
+  const f = fleet(1_000);
+  const run = runRecycle(f, STALLED, 8, {
+    RMD_RECYCLE_STALL_BOUND_S: "3",
+    STUB_PULSE_LEDGER: join(f.state, "state", "ledger.ndjson"),
+    STUB_PULSE_PID: String(DAEMON_PID),
+  });
+
+  assert.equal(run.status, 1, `a living daemon's holdings are waited for and refused: ${run.stderr}`);
+  assert.match(run.stderr, /REFUSING — 1 lane-holding and 1 lane-less worker\(s\) still in flight after 8s/);
+  assert.doesNotMatch(run.stderr, /FROZEN/, "a daemon writing rows is never proven frozen");
+  assert.ok((run.stderr.match(/ownership NOT proven/g) ?? []).length >= 2, `the proof was re-evaluated during the wait, not once:\n${run.stderr}`);
+  assert.ok(existsSync(f.lockPath), "the lock is untouched");
+  assert.ok(!existsSync(join(f.state, "state", "inflight", "reclaimed")), "nothing is reclaimed");
 });
 
 test("the launcher forwards the STALLED verdict and its progress age to the recycle in RMD_RECYCLE_VERDICT", () => {

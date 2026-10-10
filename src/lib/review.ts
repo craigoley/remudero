@@ -7862,6 +7862,9 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
     "weighs, not rule logic, same shape as scripts/test-tier-manifest.json above",
   // ── verified non-instrument: ops/dev tooling with no CI-gate role ──
   "scripts/check.mjs": "local dev convenience (`npm run check`), never invoked by any CI workflow",
+  "scripts/typecheck.mjs":
+    "local dev/worker convenience (`npm run typecheck`, and `npm run check`'s tsc), never invoked by any CI workflow — " +
+    "CI's ci job runs its own `npx tsc -p tsconfig.json --noEmit`, so no edit to this wrapper changes what a gate measures",
   "scripts/test-duration-reporter.mjs":
     "VERIFIED NON-INSTRUMENT (W1-T5923) — a node --test reporter that only writes per-file durations; the " +
     "coverage shard names it to record instrumented timings for the shard split, never reads them back, and " +

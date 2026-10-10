@@ -22,13 +22,14 @@
  * FALSIFIER: test/secret-boundary.test.ts.
  */
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer as createNetServer, type Socket } from "node:net";
-import { chmodSync, existsSync, mkdirSync, rmSync, unlinkSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { chmodSync, existsSync, lstatSync, mkdirSync, rmdirSync, rmSync, unlinkSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { isMainThread, parentPort, Worker, workerData, type MessagePort } from "node:worker_threads";
 import { mintScopedToken } from "./github-app.js";
+import { MAX_UNIX_SOCKET_PATH_BYTES, shortPathWhenTooLong } from "./short-path-root.js";
 import { setHarnessCredentialSocket } from "./worktree-git.js";
 
 /** A fresh, unguessable stand-in for a real credential — never derived from the real value, so a
@@ -349,9 +350,20 @@ export function startCredentialHelperSocket(opts: {
   });
 }
 
-/** W1-T5115: the daemon's one git credential socket, in a 0700 directory under its state root. */
+/** W1-T5115: the daemon's one git credential socket, in a 0700 directory under its state root, or under /tmp when
+ *  the state root is too deep for a unix socket path. */
 export function daemonGitCredentialSocketPath(stateDir: string): string {
-  return join(stateDir, "git-credential", "helper.sock");
+  // A state dir too deep for sun_path (a Mac's per-user TMPDIR) binds in a per-state-dir 0700 dir
+  // under /tmp instead; listen() would otherwise refuse the path. Linux's state dirs fit unchanged.
+  const name = `rmd-gc-${createHash("sha256").update(resolve(stateDir)).digest("hex").slice(0, 12)}`;
+  return shortPathWhenTooLong(join(stateDir, "git-credential", "helper.sock"), (root) => join(root, name, "helper.sock"),
+    (path) => Buffer.byteLength(path) <= MAX_UNIX_SOCKET_PATH_BYTES, existsSync);
+}
+
+/** A socket dir outside the state root sits in shared /tmp: it must be a real directory this process owns. */
+function ownedSocketDir(dir: string): boolean {
+  const stat = lstatSync(dir);
+  return stat.isDirectory() && stat.uid === process.getuid?.();
 }
 
 /** How long a minted scoped token is reported valid — one git request uses it at once. */
@@ -458,15 +470,21 @@ export async function startDaemonGitCredentialSocket(opts: {
   if (!opts.ready) return undefined;
   await opts.ready;
   const socketPath = daemonGitCredentialSocketPath(opts.stateDir);
+  const outsideState = socketPath !== join(opts.stateDir, "git-credential", "helper.sock");
   const ledgerRow = (row: BoundaryLedgerRow) => opts.log(row.step, rowFields(row));
   let handle: CredentialHelperSocketHandle | undefined;
+  let ownsShortDir = false;
   const close = async (): Promise<void> => {
     setHarnessCredentialSocket(undefined);
     await handle?.close();
     rmSync(socketPath, { force: true });
+    // A short /tmp dir proven ours goes too, once empty; the state root keeps its dir.
+    if (ownsShortDir) rmdirSync(dirname(socketPath));
   };
   try {
     mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
+    if (outsideState && !ownedSocketDir(dirname(socketPath))) throw new Error(`${dirname(socketPath)} is not a directory this daemon owns`);
+    ownsShortDir = outsideState;
     chmodSync(dirname(socketPath), 0o700);
     handle = opts.mint
       ? await (opts.socketStarter ?? startCredentialHelperSocket)({ socketPath, mint: opts.mint, log: ledgerRow })

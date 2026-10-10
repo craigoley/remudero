@@ -1,0 +1,29 @@
+- id: W1-T7650
+  title: "THE FIX-LANE GARDENER'S COSTLIEST DEFECT CLASS — operator-intervention:push cost 10034.12 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "fix-lane:operator-intervention:push"
+  files:
+    - src/run-task.ts
+    - test/fix-lane-operator-intervention-push.test.ts
+  acceptance:
+    - claim: "operator-intervention:push no longer needs an operator hand fix"
+      proof: "grep: test(\"W1-T7650: fix-lane-operator-intervention-push clears without a person\" in test/fix-lane-operator-intervention-push.test.ts"
+  note: "Filed by fix-lane at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    operator-intervention:push cost 10034.12 PR-hours; owner fix-lane
+    Owner: the fix lane itself (a defect in the harness that repairs PRs, not in the PR).
+    Source owner: src/run-task.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #8080: 3672.75 PR-hours — cao825: commit 43250a400 pushed to a fleet PR
+    - PR #7855: 1209.23 PR-hours — cao825: commit b9f64fb7c pushed to a fleet PR
+    - PR #7851: 941.83 PR-hours — cao825: commit e0e6131b5 pushed to a fleet PR
+    - PR #8197: 905.08 PR-hours — cao825: commit ac5201cae pushed to a fleet PR
+    - PR #7830: 673.90 PR-hours — cao825: commit 8316f5a55 pushed to a fleet PR
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.

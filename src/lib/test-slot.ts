@@ -18,7 +18,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { availableParallelism, hostname, loadavg, tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleepAsync } from "node:timers/promises";
@@ -175,6 +175,8 @@ export interface TestSlotHolder {
   ownerNonce?: string;
   processStart?: string;
   concurrency?: number;
+  /** The holder's pid namespace (`/proc/self/ns/pid`); a different one makes its pid unprobeable from here. */
+  pidNs?: string;
 }
 
 /** Kernel-derived start identity and parent, including on hosts without /proc. */
@@ -244,6 +246,16 @@ function inheritedTestSlot(dir: string): { lease?: TestSlotLease; rejected?: str
   }
 }
 
+/** This process's pid namespace, or undefined off Linux. A sandboxed worker (Codex's bwrap) gets its own. */
+export function readPidNamespace(path = "/proc/self/ns/pid"): string | undefined {
+  try {
+    return readlinkSync(path);
+  } catch {
+    // No /proc (macOS): every holder is judged by the pid probe, exactly as before this field existed.
+    return undefined;
+  }
+}
+
 export function readBootId(path: string = BOOT_ID_PATH): string | undefined {
   try {
     return readFileSync(path, "utf8").trim() || undefined;
@@ -277,6 +289,7 @@ export interface TestSlotOptions {
   hostname?: () => string;
   bootId?: () => string | undefined;
   isPidAlive?: (pid: number) => boolean;
+  pidNamespace?: () => string | undefined;
   pid?: number;
   load?: () => HostLoad;
   log?: (line: string) => void;
@@ -308,8 +321,12 @@ function sleepSync(ms: number): void {
  * TRAP: isHolderStale alone would call ANY container-id-shaped foreign host stale from inside a
  * container (it assumes an earlier boot of the same cell) — on a shared mount that is a live peer.
  */
-function testSlotHolderStale(held: TestSlotHolder, now: number, opts: Required<Pick<TestSlotOptions, "hostname" | "bootId" | "isPidAlive">>): boolean {
-  if (held.host === opts.hostname()) return isHolderStale(held, { isPidAlive: opts.isPidAlive, hostname: opts.hostname });
+function testSlotHolderStale(held: TestSlotHolder, now: number, opts: Required<Pick<TestSlotOptions, "hostname" | "bootId" | "isPidAlive" | "pidNamespace">>): boolean {
+  const myNs = opts.pidNamespace();
+  const foreignNs = held.pidNs !== undefined && myNs !== undefined && held.pidNs !== myNs;
+  // Same hostname but another pid namespace (two sandboxed workers in one container): the pid probe would read a
+  // live peer as dead, so it is aged like a foreign host's holder — boot id, then lease.
+  if (held.host === opts.hostname() && !foreignNs) return isHolderStale(held, { isPidAlive: opts.isPidAlive, hostname: opts.hostname });
   const mine = opts.bootId();
   if (held.bootId !== undefined && mine !== undefined && held.bootId !== mine) return true;
   return now - Date.parse(held.heartbeatAt) > TEST_SLOT_LEASE_MS;
@@ -348,6 +365,7 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
   const host = opts.hostname ?? hostname;
   const bootId = opts.bootId ?? (() => readBootId());
   const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive;
+  const pidNamespace = opts.pidNamespace ?? (() => readPidNamespace());
   const log = opts.log ?? ((line: string) => void process.stderr.write(`${line}\n`));
   const load = opts.load ?? readHostLoad;
   const { dir, scope } = opts.dir !== undefined ? { dir: opts.dir, scope: "configured" as const } : resolveTestSlotDir();
@@ -377,7 +395,7 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
   let concurrency = 1;
   const record = (): TestSlotHolder => ({
     pid: opts.pid ?? process.pid, host: host(), bootId: bootId(), startedAt: startedIso,
-    heartbeatAt: clock.iso(), label, ownerNonce, processStart, concurrency,
+    heartbeatAt: clock.iso(), label, ownerNonce, processStart, concurrency, pidNs: pidNamespace(),
   });
   let announced = false;
   try {
@@ -434,7 +452,7 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
           }
           const reclaim = reclaimStaleLock(path, {
             parseHolder: parseTestSlotHolder,
-            isStale: (held) => testSlotHolderStale(held, clock.now(), { hostname: host, bootId, isPidAlive }),
+            isStale: (held) => testSlotHolderStale(held, clock.now(), { hostname: host, bootId, isPidAlive, pidNamespace }),
             onLostReclaim: () => {},
           });
           if (reclaim.outcome === "live") {
