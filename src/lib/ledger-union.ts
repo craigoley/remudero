@@ -47,13 +47,35 @@ export interface LedgerGrepFsDeps {
   existsSync: (path: string) => boolean;
   readFileSync: (path: string) => Buffer;
   gunzipSync: (buf: Buffer) => Buffer;
+  /** Only {@link createIncrementalLedgerUnion} reads these; omitted, it uses the real file system. */
+  statSync?: (path: string) => { ino: number; size: number; mtimeMs: number };
+  /** Bytes `[start, end)` of `path`, or fewer when the file is shorter. */
+  readRangeSync?: (path: string, start: number, end: number) => Buffer;
 }
 
-export const realLedgerFs: LedgerGrepFsDeps = {
+function readRangeSync(path: string, start: number, end: number): Buffer {
+  const fd = nodeOpenSync(path, "r");
+  try {
+    const buf = Buffer.allocUnsafe(Math.max(0, end - start));
+    let at = 0;
+    while (at < buf.length) {
+      const read = nodeReadSync(fd, buf, at, buf.length - at, start + at);
+      if (read === 0) break;
+      at += read;
+    }
+    return buf.subarray(0, at);
+  } finally {
+    nodeCloseSync(fd);
+  }
+}
+
+export const realLedgerFs: Required<LedgerGrepFsDeps> = {
   readdirSync: (dir) => nodeReaddirSync(dir),
   existsSync: (path) => nodeExistsSync(path),
   readFileSync: (path) => nodeReadFileSync(path),
   gunzipSync: (buf) => nodeGunzipSync(buf),
+  statSync: (path) => nodeStatSync(path),
+  readRangeSync,
 };
 
 export interface LedgerUnionResult {
@@ -1616,33 +1638,6 @@ export function ledgerRotationDigests(
   return { rotationRecords, counts: () => ({ ...counts }) };
 }
 
-/** The file I/O {@link createIncrementalLedgerUnion} needs beyond a whole-file read. */
-export interface IncrementalLedgerFsDeps extends LedgerGrepFsDeps {
-  statSync: (path: string) => { ino: number; size: number; mtimeMs: number };
-  /** Bytes `[start, end)` of `path`, or fewer when the file is shorter. */
-  readRangeSync: (path: string, start: number, end: number) => Buffer;
-}
-
-export const realIncrementalLedgerFs: IncrementalLedgerFsDeps = {
-  ...realLedgerFs,
-  statSync: (path) => nodeStatSync(path),
-  readRangeSync: (path, start, end) => {
-    const fd = nodeOpenSync(path, "r");
-    try {
-      const buf = Buffer.allocUnsafe(Math.max(0, end - start));
-      let at = 0;
-      while (at < buf.length) {
-        const read = nodeReadSync(fd, buf, at, buf.length - at, start + at);
-        if (read === 0) break;
-        at += read;
-      }
-      return buf.subarray(0, at);
-    } finally {
-      nodeCloseSync(fd);
-    }
-  },
-};
-
 /** Bytes before the live file's read watermark that must still match before only its tail is read. */
 const LIVE_ANCHOR_BYTES = 64;
 
@@ -1677,8 +1672,10 @@ interface IncrementalUnionState {
  */
 export function createIncrementalLedgerUnion(
   opts: { holder: string; reducerVersion: string },
-  fsDeps: IncrementalLedgerFsDeps = realIncrementalLedgerFs,
+  fsDeps: LedgerGrepFsDeps = realLedgerFs,
 ): (stateDir: string, readOpts?: LedgerUnionRecordReadOptions) => LedgerUnionRecordRead {
+  const statSync = fsDeps.statSync ?? realLedgerFs.statSync;
+  const readRange = fsDeps.readRangeSync ?? realLedgerFs.readRangeSync;
   const states = new Map<string, IncrementalUnionState>();
   return (stateDir, readOpts = {}) => {
     const { step, refuseIncomplete, requireArchives, ...rest } = readOpts;
@@ -1694,7 +1691,7 @@ export function createIncrementalLedgerUnion(
     const keys = new Map<string, string>();
     for (const entry of rotations) {
       try {
-        const stat = fsDeps.statSync(entry.path);
+        const stat = statSync(entry.path);
         keys.set(entry.path, `${stat.size}:${stat.mtimeMs}`);
       } catch {
         // deliberate: an unstattable rotation is never memoized; the union's own read reports it unread.
@@ -1704,7 +1701,7 @@ export function createIncrementalLedgerUnion(
     let liveKey: string | undefined = "absent";
     try {
       if (fsDeps.existsSync(livePath)) {
-        const stat = fsDeps.statSync(livePath);
+        const stat = statSync(livePath);
         liveKey = `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
       }
     } catch {
@@ -1739,15 +1736,15 @@ export function createIncrementalLedgerUnion(
       return { rows, torn, tornLines };
     };
     const liveRecords = (path: string): LedgerRotationRecords => {
-      const stat = fsDeps.statSync(path);
+      const stat = statSync(path);
       const prior = state.live !== undefined && state.live.ino === stat.ino && stat.size >= state.live.committed ? state.live : undefined;
       let start = prior ? prior.committed - prior.anchor.length : 0;
-      let buf = fsDeps.readRangeSync(path, start, stat.size);
+      let buf = readRange(path, start, stat.size);
       let base = prior;
       if (prior && !buf.subarray(0, prior.anchor.length).equals(prior.anchor)) {
         base = undefined;
         start = 0;
-        buf = fsDeps.readRangeSync(path, 0, stat.size);
+        buf = readRange(path, 0, stat.size);
       }
       const body = base ? buf.subarray(base.anchor.length) : buf;
       const complete = body.subarray(0, body.lastIndexOf(0x0a) + 1);

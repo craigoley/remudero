@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import { buildDispatchValueContext, sortRowsByJson } from "../src/lib/dispatch-value.js";
 import {
-  createIncrementalLedgerUnion, readLedgerUnionRecordsSync, realIncrementalLedgerFs, type IncrementalLedgerFsDeps,
+  createIncrementalLedgerUnion, readLedgerUnionRecordsSync, realLedgerFs, type LedgerGrepFsDeps,
 } from "../src/lib/ledger-union.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import { dispatchValueContextForSelection } from "../src/run-task.js";
@@ -24,17 +24,17 @@ const STEPS = ["run.start", "verdict", "verdict.merged", "dispatch.cost_of_delay
 
 function countingFs() {
   const counts = { archiveReads: 0, digestReads: 0, gunzips: 0, liveReads: 0, rangeReads: 0, rangeBytes: 0 };
-  const fs: IncrementalLedgerFsDeps = {
-    ...realIncrementalLedgerFs,
+  const fs: LedgerGrepFsDeps = {
+    ...realLedgerFs,
     readFileSync: (path) => {
       if (path.includes("rotation-digests")) counts.digestReads += 1;
       else if (path.endsWith("ledger.ndjson")) counts.liveReads += 1;
       else if (/ledger\.[^/]*\.ndjson(\.gz)?$/.test(path)) counts.archiveReads += 1;
-      return realIncrementalLedgerFs.readFileSync(path);
+      return realLedgerFs.readFileSync(path);
     },
-    gunzipSync: (buf) => (counts.gunzips += 1, realIncrementalLedgerFs.gunzipSync(buf)),
+    gunzipSync: (buf) => (counts.gunzips += 1, realLedgerFs.gunzipSync(buf)),
     readRangeSync: (path, start, end) => {
-      const buf = realIncrementalLedgerFs.readRangeSync(path, start, end);
+      const buf = realLedgerFs.readRangeSync(path, start, end);
       counts.rangeReads += 1;
       counts.rangeBytes += buf.length;
       return buf;
@@ -221,22 +221,22 @@ test("the incremental union reads uncached for an option it does not cache, and 
   assert.deepEqual(pick(plain(fixture.dir, { step: STEPS, since })), pick(readLedgerUnionRecordsSync(fixture.dir, { step: STEPS, since })));
   assert.deepEqual(pick(plain(fixture.dir)), pick(readLedgerUnionRecordsSync(fixture.dir)), "an unfiltered read is never cached");
 
-  const rotationStatFails: IncrementalLedgerFsDeps = {
-    ...realIncrementalLedgerFs,
+  const rotationStatFails: LedgerGrepFsDeps = {
+    ...realLedgerFs,
     statSync: (path) => {
       if (path.endsWith(".ndjson.gz")) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
-      return realIncrementalLedgerFs.statSync(path);
+      return realLedgerFs.statSync(path);
     },
   };
   const unstattable = createIncrementalLedgerUnion({ holder: "dispatch-test", reducerVersion: "1" }, rotationStatFails);
   assert.deepEqual(pick(unstattable(fixture.dir, { step: STEPS, refuseIncomplete: true })), pick(whole(fixture.dir)),
     "a rotation it cannot stat is read in full, never memoized");
 
-  const liveStatFails: IncrementalLedgerFsDeps = {
-    ...realIncrementalLedgerFs,
+  const liveStatFails: LedgerGrepFsDeps = {
+    ...realLedgerFs,
     statSync: (path) => {
       if (path === fixture.path) throw Object.assign(new Error("EIO"), { code: "EIO" });
-      return realIncrementalLedgerFs.statSync(path);
+      return realLedgerFs.statSync(path);
     },
   };
   const failed = createIncrementalLedgerUnion({ holder: "dispatch-test", reducerVersion: "1" }, liveStatFails)(fixture.dir, { step: STEPS, refuseIncomplete: true });
@@ -247,7 +247,7 @@ test("the incremental union reads uncached for an option it does not cache, and 
 test("a ranged read past the end of a file returns the bytes that exist", (t) => {
   const fixture = writeLedger([{ ts: at(0), step: "run.start", run_id: "only" }]);
   t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
-  const size = realIncrementalLedgerFs.statSync(fixture.path).size;
-  assert.equal(realIncrementalLedgerFs.readRangeSync(fixture.path, 0, size + 100).length, size);
-  assert.equal(realIncrementalLedgerFs.readRangeSync(fixture.path, 5, 5).length, 0);
+  const size = realLedgerFs.statSync(fixture.path).size;
+  assert.equal(realLedgerFs.readRangeSync(fixture.path, 0, size + 100).length, size);
+  assert.equal(realLedgerFs.readRangeSync(fixture.path, 5, 5).length, 0);
 });
