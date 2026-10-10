@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator session 2026-10-10: core daemon loop-stall investigation (daemon.loop_lag 07:50-09:57Z), operator asked for flow improvements"
   plan_refs: [W1-T1055, W1-T3091, W1-T5689, W1-T5718, W1-T5965]
-  files: [src/lib/gardener.ts, src/lib/ci-friction-gardener.ts, src/lib/hot-file-gardener.ts, src/lib/flow-remedy-gardener.ts, src/lib/gate-gardener.ts, src/lib/flow-gardener.ts, src/lib/host-resource-gardener.ts, src/lib/scout-gardener.ts, src/run-task.ts, test/a-garden-filing-mints-its-task-id-off-the-daemon-loop.test.ts]
+  files: [src/lib/gardener.ts, src/lib/ci-friction-gardener.ts, src/lib/hot-file-gardener.ts, src/lib/flow-remedy-gardener.ts, src/lib/gate-gardener.ts, src/lib/flow-gardener.ts, src/lib/host-resource-gardener.ts, src/lib/scout-gardener.ts, src/run-task.ts, test/a-garden-filing-mints-its-task-id-off-the-daemon-loop.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts]
   status: queued
   priority: 1
   attempts: 0
@@ -47,6 +47,13 @@
 
     NOT IN SCOPE, NOTED: flow-remedy-gardener.ts:383 also runs `gitCiFrictionOwnerSearch` over a sync
     `execFileSync` git call inside the same apply. That is a second sync spawn, not a mint. It is a separate item.
+
+    CENSUS ROW (amended 2026-10-10). PR #10753 makes the sync-spawn census in
+    test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts exact: a loop-reachable count BELOW its
+    SYNC_SPAWN_LOOP_BASELINE row fails until the row is lowered, or deleted at 0, in the same PR. So this
+    build lowers the row of every site it converts (`ciLearningTaskIdMinter` and each gardener apply that stops minting synchronously) in that file, in the same PR.
+    The fix lane refuses to stage an undeclared path (W1-T4207), so the file is in `files:`. If #10753 has
+    not merged when this builds, lowering a row still passes the old census, so the step is correct either way.
 
     SERIALIZED: this task and W1-T7743 and W1-T7744 all edit src/run-task.ts, so W1-T7743 depends on this one and W1-T7744 on W1-T7743.
     Parallel agents editing one file broke main (#10349 and #10353 were each green and together reddened main,
