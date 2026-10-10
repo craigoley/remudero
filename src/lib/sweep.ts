@@ -4020,22 +4020,26 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     mergeQueue: (prUrl) => baseBranchRequiresMergeQueueAsync(prUrl, async (args) => ghAwaitForBuild(args)),
 
     // W1-T6022 — a source at one head never changes, so a read is kept; a failed one is not.
-    // W1-T7747: a kept source answers at once; a fresh read is awaited.
+    // W1-T7747: a kept source, or a sync test reader's, answers at once; a fresh async read is awaited.
     readPrFileSource: (pr, path) => {
       const key = `${owner}/${repo}@${pr.headSha}:${path}`;
       if (prFileSources.has(key)) return prFileSources.get(key);
-      return (async () => {
-        try {
-          const file = (await ghAwaitForBuild(["api", `repos/${owner}/${repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${pr.headSha}`])) as
-            { content?: unknown; encoding?: unknown } | undefined;
-          if (file?.encoding !== "base64" || typeof file.content !== "string") return undefined;
-          if (prFileSources.size >= 256) prFileSources.clear(); // BACKSTOP on memory, not a control
-          prFileSources.set(key, Buffer.from(file.content, "base64").toString("utf8"));
-          return prFileSources.get(key);
-        } catch {
-          return undefined; // unread: the ready arm names it ready-unknown, never "no overlap"
-        }
-      })();
+      const keep = (answer: unknown): string | undefined => {
+        const file = answer as { content?: unknown; encoding?: unknown } | undefined;
+        if (file?.encoding !== "base64" || typeof file.content !== "string") return undefined;
+        if (prFileSources.size >= 256) prFileSources.clear(); // BACKSTOP on memory, not a control
+        prFileSources.set(key, Buffer.from(file.content, "base64").toString("utf8"));
+        return prFileSources.get(key);
+      };
+      // unread: the ready arm names it ready-unknown, never "no overlap"
+      const unread = (_error: unknown): undefined => undefined;
+      let answer: unknown;
+      try {
+        answer = ghAwaitForBuild(["api", `repos/${owner}/${repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${pr.headSha}`]);
+      } catch (error) {
+        return unread(error);
+      }
+      return answer instanceof Promise ? answer.then(keep, unread) : keep(answer);
     },
 
     readyDraft: (pr) => readyDraftImpl(pr),
