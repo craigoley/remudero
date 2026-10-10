@@ -112,7 +112,7 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/benchmark-aa-readiness.ts": { count: 1, reason: "CHECKOUT: deriveRuntimePins reads the harness checkout it runs from (-C cwd)" },
   "src/lib/benchmark-run.ts": { count: 1, reason: "CHECKOUT: executingHarnessRevision reads the harness checkout (-C cwd)" },
   "src/lib/branch-reaper.ts": { count: 5, reason: "CHECKOUT: the reaper's injected exec(\"git\", …) steps run in the managed checkout" },
-  "src/lib/ci-friction-gardener.ts": { count: 3, reason: "CHECKOUT: gardener reads of the repo root (-C repoRoot/deps.repoRoot, run(\"git\", …))" },
+  "src/lib/ci-friction-gardener.ts": { count: 2, reason: "CHECKOUT: gardener reads of the repo root (-C repoRoot/deps.repoRoot, run(\"git\", …))" },
   "src/lib/ci-parity.ts": { count: 21, reason: "CHECKOUT: parity reads of the repo root (cwd: repoRoot) and runIsolatedLocalMergeRoute's own sandbox clone" },
   "src/lib/clone-reaper.ts": { count: 2, reason: "CHECKOUT: defaultOriginOf(Async) read a reaped clone's origin (-C dir)" },
   "src/lib/commit-message.ts": { count: 1, reason: "CHECKOUT: readRangeCommitMessages reads the repo root (cwd: repoRoot)" },
@@ -131,9 +131,9 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/feedback.ts": { count: 1, reason: "CHECKOUT: defaultUpstreamGit reads the repo root (-C root)" },
   "src/lib/fleet-control.ts": { count: 1, reason: "CHECKOUT: realSharedPauseGitDeps pushes the pause ref from the repo root" },
   "src/lib/fleet-lane.ts": { count: 1, reason: "CHECKOUT: mergedInLastDaySteps reads origin/main in the managed checkout" },
-  "src/lib/flow-remedy-gardener.ts": { count: 3, reason: "CHECKOUT: readPlan/flowGardenSpec read the repo root (-C repoRoot)" },
+  "src/lib/flow-remedy-gardener.ts": { count: 2, reason: "CHECKOUT: readPlan/ladderGardenSpec read the repo root (-C repoRoot)" },
   "src/lib/gardener-overseer.ts": { count: 1, reason: "CHECKOUT: productionGardenerOverseerPorts reads the repo root" },
-  "src/lib/gate-gardener.ts": { count: 2, reason: "CHECKOUT: defuseCandidates' run(\"git\", …) and gateGardenSpec read the repo root" },
+  "src/lib/gate-gardener.ts": { count: 1, reason: "CHECKOUT: defuseCandidates' run(\"git\", …) reads the repo root" },
   "src/lib/git-push.ts": {
     count: 6,
     reason:
@@ -142,7 +142,7 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   },
   "src/lib/hand-worktree.ts": { count: 5, reason: "CHECKOUT: findDonor/duplicateWork/createHandWorktree run against the source checkout (-C repoDir)" },
   "src/lib/host-resource-gardener.ts": { count: 1, reason: "CHECKOUT: gitHeartbeatSource reads the repo root" },
-  "src/lib/hot-file-gardener.ts": { count: 2, reason: "CHECKOUT: readMainHistory/hotFileGardenSpec read the repo root" },
+  "src/lib/hot-file-gardener.ts": { count: 1, reason: "CHECKOUT: readMainHistory reads the repo root" },
   "src/lib/image-drift.ts": { count: 1, reason: "CHECKOUT: defaultGit reads the managed checkout (-C repoDir)" },
   "src/lib/inbox.ts": {
     count: 2,

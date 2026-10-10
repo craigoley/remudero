@@ -1,0 +1,56 @@
+- id: W1-T7745
+  title: "A LOOP-LAG ROW NAMES THE CALLER BEHIND THE LEAF, AND ONLY ITS OWN INTERVAL'S SPAWNS — on 2026-10-10 about 120 of 171 `sync_spawn_top` entries named a shared leaf (`hostWorktreeGit`, `ghExecFile`, a default git runner), not the code that called it; `peek` reads a window that only `daemon.alive` resets; and no `loop_lag` row says how much of its lag was sync spawn"
+  repo: remudero
+  depends_on: [W1-T7743]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — what a loop-lag row attributes; every later stall diagnosis reads it
+  band_meaning: span
+  origin: "operator session 2026-10-10: core daemon loop-stall investigation (daemon.loop_lag 07:50-09:57Z), operator asked for flow improvements"
+  plan_refs: [W1-T5718, W1-T4041, W1-T4075, W1-T5689]
+  files: [src/lib/read-plane.ts, src/lib/daemon.ts, test/a-loop-lag-row-names-the-caller-behind-the-leaf.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-10 on the core daemon. Between 07:50 and 09:57Z there were 10 `daemon.loop_lag` stalls,
+    about 5,990 s. About 53 min of that is unattributed. Of 171 `sync_spawn_top` entries, about 120 name a shared
+    leaf as the caller, so the code that reached the leaf is unknown. `ghExecFile` alone accounts for 13 entries
+    whose callers cannot be named.
+
+    READ on origin/main 4e1831b94 (src/lib/read-plane.ts, W1-T5718).
+    - `callerFrame` (read-plane.ts:33) takes the first stack frame outside read-plane and `node:`. For a call
+      through `hostWorktreeGit` (worktree-git.ts), `ghExecFile`/`ghExec`/`ghJson` (github-transport.ts) or a
+      default runner arrow such as `loadPlanAtRef`'s (plan.ts), that frame is the leaf.
+    - `peek` (read-plane.ts:92) returns `top[0]` of the window that only `sample()` resets, and `sample()` belongs
+      to `daemon.alive`. Two `loop_lag` rows between alive samples can therefore both name the same spawn, and a
+      lag can be blamed on a spawn from before it.
+    - `reportLoopLag` (src/lib/daemon.ts:1613) writes `sync_spawn_top` from `peekSyncSpawnTop` (:1589). It has no
+      `sync_spawn_ms`, so a row cannot say how much of its own lag was sync spawn and how much was something else.
+
+    SERIALIZED: depends on W1-T7743 because both edit src/lib/daemon.ts. W1-T7746 depends on this one. Parallel agents
+    editing one file broke main (#10349 and #10353 were each green and together reddened main, 2026-10-09).
+  design: |
+    1. Each entry records `caller` as the first frame outside the shared spawn leaves, and keeps the leaf as
+       `leaf`. The leaves are the transport and git-leaf modules (worktree-git, github-transport, and plan's
+       default runner); the leaf set is declared once in read-plane.ts and exported. An entry with no frame
+       outside the leaves keeps `caller` equal to the leaf and says `caller_is_leaf: true`.
+    2. A lag-interval window, separate from the alive window. `peek` is replaced by a take that returns this
+       interval's top entry and its `sync_spawn_ms`, then resets them. `sample()` and `daemon.alive` keep their
+       own window, unchanged.
+    3. Every `daemon.loop_lag` row carries `sync_spawn_ms` for its own interval beside `sync_spawn_top`.
+  acceptance:
+    - claim: "a synchronous spawn made through hostWorktreeGit from a named function records that function as caller and hostWorktreeGit as leaf"
+      proof: 'grep: test("W1-T7745: a spawn through hostWorktreeGit records the calling function as caller and the leaf as leaf" in test/a-loop-lag-row-names-the-caller-behind-the-leaf.test.ts'
+    - claim: "a synchronous spawn made through ghExecFile records the calling function, not ghExecFile"
+      proof: 'grep: test("W1-T7745: a spawn through ghExecFile records the calling function as caller" in test/a-loop-lag-row-names-the-caller-behind-the-leaf.test.ts'
+    - claim: "a second loop-lag interval with no spawn names none, even before daemon.alive samples"
+      proof: 'grep: test("W1-T7745: a later lag interval with no spawn names none before the alive sample" in test/a-loop-lag-row-names-the-caller-behind-the-leaf.test.ts'
+    - claim: "each daemon.loop_lag row carries sync_spawn_ms for its own interval"
+      proof: 'grep: test("W1-T7745: each loop_lag row carries the sync_spawn_ms of its own interval" in test/a-loop-lag-row-names-the-caller-behind-the-leaf.test.ts'
+  falsifier: |
+    Keep `callerFrame`'s first-non-read-plane rule: the first two tests read the leaf as caller. Keep `peek` on
+    the alive window: the third test's second interval names the first interval's spawn. Leave `reportLoopLag`
+    without `sync_spawn_ms`: the fourth test finds no field.
