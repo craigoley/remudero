@@ -145,8 +145,7 @@ function reasonOf(error: unknown): string {
 
 const demandDiagnosticsSeen = new Set<string>();
 
-function diagnose(opts: ReviewDemandOptions, op: string, error: unknown): void {
-  const reason = reasonOf(error);
+function diagnose(opts: ReviewDemandOptions, op: string, reason: string): void {
   const key = `${op}:${reason}`;
   if (demandDiagnosticsSeen.has(key)) return;
   demandDiagnosticsSeen.add(key);
@@ -190,7 +189,8 @@ export function publishReviewDemand(demand: ReviewDemand, opts: ReviewDemandOpti
     write(path, `${JSON.stringify(row)}\n`);
     return row;
   } catch (error) {
-    diagnose(opts, "publish", error);
+    const reason = reasonOf(error);
+    diagnose(opts, "publish", reason);
     return undefined;
   }
 }
@@ -213,7 +213,7 @@ export function readReviewDemand(opts: ReviewDemandOptions = {}): ReviewDemandRe
     names = (opts.list ?? ((d: string) => readdirSync(d)))(dir).filter((name) => name.endsWith(".json"));
   } catch (error) {
     if (errnoOf(error) === "ENOENT") return { state: "missing", reason: "no review demand has been published", rows: [], unreadableRows: 0 };
-    diagnose(opts, "list", error);
+    diagnose(opts, "list", reasonOf(error));
     return { state: "unreadable", reason: reasonOf(error), rows: [], unreadableRows: 0 };
   }
   const read = opts.read ?? ((path: string) => readFileSync(path, "utf8"));
@@ -454,7 +454,7 @@ export function zeroWorkerShortfallMib(sample: ZeroWorkerSample): number | undef
   return shortfall > 0 ? shortfall : undefined;
 }
 
-export const CAPACITY_LEVERS = [
+export const SHORTFALL_LEVERS = [
   "a smaller service baseline (serve or a daemon)",
   "less concurrency (fewer instances or narrower lanes)",
   "more RAM for the host",
@@ -494,7 +494,7 @@ export function createShortfallTracker(): ShortfallTracker {
         shortfallMib: s.worstMib,
         shortfallGb: Math.round((s.worstMib / 1024) * 10) / 10,
         samples: s.samples,
-        levers: CAPACITY_LEVERS,
+        levers: SHORTFALL_LEVERS,
       };
     },
   };

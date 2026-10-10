@@ -56,7 +56,7 @@ export const SHADOW_SUMMARY_STEP = "memory_budget.shadow_summary";
 /** W1-T7095: one machine-owned row per (class, instance, reason) of would-be deferral. Never an escalation. */
 export const SHADOW_DEFERRAL_STEP = "memory_budget.deferral_summary";
 /** W1-T7095: a sustained zero-worker shortfall, queued once per scenario for the sweep's escalation path. */
-export const SHADOW_CAPACITY_DECISION_STEP = "memory_budget.capacity_decision";
+export const SHADOW_SHORTFALL_DECISION_STEP = "memory_budget.capacity_decision";
 
 // ── policy ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -805,10 +805,11 @@ function recordDiagnostics(
     }, ports.priorityPolicy());
     if (decision) {
       queueCapacityDecision(decision);
-      ports.write?.(ledgerPath, { ...base, step: SHADOW_CAPACITY_DECISION_STEP, counterfactual: true, ...decision });
+      ports.write?.(ledgerPath, { ...base, step: SHADOW_SHORTFALL_DECISION_STEP, counterfactual: true, ...decision });
     }
   } catch (error) {
-    logShadowError(ports, start, ledgerPath, `diagnostics:${reasonOf(error)}`);
+    const reason = `diagnostics:${reasonOf(error)}`;
+    logShadowError(ports, start, ledgerPath, reason);
   }
 }
 
