@@ -6,7 +6,7 @@
 // FIXTURES ONLY: every slot dir and admission dir lives under this test's tmp dirs; no seam reads the real host.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -131,6 +131,7 @@ test("a hand-run runner's file child waits while the headroom cannot hold it bes
   assert.equal(admission.outcome, "admitted");
   assert.deepEqual(reads.slice(1), [0.9 * GiB, 1.0 * GiB], "waited at 0.9 GiB, admitted once 1.0 GiB held 936 MiB");
   assert.deepEqual(JSON.parse(readFileSync(join(dir, "seq-3"), "utf8")), { pid: 201, start: "s201", state: "running" });
+  assert.equal(statSync(join(dir, "seq-3")).mode & 0o777, 0o600, "a ticket is owner-only");
   admission.release();
   assert.deepEqual(readdirSync(dir).sort(), ["seq-1", "seq-2"]);
 });
@@ -179,6 +180,10 @@ test("only a node --test runner's own file child queues: no reading, no runner c
   writeFileSync(blocked, "");
   const unqueued = await admitTestFile(child(join(blocked, "under-a-file"), { sleep: never }));
   assert.equal(unqueued.outcome, "unqueued", "an unusable admission dir runs the file and names why");
+  const shared = scratch(t, "admit-shared");
+  chmodSync(shared, 0o755);
+  assert.equal((await admitTestFile(child(shared, { sleep: never }))).outcome, "unqueued", "a dir other users can read is never trusted");
+  assert.deepEqual(readdirSync(shared), [], "and nothing is written into it");
 });
 
 test("the setup preload every runner child loads awaits file admission before any test file is imported", () => {

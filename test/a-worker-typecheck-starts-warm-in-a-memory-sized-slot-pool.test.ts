@@ -31,6 +31,9 @@ const SOURCES: Record<string, string> = {
   ".gitignore": "node_modules\n*.tsbuildinfo\n",
 };
 const GiB = 1024 ** 3;
+/** Every slot acquisition and tsc entrypoint here reads an INJECTED headroom that holds any peak, so a low-headroom
+ *  runner (a worker in the core container) neither waits out the slot bound nor gets the low-memory tsc flags. */
+const ROOMY = { memoryHeadroom: () => 64 * GiB };
 
 /** A slot dir of this test's own, named in the env too, with two slots — so no run here can wait on the host's. */
 function slotPool(t: TestContext): string {
@@ -106,7 +109,7 @@ test("cutting a worktree from the managed clone publishes the install root's typ
   const slots = slotPool(t);
   const host = fleetHost(t);
   // The install root's own check writes the only buildinfo on the host, as the sweep's merge probe does on the fleet.
-  assert.equal(runTypecheck(host.install, [], { spawn: realTsc(), log: () => {} }), 0);
+  assert.equal(runTypecheck(host.install, [], { spawn: realTsc(), testSlot: ROOMY, log: () => {} }), 0);
   assert.ok(existsSync(join(host.install, ".git", TYPECHECK_BUILDINFO_NAME)), "the install root holds a buildinfo");
   const seed = join(host.managed, ".git", TYPECHECK_BUILDINFO_NAME);
   assert.equal(existsSync(seed), false, "the managed clone starts with none");
@@ -123,7 +126,7 @@ test("cutting a worktree from the managed clone publishes the install root's typ
   const lines: string[] = [];
   const seen: string[][] = [];
   const code = runTypecheck(wt, [], {
-    spawn: realTsc(seen), canWrite, log: (line) => lines.push(line),
+    spawn: realTsc(seen), canWrite, testSlot: ROOMY, log: (line) => lines.push(line),
     acquireSlot: () => assert.fail("a warm first check must not wait for a slot"),
   });
   assert.equal(code, 0, lines.join("\n"));
@@ -140,7 +143,7 @@ test("the managed clone's seed is refreshed only when the install root's buildin
   assert.equal(refreshCanonicalSeed(wt), "no-seed", "the tree links no install yet");
   symlinkSync(join(host.install, "node_modules"), join(wt, "node_modules"));
   assert.equal(refreshCanonicalSeed(wt), "no-seed", "the install root has no buildinfo to give");
-  assert.equal(runTypecheck(host.install, [], { spawn: realTsc(), log: () => {}, acquireSlot: () => ({ outcome: "acquired", concurrency: 1, waitedMs: 0, note: "", refresh: () => {}, release: () => {} }) }), 0);
+  assert.equal(runTypecheck(host.install, [], { spawn: realTsc(), testSlot: ROOMY, log: () => {}, acquireSlot: () => ({ outcome: "acquired", concurrency: 1, waitedMs: 0, note: "", refresh: () => {}, release: () => {} }) }), 0);
   assert.equal(refreshCanonicalSeed(wt), "published");
   assert.equal(refreshCanonicalSeed(wt), "kept", "a seed at least as new as the donor's is left alone");
   const donor = join(host.install, ".git", TYPECHECK_BUILDINFO_NAME);
@@ -158,7 +161,7 @@ test("a cold typecheck waits while the memory headroom cannot hold its peak plus
   const project = projectWithLane(t);
   // A sandboxed worker's cold check already holds a slot: another pid namespace, its peak named in the record.
   const peer = acquireTestSlot(NPM_TYPECHECK_SLOT_LABEL, {
-    dir: slots, slots: 2, memoryBytes: TYPECHECK_COLD_PEAK_BYTES, pidNamespace: () => "pid:[4026532001]", log: () => {},
+    ...ROOMY, dir: slots, slots: 2, memoryBytes: TYPECHECK_COLD_PEAK_BYTES, pidNamespace: () => "pid:[4026532001]", log: () => {},
   });
   assert.equal(peer.outcome, "acquired");
   const during: Array<Array<{ label: string; memoryBytes?: number }>> = [];
@@ -189,8 +192,8 @@ test("a cold typecheck waits while the memory headroom cannot hold its peak plus
   assert.match(alone.join("\n"), /"slot":"acquired"/, "with no other holder the first run always goes");
 
   // A DEAD costed holder never keeps the pool shut: it is reclaimed even while memory closes the free slot beside it.
-  const filler = acquireTestSlot("suite", { dir: slots, slots: 2, log: () => {} });
-  acquireTestSlot(NPM_TYPECHECK_SLOT_LABEL, { dir: slots, slots: 2, memoryBytes: TYPECHECK_COLD_PEAK_BYTES, pid: 999_999, log: () => {} });
+  const filler = acquireTestSlot("suite", { ...ROOMY, dir: slots, slots: 2, log: () => {} });
+  acquireTestSlot(NPM_TYPECHECK_SLOT_LABEL, { ...ROOMY, dir: slots, slots: 2, memoryBytes: TYPECHECK_COLD_PEAK_BYTES, pid: 999_999, log: () => {} });
   filler.release();
   const revived: string[] = [];
   const deadPeer = { ...tight, isPidAlive: () => false };
@@ -234,13 +237,13 @@ test("rmd preflight's typecheck in a sandbox whose git dir is read-only keeps it
     const r = spawnSync(file, [...args], { cwd: options?.cwd, encoding: "utf8" });
     return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   };
-  const step = typecheckStep(project.lane, spawn, { dir: slots, log: () => {} }, canWrite);
+  const step = typecheckStep(project.lane, spawn, { ...ROOMY, dir: slots, log: () => {} }, canWrite);
   assert.equal(step.ok, true, step.detail);
   const buildInfo = join(project.lane, WORKTREE_BUILDINFO_NAME);
   assert.deepEqual(seen, [["-p", "tsconfig.json", "--noEmit", "--incremental", "--tsBuildInfoFile", buildInfo]]);
   assert.ok(existsSync(buildInfo), "tsc wrote the worktree's buildinfo");
   assert.ok(!existsSync(join(project.laneGitDir, TYPECHECK_BUILDINFO_NAME)), "nothing was written into the read-only git dir");
-  assert.equal(typecheckStep(project.lane, spawn, { dir: slots, log: () => {} }, () => false).ok, true, "nowhere writable runs the plain check");
+  assert.equal(typecheckStep(project.lane, spawn, { ...ROOMY, dir: slots, log: () => {} }, () => false).ok, true, "nowhere writable runs the plain check");
   assert.deepEqual(seen.at(-1), ["-p", "tsconfig.json", "--noEmit"]);
   assert.deepEqual(heldRecords(slots), []);
 });

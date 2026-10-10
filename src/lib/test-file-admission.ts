@@ -18,7 +18,7 @@
  * time; a sibling that died (pid gone or reused) is ignored, never waited on.
  */
 import { createHash } from "node:crypto";
-import { linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { setTimeout as sleepAsync } from "node:timers/promises";
@@ -134,16 +134,26 @@ export async function admitTestFile(opts: TestFileAdmissionOptions = {}): Promis
     path = undefined;
   };
   try {
-    // Claim the next sequence number atomically: the ticket is complete before link(2) makes it visible.
-    const draft = join(tmpdir(), `${RMD_TMP_PREFIX}test-admit-ticket-${pid}`);
+    // Claim the next sequence number atomically: the ticket is complete before link(2) makes it visible. Everything
+    // lives in a directory private to this user (0700, verified), each file owner-only and created fresh, so another
+    // user of a shared temp dir can neither read, pre-plant nor swap a ticket.
+    const draft = join(dir, `.draft-${pid}`);
     const ticket = (state: Ticket["state"]) => JSON.stringify({ pid, start, state });
-    writeFileSync(draft, ticket("waiting"));
+    const writeFresh = (file: string, body: string) => {
+      rmSync(file, { force: true });
+      writeFileSync(file, body, { flag: "wx", mode: 0o600 });
+    };
     let seq = 0;
     try {
       for (;;) {
-        mkdirSync(dir, { recursive: true });
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+        const st = lstatSync(dir);
+        if (!st.isDirectory() || st.uid !== process.getuid?.() || (st.mode & 0o077) !== 0) {
+          throw new Error(`${dir} is not a private directory of this user`);
+        }
         seq = Math.max(seq, ...readTickets(dir).map((t) => t.seq)) + 1;
         try {
+          writeFresh(draft, ticket("waiting"));
           linkSync(draft, join(dir, `seq-${seq}`));
           path = join(dir, `seq-${seq}`);
           break;
@@ -153,7 +163,7 @@ export async function admitTestFile(opts: TestFileAdmissionOptions = {}): Promis
         }
       }
     } finally {
-      unlinkSync(draft);
+      rmSync(draft, { force: true });
     }
     let announced = false;
     for (;;) {
@@ -164,7 +174,7 @@ export async function admitTestFile(opts: TestFileAdmissionOptions = {}): Promis
       const need = running.reduce((sum, t) => sum + Math.max(0, perFile - (rss(t.pid) ?? 0)), perFile);
       if (ahead.length === 0 && (room === undefined || room >= need)) {
         const promoted = `${path}.running`;
-        writeFileSync(promoted, ticket("running"));
+        writeFresh(promoted, ticket("running"));
         renameSync(promoted, path!);
         const waitedMs = now() - startedAt;
         if (announced) log(JSON.stringify({ step: "test_file_admission.admitted", pid, waitedMs }));
