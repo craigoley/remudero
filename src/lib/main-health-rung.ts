@@ -20,7 +20,8 @@ import {
   mainGuardFailureCandidates,
   mainHealthEscalationDecision,
   mainHealthFallbackCandidates,
-  mainHealthFallbackRuns,
+  mainHealthWalkRuns,
+  mainRunIsInProgress,
   mainHealthFromRollup,
   mainHealthHeadInconclusive,
   requeuedCheckKeysFromLedger,
@@ -450,6 +451,11 @@ function metPrFields(lookup: MetPrLookup | undefined): Record<string, unknown> {
   return lookup?.unreadable ? { met_prs_unreadable: lookup.unreadable } : {};
 }
 
+/** W1-T7757: a job that reached a conclusion (or a terminal status), as opposed to one still queued or running. */
+function jobConcluded(job: RollupCheckEntry): boolean {
+  return (job.conclusion ?? "") !== "" || (job.state ?? "") !== "" || (job.status ?? "").toUpperCase() === "COMPLETED";
+}
+
 function judgedRollup(rollup: readonly RollupCheckEntry[], required: ReadonlySet<string>): RollupCheckEntry[] {
   return required.size === 0
     ? [...rollup]
@@ -507,9 +513,9 @@ function mainPushRunHistoryFromResponse(response: WorkflowRunHistoryResponse): M
   return (response.workflow_runs ?? [])
     .map((run): MainHealthRunHistoryEntry | undefined => {
       if (typeof run.head_sha !== "string" || run.head_sha.trim() === "") return undefined;
-      // W1-T6023: a queued or running run concluded nothing. A run with no `status` field at all is
-      // kept: it decides nothing anyway unless it carries a `conclusion`.
-      if (typeof run.status === "string" && run.status !== "completed") return undefined;
+      // W1-T7757: a queued or running run is KEPT, marked by its `status`, because its required jobs
+      // may have concluded already. It carries no `conclusion`, so every reader of a run's verdict
+      // (the guards, the first-red search, the latency samples) still sees completed runs only.
       const pullRequests = (run.pull_requests ?? [])
         .map((pr) => ({
           ...(typeof pr.number === "number" ? { number: pr.number } : {}),
@@ -522,6 +528,7 @@ function mainPushRunHistoryFromResponse(response: WorkflowRunHistoryResponse): M
         ...(typeof run.id === "number" ? { runId: run.id } : {}),
         ...(typeof run.run_attempt === "number" ? { runAttempt: run.run_attempt } : {}),
         ...(typeof run.conclusion === "string" ? { conclusion: run.conclusion } : {}),
+        ...(typeof run.status === "string" ? { status: run.status } : {}),
         ...(typeof run.html_url === "string" ? { url: run.html_url } : {}),
         ...(pullRequests.length > 0 ? { pullRequests } : {}),
         ...(typeof run.created_at === "string" ? { createdAt: run.created_at } : {}),
@@ -950,7 +957,8 @@ export function buildMainHealthRung(
       let recentShas = runHistoryCache?.recentShas;
       const guardNeedsWindow = runHistory && mainGuardFailureCandidates(runHistory).length > 0;
       if (runHistory && !recentShas && (guardNeedsWindow ||
-        (mainHealthHeadInconclusive(observation) && mainHealthFallbackCandidates(runHistory).length > 0))) {
+        (mainHealthHeadInconclusive(observation) &&
+          (mainHealthFallbackCandidates(runHistory).length > 0 || runHistory.some(mainRunIsInProgress))))) {
         try {
           recentShas = await readMainFirstParentWindow(owner, repo, sha, deps.fetch);
           if (runHistoryCache) runHistoryCache.recentShas = recentShas;
@@ -977,12 +985,15 @@ export function buildMainHealthRung(
         const requiredKey = [...required].sort().join(",");
         if (workflowEvidence?.required !== requiredKey) workflowEvidence = { required: requiredKey, carries: new Set(), carriesNone: new Set() };
         const learned = workflowEvidence;
-        const { runs, skipped } = mainHealthFallbackRuns(runHistory, recentShas.shas, Number.POSITIVE_INFINITY);
+        const { runs, skipped } = mainHealthWalkRuns(runHistory, recentShas);
         let decidedBy: MainHealthRunHistoryEntry | undefined;
+        // W1-T7757: the newest commit passed over because a required check of it is still running.
+        let pendingCommit: { sha: string; checks: readonly string[] } | undefined;
         for (const run of runs) {
           const workflow = run.workflowName;
           if (workflow !== undefined && learned.carriesNone.has(workflow) && !learned.carries.has(workflow)) continue;
           const jobsKey = `${run.runId}#${run.runAttempt ?? 1}`;
+          const running = mainRunIsInProgress(run);
           let jobs: RollupCheckEntry[];
           try {
             jobs =
@@ -990,7 +1001,8 @@ export function buildMainHealthRung(
               rollupFromJobs(
                 (await deps.fetch(["api", `repos/${owner}/${repo}/actions/runs/${run.runId}/jobs?per_page=100`])) as WorkflowJobsResponse,
               );
-            runHistoryCache?.jobsByRunId.set(jobsKey, jobs);
+            // W1-T7757: only a run whose required jobs have all concluded is cached; a pending run is read again.
+            if (!running || judgedRollup(jobs, required).every(jobConcluded)) runHistoryCache?.jobsByRunId.set(jobsKey, jobs);
           } catch (error) {
             deps.log("main.health.completed_run_unreadable", {
               branch,
@@ -1002,15 +1014,26 @@ export function buildMainHealthRung(
             break;
           }
           if (judgedRollup(jobs, required).length === 0) {
-            if (workflow !== undefined && jobs.length > 0) learned.carriesNone.add(workflow);
+            // A running run's required jobs may simply not have registered yet: that proves nothing
+            // about the workflow, unless it is already known to carry required checks (then it is pending).
+            if (running && workflow !== undefined && learned.carries.has(workflow)) {
+              if (run.headSha !== sha) pendingCommit ??= { sha: run.headSha, checks: [] };
+            }
+            else if (!running && workflow !== undefined && jobs.length > 0) learned.carriesNone.add(workflow);
             continue;
           }
           if (workflow !== undefined) learned.carries.add(workflow);
           const fallback = mainHealthFromRollup(sha, jobs, judgedAgainst, undefined, judging);
           if (fallback.state === "undetermined") {
-            walkedPast += 1;
+            // A running commit with a required check still going decides nothing YET: remembered, and the
+            // walk continues to older evidence. Never green; a red below it is still its own concluded red.
+            // The head's own pending run is the reason the walk started (W1-T5490): it is not "newer than" the head.
+            if (running && fallback.pendingChecks.length > 0) {
+              if (run.headSha !== sha) pendingCommit ??= { sha: run.headSha, checks: fallback.pendingChecks };
+            } else walkedPast += 1;
             continue;
           }
+          const pending = pendingCommit !== undefined && pendingCommit.sha !== run.headSha ? pendingCommit : undefined;
           const evidenceWorkflows = new Set([...learned.carries, run.workflowName ?? ""]);
           evidenceAge = mainEvidenceAge(run.headSha, recentShas, runHistory, evidenceWorkflows, startedAtMs);
           const where = evidenceAge.depth > 0 ? `, ${evidenceAge.depth} first-parent commit(s) behind the head` : "";
@@ -1020,7 +1043,19 @@ export function buildMainHealthRung(
               `main's head carries no genuine evidence (${headReason}); the latest completed main run (${run.headSha}) ` +
               `decides, the newest main commit with genuine evidence${where}: ${fallback.reason}`,
           };
-          if (fallback.state === "green" && evidenceAge.freshness === "stale") {
+          if (pending && fallback.state === "green") {
+            // W1-T7757: a newer commit is still running its required checks, so an older green is not main's state.
+            observation = {
+              ...observation,
+              state: "undetermined",
+              pendingChecks: [...pending.checks],
+              reason:
+                `pending: ${pending.sha} still has required check(s) running${pending.checks.length > 0 ? ` (${pending.checks.join(", ")})` : ""} — ` +
+                `undetermined, not green; the older evidence is green at ${run.headSha}: ${fallback.reason}`,
+            };
+          } else if (pending && fallback.state === "red") {
+            observation = { ...observation, reason: `${observation.reason} (newer commit ${pending.sha} is still running its required checks)` };
+          } else if (fallback.state === "green" && evidenceAge.freshness === "stale") {
             const cadence = evidenceAge.mergeCadenceMs !== undefined ? ` at a median ${minutes(evidenceAge.mergeCadenceMs)} between merges` : "";
             observation = {
               ...observation,

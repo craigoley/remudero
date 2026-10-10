@@ -67,6 +67,10 @@ async function observe(options: Options) {
         const jobsOf = /actions\/runs\/(\d+)\/jobs\?/.exec(path)?.[1];
         if (jobsOf) {
           const conclusion = options.jobs?.[Number(jobsOf)] ?? "success";
+          // W1-T7757: the head's run is still in progress, so its job has not concluded.
+          if (HEAD_RUNS.some((r) => r.id === Number(jobsOf) && r.status === "in_progress")) {
+            return { jobs: [{ id: Number(jobsOf), name: "ci", status: "in_progress", conclusion: null }] };
+          }
           return { jobs: [{ id: Number(jobsOf), name: "ci", status: "completed", conclusion }] };
         }
         throw new Error(`unrouted: ${path}`);
