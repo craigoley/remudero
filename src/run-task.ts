@@ -40759,7 +40759,7 @@ export async function serveCommand(
     // an unconfigured install, identity is never consulted, exactly as before.
     identity,
     log,
-    consoleSnapshots: { dir: join(config.root, "state", "console-snapshots"), prewarmPaths: ["/v1/operator-activity", "/v1/action-results"] },
+    consoleSnapshots: { dir: join(config.root, "state", "console-snapshots") },
     projectionWorker: consoleProjectionWorker(),
     readModel: deps.buildBatchedGithub ? {} : { slowLane: { inbox: { root: repoRoot, planPath, ledgerPath, inboxRoot: config.root, repository: `${self.owner}/${self.repo}` },
       accountUsage: { ledgerPath, root: config.root, accountFilePath: resolveAccountFilePath(undefined) } } },
