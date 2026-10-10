@@ -128,7 +128,7 @@ test("census swaps require cleared reds and consecutive rounds joined by a pushe
   assert.equal(swapped(three).length, 2);
 });
 
-test("the native evidence reader shells through the transport at the exact recorded head", t => {
+test("the native evidence reader uses the async transport at the exact recorded head", async t => {
   const shim = ghShim([
     { when: "contents/src/lib/reader.ts?ref=old", stdout: JSON.stringify({ encoding: "base64", content: Buffer.from(source).toString("base64") }) },
     { when: "commits/old/check-runs", stdout: JSON.stringify([{ check_runs: [
@@ -148,7 +148,7 @@ test("the native evidence reader shells through the transport at the exact recor
   process.env.RMD_GH_CACHE_HOME = join(shim.dir, "cache");
   process.env.RMD_GH_SHARED_READ_GAP_MS = "0";
   t.after(() => { for (const [key, value] of saved) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
-  const native = gardener.readFixLaneEvidence({ owner: "acme", repo: "remudero" });
+  const native = await gardener.readFixLaneEvidence({ owner: "acme", repo: "remudero" }, rows());
   assert.equal(defectEventsOf(rows(), NOW, native).filter(e => e.key === "coverage-unseamed-catch").length, 1);
   assert.deepEqual(shim.calls().map(c => c.replace(/^api /, "")), [
     "repos/acme/remudero/commits/old/check-runs?per_page=100 --paginate --slurp",
@@ -156,9 +156,9 @@ test("the native evidence reader shells through the transport at the exact recor
     "repos/acme/remudero/actions/jobs/47/logs", "repos/acme/remudero/contents/src/lib/reader.ts?ref=old",
   ]);
   shim.addRoute({ when: "contents/", stdout: "{}" });
-  assert.throws(() => native.readHeadSource!("old", "src/lib/reader.ts"), /fix-lane source unreadable.*reader.ts@old/);
+  await assert.rejects(() => gardener.readFixLaneEvidence({ owner: "acme", repo: "remudero" }, rows()), /fix-lane source unreadable.*reader.ts@old/);
   shim.addRoute({ when: "check-runs", stderr: "denied", exit: 1 });
-  assert.throws(() => native.readCoverageLog!("old"), /denied/);
+  await assert.rejects(() => gardener.readFixLaneEvidence({ owner: "acme", repo: "remudero" }, rows()), /denied/);
 });
 
 test("a garden pass reuses each head's evidence and an unreadable head stops measurement", () => {

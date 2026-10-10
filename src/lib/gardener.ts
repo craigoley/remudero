@@ -313,6 +313,8 @@ export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W ex
   decision?: readonly C[];
   cheapFingerprint: () => string;
   inventory: () => I;
+  /** Daemon-only inventory work that needs network or another awaited read; sync callers remain fail-closed. */
+  inventoryAsync?: () => Promise<I>;
   fingerprint: (inventory: I) => string;
   /** True when the inventory itself shows the work is still undone (a ci-friction cause no plan task
    *  tracks), so a matching fingerprint from a pass that landed nothing is not trusted as done. */
@@ -845,7 +847,7 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
   const failurePath = gardenInventoryFailurePath(deps.stateDir, spec.name);
   let inventory: I;
   try {
-    inventory = spec.inventory();
+    inventory = yield* step(() => spec.inventoryAsync?.() ?? spec.inventory());
   } catch (e) {
     const at = clock.iso();
     const streak: GardenInventoryFailure = { cheap, firstAt: failure?.firstAt ?? at, lastAt: at, count: (failure?.count ?? 0) + 1,

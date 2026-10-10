@@ -24,7 +24,7 @@ import type { CiFrictionPlanState } from "./ci-friction-gardener.js";
 import type { OwnerSearch } from "./ci-friction-remedy.js";
 import type { Escalation } from "./escalate.js";
 import type { GardenerDeps } from "./gardener.js";
-import { ghExec } from "./github-transport.js";
+import { ghExec, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import {
   episodesOf, ladderGardenSpec, ladderOf, markEligibility, readLadderPlan, readLadderRecords, readOutcomes, reasonClass,
   type Charge, type Episode, type FlowAction, type Inventory, type LadderKind, type PrOutcome,
@@ -229,26 +229,67 @@ function unseamedCoverage(r: LedgerRecord, sources: FixLaneEvidence): string | u
   return `${r.head_sha}: ${evidence.join("; ")}`;
 }
 
-export function readFixLaneEvidence(sources: Pick<FixLaneSources, "owner" | "repo">): FixLaneEvidence {
-  const json = (args: string[]) => JSON.parse(ghExec(args, { encoding: "utf8" }));
-  return {
-    readHeadSource: (head, file) => {
-      const body = json(contentRestArgs(sources.owner, sources.repo, file, head));
-      if (body.encoding !== "base64" || typeof body.content !== "string") throw new Error(`fix-lane source unreadable: ${file}@${head}`);
-      return Buffer.from(body.content, "base64").toString("utf8");
-    },
-    readCoverageLog: head => {
-      const pages = json([...checkRunsRestArgs(sources.owner, sources.repo, head), "--paginate", "--slurp"]);
-      const checks = (pages as Array<{ check_runs: Array<{ id: number; name: string; conclusion: string; details_url?: string; external_id?: string }> }>)
-        .flatMap(p => p.check_runs);
-      const latest = new Map<string, typeof checks[number]>();
-      for (const c of checks) if (c.id > (latest.get(c.name)?.id ?? 0)) latest.set(c.name, c);
-      return [...latest.values()].filter(c => c.conclusion === "failure" && isCoverage({ check: c.name })).map(c => {
-        const job = /\/jobs\/(\d+)/.exec(c.details_url ?? "")?.[1] ?? c.external_id ?? String(c.id);
-        return ghExec(["api", `repos/${sources.owner}/${sources.repo}/actions/jobs/${job}/logs`], { encoding: "utf8" });
-      }).join("\n");
-    },
+/** Reads only the exact-head coverage evidence the ledger rows can consume, off the daemon loop. */
+export async function readFixLaneEvidence(
+  sources: Pick<FixLaneSources, "owner" | "repo" | "readHeadSource" | "readCoverageLog">,
+  records: readonly LedgerRecord[],
+): Promise<FixLaneEvidence> {
+  const logCache = new Map<string, string | undefined>();
+  const sourceCache = new Map<string, string | undefined>();
+  const readCoverageLog = async (head: string): Promise<string | undefined> => {
+    if (logCache.has(head)) return logCache.get(head);
+    if (sources.readCoverageLog) {
+      const log = sources.readCoverageLog(head);
+      logCache.set(head, log);
+      return log;
+    }
+    const pages = await ghJsonAsync([...checkRunsRestArgs(sources.owner, sources.repo, head), "--paginate", "--slurp"]) as Array<{
+      check_runs: Array<{ id: number; name: string; conclusion: string; details_url?: string; external_id?: string }>;
+    }>;
+    const checks = pages.flatMap(page => page.check_runs);
+    const latest = new Map<string, typeof checks[number]>();
+    for (const check of checks) if (check.id > (latest.get(check.name)?.id ?? 0)) latest.set(check.name, check);
+    const logs: string[] = [];
+    for (const check of latest.values()) {
+      if (check.conclusion !== "failure" || !isCoverage({ check: check.name })) continue;
+      const job = /\/jobs\/(\d+)/.exec(check.details_url ?? "")?.[1] ?? check.external_id ?? String(check.id);
+      logs.push(await ghTextAsync(["api", `repos/${sources.owner}/${sources.repo}/actions/jobs/${job}/logs`]));
+    }
+    const log = logs.join("\n");
+    logCache.set(head, log);
+    return log;
   };
+  const readHeadSource = async (head: string, file: string): Promise<string | undefined> => {
+    const key = `${head}:${file}`;
+    if (sourceCache.has(key)) return sourceCache.get(key);
+    if (sources.readHeadSource) {
+      const source = sources.readHeadSource(head, file);
+      sourceCache.set(key, source);
+      return source;
+    }
+    const body = await ghJsonAsync(contentRestArgs(sources.owner, sources.repo, file, head)) as { encoding?: string; content?: string };
+    if (body.encoding !== "base64" || typeof body.content !== "string") throw new Error(`fix-lane source unreadable: ${file}@${head}`);
+    const source = Buffer.from(body.content, "base64").toString("utf8");
+    sourceCache.set(key, source);
+    return source;
+  };
+
+  // Prefetch sequentially through the paced async transport. This makes the returned evidence readers pure cache
+  // lookups, so `defectEventsOf` stays synchronous and cannot spawn `gh` from the daemon's inventory path.
+  for (const row of records) {
+    if (row.step !== "fix.dispatch" || typeof row.head_sha !== "string") continue;
+    const failures = failuresOf(row).filter(isCoverage);
+    if (!failures.length) continue;
+    const tails = failures.flatMap(f => typeof f.logTail === "string" ? [f.logTail] : []);
+    if (tails.length !== failures.length) {
+      const log = await readCoverageLog(row.head_sha);
+      if (log !== undefined) tails.push(log);
+    }
+    const parsed = diffCoverageTargets(tails.map(tail => tail.replace(/^\d{4}-\d\d-\d\dT\S+ ?/gm, "")));
+    if (!parsed || parsed.unlisted > 0 || !parsed.targets.length) continue;
+    for (const target of parsed.targets) await readHeadSource(row.head_sha, target.file);
+  }
+  return { readHeadSource: (head, file) => sourceCache.get(`${head}:${file}`), readCoverageLog: head => logCache.get(head) };
 }
 
 /** Clusters the fix lane's ledger rows into defect events, each with a normalised class key. */
@@ -466,34 +507,50 @@ function summaryOf(inv: FixLaneInventory, now: number): string {
 /** The fix-lane garden: once per UTC day, clusters the lane's defects and files one remedy for the top-priced class. */
 export function fixLaneGardenSpec(deps: GardenerDeps, sources: FixLaneSources) {
   const clock = deps.clock ?? systemClock;
+  const readInputs = () => {
+    const now = clock.now();
+    const records = sources.ledgerRecords ? sources.ledgerRecords() : readLadderRecords(deps.stateDir, FIX_LANE_LADDER, STEPS);
+    const plan = sources.planState ? sources.planState() : readLadderPlan(deps.repoRoot, FIX_LANE_LADDER);
+    if (plan.degraded) deps.log("fix-lane.origins_degraded", { reason: plan.degraded });
+    if (plan.unreadable?.length) throw new Error(`fix-lane plan shards unreadable: ${plan.unreadable.join(", ")}`);
+    return { now, records, plan };
+  };
+  const inventoryOf = (now: number, records: readonly LedgerRecord[], plan: CiFrictionPlanState, evidence: FixLaneEvidence) => {
+    const sinceMs = now - FIX_LANE_WINDOW_MS;
+    const events = defectEventsOf(records, now, evidence);
+    const prs = [...new Set(events.filter(e => e.pr > 0 && e.at >= sinceMs).map(e => e.pr))];
+    const openPrs = [...new Set(events.filter(e => e.pr > 0).map(e => e.pr))];
+    const outcomes = sources.prOutcomes ? sources.prOutcomes(openPrs) : readOutcomes(openPrs, sources);
+    const read = sources.interventions ? sources.interventions(prs, sinceMs) : readOperatorInterventions(sources, prs, sinceMs);
+    return fixLaneInventoryOf(records, plan.tasks, outcomes, read, now, evidence);
+  };
   return ladderGardenSpec(deps, {
     kind: FIX_LANE_LADDER, sources, bucket: c => Math.floor(c.now() / DAY),
     inventory: () => {
-      const now = clock.now();
-      const records = sources.ledgerRecords ? sources.ledgerRecords() : readLadderRecords(deps.stateDir, FIX_LANE_LADDER, STEPS);
-      const plan = sources.planState ? sources.planState() : readLadderPlan(deps.repoRoot, FIX_LANE_LADDER);
-      if (plan.degraded) deps.log("fix-lane.origins_degraded", { reason: plan.degraded });
-      if (plan.unreadable?.length) throw new Error(`fix-lane plan shards unreadable: ${plan.unreadable.join(", ")}`);
-      const sinceMs = now - FIX_LANE_WINDOW_MS;
-      const native = readFixLaneEvidence(sources);
+      const { now, records, plan } = readInputs();
+      const coverageRows = records.filter(row => row.step === "fix.dispatch" && failuresOf(row).some(isCoverage));
+      if (coverageRows.length && (!sources.readHeadSource ||
+          (coverageRows.some(row => failuresOf(row).some(f => isCoverage(f) && typeof f.logTail !== "string")) && !sources.readCoverageLog))) {
+        throw new Error("fix-lane coverage evidence requires asynchronous inventory or injected evidence readers");
+      }
       const sourceCache = new Map<string, string | undefined>(), logCache = new Map<string, string | undefined>();
       const evidence: FixLaneEvidence = {
         readHeadSource: (head, file) => {
           const key = `${head}:${file}`;
-          if (!sourceCache.has(key)) sourceCache.set(key, (sources.readHeadSource ?? native.readHeadSource)!(head, file));
+          if (!sourceCache.has(key)) sourceCache.set(key, sources.readHeadSource?.(head, file));
           return sourceCache.get(key);
         },
         readCoverageLog: head => {
-          if (!logCache.has(head)) logCache.set(head, (sources.readCoverageLog ?? native.readCoverageLog)!(head));
+          if (!logCache.has(head)) logCache.set(head, sources.readCoverageLog?.(head));
           return logCache.get(head);
         },
       };
-      const events = defectEventsOf(records, now, evidence);
-      const prs = [...new Set(events.filter(e => e.pr > 0 && e.at >= sinceMs).map(e => e.pr))];
-      const openPrs = [...new Set(events.filter(e => e.pr > 0).map(e => e.pr))];
-      const outcomes = sources.prOutcomes ? sources.prOutcomes(openPrs) : readOutcomes(openPrs, sources);
-      const read = sources.interventions ? sources.interventions(prs, sinceMs) : readOperatorInterventions(sources, prs, sinceMs);
-      return fixLaneInventoryOf(records, plan.tasks, outcomes, read, now, evidence);
+      return inventoryOf(now, records, plan, evidence);
+    },
+    inventoryAsync: async () => {
+      const { now, records, plan } = readInputs();
+      const evidence = await readFixLaneEvidence(sources, records);
+      return inventoryOf(now, records, plan, evidence);
     },
     onScorecard: (inv, scorecard) => {
       const full = inv as FixLaneInventory;
