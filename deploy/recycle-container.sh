@@ -157,6 +157,7 @@ COMMISSION_TARGET=""
 COMMISSION_CONTAINER=""
 COMMISSION_RECOVERY=""
 COMMISSION_RECEIPT_DONE=0
+COMMISSION_PROBE_FILE=""
 commission_receipt() {
   local outcome="$1" stream=2 ledger_dir
   [ "${COMMISSION_GIT_AUTHOR}" = "1" ] && [ "${COMMISSION_RECEIPT_DONE}" = "0" ] || return 0
@@ -1218,10 +1219,12 @@ RECYCLE_TMPDIR="${TMPDIR:-/tmp}"
 PULL_LOG=""
 recycle_cleanup_tmp() {
   [ -n "${PULL_LOG}" ] && rm -f "${PULL_LOG}"
+  [ -n "${COMMISSION_PROBE_FILE}" ] && rm -f "${COMMISSION_PROBE_FILE}"
+  commission_on_exit
   return 0
 }
-# W1-T6160: temp cleanup, then the commissioning receipt (a no-op unless --commission-git-author).
-trap 'recycle_cleanup_tmp; commission_on_exit' EXIT
+# W1-T6160: the cleanup also emits the commissioning receipt (a no-op unless --commission-git-author).
+trap recycle_cleanup_tmp EXIT
 if ! PULL_LOG="$(mktemp "${RECYCLE_TMPDIR%/}/rmd-recycle-container-pull-log.XXXXXX" 2>/dev/null)"; then
   echo "recycle-container: REFUSING — could not create a scratch pull log under ${RECYCLE_TMPDIR}." >&2
   echo "  Without it the credential-failure check below cannot run, and a pull that failed on auth" >&2
@@ -2030,25 +2033,26 @@ commission_fail() {
 COMMISSION_PROBE_OUT=""
 commission_bounded() {
   # Run "$@" for at most $1 seconds; its stdout lands in COMMISSION_PROBE_OUT. 124 on timeout.
-  local limit="$1" out_file pid waited=0 rc=0
+  local limit="$1" pid waited=0 rc=0
   shift
   COMMISSION_PROBE_OUT=""
-  out_file="$(mktemp "${RECYCLE_TMPDIR%/}/rmd-recycle-author-probe.XXXXXX" 2>/dev/null)" || return 125
-  "$@" >"${out_file}" 2>/dev/null </dev/null &
+  # Removed here, and by recycle_cleanup_tmp (trapped on EXIT) if this run dies mid-probe.
+  COMMISSION_PROBE_FILE="$(mktemp "${RECYCLE_TMPDIR%/}/rmd-recycle-author-probe.XXXXXX" 2>/dev/null)" || return 125
+  "$@" >"${COMMISSION_PROBE_FILE}" 2>/dev/null </dev/null &
   pid=$!
   while kill -0 "${pid}" 2>/dev/null; do
     if [ "${waited}" -ge "${limit}" ]; then
       kill "${pid}" 2>/dev/null || true
       wait "${pid}" 2>/dev/null || true
-      rm -f "${out_file}"
+      rm -f "${COMMISSION_PROBE_FILE}"
       return 124
     fi
     sleep 1
     waited=$((waited + 1))
   done
   wait "${pid}" || rc=$?
-  COMMISSION_PROBE_OUT="$(cat "${out_file}" 2>/dev/null || true)"
-  rm -f "${out_file}"
+  COMMISSION_PROBE_OUT="$(cat "${COMMISSION_PROBE_FILE}" 2>/dev/null || true)"
+  rm -f "${COMMISSION_PROBE_FILE}"
   return "${rc}"
 }
 if [ "${COMMISSION_GIT_AUTHOR}" = "1" ]; then
