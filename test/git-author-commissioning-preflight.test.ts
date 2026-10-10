@@ -131,7 +131,7 @@ function git(home: string, args: string[], cwd?: string): { status: number; stdo
 }
 
 /** An empty checkout at `path`, built by the shared fixture (test/helpers/git-repo.ts) and moved into place. */
-function initCheckout(path: string): void {
+function placeEmptyGitDir(path: string): void {
   mkdirSync(dirname(path), { recursive: true });
   renameSync(gitRepo({ seedCommit: false, kind: "git-author-checkout" }).dir, path);
 }
@@ -154,9 +154,9 @@ function makeFixture(opts: { freshTarget?: boolean; targetRepoCheckout?: boolean
   const sibling = mk("sibling", "rmd-sibling-daemon", "remudero-sibling");
   for (const inst of opts.freshTarget ? [sibling] : [target, sibling]) {
     mkdirSync(join(inst.state, "state"));
-    initCheckout(join(inst.state, "remudero"));
+    placeEmptyGitDir(join(inst.state, "remudero"));
   }
-  if (opts.targetRepoCheckout) initCheckout(join(target.state, "repos", target.repo));
+  if (opts.targetRepoCheckout) placeEmptyGitDir(join(target.state, "repos", target.repo));
   const record = (inst: Instance) => [
     `  ${inst.name}:`,
     `    repo: ${inst.repo}`,
