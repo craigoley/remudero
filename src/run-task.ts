@@ -221,7 +221,7 @@ import { realThreadDecider, registryThreadItems, type ThreadDecisionContext } fr
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
-import { checkpointRemaining, isWipSubject, prTitleFromBranchCommits, renderContinuationPrompt } from "./lib/unfinished-checkpoint.js";
+import { checkpointRemaining, isWipSubject, judgeCheckpointStop, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
 import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
 import {
@@ -19611,9 +19611,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       if (resumeFail) return resumeFail;
     }
 
-    // A worker that stops on a `wip:` checkpoint tip has not finished (#10482): resume it once.
-    const tipSubject = lastCommitSubject(worktreePath);
-    if (tipSubject !== undefined && isWipSubject(tipSubject) && !parseReport(fullText(impl))?.prUrl) {
+    // A worker that stops on a `wip:` checkpoint tip has not finished (#10482): resume it. The first
+    // stop always resumes; whether a later stop resumes again is the progress judge's call (W1-T7096).
+    const checkpointStops: CheckpointStop[] = [];
+    let checkpointJudge: FixProgressJudge | undefined;
+    for (;;) {
+      const tipSubject = lastCommitSubject(worktreePath);
+      if (tipSubject === undefined || !isWipSubject(tipSubject) || parseReport(fullText(impl))?.prUrl) break;
       let tipBody = "";
       try {
         tipBody = hostWorktreeGit(worktreePath, ["log", "-1", "--format=%b"]);
@@ -19623,6 +19627,14 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       }
       const remaining = checkpointRemaining(tipBody);
       log("implement.unfinished", { subject: tipSubject, remaining: remaining ?? null });
+      checkpointStops.push({ round: checkpointStops.length + 1, subject: tipSubject, remaining });
+      const decision = await judgeCheckpointStop(checkpointStops, {
+        readHead: () => hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]),
+        makeJudge: () => (checkpointJudge ??= opts.productionProgressJudge === true || !spawnInjected
+          ? productionFixProgressJudge({ cwd: worktreePath, settingsFile }) : undefined),
+      });
+      log("implement.checkpoint_judged", { stop: checkpointStops.length, resume: decision.resume, by: decision.by, reason: decision.reason });
+      if (!decision.resume) break;
       impl = account(
         await spawn({
           cwd: worktreePath,
