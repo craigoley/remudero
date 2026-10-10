@@ -126,6 +126,7 @@ test("W1-T4071: four shards partition the suite and an absent snapshot falls bac
     // The snapshot reverses the weights: the split must follow it.
     writeLedger(root, "snapshot.json", Object.fromEntries(files.map((f, i) => [`test/${f}`, 1_000 + (files.length - i) * 400])));
     writeFileSync(join(root, "broken.json"), "{ not json");
+    writeFileSync(join(root, "misshapen.json"), JSON.stringify({ files: { "test/suite-00.test.ts": -1 } }));
     const split = (snapshot: string | undefined) => [1, 2, 3, 4].map((index) => {
       const result = tierCli(root, [
         "--select-all", "--shard", `${index}/4`, "--instrumented-manifest", "scripts/coverage-ledger.json",
@@ -144,7 +145,7 @@ test("W1-T4071: four shards partition the suite and an absent snapshot falls bac
 
     const committed = split(undefined);
     assert.notDeepEqual(fromSnapshot.map((s) => s.files), committed.map((s) => s.files), "a usable snapshot changes the split");
-    for (const fallback of ["absent.json", "broken.json"]) {
+    for (const fallback of ["absent.json", "broken.json", "misshapen.json"]) {
       const fellBack = split(fallback);
       assert.deepEqual(fellBack.map((s) => s.files), committed.map((s) => s.files), `${fallback} falls back to the committed ledger`);
       assert.match(fellBack[0]!.stderr, /warning: snapshot .* weighing the committed ledger/);
@@ -159,6 +160,8 @@ test("W1-T4071: four shards partition the suite and an absent snapshot falls bac
     assert.match(tier.partitionProblems(all, shards.map((s, i) => (i === 3 ? { ...s, digest: "d2" } : s))).join("\n"), /different ledgers/);
     writeFileSync(join(root, "sel-4.json"), JSON.stringify({ shard: 4, digest: "other", files: [] }));
     assert.equal(tierCli(root, ["--check-partition", "sel-1.json", "sel-2.json", "sel-3.json", "sel-4.json"]).status, 1);
+    assert.equal(tierCli(root, ["--check-partition", "sel-1.json", "missing.json"]).status, 1, "an unreadable selection refuses");
+    assert.equal(tierCli(root, ["--select-all", "--shard", "1/4", "--workers", "0"]).status, 2, "a non-positive worker count is refused");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -234,8 +234,8 @@ export const DURATION_EWMA_ALPHA = 0.5;
 const runOrder = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
 function lexicographicallyLess(a, b) {
-  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return a[i] < b[i];
-  return false;
+  const i = a.findIndex((value, k) => value !== b[k]);
+  return i !== -1 && a[i] < b[i];
 }
 
 function insertionIndex(sorted, file) {
