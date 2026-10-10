@@ -170,6 +170,14 @@ import type {
 } from "./review.js";
 import { parseLedger } from "./retro.js";
 import { selectRuntimeReviewWidth } from "./review-capacity.js";
+import {
+  capacityDecisionText,
+  publishReviewDemand,
+  takeCapacityDecisions,
+  trackEligibleSince,
+  type CapacityDecision,
+  type ReviewDemandOptions,
+} from "./host-memory-priority.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import {
   workerTranscript,
@@ -11425,6 +11433,11 @@ export interface SweepDeps {
     reason: string,
     signature: CiInfrastructureFailureSignature,
   ) => void | Promise<void>;
+  /** W1-T7095 — the ONE human decision a sustained zero-worker memory shortfall raises per scenario. Absent: the
+   *  existing escalation path ({@link memoryCapacityEscalation}) over `readerAgreement`'s owner/repo. */
+  escalateMemoryCapacity?: (decision: CapacityDecision) => string | null;
+  /** W1-T7095 — seams for the review-demand row (location, instance, clock). Production omits it. */
+  reviewDemand?: ReviewDemandOptions;
   /** W1-T1275 — an OPTIONAL fresh read of ONE PR's live rollup, consulted immediately before a
    *  blocked-fixable disposition acts, never the snapshot this pass started from:
    *  {@link staleCiGateTransition} must compare against a sibling's CURRENT latest attempt. NOT a
@@ -17479,6 +17492,8 @@ export async function runSweepLightPass(
   };
   observeReviewEligibility(openPrs, deps, policy, now, selectionLedgerLines, outcomes, "light");
   const queueDepth = reviewAdmissionQueueDepth(openPrs, policy, now, outcomes);
+  // W1-T7095: candidates for the host-memory demand row, read BEFORE this pass reserves its own spawning heads.
+  const demandCandidates = openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr)));
   const activeWorkers = (deps.readActiveWorkerCount ?? activeWorkerCount)();
   const policySemanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines, activeWorkers);
   const { bound: semanticBound, inFlight: reviewsInFlight } = reviewAdmissionBound(policySemanticBound);
@@ -17487,6 +17502,7 @@ export async function runSweepLightPass(
     openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr))),
     { ...policy, planFilingAdmissionBound: availablePlanFilings }, now, outcomes, semanticBound,
   );
+  publishLightPassReviewDemand(demandCandidates, spawning, policy, now, outcomes, deps);
   lightPassSpawningReservations += spawning.length;
   lightPassPlanFilingReservations += planFilings.length;
   for (const pr of [...spawning, ...planFilings]) lightPassReservedHeads.add(lightPassHeadKey(pr));
@@ -17701,6 +17717,69 @@ function observeReviewEligibility(
     });
     observed.add(key);
   }
+}
+
+/** W1-T7095 — PUBLISH THIS INSTANCE'S ELIGIBLE REVIEW DEMAND for the host-memory shadow verdict, and hand any
+ *  queued zero-worker capacity decision to the escalation path. Eligible is exactly the spawning lane's own selection
+ *  predicate; lane-ready is what that lane admits this pass. SHADOW ONLY: `publishReviewDemand` never throws, and
+ *  nothing here changes what this pass admits. A dry run writes nothing. */
+export function publishLightPassReviewDemand(
+  candidates: readonly OpenPrView[],
+  spawning: readonly OpenPrView[],
+  policy: SweepPolicy,
+  now: number,
+  outcomes: ReviewAdmissionOutcomes,
+  deps: Pick<SweepDeps, "dryRun" | "ledgerPath" | "runId" | "reviewDemand" | "escalateMemoryCapacity" | "readerAgreement" | "log">,
+): void {
+  if (deps.dryRun) return;
+  const eligible = candidates.filter((pr) =>
+    pr.isPlanFiling !== true &&
+    deriveDisposition(pr, policy, now).disposition === "post-review" &&
+    !reviewAdmissionOutcomeKnown(pr, outcomes, policy, now));
+  const root = dirname(dirname(deps.ledgerPath));
+  publishReviewDemand({
+    eligible: eligible.length,
+    laneReady: spawning.length,
+    oldestEligibleSince: trackEligibleSince(eligible.map(lightPassHeadKey), now),
+  }, {
+    root,
+    log: (event) => deps.log?.(String(event.event ?? "memory_budget.review_demand_error"), event),
+    ...deps.reviewDemand,
+  });
+  const escalateCapacity = deps.escalateMemoryCapacity ?? memoryCapacityEscalation(deps);
+  if (!escalateCapacity) return;
+  for (const decision of takeCapacityDecisions()) {
+    try {
+      escalateCapacity(decision);
+    } catch (error) {
+      deps.log?.("memory_budget.capacity_decision_failed", { scenario: decision.scenario, error: String((error as Error)?.message ?? error) });
+    }
+  }
+}
+
+/** W1-T7095 — the production escalation for a zero-worker capacity decision: the existing `tryEscalate` path, which
+ *  dedups on the stable per-scenario title. MANUAL never auto-defaults, and the recommendation names no lever: the
+ *  capacity choice is the operator's. Undefined without a repo identity, or under the test runner. */
+export function memoryCapacityEscalation(
+  deps: Pick<SweepDeps, "ledgerPath" | "runId" | "readerAgreement">,
+): ((decision: CapacityDecision) => string | null) | undefined {
+  const owner = deps.readerAgreement?.owner;
+  const repo = deps.readerAgreement?.repo;
+  if (!owner || !repo || isTestRunner()) return undefined;
+  const issues = ghIssueGateway(owner, repo);
+  return (decision) => {
+    const text = capacityDecisionText(decision);
+    return tryEscalate({
+      class: "MANUAL",
+      taskId: text.taskId,
+      runId: deps.runId,
+      summary: text.summary,
+      detail: text.detail,
+      options: text.options,
+      recommendation: text.recommendation,
+      consequence: "nothing is held (shadow only); an enforced budget would admit no worker in this scenario",
+    }, { issues, ledgerPath: deps.ledgerPath, runId: deps.runId });
+  };
 }
 
 /** W1-T526 — WHICH OPEN PRS the light pass admits into `post-review`. Branch protection's `strict`
