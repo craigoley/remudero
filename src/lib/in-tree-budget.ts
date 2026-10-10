@@ -45,7 +45,7 @@ export function killBudgetLeftovers(pid: number | undefined): void {
 /** A timeout is not a teardown receipt: wait for every process in the detached group to exit before removing its worktree. */
 export async function waitForProcessGroupExit(pgid: number | undefined, timeoutMs = 5_000): Promise<boolean> {
   if (pgid === undefined || !Number.isInteger(pgid) || pgid <= 0) return false;
-  const deadline = Date.now() + timeoutMs;
+  const deadline = performance.now() + timeoutMs;
   while (true) {
     try {
       process.kill(-pgid, 0);
@@ -55,7 +55,7 @@ export async function waitForProcessGroupExit(pgid: number | undefined, timeoutM
       // ESRCH proves exit; EPERM means the group still exists, and other probe failures are not proof, so fail closed.
       if (code !== "EPERM") return false;
     }
-    if (Date.now() >= deadline) return false;
+    if (performance.now() >= deadline) return false;
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
 }

@@ -16,11 +16,11 @@
 
 import type { AcceptanceCriterion } from "./plan.js";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { acceptanceBlockDiagnostics, acceptanceHeaderLine, parseAcceptanceBlock, parseWhitelistedProof } from "./review.js";
@@ -38,6 +38,7 @@ import { RMD_TMP_PREFIX } from "./tmp.js";
 import { RmdError } from "./errors.js";
 import { isTaskShardName } from "./task-shard-name.js";
 import { budgetedSpawn, inTreeCheckBudgetMs, killBudgetLeftovers, waitForProcessGroupExit } from "./in-tree-budget.js";
+import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 
 const PLAN_TASK_SHARD_PREFIX = ["plan", "tasks.d"].join("/") + "/";
 
@@ -780,6 +781,36 @@ function borrowNodeModules(repoDir: string, tree: string): void {
   if (existsSync(join(repoDir, "node_modules"))) symlinkSync(join(repoDir, "node_modules"), join(tree, "node_modules"));
 }
 
+/** Remove only a worktree admin directory whose reciprocal pointer proves it belongs to this temporary tree. */
+function dropOrphanedWorktreeAdmin(tree: string, realTree: string, gitCommonDir: string): void {
+  const dotGit = join(tree, ".git");
+  if (!existsSync(dotGit)) return;
+  const pointer = readFileSync(dotGit, "utf8").match(/^gitdir:\s*(.+)\s*$/);
+  if (!pointer) return;
+  const admin = resolve(dirname(dotGit), pointer[1]!);
+  const common = realpathSync(gitCommonDir);
+  const adminRoot = realpathSync(join(common, "worktrees"));
+  const adminReal = realpathSync(admin);
+  if (adminReal === adminRoot || !adminReal.startsWith(`${adminRoot}${sep}`) || !lstatSync(admin).isDirectory()) return;
+  const backLink = join(adminReal, "gitdir");
+  if (!existsSync(backLink)) return;
+  const recordedTree = resolve(dirname(backLink), readFileSync(backLink, "utf8").trim());
+  const expectedTree = join(realTree, ".git");
+  if (existsSync(recordedTree) && realpathSync(recordedTree) === realpathSync(expectedTree)) rmSync(adminReal, { recursive: true, force: true });
+}
+
+function cleanupErrorText(error: unknown): string {
+  const value = error as { message?: unknown; stderr?: unknown };
+  return `${String(value?.message ?? error)}\n${String(value?.stderr ?? "")}`;
+}
+
+function canonicalWorktreePath(path: string): string {
+  const absolute = resolve(path);
+  try { return realpathSync(absolute); } catch {
+    try { return join(realpathSync(dirname(absolute)), basename(absolute)); } catch { return absolute; }
+  }
+}
+
 /** {@link planPrPreflight} on a commit no checkout has at HEAD (feedback-landing's `commit-tree` sha): a detached
  *  worktree of it is materialized beside `repoDir`, borrows its node_modules, and is removed after. */
 export function planPrPreflightAtCommit(
@@ -790,6 +821,7 @@ export function planPrPreflightAtCommit(
 ): PlanPrPreflightResult {
   const parent = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-pr-preflight-`));
   const tree = join(parent, "tree");
+  const realTree = join(realpathSync(parent), "tree");
   const budgetMs = (checks.budgetMs ?? (() => inTreeCheckBudgetMs()))();
   try {
     try {
@@ -800,7 +832,11 @@ export function planPrPreflightAtCommit(
     borrowNodeModules(repoDir, tree);
     return planPrPreflight({ cwd: tree, ...pr }, checks);
   } finally {
-    spawnSync("git", ["-C", repoDir, "worktree", "remove", "--force", "--force", tree], { stdio: "pipe" }); // twice: a killed add leaves it locked
+    const removed = spawnSync("git", ["-C", repoDir, "worktree", "remove", "--force", "--force", realTree], { stdio: "pipe" }); // twice: a killed add leaves it locked
+    if (removed.status !== 0 && existsSync(join(tree, ".git"))) {
+      const common = hostWorktreeGit(repoDir, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim();
+      dropOrphanedWorktreeAdmin(tree, realTree, common);
+    }
     rmSync(parent, { recursive: true, force: true });
   }
 }
@@ -839,13 +875,31 @@ export async function planPrPreflightAtCommitAsync(
 }
 
 async function removeTemporaryWorktree(repoDir: string, tree: string): Promise<void> {
+  if (!existsSync(join(repoDir, ".git"))) return; // test/minimal trees with no Git metadata cannot own a registration
+  const target = canonicalWorktreePath(tree);
+  const registered = (output: string) => output.split("\n").some((line) => line.startsWith("worktree ") && canonicalWorktreePath(line.slice("worktree ".length)) === target);
+  let listed: string;
+  try {
+    listed = await hostWorktreeGitAsync(repoDir, ["worktree", "list", "--porcelain"]);
+  } catch (error) {
+    if (!existsSync(join(tree, ".git")) && /not a git repository/i.test(cleanupErrorText(error))) return;
+    throw new Error(`could not verify plan-PR worktree cleanup: ${cleanupErrorText(error).trim()}`);
+  }
+  if (!registered(listed)) return;
   for (let attempt = 0; attempt < 3; attempt++) {
-    await runChildAsync("git", ["-C", repoDir, "worktree", "remove", "--force", "--force", tree], repoDir);
-    const listed = await runChildAsync("git", ["-C", repoDir, "worktree", "list", "--porcelain"], repoDir);
-    if (listed.status !== 0) throw new Error(`could not verify plan-PR worktree cleanup: ${listed.output.trim()}`);
-    if (!listed.output.split("\n").includes(`worktree ${tree}`)) return;
+    try {
+      await hostWorktreeGitAsync(repoDir, ["worktree", "remove", "--force", "--force", target]);
+    } catch {
+      // Verify below: Git can refuse a partially materialized worktree that has no HEAD yet.
+    }
+    listed = await hostWorktreeGitAsync(repoDir, ["worktree", "list", "--porcelain"]);
+    if (!registered(listed)) return;
     if (attempt < 2) await new Promise<void>((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
   }
+  const common = await hostWorktreeGitAsync(repoDir, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  dropOrphanedWorktreeAdmin(tree, target, common.trim());
+  listed = await hostWorktreeGitAsync(repoDir, ["worktree", "list", "--porcelain"]);
+  if (!registered(listed)) return;
   throw new Error(`plan-PR worktree remains registered after cleanup attempts: ${tree}`);
 }
 
