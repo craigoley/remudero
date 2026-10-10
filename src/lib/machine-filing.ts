@@ -16,8 +16,8 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadPlanFromYaml, machineFilingAdmissionViolations, type TaskRisk } from "./plan.js";
-import { lintTask } from "./task-linter.js";
+import { loadPlanFromYaml, machineFilingAdmissionViolations, parseTasksFromYaml, type TaskRisk } from "./plan.js";
+import { lintTask, taskRulingPin } from "./task-linter.js";
 
 /** Paths whose change is dangerous whoever makes it: secrets and credentials, auth and permissions,
  *  CI and deploy machinery, the worker settings, and the operator's own policy and rulings. */
@@ -168,6 +168,37 @@ export function machineShardLandingGuard(
   if (filer.landingRefusal) return filer.landingRefusal;
   return (root, paths) =>
     machineShardLandingRefusal(root, paths, (p) => existsSync(join(filer.repoRoot, p)) || alsoAtBase?.(p) === true, filer.admissionViolations);
+}
+
+/** Drop an existing `risk_ruling:` block from a single-record shard's text. */
+export function withoutRulingBlock(lines: string[]): string[] {
+  const out: string[] = [];
+  let inBlock = false;
+  for (const line of lines) {
+    if (/^ {2}risk_ruling:\s*$/.test(line)) {
+      inBlock = true;
+      continue;
+    }
+    if (inBlock && (line.trim() === "" || /^ {4}/.test(line))) continue;
+    inBlock = false;
+    out.push(line);
+  }
+  return out;
+}
+
+/**
+ * A machine record edited after it was judged goes back to the judge rather than landing a stale pin, which
+ * machine-author-verify refuses (Law 5, W1-T2977): its ruling is dropped and it is parked at `verify: human`,
+ * the state every machine filing arrives in, and the machine-filing judge rules on it as it now stands.
+ * Text whose record is not machine-authored, carries no ruling, or still matches its pin is returned as is.
+ */
+export function reparkStaleRuling(text: string, source: string): string {
+  if (!/^ {2}risk_ruling:\s*$/m.test(text)) return text;
+  const [task, ...rest] = parseTasksFromYaml(text, source);
+  if (task === undefined || rest.length > 0 || task.author_class !== "machine" || task.risk_ruling === undefined) return text;
+  if (task.risk_ruling.pin === taskRulingPin(task)) return text;
+  const lines = withoutRulingBlock(text.replace(/\n+$/, "").split("\n"));
+  return lines.map((l) => l.replace(/^( {2}verify:\s*)[^\s#]+/, "$1human")).join("\n") + "\n";
 }
 
 /** A plan shard path, as a landing names it. */

@@ -37644,7 +37644,8 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       return withShardRepairs(stateDir, () => runShardRepairPass(repairs), gardenPass(planGardenSpec(d), d), log);
     }
     case "backlog": {
-      const d = deps("backlog");
+      // A filing streak escalates once (gardener.ts), so a refused change reaches a person rather than looping.
+      const d = deps("backlog", raiseDuplicate);
       return gardenPass(backlogGardenSpec(d), d);
     }
     // W1-T5454: the scout looks for work nobody asked for -- a recurring failure-shaped ledger step no task
