@@ -9,7 +9,8 @@ import { realpathSync } from "node:fs";
 /** The short root a too-long path moves to. */
 export const SHORT_PATH_ROOT = "/tmp";
 
-/** sun_path's capacity less its NUL terminator: 108 bytes on Linux, 104 on macOS and the BSDs. */
+/** PRIMARY CONTROL: sun_path's capacity less its NUL terminator, 108 bytes on Linux and 104 on macOS and the
+ *  BSDs. A kernel fact, not a tuning knob: listen() refuses a longer socket path. */
 export const MAX_UNIX_SOCKET_PATH_BYTES = process.platform === "linux" ? 107 : 103;
 
 /**
