@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log 22:00Z, W1-T4970 (#9167) follow-ups"
   plan_refs: [W1-T4970, W1-T4085, W1-T5743, W1-T5689]
   files: [src/lib/github-transport.ts, test/an-interactive-gh-read-awaits-its-cadence.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

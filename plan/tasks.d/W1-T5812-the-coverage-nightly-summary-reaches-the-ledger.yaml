@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5704 (#9246) follow-up"
   plan_refs: [W1-T5704, W1-T5705, W1-T5811]
   files: [src/lib/coverage-nightly-intake.ts, src/run-task.ts, test/the-coverage-nightly-summary-reaches-the-ledger.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

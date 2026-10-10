@@ -12,7 +12,7 @@
   origin: "operator-authorized follow-ups 2026-10-08; measured console T100 refusal after its contract repair auto-merged"
   plan_refs: [W1-T4838, W1-T2910, W1-T3978, "console CONSOLE-T100", "console PR #2025", "console PR #2026"]
   files: [src/lib/refusal-amendment.ts, src/lib/status.ts, src/lib/daemon.ts, src/lib/sweep.ts, src/run-task.ts, test/a-corrected-worker-refusal-rejoins-dispatch.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-08: console #2025 publishes the missing AgentView contract and #2026

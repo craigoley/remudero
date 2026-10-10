@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: round-4 steady-state daemon CPU profile (lanes/claude/daemon-cpu-round4.cpuprofile, pid 373954)"
   plan_refs: [W1-T4356, W1-T6259]
   files: [src/run-task.ts, test/the-managed-checkout-refreshes-off-the-daemon-loop.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
