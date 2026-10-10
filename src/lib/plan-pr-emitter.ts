@@ -781,7 +781,6 @@ function borrowNodeModules(repoDir: string, tree: string): void {
   if (existsSync(join(repoDir, "node_modules"))) symlinkSync(join(repoDir, "node_modules"), join(tree, "node_modules"));
 }
 
-/** Remove only a worktree admin directory whose reciprocal pointer proves it belongs to this temporary tree. */
 function dropOrphanedWorktreeAdmin(tree: string, realTree: string, gitCommonDir: string): void {
   const dotGit = join(tree, ".git");
   if (!existsSync(dotGit)) return;
@@ -890,9 +889,7 @@ async function removeTemporaryWorktree(repoDir: string, tree: string): Promise<v
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       await hostWorktreeGitAsync(repoDir, ["worktree", "remove", "--force", "--force", target]);
-    } catch {
-      // Verify below: Git can refuse a partially materialized worktree that has no HEAD yet.
-    }
+    } catch {}
     listed = await hostWorktreeGitAsync(repoDir, ["worktree", "list", "--porcelain"]);
     if (!registered(listed)) return;
     if (attempt < 2) await new Promise<void>((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
