@@ -6,7 +6,8 @@
   verify: auto
   risk: low
   priority: 2.5
-  status: queued
+  status: blocked
+  retirement: closed  # satisfied by main: #10372 fixed the readPaced union; build run-W1-T7213-1791587491981 changed only test/read-paced-view-union-typecheck.test.ts, which passes 1/1 on main
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:ci-shard:read-model-worker-readPaced-type-error"

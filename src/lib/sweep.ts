@@ -1,5 +1,5 @@
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
-import { buildFixProgressInput, judgeFixProgress, parseFixProgressVerdict,
+import { buildFixProgressInput as buildBaseFixProgressInput, judgeFixProgress, parseFixProgressVerdict,
   type FixProgressJudge, type FixProgressVerdict } from "./fix-progress-judge.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
 import { createHeadRehomePorts, headIdentityRed, headRehomePlan, rehomeBody, type HeadRehomePorts } from "./head-rehome.js";
@@ -5783,6 +5783,8 @@ export interface OpenPrView {
   progressEscalation?: { loop: string; reason: string; judged: boolean };
   /** W1-T7096: the progress judge ruled another round, or deferred the ruling to the fixable path. */
   progressContinue?: { reason: string; unavailable?: boolean };
+  /** The newest `fix.progress_judged` row for this PR; set by runSweep, absent when no judge has ruled. */
+  lastProgressJudgement?: ProgressJudgementLabel;
   fixRefusalsAtHead?: number;
   /** W1-T2794 — the MERGED PR that already completed this PR's task, from the ownership-asserted
    *  credit projection ({@link CreditCandidate} with `merged: true`). STRICTLY STRONGER EVIDENCE
@@ -9037,10 +9039,10 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
           `${base} — every red check is a RECORDABLE ratchet whose remedy is a recorded number (${how}) — ` +
           (taken
             ? "repairing deterministically instead of spending a fix round"
-            : `deterministic repair is available but DISABLED (recordableRatchetRepairEnabled) — ci-log fix, strike ${pr.priorStrikes + 1}/${fixCeilingInForce(pr, policy.strikeCap, policy.clarify)}`)
+            : `deterministic repair is available but DISABLED (recordableRatchetRepairEnabled) — ci-log fix, ${fixRoundLabel(pr, fixCeilingInForce(pr, policy.strikeCap, policy.clarify))}`)
         );
       }
-      return `${base} — ci-log fix, strike ${pr.priorStrikes + 1}/${fixCeilingInForce(pr, policy.strikeCap, policy.clarify)}`; // W1-T2504: "red" is byte-identical; else names the specific check.
+      return `${base} — ci-log fix, ${fixRoundLabel(pr, fixCeilingInForce(pr, policy.strikeCap, policy.clarify))}`; // W1-T2504: "red" is byte-identical; else names the specific check.
     },
   },
   {
@@ -9086,10 +9088,10 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     reason: (pr, policy) => {
       const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
       if (pr.unmetCriteria.length > 0) {
-        return `${pr.unmetCriteria.length} unmet criteri${pr.unmetCriteria.length === 1 ? "on" : "a"} — strike ${pr.priorStrikes + 1}/${ceiling}`;
+        return `${pr.unmetCriteria.length} unmet criteri${pr.unmetCriteria.length === 1 ? "on" : "a"} — ${fixRoundLabel(pr, ceiling)}`;
       }
       const n = pr.actionableGateFailures!.length;
-      return `${n} actionable gate failure${n === 1 ? "" : "s"} (named remedy) — strike ${pr.priorStrikes + 1}/${ceiling}`;
+      return `${n} actionable gate failure${n === 1 ? "" : "s"} (named remedy) — ${fixRoundLabel(pr, ceiling)}`;
     },
   },
   {
@@ -10370,6 +10372,31 @@ export function fixCeilingInForce(
     resetStrikeCounterOnAnswer: pr.pendingAnswer.resetStrikeCounter ?? clarifyPolicy.resetStrikeCounterOnAnswer,
   };
   return strikeCap + strikeCapForAnswer(strikeCap, clarify);
+}
+
+/** What a disposition reason shows for a judged fix lane: the round the judge ruled on and its verdict. */
+export interface ProgressJudgementLabel { round: number; verdict: string; reason: string }
+
+/** The newest `fix.progress_judged` row for `prNumber`, or undefined when the judge never ruled on it. */
+export function lastProgressJudgementFor(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  prNumber: number,
+): ProgressJudgementLabel | undefined {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const row = lines[i]!;
+    if (row.step !== "fix.progress_judged" || row.pr_number !== prNumber) continue;
+    if (typeof row.verdict !== "string" || typeof row.round_count !== "number") continue;
+    return { round: row.round_count, verdict: row.verdict, reason: typeof row.reason === "string" ? row.reason : "" };
+  }
+  return undefined;
+}
+
+/** The fix-lane progress label: the judge's round and verdict once it has ruled, else the former strike ratio. */
+export function fixRoundLabel(pr: Pick<OpenPrView, "priorStrikes" | "lastProgressJudgement">, ceiling: number): string {
+  const judged = pr.lastProgressJudgement;
+  if (judged === undefined) return `strike ${pr.priorStrikes + 1}/${ceiling}`;
+  const why = judged.reason.length > 80 ? `${judged.reason.slice(0, 77)}...` : judged.reason;
+  return `fix round ${judged.round + 1} — judge: ${judged.verdict}${why ? ` (${why})` : ""}`;
 }
 
 /** W1-T2452 — THE STRIKE BUDGET TO DISPATCH: the REMAINDER against {@link fixCeilingInForce}, NEVER
@@ -12413,6 +12440,8 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
       stalled = false;
     } else if (line.step === "fix.done" && line.flake_claim === "requeue_deferred") {
       stalled = true; // W1-T5920: the FLAKE round's requeue never landed — nothing will move this head
+    } else if (line.step === "fix.done" && (line.flake_claim === "refuted" || line.flake_claim === "repeated")) {
+      stalled = true;
     } else if (line.step === "fix.done" && line.flake_claim === undefined && ciHead !== undefined && line.head_sha === ciHead &&
         line.subtype === "success" && (line.pushed_head_sha === undefined || line.pushed_head_sha === ciHead)) {
       stalled = true;
@@ -12424,6 +12453,25 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
   }
   // W1-T1210: no owning `fix.dispatch` row at all ⇒ treated as stalled — see the doc above.
   return stalled || !dispatched;
+}
+
+export function flakeClaimsForHead(lines: readonly Record<string, unknown>[], taskId: string | undefined,
+  headSha: string | undefined, prNumber?: number): Record<string, unknown>[] {
+  if (!taskId || !headSha) return [];
+  return lines.filter(row => row.step === "fix.done" && row.task_id === taskId && row.head_sha === headSha &&
+    (prNumber === undefined || row.pr_number === undefined || row.pr_number === prNumber) &&
+    (row.flake_claim === "refuted" || row.flake_claim === "repeated"));
+}
+
+// W1-T7449: keep flake refutations visible beside the progress judge's no-op and same-red signals.
+export function buildFixProgressInput(facts: Parameters<typeof buildBaseFixProgressInput>[0]) {
+  const claims = flakeClaimsForHead(facts.ledger, facts.taskId, facts.headSha, facts.prNumber);
+  const input = buildBaseFixProgressInput(facts);
+  if (claims.length > 0) input.parkedReason = [input.parkedReason,
+    "flake claimed and refuted on an unchanged red"].filter(Boolean).join("; ");
+  return { ...input, signals: { ...input.signals,
+    refutedFlakeClaims: claims.filter(row => row.flake_claim === "refuted").length,
+    repeatedFlakeClaims: claims.filter(row => row.flake_claim === "repeated").length } };
 }
 
 const METADATA_RED_CHECKS = new Set(["commitlint", "acceptance-author-gate", "proof-discrimination"]);
@@ -12767,6 +12815,10 @@ export function fixRoundTally(
       const count = (reasons.get(reason) ?? 0) + 1;
       reasons.set(reason, count);
       if (count === 2 && tally.repeatedRefusal === undefined) tally.repeatedRefusal = reason;
+      continue;
+    }
+    if (round.done?.flake_claim === "repeated") {
+      tally.noCommitRounds.push(round.id);
       continue;
     }
     if (regime === "executed" && round.dispatch.verdict_regime !== "executed") continue;
@@ -13406,6 +13458,10 @@ export async function runSweep(
   openPrs = openPrs.map(pr => hasUnspentLadderRefresh(strikeLadderRows, pr.taskId, pr.prNumber)
     ? { ...pr, priorStrikes: fixCeilingInForce(pr, policy.strikeCap, policy.clarify) }
     : pr);
+  openPrs = openPrs.map((pr) => {
+    const judged = lastProgressJudgementFor(ledgerLines, pr.prNumber);
+    return judged === undefined ? pr : { ...pr, lastProgressJudgement: judged };
+  });
   // W1-T7096: judge every PR whose rounds reached the former ceiling BEFORE dispositions derive, so an
   // escalate verdict takes main's strikes-exhausted route and a continue verdict takes one more round.
   const judgedContinue = new Map<number, FixProgressVerdict>();
@@ -15469,7 +15525,8 @@ export async function runSweep(
               const noCommitRound = fixRoundTally(ledgerLines, pr.taskId, pr.headSha).noCommitRounds.at(-1);
               const rerunAttempted = ledgerLines.some(row => row.step === "sweep.disposed" &&
                 row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.no_commit_rerun_attempted === true);
-              if (noCommitRound !== undefined && !rerunAttempted) {
+              if (noCommitRound !== undefined && !rerunAttempted &&
+                  flakeClaimsForHead(ledgerLines, pr.taskId, pr.headSha, pr.prNumber).length === 0) {
                 acted = false;
                 if (!deps.rerunFailedChecks) {
                   standDownReason = "no-commit CI fix awaits a failed-job rerun gateway";
@@ -16141,6 +16198,9 @@ export async function runSweep(
               // W1-T2379: started either way — only the `await` moves. See `SweepDeps.detachFixWait`.
               // W1-T4459: the attempted red set rides this pass's `sweep.disposed` row.
               extraDisposedFields = { ...extraDisposedFields, red_checks: redCheckNames(pr) };
+              if (flakeClaimsForHead(ledgerLines, pr.taskId, pr.headSha, pr.prNumber).length > 0) {
+                standDownReason = `flake claim refuted at ${pr.headSha} — dispatching a real fix round`;
+              }
               if (deps.detachFixWait) {
                 detachFixDispatch(pr, (onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase)));
                 break;
