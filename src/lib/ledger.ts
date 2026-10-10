@@ -570,6 +570,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // test that derives this set from its consumers -- not a log line nobody reads.
   "repair.lease_posted",
   "pr.opened",
+  "pr.open_satisfied_by_main", // the backlog gardener retires the task from it; rotated away, a satisfied task is rebuilt.
   "pr.rehome.started", // W1-T7448: a resumed re-home reuses its started branch name; rotated away, it opens a second.
   "pr.rehomed", // W1-T7448: a completed re-home is never repeated for the same head.
   "pr.stuck", // W1-T5900: runSweep dedupes a stalled stage across passes and rotation.
