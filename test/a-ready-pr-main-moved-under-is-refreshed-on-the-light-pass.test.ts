@@ -150,7 +150,13 @@ test("W1-T7214: buildSweepLightHook presses update-branch on a ready PR main mov
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t7214-hook-`));
   const shim = ghShim(readyOverlapRoutes(), { kind: "t7214-gh" });
   const oldPath = process.env.PATH;
+  const transportEnv = ["RMD_GH_TRANSPORT_FLOOR", "RMD_GH_CACHE_HOME", "RMD_GH_SHARED_READ_GAP_MS"] as const;
+  const oldTransportEnv = transportEnv.map((key) => [key, process.env[key]] as const);
   process.env.PATH = `${shim.dir}:${oldPath}`;
+  // The shim is local: inherited reviewer cadence must not refuse its fixture reads.
+  process.env.RMD_GH_TRANSPORT_FLOOR = "advisory";
+  process.env.RMD_GH_CACHE_HOME = join(root, "gh-cache");
+  process.env.RMD_GH_SHARED_READ_GAP_MS = "0";
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   try {
     const hook = buildSweepLightHook(
@@ -165,6 +171,10 @@ test("W1-T7214: buildSweepLightHook presses update-branch on a ready PR main mov
     assert.ok(updates[0]!.includes(`expected_head_sha=${HEAD.sha}`), "the update is leased to the head CI judged");
   } finally {
     process.env.PATH = oldPath;
+    for (const [key, value] of oldTransportEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     rmSync(shim.dir, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }
