@@ -1,0 +1,23 @@
+id: host-mem-2cb2457c8893de7c
+ts: 2026-10-10T04:39:11.852Z
+raw: >-
+  host-mem:azure:remudero-daemon
+
+
+  Host azure, container remudero-daemon: memory.high 8379 MiB (policy 8192 MiB)
+  is pinned at 95% of its 8820 MiB memory.max, and it still refaulted a median
+  1058 MiB per 5 min — churn 100% of its 609 MiB page cache — across 8 beats of
+  the last 1 h.
+
+  deploy/memory-high-tuner.sh cannot grow it further (its last adjustment:
+  grow): relief needs a larger memory.max or a smaller resident set in the
+  container.
+attachments: []
+origin: incident#2cb2457c8893de7c4a5514f0c014b2060347e8db6cd495f359a8686009529b8a
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

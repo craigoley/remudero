@@ -98,7 +98,7 @@ function installHook(dir: string): void {
   ]) {
     copyFileSync(join(REPO_ROOT, "scripts", script), join(dir, "scripts", script));
   }
-  for (const lib of ["argv.mjs", "git.mjs", "json-duplicate-keys.mjs"]) {
+  for (const lib of ["argv.mjs", "git.mjs", "json-duplicate-keys.mjs", "instrument-surface-census.mjs"]) {
     copyFileSync(join(REPO_ROOT, "scripts", "lib", lib), join(dir, "scripts", "lib", lib));
   }
   writeFileSync(join(dir, "scripts", "rule15-precheck.mjs"), "process.exit(0)\n");

@@ -9,7 +9,7 @@
   band_meaning: span
   origin: "operator ruling 2026-10-09: 'We should never be left with stuck prs. lean into automated flow and self improvement. There should be a gardener for the pr fix bots too, i think to keep them self improving'"
   plan_refs: [W1-T5535, W1-T6360, W1-T7096, W1-T7243, W1-T5904, W1-T5361]
-  files: [src/lib/fix-lane-gardener.ts, src/run-task.ts, src/lib/flow-remedy-gardener.ts, src/lib/garden-registry.ts, test/the-fix-lane-gardener-files-one-remedy-per-defect-class.test.ts]
+  files: [src/lib/fix-lane-gardener.ts, src/run-task.ts, src/lib/flow-remedy-gardener.ts, src/lib/garden-registry.ts, test/the-fix-lane-gardener-files-one-remedy-per-defect-class.test.ts, "src/lib/sweep.ts"]
   status: queued
   priority: 1
   attempts: 0

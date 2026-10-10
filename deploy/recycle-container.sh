@@ -80,6 +80,8 @@
 #   RMD_RECYCLE_WAIT_S=300 ./deploy/recycle-container.sh      # widen the bounded wait for workers
 #   ./deploy/recycle-container.sh --first-boot                # RMD_STATE_DIR is a genuinely fresh
 #                                                               # host with no checkout yet (W1-T2555)
+#   RMD_GIT_AUTHOR_NAME=... RMD_GIT_AUTHOR_EMAIL=... ./deploy/recycle-container.sh --instance site \
+#     --commission-git-author   # W1-T6160: replace that target's Git author explicitly, then verify it
 #
 #   OVER SSH, RUN IT DETACHED (W1-T5281) — the wait can last up to RMD_RECYCLE_WAIT_S, longer than a
 #   session reliably survives, and a dropped session HUPs the script mid-recycle:
@@ -132,13 +134,59 @@ IMAGE="${IMAGE:-remudero}"
 TAG="${TAG:-latest}"
 CONTAINER_NAME="${RMD_DAEMON_CONTAINER:-remudero-daemon}"
 INSTANCE_NAME=""
+INSTANCE_FLAG_COUNT=0
 for ((i = 1; i <= $#; i++)); do
   if [ "${!i}" = "--instance" ]; then
+    INSTANCE_FLAG_COUNT=$((INSTANCE_FLAG_COUNT + 1))
     j=$((i + 1))
-    INSTANCE_NAME="${!j:-}"
-    break
+    [ -n "${INSTANCE_NAME}" ] || INSTANCE_NAME="${!j:-}"
   fi
 done
+
+# ── W1-T6160: EXPLICIT GIT AUTHOR COMMISSIONING — ONE NAMED TARGET, VERIFIED, WITH A RECEIPT ──────
+# An ordinary recycle keeps a non-empty outgoing RMD_GIT_AUTHOR_* over a shell export (W1-T3454), so
+# only this explicit mode may replace it: the pair comes from THIS shell (never argv), is preflighted
+# before any lifecycle step, rides the graceful replacement, and is verified as the effective author.
+# Every exit prints one receipt (target, operation, outcome, phase) — never an author value.
+COMMISSION_GIT_AUTHOR=0
+for arg in "$@"; do
+  case "${arg}" in --commission-git-author) COMMISSION_GIT_AUTHOR=1 ;; esac
+done
+COMMISSION_PHASE="preflight"
+COMMISSION_TARGET=""
+COMMISSION_CONTAINER=""
+COMMISSION_RECOVERY=""
+COMMISSION_RECEIPT_DONE=0
+COMMISSION_PROBE_FILE=""
+commission_receipt() {
+  local outcome="$1" stream=2 ledger_dir
+  [ "${COMMISSION_GIT_AUTHOR}" = "1" ] && [ "${COMMISSION_RECEIPT_DONE}" = "0" ] || return 0
+  COMMISSION_RECEIPT_DONE=1
+  [ "${outcome}" = "verified" ] && stream=1
+  printf 'recycle-container: GIT AUTHOR COMMISSION RECEIPT target=%s container=%s operation=commission-git-author outcome=%s phase=%s\n' \
+    "${COMMISSION_TARGET:-<unresolved>}" "${COMMISSION_CONTAINER:-<unresolved>}" "${outcome}" "${COMMISSION_PHASE}" >&"${stream}"
+  [ -z "${COMMISSION_RECOVERY}" ] || printf '  recovery: %s\n' "${COMMISSION_RECOVERY}" >&"${stream}"
+  ledger_dir="$(dirname "${LEDGER_FILE:-/nonexistent/x}")"
+  if [ -n "${LEDGER_FILE:-}" ] && [ -d "${ledger_dir}" ]; then
+    printf '{"ts":"%s","run_id":"RECYCLE-%s","task_id":"RECYCLE","step":"recycle.git_author_commission","lane":"deploy","instance":"%s","container":"%s","outcome":"%s","phase":"%s"}\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$" "${COMMISSION_TARGET}" "${COMMISSION_CONTAINER}" "${outcome}" "${COMMISSION_PHASE}" >> "${LEDGER_FILE}" 2>/dev/null || true
+  fi
+}
+commission_on_exit() {
+  [ "${COMMISSION_GIT_AUTHOR}" = "1" ] && [ "${COMMISSION_RECEIPT_DONE}" = "0" ] || return 0
+  if [ -z "${COMMISSION_RECOVERY}" ]; then
+    case "${COMMISSION_PHASE}" in
+      preflight|capture) COMMISSION_RECOVERY="nothing was touched; correct the refused input named above and re-run the same command" ;;
+      pull|drain|smoke) COMMISSION_RECOVERY="the outgoing container is untouched and still running; resolve the refusal above, then re-run the same commissioning command" ;;
+      *) COMMISSION_RECOVERY="the outgoing container may already be stopped and PAUSE may remain; resolve the failure above, then re-run the same commissioning command to finish" ;;
+    esac
+  fi
+  case "${COMMISSION_PHASE}" in
+    preflight|capture) commission_receipt refused ;;
+    *) commission_receipt failed ;;
+  esac
+}
+trap 'commission_on_exit' EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 DEFAULT_INSTANCE_REGISTRY="${SCRIPT_DIR%/deploy}/.remudero/daemon-instances.yaml"
@@ -190,6 +238,7 @@ list_instance_names() {
 
 if [ -n "$INSTANCE_NAME" ]; then
   validate_instance_name "$INSTANCE_NAME"
+  COMMISSION_TARGET="$INSTANCE_NAME"
   INSTANCE_REGISTRY="${RMD_INSTANCE_REGISTRY:-$DEFAULT_INSTANCE_REGISTRY}"
   if [ ! -r "$INSTANCE_REGISTRY" ]; then
     echo "recycle-container: REFUSING -- instance registry '${INSTANCE_REGISTRY}' is not readable." >&2
@@ -247,6 +296,7 @@ EOF
   IMAGE="$image_name"
   TAG="$image_tag"
   CONTAINER_NAME="$container_name"
+  COMMISSION_CONTAINER="$container_name"
   RMD_STATE_DIR="$state_dir"
   RMD_CLAUDE_DIR="$claude_dir"
   RMD_CODEX_DIR="$codex_dir"
@@ -447,15 +497,17 @@ run_docker_control() {
 # same opt-in for an interactive operator. Either form is read identically below — see section 1.5.
 FIRST_BOOT="${RMD_RECYCLE_FIRST_BOOT:-0}"
 
+CLI_RETARGET=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --tag)         TAG="${2:?--tag needs a value}"; shift 2 ;;
-    --registry)    REGISTRY="${2:?--registry needs a value}"; shift 2 ;;
-    --image)       IMAGE="${2:?--image needs a value}"; shift 2 ;;
-    --container)   CONTAINER_NAME="${2:?--container needs a value}"; shift 2 ;;
+    --registry)    REGISTRY="${2:?--registry needs a value}"; CLI_RETARGET="${CLI_RETARGET} --registry"; shift 2 ;;
+    --image)       IMAGE="${2:?--image needs a value}"; CLI_RETARGET="${CLI_RETARGET} --image"; shift 2 ;;
+    --container)   CONTAINER_NAME="${2:?--container needs a value}"; CLI_RETARGET="${CLI_RETARGET} --container"; shift 2 ;;
     --instance)    shift 2 ;;
     --first-boot)  FIRST_BOOT=1; shift ;;
-    -h|--help)     sed -n '1,72p' "$0"; exit 0 ;;
+    --commission-git-author) shift ;;
+    -h|--help)     COMMISSION_GIT_AUTHOR=0; sed -n '1,72p' "$0"; exit 0 ;;
     *) echo "recycle-container: unknown argument '$1' (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -539,6 +591,88 @@ if [ "${FIRST_BOOT}" != "1" ]; then
     echo "  Otherwise fix RMD_STATE_DIR to point at the real state directory and re-run." >&2
     exit 1
   fi
+fi
+
+# ── 1.55. GIT AUTHOR COMMISSIONING PREFLIGHT (W1-T6160) — READ-ONLY, BEFORE ANYTHING IS TOUCHED ──
+# Everything below can pause, pull, stop, remove or start, so a wrong target (missing, repeated,
+# ambiguous in the registry, or disagreeing with the live container's mounts) or an unsound pair is
+# refused HERE. The refusal names WHICH input failed, never its value.
+commission_refuse() {
+  echo "recycle-container: REFUSING git author commissioning — $1" >&2
+  echo "  NOTHING has been touched: no pause, pull, stop, removal or identity write." >&2
+  COMMISSION_RECOVERY="$2"
+  exit 2
+}
+commission_value_problem() {
+  # Prints why $2 (an RMD_GIT_AUTHOR_* value of kind $1) is unusable, or nothing when it is sound.
+  local kind="$1" v="$2" email_re='^[^[:space:]<>@]+@[^[:space:]<>@.]+(\.[^[:space:]<>@.]+)+$'
+  case "${v}" in
+    "") echo "is not set (both RMD_GIT_AUTHOR_NAME and RMD_GIT_AUTHOR_EMAIL are required)"; return ;;
+    *[![:space:]]*) : ;;
+    *) echo "is whitespace-only"; return ;;
+  esac
+  case "${v}" in *[[:cntrl:]]*) echo "contains a control character"; return ;; esac
+  [ "${#v}" -le 256 ] || { echo "is longer than 256 characters"; return; }
+  # git trims these from an ident's ends, so verification could never match: refuse up front.
+  case "${v}" in [[:space:].,:\;\<\>\"\\\']*|*[[:space:].,:\;\<\>\"\\\']) echo "begins or ends with a character git strips from an identity"; return ;; esac
+  if [ "${kind}" = "name" ]; then
+    case "${v}" in *[\<\>]*) echo "contains '<' or '>'"; return ;; esac
+  elif ! [[ "${v}" =~ ${email_re} ]]; then
+    echo "is not a single address of the form local@domain.tld"
+  fi
+}
+if [ "${COMMISSION_GIT_AUTHOR}" = "1" ]; then
+  COMMISSION_CONTAINER="${CONTAINER_NAME}"
+  if [ "${INSTANCE_FLAG_COUNT}" -eq 0 ] || [ -z "${INSTANCE_NAME}" ]; then
+    commission_refuse "--commission-git-author needs exactly one explicit --instance <name>." \
+      "re-run with --instance naming the one declared target to commission"
+  fi
+  if [ "${INSTANCE_FLAG_COUNT}" -gt 1 ]; then
+    commission_refuse "ambiguous target: --instance was given ${INSTANCE_FLAG_COUNT} times." \
+      "re-run with exactly one --instance"
+  fi
+  if [ -n "${CLI_RETARGET}" ]; then
+    commission_refuse "mismatched target:${CLI_RETARGET} would override the registry's declaration of '${INSTANCE_NAME}'." \
+      "drop${CLI_RETARGET} and let the registry name the target, or correct the registry first"
+  fi
+  declared_count="$(list_instance_names "${INSTANCE_REGISTRY}" | grep -cxF -- "${INSTANCE_NAME}" || true)"
+  if [ "${declared_count}" != "1" ]; then
+    commission_refuse "ambiguous target: '${INSTANCE_NAME}' is declared ${declared_count} times in ${INSTANCE_REGISTRY}." \
+      "leave exactly one '${INSTANCE_NAME}' record in the registry, then re-run"
+  fi
+  while IFS= read -r other; do
+    [ -n "${other}" ] && [ "${other}" != "${INSTANCE_NAME}" ] || continue
+    other_record="$(read_instance_registry "${INSTANCE_REGISTRY}" "${other}")"
+    case $'\n'"${other_record}"$'\n' in
+      *$'\n'"container_name=${CONTAINER_NAME}"$'\n'*|*$'\n'"state_dir=${STATE_DIR}"$'\n'*)
+        commission_refuse "ambiguous target: instance '${other}' declares the same container_name or state_dir as '${INSTANCE_NAME}'." \
+          "give each instance its own container_name and state_dir in the registry, then re-run" ;;
+    esac
+  done < <(list_instance_names "${INSTANCE_REGISTRY}")
+  COMMISSION_AUTHOR_NAME="${RMD_GIT_AUTHOR_NAME-}"
+  COMMISSION_AUTHOR_EMAIL="${RMD_GIT_AUTHOR_EMAIL-}"
+  name_problem="$(commission_value_problem name "${COMMISSION_AUTHOR_NAME}")"
+  email_problem="$(commission_value_problem email "${COMMISSION_AUTHOR_EMAIL}")"
+  if [ -n "${name_problem}" ] || [ -n "${email_problem}" ]; then
+    commission_refuse "invalid author pair:${name_problem:+ RMD_GIT_AUTHOR_NAME ${name_problem};}${email_problem:+ RMD_GIT_AUTHOR_EMAIL ${email_problem};} (values not printed)" \
+      "export a complete, well-formed RMD_GIT_AUTHOR_NAME and RMD_GIT_AUTHOR_EMAIL in this shell, then re-run"
+  fi
+  if [ -e "${STATE_DIR}/repos/${DAEMON_REPO}" ] && [ ! -e "${STATE_DIR}/repos/${DAEMON_REPO}/.git" ]; then
+    commission_refuse "mismatched target checkout: ${STATE_DIR}/repos/${DAEMON_REPO} exists but is not a git checkout." \
+      "repair or remove that directory so the daemon can re-clone it, then re-run"
+  fi
+  if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+    live_mounts="$(docker inspect --format '{{range .Mounts}}{{printf "%s\t%s\t%t\n" .Source .Destination .RW}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null)" \
+      || commission_refuse "could not read ${CONTAINER_NAME}'s mounts to confirm it is this instance's container." \
+        "confirm docker inspect ${CONTAINER_NAME} works from this shell, then re-run"
+    case $'\n'"${live_mounts}"$'\n' in
+      *$'\n'"${STATE_DIR}"$'\t'"${STATE_MOUNT_DEST}"$'\t'*) : ;;
+      *) commission_refuse "mismatched target: ${CONTAINER_NAME} does not mount ${STATE_DIR} at ${STATE_MOUNT_DEST}, so it is not the container '${INSTANCE_NAME}' declares." \
+           "correct the registry's state_dir or container_name for '${INSTANCE_NAME}' to match the live container, then re-run" ;;
+    esac
+  fi
+  echo "recycle-container: git author commissioning preflight passed for instance '${INSTANCE_NAME}' (${CONTAINER_NAME}); pair read from this shell, values not printed"
+  COMMISSION_PHASE="capture"
 fi
 
 # ── 1.6. THE SHARED CHECKOUT deploy/entrypoint.sh WILL CHECK OUT MUST NOT BLOCK THAT CHECKOUT
@@ -822,6 +956,18 @@ if [ -n "${INSTANCE_NAME}" ]; then
   fi
 fi
 
+# W1-T6160: THE ONE PLACE A SHELL AUTHOR SUPERSEDES THE OUTGOING CONTAINER'S. Only the explicit,
+# preflighted commissioning mode reaches this; without it the capture above keeps W1-T3454's
+# container-first precedence untouched. The pair rides the declared RMD_GIT_AUTHOR_* names, so the
+# replacement's own environment is what a later ordinary recycle captures and preserves.
+if [ "${COMMISSION_GIT_AUTHOR}" = "1" ]; then
+  CAPTURED_set RMD_GIT_AUTHOR_NAME "${COMMISSION_AUTHOR_NAME}"
+  CAPTURED_SOURCE_set RMD_GIT_AUTHOR_NAME commission
+  CAPTURED_set RMD_GIT_AUTHOR_EMAIL "${COMMISSION_AUTHOR_EMAIL}"
+  CAPTURED_SOURCE_set RMD_GIT_AUTHOR_EMAIL commission
+  echo "recycle-container: git author commissioning — RMD_GIT_AUTHOR_NAME/RMD_GIT_AUTHOR_EMAIL from this shell supersede the outgoing container's (values not printed)"
+fi
+
 CAPTURED_TOKEN="$(CAPTURED_get GH_TOKEN)"
 
 # ── 3.5. THE CASH CREDENTIAL MUST HAVE A DURABLE, SAFE HOST HOME ──────────────────────────────
@@ -1029,11 +1175,91 @@ for name in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
   fi
 done
 
+COMMISSION_PHASE="pull"
+
 # ── 4. AUTHENTICATE, THEN PULL — A FAILURE HERE REFUSES AND NEVER STARTS ANYTHING ────────────────
 # THE 2026-08-18 INCIDENT THIS SECTION EXISTS TO CLOSE: a pull failed with "authentication required"
 # and the recycle went on to `docker run` anyway, silently relaunching whatever was already cached
 # under this tag. The operator believed he had the new build and did not. So a pull failure is fatal
 # here, full stop — nothing below this section may ever run after it.
+# 4.0. ONE IMAGE RECYCLE PER HOST AT A TIME — PULL THROUGH RECLAIM HOLDS A HOST-WIDE LOCK, TAKEN BEFORE
+# THE LOGIN AND THE PULL BELOW.
+# MEASURED 2026-10-10: core pulled `:latest` (23a2f27e) at 04:27:07Z and drained for 17 minutes. In
+# that window the site instance recycled twice (04:28, 04:38), and each site run's section-8
+# `docker image prune -af` removed core's freshly pulled image — no container referenced it yet. Core's
+# smoke then failed `No such image` at 04:44:42Z, and its PAUSE had held dispatch for nothing. The
+# instances share one host, one docker store and one tag, so the window from `docker pull` to the
+# reclaim is one critical section across ALL of them.
+#
+# SO A SCOPED RECYCLE (`--instance`, the supervised path every declared instance takes) holds a
+# host-wide lock from before the pull until it exits. A second instance WAITS for it — before it pulls
+# and before it pauses anything, so waiting never holds dispatch — and refuses past a bounded wait,
+# naming the holder. Because the lock spans pull → smoke → swap → reclaim, no instance's prune can
+# ever run while another instance holds a pulled-but-unswapped image.
+#
+# `mkdir`, NOT flock: atomic everywhere (bash 3.2, no util-linux needed), and the holder writes its
+# pid so a lock whose holder died is PROVABLY stale (`kill -0` on the same host, same user) and is
+# reclaimed with a printed line, never judged by age. Unscoped runs (first boot, manual one-offs)
+# take no lock, as before. RMD_RECYCLE_HOST_LOCK names the lock; setting it also opts an unscoped run in.
+HOST_RECYCLE_LOCK=""
+if [ -n "${INSTANCE_NAME}" ] || [ -n "${RMD_RECYCLE_HOST_LOCK:-}" ]; then
+  HOST_RECYCLE_LOCK="${RMD_RECYCLE_HOST_LOCK:-${HOME}/.local/state/remudero/recycle-container.lock}"
+fi
+HOST_RECYCLE_LOCK_HELD=0
+HOST_RECYCLE_LOCK_WAIT_S="${RMD_RECYCLE_LOCK_WAIT_S:-2400}"
+HOST_RECYCLE_LOCK_POLL_S="${RMD_RECYCLE_LOCK_POLL_S:-5}"
+release_host_recycle_lock() {
+  if [ "${HOST_RECYCLE_LOCK_HELD}" = "1" ]; then
+    rm -f "${HOST_RECYCLE_LOCK}/holder" 2>/dev/null
+    rmdir "${HOST_RECYCLE_LOCK}" 2>/dev/null
+    HOST_RECYCLE_LOCK_HELD=0
+  fi
+  return 0
+}
+RECYCLE_TMPDIR="${TMPDIR:-/tmp}"
+PULL_LOG=""
+recycle_cleanup_tmp() {
+  [ -n "${PULL_LOG}" ] && rm -f "${PULL_LOG}"
+  [ -n "${COMMISSION_PROBE_FILE}" ] && rm -f "${COMMISSION_PROBE_FILE}"
+  release_host_recycle_lock
+  commission_on_exit
+  return 0
+}
+# W1-T6160: the cleanup also emits the commissioning receipt (a no-op unless --commission-git-author).
+trap recycle_cleanup_tmp EXIT
+if [ -n "${HOST_RECYCLE_LOCK}" ]; then
+  mkdir -p "$(dirname "${HOST_RECYCLE_LOCK}")"
+  lock_waited_s=0
+  while :; do
+    if mkdir "${HOST_RECYCLE_LOCK}" 2>/dev/null; then
+      HOST_RECYCLE_LOCK_HELD=1
+      printf '%s %s\n' "$$" "${INSTANCE_NAME:-unscoped}" > "${HOST_RECYCLE_LOCK}/holder"
+      echo "recycle-container: host recycle lock taken (${HOST_RECYCLE_LOCK})"
+      break
+    fi
+    holder_line="$(cat "${HOST_RECYCLE_LOCK}/holder" 2>/dev/null || true)"
+    holder_pid="${holder_line%% *}"
+    holder_instance="${holder_line#* }"
+    case "${holder_pid}" in
+      ''|*[!0-9]*) holder_pid="" ;;
+    esac
+    if [ -n "${holder_pid}" ] && ! kill -0 "${holder_pid}" 2>/dev/null; then
+      echo "recycle-container: host recycle lock held by DEAD pid ${holder_pid} (${holder_instance}) — reclaiming it"
+      rm -f "${HOST_RECYCLE_LOCK}/holder" 2>/dev/null
+      rmdir "${HOST_RECYCLE_LOCK}" 2>/dev/null || true
+      continue
+    fi
+    if [ "${lock_waited_s}" -ge "${HOST_RECYCLE_LOCK_WAIT_S}" ]; then
+      echo "recycle-container: REFUSING — another image recycle (${holder_instance:-unknown}, pid ${holder_pid:-unknown}) still holds the host recycle lock after ${lock_waited_s}s." >&2
+      echo "  ${CONTAINER_NAME} is untouched and nothing was pulled or paused; a later tick retries." >&2
+      exit 1
+    fi
+    echo "recycle-container: deploy.recycle_waiting — ${holder_instance:-another instance} (pid ${holder_pid:-unknown}) holds the host recycle lock; waited ${lock_waited_s}s"
+    sleep "${HOST_RECYCLE_LOCK_POLL_S}"
+    lock_waited_s=$((lock_waited_s + HOST_RECYCLE_LOCK_POLL_S))
+  done
+fi
+
 if command -v az >/dev/null 2>&1; then
   echo "recycle-container: az acr login -n ${REGISTRY}"
   source "${SCRIPT_DIR}/acr-login.sh"
@@ -1066,13 +1292,6 @@ fi
 # starting with it (W1-T2773), so a per-invocation name without it would trade a collision for a
 # fresh permanent leak. The trap is the primary cleanup; the prefix catches the run that dies
 # before it fires, and it is INSTALLED BEFORE the mktemp so a failed allocation still cleans up.
-RECYCLE_TMPDIR="${TMPDIR:-/tmp}"
-PULL_LOG=""
-recycle_cleanup_tmp() {
-  [ -n "${PULL_LOG}" ] && rm -f "${PULL_LOG}"
-  return 0
-}
-trap recycle_cleanup_tmp EXIT
 if ! PULL_LOG="$(mktemp "${RECYCLE_TMPDIR%/}/rmd-recycle-container-pull-log.XXXXXX" 2>/dev/null)"; then
   echo "recycle-container: REFUSING — could not create a scratch pull log under ${RECYCLE_TMPDIR}." >&2
   echo "  Without it the credential-failure check below cannot run, and a pull that failed on auth" >&2
@@ -1103,6 +1322,8 @@ if [ -z "${PULLED_IMAGE_ID}" ]; then
   exit 1
 fi
 echo "recycle-container: pulled image id ${PULLED_IMAGE_ID}"
+
+COMMISSION_PHASE="drain"
 
 # ── 5. PAUSE, THEN WAIT (BOUNDED) FOR IN-FLIGHT WORKERS ─────────────────────────────────────────
 # THE PAUSE MUST GO ON BEFORE THE WAIT, or the wait watches a fleet still admitting new work and can
@@ -1591,6 +1812,8 @@ WORKERS
   waited=$((waited + POLL_INTERVAL_S))
 done
 
+COMMISSION_PHASE="smoke"
+
 # ── 5.5. SMOKE A REAL WORKER ON THE PULLED IMAGE BEFORE ACCEPTING IT (W1-T5017) ─────────────────
 # CI fakes the worker query seam and verify-image.sh compares binary VERSIONS, so an SDK/CLI change
 # can pass both and still die at the first task dispatch. This starts ONE throwaway container on the
@@ -1689,6 +1912,31 @@ if ! cleanup_leftover_smoke "before the smoke"; then
   clear_own_pause "recycle-container: pause removed — the refusal above must not leave the fleet paused" >&2
   exit 1
 fi
+# READ 2026-10-10 04:27–04:44Z: core pulled, then drained 17 min for a worker; meanwhile the site
+# instance recycled twice, moved the shared tag and ran section 8's `docker image prune -af`, which
+# removes EVERY image no container references. Core's pulled, now untagged image was reclaimed and
+# its smoke failed with docker's bare "No such image". So the pulled id is proven to still exist
+# before the smoke spends its timeout on a ghost: an image gone during the drain gets ONE re-pull
+# of the same ref (whatever it now resolves to), then a refusal that names the cause.
+if ! docker image inspect "${PULLED_IMAGE_ID}" >/dev/null 2>&1; then
+  echo "recycle-container: pulled image ${PULLED_IMAGE_ID} is gone after the wait; re-pulling ${REF} once" >&2
+  REPULLED_IMAGE_ID=""
+  if docker pull "${REF}" >/dev/null 2>&1; then
+    REPULLED_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${REF}" 2>/dev/null || true)"
+  fi
+  if [ -z "${REPULLED_IMAGE_ID}" ]; then
+    echo "recycle-container: REFUSING — the pulled image ${PULLED_IMAGE_ID} was removed during the drain" >&2
+    echo "  (another instance's image reclaim, or an operator prune) and the re-pull of ${REF} failed." >&2
+    echo "  ${CONTAINER_NAME} is untouched and STILL RUNNING on its current image." >&2
+    clear_own_pause "recycle-container: pause removed — the refusal above must not leave the fleet paused" >&2
+    exit 1
+  fi
+  for i in "${!SMOKE_ARGS[@]}"; do
+    if [ "${SMOKE_ARGS[$i]}" = "${PULLED_IMAGE_ID}" ]; then SMOKE_ARGS[i]="${REPULLED_IMAGE_ID}"; fi
+  done
+  PULLED_IMAGE_ID="${REPULLED_IMAGE_ID}"
+  echo "recycle-container: re-pulled image id ${PULLED_IMAGE_ID}"
+fi
 echo "recycle-container: worker smoke — one real worker query on ${PULLED_IMAGE_ID} (bounded ${SMOKE_TIMEOUT_S}s)"
 set +e
 SMOKE_OUTPUT="$("${SMOKE_TIMEOUT_CMD[@]+"${SMOKE_TIMEOUT_CMD[@]}"}" docker container run "${SMOKE_ARGS[@]}" 2>&1)"
@@ -1736,6 +1984,8 @@ if [ "${SMOKE_RC}" -ne 0 ]; then
   exit 1
 fi
 echo "recycle-container: worker smoke PASSED — ${SMOKE_LINE:-exit 0}"
+
+COMMISSION_PHASE="replace"
 
 # ── 6. STOP + REMOVE THE OLD CONTAINER, CLEAR THE PAUSE, START THE NEW ONE ──────────────────────
 # `docker stop` (not `-f`/`kill`) sends SIGTERM first, giving the daemon's own signal handler a
@@ -1834,6 +2084,115 @@ else
   echo "recycle-container: FAILED RUNTIME CONTRACT — ${RUNTIME_CONTRACT_VERDICT}" >&2
   echo "  The new container remains running for investigation; no stop, remove, retry or rollback was attempted." >&2
   exit "${RUNTIME_CONTRACT_STATUS}"
+fi
+
+# ── 7.6. VERIFY THE COMMISSIONED AUTHOR IS THE ONE GIT WILL USE (W1-T6160) ───────────────────────
+# Both required: the replacement's own env carries the pair (what later recycles capture), and
+# `git var GIT_AUTHOR_IDENT` as the worker user in the target checkout resolves to it — a global match
+# proves nothing under a local or GIT_AUTHOR_* mask. Bounded and polled; any miss is a FAILURE.
+commission_fail() {
+  echo "recycle-container: FAILED git author commissioning ($1) — $2" >&2
+  echo "  The replacement ${CONTAINER_NAME} remains running for diagnosis; no rollback was attempted." >&2
+  COMMISSION_PHASE="$1"
+  COMMISSION_RECOVERY="$3"
+  exit 1
+}
+COMMISSION_PROBE_OUT=""
+commission_bounded() {
+  # Run "$@" for at most $1 seconds; its stdout lands in COMMISSION_PROBE_OUT. 124 on timeout.
+  local limit="$1" pid waited=0 rc=0
+  shift
+  COMMISSION_PROBE_OUT=""
+  # Removed here, and by recycle_cleanup_tmp (trapped on EXIT) if this run dies mid-probe.
+  COMMISSION_PROBE_FILE="$(mktemp "${RECYCLE_TMPDIR%/}/rmd-recycle-author-probe.XXXXXX" 2>/dev/null)" || return 125
+  "$@" >"${COMMISSION_PROBE_FILE}" 2>/dev/null </dev/null &
+  pid=$!
+  while kill -0 "${pid}" 2>/dev/null; do
+    if [ "${waited}" -ge "${limit}" ]; then
+      kill "${pid}" 2>/dev/null || true
+      wait "${pid}" 2>/dev/null || true
+      rm -f "${COMMISSION_PROBE_FILE}"
+      return 124
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "${pid}" || rc=$?
+  COMMISSION_PROBE_OUT="$(cat "${COMMISSION_PROBE_FILE}" 2>/dev/null || true)"
+  rm -f "${COMMISSION_PROBE_FILE}"
+  return "${rc}"
+}
+if [ "${COMMISSION_GIT_AUTHOR}" = "1" ]; then
+  COMMISSION_PHASE="verify-env"
+  if ! REPLACEMENT_ENV_RAW="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null)"; then
+    commission_fail verify-env "could not read the replacement's environment." \
+      "run docker inspect ${CONTAINER_NAME} from this shell; once it works, re-run the same commissioning command"
+  fi
+  got_name="" got_email=""
+  while IFS= read -r line || [ -n "${line}" ]; do
+    case "${line}" in
+      RMD_GIT_AUTHOR_NAME=*) got_name="${line#*=}" ;;
+      RMD_GIT_AUTHOR_EMAIL=*) got_email="${line#*=}" ;;
+    esac
+  done <<EOF_REPLACEMENT_ENV
+${REPLACEMENT_ENV_RAW}
+EOF_REPLACEMENT_ENV
+  if [ "${got_name}" != "${COMMISSION_AUTHOR_NAME}" ] || [ "${got_email}" != "${COMMISSION_AUTHOR_EMAIL}" ]; then
+    commission_fail verify-env "the replacement's RMD_GIT_AUTHOR_NAME/RMD_GIT_AUTHOR_EMAIL do not carry the requested pair." \
+      "re-run the same commissioning command with both RMD_GIT_AUTHOR_* exported in this shell"
+  fi
+
+  COMMISSION_PHASE="verify-identity"
+  if [ -e "${STATE_DIR}/repos/${DAEMON_REPO}/.git" ]; then
+    PROBE_DIR="${STATE_MOUNT_DEST}/repos/${DAEMON_REPO}"
+  else
+    PROBE_DIR="${STATE_MOUNT_DEST}/remudero"
+  fi
+  PROBE_TIMEOUT_S="${RMD_RECYCLE_AUTHOR_PROBE_TIMEOUT_S:-120}"
+  PROBE_POLL_S="${RMD_RECYCLE_AUTHOR_PROBE_POLL_S:-2}"
+  case "${PROBE_TIMEOUT_S}${PROBE_POLL_S}" in *[!0-9]*) PROBE_TIMEOUT_S=120; PROBE_POLL_S=2 ;; esac
+  expected_ident="${COMMISSION_AUTHOR_NAME} <${COMMISSION_AUTHOR_EMAIL}>"
+  probe_started="$(date +%s)"
+  probe_last="never ran"
+  identity_verified=0
+  while :; do
+    remaining=$((PROBE_TIMEOUT_S - ($(date +%s) - probe_started)))
+    [ "${remaining}" -gt 0 ] || break
+    if commission_bounded "${remaining}" docker exec --user 1000:1000 -w "${PROBE_DIR}" "${CONTAINER_NAME}" git var GIT_AUTHOR_IDENT; then
+      observed_ident="${COMMISSION_PROBE_OUT% * *}"
+      if [ "${observed_ident}" = "${expected_ident}" ]; then
+        identity_verified=1
+        break
+      fi
+      probe_last="mismatch"
+    else
+      probe_rc=$?
+      if [ "${probe_rc}" -eq 124 ]; then probe_last="timed out"; else probe_last="failed (exit ${probe_rc})"; fi
+    fi
+    sleep "${PROBE_POLL_S}"
+  done
+  if [ "${identity_verified}" -ne 1 ]; then
+    if [ "${probe_last}" != "mismatch" ]; then
+      commission_fail verify-identity "the effective-author probe from ${PROBE_DIR} ${probe_last} within ${PROBE_TIMEOUT_S}s." \
+        "read docker logs ${CONTAINER_NAME} (a boot that cannot write or read its identity stops with 'git identity: FAILED'), fix that cause, then re-run the same commissioning command"
+    fi
+    if commission_bounded 30 docker exec --user 1000:1000 -w "${PROBE_DIR}" "${CONTAINER_NAME}" git config --local --get-regexp '^user\.(name|email)$' \
+      && [ -n "${COMMISSION_PROBE_OUT}" ]; then
+      commission_fail verify-identity "a repository-local user.name/user.email in ${PROBE_DIR} masks the commissioned author." \
+        "docker exec --user 1000:1000 ${CONTAINER_NAME} git -C ${PROBE_DIR} config --local --unset-all user.name; repeat for user.email; then re-run the same commissioning command"
+    fi
+    if commission_bounded 30 docker exec --user 1000:1000 "${CONTAINER_NAME}" sh -c 'for n in GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_CONFIG_GLOBAL; do eval "v=\${$n-}"; [ -z "$v" ] || echo "$n"; done' \
+      && [ -n "${COMMISSION_PROBE_OUT}" ]; then
+      commission_fail verify-identity "the container environment sets $(printf '%s' "${COMMISSION_PROBE_OUT}" | paste -sd, - | sed 's/,/, /g'), which masks the commissioned author." \
+        "remove those variables from the image or launch environment, then re-run the same commissioning command"
+    fi
+    commission_fail verify-identity "git resolves a different author from ${PROBE_DIR} than the one commissioned." \
+      "read docker logs ${CONTAINER_NAME} for the 'git identity:' line, correct the global config in the container's HOME, then re-run the same commissioning command"
+  fi
+  COMMISSION_PHASE="verified"
+  echo "recycle-container: git author commissioning VERIFIED — ${CONTAINER_NAME}'s environment and the effective author from ${PROBE_DIR} match the requested pair (values not printed)"
+  COMMISSION_RECOVERY=""
+  commission_receipt verified
 fi
 
 echo "recycle-container: OK — ${CONTAINER_NAME} recycled onto ${PULLED_IMAGE_ID}"
