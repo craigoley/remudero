@@ -5,7 +5,7 @@
  * produces: an estimate, a stored sample, a recorded peak, or the class a lane's worker reserves under.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -82,6 +82,9 @@ test("peaks are stored per instance, read back across instances, and compacted t
     const site = { ...core, instance: () => ({ name: "rmd-site-state" }) };
     assert.equal(recordPeak("review", 900, core), true);
     assert.equal(recordPeak("review", 1100, site), true);
+    const coreFile = join(dir, "estimates", "state2.ndjson");
+    assert.equal(statSync(join(dir, "estimates")).mode & 0o777, 0o700, "the store directory is owner-only");
+    assert.equal(statSync(coreFile).mode & 0o777, 0o600, "new sample files are owner-only");
     assert.equal(recordPeak("garden", 0, core), false, "a zero peak is never recorded");
     assert.deepEqual(readdirSync(join(dir, "estimates")).sort(), ["rmd-site-state.ndjson", "state2.ndjson"]);
     assert.deepEqual(readPeakSamples("review", core).map((s) => s.peakMib).sort(), [1100, 900]);
@@ -98,6 +101,13 @@ test("peaks are stored per instance, read back across instances, and compacted t
     let rewritten = "";
     recordPeak("fix", 700, { ...core, size: () => 2 * 1024 * 1024, rewrite: (_path, content) => void (rewritten = content) });
     assert.match(rewritten, /"c":"fix","p":700/, "an oversized store is rewritten from its tail");
+
+    // The default atomic rewrite creates a replacement file too; it must retain the private mode.
+    const filler = `${JSON.stringify({ c: "review", p: 900, at: new Date(NOW).toISOString() })}\n`;
+    writeFileSync(coreFile, filler.repeat(Math.ceil((1024 * 1024 + 1) / filler.length)), { mode: 0o600 });
+    assert.equal(recordPeak("review", 1200, core), true);
+    assert.equal(statSync(coreFile).mode & 0o777, 0o600, "compaction keeps sample files owner-only");
+    assert.ok(readPeakSamples("review", core).some((sample) => sample.peakMib === 1200), "the append survives compaction");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
