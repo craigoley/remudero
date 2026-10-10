@@ -34,6 +34,18 @@ import {
   type ReadingStatus,
   type WorkerClass,
 } from "./host-memory-ledger.js";
+import {
+  HOST_MEMORY_PRIORITY_PROPOSAL,
+  WOULD_YIELD_TO_REVIEW,
+  createDeferralDiagnostics,
+  createShortfallTracker,
+  queueCapacityDecision,
+  readReviewDemand,
+  wouldYieldToReview,
+  type HostMemoryPriorityPolicy,
+  type ReviewDemandReading,
+  type YieldDecision,
+} from "./host-memory-priority.js";
 import type { LedgerLine } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { installPolicyPath } from "./policy.js";
@@ -41,6 +53,10 @@ import { installPolicyPath } from "./policy.js";
 export const SHADOW_STEP = "memory_budget.shadow";
 export const SHADOW_ERROR_STEP = "memory_budget.shadow_error";
 export const SHADOW_SUMMARY_STEP = "memory_budget.shadow_summary";
+/** W1-T7095: one machine-owned row per (class, instance, reason) of would-be deferral. Never an escalation. */
+export const SHADOW_DEFERRAL_STEP = "memory_budget.deferral_summary";
+/** W1-T7095: a sustained zero-worker shortfall, queued once per scenario for the sweep's escalation path. */
+export const SHADOW_CAPACITY_DECISION_STEP = "memory_budget.capacity_decision";
 
 // ── policy ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -136,7 +152,9 @@ export type ServeScenario = "serve-stopped" | "serve-steady" | "serve-cold-start
 export const SERVE_SCENARIOS: readonly ServeScenario[] = ["serve-stopped", "serve-steady", "serve-cold-start", "unknown"];
 
 export type ShadowReason =
-  | "memory-available" | "swap-in" | "psi" | "container-ceiling" | "unrealized-reservations" | "uncertainty";
+  | "memory-available" | "swap-in" | "psi" | "container-ceiling" | "unrealized-reservations" | "uncertainty"
+  /** W1-T7095: the start would have yielded to a queued review that memory alone held (see host-memory-priority.ts). */
+  | typeof WOULD_YIELD_TO_REVIEW;
 
 /** Every ledger state the reader can report, plus the two the shadow reader adds for a held lock or a thrown errno. */
 export type ShadowLedgerState = HostMemoryReading["state"] | "lock-held" | "error";
@@ -151,6 +169,8 @@ export interface ShadowEntryInput {
   walkComplete: boolean | null;
   /** The tree's current rss+swap, or why it could not be read (then the full estimate counts). */
   resident: { mib: number; complete: boolean; reason?: string } | { unread: string };
+  /** Since the reservation opened. W1-T7095 reads it to tell a review started since its demand row was published. */
+  ageMs?: number;
 }
 
 export interface ShadowInputs {
@@ -325,6 +345,32 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
   };
 }
 
+// ── the counterfactual review (pure, W1-T7095) ──────────────────────────────────────────────────────────────────
+
+/**
+ * The verdict a queued review would get in THIS snapshot: with the current start's claim counted (`withStart`), or with
+ * the start yielded (its reservation absent). The review is a hypothetical start at the review class estimate.
+ */
+export function counterfactualReviewVerdict(inputs: ShadowInputs, policy: HostMemoryBudgetPolicy, withStart: boolean): ShadowVerdict {
+  const own = inputs.start;
+  const recorded = own.reservationId !== undefined && inputs.entries.some((entry) => entry.id === own.reservationId);
+  let entries = inputs.entries;
+  if (!withStart) entries = entries.filter((entry) => own.reservationId === undefined || entry.id !== own.reservationId);
+  else if (!recorded) {
+    // Counted in full, exactly as the start's own verdict counts an unrecorded start (no widening for it).
+    entries = [...entries, {
+      id: own.reservationId ?? "counterfactual-start", owner: "start", workerClass: own.workerClass,
+      estimateMib: own.estimateMib, estimateSource: { kind: "measured", samples: 0 }, status: "owned", walkComplete: true,
+      resident: { mib: 0, complete: true },
+    }];
+  }
+  return evaluateShadowMemory({
+    ...inputs,
+    entries,
+    start: { workerClass: "review", estimateMib: DEFAULT_ESTIMATE_MIB.review },
+  }, policy);
+}
+
 // ── per-scenario validity (pure) ──────────────────────────────────────────────────────────────────────────────────
 
 export type ShadowTally = Record<ServeScenario, { samples: number; admit: number; defer: number }>;
@@ -383,6 +429,9 @@ export interface ShadowMemoryPorts {
   policy: () => HostMemoryBudgetPolicy;
   /** The row sink. Undefined: no sink was installed, and the verdict is not computed at all. */
   write: ((ledgerPath: string, row: LedgerLine) => void) | undefined;
+  /** W1-T7095: every instance's published review demand, from the shared ledger directory. */
+  readReviewDemand: () => ReviewDemandReading;
+  priorityPolicy: () => HostMemoryPriorityPolicy;
   stderr: (line: string) => void;
 }
 
@@ -391,6 +440,10 @@ let priorSwapIn: { at: number; pswpin: number } | undefined;
 let tally = emptyShadowTally();
 let lastState: { scenario: ServeScenario; wouldAdmit: boolean } | undefined;
 const errorSeen = new Map<string, number>();
+/** W1-T7095: per (instance, class), since when this process's starts would have been waiting. Cleared on an admit. */
+const wouldWaitSince = new Map<string, number>();
+let deferrals = createDeferralDiagnostics();
+let shortfalls = createShortfallTracker();
 
 /** run-task.ts installs the ledger appender once per process; a process without one computes nothing. */
 export function installShadowMemorySink(sink: ShadowMemoryPorts["write"]): void {
@@ -402,6 +455,14 @@ export function resetShadowMemoryStateForTests(): void {
   tally = emptyShadowTally();
   lastState = undefined;
   errorSeen.clear();
+  wouldWaitSince.clear();
+  deferrals = createDeferralDiagnostics();
+  shortfalls = createShortfallTracker();
+}
+
+/** W1-T7095: the queryable would-be wait distribution, one row per (class, instance, reason). */
+export function shadowDeferralReport(): ReturnType<typeof deferrals.report> {
+  return deferrals.report();
 }
 
 function errnoOf(error: unknown): string | undefined {
@@ -438,6 +499,8 @@ function defaultPorts(): ShadowMemoryPorts {
     policy: () => loadHostMemoryBudgetPolicy(),
     write: installedSink,
     stderr: (line) => console.error(line),
+    readReviewDemand: () => readReviewDemand(),
+    priorityPolicy: () => HOST_MEMORY_PRIORITY_PROPOSAL,
   };
 }
 
@@ -621,6 +684,7 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
     status: entry.status,
     walkComplete: entry.walkComplete,
     resident: treeResident(ports.readFile, entry.path, budget),
+    ageMs: entry.ageMs,
   }));
   const instance = basename(start.root);
   const tail = readTailRows(ports, start.root);
@@ -674,6 +738,80 @@ function logShadowError(ports: ShadowMemoryPorts, start: ShadowStart, ledgerPath
   }
 }
 
+/** W1-T7095: the counterfactual yield for this start. A failure is a named diagnostic and never a yield. */
+function reviewPriorityOf(
+  start: ShadowStart,
+  inputs: ShadowInputs,
+  policy: HostMemoryBudgetPolicy,
+  ports: ShadowMemoryPorts,
+  waitingSinceMs: number,
+  now: number,
+  ledgerPath: string,
+): YieldDecision {
+  try {
+    return wouldYieldToReview({
+      start: { instance: basename(start.root), workerClass: start.workerClass, waitingSinceMs },
+      demand: start.workerClass === "review" ? { state: "present", rows: [], unreadableRows: 0 } : ports.readReviewDemand(),
+      reservations: inputs.entries,
+      reviewVerdict: (withStart) => counterfactualReviewVerdict(inputs, policy, withStart),
+      policy: ports.priorityPolicy(),
+      now,
+    });
+  } catch (error) {
+    const reason = `priority:${reasonOf(error)}`;
+    logShadowError(ports, start, ledgerPath, reason);
+    return { yield: false, why: "demand-unread", detail: reason };
+  }
+}
+
+/**
+ * W1-T7095: routine deferrals become ONE machine row per (class, instance, reason), never an escalation; a sustained
+ * zero-worker shortfall is queued ONCE per scenario for the sweep, which owns the escalation path.
+ */
+function recordDiagnostics(
+  start: ShadowStart,
+  inputs: ShadowInputs,
+  verdict: ShadowVerdict,
+  policy: HostMemoryBudgetPolicy,
+  ports: ShadowMemoryPorts,
+  base: { run_id: string; task_id: string },
+  ledgerPath: string,
+  waitMs: number,
+): void {
+  const instance = basename(start.root);
+  try {
+    for (const reason of verdict.reasons) {
+      if (!deferrals.observe({ workerClass: start.workerClass, instance, reason, waitMs }).first) continue;
+      ports.write?.(ledgerPath, {
+        ...base,
+        step: SHADOW_DEFERRAL_STEP,
+        counterfactual: true,
+        owner: "machine",
+        escalate: false,
+        worker_class: start.workerClass,
+        instance,
+        reason,
+        dedup: "one row per class, instance and reason; later deferrals only count toward shadowDeferralReport()",
+      });
+    }
+    const workersResidentMib = inputs.entries.reduce((sum, entry) => sum + ("mib" in entry.resident ? entry.resident.mib : 0), 0);
+    const decision = shortfalls.observe({
+      scenario: verdict.scenario,
+      memAvailableMib: verdict.numbers.memAvailableMib,
+      workersResidentMib,
+      daemonGrowthMib: verdict.numbers.daemonGrowthMib,
+      coldStartReserveMib: verdict.numbers.coldStartReserveMib,
+      hostReserveMib: policy.hostReserveMib,
+    }, ports.priorityPolicy());
+    if (decision) {
+      queueCapacityDecision(decision);
+      ports.write?.(ledgerPath, { ...base, step: SHADOW_CAPACITY_DECISION_STEP, counterfactual: true, ...decision });
+    }
+  } catch (error) {
+    logShadowError(ports, start, ledgerPath, `diagnostics:${reasonOf(error)}`);
+  }
+}
+
 /**
  * The counterfactual verdict for one start that is ALREADY committed. Synchronous and bounded; NEVER throws; the caller
  * ignores its result, so admit, defer and error start identically. A failure logs memory_budget.shadow_error, once per
@@ -689,7 +827,17 @@ export function recordShadowMemoryVerdict(start: ShadowStart, overrides: Partial
     const policy = ports.policy();
     if (policy.mode === "off") return { kind: "off" };
     const inputs = gatherShadowInputs(start, ports, policy);
-    const verdict = evaluateShadowMemory(inputs, policy);
+    const instance = basename(start.root);
+    const now = ports.clock.now();
+    const waitKey = `${instance}\u0000${start.workerClass}`;
+    const waitingSinceMs = wouldWaitSince.get(waitKey) ?? now;
+    let verdict = evaluateShadowMemory(inputs, policy);
+    const priority = reviewPriorityOf(start, inputs, policy, ports, waitingSinceMs, now, ledgerPath);
+    if (priority.yield) {
+      verdict = { ...verdict, wouldAdmit: false, reasons: [...verdict.reasons, WOULD_YIELD_TO_REVIEW] };
+    }
+    if (verdict.wouldAdmit) wouldWaitSince.delete(waitKey);
+    else wouldWaitSince.set(waitKey, waitingSinceMs);
     const shadowUs = Number((ports.nowNs() - startedNs) / 1000n);
     const base = { run_id: start.runId ?? "memory-budget-shadow", task_id: start.taskId ?? "MEMORY-BUDGET" };
     let written = true;
@@ -713,6 +861,9 @@ export function recordShadowMemoryVerdict(start: ShadowStart, overrides: Partial
         ledger_state: inputs.ledger.state,
         reservations: inputs.entries.length,
         daemon_growth: inputs.daemonGrowth,
+        would_yield_to_review: priority.yield,
+        review_priority: priority,
+        would_wait_ms: verdict.wouldAdmit ? 0 : now - waitingSinceMs,
         shadow_us: shadowUs,
       });
     } catch (error) {
@@ -739,6 +890,7 @@ export function recordShadowMemoryVerdict(start: ShadowStart, overrides: Partial
         logShadowError(ports, start, ledgerPath, reason);
       }
     }
+    if (written) recordDiagnostics(start, inputs, verdict, policy, ports, base, ledgerPath, now - waitingSinceMs);
     return { kind: "recorded", verdict, written };
   } catch (error) {
     const reason = reasonOf(error);
