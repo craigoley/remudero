@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5839 (#9320) builder's follow-ups 1, 2 and 4"
   plan_refs: [W1-T5839, W1-T3535, W1-T5813, W1-T2860]
   files: [src/lib/sweep.ts, test/an-unfiled-pr-has-its-own-fix-and-escalation-identity.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

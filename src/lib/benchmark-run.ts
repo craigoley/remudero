@@ -14,6 +14,7 @@ import { fixedClock } from "./clock.js";
 import { readInflightLock, sweepStaleInflightLocks, type InflightLockInfo, type InflightSweepResult } from "./inflight-lock.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import type { Config } from "./config.js";
+import { workerClassOfLane } from "./host-memory-learning.js";
 import { spawnWorker, workerLedgerFields, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 
 export const BENCHMARK_RUN_VERSION = "benchmark-run-v1" as const;
@@ -542,7 +543,9 @@ export function attemptAssignmentJoin(assignmentId: string | undefined, threw: b
 export function benchmarkNonDispatchSpawn(
   lane: string, raw: typeof spawnWorker = spawnWorker,
 ): typeof spawnWorker {
-  return async (args) => {
+  return async (requested) => {
+    // The host memory budget reserves (and learns) by class, and the lane names it: a caller's own class still wins.
+    const args: SpawnWorkerArgs = { ...requested, workerClass: requested.workerClass ?? workerClassOfLane(lane) };
     // W1-T4613: the caller already receipts this worker; a second pair would count it twice.
     if (callerOwnsBenchmarkReceipt(args)) return raw(args);
     let observedAssignmentId: string | undefined;

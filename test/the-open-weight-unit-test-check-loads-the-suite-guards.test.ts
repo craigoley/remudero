@@ -35,7 +35,10 @@ function scriptImports(name: string): string[] {
   const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as { scripts: Record<string, string> };
   const script = pkg.scripts[name];
   assert.ok(script, `package.json must declare a ${name} script`);
-  return importsOf(script.split(/\s+/));
+  // `npm test` runs through scripts/test-run.mjs, whose own `--import tsx` loads that wrapper; the runner's chain follows it.
+  const argv = script.split(/\s+/);
+  const wrapper = argv.indexOf("scripts/test-run.mjs");
+  return importsOf(wrapper === -1 ? argv : argv.slice(wrapper + 1));
 }
 
 test("the open-weight unit_test check loads every import the test:ci script loads, in order", () => {

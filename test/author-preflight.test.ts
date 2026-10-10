@@ -16,6 +16,29 @@ const mod = (existsSync(SCRIPT) ? await import(pathToFileURL(SCRIPT).href) : {})
   main: (argv: string[], deps: { root: string; select?: (changed: string[]) => unknown; spawn?: typeof spawnSync }) => number;
 };
 
+test('author deadline admission refuses a too-small real slot budget before starting static work', async (t) => {
+  const { makeRuntimeFixture } = await import('./helpers/native-runtime-fixture.js');
+  const { calibrateAuthorRuntime } = await import(pathToFileURL(join(ROOT, 'scripts/calibrate-author-runtime.mjs')).href);
+  const f = makeRuntimeFixture(); t.after(() => f.cleanup());
+  const observed = calibrateAuthorRuntime({ root: f.dir });
+  const select = () => ({ fullRun: false, suites: ['test/a.test.ts', 'test/b.test.ts'], reasons: ['physical fixture'] });
+  const args = ['--runtime-profile', observed.path, '--deadline', new Date(Date.now() + 60_000).toISOString()];
+  assert.equal(mod.main(args, { root: f.dir, select }), 1);
+  const receipt = JSON.parse(readFileSync(join(f.dir, 'coverage/preflight-author.json'), 'utf8'));
+  assert.equal(receipt.verdict, 'refused'); assert.equal(receipt.runtimeAdmission.fits, false);
+  assert.equal(receipt.runtimeAdmission.stage, 'before-static');
+  assert.match(receipt.error, /does not fit admitted/);
+  assert.deepEqual(receipt.steps.map((row: { name: string }) => row.name), ['census-precheck']);
+  assert.equal(existsSync(join(f.dir, 'coverage/static-started')), false);
+  // Positive control: the same native profile admits ample runtime and retains complete TAP.
+  assert.equal(mod.main(['--runtime-profile', observed.path, '--deadline', new Date(Date.now() + 30 * 60_000).toISOString()], { root: f.dir, select }), 0);
+  const passed = JSON.parse(readFileSync(join(f.dir, 'coverage/preflight-author.json'), 'utf8'));
+  assert.equal(passed.verdict, 'passed'); assert.equal(passed.runtimeAdmission.stage, 'before-tests');
+  assert.equal(passed.runtimeAdmission.fits, true); assert.equal(passed.steps.at(-1).testSummary.fail, 0);
+  assert.equal(passed.runtimeEvidence.state, 'complete'); assert.equal(passed.runtimeEvidence.physicalFiles, 2);
+  assert.equal(existsSync(join(f.dir, 'coverage/static-started')), true);
+});
+
 function fixture(baseline: Record<string, string> = {}) {
   const repo = gitRepo({ kind: 'author-preflight', seedCommit: false });
   const root = repo.dir;
@@ -54,6 +77,7 @@ test('author preflight runs real affected tests without coverage and records exa
   assert.equal(receipt.headSha, f.git('rev-parse', 'HEAD'));
   assert.equal(receipt.baseSha, f.git('rev-parse', 'main'));
   assert.equal(receipt.selection, 'affected-narrow');
+  assert.equal(receipt.runtimeEvidence.state, 'not-collected');
   assert.deepEqual(receipt.suites, ['test/leaf.test.ts']);
   assert.deepEqual(receipt.steps.map((s: { ok: boolean }) => s.ok), [true, true, true]);
   assert.deepEqual(receipt.gitHistory, { state: 'complete' });
@@ -95,7 +119,17 @@ test('author static priority wrapping retains failure and never starts affected 
   assert.match(receipt.affectedTestsNotRunReason, /static-preflight did not succeed/);
 });
 
-test('author static admission holds one real slot from static preflight through affected tests', () => {
+test('author static admission holds one real slot from static preflight through affected tests', (t) => {
+  // This fixture starts its OWN author: the enclosing real author's admission is
+  // not the fixture's cheap census or its private test-slot directory.
+  const keys = ['RMD_TEST_SLOT_PARENT', 'RMD_TEST_SLOT_DIR'] as const;
+  const saved = keys.map(key => [key, process.env[key]] as const);
+  for (const key of keys) delete process.env[key];
+  t.after(() => {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
   const f = fixture();
   const slotModule = pathToFileURL(join(ROOT, 'src/lib/test-slot.ts')).href;
   writeFileSync(join(f.root, 'scripts/census-precheck.mjs'), `
