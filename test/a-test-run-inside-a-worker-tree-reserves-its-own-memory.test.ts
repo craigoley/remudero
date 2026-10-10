@@ -105,6 +105,43 @@ test("a tree tracked without a hook, or a hook that opens nothing, keeps the run
   assert.equal(throwing.finish("w"), 300 + 10 + 90 + 150 + 560, "a failing hook never breaks the sampler");
 });
 
+test("a failed release, an unreadable argv, an unreadable /proc and a crowded tree never break the sampler", () => {
+  const procs = procTable();
+  const timers: Array<() => void> = [];
+  const ports = samplerPorts(procs, timers, []);
+  let listingFails = false;
+  const unreadableArgv = new Set<number>([11]);
+  const sampler = createTreePeakSampler({
+    ...ports,
+    listProcesses: () => {
+      if (listingFails) throw new Error("EACCES /proc");
+      return ports.listProcesses!();
+    },
+    readFile: (path) => {
+      if (path.endsWith("/cmdline") && unreadableArgv.has(Number(/\/proc\/(\d+)\//.exec(path)?.[1]))) throw new Error("EACCES");
+      return ports.readFile!(path);
+    },
+  });
+  sampler.track("w", 10, { onTestRunner: () => ({ finish: () => { throw new Error("ledger unwritable"); } }) });
+  assert.equal(sampler.size(), 2, "an unreadable argv is no runner, and the real runner below it is still found");
+  listingFails = true;
+  timers[0]!();
+  assert.equal(sampler.size(), 2, "a pass with no listing invents nothing and ends nothing");
+  listingFails = false;
+  for (const pid of [12, 13, 14]) procs.delete(pid);
+  timers[0]!();
+  assert.equal(sampler.size(), 1, "a run whose release throws is still ended");
+
+  // More processes than the argv memo holds: it starts over rather than growing, and a runner is still found once.
+  const crowd = new Map<number, Proc>([[10, procTable().get(10)!]]);
+  for (let pid = 1000; pid < 1000 + 4_200; pid += 1) crowd.set(pid, { parent: 10, start: `proc:${pid}`, argv: ["git", "status"], hwmKb: 1 });
+  crowd.set(9000, { parent: 10, start: "proc:9000", argv: ["node", "--test"], hwmKb: 1024 });
+  const found: number[] = [];
+  const big = createTreePeakSampler(samplerPorts(crowd, [], []));
+  big.track("w", 10, { onTestRunner: (pid) => { found.push(pid); return undefined; } });
+  assert.deepEqual(found, [9000]);
+});
+
 function reservationSpace(): HostMemoryLedgerOptions {
   const files = new Map<string, string>();
   const dir = `/ledger/${Math.random().toString(36).slice(2)}`;
@@ -175,4 +212,20 @@ test("a test reservation does not nest another test reservation inside itself", 
   assert.equal(sampler.size(), 1, "only the test run's own tree is tracked; the runners inside it are part of it");
   run.releaseOccupancy();
   assert.match(recorded.join(""), /"c":"test","p":1110/, "the whole run, runners included, is one test peak");
+});
+
+test("a test run whose estimate store fails still opens, at the test class's prior", () => {
+  resetLearnedEstimateCacheForTests();
+  const ledger = reservationSpace();
+  const logs: string[] = [];
+  const brokenClock = { now: (): number => { throw new Error("clock"); }, iso: (): string => { throw new Error("clock"); } };
+  const store = { list: () => [] as string[], append: () => undefined, size: () => 0, clock: brokenClock, log: (e: Record<string, unknown>) => void logs.push(String(e.op)) };
+  const sampler = createTreePeakSampler(samplerPorts(procTable(), [], []));
+  const worker = openLearnedReservation({ workerClass: "fix" }, { ledger, store, sampler });
+  worker.bindRoot(10);
+  const run = readMemoryLedger(ledger)!.entries.find((e) => e.workerClass === "test");
+  assert.equal(run?.estimateMib, 2048, "the unmeasured prior, said so");
+  assert.deepEqual(run?.estimateSource, { kind: "default-unmeasured" });
+  assert.ok(logs.includes("estimate"), `the store failure is named: ${logs.join(",")}`);
+  worker.releaseOccupancy();
 });
