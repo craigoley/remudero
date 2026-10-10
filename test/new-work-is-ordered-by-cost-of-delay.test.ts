@@ -50,7 +50,7 @@ test("W1-T4064: every eligible task is selected within finitely many passes unde
     const picked = nextRunnable(plan(tasks), () => false, { dispatchValueContext: context });
     assert.ok(picked);
     seen.add(picked.id);
-    rows.push({ step: "run.start", task_id: picked.id, run_id: `selection-${pass}`, task_class: "src", ts: new Date(NOW).toISOString() });
+    rows.push({ step: "run.start", task_id: picked.id, run_id: `selection-${pass}`, task_class: "src", ts: new Date(NOW).toISOString() }); // expiring-fixture: exempt -- calibrate() passes nowMs=NOW explicitly, never the wall clock; 15/15 pass with Date.now shifted +7d and +30d
   }
   assert.deepEqual([...seen].sort(), tasks.map(t => t.id).sort());
   const freshCount = rows.filter(r => r.step === "run.start" && r.task_id === fresh.id).length;
@@ -207,7 +207,7 @@ test("W1-T4064: command snapshot is clock-free and unreadable inputs log once pe
   const log = (step: string, extra?: Record<string, unknown>) => logs.push({ step, extra });
   const snapshot = { planTreeSha: "tree-sha", filedAtByTaskId: filed };
   const readFiling = () => ({ kind: "ready" as const, snapshot });
-  const corpus = { rows: [...history, { step: "verdict.merged", ts: new Date(NOW).toISOString() }], ok: true, unread: [] as string[] };
+  const corpus = { rows: [...history, { step: "verdict.merged", ts: new Date(NOW).toISOString() }], ok: true, unread: [] as string[] }; // expiring-fixture: exempt -- the injected corpus's newest row IS the selection's now (asserted below at NOW + 999 days); 15/15 pass with Date.now shifted +7d and +30d
   const readLedger = (() => corpus) as unknown as NonNullable<Parameters<typeof dispatchValueContextForSelection>[5]>;
   const select = (state: string, filing = readFiling) => dispatchValueContextForSelection(plan([old, fresh]), () => false, state, log, "/fixture/tasks.yaml", readLedger, filing);
   const a = select("snapshot-ready");
@@ -225,7 +225,7 @@ test("W1-T4064: command snapshot is clock-free and unreadable inputs log once pe
   const fallbacks = logs.filter(row => row.step === "dispatch.cost_of_delay.fallback");
   assert.equal(fallbacks.length, 1);
   assert.deepEqual(fallbacks[0].extra?.reasons, ["missing-history"]);
-  corpus.rows.push({ step: fallbacks[0].step, ...fallbacks[0].extra, ts: new Date(NOW).toISOString() });
+  corpus.rows.push({ step: fallbacks[0].step, ...fallbacks[0].extra, ts: new Date(NOW).toISOString() }); // expiring-fixture: exempt -- a fallback row in the injected corpus; the selection's now is that corpus's newest row, never the wall clock
   dispatchValueContextForSelection(plan([old, fresh]), () => false, "snapshot-restarted", log, "/fixture/tasks.yaml", readLedger, missing);
   assert.equal(logs.filter(row => row.step === "dispatch.cost_of_delay.fallback").length, 1, "the persisted key survives restart");
   corpus.ok = false;
@@ -246,9 +246,16 @@ test("W1-T4064: command snapshot is clock-free and unreadable inputs log once pe
 
 test("W1-T4064: the daemon reads filing dates from the plan path it was given", async () => {
   const repo = gitRepo({ kind: "cost-of-delay-daemon" });
-  const home = join(repo.dir, "home");
+  // daemonCommand's boot rung sweeps tmpdir() for rmd-* dirs older than 24 h by Date.now() against REAL
+  // mtimes, and this fixture's repo is itself an rmd-* dir there: under a +1 day clock the daemon deleted the
+  // plan it was handed (ENOENT -> filing-history-unreadable). A private TMPDIR holding the fixture's HOME (the
+  // ledger guard refuses a test append outside tmpdir()) keeps that sweep off the fixture and off every
+  // other process's temp dirs.
+  const privateTmp = join(repo.dir, "tmp");
+  const home = join(privateTmp, "home");
   const root = join(home, "Remudero");
   const oldHome = process.env.HOME;
+  const oldTmp = process.env.TMPDIR;
   try {
     mkdirSync(join(root, "state"), { recursive: true });
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
@@ -266,6 +273,7 @@ test("W1-T4064: the daemon reads filing dates from the plan path it was given", 
     repo.git("add", "plan");
     repo.git("commit", "-m", "file both tasks");
     process.env.HOME = home;
+    process.env.TMPDIR = privateTmp;
     let context: ReturnType<typeof dispatchValueContextForSelection>;
     const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
       runDaemon: async (daemonPlan, deps): Promise<DaemonSummary> => {
@@ -280,6 +288,8 @@ test("W1-T4064: the daemon reads filing dates from the plan path it was given", 
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
+    if (oldTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = oldTmp;
     repo.cleanup();
   }
 });
