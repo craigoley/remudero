@@ -1,4 +1,4 @@
-- id: W1-T7620
+- id: W1-T7690
   title: "WALL-CLOCK-DUE RUNGS DO NOT WAIT ON THE DAEMON'S OUTER CYCLE — measurement, digest, compaction, ci_learning, board_review, intake and wipetest are evaluated only inside the outer cycle's cadence block, so a rung that came due waits 20 min to 2 h for a cycle to reach it"
   repo: remudero
   depends_on: []
@@ -41,9 +41,9 @@
     same `<rung>.skipped` / `.fired` rows, so the ledger shows when each check ran.
   acceptance:
     - claim: "a due rung is evaluated while the outer cycle is still busy dispatching"
-      proof: 'grep: test("W1-T7620: a due measurement cadence fires while the outer cycle is blocked" in test/wall-clock-due-rungs-do-not-wait-on-the-outer-cycle.test.ts'
+      proof: 'grep: test("W1-T7690: a due measurement cadence fires while the outer cycle is blocked" in test/wall-clock-due-rungs-do-not-wait-on-the-outer-cycle.test.ts'
     - claim: "a rung still in flight is not started again by the timer"
-      proof: 'grep: test("W1-T7620: the due timer never starts a second run of an in-flight rung" in test/wall-clock-due-rungs-do-not-wait-on-the-outer-cycle.test.ts'
+      proof: 'grep: test("W1-T7690: the due timer never starts a second run of an in-flight rung" in test/wall-clock-due-rungs-do-not-wait-on-the-outer-cycle.test.ts'
   falsifier: |
     Leave the due checks inside the outer cycle: with runOne held unresolved past a rung's due time, the fixture
     sees no `<rung>.fired` row until the cycle completes, and the first test fails.
