@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
+  priority: 2.5
   risk: low
   status: queued
   attempts: 0
@@ -16,3 +17,14 @@
       proof: "grep: test/new-work-is-ordered-by-cost-of-delay\\.test\\.ts in src/lib/affected-suites.ts"
     - claim: "a regression test selects test/new-work-is-ordered-by-cost-of-delay.test.ts for each recorded edge"
       proof: "grep: test/new-work-is-ordered-by-cost-of-delay\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.92
+    reasons:
+      - "The filed plan specifies one selector-edge repair and corresponding regression coverage; both declared files align with that scope."
+      - "The supplied family track record reports 16 merged tasks and 0 declined, supporting established practice."
+      - "The filing-time gates report no concerning condition, and the stated scope names no sensitive access, destructive action, policy change, or operator-only decision."
+      - "No implementation or actual-change view is supplied; this verdict assesses the proposed scope, not verified implementation behavior."
+    judged_at: "2026-10-10T14:07:40.299Z"
+    pin: "669a48847b7837e51a45433ce46595f20269b3a44d5e80a5720ee9d792e5b961"

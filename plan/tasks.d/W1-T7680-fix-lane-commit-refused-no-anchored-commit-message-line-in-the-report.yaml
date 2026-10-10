@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.13
   status: queued
@@ -27,3 +27,13 @@
     - PR #6577: 426.82 PR-hours — no anchored COMMIT_MESSAGE line in the report
     - PR #6575: 426.74 PR-hours — no anchored COMMIT_MESSAGE line in the report
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.82
+    reasons:
+      - "The filed plan targets a missing anchored COMMIT_MESSAGE report line; declared scope is src/run-task.ts and one defect-specific test, consistent with that remedy."
+      - "The supplied record requests automatic verification and describes no secrets access, destructive action, merge/deploy/review policy change, or operator-only decision."
+      - "This is a filing-time assessment with no diff or actual-change view; implementation correctness and passing checks are not established."
+    judged_at: "2026-10-10T12:24:17.267Z"
+    pin: "fffd25974c1f898bba2454d0b7fb603b84cde2389fc8c41e2c72bc10dc549148"

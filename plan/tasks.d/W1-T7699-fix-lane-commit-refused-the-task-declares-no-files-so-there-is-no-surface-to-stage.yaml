@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.25
   status: queued
@@ -27,3 +27,13 @@
     - PR #6507: 440.70 PR-hours — the task declares no files, so there is no surface to stage
     - PR #6905: 395.99 PR-hours — the task declares no files, so there is no surface to stage
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
+    reasons:
+      - "The declared files are src/run-task.ts and one new test file. Nothing in the description or file list touches secrets, credentials, auth, permissions, merge/deploy/infrastructure policy, or data/branch deletion."
+      - "The description names a defect (commit-refused when a task declares no files) and the acceptance criterion is a grep for a specific test name in the paired test file. This is verifiable from what is shown and does not ask for an operator-only decision."
+      - "The family has no track record (0 merged, 0 declined; Beta mean 0.75), so there is no evidence of repeated failure. The machine-authored change still has to pass CI and review. The one residual concern is that src/run-task.ts is core runner logic, and the \"clears without a person\" wording could be met by loosening a commit guard. That cannot be confirmed without seeing the code, so confidence is moderate."
+    judged_at: "2026-10-10T16:35:27.331Z"
+    pin: "05b075dea396a73f65bc0f01dd79be38d9d6b0d1b952dd4d130240a33655b31b"
