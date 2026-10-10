@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -61,7 +61,6 @@ function recycle(lockPath: string, extraEnv: Record<string, string> = {}): Outco
   writeFileSync(join(binDir, "az"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
   const cashKeyPath = join(recDir, "openweight-api-key");
   writeFileSync(cashKeyPath, "fixture-cash-key\n", { mode: 0o600 });
-  chmodSync(cashKeyPath, 0o600);
   const r = spawnSync(BASH_BIN, [SCRIPT], {
     encoding: "utf8",
     cwd: REPO_ROOT,
