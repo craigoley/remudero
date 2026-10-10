@@ -8076,9 +8076,10 @@ test("daemonCommand: builds the real daemon deps (sweep + sweepLight wiring) the
   // `home` starts with RMD_TMP_PREFIX ("rmd-"), the exact prefix daemonCommand's OWN real
   // boot-time `sweepStaleTempDirs` (lib/tmp.ts) reaps anything under os.tmpdir() matching, by
   // AGE (`now() - mtimeMs > maxAgeMs`, default 24h). Every mkdirSync/writeFileSync above this
-  // line updates `home`'s own mtime to the REAL OS clock (mtimes are not shiftable, same
-  // mechanism CLOCK_ARTIFACTS' prune-liveness/serve.glance entries cite) — under clock-sweep's
-  // future shift that real mtime reads as ancient, so the daemon's own real housekeeping sweep
+  // line updates `home`'s own mtime to the REAL OS clock. Since W1-T6035 the clock-shift probe
+  // shifts fs stat times in this process, but a child process's clock still does not move, and the
+  // explicit stamp below pins the age to the injected clock either way. Before W1-T6035 (mtimes
+  // were not shiftable) the real mtime read as ancient under clock-sweep's future shift, so the daemon's own real housekeeping sweep
   // deletes this fixture (the STOP file requestStop is about to write, included) before
   // daemonCommand ever consults it. Stamping `home`'s mtime from the (possibly shifted)
   // injected clock keeps this fixture's own age reading consistent with `Date.now()` regardless

@@ -61,13 +61,13 @@ import type { Config } from "../src/lib/config.js";
 
 const MIN = 60_000;
 const ago = (mins: number) => new Date(Date.now() - mins * MIN);
-// `newestActivityMs`/`reapStaleWorktrees` age-gate on REAL FILESYSTEM MTIMES, which
-// `scripts/clock-shift.mjs` cannot shift (it monkeypatches only this process's `Date`) — the
-// exact mechanism `CLOCK_ARTIFACTS`' `prune-liveness` entry (scripts/clock-sweep.mjs) already
-// names for this suite's own sibling. A file/dir created via `writeFileSync`/`mkdirSync` gets its
-// mtime from the REAL OS clock, so under clock-sweep's future shift a fixture meant to read as
-// "just written" instead reads as `Date.now() - mtimeMs` days old. Every fixture below that needs
-// a path to read as FRESH re-stamps it explicitly from the injected clock — the same "stamp from
+// `newestActivityMs`/`reapStaleWorktrees` age-gate on FILESYSTEM MTIMES. Since W1-T6035
+// `scripts/clock-shift.mjs` shifts fs stat times as well as `Date`, so a file written "now" reads
+// back at the shifted now; before it, a file/dir created via `writeFileSync`/`mkdirSync` got its
+// mtime from the REAL OS clock and a fixture meant to read as "just written" instead read as
+// `Date.now() - mtimeMs` days old (the mechanism `CLOCK_ARTIFACTS`' `prune-liveness` entry in
+// scripts/clock-sweep.mjs once named). A child process's clock still does not move. Every fixture
+// below that needs a path to read as FRESH keeps re-stamping it explicitly from the injected clock — the same "stamp from
 // the injected clock" remedy #2250 established for ledger `ts` fields — rather than trusting the
 // OS's own real-time write stamp.
 const touchNow = (p: string) => utimesSync(p, ago(0), ago(0));
@@ -89,7 +89,7 @@ function fixture(entryName = "run-W1-T350-1785957031821") {
 function backdateAllButDeepFile(entry: string, mins: number): string {
   const deep = join(entry, "src", "lib", "feedback.ts");
   writeFileSync(deep, "export const x = 1;\n"); // fresh, now
-  touchNow(deep); // writeFileSync's own mtime is real-clock; re-stamp from the injected clock
+  touchNow(deep); // pin the age to the injected clock explicitly (W1-T6035 shifts stat times, but the stamp stays exact)
   const past = ago(mins);
   utimesSync(join(entry, "src", "lib"), past, past);
   utimesSync(join(entry, "src"), past, past);

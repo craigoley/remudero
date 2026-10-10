@@ -72,7 +72,7 @@ export const SPAWN_REACHING = new Map([
 
 /**
  * RUN, BUT EXPECTED TO FAIL SHIFTED. Each of these compares a shifted `Date.now()` against a clock
- * this probe cannot shift, so it fails for a reason that is not a fixture bomb. Each reason names
+ * a clock this probe does not shift, so it fails for a reason that is not a fixture bomb. Each reason names
  * the MECHANISM, because "flaky" is not a reason and would rot into a silent mute.
  *
  * They are still RUN — that is the point. If one starts PASSING shifted, its stated mechanism no
@@ -81,7 +81,7 @@ export const SPAWN_REACHING = new Map([
  * config-reader-seam checks already use.
  */
 export const CLOCK_ARTIFACTS = new Map([
-  ["prune-liveness", "compares a real FILESYSTEM MTIME against the shifted clock — mtimes are not shiftable, so a just-created directory reads as 400 days old. Its fixture is already derived; there is no literal to convert"],
+  ["prune-liveness", "compared a real FILESYSTEM MTIME against the shifted clock, so a just-created directory read as 400 days old. W1-T6035 (#9669) made the probe shift fs stat times, which ended that mechanism; the exclusion stays only because its shifted behaviour is unmeasured, and a completed sweep that sees the suite pass reports it as a stale exclusion. Its fixture is already derived; there is no literal to convert"],
   // W1-T1104: `emissions` REMOVED — measured PASSING at +400d by the sweep running in CI, which is
   // the only environment whose verdict this gate acts on. Its stated mechanism ("reads the REAL
   // on-disk ledger through a Date.now()-derived window cutoff") no longer holds there.

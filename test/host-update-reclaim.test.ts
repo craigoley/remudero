@@ -632,7 +632,7 @@ function printWithPaths(stateDir: string, credDir: string, scriptPath = SCRIPT, 
 // `deploy/host-update.sh` is a REAL bash subprocess (`spawnSync("bash", ...)` throughout this
 // file) that computes its own "now" through a real `date` call to render "valid for N more
 // minute(s)"/"EXPIRED N minute(s) ago" — a syscall `scripts/clock-shift.mjs` cannot reach, since
-// it monkeypatches only THIS process's global `Date`, never a child process's. Stamping
+// it shifts only THIS process's clocks (`Date` and, since W1-T6035, fs stat times), never a child process's. Stamping
 // `expiresAt` from `Date.now()` (shifted under the clock-sweep probe) offset every fixture's
 // expiry by the FULL shift relative to the script's own real clock, so a "90 minutes ago"
 // expiry read as ~7 days VALID instead (measured: "valid for 9990 more minute(s)" at +7d, i.e.
