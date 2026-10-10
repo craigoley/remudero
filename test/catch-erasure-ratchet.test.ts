@@ -57,7 +57,13 @@ const GIT_ENV = {
 const SRC_TS_RE = /^src\/.*\.ts$/;
 
 function trackedSrcFiles(root: string): string[] {
-  const listing = execFileSync("git", ["-C", root, "ls-files"], { encoding: "utf8" });
+  // W1-T7532: list ONLY src/ (not the whole ~8k-path tree) and lift the 1 MiB default maxBuffer.
+  // The unscoped listing grew toward that ceiling with every plan shard and test file merged, so
+  // the property tests died with ENOBUFS on whichever PR pushed the tracked-path total over it.
+  const listing = execFileSync("git", ["-C", root, "ls-files", "--", "src"], {
+    encoding: "utf8",
+    maxBuffer: 256 * 1024 * 1024,
+  });
   return listing
     .split("\n")
     .filter(Boolean)
@@ -732,4 +738,25 @@ test("W1-T2670: the recognition moves exactly the catches that record by a house
   }
   // Non-vacuity: the sweep must actually have found the population it is asserting over.
   assert.ok(moved > 0, "no catch moved at all — this test would be vacuously true");
+});
+
+// W1-T7532: the cause of the intermittent failure -- trackedSrcFiles() used to list EVERY tracked
+// path with the default 1 MiB maxBuffer, so a tree whose total tracked-path bytes crossed that
+// ceiling threw ENOBUFS in the property tests of PRs that never touched this file.
+test("W1-T7532 pins the cause of the intermittent failure", () => {
+  const dir = initFixtureRepo();
+  try {
+    mkdirSync(join(dir, "src"), { recursive: true });
+    writeFileSync(join(dir, "src", "only.ts"), "export const x = 1;\n");
+    // ~1400 non-src paths of ~900 chars each: well over 1 MiB of unscoped `git ls-files` output.
+    const deep = join("docs", "a".repeat(200), "b".repeat(200), "c".repeat(200), "d".repeat(200));
+    mkdirSync(join(dir, deep), { recursive: true });
+    for (let i = 0; i < 1400; i++) writeFileSync(join(dir, deep, `f${i}.md`), "x");
+    commitFixture(dir);
+    const unscoped = execFileSync("git", ["-C", dir, "ls-files"], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+    assert.ok(unscoped.length > 1024 * 1024, "fixture must exceed the default maxBuffer");
+    assert.deepEqual(trackedSrcFiles(dir), ["src/only.ts"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
