@@ -8886,6 +8886,104 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     blocker: "awaiting-review",
     reason: (pr) => `dependabot PR — dep-review lane (checks ${pr.checksState}, review ${pr.reviewState})`,
   },
+  // CONFLICT-FIRST (#10555): a dirty merge state is ranked ABOVE every review-failed, ci-red and
+  // strike row. A conflicting PR registers zero check runs and no review/ci fix round can clear a
+  // conflict, so routing it to those rows parked #10555 conflicted for hours.
+  {
+    // CONFLICTED is above mergeable: a dirty PR is NEVER armed however green. The old policy
+    // admitted only zero-deletion/deterministic cases and stranded fleet PRs whenever main had
+    // deleted code. The repair worker already has a strike cap, lease-protected same-branch push,
+    // and a fresh review+CI fence; its prompt now requires hunk-level semantic reasoning. That is
+    // sufficient for the PR task's OWN rmd run branch, not for a human/contributor or foreign
+    // run branch we do not own.
+    disposition: "conflicted",
+    blocker: "conflict",
+    when: (pr, policy) => {
+      if (policy.mergeConflictAdmissionEnabled !== true || pr.mergeState !== "dirty") return false;
+      const taskId = pr.taskId;
+      return (
+        taskId !== undefined &&
+        fixHeadAcceptable(pr.headRefName, taskId, isSyntheticOrchestratorLaneId(taskId)) &&
+        hasCapturedMergeConflictEvidence(pr.mergeConflict)
+      );
+    },
+    reason: (pr) => {
+      const evidence = pr.mergeConflict;
+      const files = evidence?.files ?? [];
+      if (isRegenerableArtifactConflict(files)) {
+        const named = files.map((f) => `${f.path} (generator: ${REGENERABLE_ARTIFACT_GENERATORS[f.path]})`).join(", ");
+        return (
+          `merge conflict (mergeState dirty) — every conflicting path has a declared generator: ${named} — ` +
+          `dispatching the merge-conflict fix mode to RE-RUN the generator(s) on the merged tree — the ` +
+          `resolution is that output, never either side's recorded value`
+        );
+      }
+      if (isRedundantRefixConflict(evidence)) {
+        const paths = evidence!.redundantRefix!.comparedPaths.join(", ");
+        return (
+          `merge conflict (mergeState dirty) — redundant re-fix byte comparison matched main for ` +
+          `${paths}; resolving those conflicting path(s) to main is byte-identical to main and the ` +
+          `branch's non-conflicting files apply cleanly — dispatching the merge-conflict fix mode to ` +
+          `take main for the redundant hunk(s)`
+        );
+      }
+      if (files.some((file) => file.oursDeleted > 0 || file.theirsDeleted > 0)) {
+        return (
+          `merge conflict (mergeState dirty) — rmd-owned branch has captured deletion evidence on ` +
+          `${files.map((file) => `${file.path} (ours -${file.oursDeleted}, theirs -${file.theirsDeleted})`).join(", ")} — dispatching the bounded merge-conflict fix worker ` +
+          `to inspect actual hunks and preserve both sides' intended behavior; a fresh review and CI gate the new head`
+        );
+      }
+      return (
+        `merge conflict (mergeState dirty) — captured file evidence on ` +
+        `${files.map((f) => `${f.path} (ours -${f.oursDeleted}, theirs -${f.theirsDeleted})`).join(", ")} — dispatching the bounded merge-conflict fix worker; ` +
+        `it must inspect actual hunks and a fresh review and CI gate the new head`
+      );
+    },
+  },
+  {
+    // W1-T5908: no evidence while mergeability reads `unknown` is transient; wait up to the BACKSTOP.
+    disposition: "wait",
+    blocker: "conflict",
+    when: (pr, _policy, _ageDays, _now, facts) => {
+      const taskId = pr.taskId;
+      return (
+        pr.mergeState === "dirty" &&
+        taskId !== undefined &&
+        fixHeadAcceptable(pr.headRefName, taskId, isSyntheticOrchestratorLaneId(taskId)) &&
+        !hasCapturedMergeConflictEvidence(pr.mergeConflict) &&
+        mergeabilityReadUnknown(pr) &&
+        (facts?.mergeabilityUnknownPasses ?? 0) < MERGEABILITY_UNKNOWN_WAIT_BACKSTOP
+      );
+    },
+    reason: () =>
+      `mergeability-unknown — merge conflict (mergeState dirty) read while GitHub's mergeable_state is ` +
+      `still unknown and no conflicting-file evidence was captured — waiting for a pass that captures ` +
+      `it (escalates after ${MERGEABILITY_UNKNOWN_WAIT_BACKSTOP} passes on this head)`,
+  },
+  {
+    // A dirty contributor, foreign-run branch, an explicit policy disable, or missing evidence
+    // must still never receive an unattended write. A deletion by itself is not a refusal for
+    // the PR task's own rmd run branch; it is handled by the bounded worker above.
+    disposition: "blocked-ambiguous",
+    when: (pr) => pr.mergeState === "dirty",
+    blocker: "conflict",
+    reason: (pr, policy) => {
+      const evidence = pr.mergeConflict;
+      const files = evidence?.files ?? [];
+      const fileList = files.map((f) => `${f.path} (ours -${f.oursDeleted}, theirs -${f.theirsDeleted})`).join(", ");
+      const taskId = pr.taskId;
+      const ownsExactRunBranch =
+        taskId !== undefined && fixHeadAcceptable(pr.headRefName, taskId, isSyntheticOrchestratorLaneId(taskId));
+      const cause = !ownsExactRunBranch
+        ? "head is not this PR task's rmd-owned run branch"
+        : conflictRefusalCause(files, policy, REGENERABLE_ARTIFACT_GENERATORS, evidence);
+      return (
+        `merge conflict (mergeState dirty) — ${cause} — not dispatched — ` +
+        `files: ${files.length > 0 ? fileList : "none captured"} — escalating`
+      );
+    },
+  },
   {
     // W1-T3078 — a worker can DECLINE a criterion under review.ts's closed grammar, but it may
     // never choose its own remedy or spend another attempt. This must sit above an answered
@@ -9139,101 +9237,6 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
           ? `review failing on Standing rule 15 — a criterion was added/edited beside non-plan files — ` +
             `escalating — derived repair: file the shard in its own plan-only PR, then build it in a second PR`
           : "review failing with no actionable unmet criteria (contradictory) — escalating",
-  },
-  {
-    // CONFLICTED is above mergeable: a dirty PR is NEVER armed however green. The old policy
-    // admitted only zero-deletion/deterministic cases and stranded fleet PRs whenever main had
-    // deleted code. The repair worker already has a strike cap, lease-protected same-branch push,
-    // and a fresh review+CI fence; its prompt now requires hunk-level semantic reasoning. That is
-    // sufficient for the PR task's OWN rmd run branch, not for a human/contributor or foreign
-    // run branch we do not own.
-    disposition: "conflicted",
-    blocker: "conflict",
-    when: (pr, policy) => {
-      if (policy.mergeConflictAdmissionEnabled !== true || pr.mergeState !== "dirty") return false;
-      const taskId = pr.taskId;
-      return (
-        taskId !== undefined &&
-        fixHeadAcceptable(pr.headRefName, taskId, isSyntheticOrchestratorLaneId(taskId)) &&
-        hasCapturedMergeConflictEvidence(pr.mergeConflict)
-      );
-    },
-    reason: (pr) => {
-      const evidence = pr.mergeConflict;
-      const files = evidence?.files ?? [];
-      if (isRegenerableArtifactConflict(files)) {
-        const named = files.map((f) => `${f.path} (generator: ${REGENERABLE_ARTIFACT_GENERATORS[f.path]})`).join(", ");
-        return (
-          `merge conflict (mergeState dirty) — every conflicting path has a declared generator: ${named} — ` +
-          `dispatching the merge-conflict fix mode to RE-RUN the generator(s) on the merged tree — the ` +
-          `resolution is that output, never either side's recorded value`
-        );
-      }
-      if (isRedundantRefixConflict(evidence)) {
-        const paths = evidence!.redundantRefix!.comparedPaths.join(", ");
-        return (
-          `merge conflict (mergeState dirty) — redundant re-fix byte comparison matched main for ` +
-          `${paths}; resolving those conflicting path(s) to main is byte-identical to main and the ` +
-          `branch's non-conflicting files apply cleanly — dispatching the merge-conflict fix mode to ` +
-          `take main for the redundant hunk(s)`
-        );
-      }
-      if (files.some((file) => file.oursDeleted > 0 || file.theirsDeleted > 0)) {
-        return (
-          `merge conflict (mergeState dirty) — rmd-owned branch has captured deletion evidence on ` +
-          `${files.map((file) => `${file.path} (ours -${file.oursDeleted}, theirs -${file.theirsDeleted})`).join(", ")} — dispatching the bounded merge-conflict fix worker ` +
-          `to inspect actual hunks and preserve both sides' intended behavior; a fresh review and CI gate the new head`
-        );
-      }
-      return (
-        `merge conflict (mergeState dirty) — captured file evidence on ` +
-        `${files.map((f) => `${f.path} (ours -${f.oursDeleted}, theirs -${f.theirsDeleted})`).join(", ")} — dispatching the bounded merge-conflict fix worker; ` +
-        `it must inspect actual hunks and a fresh review and CI gate the new head`
-      );
-    },
-  },
-  {
-    // W1-T5908: no evidence while mergeability reads `unknown` is transient; wait up to the BACKSTOP.
-    disposition: "wait",
-    blocker: "conflict",
-    when: (pr, _policy, _ageDays, _now, facts) => {
-      const taskId = pr.taskId;
-      return (
-        pr.mergeState === "dirty" &&
-        taskId !== undefined &&
-        fixHeadAcceptable(pr.headRefName, taskId, isSyntheticOrchestratorLaneId(taskId)) &&
-        !hasCapturedMergeConflictEvidence(pr.mergeConflict) &&
-        mergeabilityReadUnknown(pr) &&
-        (facts?.mergeabilityUnknownPasses ?? 0) < MERGEABILITY_UNKNOWN_WAIT_BACKSTOP
-      );
-    },
-    reason: () =>
-      `mergeability-unknown — merge conflict (mergeState dirty) read while GitHub's mergeable_state is ` +
-      `still unknown and no conflicting-file evidence was captured — waiting for a pass that captures ` +
-      `it (escalates after ${MERGEABILITY_UNKNOWN_WAIT_BACKSTOP} passes on this head)`,
-  },
-  {
-    // A dirty contributor, foreign-run branch, an explicit policy disable, or missing evidence
-    // must still never receive an unattended write. A deletion by itself is not a refusal for
-    // the PR task's own rmd run branch; it is handled by the bounded worker above.
-    disposition: "blocked-ambiguous",
-    when: (pr) => pr.mergeState === "dirty",
-    blocker: "conflict",
-    reason: (pr, policy) => {
-      const evidence = pr.mergeConflict;
-      const files = evidence?.files ?? [];
-      const fileList = files.map((f) => `${f.path} (ours -${f.oursDeleted}, theirs -${f.theirsDeleted})`).join(", ");
-      const taskId = pr.taskId;
-      const ownsExactRunBranch =
-        taskId !== undefined && fixHeadAcceptable(pr.headRefName, taskId, isSyntheticOrchestratorLaneId(taskId));
-      const cause = !ownsExactRunBranch
-        ? "head is not this PR task's rmd-owned run branch"
-        : conflictRefusalCause(files, policy, REGENERABLE_ARTIFACT_GENERATORS, evidence);
-      return (
-        `merge conflict (mergeState dirty) — ${cause} — not dispatched — ` +
-        `files: ${files.length > 0 ? fileList : "none captured"} — escalating`
-      );
-    },
   },
   {
     disposition: "post-review",
