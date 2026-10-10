@@ -253,7 +253,11 @@ test("W1-T4064: the daemon reads filing dates from the plan path it was given", 
     mkdirSync(join(root, "state"), { recursive: true });
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
     writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
-    writeFileSync(join(root, "state", "ledger.ndjson"), history.map(row => JSON.stringify(row)).join("\n") + "\n");
+    // The daemon reads the ledger against the REAL clock through a DISPATCH_VALUE_WINDOW_MS window, so a
+    // fixture pinned to NOW aged out of it on 2026-10-10 (a time bomb): stamp the rows relative to real time.
+    const shift = Date.now() - NOW;
+    const live = history.map(row => ({ ...row, ts: new Date(Date.parse(String(row.ts)) + shift).toISOString() }));
+    writeFileSync(join(root, "state", "ledger.ndjson"), live.map(row => JSON.stringify(row)).join("\n") + "\n");
     mkdirSync(join(repo.dir, "plan"));
     const planPath = join(repo.dir, "plan/tasks.yaml");
     const entry = (id: string) =>

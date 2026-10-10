@@ -41,7 +41,7 @@ function writeIssueBoardGh(dir: string): string {
   const script = `#!/usr/bin/env bash
 args="$*"
 if [[ "$args" == *"/issues?"* ]]; then
-  cat <<'JSON'
+  cat <<'JSON' # expiring-fixture: exempt -- fake gh output read through a gateway on this suite's injected clock; 7/7 pass with Date.now shifted +8d and +30d and with this stamp aged to 2026-07-01
 [{"number":9,"html_url":"https://github.com/o/r/issues/9","state":"open","title":"needs an operator","updated_at":"2026-09-30T00:00:00Z"}]
 JSON
 else

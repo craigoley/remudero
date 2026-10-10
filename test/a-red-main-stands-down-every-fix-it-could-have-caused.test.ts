@@ -223,3 +223,33 @@ test("W1-T5490: infrastructure retries from fallback evidence are bounded by the
   assert.equal(attempts[0]?.head_sha, LAST);
   assert.ok(r.rows.some((row) => row.step === "main.health.escalated"), "a repeated infrastructure red escalates after its one retry");
 });
+
+// 2026-10-10: main red on test-slow-shard (2/2) alone held eight PRs whose reds were coverage
+// shards main ran GREEN — the census held only ci-gate's required aggregates, never a shard name.
+test("base red census: a shard main ran green beside a red required aggregate is the PR's own red", async () => {
+  const r = await observe([check("ci", "failure"), check("build", "success"), check("coverage-shard (2/8)", "success"),
+    check("test-slow-shard (2/2)", "failure"), check("coverage-shard (5/8)", null)]);
+  assert.equal(r.observed.state, "red");
+  const main = mainLatestRunFromLedger(r.rows);
+  const none = baseRedHistoryFromLedger([]);
+  assert.deepEqual(decideBaseRed(pr(["coverage-shard (2/8)"]), main, none), { kind: "own" });
+  assert.deepEqual(decideBaseRed(pr(["test-slow-shard (2/2)"]), main, none), { kind: "wait", check: "test-slow-shard (2/2)" });
+  assert.deepEqual(decideBaseRed(pr(["coverage-shard (5/8)"]), main, none), { kind: "wait", check: "coverage-shard (5/8)" },
+    "a shard still running on main is not evidence it passed");
+});
+
+test("base red census: a held head never claims main fails its check while main is undetermined", async () => {
+  const rows: Record<string, unknown>[] = [redMain()];
+  const run = () => runSweep([pr(["ci"])], {
+    ledgerPath: "/dev/null/t5490", runId: "T5490", now: () => NOW,
+    readLedger: () => rows, appendLine: (_path, row) => { rows.push(row); },
+    arm: () => {}, close: () => {}, escalate: () => {}, postReview: async () => {},
+    dispatchFix: () => {}, updateBranch: () => "updated",
+  });
+  await run();
+  rows.push({ step: "main.health.observed", sha: HEAD, state: "undetermined", failing_checks: [], observed_checks: [] });
+  await run();
+  const reason = String(rows.filter((r) => r.step === "sweep.disposed" && r.pr_number === 8920).at(-1)?.stand_down_reason);
+  assert.doesNotMatch(reason, /also fails on main/);
+  assert.match(reason, /main is undetermined at a{40}, not yet green/);
+});
