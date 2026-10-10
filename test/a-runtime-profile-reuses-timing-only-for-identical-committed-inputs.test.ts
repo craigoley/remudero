@@ -22,6 +22,10 @@ test("native timing reuse requires an identical committed input tree and never t
   assert.deepEqual(reused.timingCompatibility, { observedHead: observed.head, currentHead: current,
     inputTree: bindings.inputTree, reusedAcrossHeads: true, assurance: "timing-only; never author PASS" });
   assert.equal(readFileSync(observed.path, "utf8"), original, "reuse may not rewrite original observations");
+  writeFileSync(observed.path, JSON.stringify({ ...old, author: "passed", assurance: "author-only" }));
+  const forged = runtime.readRuntimeProfile(f.dir, observed.path, bindings);
+  assert.equal(forged.author, "not-proven"); assert.equal(forged.assurance, "runtime-sample-only");
+  writeFileSync(observed.path, original);
   assert.throws(() => runtime.readRuntimeProfile(f.dir, observed.path, { ...bindings, head: "f".repeat(40) }), /binding mismatch/);
   writeFileSync(observed.path, JSON.stringify({ ...old, bindings: { ...old.bindings, inputTree: "e".repeat(40) } }));
   assert.throws(() => runtime.readRuntimeProfile(f.dir, observed.path, bindings), /binding mismatch/);

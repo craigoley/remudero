@@ -147,7 +147,8 @@ export function readRuntimeProfile(root, path, expected, now = Date.now()) {
         !lstatSync(join(root, file)).isFile() || !Number.isFinite(duration.files[file]) || duration.files[file] <= 0)) {
     throw new Error('runtime profile: incomplete physical sample durations');
   }
-  return { ...profile, timingCompatibility: { observedHead: observed.head, currentHead: expected.head,
+  return { ...profile, assurance: 'runtime-sample-only', author: 'not-proven',
+    timingCompatibility: { observedHead: observed.head, currentHead: expected.head,
     inputTree: expected.inputTree, reusedAcrossHeads: observed.head !== expected.head,
     assurance: 'timing-only; never author PASS' } };
 }
