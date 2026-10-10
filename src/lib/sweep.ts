@@ -12453,6 +12453,8 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
       stalled = line.state !== "success";
     } else if (line.step === "fix.stood_down") {
       stalled = line.outcome !== "handed_off"; // a stand-down ENDS the rung; a hand-off to the sweep is a live wait
+    } else if (line.step === "fix.done" && line.worker_exit === "unobserved") {
+      stalled = true; // #10555: the worker threw with no process end — no review or push will follow
     } else if (line.step === "fix.resolved") {
       stalled = false;
     } else if (line.step === "fix.done" && line.flake_claim === "requeue_deferred") {
