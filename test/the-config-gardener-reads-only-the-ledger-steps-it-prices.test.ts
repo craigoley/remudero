@@ -61,6 +61,7 @@ function corpus(): Array<Record<string, unknown>> {
       { step: "implement.done", run_id: id, num_turns: 20 + i, cost_usd: 2 + i, ...call(), ts: at(m++) },
       ...(i === 0 ? [{ step: "implement.resumed", run_id: id, num_turns: 5, cost_usd: 1, ...call(), ts: at(m++) }] : []),
       ...(i === 1 ? [{ step: "implement.continued", run_id: id, num_turns: 4, cost_usd: 1.5, ...call(), ts: at(m++) }] : []),
+      ...(i === 2 ? [{ step: "implement.preopen_continued", run_id: id, num_turns: 3, cost_usd: 1.25, ...call(), ts: at(m++) }] : []),
       { step: "pr.opened", run_id: id, pr_url: url, ts: at(m++) },
       { step: "verdict", run_id: id, task_id: `W1-T${100 + i}`, verdict: i === 5 ? "failed" : "merged", cost_usd: 3 + i, ...call(), ts: at(m++) },
       ...(i === 4 ? [{ step: "correction.provenance", run_id: id, actual_pr_url: `${url}0`, ts: at(m++) }] : []),
