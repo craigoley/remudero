@@ -9,7 +9,7 @@ import { requestPause } from "../src/lib/fleet-control.js";
 import { acquireInflightLock } from "../src/lib/inflight-lock.js";
 import { recyclePauseDetail } from "../src/lib/recycle-yield.js";
 import { buildSweepEffects, DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
-import { fixBranchClaimKey, pollToGate, runFixRung, runTask, waitForCiGreen, withInflightRunLock, type PollDeps } from "../src/run-task.js";
+import { fixBranchClaimKey, pollToGate, runFixRung, runTask, waitForCiGreen, withInflightRunLock, type PollDeps } from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";

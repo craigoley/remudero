@@ -35,7 +35,7 @@ import {
   singlePrRestArgs,
   type GhApiFetcher,
 } from "../src/lib/open-prs-rest.js";
-import { checksStateFromRollup, DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { checksStateFromRollup, DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { fixCommand, type routeFix } from "../src/run-task.js";
 import { ghJson, type GhRateLimitReading } from "../src/lib/worker.js";
 import { readLedgerLines } from "../src/lib/status.js";

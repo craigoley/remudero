@@ -19,7 +19,7 @@ import {
   type CreditCandidate,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { buildOpenPrViews, DECLARED_BRANCH_GUARDS, keepReversiblyClosedHeads, reapBranchesCommand } from "../src/run-task.js";
 
 const NOW = Date.parse("2026-09-27T15:12:50.591Z");

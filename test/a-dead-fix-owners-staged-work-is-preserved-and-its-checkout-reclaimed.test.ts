@@ -31,7 +31,7 @@ import {
   resetTrackedDirtyFixOwner,
   type BuildSweepEffectsDeps,
 } from "../src/run-task.js";
-import { DEFAULT_SWEEP_POLICY, FIX_CLAIM_DECLINE_BACKSTOP, runSweep, type OpenPrView } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, FIX_CLAIM_DECLINE_BACKSTOP, runSweep, type OpenPrView } from "./helpers/sweep-test.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";

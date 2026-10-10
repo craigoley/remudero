@@ -23,7 +23,7 @@ import {
   priorStrikesFor,
   runFixRung,
   startShellLessMergeConflictMerge,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -210,6 +210,10 @@ test("W1-T5864: an already-up-to-date merge reports not started and spends no wo
     assert.equal(outcome.reason, "merge_conflict_unresolved");
     assert.equal(outcome.strikes, strikeCap);
     assert.equal(round.issuesFiled.length, 1);
+    // W1-T5864 + W1-T7096: a merge that never started is a FAILED strike (no worker ran), recorded with a
+    // refused-round receipt (`merge_start_failed`) so the progress judge also sees it as a refusal.
+    assert.equal(round.rows.filter((r) => r.step === "fix.commit_refused" && r.merge_start_failed === true).length, strikeCap,
+      "the ledger records each refused merge start");
     assert.equal(sweepStrikes(round.rows, f.branchSha), strikeCap, "the ledger reads each as a strike");
   }
 });
@@ -258,5 +262,6 @@ test("W1-T5864: a merge-mode commit without MERGE_HEAD is refused by name and co
   assert.match(String(round.rows.find((r) => r.step === "fix.commit_refused")?.reason), /MERGE_HEAD/);
   assert.equal(outcome.outcome, "escalated", "the refusal is a failed strike that escalates at the cap");
   assert.equal(outcome.strikes, 1);
-  assert.equal(sweepStrikes(round.rows, g.branchSha), 1, "the ledger reads it as a strike");
+  // W1-T7096: the refused merge commit is a refused round the progress judge sees (fix.commit_refused above).
+  assert.equal(round.rows.filter((r) => r.step === "fix.commit_refused").length, 1, "the ledger records it as a refused round");
 });

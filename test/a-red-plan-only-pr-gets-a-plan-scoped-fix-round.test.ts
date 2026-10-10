@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import type { Config } from "../src/lib/config.js";
 import * as runner from "../src/run-task.js";
 import { deriveFixMode, renderFixPrompt } from "../src/lib/prompt-render.js";
-import { buildSweepEffects, DEFAULT_SWEEP_POLICY, drainDetachedSweepActions, fixRoundTally, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { buildSweepEffects, DEFAULT_SWEEP_POLICY, drainDetachedSweepActions, fixRoundTally, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import type { PlanPrPreflightResult } from "../src/lib/plan-pr-emitter.js";
 import { acceptanceAuthorTimeCheck } from "../src/lib/review.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";

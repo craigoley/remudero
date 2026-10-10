@@ -33,7 +33,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { resolveFixRungTaskContractAtHead, runFixRung } from "../src/run-task.js";
+import { resolveFixRungTaskContractAtHead, runFixRung } from "./helpers/run-task-test.js";
 import { judgeReview } from "../src/lib/review.js";
 import type { CriterionVerdict, PlanCriteriaAtHeadResult, ReviewVerdict } from "../src/lib/review.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";

@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { describe, test } from "node:test";
 import { appendLedger } from "../src/lib/ledger.js";
 import * as selfSync from "../src/lib/self-sync.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
 

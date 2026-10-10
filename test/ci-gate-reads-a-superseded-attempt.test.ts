@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildFixRungDispatchArgs, ciGateFromRollup, ciGateSha, ciGateState, runFixRung, waitForCiGreen } from "../src/run-task.js";
+import { buildFixRungDispatchArgs, ciGateFromRollup, ciGateSha, ciGateState, runFixRung, waitForCiGreen } from "./helpers/run-task-test.js";
 import { dedupeRollupByLatestAttempt, type RollupCheckEntry } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { ReviewVerdict } from "../src/lib/review.js";

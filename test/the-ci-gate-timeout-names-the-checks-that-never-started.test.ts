@@ -20,7 +20,7 @@ import {
   type OpenPrView,
   type RollupCheckEntry,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 const TIMEOUT_LINE =
   "ci-gate: TIMED OUT waiting for required check(s) to complete (this is NOT a check failure -- a NEW sha " +

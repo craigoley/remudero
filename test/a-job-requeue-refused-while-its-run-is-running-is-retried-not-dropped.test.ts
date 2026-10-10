@@ -32,14 +32,14 @@ import {
   type OpenPrView,
   type RollupCheckEntry,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import {
   buildSweepEffects,
   requeueActionsJob,
   requeueActionsJobAsync,
   requeueActionsJobOutcome,
   runFixRung,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";

@@ -30,8 +30,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runFixRung, branchAuthorshipStandDownReason, buildSweepEffects, type LiveHeadResult } from "../src/run-task.js";
-import { runSweep, stillRedRequiredNames, DEFAULT_SWEEP_POLICY, type OpenPrView, type RollupCheckEntry } from "../src/lib/sweep.js";
+import { runFixRung, branchAuthorshipStandDownReason, buildSweepEffects, type LiveHeadResult } from "./helpers/run-task-test.js";
+import { runSweep, stillRedRequiredNames, DEFAULT_SWEEP_POLICY, type OpenPrView, type RollupCheckEntry } from "./helpers/sweep-test.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";

@@ -22,7 +22,7 @@ import {
   ghUpdateBranchArgv,
   redBaseRefreshFactsFromRest,
   runFixRung,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 
 const MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 };
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));

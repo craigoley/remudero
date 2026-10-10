@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { anchoredFixOutcome, decideFixOutcomeAction } from "../src/lib/fix-outcome.js";
 import { renderFixPrompt } from "../src/lib/prompt-render.js";
-import { commitWorkerEdits, missingCommitLinePrompt, runFixRung } from "../src/run-task.js";
+import { commitWorkerEdits, missingCommitLinePrompt, runFixRung } from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import { gitRepo } from "./helpers/git-repo.js";

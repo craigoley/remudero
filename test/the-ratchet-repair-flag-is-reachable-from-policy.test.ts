@@ -15,7 +15,7 @@ import {
   type OpenPrView,
   type SweepDeps,
   type SweepPolicy,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 const REPO_ROOT = join(new URL("..", import.meta.url).pathname);
 const NOW = Date.parse("2026-09-10T00:00:00.000Z");

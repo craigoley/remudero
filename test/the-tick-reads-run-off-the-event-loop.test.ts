@@ -13,7 +13,7 @@ import { makeTempDir } from "../src/lib/tmp.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { runDaemon, type DaemonDeps, type DaemonSummary } from "../src/lib/daemon.js";
 import { defaultCreditStorePath, loadCreditStore, type StatusProjection } from "../src/lib/status.js";
-import { runSweep, type OpenPrView } from "../src/lib/sweep.js";
+import { runSweep, type OpenPrView } from "./helpers/sweep-test.js";
 import { runReadPlaneWorker, readPlaneWorkerInput, readPlaneWorkerLog } from "../src/lib/read-plane.worker.js";
 import { boardOpenSnapshotPath } from "../src/lib/board-snapshot-cache.js";
 import { ghShim } from "./helpers/gh-shim.js";
