@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { setImmediate as drainMicrotasks } from "node:timers/promises";
 import { test } from "node:test";
 import { loadPlan } from "../src/lib/plan.js";
-import { freshnessRestartWaitReportDue, runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
+import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import { FRESHNESS_COALESCE_WINDOW_MS } from "../src/lib/deploy-judge.js";
 import type { RunResult } from "../src/run-task.js";
 
@@ -144,12 +144,4 @@ test("a decided restart's wait rows back off, one per doubling of the wait", asy
     // Waits of 1..8 polls report at 1, 2, 4 and 8 polls — four rows over eight ticks, never one a poll.
     assert.deepEqual(h.waits().map((l) => l.extra?.waited_ms), [1, 2, 4, 8].map((n) => n * POLL_MS));
   });
-});
-
-test("freshnessRestartWaitReportDue reports at once, then at each doubling of the wait", () => {
-  assert.equal(freshnessRestartWaitReportDue(0, 0, POLL_MS), true);
-  assert.equal(freshnessRestartWaitReportDue(POLL_MS, 1, POLL_MS), false);
-  assert.equal(freshnessRestartWaitReportDue(2 * POLL_MS, 1, POLL_MS), true);
-  assert.equal(freshnessRestartWaitReportDue(7 * POLL_MS, 3, POLL_MS), false);
-  assert.equal(freshnessRestartWaitReportDue(8 * POLL_MS, 3, POLL_MS), true);
 });

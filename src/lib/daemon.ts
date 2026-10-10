@@ -216,7 +216,7 @@ export const DISPATCH_PHASE_REFILL_BOUND_MS = 20 * 60_000;
 
 /** A decided restart waits for every in-flight lane, silently: 2026-10-10 it waited 60+ min with no row. Name the
  *  wait at once, then at doubling intervals (1, 2, 4, 8… polls), so a long wait stays visible without a row a poll. */
-export function freshnessRestartWaitReportDue(waitedMs: number, reported: number, pollIntervalMs: number): boolean {
+function freshnessRestartWaitReportDue(waitedMs: number, reported: number, pollIntervalMs: number): boolean {
   return reported === 0 || waitedMs >= pollIntervalMs * 2 ** reported;
 }
 
