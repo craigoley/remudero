@@ -1,0 +1,77 @@
+- id: W1-T7744
+  title: "A DISPATCHED BUILD'S GIT AND CENSUS CALLS RUN OFF THE DAEMON LOOP — the daemon runs each build in process, so its synchronous worktree git, census precheck, affected-suite listing, pre-push gate and filing-snapshot read freeze the whole loop: on 2026-10-10 `hostWorktreeGit` alone held it 36 times, worst 77.3 s"
+  repo: remudero
+  depends_on: [W1-T7743]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high  # Rule 19: one concern — where a dispatched build's blocking child processes run; it gates every build lane
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-10: core daemon loop-stall investigation (daemon.loop_lag 07:50-09:57Z), operator asked for flow improvements"
+  plan_refs: [W1-T5689, W1-T5718, W1-T6120, W1-T6121, W1-T6135, W1-T7534, W1-T7729]
+  files: [src/run-task.ts, src/lib/worktree-git.ts, src/lib/affected-suites.ts, src/lib/git-push.ts, test/a-dispatched-build-runs-its-git-off-the-daemon-loop.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-10 on the core daemon. Between 07:50 and 09:57Z it logged 10 `daemon.loop_lag` stalls,
+    about 5,990 s in total, and 171 `sync_spawn_top` entries (lower bounds). The build pipeline's share:
+    - `hostWorktreeGit`: 36 entries, worst 77.3 s;
+    - `readAffectedListings`: worst 14.9 s;
+    - `checkFixCensusSnapshot`: 14 entries, worst 5.9 s;
+    - `readDispatchFilingSnapshot`: worst 5.1 s;
+    - the pre-push gate hook: worst 3.0 s.
+
+    READ on origin/main 4e1831b94.
+    - The daemon runs each build in its own process. `daemonCommand` (src/run-task.ts:38221) wires
+      `runOne: (taskId) => runTaskFn(taskId, ...)` at :39182, so every synchronous spawn in `runTask` is a
+      loop stall.
+    - `hostWorktreeGit` (src/lib/worktree-git.ts:429) is the hardened leaf. It runs `execFileSync` at :432.
+      `hostWorktreeGitAsync` (:436) already exists. run-task.ts calls the sync leaf 108 times and the async one 6.
+    - `checkFixCensusSnapshot` (run-task.ts:17827) spawns the census precheck at :17838 and the reach-ratchet
+      test at :17845, each with `spawnSync` and a 60 s timeout. Its callers are `runFixRung` and
+      `repairCensusRefusedPush`.
+    - `readAffectedListings` (src/lib/affected-suites.ts:702) spawns `diff-class.mjs` with `spawnSync` at :709.
+      It is reached through `readAffectedSuitesInput` from `coveragePrecheck` (run-task.ts:18046).
+    - `worktreePushExec` (src/lib/git-push.ts:582) runs the harness pre-push gate through `spawnSync` at :587.
+    - `readDispatchFilingSnapshot` (run-task.ts:35408) runs `execFileSync git` at :35414. Its caller is
+      `dispatchValueContextForSelection` (:35447), on the daemon side before any build starts.
+
+    TWO ROUTES, THE BUILDER CHOOSES AND RECORDS WHY:
+    (a) Run the per-task build out of the daemon process, so every sync spawn in it leaves the loop at once.
+        Memory cost: core memory.max stays where it is (operator ruling 2026-10-10). A tsx child starts at
+        284-519 MB (measured for W1-T7729). An out-of-process build must therefore be charged to the queue
+        governor's memory admission like any other child.
+    (b) Move the named sites to awaited `*Async` leaves. There is no new memory, but the 108 sync
+        `hostWorktreeGit` sites shrink only as each converted path is reached.
+    Either way, the daemon-side `readDispatchFilingSnapshot` gets an awaited form.
+
+    SERIALIZED: depends on W1-T7743, which depends on W1-T7742. All three edit src/run-task.ts, and parallel agents editing
+    one file broke main (#10349 and #10353 were each green and together reddened main, 2026-10-09).
+  design: |
+    1. Pick route (a) or (b) above and state the choice and the memory reading in the PR body. With (a), the build
+       child's memory is charged to admission, and its `RunResult` comes back unchanged (verdict, PR URL, ledger
+       rows).
+    2. Whichever route: `checkFixCensusSnapshotAsync`, `readAffectedListingsAsync` and an async pre-push gate in
+       `worktreePushExec`'s async sibling. Each has the same outcomes as its sync form: refusal, unmeasured,
+       listing, gate refusal. Callers on the loop await them, and the sync forms stay for CLI callers.
+    3. `readDispatchFilingSnapshotAsync`, with the same `ready`/`refused` result, awaited by
+       `dispatchValueContextForSelection`'s caller.
+    4. No fixed timeout is added or changed. The existing 60 s child bounds stay as they are.
+  acceptance:
+    - claim: "a daemon-dispatched build whose worktree git blocks adds nothing to the daemon process's sync_spawn_ms"
+      proof: 'grep: test("W1-T7744: a dispatched build that blocks in worktree git adds no sync spawn time to the daemon process" in test/a-dispatched-build-runs-its-git-off-the-daemon-loop.test.ts'
+    - claim: "checkFixCensusSnapshotAsync returns the same refusal as the sync form while every synchronous child_process primitive throws"
+      proof: 'grep: test("W1-T7744: checkFixCensusSnapshotAsync returns the census refusal with sync spawns trapped" in test/a-dispatched-build-runs-its-git-off-the-daemon-loop.test.ts'
+    - claim: "readAffectedListingsAsync returns the same listing as readAffectedListings with sync spawns trapped"
+      proof: 'grep: test("W1-T7744: readAffectedListingsAsync returns the diff-class listing with sync spawns trapped" in test/a-dispatched-build-runs-its-git-off-the-daemon-loop.test.ts'
+    - claim: "the async run-branch push refuses on a failing pre-push gate with sync spawns trapped"
+      proof: 'grep: test("W1-T7744: the async run-branch push refuses a failing pre-push gate with sync spawns trapped" in test/a-dispatched-build-runs-its-git-off-the-daemon-loop.test.ts'
+    - claim: "readDispatchFilingSnapshotAsync returns the same snapshot as the sync form on a real git fixture with sync spawns trapped"
+      proof: 'grep: test("W1-T7744: readDispatchFilingSnapshotAsync returns the filing snapshot with sync spawns trapped" in test/a-dispatched-build-runs-its-git-off-the-daemon-loop.test.ts'
+  falsifier: |
+    Keep `runOne` calling `runTask` in process with sync worktree git: the read plane's `sync_spawn_ms` on the
+    daemon process grows by the blocked call, and the first test fails. For the other four, trap
+    `execFileSync`, `spawnSync` and `execSync` to throw (the `syncBuiltinESMExports` swap `startReadPlaneTelemetry`
+    uses). Today's sync forms then throw where the async forms must return.
