@@ -357,6 +357,7 @@ export function freshMergedPlanLint(root: string, paths: readonly string[]): Mer
     try {
       return hostWorktreeGit(root, ["show", `${ref}:${p}`], { maxBuffer: 1 << 26 });
     } catch {
+      // deliberate: a path absent at that ref is a legitimate "does not exist there", not a failure.
       return undefined;
     }
   };
@@ -465,6 +466,7 @@ export async function freshMergedPlanLintAsync(root: string, paths: readonly str
       try {
         ancestor = await git("show", `HEAD:${p}`);
       } catch {
+        // deliberate: a file new in this change has no ancestor at HEAD; that is absence, not failure.
         ancestor = undefined;
       }
       if (ours === undefined || ancestor === undefined || ours === ancestor) {
@@ -482,6 +484,7 @@ export async function freshMergedPlanLintAsync(root: string, paths: readonly str
       try {
         changes[p] = await git("merge-file", "-p", oursPath, ancestorPath, theirsPath);
       } catch {
+        // deliberate: a non-zero merge-file exit means conflict, reported as a lint failure below.
         return { file: p, message: "merge conflict against fresh origin/main" };
       }
     }
@@ -957,7 +960,7 @@ export function runGarden<C extends string, I, A extends GardenAction<C>, W exte
   spec: GardenSpec<C, I, A, W>,
   deps: GardenerDeps<W>,
 ): GardenPassResult<C, A> {
-  return runStepsSyncOnly(gardenPassSteps(spec, deps.mergedPlanLint ? deps : { ...deps, mergedPlanLint: freshMergedPlanLint }));
+  return runStepsSyncOnly(gardenPassSteps(spec, { ...deps, mergedPlanLint: deps.mergedPlanLint ?? freshMergedPlanLint }));
 }
 
 /** {@link runGarden} with its checkout made, landed and disposed off the event loop (W1-T5740): the
@@ -966,7 +969,7 @@ export function runGardenAsync<C extends string, I, A extends GardenAction<C>, W
   spec: GardenSpec<C, I, A, W>,
   deps: GardenerDeps<W, PrState | Promise<PrState>>,
 ): Promise<GardenPassResult<C, A>> {
-  return runStepsAsync(gardenPassSteps(spec, deps.mergedPlanLint ? deps : { ...deps, mergedPlanLint: freshMergedPlanLintAsync }));
+  return runStepsAsync(gardenPassSteps(spec, { ...deps, mergedPlanLint: deps.mergedPlanLint ?? freshMergedPlanLintAsync }));
 }
 
 function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
