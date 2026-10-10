@@ -17455,6 +17455,9 @@ export interface QueueGovernorFlow {
   trailingMergedCount?: number;
   /** New PRs opened inside the SAME trailing window (ledger `pr.opened` rows). */
   trailingOpenedCount?: number;
+  stuckOwnedCount?: number;
+  adaptiveBound?: number;
+  headroomFraction?: number;
 }
 
 /** {@link checkQueueGovernor}'s verdict for one dispatch-path consultation. Every W1-T4465 field is
@@ -17485,6 +17488,9 @@ export interface QueueGovernorResult {
   trailingMergedCount?: number;
   /** Opens observed in the SAME trailing window. 0 when the caller supplies no flow observation. */
   trailingOpenedCount?: number;
+  baseWipLimit?: number;
+  stuckOwnedCount?: number;
+  headroomFraction?: number;
 }
 
 /**
@@ -17517,32 +17523,20 @@ export function checkQueueGovernor(
   const observedForeignCount = flow.foreignOpenCount ?? 0;
   const trailingMergedCount = flow.trailingMergedCount ?? 0;
   const trailingOpenedCount = flow.trailingOpenedCount ?? 0;
-  if (openPrCount < policy.wipLimit) {
-    return {
-      deferred: false,
-      observedOpenCount: openPrCount,
-      wipLimit: policy.wipLimit,
-      observedForeignCount,
-      tier: "under_limit",
-      trailingMergedCount,
-      trailingOpenedCount,
-    };
-  }
+  const limit = flow.adaptiveBound ?? policy.wipLimit;
+  const stuckOwnedCount = Math.min(openPrCount, Math.max(0, flow.stuckOwnedCount ?? 0));
+  const common = {
+    observedOpenCount: openPrCount, wipLimit: limit, observedForeignCount, trailingMergedCount, trailingOpenedCount,
+    baseWipLimit: policy.wipLimit, stuckOwnedCount, headroomFraction: flow.headroomFraction,
+  };
+  if (openPrCount - stuckOwnedCount < limit) return { deferred: false, tier: "under_limit", ...common };
   // "Draining" needs REAL trailing activity (design ii): a silent window (0 merges, 0 opens — a
   // freshly initialized state with no ledger history yet, or genuinely nothing happening) must
   // NOT read as draining merely because 0 >= 0 is vacuously true. Requiring at least one of the
   // two figures to be positive keeps that degenerate case in "growing" (still defers), while a
   // real trailing merge with zero trailing opens (pure drainage) still correctly reads draining.
   const draining = (trailingMergedCount > 0 || trailingOpenedCount > 0) && trailingMergedCount >= trailingOpenedCount;
-  return {
-    deferred: !draining,
-    observedOpenCount: openPrCount,
-    wipLimit: policy.wipLimit,
-    observedForeignCount,
-    tier: draining ? "draining" : "growing",
-    trailingMergedCount,
-    trailingOpenedCount,
-  };
+  return { deferred: !draining, tier: draining ? "draining" : "growing", ...common };
 }
 
 /** W1-T4465 design (ii) — the trailing flow {@link checkQueueGovernor}'s tiered admission compares:
@@ -17594,6 +17588,9 @@ export function logQueueGovernorDeferral(
     tier: result.tier ?? "growing",
     trailing_merged_count: result.trailingMergedCount ?? 0,
     trailing_opened_count: result.trailingOpenedCount ?? 0,
+    base_wip_limit: result.baseWipLimit ?? result.wipLimit,
+    stuck_owned_count: result.stuckOwnedCount ?? 0,
+    headroom_fraction: result.headroomFraction ?? null,
   });
 }
 
