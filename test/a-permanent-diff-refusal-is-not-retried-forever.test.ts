@@ -12,7 +12,7 @@ import {
   type OpenPrView,
   type SweepDeps,
   type SweepPolicy,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 const NOW = Date.now();
 

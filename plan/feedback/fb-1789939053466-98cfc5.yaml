@@ -10,10 +10,11 @@ raw: "Corrective core feedback: current feedback landing PR #6259 regresses
   removes the merge guard. Do not solve by re-triaging or duplicating W1-T3884."
 attachments: []
 origin: cli
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

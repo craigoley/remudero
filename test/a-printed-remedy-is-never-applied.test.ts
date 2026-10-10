@@ -32,7 +32,7 @@ import {
   remedyGeneratorNamedInLog,
   runFixRung,
   runGeneratorFixForCiFailures,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import type { CiFailure } from "../src/lib/sweep.js";
 import type { ReviewVerdict } from "../src/lib/review.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";

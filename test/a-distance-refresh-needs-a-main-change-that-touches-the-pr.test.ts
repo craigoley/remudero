@@ -11,7 +11,7 @@ import {
   type OpenPrView,
   type SweepDeps,
   type SweepPolicy,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 const NOW = 1_800_000_000_000;
 const POLICY: SweepPolicy = {

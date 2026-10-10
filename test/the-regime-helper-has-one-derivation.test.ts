@@ -48,7 +48,11 @@ test("W1-T4042: the regime is derived in exactly one place", () => {
   assert.ok(src.length > 100_000, `read only ${src.length} bytes of run-task.ts — refusing to count against an empty corpus`);
 
   const callSites = src.match(/strikeRegimeForDispatch\(review\.criteria\)/g) ?? [];
-  assert.equal(callSites.length, 2, "both strike writers — the ordinary dispatch and the body-repair arm — call the one helper");
+  assert.equal(
+    callSites.length,
+    3,
+    "the ordinary dispatch, body-repair arm, and pre-dispatch strike tally all call the one helper",
+  );
 
   // The helper's OWN comparison, and nothing else. A second occurrence is a writer that went back
   // to deriving the regime inline, which is exactly the drift W1-T4033 removed and this guards.

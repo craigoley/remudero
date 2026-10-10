@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ciLogNamedSourcePaths, runFixRung } from "../src/run-task.js";
+import { ciLogNamedSourcePaths, runFixRung } from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
 import type { ReviewVerdict } from "../src/lib/review.js";
 import type { WorkerResult } from "../src/lib/worker.js";

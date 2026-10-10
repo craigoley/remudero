@@ -17,7 +17,7 @@ import {
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { buildSweepEffects } from "../src/run-task.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import { readLedgerLines } from "../src/lib/status.js";

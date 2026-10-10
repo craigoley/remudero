@@ -9,7 +9,7 @@ import {
   runSweep,
   type CiFailure,
   type OpenPrView,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { buildSweepEffects } from "../src/run-task.js";
 
 /**

@@ -21,7 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { PolicyError } from "../src/lib/policy.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, validateReviewLanesRow, type OpenPrView, type SweepDeps, type SweepPolicy } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, validateReviewLanesRow, type OpenPrView, type SweepDeps, type SweepPolicy } from "./helpers/sweep-test.js";
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-review-lane-budget-")), "ledger.ndjson");

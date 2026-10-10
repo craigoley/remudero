@@ -12,7 +12,7 @@ import {
   type CiFailure,
   type OpenPrView,
   type RollupCheckEntry,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import type { CriterionVerdict } from "../src/lib/review.js";
 
 /**

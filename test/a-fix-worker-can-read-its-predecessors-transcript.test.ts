@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import * as runner from "../src/run-task.js";
+import * as runner from "./helpers/run-task-test.js";
 import type { SpawnWorkerArgs } from "../src/lib/worker.js";
 
 const { archiveWorkerTranscript, runFixRung, TRANSCRIPT_EXCERPT_CAP, TRANSCRIPT_RETENTION_DEFAULT,

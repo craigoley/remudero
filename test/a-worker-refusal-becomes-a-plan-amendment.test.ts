@@ -26,7 +26,7 @@ import {
   runSweep,
   type BuildSweepEffectsDeps,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
 
 // W1-T4838 — a worker's REASONED refusal was scored as a failed attempt and re-dispatched until the

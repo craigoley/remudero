@@ -24,7 +24,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test, type TestContext } from "node:test";
-import { harnessCommitForShellLessWorker, runFixRung } from "../src/run-task.js";
+import { harnessCommitForShellLessWorker, runFixRung } from "./helpers/run-task-test.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import * as worker from "../src/lib/worker.js";
 import { spawnCodexWorker, spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
