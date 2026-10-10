@@ -1,0 +1,103 @@
+- id: W1-T7736
+  title: "THE MERGE QUEUE IS REHEARSED ON A SCRATCH BRANCH BEFORE MAIN RE-ENABLES IT — ruleset 24525891 has stayed off since 2026-10-05, when enabling it on main turned the board red and stuck (merge groups timed out); W1-T5940 since narrowed a group to its affected suites, but no merge group has run on real GitHub since, so the operator has no go/no-go evidence"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human  # writes a repository ruleset, scratch branches and replay PRs on the live repo; the operator owns the queue decision
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — a rehearsal harness that must never touch main's rules
+  band_meaning: blast-radius
+  origin: "operator approval 2026-10-10: throughput study follow-up — 'rehearse the merge queue on a scratch target before main'"
+  plan_refs: [W1-T5940, W1-T5941, W1-T4406, W1-T5515, W1-T5522, W1-T5909, W1-T5956, W1-T6088, W1-T7214]
+  files: [scripts/merge-queue-canary.mjs, test/the-merge-queue-is-rehearsed-on-a-scratch-branch-before-main-re-enables-it.test.ts, docs/recon/merge-queue-canary-rehearsal.md, docs/docs-index.json, src/lib/sweep.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-10 on origin/main faca80c75.
+
+    THE QUEUE IS OFF AND STAYS OFF. Ruleset 24525891 (main's merge_queue rule: SQUASH, ALLGREEN, required
+    `ci`, `coverage-ratchet`, `test-slow`) was enabled on 2026-10-05 and disabled about two hours later,
+    at ~21:36Z. Group jobs waited ~15 min for runners during that day's Actions incident and were
+    cancelled, so groups timed out and ejected #9391, #9392, #9388 and #9390 (W1-T5909, W1-T5956, W1-T5939);
+    the board went red and stuck, and the operator re-enqueued by hand ("next time don't have me enable
+    something that won't work", W1-T5941). Every gap found then was fixed IN ISOLATION. W1-T5941 proved the
+    ejection path in a unit scenario, not on GitHub. W1-T5940 (#10400) made a group run only its affected
+    suites, and no group has run on real GitHub since it merged.
+
+    THE QUEUE IS STILL WANTED. It is the only guard that tests the MERGED COMBINATION. On 2026-10-09
+    #10349 x #10353 (both green alone, same file src/lib/read-model-worker.ts) broke main for ~55 min
+    (W1-T7214). The 2026-10-10 throughput study found 37 of 108 head pushes since 09:30 were main-merge
+    refreshes, costing about 600 PR-min of CI. A working queue is the principled replacement for most of
+    them (see W1-T7735). The operator will not re-enable 24525891 until a canary proves that groups finish
+    green (memory ruling 2026-10-09).
+
+    THE EXISTING merge_group WIRING, which a rehearsal exercises unchanged:
+    - `.github/workflows/ci.yml:43` declares `merge_group:` with no `types:` filter (header :20-28).
+    - ci-shard's "Select the merge group's suites (W1-T5940)" step is at :271. It reads
+      `github.event.merge_group.base_sha` at :273 and is guarded at :275. The Test step at :327-330 swaps
+      CLASS to AFFECTED when the selection is not `full`.
+    - test-slow repeats the selection at :843-860.
+    - The gate job takes `GATE_BASE` from the group base at :1034-1037. The merge_group branches are at
+      :1096, :1182, :1222 and :1238.
+    - ci-gate's MERGE_GROUP_REQUIRED contract is at ci.yml:2219-2233 and `scripts/ci-gate-from-contract.mjs:48`.
+    - `.github/workflows/merge-queue-review-attest.yml:15` is the `remudero-review` attestation.
+    - The selection itself is `mergeGroupSelection` (`scripts/test-tier-manifest.mjs:612`) via
+      `writeMergeGroupSelection` (:646).
+    - The only prior rehearsal was by hand on 2026-09-29 in craigoley/remudero-sandbox (W1-T5515). It found
+      the queue merging a group whose `ci` was red until a ruleset named `ci` as required.
+    - No harness exists that creates a ruleset, a scratch branch or a replayed PR head: a sweep of src/,
+      scripts/ and .github/ found only ruleset READS (`src/lib/onboarding-readiness.ts:326-360`,
+      `src/lib/arm-auto-merge.ts:744`).
+  design: |
+    A harness, `scripts/merge-queue-canary.mjs`, with its GitHub calls behind an injected seam so that
+    every step is testable without the network:
+    1. SCRATCH TARGET. Create `mq-canary/<utc-date>` at main's head. Create a NEW repository ruleset whose
+       `conditions.ref_name.include` names ONLY that branch. It carries a `merge_queue` rule copied from
+       24525891's parameters (read, never written) and the same required checks. The harness refuses to
+       start if the payload's include list names `main`, `~DEFAULT_BRANCH`, a wildcard, or anything other
+       than its own scratch ref. It never reads ruleset 24525891 for writing and never PATCHes or PUTs it.
+    2. REPLAY. Sample real PR heads that were green on `ci` and `ci-gate` from recent merged PRs. The sample
+       is sized from the observed group CI duration and the runner budget the harness reads first, with no
+       fixed count. Push each head to `mq-canary-replay/<pr>`, open a PR against the scratch branch, and
+       enqueue it through the GraphQL `enqueuePullRequest` mutation. Include at least one known-conflicting
+       pair when the sample has one, e.g. a #10349/#10353-shaped pair, so the queue's reason to exist is
+       exercised. Pace every gh call through the existing pacer (the W1-T3275 read floor applies). Never
+       burst, and never set RMD_GH_COOLDOWN_S=0.
+    3. SWEEP ISOLATION. The fleet sweep must never dispose, review, fix or refresh a replay PR. If
+       `src/lib/sweep.ts` does not already exclude PRs whose base is not the default branch, add that one
+       filter there and prove it. That is the only production change this task may make.
+    4. MEASURE, per group, from the merge_group check runs:
+       - time from enqueue to group completion;
+       - pass/fail/timeout/ejected, with the ejection reason;
+       - per job, queue wait vs run time;
+       - the W1-T5940 selection the group actually ran (`affected` with N suites, or `full`, and why).
+    5. TEAR DOWN. Delete the ruleset, close the replay PRs and delete the scratch and replay branches in a
+       `finally`, even when a group fails or the harness is interrupted. Record the teardown outcome.
+    6. REPORT. Write `docs/recon/merge-queue-canary-rehearsal.md` (indexed in docs/docs-index.json). It
+       states:
+       - the identity that ran it (prove privileged actions under the SERVICE identity, not an admin
+         token; if the App identity cannot create a ruleset, that refusal is itself a recorded finding);
+       - the sample, and each group's measurements;
+       - the 2026-10-05 baseline;
+       - a single line `merge-queue canary verdict: go|no-go — <reason>`.
+       The operator decides on re-enabling 24525891 from this report. This task does not.
+  acceptance:
+    - claim: "the rehearsal ruleset includes only the scratch branch, and a payload naming main, the default branch or a wildcard is refused before any write"
+      proof: 'grep: test("W1-T7736: the rehearsal ruleset targets only the scratch branch and never main" in test/the-merge-queue-is-rehearsed-on-a-scratch-branch-before-main-re-enables-it.test.ts'
+    - claim: "a replayed head is opened against the scratch branch and enqueued, never against main"
+      proof: 'grep: test("W1-T7736: a replayed head is opened against the scratch branch and enqueued" in test/the-merge-queue-is-rehearsed-on-a-scratch-branch-before-main-re-enables-it.test.ts'
+    - claim: "the report records each group's completion time, outcome and the affected-suite selection it ran"
+      proof: 'grep: test("W1-T7736: the report records completion time, outcome and suite selection per group" in test/the-merge-queue-is-rehearsed-on-a-scratch-branch-before-main-re-enables-it.test.ts'
+    - claim: "the ruleset, replay PRs and scratch branches are torn down even when a group fails"
+      proof: 'grep: test("W1-T7736: the rehearsal tears down even when a group fails" in test/the-merge-queue-is-rehearsed-on-a-scratch-branch-before-main-re-enables-it.test.ts'
+    - claim: "the sweep never acts on a replay pull request whose base is the scratch branch"
+      proof: 'grep: test("W1-T7736: the sweep never acts on a replay pull request" in test/the-merge-queue-is-rehearsed-on-a-scratch-branch-before-main-re-enables-it.test.ts'
+    - claim: "a canary report with a go/no-go verdict exists for the operator"
+      proof: 'grep: merge-queue canary verdict: in docs/recon/merge-queue-canary-rehearsal.md'
+  falsifier: |
+    Let the ruleset payload take its include list from a parameter with no guard: the targeting test builds a
+    payload naming `~DEFAULT_BRANCH` and the harness writes it. Drop the `finally`: the teardown test throws
+    from a failing group and finds the ruleset still present in the fake. Omit the selection field: the report
+    test finds no `affected`/`full` entry for a group.
