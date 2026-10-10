@@ -214,6 +214,7 @@ import { realThreadDecider, registryThreadItems, type ThreadDecisionContext } fr
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
+import { checkpointRemaining, isWipSubject, prTitleFromBranchCommits, renderContinuationPrompt } from "./lib/unfinished-checkpoint.js";
 import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
 import {
@@ -4792,6 +4793,18 @@ export function lastCommitSubject(worktreePath: string): string | undefined {
     // Corrupt marker JSON fails open to a new retained-history window; cadence parsing is separate.
     void e;
     return undefined;
+  }
+}
+
+/** A build PR's title: the branch's newest non-checkpoint subject, never a `wip:` one (#10482). */
+export function branchPrTitle(worktreePath: string): string | undefined {
+  try {
+    const subjects = hostWorktreeGit(worktreePath, ["log", "--format=%s", "origin/main..HEAD"]).split("\n");
+    return prTitleFromBranchCommits(subjects) ?? lastCommitSubject(worktreePath);
+  } catch (e) {
+    // An unreadable range falls back to the tip subject, the pre-#10482 behaviour.
+    void e;
+    return lastCommitSubject(worktreePath);
   }
 }
 
@@ -19224,6 +19237,42 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       if (resumeFail) return resumeFail;
     }
 
+    // A worker that stops on a `wip:` checkpoint tip has not finished (#10482): resume it once.
+    const tipSubject = lastCommitSubject(worktreePath);
+    if (tipSubject !== undefined && isWipSubject(tipSubject) && !parseReport(fullText(impl))?.prUrl) {
+      let tipBody = "";
+      try {
+        tipBody = hostWorktreeGit(worktreePath, ["log", "-1", "--format=%b"]);
+      } catch (e) {
+        // An unreadable body only loses the remaining hint; the resume still runs with a generic prompt.
+        void e;
+      }
+      const remaining = checkpointRemaining(tipBody);
+      log("implement.unfinished", { subject: tipSubject, remaining: remaining ?? null });
+      impl = account(
+        await spawn({
+          cwd: worktreePath,
+          permissionMode: "bypassPermissions",
+          settingsFile,
+          resumeSessionId: impl.sessionId,
+          model: implementMount.model,
+          mountProvider: implementMount.provider,
+          effort: implementMount.effort,
+          maxTurns: implementMount.maxTurns,
+          maxBudgetUsd: budgetUsd,
+          config: implementConfig,
+          tools: implementTools === undefined ? undefined : [...implementTools],
+          ...(ruleLookup === undefined ? {} : { ruleLookup }),
+          ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
+          ...cashTrialSpawn,
+          prompt: renderContinuationPrompt(tipSubject, remaining, harnessOwnsGit),
+        }),
+      );
+      log("implement.continued", { session_id: impl.sessionId, cost_usd: impl.costUsd, num_turns: impl.numTurns, subtype: impl.subtype, ...workerLedgerFields(impl) });
+      const continueFail = failOnWorkerError(impl, "implement.continued");
+      if (continueFail) return continueFail;
+    }
+
     // ── QUESTION contract (non-blocking) — log, don't stall (§2).
     const question = parseQuestion(fullText(impl));
     if (question) {
@@ -19625,7 +19674,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
       try {
         // W1-T6034: the filed proofs run as awaited children, off the daemon loop.
-        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath));
+        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, branchPrTitle(worktreePath));
       } catch (err) {
         if (!(err instanceof PrOpenRefusedError)) throw err;
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
