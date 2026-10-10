@@ -13,6 +13,7 @@
 // poll" is the MAX ts among every "daemon."-prefixed ledger line -- real, ledger-sourced, and
 // always advancing as the daemon keeps ticking, without requiring a new unconditional log call.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,6 +25,7 @@ import {
   buildDaemonHealthRoute,
   deriveLastPoll,
   readDiskFreeBytes,
+  readDiskTotalBytes,
   readGhRateLimitBuckets,
   readGhRateLimitRemaining,
 } from "../src/lib/daemon-health.js";
@@ -75,6 +77,47 @@ test("W1-T159: readDiskFreeBytes returns undefined (never a fake 0) when the inj
     throw new Error("ENOENT");
   });
   assert.equal(bytes, undefined);
+});
+
+test("native disk capacity preserves zero and refuses invalid or overflowing block arithmetic", () => {
+  assert.equal(readDiskFreeBytes("/", () => ({ bavail: 3n, bsize: 4096n })), 12288);
+  assert.equal(readDiskFreeBytes("/", () => ({ bavail: 0n, bsize: 4096n })), 0);
+  assert.equal(readDiskTotalBytes("/", () => ({ bavail: 0n, bsize: 4096n, blocks: 0n })), 0);
+  assert.equal(readDiskFreeBytes("/", () => ({ bavail: BigInt(Number.MAX_SAFE_INTEGER), bsize: 1n })), Number.MAX_SAFE_INTEGER);
+  for (const stat of [
+    { bavail: -1n, bsize: 4096n }, { bavail: 1n, bsize: 0n },
+    { bavail: NaN, bsize: 4096 }, { bavail: 1, bsize: Infinity },
+    { bavail: 1.5, bsize: 4096 }, { bavail: 1, bsize: -1 },
+    { bavail: Number.MAX_SAFE_INTEGER + 1, bsize: 1 },
+    { bavail: BigInt(Number.MAX_SAFE_INTEGER), bsize: 2n },
+  ]) {
+    assert.equal(readDiskFreeBytes("/", () => stat), undefined);
+    assert.equal(readDiskTotalBytes("/", () => ({ ...stat, blocks: stat.bavail })), undefined);
+  }
+  assert.equal(readDiskTotalBytes("/", () => ({ bavail: 1n, bsize: 4096n })), undefined);
+  for (const code of ["ENOENT", "EACCES", "EIO"]) {
+    assert.equal(readDiskFreeBytes("/", () => { throw Object.assign(new Error(code), { code }); }), undefined);
+    assert.equal(readDiskTotalBytes("/", () => { throw Object.assign(new Error(code), { code }); }), undefined);
+  }
+});
+
+test("native disk capacity reads real user-available blocks without a df executable", () => {
+  const loader = new URL("../node_modules/tsx/dist/loader.mjs", import.meta.url).pathname;
+  const module = new URL("../src/lib/daemon-health.ts", import.meta.url).href;
+  const result = spawnSync(process.execPath, ["--import", loader, "--input-type=module", "-e",
+    `import {readDiskFreeBytes,readDiskTotalBytes} from ${JSON.stringify(module)};
+     import {statfsSync} from 'node:fs';
+     const s=statfsSync(process.argv[1],{bigint:true});
+     console.log(JSON.stringify({available:readDiskFreeBytes(process.argv[1]),total:readDiskTotalBytes(process.argv[1]),expected:Number(s.bavail*s.bsize),missing:readDiskFreeBytes(process.argv[1]+'/not-present')}));`, tmpdir()],
+    { env: { ...process.env, PATH: "/nonexistent-rmd-disk-capacity-path" }, encoding: "utf8", timeout: 30000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.signal, null);
+  assert.equal(result.error, undefined);
+  const observed = JSON.parse(result.stdout);
+  assert.ok(Number.isSafeInteger(observed.available) && observed.available > 0);
+  assert.ok(Number.isSafeInteger(observed.total) && observed.total >= observed.available);
+  assert.ok(Math.abs(observed.available - observed.expected) < 64 * 1024 ** 2, "independent live reads may observe concurrent small writes");
+  assert.equal(Object.hasOwn(observed, "missing"), false, "unreadable is omitted, never zero");
 });
 
 // ── readGhRateLimitRemaining: an injectable exec, mirroring status.ts's ghGateway pattern -- never a real network call in a unit test ──
