@@ -8,12 +8,13 @@
 // HOME the target container would have used, not inferred from the call list alone.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const RECYCLER = join(REPO_ROOT, "deploy", "recycle-container.sh");
@@ -129,6 +130,12 @@ function git(home: string, args: string[], cwd?: string): { status: number; stdo
   return { status: r.status ?? -1, stdout: (r.stdout ?? "").trim() };
 }
 
+/** An empty checkout at `path`, built by the shared fixture (test/helpers/git-repo.ts) and moved into place. */
+function initCheckout(path: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  renameSync(gitRepo({ seedCommit: false, kind: "git-author-checkout" }).dir, path);
+}
+
 function makeFixture(opts: { freshTarget?: boolean; targetRepoCheckout?: boolean } = {}): Fixture {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}git-author-commission-`));
   const world = join(root, "world");
@@ -147,9 +154,9 @@ function makeFixture(opts: { freshTarget?: boolean; targetRepoCheckout?: boolean
   const sibling = mk("sibling", "rmd-sibling-daemon", "remudero-sibling");
   for (const inst of opts.freshTarget ? [sibling] : [target, sibling]) {
     mkdirSync(join(inst.state, "state"));
-    git(root, ["init", "-q", join(inst.state, "remudero")]);
+    initCheckout(join(inst.state, "remudero"));
   }
-  if (opts.targetRepoCheckout) git(root, ["init", "-q", join(target.state, "repos", target.repo)]);
+  if (opts.targetRepoCheckout) initCheckout(join(target.state, "repos", target.repo));
   const record = (inst: Instance) => [
     `  ${inst.name}:`,
     `    repo: ${inst.repo}`,
