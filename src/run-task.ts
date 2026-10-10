@@ -437,6 +437,7 @@ import {
   runDaemon,
   type CrashLoopVerdict,
   type DaemonFreshness,
+  type LaneRestartHooks,
   type DaemonOpts,
   type DaemonSummary,
   type HeadroomPolicy,
@@ -16178,6 +16179,8 @@ interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   containmentExec?: ProbeExecutor;
   externalWaitFreshness?: ExternalWaitFreshness;
   externalWaitRecycle?: () => string | undefined;
+  /** W1-T7806: the daemon's latched restart and boundary report for this lane. */
+  laneRestart?: LaneRestartHooks;
   handOffAtPrOpen?: boolean;
   isolationExec?: IsolationProbeExecutor;
   managedCheckoutInstall?: (repoDir: string) => void;
@@ -17081,6 +17084,8 @@ async function runTask(
     containmentExec?: ProbeExecutor;
     externalWaitFreshness?: ExternalWaitFreshness;
     externalWaitRecycle?: () => string | undefined;
+    /** W1-T7806: the daemon's latched restart and boundary report for this lane. */
+    laneRestart?: LaneRestartHooks;
     /** W1-T5345: hand the PR to the sweep at the first CI poll ({@link PollDeps.handOffAtPrOpen}). Daemon only. */
     handOffAtPrOpen?: boolean;
     /** Injectable isolation-probe executor (W1-T91) — the isolation sibling of
@@ -19425,7 +19430,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     let impl!: WorkerResult;
     // W1-T7697: retain disk work before releasing a lane; a failed checkpoint is never a handoff.
     const yieldAtWorkerBoundary = async (waitingOn: string): Promise<RunResult | undefined> => {
-      const freshness = await opts.externalWaitFreshness?.();
+      // W1-T7806: report the boundary, then read the daemon's latch as well as this run's own reading.
+      opts.laneRestart?.boundaryReached();
+      const freshness = (await opts.externalWaitFreshness?.()) ?? opts.laneRestart?.restartLatched();
       const recycle = freshness ? undefined : opts.externalWaitRecycle?.();
       if (!freshness && !recycle) return undefined;
       try {
@@ -39212,7 +39219,7 @@ export async function daemonCommand(
         // opening its PR against the WRONG owner. That partial fix is worse than today's honest
         // self-owner-only behaviour and is exactly what test/owner-dispatch-threading.test.ts
         // refuses.
-        runOne: (taskId) =>
+        runOne: (taskId, laneRestart) =>
           runTaskFn(taskId, {
             planPath: target.planPath,
             config,
@@ -39237,6 +39244,7 @@ export async function daemonCommand(
             // readings remain undefined and therefore cannot manufacture a restart.
             externalWaitFreshness: daemonFreshnessReads(effectiveRepoRoot).externalWaitFreshness,
             externalWaitRecycle: () => recyclePauseDetail(config.root),
+            laneRestart,
             // W1-T5345: a daemon lane is free once its PR is open — the sweep owns CI wait and review.
             handOffAtPrOpen: true,
             ...(gitCredentialSocket ? { gitCredentialSocketPath: gitCredentialSocket.socketPath } : {}),
