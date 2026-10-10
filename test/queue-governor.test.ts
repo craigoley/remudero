@@ -25,6 +25,7 @@ import { runDaemon, type DaemonDeps, type DaemonSummary } from "../src/lib/daemo
 import { checkDispatchGovernors } from "../src/lib/dispatch-governor.js";
 import type { Config } from "../src/lib/config.js";
 import { createOpenPrCountObservation, drainCommand, daemonCommand } from "../src/run-task.js";
+import { appendGitConfigEnv } from "./setup/no-live-remote.js";
 
 test("idle_starved: only a successful complete board read may prove zero open PRs", () => {
   const board = createOpenPrCountObservation();
@@ -420,19 +421,34 @@ function boardWithUnplannedOpenPrs(count: number, onList?: () => void): GitHub {
  *  `runDrain`'s own loop performs on every tick — so `checkQueueGovernor()` reads a live count. */
 async function captureDrainDepsWithLiveProjection(config: Config, planPath: string, github: GitHub): Promise<DrainDeps> {
   let captured: DrainDeps | undefined;
-  const code = await drainCommand([], {
-    config,
-    planPath,
-    skipGitSync: true,
-    githubFactory: () => github,
-    notifyChannel: { send: () => true } as never,
-    runDrain: async (_plan, deps): Promise<DrainSummary> => {
-      deps.refreshMerged();
-      captured = deps;
-      return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, resumeCommand: "rmd drain" };
-    },
-  });
-  assert.equal(code, 0);
+  // drainCommand reads owner/repo from the checkout's origin before any injected dep is consulted,
+  // and the proof sandbox checks the PR head out with NO origin remote. Give the composition its
+  // own fixture origin through git's env config (appended, never clobbering the sandbox's entries),
+  // then restore every key touched. The repo name matches the plan fixture's `repo: remudero`.
+  const gitConfigIndex = Number.parseInt(process.env.GIT_CONFIG_COUNT ?? "0", 10) || 0;
+  const envKeys = ["GIT_CONFIG_COUNT", `GIT_CONFIG_KEY_${gitConfigIndex}`, `GIT_CONFIG_VALUE_${gitConfigIndex}`];
+  const oldEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
+  appendGitConfigEnv("remote.origin.url", "https://github.com/fixture/remudero.git");
+  try {
+    const code = await drainCommand([], {
+      config,
+      planPath,
+      skipGitSync: true,
+      githubFactory: () => github,
+      notifyChannel: { send: () => true } as never,
+      runDrain: async (_plan, deps): Promise<DrainSummary> => {
+        deps.refreshMerged();
+        captured = deps;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, resumeCommand: "rmd drain" };
+      },
+    });
+    assert.equal(code, 0);
+  } finally {
+    for (const [key, value] of oldEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
   assert.ok(captured);
   return captured;
 }
