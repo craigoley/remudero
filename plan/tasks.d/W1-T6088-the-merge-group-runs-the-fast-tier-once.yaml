@@ -38,3 +38,11 @@
     OPERATOR BUILD: a .github/workflows path routes this task to operator-build. The merge queue was
     disabled on 2026-10-05 (W1-T5940's rationale); the saving lands only while it is on. If W1-T5940 merges
     first and already runs the fast tier once on merge_group, retire this as a duplicate.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/ci.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-10T22:08:30.202Z"
+    pin: "99d7542b6cb046f1f592150220a384e3d6163024abdc5f2e5e497ca0c38541ed"
