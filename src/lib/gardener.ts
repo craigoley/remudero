@@ -1,5 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -9,6 +10,7 @@ import type { Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { runStepsAsync, runStepsSync, step, type StepEffect, type Steps } from "./git-push.js";
 import { parseTasksFromYaml } from "./plan.js";
+import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 import { sampleBeta, seededRandom } from "./knowledge-value.js";
 
 /**
@@ -305,7 +307,7 @@ export interface GardenerDeps<W extends GardenCheckout = GardenCheckout, P exten
   landingRefusal?: (root: string, paths: readonly string[]) => string | undefined;
   /** W1-T5457: lints the plan change on top of FRESH origin/main just before it lands; a fixture injects it.
    *  Absent, {@link freshMergedPlanLint} fetches and merges for real. */
-  mergedPlanLint?: (root: string, paths: readonly string[]) => MergedPlanLintFailure | undefined;
+  mergedPlanLint?: (root: string, paths: readonly string[]) => MergedPlanLintFailure | undefined | Promise<MergedPlanLintFailure | undefined>;
 }
 
 /** The first plan file whose merged result would not load, and why. */
@@ -350,10 +352,13 @@ export function lintMergedPlanChange(input: { base: Record<string, string>; chan
 export function freshMergedPlanLint(root: string, paths: readonly string[]): MergedPlanLintFailure | undefined {
   const planPaths = paths.filter((p) => isPlanShard(p));
   if (planPaths.length === 0) return undefined;
-  const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26 });
+  const git = (...args: string[]) => hostWorktreeGit(root, args, { maxBuffer: 1 << 26 });
   const show = (ref: string, p: string): string | undefined => {
-    const r = spawnSync("git", ["-C", root, "show", `${ref}:${p}`], { encoding: "utf8", maxBuffer: 1 << 26 });
-    return r.status === 0 ? r.stdout : undefined;
+    try {
+      return hostWorktreeGit(root, ["show", `${ref}:${p}`], { maxBuffer: 1 << 26 });
+    } catch {
+      return undefined;
+    }
   };
   git("fetch", "-q", "origin", "main");
   const base: Record<string, string> = {};
@@ -376,6 +381,112 @@ export function freshMergedPlanLint(root: string, paths: readonly string[]): Mer
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+  return lintMergedPlanChange({ base, changes });
+}
+
+function tarField(header: Buffer, start: number, length: number): string {
+  const field = header.subarray(start, start + length);
+  const end = field.indexOf(0);
+  return field.subarray(0, end < 0 ? field.length : end).toString("utf8");
+}
+
+function tarOctal(header: Buffer): number {
+  const raw = header.subarray(124, 136).toString("ascii").split("\0", 1)[0]!.trim();
+  if (raw === "") return 0;
+  if (!/^[0-7]+$/.test(raw)) throw new Error("plan archive has an invalid tar size");
+  return Number.parseInt(raw, 8);
+}
+
+function paxPath(data: Buffer): string | undefined {
+  let offset = 0;
+  let path: string | undefined;
+  while (offset < data.length) {
+    const space = data.indexOf(0x20, offset);
+    if (space < 0) throw new Error("plan archive has an invalid pax record");
+    const length = Number(data.subarray(offset, space).toString("ascii"));
+    if (!Number.isSafeInteger(length) || length <= space - offset + 1 || offset + length > data.length) {
+      throw new Error("plan archive has an invalid pax record length");
+    }
+    const record = data.subarray(space + 1, offset + length - 1);
+    const equals = record.indexOf(0x3d);
+    if (equals >= 0 && record.subarray(0, equals).toString("ascii") === "path") path = record.subarray(equals + 1).toString("utf8");
+    offset += length;
+  }
+  return path;
+}
+
+function planFilesFromTar(archive: string): Record<string, string> {
+  const bytes = Buffer.from(archive, "latin1");
+  const files: Record<string, string> = {};
+  let offset = 0;
+  let localPath: string | undefined;
+  let globalPath: string | undefined;
+  while (offset + 512 <= bytes.length) {
+    const header = bytes.subarray(offset, offset + 512);
+    if (header.every((byte) => byte === 0)) break;
+    const size = tarOctal(header);
+    const start = offset + 512;
+    const end = start + size;
+    if (end > bytes.length) throw new Error("plan archive ended inside a tar entry");
+    const type = header[156] === 0 ? "0" : String.fromCharCode(header[156]!);
+    const name = tarField(header, 0, 100);
+    const prefix = tarField(header, 345, 155);
+    const headerPath = prefix ? `${prefix}/${name}` : name;
+    const data = bytes.subarray(start, end);
+    if (type === "x") localPath = paxPath(data);
+    else if (type === "g") globalPath = paxPath(data) ?? globalPath;
+    else if (type === "L") localPath = data.toString("utf8").replace(/\0.*$/s, "");
+    else {
+      const path = localPath ?? globalPath ?? headerPath;
+      localPath = undefined;
+      if ((type === "0" || type === "7") && isPlanShard(path)) files[path] = data.toString("utf8");
+    }
+    offset = start + Math.ceil(size / 512) * 512;
+  }
+  return files;
+}
+
+/** Async default for daemon passes: one fresh archive read, then only changed-path ancestors. */
+export async function freshMergedPlanLintAsync(root: string, paths: readonly string[]): Promise<MergedPlanLintFailure | undefined> {
+  const planPaths = paths.filter((p) => isPlanShard(p));
+  if (planPaths.length === 0) return undefined;
+  const git = (...args: string[]) => hostWorktreeGitAsync(root, args, { maxBuffer: 1 << 26 });
+  await git("fetch", "-q", "origin", "main");
+  const archive = await hostWorktreeGitAsync(root, ["archive", "--format=tar", "origin/main", "plan/"], { encoding: "latin1", maxBuffer: 1 << 28 });
+  const base = planFilesFromTar(archive);
+  const changes: Record<string, string> = {};
+  const dir = await mkdtemp(join(tmpdir(), "rmd-merged-plan-lint-"));
+  try {
+    for (const p of planPaths) {
+      const theirs = await readFile(join(root, p), "utf8");
+      const ours = base[p];
+      let ancestor: string | undefined;
+      try {
+        ancestor = await git("show", `HEAD:${p}`);
+      } catch {
+        ancestor = undefined;
+      }
+      if (ours === undefined || ancestor === undefined || ours === ancestor) {
+        changes[p] = theirs;
+        continue;
+      }
+      const file = async (name: string, text: string): Promise<string> => {
+        const path = join(dir, name);
+        await writeFile(path, text);
+        return path;
+      };
+      const [oursPath, ancestorPath, theirsPath] = await Promise.all([
+        file("ours", ours), file("ancestor", ancestor), file("theirs", theirs),
+      ]);
+      try {
+        changes[p] = await git("merge-file", "-p", oursPath, ancestorPath, theirsPath);
+      } catch {
+        return { file: p, message: "merge conflict against fresh origin/main" };
+      }
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
   return lintMergedPlanChange({ base, changes });
 }
@@ -846,7 +957,7 @@ export function runGarden<C extends string, I, A extends GardenAction<C>, W exte
   spec: GardenSpec<C, I, A, W>,
   deps: GardenerDeps<W>,
 ): GardenPassResult<C, A> {
-  return runStepsSyncOnly(gardenPassSteps(spec, deps));
+  return runStepsSyncOnly(gardenPassSteps(spec, deps.mergedPlanLint ? deps : { ...deps, mergedPlanLint: freshMergedPlanLint }));
 }
 
 /** {@link runGarden} with its checkout made, landed and disposed off the event loop (W1-T5740): the
@@ -855,7 +966,7 @@ export function runGardenAsync<C extends string, I, A extends GardenAction<C>, W
   spec: GardenSpec<C, I, A, W>,
   deps: GardenerDeps<W, PrState | Promise<PrState>>,
 ): Promise<GardenPassResult<C, A>> {
-  return runStepsAsync(gardenPassSteps(spec, deps));
+  return runStepsAsync(gardenPassSteps(spec, deps.mergedPlanLint ? deps : { ...deps, mergedPlanLint: freshMergedPlanLintAsync }));
 }
 
 function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
@@ -981,7 +1092,8 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
         if (landing) {
           let lint: MergedPlanLintFailure | undefined;
           try {
-            lint = (deps.mergedPlanLint ?? freshMergedPlanLint)(ws.root, landing.paths);
+            if (!deps.mergedPlanLint) throw new Error("garden landing lint was not wired by its driver");
+            lint = yield* step(() => deps.mergedPlanLint!(ws.root, landing.paths));
           } catch (e) {
             deps.log(`${spec.name}.landing_lint_skipped`, { reason: String((e as Error)?.message ?? e) });
           }

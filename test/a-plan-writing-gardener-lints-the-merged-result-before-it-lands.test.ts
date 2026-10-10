@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { GARDEN_FILING_ESCALATE_AT, freshMergedPlanLint, gardenStatePath, lintMergedPlanChange, runGarden, type GardenAction, type GardenSpec, type GardenerDeps } from "../src/lib/gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { GARDEN_FILING_ESCALATE_AT, freshMergedPlanLint, freshMergedPlanLintAsync, gardenStatePath, lintMergedPlanChange, runGarden, runGardenAsync, type GardenAction, type GardenSpec, type GardenerDeps } from "../src/lib/gardener.js";
+import { makeTempDir, RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const task = (id: string, extra = "") => `- id: ${id}\n  title: t\n  repo: remudero\n  type: implement\n  verify: auto\n${extra}`;
 const SHARD = "plan/tasks.d/W1-T1-a.yaml";
@@ -49,7 +50,7 @@ function harness(t: { after: (fn: () => void) => void }, lint: GardenerDeps["mer
     log: (step: string, extra?: Record<string, unknown>) => void rows.push({ step, extra }),
     mergedPlanLint: lint,
   } as unknown as GardenerDeps<{ root: string; land: () => string; dispose: () => void }>;
-  return { dir, rows, landed, run: () => runGarden(spec as never, deps as never) };
+  return { dir, rows, landed, run: () => runGarden(spec as never, deps as never), runAsync: () => runGardenAsync(spec as never, deps as never) };
 }
 
 test("W1-T5457: a refused landing is ledgered and is not a filing failure", (t) => {
@@ -68,6 +69,45 @@ test("W1-T5457: a refused landing is ledgered and is not a filing failure", (t) 
   }
   assert.equal(state.filingFailures, undefined);
   assert.equal(state.lastPass, undefined, "no fingerprint recorded, so the next pass rebuilds on fresh main");
+});
+
+test("W1-T5457: the async gardener awaits a refused landing lint before it can land", async (t) => {
+  let settled = false;
+  const h = harness(t, async () => {
+    await Promise.resolve();
+    settled = true;
+    return { file: SHARD, message: "duplicate key priority" };
+  });
+  await h.runAsync();
+  assert.equal(settled, true);
+  assert.deepEqual(h.landed, [], "the asynchronous refusal is observed before landing");
+  assert.equal(h.rows.filter((r) => r.step === "probe.landing_refused").length, 1);
+});
+
+test("W1-T5457: async default lint sees a duplicate added to fresh origin/main", async () => {
+  const origin = gitRepo({ bare: true, branch: "main", kind: "merged-plan-origin" });
+  const repo = gitRepo({ kind: "merged-plan-client" });
+  repo.addRemote("origin", origin.dir);
+  repo.git("push", "--quiet", "--set-upstream", "origin", "main");
+
+  const base = "plan/tasks.d/W1-T1-base.yaml";
+  mkdirSync(join(repo.dir, "plan/tasks.d"), { recursive: true });
+  writeFileSync(join(repo.dir, base), task("W1-T1"));
+  repo.git("add", base);
+  repo.git("commit", "--quiet", "-m", "add base plan task");
+  repo.git("push", "--quiet", "origin", "main");
+
+  const feature = repo.addWorktree(join(makeTempDir("merged-plan-feature"), "tree"), "feature");
+  const duplicateOnMain = "plan/tasks.d/W1-T2-main.yaml";
+  writeFileSync(join(repo.dir, duplicateOnMain), task("W1-T1"));
+  repo.git("add", duplicateOnMain);
+  repo.git("commit", "--quiet", "-m", "add task on fresh main");
+  repo.git("push", "--quiet", "origin", "main");
+
+  const incoming = "plan/tasks.d/W1-T3-incoming.yaml";
+  writeFileSync(join(feature.dir, incoming), task("W1-T1"));
+  const refusal = await freshMergedPlanLintAsync(feature.dir, [incoming]);
+  assert.match(refusal?.message ?? "", /duplicate task id 'W1-T1'/);
 });
 
 test("W1-T5457: a path outside the plan is not checked", (t) => {
