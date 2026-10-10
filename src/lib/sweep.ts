@@ -6604,8 +6604,10 @@ export const PUSH_VACUOUS_SUCCESS_CHECK_NAMES: ReadonlySet<string> = new Set(["c
 /** Main's health read off its own rollup — the default-branch sibling of `checksState`. "green": a
  *  required check GENUINELY concluded passing, none failed, none outstanding. "red": never
  *  auto-acted on beyond an escalation. "undetermined": still running, or every concluded check
- *  skipped or known-vacuous — NEVER collapsed into "green", the vacuous pass this reader refuses. */
-export type MainHealthState = "green" | "red" | "undetermined";
+ *  skipped or known-vacuous — NEVER collapsed into "green", the vacuous pass this reader refuses.
+ *  "stale": the newest genuine evidence is green but older than main's own observed evidence
+ *  latency allows, so newer merges have gone unverified too long to call the trunk green. */
+export type MainHealthState = "green" | "red" | "undetermined" | "stale";
 
 /** One named observation of main's own check rollup (acceptance 1) — never a bare boolean. */
 export interface MainHealthObservation {
@@ -6646,6 +6648,13 @@ export interface MainHealthRunHistoryEntry {
   readonly conclusion?: string;
   readonly url?: string;
   readonly pullRequests?: readonly MainHealthPullRequestRef[];
+  /** GitHub's `run_attempt`: a re-run of a completed run is a new attempt with its own jobs. */
+  readonly runAttempt?: number;
+  /** When the run was queued (`created_at`), started (`run_started_at`) and last updated
+   *  (`updated_at`, its completion for a completed run) — the evidence-latency samples. */
+  readonly createdAt?: string;
+  readonly startedAt?: string;
+  readonly completedAt?: string;
 }
 
 export interface MainHealthFirstRedCommit {
@@ -6878,10 +6887,12 @@ export function mainHealthFallbackRuns(
   };
 }
 
-/** True when the head's own rollup concluded nothing: no required check yet, or one still pending
- *  (a cancelled one included). An all-skipped/vacuous head DID complete, and is not replaced. */
+/** True when the head's own rollup carries no genuine evidence: no required check yet, one still
+ *  pending (a cancelled one included), or every concluded one skipped or known-vacuous. 2026-10-10:
+ *  an all-skipped head (a plan-only merge, or the CI run not yet registered beside its skipped
+ *  siblings) was never walked past, so main read `undetermined` on nearly every pass since 14:40Z. */
 export function mainHealthHeadInconclusive(observation: MainHealthObservation): boolean {
-  return observation.state === "undetermined" && (observation.pendingChecks.length > 0 || observation.nonEvidenceChecks.length === 0);
+  return observation.state === "undetermined";
 }
 
 /** Read main's rollup into a {@link MainHealthObservation}, reusing the exact dedupe and
@@ -7853,7 +7864,11 @@ export function selectBaseCausedRelease(
 /** W1-T4351 — main's LATEST observed run, read back from the main-health rung's own
  *  `main.health.observed` row (it runs before every full pass), so no second GitHub read. */
 export interface MainLatestRun {
+  /** Main's head when the observer read it. */
   sha: string;
+  /** The main commit whose run decided `state` and the check census: the head, or the newest commit
+   *  behind it with genuine evidence. Legacy rows carry no `decided_by_sha`, so it falls back to `sha`. */
+  decidedBySha: string;
   state: string;
   failingChecks: readonly string[];
   /** Absent on legacy rows: absence of a name is evidence only when the observer supplied its census. */
@@ -7870,7 +7885,8 @@ export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[
     const failing = [...new Set([line.failing_checks, line.advisory_failing_checks]
       .flatMap((list) => (Array.isArray(list) ? list.filter((n): n is string => typeof n === "string") : [])))];
     latest = {
-      sha: line.sha, state: line.state, failingChecks: failing,
+      sha: line.sha, decidedBySha: typeof line.decided_by_sha === "string" ? line.decided_by_sha : line.sha,
+      state: line.state, failingChecks: failing,
       ...(Array.isArray(line.observed_checks)
         ? { observedChecks: line.observed_checks.filter((n): n is string => typeof n === "string") }
         : {}),
@@ -16139,7 +16155,11 @@ export async function runSweep(
                 baseRedStandDownPrs.add(pr.prNumber);
                 acted = false;
                 const mainSha = mainLatestRun?.sha ?? "unread";
-                const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, check_name: baseRed.check, main_sha: mainSha };
+                // The red and the census belong to the run that decided main's state, which may be an
+                // older main commit than the head when the head's own run carries no evidence yet.
+                const decidedSha = mainLatestRun?.decidedBySha ?? mainSha;
+                const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, check_name: baseRed.check, main_sha: mainSha,
+                  ...(decidedSha !== mainSha ? { main_decided_by_sha: decidedSha } : {}) };
                 if (baseRed.kind === "refresh" && deps.updateBranch && baseRedRefreshPr === undefined) {
                   baseRedRefreshPr = pr.prNumber;
                   let outcome: string;
@@ -16156,9 +16176,9 @@ export async function runSweep(
                 standDownReason = baseRed.kind === "refresh"
                   ? `base red: ${baseRed.check} was held while main was red; main is green, but this pass's one branch refresh is spent or unwired — no fix dispatched`
                   : mainLatestRun?.state === "red" && mainLatestRun.observedChecks !== undefined && !mainLatestRun.observedChecks.includes(baseRed.check)
-                    ? `base red: ${baseRed.check} is absent from main's latest run (${mainSha}), and main is red — no fix dispatched, the branch refreshes once main is green`
+                    ? `base red: ${baseRed.check} is absent from main's latest run (${decidedSha}), and main is red — no fix dispatched, the branch refreshes once main is green`
                     : mainLatestRun?.state === "red"
-                      ? `base red: ${baseRed.check} also fails on main's latest run (${mainSha}) — not this diff's; no fix dispatched, the branch refreshes once main is green`
+                      ? `base red: ${baseRed.check} also fails on main's latest run (${decidedSha}) — not this diff's; no fix dispatched, the branch refreshes once main is green`
                       : `base red: ${baseRed.check} was held while main was red; main is ${mainLatestRun?.state ?? "unread"} at ${mainSha}, not yet green — no fix dispatched, the branch refreshes once main is green`;
                 break;
               }
