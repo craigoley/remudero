@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.17
   status: queued
@@ -27,3 +27,13 @@
     - PR #10363: 0.93 PR-hours — plan-only PR is red on ci-shard (1/8) — the code-fix lane cannot stage outside a plan filing, so no fix is dispatched; the plan violation needs a plan repair
     - PR #10597: 0.93 PR-hours — plan-only PR is red on ci-shard (6/8) — the code-fix lane cannot stage outside a plan filing, so no fix is dispatched; the plan violation needs a plan repair
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.79
+    reasons:
+      - "The filed plan targets automatic owner resolution of one named blocker and declares src/lib/pr-blocker.ts plus a dedicated test, consistent with the flow-blocker family."
+      - "The supplied scope states no credential handling, deletion, irreversible action, operator-only decision, or merge/deploy/review policy change."
+      - "The family record reports 5 merged and 0 declined tasks. This is a filing-time assessment; no implementation or passing gate results are supplied."
+    judged_at: "2026-10-10T18:08:13.508Z"
+    pin: "bc6777fc4ed641c72550355165c1b2ff23822bbb67ecd46f788055dc44dafa54"
