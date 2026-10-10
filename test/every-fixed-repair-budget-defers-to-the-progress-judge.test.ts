@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runFixRung, buildSweepEffects, runPlanScopedFixRound, routeFix,
   finishTransientRetry, implementAttemptOutcome } from "./helpers/run-task-test.js";
-import { runDiagnoseThenRetry, MAX_STRIKES, MAX_TRANSIENT_RETRIES } from "../src/lib/classify.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import { buildFixProgressInput, FIX_BUDGET_JUDGE_SITES, type FixProgressJudge } from "../src/lib/fix-progress-judge.js";
 import { judgeSloRebuild, BLOCKER_SLO_MS } from "../src/lib/pr-blocker.js";
@@ -37,39 +36,10 @@ const input = () => buildFixProgressInput({ taskId: "W1-T7243", prNumber: 7243, 
 const continueJudge: FixProgressJudge = async () => ({ verdict: "continue", reason: "new evidence" });
 
 describe("test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts", () => {
-  test("diagnose and transient retries continue past their former ceilings on the judge's advice", async () => {
-    for (const transient of [false, true]) {
-      for (const changeApproach of [false, true]) {
-        let attempts = 0;
-        const findings: (string | undefined)[] = [];
-        const judged: number[] = [];
-        const ceiling = transient ? MAX_TRANSIENT_RETRIES : MAX_STRIKES;
-        const result = await runDiagnoseThenRetry({
-          attempt: async report => {
-            findings.push(report);
-            return ++attempts === ceiling + 3 ? { success: true }
-              : { success: false, evidence: { text: transient ? "ECONNRESET" : "assertion failed" } };
-          },
-          diagnose: async () => ({ text: "inspect the failed assertion" }),
-          fixProgressJudge: async facts => {
-            assert.equal(facts.formerCeiling, ceiling);
-            assert.match(facts.parkedReason!, transient ? /transient-retry/ : /diagnose-retry/);
-            judged.push(facts.strikesSpent!);
-            return changeApproach ? { verdict: "change-approach", approach: "inspect the next endpoint", reason: "new evidence" }
-              : { verdict: "continue", reason: "new evidence" };
-          },
-        });
-        assert.equal(result.outcome, "success");
-        assert.equal(attempts, ceiling + 3);
-        assert.deepEqual(judged, [ceiling + 1, ceiling + 2]);
-        assert.equal(transient ? result.transientRetries : result.strikes, ceiling + 2);
-        assert.equal(result.exhaustedClass, undefined);
-        if (changeApproach) assert.match(findings.at(-1)!, /inspect the next endpoint/);
-      }
-    }
-  });
-
-  test("a transient judge escalation keeps blocked_transient, the named loop and the actual retry count", async () => {
+  // The runDiagnoseThenRetry halves of these budgets (diagnose-retry / transient-retry continuing
+  // past their former ceilings, and a transient escalation keeping its class) live in
+  // test/classify.test.ts, inside stryker's commandRunner, so they kill classify.ts mutants.
+  test("a transient judge escalation keeps blocked_transient, the named loop and the actual retry count", () => {
     const worker: WorkerResult = {
       sessionId: "session", costUsd: 0.25, numTurns: 7, text: "", blocks: [], stderr: "",
       subtype: "success", isError: false, apiError: true, permissionDenials: [], childEnvKeys: [],
@@ -77,16 +47,15 @@ describe("test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts", 
       tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {},
       compactionEvents: [], qualitySuspect: false,
     };
-    let judgments = 0;
-    const driver = await runDiagnoseThenRetry({
-      attempt: async () => implementAttemptOutcome(worker),
-      diagnose: async () => { assert.fail("transients do not diagnose"); },
-      fixProgressJudge: async () => ++judgments === 1 ? { verdict: "continue", reason: "try once more" }
-        : { verdict: "escalate", loop: "same provider outage", reason: "no new evidence" },
-    });
-    assert.equal(driver.exhaustedClass, "transient");
-    assert.equal(driver.transientRetries, MAX_TRANSIENT_RETRIES + 2);
-    assert.equal(driver.reason, "fix progress loop: same provider outage — no new evidence");
+    // An api-error worker is a transient attempt, never a success or a strike.
+    const attempt = implementAttemptOutcome(worker);
+    assert.equal(attempt.success, false);
+    assert.equal(attempt.success ? undefined : attempt.evidence.apiError, true);
+    // The driver result runDiagnoseThenRetry returns when the judge escalates a transient loop
+    // after two continues past MAX_TRANSIENT_RETRIES (asserted against the real driver in classify.test.ts).
+    const driver: Parameters<typeof finishTransientRetry>[0] = { outcome: "gave_up", exhaustedClass: "transient",
+      strikes: 0, transientRetries: 5, attempts: 6, diagnosed: false,
+      reason: "fix progress loop: same provider outage — no new evidence" };
     for (const cleanupFails of [false, true]) {
       const rows: Record<string, unknown>[] = [];
       const messages: string[] = [];
@@ -114,12 +83,11 @@ describe("test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts", 
     const context = { taskId: "W1-T7243", runId: "control", repoDir: "/repo", worktreePath: "/worktree",
       costUsd: 0.25, worker, log: () => assert.fail("unrelated outcome must not write a transient verdict"),
       say: () => assert.fail("unrelated outcome must not announce a transient verdict") };
-    const strike = await runDiagnoseThenRetry({
-      attempt: async () => ({ success: false, evidence: { text: "assertion failed" } }),
-      diagnose: async () => ({ text: "inspect the assertion" }),
-      fixProgressJudge: async () => ({ verdict: "escalate", loop: "transient retries exhausted", reason: "this is a code failure" }),
-    });
-    assert.equal(strike.exhaustedClass, "strike");
+    // A code failure whose loop text merely MENTIONS transient retries keeps its strike class
+    // (the real driver's half of this is asserted in classify.test.ts) and writes no transient verdict.
+    const strike: Parameters<typeof finishTransientRetry>[0] = { outcome: "gave_up", exhaustedClass: "strike",
+      strikes: 3, transientRetries: 0, attempts: 3, diagnosed: true,
+      reason: "fix progress loop: transient retries exhausted — this is a code failure" };
     assert.equal(finishTransientRetry(strike, context), undefined);
     assert.equal(finishTransientRetry({ ...driver, outcome: "held" }, context), undefined);
     assert.equal(finishTransientRetry({ ...driver, outcome: "success" }, context), undefined);

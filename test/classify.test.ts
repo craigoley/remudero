@@ -610,3 +610,62 @@ test("judge-admitted retries keep their backoff and pass an approach without a p
       changed ? "\nApproach: try another endpoint" : undefined]);
   }
 });
+
+// W1-T7243: moved here from test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts
+// so the file importing classify.ts stays inside stryker's commandRunner (mutation-ratchet).
+test("diagnose and transient retries continue past their former ceilings on the judge's advice", async () => {
+  for (const transient of [false, true]) {
+    for (const changeApproach of [false, true]) {
+      let attempts = 0;
+      const findings: (string | undefined)[] = [];
+      const judged: number[] = [];
+      const ceiling = transient ? MAX_TRANSIENT_RETRIES : MAX_STRIKES;
+      const result = await runDiagnoseThenRetry({
+        attempt: async report => {
+          findings.push(report);
+          return ++attempts === ceiling + 3 ? { success: true }
+            : { success: false, evidence: { text: transient ? "ECONNRESET" : "assertion failed" } };
+        },
+        diagnose: async () => ({ text: "inspect the failed assertion" }),
+        sleep: async () => {},
+        fixProgressJudge: async facts => {
+          assert.equal(facts.formerCeiling, ceiling);
+          assert.match(facts.parkedReason!, transient ? /transient-retry/ : /diagnose-retry/);
+          judged.push(facts.strikesSpent!);
+          return changeApproach ? { verdict: "change-approach", approach: "inspect the next endpoint", reason: "new evidence" }
+            : { verdict: "continue", reason: "new evidence" };
+        },
+      });
+      assert.equal(result.outcome, "success");
+      assert.equal(attempts, ceiling + 3);
+      assert.deepEqual(judged, [ceiling + 1, ceiling + 2]);
+      assert.equal(transient ? result.transientRetries : result.strikes, ceiling + 2);
+      assert.equal(result.exhaustedClass, undefined);
+      if (changeApproach) assert.match(findings.at(-1)!, /inspect the next endpoint/);
+    }
+  }
+});
+
+test("a transient judge escalation keeps the transient class, the named loop and the actual retry count", async () => {
+  let judgments = 0;
+  const driver = await runDiagnoseThenRetry({
+    attempt: async () => ({ success: false, evidence: { apiError: true } }),
+    diagnose: async () => { assert.fail("transients do not diagnose"); },
+    sleep: async () => {},
+    fixProgressJudge: async () => ++judgments === 1 ? { verdict: "continue", reason: "try once more" }
+      : { verdict: "escalate", loop: "same provider outage", reason: "no new evidence" },
+  });
+  assert.equal(driver.outcome, "gave_up");
+  assert.equal(driver.exhaustedClass, "transient");
+  assert.equal(driver.transientRetries, MAX_TRANSIENT_RETRIES + 2);
+  assert.equal(driver.strikes, 0);
+  assert.equal(driver.reason, "fix progress loop: same provider outage — no new evidence");
+  const strike = await runDiagnoseThenRetry({
+    attempt: async () => ({ success: false, evidence: { text: "assertion failed" } }),
+    diagnose: async () => ({ text: "inspect the assertion" }),
+    sleep: async () => {},
+    fixProgressJudge: async () => ({ verdict: "escalate", loop: "transient retries exhausted", reason: "this is a code failure" }),
+  });
+  assert.equal(strike.outcome, "gave_up");
+  assert.equal(strike.exhaustedClass, "strike");
+});
