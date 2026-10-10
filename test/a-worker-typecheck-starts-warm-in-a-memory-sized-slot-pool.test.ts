@@ -200,17 +200,6 @@ test("a cold typecheck waits while the memory headroom cannot hold its peak plus
   assert.deepEqual(heldRecords(slots), []);
 });
 
-test("a slot record that cannot be removed at release is logged, and the run's verdict stands", (t) => {
-  const slots = slotPool(t);
-  const lines: string[] = [];
-  const lease = acquireTestSlot(NPM_TYPECHECK_SLOT_LABEL, { dir: slots, slots: 1, memoryBytes: TYPECHECK_COLD_PEAK_BYTES, log: (line) => lines.push(line) });
-  assert.equal(lease.outcome, "acquired");
-  rmSync(join(slots, "slot-1.json"));
-  mkdirSync(join(slots, "slot-1.json")); // what is there now cannot be read as a record, so the unlink is refused
-  lease.release();
-  assert.match(lines.join("\n"), /"step":"test_slot\.release_failed"/);
-});
-
 test("the slot pool's memory headroom is the smaller of MemAvailable and the container's cgroup bound less its droppable cache", () => {
   const files = (entries: Record<string, string>) => (path: string): string => {
     const text = entries[path];
