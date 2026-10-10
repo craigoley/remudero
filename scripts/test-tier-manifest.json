@@ -2233,7 +2233,7 @@
     "test/retro-closure-per-attempt-never-searches-history.test.ts": 830,
     "test/retro-gateway-batched.test.ts": 3700,
     "test/retro-gateway-merged-commits.test.ts": 2300,
-    "test/retro-marker-atomic.test.ts": 520000,
+    "test/retro-marker-atomic.test.ts": 20298,
     "test/retro-open-pr-guard.test.ts": 39000,
     "test/retro-preflight-bound-fires-on-a-healthy-run.test.ts": 1988,
     "test/retro-prepublish-validation.test.ts": 333,
