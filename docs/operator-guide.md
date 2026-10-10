@@ -862,6 +862,68 @@ with no node, no `rmd` and no checkout, which rules out an `rmd` verb outright �
 `checkCliFreshness` first, which would fast-forward the very checkout the container being recycled
 is bind-mounting.
 
+#### Commissioning or replacing a target's Git author (W1-T6160)
+
+Every commit a target's workers make carries the author in that container's `RMD_GIT_AUTHOR_NAME`
+and `RMD_GIT_AUTHOR_EMAIL`. An **ordinary** recycle keeps a non-empty outgoing pair over anything
+exported in your shell (W1-T3454): a live container's own value is never silently replaced by a stale
+export. So exporting a new pair and recycling **cannot** fix a bad author. The explicit operation can:
+
+```sh
+# Run from the host, detached as for any recycle. The pair comes from the environment only, never argv.
+export RMD_GIT_AUTHOR_NAME='<the GitHub account display name>'
+export RMD_GIT_AUTHOR_EMAIL='<an email verified on that GitHub account>'
+./deploy/recycle-container.sh --instance site --commission-git-author
+```
+
+- **Initial commission (fresh target).** With no container yet, add `--first-boot` exactly as for
+  any first recycle. The pair is carried into the new container and booted.
+- **Bad-identity replacement.** With a live container, the requested pair replaces the container's
+  author. If the container's HOME already holds a different `user.name`/`user.email`, that is
+  replaced too. `deploy/entrypoint.sh` treats a complete `RMD_GIT_AUTHOR_*` pair as authoritative at
+  every boot, and stops with `git identity: FAILED ...` rather than booting on an author it could
+  not write or read back.
+- **Ordinary preservation afterwards.** The pair persists only as the two declared
+  `RMD_GIT_AUTHOR_*` names on the container. Later ordinary recycles carry it across, and no
+  force switch stays behind. An undeclared runtime variable still refuses the recycle as before.
+
+**Preflight refuses before anything is touched**: no pause, pull, stop, removal or identity write.
+It refuses when `--instance` is missing or repeated, or when `--container`, `--image` or
+`--registry` would retarget away from the registry. It refuses when the name is undeclared or
+declared twice, or when another instance shares its `container_name` or `state_dir`. It refuses when
+the live container does not mount the instance's `state_dir`, or when `repos/<repo>` exists but is
+not a checkout. It also refuses a partial, blank, whitespace-only or control-character pair, a name
+containing `<`/`>`, a value git would trim, or an email that is not one `local@domain.tld` address.
+The refusal names the input that failed, never its value.
+
+**Verification is part of the operation.** After the ordinary graceful replacement (pause, bounded
+drain, smoke, stop, rm, run, image and runtime-contract checks), the script reads the replacement's
+own environment, which must carry the pair. It then runs `git var GIT_AUTHOR_IDENT` as uid
+1000:1000 from the target checkout (`repos/<repo>`, else the daemon's own `remudero` tree). That
+must resolve to the pair within `RMD_RECYCLE_AUTHOR_PROBE_TIMEOUT_S` (default 120s). A matching
+global config is not enough. A repository-local identity or a `GIT_AUTHOR_*` variable that masks it
+fails the operation, as do a failed probe and a timed-out probe. On failure the replacement is left
+running for diagnosis.
+
+**Every run ends in one receipt**, printed and appended to the target's ledger as
+`recycle.git_author_commission`. It carries `target`, `container`,
+`operation=commission-git-author`, `outcome=verified|refused|failed` and the `phase`. It never
+carries an author value or a credential. A refusal or failure also prints a `recovery:` line:
+
+| phase | meaning | recovery |
+|---|---|---|
+| `preflight`, `capture` (refused) | nothing was touched | fix the named input, re-run |
+| `pull`, `drain`, `smoke` | old container untouched, still running | resolve the refusal, re-run |
+| `replace` | old container may be stopped, PAUSE may remain | re-run to finish |
+| `verify-env` | replacement lacks the pair | re-run with both names exported |
+| `verify-identity` | probe failed, timed out, or masked | `docker logs <container>` for `git identity: FAILED`; for a local mask, `git -C <checkout> config --local --unset-all user.name` (and `user.email`) inside the container; for an environment mask, remove the variable from the image/launch; then re-run |
+
+**What this does not certify.** Local validation and the effective-identity probe prove which author
+git will write. They do not prove that GitHub maps that email to an account, or that the account is
+a member of the Vercel team whose previews must accept its commits. Both are operational
+prerequisites: confirm the email is verified on the intended GitHub account and that account has
+Vercel team access **before** commissioning. This operation adds no token and calls no live service.
+
 ### Bringing up the console container (`remudero-serve`)
 
 The console the fleet is actually read from — `console.remudero.com` — is a **separate container**,
