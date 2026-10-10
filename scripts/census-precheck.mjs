@@ -793,6 +793,8 @@ export const PRECHECK_PARITY = {
   "test/authority-ratchet.test.ts": { run: "census:authority" },
   "test/no-shallowing-of-the-canonical-checkout.test.ts": { run: "census:no-shallowing" },
   "test/no-draft-pull-request-ever-sits-on-the-board.test.ts": { run: "census:no-draft-pr" },
+  // W1-T7719: listRuleSuites includes this rostered proof, so pre-push asks it directly as well.
+  "test/a-stale-dirty-fix-owner-is-preserved-and-reclaimed.test.ts": { run: "test:fix-owner-recovery" },
   ...Object.fromEntries(PRECHECK_TRIGGERED_SUITES.map((m) => [m.testFile, { run: m.script }])),
 };
 
