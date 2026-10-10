@@ -9224,6 +9224,12 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
           // Why: measured 2026-08-31 on #3363/#3400/#3403 — docs/forensics/sweep.md.
           `review failing — criteria unrecoverable (no Remudero-Task: trailer to resolve them from) — escalating` +
           (() => {
+            // #10597: an OBSERVED body that already carries an Acceptance block was judged on it, so a
+            // trailer cannot change this verdict — the action's `applyMissingTaskTrailerRepair` ignores
+            // that body for the same reason, and the reason must not advertise a repair nobody applies.
+            if (pr.body !== undefined && bodyAlreadyCarriesGateInput(pr.body)) {
+              return " — no body repair derived: the review judged the body's own Acceptance block, so a trailer would not change this verdict";
+            }
             const d = diagnoseBodyDefects("", [], { headRef: pr.headRefName });
             const repair = d.find((x) => x.kind === "no-trailer")?.repair;
             return repair === undefined ? "" : ` — derived repair: add \`${repair}\` to the PR body`;
