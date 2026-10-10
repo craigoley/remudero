@@ -1695,7 +1695,6 @@ function ciLearningMainOrigins(shardRelDir: string, git: GitExec): Set<string> {
   return ciLearningOriginsOf(git(ciLearningMainOriginsArgs(shardRelDir)));
 }
 
-/** The same `git grep` as {@link ciLearningMainOrigins}, yielded to the landing driver so the async form awaits it. */
 function* ciLearningMainOriginsSteps(shardRelDir: string, net: LandingNet): Generator<LandingAsk, Set<string>, AskReply> {
   return ciLearningOriginsOf(yield* net.git(ciLearningMainOriginsArgs(shardRelDir)));
 }
@@ -1771,9 +1770,6 @@ export async function landCiLearningShardsAsync(
 ): Promise<CiLearningFilingResult> {
   const { planPrPreflight, ...landOpts } = deps;
   const preflight = planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommitAsync(checkoutRoot, sha, pr));
-  // The real async seams, or every network ask resolves through the SYNC `git`/`gh` a microtask later and the
-  // daemon loop is held for the child's whole life: on 2026-10-10 this rung's `git fetch` under host thrash held
-  // core's loop with no pulse and unreaped children while the progress watchdog's recycle waited on it.
   return driveLandingAsync(ciLearningLandingSteps(drafts, checkoutRoot, { ...landOpts, ...asyncSeamsOf(checkoutRoot, landOpts) }), preflight);
 }
 
@@ -1783,7 +1779,6 @@ function* ciLearningLandingSteps(
   deps: Omit<LandCiLearningShardsOptions, "planPrPreflight"> & { gitAsync?: GitExecAsync; ghAsync?: GhExecAsync },
 ): PreflightSteps<CiLearningFilingResult> {
   const git = deps.git ?? defaultGit(checkoutRoot);
-  // The fetch and both origin/main reads are yielded, never run on the sync `git`: the async driver awaits them.
   const net = landingNet(git, deps.gh ?? defaultGh(), deps);
   const kind = ciLearningLandingKind(checkoutRoot, deps, git);
   const shardRelDir = ciLearningShardRelDir(checkoutRoot);
