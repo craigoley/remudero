@@ -11,6 +11,7 @@ import { listTestFiles } from './test-tier-manifest.mjs';
 import { isMainModule, parseArgv } from './lib/argv.mjs';
 import { REPO_ROOT } from './lib/repo-root.mjs';
 import { captureStepSync, AUTHOR_OUTPUT_LIMIT_BYTES, AUTHOR_STEP_RUNTIME_MS } from './lib/author-step-capture.mjs';
+import { AUTHOR_SHUTDOWN_RESERVE_MS, runtimeBindings, readRuntimeProfile, runtimeDeadlineFit } from './lib/native-author-runtime.mjs';
 
 export function authorEnvironment(parent) {
   const env = { ...parent, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: '' };
@@ -75,12 +76,15 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   select = (changed, range) => authorSelection(root, changed, range) } = {}) {
   const { values, helpRequested } = parseArgv(argv, {
     'dry-run': { type: 'boolean' },
-  }, { allowPositionals: false, helpText: 'preflight-author.mjs [--dry-run]: fresh-base affected tests + default static preflight; full hosted CI remains required.' });
+    deadline: { type: 'string' },
+    'runtime-profile': { type: 'string' },
+  }, { allowPositionals: false, helpText: 'preflight-author.mjs [--dry-run] [--deadline <ISO> --runtime-profile <path>]: fresh-base affected tests + default static preflight; full hosted CI remains required.' });
   if (helpRequested) return 0;
   const startedAt = Date.now();
   const receipt = { version: 1, assurance: 'author-only', hostedFullSuiteAndCoverage: 'required-pending',
     node: process.version, dryRun: Boolean(values['dry-run']), steps: [], suites: [] };
   let diagnosticsRoot;
+  const deadline = values.deadline === undefined ? undefined : Date.parse(values.deadline);
   const run = (file, args, extra = {}) => spawn(file, args, {
     cwd: root, encoding: 'utf8', maxBuffer: 100 * 1024 * 1024,
     env: authorEnvironment(process.env), ...extra,
@@ -100,14 +104,16 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     renameSync(path + '.next', path);
   };
   const runStep = (name, args, file = process.execPath, childEnvironment = {}) => {
-    progress({ name, outputLimitBytes: AUTHOR_OUTPUT_LIMIT_BYTES, runtimeLimitMs: AUTHOR_STEP_RUNTIME_MS });
+    const runtimeLimitMs = deadline === undefined ? AUTHOR_STEP_RUNTIME_MS :
+      Math.min(AUTHOR_STEP_RUNTIME_MS, Math.max(1, deadline - Date.now() - AUTHOR_SHUTDOWN_RESERVE_MS));
+    progress({ name, outputLimitBytes: AUTHOR_OUTPUT_LIMIT_BYTES, runtimeLimitMs });
     const logs = { stdoutPath: join(diagnosticsRoot, `${name}.stdout.log`),
       stderrPath: join(diagnosticsRoot, `${name}.stderr.log`) };
     // Injected spawn outcomes remain an explicit diagnostic seam; production owns live pipes.
     if (spawn !== spawnSync) return run(file, args, { env: { ...authorEnvironment(process.env), ...childEnvironment } });
     const resultPath = join(diagnosticsRoot, `${name}.native-result.json`);
     const result = captureStepSync(file, args, { cwd: root, env: { ...authorEnvironment(process.env), ...childEnvironment },
-      ...logs, resultPath });
+      ...logs, resultPath, runtimeMs: runtimeLimitMs });
     return { ...result, capturedLogs: true, nativeResult: relative(root, resultPath) };
   };
   const git = (args) => {
@@ -144,6 +150,10 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     if (result.error) console.error(`${name}: ${result.error.code ?? 'spawn-error'}: ${result.error.message}; captured logs may be incomplete`);
   };
   try {
+    if ((values.deadline === undefined) !== (values['runtime-profile'] === undefined) ||
+        (deadline !== undefined && (!Number.isFinite(deadline) || deadline <= Date.now()))) {
+      throw new Error('runtime admission requires a future ISO deadline and a native runtime profile together');
+    }
     const pinnedNode = readFileSync(join(root, '.nvmrc'), 'utf8').trim().replace(/^v/, '');
     if (process.versions.node !== pinnedNode) throw new Error(`Node ${pinnedNode} required; got ${process.versions.node}`);
     // Turning worktreeConfig on removes Git's main-worktree-only exception for these keys.
@@ -223,6 +233,20 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         const slot = acquireTestSlot('preflight-author:static-and-affected');
         try {
           receipt.testSlot = { outcome: slot.outcome, concurrency: slot.concurrency, waitedMs: slot.waitedMs, note: slot.note };
+          let runtimeProfile, runtimeManifest;
+          const admitRuntime = (stage, staticReserveMs) => {
+            if (deadline === undefined) return;
+            if (!['acquired', 'inherited'].includes(slot.outcome)) throw new Error('runtime admission requires a real slot; unslotted fallback is not deadline-fit capacity');
+            runtimeProfile ??= readRuntimeProfile(root, values['runtime-profile'], runtimeBindings(root, receipt.headSha, authorEnvironment(process.env)));
+            runtimeManifest ??= JSON.parse(readFileSync(join(root, 'scripts/test-tier-manifest.json'), 'utf8'));
+            const decision = runtimeDeadlineFit(receipt.suites, runtimeManifest, runtimeProfile, {
+              workers: Math.min(4, slot.concurrency), deadline, ...(staticReserveMs === undefined ? {} : { staticReserveMs }),
+            });
+            receipt.runtimeAdmission = { stage, profile: relative(root, resolve(root, values['runtime-profile'])), ...decision };
+            progress({ name: 'runtime-admission', stage, fits: decision.fits });
+            if (!decision.fits) throw new Error(`runtime deadline does not fit admitted ${decision.workers}-worker pool: need ${decision.requiredMs}ms, have ${decision.availableMs}ms; expensive phase not started`);
+          };
+          admitRuntime('before-static');
           const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
             join(root, 'src/run-task.ts'), 'preflight', '--from', receipt.baseSha,
             '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
@@ -232,10 +256,14 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
           // An unsuccessful static gate already makes this tree unpublishable. Keep its failed
           // receipt and selected floor, but don't spend another full run on known-doomed tests.
           if (staticOk) {
+            admitRuntime('before-tests', 0);
             // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
             // The host-wide test slot, a load-derived concurrency (never above the old 4) and nice (test-slot.ts).
             slot.refresh();
-            const child = lowPriorityCommand(process.execPath, testRunArgv(['--test', '--test-reporter=tap',
+            const durationArgs = deadline === undefined ? [] : ['--test-reporter-destination=stdout',
+              `--test-reporter=${join(root, 'scripts/test-duration-reporter.mjs')}`,
+              `--test-reporter-destination=${join(diagnosticsRoot, 'durations.json')}`];
+            const child = lowPriorityCommand(process.execPath, testRunArgv(['--test', '--test-reporter=tap', ...durationArgs,
               '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...receipt.suites], Math.min(4, slot.concurrency)));
             const tests = runStep('affected-tests', child.args, child.file);
             report('affected-tests', tests, completeTestResult(tests));

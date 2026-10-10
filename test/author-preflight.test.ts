@@ -16,6 +16,28 @@ const mod = (existsSync(SCRIPT) ? await import(pathToFileURL(SCRIPT).href) : {})
   main: (argv: string[], deps: { root: string; select?: (changed: string[]) => unknown; spawn?: typeof spawnSync }) => number;
 };
 
+test('author deadline admission refuses a too-small real slot budget before starting static work', async (t) => {
+  const { makeRuntimeFixture } = await import('./helpers/native-runtime-fixture.js');
+  const { calibrateAuthorRuntime } = await import(pathToFileURL(join(ROOT, 'scripts/calibrate-author-runtime.mjs')).href);
+  const f = makeRuntimeFixture(); t.after(() => f.cleanup());
+  const observed = calibrateAuthorRuntime({ root: f.dir });
+  const select = () => ({ fullRun: false, suites: ['test/a.test.ts', 'test/b.test.ts'], reasons: ['physical fixture'] });
+  const args = ['--runtime-profile', observed.path, '--deadline', new Date(Date.now() + 60_000).toISOString()];
+  assert.equal(mod.main(args, { root: f.dir, select }), 1);
+  const receipt = JSON.parse(readFileSync(join(f.dir, 'coverage/preflight-author.json'), 'utf8'));
+  assert.equal(receipt.verdict, 'refused'); assert.equal(receipt.runtimeAdmission.fits, false);
+  assert.equal(receipt.runtimeAdmission.stage, 'before-static');
+  assert.match(receipt.error, /does not fit admitted/);
+  assert.deepEqual(receipt.steps.map((row: { name: string }) => row.name), ['census-precheck']);
+  assert.equal(existsSync(join(f.dir, 'coverage/static-started')), false);
+  // Positive control: the same native profile admits ample runtime and retains complete TAP.
+  assert.equal(mod.main(['--runtime-profile', observed.path, '--deadline', new Date(Date.now() + 30 * 60_000).toISOString()], { root: f.dir, select }), 0);
+  const passed = JSON.parse(readFileSync(join(f.dir, 'coverage/preflight-author.json'), 'utf8'));
+  assert.equal(passed.verdict, 'passed'); assert.equal(passed.runtimeAdmission.stage, 'before-tests');
+  assert.equal(passed.runtimeAdmission.fits, true); assert.equal(passed.steps.at(-1).testSummary.fail, 0);
+  assert.equal(existsSync(join(f.dir, 'coverage/static-started')), true);
+});
+
 function fixture(baseline: Record<string, string> = {}) {
   const repo = gitRepo({ kind: 'author-preflight', seedCommit: false });
   const root = repo.dir;
