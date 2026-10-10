@@ -3,13 +3,14 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human  # writes a repository ruleset, scratch branches and replay PRs on the live repo; the operator owns the queue decision
+  # writes a repository ruleset, scratch branches and replay PRs on the live repo; the operator owns the queue decision
+  verify: human
   principles: {tdd: strict}
   budget_usd: 12.00
   risk: high  # Rule 19: one concern — a rehearsal harness that must never touch main's rules
   band_meaning: blast-radius
   origin: "operator approval 2026-10-10: throughput study follow-up — 'rehearse the merge queue on a scratch target before main'"
-  plan_refs: [W1-T5940, W1-T5941, W1-T4406, W1-T5515, W1-T5522, W1-T5909, W1-T5956, W1-T6088, W1-T7214]
+  plan_refs: [W1-T5940, W1-T5941, W1-T4406, W1-T5515, W1-T5522, W1-T5909, W1-T5956, W1-T6088, W1-T7214, W1-T7735]
   files: [scripts/merge-queue-canary.mjs, test/the-merge-queue-is-rehearsed-on-a-scratch-branch-before-main-re-enables-it.test.ts, docs/recon/merge-queue-canary-rehearsal.md, docs/docs-index.json, src/lib/sweep.ts]
   status: queued
   priority: 2
