@@ -13,6 +13,7 @@
 // running only if the loop turns while the child is alive. The control runs the sync lander and must never see it.
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -20,6 +21,7 @@ import { test } from "node:test";
 
 import * as landing from "../src/lib/feedback-landing.js";
 import { ciLearningRecordVerdict, ciLearningShardYaml } from "../src/lib/measurement-cadence.js";
+import { buildCiLearningCadenceRunner } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const { landCiLearningShards, landCiLearningShardsAsync } = landing;
@@ -124,4 +126,108 @@ test("the awaited ci-learning landing still skips a draft whose origin fetched o
   const result = await landCiLearningShardsAsync([draft], f.clone.dir, f.deps);
 
   assert.deepEqual(result, { filed: [], skipped: ["ci-learning:1:seed"], refused: [] }, "the yielded origin/main read still feeds idempotency");
+});
+
+/** One draft the rung would land; its finding id is not on the fixture's main. */
+function freshDraft(findingId: string) {
+  return {
+    findingId,
+    title: "teach the ci gate its repaired failure shape",
+    gate: "ci-gate",
+    pr: 2,
+    prs: [2],
+    repairFiles: ["src/lib/x.ts"],
+    dominantRepairFiles: [{ file: "src/lib/x.ts", prs: 1 }],
+    action: "gate",
+    author_class: "machine",
+    verify: "human",
+    remedySurface: "test",
+  } as unknown as Parameters<typeof landCiLearningShardsAsync>[0][number];
+}
+
+test("the awaited ci-learning landing mints its task id through the async minter, never the sync one", async () => {
+  const f = slowFetchFixture("mint");
+  const asked: string[] = [];
+
+  const result = await landCiLearningShardsAsync([freshDraft("ci-learning:2:mint")], f.clone.dir, {
+    ...f.deps,
+    mintTaskIdAsync: async (branch: string) => {
+      asked.push(branch);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return "W1-T9901";
+    },
+    recordVerdict: (_content: string, label: string) => ({ ok: false, reason: `fixture refuses ${label}` }),
+  } as Parameters<typeof landCiLearningShardsAsync>[2]);
+
+  assert.equal(asked.length, 1, "the reservation is asked once, as an awaited child");
+  assert.deepEqual(result.refused, [{ findingId: "ci-learning:2:mint", reason: "fixture refuses ci-learning:W1-T9901" }]);
+});
+
+test("the daemon's ci-learning rung reads origin/main's filed origins while a timer set before it fires", async () => {
+  const f = slowFetchFixture("merged");
+  const shimDir = mkdtempSync(join(tmpdir(), "rmd-slowgrep-shim-"));
+  const marks = join(shimDir, "grep-marks");
+  const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+  writeFileSync(
+    join(shimDir, "git"),
+    ["#!/bin/sh", 'case " $* " in *" grep "*)', `  echo started >> '${marks}'`, `  sleep ${SLOW_FETCH_MS / 1000}`, `  echo done >> '${marks}' ;;`, "esac", `exec '${realGit}' "$@"`, ""].join("\n"),
+  );
+  chmodSync(join(shimDir, "git"), 0o755);
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${shimDir}:${savedPath ?? ""}`;
+  try {
+    const runner = buildCiLearningCadenceRunner({
+      root: f.deps.stateRoot,
+      checkoutRoot: f.clone.dir,
+      loadWindow: () => ({ prs: [] }) as never,
+      loadLessons: () => ({ status: "unreadable" }),
+      planOrigins: [],
+      recordFire: () => {},
+      recordAttempt: () => {},
+    } as Parameters<typeof buildCiLearningCadenceRunner>[0]);
+    const { result, sawFetchRunning } = await observeLoop(marks, () => runner());
+    assert.equal(readFileSync(marks, "utf8"), "started\ndone\n", "the origin/main read ran through the slow git in a real child");
+    assert.ok(sawFetchRunning, "a tick landed while the origin/main read's child was alive");
+    assert.equal(result.draftCount, 0);
+  } finally {
+    process.env.PATH = savedPath;
+  }
+});
+
+test("the daemon's ci-learning rung hands its lander the minter's async reservation", async () => {
+  const f = slowFetchFixture("wired");
+  const mintAsync = async (): Promise<string> => "W1-T9902";
+  const mintTaskId = Object.assign((): string => "W1-T9902", { async: mintAsync });
+  let handed: unknown;
+  const runner = buildCiLearningCadenceRunner({
+    root: f.deps.stateRoot,
+    checkoutRoot: f.clone.dir,
+    loadWindow: () =>
+      ({
+        prs: [
+          {
+            number: 2,
+            commits: [
+              { sha: "aaa0002", rollup: [{ name: "ci-gate", conclusion: "FAILURE" }], changedFiles: ["src/lib/x.ts"] },
+              { sha: "bbb0002", rollup: [{ name: "ci-gate", conclusion: "SUCCESS" }], changedFiles: ["src/lib/x.ts"] },
+            ],
+          },
+        ],
+      }) as never,
+    loadLessons: () => ({ status: "unreadable" }),
+    planOrigins: [],
+    mergedOrigins: () => [],
+    mintTaskId,
+    landShards: (_drafts: unknown, _root: unknown, deps: Record<string, unknown>) => {
+      handed = deps.mintTaskIdAsync;
+      return { filed: [], skipped: [], refused: [] };
+    },
+    recordFire: () => {},
+    recordAttempt: () => {},
+  } as unknown as Parameters<typeof buildCiLearningCadenceRunner>[0]);
+
+  const result = await runner();
+
+  assert.equal(result.draftCount, 1, "the window minted one draft to land");
+  assert.equal(handed, mintAsync, "the lander awaits the reservation instead of running it on the loop");
 });

@@ -1655,6 +1655,16 @@ export function ciLearningMergedOrigins(checkoutRoot: string, git: GitExec = def
   }
 }
 
+/** {@link ciLearningMergedOrigins} as an awaited child, for the daemon's rung. */
+export async function ciLearningMergedOriginsAsync(checkoutRoot: string, gitAsync: GitExecAsync = defaultGitAsync(checkoutRoot)): Promise<string[]> {
+  try {
+    return [...ciLearningOriginsOf(await gitAsync(ciLearningMainOriginsArgs(ciLearningShardRelDir(checkoutRoot))))].sort();
+  } catch (e) {
+    console.error(`ci-learning: origin/main's filed origins are unreadable, so only the plan and queue hold findings: ${String((e as Error)?.message ?? e)}`);
+    return [];
+  }
+}
+
 /** Every CI-learning finding already staged outside the checkout and awaiting its landing PR. */
 export function ciLearningPendingOrigins(stateRoot: string, checkoutRoot: string): string[] {
   const origins = new Set<string>();
@@ -1761,6 +1771,8 @@ export function landCiLearningShards(
 
 export interface LandCiLearningShardsAsyncOptions extends Omit<LandCiLearningShardsOptions, "planPrPreflight"> {
   planPrPreflight?: PlanPrPreflightAsyncFn;
+  /** The reservation as an awaited child; absent, `mintTaskId` runs on the thread as in the sync lander. */
+  mintTaskIdAsync?: (filingBranch: string) => Promise<string>;
 }
 
 export async function landCiLearningShardsAsync(
@@ -1776,7 +1788,11 @@ export async function landCiLearningShardsAsync(
 function* ciLearningLandingSteps(
   drafts: readonly CiLearningShardDraft[],
   checkoutRoot: string,
-  deps: Omit<LandCiLearningShardsOptions, "planPrPreflight"> & { gitAsync?: GitExecAsync; ghAsync?: GhExecAsync },
+  deps: Omit<LandCiLearningShardsOptions, "planPrPreflight"> & {
+    gitAsync?: GitExecAsync;
+    ghAsync?: GhExecAsync;
+    mintTaskIdAsync?: (filingBranch: string) => Promise<string>;
+  },
 ): PreflightSteps<CiLearningFilingResult> {
   const git = deps.git ?? defaultGit(checkoutRoot);
   const net = landingNet(git, deps.gh ?? defaultGh(), deps);
@@ -1806,7 +1822,10 @@ function* ciLearningLandingSteps(
       skipped.push(draft.findingId);
       continue;
     }
-    const taskId = deps.mintTaskId(kind.branch);
+    const taskId = (yield {
+      run: () => deps.mintTaskId(kind.branch),
+      runAsync: () => (deps.mintTaskIdAsync ? deps.mintTaskIdAsync(kind.branch) : Promise.resolve().then(() => deps.mintTaskId(kind.branch))),
+    }) as string;
     const content = deps.renderShard(draft, taskId);
     const verdict = deps.recordVerdict(content, `ci-learning:${taskId}`);
     if (!verdict.ok) {
