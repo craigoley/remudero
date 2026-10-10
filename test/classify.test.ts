@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { buildFixProgressInput, type FixProgressJudge } from "../src/lib/fix-progress-judge.js";
 import {
+  judgeCappedRepair,
   DIAGNOSE_AT_STRIKES,
   INITIAL_RETRY_STATE,
   MAX_STRIKES,
@@ -408,4 +410,62 @@ test("USAGE_WINDOW_RESET_RE: it ACCEPTS a real reset clause and REFUSES text car
     false,
     "and prose containing the word reset but no time is refused too",
   );
+});
+
+// W1-T7243: the classify-side budgets defer to the progress judge. These live here, inside
+// stryker's commandRunner, so their assertions kill classify.ts mutants (W1-T133).
+const input = () => buildFixProgressInput({ taskId: "W1-T7243", prNumber: 7243, headSha: "head", currentRed: ["ci"], ledger: [] });
+const continueJudge: FixProgressJudge = async () => ({ verdict: "continue", reason: "new evidence" });
+
+test("capped body and plan judgments hold unavailable and carry their named loop", async () => {
+  for (const capable of [false, true]) {
+    const state = { bodyStrikes: 4, planRepairStrikes: 4 };
+    const opts = { planRepairCapable: capable, input: input(), judge: continueJudge };
+    assert.equal((await judgeCappedRepair(state, 2, opts)).kind, capable ? "repair_plan_shard" : "repair_body");
+    const changed = await judgeCappedRepair(state, 2, { ...opts, judge: async () => ({ verdict: "change-approach", approach: "reproduce", reason: "new route" }) });
+    assert.equal(changed.progress?.verdict, "change-approach");
+    assert.equal((await judgeCappedRepair(state, 2, { ...opts, judge: async () => undefined })).kind, "hold");
+    const stopped = await judgeCappedRepair(state, 2, { ...opts, judge: async () => ({ verdict: "escalate", loop: "same proof forever", reason: "no progress" }) });
+    assert.equal(stopped.kind, "give_up");
+    assert.match(stopped.reason!, /same proof forever/);
+  }
+});
+
+test("diagnose-informed retries and transient retries continue past their old ceilings", async () => {
+  for (const text of ["test failed", "ECONNRESET"]) {
+    let attempts = 0;
+    const judgments: unknown[] = [];
+    const result = await runDiagnoseThenRetry({
+      attempt: async () => ++attempts === 6 ? { success: true } : { success: false, evidence: { text } },
+      diagnose: async () => ({ text: "inspect failing test" }),
+      fixProgressJudge: async facts => { judgments.push(facts); return { verdict: "continue", reason: "new evidence" }; },
+    });
+    assert.equal(result.outcome, "success");
+    assert.equal(attempts, 6);
+    assert.ok(judgments.length >= 2);
+  }
+});
+
+test("retry judgment escalates its loop and holds an unavailable response", async () => {
+  for (const verdict of ["escalate", "unavailable", "change-approach"] as const) {
+    let attempts = 0;
+    let approach: string | undefined;
+    const result = await runDiagnoseThenRetry({
+      attempt: async findings => {
+        approach = findings;
+        return ++attempts === 5 ? { success: true } : { success: false, evidence: { text: "test failed" } };
+      }, diagnose: async () => ({ text: "failure diagnosis" }),
+      progressInput: input(),
+      fixProgressJudge: async facts => {
+        assert.equal(facts.rounds.length, attempts);
+        assert.deepEqual(facts.currentRed, ["test failed"]);
+        return verdict === "unavailable" ? undefined : verdict === "escalate"
+          ? { verdict, loop: "same patch forever", reason: "no progress" }
+          : { verdict, approach: "reproduce with the real fixture", reason: "new evidence" };
+      },
+    });
+    assert.equal(result.outcome, verdict === "unavailable" ? "held" : verdict === "escalate" ? "gave_up" : "success");
+    if (verdict === "escalate") assert.match(result.reason!, /same patch forever/);
+    if (verdict === "change-approach") assert.match(approach!, /reproduce with the real fixture/);
+  }
 });

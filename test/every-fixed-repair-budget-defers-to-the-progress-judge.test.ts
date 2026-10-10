@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runFixRung, buildSweepEffects, runPlanScopedFixRound, routeFix } from "./helpers/run-task-test.js";
 import { buildFixProgressInput, FIX_BUDGET_JUDGE_SITES, type FixProgressJudge } from "../src/lib/fix-progress-judge.js";
-import { judgeCappedRepair, runDiagnoseThenRetry } from "../src/lib/classify.js";
 import { judgeSloRebuild, BLOCKER_SLO_MS } from "../src/lib/pr-blocker.js";
 import { systemClock } from "../src/lib/clock.js";
 import { createSweepFixAdmissionController, checkQueueGovernor, deriveQueueGovernorTrailingFlow,
@@ -59,20 +58,6 @@ describe("test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts", 
     assert.match(String(judgment?.parked_reason), /plan-repair/);
   });
 
-  test("capped body and plan judgments hold unavailable and carry their named loop", async () => {
-    for (const capable of [false, true]) {
-      const state = { bodyStrikes: 4, planRepairStrikes: 4 };
-      const opts = { planRepairCapable: capable, input: input(), judge: continueJudge };
-      assert.equal((await judgeCappedRepair(state, 2, opts)).kind, capable ? "repair_plan_shard" : "repair_body");
-      const changed = await judgeCappedRepair(state, 2, { ...opts, judge: async () => ({ verdict: "change-approach", approach: "reproduce", reason: "new route" }) });
-      assert.equal(changed.progress?.verdict, "change-approach");
-      assert.equal((await judgeCappedRepair(state, 2, { ...opts, judge: async () => undefined })).kind, "hold");
-      const stopped = await judgeCappedRepair(state, 2, { ...opts, judge: async () => ({ verdict: "escalate", loop: "same proof forever", reason: "no progress" }) });
-      assert.equal(stopped.kind, "give_up");
-      assert.match(stopped.reason!, /same proof forever/);
-    }
-  });
-
   test("a capped body continues its own remedy before any plan repair has been tried", async () => {
     const criterion = { claim: "claim", proof: "unit test: proof", met: true, reason: "keyword floor", proof_exec: "not_executable" };
     const rows: Record<string, unknown>[] = [{ task_id: "W1-T7243", step: "review.posted", pr_url: pr().prUrl,
@@ -85,21 +70,6 @@ describe("test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts", 
     await runSweep([pr({ checksState: "green", reviewState: "success", ciFailures: [], priorStrikes: 2 })], f.deps);
     assert.equal(f.fixed.length, 1);
     assert.equal(f.planned.length, 0);
-  });
-
-  test("diagnose-informed retries and transient retries continue past their old ceilings", async () => {
-    for (const text of ["test failed", "ECONNRESET"]) {
-      let attempts = 0;
-      const judgments: unknown[] = [];
-      const result = await runDiagnoseThenRetry({
-        attempt: async () => ++attempts === 6 ? { success: true } : { success: false, evidence: { text } },
-        diagnose: async () => ({ text: "inspect failing test" }),
-        fixProgressJudge: async facts => { judgments.push(facts); return { verdict: "continue", reason: "new evidence" }; },
-      });
-      assert.equal(result.outcome, "success");
-      assert.equal(attempts, 6);
-      assert.ok(judgments.length >= 2);
-    }
   });
 
   test("a third rebuild on the same day is judged instead of refused", async () => {
@@ -190,30 +160,6 @@ describe("test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts", 
       assert.equal(digests.length, verdict === "escalate" ? 1 : 0);
       if (verdict === "escalate") assert.match(summary.actions[0].reason, /identical rebuilds/);
       if (verdict === "unavailable") assert.match(summary.actions[0].reason, /absent or unparseable/);
-    }
-  });
-
-  test("retry judgment escalates its loop and holds an unavailable response", async () => {
-    for (const verdict of ["escalate", "unavailable", "change-approach"] as const) {
-      let attempts = 0;
-      let approach: string | undefined;
-      const result = await runDiagnoseThenRetry({
-        attempt: async findings => {
-          approach = findings;
-          return ++attempts === 5 ? { success: true } : { success: false, evidence: { text: "test failed" } };
-        }, diagnose: async () => ({ text: "failure diagnosis" }),
-        progressInput: input(),
-        fixProgressJudge: async facts => {
-          assert.equal(facts.rounds.length, attempts);
-          assert.deepEqual(facts.currentRed, ["test failed"]);
-          return verdict === "unavailable" ? undefined : verdict === "escalate"
-            ? { verdict, loop: "same patch forever", reason: "no progress" }
-            : { verdict, approach: "reproduce with the real fixture", reason: "new evidence" };
-        },
-      });
-      assert.equal(result.outcome, verdict === "unavailable" ? "held" : verdict === "escalate" ? "gave_up" : "success");
-      if (verdict === "escalate") assert.match(result.reason!, /same patch forever/);
-      if (verdict === "change-approach") assert.match(approach!, /reproduce with the real fixture/);
     }
   });
 
