@@ -18,6 +18,9 @@
  * either run-task.ts, a future drain v2, or the daemon.
  */
 
+import { buildFixProgressInput, judgeFixProgress, type FixProgressInput,
+  type FixProgressJudge, type FixProgressResult } from "./fix-progress-judge.js";
+
 // ── The classifier ──────────────────────────────────────────────────────────
 
 export type FailureClass = "transient" | "strike";
@@ -324,6 +327,28 @@ export function planCappedRepair(
 
 // ── The diagnose-then-retry driver ─────────────────────────────────────────
 
+export async function judgeCappedRepair(
+  state: CappedRepairState, bodyCeiling: number,
+  opts: { planRepairCapable: boolean; input: FixProgressInput; judge: FixProgressJudge;
+    log?: (step: string, fields: Record<string, unknown>) => void },
+): Promise<{ kind: "repair_body" | "repair_plan_shard" | "give_up" | "hold";
+  reason?: string; progress?: FixProgressResult }> {
+  if (state.bodyStrikes < bodyCeiling) return { kind: "repair_body" };
+  const plan = opts.planRepairCapable && state.planRepairStrikes > 0;
+  const site = plan ? "plan-repair" : "capped-body";
+  const input = { ...opts.input, strikesSpent: plan ? state.planRepairStrikes : state.bodyStrikes,
+    formerCeiling: plan ? MAX_PLAN_REPAIR_STRIKES : bodyCeiling,
+    parkedReason: `${site}: ${plan ? state.planRepairStrikes : state.bodyStrikes} prior repairs` };
+  const progress = await judgeFixProgress(input, opts.judge);
+  opts.log?.("fix.progress_judged", { site, pr_number: input.prNumber, head_sha: input.headSha,
+    former_ceiling: input.formerCeiling, parked_reason: input.parkedReason,
+    round_count: input.rounds.length, signals: input.signals, ...progress });
+  return { kind: progress.verdict === "unavailable" ? "hold" : progress.verdict === "escalate" ? "give_up"
+    : plan ? "repair_plan_shard" : "repair_body",
+    reason: progress.verdict === "escalate" ? `fix progress loop: ${progress.loop} — ${progress.reason}` : progress.reason,
+    progress };
+}
+
 export interface AttemptSuccess {
   success: true;
 }
@@ -343,6 +368,8 @@ export type AttemptOutcome = AttemptSuccess | AttemptFailure;
  * so the whole state machine is testable with fakes, with no real spawn.
  */
 export interface DiagnoseThenRetryDeps {
+  fixProgressJudge?: FixProgressJudge;
+  progressInput?: FixProgressInput;
   /**
    * Run one patch attempt. `findings` carries the prior DIAGNOSE worker's
    * evidence-only report (undefined on the first attempt, or on a blind
@@ -371,7 +398,7 @@ export interface DiagnoseThenRetryDeps {
 }
 
 export interface DiagnoseThenRetryResult {
-  outcome: "success" | "gave_up";
+  outcome: "success" | "gave_up" | "held";
   strikes: number;
   transientRetries: number;
   /** Whether a DIAGNOSE worker was ever dispatched during this run. */
@@ -401,6 +428,7 @@ export async function runDiagnoseThenRetry(deps: DiagnoseThenRetryDeps): Promise
   let diagnosed = false;
   let findings: string | undefined;
   let attempts = 0;
+  const rounds: Record<string, unknown>[] = [];
 
   for (;;) {
     attempts++;
@@ -444,7 +472,11 @@ export async function runDiagnoseThenRetry(deps: DiagnoseThenRetryDeps): Promise
     }
 
     const cls = classifyFailure(result.evidence);
-    const action = planRetry(state, cls);
+    const retryTask = deps.progressInput?.taskId ?? "retry";
+    rounds.push({ task_id: retryTask, step: "fix.dispatch", round_id: String(attempts),
+      ci_failures: [result.evidence.text ?? result.evidence.subtype ?? "unknown failure"] },
+    { task_id: retryTask, step: "fix.done", round_id: String(attempts), subtype: "failure" });
+    let action = planRetry(state, cls);
     state = action.state;
     log("retry.classified", {
       attempts,
@@ -455,6 +487,27 @@ export async function runDiagnoseThenRetry(deps: DiagnoseThenRetryDeps): Promise
     });
 
     if (action.kind === "give_up") {
+      if (deps.fixProgressJudge) {
+        const site = cls === "transient" ? "transient-retry" : "diagnose-retry";
+        const input = { ...buildFixProgressInput({ taskId: retryTask, prNumber: deps.progressInput?.prNumber,
+          headSha: deps.progressInput?.headSha ?? "uncommitted", ledger: rounds,
+          currentRed: [result.evidence.text ?? result.evidence.subtype ?? "unknown failure"],
+          operatorAnswer: deps.progressInput?.operatorAnswer }),
+          strikesSpent: cls === "transient" ? state.transientRetries : state.strikes,
+          formerCeiling: cls === "transient" ? MAX_TRANSIENT_RETRIES : MAX_STRIKES,
+          parkedReason: `${site}: ${action.reason}${findings ? `; diagnosis: ${findings}` : ""}` };
+        const decision = await judgeFixProgress(input, deps.fixProgressJudge);
+        log("fix.progress_judged", { site, parked_reason: input.parkedReason, former_ceiling: input.formerCeiling,
+          round_count: input.rounds.length, signals: input.signals, ...decision });
+        if (decision.verdict === "continue" || decision.verdict === "change-approach") {
+          if (decision.verdict === "change-approach") findings = `${findings ?? ""}\nApproach: ${decision.approach}`;
+          if (deps.sleep) await deps.sleep(transientBackoffMs(attempts));
+          continue;
+        }
+        if (decision.verdict === "unavailable") return { outcome: "held", strikes: state.strikes,
+          transientRetries: state.transientRetries, diagnosed, attempts, reason: decision.reason };
+        action = { ...action, reason: `fix progress loop: ${decision.loop} — ${decision.reason}` };
+      }
       log("retry.exhausted", { attempts, reason: action.reason, strikes: state.strikes, transient_retries: state.transientRetries });
       return {
         outcome: "gave_up",

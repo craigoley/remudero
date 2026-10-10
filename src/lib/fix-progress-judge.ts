@@ -1,3 +1,18 @@
+export const FIX_BUDGET_JUDGE_SITES = [
+  { name: "diagnose-retry", file: "src/lib/classify.ts", formerCeiling: 2 },
+  { name: "transient-retry", file: "src/lib/classify.ts", formerCeiling: 3 },
+  { name: "capped-body", file: "src/lib/classify.ts", formerCeiling: 2 },
+  { name: "plan-repair", file: "src/lib/classify.ts", formerCeiling: 2 },
+  { name: "fix-retrigger", file: "src/run-task.ts", formerCeiling: 2 },
+  { name: "fix-strike", file: "src/run-task.ts", formerCeiling: 2 },
+  { name: "rebuild", file: "src/lib/pr-blocker.ts", formerCeiling: 2 },
+  { name: "re-arm", file: "src/lib/sweep.ts", formerCeiling: 3 },
+  { name: "proof-repair-refusals", file: "src/lib/sweep.ts", formerCeiling: 2 },
+  { name: "refused-twice", file: "src/lib/sweep.ts", formerCeiling: 2 },
+  { name: "rerun-still-red", file: "src/lib/sweep.ts", formerCeiling: 1 },
+  { name: "amendment-closed", file: "src/lib/sweep.ts", formerCeiling: 1 },
+] as const;
+
 export interface FixProgressRound {
   id: string;
   dispatchedHead?: string;
@@ -19,6 +34,7 @@ export interface FixProgressInput {
   strikesSpent: number;
   currentRed: string[];
   rounds: FixProgressRound[];
+  remedyHistory?: readonly Record<string, unknown>[];
   operatorAnswer?: string;
   formerCeiling?: number;
   parkedReason?: string;

@@ -1,4 +1,5 @@
 import { fixedClock } from "./clock.js";
+import { judgeFixProgress, type FixProgressInput, type FixProgressJudge, type FixProgressResult } from "./fix-progress-judge.js";
 
 export const PR_BLOCKERS = [
   "awaiting-ci", "own-red", "base-red", "awaiting-review", "review-failed", "awaiting-arm",
@@ -121,6 +122,26 @@ export interface SloRungDecision {
 }
 
 export const utcDayOf = (ms: number): number => Math.floor(ms / MS_PER_UTC_DAY);
+
+export async function judgeSloRebuild(input: SloRungInput, progressInput: FixProgressInput,
+  judge: FixProgressJudge, log?: (step: string, fields: Record<string, unknown>) => void,
+): Promise<SloRungDecision & { progress?: FixProgressResult }> {
+  const prior = decideSloRung(input);
+  if (input.blockerAgeMs < BLOCKER_SLO_MS || input.unavailable?.includes("rebuild") ||
+      (!SLO_CLIMBING_BLOCKERS.includes(input.blocker) && input.owner !== "NONE") || prior.rung === "refresh") return prior;
+  const rebuilds = input.rungHistory.filter(row => row.rung === "rebuild");
+  const facts = { ...progressInput, strikesSpent: rebuilds.length, formerCeiling: MAX_SLO_REBUILDS,
+    remedyHistory: input.rungHistory.map(row => ({ ...row })),
+    parkedReason: `rebuild: ${rebuilds.length} previous rebuilds; ${JSON.stringify(input.rungHistory)}` };
+  const progress = await judgeFixProgress(facts, judge);
+  log?.("fix.progress_judged", { site: "rebuild", pr_number: facts.prNumber, head_sha: facts.headSha,
+    former_ceiling: facts.formerCeiling, parked_reason: facts.parkedReason,
+    round_count: facts.rounds.length, signals: facts.signals, ...progress });
+  return { rung: progress.verdict === "unavailable" ? "none" : progress.verdict === "escalate" ? "digest" : "rebuild",
+    deadlineMs: BLOCKER_SLO_MS, progress,
+    reason: progress.verdict === "escalate" ? `fix progress loop: ${progress.loop} — ${progress.reason}`
+      : `${progress.reason}${progress.verdict === "change-approach" ? `; approach: ${progress.approach}` : ""}` };
+}
 
 /** Pure: does this blocker, at this age, take a rung? Under the SLO nothing; over it, the next of
  *  refresh -> rebuild -> digest not already taken at this head. Rebuild is skipped past the lifetime

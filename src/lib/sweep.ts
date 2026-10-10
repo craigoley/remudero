@@ -57,9 +57,10 @@ import {
   type StackPrerequisiteCheck,
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
-import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair } from "./classify.js";
+import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
+import { DEFAULT_ESTIMATE_MIB } from "./host-memory-ledger.js";
 import {
-  blockerFields, decideSloRung, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
+  blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
 } from "./pr-blocker.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
@@ -2708,7 +2709,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     readActionsStatusSummary: isTestRunner() ? undefined : readGithubActionsStatus, // W1-T5939: tests never reach githubstatus.com
 
     // W1-T5909: the same gateway dedup as the two check escalations — one issue per task/head/cause.
-    escalateRearmExhausted: (pr, rearms, bound) => {
+    escalateRearmExhausted: (pr, rearms, bound, judgedReason) => {
       return tryEscalate(
         {
           class: "BLOCKED",
@@ -2717,7 +2718,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           headSha: pr.headSha,
           cause: "ci",
           summary: `auto-merge disabled again after ${rearms} sweep re-arms at one head — ${pr.prUrl}`,
-          detail:
+          detail: (judgedReason ? `${judgedReason}\n\n` : "") +
             `GitHub disabled auto-merge on ${pr.prUrl} at head ${pr.headSha} after a sweep arm, and the ` +
             `sweep re-armed it ${rearms} times (bound ${bound}). The merge queue ejecting it on every ` +
             `group run is the usual cause; the sweep will not re-arm this head again.`,
@@ -2865,7 +2866,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const compare = await readJsonImpl(compareRestArgs(owner, repo, "main", pr.headSha)) as { merge_base_commit?: { sha?: string } } | undefined;
         return compare?.merge_base_commit?.sha;
       },
-      digest: (pr, causeKey, rebuilds, listedIssues) => {
+      digest: (pr, causeKey, rebuilds, listedIssues, judgedReason) => {
         if (!issues.listOpen) return { outcome: "hold", reason: "strike ladder hold: issue list is not wired" };
         let open: OpenIssue[];
         try {
@@ -2874,7 +2875,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           return { outcome: "hold", reason: `strike ladder hold: issue list unreadable: ${String(error)}` };
         }
         const marker = `<!-- Strike-Ladder-PR: ${pr.prNumber} -->`;
-        const entry = `${marker}\n- ${pr.prUrl} — task ${pr.taskId ?? "unfiled"}; rebuilds ${rebuilds}/2; ` +
+        const entry = `${marker}\n${judgedReason ? `${judgedReason}\n` : ""}- ${pr.prUrl} — task ${pr.taskId ?? "unfiled"}; rebuilds ${rebuilds}/2; ` +
           `${causeKey}; ${describeCiFailures(pr)}; ` +
           `[operator notes](${config.consoleUrl ?? "http://localhost:4317"}/v1/operator-notes?taskId=${encodeURIComponent(pr.taskId ?? "")}) ` +
           `(plan/operator-notes.ndjson).`;
@@ -3087,12 +3088,17 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // why a hardcoded `[]` here made a `blocked_review` synthetic dispatch
         // permanently unjudgeable. `files` rides the SAME call for the SAME reason
         // (W1-T4460): the synthetic task's own commit surface.
-        const headRef = ghJsonForBuild(["pr", "view", pr.prUrl, "--json", "headRefName,headRefOid,body,files"]) as {
+        const headReadStarted = performance.now();
+        const headRef = await (deps.ghJsonImpl
+          ? Promise.resolve(ghJsonForBuild(["pr", "view", pr.prUrl, "--json", "headRefName,headRefOid,body,files"]))
+          : readJsonImpl(["pr", "view", pr.prUrl, "--json", "headRefName,headRefOid,body,files"])) as {
           headRefName?: string;
           headRefOid?: string;
           body?: string;
           files?: { path: string }[];
         };
+        log("sweep.fix.prepare_timing", { pr_number: pr.prNumber, stage: "head-lookup",
+          elapsed_ms: performance.now() - headReadStarted, asynchronous: deps.ghJsonImpl === undefined });
         const realBranch = headRef.headRefName;
         const changedPaths = (headRef.files ?? []).map((f) => f.path);
         // impl-FY: a PR with no plan task is STILL repairable — see fixRungTaskFor. The rung used to
@@ -4251,6 +4257,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           pr_url: pr.prUrl,
           head_sha: pr.headSha,
           outcome,
+          progress_approach: evidence.progressApproach,
           ...extra,
         });
       if (!shardRelPath) {
@@ -10492,6 +10499,7 @@ export type NonExecutedProofExecOutcome = Exclude<
 >;
 
 export interface ProofDiscriminationEvidence {
+  progressApproach?: string;
   /** W1-T5544: `"gate-log"` marks evidence read from the red `proof-discrimination` check's own job log
    *  at this head (no posted review exists for it); absent means the capped review's own rows. */
   readonly source?: "review" | "gate-log";
@@ -10977,7 +10985,7 @@ export interface StrikeLadderEffects {
   readAuthor: (pr: OpenPrView) => Promise<string | undefined>;
   /** One `main...head` compare, read only for a ladder-due PR whose merge base was not hydrated. */
   readMergeBase: (pr: OpenPrView) => Promise<string | undefined>;
-  digest: (pr: OpenPrView, causeKey: string, rebuilds: number, listedIssues: string[]) => {
+  digest: (pr: OpenPrView, causeKey: string, rebuilds: number, listedIssues: string[], judgedReason?: string) => {
     outcome: "opened" | "appended" | "listed" | "hold";
     reason: string;
     issueUrl?: string;
@@ -11007,7 +11015,7 @@ export interface SweepDeps {
   readArmFacts?: (pr: OpenPrView) => ArmReprobeFacts | undefined | Promise<ArmReprobeFacts | undefined>;
   /** W1-T5909 — read only for an unarmed `mergeable` PR on a pass that may arm. Omitted: the memory dedup. */
   readMergeQueueMembership?: (pr: OpenPrView) => MergeQueueMembership | Promise<MergeQueueMembership>;
-  escalateRearmExhausted?: (pr: OpenPrView, rearms: number, bound: number) => string | null | Promise<string | null>;
+  escalateRearmExhausted?: (pr: OpenPrView, rearms: number, bound: number, reason?: string) => string | null | Promise<string | null>;
   /** W1-T5911 — read only for a risk-refused head with no override, on a pass that may arm. Omitted: refused. */
   readArmTimeline?: (pr: OpenPrView) => ArmTimeline | Promise<ArmTimeline>;
   /** W1-T5403 — risk-judge a head whose run ended `handed_off`, once, before the `mergeable` arm.
@@ -11090,8 +11098,8 @@ export interface SweepDeps {
    *  `dispatchFix`'s body-repair budget — the shard's OWN text is wrong, and Standing rule 15's
    *  `criterionFieldTampered` (review.ts) refuses a non-plan-only diff (any body repair) touching
    *  it. OPTIONAL: omission preserves every caller's behaviour byte-for-byte (see
-   *  `planCappedRepair`'s `planRepairCapable` gate, classify.ts). Bounded by its OWN ceiling
-   *  ({@link "./classify.js".MAX_PLAN_REPAIR_STRIKES}), separate from `dispatchFix`'s strike cap.
+ *  `planCappedRepair`'s `planRepairCapable` gate, classify.ts). W1-T7243 keeps the former ceiling
+ *  as evidence for the progress judge, separate from `dispatchFix`'s strike count.
    *  Return contract mirrors `dispatchFix` ({@link dispatchFixSpent}). */
   dispatchPlanOnlyRepair?: (
     pr: OpenPrView,
@@ -11115,7 +11123,7 @@ export interface SweepDeps {
    *  cannot all observe the same free slot. Omitted by every non-light caller, preserving the
    *  full sweep and CLI paths byte-for-byte. A refusal spends no strike and re-derives next pass. */
   claimFixAdmission?: (pr: OpenPrView) =>
-    | { admitted: true }
+    | { admitted: true; release?: () => void }
     | { admitted: false; reason: string };
   /** W1-T3202 — identifies the one shared host-budget controller that admitted this pass's
    *  detached repairs. Full sweeps build it inside {@link runSweep}; light sweeps share one across
@@ -11126,6 +11134,7 @@ export interface SweepDeps {
   /** W1-T3202 — injectable seam for the process-wide count. Production omits it and reads
    *  {@link activeWorkerCount}; a pass invokes either form exactly once. */
   readActiveWorkerCount?: () => number;
+  readFixPressure?: () => FixHostPressure;
   /** W1-T2998 — repair a red RECORDABLE ratchet by re-running its generator and pushing the result,
    *  instead of spending an LLM fix round on a number the failing script already printed. Consulted
    *  ONLY when {@link SweepPolicy.recordableRatchetRepairEnabled} is true AND
@@ -12314,7 +12323,7 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
     }
   }
   if (awaitingAmendment !== undefined && lines.some((line) =>
-    line.step === PR_TERMINAL_STEP && line.state === "merged" && Number(line.pr_number) === awaitingAmendment)) {
+    line.step === PR_TERMINAL_STEP && (line.state === "merged" || line.state === "closed") && Number(line.pr_number) === awaitingAmendment)) {
     return true;
   }
   // W1-T1210: no owning `fix.dispatch` row at all ⇒ treated as stalled — see the doc above.
@@ -12851,6 +12860,18 @@ export function detachedActionInFlight(kind: DetachedActionKind): boolean {
 
 export type SweepRepairSurface = "full" | "light";
 
+export interface FixHostPressure { availableMib: number; floorMib: number; reason?: string }
+
+export function readFixHostPressure(floorMib: number, read: (path: string) => string = path => readFileSync(path, "utf8")): FixHostPressure {
+  try {
+    const match = /^MemAvailable:\s*(\d+)\s*kB\s*$/m.exec(read("/proc/meminfo"));
+    if (!match) throw new Error("MemAvailable absent from /proc/meminfo");
+    return { availableMib: Math.floor(Number(match[1]) / 1024), floorMib };
+  } catch (error) {
+    return { availableMib: 0, floorMib, reason: `host pressure unreadable: ${String(error)}` };
+  }
+}
+
 export interface SweepFixCapacitySnapshot {
   surface: SweepRepairSurface;
   queueDepth: number;
@@ -12860,38 +12881,48 @@ export interface SweepFixCapacitySnapshot {
   fixesAdmitted: number;
   fixesRefused: number;
   fixAdmissionsAvailable: number;
+  pressure?: FixHostPressure;
 }
 
-/** W1-T3202 — one admission controller shared by both sweep surfaces. The caller supplies the
- *  already-measured worker count and review reservation; this function never re-reads either, so
- *  concurrent repair starts cannot each observe the same free slot. */
+/** W1-T7243: reserve concurrent starts, re-read occupancy and pressure, release completed rounds. */
 export function createSweepFixAdmissionController(input: {
   surface: SweepRepairSurface;
   queueDepth: number;
   hostWorkerBudget: number;
   activeWorkers: number;
   reviewReservations: number;
+  readActiveWorkers?: () => number;
+  readPressure?: () => FixHostPressure;
   log?: (step: string, extra?: Record<string, unknown>) => void;
 }): {
   claim: NonNullable<SweepDeps["claimFixAdmission"]>;
   snapshot: () => SweepFixCapacitySnapshot;
 } {
-  let available = Math.max(
-    0,
-    Math.trunc(input.hostWorkerBudget) - Math.max(0, Math.trunc(input.activeWorkers)) -
-      Math.max(0, Math.trunc(input.reviewReservations)),
-  );
+  let reservations = 0;
+  const standIn = input.readActiveWorkers === undefined && input.readPressure === undefined;
+  let activeWorkers = input.activeWorkers;
+  let pressure: FixHostPressure | undefined;
+  let available = 0;
+  const refresh = () => {
+    activeWorkers = Math.max(0, Math.trunc(input.readActiveWorkers?.() ?? input.activeWorkers));
+    pressure = input.readPressure?.();
+    const free = pressure ? Math.floor(Math.max(0, pressure.availableMib - pressure.floorMib) / DEFAULT_ESTIMATE_MIB.fix)
+      : Math.max(0, input.hostWorkerBudget - activeWorkers);
+    available = pressure?.reason ? 0 : Math.max(0, free - input.reviewReservations - reservations);
+  };
+  refresh();
   let fixesAdmitted = 0;
   let fixesRefused = 0;
   const snapshot = (): SweepFixCapacitySnapshot => ({
     surface: input.surface,
     queueDepth: input.queueDepth,
     hostWorkerBudget: input.hostWorkerBudget,
-    activeWorkers: input.activeWorkers,
+    activeWorkers,
     reviewReservations: input.reviewReservations,
     fixesAdmitted,
     fixesRefused,
     fixAdmissionsAvailable: available,
+    pressure,
   });
   const emit = (): void => {
     const state = snapshot();
@@ -12904,28 +12935,41 @@ export function createSweepFixAdmissionController(input: {
       fixes_admitted: state.fixesAdmitted,
       fixes_refused: state.fixesRefused,
       fix_admissions_available: state.fixAdmissionsAvailable,
+      pressure_available_mib: state.pressure?.availableMib,
+      pressure_floor_mib: state.pressure?.floorMib,
+      pressure_reason: state.pressure?.reason,
+      pending_reservations: reservations,
     });
   };
   emit();
   return {
     snapshot,
     claim: () => {
+      refresh();
       if (available <= 0) {
         fixesRefused++;
         emit();
         return {
           admitted: false,
           reason:
-            `host worker budget ${input.hostWorkerBudget} exhausted for this ${input.surface} pass ` +
-            `(${input.activeWorkers} active, ${input.reviewReservations} reserved for review, ` +
+            `${standIn ? `host worker budget ${input.hostWorkerBudget}` : "live host capacity"} exhausted for this ${input.surface} pass ` +
+            `(${activeWorkers} active, ${input.reviewReservations} reserved for review, ` +
             `${fixesAdmitted} fixes admitted)` +
             " — repair remains queued and will be re-derived next pass",
         };
       }
       available--;
+      reservations++;
       fixesAdmitted++;
       emit();
-      return { admitted: true };
+      let released = false;
+      return { admitted: true, release: standIn ? undefined : () => {
+        if (released) return;
+        released = true;
+        reservations--;
+        refresh();
+        emit();
+      } };
     },
   };
 }
@@ -13141,10 +13185,24 @@ export async function runSweep(
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary> {
   // W1-T7096: every round this pass dispatches is judged by the judge this pass was given.
-  const deps: SweepDeps = sweepDeps.fixProgressJudge === undefined ? sweepDeps : {
+  const deps: SweepDeps = {
     ...sweepDeps,
-    dispatchFix: (pr, evidence, onPhase) => sweepDeps.dispatchFix(pr,
-      { ...evidence, progressJudge: evidence.progressJudge ?? sweepDeps.fixProgressJudge }, onPhase),
+    dispatchFix: (pr, evidence, onPhase) => {
+      const started = performance.now();
+      try {
+        return sweepDeps.dispatchFix(pr,
+          { ...evidence, progressJudge: evidence.progressJudge ?? sweepDeps.fixProgressJudge }, phase => {
+            if (phase === "ci-wait") {
+              fixCapacityReleases.get(pr.prNumber)?.();
+              fixCapacityReleases.delete(pr.prNumber);
+            }
+            onPhase?.(phase);
+          });
+      } finally {
+        sweepDeps.log?.("sweep.fix.prepare_timing", { pr_number: pr.prNumber, stage: "dispatch-call",
+          synchronous_ms: performance.now() - started });
+      }
+    },
   };
   // Alias-bound call site (W1-T2393): the bare `readLedgerLines` regex cannot match a name-bound
   // call, so this marker is documentary only — the enforced corpus and the regex are unchanged.
@@ -13323,6 +13381,18 @@ export async function runSweep(
     const judged = deps.fixProgressJudge !== undefined;
     const next: OpenPrView[] = [];
     for (const pr of openPrs) {
+      if (judged && cappedProofDiscriminationFromLedger(pr, ledgerLines) !== undefined) {
+        next.push({ ...pr, progressContinue: { reason: "capped repair judged at its own site" } });
+        continue;
+      }
+      if (judged && pr.repeatedFixRefusal !== undefined && !ledgerLines.some(row =>
+          row.step === "sweep.disposed" && row.pr_number === pr.prNumber && row.head_sha === pr.headSha &&
+          typeof row.stand_down_reason === "string" && row.stand_down_reason.startsWith("refused-twice:"))) {
+        const reason = `refused-twice: ${pr.repeatedFixRefusal}; waiting once before judgment`;
+        judgedUnavailable.set(pr.prNumber, reason);
+        next.push({ ...pr, progressContinue: { reason, unavailable: true } });
+        continue;
+      }
       // A repeated refusal is judged later, with its parked reason; only a reached ceiling is judged here.
       // The parked waits W1-T7096 owns (a refused commit at this head, a metadata or proof repair in
       // flight) are judged later on the fixable path, which supplies their parked reason.
@@ -13334,16 +13404,19 @@ export async function runSweep(
         next.push({ ...pr, progressContinue: { reason: "judged on the fixable path with its parked reason" } });
         continue;
       }
-      const parkedReason = pr.repeatedFixRefusal ??
+      const parkedReason = pr.repeatedFixRefusal ? `refused-twice: ${pr.repeatedFixRefusal}` :
         (!isFixStrikeExhausted(pr, policy) && pr.reviewState === "failure" && fixRungRepeatsIdenticalFailure(pr)
           ? "fix strike repeated the identical unmet criteria" : undefined);
       const input = buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
+        strikesSpent: pr.priorStrikes,
         currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")), ...pr.unmetCriteria.map(c => `review:${c.claim}`)],
         ledger: ledgerLines, operatorAnswer: pr.pendingAnswer?.constraint,
-        formerCeiling: fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason });
+        formerCeiling: pr.repeatedFixRefusal !== undefined ? 2 : fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason });
       const result = await judgeFixProgress(input, progressJudge);
       appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? `PR-${pr.prNumber}`,
-        step: "fix.progress_judged", pr_number: pr.prNumber, head_sha: pr.headSha, site: "exhaustion",
+        step: "fix.progress_judged", pr_number: pr.prNumber, head_sha: pr.headSha,
+        site: pr.repeatedFixRefusal !== undefined ? "refused-twice" : "fix-strike",
+        parked_reason: input.parkedReason, former_ceiling: input.formerCeiling,
         round_count: input.rounds.length, signals: input.signals, ...result });
       if (result.verdict === "escalate") {
         next.push({ ...pr, progressEscalation: { loop: result.loop, reason: result.reason, judged } });
@@ -13436,10 +13509,8 @@ export async function runSweep(
       reason: "armed-idle eligibility or head changed" });
     idleHeads.delete(pr.prNumber);
   };
-  // W1-T3202 — FULL-SWEEP CAPACITY IS DERIVED ONCE, BEFORE ANY REPAIR CAN SPAWN. Reviews reserve
-  // only their live spawning width (plan filings are deterministic), and the same active-worker
-  // sample feeds both the adaptive review selector and the repair remainder. Light passes supply
-  // their shared controller below because they fan this function out one PR at a time.
+  // W1-T7243: reviews reserve their spawning width; each repair claim re-reads live capacity.
+  // Light passes share one controller across their per-PR calls.
   const fullRepairActiveWorkers =
     deps.repairAdmissionSurface === "full" && !deps.claimFixAdmission
       ? (deps.readActiveWorkerCount ?? activeWorkerCount)()
@@ -13462,10 +13533,18 @@ export async function runSweep(
           queueDepth: fullReviewQueueDepth,
           hostWorkerBudget: policy.reviewCapacity.hostWorkerBudget,
           activeWorkers: fullRepairActiveWorkers,
+          readActiveWorkers: deps.fixProgressJudge || deps.readFixPressure ? deps.readActiveWorkerCount ?? activeWorkerCount : undefined,
+          readPressure: deps.readFixPressure ?? (deps.fixProgressJudge ? () => readFixHostPressure(policy.memoryFloorMib) : undefined),
           reviewReservations: Math.min(fullReviewQueueDepth, fullReviewLanes),
           log,
         });
-  const claimFixAdmission = deps.claimFixAdmission ?? fullRepairAdmission?.claim;
+  const fixCapacityReleases = new Map<number, () => void>();
+  const capacityClaim = deps.claimFixAdmission ?? fullRepairAdmission?.claim;
+  const claimFixAdmission = capacityClaim ? (pr: OpenPrView) => {
+    const claim = capacityClaim(pr);
+    if (claim.admitted && claim.release) fixCapacityReleases.set(pr.prNumber, claim.release);
+    return claim;
+  } : undefined;
   const repairAdmissionTelemetry = deps.repairAdmissionTelemetry ?? fullRepairAdmission?.snapshot;
   // W1-T1223 (design ii) — read fresh every pass, off the SAME ledger read above; never held in
   // memory across passes. See `requeuedCheckKeysFromLedger`'s own doc.
@@ -13828,9 +13907,10 @@ export async function runSweep(
         const unavailable: SloRung[] = [];
         if (mainRepair === undefined || input.refreshedAtMainTip || !currentMergeBaseSha ||
             currentMergeBaseSha === mainRepair.sha || !deps.updateBranch) unavailable.push("refresh");
-        if (!effects || pr.taskId === undefined || input.requeueable !== true || rebuilds >= 2) unavailable.push("rebuild");
+        if (!effects || pr.taskId === undefined || input.requeueable !== true || (!deps.fixProgressJudge && rebuilds >= 2)) unavailable.push("rebuild");
         const sloDecision = decideSloRung({
-          blocker: slo.blocker, owner: slo.owner, blockerAgeMs: slo.ageMs, nowMs: now, rungHistory, unavailable,
+          blocker: slo.blocker, owner: slo.owner, blockerAgeMs: slo.ageMs, nowMs: now,
+          rungHistory: deps.fixProgressJudge ? rungHistory.filter(row => row.rung === "refresh") : rungHistory, unavailable,
           reasonClass: slo.noOp ? "no-op-hold" : decision.rung === "hold" ? "ladder-hold" : "other",
         });
         if (sloDecision.rung === "none") {
@@ -13842,7 +13922,7 @@ export async function runSweep(
         }
       } else if (decision.rung === "hold") return decision.reason;
       // W1-T5690: one rebuild per task per UTC day, on top of the lifetime cap of 2, on every path in.
-      if (decision.rung === "rebuild" && rebuiltOnUtcDay(rungHistory, now)) {
+      if (!deps.fixProgressJudge && decision.rung === "rebuild" && rebuiltOnUtcDay(rungHistory, now)) {
         decision = { rung: "digest", reason: "strike ladder digest: a rebuild already ran for this task today (UTC); one per task per day" };
       }
       const live = await deps.readLiveState?.(pr);
@@ -13856,7 +13936,7 @@ export async function runSweep(
           // A conflict cannot clear by refreshing again; only a rebuild from main (or a human) can.
           record("sweep.strike_ladder.held", { reason: hold("refresh did not take: conflict"), refresh_outcome: outcome, main_sha: mainRepair!.sha });
           decision = decideStrikeLadderRung({ ...input, refreshedAtMainTip: true });
-          if (decision.rung === "rebuild" && rebuiltOnUtcDay(rungHistory, now)) {
+          if (!deps.fixProgressJudge && decision.rung === "rebuild" && rebuiltOnUtcDay(rungHistory, now)) {
             decision = { rung: "digest", reason: "strike ladder digest: a rebuild already ran for this task today (UTC); one per task per day" };
           }
         } else if (outcome !== "updated") {
@@ -13868,6 +13948,21 @@ export async function runSweep(
         }
       }
       const causeKey = strikeCauseKey(pr, failingTestFilesFromCiFailures(pr.ciFailures ?? []));
+      if (deps.fixProgressJudge && decision.rung !== "refresh" && input.requeueable === true && effects && pr.taskId) {
+        const history = [...rungHistory];
+        while (history.filter(row => row.rung === "rebuild").length < rebuilds) {
+          history.push({ rung: "rebuild", atMs: now, atThisHead: false });
+        }
+        const progress = await judgeSloRebuild({
+          blocker: slo?.blocker ?? "strikes-exhausted", owner: slo?.owner ?? "strike-ladder",
+          blockerAgeMs: Math.max(slo?.ageMs ?? 0, 45 * 60_000), reasonClass: "no-op-hold",
+          nowMs: now, rungHistory: history, unavailable: ["refresh"],
+        }, buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
+          currentRed: redCheckNames(pr), ledger: strikeLadderRows, operatorAnswer: pr.pendingAnswer?.constraint }),
+        deps.fixProgressJudge, record);
+        if (progress.rung === "none") return hold(progress.reason);
+        decision = { rung: progress.rung, reason: progress.reason };
+      }
       if (decision.rung === "rebuild") {
         const reason = `${decision.reason}; cause ${causeKey}`;
         await deps.close(pr, reason);
@@ -13893,7 +13988,7 @@ export async function runSweep(
         (r.step === "sweep.strike_ladder.digest_opened" || r.step === "sweep.strike_ladder.digest_appended") &&
         r.pr_number === pr.prNumber && r.cause_key === causeKey && typeof r.issue_url === "string")
         .map(r => r.issue_url as string);
-      const result = effects!.digest(pr, causeKey, rebuilds, listedIssues);
+      const result = effects!.digest(pr, causeKey, rebuilds, listedIssues, deps.fixProgressJudge ? decision.reason : undefined);
       if (result.outcome === "opened" || result.outcome === "appended") {
         record(result.outcome === "opened" ? "sweep.strike_ladder.digest_opened" : "sweep.strike_ladder.digest_appended", {
           cause_key: causeKey, issue_url: result.issueUrl, assignee: result.assignee,
@@ -13902,7 +13997,7 @@ export async function runSweep(
         });
         ladderActedPrs.add(pr.prNumber);
       }
-      return result.reason;
+      return deps.fixProgressJudge ? `${decision.reason}; ${result.reason}` : result.reason;
     } catch (error) {
       const reason = hold(String(error));
       record("sweep.strike_ladder.held", { reason });
@@ -14062,6 +14157,8 @@ export async function runSweep(
       if (released) return;
       released = true;
       inFlightFixKeys.delete(fixKey);
+      fixCapacityReleases.get(pr.prNumber)?.();
+      fixCapacityReleases.delete(pr.prNumber);
     };
     return {
       ok: true,
@@ -14533,7 +14630,8 @@ export async function runSweep(
         blocker: sloContext.blocker, owner: sloContext.owner, blockerAgeMs: sloContext.ageMs, nowMs: now,
         reasonClass: sloContext.noOp ? "no-op-hold" : "other",
         rungHistory: sloRungHistory(strikeLadderRows, {
-          taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha, mainSha: mainRepair?.sha }),
+          taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha, mainSha: mainRepair?.sha })
+          .filter(row => !deps.fixProgressJudge || row.rung === "refresh"),
       }).rung !== "none";
     if (inheritedMergeState) {
       reason =
@@ -14543,7 +14641,8 @@ export async function runSweep(
     }
     // W1-T5543: fleet filings have their own plan surface; the code rung still never owns one.
     if (disposition === "blocked-fixable" && isBlockedCi(pr) && pr.isPlanFiling === true) {
-      const repair = await tryPlanRepair(pr);
+      const pendingJudgment = judgedUnavailable.get(pr.prNumber);
+      const repair = pendingJudgment ? { repaired: true, reason: pendingJudgment } : await tryPlanRepair(pr);
       const facts = planRoundFacts.get(pr.prNumber);
       let planRoundExhausted = false;
       if (!repair.repaired && deps.dispatchPlanGateRound && isFleetAppAuthor(facts?.authorLogin) &&
@@ -14583,10 +14682,34 @@ export async function runSweep(
               }
               const repeated = history.find((l) => history.filter((r) => r.reason === l.reason).length >= 2);
               if (repeated) {
-                repair.repaired = false;
-                planRoundExhausted = true;
-                repair.reason = `; ${repeatedFixRefusalReason(String(repeated.reason))}`;
-                return;
+                if (!deps.fixProgressJudge) {
+                  repair.repaired = false;
+                  planRoundExhausted = true;
+                  repair.reason = `; ${repeatedFixRefusalReason(String(repeated.reason))}`;
+                  return;
+                }
+                const parkedReason = `refused-twice: plan round ${String(repeated.reason)}`;
+                if (!ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
+                    row.head_sha === pr.headSha && (row.stand_down_reason === parkedReason || row.reason === parkedReason))) {
+                  repair.reason = parkedReason;
+                  return;
+                }
+                const input = buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
+                  currentRed: redCheckNames(pr), ledger: ledgerLines, formerCeiling: 2,
+                  parkedReason: `${parkedReason}; ${JSON.stringify(history)}` });
+                input.remedyHistory = history;
+                const progress = await judgeFixProgress(input, deps.fixProgressJudge);
+                appendLine(deps.ledgerPath, { ...row, step: "fix.progress_judged", site: "refused-twice",
+                  parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, ...progress });
+                if (progress.verdict === "unavailable") { repair.reason = progress.reason; return; }
+                if (progress.verdict === "escalate") {
+                  repair.repaired = false;
+                  planRoundExhausted = true;
+                  repair.reason = `fix progress loop: ${progress.loop} — ${progress.reason}`;
+                  await deps.escalate(pr, repair.reason, renderClarificationQuestion(pr, repair.reason, pr.strikeHistory ?? []));
+                  return;
+                }
+                if (progress.verdict === "change-approach") pr.pendingAnswer = { ...pr.pendingAnswer, constraint: progress.approach };
               }
               const admission = claimFixAdmission?.(pr);
               if (admission && !admission.admitted) {
@@ -14624,21 +14747,39 @@ export async function runSweep(
       cappedRouteReadsDisposition(pr, disposition) && automergeHoldFromLedger(ledgerLines, pr.prNumber) === undefined
         ? cappedProofDiscriminationFromLedger(pr, ledgerLines)
         : undefined;
-    // W1-T3390 — a capped-green review has no red code check to fix. Preserve its separate
-    // plan-shard rung; W1-T7096's progress judge governs ordinary code-fix rounds, not this
-    // plan-only correction. The plan-repair ceiling remains its own follow-up concern (W1-T7243).
+    // W1-T7243: capped repairs keep their remedy and counters; the judge chooses whether to repeat it.
     let planShardRepairDue = false;
     if (proofDiscrimination !== undefined && !decideSweepArm(pr, ledgerLines, undefined, readArmLedgerUnion).arm) {
       planProofBlockedPrs.add(pr.prNumber);
       const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
       const planRepairCapable = typeof deps.dispatchPlanOnlyRepair === "function";
       const planRepairStrikes = priorPlanRepairStrikesFromLedger(pr, ledgerLines);
-      const action = planCappedRepair({ bodyStrikes: pr.priorStrikes, planRepairStrikes }, ceiling, {
-        planRepairCapable,
-      });
+      const action = deps.fixProgressJudge
+        ? await judgeCappedRepair({ bodyStrikes: pr.priorStrikes, planRepairStrikes }, ceiling, {
+            planRepairCapable, judge: deps.fixProgressJudge,
+            input: { ...buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
+              currentRed: proofDiscrimination.proofs.map(proof => `proof:${proof.proof}`), ledger: ledgerLines,
+              operatorAnswer: pr.pendingAnswer?.constraint }),
+              remedyHistory: ledgerLines.filter(row => row.step === PLAN_REPAIR_DISPATCH_STEP && row.task_id === pr.taskId) },
+            log: (step, fields) => appendLine(deps.ledgerPath, { run_id: deps.runId,
+              task_id: pr.taskId ?? `PR-${pr.prNumber}`, step, ...fields }),
+          })
+        : planCappedRepair({ bodyStrikes: pr.priorStrikes, planRepairStrikes }, ceiling, { planRepairCapable });
+      if ("progress" in action && action.progress) {
+        if (action.progress.verdict === "continue" || action.progress.verdict === "change-approach") {
+          judgedContinue.set(pr.prNumber, action.progress);
+          pr.progressContinue = { reason: action.progress.reason };
+          if (action.progress.verdict === "change-approach") proofDiscrimination.progressApproach = action.progress.approach;
+        }
+        if (action.progress.verdict === "unavailable") judgedUnavailable.set(pr.prNumber, action.progress.reason);
+      }
+      if (action.kind === "hold") {
+        disposition = "wait";
+        reason = action.reason!;
+      } else
       if (action.kind === "give_up") {
         disposition = "blocked-ambiguous";
-        reason = planRepairCapable
+        reason = "progress" in action ? action.reason! : planRepairCapable
           ? `capped review still has non-discriminating proofs, but every repair path is exhausted ` +
             `(body ${pr.priorStrikes}/${ceiling}, plan-shard repair ${planRepairStrikes}/${MAX_PLAN_REPAIR_STRIKES})`
           : `capped review still has non-discriminating proofs, but its shared fix budget is exhausted (${pr.priorStrikes}/${ceiling})`;
@@ -14792,16 +14933,36 @@ export async function runSweep(
           rearmCounted = rearmSpendsBound(incident, rearmRows, now);
           rearmIncidentFields = { counted: rearmCounted, actions_status: incident.state, actions_detail: incident.detail, at_ms: now };
         }
-        const rearmExhausted = disarmedByGitHub && rearmCounted && rearms >= MAX_REARMS_AFTER_DISARM_PER_HEAD;
+        let rearmReason: string | undefined;
+        let rearmUnavailable = false;
+        let rearmExhausted = disarmedByGitHub && rearmCounted && rearms >= MAX_REARMS_AFTER_DISARM_PER_HEAD;
+        if (rearmExhausted && deps.fixProgressJudge && !deps.dryRun && !rearmEscalated) {
+          const input = buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
+            strikesSpent: rearms, ledger: ledgerLines, currentRed: redCheckNames(pr),
+            formerCeiling: MAX_REARMS_AFTER_DISARM_PER_HEAD,
+            parkedReason: `re-arm: ${rearms} merge queue ejections at this head`, operatorAnswer: pr.pendingAnswer?.constraint });
+          input.remedyHistory = rearmRows;
+          const progress = await judgeFixProgress(input, deps.fixProgressJudge);
+          appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+            step: "fix.progress_judged", site: "re-arm", pr_number: pr.prNumber, head_sha: pr.headSha,
+            former_ceiling: input.formerCeiling, parked_reason: input.parkedReason,
+            round_count: input.rounds.length, signals: input.signals, ...progress });
+          rearmExhausted = progress.verdict === "escalate";
+          rearmUnavailable = progress.verdict === "unavailable";
+          rearmReason = progress.verdict === "escalate" ? `fix progress loop: ${progress.loop} — ${progress.reason}`
+            : progress.reason;
+          rearmIncidentFields = { ...rearmIncidentFields,
+            progress_approach: progress.verdict === "change-approach" ? progress.approach : undefined };
+        }
         if (disarmedByGitHub && !rearmExhausted) rearmAfterDisarm = rearms + (rearmCounted ? 1 : 0);
-        alreadyDone = armedByGitHub || queued || armedByPriorPass || rearmExhausted || refused || hold !== undefined;
+        alreadyDone = armedByGitHub || queued || armedByPriorPass || rearmExhausted || rearmUnavailable || refused || hold !== undefined;
         if (rearmExhausted && !deps.dryRun &&
             !rowsAtHead(ledgerLines, REARM_EXHAUSTED_STEP, pr).some((line) => line.escalated === true)) {
           const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: REARM_EXHAUSTED_STEP,
             pr_number: pr.prNumber, head_sha: pr.headSha, rearms, bound: MAX_REARMS_AFTER_DISARM_PER_HEAD };
           try {
             // tryEscalate never throws: a null url is an undelivered issue, retried on the next pass.
-            const issueUrl = await deps.escalateRearmExhausted?.(pr, rearms, MAX_REARMS_AFTER_DISARM_PER_HEAD);
+            const issueUrl = await deps.escalateRearmExhausted?.(pr, rearms, MAX_REARMS_AFTER_DISARM_PER_HEAD, rearmReason);
             appendLine(deps.ledgerPath, { ...row, escalated: typeof issueUrl === "string",
               ...(typeof issueUrl === "string" ? { issue_url: issueUrl } : {}) });
           } catch (e) {
@@ -14838,8 +14999,10 @@ export async function runSweep(
           dedupStandDownReason = typeof queueMembership === "object"
             ? `queue membership unreadable (${queueMembership.reason}) — fell back to the prior-pass arm memory: ${memory}`
             : memory;
+        } else if (rearmUnavailable) {
+          dedupStandDownReason = rearmReason;
         } else if (rearmExhausted) {
-          dedupStandDownReason = `GitHub disarmed this head after ${rearms} sweep re-arms (bound ` +
+          dedupStandDownReason = rearmReason ?? `GitHub disarmed this head after ${rearms} sweep re-arms (bound ` +
             `${MAX_REARMS_AFTER_DISARM_PER_HEAD}) — not re-armed; escalated once, see ${REARM_EXHAUSTED_STEP}`;
         } else if (refused) {
           // Carry the SAME `issue_url` the sibling `risk_judge.escalated` row already holds: the
@@ -15263,7 +15426,7 @@ export async function runSweep(
               let progressDecision: FixProgressVerdict | undefined;
               let progressParkedReason: string | undefined;
               const askProgress = async (): Promise<boolean> => {
-                progressDecision ??= judgedContinue.get(pr.prNumber);
+                progressDecision ??= progressParkedReason ? undefined : judgedContinue.get(pr.prNumber);
                 if (progressDecision) return true;
                 const unavailable = judgedUnavailable.get(pr.prNumber);
                 if (unavailable !== undefined) {
@@ -15278,7 +15441,9 @@ export async function runSweep(
                     ...pr.unmetCriteria.map(c => `review:${c.claim}`),
                     ...(pr.reviewState === "failure" && pr.unmetCriteria.length === 0 ? ["remudero-review"] : [])], ledger: ledgerLines,
                   operatorAnswer: pr.pendingAnswer?.constraint,
-                  formerCeiling: fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason: progressParkedReason });
+                  formerCeiling: progressParkedReason?.startsWith("proof-repair-refusals") ? MAX_PROOF_REPAIR_REFUSALS_PER_HEAD
+                    : progressParkedReason?.startsWith("rerun-still-red") || progressParkedReason?.startsWith("amendment-closed") ? 1
+                    : fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason: progressParkedReason });
                 const inputKey = createHash("sha256").update(JSON.stringify(input)).digest("hex");
                 if (ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
                     row.head_sha === pr.headSha && row.progress_escalated_key === inputKey)) {
@@ -15290,6 +15455,8 @@ export async function runSweep(
                 const result = await judgeFixProgress(input, progressJudge);
                 appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? `PR-${pr.prNumber}`,
                   step: "fix.progress_judged", pr_number: pr.prNumber, head_sha: pr.headSha,
+                  site: progressParkedReason?.split(":")[0] ?? "fix-strike",
+                  parked_reason: input.parkedReason, former_ceiling: input.formerCeiling,
                   input_key: inputKey, round_count: input.rounds.length, signals: input.signals, ...result });
                 if (result.verdict === "unavailable") {
                   acted = false;
@@ -15305,6 +15472,7 @@ export async function runSweep(
                   return false;
                 }
                 progressDecision = result;
+                pr.progressContinue = { reason: result.reason };
                 return true;
               };
               // W1-T177 — TERMINAL-STATE CHECK AT THE SPENDING SITE: re-read this PR's state
@@ -15375,6 +15543,10 @@ export async function runSweep(
                   no_commit_rerun_reason: result.reason };
                 standDownReason = `no-commit CI fix: failed-job rerun ${result.outcome}` + (result.reason ? ` — ${result.reason}` : "");
                 break;
+              }
+              if (noCommitRound !== undefined && rerunAttempted && deps.fixProgressJudge) {
+                progressParkedReason = "rerun-still-red: failed-job rerun left this head red";
+                if (!await askProgress()) break;
               }
               // W1-T3980 — the CodeQL-blocker route: the same hold, claim and host admission as the
               // ordinary dispatch below, its dedupe key ledgered BEFORE the worker starts, and the
@@ -15496,7 +15668,17 @@ export async function runSweep(
                 }
               }
               const refusedSameRed = sameHeadRedFixRefusal(ledgerLines, pr);
-              if (refusedSameRed?.scopeAmendment) {
+              const scopeAmendment = ledgerLines.findLast(row => row.task_id === pr.taskId && row.step === "fix.scope_amendment");
+              const closedAmendment = scopeAmendment && ledgerLines.some(row => row.step === PR_TERMINAL_STEP &&
+                row.state === "closed" && Number(row.pr_number) === Number(scopeAmendment.amendmentNumber ?? scopeAmendment.amendment_number));
+              if (closedAmendment && deps.fixProgressJudge) {
+                progressParkedReason = `amendment-closed: scope amendment ${scopeAmendment.amendmentNumber ?? scopeAmendment.amendment_number} closed without merging`;
+                const waited = ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
+                  row.head_sha === pr.headSha && row.stand_down_reason === progressParkedReason);
+                if (!waited) { acted = false; standDownReason = progressParkedReason; break; }
+                if (!await askProgress()) break;
+              }
+              if (refusedSameRed?.scopeAmendment && !closedAmendment) {
                 const reason = `fix report requests a scope amendment: ${refusedSameRed.scopeAmendment}`;
                 const alreadyEscalated = ledgerLines.some((line) =>
                   line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
@@ -15838,15 +16020,29 @@ export async function runSweep(
               // A proof amendment already filed for this exact head stands the PR down: no round, no strike.
               const proofRepairState = proofRepairRoute ? proofRepairLadder(pr, ledgerLines) : undefined;
               if (proofRepairState?.amendmentUrl !== undefined) {
-                acted = false;
-                standDownReason = `proof amendment ${proofRepairState.amendmentUrl || "PR"} is filed for this head — standing down without a strike until it merges`;
-                break;
+                const amendment = ledgerLines.findLast(row => row.step === PR_TERMINAL_STEP &&
+                  typeof row.pr_url === "string" && prUrlKey(row.pr_url) === prUrlKey(proofRepairState.amendmentUrl!));
+                if (deps.fixProgressJudge && amendment?.state === "closed") {
+                  progressParkedReason = `amendment-closed: ${proofRepairState.amendmentUrl} closed without merging`;
+                  const waited = ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
+                    row.head_sha === pr.headSha && row.stand_down_reason === progressParkedReason);
+                  if (!waited) { acted = false; standDownReason = progressParkedReason; break; }
+                  if (!await askProgress()) break;
+                } else {
+                  acted = false;
+                  standDownReason = `proof amendment ${proofRepairState.amendmentUrl || "PR"} is filed for this head — standing down without a strike until it merges`;
+                  break;
+                }
               }
-              // MAX_PROOF_REPAIR_REFUSALS_PER_HEAD is W1-T7243's budget, not this task's strike cap: past it the
-              // ladder's rung two (the plan-shard flag) still takes over, unchanged.
-              const proofRepairActive =
+              // W1-T7243: reaching the former refusal limit asks the judge before repeating the remedy.
+              let proofRepairActive =
                 proofRepairRoute !== undefined && proofRepairState !== undefined &&
                 proofRepairState.refusals < MAX_PROOF_REPAIR_REFUSALS_PER_HEAD;
+              if (deps.fixProgressJudge && proofRepairRoute && proofRepairState && !proofRepairActive) {
+                progressParkedReason = `proof-repair-refusals: proof-repair refused ${proofRepairState.refusals} times at this head`;
+                if (!await askProgress()) break;
+                proofRepairActive = true;
+              }
               const fixEvidence: FixDispatchEvidence = proofRepairActive
                 ? { unmetCriteria: [], proofDiscrimination: proofRepairRoute }
                 : isBlockedCi(pr)
@@ -16001,6 +16197,7 @@ export async function runSweep(
               const planRepairEvidence = proofRepairActive ? undefined : planShardRepairDue ? proofDiscrimination : staleProofs;
               if (deps.dispatchPlanOnlyRepair && planRepairEvidence) {
                 const dispatchPlanOnlyRepair = deps.dispatchPlanOnlyRepair;
+                if (progressDecision?.verdict === "change-approach") planRepairEvidence.progressApproach = progressDecision.approach;
                 if (deps.detachFixWait) {
                   detachSweepAction(
                     fixClaim.run(() => dispatchPlanOnlyRepair(pr, planRepairEvidence)),
@@ -17091,6 +17288,8 @@ export async function runSweepLightPass(
     queueDepth,
     hostWorkerBudget,
     activeWorkers,
+    readActiveWorkers: deps.fixProgressJudge || deps.readFixPressure ? deps.readActiveWorkerCount ?? activeWorkerCount : undefined,
+    readPressure: deps.readFixPressure ?? (deps.fixProgressJudge ? () => readFixHostPressure(policy.memoryFloorMib) : undefined),
     reviewReservations,
     log: deps.log,
   });
@@ -17442,16 +17641,16 @@ export function renderSweepSummary(s: SweepSummary): string {
 export type QueueGovernorTier = "under_limit" | "draining" | "growing";
 
 /** W1-T4465 design (i)/(ii) — the ownership and flow observation {@link checkQueueGovernor}
- *  compares against `policy.wipLimit`, once the owned count reaches it. Every field is OPTIONAL
+ *  compares against its measured bound. Every field is OPTIONAL
  *  and defaults to 0 so every pre-W1-T4465 call in test/queue-governor.test.ts (a bare
  *  `checkQueueGovernor(openPrCount, policy)`) keeps its exact prior always-defer-at-the-limit
  *  answer — the falsifier's own words: "count every open PR and ignore the trailing merges". */
 export interface QueueGovernorFlow {
+  pressure?: FixHostPressure;
   /** Open PRs the fleet did NOT author (design (i)) — counted and ledgered for transparency,
    *  never gates dispatch. */
   foreignOpenCount?: number;
-  /** Merges inside the trailing flow window (ledger `verdict.merged` rows, or a `verdict` row
-   *  itself carrying `verdict: "merged"`). See {@link deriveQueueGovernorTrailingFlow}. */
+  /** Distinct merged PRs inside the trailing flow window, including `pr.terminal` merges. */
   trailingMergedCount?: number;
   /** New PRs opened inside the SAME trailing window (ledger `pr.opened` rows). */
   trailingOpenedCount?: number;
@@ -17466,12 +17665,14 @@ export interface QueueGovernorFlow {
  *  `tier` "growing" (the pre-W1-T4465 always-defer answer), `trailingMergedCount`/
  *  `trailingOpenedCount` 0. */
 export interface QueueGovernorResult {
+  measuredBound?: number;
+  pressure?: FixHostPressure;
   /** true ⇒ the dispatch path MUST defer — do not open a new PR this pass. */
   deferred: boolean;
   /** The FLEET-OWNED open-PR count the decision was made against (design (i)) — an open PR the
    *  fleet did not author never inflates this field. */
   observedOpenCount: number;
-  /** The policy limit consulted (`policy.wipLimit`, carried for the ledger line). */
+  /** Nominal policy limit, retained for telemetry and unwired stand-ins. */
   wipLimit: number;
   /** W1-T4465 — open PRs observed but NOT counted above because the fleet did not author them
    *  (design (i)'s `observed_foreign_count`). 0 when the caller supplies no ownership split. */
@@ -17496,7 +17697,7 @@ export interface QueueGovernorResult {
  *       PR, ...) belongs in `flow.foreignOpenCount` instead, which this predicate carries into the
  *       ledger line but never gates on.
  *
- *   (ii) FLOW, TIERED: below `policy.wipLimit`, dispatch proceeds exactly as before ("under_limit"
+ *   (ii) FLOW, TIERED: below the measured bound, dispatch proceeds ("under_limit"
  *       — flow is irrelevant). At or over it, `flow.trailingMergedCount`/`trailingOpenedCount`
  *       (the ledger's own `verdict.merged`/`pr.opened` rows over `policy.queueGovernorFlowWindowMinutes`)
  *       decide the tier: DRAINING (real trailing activity — at least one merge or open — with
@@ -17505,8 +17706,8 @@ export interface QueueGovernorResult {
  *       that omits `flow` entirely reads 0/0 for both, which is `growing` — the exact pre-W1-T4465
  *       always-defer-at-the-limit answer, unchanged.
  *
- * THRESHOLDS ARE POLICY DATA (rule 2) — `wipLimit`/`queueGovernorFlowWindowMinutes` are the ONLY
- * things that move this decision. Never call this from `runSweep` or any of its deps; see the
+ * W1-T7243 derives the bound from trailing merges and memory headroom; a silent window bootstraps
+ * from headroom. Never call this from `runSweep` or any of its deps; see the
  * asymmetry note above.
  */
 export function checkQueueGovernor(
@@ -17517,11 +17718,18 @@ export function checkQueueGovernor(
   const observedForeignCount = flow.foreignOpenCount ?? 0;
   const trailingMergedCount = flow.trailingMergedCount ?? 0;
   const trailingOpenedCount = flow.trailingOpenedCount ?? 0;
-  if (openPrCount < policy.wipLimit) {
+  const pressure = flow.pressure;
+  const pressureHeld = pressure !== undefined && (pressure.reason !== undefined || pressure.availableMib - pressure.floorMib < DEFAULT_ESTIMATE_MIB.implement);
+  const hostBound = pressure ? Math.max(0, Math.floor((pressure.availableMib - pressure.floorMib) / DEFAULT_ESTIMATE_MIB.implement)) : undefined;
+  const measuredBound = hostBound === undefined ? undefined : pressureHeld ? 0
+    : Math.min(trailingMergedCount || Math.max(1, hostBound), hostBound);
+  // An unwired stand-in retains the old bound; production always supplies live pressure.
+  const wipLimit = measuredBound ?? policy.wipLimit;
+  if (openPrCount < wipLimit) {
     return {
       deferred: false,
       observedOpenCount: openPrCount,
-      wipLimit: policy.wipLimit,
+      wipLimit: policy.wipLimit, measuredBound, pressure,
       observedForeignCount,
       tier: "under_limit",
       trailingMergedCount,
@@ -17535,9 +17743,9 @@ export function checkQueueGovernor(
   // real trailing merge with zero trailing opens (pure drainage) still correctly reads draining.
   const draining = (trailingMergedCount > 0 || trailingOpenedCount > 0) && trailingMergedCount >= trailingOpenedCount;
   return {
-    deferred: !draining,
+    deferred: pressureHeld || !draining,
     observedOpenCount: openPrCount,
-    wipLimit: policy.wipLimit,
+    wipLimit: policy.wipLimit, measuredBound, pressure,
     observedForeignCount,
     tier: draining ? "draining" : "growing",
     trailingMergedCount,
@@ -17594,6 +17802,10 @@ export function logQueueGovernorDeferral(
     tier: result.tier ?? "growing",
     trailing_merged_count: result.trailingMergedCount ?? 0,
     trailing_opened_count: result.trailingOpenedCount ?? 0,
+    measured_bound: result.measuredBound,
+    pressure_available_mib: result.pressure?.availableMib,
+    pressure_floor_mib: result.pressure?.floorMib,
+    pressure_reason: result.pressure?.reason,
   });
 }
 
