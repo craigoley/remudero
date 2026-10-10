@@ -42,7 +42,7 @@ import { makeTempDir, withTempDir } from "./tmp.js";
 import { assertModelAllowed, modelAllowed } from "./model-gate.js";
 import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWindow } from "./version-switchback.js";
 import type { ModelApproval } from "./config-schema.js";
-import { hasUsableTypecheckBuildInfo, installedTypescriptVersion, seedFromCanonical, TYPECHECK_BUILDINFO_NAME } from "./typecheck-buildinfo.js";
+import { hasUsableTypecheckBuildInfo, installedTypescriptVersion, seedFromCanonical, TYPECHECK_BUILDINFO_NAME, TYPECHECK_COLD_PEAK_BYTES } from "./typecheck-buildinfo.js";
 import { acquireTestSlotAsync, TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "./test-slot.js";
 import { selectFromRoutingPool, type RoutingPoolDecision, type RoutingPoolRequest, type RoutingPoolSnapshot } from "./model-pool.js";
 import {
@@ -4042,7 +4042,7 @@ async function executeOpenWeightTool(
       const scoped = suites === null ? {} : { suites };
       const slot = args.check === "typecheck" &&
         !hasUsableTypecheckBuildInfo(join(workerHome, TYPECHECK_BUILDINFO_NAME), installedTypescriptVersion(cwd))
-        ? await acquireTestSlotAsync("typecheck:bwrap") : undefined;
+        ? await acquireTestSlotAsync("typecheck:bwrap", { memoryBytes: TYPECHECK_COLD_PEAK_BYTES }) : undefined;
       try {
         const stdout = await (runCheck ?? runOpenWeightCheck)({
           argv,
