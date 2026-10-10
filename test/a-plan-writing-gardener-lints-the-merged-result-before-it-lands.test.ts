@@ -46,6 +46,7 @@ function harness(t: { after: (fn: () => void) => void }, lint: GardenerDeps["mer
   const deps = {
     stateDir: join(dir, "state"),
     repoRoot: dir,
+    seed: 1,
     openWorkspace: () => ({ root: dir, land: () => (landed.push("x"), "https://github.com/o/r/pull/1"), dispose: () => {} }),
     log: (step: string, extra?: Record<string, unknown>) => void rows.push({ step, extra }),
     mergedPlanLint: lint,
