@@ -302,6 +302,30 @@ test("an unratified ceiling is never recorded by the lane", async () => {
   }
 });
 
+test("a shard log that cannot be read is logged and leaves the red on the fix worker", async () => {
+  const root = tmpRoot();
+  const ledgerPath = join(root, "ledger.ndjson");
+  try {
+    const lane = fakeLane(() => ({ opened: LANE_PR }));
+    const logged: Array<{ event: string; fields: unknown }> = [];
+    await rig(world(), lane, ledgerPath, SHARD_LOG, {
+      log: (event, fields) => {
+        logged.push({ event, fields });
+      },
+      readCeilingVerdict: async () => {
+        throw new Error("job log expired");
+      },
+    }).observe();
+    const unreadable = logged.filter((entry) => entry.event === "main.repair.ratchet_log_unreadable");
+    assert.equal(unreadable.length, 1);
+    assert.deepEqual(unreadable[0]!.fields, { head_sha: HEAD, check_name: SHARD, error: "job log expired" });
+    assert.equal(lane.records.length, 0, "an unreadable log is never recorded away");
+    assert.equal(lane.fixes.length, 1, "the ordinary fix worker keeps the red");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("an open PR that already records the ceiling makes the lane stand down", async () => {
   const root = tmpRoot();
   const ledgerPath = join(root, "ledger.ndjson");
