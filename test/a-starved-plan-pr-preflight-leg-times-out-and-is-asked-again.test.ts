@@ -11,8 +11,8 @@
  * never kills them, each case waits them out and then reads green, which is exactly the silent pass this refuses.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -168,6 +168,35 @@ test("a tree whose checkout is killed at its budget is held, not pushed unchecke
     assert.equal(missing.timedOut, undefined, "a checkout that fails outright stays an unreadable check, as before");
     assert.deepEqual(missing.unreadable.map((f) => f.check), ["tree"]);
   } finally {
+    repo.cleanup();
+  }
+});
+
+/** The state a `git worktree add` killed before it wrote HEAD leaves behind: `worktree remove --force --force` then
+ *  refuses ("validation failed") and only the admin dir's own removal deregisters the tree. */
+function strandRegistration(tree: string): void {
+  const admin = readFileSync(join(tree, ".git"), "utf8").replace(/^gitdir:\s*/, "").trim();
+  rmSync(join(admin, "HEAD"), { force: true });
+}
+
+test("a checkout killed before it wrote HEAD is still deregistered, by its own admin dir and no other", async () => {
+  const repo = gitRepo({ kind: "stranded-preflight-tree" });
+  const neighbour = join(repo.dir, "..", `${basename(repo.dir)}-neighbour`);
+  try {
+    repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+    const head = repo.git("rev-parse", "HEAD");
+    repo.git("worktree", "add", "--detach", "--quiet", neighbour, head);
+    const strand = (cwd: string) => (strandRegistration(cwd), GREEN);
+    emitter.planPrPreflightAtCommit(repo.dir, head, PR, { lintPlan: strand, taskIdExistence: () => GREEN, shardCensus: () => GREEN, checkProof: () => 0 });
+    assert.equal(repo.git("worktree", "list").split("\n").length, 2, "the stranded tree is deregistered; the neighbour worktree is kept");
+    await emitter.planPrPreflightAtCommitAsync(repo.dir, head, PR, {
+      lintPlan: async (cwd) => strand(cwd), taskIdExistence: async () => GREEN, shardCensus: async () => GREEN, checkProof: async () => 0,
+    });
+    const listed = repo.git("worktree", "list");
+    assert.equal(listed.split("\n").length, 2, "the awaited path deregisters it too");
+    assert.match(listed, /-neighbour /);
+  } finally {
+    rmSync(neighbour, { recursive: true, force: true });
     repo.cleanup();
   }
 });

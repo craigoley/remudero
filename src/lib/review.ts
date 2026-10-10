@@ -1803,10 +1803,99 @@ export interface ProofSandboxArgvInput {
   execPath?: string;
 }
 
+/** An origin url with every credential-bearing part removed: a URL's userinfo, query and fragment, or an scp-like
+ *  remote's `user@`. `undefined` when it cannot be read as either shape — the caller then writes no remote at all. */
+export function credentialFreeOriginUrl(url: string): string | undefined {
+  if (url === "" || /[\r\n]/.test(url)) return undefined;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return undefined; // a scheme-shaped url WHATWG cannot parse: no remote, rather than a guess at its userinfo
+    }
+    parsed.username = "";
+    parsed.password = "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  }
+  return url.replace(/^[^@/:]+@(?=[^/:]+:)/, ""); // scp-like `user@host:path`, or a local path left as it is
+}
+
+function gitQuotedValue(raw: string): string | undefined {
+  const value = raw.trimStart();
+  if (!value.startsWith('"')) {
+    let end = value.length;
+    for (let i = 0; i < value.length; i++) {
+      if ((value[i] === "#" || value[i] === ";") && (i === 0 || /\s/.test(value[i - 1]!))) { end = i; break; }
+    }
+    return value.slice(0, end).trimEnd();
+  }
+  let out = "";
+  for (let i = 1; i < value.length; i++) {
+    const ch = value[i]!;
+    if (ch === '"') return /^[\s]*(?:[#;].*)?$/.test(value.slice(i + 1)) ? out : undefined;
+    if (ch !== "\\") { out += ch; continue; }
+    const escaped = value[++i];
+    if (escaped === undefined) return undefined;
+    if (escaped === "n") out += "\n";
+    else if (escaped === "t") out += "\t";
+    else if (escaped === "b") out += "\b";
+    else if (escaped === "\\" || escaped === '"') out += escaped;
+    else return undefined;
+  }
+  return undefined;
+}
+
+function originUrlFromGitConfig(text: string): string | undefined {
+  const lines = text.replace(/\\\r?\n[ \t]*/g, "").split(/\r?\n/);
+  let inOrigin = false;
+  const values: string[] = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#") || line.startsWith(";")) continue;
+    const section = /^\[\s*([A-Za-z][A-Za-z0-9-]*)(?:\s+(?:"((?:\\.|[^"])*)"|([A-Za-z0-9.-]+)))?\s*\]$/.exec(line);
+    const dotted = /^\[\s*([A-Za-z][A-Za-z0-9-]*)\.([A-Za-z0-9.-]+)\s*\]$/.exec(line);
+    if (line.startsWith("[") && !section && !dotted) return undefined;
+    if (section || dotted) {
+      const name = (section?.[1] ?? dotted?.[1] ?? "").toLowerCase();
+      const subsection = section?.[2]?.replace(/\\([\\"])/g, "$1") ?? section?.[3] ?? dotted?.[2] ?? "";
+      inOrigin = name === "remote" && subsection === "origin";
+      continue;
+    }
+    if (!inOrigin) continue;
+    const entry = /^([A-Za-z][A-Za-z0-9-]*)\s*(?:=\s*(.*))?$/.exec(line);
+    if (entry?.[1]?.toLowerCase() !== "url") continue;
+    const value = gitQuotedValue(entry[2] ?? "");
+    if (value === undefined) return undefined;
+    values.push(value);
+  }
+  return values.length === 1 ? values[0] : undefined;
+}
+
+/** The masked git config a proof sandbox binds over the shared one: `[remote "origin"] url = …` with
+ *  {@link credentialFreeOriginUrl}'s url, and nothing else — or EMPTY when the shared config names no usable origin.
+ *  Read with `--file` and no `--includes`, so an included file never contributes. */
+export function proofMaskedGitConfig(sharedConfig: string): string {
+  let config: string;
+  try {
+    config = readFileSync(sharedConfig, "utf8");
+  } catch {
+    return ""; // unreadable config: the proof sees no remote, as before this mask
+  }
+  const raw = originUrlFromGitConfig(config);
+  if (raw === undefined) return "";
+  const url = credentialFreeOriginUrl(raw);
+  if (url === undefined) return "";
+  return `[remote "origin"]\n\turl = "${url.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"\n`;
+}
+
 /** Bubblewrap arguments, ending in `--`, for one proof child. Writable: the checkout, its throwaway HOME and its
  *  worktree gitdir. Read-only: the runtime, the git common dir (its `config`, which can carry a token-bearing remote,
- *  masked by an empty file), the node_modules link targets and the browser cache. NOT mounted: the daemon's HOME, its
- *  checkout and state, and the App key — masked by /dev/null too if some bind happens to contain it. */
+ *  masked by a file carrying only its credential-free origin url), the node_modules link targets and the browser
+ *  cache. NOT mounted: the daemon's HOME, its checkout and state, and the App key — masked by /dev/null too if some
+ *  bind happens to contain it. */
 export function proofSandboxArgv(input: ProofSandboxArgvInput): string[] {
   const env = input.env ?? process.env;
   const cwd = realpathSync(input.cwd);
@@ -1832,16 +1921,18 @@ export function proofSandboxArgv(input: ProofSandboxArgvInput): string[] {
   // Shallower first, so a deeper bind (the worktree gitdir inside its common dir) lands on top of its parent.
   binds.sort((a, b) => a.path.split(pathSep).length - b.path.split(pathSep).length);
   // bwrap mounts binds nodev, so a /dev/null bound over a file reads as EACCES: right for the App key, fatal
-  // for git, which refuses an unreadable config. The config is masked by an EMPTY file in the throwaway HOME.
+  // for git, which refuses an unreadable config. The config is masked by a file in the throwaway HOME that carries
+  // ONLY the origin url with its credentials stripped ({@link proofMaskedGitConfig}): a proof that reads this repo's
+  // owner/repo (resolveOwnerRepo) resolves it as it does in CI's checkout, and no token or other key crosses.
   const masks: { from: string; path: string }[] = [];
   if (git.common !== undefined && existsSync(join(git.common, "config"))) {
-    const empty = join(home, ".rmd-masked-git-config");
+    const masked = join(home, ".rmd-masked-git-config");
     try {
-      writeFileSync(empty, "", { mode: 0o444, flag: "wx" });
+      writeFileSync(masked, proofMaskedGitConfig(join(git.common, "config")), { mode: 0o444, flag: "wx" });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; // this HOME's earlier argv already made it
     }
-    masks.push({ from: empty, path: join(git.common, "config") });
+    masks.push({ from: masked, path: join(git.common, "config") });
   }
   const key = env.GH_APP_PRIVATE_KEY_PATH ? realpathIfPresent(env.GH_APP_PRIVATE_KEY_PATH) : undefined;
   if (key !== undefined && binds.some((b) => isWithin(key, b.path))) masks.push({ from: "/dev/null", path: key });

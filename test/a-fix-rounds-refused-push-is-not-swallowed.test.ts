@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { buildSweepEffects, FixRoundPushError, pushFixRound, runTask } from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
+import { ghJsonAsync } from "../src/lib/github-transport.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
 import { LanePushForeignHeadError } from "../src/lib/git-push.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
@@ -331,7 +332,7 @@ test("W1-T4693: the sweep's fix dispatch hands runFixRung the same push, so its 
   const shim = ghShim(
     [
       {
-        when: "pr view https://github.com/craigoley/remudero/pull/2890 --json headRefName,headRefOid,body",
+        when: "pr view https://github.com/craigoley/remudero/pull/2890 --json headRefName,headRefOid,body,files",
         stdout: JSON.stringify({ headRefName: "run-W1-T2890-1789022939729", headRefOid: "remote123456789", body: "" }),
       },
     ],
@@ -367,7 +368,7 @@ test("W1-T4693: the sweep's fix dispatch hands runFixRung the same push, so its 
       spawnWallClockBoundMsOverride: 1,
       reclaimWorkerImpl: () => {},
       disarmImpl: () => undefined,
-      readJsonImpl: async () => ({}),
+      readJsonImpl: async (args: string[]) => args[0] === "pr" ? ghJsonAsync(args) : {},
       registeredWorktreeOwnerImpl: () => (++ownerReads === 1 ? join(fx.root, "worktrees", "owner") : undefined),
       registeredOwnerRecovery: {
         capture: () => ({

@@ -16,12 +16,15 @@
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { fixedClock, systemClock } from "./clock.js";
+import { diffCoverageTargets } from "./diff-coverage-targets.js";
+import { checkRunsRestArgs, contentRestArgs } from "./open-prs-rest.js";
 import type { CiFrictionPlanState } from "./ci-friction-gardener.js";
 import type { OwnerSearch } from "./ci-friction-remedy.js";
 import type { Escalation } from "./escalate.js";
 import type { GardenerDeps } from "./gardener.js";
-import { ghExec } from "./github-transport.js";
+import { ghExec, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import {
   episodesOf, ladderGardenSpec, ladderOf, markEligibility, readLadderPlan, readLadderRecords, readOutcomes, reasonClass,
   type Charge, type Episode, type FlowAction, type Inventory, type LadderKind, type PrOutcome,
@@ -59,7 +62,12 @@ export interface OperatorIntervention { pr: number; at: string; kind: Interventi
 /** An unreadable source is UNKNOWN, never zero. */
 export type InterventionRead = { ok: true; interventions: readonly OperatorIntervention[] } | { ok: false; reason: string };
 
-export interface FixLaneSources {
+export interface FixLaneEvidence {
+  readHeadSource?: (head: string, file: string) => string | undefined;
+  readCoverageLog?: (head: string) => string | undefined;
+}
+
+export interface FixLaneSources extends FixLaneEvidence {
   owner: string; repo: string;
   mintTaskId: (branch?: string) => string;
   ledgerRecords?: () => readonly LedgerRecord[];
@@ -92,14 +100,200 @@ const prOfRow = (r: LedgerRecord, byHead: ReadonlyMap<string, number>, byRound: 
     (typeof r.head_sha === "string" ? byHead.get(r.head_sha) : undefined) ?? 0;
 };
 const tsOf = (r: LedgerRecord) => Date.parse(String(r.ts));
-const checkSet = (r: LedgerRecord): string => (Array.isArray(r.ci_failures) ? r.ci_failures as Array<{ check?: unknown; signature?: unknown }> : [])
+const checkSet = (r: LedgerRecord): string => failuresOf(r)
   .map(f => `${String(f.check)}=${String(f.signature ?? "")}`).sort().join("|");
 const quote = (tail: unknown) => (typeof tail === "string" && tail ? ` — worker saw: ${tail}` : "");
 const roundShape = (done: LedgerRecord | undefined) => done === undefined ? "" : ` [${["provider", "selected_model", "model", "effort"]
   .map(k => (typeof done[k] === "string" ? `${k} ${String(done[k])}` : "")).filter(Boolean).join(", ")}${typeof done.elapsed_ms === "number" ? `, ${Math.round(Number(done.elapsed_ms) / 1000)}s` : ""}]`;
 
+type Failure = { check: string; signature?: string; logTail?: string };
+const failuresOf = (r: LedgerRecord): Failure[] => (Array.isArray(r.ci_failures) ? r.ci_failures : [])
+  .filter((f): f is Failure => f !== null && typeof f === "object" && typeof f.check === "string");
+const isCoverage = (f: Failure) => /diff.coverage|coverage-ratchet/i.test(`${f.check} ${f.signature ?? ""}`);
+const isCensus = (f: Failure) => /rule-checks|\bcensus\b|reach[-_ ]ratchet|affected-suite-reach-ratchet|negative-reachability-ratchet|coverage-session-blanking|env[-_ ](?:var[-_ ])?registry/i
+  .test(`${f.check} ${f.signature ?? ""}`);
+
+function missingSeam(source: string, line: number): string | undefined {
+  const scanner = createScanner(true, undefined, source);
+  const tokens: Array<{ text: string; start: number; end: number }> = [];
+  const templates: number[] = [];
+  let braceDepth = 0;
+  for (let kind = scanner.scan(); kind !== SyntaxKind.EndOfFile; kind = scanner.scan()) {
+    if (kind === SyntaxKind.SlashToken && /^(?:=|\(|\[|\{|,|:|\?|return|case|=>|!|&&|\|\||\?\?)$/.test(tokens.at(-1)?.text ?? "=")) kind = scanner.reScanSlashToken();
+    if (scanner.isUnterminated() || kind === SyntaxKind.Unknown) return undefined;
+    const start = scanner.getTokenStart();
+    if (kind === SyntaxKind.CloseBraceToken && templates.at(-1) === braceDepth - 1) {
+      tokens.push({ text: "}", start, end: start + 1 }); braceDepth--;
+      kind = scanner.reScanTemplateToken(false);
+      if (scanner.isUnterminated()) return undefined;
+      if (kind === SyntaxKind.TemplateTail) { templates.pop(); continue; }
+    }
+    if (kind === SyntaxKind.TemplateHead) templates.push(braceDepth);
+    const text = kind === SyntaxKind.TemplateHead || kind === SyntaxKind.TemplateMiddle ? "{" : scanner.getTokenText();
+    if (text === "{") braceDepth++;
+    if (text === "}") braceDepth--;
+    tokens.push({ text, start, end: scanner.getTokenEnd() });
+  }
+  const pairs = new Map<number, number>(), stack: number[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i]!.text;
+    if (["(", "{", "["].includes(t)) stack.push(i);
+    else if ([")", "}", "]"].includes(t)) {
+      const open = stack.pop();
+      if (open === undefined || tokens[open]!.text !== ({ ")": "(", "}": "{", "]": "[" } as Record<string, string>)[t]) return undefined;
+      pairs.set(open, i); pairs.set(i, open);
+    }
+  }
+  if (stack.length) return undefined;
+  const imported = new Set<string>();
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i]!.text !== "import") continue;
+    for (let n = i + 1; n < tokens.length && !["from", ";"].includes(tokens[n]!.text); n++) {
+      if (/^[A-Za-z_$][\w$]*$/.test(tokens[n]!.text)) imported.add(tokens[n]!.text);
+    }
+  }
+  const functions: Array<{ params: number; close: number; body: number; end: number }> = [];
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i]!.text !== "function" && tokens[i]!.text !== "=>") continue;
+    const arrow = tokens[i]!.text === "=>";
+    const params = arrow ? (pairs.get(i - 1) ?? i - 1) : tokens.findIndex((t, n) => n > i && t.text === "(");
+    const close = pairs.get(params) ?? params;
+    let body = arrow ? i + 1 : close + 1;
+    if (!arrow) while (body < tokens.length && !["{", ";", "=>"].includes(tokens[body]!.text)) body++;
+    let end = pairs.get(body);
+    if (arrow && tokens[body]?.text !== "{") {
+      end = body;
+      while (end < tokens.length && ![",", ";", ")", "}"].includes(tokens[end]!.text)) end = (pairs.get(end) ?? end) + 1;
+      end--;
+    }
+    if (end === undefined || end < body) continue;
+    functions.push({ params, close, body, end });
+  }
+  const calls = (start: number, end: number) => tokens.slice(start, end).flatMap((t, offset) => {
+    const i = start + offset;
+    if (!/^[A-Za-z_$][\w$]*$/.test(t.text) || ["if", "for", "while", "switch", "catch", "function"].includes(t.text) || [".", "?."].includes(tokens[i - 1]?.text ?? "")) return [];
+    let next = i + 1;
+    while ([".", "?."].includes(tokens[next]?.text ?? "")) next += 2;
+    return tokens[next]?.text === "(" ? [t.text] : [];
+  });
+  const lineOf = (pos: number) => source.slice(0, pos).split("\n").length;
+  const contains = (start: number, end: number) => line >= lineOf(tokens[start]!.start) && line <= lineOf(tokens[end]!.end);
+  const dependency = (fn: typeof functions[number], start: number, end: number) => {
+    const params = new Set(tokens.slice(fn.params, fn.close + 1).map(t => t.text));
+    const used = calls(start, end);
+    for (let i = fn.body + 1; i < start; i++) {
+      if (!["const", "let"].includes(tokens[i]!.text) || tokens[i + 2]?.text !== "=") continue;
+      let end = i + 3;
+      while (end < start && tokens[end]!.text !== ";") end++;
+      if (tokens.slice(i + 3, end).some(t => params.has(t.text))) params.add(tokens[i + 1]!.text);
+    }
+    if (used.some(name => params.has(name))) return undefined;
+    return [...new Set(used.filter(name => imported.has(name)))].join(", ") || undefined;
+  };
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i]!.text !== "catch") continue;
+    const body = tokens[i + 1]?.text === "(" ? (pairs.get(i + 1) ?? i) + 1 : i + 1;
+    const end = pairs.get(body), tryEnd = i - 1, tryStart = pairs.get(tryEnd);
+    if (end === undefined || tryStart === undefined || !contains(body, end)) continue;
+    const fn = functions.filter(f => f.body < i && f.end > end).sort((a, b) => b.body - a.body)[0];
+    if (fn) return dependency(fn, tryStart + 1, tryEnd);
+  }
+  for (const fn of functions) {
+    if (!contains(fn.body, fn.end)) continue;
+    const parent = functions.find(f => f.params < fn.params && f.close > fn.end);
+    if (parent && tokens.slice(parent.params, fn.params).some(t => t.text === "=")) return dependency(fn, fn.body + (tokens[fn.body]!.text === "{" ? 1 : 0), fn.end);
+  }
+  return undefined;
+}
+
+function unseamedCoverage(r: LedgerRecord, sources: FixLaneEvidence): string | undefined {
+  const failures = failuresOf(r).filter(isCoverage);
+  if (!failures.length || typeof r.head_sha !== "string") return undefined;
+  const tails = failures.flatMap(f => typeof f.logTail === "string" ? [f.logTail] : []);
+  if (tails.length !== failures.length) {
+    const log = sources.readCoverageLog?.(r.head_sha);
+    if (log !== undefined) tails.push(log);
+  }
+  const parsed = diffCoverageTargets(tails.map(tail => tail.replace(/^\d{4}-\d\d-\d\dT\S+ ?/gm, "")));
+  if (!parsed || parsed.unlisted > 0 || !parsed.targets.length) return undefined;
+  const evidence: string[] = [];
+  for (const target of parsed.targets) {
+    const source = sources.readHeadSource?.(r.head_sha, target.file);
+    if (source === undefined) return undefined;
+    for (const line of target.lines) {
+      const dependency = missingSeam(source, line);
+      if (dependency === undefined) return undefined;
+      evidence.push(`${target.file}:${line} — ${dependency}: missing injectable seam`);
+    }
+  }
+  return `${r.head_sha}: ${evidence.join("; ")}`;
+}
+
+/** Reads only the exact-head coverage evidence the ledger rows can consume, off the daemon loop. */
+export async function readFixLaneEvidence(
+  sources: Pick<FixLaneSources, "owner" | "repo" | "readHeadSource" | "readCoverageLog">,
+  records: readonly LedgerRecord[],
+): Promise<FixLaneEvidence> {
+  const logCache = new Map<string, string | undefined>();
+  const sourceCache = new Map<string, string | undefined>();
+  const readCoverageLog = async (head: string): Promise<string | undefined> => {
+    if (logCache.has(head)) return logCache.get(head);
+    if (sources.readCoverageLog) {
+      const log = sources.readCoverageLog(head);
+      logCache.set(head, log);
+      return log;
+    }
+    const pages = await ghJsonAsync([...checkRunsRestArgs(sources.owner, sources.repo, head), "--paginate", "--slurp"]) as Array<{
+      check_runs: Array<{ id: number; name: string; conclusion: string; details_url?: string; external_id?: string }>;
+    }>;
+    const checks = pages.flatMap(page => page.check_runs);
+    const latest = new Map<string, typeof checks[number]>();
+    for (const check of checks) if (check.id > (latest.get(check.name)?.id ?? 0)) latest.set(check.name, check);
+    const logs: string[] = [];
+    for (const check of latest.values()) {
+      if (check.conclusion !== "failure" || !isCoverage({ check: check.name })) continue;
+      const job = /\/jobs\/(\d+)/.exec(check.details_url ?? "")?.[1] ?? check.external_id ?? String(check.id);
+      logs.push(await ghTextAsync(["api", `repos/${sources.owner}/${sources.repo}/actions/jobs/${job}/logs`]));
+    }
+    const log = logs.join("\n");
+    logCache.set(head, log);
+    return log;
+  };
+  const readHeadSource = async (head: string, file: string): Promise<string | undefined> => {
+    const key = `${head}:${file}`;
+    if (sourceCache.has(key)) return sourceCache.get(key);
+    if (sources.readHeadSource) {
+      const source = sources.readHeadSource(head, file);
+      sourceCache.set(key, source);
+      return source;
+    }
+    const body = await ghJsonAsync(contentRestArgs(sources.owner, sources.repo, file, head)) as { encoding?: string; content?: string };
+    if (body.encoding !== "base64" || typeof body.content !== "string") throw new Error(`fix-lane source unreadable: ${file}@${head}`);
+    const source = Buffer.from(body.content, "base64").toString("utf8");
+    sourceCache.set(key, source);
+    return source;
+  };
+
+  // Prefetch sequentially through the paced async transport. This makes the returned evidence readers pure cache
+  // lookups, so `defectEventsOf` stays synchronous and cannot spawn `gh` from the daemon's inventory path.
+  for (const row of records) {
+    if (row.step !== "fix.dispatch" || typeof row.head_sha !== "string") continue;
+    const failures = failuresOf(row).filter(isCoverage);
+    if (!failures.length) continue;
+    const tails = failures.flatMap(f => typeof f.logTail === "string" ? [f.logTail] : []);
+    if (tails.length !== failures.length) {
+      const log = await readCoverageLog(row.head_sha);
+      if (log !== undefined) tails.push(log);
+    }
+    const parsed = diffCoverageTargets(tails.map(tail => tail.replace(/^\d{4}-\d\d-\d\dT\S+ ?/gm, "")));
+    if (!parsed || parsed.unlisted > 0 || !parsed.targets.length) continue;
+    for (const target of parsed.targets) await readHeadSource(row.head_sha, target.file);
+  }
+  return { readHeadSource: (head, file) => sourceCache.get(`${head}:${file}`), readCoverageLog: head => logCache.get(head) };
+}
+
 /** Clusters the fix lane's ledger rows into defect events, each with a normalised class key. */
-export function defectEventsOf(records: readonly LedgerRecord[], now: number): DefectEvent[] {
+export function defectEventsOf(records: readonly LedgerRecord[], now: number, sources: FixLaneEvidence = {}): DefectEvent[] {
   const rows = records.filter(r => Number.isFinite(tsOf(r)) && tsOf(r) <= now).sort((a, b) => tsOf(a) - tsOf(b));
   const byHead = new Map<string, number>(), byRound = new Map<string, number>();
   for (const r of rows) {
@@ -117,11 +311,26 @@ export function defectEventsOf(records: readonly LedgerRecord[], now: number): D
   const add = (r: LedgerRecord, key: string, evidence: string, pr = prOfRow(r, byHead, byRound), elapsedMs?: number) =>
     events.push({ pr, at: tsOf(r), key, evidence, elapsedMs: elapsedMs ?? (typeof r.elapsed_ms === "number" ? r.elapsed_ms : undefined) });
   const pushed = new Map<string, { pr: number; done: LedgerRecord }>();
+  const previousRound = new Map<number, LedgerRecord>();
   const lastSet = new Map<number, string>(), lastFlake = new Map<number, string>(), lastWasFixed = new Map<number, boolean>();
   for (const r of rows) {
     const pr = prOfRow(r, byHead, byRound);
     const done = typeof r.round_id === "string" ? doneByRound.get(r.round_id) : undefined;
     if (r.step === "fix.dispatch") {
+      const coverage = unseamedCoverage(r, sources);
+      if (coverage !== undefined) add(r, "coverage-unseamed-catch", coverage);
+      const previous = previousRound.get(pr);
+      const priorDone = previous && typeof previous.round_id === "string" ? doneByRound.get(previous.round_id) : undefined;
+      const oldReds = previous ? failuresOf(previous) : [], newReds = failuresOf(r);
+      if (pr > 0 && previous && typeof r.round_id === "string" && r.round_id !== previous.round_id &&
+          priorDone && prOfRow(priorDone, byHead, byRound) === pr && tsOf(priorDone) >= tsOf(previous) &&
+          tsOf(priorDone) <= tsOf(r) && priorDone.fix_outcome === "FIXED" &&
+          typeof r.head_sha === "string" && priorDone.pushed_head_sha === r.head_sha && r.head_sha !== previous.head_sha &&
+          oldReds.length > 0 && newReds.length > 0 && newReds.every(isCensus) &&
+          !oldReds.some(a => newReds.some(b => a.check === b.check && a.signature === b.signature))) {
+        add(r, "fix-swapped-red-for-census", `round ${String(previous.round_id)} cleared ${checkSet(previous)}; round ${r.round_id} sees ${checkSet(r)} at pushed head ${r.head_sha}`);
+      }
+      if (pr > 0) previousRound.set(pr, r);
       const set = checkSet(r);
       if (set && pr > 0) {
         if (lastSet.get(pr) === set && lastWasFixed.get(pr) !== true) add(r, "same-red-set", `the same red set ${set} across consecutive rounds${roundShape(done)}`);
@@ -178,8 +387,8 @@ export interface FixLaneInventory extends Inventory {
 
 /** Builds the fix-lane episodes (one per defect event, plus the fix-lane-owned sweep blockers) and runs the shared ladder. */
 export function fixLaneInventoryOf(records: readonly LedgerRecord[], tasks: Parameters<typeof ladderOf>[3], outcomes: ReadonlyMap<number, PrOutcome>,
-  interventions: InterventionRead, now: number): FixLaneInventory {
-  const events = defectEventsOf(records, now);
+  interventions: InterventionRead, now: number, sources: FixLaneEvidence = {}): FixLaneInventory {
+  const events = defectEventsOf(records, now, sources);
   const terminal = new Map<number, number>();
   for (const r of records) {
     const pr = Number(r.pr_number) || Number(/\/pull\/(\d+)$/.exec(String(r.pr_url ?? ""))?.[1]);
@@ -298,21 +507,50 @@ function summaryOf(inv: FixLaneInventory, now: number): string {
 /** The fix-lane garden: once per UTC day, clusters the lane's defects and files one remedy for the top-priced class. */
 export function fixLaneGardenSpec(deps: GardenerDeps, sources: FixLaneSources) {
   const clock = deps.clock ?? systemClock;
+  const readInputs = () => {
+    const now = clock.now();
+    const records = sources.ledgerRecords ? sources.ledgerRecords() : readLadderRecords(deps.stateDir, FIX_LANE_LADDER, STEPS);
+    const plan = sources.planState ? sources.planState() : readLadderPlan(deps.repoRoot, FIX_LANE_LADDER);
+    if (plan.degraded) deps.log("fix-lane.origins_degraded", { reason: plan.degraded });
+    if (plan.unreadable?.length) throw new Error(`fix-lane plan shards unreadable: ${plan.unreadable.join(", ")}`);
+    return { now, records, plan };
+  };
+  const inventoryOf = (now: number, records: readonly LedgerRecord[], plan: CiFrictionPlanState, evidence: FixLaneEvidence) => {
+    const sinceMs = now - FIX_LANE_WINDOW_MS;
+    const events = defectEventsOf(records, now, evidence);
+    const prs = [...new Set(events.filter(e => e.pr > 0 && e.at >= sinceMs).map(e => e.pr))];
+    const openPrs = [...new Set(events.filter(e => e.pr > 0).map(e => e.pr))];
+    const outcomes = sources.prOutcomes ? sources.prOutcomes(openPrs) : readOutcomes(openPrs, sources);
+    const read = sources.interventions ? sources.interventions(prs, sinceMs) : readOperatorInterventions(sources, prs, sinceMs);
+    return fixLaneInventoryOf(records, plan.tasks, outcomes, read, now, evidence);
+  };
   return ladderGardenSpec(deps, {
     kind: FIX_LANE_LADDER, sources, bucket: c => Math.floor(c.now() / DAY),
     inventory: () => {
-      const now = clock.now();
-      const records = sources.ledgerRecords ? sources.ledgerRecords() : readLadderRecords(deps.stateDir, FIX_LANE_LADDER, STEPS);
-      const plan = sources.planState ? sources.planState() : readLadderPlan(deps.repoRoot, FIX_LANE_LADDER);
-      if (plan.degraded) deps.log("fix-lane.origins_degraded", { reason: plan.degraded });
-      if (plan.unreadable?.length) throw new Error(`fix-lane plan shards unreadable: ${plan.unreadable.join(", ")}`);
-      const sinceMs = now - FIX_LANE_WINDOW_MS;
-      const events = defectEventsOf(records, now);
-      const prs = [...new Set(events.filter(e => e.pr > 0 && e.at >= sinceMs).map(e => e.pr))];
-      const openPrs = [...new Set(events.filter(e => e.pr > 0).map(e => e.pr))];
-      const outcomes = sources.prOutcomes ? sources.prOutcomes(openPrs) : readOutcomes(openPrs, sources);
-      const read = sources.interventions ? sources.interventions(prs, sinceMs) : readOperatorInterventions(sources, prs, sinceMs);
-      return fixLaneInventoryOf(records, plan.tasks, outcomes, read, now);
+      const { now, records, plan } = readInputs();
+      const coverageRows = records.filter(row => row.step === "fix.dispatch" && failuresOf(row).some(isCoverage));
+      if (coverageRows.length && (!sources.readHeadSource ||
+          (coverageRows.some(row => failuresOf(row).some(f => isCoverage(f) && typeof f.logTail !== "string")) && !sources.readCoverageLog))) {
+        throw new Error("fix-lane coverage evidence requires asynchronous inventory or injected evidence readers");
+      }
+      const sourceCache = new Map<string, string | undefined>(), logCache = new Map<string, string | undefined>();
+      const evidence: FixLaneEvidence = {
+        readHeadSource: (head, file) => {
+          const key = `${head}:${file}`;
+          if (!sourceCache.has(key)) sourceCache.set(key, sources.readHeadSource?.(head, file));
+          return sourceCache.get(key);
+        },
+        readCoverageLog: head => {
+          if (!logCache.has(head)) logCache.set(head, sources.readCoverageLog?.(head));
+          return logCache.get(head);
+        },
+      };
+      return inventoryOf(now, records, plan, evidence);
+    },
+    inventoryAsync: async () => {
+      const { now, records, plan } = readInputs();
+      const evidence = await readFixLaneEvidence(sources, records);
+      return inventoryOf(now, records, plan, evidence);
     },
     onScorecard: (inv, scorecard) => {
       const full = inv as FixLaneInventory;

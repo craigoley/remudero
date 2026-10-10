@@ -1,0 +1,27 @@
+- id: W1-T7698
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — plan-proof-unrunnable:plan-only PR is red on task-id-existence, remudero-review cost 4.65 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.26
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-blocker:plan-proof-unrunnable:plan-only PR is red on task-id-existence, remudero-review"
+  files:
+    - src/lib/pr-blocker.ts
+    - test/flow-plan-proof-unrunnable-plan-only-pr-is-red-on-task-id-existence-remudero-review.test.ts
+  acceptance:
+    - claim: "plan-proof-unrunnable:plan-only PR is red on task-id-existence, remudero-review is cleared by its owner without manual intervention"
+      proof: "grep: test(\"W1-T7698: flow-plan-proof-unrunnable-plan-only-pr-is-red-on-task-id-existence-remudero-review clears without a person\" in test/flow-plan-proof-unrunnable-plan-only-pr-is-red-on-task-id-existence-remudero-review.test.ts"
+  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    plan-proof-unrunnable:plan-only PR is red on task-id-existence, remudero-review cost 4.65 PR-hours; owner NONE
+    Owner NONE is absent.
+    Source owner: src/lib/pr-blocker.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #10597: 4.60 PR-hours — plan-only PR is red on task-id-existence, remudero-review — the code-fix lane cannot stage outside a plan filing, so no fix is dispatched; the plan violation needs a plan repair
+    - PR #9557: 0.08 PR-hours — plan-only PR is red on task-id-existence, remudero-review — the code-fix lane cannot stage outside a plan filing, so no fix is dispatched; the plan violation needs a plan repair
+    - PR #10175: 0.04 PR-hours — plan-only PR is red on task-id-existence, remudero-review — the code-fix lane cannot stage outside a plan filing, so no fix is dispatched; the plan violation needs a plan repair
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
