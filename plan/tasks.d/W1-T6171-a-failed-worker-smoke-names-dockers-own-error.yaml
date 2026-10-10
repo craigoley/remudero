@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: site and console recycle refusals (exit 125) with no cause on record"
   plan_refs: [W1-T5017, W1-T6062, W1-T5706]
   files: [deploy/recycle-container.sh, src/lib/deployer.ts, test/a-failed-worker-smoke-names-dockers-own-error.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

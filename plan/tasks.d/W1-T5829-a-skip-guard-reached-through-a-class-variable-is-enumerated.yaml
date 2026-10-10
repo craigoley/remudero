@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5700 (#9261) hand-build follow-up"
   plan_refs: [W1-T3220, W1-T3703, W1-T5700]
   files: [scripts/workflow-guard-mutation-ratchet.mjs, scripts/workflow-guard-mutation-baseline.json, test/workflow-guard-mutation-ratchet.test.ts, test/a-skip-guard-reached-through-a-class-variable-is-enumerated.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

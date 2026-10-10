@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: data-disk I/O research (no disk upgrade; find other ways)"
   plan_refs: [W1-T4356]
   files: [deploy/install-host-units.sh, test/the-watchdog-tick-skips-git-and-node-work-when-nothing-changed.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

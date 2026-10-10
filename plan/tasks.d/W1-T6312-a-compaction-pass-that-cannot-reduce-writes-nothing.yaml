@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: serve CPU and memory plan, slow-lane OOM attribution (75 heap deaths 2026-10-06 19:00Z to 10-08 00:46Z)"
   plan_refs: [W1-T4262]
   files: [src/lib/ledger-compact.ts, test/a-compaction-pass-that-cannot-reduce-writes-nothing.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
