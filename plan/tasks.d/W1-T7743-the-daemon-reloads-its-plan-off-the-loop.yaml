@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator session 2026-10-10: core daemon loop-stall investigation (daemon.loop_lag 07:50-09:57Z), operator asked for flow improvements"
   plan_refs: [W1-T3972, W1-T3554, W1-T4481, W1-T2511, W1-T5689, W1-T5718, W1-T147]
-  files: [src/lib/plan.ts, src/run-task.ts, src/lib/review.ts, src/lib/daemon.ts, test/the-daemon-reloads-its-plan-off-the-loop.test.ts]
+  files: [src/lib/plan.ts, src/run-task.ts, src/lib/review.ts, src/lib/daemon.ts, test/the-daemon-reloads-its-plan-off-the-loop.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts]
   status: queued
   priority: 1
   attempts: 0
@@ -34,8 +34,15 @@
     - The reviewer: `resolvePlanCriteriaAtHead` (src/lib/review.ts:6985) calls `loadPlanAtRef` at review.ts:7008
       with the sync runner of :7005. Its callers are in src/run-task.ts at :22200, :22531 and :29739.
     - All three of `loadPlanAtRef`, `planReloader` and `resolvePlanCriteriaAtHead` are rows in the sync-spawn
-      census baseline (test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts). A converted site needs
-      no edit there, because a count below its row passes.
+      census baseline (test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts). Once #10753 merges the
+      census is exact, so the build must lower each converted site's row in that file in the same PR (see CENSUS ROW below).
+
+    CENSUS ROW (amended 2026-10-10). PR #10753 makes the sync-spawn census in
+    test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts exact: a loop-reachable count BELOW its
+    SYNC_SPAWN_LOOP_BASELINE row fails until the row is lowered, or deleted at 0, in the same PR. So this
+    build lowers the row of every site it converts (`loadPlanAtRef`, `planReloader`, `dedicatedTargetPlanReloader`, `resolvePlanCriteriaAtHead` and their callers) in that file, in the same PR.
+    The fix lane refuses to stage an undeclared path (W1-T4207), so the file is in `files:`. If #10753 has
+    not merged when this builds, lowering a row still passes the old census, so the step is correct either way.
 
     SHARED SURFACE ONLY: W1-T147 (the overnight chaos drill) also names src/lib/daemon.ts and src/run-task.ts.
     It does not touch plan reloading or the plan loaders.
