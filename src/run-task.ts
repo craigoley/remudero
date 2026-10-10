@@ -55322,7 +55322,11 @@ function logCliInvocation(cmd: string | undefined, argv: string[], stateRootOver
     // Do not create either HOME config or an override's state/ directory before deploy-run validates
     // the path. The supervisor's explicit-root path is intentionally not logged at this seam.
     if (stateRootOverride !== undefined) return;
-    appendLedger(ledgerPathFor(loadConfig()), {
+    const config = loadConfig();
+    // A missing pause/resume root must reach target validation still missing. Invocation
+    // telemetry must not recreate it and turn an unavailable state mount into a local target.
+    if ((cmd === "pause" || cmd === "resume") && !existsSync(config.root)) return;
+    appendLedger(ledgerPathFor(config), {
       run_id: `CLI-${Date.now()}`,
       task_id: "CLI",
       step: "cli.invoked",

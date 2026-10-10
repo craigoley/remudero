@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -226,6 +226,22 @@ test("W1-T7727: an existing fleet-wide hold is honored, survives an instance res
   for (const name of INSTANCES) assert.equal(existsSync(pauseFilePath(fx.root(name))), false, "--fleet writes no instance flag");
 });
 
+test("W1-T7727: a missing configured root refuses pause and resume without recreating state", () => {
+  for (const verb of ["pause", "resume"] as const) {
+    const fx = makeFixture();
+    renameSync(fx.root("core"), join(fx.dir, "core-unavailable"));
+    const result = rmd(fx, "core", verb);
+    assert.notEqual(result.status, 0, `${verb}: the missing configured root is refused`);
+    assert.match(result.out, /not reachable from this process/);
+    assert.equal(existsSync(fx.root("core")), false, `${verb}: neither invocation telemetry nor the control creates a replacement root`);
+    assert.equal(sharedRefOnOrigin(fx), "", `${verb}: no shared pause ref is written`);
+    for (const other of ["site", "console", "wild-trails"] as const) {
+      assert.equal(controlRows(fx, other).length, 0, `${verb}: ${other}'s ledger is untouched`);
+      assert.equal(existsSync(pauseFilePath(fx.root(other))), false, `${verb}: ${other} stays unpaused`);
+    }
+  }
+});
+
 test("W1-T7727: resolvePauseTarget names the registry instance, or refuses", () => {
   const dir = "/srv/fixture";
   const text = registryText(dir);
@@ -241,6 +257,9 @@ test("W1-T7727: resolvePauseTarget names the registry instance, or refuses", () 
   const unreachable = resolvePauseTarget({ configRoot: "/elsewhere", instance: "site", registryText: text, registryPath: "r", dirExists: () => false });
   assert.equal(unreachable.ok, false);
   assert.match(unreachable.ok ? "" : unreachable.refusal, /not reachable from this process/);
+  const missingDefault = resolvePauseTarget({ configRoot: `${dir}/core`, registryText: text, registryPath: "r", dirExists: () => false });
+  assert.equal(missingDefault.ok, false, "a config-root target requires the same reachability as an explicit target");
+  assert.match(missingDefault.ok ? "" : missingDefault.refusal, /not reachable from this process/);
   const retired = resolvePauseTarget({
     configRoot: "/elsewhere",
     instance: "site",

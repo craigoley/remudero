@@ -80,5 +80,8 @@ export function resolvePauseTarget(input: PauseTargetInput): PauseTargetResoluti
     );
   }
   if (!live.has(name)) return refuse(`config.root ${input.configRoot} belongs to instance '${name}', which is retired in ${input.registryPath}`);
+  if (!dirExists(input.configRoot)) {
+    return refuse(`instance '${name}' state_dir ${input.configRoot} is not reachable from this process — run this on the host that holds it`);
+  }
   return { ok: true, target: { instance: name, root: input.configRoot, resolvedBy: "config-root" } };
 }
