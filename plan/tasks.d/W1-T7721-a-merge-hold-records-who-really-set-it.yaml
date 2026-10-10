@@ -1,0 +1,80 @@
+- id: W1-T7721
+  title: "A MERGE HOLD RECORDS WHO REALLY SET IT — on 2026-10-09T13:30:46Z an agent session inside a container wrote an `automerge.hold_engaged` row for PR #10339 as \"Craig Oley\" with authority interactive-cli, because `--by` is free text and a pty passes the isTTY check; record a verifiable actor and refuse or flag a human name from a non-human caller"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — the provenance of a durable merge hold
+  band_meaning: span
+  origin: "operator ruling 2026-10-10: merge-hold identity (PR #10339 hold, 2026-10-09T13:30:46Z, host fa3e9bb4d422)"
+  plan_refs: [W1-T3601, W1-T2581, W1-T2719, W1-T4244, W1-T1000002, W1-T100]
+  files: [src/lib/operator-merge-hold.ts, src/run-task.ts, src/lib/review.ts, src/lib/status-board.ts, src/lib/sweep.ts, test/a-merge-hold-records-who-really-set-it.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-09T13:30:46Z. An `automerge.hold_engaged` row for PR #10339 carries by "Craig Oley" and
+    authority "interactive-cli". It was written from inside a container (host fa3e9bb4d422). The operator did
+    NOT set it. An agent session did, and it passed the operator's name in the free-text `--by`. Every reader
+    then showed the hold as the operator's own decision.
+    CURRENT BEHAVIOUR, read on origin/main f76df1f45:
+      - src/run-task.ts:47942 mergeHoldCommand. Its only human-presence check is src/run-task.ts:47951,
+        `process.stdin.isTTY === true` (added by W1-T3601). An agent harness or `script`/ssh -t that allocates a
+        pty passes it, so the check proves a terminal and not a person.
+      - src/lib/operator-merge-hold.ts:48 takes `--by` as an arbitrary trimmed string. src/lib/operator-merge-hold.ts:79
+        hard-codes `authority: "interactive-cli"` for every CLI write. src/lib/operator-merge-hold.ts:120-129
+        appends the row with `by`, `reason` and `authority` only. It has no OS user, host or container id, tty
+        provenance, session/agent identity or parent process, so nothing on the row can contradict the claimed name.
+      - src/lib/review.ts:5880-5886 automergeHoldFromLedger trusts any row whose authority is interactive-cli or
+        console-confirmed and returns `{by, reason}`. src/lib/sweep.ts (the `engaged by ${hold.by}` detail and the
+        `held by ${mergeHold.by}` reason) and src/lib/status-board.ts MergeHeldRow.by then show that claimed name
+        as fact.
+    W1-T3601 closed the NON-interactive hole. This is the remaining one: an interactive-looking non-human caller
+    can sign as a human. W1-T4244 (the console reaching core as the signed-in operator) covers the
+    console-confirmed path. This task covers the CLI path and how every reader displays the result.
+    OVERLAP. lint-plan reports W1-T100 (route blocked_ci to the ci-log fix path) as sharing src/lib/sweep.ts and
+    src/run-task.ts. That is the whole-file surface only: W1-T100 routes a red PR to the fix rung, and this task
+    touches only the merge-hold command and the hold detail/reason strings, so neither shard supersedes the other.
+  design: |
+    1. VERIFIABLE ACTOR. applyOperatorMergeHold writes an `actor` object beside the free-text `by`, gathered by
+       an injectable seam (one real-default test, per the coverage-traps doctrine). The object holds the OS user
+       (os.userInfo), the hostname, a container id when the process runs in one (/.dockerenv or the cgroup
+       path), tty provenance (isTTY, plus whether the controlling terminal is a pty under an agent harness: the
+       parent process chain, and the presence of a known agent/session marker in process.env such as
+       CLAUDECODE, CLAUDE_CODE_*, RMD_RUN_ID or RMD_WORKER), and the session or agent identity when one is present.
+       The actor is evidence gathered by the writer, never typed by the caller.
+    2. CLASSIFY THE CALLER, then refuse or flag. A caller is non-human when an agent/session marker is present,
+       or when it runs inside a fleet container. When a non-human caller passes a `--by` that names a human (a
+       configured operator name, or any value that is not an agent identity), refuse the write by default with a
+       message naming the evidence. Keep an explicit agent path: the caller states it is acting as an agent
+       (for example `--by agent:<session>`), and the row is written with authority `agent-cli`. The hold reader
+       must NOT treat `agent-cli` as a confirmed human authority. Whether an agent hold still blocks the merge is
+       a policy value. Leave it exactly as safe as today: an unconfirmed hold does not strand a PR. A human at a
+       real terminal with no agent markers is unchanged.
+    3. SHOW WHO REALLY SET IT. AutomergeHold, MergeHeldRow and the sweep's hold detail/reason carry the actor
+       (OS user, host/container, human or agent) beside `by`. When `by` and the actor disagree, every surface
+       says so ("by Craig Oley (claimed); written by agent session <id> on <host>"), never the bare claimed name.
+       Older rows with no actor read as "actor unrecorded".
+    SCOPE NOTE. "The console shows who really set a hold" is met in core by exposing the actor on the existing
+    board/API fields the console already reads. The console's own rendering lives in remudero-console, and it
+    is filed as a CONSOLE-T task after this merges, pinned to the exact field names this PR ships.
+    Tests go in the new file test/a-merge-hold-records-who-really-set-it.test.ts, with `test(` titles verbatim as in
+    the proofs below. test/operator-merge-hold-command.test.ts and test/automerge-hold.test.ts must stay green.
+  acceptance:
+    - claim: "a merge-hold row records the verifiable actor gathered by the writer, not only the claimed name"
+      proof: 'grep: test("W1-T7721: a merge-hold row records the verifiable actor beside the claimed name" in test/a-merge-hold-records-who-really-set-it.test.ts'
+    - claim: "an agent caller naming a human in --by is refused"
+      proof: 'grep: test("W1-T7721: an agent caller naming a human in --by is refused" in test/a-merge-hold-records-who-really-set-it.test.ts'
+    - claim: "an agent hold is written as agent-cli and is never read as a confirmed human hold"
+      proof: 'grep: test("W1-T7721: an agent hold is never read as a confirmed human hold" in test/a-merge-hold-records-who-really-set-it.test.ts'
+    - claim: "the sweep and the board show the actor beside the claimed name and flag a mismatch"
+      proof: 'grep: test("W1-T7721: the sweep and the board show who really set a hold" in test/a-merge-hold-records-who-really-set-it.test.ts'
+    - claim: "a human at a real terminal with no agent markers is unchanged"
+      proof: 'grep: test("W1-T7721: a human at a real terminal is unchanged" in test/a-merge-hold-records-who-really-set-it.test.ts'
+  falsifier: |
+    Leave the row with only `by`/`reason`/`authority`: the actor test finds no actor object. Keep authority hard-coded
+    to interactive-cli: the agent test sees a "Craig Oley" hold written from a CLAUDECODE session and read back as a
+    confirmed human hold. Leave the sweep reason as `held by ${by}`: the display test sees the claimed name with
+    no actor and no mismatch flag.
