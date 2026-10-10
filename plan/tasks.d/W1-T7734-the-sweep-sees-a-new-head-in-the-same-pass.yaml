@@ -1,0 +1,103 @@
+- id: W1-T7734
+  title: "THE SWEEP SEES A NEW HEAD IN THE SAME PASS, NOT A PASS LATER — on 2026-10-10, CI start to the sweep's first sight of the new head took a median 9.8 min (p90 44.9, 545 PR-min across 38 merged PRs), and 31 `sweep.head_moved` stand-downs in 6 h each waited a whole tick because the act-time guard stands down instead of re-reading the one PR it caught moving"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — when the sweep's view of one PR is refreshed; it gates every acting disposition
+  band_meaning: span
+  origin: "operator session 2026-10-10: throughput study (ledger union 05:53-15:39Z, 38 PRs merged 10:00-15:39Z), operator asked for flow improvements"
+  plan_refs: [W1-T5749, W1-T5789, W1-T5922, W1-T5931, W1-T2852, W1-T4732, W1-T5491, W1-T3275, W1-T100, W1-T147]
+  files: [src/lib/sweep.ts, src/lib/daemon.ts, src/run-task.ts, src/lib/open-prs-rest.ts, test/the-sweep-sees-a-new-head-in-the-same-pass.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-10 from the ledger union (05:53-15:39Z) and gh PR timelines. For the 38 PRs merged
+    10:00-15:39Z:
+    - CI start to the sweep's first sight of the new head: median 9.8 min, p90 44.9 min, 545 PR-min total.
+    - CI start to green: median 16.4 min. Seeing the head is therefore over half of the CI time again.
+    - 31 `sweep.head_moved` stand-downs in 6 h.
+
+    READ on origin/main faca80c75. The delay has three parts.
+
+    (1) THE SNAPSHOT IS AGED AT TAKE TIME, NOT AT ACT TIME.
+    - The full pass consumes the tick's read-plane generation via `onePassPerGeneration`
+      (src/lib/read-plane.ts:169, wired at src/run-task.ts:39363).
+    - Its age is gated by `freshReadGeneration` (read-plane.ts:145) against `TICK_READ_MAX_AGE_MS = 5 * 60_000`
+      (read-plane.ts:132), when the pass STARTS. `buildSweepHook` (run-task.ts:46767) then hands `openPrViews`
+      to `runSweep` (src/lib/sweep.ts:13478), which acts on PRs minutes later.
+    - No row records how old the snapshot was when a PR was acted on. There is no `snapshot_age_ms` anywhere
+      in src/. `tick_read.stale_refused` (read-plane.ts:156) is written only for a refused generation.
+
+    (2) THE ACT-TIME GUARD STANDS DOWN FOR A WHOLE TICK.
+    - W1-T5749/W1-T5789's guard is in `runSweep` at sweep.ts:15428-15442. It reads `deps.readLiveStateAtAct`
+      (wired to `effects.readLiveState` → `ghLiveState`, run-task.ts:46951 and :9222).
+    - On `liveHead !== pr.headSha` (sweep.ts:15435) it sets `acted = false`, writes `sweep.head_moved`
+      (:15440), and its reason says "the next pass re-derives from the live head" (:15439).
+    - It already paid for one live read of exactly that PR, but `ghLiveState` keeps only `headSha`, with no
+      rollup, so the disposition cannot be re-derived from it.
+    - `fetchSinglePrRest` (src/lib/open-prs-rest.ts:411) already reads one PR plus its rollup, but only
+      `rmd fix` calls it, and it bypasses the `GhCallPacer` (src/lib/github-transport.ts:464). So does
+      `ghLiveState`.
+
+    (3) NO LIGHT PASS RUNS WHILE THE DAEMON IS IDLE.
+    - Light passes run only inside `startInFlightTicker` (src/lib/daemon.ts:1908), which exists only while
+      a dispatch, retro or sweep phase holds the loop. Its per-tick light pass is at :2189.
+    - `startInterphaseReviewClock` (daemon.ts:1603) covers the gap between phases, but the idle branch
+      (daemon.ts:4896) stops it at :5013 before `sleepUntilSweepWake(pollIntervalMs)` at :5014.
+    - So an idle daemon with a post-review PR waiting does not review it until the next phase or full pass.
+    - W1-T2852 and W1-T4732 closed the interphase gap. The idle gap is what remains.
+
+    SHARED SURFACE ONLY: W1-T100 (blocked_ci routing to the ci-log fix) and W1-T147 (the overnight chaos
+    drill) also name src/lib/sweep.ts, src/lib/daemon.ts and src/run-task.ts. Neither touches snapshot
+    freshness, the act-time guard or the idle light pass.
+
+    RELATED OPEN WORK: #10690 refills a freed review lane between passes. That is complementary: it uses
+    the width, and this task makes sure the head the width serves is current.
+  design: |
+    1. SAME-PASS RE-DERIVE. When the act-time guard sees a moved head:
+       - Re-read THAT ONE PR (the PR plus its status rollup, i.e. `fetchSinglePrRest`'s shape) through the
+         daemon's `GhCallPacer`. The pacer is budget-adaptive: it defers when the pacer's budget says so,
+         with no fixed retry count.
+       - Rebuild that PR's `OpenPrView` and re-derive its disposition in the same pass.
+       - Act on the re-derived disposition under the same guards, width and admission bounds as any other
+         PR in the pass (`reviewAdmissionBound`, sweep.ts:17497; `effectiveReviewWidth`, :13341).
+       - A post-review head that re-derives as review-eligible is admitted in this pass when width allows.
+       - The re-read is spent once per (PR, pass). A head that moves AGAIN during the re-read stands down as
+         today.
+       - A failed re-read stands down with the read error in `standDownReason` and on the
+         `sweep.head_moved` row. It never fails silently and never falls back to the stale snapshot.
+       - Make `ghLiveState`'s act-time read and the re-read the same paced call where possible, so the
+         guard does not read the PR twice.
+    2. AGE AT ACT TIME. Every `sweep.disposed` row the full pass writes records `snapshot_age_ms`: now minus
+       the generation's `publishedAtMs`, read when the PR is ACTED on, not when the pass starts. A re-derived
+       PR records the age of its fresh read and `rederived: true`.
+    3. IDLE LIGHT PASS.
+       - In the idle branch, when eligible review demand exists, run a light pass during the idle sleep
+         instead of stopping the interphase clock and sleeping blind. Review demand means post-review PRs
+         known from the last pass and not yet admitted (`reviewAdmissionQueueDepth`, sweep.ts:17883).
+       - The cadence is derived, not fixed: a pure function of the observed review duration and the
+         head-churn rate (head pushes per PR-hour from recent `sweep.head_moved` and `sweep.disposed` rows),
+         read from in-process memos, never a full ledger union.
+       - No fixed cap and no fixed floor. With no demand the daemon sleeps as today.
+       - Each idle light pass writes a row naming the demand and the derived cadence.
+  acceptance:
+    - claim: "a full pass whose act-time guard finds a moved head re-reads that one PR and re-derives its disposition in the same pass"
+      proof: 'grep: test("W1-T7734: a full pass that finds a moved head re-derives that PR from a fresh single-PR read in the same pass" in test/the-sweep-sees-a-new-head-in-the-same-pass.test.ts'
+    - claim: "a re-derived post-review head is admitted to review in the same pass when the width allows"
+      proof: 'grep: test("W1-T7734: a re-derived post-review head is admitted in the same pass when width allows" in test/the-sweep-sees-a-new-head-in-the-same-pass.test.ts'
+    - claim: "a failed single-PR re-read stands down and names the read error in its reason"
+      proof: 'grep: test("W1-T7734: a failed single-PR re-read stands down naming the read error in its reason" in test/the-sweep-sees-a-new-head-in-the-same-pass.test.ts'
+    - claim: "an idle daemon runs a light pass when eligible review demand exists, at a cadence derived from observed review duration and head churn"
+      proof: 'grep: test("W1-T7734: an idle daemon runs a light pass when eligible review demand exists" in test/the-sweep-sees-a-new-head-in-the-same-pass.test.ts'
+    - claim: "a disposed row records the snapshot's age at act time"
+      proof: 'grep: test("W1-T7734: a disposed row records the snapshot age at act time" in test/the-sweep-sees-a-new-head-in-the-same-pass.test.ts'
+  falsifier: |
+    Leave the guard as a bare stand-down: the same-pass test finds `sweep.head_moved` and no second
+    `sweep.disposed` row for the new head, and the admission test finds no `sweep.review_admitted` for it.
+    Make the re-read's catch return the snapshot view: the failure test finds no read error in the reason.
+    Keep `stopInterphaseReviewClock()` ahead of the idle sleep with no demand check: the idle test sees zero
+    light passes while a post-review PR waits.
