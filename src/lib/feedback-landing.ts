@@ -1680,18 +1680,28 @@ function readPendingCiLearningInputs(stateRoot: string, shardRelDir: string): La
   }));
 }
 
+const ciLearningMainOriginsArgs = (shardRelDir: string): string[] => [
+  "grep",
+  "--no-color",
+  "-h",
+  "-E",
+  "^[[:space:]]*origin:[[:space:]]*[^#]+",
+  "origin/main",
+  "--",
+  shardRelDir,
+];
+
 function ciLearningMainOrigins(shardRelDir: string, git: GitExec): Set<string> {
+  return ciLearningOriginsOf(git(ciLearningMainOriginsArgs(shardRelDir)));
+}
+
+/** The same `git grep` as {@link ciLearningMainOrigins}, yielded to the landing driver so the async form awaits it. */
+function* ciLearningMainOriginsSteps(shardRelDir: string, net: LandingNet): Generator<LandingAsk, Set<string>, AskReply> {
+  return ciLearningOriginsOf(yield* net.git(ciLearningMainOriginsArgs(shardRelDir)));
+}
+
+function ciLearningOriginsOf(output: string): Set<string> {
   const origins = new Set<string>();
-  const output = git([
-    "grep",
-    "--no-color",
-    "-h",
-    "-E",
-    "^[[:space:]]*origin:[[:space:]]*[^#]+",
-    "origin/main",
-    "--",
-    shardRelDir,
-  ]);
   for (const line of output.split(/\r?\n/)) {
     const raw = line.replace(/^[ \t]*origin:[ \t]*/, "").trim();
     const origin = raw.replace(/\\"/g, '"').replace(/^(['"])(.*)\1$/, "$2").trim();
@@ -1700,8 +1710,7 @@ function ciLearningMainOrigins(shardRelDir: string, git: GitExec): Set<string> {
   return origins;
 }
 
-function acknowledgeMergedCiLearningShards(stateRoot: string, shardRelDir: string, git: GitExec): void {
-  const mainOrigins = ciLearningMainOrigins(shardRelDir, git);
+function acknowledgeMergedCiLearningShards(stateRoot: string, shardRelDir: string, git: GitExec, mainOrigins: Set<string>): void {
   for (const relPath of ciLearningPendingRelPaths(stateRoot, shardRelDir)) {
     try {
       const queuedPath = ciLearningPendingAbsPath(stateRoot, relPath);
@@ -1762,28 +1771,40 @@ export async function landCiLearningShardsAsync(
 ): Promise<CiLearningFilingResult> {
   const { planPrPreflight, ...landOpts } = deps;
   const preflight = planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommitAsync(checkoutRoot, sha, pr));
-  return driveLandingAsync(ciLearningLandingSteps(drafts, checkoutRoot, landOpts), preflight);
+  // The real async seams, or every network ask resolves through the SYNC `git`/`gh` a microtask later and the
+  // daemon loop is held for the child's whole life: on 2026-10-10 this rung's `git fetch` under host thrash held
+  // core's loop with no pulse and unreaped children while the progress watchdog's recycle waited on it.
+  return driveLandingAsync(ciLearningLandingSteps(drafts, checkoutRoot, { ...landOpts, ...asyncSeamsOf(checkoutRoot, landOpts) }), preflight);
 }
 
 function* ciLearningLandingSteps(
   drafts: readonly CiLearningShardDraft[],
   checkoutRoot: string,
-  deps: Omit<LandCiLearningShardsOptions, "planPrPreflight">,
+  deps: Omit<LandCiLearningShardsOptions, "planPrPreflight"> & { gitAsync?: GitExecAsync; ghAsync?: GhExecAsync },
 ): PreflightSteps<CiLearningFilingResult> {
   const git = deps.git ?? defaultGit(checkoutRoot);
+  // The fetch and both origin/main reads are yielded, never run on the sync `git`: the async driver awaits them.
+  const net = landingNet(git, deps.gh ?? defaultGh(), deps);
   const kind = ciLearningLandingKind(checkoutRoot, deps, git);
   const shardRelDir = ciLearningShardRelDir(checkoutRoot);
   const held = new Set([...deps.planOrigins, ...ciLearningPendingOrigins(deps.stateRoot, checkoutRoot)]);
   const skipped: string[] = [];
   const refused: { findingId: string; reason: string }[] = [];
 
+  let mainOrigins: Set<string> | undefined;
   try {
-    git(["fetch", "origin", "--quiet"]);
-    acknowledgeMergedCiLearningShards(deps.stateRoot, shardRelDir, git);
+    yield* net.git(["fetch", "origin", "--quiet"]);
+    mainOrigins = yield* ciLearningMainOriginsSteps(shardRelDir, net);
+    acknowledgeMergedCiLearningShards(deps.stateRoot, shardRelDir, git, mainOrigins);
   } catch {
     // Fetch/ack failure must not discard staged bytes or prevent a new durable staging write.
   }
-  for (const origin of ciLearningMergedOrigins(checkoutRoot, git)) held.add(origin);
+  try {
+    mainOrigins ??= yield* ciLearningMainOriginsSteps(shardRelDir, net);
+  } catch (e) {
+    console.error(`ci-learning: origin/main's filed origins are unreadable, so only the plan and queue hold findings: ${String((e as Error)?.message ?? e)}`);
+  }
+  for (const origin of mainOrigins ?? []) held.add(origin);
 
   for (const draft of drafts) {
     if (held.has(draft.findingId)) {
@@ -1809,7 +1830,7 @@ function* ciLearningLandingSteps(
 
   const landing = yield* landContentSteps(checkoutRoot, kind, inputs, deps);
   try {
-    acknowledgeMergedCiLearningShards(deps.stateRoot, shardRelDir, git);
+    acknowledgeMergedCiLearningShards(deps.stateRoot, shardRelDir, git, yield* ciLearningMainOriginsSteps(shardRelDir, net));
   } catch {
     // Best-effort acknowledgement only; pending bytes remain retryable.
   }
