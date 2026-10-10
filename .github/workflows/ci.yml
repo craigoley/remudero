@@ -133,6 +133,10 @@ jobs:
             BROWSER="$(node scripts/ci-shard-admission.mjs --changed-files admission-files.txt --shard 2)" || BROWSER="true"
             case "$BROWSER" in false) ;; *) BROWSER="true" ;; esac
           fi
+          # The flake screen below runs on shard 1 every test file this PR adds, browser suites included.
+          if [ "$SETUP" != "false" ] && [ "${{ matrix.shard }}" = "1" ] && [ -n "$(node scripts/flake-screen.mjs --list 2>/dev/null || echo unknown)" ]; then
+            BROWSER="true"
+          fi
           echo "setup=${SETUP}" >> "$GITHUB_OUTPUT"
           echo "browser=${BROWSER}" >> "$GITHUB_OUTPUT"
           echo "- ci shard ${{ matrix.shard }}/8: setup=${SETUP}, browser=${BROWSER} (W1-T5697: shard 1 keeps setup for Typecheck; its browser serves Test, or a ci.yml diff's guard-mutation suites); full required coverage is unchanged." >> "$GITHUB_STEP_SUMMARY"
@@ -489,6 +493,11 @@ jobs:
           mkdir -p "$FLAKE_RETRY_DIR"
           grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-${{ matrix.shard }}.log" || : > "$FLAKE_RETRY_DIR/shard-${{ matrix.shard }}.log"
           exit "$CODE"
+      - name: Flake-screen the test files this pull request adds (a test that passed once on its PR reddened main three times on 2026-10-10)
+        # scripts/flake-screen.mjs: shard 1 reruns each ADDED test file under twice the runner's
+        # parallelism for the predicted coverage makespan, the time the PR already waits; one failed
+        # run fails the shard. A push, a merge group and shards 2-8 print why and screen nothing.
+        run: node scripts/flake-screen.mjs --shard ${{ matrix.shard }}
       - name: Workflow guard mutation (W1-T3220 — a ci.yml skip guard that no test can distinguish turns a required check into a green no-op)
         run: |
           # NO EARLY `exit 0` IN THIS STEP, DELIBERATELY. The check below enumerates skip-shaped
