@@ -489,7 +489,10 @@ describe("test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts", 
     let release!: () => void;
     const pending = new Promise<void>(resolve => { release = resolve; });
     const task = { id: "W1-T7243", title: "repair", files: [], acceptance: [], depends_on: [], type: "implement" };
-    const effects = buildSweepEffects({ owner: "o", repo: "r", config: { root } as never,
+    // localRepoName pins the "is this the local checkout?" comparison. Omitted, buildSweepEffects
+    // shells `git config remote.origin.url` on the checkout, which throws where the checkout has
+    // no readable origin (the reviewer's bwrap sandbox) — failing this test before any dispatch.
+    const effects = buildSweepEffects({ owner: "o", repo: "r", localRepoName: "remudero", config: { root } as never,
       plan: { tasks: [task], byId: new Map([[task.id, task]]) } as never,
       runId: "timing", ledgerPath: join(root, "ledger.ndjson"), log: (step, fields) => timings.push({ step, ...fields }),
       dispatchFixPreflightStandDownImpl: async () => undefined,
