@@ -46,6 +46,18 @@ const redSet = (row: Record<string, unknown>): string[] => row.mode === "merge-c
   ...(Array.isArray(row.unmet_claims) ? row.unmet_claims.filter((c): c is string => typeof c === "string").map(c => `review:${c}`) : []),
 ]);
 
+// Fix-round rows name their PR by `repair_pr_url`, not `pr_number`; every run-unfiled PR shares
+// task id "unfiled", so a row's PR must be read from either field or one PR inherits all their rounds.
+export function rowPrNumber(row: Record<string, unknown>): number | undefined {
+  if (typeof row.pr_number === "number") return row.pr_number;
+  for (const key of ["repair_pr_url", "pr_url"]) {
+    const value = row[key];
+    const match = typeof value === "string" ? /\/pull\/(\d+)$/.exec(value) : null;
+    if (match) return Number(match[1]);
+  }
+  return undefined;
+}
+
 export function buildFixProgressInput(facts: {
   taskId?: string; prNumber?: number; headSha: string; strikesSpent?: number; currentRed: string[];
   ledger: readonly Record<string, unknown>[]; operatorAnswer?: string; formerCeiling?: number; parkedReason?: string;
@@ -53,8 +65,9 @@ export function buildFixProgressInput(facts: {
   const rounds: FixProgressRound[] = [];
   const byId = new Map<string, FixProgressRound>();
   for (const [index, row] of facts.ledger.entries()) {
-    if (facts.taskId !== undefined ? row.task_id !== facts.taskId : row.pr_number !== facts.prNumber) continue;
-    if (typeof row.pr_number === "number" && facts.prNumber !== undefined && row.pr_number !== facts.prNumber) continue;
+    const rowPr = rowPrNumber(row);
+    if (facts.taskId !== undefined ? row.task_id !== facts.taskId : rowPr !== facts.prNumber) continue;
+    if (rowPr !== undefined && facts.prNumber !== undefined && rowPr !== facts.prNumber) continue;
     // W1-T5032: this dispatch-shaped proof-amendment row is only an idempotency identity, not a
     // worker round. Keep it out of the judge's progress history just as the strike tally does.
     if (row.step === "fix.dispatch" && row.kind === "proof_amendment") continue;

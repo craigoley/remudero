@@ -44,7 +44,7 @@
     read-model-worker.ts by name; build on #9160 rather than carrying its fix.
   acceptance:
     - claim: "the census fails by file and kind on a Worker spawn with neither env SHARE_ENV nor an exemption row and on a stale exemption row, passes on the recorded tree, and a SHARE_ENV fixture thread reads a GH_TOKEN its parent changed after spawn"
-      proof: "unit test: test/every-long-lived-worker-sees-a-refreshed-gh-token.test.ts"
+      proof: "grep: the census fails by file and kind on a Worker spawn with neither env SHARE_ENV nor an exemption row in test/every-long-lived-worker-sees-a-refreshed-gh-token.test.ts"
   falsifier: |
     Remove `env: SHARE_ENV` from read-plane.ts's spawn: the census names read-plane.ts and the test
     fails.
