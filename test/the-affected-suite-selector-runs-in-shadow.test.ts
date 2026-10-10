@@ -176,6 +176,29 @@ test("W1-T7475: the red-branch strike suite is selected for each recorded miss e
   assert.ok(!unrelated.suites.includes(suite), "an unrelated source change must not select the suite");
 });
 
+test("W1-T4894: the wall-clock bound suite is selected for each recorded miss edge", () => {
+  const suite = "test/a-wall-clock-bound-declares-itself.test.ts";
+  const edges = [
+    "src/lib/board.ts",
+    "src/lib/github-transport.ts",
+    "src/lib/serve.ts",
+    "src/lib/status.ts",
+    "test/board-github-off-loop.test.ts",
+  ];
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  const readMap: ReadMapInput = {
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} },
+    drift: { distance: 0, changedSinceMap: [] },
+  };
+  for (const changed of edges) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+  }
+  const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [], readMap });
+  assert.ok(!unrelated.suites.includes(suite), "an unrelated source change must not select the suite");
+});
+
 test("W1-T6751: the precheck census is selected for each recorded miss edge", () => {
   const census = "test/every-ci-census-is-asked-before-the-push.test.ts";
   const edges = [
