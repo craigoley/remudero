@@ -52,6 +52,8 @@ interface Run {
   stdout: string;
   stderr: string;
   calls: Call[];
+  /** The stub's record directory, so a test can read markers the stub wrote mid-run. */
+  rec: string;
 }
 
 /**
@@ -110,7 +112,8 @@ function writeStubs(dir: string): void {
     '        *:*:id)     echo "sha256:idsame" ;;',
     "      esac; exit 0",
     "    fi",
-    // `docker image prune -af`
+    // `docker image prune -af` — records whether the host recycle lock was HELD while it ran.
+    '    [ -n "$RMD_RECYCLE_HOST_LOCK" ] && [ -d "$RMD_RECYCLE_HOST_LOCK" ] && : > "$STUB_REC/prune-under-lock"',
     '    echo "Total reclaimed space: 1GB"; exit 0 ;;',
     '  container|builder) echo "Total reclaimed space: 0B"; exit 0 ;;',
     "  pull)",
@@ -145,7 +148,10 @@ function runHostUpdate(
   scriptPath = SCRIPT,
   extraEnv: NodeJS.ProcessEnv = {},
 ): Run {
-  if (scriptPath !== SCRIPT) cpSync(join(REPO_ROOT, "deploy", "acr-login.sh"), join(dirname(scriptPath), "acr-login.sh"));
+  if (scriptPath !== SCRIPT) {
+    cpSync(join(REPO_ROOT, "deploy", "acr-login.sh"), join(dirname(scriptPath), "acr-login.sh"));
+    cpSync(join(REPO_ROOT, "deploy", "host-recycle-lock.sh"), join(dirname(scriptPath), "host-recycle-lock.sh"));
+  }
   const dir = mkdtempSync(join(tmpdir(), "host-update-stub-"));
   const rec = mkdtempSync(join(tmpdir(), "host-update-rec-"));
   const state = mkdtempSync(join(tmpdir(), "host-update-state-"));
@@ -159,6 +165,7 @@ function runHostUpdate(
       STUB_REC: rec,
       STUB_MODE: mode,
       RMD_STATE_DIR: state,
+      RMD_RECYCLE_HOST_LOCK: join(state, "recycle-container.lock"),
       ...extraEnv,
     },
   });
@@ -174,7 +181,7 @@ function runHostUpdate(
   } catch {
     calls = [];
   }
-  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "", calls };
+  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "", calls, rec };
 }
 
 /** Index of the first call matching `pred`, or -1 — ordering is asserted on these, never on source. */
@@ -886,4 +893,40 @@ test("MUTANT: dropping the serve publish from the REAL block is caught by the lo
   // …and the healthy script must still carry it, or this proves nothing about the guard.
   const real = printWithPaths(dead, credFixture(8 * 3600_000));
   assert.match(serveBlock(real.out), /-p 127\.0\.0\.1:/, "the real script must carry what the mutant dropped");
+});
+
+// ── THE HOST RECYCLE LOCK (follow-up to #10582) ───────────────────────────────────────────────
+// deploy/recycle-container.sh holds a host-wide lock from its pull until its swap. The nightly
+// `--reclaim-only` runs `docker image prune -a`, which deletes a pulled image no container references
+// yet — exactly an instance mid-recycle. So the reclaim's image prune must take the same lock.
+
+const isImagePrune = (c: Call) => c.bin === "docker" && c.argv[0] === "image" && c.argv[1] === "prune";
+
+test("the nightly reclaim skips the image prune while another instance holds the host recycle lock", () => {
+  const lockRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-lock-`));
+  const lock = join(lockRoot, "recycle-container.lock");
+  mkdirSync(lock);
+  // A LIVE holder: this test process's own pid, so the dead-holder takeover cannot fire.
+  writeFileSync(join(lock, "holder"), `${process.pid} core\n`);
+  const run = runHostUpdate("good", ["--reclaim-only"], SCRIPT, {
+    RMD_RECYCLE_HOST_LOCK: lock,
+    RMD_RECLAIM_LOCK_WAIT_S: "0",
+    RMD_GIT_RECLAIM_DIRS: "",
+  });
+  assert.equal(firstIndex(run.calls, isImagePrune), -1, "no image prune may run under another instance's recycle lock");
+  assert.match(run.stdout, /SKIPPING image and build-cache prune — core \(pid \d+\) holds the host recycle lock/);
+  assert.ok(existsSync(join(lock, "holder")), "the other instance's lock is left exactly as it was");
+});
+
+test("the nightly reclaim takes the free host recycle lock around its image prune and releases it", () => {
+  const lockRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-lock-`));
+  const lock = join(lockRoot, "recycle-container.lock");
+  const run = runHostUpdate("good", ["--reclaim-only"], SCRIPT, {
+    RMD_RECYCLE_HOST_LOCK: lock,
+    RMD_RECLAIM_LOCK_WAIT_S: "0",
+    RMD_GIT_RECLAIM_DIRS: "",
+  });
+  assert.notEqual(firstIndex(run.calls, isImagePrune), -1, "the image prune runs when no recycle holds the lock");
+  assert.ok(existsSync(join(run.rec, "prune-under-lock")), "the image prune ran while host-update held the host recycle lock");
+  assert.ok(!existsSync(lock), "the lock is released once the prune is done");
 });

@@ -1,6 +1,6 @@
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
 import { judgeFixProgress,
-  type FixProgressJudge, type FixProgressVerdict } from "./lib/fix-progress-judge.js";
+  type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "./lib/fix-progress-judge.js";
 import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-update.js";
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
   loadCapabilityInspectionSource, readInspectionJson } from "./lib/capability-inspection.js";
@@ -206,6 +206,7 @@ import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
 import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
+import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputs, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, evidenceCoveragePassDue, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
@@ -303,7 +304,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "scout"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "fix-lane", "scout"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -1647,6 +1648,7 @@ import {
   runPostFixReverification,
   runSweep,
   runSweepLightPass,
+  runLightPassReadyRefresh,
   withFullSweepRepairAdmission,
   redQualityGateNames,
   stillRedRequiredNames,
@@ -13171,6 +13173,9 @@ export async function runFixRung(opts: {
         strike_cap: opts.strikeCap,
         unmet_count: unmet.length,
         unmet_claims: unmet.map((criterion) => criterion.claim),
+        // The progress judge compares these across rounds: a FIXED round followed by the same
+        // reviewer-side output is a reviewer-only failure, not a worker that needs another try.
+        ...(reviewerProofFailures(unmet).length > 0 ? { reviewer_proof_failures: reviewerProofFailures(unmet) } : {}),
         round,
         mode: fixMode,
         verdict_regime: verdictRegime,
@@ -37544,6 +37549,15 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log }),
       }), d);
     }
+    // W1-T7421: the fix lane's own defects (operator interventions, unstated or refused rounds, FIXED-but-red heads)
+    // are clustered and priced once a UTC day; the top class is drafted as ONE remedy through the flow ladder.
+    case "fix-lane": {
+      const d = deps("fix-lane", raiseDuplicate);
+      return gardenPass(fixLaneGardenSpec(d, {
+        owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot, log),
+        escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log }),
+      }), d);
+    }
     // W1-T4439: aggregate complete coverage-shard shadow records before W1-T4406
     // may narrow CI. A real miss opens a parked task naming the observed edge.
     case "selector-shadow": {
@@ -40758,7 +40772,7 @@ export async function serveCommand(
     // an unconfigured install, identity is never consulted, exactly as before.
     identity,
     log,
-    consoleSnapshots: { dir: join(config.root, "state", "console-snapshots"), prewarmPaths: ["/v1/operator-activity", "/v1/action-results"] },
+    consoleSnapshots: { dir: join(config.root, "state", "console-snapshots") },
     projectionWorker: consoleProjectionWorker(),
     readModel: deps.buildBatchedGithub ? {} : { slowLane: { inbox: { root: repoRoot, planPath, ledgerPath, inboxRoot: config.root, repository: `${self.owner}/${self.repo}` },
       accountUsage: { ledgerPath, root: config.root, accountFilePath: resolveAccountFilePath(undefined) } } },
@@ -42015,6 +42029,8 @@ function unmetFromLedger(lines: Array<Record<string, unknown>>, taskId: string, 
     reason: reasons[i] ?? "",
     // Legacy ledger rows can lack this required live-verdict field (W1-T5020).
     proof_exec: proofContext.get(claim)?.proof_exec as CriterionVerdict["proof_exec"],
+    ...(typeof proofContext.get(claim)?.proofFailureOutput === "string"
+      ? { proofFailureOutput: proofContext.get(claim)!.proofFailureOutput } : {}),
     refusal: refusals.get(claim),
   }));
 }
@@ -47127,9 +47143,25 @@ export function buildSweepLightHook(
       // `fixRungAllowed` is false — can never spend a fix-rung strike. Every other open PR
       // (including a `blocked-fixable` PR with a genuine, non-cancelled failure) stays in the
       // batch below, gated by `fixRungAllowed` exactly as before this task.
-      const requeueOnlyPrs = reviewOnly ? [] : openPrs.filter((pr) => blockedFixableIsRequeueOnly(pr));
+      // W1-T7214: a ready PR main moved under is refreshed HERE, once over the whole snapshot (never
+      // per PR — W1-T528), before either batch below can arm it on the base main has left. Only a
+      // ready PR is probed, so a pass with none spends no compare read. The refreshed PR sits out
+      // this pass: its snapshot names the head the update just replaced.
+      let readyRefreshed: number | undefined;
+      const readyPrs = reviewOnly ? [] : openPrs.filter((pr) =>
+        pr.isDraft !== true && pr.checksState === "green" && pr.reviewState === "success");
+      if (readyPrs.length > 0) {
+        const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
+        const behindMainByPr = buildBehindMainByPr(owner, repo, readyPrs, undefined, undefined, baseChangedFilesByPr);
+        readyRefreshed = await runLightPassReadyRefresh(openPrs, {
+          ...effects, ledgerPath, runId, behindMainByPr, baseChangedFilesByPr,
+          inFlightTaskIds: new Set(inFlightTaskIdsFrom(join(config.root, "state", "inflight"))),
+        }, DEFAULT_SWEEP_POLICY);
+      }
+      const passPrs = readyRefreshed === undefined ? openPrs : openPrs.filter((pr) => pr.prNumber !== readyRefreshed);
+      const requeueOnlyPrs = reviewOnly ? [] : passPrs.filter((pr) => blockedFixableIsRequeueOnly(pr));
       const requeueOnlyPrNumbers = new Set(requeueOnlyPrs.map((pr) => pr.prNumber));
-      const restPrs = requeueOnlyPrNumbers.size === 0 ? openPrs : openPrs.filter((pr) => !requeueOnlyPrNumbers.has(pr.prNumber));
+      const restPrs = requeueOnlyPrNumbers.size === 0 ? passPrs : passPrs.filter((pr) => !requeueOnlyPrNumbers.has(pr.prNumber));
       const passes: Array<Promise<unknown>> = [
         // UNCHANGED FROM BEFORE THIS TASK when `requeueOnlyPrs` is empty (the overwhelming
         // common case — cancellations were measured at ~7% of `coverage-ratchet` runs): `restPrs`
@@ -47160,7 +47192,8 @@ export function buildSweepLightHook(
             // one tick, exactly the N+(N-1)+…+1 cost this shard exists to prevent. `updateBranch`
             // joins dispatchFix/close/escalate/depReview/arm on the list that stands down here
             // until the NEXT FULL sweep (`sweepCommand`/the daemon poll rung, both of which call
-            // `runSweep` ONCE over the whole set) picks it back up.
+            // `runSweep` ONCE over the whole set) picks it back up. W1-T7214: the one exception, a
+            // ready-overlap refresh, runs ONCE above (`runLightPassReadyRefresh`), never through this fan-out.
             updateBranch: undefined,
           },
           DEFAULT_SWEEP_POLICY,

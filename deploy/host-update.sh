@@ -752,6 +752,7 @@ host_update_cleanup_tmp() {
   [ -n "${DOCKER_ERR}" ] && rm -f "${DOCKER_ERR}"
   [ -n "${PULL_LOG}" ] && rm -f "${PULL_LOG}"
   [ -n "${OFFHOST_TAR}" ] && rm -f "${OFFHOST_TAR}"
+  [ -n "${HOST_RECYCLE_LOCK_TAKEN:-}" ] && rmd_release_host_recycle_lock "${HOST_RECYCLE_LOCK_TAKEN}"
   return 0
 }
 trap host_update_cleanup_tmp EXIT
@@ -1297,8 +1298,21 @@ else
   else
     echo "  (skipping 'docker container prune' — --reclaim-only never removes a container)"
   fi
-  docker image     prune -af 2>&1 | tail -1 | sed 's/^/  /' || true
-  docker builder   prune -af 2>&1 | tail -1 | sed 's/^/  /' || true
+  # The image prune takes deploy/recycle-container.sh's host lock (deploy/host-recycle-lock.sh): an
+  # instance mid-recycle holds a pulled image no container references yet, and `image prune -a`
+  # would delete it. A held lock past the wait SKIPS this prune and says why — never prunes under it.
+  source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/host-recycle-lock.sh"
+  HOST_RECYCLE_LOCK="$(rmd_host_recycle_lock_path)"
+  if rmd_take_host_recycle_lock "${HOST_RECYCLE_LOCK}" "host-update" \
+      "${RMD_RECLAIM_LOCK_WAIT_S:-600}" "${RMD_RECYCLE_LOCK_POLL_S:-5}"; then
+    HOST_RECYCLE_LOCK_TAKEN="${HOST_RECYCLE_LOCK}"
+    docker image     prune -af 2>&1 | tail -1 | sed 's/^/  /' || true
+    docker builder   prune -af 2>&1 | tail -1 | sed 's/^/  /' || true
+    rmd_release_host_recycle_lock "${HOST_RECYCLE_LOCK}"
+    HOST_RECYCLE_LOCK_TAKEN=""
+  else
+    echo "  SKIPPING image and build-cache prune — ${RMD_HOST_RECYCLE_LOCK_HOLDER} holds the host recycle lock (${HOST_RECYCLE_LOCK}); a later run reclaims."
+  fi
 fi
 
 # ── 4a. GIT OBJECT RECLAIM (W1-T3612) — the OTHER filesystem the disk actually fills on ─────────

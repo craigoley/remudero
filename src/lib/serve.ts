@@ -86,7 +86,7 @@ import {
 } from "./ci-incidents.js";
 import { loadEscalationLinkSecret, readEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { projectClassifiedHumanGates } from "./ask-classification.js";
-import { buildReadModelViewRoutes, viewMode, type ViewBodySource } from "./views.js";
+import { buildReadModelViewRoutes, oldestAsOf, viewMode, type ViewBodySource } from "./views.js";
 import { createViewEvents, VIEW_EVENTS_PATH, type ViewEvents } from "./view-events.js";
 import { analyticsLegacyView } from "./analytics-view.js";
 import { NAV_BADGE_NO_COMPOSITE, navBadgeView, navBadgeWithDecisions, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
@@ -95,8 +95,8 @@ import { HOST_VIEW_NAME, hostLegacyView, providerPolicyConfigFromStatus, provide
 import { FEEDBACK_VIEW_NAME, feedbackLegacyView } from "./feedback-view.js";
 import { INBOX_VIEW_NAME, inboxLegacyView } from "./inbox-view.js";
 import { NEEDS_YOU_VIEW_NAME, withNeedsYouView, type NeedsYouData } from "./needs-you-view.js";
-import { WORKSTREAMS_VIEW_NAME } from "./workstreams-view.js";
-import { ACTIONS_VIEW_NAME } from "./actions-view.js";
+import { WORKSTREAMS_VIEW_NAME, WORKSTREAMS_VIEW_VERSION, type WorkstreamsData } from "./workstreams-view.js";
+import { ACTIONS_VIEW_NAME, ACTIONS_VIEW_VERSION, type ActionsData } from "./actions-view.js";
 import { AGENT_VIEW_NAME } from "./agent-view.js";
 import { INCIDENTS_VIEW_NAME } from "./incidents-view.js";
 import { TASK_VIEW_NAME } from "./view-demand.js";
@@ -228,9 +228,10 @@ import {
   createConsoleSnapshotCache,
   createConsoleWriteGeneration,
   invalidateSnapshotsOnWrite,
-  prewarmReadRoutes,
   RouteResponseBuffer,
   sendStaleJson,
+  snapshotEtag,
+  writeBufferedResponse,
   type ConsoleResponseStaleness,
   type ConsoleSnapshotCacheOptions,
 } from "./console-snapshot-cache.js";
@@ -313,7 +314,7 @@ export interface ServeDeps {
   routeReadRollup?: RouteReadRollup;
   projectionWorker?: ConsoleProjectionWorker;
   readModel?: Pick<ReadModelWorkerOptions, "tickMs" | "stopWaitMs" | "workerUrl" | "every" | "slowLane">;
-  consoleSnapshots?: { dir: string; prewarmPaths?: readonly string[] };
+  consoleSnapshots?: { dir: string };
   /** Injectable ONLY so a unit test can pin the captured sha; real callers omit it and get
    *  {@link resolveConsoleSha}, resolved once at server start. */
   consoleSha?: string;
@@ -970,17 +971,45 @@ export function boundConsoleReadRoute(
   return { ...route, handler: droppable.handler };
 }
 
+/** W1-T7390: reuse an instance's fresh view before entering the legacy cache or ledger fold. */
+function legacyReadFromView(route: Route, readModel: { source: ViewBodySource; instance: string } | undefined, budgetMs: number): Route {
+  const view = route.path === "/v1/operator-activity" ? WORKSTREAMS_VIEW_NAME : route.path === "/v1/action-results" ? ACTIONS_VIEW_NAME : undefined;
+  if (route.method !== "GET" || !view || !readModel) return route;
+  const { source, instance } = readModel;
+  return { ...route, handler: (req, res, ctx) => {
+    const params = new URL(req.url ?? route.path, "http://localhost").searchParams;
+    // The views are unfiltered and bounded: even a valid filter may need rows outside their bodies.
+    if (params.size > 0) return route.handler(req, res, ctx);
+    const entry = source.body(view, "");
+    const version = view === WORKSTREAMS_VIEW_NAME ? WORKSTREAMS_VIEW_VERSION : ACTIONS_VIEW_VERSION;
+    if (!entry || entry.version !== version) return route.handler(req, res, ctx);
+    const data = entry.body.data as WorkstreamsData | ActionsData | undefined;
+    const selected = data?.instances?.find((item) => item.instance === instance);
+    const body = selected && ("activity" in selected ? selected.activity : selected.results);
+    if (!body || body.state === "unavailable" || body.state === "not-collected") return route.handler(req, res, ctx);
+    const now = systemClock.now();
+    const sources = source.judge(entry.body.sources.filter((s) => s.instance === instance || s.name.endsWith(`:${instance}`)), now, entry);
+    if (sources.length === 0 || sources.some((s) => s.state !== "fresh")) return route.handler(req, res, ctx);
+    const asOf = oldestAsOf(sources);
+    const text = JSON.stringify(body);
+    writeBufferedResponse(req, res, { status: 200, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-cache" },
+      body: text, generatedAtMs: Date.parse(entry.body.generatedAt), etag: snapshotEtag(text), jsonObject: true },
+    { status: "fresh", stale: false, ageMs: asOf === null ? null : Math.max(0, now - Date.parse(asOf)),
+      generatedAt: entry.body.generatedAt, refreshing: false, budgetMs });
+  } };
+}
+
 export function boundConsoleReadRoutes(
   routes: readonly Route[],
   deps: ServeDeps,
   budgetMs: number = CONSOLE_READ_ROUTE_BUDGET_MS,
   memory?: { registry: ServeMemoryRegistry; scope: string },
+  readModel?: { source: ViewBodySource; instance: string },
 ): Route[] {
   const generation = createConsoleWriteGeneration();
   const snapshots = deps.consoleSnapshots;
   const store = snapshots && createConsoleSnapshotStore({ dir: snapshots.dir, codeRev: deps.consoleSha ?? CONSOLE_SHA_UNKNOWN, log: deps.log });
-  if (snapshots?.prewarmPaths) void prewarmReadRoutes(routes, snapshots.prewarmPaths, deps.log);
-  return routes.map((route) => invalidateSnapshotsOnWrite(boundConsoleReadRoute(route, deps, budgetMs, { generation, store }, memory), generation));
+  return routes.map((route) => invalidateSnapshotsOnWrite(legacyReadFromView(boundConsoleReadRoute(route, deps, budgetMs, { generation, store }, memory), readModel, budgetMs), generation));
 }
 
 /**
@@ -3033,7 +3062,8 @@ function assembleServeRoutes(
     }),
     buildGardenersRoute({ stateDir: dirname(deps.ledgerPath) }),
   ];
-  const routes = boundConsoleReadRoutes(rawRoutes, deps, CONSOLE_READ_ROUTE_BUDGET_MS, memory && { registry: memory, scope: "core" });
+  const routes = boundConsoleReadRoutes(rawRoutes, deps, CONSOLE_READ_ROUTE_BUDGET_MS, memory && { registry: memory, scope: "core" },
+    readModel && { source: readModel, instance: deps.instances?.coreInstance ?? CORE_INSTANCE });
   routes.push(...buildOnboardingGoLiveRoutes(deps));
   routes.push(
     ...buildInstanceGatewayRoutes(routes, {
@@ -3044,7 +3074,8 @@ function assembleServeRoutes(
       log: deps.log,
       bound: (reads, board, instance) => boundConsoleReadRoutes(reads.map((r) => projectConsoleStatusRoute(r, modelApprovals)), {
         ...deps, board, consoleSnapshots: deps.consoleSnapshots && instance ? { dir: join(deps.consoleSnapshots.dir, "instances", instance) } : undefined,
-      }, CONSOLE_READ_ROUTE_BUDGET_MS, memory && { registry: memory, scope: instance ?? "instance" }),
+      }, CONSOLE_READ_ROUTE_BUDGET_MS, memory && { registry: memory, scope: instance ?? "instance" },
+      readModel && { source: readModel, instance: instance ?? CORE_INSTANCE }),
       ...deps.instances,
       assistantClaimRoot: deps.fleetControlRoot,
       assistantBootSha: consoleSha,

@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import crypto, { createHash } from "node:crypto";
+import { syncBuiltinESMExports } from "node:module";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
+import { readRoutingQuarantineResolutions, resolveRoutingQuarantineRow } from "../src/lib/routing-quarantine-resolution.js";
 
 const { dailyRoutingReview } = await import(pathToFileURL(join(import.meta.dirname, "../scripts/private-routing-daily-review.mjs")).href);
 const asOf = "2026-10-08T12:00:00.000Z";
@@ -23,6 +25,31 @@ function fixture(rows: unknown[] = [cli], extra = "") {
   return { dir, sources: [{ label: "core", stateDir }], outDir: join(dir, "out"), ledger, raw,
     close: () => rmSync(dir, { recursive: true, force: true }) };
 }
+
+test("quarantine eligibility rejects unrelated rows before real hashing and still hashes an exact future CLI row", () => {
+  const resolution = entry();
+  const resolutions = readRoutingQuarantineResolutions(manifest([resolution]), asOf, ["core"]);
+  const original = crypto.createHash;
+  let hashes = 0;
+  crypto.createHash = (...args: Parameters<typeof original>) => { hashes++; return original(...args); };
+  syncBuiltinESMExports();
+  try {
+    const excluded: Record<string, unknown>[] = [
+      { ...cli, step: "worker.attempt" }, { ...cli, ts: asOf }, { ...cli, ts: "invalid" },
+      { ...cli, ts: 0 },
+      ...["selection_assignment_id", "worker_assignment", "tokens", "total_cost_usd", "cost_usd",
+        "notional_cost_usd", "billing_mode", "success", "served_model"].map(key => ({ ...cli, [key]: null })),
+    ];
+    for (const row of excluded) assert.equal(resolveRoutingQuarantineRow(resolutions, "core", row, JSON.stringify(row), asOf), undefined);
+    assert.equal(hashes, 0, "ineligible rows must not allocate a real hash");
+    assert.deepEqual(resolveRoutingQuarantineRow(resolutions, "core", cli, JSON.stringify(cli), asOf), resolution);
+    assert.equal(hashes, 1, "eligible resolution still requires the native exact-byte hash");
+    assert.equal(resolveRoutingQuarantineRow(resolutions, "site", cli, JSON.stringify(cli), asOf), undefined);
+    assert.equal(hashes, 2, "a different source cannot borrow an identical row's resolution");
+    assert.equal(resolveRoutingQuarantineRow(resolutions, "core", cli, JSON.stringify({ ...cli, argv: ["changed"] }), asOf), undefined);
+    assert.equal(hashes, 3, "changed raw bytes cannot qualify by decoded metadata alone");
+  } finally { crypto.createHash = original; syncBuiltinESMExports(); }
+});
 
 test("an exact CLI quarantine resolution qualifies only trial inputs and retains the raw warning", async () => {
   const f = fixture();

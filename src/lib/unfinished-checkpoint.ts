@@ -35,7 +35,8 @@ export function checkpointProgressInput(stops: readonly CheckpointStop[], headSh
       id: `checkpoint-${s.round}`, subtype: "checkpoint-stop", redBefore: red(s), redAfter: red(stops[i + 1]!), completed: true,
     })),
     parkedReason: "the build stopped on a wip checkpoint again; resume it or open the PR with the remaining work as known reds",
-    signals: { noOpRounds: 0, identicalRedSets: identical, identicalDiffs: 0, oscillating: false, refusedRounds: 0, incompleteRounds: 0 },
+    signals: { noOpRounds: 0, identicalRedSets: identical, identicalDiffs: 0, oscillating: false, refusedRounds: 0, incompleteRounds: 0,
+      reviewerOnlyFailurePersists: 0 },
   };
 }
 

@@ -6,6 +6,22 @@ import { test } from "node:test";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { REAL_SCRIPT } from "./helpers/fleet-heartbeat-harness.js";
 
+// Declare the fixture's topology before host paths: its temporary root may itself
+// live below /mnt/rmd, but that must not move its synthetic root onto /dev/data.
+const FIXTURE_DF = `
+[ "\${DF_FAIL:-}" = 1 ] && exit 1
+p="\${@: -1}"
+case "$p" in
+  "$FIXTURE"/live-*|"$FIXTURE"/tmp/*|"$FIXTURE"/container-tmp/*) device=/dev/scratch ;;
+  "$FIXTURE/docker data") device=/dev/data ;;
+  "$FIXTURE"|"$FIXTURE"/*) device=/dev/root ;;
+  /var/lib/containerd|/mnt/rmd*) device=/dev/data ;;
+  *) device=/dev/root ;;
+esac
+used=1000; mounted=/
+[ "$p" = /mnt/rmd ] && { used=61000000; mounted=/mnt/rmd; }
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n%s 100000000 %s 90000000 1%% %s\\n' "$device" "$used" "$mounted"`;
+
 function measure(
   overrides: Record<string, string> = {},
   opts: { status?: number; inspect?: (dir: string) => void; state?: string } = {},
@@ -80,17 +96,7 @@ case "$p" in
   *) n=10 ;;
 esac
 printf '%s\\t%s\\n' "$n" "$p"`);
-    stub("df", `
-[ "\${DF_FAIL:-}" = 1 ] && exit 1
-p="\${@: -1}"
-case "$p" in
-  "$FIXTURE"/live-*|"$FIXTURE"/tmp/*|"$FIXTURE"/container-tmp/*) device=/dev/scratch ;;
-  "$FIXTURE/docker data"|/var/lib/containerd|/mnt/rmd*) device=/dev/data ;;
-  *) device=/dev/root ;;
-esac
-used=1000; mounted=/
-[ "$p" = /mnt/rmd ] && { used=61000000; mounted=/mnt/rmd; }
-printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n%s 100000000 %s 90000000 1%% %s\\n' "$device" "$used" "$mounted"`);
+    stub("df", FIXTURE_DF);
     writeFileSync(join(dir, "state-root/state/heartbeat-count.txt"), overrides.BEAT_N ?? "0");
     if (opts.state !== undefined) writeFileSync(join(dir, "state-root/state/consumer-probe.state"), opts.state);
     const result = spawnSync("bash", [script], {
@@ -124,6 +130,49 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n%s 100000000 %s
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+test("heartbeat fixture device roles do not depend on its host temp prefix", () => {
+  // Execute the SAME Bash model used by measure(), not a reimplementation of it.
+  // These are model inputs; neither prefix needs to exist on the running host.
+  for (const fixture of ["/mnt/rmd/tmp/heartbeat fixture", "/private/tmp/heartbeat fixture"]) {
+    const devices: Array<[string, string]> = [
+      [fixture, "/dev/root"],
+      [join(fixture, "tmp"), "/dev/root"],
+      [join(fixture, "tmp/rmd-c-one"), "/dev/scratch"],
+      [join(fixture, "container-tmp"), "/dev/root"],
+      [join(fixture, "container-tmp/rmd-c-three"), "/dev/scratch"],
+      [join(fixture, "live-worktrees"), "/dev/scratch"],
+      [join(fixture, "live-coverage"), "/dev/scratch"],
+      [join(fixture, "live-tmp"), "/dev/scratch"],
+      [join(fixture, "docker data"), "/dev/data"],
+      [join(fixture, "configured-docker"), "/dev/root"],
+      [join(fixture, "state-root/state"), "/dev/root"],
+      ["/mnt/rmd", "/dev/data"],
+      ["/mnt/rmd/tmp", "/dev/data"],
+      ["/var/lib/containerd", "/dev/data"],
+      ["/var/lib/docker", "/dev/root"],
+    ];
+    for (const [path, device] of devices) {
+      const result = spawnSync("bash", ["-c", FIXTURE_DF, "df", "-Pk", "--", path], {
+        encoding: "utf8", timeout: 5_000,
+        env: { ...process.env, FIXTURE: fixture, DF_FAIL: "" },
+      });
+      assert.equal(result.error, undefined);
+      assert.equal(result.signal, null);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout.trim().split("\n")[1]?.split(/\s+/)[0], device, path);
+      if (path === "/mnt/rmd") assert.match(result.stdout, /61000000 90000000 1% \/mnt\/rmd/);
+    }
+    const failed = spawnSync("bash", ["-c", FIXTURE_DF, "df", "-Pk", fixture], {
+      encoding: "utf8", timeout: 5_000,
+      env: { ...process.env, FIXTURE: fixture, DF_FAIL: "1" },
+    });
+    assert.equal(failed.error, undefined);
+    assert.equal(failed.signal, null);
+    assert.equal(failed.status, 1);
+    assert.equal(failed.stdout, "", "a failed measurement must not invent a device");
+  }
+});
 
 test("test/the-heartbeat-measures-the-real-disk-consumers.test.ts: real roots, devices and unknown in an isolated byte-identical install", () => {
   const beat = measure();

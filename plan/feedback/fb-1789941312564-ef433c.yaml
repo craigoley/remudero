@@ -12,10 +12,11 @@ raw: "Guard: revalidate plan-ID uniqueness against the merge-time target before
   numbered task reservations and report the colliding paths explicitly."
 attachments: []
 origin: cli
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
