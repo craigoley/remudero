@@ -30,7 +30,7 @@ test("review command continues to the review workspace for an open PR", async ()
   await assert.rejects(
     reviewCommand("8303", ["--repo", "acme/remudero"], {
       resolveOwnerRepo: () => ({ owner: "acme", repo: "remudero" }),
-      fetchView: () => ({ state: "open", number: 8303, html_url: "https://github.com/acme/remudero/pull/8303", updated_at: "2026-10-01T00:00:00Z", head: { ref: "topic", sha: "abc123" }, body: "" }),
+      fetchView: () => ({ state: "open", number: 8303, html_url: "https://github.com/acme/remudero/pull/8303", updated_at: "2026-10-01T00:00:00Z", head: { ref: "topic", sha: "abc123" }, body: "" }), // expiring-fixture: exempt -- the closed-PR preflight reads state, not age; 2/2 pass with Date.now shifted +8d and +30d and with this stamp aged to 2026-07-01
       loadConfig: () => { loaded = true; throw new Error("open PR reached review workspace"); },
     }),
     /open PR reached review workspace/,
