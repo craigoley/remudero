@@ -11,6 +11,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { contributionOriginFromRest, type ContributionOrigin, type RestContributionOrigin } from "./contributor-admission.js";
 import type { ConflictFileDiff, MergeConflictEvidence, MergeState, RedundantRefixEvidence } from "./merge-state.js";
 import type { WorkflowRunObservation } from "./workflow-run.js";
 // W1-T2384: from the LEAF, never from sweep.js. dependency-cruiser reads a type-only import as
@@ -250,7 +251,7 @@ export function rollupFromRest(checkRuns: RestCheckRun[], statuses: RestStatus[]
 }
 
 /** One pull request as REST's `/pulls` endpoint returns it — the wire shape, never a consumer's. */
-export interface RestPullRow {
+export interface RestPullRow extends RestContributionOrigin {
   number: number;
   /** The api.github.com URL. DROPPED — consumers match on the github.com web URL. */
   url?: string;
@@ -269,7 +270,7 @@ export interface RestPullRow {
   /** `null` on an empty body, where GraphQL reports "". */
   body?: string | null;
   updated_at: string;
-  head?: { ref?: string; sha?: string };
+  head?: RestContributionOrigin["head"] & { ref?: string; sha?: string };
   /** `null` unless auto-merge is armed. Consumed ONLY as a nullity test. */
   auto_merge?: unknown;
   /** The PR title (W1-T184's RECENT decoration). Absent only on a malformed row. */
@@ -290,6 +291,8 @@ export interface OpenPrRest {
   updatedAt: string;
   body: string;
   autoMergeRequest: unknown;
+  /** Original authenticated contributor/repository evidence, not a trust decision. */
+  contributionOrigin?: ContributionOrigin;
   statusCheckRollup?: RestRollupEntry[];
   /** W1-T521: true when this PR's rollup fetch threw — exhaustion, a 404 on a head deleted mid-pass, a
    *  network blip — so `statusCheckRollup` is absent rather than an observed empty rollup. Sparse,
@@ -312,6 +315,7 @@ export interface OpenPrRest {
  *  as `""` because the Dependabot predicate calls `.startsWith`; and `autoMergeRequest` passes
  *  `auto_merge` verbatim, since `autoMergeArmed: pr.autoMergeRequest != null` is the whole contract. */
 export function mapRestPr(row: RestPullRow): OpenPrRest {
+  const contributionOrigin = contributionOriginFromRest(row);
   return {
     number: row.number,
     url: row.html_url,
@@ -320,6 +324,7 @@ export function mapRestPr(row: RestPullRow): OpenPrRest {
     updatedAt: row.updated_at,
     body: row.body ?? "",
     autoMergeRequest: row.auto_merge ?? null,
+    ...(contributionOrigin === undefined ? {} : { contributionOrigin }),
     // W1-T528: undefaulted — `?? false` would make a malformed row assert "not a draft" rather than
     // "unknown", and the operator's hold is the one fact this rung must not guess at. Sparse like
     // `rollupUnreadable`, so a row omitting `draft` maps to exactly the pre-W1-T528 object.
