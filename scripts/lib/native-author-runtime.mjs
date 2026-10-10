@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { availableParallelism, cpus, hostname, release } from 'node:os';
 import { listTestFiles, medianMeasuredDurationMs, predictMakespanMs, weightedDurationMs } from '../test-tier-manifest.mjs';
@@ -40,20 +40,46 @@ export function runtimeSamples(files, manifest, count = 32) {
     Math.floor(i * (ordered.length - 1) / (n - 1))]))].sort();
 }
 
-function artifactPath(root, path) {
+function readArtifactBytes(root, path, maxBytes, oversizedMessage) {
   const absolute = resolve(root, path);
-  if (!absolute.startsWith(resolve(root, 'coverage') + sep) || !lstatSync(absolute).isFile() ||
-      !realpathSync(absolute).startsWith(realpathSync(join(root, 'coverage')) + sep)) {
+  const coverage = resolve(root, 'coverage');
+  if (!absolute.startsWith(coverage + sep)) {
     throw new Error('runtime profile: evidence must be a regular file under owned coverage');
   }
-  return absolute;
+  const ownedCoverage = realpathSync(coverage);
+  const fd = openSync(absolute, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) |
+    (constants.O_NONBLOCK ?? 0));
+  try {
+    const opened = fstatSync(fd);
+    const canonical = realpathSync(absolute);
+    const currentPath = lstatSync(absolute);
+    if (!canonical.startsWith(ownedCoverage + sep) || !currentPath.isFile() ||
+        currentPath.dev !== opened.dev || currentPath.ino !== opened.ino) {
+      throw new Error('runtime profile: evidence must be a regular file under owned coverage');
+    }
+    if (!opened.isFile() || opened.size > maxBytes) throw new Error(oversizedMessage);
+
+    // Read only the descriptor we validated, with a hard bound even if another process grows it.
+    const chunk = Buffer.alloc(Math.min(64 * 1024, maxBytes + 1));
+    const chunks = [];
+    let length = 0;
+    while (length <= maxBytes) {
+      const read = readSync(fd, chunk, 0, Math.min(chunk.length, maxBytes + 1 - length), null);
+      if (read === 0) break;
+      chunks.push(Buffer.from(chunk.subarray(0, read)));
+      length += read;
+    }
+    if (length > maxBytes) throw new Error(oversizedMessage);
+    return Buffer.concat(chunks, length);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** Re-read every closed capture, rather than trusting a success-shaped profile field. */
 export function readRuntimeProfile(root, path, expected, now = Date.now()) {
-  const absolute = artifactPath(root, path);
-  if (lstatSync(absolute).size > 2 * 1024 * 1024) throw new Error('runtime profile: oversized evidence');
-  const profile = JSON.parse(readFileSync(absolute, 'utf8'));
+  const profile = JSON.parse(readArtifactBytes(root, path, 2 * 1024 * 1024,
+    'runtime profile: oversized evidence').toString('utf8'));
   if (profile.format !== RUNTIME_PROFILE_FORMAT || JSON.stringify(profile.bindings) !== JSON.stringify(expected)) {
     throw new Error('runtime profile: source/runtime/corpus binding mismatch');
   }
@@ -66,9 +92,8 @@ export function readRuntimeProfile(root, path, expected, now = Date.now()) {
   if (profile.artifacts?.length !== 4) throw new Error('runtime profile: missing closed capture');
   for (const row of profile.artifacts ?? []) {
     if (!['stdout', 'stderr', 'native', 'durations'].includes(row.name) || Object.hasOwn(artifacts, row.name)) throw new Error('runtime profile: duplicate or unexpected artifact');
-    const file = artifactPath(root, row.path);
-    if (lstatSync(file).size > 100 * 1024 * 1024) throw new Error('runtime profile: oversized capture artifact');
-    const bytes = readFileSync(file);
+    const bytes = readArtifactBytes(root, row.path, 100 * 1024 * 1024,
+      'runtime profile: oversized capture artifact');
     if (bytes.length !== row.bytes || digest(bytes) !== row.sha256) throw new Error('runtime profile: artifact hash mismatch');
     artifacts[row.name] = bytes.toString('utf8');
   }
@@ -102,9 +127,9 @@ export function readRuntimeProfile(root, path, expected, now = Date.now()) {
 
 /** Complete default author timing remains a separate, source-bound diagnostic artifact. */
 export function closedDurationEvidence(root, path, expectedFiles, bindings) {
-  const file = artifactPath(root, path);
-  if (lstatSync(file).size > 2 * 1024 * 1024) throw new Error('runtime durations: oversized evidence');
-  const bytes = readFileSync(file), evidence = JSON.parse(bytes);
+  const bytes = readArtifactBytes(root, path, 2 * 1024 * 1024,
+    'runtime durations: oversized evidence');
+  const evidence = JSON.parse(bytes);
   if (evidence.version !== 1 || JSON.stringify(Object.keys(evidence.files ?? {}).sort()) !==
       JSON.stringify([...expectedFiles].sort()) || Object.values(evidence.files ?? {}).some((ms) => !Number.isFinite(ms) || ms <= 0)) {
     throw new Error('runtime durations: incomplete physical file-wrapper evidence');

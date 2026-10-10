@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
@@ -57,6 +57,23 @@ test('native runtime profile rereads real closed evidence and rejects stale, cor
   const durations = parsed.artifacts.find((row: { name: string }) => row.name === 'durations');
   assert.equal(runtime.closedDurationEvidence(f.dir, durations.path, parsed.samples, bindings).state, 'complete');
   assert.throws(() => runtime.closedDurationEvidence(f.dir, durations.path, ['test/a.test.ts'], bindings), /incomplete physical/);
+  const profileLink = join(f.dir, 'coverage', 'profile-link.json');
+  symlinkSync(observed.path, profileLink);
+  assert.throws(() => runtime.readRuntimeProfile(f.dir, 'coverage/profile-link.json', bindings));
+  unlinkSync(profileLink);
+  assert.throws(() => runtime.readRuntimeProfile(f.dir, join(f.dir, 'outside-profile.json'), bindings), /owned coverage/);
+  const outsideArtifact = join(f.dir, 'outside.json'), redirect = join(f.dir, 'coverage', 'redirect');
+  writeFileSync(outsideArtifact, '{}');
+  symlinkSync(f.dir, redirect);
+  assert.throws(() => runtime.closedDurationEvidence(f.dir, 'coverage/redirect/outside.json', parsed.samples, bindings), /owned coverage/);
+  unlinkSync(redirect);
+  const durationLink = join(f.dir, 'coverage', 'duration-link.json');
+  symlinkSync(join(f.dir, durations.path), durationLink);
+  assert.throws(() => runtime.closedDurationEvidence(f.dir, 'coverage/duration-link.json', parsed.samples, bindings));
+  unlinkSync(durationLink);
+  const oversized = join(f.dir, 'coverage', 'oversized.json');
+  writeFileSync(oversized, Buffer.alloc(2 * 1024 * 1024 + 1));
+  assert.throws(() => runtime.closedDurationEvidence(f.dir, 'coverage/oversized.json', parsed.samples, bindings), /oversized/);
   const nativeRow = parsed.artifacts.find((row: { name: string }) => row.name === 'native');
   const nativePath = join(f.dir, nativeRow.path), nativeOriginal = readFileSync(nativePath, 'utf8');
   for (const change of [{ status: 1 }, { signal: 'SIGTERM' }, { error: { code: 'fixture-error' } },
