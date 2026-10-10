@@ -14,7 +14,7 @@
  */
 import { execFile, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { setPriority as osSetPriority } from "node:os";
+import { homedir, setPriority as osSetPriority } from "node:os";
 import { join } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { gardenLedgerBucket, type GardenerDeps } from "./gardener.js";
@@ -29,6 +29,9 @@ import {
   selectorShadowFlakeLedger,
 } from "./selector-shadow-gardener.js";
 import { SELF_SYNC_GUARD_ENV } from "./self-sync.js";
+import { awaitMemoryAdmission, type AdmissionPorts } from "./host-memory-admission.js";
+import { daemonOwnedProcess, openLearnedReservation, type LearnedReservation } from "./host-memory-learning.js";
+import { recordShadowMemoryVerdict } from "./host-memory-shadow.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { randomUUID } from "node:crypto";
 import type { GardenerRuntimeEvent } from "./gardener-runtime.js";
@@ -327,7 +330,9 @@ const STDERR_TAIL_CHARS = 8 * 1024;
  * The production pass: `rmd garden run <name>` as a child of THIS process's own node and loader, so the
  * child runs the same source tree and inherits the same config root, state and ledger actor. Self-sync is
  * skipped in the child: the parent already decided which code it runs. The child runs under
- * {@link GARDEN_CHILD_HEAP_LIMIT_MB}, niced, and in the idle IO class where an `ionice` binary exists.
+ * {@link GARDEN_CHILD_HEAP_LIMIT_MB}, niced, and in the idle IO class where an `ionice` binary exists. In a
+ * daemon-owned process each child also holds a "garden" host-memory reservation for its lifetime (about 1 GB each,
+ * 2-3 at once, measured 2026-10-10 and unreserved until now), and under an enforced budget it waits its turn first.
  */
 export function childGardenPassSpawn(
   opts: {
@@ -340,6 +345,12 @@ export function childGardenPassSpawn(
     setPriority?: (pid: number, priority: number) => void;
     ionice?: string;
     log?: (step: string, extra?: Record<string, unknown>) => void;
+    /** The state root whose ledger the budget reads. Default: the config default, `~/Remudero`. */
+    root?: string;
+    /** Opens the child's reservation. Default: a learned "garden" reservation in a daemon-owned process, else none. */
+    reserve?: () => LearnedReservation | undefined;
+    /** The enforce-mode admission's ports (tests). */
+    admission?: Partial<AdmissionPorts>;
   } = {},
 ): GardenPassSpawn {
   const execPath = opts.execPath ?? process.execPath;
@@ -351,8 +362,24 @@ export function childGardenPassSpawn(
   const noted = new Set<string>();
   const firstRefusal = (how: "nice" | "ionice"): boolean => !noted.has(how) && noted.add(how).has(how);
   const refusal = (how: "nice" | "ionice", e: unknown) => ({ how, error: String((e as Error)?.message ?? e) });
-  return (name, args) =>
-    new Promise((resolve, reject) => {
+  const root = opts.root ?? join(homedir(), "Remudero");
+  const reserve = opts.reserve ??
+    (() => (daemonOwnedProcess() ? openLearnedReservation({ workerClass: "garden", root }) : undefined));
+  return async (name, args) => {
+    await awaitMemoryAdmission({ workerClass: "garden", root, taskId: "GARDEN", runId: `garden-${name}` }, opts.admission);
+    const reservation = reserve();
+    // The same counterfactual row a worker start writes, so a garden start's fit is measured before any ruling.
+    if (reservation) {
+      recordShadowMemoryVerdict({ workerClass: "garden", reservationId: reservation.id, estimateMib: reservation.estimateMib, root,
+        taskId: "GARDEN", runId: `garden-${name}` }, opts.admission);
+    }
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      reservation?.releaseOccupancy();
+    };
+    return new Promise<number | null>((resolve, reject) => {
       // The cap follows the inherited flags: V8 takes the last `--max-old-space-size` it is given.
       const child = spawn(execPath, [...execArgv, `--max-old-space-size=${heapLimitMb}`, entry, "garden", "run", name, ...args], {
         cwd: opts.cwd,
@@ -371,6 +398,7 @@ export function childGardenPassSpawn(
       let lowered: Promise<void> = Promise.resolve();
       const pid = child.pid;
       if (pid !== undefined) {
+        reservation?.bindRoot(pid);
         try {
           setPriority(pid, GARDEN_CHILD_NICENESS);
         } catch (e) {
@@ -386,8 +414,12 @@ export function childGardenPassSpawn(
           });
         });
       }
-      child.once("error", reject);
+      child.once("error", (error) => {
+        release();
+        reject(error);
+      });
       child.once("close", (code, signal) => {
+        release();
         void lowered.then(() => {
           if (signal !== null && heapExhaustedSeen) {
             reject(new Error(`${GARDEN_HEAP_EXHAUSTED}: garden ${name} exceeded its ${heapLimitMb} MB heap cap (${signal})`));
@@ -396,7 +428,11 @@ export function childGardenPassSpawn(
           }
         });
       });
+    }).catch((error: unknown) => {
+      release(); // A spawn that threw synchronously never reached "error" or "close".
+      throw error;
     });
+  };
 }
 
 /** The GitHub reads a selector-shadow pass makes; each absent one goes through the gh transport. */
