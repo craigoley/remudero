@@ -78,6 +78,8 @@
     4. EXPLICIT FLEET-WIDE HOLD, kept separate:
        - `rmd pause --fleet [--reason]` pushes refs/rmd-pause/hold (writeSharedPause, unchanged anchor format) and writes no
          local flag.
+       - An anchor creation failure refuses before push: an empty source is Git's ref-delete syntax, never a new hold.
+         A failed push result does not certify that no existing hold remains.
        - `rmd resume --fleet` deletes it and touches no local flag.
        - Both write a scope "fleet" ledger row.
     5. LEGACY HOLDS. Readers are UNCHANGED: checkSharedPause still honors refs/rmd-pause/hold (an existing operator hold
@@ -101,6 +103,10 @@
       proof: 'grep: resolvePauseTarget( in src/run-task.ts'
     - claim: "pause and resume refuse an absent configured root without recreating state"
       proof: 'unit test: W1-T7727: a missing configured root refuses pause and resume without recreating state'
+    - claim: "a failed fleet anchor cannot delete an existing shared hold"
+      proof: 'unit test: W1-T7727: a failed fleet anchor never clears an existing shared hold'
+    - claim: "the real CLI refuses a rejected fleet hold update without reporting an existing hold absent"
+      proof: 'unit test: W1-T7727: the real CLI refuses a rejected fleet hold update without claiming an existing hold is absent'
   falsifier: |
     Restore the old propagation (requestPause called with the real shared git deps from pauseCommand). The isolation test then
     finds refs/rmd-pause/hold on the fixture's bare origin, and the site, console and wild-trails instances' production
