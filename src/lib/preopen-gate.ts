@@ -17,6 +17,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { preflightSummaryPath } from "./ci-parity.js";
+import { systemClock, type Clock } from "./clock.js";
 
 export const PREOPEN_GATE_STEP = "implement.preopen_gate";
 
@@ -28,11 +29,11 @@ export type PreopenGateResult =
   | { kind: "fail"; failedSteps: string[]; durationMs: number }
   | { kind: "unmeasured"; reason: string; durationMs: number };
 
-export interface PreopenGateDeps {
+export interface PreopenGateOptions {
   /** Runs the fast gate in `cwd`; resolves when the child exits, whatever its status. */
   runGate?: (cwd: string) => Promise<{ exitCode: number | null; error?: string }>;
   readFile?: (path: string) => string;
-  now?: () => number;
+  clock?: Clock;
 }
 
 function defaultRunGate(cwd: string): Promise<{ exitCode: number | null; error?: string }> {
@@ -68,8 +69,9 @@ export function readGateSummary(
 }
 
 /** Run the fast gate in a build's worktree and classify the result. */
-export async function runPreopenGate(worktreePath: string, deps: PreopenGateDeps = {}): Promise<PreopenGateResult> {
-  const now = deps.now ?? Date.now;
+export async function runPreopenGate(worktreePath: string, deps: PreopenGateOptions = {}): Promise<PreopenGateResult> {
+  const clock = deps.clock ?? systemClock;
+  const now = () => clock.now();
   const startedAt = now();
   const run = await (deps.runGate ?? defaultRunGate)(worktreePath);
   const durationMs = now() - startedAt;

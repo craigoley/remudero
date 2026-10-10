@@ -302,7 +302,7 @@ export function capDerivation(rows: Array<Record<string, unknown>>, weights: Rec
  *  folds every tokened call row. */
 export const CONFIG_GARDEN_LEDGER_STEPS: readonly string[] = [
   // gatherRuns, by name.
-  "run.start", "verdict", "verdict.merged", "recon.done", "implement.done", "implement.resumed", "implement.continued", "pr.opened", "correction.provenance",
+  "run.start", "verdict", "verdict.merged", "recon.done", "implement.done", "implement.resumed", "implement.continued", "implement.preopen_continued", "pr.opened", "correction.provenance",
   // gatherRuns' pr_url fallback.
   "report.followups", "pr.head_provider", "dispatch.blocked_independent", "automerge.armed", "automerge.arm_skipped",
   "automerge.arm_failed", "automerge.clean_status_direct_merge", "review.posted", "review.pending_posted",

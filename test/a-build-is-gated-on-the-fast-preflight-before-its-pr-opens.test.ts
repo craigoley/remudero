@@ -20,7 +20,7 @@ test("a build whose tree fails a census step is reported failing with that censu
   const run = fn<Gate>("runPreopenGate");
   let read = "";
   const result = await run("/wt", {
-    now: () => Date.parse("2026-10-10T03:00:00Z"),
+    clock: { now: () => Date.parse("2026-10-10T03:00:00Z") },
     runGate: async () => ({ exitCode: 1 }),
     readFile: (p: string) => {
       read = p;
@@ -37,13 +37,13 @@ test("a build whose tree fails a census step is reported failing with that censu
 
 test("a clean tree passes, and a stale or missing summary is unmeasured rather than a pass", async () => {
   const run = fn<Gate>("runPreopenGate");
-  const now = () => Date.parse("2026-10-10T03:00:00Z");
-  const clean = await run("/wt", { now, runGate: async () => ({ exitCode: 0 }), readFile: () => summary("2026-10-10T03:01:00Z", [{ name: "depcruise", ok: true }]) });
+  const clock = { now: () => Date.parse("2026-10-10T03:00:00Z") };
+  const clean = await run("/wt", { clock, runGate: async () => ({ exitCode: 0 }), readFile: () => summary("2026-10-10T03:01:00Z", [{ name: "depcruise", ok: true }]) });
   assert.equal(clean.kind, "pass");
-  const stale = await run("/wt", { now, runGate: async () => ({ exitCode: 0 }), readFile: () => summary("2026-10-10T02:00:00Z", [{ name: "depcruise", ok: true }]) });
+  const stale = await run("/wt", { clock, runGate: async () => ({ exitCode: 0 }), readFile: () => summary("2026-10-10T02:00:00Z", [{ name: "depcruise", ok: true }]) });
   assert.equal(stale.kind, "unmeasured");
-  const missing = await run("/wt", { now, runGate: async () => ({ exitCode: 1 }), readFile: () => { throw new Error("ENOENT"); } });
+  const missing = await run("/wt", { clock, runGate: async () => ({ exitCode: 1 }), readFile: () => { throw new Error("ENOENT"); } });
   assert.equal(missing.kind, "unmeasured");
-  const timedOut = await run("/wt", { now, runGate: async () => ({ exitCode: null, error: "fast gate exceeded its backstop" }), readFile: () => "" });
+  const timedOut = await run("/wt", { clock, runGate: async () => ({ exitCode: null, error: "fast gate exceeded its backstop" }), readFile: () => "" });
   assert.equal(timedOut.kind, "unmeasured");
 });
