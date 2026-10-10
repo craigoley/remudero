@@ -1034,6 +1034,74 @@ done
 # and the recycle went on to `docker run` anyway, silently relaunching whatever was already cached
 # under this tag. The operator believed he had the new build and did not. So a pull failure is fatal
 # here, full stop — nothing below this section may ever run after it.
+# 4.0. ONE IMAGE RECYCLE PER HOST AT A TIME — PULL THROUGH RECLAIM HOLDS A HOST-WIDE LOCK, TAKEN BEFORE
+# THE LOGIN AND THE PULL BELOW.
+# MEASURED 2026-10-10: core pulled `:latest` (23a2f27e) at 04:27:07Z and drained for 17 minutes. In
+# that window the site instance recycled twice (04:28, 04:38), and each site run's section-8
+# `docker image prune -af` removed core's freshly pulled image — no container referenced it yet. Core's
+# smoke then failed `No such image` at 04:44:42Z, and its PAUSE had held dispatch for nothing. The
+# instances share one host, one docker store and one tag, so the window from `docker pull` to the
+# reclaim is one critical section across ALL of them.
+#
+# SO A SCOPED RECYCLE (`--instance`, the supervised path every declared instance takes) holds a
+# host-wide lock from before the pull until it exits. A second instance WAITS for it — before it pulls
+# and before it pauses anything, so waiting never holds dispatch — and refuses past a bounded wait,
+# naming the holder. Because the lock spans pull → smoke → swap → reclaim, no instance's prune can
+# ever run while another instance holds a pulled-but-unswapped image.
+#
+# `mkdir`, NOT flock: atomic everywhere (bash 3.2, no util-linux needed), and the holder writes its
+# pid so a lock whose holder died is PROVABLY stale (`kill -0` on the same host, same user) and is
+# reclaimed with a printed line, never judged by age. Unscoped runs (first boot, manual one-offs)
+# take no lock, as before. RMD_RECYCLE_HOST_LOCK names the lock; setting it also opts an unscoped run in.
+HOST_RECYCLE_LOCK=""
+if [ -n "${INSTANCE_NAME}" ] || [ -n "${RMD_RECYCLE_HOST_LOCK:-}" ]; then
+  HOST_RECYCLE_LOCK="${RMD_RECYCLE_HOST_LOCK:-${HOME}/.local/state/remudero/recycle-container.lock}"
+fi
+HOST_RECYCLE_LOCK_HELD=0
+HOST_RECYCLE_LOCK_WAIT_S="${RMD_RECYCLE_LOCK_WAIT_S:-2400}"
+HOST_RECYCLE_LOCK_POLL_S="${RMD_RECYCLE_LOCK_POLL_S:-5}"
+release_host_recycle_lock() {
+  if [ "${HOST_RECYCLE_LOCK_HELD}" = "1" ]; then
+    rm -f "${HOST_RECYCLE_LOCK}/holder" 2>/dev/null
+    rmdir "${HOST_RECYCLE_LOCK}" 2>/dev/null
+    HOST_RECYCLE_LOCK_HELD=0
+  fi
+  return 0
+}
+if [ -n "${HOST_RECYCLE_LOCK}" ]; then
+  mkdir -p "$(dirname "${HOST_RECYCLE_LOCK}")"
+  trap release_host_recycle_lock EXIT
+  lock_waited_s=0
+  while :; do
+    if mkdir "${HOST_RECYCLE_LOCK}" 2>/dev/null; then
+      HOST_RECYCLE_LOCK_HELD=1
+      printf '%s %s\n' "$$" "${INSTANCE_NAME:-unscoped}" > "${HOST_RECYCLE_LOCK}/holder"
+      echo "recycle-container: host recycle lock taken (${HOST_RECYCLE_LOCK})"
+      break
+    fi
+    holder_line="$(cat "${HOST_RECYCLE_LOCK}/holder" 2>/dev/null || true)"
+    holder_pid="${holder_line%% *}"
+    holder_instance="${holder_line#* }"
+    case "${holder_pid}" in
+      ''|*[!0-9]*) holder_pid="" ;;
+    esac
+    if [ -n "${holder_pid}" ] && ! kill -0 "${holder_pid}" 2>/dev/null; then
+      echo "recycle-container: host recycle lock held by DEAD pid ${holder_pid} (${holder_instance}) — reclaiming it"
+      rm -f "${HOST_RECYCLE_LOCK}/holder" 2>/dev/null
+      rmdir "${HOST_RECYCLE_LOCK}" 2>/dev/null || true
+      continue
+    fi
+    if [ "${lock_waited_s}" -ge "${HOST_RECYCLE_LOCK_WAIT_S}" ]; then
+      echo "recycle-container: REFUSING — another image recycle (${holder_instance:-unknown}, pid ${holder_pid:-unknown}) still holds the host recycle lock after ${lock_waited_s}s." >&2
+      echo "  ${CONTAINER_NAME} is untouched and nothing was pulled or paused; a later tick retries." >&2
+      exit 1
+    fi
+    echo "recycle-container: deploy.recycle_waiting — ${holder_instance:-another instance} (pid ${holder_pid:-unknown}) holds the host recycle lock; waited ${lock_waited_s}s"
+    sleep "${HOST_RECYCLE_LOCK_POLL_S}"
+    lock_waited_s=$((lock_waited_s + HOST_RECYCLE_LOCK_POLL_S))
+  done
+fi
+
 if command -v az >/dev/null 2>&1; then
   echo "recycle-container: az acr login -n ${REGISTRY}"
   source "${SCRIPT_DIR}/acr-login.sh"
@@ -1070,6 +1138,7 @@ RECYCLE_TMPDIR="${TMPDIR:-/tmp}"
 PULL_LOG=""
 recycle_cleanup_tmp() {
   [ -n "${PULL_LOG}" ] && rm -f "${PULL_LOG}"
+  release_host_recycle_lock
   return 0
 }
 trap recycle_cleanup_tmp EXIT
