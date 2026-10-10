@@ -7,14 +7,31 @@
  * #10374 and #10487 fixed the harness's own calls: two such checks in run-W1-T7615/W1-T7616 worktrees held 2.4 and
  * 2.2 GB RSS for 18+ minutes while the host sat at load 30, memory PSI full 80% (OBSERVED 2026-10-10 08:12Z).
  *
+ * A SANDBOXED WORKER CANNOT WRITE ITS GIT DIR. Codex's sandbox mounts everything but the worktree and /tmp read-only,
+ * and a linked worktree's git dir lives in the canonical checkout, so tsc would fail TS5033 writing the buildinfo there
+ * (a false red). Then the buildinfo lives in TMPDIR, keyed by the tree's path, seeded from the git dir's or the
+ * canonical checkout's. With nowhere writable at all, the plain check runs.
+ *
  * SAME RESULT AS PLAIN TSC. The diagnostics and the exit code are tsc's own; a buildinfo only changes what is rebuilt,
  * and tsc discards any cached entry whose hash, options or version differ. Extra argv is passed through to tsc.
  */
 import { spawnSync } from "node:child_process";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { existsSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 
 import { acquireTestSlot, type TestSlotLease } from "./test-slot.js";
-import { hasUsableTypecheckBuildInfo, installedTypescriptVersion, prepareWorktreeTypecheck } from "./typecheck-buildinfo.js";
+import {
+  canonicalBuildInfo,
+  hasUsableTypecheckBuildInfo,
+  installedTypescriptVersion,
+  prepareWorktreeTypecheck,
+  seedBuildInfo,
+  typecheckArgs,
+  worktreeBuildInfoPath,
+  type SeedOutcome,
+} from "./typecheck-buildinfo.js";
 
 /** The slot label a cold `npm run typecheck` holds while tsc runs. */
 export const NPM_TYPECHECK_SLOT_LABEL = "typecheck:npm";
@@ -24,6 +41,9 @@ export type TypecheckRunSpawn = (file: string, args: readonly string[], cwd: str
 
 export interface TypecheckRunOptions {
   spawn?: TypecheckRunSpawn;
+  /** Where a tree whose git dir is unwritable keeps its buildinfo; default `os.tmpdir()`. */
+  tmpDir?: string;
+  canWrite?: (dir: string) => boolean;
   acquireSlot?: (label: string) => TestSlotLease;
   log?: (line: string) => void;
 }
@@ -33,16 +53,49 @@ const inheritSpawn: TypecheckRunSpawn = (file, args, cwd) => {
   return { status: r.status, ...(r.error ? { error: r.error } : {}) };
 };
 
+/** Can this process create a file in `dir`? Probed by writing one: a sandbox's read-only bind still passes access(2). */
+export function dirIsWritable(dir: string): boolean {
+  const probe = join(dir, `.rmd-write-probe-${process.pid}`);
+  try {
+    writeFileSync(probe, "");
+    unlinkSync(probe);
+    return true;
+  } catch {
+    // Read-only mount, sandbox deny or a missing dir: tsc could not write a buildinfo here either.
+    return false;
+  }
+}
+
+export interface PreparedTypecheck {
+  args: string[];
+  buildInfo?: string;
+  seed: SeedOutcome;
+  where: "git-dir" | "tmp" | "plain";
+}
+
+/** The argv for `root`'s check: its git dir's buildinfo when writable, else a per-tree one in `tmp`, else plain. */
+export function prepareTypecheckRun(root: string, tmp: string = tmpdir(), canWrite: (dir: string) => boolean = dirIsWritable): PreparedTypecheck {
+  const own = worktreeBuildInfoPath(root);
+  if (own !== undefined && canWrite(dirname(own))) return { ...prepareWorktreeTypecheck(root), where: "git-dir" };
+  if (!canWrite(tmp)) return { args: typecheckArgs(undefined), seed: "no-seed", where: "plain" };
+  const key = createHash("sha1").update(realpathSync(root)).digest("hex").slice(0, 16);
+  const buildInfo = join(tmp, `rmd-typecheck-${key}.tsbuildinfo`);
+  const from = own !== undefined && existsSync(own) ? { root, buildInfo: own } : canonicalBuildInfo(root);
+  const seed = from === undefined ? (existsSync(buildInfo) ? "kept" : "no-seed")
+    : seedBuildInfo(from, { root, buildInfo }, installedTypescriptVersion(root));
+  return { args: typecheckArgs(buildInfo), buildInfo, seed, where: "tmp" };
+}
+
 /** Run the incremental full typecheck of the checkout at `root`, taking a slot only when it would run cold. */
 export function runTypecheck(root: string, extraArgs: readonly string[] = [], opts: TypecheckRunOptions = {}): number {
-  const prepared = prepareWorktreeTypecheck(root);
+  const prepared = prepareTypecheckRun(root, opts.tmpDir, opts.canWrite);
   const cold = !hasUsableTypecheckBuildInfo(prepared.buildInfo, installedTypescriptVersion(root));
   const log = opts.log ?? ((line: string) => process.stderr.write(line + "\n"));
   let slot: TestSlotLease | undefined;
   try {
     if (cold) {
       slot = (opts.acquireSlot ?? acquireTestSlot)(NPM_TYPECHECK_SLOT_LABEL);
-      log(JSON.stringify({ step: "typecheck.cold", seed: prepared.seed, slot: slot.outcome, note: slot.note }));
+      log(JSON.stringify({ step: "typecheck.cold", where: prepared.where, seed: prepared.seed, slot: slot.outcome, note: slot.note }));
     }
     const res = (opts.spawn ?? inheritSpawn)(join(root, "node_modules", ".bin", "tsc"), [...prepared.args, ...extraArgs], root);
     if (res.error) {

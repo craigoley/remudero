@@ -6,14 +6,15 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { TYPECHECK_BUILDINFO_NAME } from "../src/lib/typecheck-buildinfo.js";
-import { NPM_TYPECHECK_SLOT_LABEL, runTypecheck } from "../src/lib/typecheck-run.js";
+import { acquireTestSlot } from "../src/lib/test-slot.js";
+import { NPM_TYPECHECK_SLOT_LABEL, prepareTypecheckRun, runTypecheck } from "../src/lib/typecheck-run.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -114,4 +115,55 @@ test("a tsc that cannot start is named and exits 127, and the cold slot is still
   assert.match(lines.join("\n"), /"slot":"acquired"/);
   assert.match(lines.join("\n"), /could not run tsc: .*ENOENT/);
   assert.deepEqual(heldLabels(slots), []);
+});
+
+test("a sandboxed worker whose git dir is read-only keeps its buildinfo in TMPDIR, and tsc still reports its own result", (t) => {
+  slotEnv(t);
+  const tree = project(t);
+  const lane = tree.addWorktree(join(realpathSync(dirname(tree.dir)), `${RMD_TMP_PREFIX}npm-typecheck-ro-${process.pid}`), "ro-lane");
+  t.after(() => rmSync(lane.dir, { recursive: true, force: true }));
+  symlinkSync(join(REPO_ROOT, "node_modules"), join(lane.dir, "node_modules"));
+  const laneGitDir = realpathSync(spawnSync("git", ["-C", lane.dir, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).stdout.trim());
+  const tmp = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}npm-typecheck-tmp-`));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  // Codex's sandbox binds the canonical checkout's git dir read-only; the worktree and TMPDIR stay writable.
+  const canWrite = (dir: string) => realpathSync(dir) !== laneGitDir;
+  const prepared = prepareTypecheckRun(lane.dir, tmp, canWrite);
+  assert.equal(prepared.where, "tmp");
+  assert.ok(prepared.buildInfo?.startsWith(tmp + "/"), prepared.buildInfo);
+  assert.deepEqual(prepared.args, ["-p", "tsconfig.json", "--noEmit", "--incremental", "--tsBuildInfoFile", prepared.buildInfo]);
+  const realTsc = (file: string, args: readonly string[], cwd: string) => {
+    const r = spawnSync(file, [...args], { cwd, encoding: "utf8" });
+    return { status: r.status };
+  };
+  assert.equal(runTypecheck(lane.dir, [], { spawn: realTsc, tmpDir: tmp, canWrite, log: () => {} }), 0);
+  assert.ok(existsSync(prepared.buildInfo!), "tsc wrote the TMPDIR buildinfo");
+  assert.ok(!existsSync(join(laneGitDir, TYPECHECK_BUILDINFO_NAME)), "nothing was written into the read-only git dir");
+  assert.equal(prepareTypecheckRun(lane.dir, tmp, () => false).where, "plain", "nowhere writable runs the plain check");
+  if (process.getuid?.() !== 0) {
+    // The real filesystem shape: a read-only git dir would fail tsc with TS5033 if the buildinfo stayed there.
+    chmodSync(laneGitDir, 0o555);
+    const lines: string[] = [];
+    try {
+      assert.equal(runTypecheck(lane.dir, [], { spawn: realTsc, tmpDir: tmp, log: (line) => lines.push(line) }), 0, lines.join("\n"));
+    } finally {
+      chmodSync(laneGitDir, 0o755);
+    }
+  }
+});
+
+test("a slot holder in another pid namespace on the same host is live by its lease, not dead by its pid", (t) => {
+  const slots = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}npm-typecheck-ns-slots-`));
+  t.after(() => rmSync(slots, { recursive: true, force: true }));
+  const base = { dir: slots, slots: 1, log: () => {}, bootId: () => "boot-1" };
+  const first = acquireTestSlot("typecheck:npm", { ...base, pidNamespace: () => "pid:[111]" });
+  assert.equal(first.outcome, "acquired");
+  // A second sandboxed worker cannot see the first's pid: the probe says dead, the namespace says "not yours to judge".
+  const peer = acquireTestSlot("typecheck:npm", { ...base, pidNamespace: () => "pid:[222]", isPidAlive: () => false, waitBoundMs: 0 });
+  assert.equal(peer.outcome, "wait_bound_exceeded", peer.note);
+  // Control: the same namespace with a dead pid is still reclaimed, as before.
+  const sameNs = acquireTestSlot("typecheck:npm", { ...base, pidNamespace: () => "pid:[111]", isPidAlive: () => false, waitBoundMs: 0 });
+  assert.equal(sameNs.outcome, "acquired", sameNs.note);
+  sameNs.release();
+  first.release();
 });
