@@ -152,6 +152,10 @@ test("the shipped shadow mode never waits, reads nothing and writes nothing", as
   assert.equal(read, 0, "the state root is not even resolved");
   const elsewhere = await awaitMemoryAdmission(request, ports(w, { enforceHere: () => false }));
   assert.deepEqual(elsewhere, { kind: "not-enforced", why: "not a daemon-owned process" });
+  const { enforceHere: _ignored, ...withoutEnforceHere } = ports(w);
+  void _ignored;
+  assert.deepEqual(await awaitMemoryAdmission(request, withoutEnforceHere), { kind: "not-enforced", why: "not a daemon-owned process" },
+    "by default a test (or an operator's shell) is never held: only daemon-owned processes are");
 });
 
 test("under enforce a start that fits is admitted at once and silently", async () => {
@@ -388,4 +392,18 @@ test("a garden child waits its turn under enforce, holds a garden reservation fo
     resetShadowMemoryStateForTests();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("the real back-off sleeps between re-reads", async () => {
+  resetShadowMemoryStateForTests();
+  const w = world();
+  w.state.availableMib = 4300;
+  w.running.entries = [{ id: "busy" }];
+  const { sleep: _sleep, random: _random, ...real } = ports(w, { daemonPid: () => undefined });
+  void _sleep;
+  void _random;
+  const started = Date.now();
+  const outcome = await awaitMemoryAdmission(request, real);
+  assert.equal(outcome.kind, "admitted");
+  assert.ok(Date.now() - started >= ADMISSION_BACKOFF.baseMs * (1 - ADMISSION_BACKOFF.jitter) - 50, "one real back-off step elapsed");
 });

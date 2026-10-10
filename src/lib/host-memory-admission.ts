@@ -115,12 +115,7 @@ export async function awaitMemoryAdmission(
   request: AdmissionRequest,
   overrides: Partial<AdmissionPorts> = {},
 ): Promise<AdmissionOutcome> {
-  let ports: AdmissionPorts;
-  try {
-    ports = { ...defaultAdmissionPorts(), ...overrides };
-  } catch (error) {
-    return { kind: "error", reason: reasonOf(error) };
-  }
+  const ports: AdmissionPorts = { ...defaultAdmissionPorts(), ...overrides };
   let ledgerPath: string | undefined;
   const base = { run_id: request.runId ?? "memory-budget-enforce", task_id: request.taskId ?? "MEMORY-BUDGET" };
   const write = (row: { step: string } & Record<string, unknown>): void => {

@@ -387,11 +387,7 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
       }
     },
     finish(id) {
-      try {
-        sampleNow();
-      } catch (error) {
-        void error; // The final pass is best-effort; what earlier passes saw stands.
-      }
+      sampleNow(); // Never throws: an unreadable listing or member is skipped inside it.
       const entry = tracked.get(id);
       tracked.delete(id);
       stopIfIdle();

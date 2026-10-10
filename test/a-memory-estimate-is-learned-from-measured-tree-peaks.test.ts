@@ -277,3 +277,67 @@ test("readFileTail reads the last bytes of a real file from a whole line", () =>
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("the real sampler measures a live process from /proc where /proc exists, and records nothing where it does not", () => {
+  const sampler = createTreePeakSampler();
+  sampler.track("self", process.pid);
+  const peak = sampler.finish("self");
+  if (process.platform === "linux") assert.ok(peak !== undefined && peak > 0, `this test process's own VmHWM: ${peak}`);
+  else assert.equal(peak, undefined, "no /proc: never a zero peak");
+  assert.equal(sampler.size(), 0);
+});
+
+test("an oversized store compacts in place through the real atomic rewrite, and a class estimate is reused within its cache window", () => {
+  const dir = scratch();
+  try {
+    resetLearnedEstimateCacheForTests();
+    const store = { location: () => ({ dir }), root: "/r", instance: () => ({ name: "one" }), clock: fixedClock(NOW) };
+    for (let i = 0; i < 3; i += 1) recordPeak("review", 600 + i, store);
+    recordPeak("review", 700, { ...store, size: () => 2 * 1024 * 1024 });
+    assert.equal(readPeakSamples("review", store).length, 4, "compaction keeps every sample under the per-class bound");
+    const first = classEstimate("review", store);
+    assert.equal(classEstimate("review", store), first, "within the cache window the same estimate object is reused");
+    recordPeak("review", 5000, { ...store, append: () => undefined });
+    assert.notEqual(classEstimate("review", store), first, "a recorded peak invalidates the cached estimate");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a learned reservation never throws: an unreadable clock, a failing tracker or a failing peak read leave the default", () => {
+  resetLearnedEstimateCacheForTests();
+  const logs: Array<Record<string, unknown>> = [];
+  const store = { list: () => [], clock: { now: () => { throw new Error("clock gone"); }, date: () => new Date(0), iso: () => "" },
+    log: (e: Record<string, unknown>) => void logs.push(e) };
+  const throwing: TreePeakSampler = { track: () => { throw new Error("track"); }, finish: () => { throw new Error("finish"); },
+    sampleNow: () => undefined, size: () => 0 };
+  const reservation = openLearnedReservation({ workerClass: "fix" }, { ledger: reservationSpace().deps, store, sampler: throwing });
+  assert.equal(reservation.estimateMib, DEFAULT_ESTIMATE_MIB.fix);
+  reservation.bindRoot(1234);
+  reservation.releaseOccupancy();
+  assert.deepEqual(logs.map((e) => e.op), ["estimate", "track", "finish"]);
+});
+
+test("a sampler skips an unreadable listing or member, and a failing store or logger never reaches the caller", () => {
+  let listingFails = true;
+  const sampler = createTreePeakSampler({
+    listProcesses: () => {
+      if (listingFails) throw new Error("EACCES /proc");
+      return listing([[20, 1, "proc:3"], [21, 20, "proc:4"]]);
+    },
+    readFile: (path) => {
+      if (path === "/proc/20/stat") return statLine(20, "proc:3");
+      if (path === "/proc/20/status") return "VmHWM:\t 2048 kB\n";
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); // pid 21 exited between listing and read
+    },
+    setTimer: () => undefined,
+    clearTimer: () => undefined,
+  });
+  sampler.track("t", 20);
+  listingFails = false;
+  assert.equal(sampler.finish("t"), 2, "the unreadable pass and the vanished member add nothing; the readable root counts");
+
+  resetLearnedEstimateCacheForTests();
+  assert.equal(recordPeak("fix", 800, { location: () => ({ dir: "/x" }), append: () => { throw new Error("ENOSPC"); },
+    log: () => { throw new Error("logger down"); } }), false, "a full disk loses one sample, and a broken logger is swallowed");
+});

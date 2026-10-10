@@ -176,6 +176,11 @@ test("the daemon's growth is measured from its own /proc status, with no daemon.
   recordShadowMemoryVerdict({ workerClass: "implement", reservationId: "start", root: "/home/node/Remudero" },
     ports(unreadable, { daemonPid: () => 4040, readTail: () => { throw enoent("tail"); } }));
   assert.match(JSON.stringify(unreadable[0]!.daemon_growth), /proc 4040: ENOENT; ledger tail unreadable: ENOENT/);
+  resetShadowMemoryStateForTests();
+  const partial: LedgerLine[] = [];
+  recordShadowMemoryVerdict({ workerClass: "implement", reservationId: "start", root: "/home/node/Remudero" },
+    ports(partial, { readFile: hostFiles({ "/proc/777/status": "VmRSS:\t 1 kB\n" }) }));
+  assert.match(JSON.stringify(partial[0]!.daemon_growth), /proc 777: no VmHWM\/VmRSS; 1 daemon.alive row/);
 });
 
 test("the daemon process publishes its pid, so every process it starts can read the daemon's growth", () => {
@@ -265,6 +270,11 @@ test("the container ceiling is memory.high when lower, page cache is not counted
   recordShadowMemoryVerdict({ workerClass: "implement", reservationId: "start", root: "/home/node/Remudero" },
     ports(gone, { readFile: (path) => (path.endsWith("memory.high") ? (() => { throw enoent(path); })() : noHigh(path)) }));
   assert.equal((gone[0]!.numbers as Record<string, number>).containerCeilingMib, 8820);
+  resetShadowMemoryStateForTests();
+  const noStat: LedgerLine[] = [];
+  recordShadowMemoryVerdict({ workerClass: "implement", reservationId: "start", root: "/home/node/Remudero" },
+    ports(noStat, { readFile: (path) => (path.endsWith("memory.stat") ? (() => { throw enoent(path); })() : noHigh(path)) }));
+  assert.equal((noStat[0]!.numbers as Record<string, number>).containerWorkingSetMib, 7371, "an unreadable memory.stat subtracts nothing");
 });
 
 test("a finished reservation claims nothing more than it holds, and its default estimate adds no margin", () => {
