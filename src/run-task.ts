@@ -222,6 +222,7 @@ import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
 import { checkpointRemaining, isWipSubject, judgeCheckpointStop, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
+import { PREOPEN_GATE_STEP, renderPreopenGatePrompt, runPreopenGate, type PreopenGateResult } from "./lib/preopen-gate.js";
 import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
 import {
@@ -16083,6 +16084,8 @@ interface ProbeAdmissionOptions {
 interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   /** W1-T7096: set only by the drain and the CLI — the fix rung then asks the production judge. */
   productionProgressJudge?: boolean;
+  /** Test seam for the pre-open fast gate; production runs `runPreopenGate`, an injected spawn skips it. */
+  preopenGate?: (worktreePath: string) => Promise<PreopenGateResult>;
   instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
   armAdhocLaneReap?: boolean;
   binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
@@ -19667,6 +19670,38 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       log("implement.continued", { session_id: impl.sessionId, cost_usd: impl.costUsd, num_turns: impl.numTurns, subtype: impl.subtype, ...workerLedgerFields(impl) });
       const continueFail = failOnWorkerError(impl, "implement.continued");
       if (continueFail) return continueFail;
+    }
+
+    // The harness runs the fast gate itself before opening the PR; a failing step goes back to the worker once.
+    const preopenGate = opts.preopenGate ?? (spawnInjected ? undefined : (path: string) => runPreopenGate(path));
+    if (preopenGate !== undefined && !parseReport(fullText(impl))?.prUrl) {
+      const gate = await preopenGate(worktreePath);
+      log(PREOPEN_GATE_STEP, { result: gate.kind, failed: gate.kind === "fail" ? gate.failedSteps : [], duration_ms: gate.durationMs,
+        ...(gate.kind === "unmeasured" ? { reason: gate.reason } : {}) });
+      if (gate.kind === "fail") {
+        impl = account(
+          await spawn({
+            cwd: worktreePath,
+            permissionMode: "bypassPermissions",
+            settingsFile,
+            resumeSessionId: impl.sessionId,
+            model: implementMount.model,
+            mountProvider: implementMount.provider,
+            effort: implementMount.effort,
+            maxTurns: implementMount.maxTurns,
+            maxBudgetUsd: budgetUsd,
+            config: implementConfig,
+            tools: implementTools === undefined ? undefined : [...implementTools],
+            ...(ruleLookup === undefined ? {} : { ruleLookup }),
+            ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
+            ...cashTrialSpawn,
+            prompt: renderPreopenGatePrompt(gate.failedSteps, harnessOwnsGit),
+          }),
+        );
+        log("implement.preopen_continued", { session_id: impl.sessionId, cost_usd: impl.costUsd, num_turns: impl.numTurns, subtype: impl.subtype, ...workerLedgerFields(impl) });
+        const gateFail = failOnWorkerError(impl, "implement.preopen_continued");
+        if (gateFail) return gateFail;
+      }
     }
 
     // ── QUESTION contract (non-blocking) — log, don't stall (§2).
