@@ -1855,7 +1855,9 @@ function originUrlFromGitConfig(text: string): string | undefined {
   for (const raw of lines) {
     const line = raw.trim();
     if (line === "" || line.startsWith("#") || line.startsWith(";")) continue;
-    const section = /^\[\s*([A-Za-z][A-Za-z0-9-]*)(?:\s+(?:"((?:\\.|[^"])*)"|([A-Za-z0-9.-]+)))?\s*\]$/.exec(line);
+    // Keep the quoted subsection alternatives disjoint: a backslash belongs only to `\\.`.
+    // Letting `[^\"]` also consume `\\` makes malformed long sections exponentially backtrack.
+    const section = /^\[\s*([A-Za-z][A-Za-z0-9-]*)(?:\s+(?:"((?:[^"\\]|\\.)*)"|([A-Za-z0-9.-]+)))?\s*\]$/.exec(line);
     const dotted = /^\[\s*([A-Za-z][A-Za-z0-9-]*)\.([A-Za-z0-9.-]+)\s*\]$/.exec(line);
     if (line.startsWith("[") && !section && !dotted) return undefined;
     if (section || dotted) {
@@ -7893,6 +7895,8 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // diff touching it changes what those gates measure.
   "^scripts/diff-class\\.mjs$",
   "^scripts/ci-shard-admission\\.mjs$",
+  // 2026-10-10: the flake screen fails ci-shard 1 when a test file the PR adds fails one rerun.
+  "^scripts/flake-screen\\.mjs$",
   "^scripts/expiring-fixture-census\\.mjs$",
   "^scripts/baseline-monotonic-check\\.mjs$", // W1-T2906: refuses a baseline-score regression against origin/main
   "^scripts/gate-monotonic-check\\.mjs$", // W1-T3519: refuses a REQUIRED gate demoted against origin/main

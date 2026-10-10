@@ -32,7 +32,7 @@ import { resolveRepoLayout } from "./repo-layout.js";
 import { hostWorktreeGit } from "./worktree-git.js";
 import type { GardenWorkspacePort, PrState } from "./gardener.js";
 import type { Proposal } from "./inbox.js";
-import { parseTasksFromYaml, type Plan, type Task } from "./plan.js";
+import { machineFilingAdmissionViolations, parseTasksFromYaml, type MachineFilingAdmissionContext, type Plan, type Task } from "./plan.js";
 import {
   buildFilingRiskJudgeInput,
   DEFAULT_RISK_POLICY,
@@ -43,7 +43,7 @@ import {
   type RiskJudgeVerdict,
   type RiskPolicy,
 } from "./risk-judge.js";
-import { deterministicEscalation, UNPRICED_PRIORITY } from "./machine-filing.js";
+import { deterministicEscalation, UNPRICED_PRIORITY, withoutRulingBlock } from "./machine-filing.js";
 import { lintTask, promoteIntroducedPlanOnlyDiagnostics, rulingVerifyViolation, taskRulingPin, type LintViolation } from "./task-linter.js";
 
 /** The operator's escalation rule, handed to the judge verbatim in its gates state. */
@@ -215,22 +215,6 @@ export async function judgeMachineShard(
 
 const q = (v: string): string => JSON.stringify(v);
 
-/** Drop an existing `risk_ruling:` block from a single-record shard's text. */
-function withoutRulingBlock(lines: string[]): string[] {
-  const out: string[] = [];
-  let inBlock = false;
-  for (const line of lines) {
-    if (/^ {2}risk_ruling:\s*$/.test(line)) {
-      inBlock = true;
-      continue;
-    }
-    if (inBlock && (line.trim() === "" || /^ {4}/.test(line))) continue;
-    inBlock = false;
-    out.push(line);
-  }
-  return out;
-}
-
 /** A shard's text without its `risk_ruling` block's `judged_at:` line: an operator release is stamped
  *  afresh every pass, so only this line may differ from the ruling main carries (W1-T5406). */
 function withoutJudgedAt(text: string): string {
@@ -261,14 +245,20 @@ export function renderRuledShard(
   judgedPin: string,
   ruling: FilingRiskRuling,
   known: { has: (id: string) => boolean } = new Set<string>(),
+  /** lint-plan --base's machine-filing admission (W1-T3843), as the landing PR will meet it. Absent: not checked. */
+  admission?: Omit<MachineFilingAdmissionContext, "releasedIds">,
 ): { contents: string } | { refused: string; lint?: true } {
   if ((text.match(/^- id:/gm) ?? []).length !== 1) return { refused: `${relPath} does not hold exactly one record` };
   const unknownDep = shardRecord(text, relPath).depends_on.find((d) => !known.has(d));
   if (unknownDep !== undefined) return { refused: `${relPath}: depends_on unknown task '${unknownDep}'` };
   const verify = ruling.action === "proceed" ? "auto" : "human";
   const lines = withoutRulingBlock(text.replace(/\n+$/, "").split("\n"));
-  const verifyAt = lines.findIndex((l) => /^ {2}verify:\s*\S+\s*$/.test(l));
+  // 2026-10-10: `verify: human  # <why>` is valid YAML the plan loads, and W1-T7736 was refused as having no
+  // verify: line. The comment is kept on its own line above, so the rewrite never drops the filer's words.
+  let verifyAt = lines.findIndex((l) => /^ {2}verify:\s*[^\s#]+\s*(#.*)?$/.test(l));
   if (verifyAt < 0) return { refused: `${relPath} has no verify: line` };
+  const comment = /^ {2}verify:\s*[^\s#]+\s*#\s*(.*?)\s*$/.exec(lines[verifyAt]!)?.[1];
+  if (comment) lines.splice(verifyAt++, 0, `  # ${comment}`);
   lines[verifyAt] = `  verify: ${verify}`;
   // Released machine work with no measured cost dispatches mid-queue, never last (2026-09-29).
   const released = shardRecord(text, relPath);
@@ -304,6 +294,15 @@ export function renderRuledShard(
   const had = checks(base);
   const added = [...checks(promoteIntroducedPlanOnlyDiagnostics(lintTask(reparsed).violations, base, false))].filter((c) => !had.has(c));
   if (added.length > 0) return { refused: `${reparsed.id}: at verify: auto it fails lint (${added.join(", ")})`, lint: true };
+  // lint-plan --base also runs the machine-filing admission on every changed machine record, and a plain lintTask
+  // skips it: at verify: auto it refuses unmerged depends_on, which verify: human parks past. Only what the
+  // rewrite introduces counts, as above, so a reason the record already carried is not the ruling's to answer.
+  if (admission !== undefined) {
+    const admit = (t: Task) => machineFilingAdmissionViolations(t, { ...admission, releasedIds: new Set() });
+    const held = new Set(admit(before));
+    const refusedBy = admit(reparsed).filter((r) => !held.has(r));
+    if (refusedBy.length > 0) return { refused: `${reparsed.id}: at verify: auto lint-plan's machine-filing admission refuses it (${refusedBy.join("; ")})`, lint: true };
+  }
   return { contents };
 }
 
@@ -559,14 +558,15 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
         const relPath = shardRelPath(r.task)!;
         const text = readFileIfExists(join(root, relPath));
         const judgedPin = taskRulingPin({ ...r.task, verify: "auto" });
+        const admission = { plan, isMerged: (t: Task) => isMerged(t.id), pathExists: (p: string) => existsSync(join(root, p)) };
         let out = text === undefined
           ? { refused: `${relPath} is absent from the landing tree` }
-          : renderRuledShard(text, relPath, judgedPin, r.ruling, plan.byId);
+          : renderRuledShard(text, relPath, judgedPin, r.ruling, plan.byId, admission);
         if (text !== undefined && "refused" in out && out.lint && !r.byOperator) {
           // A proceed the record cannot honour is BROKEN, which is the operator's to see: park it,
           // pinned, with the reason, rather than re-asking the judge every pass.
           r.ruling = { ...r.ruling, action: "escalate", reasons: [...r.ruling.reasons, `the judge said proceed, but ${out.refused}`] };
-          out = renderRuledShard(text, relPath, judgedPin, r.ruling, plan.byId);
+          out = renderRuledShard(text, relPath, judgedPin, r.ruling, plan.byId, admission);
         }
         if ("refused" in out) {
           // Settled by the record's pin, so an unchanged record is not re-judged every pass.

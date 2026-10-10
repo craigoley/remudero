@@ -1,0 +1,40 @@
+- id: W1-T7800
+  title: "PLAN RELINT AND TASK-PROOF RESOLUTION ARE CORE-ONLY — a console plan's tests/unit (vitest) and tests/e2e (playwright) proofs are downgraded to dead proof because the unit-test dialect recognizes only test/ and apps/dashboard/src; derive supported roots and runners from the selected target repository's test configuration"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  origin: "feedback#fb-1790082750747-07ee12"
+  plan_refs: ["W1-T3564", "W1-T4038", "W1-T41"]
+  files: [src/lib/proof-grammar.ts, src/lib/task-linter.ts, src/lib/relint.ts, test/plan-relint-target-repo-proof-roots.test.ts]
+  priority: 4
+  status: queued
+  attempts: 0
+  rationale: |
+    Running `rmd plan mode create` from remudero-console produced the right successor scope, but plan
+    relint rejected valid console proofs: the unit-test dialect knows only core roots (test/,
+    apps/dashboard/src). The console manifest defines test:unit as `vitest run tests/unit` and
+    test:e2e as `playwright test` with testDir tests/e2e; both are real suite roots. This blocks the
+    console PR-action observable-lifecycle successor.
+
+    The planner-retry half of the feedback (preserve and require a valid verdict after relint repair)
+    is ALREADY filed as W1-T4038 and is not re-filed here. W1-T3564 registered the console for REVIEW
+    proof routing by a closed owner/repo registry; this task covers the distinct plan-time
+    task-proof resolution and relint path.
+  design: |
+    (i) Task-proof resolution and plan relint take the selected target repository (the repo the plan
+    is created for) and derive supported unit roots and runners from that repo's test configuration
+    (package.json test:unit / test:e2e scripts, playwright testDir), not from core constants.
+    (ii) Core behaviour for repo remudero stays byte-identical. An unknown or unreadable target
+    config fails closed (dead proof), never a wildcard.
+    (iii) Regression: a console plan carrying a vitest tests/unit proof and a Playwright tests/e2e
+    proof lints clean and is not downgraded to dead proof; the same paths under the core repo remain
+    refused.
+  acceptance:
+    - claim: "a console plan can carry unit and Playwright proofs without relint downgrading them to dead proof"
+      proof: "unit test: test/plan-relint-target-repo-proof-roots.test.ts"
+    - claim: "relint resolves proof roots from the target repository"
+      proof: "grep: targetRepo in src/lib/proof-grammar.ts"

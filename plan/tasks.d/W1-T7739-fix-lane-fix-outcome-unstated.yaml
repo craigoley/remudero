@@ -27,3 +27,11 @@
     - PR #10234: 24.76 PR-hours — the worker's FIX_OUTCOME line was not recognised [provider codex, selected_model gpt-6.1-sol, model sonnet, effort high]
     - PR #10311: 8.19 PR-hours — the worker's FIX_OUTCOME line was not recognised [provider codex, selected_model gpt-6.1-sol, model sonnet, effort high]
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.86
+    reasons:
+      - "high-risk verdict at confidence 0.86 — on the change's description/files alone, no diff was read — The filed record names fix-outcome:unstated and requests clearing it without a person, but does not specify the automated remedy or its permitted actions; the supplied text cannot establish whether operator-only decisions are involved.; on the change's description/files alone, no diff was read — The sole acceptance proof checks for a test declaration via grep, rather than executing a behavioral test; it does not verify the claimed removal of operator intervention."
+    judged_at: "2026-10-10T18:08:28.885Z"
+    pin: "a1fcb9c24b69ae28bdd4ebbbb3ac74c1af8eae494efa79610c807cf95f2fef58"

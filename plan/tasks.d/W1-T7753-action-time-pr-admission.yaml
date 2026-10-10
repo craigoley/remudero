@@ -1,0 +1,46 @@
+- id: W1-T7753
+  title: Check contributor admission at privileged PR action boundaries while preserving owner flow
+  repo: remudero
+  depends_on: [W1-T7752]
+  type: implement
+  verify: auto
+  author_class: operator
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "Operator-approved admission brief and 2026-10-10 filing/start instruction; owner override and existing trusted PR flow are required, not optional."
+  files: [src/lib/contributor-admission.ts, src/lib/sweep.ts, src/lib/arm-auto-merge.ts, src/lib/config-schema.ts, src/run-task.ts, test/action-time-pr-admission.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED: review selection, direct review/fix and auto-merge helpers use quality/head/lane guards
+    without original-contributor admission. A sweep-only filter would leave direct and special paths.
+    INFERRED: one shared resolver and action-time contract avoids inconsistent privilege decisions.
+    This record translates the approved brief; it does not authorize live policy activation.
+  design: |
+    Trace and test each privileged materialization, review, repair, plan-only, dependency and
+    auto-merge path. Resolve identity through bounded authenticated reads, cache only fresh verified
+    evidence, and revalidate repo/PR/head/policy before the effect. Keep reads off the daemon's
+    synchronous critical loop. Scope bot grants to their existing actions; do not broaden operator
+    authority to every organization member. Preserve owner-authenticated per-head adoption/override
+    without a second reviewer, fake CI success or a global queue hold. Missing legacy provenance
+    needs reconciliation, not a blanket trusted-PR refusal. Ship compatible shadow evaluation until
+    W1-T7755 supplies terminal disposition; enforcement activation remains a separate operator step.
+    No live config edits, GitHub settings, workflow-permission changes or infrastructure changes.
+  acceptance:
+    - claim: The privileged auto-merge boundary calls the shared admission classifier
+      proof: 'grep: classifyContribution( in src/lib/arm-auto-merge.ts'
+    - claim: Every privileged PR path checks the current origin before executing the protected effect
+      proof: 'unit test: W1-T7753: direct and sweep PR actions share fresh admission'
+    - claim: Owner override and existing scoped trusted bot flows work without a second approval
+      proof: 'unit test: W1-T7753: owner override and scoped trusted flows do not require another reviewer'
+    - claim: Head changes and stale evidence invalidate admission without blocking unrelated trusted work
+      proof: 'unit test: W1-T7753: stale admission is isolated to its PR and head'
+    - claim: The compatible shadow phase performs no refusal, closure or activation
+      proof: 'unit test: W1-T7753: shadow evaluation leaves trusted PR effects unchanged'
+  falsifier: |
+    Bypass admission at any traced direct/special path and its effect trap must fire. Reuse a decision
+    after a head change and the stale-head test must fail. Treat an identity outage as a queue-wide
+    stop, add a second approval or enforce during shadow mode and trusted-flow assertions must fail.

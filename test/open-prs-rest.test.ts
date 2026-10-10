@@ -136,6 +136,22 @@ test("mapRestPr normalises a null body to the empty string the Remudero-Task tra
   assert.equal(got.body, "");
 });
 
+test("W1-T7752: direct PR reads preserve original actor and deleted source repository", () => {
+  const fetch = fakeFetcher({
+    [singlePrRestArgs(OWNER, REPO, 806)[1]]: {
+      number: 806, html_url: "https://example.invalid/pull/806", updated_at: "t",
+      user: { id: 31, type: "User", login: "example-contributor" },
+      head: { sha: SHA, ref: "branch", repo: null }, base: { repo: { id: 32, full_name: "example/core" } },
+    },
+    [checkRunsRestArgs(OWNER, REPO, SHA)[1]]: { check_runs: [] },
+    [combinedStatusRestArgs(OWNER, REPO, SHA)[1]]: { statuses: [] },
+  });
+  assert.deepEqual(fetchSinglePrRest(OWNER, REPO, 806, fetch).contributionOrigin, {
+    actor: { id: 31, type: "User", login: "example-contributor" },
+    headRepository: null, targetRepository: { id: 32, fullName: "example/core" },
+  });
+});
+
 test("mapRestPr carries autoMergeRequest null when auto-merge is unarmed and non-null when armed, the only distinction its consumer draws", () => {
   const unarmed = mapRestPr({ number: 1, html_url: "u", updated_at: "t", head: { ref: "b", sha: "s" }, auto_merge: null });
   assert.equal(unarmed.autoMergeRequest, null);

@@ -1,0 +1,71 @@
+- id: W1-T7743
+  title: "THE DAEMON RELOADS ITS PLAN OFF THE LOOP — `loadPlanAtRef`'s default git runner is `execFileSync`, and the tick's plan reloader and the reviewer's at-head criteria read both call it on the loop: 62 `sync_spawn_top` entries on 2026-10-10, worst 10.7 s, plus a synchronous `git fetch` in the dedicated-target reloader"
+  repo: remudero
+  depends_on: [W1-T7742]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — how the daemon re-reads a committed plan; it gates every tick's plan binding
+  band_meaning: span
+  origin: "operator session 2026-10-10: core daemon loop-stall investigation (daemon.loop_lag 07:50-09:57Z), operator asked for flow improvements"
+  plan_refs: [W1-T3972, W1-T3554, W1-T4481, W1-T2511, W1-T5689, W1-T5718, W1-T147]
+  files: [src/lib/plan.ts, src/run-task.ts, src/lib/review.ts, src/lib/daemon.ts, test/the-daemon-reloads-its-plan-off-the-loop.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-10 on the core daemon. Between 07:50 and 09:57Z it logged 10 `daemon.loop_lag` stalls,
+    about 5,990 s in total. Of 171 `sync_spawn_top` entries, 62 came from `loadPlanAtRef`'s default runner,
+    worst 10.7 s.
+
+    READ on origin/main 4e1831b94.
+    - `loadPlanAtRef` (src/lib/plan.ts:1040). Its default `runGit` is
+      `execFileSync("git", ["-C", repoRoot, ...args], ...)` at plan.ts:1045.
+    - `readBlobsAtRefAsync` (plan.ts:1124) already reads blobs off the loop. Nothing assembles a whole plan
+      from it.
+    - `planReloader` (src/run-task.ts:36422), the self target's per-tick reloader:
+      - `treeSha` runs `execFileSync git rev-parse origin/main:plan` at :36448;
+      - `load` calls `loadPlanAtRef(..., "origin/main")` at :36451.
+    - `dedicatedTargetPlanReloader` (run-task.ts:36505) is worse. It runs a sync `git fetch --quiet origin`, a
+      sync rev-parse at :36530 and a sync `reset --hard`.
+    - The daemon calls the reloader synchronously. `DaemonDeps.reloadPlan` is typed `() => Plan | null`
+      (src/lib/daemon.ts:1006), and `reloadPlanBinding` (daemon.ts:3588) calls it without awaiting.
+    - The reviewer: `resolvePlanCriteriaAtHead` (src/lib/review.ts:6985) calls `loadPlanAtRef` at review.ts:7008
+      with the sync runner of :7005. Its callers are in src/run-task.ts at :22200, :22531 and :29739.
+    - All three of `loadPlanAtRef`, `planReloader` and `resolvePlanCriteriaAtHead` are rows in the sync-spawn
+      census baseline (test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts). A converted site needs
+      no edit there, because a count below its row passes.
+
+    SHARED SURFACE ONLY: W1-T147 (the overnight chaos drill) also names src/lib/daemon.ts and src/run-task.ts.
+    It does not touch plan reloading or the plan loaders.
+
+    SERIALIZED: depends on W1-T7742 because both edit src/run-task.ts. W1-T7744 depends on this one for the same file,
+    and W1-T7745 for src/lib/daemon.ts. Parallel agents editing one file broke main (#10349 and #10353 were each
+    green and together reddened main, 2026-10-09).
+  design: |
+    1. `loadPlanAtRefAsync(repoRoot, planRelPath, ref, runGit?)` in plan.ts. It returns the same `Plan` as
+       `loadPlanAtRef` for the same ref and the same errors. Its default runner is an awaited child. Build it on
+       `readBlobsAtRefAsync` and share the parse and merge with the sync form; do not fork them.
+    2. `planReloader` and `dedicatedTargetPlanReloader` return `() => Promise<Plan | null>`. Their default
+       rev-parse, fetch, reset and load are awaited children. The "do not advance lastSha until the ref
+       parsed" rule and the first-tick `daemon.plan_unchanged` row are unchanged.
+    3. `DaemonDeps.reloadPlan` may return a promise, and the tick awaits it at the same place, before the batch,
+       with the same "never mid-batch" guarantee. A rejected reload still writes `daemon.plan_reload_failed`.
+    4. `resolvePlanCriteriaAtHeadAsync` in review.ts, on the async loader. Its three run-task.ts callers await it.
+       The sync form stays for CLI callers off the loop.
+  acceptance:
+    - claim: "loadPlanAtRefAsync returns a plan deep-equal to loadPlanAtRef on a real git fixture while every synchronous child_process primitive throws"
+      proof: 'grep: test("W1-T7743: loadPlanAtRefAsync equals loadPlanAtRef on a real fixture with sync spawns trapped" in test/the-daemon-reloads-its-plan-off-the-loop.test.ts'
+    - claim: "the self-target plan reloader returns the fresh plan after origin/main:plan moves, with sync spawns trapped"
+      proof: 'grep: test("W1-T7743: planReloader returns the fresh plan after origin/main moves with sync spawns trapped" in test/the-daemon-reloads-its-plan-off-the-loop.test.ts'
+    - claim: "the dedicated-target plan reloader fetches, resets and reloads with sync spawns trapped"
+      proof: 'grep: test("W1-T7743: dedicatedTargetPlanReloader fetches, resets and reloads with sync spawns trapped" in test/the-daemon-reloads-its-plan-off-the-loop.test.ts'
+    - claim: "the daemon awaits a promise-returning reloadPlan before the batch and binds the plan it resolves to"
+      proof: 'grep: test("W1-T7743: the tick awaits an async reloadPlan and binds the resolved plan before the batch" in test/the-daemon-reloads-its-plan-off-the-loop.test.ts'
+    - claim: "the reviewer resolves at-head criteria through the async loader with sync spawns trapped"
+      proof: 'grep: test("W1-T7743: resolvePlanCriteriaAtHeadAsync resolves the head criteria with sync spawns trapped" in test/the-daemon-reloads-its-plan-off-the-loop.test.ts'
+  falsifier: |
+    Trap `execFileSync`, `spawnSync` and `execSync` to throw, using the same `syncBuiltinESMExports` swap that
+    `startReadPlaneTelemetry` uses. Today's default runners then throw, and every test fails. Have the daemon call
+    `reloadPlan()` without awaiting: the fourth test binds a Promise, not a Plan, and fails.

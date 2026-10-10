@@ -400,6 +400,10 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
     pathReaders.push(mkdtempCensus);
   }
   const changedSrcTypeScript = files.some((f) => f.startsWith("src/") && f.endsWith(".ts"));
+  const declaredSenderCensus = "test/every-message-names-one-declared-sender.test.ts";
+  if (input.files.has(declaredSenderCensus) && changedSrcTypeScript) {
+    pathReaders.push(declaredSenderCensus);
+  }
   // This census greps tracked src/**/*.ts in a child process, outside the import and read maps.
   const errorCensus = "test/error-subclass-census.test.ts";
   if (input.files.has(errorCensus) && changedSrcTypeScript) {

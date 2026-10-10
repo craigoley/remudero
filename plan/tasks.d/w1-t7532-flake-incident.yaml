@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -15,6 +15,8 @@
   acceptance:
     - claim: "the cause of test/catch-erasure-ratchet.test.ts's intermittent failure is fixed in test/catch-erasure-ratchet.test.ts, pinned by a test that forces the failing order"
       proof: "unit test: W1-T7532 pins the cause of the intermittent failure"
+    - claim: "the test that pins the cause is added to test/catch-erasure-ratchet.test.ts, beside the test that failed"
+      proof: 'grep: test("W1-T7532 pins the cause of the intermittent failure" in test/catch-erasure-ratchet.test.ts'
   note: "Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The SRE ruling of 2026-09-23 is that a CI flake is an incident."
   rationale: |
     Test: test/catch-erasure-ratchet.test.ts
@@ -22,3 +24,13 @@
     CI runs: 37944299457, 37947872859, 37956839580, 38001976388.
     Retry outcomes: 0 recovered on retry, 4 also failed on retry (the case that reds a PR).
     Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The declared scope is a single test file (test/catch-erasure-ratchet.test.ts), and the acceptance criteria only require fixing a flaky test and adding a pinning test beside it. Nothing described touches secrets, auth, permissions, deletion, merge/deploy/review policy, or irreversible actions."
+      - "The task needs no operator decision, and both acceptance items are checkable automatically (a unit test and a grep)."
+      - "The flake-incident family has 7 merged and 0 declined tasks (Beta mean 0.89), and the gates state is clean. The task is machine-authored and filed at filing time, and CI and review still apply."
+    judged_at: "2026-10-10T18:08:48.845Z"
+    pin: "c947bc7a7c52d302cfb9081bfdac745f96e571ea536c4b5e300ff172d25bfe17"
