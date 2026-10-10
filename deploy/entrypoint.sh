@@ -30,12 +30,9 @@ die() { log "$*"; exit 1; }
 # `mkdir -p` first: `git config --global` writes $HOME/.gitconfig and fails outright if HOME does
 # not exist (the same trap recorded further down).
 mkdir -p "${HOME:?HOME must be set — git config --global writes \$HOME/.gitconfig and cannot without it}"
-# W1-T6160: A COMPLETE EXPLICIT PAIR IS AUTHORITATIVE. Both RMD_GIT_AUTHOR_* non-empty is the
-# container's declared identity (an ordinary recycle carries it across; `recycle-container.sh
-# --commission-git-author` is the one operation that replaces it), so it is written even when HOME
-# already holds a different identity — otherwise a bad persisted identity could never be replaced.
-# It is READ BACK and the boot dies on any write/read error or mismatch: a boot that cannot apply
-# its declared author must never continue as if it had. A partial pair or none keeps the old branch.
+# W1-T6160: a complete RMD_GIT_AUTHOR_* pair is the container's declared author, so it is written even
+# over an identity HOME already holds, then read back; a write/read error or mismatch stops the boot.
+# A partial pair or none keeps the configured-identity/default behaviour below.
 if [ -n "${RMD_GIT_AUTHOR_NAME:-}" ] && [ -n "${RMD_GIT_AUTHOR_EMAIL:-}" ]; then
   git config --global --replace-all user.name "${RMD_GIT_AUTHOR_NAME}" \
     || die "git identity: FAILED to write user.name to the global config (\$HOME/.gitconfig) — refusing to boot on an unapplied author"

@@ -144,15 +144,10 @@ for ((i = 1; i <= $#; i++)); do
 done
 
 # ── W1-T6160: EXPLICIT GIT AUTHOR COMMISSIONING — ONE NAMED TARGET, VERIFIED, WITH A RECEIPT ──────
-# An ordinary recycle keeps a non-empty outgoing RMD_GIT_AUTHOR_* over a conflicting shell export
-# (W1-T3454), so an export alone can never replace a bad author. `--commission-git-author` is the one
-# operation that may: it reads the complete pair from THIS shell's RMD_GIT_AUTHOR_NAME/_EMAIL (never
-# from argv or the repository), refuses before any pause, pull, stop, removal or identity write unless
-# the pair and the single --instance target are sound, carries the pair through the ordinary graceful
-# replacement, then verifies the replacement's environment AND the author git really resolves from
-# the target checkout as the worker user. Every exit prints one receipt naming target, operation,
-# outcome and phase — never an author value or credential. The pair persists only as the declared
-# RMD_GIT_AUTHOR_* names, so a later ordinary recycle preserves it with no standing force switch.
+# An ordinary recycle keeps a non-empty outgoing RMD_GIT_AUTHOR_* over a shell export (W1-T3454), so
+# only this explicit mode may replace it: the pair comes from THIS shell (never argv), is preflighted
+# before any lifecycle step, rides the graceful replacement, and is verified as the effective author.
+# Every exit prints one receipt (target, operation, outcome, phase) — never an author value.
 COMMISSION_GIT_AUTHOR=0
 for arg in "$@"; do
   case "${arg}" in --commission-git-author) COMMISSION_GIT_AUTHOR=1 ;; esac
@@ -598,11 +593,9 @@ if [ "${FIRST_BOOT}" != "1" ]; then
 fi
 
 # ── 1.55. GIT AUTHOR COMMISSIONING PREFLIGHT (W1-T6160) — READ-ONLY, BEFORE ANYTHING IS TOUCHED ──
-# Everything below this block can pause, pull, stop, remove or start; so every way the request can
-# be wrong is refused HERE: no single explicit target, a target the registry cannot name uniquely,
-# a live container whose state mount disagrees with the registry, a target checkout that is not a
-# checkout, or an author pair that is partial, blank, malformed or carries control characters. The
-# refusal names WHICH input failed, never its value.
+# Everything below can pause, pull, stop, remove or start, so a wrong target (missing, repeated,
+# ambiguous in the registry, or disagreeing with the live container's mounts) or an unsound pair is
+# refused HERE. The refusal names WHICH input failed, never its value.
 commission_refuse() {
   echo "recycle-container: REFUSING git author commissioning — $1" >&2
   echo "  NOTHING has been touched: no pause, pull, stop, removal or identity write." >&2
@@ -1227,8 +1220,7 @@ recycle_cleanup_tmp() {
   [ -n "${PULL_LOG}" ] && rm -f "${PULL_LOG}"
   return 0
 }
-# W1-T6160: one EXIT handler — the temp-file cleanup, then the commissioning receipt (a no-op
-# unless --commission-git-author), so a refusal or failure anywhere below still prints it.
+# W1-T6160: temp cleanup, then the commissioning receipt (a no-op unless --commission-git-author).
 trap 'recycle_cleanup_tmp; commission_on_exit' EXIT
 if ! PULL_LOG="$(mktemp "${RECYCLE_TMPDIR%/}/rmd-recycle-container-pull-log.XXXXXX" 2>/dev/null)"; then
   echo "recycle-container: REFUSING — could not create a scratch pull log under ${RECYCLE_TMPDIR}." >&2
@@ -2025,12 +2017,9 @@ else
 fi
 
 # ── 7.6. VERIFY THE COMMISSIONED AUTHOR IS THE ONE GIT WILL USE (W1-T6160) ───────────────────────
-# Two separate facts, both required. The replacement's OWN environment must carry the requested pair
-# (what a later ordinary recycle will capture), and `git var GIT_AUTHOR_IDENT`, run as the worker user
-# from the target checkout, must resolve to it — a matching global config proves nothing when a
-# repository-local identity or a GIT_AUTHOR_* variable masks it. The probe is bounded and polled
-# because the boot writes the identity after `docker run` returns. A mismatch, an unreadable config or
-# a failed or timed-out probe is a FAILED commissioning; the replacement is left running to diagnose.
+# Both required: the replacement's own env carries the pair (what later recycles capture), and
+# `git var GIT_AUTHOR_IDENT` as the worker user in the target checkout resolves to it — a global match
+# proves nothing under a local or GIT_AUTHOR_* mask. Bounded and polled; any miss is a FAILURE.
 commission_fail() {
   echo "recycle-container: FAILED git author commissioning ($1) — $2" >&2
   echo "  The replacement ${CONTAINER_NAME} remains running for diagnosis; no rollback was attempted." >&2
