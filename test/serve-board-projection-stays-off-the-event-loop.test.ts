@@ -337,13 +337,34 @@ async function publishedIds(url: string, until: (ids: string[]) => boolean): Pro
   const deadline = Date.now() + 5_000;
   let ids: string[] = [];
   while (Date.now() < deadline) {
-    const body = await (await fetch(`${url}/v1/status`)).json() as { tasks?: Array<{ taskId: string }> };
-    ids = (body.tasks ?? []).map((task) => task.taskId);
+    const response = await fetch(`${url}/v1/status`);
+    const body = await response.json() as { tasks?: Array<{ taskId: string }> };
+    if (response.status !== 200 || !Array.isArray(body.tasks)) {
+      await sleep(30);
+      continue;
+    }
+    ids = body.tasks.map((task) => task.taskId);
     if (until(ids)) break;
     await sleep(30);
   }
   return ids;
 }
+
+test("board retirement waits for a valid snapshot instead of accepting unavailable as empty", async (t) => {
+  let reads = 0;
+  const server = createHttpServer((_req, res) => {
+    reads++;
+    res.writeHead(reads === 1 ? 503 : 200, { "content-type": "application/json" });
+    res.end(JSON.stringify(reads === 1 ? { error: "board_unavailable" }
+      : reads === 2 ? {} : { tasks: [{ taskId: "W1-T2" }] }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as { port: number }).port;
+  const ids = await publishedIds(`http://127.0.0.1:${port}`, (tasks) => !tasks.includes("W1-T1"));
+  assert.deepEqual(ids, ["W1-T2"]);
+  assert.equal(reads, 3, "both unavailable and missing-task responses were observed before the valid snapshot");
+});
 
 test("the running board worker publishes a filed task and drops a retired one after the plan file changes", async (t) => {
   const { worker, planPath, url } = await fixture(t, { intervalMs: 100 });
@@ -351,7 +372,7 @@ test("the running board worker publishes a filed task and drops a retired one af
   writeFileSync(planPath, planTask("W1-T1") + planTask("W1-T2"));
   assert.deepEqual(await publishedIds(url, (ids) => ids.includes("W1-T2")), ["W1-T1", "W1-T2"], "a filed task appears without a worker restart");
   writeFileSync(planPath, planTask("W1-T2"));
-  assert.deepEqual(await publishedIds(url, (ids) => !ids.includes("W1-T1")), ["W1-T2"], "a retired task disappears without a worker restart");
+  assert.deepEqual(await publishedIds(url, (ids) => ids.length === 1 && ids[0] === "W1-T2"), ["W1-T2"], "a retired task disappears and the surviving task stays without a worker restart");
 });
 
 test("a board worker pass parses an unchanged plan once and re-reads it when the file changes", async (t) => {
