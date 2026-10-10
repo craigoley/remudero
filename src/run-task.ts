@@ -222,6 +222,7 @@ import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
 import { checkpointRemaining, isWipSubject, judgeCheckpointStop, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
+import { PREOPEN_GATE_STEP, renderPreopenGatePrompt, runPreopenGate, type PreopenGateResult } from "./lib/preopen-gate.js";
 import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
 import {
@@ -16083,6 +16084,8 @@ interface ProbeAdmissionOptions {
 interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   /** W1-T7096: set only by the drain and the CLI — the fix rung then asks the production judge. */
   productionProgressJudge?: boolean;
+  /** Test seam for the pre-open fast gate; production runs `runPreopenGate`, an injected spawn skips it. */
+  preopenGate?: (worktreePath: string) => Promise<PreopenGateResult>;
   instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
   armAdhocLaneReap?: boolean;
   binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
@@ -19669,6 +19672,38 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       if (continueFail) return continueFail;
     }
 
+    // The harness runs the fast gate itself before opening the PR; a failing step goes back to the worker once.
+    const preopenGate = opts.preopenGate ?? (spawnInjected ? undefined : (path: string) => runPreopenGate(path));
+    if (preopenGate !== undefined && !parseReport(fullText(impl))?.prUrl) {
+      const gate = await preopenGate(worktreePath);
+      log(PREOPEN_GATE_STEP, { result: gate.kind, failed: gate.kind === "fail" ? gate.failedSteps : [], duration_ms: gate.durationMs,
+        ...(gate.kind === "unmeasured" ? { reason: gate.reason } : {}) });
+      if (gate.kind === "fail") {
+        impl = account(
+          await spawn({
+            cwd: worktreePath,
+            permissionMode: "bypassPermissions",
+            settingsFile,
+            resumeSessionId: impl.sessionId,
+            model: implementMount.model,
+            mountProvider: implementMount.provider,
+            effort: implementMount.effort,
+            maxTurns: implementMount.maxTurns,
+            maxBudgetUsd: budgetUsd,
+            config: implementConfig,
+            tools: implementTools === undefined ? undefined : [...implementTools],
+            ...(ruleLookup === undefined ? {} : { ruleLookup }),
+            ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
+            ...cashTrialSpawn,
+            prompt: renderPreopenGatePrompt(gate.failedSteps, harnessOwnsGit),
+          }),
+        );
+        log("implement.preopen_continued", { session_id: impl.sessionId, cost_usd: impl.costUsd, num_turns: impl.numTurns, subtype: impl.subtype, ...workerLedgerFields(impl) });
+        const gateFail = failOnWorkerError(impl, "implement.preopen_continued");
+        if (gateFail) return gateFail;
+      }
+    }
+
     // ── QUESTION contract (non-blocking) — log, don't stall (§2).
     const question = parseQuestion(fullText(impl));
     if (question) {
@@ -20076,7 +20111,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
         const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
         const issues = opts.prOpenRefusalIssues ?? ghIssueGateway(owner, task.repo);
-        const issueUrl = recordRefusedPrOpen(err, { taskId, branch, headSha }, log, { issues, ledgerPath, runId });
+        const changedFiles = refusedBranchChangedFiles(worktreePath);
+        const issueUrl = recordRefusedPrOpen(err, { taskId, branch, headSha, changedFiles, declaredFiles: task.files }, log, { issues, ledgerPath, runId });
         reclaimRunWorktree(repoDir, worktreePath, "pr_open.refused", log);
         log("verdict", {
           verdict: "failed",
@@ -27071,6 +27107,16 @@ export function hostWorktreeGitAtTopLevel(dir: string, args: string[], opts: Hos
       if (!(error instanceof WorktreePointerRefusedError) || error.observed !== "<absent>" || dirname(at) === at) throw error;
     }
   }
+}
+
+/** The files a refused run branch changed since its merge base with origin/main, or undefined when either read
+ *  fails: an unreadable diff keeps the refusal's escalation rather than guessing the build changed only tests. */
+export function refusedBranchChangedFiles(worktreePath: string): string[] | undefined {
+  const base = hostWorktreeGitResult(worktreePath, ["merge-base", "origin/main", "HEAD"]);
+  if (base.status !== 0 || base.stdout.trim() === "") return undefined;
+  const diff = hostWorktreeGitResult(worktreePath, ["diff", "--name-only", base.stdout.trim(), "HEAD"]);
+  if (diff.status !== 0) return undefined;
+  return diff.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
 }
 
 export function hostWorktreeGitResult(worktreePath: string, args: string[]): { status: number | null; stdout: string; stderr: string } {
