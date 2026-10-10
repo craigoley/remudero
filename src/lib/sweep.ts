@@ -17723,7 +17723,7 @@ export async function runSweepLightPass(
   });
   const admitOneRefill = async (): Promise<boolean> => {
     if (refillTail.length === 0 || providerFloorMet) return false;
-    const nowMs = deps.now ? deps.now() : Date.now();
+    const nowMs = deps.now ? deps.now() : systemClock.now();
     const width = effectiveReviewWidth(deps, policy, refillTail.length, nowMs, selectionLedgerLines,
       (deps.readActiveWorkerCount ?? activeWorkerCount)());
     const { bound, inFlight } = reviewAdmissionBound(width);
@@ -17757,6 +17757,7 @@ export async function runSweepLightPass(
       if (terminal !== undefined) skip = terminal;
       else if (liveHead !== undefined && liveHead !== next.headSha) skip = `head moved to ${liveHead.slice(0, 8)}`;
     } catch (error) {
+      // Not an erasing catch: the error text is carried into `skip`, which the skipped row records.
       skip = `live head unreadable (${String((error as Error)?.message ?? error)}) — left to the next pass`;
     }
     if (skip !== undefined) {
