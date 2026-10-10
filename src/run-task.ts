@@ -32637,11 +32637,17 @@ export function netStateAdvisorySectionFor(repoRoot: string): string {
  * function already had before this task, so an isolated caller (this function's direct unit
  * tests below) keeps working unchanged.
  */
-export function planHealthSweepSectionFor(repoRoot: string, isMerged?: (task: Task) => boolean): string {
-  try {
+export function planHealthSweepSectionFor(
+  repoRoot: string,
+  isMerged?: (task: Task) => boolean,
+  loadTasks: () => Task[] | undefined = () => {
     const tasksYamlPath = join(repoRoot, "plan", "tasks.yaml");
-    if (!existsSync(tasksYamlPath)) return "";
-    const { tasks } = loadPlan(tasksYamlPath);
+    return existsSync(tasksYamlPath) ? loadPlan(tasksYamlPath).tasks : undefined;
+  },
+): string {
+  try {
+    const tasks = loadTasks();
+    if (tasks === undefined) return "";
     const report = planHealthSweep(
       tasks,
       () => ({
@@ -32900,6 +32906,7 @@ export function readPlanCoherenceInputs(root: string): {
 async function retroCommand(
   rest: string[],
   opts: {
+    repoRoot?: string;
     /** Injectable worker-spawn (mirrors {@link runTask}'s `opts.spawn`) — lets a test drive
      *  the retro success path (through the atomic marker-advance, W1-T242) without a real
      *  Architect spawn. Default: the real {@link spawnWorker}. */
@@ -32953,6 +32960,7 @@ async function retroCommand(
   } = {},
 ): Promise<number> {
   const dryRun = rest.includes("--dry-run");
+  const checkoutRoot = opts.repoRoot ?? repoRoot;
   const spawn = opts.spawn ?? ledgeredNonDispatchSpawn("retro");
   const config = loadConfig();
   const ledgerPath = ledgerPathFor(config);
@@ -32972,7 +32980,7 @@ async function retroCommand(
     if (refresh.ready) await refresh.ready;
   }
   const markerPath = join(config.root, "state", "last-retro.json");
-  const learningsPath = join(repoRoot, "LEARNINGS.md");
+  const learningsPath = join(checkoutRoot, "LEARNINGS.md");
   // W1-T242: a corrupt-but-present marker (e.g. a torn write from a crash, or a manual
   // edit) MUST NOT be silently treated as "no marker" — that would replay the whole
   // already-consumed run window and double-count SHIPPED/learnings. resolveMarkerForGather
@@ -33021,7 +33029,7 @@ async function retroCommand(
   // (every failure verdict reports unmapped, LOUDLY, in the render) rather than
   // aborting the retro; a PRESENT-but-malformed file fails closed (loadMastMapping
   // throws MastMappingError), same discipline as a corrupt marker below.
-  const mastMappingPath = join(repoRoot, "plan", "mast-mapping.yaml");
+  const mastMappingPath = join(checkoutRoot, "plan", "mast-mapping.yaml");
   const mastMapping: MastMapping = existsSync(mastMappingPath) ? loadMastMapping(mastMappingPath) : { rows: [] };
   // owner/repo: still needed below (repo clone, orientation's own gateway, PR create) —
   // retroShippedGithubGateway() resolves its OWN copy internally for the SHIPPED union.
@@ -33044,16 +33052,23 @@ async function retroCommand(
   // a proposal's indented (a)/(b)/(c) continuation bullets). Best-effort: a read/parse
   // hiccup degrades to "no dedup source" (every followup mints) rather than aborting
   // the retro — the SAME non-fatal discipline the mast-mapping/orientation reads use.
-  const openTaskTitles = tryReadFollowupTitles("tasks", () => {
-    const tasksYamlPath = join(repoRoot, "plan", "tasks.yaml");
-    return existsSync(tasksYamlPath) ? loadPlan(tasksYamlPath).tasks.map((t) => t.title) : [];
-  });
-  const openTaskClasses = tryReadFollowupTitles("classes", () => {
-    const tasksYamlPath = join(repoRoot, "plan", "tasks.yaml");
-    return existsSync(tasksYamlPath) ? loadPlan(tasksYamlPath).tasks.filter((t) => t.status !== "merged" && t.status !== "done").map((t) => deriveTaskClass(t)) : [];
-  });
+  let gatherPlanRead: { plan: ReturnType<typeof loadPlan> | undefined } | { error: unknown };
+  try {
+    const tasksYamlPath = join(checkoutRoot, "plan", "tasks.yaml");
+    gatherPlanRead = { plan: existsSync(tasksYamlPath) ? loadPlan(tasksYamlPath) : undefined };
+  } catch (error) {
+    gatherPlanRead = { error: error };
+  }
+  const readGatherPlan = (): ReturnType<typeof loadPlan> | undefined => {
+    if ("error" in gatherPlanRead) throw gatherPlanRead.error;
+    return gatherPlanRead.plan;
+  };
+  const openTaskTitles = tryReadFollowupTitles("tasks", () =>
+    readGatherPlan()?.tasks.map((t) => t.title) ?? []);
+  const openTaskClasses = tryReadFollowupTitles("classes", () =>
+    readGatherPlan()?.tasks.filter((t) => t.status !== "merged" && t.status !== "done").map((t) => deriveTaskClass(t)) ?? []);
   const openProposalLines = tryReadFollowupTitles("proposals", () => {
-    const masterPlanPath = join(repoRoot, "MASTER-PLAN.md");
+    const masterPlanPath = join(checkoutRoot, "MASTER-PLAN.md");
     const masterPlanMd = existsSync(masterPlanPath) ? readFileSync(masterPlanPath, "utf8") : "";
     const lines = masterPlanMd.match(/^-\s+(?:\*\*)?(?:★\s*)?P\d+[A-Za-z]?\b.*$/gm) ?? [];
     // DEGRADE LOUDLY (W1-T132's discipline): a non-trivial MASTER-PLAN.md yielding
@@ -33071,7 +33086,7 @@ async function retroCommand(
   // ratifies) is wired live rather than shipping as an inert, never-called
   // organ. loadMounts throws on a bad/absent table — same fail-closed
   // discipline every other mounts.yaml read in this file already has.
-  const mountsTable = loadMounts(mountsPath(repoRoot));
+  const mountsTable = loadMounts(mountsPath(checkoutRoot));
   const gather = buildGather({
     ledgerNdjson,
     followupLedgerNdjson,
@@ -33089,7 +33104,7 @@ async function retroCommand(
     // the rung answers the fourteen-cycle monolith-vs-shard question by MEASUREMENT on every
     // `rmd retro` cycle instead of rendering `unexamined`. Reads THIS checkout's plan (repoRoot),
     // the same tree `openTaskTitles` above already loads.
-    planCoherence: readPlanCoherenceInputs(repoRoot),
+    planCoherence: readPlanCoherenceInputs(checkoutRoot),
     now: Date.now(),
   });
   // W1-T111 (P25 iv): the approve/reframe rate is telemetry, not decoration — the field's
@@ -33101,7 +33116,7 @@ async function retroCommand(
   // checkout (this repo's own working tree, `repoRoot` — never a PR diff). Best-effort + silent
   // on failure, the SAME non-fatal discipline `openProposalLines`/`openTaskTitles` above already
   // follow: a read/scan hiccup degrades to "nothing to advise" rather than aborting the retro.
-  const netStateAdvisorySection = netStateAdvisorySectionFor(repoRoot);
+  const netStateAdvisorySection = netStateAdvisorySectionFor(checkoutRoot);
   // W1-T367: a single batched `projectPlan` pass over the SAME `repoRoot`/plan/tasks.yaml the
   // plan-health sweep reads below, so its "already shipped" skip is decided the SAME way the
   // dispatch path decides it — never the decorative yaml `status:` field (MEASURED: 248/359
@@ -33127,9 +33142,8 @@ async function retroCommand(
   // file or a throwing scan retires NOTHING, which is the direction that cannot lose work.
   let followupReferentRead: FollowupReferentRead = { kind: "unreadable" };
   try {
-    const planHealthPlanPath = join(repoRoot, "plan", "tasks.yaml");
-    if (existsSync(planHealthPlanPath)) {
-      const planHealthPlan = loadPlan(planHealthPlanPath);
+    const planHealthPlan = readGatherPlan();
+    if (planHealthPlan) {
       const planHealthProjection = projectPlan(
         planHealthPlan,
         { ledgerPath, github: opts.github ?? buildBatchedGithub(owner, repo) },
@@ -33138,7 +33152,7 @@ async function retroCommand(
       followupReferentRead = {
         kind: "ok",
         merged: new Set([...planHealthProjection].filter(([, v]) => v.merged).map(([id]) => id)),
-        mergedPrs: mergedPullRequestNumbers(repoRoot),
+        mergedPrs: mergedPullRequestNumbers(checkoutRoot),
       };
       isTaskMerged = (task) => planHealthProjection.get(task.id)?.merged ?? false;
       planStateResolver = (taskId) => {
@@ -33155,11 +33169,11 @@ async function retroCommand(
   // MASTER-PLAN.md asserts unbuilt against the SAME merge resolver above — a BLOCKING
   // contradiction (design (iv): outranks the plan-health sweep below for KICK ORDER purposes),
   // so it is concatenated ahead of that advisory floor.
-  const planStateTruthSection = planStateTruthSectionFor(repoRoot, planStateResolver);
+  const planStateTruthSection = planStateTruthSectionFor(checkoutRoot, planStateResolver);
   // W1-T358 (Standing rule 20): the plan-health sweep re-grades the OPEN queue against
   // every standing rule the linter encodes — rides EVERY retro report (dry-run and real
   // alike), same as the net-state advisory section above.
-  const planHealthSection = planHealthSweepSectionFor(repoRoot, isTaskMerged);
+  const planHealthSection = planHealthSweepSectionFor(checkoutRoot, isTaskMerged, () => readGatherPlan()?.tasks);
   const reportWithoutPromotion =
     [
       renderGather(gather),
