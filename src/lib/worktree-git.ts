@@ -26,6 +26,8 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
  *   4. VETS the pinned gitdir's own config before git runs (W1-T6148): a key the harness never writes
  *      is refused ({@link WorktreeConfigRefusedError}), and `credential.helper` is reset and re-added
  *      from HARNESS state only — system/global helpers, or the daemon's socket helper.
+ *   5. NEUTRALISES attribute-named filters from system/global config, including trusted includes.
+ *      Custom merge commands become the harness's plain text merge, never the configured program.
  *
  * WHAT IT DELIBERATELY KEEPS: system and global config (daemon-owned), and the pinned gitdir's config
  * keys that (4) admits, so pushes authenticate exactly as before.
@@ -347,8 +349,41 @@ function harnessCredentialConfig(entries: readonly ConfigEntry[]): Array<[string
   return [...out, ["core.askPass", ""], ["http.extraHeader", ""]];
 }
 
+/** W1-T6146: config subsections are case-sensitive and can contain dots. Override every discovered
+ *  driver, including required/process-only filters. Empty filters pass bytes through; clearing
+ *  `required` keeps an intentionally disabled filter from rejecting every add or checkout. A custom
+ *  merge uses the harness's text merge command: an empty command would claim success without merging.
+ *  No production path in this repository installs LFS; the host leaf stores unfiltered bytes even
+ *  when a daemon-wide LFS filter exists. Worker-local driver keys remain refused above. */
+function attributeDriverConfig(entries: readonly ConfigEntry[]): Array<[string, string]> {
+  const filters = new Set<string>();
+  const merges = new Set<string>();
+  for (const { key } of entries) {
+    const filter = /^filter\.(.+)\.(?:clean|smudge|process|required)$/.exec(key);
+    const merge = /^merge\.(.+)\.(?:driver|recursive)$/.exec(key);
+    if (filter) filters.add(filter[1]!);
+    if (merge) merges.add(merge[1]!);
+  }
+  return [
+    ...[...filters].flatMap((name): Array<[string, string]> => [
+      [`filter.${name}.clean`, ""], [`filter.${name}.smudge`, ""],
+      [`filter.${name}.process`, ""], [`filter.${name}.required`, "false"],
+    ]),
+    ...[...merges].flatMap((name): Array<[string, string]> => [
+      [`merge.${name}.driver`, "git merge-file -- %A %O %B"], [`merge.${name}.recursive`, "text"],
+    ]),
+  ];
+}
+
 const CONFIG_LIST_ARGS = ["config", "--list", "--show-scope", "--null", "--no-includes"];
+const CONFIG_LIST_WITH_INCLUDES_ARGS = ["config", "--list", "--show-scope", "--null", "--includes"];
 const CONFIG_READ_TIMEOUT_MS = 30_000;
+
+/** Follow includes only AFTER their direct keys have passed the pinned-config refusal. The actual
+ *  git call follows trusted includes too, so a no-includes listing alone misses their drivers. */
+function hasConfigIncludes(listing: string): boolean {
+  return parseConfigListing(listing).some(({ key }) => /^(?:include\.path|includeif\..+\.path)$/.test(key));
+}
 
 /** Whether `pin` is the HARNESS's own checkout — the tree this code runs from, which no worker writes
  *  (CI's runner checkout carries `actions/checkout`'s includeIf credentials). Real paths, never names: a
@@ -366,22 +401,32 @@ function vetted(pin: PinnedWorktreeGit, listing: string, log: WorktreeGitLog, ha
     log("worktree_git.config_refused", { worktree: pin.worktree, git_dir: pin.gitDir, keys });
     throw new WorktreeConfigRefusedError(pin.worktree, keys);
   }
-  return harnessCredentialConfig(entries);
+  return [...harnessCredentialConfig(entries), ...attributeDriverConfig(entries)];
 }
 
 /** Vet the pinned repository's own config before a call (W1-T6148); returns the overrides it adds. */
 export function vetPinnedConfig(pin: PinnedWorktreeGit, log: WorktreeGitLog = stderrLog, harnessRoot: string = HARNESS_ROOT): Array<[string, string]> {
-  const listing = execFileSync("git", CONFIG_LIST_ARGS, {
-    cwd: pin.worktree, encoding: "utf8", env: configReadEnv(pin), stdio: ["ignore", "pipe", "pipe"], timeout: CONFIG_READ_TIMEOUT_MS,
-  });
-  return vetted(pin, listing, log, harnessRoot);
+  let args = CONFIG_LIST_ARGS;
+  for (;;) {
+    const listing = execFileSync("git", args, {
+      cwd: pin.worktree, encoding: "utf8", env: configReadEnv(pin), stdio: ["ignore", "pipe", "pipe"], timeout: CONFIG_READ_TIMEOUT_MS,
+    });
+    const overrides = vetted(pin, listing, log, harnessRoot);
+    if (args === CONFIG_LIST_WITH_INCLUDES_ARGS || !hasConfigIncludes(listing)) return overrides;
+    args = CONFIG_LIST_WITH_INCLUDES_ARGS;
+  }
 }
 
 async function vetPinnedConfigAsync(pin: PinnedWorktreeGit, log: WorktreeGitLog): Promise<Array<[string, string]>> {
-  const { stdout } = await execFilePromise("git", CONFIG_LIST_ARGS, {
-    cwd: pin.worktree, encoding: "utf8", env: configReadEnv(pin), timeout: CONFIG_READ_TIMEOUT_MS,
-  });
-  return vetted(pin, stdout, log);
+  let args = CONFIG_LIST_ARGS;
+  for (;;) {
+    const { stdout } = await execFilePromise("git", args, {
+      cwd: pin.worktree, encoding: "utf8", env: configReadEnv(pin), timeout: CONFIG_READ_TIMEOUT_MS,
+    });
+    const overrides = vetted(pin, stdout, log);
+    if (args === CONFIG_LIST_WITH_INCLUDES_ARGS || !hasConfigIncludes(stdout)) return overrides;
+    args = CONFIG_LIST_WITH_INCLUDES_ARGS;
+  }
 }
 
 /** `args` with `--no-ext-diff --no-textconv` after a diff-producing subcommand. */
