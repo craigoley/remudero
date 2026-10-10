@@ -473,7 +473,9 @@ export function reviewOutcomeTaskIdFor(pr: { taskId?: string; prNumber: number; 
  * lane's own verdict under — no new ledger shape, no second synthetic id.
  */
 export function sweepArmTaskId(pr: { taskId?: string; prNumber: number }, armSessionPrs: boolean): string | undefined {
-  return armSessionPrs ? escalationTaskIdFor(pr) : pr.taskId;
+  // W1-T5866: deliberately NOT {@link escalationTaskIdFor} — the arm gate reads rows already scoped to this PR's url
+  // (armLedgerLinesForPr), and a legacy `unfiled`-keyed row must keep matching the id the arm passes.
+  return armSessionPrs ? (pr.taskId ?? `PR-${pr.prNumber}`) : pr.taskId;
 }
 
 /** W1-T5813 — the arm's ledger gate reads only THIS PR's `review.posted` rows (a legacy row with
