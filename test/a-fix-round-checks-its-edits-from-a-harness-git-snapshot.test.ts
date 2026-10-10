@@ -60,7 +60,7 @@ test("test/a-fix-round-checks-its-edits-from-a-harness-git-snapshot.test.ts: no 
   const refused = run(REACH, reachArgs, f.env);
   assert.equal(refused.status, 1, refused.text);
   assert.match(refused.text, /importerCount: 934 > 933; new importers: test\/new.test.ts/);
-  assert.doesNotMatch(refused.text, /ENOENT|git ls-files/);
+  assert.doesNotMatch(refused.text, /ENOENT|git /);
   const precheck = spawnSync(process.execPath, [join(ROOT, "scripts/census-precheck.mjs"), "--root", f.root],
     { cwd: ROOT, env: f.env, encoding: "utf8", timeout: 60_000 });
   assert.ifError(precheck.error);
