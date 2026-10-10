@@ -174,6 +174,10 @@ test("the governor tightens in proportion, backs off when the share falls, and r
   assert.deepEqual(steps.map((s) => s.tier), ["clear", "tighten", "clear", "tighten", "restart"]);
   assert.deepEqual(steps.map((s) => s.changed), [false, true, true, true, true]);
   assert.deepEqual(flags, ["--heap-growing-percent=30", "--heap-growing-percent=50", "--heap-growing-percent=10"]);
+  // The defaults read this process's own RSS, /proc and cgroup; a test process is far below any share.
+  const real = createDaemonMemoryGovernor({}).step();
+  assert.ok(real.reading.rss_bytes > 0, "the default reader measures this process");
+  assert.equal(real.tier, "clear");
 });
 
 test("parseDaemonMemoryPolicy defaults each row and refuses an out-of-bounds or inverted one", () => {

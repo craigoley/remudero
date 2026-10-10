@@ -2893,7 +2893,7 @@ export async function runDaemon(
   let dailyCostCeilingUsd: number | undefined;
   let costUsd = 0;
   let ticks = 0;
-  const memoryGovernor = deps.memoryGovernor ?? createDaemonMemoryGovernor();
+  const memoryGovernor = deps.memoryGovernor ?? createDaemonMemoryGovernor({});
   // W1-T2965 — cycles this LIFETIME has entered past both operator holds and the freshness read.
   // Not `ticks`: those are incremented on many completion paths, and the deferral below must be
   // bounded by the loop's own control flow. Incremented BELOW the freshness read, so paused

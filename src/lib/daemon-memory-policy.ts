@@ -262,12 +262,14 @@ export interface DaemonMemoryGovernor {
   step(): MemoryGovernorStep;
 }
 
-/** The stateful half: reads, decides, applies a changed growth percent, and remembers what is in force. */
-export function createDaemonMemoryGovernor(opts: {
+export interface DaemonMemoryGovernorOptions {
   policy?: DaemonMemoryPolicy;
   read?: () => DaemonMemoryReading;
   setFlags?: (flags: string) => void;
-} = {}): DaemonMemoryGovernor {
+}
+
+/** The stateful half: reads, decides, applies a changed growth percent, and remembers what is in force. */
+export function createDaemonMemoryGovernor(opts: DaemonMemoryGovernorOptions): DaemonMemoryGovernor {
   const policy = opts.policy ?? DEFAULT_DAEMON_MEMORY_POLICY;
   const setFlags = opts.setFlags ?? setFlagsFromString;
   const read = opts.read ?? (() => readDaemonMemory());
