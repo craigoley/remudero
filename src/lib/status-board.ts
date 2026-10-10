@@ -426,6 +426,21 @@ export interface CacheHitSection {
   totals?: CacheHitTotals;
 }
 
+/** W1-T4939 IDLE LANE — build-lane minutes spent idle while work existed, by cause, summed over the `lane.idle_summary`
+ *  rows (hourly, plus the partial rows a daemon exit flushes) whose window ended in the last 24 hours. */
+export interface IdleLaneSection {
+  found: boolean;
+  /** The look-back this section sums over. */
+  windowHours: number;
+  rows: number;
+  /** Rows a daemon exit flushed before their hour closed (`partial: true`). */
+  partialRows: number;
+  idleMinutes: number;
+  /** Only causes with a non-zero total appear. */
+  minutesByCause: Record<string, number>;
+  largestCause: string | null;
+}
+
 /** W1-T940: learnings-injection drop pressure over the SAME ledger window, via digest.ts's {@link
  *  aggregateLearningsInjection} — ONE traversal. `found: false` renders explicit absence, never a fabricated `dropped:
  *  0`. */
@@ -542,6 +557,8 @@ export interface StatusBoardModel {
   headroom: HeadroomSection;
   cacheHit: CacheHitSection;
   learningsInjection: LearningsInjectionSection;
+  /** W1-T4939. Optional so a model assembled before this section existed still renders; `buildStatusBoard` always sets it. */
+  idleLane?: IdleLaneSection;
   needsMe: NeedsMeSection;
 }
 
@@ -2006,6 +2023,45 @@ function deriveHeadroomDegraded(
   return best;
 }
 
+const IDLE_LANE_STATUS_WINDOW_HOURS = 24;
+
+/** W1-T4939: sum the `lane.idle_summary` rows whose window closed within the last day, by cause. A row is placed by its
+ *  own `window_end_ms` (falling back to `ts`); one with neither, or a non-finite figure, is skipped, never counted as 0. */
+function deriveIdleLane(lines: ReadonlyArray<Record<string, unknown>>, nowMs: number): IdleLaneSection {
+  const sinceMs = nowMs - IDLE_LANE_STATUS_WINDOW_HOURS * 3_600_000;
+  const minutesByCause: Record<string, number> = {};
+  let rows = 0;
+  let partialRows = 0;
+  for (const line of lines) {
+    if (line.step !== "lane.idle_summary") continue;
+    const endMs = typeof line.window_end_ms === "number" ? line.window_end_ms : typeof line.ts === "string" ? Date.parse(line.ts) : NaN;
+    if (!Number.isFinite(endMs) || endMs < sinceMs || endMs > nowMs) continue;
+    const byCause = line.minutes_by_cause;
+    if (typeof byCause !== "object" || byCause === null) continue;
+    rows++;
+    if (line.partial === true) partialRows++;
+    for (const [cause, minutes] of Object.entries(byCause)) {
+      if (typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0) minutesByCause[cause] = (minutesByCause[cause] ?? 0) + minutes;
+    }
+  }
+  let idleMinutes = 0;
+  let largestCause: string | null = null;
+  for (const cause of Object.keys(minutesByCause)) {
+    minutesByCause[cause] = Math.round(minutesByCause[cause]! * 100) / 100;
+    idleMinutes += minutesByCause[cause]!;
+    if (largestCause === null || minutesByCause[cause]! > minutesByCause[largestCause]!) largestCause = cause;
+  }
+  return {
+    found: rows > 0,
+    windowHours: IDLE_LANE_STATUS_WINDOW_HOURS,
+    rows,
+    partialRows,
+    idleMinutes: Math.round(idleMinutes * 100) / 100,
+    minutesByCause,
+    largestCause,
+  };
+}
+
 function deriveHeadroom(lines: Array<Record<string, unknown>>, nowMs: number, enforced: boolean): HeadroomSection {
   const { ts, telemetry } = deriveHeadroomLatest(lines);
   const tsParsed = ts ? Date.parse(ts) : NaN;
@@ -2390,6 +2446,9 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
     totals: learningsInjectionTotals,
   };
 
+  // ── W1-T4939: IDLE LANE — the same `lines` window, one more pure fold, no second ledger read. ──
+  const idleLane = deriveIdleLane(lines, nowMs);
+
   // ── W1-T931: NEEDS ME — same `lines` window every other section above already read, one
   // extra pure fold (deriveNeedsMe), no second ledger read. ──────────────────────────────────
   const operatorReleases = readOperatorReleasesForBoard(root);
@@ -2415,6 +2474,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
     headroom,
     cacheHit,
     learningsInjection,
+    idleLane,
     needsMe,
   };
 }
@@ -2719,6 +2779,20 @@ function renderLearningsInjectionBlock(s: LearningsInjectionSection): string[] {
   return out;
 }
 
+/** W1-T4939: the idle-lane account as the operator reads it — total, then each cause largest first. An empty window says
+ *  so rather than printing a zero that would read as "the lanes were never idle". */
+function renderIdleLaneBlock(i: IdleLaneSection): string[] {
+  const out = [sectionRule("IDLE LANE", SECTION_RULE_WIDTH)];
+  if (!i.found) {
+    out.push(`no idle-lane summary rows in the last ${i.windowHours} hours`);
+    return out;
+  }
+  out.push(`idle minutes (${i.windowHours}h): ${i.idleMinutes}  rows: ${i.rows} (${i.partialRows} partial)`);
+  const causes = Object.keys(i.minutesByCause).sort((a, b) => i.minutesByCause[b]! - i.minutesByCause[a]! || a.localeCompare(b));
+  out.push(causes.length ? causes.map((c) => `${c}: ${i.minutesByCause[c]}`).join("  ") : "no idle minute in these rows");
+  return out;
+}
+
 /** W1-T5374: one anomaly money field as rendered: unknown when the row did not carry it, never a verified $0.00. */
 export function costAnomalyUsd(row: CostAnomalyRow, field: "cost_usd" | "median_cost_usd"): string {
   if (row.unknown?.includes(field)) return "unknown";
@@ -2921,6 +2995,7 @@ export function renderStatusBoardText(model: StatusBoardModel, opts: { colourEna
       section: model.learningsInjection,
       rendered: renderLearningsInjectionBlock(model.learningsInjection),
     },
+    ...(model.idleLane ? [{ label: "idle lane", section: model.idleLane, rendered: renderIdleLaneBlock(model.idleLane) }] : []),
     { label: "needs me", section: model.needsMe, rendered: renderNeedsMeBlock(model.needsMe) },
   ];
   const lines: string[] = [`### rmd status — ${model.generatedAt}`, ""];
