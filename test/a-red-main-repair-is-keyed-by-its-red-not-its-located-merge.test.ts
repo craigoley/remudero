@@ -218,7 +218,7 @@ function fakeLane(opts: { noPr?: boolean } = {}): FakeLane {
 
 const rowsOf = (ledgerPath: string, step: string) => readLedgerLines(ledgerPath).filter((row) => row.step === step); // ledger-read-intent: live
 
-function withLedger(body: (ledgerPath: string) => Promise<void>): () => Promise<void> {
+function inScratchDir(body: (ledgerPath: string) => Promise<void>): () => Promise<void> {
   return async () => {
     const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}redkey-`));
     try {
@@ -231,7 +231,7 @@ function withLedger(body: (ledgerPath: string) => Promise<void>): () => Promise<
 
 test(
   "red-main repair: a red whose locator names a new merge each pass dispatches ONE fix, keyed by its red signature",
-  withLedger(async (ledgerPath) => {
+  inScratchDir(async (ledgerPath) => {
     const w = world();
     const lane = fakeLane();
     const daemon = rig(w, lane, ledgerPath);
@@ -269,7 +269,7 @@ test(
 
 test(
   "red-main repair: an attempt that ended without a PR asks the fix-progress judge, never re-dispatches by rote",
-  withLedger(async (ledgerPath) => {
+  inScratchDir(async (ledgerPath) => {
     const w = world();
     const lane = fakeLane({ noPr: true }); // every fix run ends `main-repair.no_pr`
     const asked: FixProgressInput[] = [];
@@ -321,7 +321,7 @@ test(
 
 test(
   "red-main repair: a judge that cannot rule decides nothing, and the next pass asks again",
-  withLedger(async (ledgerPath) => {
+  inScratchDir(async (ledgerPath) => {
     const w = world();
     const lane = fakeLane({ noPr: true });
     let calls = 0;
@@ -345,7 +345,7 @@ test(
 
 test(
   "red-main repair: a revert is withheld and escalated once unless the located merge is proven the culprit",
-  withLedger(async (ledgerPath) => {
+  inScratchDir(async (ledgerPath) => {
     const cases: Array<{ name: string; arrange: (w: World) => void; reason: RegExp }> = [
       {
         name: "the first parent's run was cancelled",

@@ -950,9 +950,10 @@ export function buildMainHealthRung(
     evidence: RepairEvidence | undefined,
   ): Promise<{ proven: true; detail: string } | { proven: false; reason: string } | { unreadable: string }> => {
     const sha = record.offendingSha;
-    if (!evidence?.runHistory) return { proven: false, reason: "main's push run history was not read" };
+    const history = evidence === undefined ? undefined : evidence.runHistory;
+    if (history === undefined) return { proven: false, reason: "main's push run history was not read" };
     try {
-      const own = await concludedRunOf(sha, evidence.runHistory, evidence.required);
+      const own = await concludedRunOf(sha, history, evidence!.required);
       if (!own) {
         return { proven: false, reason: `\`${sha}\` has no completed run carrying the required checks in main's push run history (a cancelled run concluded nothing)` };
       }
@@ -972,7 +973,7 @@ export function buildMainHealthRung(
       const commit = (await deps.fetch(["api", `repos/${owner}/${repo}/commits/${sha}`])) as { parents?: ReadonlyArray<{ sha?: unknown }> };
       const parent = commit?.parents?.[0]?.sha;
       if (typeof parent !== "string") return { unreadable: `GitHub's read of \`${sha}\` named no first parent` };
-      const before = await concludedRunOf(parent, evidence.runHistory, evidence.required);
+      const before = await concludedRunOf(parent, history, evidence!.required);
       if (!before) {
         return { proven: false, reason: `its first parent \`${parent}\` has no completed run carrying the required checks (cancelled, or outside the run-history window)` };
       }
