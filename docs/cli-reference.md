@@ -80,7 +80,7 @@ usage:
   rmd fix <pr-number> [--repo <name>]   # Operator verb for the fix rung: dispatch the same rung `rmd sweep` uses.
   rmd wipe-test <task-id> [--factor learnings|recon|rules] [--repo remudero-sandbox] [--allow-non-sandbox]   # P12 A/B harness: run a sandbox task twice, ledger the deltas for one factor.
   rmd stop [--reason <text>]   # Fleet control: one-shot halt of the running drain; auto-clears when it ends.
-  rmd pause [--instance <name>] [--reason <text>] | rmd pause --fleet [--reason <text>]   # Fleet control: persistent drain-and-hold of ONE instance until `rmd resume`; --fleet holds every instance.
+  rmd pause [--instance <name>] [--reason <text>] | rmd pause --fleet [--reason <text>]   # Fleet control: drain-and-hold ONE instance until `rmd resume`; --fleet holds every instance.
   rmd resume [--instance <name>] | rmd resume --fleet   # Fleet control: clear ONE instance's PAUSE (and any STOP); --fleet clears the fleet-wide hold.
   rmd away [on|off]   # Set/show operator presence; batches escalations into a recap while away.
   rmd correct <task-id> --pr <n> [--reason <text>]   # Sanctioned operator-correction writer: name a task's true merged PR.
@@ -783,7 +783,7 @@ fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run end
 
 ### `rmd pause`
 
-Fleet control: persistent drain-and-hold of ONE instance until `rmd resume`; --fleet holds every instance.
+Fleet control: drain-and-hold ONE instance until `rmd resume`; --fleet holds every instance.
 
 ```
 rmd pause [--instance <name>] [--reason <text>] | rmd pause --fleet [--reason <text>]
