@@ -3,13 +3,14 @@
   repo: remudero
   depends_on: [W1-T6083]
   type: implement
-  verify: human  # a .github/workflows path: an operator build, as W1-T6088 and W1-T5940 park theirs
+  # a .github/workflows path: an operator build, as W1-T6088 and W1-T5940 park theirs
+  verify: human
   principles: {tdd: strict}
   budget_usd: 10.00
   risk: high  # Rule 19: one concern — the impact map is produced on main and handed to the shadow selector
   band_meaning: blast-radius
   origin: "operator session 2026-10-06: follow-up found while building W1-T6083 (PR #9760)"
-  plan_refs: [W1-T6083, W1-T4404, W1-T4406, W1-T6088]
+  plan_refs: [W1-T6083, W1-T4404, W1-T4406, W1-T6088, W1-T5940]
   files: [.github/workflows/ci.yml, test/main-builds-the-test-impact-map-the-shadow-arm-reads.test.ts]
   status: queued
   priority: 2
