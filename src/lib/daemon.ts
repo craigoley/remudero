@@ -2799,6 +2799,16 @@ export async function runDaemon(
       idleLaneAccount = rollIdleLaneWindow(idleLaneAccount, atMs);
     }
   };
+  // W1-T4939: every exit (operator stop, freshness restart, error, max) passes through `summary`, and the
+  // daemon restarts on merges long before most hourly windows close, so the open window is written out as a
+  // partial row rather than lost with the process. A window with no idle minute writes nothing: a restart
+  // must not add a row of zeros to the ledger. The account is rolled, so a second call cannot double-count.
+  const flushIdleLaneWindow = (): void => {
+    const atMs = idleLaneClock.now();
+    const row = summarizeIdleLaneAccount(idleLaneAccount, atMs);
+    idleLaneAccount = rollIdleLaneWindow(idleLaneAccount, atMs);
+    if (row.idle_minutes > 0) emitLog("lane.idle_summary", { ...row, partial: true });
+  };
   // Shared by both governor call sites below, so the two cannot silently drift into different field
   // names for the same verdict (W1-T342).
   const logDispatchGovernorDefer = (verdict: DispatchGovernorVerdict, tick: number): void => {
@@ -3056,6 +3066,7 @@ export async function runDaemon(
         abandoned_in_flight_reviews: abandonedReviews, bound_ms: sweepWallClockBoundMs,
       });
     }
+    flushIdleLaneWindow();
     const s: DaemonSummary = { attempted, merged, stopReason, stopDetail, costUsd, ticks };
     log("daemon.summary", { ...s });
     return s;
