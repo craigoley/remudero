@@ -364,3 +364,68 @@ test("a pre-pr handoff releases only its exact branch and sha for a fresh daemon
     assert.deepEqual(h.started.map(({ id }) => id), ["A", "C", "D"], "only the exact yielded head releases admission");
   } finally { await h.cleanup(); }
 });
+
+// 2026-10-10 19:38: phase 21 min against a 16 min measured mean, both freed lanes held for good while the run that
+// went on to hold the phase (a refill, 5 min old then) crossed the mean 11 min later. Only a re-decision can see that.
+test("a lane the phase bound holds refills once a refilled sibling outlives the measured run length", async () => {
+  const h = phase(16 * minute);
+  try {
+    await flush();
+    await h.settle("A", 2);
+    await h.settle("B", 4);
+    await h.settle("C", 10);
+    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C", "D", "E", "F"]);
+    await h.settle("D", 17);
+    await h.settle("E", 18);
+    assert.equal(h.started.length, 6, "no sibling has outlived the measured run length yet");
+    await h.tick(26);
+    assert.equal(h.started.length, 6, "F, 16 min old, is not yet past the mean");
+    await h.tick(27);
+    assert.deepEqual(h.started.slice(6), [{ id: "G", age: 27 * minute }, { id: "H", age: 27 * minute }],
+      "both parked lanes refill once F outlives the measured run length");
+    assert.equal(h.rows.some(({ step, extra }) => step === "dispatch.lane_refill_held" && extra?.reason === "phase bound"), false);
+  } finally { await h.cleanup(); }
+});
+
+test("a parked lane ends with the phase when its last sibling settles inside the measured run length", async () => {
+  const h = phase(16 * minute);
+  try {
+    await flush();
+    await h.settle("A", 2);
+    await h.settle("B", 4);
+    await h.settle("C", 10);
+    await h.settle("D", 17);
+    await h.settle("E", 18);
+    assert.deepEqual(h.rows.filter(({ step }) => step === "dispatch.lane_parked").map(({ extra }) => extra?.waiting_on),
+      [["E", "F"], ["F"]]);
+    await h.settle("F", 20);
+    await flush();
+    const held = h.rows.filter(({ step, extra }) => step === "dispatch.lane_refill_held" && extra?.reason === "phase bound");
+    assert.deepEqual(held.map(({ extra }) => extra?.finished_task).sort(), ["D", "E", "F"]);
+    const settled = h.rows.find(({ step }) => step === "dispatch.settled_set");
+    assert.equal(settled?.extra?.dispatched, 6, "the phase settles with no refill; no parked lane strands it");
+  } finally { await h.cleanup(); }
+});
+
+test("a restart decided while lanes are parked drains them", async () => {
+  const h = phase(16 * minute);
+  try {
+    await flush();
+    await h.settle("A", 2);
+    await h.settle("B", 4);
+    await h.tick(8, true);
+    await h.settle("C", 10);
+    await h.settle("D", 17);
+    await h.settle("E", 18);
+    assert.equal(h.rows.filter(({ step }) => step === "dispatch.lane_parked").length, 2);
+    await h.tick(20);
+    assert.equal(h.rows.some(({ step, extra }) => step === "daemon.freshness_decision" && extra?.action === "restart"), true);
+    await flush();
+    const held = h.rows.filter(({ step }) => step === "dispatch.lane_refill_held");
+    assert.deepEqual(held.map(({ extra }) => [extra?.finished_task, extra?.reason]).sort(), [["D", "stale code"], ["E", "stale code"]]);
+    await h.tick(30);
+    assert.equal(h.started.length, 6, "F outliving the mean after the latch cannot renew refill");
+    await h.settle("F", 31);
+    assert.equal((await h.run).stopReason, "stale");
+  } finally { await h.cleanup(); }
+});

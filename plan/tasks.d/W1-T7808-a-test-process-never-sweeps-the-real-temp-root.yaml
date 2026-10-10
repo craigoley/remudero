@@ -1,0 +1,60 @@
+- id: W1-T7808
+  title: "A TEST PROCESS NEVER SWEEPS THE MACHINE'S REAL TEMP ROOT — every test that boots `daemonCommand` or `main()` runs `sweepStaleTempDirs()` on `tmpdir()`, deleting every rmd-* dir older than 24 h on the operator Mac or the host, other sessions' dirs included, and under a clock that moves `Date.now` without the file clock it deletes the test's own fixture"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a test process's temp sweep is confined to a temp root the test owns
+  band_meaning: span
+  origin: "operator session 2026-10-10: #10719 (W1-T4064 daemon test deleted its own plan under a shifted clock); approved 2026-10-10"
+  plan_refs: [W1-T115, W1-T131, W1-T320, W1-T3065, W1-T4948, W1-T4064]
+  files: [src/lib/tmp.ts, test/setup/tmp-hygiene.ts, test/a-test-process-never-sweeps-the-real-temp-root.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ on origin/main e2288e457.
+    - `sweepStaleTempDirs` (src/lib/tmp.ts:147) defaults its root to `tmpdir()` (tmp.ts:148). It removes
+      every rmd-owned dir there whose mtime is older than `DEFAULT_TEMP_SWEEP_MAX_AGE_MS` (24 h, tmp.ts:130).
+      It never asks whether it is running inside a test.
+    - It has three production callers that a test reaches:
+      - `daemonCommand`'s boot rung (src/run-task.ts:38925);
+      - the hand-lane sweep at the top of `main()` (src/run-task.ts:56148), which runs on every CLI verb;
+      - the async twin `sweepStaleTempDirsAsync` (tmp.ts:202) through `DISK_RECLAIM_DEFAULT_SWEEPS`
+        (run-task.ts:36254).
+    - 68 test files call `daemonCommand(`, and several import `main` from src/run-task.ts.
+    - The test setup makes the sweep's targets: test/setup/tmp-hygiene.ts:146-151 wraps `mkdtempSync` and
+      renames every direct child of the temp root to the rmd- prefix (`reapableTmpPrefix`,
+      test/setup/reapable-prefix.ts:39). So every fixture dir is a candidate.
+    - The sweep compares `Date.now()` against REAL mtimes. A test that moves `Date.now` but not the file
+      clock therefore ages its own fixture past 24 h and deletes it. #10719 hit exactly this: the W1-T4064
+      daemon test deleted the plan it was handed (ENOENT, then filing-history-unreadable).
+    - #10719 fixed that ONE test by giving it a private TMPDIR
+      (test/new-work-is-ordered-by-cost-of-delay.test.ts, "the daemon reads filing dates"). Every other
+      daemon-booting test still sweeps the machine's real temp root. On the operator Mac and on the shared
+      Azure host that root also holds other sessions' and other lanes' stale dirs.
+    - W1-T4948 already gave the clock-sweep its own temp roots. This task is the general case.
+  design: |
+    Fix it at the root, once, not per test. Either of these meets the acceptance; the builder picks:
+    (a) test/setup/tmp-hygiene.ts gives every test process a private TMPDIR under the real temp root before
+        any fixture runs, and removes it on exit, as it already removes recorded mkdtemp dirs; or
+    (b) `sweepStaleTempDirs` and `sweepStaleTempDirsAsync` refuse to sweep under `NODE_TEST_CONTEXT`
+        unless their root is a dir the test owns. A refused sweep returns a summary naming the refusal,
+        never a silent empty one: callers log `removed`/`kept`, and an empty summary would read as
+        "nothing stale".
+    Production behaviour outside a test is unchanged: same root, same age ceiling.
+    The test must not depend on which option was chosen. It spawns a real `node --test` child under the
+    repo's own setup imports, with TMPDIR pointed at a sandbox that holds an aged rmd- canary dir.
+  acceptance:
+    - claim: "a node --test child booting the temp sweep under the repo's test setup leaves an aged rmd- dir in its parent's temp root in place"
+      proof: 'grep: test("W1-T7808: a test process that runs the temp sweep leaves an aged rmd- dir in the real temp root" in test/a-test-process-never-sweeps-the-real-temp-root.test.ts'
+    - claim: "the same child under a clock that moves Date.now two days ahead of the file clock keeps its own fixture dir"
+      proof: 'grep: test("W1-T7808: a shifted wall clock does not let the sweep delete the test fixture" in test/a-test-process-never-sweeps-the-real-temp-root.test.ts'
+    - claim: "outside a test context the sweep still removes an aged rmd- dir from its root, so production reclaim is unchanged"
+      proof: 'grep: test("W1-T7808: outside a test the sweep still reaps an aged rmd- dir" in test/a-test-process-never-sweeps-the-real-temp-root.test.ts'
+  falsifier: |
+    Revert the fix (no private TMPDIR, no NODE_TEST_CONTEXT refusal). The child's sweep then removes the
+    canary from the sandbox root, and the first test fails. With `Date.now` moved forward, the second test
+    loses its fixture. A fix that disables the sweep everywhere fails the third test.
