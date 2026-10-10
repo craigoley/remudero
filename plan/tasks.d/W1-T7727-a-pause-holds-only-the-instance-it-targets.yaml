@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator ruling 2026-10-10: fix pause scoping before any serve restoration window (a core-only pause was the approved precondition)"
   plan_refs: [W1-T1216, W1-T2262, W1-T4429, W1-T3622, W1-T6640, W1-T5343, W1-T3732]
-  files: [src/run-task.ts, src/lib/fleet-control.ts, src/lib/pause-target.ts, src/lib/status-board.ts, src/lib/config-schema.ts, docs/control-surface.md, docs/cli-reference.md, docs/operator-guide.md, test/a-pause-holds-only-the-instance-it-targets.test.ts, test/pause-hold-is-attributable.test.ts, test/w1-t143-diff-coverage.test.ts, test/cli-reference.test.ts]
+  files: [src/run-task.ts, src/lib/fleet-control.ts, src/lib/pause-target.ts, src/lib/status-board.ts, src/lib/config-schema.ts, docs/control-surface.md, docs/cli-reference.md, docs/operator-guide.md, test/a-pause-holds-only-the-instance-it-targets.test.ts, test/a-test-run-never-pauses-the-live-fleet.test.ts, test/pause-hold-is-attributable.test.ts, test/w1-t143-diff-coverage.test.ts, test/cli-reference.test.ts]
   status: queued
   priority: 1
   attempts: 0
@@ -96,6 +96,8 @@
          --fleet cases assert exactly the one push;
        - pause-hold-is-attributable names `rmd resume --fleet` as the remedy;
        - cli-reference's drift fixture tracks the new resume syntax.
+       - a-test-run-never-pauses-the-live-fleet keeps its live-write refusal and no-push assertions; its recording git
+         returns a synthetic non-empty anchor so it reaches the push guard rather than the anchor-failure arm.
   acceptance:
     - claim: "pausing one instance through the real CLI leaves every other instance sharing its checkout and origin unpaused, resuming one leaves another's hold standing, and an ambiguous target makes no control writes"
       proof: 'grep: test("W1-T7727: a pause through the real CLI holds only the instance it targets" in test/a-pause-holds-only-the-instance-it-targets.test.ts'
