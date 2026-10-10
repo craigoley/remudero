@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { setTimeout as sleepAsync } from "node:timers/promises";
 
+import { systemClock, type Clock } from "./clock.js";
 import { readMemoryHeadroom, TEST_FILE_PEAK_BYTES, testSlotProcessFacts } from "./test-slot.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
 
@@ -65,7 +66,7 @@ export interface TestFileAdmissionOptions {
   dir?: string;
   pollMs?: number;
   sleep?: (ms: number) => Promise<unknown>;
-  now?: () => number;
+  clock?: Clock;
   log?: (line: string) => void;
 }
 
@@ -101,7 +102,8 @@ function readTickets(dir: string): Ticket[] {
 
 /** Wait (bounded only by siblings finishing) until this file child may load its test file. Never throws. */
 export async function admitTestFile(opts: TestFileAdmissionOptions = {}): Promise<TestFileAdmission> {
-  const now = opts.now ?? Date.now;
+  const clock = opts.clock ?? systemClock;
+  const now = () => clock.now();
   const startedAt = now();
   const skip = (outcome: TestFileAdmission["outcome"]): TestFileAdmission => ({ outcome, waitedMs: 0, release: () => {} });
   const env = opts.env ?? process.env;
