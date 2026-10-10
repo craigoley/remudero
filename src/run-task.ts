@@ -13213,10 +13213,16 @@ export async function runFixRung(opts: {
       });
     }
     const fixClaimFields: Record<string, unknown> = {};
+    // W1-T6003: a claim released before this round's fix.done (the flake path's CI wait) is still named on it.
+    let releasedClaimId: string | undefined;
+    const releaseRoundClaim = (): void => {
+      releasedClaimId ??= deps.branchClaim?.id();
+      deps.branchClaim?.release();
+    };
     const logFixDoneRow = (pushedHeadSha?: string, subtype?: string) => deps.log("fix.done", {
       ...fixReceipt.ledgerFields(fixResult), // W1-T4613: FIRST, so every field this row already carried keeps its value
       round_id: roundId,
-      ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() } : {}),
+      ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() ?? releasedClaimId } : {}),
       fix_outcome: fixOutcome?.kind ?? "unstated",
       ...fixClaimFields,
       head_sha: priorHeadSha,
@@ -13244,7 +13250,7 @@ export async function runFixRung(opts: {
     // W1-T5955: the round ends here, so its branch claim does too; the CI wait holds none.
     const logFixDone = (pushedHeadSha?: string, subtype?: string): void => {
       logFixDoneRow(pushedHeadSha, subtype);
-      deps.branchClaim?.release();
+      releaseRoundClaim();
     };
 
     // W1-T3079: archive this worker's transcript — see the "Worker transcript archive" section
@@ -13337,6 +13343,8 @@ export async function runFixRung(opts: {
           deps.log("fix.flake_requeue_failed", { head_sha: priorHeadSha, check_name: failure.name, reason: String(error) });
         }
       }
+      // W1-T6003: the requeues are posted, so the round's branch work is done; its CI wait holds no claim.
+      releaseRoundClaim();
       let green = false;
       if (requeued) {
         try {
