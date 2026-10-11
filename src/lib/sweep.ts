@@ -59,6 +59,8 @@ import {
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair, planHostGapRereview, hostGapProgressInput,
   type HostGapRereview } from "./classify.js";
+// W1-T7837: the host-gap pacing helpers are surfaced here so the route's tests reach them through the sweep.
+export { hostGapProgressInput, hostGapRereviewWaitMs, planHostGapRereview, type HostGapRereviewState } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB } from "./host-memory-ledger.js";
 import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,

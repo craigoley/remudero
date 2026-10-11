@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import {
-  hostGapProgressInput, hostGapRereviewWaitMs, planHostGapRereview, type HostGapRereviewState,
-} from "../src/lib/classify.js";
 import type { FixProgressInput } from "../src/lib/fix-progress-judge.js";
 import {
   HOST_GAP_REREVIEW_STEP, DEFAULT_SWEEP_POLICY, cappedProofDiscriminationFromLedger,
-  hostGapRereviewFacts, isHostGapCriterion, runSweep, type OpenPrView, type SweepDeps,
+  hostGapProgressInput, hostGapRereviewFacts, hostGapRereviewWaitMs, isHostGapCriterion, planHostGapRereview, runSweep,
+  type HostGapRereviewState, type OpenPrView, type SweepDeps,
 } from "../src/lib/sweep.js";
 
 const MIN = 60_000;
