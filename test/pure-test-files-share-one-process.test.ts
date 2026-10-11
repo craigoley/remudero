@@ -168,6 +168,7 @@ test("unit test: a pooled file that also fails isolated is a test failure, not a
 function cleanEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
+  env.NODE_V8_COVERAGE = undefined; // a nested node runner must not enrol in the parent's coverage session
   return env;
 }
 

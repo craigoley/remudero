@@ -71,6 +71,7 @@ function hookFixture(files: Record<string, number>): { root: string; cleanup: ()
   mkdirSync(join(root, "scripts"), { recursive: true });
   copyFileSync(join(REPO_ROOT, "hooks", "pre-commit"), join(root, "hooks", "pre-commit"));
   copyFileSync(SCRIPT, join(root, "scripts", "test-tier-manifest.mjs"));
+  copyFileSync(join(REPO_ROOT, "scripts", "pure-test-pool.mjs"), join(root, "scripts", "pure-test-pool.mjs")); // W1-T6085: sibling import
   // Every row named in `files` needs a REAL file on disk too, or `--check`'s own W1-T4430 ghost-row
   // refusal would fire on this fixture's setup, never on the behaviour the test means to observe.
   for (const file of Object.keys(files)) {
