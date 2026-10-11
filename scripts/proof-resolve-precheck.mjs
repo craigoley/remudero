@@ -24,13 +24,83 @@
  *
  * Exit 0 clean or reported-only, 1 a blocking refusal, 2 could not read (the hook never blocks on 2).
  */
-import { certainHeadRefusals, extractTaskTrailerId, planOnlyDiff, resolvePlanCriteriaAtHead } from "../src/lib/review.js";
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { loadPlanAtRef, visibleCriteria } from "../src/lib/plan.js";
+import { certainHeadRefusals, extractTaskTrailerId, parseWhitelistedProof, planOnlyDiff, resolvePlanCriteriaAtHead } from "../src/lib/review.js";
 import { certainStaleProofs } from "../src/lib/proof-base-stale.js";
 import { taskIdFromRunBranch } from "../src/lib/status.js";
+import { literalTestTitlesIn } from "../src/lib/task-linter.js";
 import { isMainModule } from "./lib/argv.mjs";
 import { gitOrThrow } from "./lib/git.mjs";
 
 const PLAN = "plan/tasks.yaml";
+
+/** Pure over a plan, removed paths and added-file evidence: `{ path, matchingProofs: string[] }`.
+ * The caller owns grep/file reads; a missing hint never suppresses an orphan. */
+export function mergedProofOrphans({ plan, removedPaths, addedFiles }) {
+  const removed = new Set(removedPaths);
+  const rows = [];
+  for (const task of plan.tasks) {
+    if (task.status !== "merged") continue;
+    for (const criterion of visibleCriteria(task.acceptance ?? [])) {
+      const parsed = parseWhitelistedProof(criterion.proof ?? "");
+      if (!parsed) continue;
+      const path = parsed.kind === "test" && !parsed.nameFiltered ? parsed.label
+        : parsed.kind === "grep" && !parsed.authorSelectedArgv ? parsed.args[3] : undefined;
+      if (!removed.has(path)) continue;
+      rows.push({
+        taskId: task.id, claim: criterion.claim, proof: criterion.proof, removedPath: path,
+        candidates: addedFiles.filter((file) => file.matchingProofs.includes(criterion.proof)).map((file) => file.path),
+      });
+    }
+  }
+  return rows;
+}
+
+function changedProofPaths(nameStatus) {
+  const fields = nameStatus.split("\0");
+  const removedPaths = [];
+  const addedPaths = [];
+  for (let index = 0; index < fields.length && fields[index];) {
+    const status = fields[index++];
+    const path = fields[index++];
+    if (status.startsWith("R")) {
+      removedPaths.push(path);
+      addedPaths.push(fields[index++]);
+    } else if (status === "D") removedPaths.push(path);
+    else if (status === "A") addedPaths.push(path);
+  }
+  return { removedPaths, addedPaths };
+}
+
+function addedProofEvidence(orphans, addedPaths, repoRoot, baseSha) {
+  const titles = new Map();
+  return addedPaths.map((path) => {
+    const matchingProofs = [];
+    for (const orphan of orphans) {
+      const parsed = parseWhitelistedProof(orphan.proof);
+      let matches;
+      if (parsed.kind === "grep") {
+        const result = spawnSync("grep", ["-an", "--", parsed.args[2], path], { cwd: repoRoot, encoding: "utf8" });
+        if (result.error || (result.status !== 0 && result.status !== 1)) {
+          throw new Error(`cannot check replacement ${path}: ${result.error?.message ?? result.stderr}`);
+        }
+        matches = result.status === 0;
+      } else {
+        if (!path.endsWith(".test.ts")) continue;
+        if (!titles.has(orphan.removedPath)) {
+          titles.set(orphan.removedPath, literalTestTitlesIn(gitOrThrow(["show", `${baseSha}:${orphan.removedPath}`], { cwd: repoRoot })));
+        }
+        const addedTitles = literalTestTitlesIn(readFileSync(join(repoRoot, path), "utf8"));
+        matches = titles.get(orphan.removedPath).some((title) => addedTitles.some((addedTitle) => addedTitle.includes(title)));
+      }
+      if (matches) matchingProofs.push(orphan.proof);
+    }
+    return { path, matchingProofs };
+  });
+}
 
 /**
  * The pure verdict. `resolveCriteria(taskId)` and `refusalsFor(criteria)` are injected so a test drives every arm
@@ -89,14 +159,25 @@ function main() {
   try {
     const repoRoot = gitOrThrow(["rev-parse", "--show-toplevel"]);
     const headSha = gitOrThrow(["rev-parse", "HEAD"]);
+    const baseSha = gitOrThrow(["merge-base", base, "HEAD"]);
+    const plan = loadPlanAtRef(repoRoot, PLAN, headSha);
+    const { removedPaths, addedPaths } = changedProofPaths(gitOrThrow(["diff", "--name-status", "-z", "-M", `${baseSha}...HEAD`]));
+    const orphans = mergedProofOrphans({ plan, removedPaths, addedFiles: [] });
+    const addedFiles = addedProofEvidence(orphans, addedPaths, repoRoot, baseSha);
+    const orphanLines = mergedProofOrphans({ plan, removedPaths, addedFiles }).map((row) =>
+      `proof-resolve-precheck: merged proof orphan (reported, never blocking): ${row.taskId}; claim: ${row.claim}; ` +
+      `removed: ${row.removedPath}; candidates: ${row.candidates.join(", ") || "none"}; ` +
+      "a builder may not edit a merged criterion (Standing rule 15): name this in your PR body so the operator files the amendment",
+    );
     verdict = proofResolveVerdict({
       diff: gitOrThrow(["diff", `${base}...HEAD`]),
       headRef: flag("--head-ref") || gitOrThrow(["rev-parse", "--abbrev-ref", "HEAD"]),
       headMessage: gitOrThrow(["log", "-1", "--format=%B"]),
       resolveCriteria: (taskId) => resolvePlanCriteriaAtHead(`Remudero-Task: ${taskId}`, repoRoot, PLAN, headSha).criteria,
       refusalsFor: (criteria) => certainHeadRefusals(criteria, repoRoot),
-      staleFor: (criteria) => certainStaleProofs(criteria, repoRoot, gitOrThrow(["merge-base", base, "HEAD"])),
+      staleFor: (criteria) => certainStaleProofs(criteria, repoRoot, baseSha),
     });
+    verdict.lines.unshift(...orphanLines);
   } catch (e) {
     console.error(`proof-resolve-precheck: could not read this head (${e.message}) -- NOT reporting clean`);
     return 2;
