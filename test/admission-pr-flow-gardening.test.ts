@@ -307,7 +307,7 @@ test("W1-T7756 recurrence ladder: actual merged remedy and controlled snapshots 
   const action = remedy.admissionFlowInventory(measured, [], [], now).next!, merge = now - 3_600_000;
   const before = { ...measured, observedAtMs: merge - 1_000 }, after = { ...measured, observedAtMs: merge + 1_000 };
   const rows = [before, after].map(r => ({ step: flow.ADMISSION_FLOW_STEP, ...r }));
-  const task = { id: "W1-T9999", origin: action.origin, status: "queued", files: ["src/lib/flow-gardener.ts"], mergedAt: fixedClock(merge).iso() };
+  const task = { id: "W1-T9999", origin: action.origin, status: "queued", retired: false, files: ["src/lib/flow-gardener.ts"], mergedAt: fixedClock(merge).iso() };
   const inv = remedy.admissionFlowInventory(measured, rows, [task], now);
   assert.equal(inv.next!.rung, 2); assert.equal(inv.next!.admissionShadow, true); assert.ok(inv.next!.escalation);
   assert.equal(inv.ladder[0]!.effect!.verdict, "debit");
