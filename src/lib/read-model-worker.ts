@@ -1314,7 +1314,6 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     viewBuilds.set(unit, counts);
     const peakMs = (unit.peakMs = Math.max(unit.peakMs ?? 0, unit.costMs));
     if (unit.cold && succeeded) {
-      // Previous-generation estimates expire at recreation; a same-generation warm peer keeps its sender's cost.
       unit.coldCostMs = unit.restoredColdCost ? peakMs : Math.max(unit.coldCostMs ?? 0, peakMs);
       unit.restoredColdCost = undefined;
       unit.cold = undefined;
