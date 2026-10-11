@@ -97,7 +97,15 @@ test("W1-T3341 (1, falsifier): the PRE-MIGRATION cap would fail this suite — t
 // ── criterion 2: the ratchet still passes, and one byte over is refused ──────────────────────────
 
 test("W1-T3341 (2): the ratchet passes on the committed CLAUDE.md at the new cap", () => {
-  const out = execFileSync(process.execPath, [RATCHET], { cwd: REPO_ROOT, encoding: "utf8" });
+  // The §8A net-byte rule may route fold debt on a CLAUDE.md-growing branch; without
+  // --feedback-dir that filing lands in the tracked plan/feedback/ and dirties the tree.
+  const inbox = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}doctrine-cap-inbox-`));
+  let out: string;
+  try {
+    out = execFileSync(process.execPath, [RATCHET, "--feedback-dir", inbox], { cwd: REPO_ROOT, encoding: "utf8" });
+  } finally {
+    rmSync(inbox, { recursive: true, force: true });
+  }
   assert.match(out, new RegExp(`cap ${baseline().capBytes} bytes`));
   // The absolute cap can pass while the separate §8A net-byte rule routes fold debt. Keep this
   // criterion about the cap itself; asserting the overall OK line made the test reject the

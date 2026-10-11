@@ -1,7 +1,10 @@
-- **A `catch` that returns a success-shaped literal is making a CLAIM: name the outcomes it collapses, and
-  where two remedies differ, the answer is a third value the caller can see — never a comment asserting the
-  collapse is fine. Reasoning vocabulary (fail-soft, degrade, treat as, unknown) does NOT track correctness.
-  diff-coverage is the gate for NEW conflations, forcing tests per arm and thus naming outcomes.**
+- **A `catch` returning a success-shaped literal is a CLAIM: name what it collapses, and where remedies
+  differ, return a third value the caller sees.**
+  Never a comment asserting the collapse is fine. Reasoning vocabulary (fail-soft, degrade, treat as,
+  unknown) does NOT track correctness. diff-coverage is the gate for NEW conflations, forcing tests per
+  arm and thus naming outcomes. *(Headline shortened 2026-10-10 to fold CLAUDE.md; these three
+  sentences were its tail.)*
+
   
   648 `catch` clauses measured in `src/` under `@babel/parser` AST walk, Sep 2026: 145 return
   success-shaped literals and 371 do not inspect the error. Hand-classified sample of 10 of the 145

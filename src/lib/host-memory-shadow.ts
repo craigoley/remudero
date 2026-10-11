@@ -12,7 +12,14 @@
  * may wait; switching to it is an operator ruling, made by editing plan/policy.yaml.
  *
  * NO DOUBLE COUNT. A worker tree's resident memory is already inside MemAvailable and the container's memory.current,
- * so a reservation counts only its UNREALIZED part: max(0, estimate - the tree's current rss+swap).
+ * so a reservation counts only its UNREALIZED part: max(0, estimate - the tree's current rss+swap). A process inside
+ * two recorded trees (a test run nested in a worker's tree) is resident in the innermost one only.
+ *
+ * ONE TAIL AT A TIME (the container check). A reservation's estimate is its class's p90 peak, and the live trees do not
+ * all reach their p90 at once. The container claim is each live tree's TYPICAL remaining growth, max(0, class median -
+ * resident), summed, plus ONE tail allowance: the largest single remaining spike above a typical, max over trees of
+ * (remaining to the p90 - remaining to the median). Both quantiles are learned (host-memory-learning.ts); a class with
+ * no samples has its median equal to its estimate, so its whole claim counts and it adds no tail.
  *
  * NEVER WAITS. No lock is taken; a ledger reader that reports a held lock (EWOULDBLOCK/EAGAIN/EBUSY), an errno, or a
  * missing/unreadable/reset store yields a verdict naming that state as an uncertainty that WIDENS the margin. It is
@@ -48,7 +55,7 @@ import {
   type ReviewDemandReading,
   type YieldDecision,
 } from "./host-memory-priority.js";
-import { classEstimate } from "./host-memory-learning.js";
+import { classEstimate, classTypical } from "./host-memory-learning.js";
 import { DAEMON_PID_ENV, type LedgerLine } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { installPolicyPath } from "./policy.js";
@@ -176,6 +183,8 @@ export interface ShadowEntryInput {
   ageMs?: number;
   /** Its work has ended: what its tree still holds is resident, and it can claim nothing more. */
   occupancyReleased?: boolean;
+  /** The class's learned median peak, at most `estimateMib`. Absent: the estimate, so the whole claim is typical. */
+  typicalMib?: number;
 }
 
 export interface ShadowInputs {
@@ -188,7 +197,7 @@ export interface ShadowInputs {
   ledger: { state: ShadowLedgerState; reason?: string };
   entries: ShadowEntryInput[];
   /** The start this verdict is about. Its own reservation is counted even when the ledger could not show it. */
-  start: { reservationId?: string; workerClass: WorkerClass; estimateMib: number };
+  start: { reservationId?: string; workerClass: WorkerClass; estimateMib: number; typicalMib?: number };
   /** `own` marks this container's daemon, whose growth also counts against the container ceiling. */
   daemonGrowth: Array<{ instance: string; samples: number; growthMib?: number; reason?: string; basis?: string; own?: boolean }>;
   serve: { scenario: ServeScenario; basis: string };
@@ -203,15 +212,34 @@ export interface ShadowUncertainty {
   detail?: string[];
 }
 
+/** One live reservation's part in the claims, so a row can be replayed under another summing rule. */
+export interface ShadowClaim {
+  workerClass: WorkerClass;
+  estimateMib: number;
+  typicalMib: number;
+  /** Resident rss+swap; null when the tree was unread (the whole estimate counts). */
+  residentMib: number | null;
+  /** In this container: its claim counts against the container ceiling. */
+  own: boolean;
+  released: boolean;
+}
+
 export interface ShadowVerdict {
   wouldAdmit: boolean;
   reasons: ShadowReason[];
   scenario: ServeScenario;
   uncertainty: ShadowUncertainty[];
+  /** Every live reservation, then the start's own when the ledger could not show it; at most CLAIMS_CAP. */
+  claims: ShadowClaim[];
   numbers: {
     memAvailableMib: number | null;
     unrealizedMib: number;
+    /** The sum of this container's trees' remaining p90 claims: every tree at its p90 at once. */
     unrealizedOwnContainerMib: number;
+    /** What the container check counts: the typical sum plus the one tail allowance. */
+    containerClaimMib: number;
+    containerTypicalMib: number;
+    containerTailMib: number;
     daemonGrowthMib: number;
     coldStartReserveMib: number;
     marginMib: number;
@@ -222,6 +250,8 @@ export interface ShadowVerdict {
     containerCurrentMib: number | null;
     containerMaxMib: number | null;
     containerHeadroomMib: number | null;
+    /** The headroom were every tree to reach its p90 at once (the pre-W1 rule), for comparison only; it decides nothing. */
+    containerHeadroomAllPeaksMib: number | null;
     /** min(memory.max, memory.high): where this container's reclaim begins. */
     containerCeilingMib: number | null;
     /** memory.current less reclaimable page cache: the memory the ceiling is measured against. */
@@ -234,6 +264,8 @@ export interface ShadowVerdict {
 }
 
 const DETAIL_CAP = 8;
+/** BACKSTOP on the claims a row lists; a ledger holds a handful of live reservations. */
+const CLAIMS_CAP = 32;
 
 /** Decide the counterfactual from one snapshot. Pure: no clock, no fs. */
 export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBudgetPolicy): ShadowVerdict {
@@ -255,6 +287,15 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
   let unrealized = 0;
   let unrealizedOwn = 0;
   let residentOwn = 0;
+  let typicalOwn = 0;
+  let tailOwn = 0;
+  const claims: ShadowClaim[] = [];
+  /** One tree's claim: its remaining growth to the p90 (`share`), and how much of that is typical. */
+  const claim = (estimateMib: number, typicalMib: number | undefined, resident: number, released: boolean) => {
+    if (released) return { share: 0, typical: 0 };
+    const share = Math.max(0, estimateMib - resident);
+    return { share, typical: Math.min(share, Math.max(0, Math.min(typicalMib ?? estimateMib, estimateMib) - resident)) };
+  };
   for (const entry of inputs.entries) {
     let resident = 0;
     if ("unread" in entry.resident) widen("tree-unread", 0, `${entry.id}: ${entry.resident.unread}`);
@@ -263,13 +304,22 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       if (!entry.resident.complete) widen("tree-partial", margin, `${entry.id}: ${entry.resident.reason ?? "partial"}`);
     }
     // A released occupancy's tree can only shrink: its resident memory is already measured, so it claims nothing more.
-    const share = entry.occupancyReleased ? 0 : Math.max(0, entry.estimateMib - resident);
+    const released = entry.occupancyReleased === true;
+    const { share, typical } = claim(entry.estimateMib, entry.typicalMib, resident, released);
     unrealized += share;
-    if (entry.status === "owned") {
+    const own = entry.status === "owned";
+    if (own) {
       unrealizedOwn += share;
       residentOwn += resident;
+      typicalOwn += typical;
+      tailOwn = Math.max(tailOwn, share - typical);
     }
-    if (entry.estimateSource.kind === "default-unmeasured" && !entry.occupancyReleased) widen("unmeasured-estimate", margin, entry.id);
+    if (claims.length < CLAIMS_CAP) {
+      claims.push({ workerClass: entry.workerClass, estimateMib: entry.estimateMib,
+        typicalMib: Math.min(entry.typicalMib ?? entry.estimateMib, entry.estimateMib),
+        residentMib: "unread" in entry.resident ? null : entry.resident.mib, own, released });
+    }
+    if (entry.estimateSource.kind === "default-unmeasured" && !released) widen("unmeasured-estimate", margin, entry.id);
     if (entry.status === "uncertain") widen("uncertain-entry", margin, entry.id);
     if (entry.walkComplete === false) widen("incomplete-walk", margin, entry.id);
   }
@@ -277,10 +327,19 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
     inputs.entries.some((entry) => entry.id === inputs.start.reservationId);
   if (!startSeen) {
     // The start's own claim is counted in full even when the ledger cannot show it: never zero reservations.
-    unrealized += inputs.start.estimateMib;
-    unrealizedOwn += inputs.start.estimateMib;
+    const own = claim(inputs.start.estimateMib, inputs.start.typicalMib, 0, false);
+    unrealized += own.share;
+    unrealizedOwn += own.share;
+    typicalOwn += own.typical;
+    tailOwn = Math.max(tailOwn, own.share - own.typical);
+    if (claims.length < CLAIMS_CAP) {
+      claims.push({ workerClass: inputs.start.workerClass, estimateMib: inputs.start.estimateMib,
+        typicalMib: Math.min(inputs.start.typicalMib ?? inputs.start.estimateMib, inputs.start.estimateMib),
+        residentMib: 0, own: true, released: false });
+    }
     widen("start-unrecorded", 0, inputs.start.reservationId ?? "no reservation id");
   }
+  const containerClaim = typicalOwn + tailOwn;
 
   let daemonGrowth = 0;
   let ownDaemonGrowth = 0;
@@ -310,6 +369,7 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
   let containerCurrent: number | null = null;
   let containerMax: number | null = null;
   let containerHeadroom: number | null = null;
+  let containerHeadroomAllPeaks: number | null = null;
   let containerCeiling: number | null = null;
   let containerWorkingSet: number | null = null;
   if ("unread" in inputs.container) widen("container-unread", margin, inputs.container.unread);
@@ -320,7 +380,8 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
     containerWorkingSet = Math.max(0, containerCurrent - (inputs.container.reclaimableMib ?? 0));
     if (limits.length > 0) {
       containerCeiling = Math.min(...limits);
-      containerHeadroom = containerCeiling - containerWorkingSet - unrealizedOwn - ownDaemonGrowth;
+      containerHeadroom = containerCeiling - containerWorkingSet - containerClaim - ownDaemonGrowth;
+      containerHeadroomAllPeaks = containerCeiling - containerWorkingSet - unrealizedOwn - ownDaemonGrowth;
       if (containerHeadroom < policy.containerReserveMib) reasons.add("container-ceiling");
     }
   }
@@ -347,10 +408,14 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
     reasons: [...reasons],
     scenario,
     uncertainty: [...named.values()],
+    claims,
     numbers: {
       memAvailableMib: memAvailable,
       unrealizedMib: unrealized,
       unrealizedOwnContainerMib: unrealizedOwn,
+      containerClaimMib: containerClaim,
+      containerTypicalMib: typicalOwn,
+      containerTailMib: tailOwn,
       daemonGrowthMib: daemonGrowth,
       coldStartReserveMib: coldStartReserve,
       marginMib,
@@ -361,6 +426,7 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       containerCurrentMib: containerCurrent,
       containerMaxMib: containerMax,
       containerHeadroomMib: containerHeadroom,
+      containerHeadroomAllPeaksMib: containerHeadroomAllPeaks,
       containerCeilingMib: containerCeiling,
       containerWorkingSetMib: containerWorkingSet,
       containerReserveMib: policy.containerReserveMib,
@@ -466,6 +532,8 @@ export interface ShadowMemoryPorts {
   listStateDir: (dir: string) => string[];
   /** A class's learned estimate (host-memory-learning.ts). */
   estimate: (workerClass: WorkerClass) => number;
+  /** A class's learned TYPICAL (median) peak (host-memory-learning.ts). */
+  typical: (workerClass: WorkerClass) => number;
 }
 
 let installedSink: ShadowMemoryPorts["write"];
@@ -542,6 +610,7 @@ export function defaultShadowMemoryPorts(): ShadowMemoryPorts {
     },
     listStateDir: (dir) => readdirSync(dir),
     estimate: (workerClass) => classEstimate(workerClass).estimateMib,
+    typical: (workerClass) => classTypical(workerClass).estimateMib,
   };
 }
 
@@ -645,26 +714,62 @@ function readLedgerState(ports: ShadowMemoryPorts, root: string): { reading?: Ho
   return { reading, state: reading.state, ...(reading.reason ? { reason: code ?? reading.reason } : {}) };
 }
 
-/** rss+swap of one recorded tree, verifying each (pid, start) so a reused pid is never counted. */
-function treeResident(
-  read: ShadowMemoryPorts["readFile"],
-  entryPath: string,
-  budget: { left: number },
-): ShadowEntryInput["resident"] {
-  let tree: ProcessIdentity[];
+const identityKey = (p: ProcessIdentity): string => `${p.pid}:${p.start}`;
+
+/** One recorded tree's identities (roots first, deduplicated), or why its entry file could not be read. */
+function recordedTree(read: ShadowMemoryPorts["readFile"], entryPath: string): { roots: ProcessIdentity[]; tree: ProcessIdentity[] } | { unread: string } {
   try {
     const parsed = JSON.parse(read(entryPath)) as { tree?: ProcessIdentity[]; roots?: ProcessIdentity[] };
     const seen = new Set<string>();
-    tree = [...(parsed.roots ?? []), ...(parsed.tree ?? [])].filter((p) => {
-      const key = `${p.pid}:${p.start}`;
+    const tree = [...(parsed.roots ?? []), ...(parsed.tree ?? [])].filter((p) => {
+      const key = identityKey(p);
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     });
+    return { roots: parsed.roots ?? [], tree };
   } catch (error) {
     const reason = reasonOf(error);
     return { unread: reason };
   }
+}
+
+/**
+ * Each tree's rss+swap, a process counted ONCE: a tree rooted inside another (a test run inside a worker's tree) is
+ * measured first and keeps its processes, so the enclosing tree's resident leaves them out. Pure over `read`.
+ */
+export function residentsOf(
+  read: ShadowMemoryPorts["readFile"],
+  paths: readonly string[],
+  budget: { left: number } = { left: MAX_TREE_PROCESSES },
+): ShadowEntryInput["resident"][] {
+  const trees = paths.map((path) => recordedTree(read, path));
+  const keys = trees.map((t) => new Set("unread" in t ? [] : t.tree.map(identityKey)));
+  // How many other trees hold this tree's roots: the deeper a tree is nested, the earlier it is measured.
+  const depth = trees.map((t, i) => ("unread" in t ? 0
+    : keys.filter((other, j) => j !== i && t.roots.some((root) => other.has(identityKey(root)))).length));
+  const order = trees.map((_, i) => i).sort((a, b) => depth[b]! - depth[a]!);
+  const counted = new Set<string>();
+  const out: ShadowEntryInput["resident"][] = new Array(trees.length);
+  for (const i of order) {
+    const t = trees[i]!;
+    if ("unread" in t) {
+      out[i] = t;
+      continue;
+    }
+    const own = t.tree.filter((p) => !counted.has(identityKey(p)));
+    for (const p of own) counted.add(identityKey(p));
+    out[i] = treeResident(read, own, budget);
+  }
+  return out;
+}
+
+/** rss+swap of one recorded tree, verifying each (pid, start) so a reused pid is never counted. */
+function treeResident(
+  read: ShadowMemoryPorts["readFile"],
+  tree: readonly ProcessIdentity[],
+  budget: { left: number },
+): ShadowEntryInput["resident"] {
   let kb = 0;
   for (const identity of tree) {
     if (budget.left <= 0) return { mib: kb / 1024, complete: false, reason: `process cap ${MAX_TREE_PROCESSES}` };
@@ -781,8 +886,14 @@ export function serveScenarioOf(rows: readonly TailRow[], now: number, coverageM
 export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts, policy: HostMemoryBudgetPolicy): ShadowInputs {
   const now = ports.clock.now();
   const ledger = readLedgerState(ports, start.root);
-  const budget = { left: MAX_TREE_PROCESSES };
-  const entries: ShadowEntryInput[] = (ledger.reading?.entries ?? []).map((entry) => ({
+  const recorded = ledger.reading?.entries ?? [];
+  const residents = residentsOf(ports.readFile, recorded.map((entry) => entry.path));
+  // A measured estimate's class also has a learned median; an unmeasured one claims its whole estimate as typical.
+  const typical = (workerClass: WorkerClass, estimateMib: number): { typicalMib?: number } => {
+    const median = typicalOf(ports, workerClass);
+    return median === undefined ? {} : { typicalMib: Math.min(median, estimateMib) };
+  };
+  const entries: ShadowEntryInput[] = recorded.map((entry, i) => ({
     id: entry.id,
     owner: entry.owner,
     workerClass: entry.workerClass,
@@ -790,9 +901,10 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
     estimateSource: entry.estimateSource,
     status: entry.status,
     walkComplete: entry.walkComplete,
-    resident: treeResident(ports.readFile, entry.path, budget),
+    resident: residents[i]!,
     ageMs: entry.ageMs,
     ...(entry.occupancyReleased ? { occupancyReleased: true } : {}),
+    ...(entry.estimateSource.kind === "measured" ? typical(entry.workerClass, entry.estimateMib) : {}),
   }));
   const instance = instanceOf(ports, start.root);
   const tail = readTailRows(ports, start.root);
@@ -826,6 +938,16 @@ function instanceOf(ports: ShadowMemoryPorts, root: string): string {
   } catch (error) {
     void error; // An unreadable mount table: the root's own name, as the ledger itself falls back.
     return root.split("/").filter(Boolean).at(-1) ?? root;
+  }
+}
+
+/** The class's learned median, or undefined when the store is unreadable: then no tail is split off the estimate. */
+function typicalOf(ports: ShadowMemoryPorts, workerClass: WorkerClass): number | undefined {
+  try {
+    return ports.typical(workerClass);
+  } catch (error) {
+    void error; // An unreadable estimate store: the whole estimate stays typical, the conservative reading.
+    return undefined;
   }
 }
 
@@ -1027,6 +1149,7 @@ export function recordShadowMemoryVerdict(start: ShadowStart, overrides: Partial
         reasons: verdict.reasons,
         uncertainty: verdict.uncertainty,
         numbers: verdict.numbers,
+        claims: verdict.claims,
         ledger_state: inputs.ledger.state,
         reservations: inputs.entries.length,
         daemon_growth: inputs.daemonGrowth,

@@ -278,6 +278,7 @@ export async function claimReviewDecision(opts: {
  * `dialect-parse-error` an authoring error; `prose-no-match` zero candidates on a prose body (W1-T161/#349);
  * `exec-error` threw or timed out; `runner-absent` names an unavailable checkout-local tool; `runtime-broken` the only
  * `not ok` names the FILE ITSELF (W1-T1077); `incomplete-run` results then no `# duration_ms` summary (W1-T2740);
+ * `cwd-missing` the proof's checkout was deleted before the child could start (W1-T7822);
  * `no-exec-context` no PR-head checkout; `forward-reference` absent at head but declared by this diff's own shard — see {@link
  * shardDeclaredFilesInDiff} — or, on a filing head, any target the diff does not change ({@link FILING_FORWARD_ADVISORY}). */
 export type ProofSkipReason =
@@ -289,6 +290,7 @@ export type ProofSkipReason =
   | "cannot-load"
   | "incomplete-run"
   | "runner-absent"
+  | "cwd-missing"
   | "no-exec-context"
   | "forward-reference"
   | "proof-form";
@@ -1673,6 +1675,15 @@ export class ProofSandboxUnavailableError extends RmdError {
   }
 }
 
+/** The proof's working directory no longer exists (W1-T7822) — a reclaimed review worktree, say. Node raises ENOENT for a
+ *  missing cwd exactly as for a missing binary, so it is named BEFORE any spawn: {@link spawnFailureText} would call it
+ *  a missing sandbox. {@link judgeCriterion} grades it `not_executable` / `cwd-missing`, never a pass. */
+export class ProofCwdMissingError extends RmdError {
+  constructor(readonly missingCwd: string) {
+    super("usage", GENERIC_EXIT_CODE, `proof cwd no longer exists: ${missingCwd}`, { missingCwd });
+  }
+}
+
 let proofSandboxMemo: ProofSandboxStatus | undefined;
 let unsandboxedProofSpawns = 0;
 
@@ -1983,6 +1994,7 @@ interface PreparedProofChild {
 
 /** One proof child's argv and env, with its throwaway HOME made (`rmd-proof-home-*`) and the cleanup that removes it. */
 function prepareProofChild(command: string, args: readonly string[], cwd: string): PreparedProofChild {
+  if (!existsSync(cwd)) throw new ProofCwdMissingError(cwd);
   const child = proofChildCommand(command, args);
   const home = makeTempDir("proof-home");
   const cleanup = () => rmSync(home, { recursive: true, force: true });
@@ -2003,11 +2015,15 @@ function prepareProofChild(command: string, args: readonly string[], cwd: string
     };
   } catch (error) {
     cleanup();
-    throw error instanceof ProofSandboxUnavailableError ? error : new ProofSandboxUnavailableError(spawnFailureText(error));
+    if (error instanceof ProofSandboxUnavailableError || error instanceof ProofCwdMissingError) throw error;
+    // W1-T7822: a cwd that vanished after the check above still raises ENOENT from realpath — name it, not the sandbox.
+    if (!existsSync(cwd)) throw new ProofCwdMissingError(cwd);
+    throw new ProofSandboxUnavailableError(spawnFailureText(error));
   }
 }
 
 function startCheckSync(child: PreparedProofChild, cwd: string): void {
+  if (!existsSync(cwd)) throw new ProofCwdMissingError(cwd);
   try {
     execFileSync(child.startCheck!.file, child.startCheck!.args, {
       cwd,
@@ -2023,6 +2039,7 @@ function startCheckSync(child: PreparedProofChild, cwd: string): void {
 }
 
 async function startCheckAsync(child: PreparedProofChild, cwd: string): Promise<void> {
+  if (!existsSync(cwd)) throw new ProofCwdMissingError(cwd);
   try {
     await execFileAsync(child.startCheck!.file, child.startCheck!.args, {
       cwd,
@@ -3935,6 +3952,11 @@ export function judgeCriterion(
             loadError = e.loadError;
             met = false;
             reason = `proof cannot-evaluate: test files failed to load after one toolchain refresh (${e.loadError})`;
+          } else if (e instanceof ProofCwdMissingError) {
+            // W1-T7822: the checkout was deleted under the proof; the sandbox is not the problem.
+            proofExec = "not_executable";
+            proofSkip = "cwd-missing";
+            reason = `${reason} — NOTE: ${e.message}; not executed, keyword floor applied`;
           } else if (e instanceof ProofSandboxUnavailableError) {
             // W1-T6124: the proof's code never ran, so this is a host gap, not an outcome — and never a pass.
             proofExec = "not_executable";

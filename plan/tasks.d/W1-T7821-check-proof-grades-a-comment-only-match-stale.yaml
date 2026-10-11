@@ -1,0 +1,75 @@
+- id: W1-T7821
+  title: "CHECK-PROOF GRADES A COMMENT-ONLY GREP MATCH STALE, AS THE REVIEWER DOES — `rmd check-proof` reported `discriminates` and exit 0 for PR #10765's proof whose only match is a YAML `#` comment, while the reviewer's `matchedLinesAreAllComments` graded the same proof `executed_stale` from the head alone, so the author tool and the reviewer disagree"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — check-proof and the reviewer share one comment-only staleness predicate
+  band_meaning: span
+  origin: "operator session 2026-10-10: PR #10765 (proof graded executed_stale by review, discriminates by check-proof); filed at operator request 2026-10-10"
+  plan_refs: [W1-T3210, W1-T4042, W1-T912, W1-T387, W1-T273]
+  files: [src/lib/review.ts, src/run-task.ts, test/check-proof-grades-a-comment-only-match-stale.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main 9b942cbd5.
+    - The reviewer's rule. In `judgeCriterion`, a `grep:` proof that passes on the head is graded
+      `executed_stale` when `matchedLinesAreAllComments(whitelisted.matchedLines ?? [],
+      matchedLineCommentContext(whitelisted, execCtx.cwd))` holds (src/lib/review.ts:3797-3805). That check
+      runs on the head alone, before any merge-base comparison (the base re-run is in the `else` arm,
+      review.ts:3806-3812). `matchedLinesAreAllComments` is exported (review.ts:1279).
+      `matchedLineCommentContext` is not (review.ts:1299), so no caller outside review.ts can apply the
+      rule the reviewer applies.
+    - The author tool. `checkProofCommand` (src/run-task.ts:26475) prints `verdict:    ${outcome}`
+      (run-task.ts:26747) and returns `headExit` without --base (run-task.ts:26755-26761). With --base it
+      prints "discrimination: discriminates" whenever head and base disagree (run-task.ts:26891). It never
+      looks at whether the matched lines are comments. `CHECK_PROOF_EXIT.executedStale` (5) is documented as
+      "ONLY reachable with `--base <ref>`" (run-task.ts:23801-23804).
+    - REPRODUCED 2026-10-10 on PR #10765's head 69cf4c5d7. The proof is
+      `grep: Switching to enforce is an operator in plan/policy.yaml`. Its only hit is policy.yaml:878, a YAML
+      `#` comment line. `rmd check-proof '<proof>'` printed `verdict: pass` and exited 0. With
+      `--base origin/main` it printed "discriminates — head and base disagree" and still exited 0.
+      `judgeCriterion` on the same checkout returned `executed_stale` with "every executor-returned matching
+      line is a comment".
+    - So an author who runs the verb the doctrine prescribes before pushing is told the proof is good, and
+      the reviewer then withdraws it. A comment can be satisfied by writing a sentence, so a claim ABOUT a
+      comment cannot be proven by a grep of that comment. The reviewer is right (W1-T3210, and W1-T4042 rules
+      it stays untouched). The author tool has to say the same thing, and say what to do instead: point the
+      proof at the code that does the work, or at a test title.
+  design: |
+    1. Export ONE shared predicate from src/lib/review.ts, `grepProofMatchesOnlyComments(whitelisted, cwd)`.
+       It is true only for a `grep:` proof whose executor-returned `matchedLines` are all comments, under the
+       same `matchedLineCommentContext` the reviewer uses. `judgeCriterion` calls it in place of its inline
+       expression (review.ts:3797-3799), so the two callers cannot drift. The reviewer's grading does not
+       change.
+    2. In `checkProofCommand`, after a head `pass` and before any --base work, call the predicate. When it
+       holds:
+       - print `verdict:    executed_stale` with a line saying every matching line is a comment;
+       - print the remedy: a grep of a comment proves nothing, so target the code that does the work or a
+         test title;
+       - return `CHECK_PROOF_EXIT.executedStale`, with or without --base, and never print "discriminates".
+       This mirrors the reviewer, which grades stale before it re-runs the base.
+    3. Update the exit-code doc (run-task.ts:23801-23804) and the check-proof help `detail` (the
+       `executed_stale (--base only ...)` clause): exit 5 is now also reached from the head alone, for a
+       comment-only grep match.
+    4. A grep whose match is a code line keeps today's output and exit codes byte for byte. Audit the existing
+       check-proof suites for a fixture whose only match is a comment: re-point that fixture at a code line,
+       and keep its assertion.
+  acceptance:
+    - claim: "check-proof returns CHECK_PROOF_EXIT.executedStale without --base when every grep match is a comment line"
+      proof: 'grep: test("W1-T7821: check-proof exits executed_stale when every grep match is a comment" in test/check-proof-grades-a-comment-only-match-stale.test.ts'
+    - claim: "with --base and a base that lacks the line, a comment-only match still exits executed_stale and never prints discriminates"
+      proof: 'grep: test("W1-T7821: check-proof with --base never says discriminates for a comment-only match" in test/check-proof-grades-a-comment-only-match-stale.test.ts'
+    - claim: "for the same fixture, judgeCriterion grades executed_stale and check-proof exits executedStale, both through the one exported predicate"
+      proof: 'grep: test("W1-T7821: check-proof and the reviewer agree on a comment-only grep" in test/check-proof-grades-a-comment-only-match-stale.test.ts'
+    - claim: "the stale message tells the author to target code or a test title"
+      proof: 'grep: test("W1-T7821: the stale message tells the author to target code or a test title" in test/check-proof-grades-a-comment-only-match-stale.test.ts'
+    - claim: "a grep whose match is a code line still passes with exit 0"
+      proof: 'grep: test("W1-T7821: check-proof still passes a grep whose match is a code line" in test/check-proof-grades-a-comment-only-match-stale.test.ts'
+  falsifier: |
+    Remove the predicate call from `checkProofCommand`. The comment-only fixture then exits 0 with
+    `verdict: pass`, as PR #10765's proof did, and the first four tests fail. A fix that grades every grep
+    stale fails the fifth.

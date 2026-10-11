@@ -1,0 +1,115 @@
+- id: W1-T7727
+  title: "A PAUSE HOLDS ONLY THE INSTANCE IT TARGETS — `rmd pause` pushes the fleet-wide refs/rmd-pause/hold, and core, site and console all run the same checkout against the same origin, so pausing core for a serve window also halts site, console and any other host's daemon: the default pause and resume act on ONE instance resolved through the registry's state_dir, and the fleet-wide hold becomes a separate, explicit --fleet act"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — which instance a CLI pause or resume writes; the readers and the gates a pause holds are unchanged
+  band_meaning: span
+  origin: "operator ruling 2026-10-10: fix pause scoping before any serve restoration window (a core-only pause was the approved precondition)"
+  plan_refs: [W1-T1216, W1-T2262, W1-T4429, W1-T3622, W1-T6640, W1-T5343, W1-T3732]
+  files: [src/run-task.ts, src/lib/fleet-control.ts, src/lib/pause-target.ts, src/lib/status-board.ts, src/lib/config-schema.ts, docs/control-surface.md, docs/cli-reference.md, docs/operator-guide.md, test/a-pause-holds-only-the-instance-it-targets.test.ts, test/a-test-run-never-pauses-the-live-fleet.test.ts, test/pause-hold-is-attributable.test.ts, test/w1-t143-diff-coverage.test.ts, test/cli-reference.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-10 at origin/main fe85160db.
+    THE DEFECT. `pauseCommand` (src/run-task.ts) calls `requestPause(config.root, reason, realDeps().sharedPauseGit)`.
+    `requestPause` (src/lib/fleet-control.ts) writes the local `<root>/state/PAUSE` flag and then ALWAYS calls
+    `writeSharedPause`, which pushes `refs/rmd-pause/hold` to origin. The module documents that ref as "fleet-WIDE": every
+    daemon's `checkPause` is `checkSharedPause(config.root, ...)`, which falls through to the shared ref when its own local
+    flag is silent. `resumeFleetCommand` likewise clears the local flags AND the shared ref.
+    OBSERVED 2026-10-10 on the Azure host:
+    - All three daemons (core remudero-daemon, site remudero-site-daemon, console remudero-console-daemon) run
+      `./bin/rmd daemon --repo <name>` from a checkout whose origin is https://github.com/craigoley/remudero.git.
+    - Each has its own state root: the registry (.remudero/daemon-instances.yaml) records state_dir rmd-state2,
+      rmd-site-state and /mnt/rmd/remudero-console-state, each bind-mounted at /home/node/Remudero, the container's
+      config.root.
+    - So the LOCAL flag is already per instance. The ONE coupling is the shared ref.
+    - An operator-approved core-only pause for a serve restoration window was refused before running, because
+      `rmd pause` would have paused site and console too.
+    WHAT ALREADY SCOPES CORRECTLY. The panel and API routes (`armPause` / `armResume` in src/lib/panel-actions.ts, also used
+    by action-executor) call `requestPause(deps.root, reason)` and `resumeFleet(deps.root)` WITHOUT git deps, so they are
+    local and per instance. Serve's gateway mounts each instance's routes over that instance's root (instance-gateway.ts).
+    deploy/recycle-container.sh writes and removes its own body in `${STATE_DIR}/state/PAUSE` for the instance it recycles.
+    serve-policy-convergence's `pausePresent` reads `isPaused(stateRoot)`. Only the CLI pause and resume reach the shared ref.
+    THE EXISTING IDENTITY MACHINERY. `instanceForStateRoot(registryText, stateRoot)` (src/lib/deployer.ts, W1-T3732) maps a
+    state root to exactly one declared instance, or returns undefined for none or several. `readInstanceRegistryText`
+    (src/lib/instance-mode.ts) reads the checkout's registry. `daemonInstanceRows` gives each instance's state_dir.
+    WHY THE SHARED REF EXISTED (W1-T1216). config.root differs per host, so a local flag cannot reach a daemon on another
+    host. That cross-host reach is exactly what couples independent instances that share one origin. It stays available,
+    but only as an explicit fleet-wide act (--fleet), never as the default.
+    OWNERSHIP (plan shards and Remudero-Task trailers at fe85160db; open PRs read at filing):
+    - W1-T1216 introduced the shared ref.
+    - W1-T2262 (merged #2861) gated who may push it and named its setter.
+    - W1-T4429 (merged) gave it an owner, reason and expiry.
+    - W1-T3622 and W1-T6640 (merged) fixed its anchor read and moved its read off the loop.
+    - W1-T5343 (merged) keeps reviews running while paused.
+    None scopes a pause to an instance.
+  design: |
+    1. TARGET RESOLUTION: one function, `resolvePauseTarget` in a new src/lib/pause-target.ts, used by BOTH pause and
+       resume. It is not in fleet-control.ts because deployer.ts imports fleet-control.ts and the resolver needs
+       deployer.ts's instanceForStateRoot. The target is an instance state root, resolved only through the registry
+       and config:
+       - The registry is the checkout's .remudero/daemon-instances.yaml, or the file named by RMD_INSTANCE_REGISTRY (the
+         override the shell readers already honor).
+       - `--instance <name>`: the registry must be readable, the name declared and live, and its state_dir must exist
+         from this process.
+       - Inside a daemon container, config.root is not the host path the registry records, so a pause there refuses;
+         the operator runs `rmd pause --instance <name>` on the host.
+       - No flag: config.root must be reachable and match exactly one declared instance via instanceForStateRoot.
+       - Anything else REFUSES, exit non-zero, before any pause/resume control write: an unreadable registry, an unknown or retired name, zero or
+         several matches, an unreachable state_dir, or `--instance` combined with `--fleet`. The refusal names what was tried.
+       - Preserve the existing cli.invoked audit in an already reachable configured root; it is not a control write.
+         For pause/resume only, invocation auditing must not recreate an absent configured root before target validation.
+       - Never inferred from cwd, repository, hostname or pid.
+    2. `rmd pause [--instance <name>] [--reason <text>]` writes ONLY the target's `<state_dir>/state/PAUSE`, through the
+       existing requestPause with no git deps.
+       - Reason, expiry and session owner are as today (W1-T4429), plus the instance name and state root in the flag body.
+       - The `fleet.pause` ledger row goes to the TARGET instance's own ledger, with scope "instance", the instance name and
+         the root.
+       - Prints the instance and root it paused.
+    3. `rmd resume [--instance <name>]` clears ONLY that target's PAUSE and STOP flags.
+       - It never deletes refs/rmd-pause/hold. It says so and names `rmd resume --fleet`, without a remote read: a resume
+         from a checkout whose origin is the live repo must not spend a network read.
+       - Ledger row `fleet.resume` with scope "instance".
+    4. EXPLICIT FLEET-WIDE HOLD, kept separate:
+       - `rmd pause --fleet [--reason]` pushes refs/rmd-pause/hold (writeSharedPause, unchanged anchor format) and writes no
+         local flag.
+       - An anchor creation failure refuses before push: an empty source is Git's ref-delete syntax, never a new hold.
+         A failed push result does not certify that no existing hold remains.
+       - `rmd resume --fleet` deletes it and touches no local flag.
+       - Both write a scope "fleet" ledger row.
+    5. LEGACY HOLDS. Readers are UNCHANGED: checkSharedPause still honors refs/rmd-pause/hold (an existing operator hold
+       keeps its fleet-wide meaning; unreachable still reads held). Only an explicit `rmd resume --fleet` clears it; no
+       migration deletes, reinterprets or releases it.
+    6. WHAT PAUSE GATES IS UNCHANGED, AND DOCUMENTED in docs/control-surface.md:
+       - new implement, fix and review spawns of that instance's daemon and drain;
+       - one review-only pass while a lane is in flight (W1-T5343);
+       - in-flight work finishes and merges;
+       - for the core instance only, deploy-run's automatic serve replace (serve-policy-convergence pausePresent).
+       Update the cli-reference and operator-guide rows to say pause is per instance and --fleet is the fleet-wide act.
+    7. EXISTING TESTS THAT ENCODE THE OLD CONTRACT CHANGE WITH IT, never weaker:
+       - w1-t143-diff-coverage's main() pause/resume cases assert that an instance pause and resume push NOTHING, and new
+         --fleet cases assert exactly the one push;
+       - pause-hold-is-attributable names `rmd resume --fleet` as the remedy;
+       - cli-reference's drift fixture tracks the new resume syntax.
+       - a-test-run-never-pauses-the-live-fleet keeps its live-write refusal and no-push assertions; its recording git
+         returns a synthetic non-empty anchor so it reaches the push guard rather than the anchor-failure arm.
+  acceptance:
+    - claim: "pausing one instance through the real CLI leaves every other instance sharing its checkout and origin unpaused, resuming one leaves another's hold standing, and an ambiguous target makes no control writes"
+      proof: 'grep: test("W1-T7727: a pause through the real CLI holds only the instance it targets" in test/a-pause-holds-only-the-instance-it-targets.test.ts'
+    - claim: "the CLI resolves its pause target through the new resolver"
+      proof: 'grep: resolvePauseTarget( in src/run-task.ts'
+    - claim: "pause and resume refuse an absent configured root without recreating state"
+      proof: 'unit test: W1-T7727: a missing configured root refuses pause and resume without recreating state'
+    - claim: "a failed fleet anchor cannot delete an existing shared hold"
+      proof: 'unit test: W1-T7727: a failed fleet anchor never clears an existing shared hold'
+    - claim: "the real CLI refuses a rejected fleet hold update without reporting an existing hold absent"
+      proof: 'unit test: W1-T7727: the real CLI refuses a rejected fleet hold update'
+  falsifier: |
+    Restore the old propagation (requestPause called with the real shared git deps from pauseCommand). The isolation test then
+    finds refs/rmd-pause/hold on the fixture's bare origin, and the site, console and wild-trails instances' production
+    checkSharedPause readers report held. The test fails.
