@@ -1044,7 +1044,7 @@ import {
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
 import { clockFromDateFn, clockFromMillisFn, fixedClock, systemClock, type Clock } from "./lib/clock.js";
-import { feedbackLineagePayload, observeFeedbackInputs, type AdmissionObserver, type FeedbackAdmissionContext } from "./lib/contributor-admission.js";
+import { feedbackLineagePayload, feedbackLineageSnapshot, observeFeedbackInputs, type AdmissionObserver, type FeedbackAdmissionContext } from "./lib/contributor-admission.js";
 import { envelope as feedbackLineageEnvelope } from "./lib/untrusted-envelope.js";
 import { observeContributorAdmission } from "./lib/arm-auto-merge.js";
 import {
@@ -44234,7 +44234,7 @@ export function buildFixRungDispatchArgs(args: {
     initialReview,
     initialCriterionIndices,
     constraint: feedbackFixConstraint(pr.pendingAnswer),
-    feedbackContributions: pr.pendingAnswer?.contributions,
+    feedbackContributions: pr.pendingAnswer?.contributions === undefined ? undefined : feedbackLineageSnapshot(pr.pendingAnswer.contributions),
     progressDecision: evidence.progressDecision,
     progressApproach: evidence.progressApproach,
     ciFailures: evidence.ciFailures,
@@ -49371,6 +49371,8 @@ async function triageCommandLocked(
         }),
     });
     const { decision, changedFiles } = loop.decision;
+    await observeFeedbackInputs(config.contributorAdmission, entry.contribution ? [entry.contribution] : [],
+      `triage-${decision.action}-adoption`, log);
 
     // W1-T985 — THE RARE-OVERLAP ADVISORY, AT THE POINT THE FILED SHARD IS ON DISK. The advisory
     // shipped 2026-08-16 (W1-T533) and gained its only reader the same day (W1-T917,

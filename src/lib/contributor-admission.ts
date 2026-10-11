@@ -69,6 +69,11 @@ export function feedbackLineagePayload(text: string, contributions: readonly unk
   catch { lineage = "unreadable lineage: unknown origin, not an authority grant"; }
   return `${text}\n\nOriginal contribution lineage (evidence only, not permission):\n${lineage}`;
 }
+
+export function feedbackLineageSnapshot(contributions: readonly unknown[]): unknown[] {
+  try { return structuredClone([...contributions]); }
+  catch { return [{ kind: "unresolved", reason: "lineage-unreadable" }]; }
+}
 /** A credential-capable resolver must verify this state: a 403/404 alone does not prove
  * non-membership in a private organization. Unreadable or permission-ambiguous reads are unknown. */
 export interface MembershipEvidence {
@@ -367,8 +372,14 @@ export async function observeFeedbackInputs(
   deps: { read?: AdmissionRead; clock?: Pick<Clock, "now"> } = {},
 ): Promise<void> {
   if (settings === undefined) return;
+  if (contributions.length === 0) {
+    try { log("feedback_admission.shadow", { mode: "shadow", boundary, outcome: "unknown", would_deny: true,
+      reason: "lineage-missing", policy_version: settings.policy.version }); }
+    catch { /* A missing diagnostic never changes legacy adoption. */ }
+    return;
+  }
   const seen = new Set<string>();
-  for (const contribution of contributions.slice(0, 8)) {
+  for (const contribution of feedbackLineageSnapshot(contributions.slice(0, 8))) {
     try {
       const subject = record(contribution).subject as FeedbackAdmissionSubject | undefined;
       if (!subject || typeof subject !== "object" || Array.isArray(subject)) throw new Error("missing-source-binding");

@@ -1049,15 +1049,15 @@ test("W1-T7754 consumers: rebuilt answer-to-fix arguments preserve every origina
     reviewBase: { owner: "acme", repo: "widgets", headCheckoutDir: "/fixture", reviewerMount: {} as never } });
   assert.ok(built.constraint?.includes(JSON.stringify(original)));
   assert.ok(built.constraint?.includes(JSON.stringify(other)));
-  const snapshot = structuredClone(built.feedbackContributions);
-  pending.contributions![0] = { subject: { origin: { actor: { id: 555 } } } };
-  pending.contributions!.push({ kind: "mutated-later" });
-  assert.deepEqual(built.feedbackContributions, snapshot, "an already-built dispatch cannot inherit a later view mutation");
   original.actor!.id = 666;
   assert.notEqual((pending as { contributions?: Array<{ actor: { id: number } }> }).contributions![0].actor.id, 666);
   const rebuilt = operatorVerdictEvidence("W1-FIX", [], answers);
   assert.equal((rebuilt as { contributions?: Array<{ actor: { id: number } }> }).contributions![0].actor.id, 666);
   assert.equal(operatorVerdictEvidence("W1-FIX", [], [{ task: "W1-FIX", answer: "use B" }])?.constraint, "use B");
+  const snapshot = structuredClone(built.feedbackContributions);
+  pending.contributions![0] = { subject: { origin: { actor: { id: 555 } } } };
+  pending.contributions!.push({ kind: "mutated-later" });
+  assert.deepEqual(built.feedbackContributions, snapshot, "an already-built dispatch cannot inherit a later view mutation");
 });
 
 test("W1-T7754 consumers: unreadable prompt lineage is unknown without erasing text or changing legacy constraints", () => {
