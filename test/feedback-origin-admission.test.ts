@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -11,7 +11,8 @@ import {
   admitFeedbackContribution, captureFeedback, feedbackEntryPath, homeRepoPath, proposeFeedbackWithSummary,
   readFeedbackEntry, type FeedbackEntry,
 } from "../src/lib/feedback.js";
-import { normalizeIssue, pollIssues, type IssueListGateway } from "../src/lib/issues-intake.js";
+import { ghIssueListGateway, normalizeIssue, pollIssues, type IssueListGateway } from "../src/lib/issues-intake.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 // W1-T7754 — an issue or comment is an outside contribution until the shared classifier admits
 // its ORIGINAL actor. These fixtures drive real captures through pollIssues/captureFeedback and
@@ -344,4 +345,46 @@ test("W1-T7754 checkpoint: capture deep-copies source binding and unreadable rep
     admission: { mode: "shadow", policy: POLICY } });
   assert.equal(result.created[0].contribution?.admission.reason, "invalid-source-identity");
   assert.ok(newFeedbackIdsOldestFirst(root).includes(result.created[0].id));
+});
+
+test("W1-T7754 checkpoint: default repository transport really spawns a contained CLI and rejects unreadable metadata", async () => {
+  for (const stdout of [
+    'HTTP/2 200 OK\ncontent-type: application/json\n\n{"id":100,"full_name":"acme/widgets","private":true}',
+    'HTTP/2 404 Not Found\ncontent-type: application/json\n\n{}',
+    'HTTP/2 200 OK\ncontent-type: application/json\n\nnull',
+  ]) {
+    const shim = ghShim([{ when: "", stdout }], { kind: "feedback-source-repository" });
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${shim.dir}:${oldPath}`;
+    try {
+      const repository = await ghIssueListGateway().repository!("acme", "widgets");
+      assert.equal(shim.calls().length, 1, "the default adapter was exercised, not injected");
+      assert.deepEqual(shim.calls()[0].slice(0, 3), ["api", "repos/acme/widgets", "-i"]);
+      assert.deepEqual(repository, stdout.includes('"id":100') ? { id: 100, fullName: "acme/widgets", private: true } : undefined);
+    } finally {
+      process.env.PATH = oldPath;
+      rmSync(shim.dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("W1-T7754 checkpoint: a policy without explicit shadow mode adds no metadata or repository reads", async () => {
+  const root = tmpRoot();
+  const issues = gateway([issueRow(8, { id: OWNER_ID, type: "User", login: "owner" })]);
+  issues.repository = () => assert.fail("unconfigured metadata read");
+  const result = await pollIssues([{ owner: "acme", repo: "widgets" }], { issues, root,
+    ledgerPath: join(root, "ledger.ndjson"), runId: "no-mode", now: () => NOW, admission: { policy: POLICY } });
+  assert.equal(result.created[0].contribution, undefined);
+  assert.ok(newFeedbackIdsOldestFirst(root).includes(result.created[0].id));
+});
+
+test("W1-T7754 checkpoint: malformed shadow lineage is unknown without changing legacy selection", () => {
+  const root = tmpRoot();
+  writeFileSync(join(root, "plan", "feedback", "fb-malformed.yaml"), "status: new\nraw: [broken\n");
+  const receipts: Record<string, unknown>[] = [];
+  const context = { mode: "shadow" as const, policy: POLICY, nowMs: NOW,
+    record: (_step: string, fields: Record<string, unknown>) => { receipts.push(fields); } };
+  assert.deepEqual(newFeedbackIdsOldestFirst(root, context), ["fb-malformed"]);
+  assert.equal(receipts[0].reason, "unreadable-entry");
+  assert.equal(receipts[0].would_deny, true);
 });
