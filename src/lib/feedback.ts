@@ -101,8 +101,7 @@ export interface FeedbackEntry {
   expansion?: FeedbackExpansion | null;
   /** Present ONLY when a home-repo pointer (W1-T397) is configured AND this checkout is not
    * itself the home repo. `status: "landed"` once a PR carries this entry; `"unreachable"` on
-   * any failure, with `error` naming why.
-   * The entry is always captured locally first. */
+   * any failure, with `error` naming why. The entry is always captured locally first. */
   upstream?: {
     /** "owner/repo" of the configured home repo. */
     home: string;
@@ -119,8 +118,7 @@ export interface FeedbackEntry {
    * REPLIES TO, via `POST /v1/escalation/reply` — a DIFFERENT edge than `reply_to`, which names
    * another feedback entry rather than a thread. `null`/absent when none was supplied. */
   thread_id?: string | null;
-  /** W1-T7754: the original outside item, its actor and admission; survives status writes and
-   *  re-filing. Absent on legacy/internal entries, which authority.ts reconciles per item. */
+  /** W1-T7754: immutable original-source evidence, not a replayable authority grant. */
   contribution?: FeedbackContribution | null;
 }
 
@@ -706,8 +704,6 @@ function resolveAttachments(root: string, id: string, inputs: string[]): string[
   return out;
 }
 
-// ── Contribution lineage (W1-T7754): a summarizer or relay is `relayed_by`, never the contributor.
-
 export interface FeedbackContributionAdmission {
   outcome: AdmissionDecision["outcome"];
   reason: string;
@@ -719,7 +715,6 @@ export interface FeedbackContribution {
   kind: FeedbackAdmissionSubject["kind"] | "unresolved";
   source_ref: string;
   url: string | null;
-  /** The ORIGINAL contributor as GitHub reported it, never a relaying identity. */
   actor: ContributionActor | null;
   association: string | null;
   observed_at: string;
@@ -772,8 +767,7 @@ export function admitFeedbackContribution(input: FeedbackContributionInput, cont
   };
 }
 
-/** A derived entry keeps `parent`'s contributor and admission and appends `relayedBy`; an
- *  unresolved legacy parent yields `unknown`, a legacy internal parent `null`. */
+/** Preserve the original contributor; a trusted relay cannot replace it. */
 export function inheritFeedbackLineage(
   parent: Pick<FeedbackEntry, "id" | "origin" | "contribution">, relayedBy: string,
 ): FeedbackContribution | null {
@@ -821,11 +815,9 @@ export interface CaptureFeedbackOptions {
    * UNTOUCHED ({@link findFeedbackBySubmissionKey}); `undefined` always files fresh. Why: the
    * reasoning against reusing `id` for dedup is archived in docs/forensics/feedback.md. */
   submissionKey?: string;
-  /** W1-T7754: the original outside item, classified before landing or upstream publishing. */
+  /** W1-T7754: source input and explicit shadow context; derived entries preserve their parent. */
   contribution?: FeedbackContributionInput;
-  /** W1-T7754: the policy and evidence `contribution` is classified under. */
   admission?: FeedbackAdmissionContext;
-  /** W1-T7754: re-filed content (a summary) inherits the parent's lineage; `contribution` is ignored. */
   derivedFrom?: { entry: Pick<FeedbackEntry, "id" | "origin" | "contribution">; relayedBy: string };
 }
 
@@ -837,14 +829,9 @@ export function findFeedbackBySubmissionKey(root: string, key: string, stateRoot
   return [...listFeedback(root), ...queued].find((e) => e.submission_key === key) ?? null;
 }
 
-/** Capture one feedback item: writes `plan/feedback/<id>.yaml` with `status: new`, copying any
- * local-path attachments alongside it. The write is synchronous filesystem I/O only — no
- * network, no LLM — so `rmd feedback` always returns effectively immediately.
- *
- * After the write, this also attempts to LAND the entry onto `origin/main` (W1-T243) and, when
- * a home-repo pointer is configured and this checkout is not the home repo, to open a PR
- * against it (W1-T397). Both steps are best-effort and NEVER throw. Why: the full
- * landing/upstream sequencing is archived in docs/forensics/feedback.md. */
+/** Capture locally before best-effort landing (W1-T243) and upstreaming to a configured home
+ * (W1-T397). Local writes/attachments need no network; later publication can use the network.
+ * Landing/upstream failures never discard the local entry. See docs/forensics/feedback.md. */
 export function captureFeedback(root: string, opts: CaptureFeedbackOptions): FeedbackEntry {
   if (opts.submissionKey) {
     const existing = findFeedbackBySubmissionKey(root, opts.submissionKey, opts.land?.stateRoot);
@@ -862,7 +849,6 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
   const id = opts.id ?? generateFeedbackId();
   mkdirSync(feedbackDir(root), { recursive: true });
   const attachments = resolveAttachments(root, id, opts.attachments ?? []);
-  // W1-T7754: lineage is decided BEFORE the entry is written, landed or published upstream.
   const contribution = opts.derivedFrom !== undefined
     ? inheritFeedbackLineage(opts.derivedFrom.entry, opts.derivedFrom.relayedBy)
     : opts.admission?.mode === "shadow" && opts.contribution !== undefined

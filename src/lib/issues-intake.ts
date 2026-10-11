@@ -28,8 +28,7 @@ import type { ManagedRepo } from "./managed-repos.js";
  * feedback id is DETERMINISTIC ({@link issueFeedbackId}) — `existsSync` on that one path IS the
  * dedup check, so a prior run's entry is directly visible to the next one with no extra bookkeeping.
  *
- * remudero's OWN public issues stay OFF this lane until WS-4 (G-6, operator standing decision) —
- * enforced simply by NOT listing this repo in `.remudero/managed-repos.json`, not by code here.
+ * G-6 keeps remudero's public issues off this lane until WS-4: omit it from `.remudero/managed-repos.json`.
  */
 
 // ── Issues, normalized across the one GitHub issues-list API ───────────────
@@ -45,7 +44,6 @@ export interface RawIssue {
   createdAt: string;
   url: string;
   labels: string[];
-  /** W1-T7754: the issue's original author as GitHub reported it, never the poller's identity. */
   origin?: ContributionOrigin;
   itemId?: number;
   revision?: FeedbackAdmissionSubject["revision"];
@@ -101,7 +99,9 @@ export function normalizeIssue(owner: string, repo: string, raw: GhIssueJson): R
     labels: (raw.labels ?? []).map((l) => (typeof l === "string" ? l : (l.name ?? ""))).filter((l) => l.length > 0),
     ...(origin === undefined ? {} : { origin }),
     ...(raw.id === undefined ? {} : { itemId: raw.id }),
-    revision: { updatedAt: raw.updated_at, contentDigest: feedbackContentDigest([raw.title, raw.body, raw.labels]) },
+    ...(raw.updated_at === undefined ? {} : {
+      revision: { updatedAt: raw.updated_at, contentDigest: feedbackContentDigest([raw.title, raw.body, raw.labels]) },
+    }),
   };
 }
 
