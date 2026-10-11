@@ -332,11 +332,6 @@ export async function executeAdmissionDisposition(
   if (store.domain !== "shadow" && store.domain !== "rehearsal"
     || (store.domain === "rehearsal") !== (simulation?.domain === "rehearsal")) return result("owner-action", "domain-mismatch");
   const cause = dispositionHash([store.domain, settings.repositoryId, target.owner, target.repo, target.prNumber]);
-  let history: readonly AdmissionDispositionReceipt[];
-  try { history = await store.load(cause); validateDispositionHistory(history, store.domain, cause); }
-  catch { /* Missing/corrupt/incomplete history is unknown, never a fresh effect budget. */
-    return result("owner-action", "journal-unreadable"); }
-  let last = history.at(-1);
   const started = clock.now();
   const policy = dispositionHash(settings);
   let reads = 0;
@@ -351,6 +346,11 @@ export async function executeAdmissionDisposition(
         })]);
     } finally { if (timer !== undefined) clearTimeout(timer); }
   };
+  let history: readonly AdmissionDispositionReceipt[];
+  try { history = await bounded(() => store.load(cause)); validateDispositionHistory(history, store.domain, cause); }
+  catch { /* Missing/corrupt/incomplete or stalled history is unknown, never a fresh effect budget. */
+    return result("owner-action", "journal-unreadable"); }
+  let last = history.at(-1);
   const read: AdmissionRead = async path => {
     if (++reads > 32) throw new Error("disposition-read-bound");
     return bounded(() => sourceRead(path));
@@ -371,7 +371,7 @@ export async function executeAdmissionDisposition(
       identityAttempts: last?.identityAttempts ?? 0, reconciliationAttempts: last?.reconciliationAttempts ?? 0,
       closeAttempts: last?.closeAttempts ?? 0, escalationAttempts: last?.escalationAttempts ?? 0, ...counts };
     validateDispositionHistory([...history, row], store.domain, cause);
-    await store.append(row);
+    await bounded(() => store.append(row));
     history = [...history, row]; last = row;
     return row;
   };
