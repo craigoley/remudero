@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator session 2026-10-10: core daemon ledger 19:35-20:33Z, lane running W1-T7734 (W1-T7697 design 3)"
   plan_refs: [W1-T7697, W1-T6274, W1-T5761, W1-T4416, W1-T4662, W1-T3793, W1-T147]
-  files: [src/lib/daemon.ts, src/run-task.ts, test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts]
+  files: [src/lib/daemon.ts, src/run-task.ts, test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts, test/a-daemon-draining-for-a-restart-dispatches-no-new-run.test.ts]
   status: queued
   priority: 1
   attempts: 0
@@ -52,6 +52,14 @@
     design 3 left half-built as the age cohort), W1-T6274 (a draining daemon dispatches no new run; this task
     must keep that guarantee once every lane can yield), W1-T4662 (a yield is handed_off, never a transient
     failure).
+    AMENDED 2026-10-11 (operator approval): files: adds test/a-daemon-draining-for-a-restart-dispatches-no-new-run.test.ts.
+    Its two W1-T6274 tests latch the restart while lane A is in flight and has reached no yield boundary, then assert
+    that B's freed lane is held with "stale code". Design 1 below makes A a holdout, so that lane now refills, and the
+    build must move those fixtures onto design 3's common case (A has reached a boundary or settled) to keep W1-T6274's
+    guarantee. With the file undeclared, the run's restart checkpoint was refused at 19:40:14Z (verdict no_pr,
+    reason restart_checkpoint_failed), detail:
+      "restart checkpoint refused: test/a-daemon-draining-for-a-restart-dispatches-no-new-run.test.ts"
+    and the work was lost (W1-T8008 owns keeping undeclared work).
     OVERLAP. lint-plan reports W1-T147 (the overnight chaos drill) as sharing src/lib/daemon.ts and src/run-task.ts.
     That is the whole-file surface only: W1-T147 injects faults and checks recovery rows, and does not touch the
     restart latch or lane refill, so neither shard supersedes the other (the same ruling W1-T7697 recorded).
