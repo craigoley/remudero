@@ -431,14 +431,16 @@ test("W1-T7754 consumers: every advancing merge preserves original lineage inste
   assert.deepEqual(mergeFeedbackRecord("status: new\n", "status: accepted\n"), { kind: "take-local" });
 });
 
-for (const path of ["disk", "status-content", "queued"] as const) {
+for (const path of ["disk", "status-content", "queued", "pending-disk", "pending-status-content", "pending-queued"] as const) {
   test(`W1-T7754 consumers: ${path} writer really stages original lineage and a forward status without a global hold`, () => {
     const origin = gitRepo({ bare: true, kind: "admission-origin" });
     const seed = gitRepo({ kind: "admission-seed" });
     const rel = "plan/feedback/fb-lineage.yaml";
     const original = admitFeedbackContribution(boundIssue(), { mode: "shadow", policy: POLICY, nowMs: NOW });
     mkdirSync(join(seed.dir, "plan", "feedback"), { recursive: true });
-    writeFileSync(join(seed.dir, rel), stringifyYaml({ id: "fb-lineage", status: "new", contribution: original }));
+    const originalContent = stringifyYaml({ id: "fb-lineage", status: "new", contribution: original });
+    if (path.startsWith("pending-")) writeFileSync(join(seed.dir, "README.md"), "seed\n");
+    else writeFileSync(join(seed.dir, rel), originalContent);
     seed.git("add", "-A");
     seed.git("commit", "--quiet", "-m", "chore: seed lineage");
     seed.addRemote("origin", origin.dir);
@@ -453,13 +455,18 @@ for (const path of ["disk", "status-content", "queued"] as const) {
     const opts = { gh, targetRepository: { owner: "acme", repo: "widgets" },
       sourceRepository: { owner: "acme", repo: "widgets" } };
     const result = withLiveWritesAllowed(() => {
-      if (path === "status-content") return landFeedbackStatusContent(root.dir, rel, content, opts);
-      if (path === "queued") {
+      if (path.startsWith("pending-")) {
+        const first = landFeedbackStatusContent(root.dir, rel, originalContent, opts);
+        assert.equal(first.landed, true, JSON.stringify(first));
+      }
+      if (path.endsWith("status-content")) return landFeedbackStatusContent(root.dir, rel, content, opts);
+      if (path.endsWith("queued")) {
         const stateRoot = tmpRoot();
         const queued = landFeedbackStatusContent(root.dir, rel, content, { ...opts, stateRoot });
         assert.deepEqual(queued.queued, [rel]);
         return sweepFeedbackLanding(root.dir, { ...opts, stateRoot });
       }
+      mkdirSync(join(root.dir, "plan", "feedback"), { recursive: true });
       writeFileSync(join(root.dir, rel), content);
       return landFeedback(root.dir, opts);
     });
