@@ -59,6 +59,7 @@ import {
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB } from "./host-memory-ledger.js";
+import type { ContainerMemoryHeadroom } from "./host-memory-shadow.js";
 import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
 } from "./pr-blocker.js";
@@ -149,6 +150,7 @@ import {
 import {
   acceptanceBlockDiagnostics,
   automergeHoldFromLedger,
+  describeHoldSetter,
   cappedOverrideFromLedger,
   decideAutoMergeArm,
   extractTaskTrailerId,
@@ -215,6 +217,7 @@ import {
   escalate,
   ghIssueGateway,
   isEscalationJudgeExempt,
+  taskContractRevision,
   tryEscalate,
   type AskType,
   type Escalation,
@@ -1804,6 +1807,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "readArmTimeline",
   "readActionsStatusSummary", // W1-T5939
   "rerunFailedChecks",
+  // remudero-console #2035: the task contract an escalated fix-progress latch stands on.
+  "readTaskContractRevision",
 ] as const;
 
 export function productionFixProgressJudge(opts: {
@@ -1896,6 +1901,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "escalateRearmExhausted"
   | "readArmTimeline"
   | "readActionsStatusSummary"
+  | "readTaskContractRevision"
 > & {
   /** W1-T3618 — see `reviewerCodeStaleThisPassImpl`. Not a `SweepDeps` member: it is a read-back on
    *  this builder's own return, not an effect the sweep invokes. */
@@ -2291,9 +2297,35 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     }
   };
 
+  // The daemon hands each pass its tick's fresh plan; a task missing from it gets ONE re-read per cycle.
+  let reloadedForContract: { plan: Plan | undefined } | undefined;
+  const readTaskContractRevision = (taskId: string): string | undefined => {
+    let task = plan.byId.get(taskId);
+    if (task === undefined) {
+      reloadedForContract ??= { plan: reloadPlanForFix() };
+      task = reloadedForContract.plan?.byId.get(taskId);
+    }
+    return task === undefined ? undefined : taskContractRevision(task);
+  };
+  // The `**Contract:**` line every escalation this sweep opens about a PR carries: the revision of
+  // the task contract the question was asked under. The fix rung's open-escalation probe compares
+  // it with the current revision (openEscalationStandDownReason), so a plan amendment re-admits the
+  // rung while the issue is still open. Empty for a PR whose task is not in the plan: escalate.ts
+  // then omits the line, as it does for any producer without a revision.
+  const contractRevisionFor = (pr: { taskId?: string }): { contractRevision?: string } => {
+    let contractRevision: string | undefined;
+    try {
+      contractRevision = pr.taskId ? readTaskContractRevision(pr.taskId) : undefined;
+    } catch {
+      // An unreadable plan leaves the line off; it never stops the escalation from being filed.
+      contractRevision = undefined;
+    }
+    return contractRevision ? { contractRevision } : {};
+  };
   return {
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
     fixProgressJudge: effectsProgressJudge,
+    readTaskContractRevision,
     // W1-T3618: the entrypoint's freshness gate, surfaced so the lib-built and entrypoint-built
     // effect surfaces stay key-identical (W1-T2890).
     reviewerCodeStaleThisPass: reviewerCodeStaleThisPassImpl,
@@ -2741,6 +2773,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           runId,
           headSha: pr.headSha,
           cause: "ci",
+          ...contractRevisionFor(pr),
           summary: `required check "${check.name}" ${CANCELLED_CHECK_ESCALATION_SUMMARY[kind]} — ${pr.prUrl}`,
           detail:
             `The gate-reconciliation lane (W1-T1223) re-queued required check "${check.name}"'s job once ` +
@@ -2776,6 +2809,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           runId,
           headSha: pr.headSha,
           cause: "ci",
+          ...contractRevisionFor(pr),
           summary: `auto-merge disabled again after ${rearms} sweep re-arms at one head — ${pr.prUrl}`,
           detail: (judgedReason ? `${judgedReason}\n\n` : "") +
             `GitHub disabled auto-merge on ${pr.prUrl} at head ${pr.headSha} after a sweep arm, and the ` +
@@ -2799,6 +2833,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           runId,
           headSha: pr.headSha,
           cause: "ci",
+          ...contractRevisionFor(pr),
           summary: `required check "${check.name}" exhausted its bounded infrastructure retry — ${pr.prUrl}`,
           detail:
             `The failed-CI infrastructure classifier identified ${signature} for check "${check.name}" ` +
@@ -3009,6 +3044,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             ? { headDedup: "independent" as const }
             : {}),
           cause: escalationCause(pr.mergeState === "dirty", isBlockedCi(pr)),
+          ...contractRevisionFor(pr),
           summary: `PR ${pr.prUrl} needs a clarification — ${reason}`,
           detail:
             `${context}The CLARIFICATION-QUESTION rung (W1-T78, ratifies P22's new rung) reconciled open PR #${pr.prNumber} ` +
@@ -7961,6 +7997,8 @@ export const BASE_RED_REFRESH_STEP = "sweep.base_red.refresh";
 /** W1-T6405 — a red head behind main whose failing test files all pass on current main took that
  *  main: one update-branch per `pr@head`, shared with {@link BASE_RED_REFRESH_STEP}'s once-per-head key. */
 export const BASE_FIXED_REFRESH_STEP = "sweep.base_fixed.refresh";
+/** remudero-console #2035 — an escalated head whose task contract was amended on main took main once. */
+export const CONTRACT_AMENDED_REFRESH_STEP = "sweep.contract_amended.refresh";
 
 /** W1-T6405 — the failing test files of a red head that is BEHIND main and whose every failing test file
  *  a recorded probe found passing at main's CURRENT tip (`clear`, never partial or unrunnable); else
@@ -10997,7 +11035,7 @@ export function diagnoseCappedRoutingBlock(
     return {
       blocked: true,
       precondition: "held",
-      detail: `an automerge hold stands over PR #${pr.prNumber} (engaged by ${hold.by}: ${hold.reason})`,
+      detail: `an automerge hold stands over PR #${pr.prNumber} (engaged by ${describeHoldSetter(hold)}: ${hold.reason})`,
     };
   }
   const proofDiscrimination = cappedProofDiscriminationFromLedger(pr, ledgerLines);
@@ -11382,6 +11420,11 @@ export interface StrikeLadderEffects {
 
 export interface SweepDeps {
   fixProgressJudge?: FixProgressJudge;
+  /** The CURRENT task contract revision ({@link taskContractRevision}) of a plan task on main, or `undefined`
+   *  when the plan does not hold it. An escalated fix-progress latch records the revision it stands on;
+   *  a different one means the plan was amended under it (remudero-console #2035). Omitted: the latch
+   *  holds on its input key alone, as before. */
+  readTaskContractRevision?: (taskId: string) => string | undefined;
   headRehome?: HeadRehomePorts;
   /** The already-listed peers retained when the light pass reconciles one PR at a time. */
   stuckStagePeers?: readonly OpenPrView[];
@@ -14871,7 +14914,7 @@ export async function runSweep(
       ? dispatchHold?.reason ?? standDownReason ?? actionError ?? "no dispatch was attempted"
       : undefined;
     const shownReason = mergeHold !== undefined
-      ? `held by ${mergeHold.by}: ${mergeHold.reason} — auto-merge refused until an operator releases it (rmd merge-hold)`
+      ? `held by ${describeHoldSetter(mergeHold)}: ${mergeHold.reason} — auto-merge refused until an operator releases it (rmd merge-hold)`
       : notDispatched !== undefined
         ? `${reason.replace(/\bdispatching\b/g, "would dispatch")} — NOT DISPATCHED this pass: ${notDispatched}`
         : reason;
@@ -16075,6 +16118,45 @@ export async function runSweep(
               }
               let progressDecision: FixProgressVerdict | undefined;
               let progressParkedReason: string | undefined;
+              // remudero-console #2035: an escalated latch keys on the head and its round history, and a plan
+              // amendment on main moves neither, so it held a PR for 30+ hours after its contract was fixed.
+              // Each latched pass records the contract revision it stands on; when main's differs, take main
+              // into the branch once. The fix rung reads the contract AT THE HEAD (W1-T4073), so only a new
+              // head carries the amendment, and a new head releases every head-keyed hold with it.
+              const refreshAmendedContract = async (
+                latched: readonly Record<string, unknown>[], inputKey: string,
+              ): Promise<string | undefined> => {
+                const current = pr.taskId !== undefined ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
+                const standingOn = latched.findLast(row => typeof row.progress_contract_revision === "string")
+                  ?.progress_contract_revision as string | undefined;
+                const record = (revision: string | undefined) => {
+                  extraDisposedFields = { ...extraDisposedFields, progress_escalated_key: inputKey,
+                    ...(revision !== undefined ? { progress_contract_revision: revision } : {}) };
+                };
+                // First observation (or a latch predating the record): adopt the current contract, change nothing.
+                if (current === undefined || standingOn === undefined || standingOn === current) {
+                  record(standingOn ?? current);
+                  return undefined;
+                }
+                record(standingOn);
+                if (!deps.updateBranch) {
+                  return "task contract amended since this head was escalated — deferred to full sweep (update-branch not available on this pass)";
+                }
+                let outcome: string;
+                try { outcome = await deps.updateBranch(pr); }
+                catch (error) { outcome = `error: ${String(error)}`; }
+                appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+                  step: CONTRACT_AMENDED_REFRESH_STEP, pr_number: pr.prNumber, head_sha: pr.headSha,
+                  escalated_under: standingOn, contract_revision: current, outcome });
+                record(current);
+                if (outcome === "updated" || outcome === "head-moved") {
+                  acted = true;
+                  return `task contract amended since this head was escalated — took main into the branch (${outcome}) ` +
+                    "so the next round works on the amended contract";
+                }
+                return `task contract amended since this head was escalated — branch refresh ${outcome}; ` +
+                  "awaiting new evidence or an operator answer";
+              };
               const askProgress = async (): Promise<boolean> => {
                 progressDecision ??= progressParkedReason ? undefined : judgedContinue.get(pr.prNumber);
                 if (progressDecision) return true;
@@ -16095,11 +16177,14 @@ export async function runSweep(
                     : progressParkedReason?.startsWith("rerun-still-red") || progressParkedReason?.startsWith("amendment-closed") ? 1
                     : fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason: progressParkedReason });
                 const inputKey = createHash("sha256").update(JSON.stringify(input)).digest("hex");
-                if (ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
-                    row.head_sha === pr.headSha && row.progress_escalated_key === inputKey)) {
+                const latched = ledgerLines.filter(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
+                  row.head_sha === pr.headSha && row.progress_escalated_key === inputKey);
+                if (latched.length > 0) {
                   acted = false;
                   spent = false;
                   standDownReason = "this fix progress loop is already escalated; awaiting new evidence or an operator answer";
+                  const amended = await refreshAmendedContract(latched, inputKey);
+                  if (amended !== undefined) standDownReason = amended;
                   return false;
                 }
                 const result = await judgeFixProgress(input, progressJudge);
@@ -16116,7 +16201,9 @@ export async function runSweep(
                 if (result.verdict === "escalate") {
                   const reason = `fix progress loop: ${result.loop} — ${result.reason}`;
                   await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
-                  extraDisposedFields = { ...extraDisposedFields, progress_escalated_key: inputKey };
+                  const contract = pr.taskId !== undefined ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
+                  extraDisposedFields = { ...extraDisposedFields, progress_escalated_key: inputKey,
+                    ...(contract !== undefined ? { progress_contract_revision: contract } : {}) };
                   spent = false;
                   standDownReason = reason;
                   return false;
@@ -17352,6 +17439,7 @@ export async function runSweep(
           pr_url: pr.prUrl,
           head_sha: pr.headSha,
           hold_by: holdToWithdraw.by,
+          ...(holdToWithdraw.actor ? { hold_actor: holdToWithdraw.actor } : {}),
           hold_reason: holdToWithdraw.reason,
         };
         log("automerge.hold_withdrawal", withdrawalLine);
@@ -18926,27 +19014,44 @@ export function logCostGovernorDeferral(
 export interface MemoryGovernorResult {
   /** true ⇒ the dispatch path MUST defer — do not open a new run this pass. */
   deferred: boolean;
-  /** The observed `MemAvailable` (MiB, read from `/proc/meminfo` — NEVER a cgroup limit; design
-   *  note (6): this fleet's containers carry no memory limit, so a cgroup read reports
-   *  "unbounded" and would authorise every dispatch silently). */
+  /** The smaller of the host's `MemAvailable` and this container's own headroom (MiB): a new worker draws on
+   *  both. Containers have carried memory limits since #10371/#10486, and the host figure cannot see them. */
   observedAvailableMib: number;
   /** The policy floor consulted (`policy.memoryFloorMib`, carried for the ledger line). */
   floorMib: number;
+  /** Set only when a container reading was taken: what each pool showed, and which one decided. */
+  hostAvailableMib?: number;
+  container?: ContainerMemoryHeadroom;
+  binding?: "host" | "container";
+  /** fits; host-short or container-short (deferred); nothing-to-wait-for: the container is short but no live
+   *  work in it can free memory, so waiting cannot help and the dispatch is admitted, named. */
+  tier?: "fits" | "host-short" | "container-short" | "nothing-to-wait-for";
 }
 
 /** The memory governor's pure predicate: STRICTLY BELOW `policy.memoryFloorMib` available, NEW
  *  dispatch is deferred. Same shape and the SAME dispatch-only asymmetry as its two siblings. SHIPS
  *  INERT: the floor defaults to 0 and the observation can never be negative, so this never defers
- *  until an operator raises the floor against a figure not yet measured. DEFER, NEVER KILL. */
+ *  until an operator raises the floor against a figure not yet measured. DEFER, NEVER KILL.
+ *
+ *  TIERED for the container: below the floor it defers only while live work in this container can still free
+ *  memory (`ownWorkLive`, asked only then). With none, waiting cannot help (the daemon's own heap holds the
+ *  shortfall), so the dispatch is admitted and named, never wedged. The host arm is unchanged. */
 export function checkMemoryGovernor(
   availableMib: number,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+  container?: ContainerMemoryHeadroom,
+  ownWorkLive: () => boolean = () => true,
 ): MemoryGovernorResult {
-  return {
-    deferred: availableMib < policy.memoryFloorMib,
-    observedAvailableMib: availableMib,
-    floorMib: policy.memoryFloorMib,
-  };
+  const base = { observedAvailableMib: availableMib, floorMib: policy.memoryFloorMib };
+  if (container === undefined) return { deferred: availableMib < policy.memoryFloorMib, ...base };
+  const bounded = "headroomMib" in container;
+  const binding = bounded && container.headroomMib < availableMib ? "container" : "host";
+  const observed = bounded ? Math.min(availableMib, container.headroomMib) : availableMib;
+  const named = { ...base, observedAvailableMib: observed, hostAvailableMib: availableMib, container, binding } as const;
+  if (availableMib < policy.memoryFloorMib) return { deferred: true, ...named, tier: "host-short" };
+  if (!bounded || container.headroomMib >= policy.memoryFloorMib) return { deferred: false, ...named, tier: "fits" };
+  return ownWorkLive() ? { deferred: true, ...named, tier: "container-short" }
+    : { deferred: false, ...named, tier: "nothing-to-wait-for" };
 }
 
 /** THE OBSERVATION IS LEDGERED ON EVERY CONSULTATION — unlike the two deferral loggers above, this
@@ -18969,6 +19074,16 @@ export function logMemoryObservation(
     observed_available_mib: result.observedAvailableMib,
     memory_floor_mib: result.floorMib,
     deferred: result.deferred,
+    ...(result.container === undefined ? {} : {
+      host_available_mib: result.hostAvailableMib,
+      ...("headroomMib" in result.container ? {
+        container_headroom_mib: result.container.headroomMib,
+        container_ceiling_mib: result.container.ceilingMib,
+        container_working_set_mib: result.container.workingSetMib,
+      } : { container_headroom: "unbounded" in result.container ? "unbounded" : `unread: ${result.container.unread}` }),
+      binding: result.binding,
+      tier: result.tier,
+    }),
   });
 }
 

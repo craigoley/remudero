@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: security follow-up batch 3, raised by W1-T6138's builder (#9818); premise verified read-only on origin/main 44513355a and the #9818 head 8b79b0624 before filing"
   plan_refs: [W1-T6138, W1-T6120]
   files: [scripts/ci-control-plane-precheck.mjs, hooks/pre-push, test/the-control-plane-precheck-calls-its-capability-snapshot-runner.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

@@ -176,6 +176,7 @@ export function gitPushRunBranch(worktreePath: string, opts: PushRunBranchOpts =
 export interface PushRunBranchAsyncOpts extends Omit<PushRunBranchOpts, "capture" | "exec"> {
   exec?: PushExecAsync;
   capture?: GitCaptureAsync;
+  prGates?: boolean;
 }
 
 /**
@@ -188,7 +189,7 @@ export async function gitPushRunBranchAsync(worktreePath: string, opts: PushRunB
   await runStepsAsync(
     pushRunBranchSteps(worktreePath, opts, {
       capture: opts.capture ?? worktreeGitCaptureAsync(worktreePath),
-      exec: opts.exec ?? worktreePushExecAsync(worktreePath),
+      exec: opts.exec ?? worktreePushExecAsync(worktreePath, { prGates: opts.prGates }),
     }),
   );
 }
@@ -604,11 +605,11 @@ export function worktreePushExec(worktreePath: string): PushExec {
   };
 }
 
-/** {@link worktreePushExec} off the event loop. */
-export function worktreePushExecAsync(worktreePath: string): PushExecAsync {
+/** {@link worktreePushExec} off the event loop; `prGates: false` (a restart checkpoint, which opens no PR) skips the PR gate. */
+export function worktreePushExecAsync(worktreePath: string, { prGates = true }: { prGates?: boolean } = {}): PushExecAsync {
   return async (_file, args, opts) => {
     const pushArgs = leafArgs(worktreePath, args);
-    const gate = await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGitAsync(worktreePath, a)));
+    const gate = prGates ? await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGitAsync(worktreePath, a))) : undefined;
     if (gate) {
       try {
         const out = await withGateHome(gate, (env) => new Promise<{ stdout: string; stderr: string }>((resolveGate, reject) => {

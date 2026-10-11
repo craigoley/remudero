@@ -195,6 +195,7 @@ import {
   GITDIR_RECORD_PREFIX,
   HOST_GIT_CONFIG,
   hostWorktreeGit,
+  hostWorktreeGitAsync,
   originUrlAtCut,
   pinnedConfigValue,
   pinWorktreeGit,
@@ -5736,9 +5737,9 @@ export function worktreeRemove(repoDir: string, worktreePath: string): void {
   // deletes it. The Claude CLI leaves `/private/tmp/claude-<uid>/<slug>/` behind on a non-graceful exit and nothing else
   // reaps it. Best-effort, guarded, never throws.
   reapWorkerScratch(worktreePath);
-  execFileSync("git", ["-C", repoDir, "worktree", "remove", "--force", worktreePath], {
-    stdio: "inherit",
-  });
+  // Through the hardened leaf: the managed checkout is pinned, so an inherited GIT_DIR / GIT_WORK_TREE / GIT_CONFIG_*
+  // cannot point the removal at another repository, and its own config is vetted first.
+  hostWorktreeGit(repoDir, ["worktree", "remove", "--force", worktreePath], { stdio: "inherit-stdout" });
   removeWorktreeBase(worktreePath); // the sibling base record dies with its worktree
   // Accumulation control, orchestrator-side so it survives a killed worker: reap STALE ORPHAN scratch under the same
   // claude-<uid> root, the fixtures a SIGKILL'd `npm test` leaves behind, which the boot sweep over os.tmpdir() never scans.
@@ -5749,7 +5750,7 @@ export function worktreeRemove(repoDir: string, worktreePath: string): void {
 
 export async function worktreeRemoveAsync(repoDir: string, worktreePath: string): Promise<void> {
   reapWorkerScratch(worktreePath);
-  await worktreeGit(["-C", repoDir, "worktree", "remove", "--force", worktreePath], true);
+  await hostWorktreeGitAsync(repoDir, ["worktree", "remove", "--force", worktreePath], { stdio: "inherit-stdout" });
   removeWorktreeBase(worktreePath);
   sweepStaleWorkerScratch({ maxAgeMs: DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS });
 }
@@ -6139,9 +6140,7 @@ export function pruneStaleRuns(
           }
         }
         try {
-          execFileSync("git", ["-C", repoDir, "worktree", "remove", "--force", registered.path], {
-            stdio: "pipe",
-          });
+          hostWorktreeGit(repoDir, ["worktree", "remove", "--force", registered.path]);
           removeRunLock(registered.path); // clear the dead sibling lock so it can't linger
           removeWorktreeBase(registered.path); // the sibling base record dies with its worktree too
           removedWorktrees.push(registered.path);
@@ -6486,9 +6485,9 @@ function executeWorktreeRemoval(
   initializing: boolean,
 ): void {
   if (plan.kind === "git-remove") {
-    execFileSync("git", ["-C", plan.repoDir, "worktree", "remove", "--force", ...(initializing ? ["--force"] : []), entryPath], {
-      stdio: "pipe",
-    });
+    // The parent is pinned through the hardened leaf: an inherited GIT_DIR cannot redirect the removal, and a parent whose
+    // config holds a key the harness never writes is refused (removal-failed) rather than run.
+    hostWorktreeGit(plan.repoDir, ["worktree", "remove", "--force", ...(initializing ? ["--force"] : []), entryPath]);
     return;
   }
   fs.rmSync(entryPath, { recursive: true, force: true });

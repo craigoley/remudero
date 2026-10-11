@@ -533,6 +533,7 @@ import {
   escalationHeadSha,
   escalationContractRevision,
   findDuplicateEscalation,
+  taskContractRevision,
   ghIssueGateway,
   ghIssueGatewayAsync,
   presenceMode,
@@ -625,7 +626,7 @@ import {
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
 import { ghEscalationAnswerGateway, readEscalationAnswers, type EscalationAnswerGateway } from "./lib/escalation-answers.js";
 import { loadManagedRepos, ManagedReposError, type ManagedRepo } from "./lib/managed-repos.js";
-import { mergedHeadTypechecks, probeOpenPrMerges, type MergedTypecheckPorts } from "./lib/merge-probe.js";
+import { mergedHeadTypechecks, probeMerge, probeOpenPrMerges, type MergedTypecheckPorts } from "./lib/merge-probe.js";
 import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
 import {
   captureFeedback,
@@ -1403,7 +1404,15 @@ import type { LearningEntry, LearningsIndex, RuleHeadline } from "./lib/learning
 import { assertProvenance, citation } from "./lib/provenance.js";
 import { certainStaleProofs, grepOnlyBaseTargets, isDialectGrepProof, materialiseBaseGrepTree, type BaseGrepTreeReaders } from "./lib/proof-base-stale.js";
 import { loadOperatorNotesForTask, renderOperatorNotes, appendOperatorNote } from "./lib/operator-notes.js";
-import { applyOperatorMergeHold, parseOperatorMergeHoldArgs } from "./lib/operator-merge-hold.js";
+import {
+  applyOperatorMergeHold,
+  authorizeMergeHoldWrite,
+  gatherMergeHoldActor,
+  humanTerminalActorProbe,
+  parseOperatorMergeHoldArgs,
+  realMergeHoldActorProbe,
+  type MergeHoldActorProbe,
+} from "./lib/operator-merge-hold.js";
 import {
   computeMatchedLearningsForArm,
   generateSandboxTask,
@@ -2147,7 +2156,6 @@ export function readyDraftViaGh(
     });
 }
 
-const baseReproductionExecFile = promisify(execFile);
 let baseReproductionQueue: Promise<void> = Promise.resolve();
 const baseReproductionHostCache = new Map<string, BaseProbeFile>();
 
@@ -2183,8 +2191,12 @@ export function buildBaseReproductionProbe(
       let setupError: string | undefined;
       let created = false;
       let timeoutMs: number | undefined;
+      // Seam argv opens with -C and a directory; the default runs the rest through the hardened leaf pinned to that
+      // directory. In a fix round it is the fix worktree itself, so the leaf's pin, not its writable `.git` pointer,
+      // names the repository.
       const git = deps.git ?? (async (args: string[], timeout: number) => {
-        await baseReproductionExecFile("git", args, { timeout, killSignal: "SIGKILL", maxBuffer: 1 << 26 });
+        const [, dir, ...rest] = args;
+        await hostWorktreeGitAsync(dir!, rest, { stdio: "ignore", timeout, killSignal: "SIGKILL", maxBuffer: 1 << 26 });
       });
       const remove = deps.remove ?? rmAsync;
       const unreadable = (file: string, detail: { reason: string }): BaseProbeFile =>
@@ -2879,9 +2891,10 @@ export function retroErrorLedgerFields(error: unknown): Record<string, unknown> 
 // W1-T2627/W1-T2888: `readWorktreeBase`'s only reader (doctorCommand) moved to
 // src/lib/report-commands.ts, which imports it directly from lib/worker.js.
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
-import { sweepMemoryReservations } from "./lib/host-memory-ledger.js";
+import { memoryStoreReadFailure, readMemoryLedger, sweepMemoryReservations } from "./lib/host-memory-ledger.js";
+import { createMemoryReadTracker, type MemoryReadHold, type MemoryReadSource, type MemoryReadTracker } from "./lib/dispatch-governor.js";
 import { withSyncChildReservation } from "./lib/host-memory-learning.js";
-import { installShadowMemorySink } from "./lib/host-memory-shadow.js";
+import { installShadowMemorySink, ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./lib/host-memory-shadow.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
 // runaway-turns bound below — see `deriveRunawayTurnBound`'s own doc for why this borrows that
 // row rather than inventing a second, duplicate "N times median" knob just because the unit is
@@ -2927,6 +2940,7 @@ import {
   type SelfSyncDeps,
 } from "./lib/self-sync.js";
 import { LIVE_EDIT_TREES, runLiveEditLadder, withLiveEditLadders, type LiveEditLadderWiring, type LiveEditTree } from "./lib/live-edit-ladder.js";
+import { recoveryRefMaintainer } from "./lib/recovery-refs.js";
 import { checkImageDrift, IMAGE_DRIFT_STEP } from "./lib/image-drift.js";
 import {
   acquireInflightLock,
@@ -4974,6 +4988,57 @@ export function branchPrTitle(worktreePath: string): string | undefined {
     void e;
     return lastCommitSubject(worktreePath);
   }
+}
+
+/** Where {@link restoreBoundaryCheckpoint} left a fresh run's branch: on current main, or on the checkpoint's
+ *  own base when main conflicts with it (naming those paths, or why the merge could not be read). */
+export type BoundaryCheckpointRestore =
+  | { base: "main"; headSha: string }
+  | { base: "checkpoint"; headSha: string; mainConflicts: string[]; reason?: string };
+
+/**
+ * A restart checkpoint is RESTORED BY MERGE, never replayed: the fresh branch becomes the checkpoint's
+ * head with current main merged in (the checkpoint is the first parent, so its commits keep their shas).
+ * When main conflicts, the branch stays on the checkpoint's own base and the run goes on; the conflict
+ * reaches the PR, whose merge-conflict repair rounds resolve it. Why: a cherry-pick onto a moved main
+ * conflicted and ended W1-T7806 and W1-T7766 `restart_checkpoint_restore_failed`, stranding paid work.
+ * Only a remote head that moved since the handoff still refuses — that is someone else's work.
+ */
+export async function restoreBoundaryCheckpoint(
+  checkpoint: { branch: string; headSha: string },
+  taskId: string,
+  git: (args: string[]) => Promise<string>,
+): Promise<BoundaryCheckpointRestore> {
+  const remoteHead = (await git(["ls-remote", "origin", `refs/heads/${checkpoint.branch}`])).trim().split(/\s+/)[0];
+  if (remoteHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved; refusing to replay a different worker's work");
+  await git(["fetch", "origin", checkpoint.branch]);
+  const fetchedHead = (await git(["rev-parse", "FETCH_HEAD"])).trim();
+  if (fetchedHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved during fetch");
+  const mainSha = (await git(["rev-parse", "HEAD"])).trim();
+  const base = (await git(["merge-base", checkpoint.headSha, mainSha])).trim();
+  if (base === checkpoint.headSha) return { base: "main", headSha: mainSha }; // main already carries it
+  if (base === mainSha) {
+    await git(["reset", "--hard", "--quiet", checkpoint.headSha]); // it already sits on current main
+    return { base: "main", headSha: checkpoint.headSha };
+  }
+  const probe = await probeMerge({ headSha: checkpoint.headSha, mainSha, git: async (args) => {
+    try {
+      return { status: 0, stdout: await git([...args]) };
+    } catch (error) {
+      // merge-tree exits 1 on a conflict with the tree and the conflicted paths still on stdout.
+      const failed = error as { code?: unknown; stdout?: unknown };
+      return { status: typeof failed.code === "number" ? failed.code : null, stdout: typeof failed.stdout === "string" ? failed.stdout : "" };
+    }
+  } });
+  if (probe.verdict !== "clean") {
+    await git(["reset", "--hard", "--quiet", checkpoint.headSha]);
+    return { base: "checkpoint", headSha: checkpoint.headSha, mainConflicts: probe.verdict === "conflict" ? probe.paths : [],
+      ...(probe.verdict === "unreadable" ? { reason: probe.reason } : {}) };
+  }
+  const merged = (await git(["commit-tree", probe.tree, "-p", checkpoint.headSha, "-p", mainSha, "-m",
+    `wip: merge main into the restored checkpoint\n\nRemudero-Task: ${taskId}`])).trim();
+  await git(["reset", "--hard", "--quiet", merged]);
+  return { base: "main", headSha: merged };
 }
 
 /**
@@ -7221,6 +7286,8 @@ export function liveEditLadderWiring(config: Config, clock: Clock = systemClock)
     clock,
     escalate: (e) => escalateAsync(e, { issues: issues(), ledgerPath: ledgerPathFor(config), runId: e.runId ?? e.taskId }),
     comment: async (url, body) => { await issues().comment?.(url, body); },
+    recovery: recoveryRefMaintainer((dir) => gitClaimRunnerAsync(dir), join(config.root, "state"),
+      (step, extra) => appendLedger(ledgerPathFor(config), { run_id: "RECOVERY-REFS", task_id: "RECOVERY-REFS", step, ...extra })),
   };
 }
 
@@ -9567,32 +9634,9 @@ export function unchangedTreeStandDownReason(
   };
 }
 
-/**
- * W1-T3579: one deterministic revision of the CURRENT authoritative task contract the fix rung's
- * open-escalation guard (immediately below) versions its stand-down against — covers task
- * identity, declared `files:`, and every acceptance criterion's `claim`/`proof` pair, never
- * `satisfied_by`/`holdout` or any other decorative/volatile field (a `status`/`attempts` bump on
- * every dispatch must never move this). THE DEFECT THIS CLOSES: PORTAL-T4 (remudero-site PR #21,
- * 2026-09-14) was correctly refused, then a plan-only scope amendment re-authorized the exact same
- * repair on the exact same PR head — and the open-escalation guard, keyed on `headSha` alone,
- * stood the repair down forever because nothing distinguished "a human already answered this
- * question" from "the question changed underneath an open issue". Declared files are sorted
- * first (order is never part of the contract — {@link filesDigest}'s own convention); acceptance
- * pairs are read in DECLARED order, because reordering criteria is itself an amendment a re-admit
- * should notice. PURE: reads nothing off disk — the caller already holds the live `Task`/{@link
- * runFixRung}'s own `opts.task` this rung dispatched against, never a worker report or PR-body
- * prose (design note (i) — recovering it from either would let a worker's own claim decide
- * whether it gets re-admitted).
- */
-export function taskContractRevision(task: {
-  id: string;
-  files?: readonly string[];
-  acceptance?: ReadonlyArray<Pick<AcceptanceCriterion, "claim" | "proof">>;
-}): string {
-  const files = [...(task.files ?? [])].sort();
-  const acceptance = (task.acceptance ?? []).map((c) => ({ claim: c.claim, proof: c.proof }));
-  return sha256Hex(JSON.stringify({ id: task.id, files, acceptance }));
-}
+/** W1-T3579's task contract revision now lives in lib/escalate.ts, so the sweep's progress-judge
+ *  latch and its escalations version themselves by the SAME function the fix rung's guard reads. */
+export { taskContractRevision };
 
 /**
  * W1-T2799 (the fix-rung pre-strike gate's SIXTH reason source, composed into {@link
@@ -19195,14 +19239,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const checkpoint = pendingWorkerBoundaryHandoffs(readLedgerRawLines(ledgerPath)).get(taskId);
     if (checkpoint) {
       try {
-        const remoteHead = (await hostWorktreeGitAsync(worktreePath, ["ls-remote", "origin", `refs/heads/${checkpoint.branch}`])).trim().split(/\s+/)[0];
-        if (remoteHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved; refusing to replay a different worker's work");
-        await hostWorktreeGitAsync(worktreePath, ["fetch", "origin", checkpoint.branch]);
-        const fetchedHead = (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "FETCH_HEAD"])).trim();
-        if (fetchedHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved during fetch");
-        const commits = (await hostWorktreeGitAsync(worktreePath, ["rev-list", "--reverse", "--no-merges", `origin/main..${checkpoint.headSha}`])).trim();
-        if (commits) await hostWorktreeGitAsync(worktreePath, ["cherry-pick", ...commits.split("\n")]);
-        log("implement.checkpoint_restored", { source_branch: checkpoint.branch, source_head_sha: checkpoint.headSha, branch });
+        const restored = await restoreBoundaryCheckpoint(checkpoint, taskId, (args) => hostWorktreeGitAsync(worktreePath, args));
+        log("implement.checkpoint_restored", { source_branch: checkpoint.branch, source_head_sha: checkpoint.headSha, branch,
+          base: restored.base, restored_head_sha: restored.headSha,
+          ...(restored.base === "checkpoint" ? { main_conflicts: restored.mainConflicts, merge_unreadable: restored.reason } : {}) });
       } catch (error) {
         log("verdict", { verdict: "no_pr", reason: "restart_checkpoint_restore_failed", branch,
           source_branch: checkpoint.branch, detail: String((error as Error)?.message ?? error), cost_usd: costUsd });
@@ -19635,7 +19675,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
             throw new Error(`restart checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}`);
           }
         }
-        await gitPushRunBranchAsync(worktreePath);
+        await gitPushRunBranchAsync(worktreePath, { prGates: false }); // a checkpoint opens no PR: see worktreePushExecAsync
       } catch (error) {
         log("verdict", { verdict: "no_pr", reason: "restart_checkpoint_failed", waiting_on: waitingOn,
           detail: String((error as Error)?.message ?? error), branch, cost_usd: costUsd, ...terminalVerdictFields(impl) });
@@ -35351,11 +35391,11 @@ export function createOpenPrCountObservation(): {
 }
 
 /**
- * W1-T1038 — THE REAL `MemAvailable` PROBE `checkMemoryGovernor` (sweep.ts) consults. Reads
- * `/proc/meminfo` and NEVER a cgroup limit (design note (6), `checkMemoryGovernor`'s own doc):
- * this fleet's containers carry no memory limit (`memory.max` reads `max`), so a cgroup read
- * would report "unbounded" and authorise every dispatch silently, while `/proc/meminfo` reports
- * the real host figure this guard actually wants.
+ * W1-T1038 — THE REAL `MemAvailable` PROBE `checkMemoryGovernor` (sweep.ts) consults: the HOST
+ * figure. It is not the only one. The daemon containers have carried memory limits since #10371 and
+ * #10486 (core: memory.max 8820 MiB, memory.high pinned below it), which `/proc/meminfo` cannot see,
+ * so {@link memoryGovernorGateFor} also reads the container's own headroom
+ * (`readContainerMemoryHeadroom`, the host memory budget's reader) and the floor takes the smaller.
  *
  * `path` defaults to the real file and is injectable so a test can point this at a fixture
  * without touching the live `/proc/meminfo` (test/dispatch-memory-governor.test.ts, "the probe
@@ -35409,14 +35449,66 @@ export function memoryGovernorGateFor(
   ledgerPath: string,
   runId: string,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
-  readAvailableMib: () => number = readAvailableMemoryMib,
+  readAvailableMib?: () => number,
+  // The container's own headroom. An injected host reading (a fixture) reads no container unless one is injected
+  // too, so a test never reads the cgroup of whatever container runs it.
+  readContainer: (() => ContainerMemoryHeadroom) | undefined = readAvailableMib === undefined ? () => readContainerMemoryHeadroom() : undefined,
+  ownWorkLive: () => boolean = () => ownContainerWorkLive(dirname(dirname(ledgerPath))),
 ): () => MemoryGovernorResult | undefined {
   return () => {
-    const result = checkMemoryGovernor(readAvailableMibBounded(readAvailableMib, ledgerPath, runId, policy), policy);
+    const available = readAvailableMibBounded(readAvailableMib ?? readAvailableMemoryMib, ledgerPath, runId, policy);
+    const result = checkMemoryGovernor(available, policy, readContainer?.(), ownWorkLive);
     // EVERY dispatch, including the ones it admits (design (iv)) — never gated on `result.deferred`.
     logMemoryObservation(result, appendLedger, ledgerPath, runId);
     return result.deferred ? result : undefined;
   };
+}
+
+/**
+ * W1-T7720 — THE STREAK TRACKER an unreadable memory reading reports to, wired for one run (daemon or
+ * drain). `memory_read.*` rows land in the ledger under task `GOVERNOR`; the adaptive bound reads the
+ * source's past `memory_read.recovered` durations back from the same ledger; a SUSTAINED streak raises
+ * ONE BLOCKED escalation, its task id carrying the streak start so each streak dedups on its own.
+ */
+export function memoryReadTrackerFor(
+  ledgerPath: string,
+  runId: string,
+  owner: string,
+  repo: string,
+  clock: Clock = systemClock,
+  issues: IssueGateway = ghIssueGateway(owner, repo),
+): MemoryReadTracker {
+  return createMemoryReadTracker(clock, {
+    recoveredDurationsMs: (source: MemoryReadSource) =>
+      readLedgerLines(ledgerPath) // ledger-read-intent: live — the recovered rows of this host's recent streaks.
+        .filter((row) => row.step === "memory_read.recovered" && row.source === source && typeof row.duration_ms === "number")
+        .map((row) => row.duration_ms as number),
+    writeRow: (step, fields) => appendLedger(ledgerPath, { run_id: runId, task_id: "GOVERNOR", step, ...fields }),
+    escalate: (hold: MemoryReadHold) => {
+      const startedAt = fixedClock(hold.streakStartedAtMs).iso();
+      void tryEscalate(
+        {
+          class: "BLOCKED",
+          taskId: `GOVERNOR-MEMORY-${hold.source}-${hold.streakStartedAtMs}`,
+          runId,
+          summary: `host memory ${hold.source} has been unreadable since ${startedAt}: new dispatch is held`,
+          detail:
+            `W1-T7720: the host memory ${hold.source === "probe" ? "probe (/proc/meminfo)" : "reservation store"} has been ` +
+            `unreadable for ${Math.round(hold.ageMs / 1000)} s, past the sustained bound of ` +
+            `${Math.round(hold.boundMs / 1000)} s (${hold.basis}). Short failures keep dispatching; this one ` +
+            `outlived what this fleet has seen recover, so NEW dispatch is held (the sweep and in-flight runs are untouched) ` +
+            `until a read succeeds. Last error: ${hold.error}`,
+          options: [
+            { label: "wait for recovery", detail: "Take no action; the hold releases itself on the first good read." },
+            { label: "repair the reading", detail: "Fix the unreadable source on the host (the error above names it), then dispatch resumes." },
+          ],
+          recommendation: "wait for recovery",
+        },
+        { issues, ledgerPath, runId },
+      );
+    },
+    onSinkError: (label, error) => console.error(`memory_read tracker: ${label} sink failed: ${error instanceof Error ? error.message : String(error)}`),
+  });
 }
 
 /** W1-T5347: how many `MemAvailable` reads one consultation makes before it reports "unreadable". */
@@ -36182,6 +36274,9 @@ async function drainCommand(
         // /proc/meminfo reading per consultation, so the per-lane re-check sees each lane's cost.
         // Holds NEW implement dispatch only — never a running worker or a review.
         checkMemoryGovernor: memoryGovernorGateFor(ledgerPath, runId, undefined, deps.readAvailableMemoryMib),
+        // W1-T7720: an unreadable probe / reservation store is tiered by how long it lasts.
+        memoryReadTracker: memoryReadTrackerFor(ledgerPath, runId, owner, repo),
+        readMemoryStoreFailure: () => memoryStoreReadFailure(readMemoryLedger()),
         checkQuietHours: () =>
           isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         // W1-T2513: `planSnapshot` is the coalescer built above — every lane of a tick shares
@@ -39421,6 +39516,9 @@ export async function daemonCommand(
         // /proc/meminfo reading per consultation, so the per-lane re-check sees each lane's cost.
         // Holds NEW implement dispatch only — never a running worker or a review.
         checkMemoryGovernor: memoryGovernorGateFor(ledgerPath, runId, undefined, deps.readAvailableMemoryMib),
+        // W1-T7720: an unreadable probe / reservation store is tiered by how long it lasts.
+        memoryReadTracker: memoryReadTrackerFor(ledgerPath, runId, target.owner, target.repo),
+        readMemoryStoreFailure: () => memoryStoreReadFailure(readMemoryLedger()),
         checkQuietHours: () =>
           isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
@@ -44647,9 +44745,8 @@ function readOwnerHasTrackedWork(ownerPath: string): boolean {
 }
 
 export function removeAbandonedFixWorktreeOwner(repoDir: string, worktreePath: string): void {
-  execFileSync("git", ["-C", repoDir, "worktree", "remove", worktreePath], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  // No --force: a dirty owner is refused. The fix clone is pinned through the hardened leaf.
+  hostWorktreeGit(repoDir, ["worktree", "remove", worktreePath]);
   removeRunLock(worktreePath);
   removeWorktreeBase(worktreePath);
 }
@@ -48584,7 +48681,15 @@ export async function awayCommand(rest: string[]): Promise<number> {
  */
 export function mergeHoldCommand(
   rest: string[],
-  deps: { config?: Config; ledgerPath?: string; now?: () => number; isInteractive?: () => boolean } = {},
+  deps: {
+    config?: Config;
+    ledgerPath?: string;
+    now?: () => number;
+    isInteractive?: () => boolean;
+    /** W1-T7721 — where the writer's actor is gathered from. A caller that injects `isInteractive` without a probe
+     *  has taken control of the terminal, so it also gets a human-terminal probe rather than this process's own env. */
+    actorProbe?: MergeHoldActorProbe;
+  } = {},
 ): number {
   const parsed = parseOperatorMergeHoldArgs(rest);
   if (!parsed.ok) {
@@ -48597,10 +48702,25 @@ export function mergeHoldCommand(
     );
     return 2;
   }
+  const actor = gatherMergeHoldActor(
+    deps.actorProbe ?? (deps.isInteractive ? humanTerminalActorProbe() : realMergeHoldActorProbe()),
+  );
+  const authorized = authorizeMergeHoldWrite(parsed.input, actor);
+  if (!authorized.ok) {
+    console.error(`rmd merge-hold: ${authorized.error}`);
+    return 2;
+  }
   const ledgerPath = deps.ledgerPath ?? ledgerPathFor(deps.config ?? loadConfig());
-  const result = applyOperatorMergeHold(ledgerPath, parsed.input, { now: deps.now });
+  const result = applyOperatorMergeHold(ledgerPath, authorized.input, { now: deps.now, actor });
   if (!result.written) {
     console.log(`### rmd merge-hold — ${result.scope} is already released; no ledger row written.`);
+    return 0;
+  }
+  if (authorized.input.authority === "agent-cli") {
+    console.log(
+      `### rmd merge-hold — AGENT NOTE recorded for ${result.scope}; by ${parsed.input.by}: ${parsed.input.reason}. ` +
+        `An agent hold is audit-only (authority agent-cli): it does NOT block auto-merge.`,
+    );
     return 0;
   }
   console.log(
