@@ -1784,6 +1784,7 @@ import {
   readIdleLightCadence,
 } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
+import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
 import { applyDaemonMemoryPolicy, createDaemonMemoryGovernor, readDaemonMemoryPolicy } from "./lib/daemon-memory-policy.js";
 import { workerThreads, type TrackedWorker } from "./lib/worker-heaps.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
@@ -38526,7 +38527,7 @@ export function orphanSweepRunActive(
  *  one unresolved request per thread). `liveThreads` is a test seam. */
 export function daemonMemoryTelemetryReader(
   bootHeadSha: string | undefined,
-  opts: { generation?: string; liveThreads?: () => readonly TrackedWorker[] } = {},
+  opts: { generation?: string; liveThreads?: () => readonly TrackedWorker[]; footprint?: DaemonFootprint; clock?: Clock } = {},
 ): (() => Record<string, unknown>) & { afterRow: () => void } {
   const threadHeaps = workerHeapReadings({
     live: opts.liveThreads ?? workerThreads().live,
@@ -38539,7 +38540,12 @@ export function daemonMemoryTelemetryReader(
       workload: () => ({ active_workers: activeWorkerCount(), in_flight_reviews: inFlightReviewCount() }),
       bootHeadSha,
     });
-    return { ...memory, ...threadHeaps.fields(memory) };
+    // The same reading, kept as the daemon's own rolling footprint for the memory budget (daemon-footprint.ts). A
+    // failed persist keeps the sample in memory and rides the row.
+    const kept = opts.footprint?.record({
+      at: (opts.clock ?? systemClock).now(), bytes: memory.rss_bytes + (memory.vm_swap_bytes ?? 0), pid: process.pid,
+    });
+    return { ...memory, ...threadHeaps.fields(memory), ...(kept && !kept.persisted ? { footprint_persist: `error:${kept.reason}` } : {}) };
   };
   return Object.assign(read, { afterRow: () => threadHeaps.refresh() });
 }
@@ -39404,6 +39410,9 @@ export async function daemonCommand(
       (inlineProducer ??= createTickReadProducer(readOptions, { log }))(input),
   });
   const loopTelemetry = startReadPlaneTelemetry();
+  // The daemon's rolling rss+swap samples, kept across rotations and restarts for the memory budget's daemon split.
+  const daemonFootprint = createDaemonFootprint(daemonFootprintPath(join(config.root, "state")));
+  installDaemonFootprint(daemonFootprint);
   try {
     try { await gardenerRuntime.flush(); } catch { log("garden.telemetry_failed", { reason: "runtime-inventory-write-failed" }); }
     const summary = await runDaemonFn(
@@ -39422,7 +39431,7 @@ export async function daemonCommand(
           ledgerPath, statusPath, log,
         }) : undefined,
         readLoopTelemetry: loopTelemetry.sample,
-        readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha, { generation: runId }),
+        readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha, { generation: runId, footprint: daemonFootprint }),
         memoryGovernor: createDaemonMemoryGovernor({ policy: memoryPolicyRead.policy }),
         lastStepBeforeBlock: () => lastReadPlaneStep,
         idleStarvedSupervised: process.env.RMD_IDLE_STARVED_SUPERVISED === "1" && !target.isSelf && !flagValue(rest, "--plan"),
