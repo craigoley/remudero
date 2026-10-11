@@ -161,6 +161,22 @@ test("the attention census reads retained evidence from the same persisted class
   assert.equal(passes(), 0);
 });
 
+test("legacy Inbox pagination retains its response shape while the census uses cached classification age", async (t) => {
+  const { laneDeps } = world(t, ["ruling:a", "adoption:fixture"]);
+  const inbox = await get(t, buildInboxRoute(laneDeps), "/v1/inbox?section=needsYou");
+  assert.equal(inbox.status, 200);
+  assert.deepEqual(Object.keys(inbox.body).sort(), ["counts", "needsYou"]);
+  const route = buildInboxAttentionCensusRoute(laneDeps);
+  const first = await get(t, route, "/v1/inbox/attention-census?qualified=1");
+  assert.equal(first.status, 200);
+  const firstSource = first.body.source as { classifiedAt: string };
+  assert.ok(Number.isFinite(Date.parse(firstSource.classifiedAt)));
+  const second = await get(t, route, "/v1/inbox/attention-census?qualified=1");
+  assert.equal(second.status, 200);
+  assert.equal((second.body.source as { classifiedAt: string }).classifiedAt, firstSource.classifiedAt);
+  assert.equal(second.body.snapshotKey, first.body.snapshotKey);
+});
+
 test("a legacy attention snapshot waits for the slow lane instead of doing request-time archive recovery", async (t) => {
   const { stateDir, laneDeps } = world(t, ["ruling:a"]);
   await refreshInboxClassification(laneDeps, {}, fixedClock(Date.now()));

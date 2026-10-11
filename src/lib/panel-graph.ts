@@ -2261,7 +2261,7 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
       if (!read) return void inboxNotReady(res);
       const { ready, drafting, notReady, declined, needsYou, fleet, counts } = read.lanes();
       const lanes = { ready, drafting, notReady, declined, fleet };
-      const at = { ...(read.classifiedAt === undefined ? {} : { classifiedAt: read.classifiedAt }), ...withPlanSource(deps, {}) };
+      const at = { ...(deps.inboxFromSlowLane && read.classifiedAt !== undefined ? { classifiedAt: read.classifiedAt } : {}), ...withPlanSource(deps, {}) };
       if (shape.section === undefined) sendJson(res, 200, { ready, drafting, notReady, declined, needsYou, fleet, counts, ...at });
       else if (shape.section === "needsYou") sendJson(res, 200, { needsYou, counts, ...at });
       else {
