@@ -12,6 +12,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
+import { systemClock } from "../src/lib/clock.js";
+import type { GhCallPacer } from "../src/lib/open-prs-rest.js";
+import type { ReadGeneration } from "../src/lib/read-plane.js";
+import { buildRereadPrAtAct, servedTickRead } from "./helpers/run-task-test.js";
+import { ghShim } from "./helpers/gh-shim.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import {
@@ -192,7 +197,7 @@ function idlePlan(): Plan {
   return loadPlan(path);
 }
 
-async function idleDaemon(demand: DaemonDeps["readIdleReviewDemand"]) {
+async function idleDaemon(demand: DaemonDeps["readIdleReviewDemand"], over: Partial<DaemonDeps> = {}) {
   const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const sleeps: number[] = [];
   let lightPasses = 0;
@@ -209,6 +214,7 @@ async function idleDaemon(demand: DaemonDeps["readIdleReviewDemand"]) {
     sweepLight: async () => { lightPasses++; },
     readIdleReviewDemand: demand,
     log: (step, extra) => { rows.push({ step, extra }); },
+    ...over,
   }, { pollIntervalMs: 5_000 });
   return { rows, sleeps, lightPasses: () => lightPasses };
 }
@@ -279,4 +285,193 @@ test("W1-T7734: the memo the daemon reads holds demand, review durations and hea
   assert.equal(read?.pushesPerPrHour, 1 / 3, "one push, three open PRs, one hour");
   assert.equal(read?.cadenceMs, 90_000);
   resetIdleReviewMemo();
+});
+
+test("W1-T7734: an unreadable idle demand logs its cause and uses the ordinary sleep", async () => {
+  let unreadable = false;
+  const idle = await idleDaemon(() => {
+    unreadable = true;
+    throw new Error("review memo unavailable");
+  }, { checkStop: () => unreadable ? "fixture complete" : undefined });
+  const failures = idle.rows.filter((row) => row.step === "daemon.idle_light_pass.demand_unreadable");
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].extra?.error, "review memo unavailable");
+  assert.ok(idle.sleeps.includes(5_000));
+  assert.equal(idle.sleeps.includes(700), false);
+  assert.equal(idle.rows.some((row) => row.step === "daemon.idle_light_pass"), false);
+});
+
+test("W1-T7734: a failed idle light pass logs its error and finishes the remaining sleep", async () => {
+  let demandReads = 0;
+  let idleAttempts = 0;
+  const idle = await idleDaemon(
+    () => (++demandReads === 1 ? { eligible: 2, cadenceMs: 700 } : { eligible: 0 }),
+    { sweepLight: async (opts) => {
+      if (opts?.reviewOnly) {
+        idleAttempts++;
+        throw new Error("idle PR read unavailable");
+      }
+    } },
+  );
+  assert.equal(idleAttempts, 1);
+  const failures = idle.rows.filter((row) => row.step === "daemon.sweep_light.failed" && row.extra?.phase === "idle");
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].extra?.error, "idle PR read unavailable");
+  assert.equal(demandReads, 2, "demand is checked again after the failed pass");
+  assert.deepEqual(idle.sleeps.slice(-2), [700, 4_300]);
+});
+
+test("W1-T7734: cleared idle demand finishes the sleep without another light pass", async () => {
+  let demandReads = 0;
+  const idle = await idleDaemon(() => (++demandReads === 1 ? { eligible: 2, cadenceMs: 700 } : undefined));
+  assert.equal(demandReads, 2);
+  assert.equal(idle.rows.filter((row) => row.step === "daemon.idle_light_pass").length, 1);
+  assert.equal(idle.lightPasses(), 1);
+  assert.deepEqual(idle.sleeps.slice(-2), [700, 4_300]);
+});
+
+test("W1-T7734: served facts keep the publication time of their original generation", async (t) => {
+  t.mock.method(systemClock, "now", () => NOW);
+  const facts = { headSha: LIVE_HEAD };
+  let generation: ReadGeneration<typeof facts> = {
+    generation: 1, source: "worker", publishedAtMs: NOW - 90_000, facts,
+  };
+  const read = servedTickRead(async () => {
+    generation = { generation: 2, source: "worker", publishedAtMs: NOW, facts: { headSha: AGAIN_HEAD } };
+    return facts;
+  }, () => generation);
+  assert.deepEqual(await read(), { headSha: LIVE_HEAD, servedPublishedAtMs: NOW - 90_000 });
+  assert.equal(generation.generation, 2, "a newer publication cannot relabel the served facts");
+  assert.equal("servedPublishedAtMs" in facts, false, "the shared generation is not mutated");
+});
+
+test("W1-T7734: inline and replaced facts are stamped at request time and absent facts stay absent", async (t) => {
+  let clock = NOW;
+  t.mock.method(systemClock, "now", () => clock);
+  const facts = { headSha: LIVE_HEAD };
+  const read = servedTickRead(async () => { clock += 5_000; return facts; }, () => undefined);
+  assert.deepEqual(await read(), { ...facts, servedPublishedAtMs: NOW });
+  const replaced = servedTickRead(async () => { clock += 5_000; return { ...facts }; },
+    () => ({ generation: 1, source: "worker", publishedAtMs: NOW - 90_000, facts }));
+  assert.deepEqual(await replaced(), { ...facts, servedPublishedAtMs: NOW + 5_000 });
+  assert.equal(await servedTickRead(async () => undefined, () => undefined)(), undefined);
+});
+
+const rereadViews = {
+  requiredContexts: () => ["ci-gate"],
+  readCiGateRequired: () => [],
+  readMainPlan: (): Plan => ({ tasks: [], byId: new Map() }),
+  fetchCiFailureEvidence: () => [],
+};
+
+function rereadRow(over: Record<string, unknown> = {}) {
+  return {
+    number: 10001, html_url: "https://github.com/o/r/pull/10001", state: "open", draft: false,
+    title: "fix: refreshed head", body: "Remudero-Task: W1-T10001",
+    updated_at: minutesAgo(0), created_at: minutesAgo(30),
+    head: { ref: "run-W1-T10001-1", sha: LIVE_HEAD }, mergeable_state: "clean",
+    ...over,
+  };
+}
+
+function rereadAnswer(args: string[], row = rereadRow()): unknown {
+  const path = args[1];
+  if (path.includes("/check-runs?")) return { check_runs: [{ id: 77, name: "ci-gate", status: "completed", conclusion: "success" }] };
+  if (path.endsWith("/status")) return { statuses: [{ context: "remudero-review", state: "success" }] };
+  if (path.includes("/files?")) return [{ filename: "src/lib/sweep.ts" }];
+  if (/\/pulls\/\d+$/.test(path)) return row;
+  throw new Error(`unexpected reread: ${args.join(" ")}`);
+}
+
+test("W1-T7734: the paced single-PR producer rebuilds head facts and preserves board facts", async () => {
+  const calls: string[] = [];
+  let waits = 0;
+  const pacedResults: boolean[] = [];
+  const pacer: GhCallPacer = {
+    wait: () => { throw new Error("blocking pacer used"); },
+    waitAsync: async () => { waits++; },
+    recordResult: (limited) => { pacedResults.push(limited); },
+  };
+  const pr: OpenPrView = {
+    ...snapshotPr(), supersededBy: 10002,
+    supersessionVerdict: { status: "indeterminate", detail: "whole-board comparison awaits evidence" },
+    taskMergedBy: 9999, planResequenceIneligible: "dependency awaits credit",
+    planResequenceUnmetDependencies: ["W1-T9999"], planResequenceHeld: "waiting for dependency credit",
+  };
+  const reread = buildRereadPrAtAct("o", "r", writeLedger().path, {
+    pacer, views: rereadViews,
+    fetchAsync: async (args) => { calls.push(args[1]); return rereadAnswer(args); },
+  });
+  const view = await reread(pr);
+  assert.ok(view);
+  assert.equal(view.prNumber, pr.prNumber);
+  assert.equal(view.headSha, LIVE_HEAD);
+  assert.equal(view.reviewState, "success");
+  assert.equal(view.checksState, "green");
+  assert.equal(view.supersededBy, pr.supersededBy);
+  assert.equal(view.supersessionVerdict, pr.supersessionVerdict);
+  assert.equal(view.taskMergedBy, pr.taskMergedBy);
+  assert.equal(view.planResequenceIneligible, pr.planResequenceIneligible);
+  assert.deepEqual(view.planResequenceUnmetDependencies, pr.planResequenceUnmetDependencies);
+  assert.equal(view.planResequenceHeld, pr.planResequenceHeld);
+  assert.equal(waits, 1, "the reread uses the daemon's async pacer");
+  assert.deepEqual(pacedResults, [false]);
+  assert.equal(calls.filter((path) => path.includes("/check-runs?")).length, 1);
+  assert.equal(calls.filter((path) => path.endsWith("/status")).length, 1);
+  assert.ok(calls.every((path) => !path.includes("state=open")), "the board is not enumerated again");
+});
+
+test("W1-T7734: the single-PR producer reaches its default async transport", async () => {
+  const shim = ghShim([
+    { when: "/check-runs?", stdout: JSON.stringify(rereadAnswer(["api", "/check-runs?"])) },
+    { when: "/status", stdout: JSON.stringify(rereadAnswer(["api", "/status"])) },
+    { when: "/files?", stdout: JSON.stringify([{ filename: "src/lib/sweep.ts" }]) },
+    { when: "/pulls/10001", stdout: JSON.stringify(rereadRow()) },
+    { when: "", stderr: "unexpected single-PR transport call", exit: 1 },
+  ], { kind: "same-pass-reread" });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${previousPath ?? ""}`;
+  try {
+    const view = await buildRereadPrAtAct("o", "r", writeLedger().path, { views: rereadViews })(snapshotPr());
+    assert.equal(view?.headSha, LIVE_HEAD);
+    assert.equal(view?.checksState, "green");
+    assert.equal(view?.reviewState, "success");
+    assert.ok(shim.calls().some((call) => call.includes("repos/o/r/pulls/10001")));
+    assert.equal(shim.calls().filter((call) => call.includes(`/commits/${LIVE_HEAD}/check-runs?`)).length, 1);
+    assert.equal(shim.calls().filter((call) => call.includes(`/commits/${LIVE_HEAD}/status`)).length, 1);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+  }
+});
+
+test("W1-T7734: the reread rollup preserves a posted gate's job identity", async () => {
+  const reread = buildRereadPrAtAct("o", "r", writeLedger().path, {
+    views: rereadViews,
+    fetchAsync: async (args) => args[1].includes("/check-runs?") ? {
+      check_runs: [{ id: 77, name: "ci-gate", status: "completed", conclusion: "cancelled",
+        details_url: "https://github.com/o/r/runs/77", external_id: "job:445" }],
+    } : rereadAnswer(args),
+  });
+  const view = await reread(snapshotPr());
+  assert.equal(view?.headSha, LIVE_HEAD);
+  assert.equal(view?.checksState, "red");
+  assert.deepEqual(view?.cancelledRequiredChecks, [{ name: "ci-gate", jobId: "445" }]);
+});
+
+test("W1-T7734: the single-PR producer returns absence for closed PRs and rejects failed or mismatched reads", async () => {
+  const closed = buildRereadPrAtAct("o", "r", writeLedger().path, {
+    views: { ...rereadViews, readMainPlan: () => { throw new Error("closed PR must not be rebuilt"); } },
+    fetchAsync: async (args) => rereadAnswer(args, rereadRow({ state: "closed" })),
+  });
+  assert.equal(await closed(snapshotPr()), undefined);
+  const failed = buildRereadPrAtAct("o", "r", writeLedger().path, {
+    fetchAsync: async () => { throw new Error("single PR transport failed"); },
+  });
+  await assert.rejects(failed(snapshotPr()), /single PR transport failed/);
+  const mismatch = buildRereadPrAtAct("o", "r", writeLedger().path, {
+    views: rereadViews,
+    fetchAsync: async (args) => rereadAnswer(args, rereadRow({ number: 10002 })),
+  });
+  await assert.rejects(mismatch(snapshotPr()), /the rebuilt view list did not contain PR #10001/);
 });
