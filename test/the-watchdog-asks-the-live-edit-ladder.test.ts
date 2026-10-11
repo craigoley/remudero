@@ -34,7 +34,7 @@ function renderedRefresh(t: TestContext): string {
   });
   assert.equal(render.status, 0, render.stderr);
   const text = readFileSync(launcher, "utf8");
-  return ["deploy_code_idle", "deploy_code_clean", "live_edits_ladder", "refresh_deploy_code"].map((name) => {
+  return ["host_alert", "host_alert_clear", "deploy_code_idle", "deploy_code_clean", "live_edits_ladder", "refresh_deploy_code"].map((name) => {
     const body = new RegExp(`^${name}\\(\\) \\{\\n[\\s\\S]*?\\n\\}$`, "m").exec(text);
     assert.ok(body, `the rendered launcher defines ${name}`);
     return body[0];
