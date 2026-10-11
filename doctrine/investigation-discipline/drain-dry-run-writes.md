@@ -1,3 +1,7 @@
+- **Prove a dispatch change in-process with `assertLintClean`, never `rmd drain --dry-run` — it writes
+  the LIVE ledger and reads origin/main's plan, not your branch.**
+  *(Index line retired 2026-10-11: the W1-T3323 bullet below said what the dry-run cannot do, not what to run instead. It is kept verbatim; its id resolves here through `doctrine/merged-rules.json`.)*
+
 - **`rmd drain --dry-run` is neither side-effect-free nor able to see your branch.** `drainCommand`
   resolves the LIVE ledger and appends to it before the dry-run branch is reached, and its W1-T60
   self-sync dispatches from **origin/main's** plan blob, never the working tree. Prove a dispatch

@@ -505,6 +505,29 @@ export interface components {
       actionId: string;
       detail?: string;
     };
+    /** The verified actor's own admitted actions on this exact target that lack a verified completion receipt. Read-only evidence, never permission to retry. Only a cursor-less, complete answer with verifiedEmpty true certifies that nothing is pending; partial and unavailable answers never do. */
+    AssistantActionDiscovery: {
+      contract: "assistant-action-discovery-v1";
+      source: {
+        instance: string;
+        repository: string | null;
+        bootSha: string;
+      };
+      observedAt: string;
+      completeness: "complete" | "partial" | "unavailable";
+      limitations: ("legacy_claims_without_identity" | "unreadable_entries" | "oversized_entries" | "unsupported_entries" | "unverifiable_entries" | "corpus_changed" | "corpus_over_listing_bound" | "file_budget" | "byte_budget" | "time_budget" | "page_size" | "store_unavailable")[];
+      pending: ({
+        actionId: string;
+        action: "pause" | "resume" | "stop";
+        instance: string;
+        repository: string | null;
+        submittedAt: string;
+        status: "claimed_unknown" | "receipt_unverified";
+      })[];
+      /** Opaque, bound to the verified actor and exact target; discloses no store path. */
+      continuation: string | null;
+      verifiedEmpty: boolean;
+    };
     /** POST /v1/questions/answer's body -- an operator's answer to a QUESTION-contract entry (worker.ts's plan/questions.ndjson), addressed by the task it was raised on (v0 routing has no path params, src/lib/service.ts). */
     AnswerQuestionRequest: {
       taskId: string;
@@ -4883,6 +4906,17 @@ export interface paths {
         };
     };
   };
+  "/v1/control/assistant-action/discovery": {
+    get: {
+      responses: {
+          "200": AssistantActionDiscovery;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "503": AssistantActionDiscovery;
+        };
+    };
+  };
   "/v1/questions/answer": {
     post: {
       responses: {
@@ -5111,6 +5145,17 @@ export interface paths {
           "404": AssistantControlLookup;
           "409": AssistantControlLookup;
           "503": AssistantControlLookup;
+        };
+    };
+  };
+  "/v1/i/{instance}/control/assistant-action/discovery": {
+    get: {
+      responses: {
+          "200": AssistantActionDiscovery;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "503": AssistantActionDiscovery;
         };
     };
   };

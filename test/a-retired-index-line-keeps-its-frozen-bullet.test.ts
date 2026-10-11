@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { resolveMergedRuleId } from "../src/lib/knowledge-gardener.js";
 import { slugifyRuleId } from "../src/lib/doctrine-lifecycle.js";
-import { parseRuleBodyPointer, parseRuleHeadlines, type RuleHeadline } from "../src/lib/learnings.js";
+import { lookupWorkerRule, parseRuleBodyPointer, parseRuleHeadlines, type RuleHeadline } from "../src/lib/learnings.js";
 
 // ── 2026-10-11: AN INDEX LINE CAN RETIRE WITHOUT ITS FROZEN RULE BEING LOST ─────────────────────
 //
@@ -106,4 +106,51 @@ test("an index headline states its instruction — CONTROL: every deferring shap
     "AND A TRAILER-ONLY SET UNDER-CREDITS",
     "See the rule below.",
   ]);
+});
+
+// A body file can be RENAMED (round 3, 2026-10-11: 42 sentence-length slugs became 2-4 words) or
+// retired into a carrier, and merged plan shards, docs and learnings still cite the old path. Those
+// files are history and are not rewritten, so an old path must keep reaching its rule: on disk, or
+// through `doctrine/merged-rules.json`, which `lookupWorkerRule` already consults for a miss.
+const DOCTRINE_PATH_RE = /doctrine\/[a-z0-9-]+\/[a-z0-9._-]+\.md/g;
+
+function citingFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const abs = join(dir, entry);
+    if (statSync(abs).isDirectory()) out.push(...citingFiles(abs));
+    else if (/\.(md|ya?ml)$/.test(entry)) out.push(abs);
+  }
+  return out;
+}
+
+/** Paths into a real section only: `doctrine/x/y.md` in a shard is an example, not a citation. */
+function citedDoctrinePaths(texts: string[], sections: Set<string>): Set<string> {
+  return new Set(texts.flatMap((t) => t.match(DOCTRINE_PATH_RE) ?? []).filter((p) => sections.has(p.split("/")[1])));
+}
+
+function unresolvedDoctrineCitations(texts: string[], sections: Set<string>, resolves: (path: string) => boolean): string[] {
+  return [...citedDoctrinePaths(texts, sections)].filter((path) => !resolves(path)).sort();
+}
+
+test("a doctrine path cited outside doctrine/ still reaches its rule — on disk or through the merge registry", () => {
+  const roots = ["plan", "docs", "learnings"].map((d) => join(REPO_ROOT, d));
+  const rootDocs = readdirSync(REPO_ROOT).filter((f) => f.endsWith(".md") && f !== "CLAUDE.md").map((f) => join(REPO_ROOT, f));
+  const texts = [...roots.flatMap(citingFiles), ...rootDocs].map((f) => readFileSync(f, "utf8"));
+  const source = readFileSync(join(REPO_ROOT, "CLAUDE.md"), "utf8");
+  const resolves = (path: string) => existsSync(join(REPO_ROOT, path)) || lookupWorkerRule(path, source, readStore, []) !== undefined;
+  const doctrine = join(REPO_ROOT, "doctrine");
+  const sections = new Set(readdirSync(doctrine).filter((e) => statSync(join(doctrine, e)).isDirectory()));
+  // POSITIVE CONTROL: the sweep must be reading real citations, not an empty corpus.
+  const cited = citedDoctrinePaths(texts, sections);
+  assert.ok(cited.size >= 3, `expected the plan to cite doctrine paths; got ${cited.size}`);
+  assert.deepEqual(unresolvedDoctrineCitations(texts, sections, resolves), [], "alias each old body path in doctrine/merged-rules.json");
+});
+
+test("a doctrine path cited outside doctrine/ — CONTROL: a path with no file and no alias is caught", () => {
+  const texts = ["see doctrine/s/kept.md", "moved: doctrine/s/old-long-name.md", "gone: doctrine/s/nowhere.md", "e.g. doctrine/x/y.md"];
+  const onDisk = new Set(["doctrine/s/kept.md"]);
+  const aliased = new Set(["doctrine/s/old-long-name.md"]);
+  // `doctrine/x/y.md` names no real section, so it is an example and never a miss.
+  assert.deepEqual(unresolvedDoctrineCitations(texts, new Set(["s"]), (p) => onDisk.has(p) || aliased.has(p)), ["doctrine/s/nowhere.md"]);
 });
