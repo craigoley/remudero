@@ -8,6 +8,8 @@
  * resumes; whether a later stop resumes again is the W1-T7096 progress judge's call.
  */
 import type { FixProgressInput, FixProgressJudge } from "./fix-progress-judge.js";
+import { fitConventionalTitle } from "./commit-message.js";
+import type { Task } from "./plan.js";
 
 /** One stop on a checkpoint tip: its 1-based ordinal, the checkpoint subject and its `remaining` line. */
 export interface CheckpointStop { round: number; subject: string; remaining?: string }
@@ -130,4 +132,13 @@ export function prTitleFromBranchCommits(subjects: readonly string[]): string | 
   const real = subjects.map((s) => s.trim()).filter((s) => s.length > 0);
   if (real.length === 0) return undefined;
   return real.find((s) => !isWipSubject(s)) ?? stripWipMarker(real[0]!);
+}
+
+/** Filed builds use their task's lead clause; commits supply only a conventional type and scope. */
+export function prTitleForTask(subjects: readonly string[], task: Pick<Task, "id" | "title">): string {
+  const newest = subjects.map((s) => s.trim()).find((s) => s.length > 0 && !isWipSubject(s));
+  const prefix = /^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([^)]*\))?!?:\s/.exec(newest ?? "");
+  const typeAndScope = prefix ? `${prefix[1]}${prefix[2] ?? ""}` : "feat";
+  const lead = task.title.split(" — ", 1)[0]!.trim().toLowerCase();
+  return fitConventionalTitle(`${typeAndScope}: ${lead} (${task.id})`).header;
 }
