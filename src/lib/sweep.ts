@@ -70,6 +70,7 @@ import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, work
 import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
+import { observeAdmissionDisposition } from "./action-executor.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
 import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
 import { reclaimStaleLock } from "./fs-race-safe.js";
@@ -2038,8 +2039,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
   const admission: AdmissionObserver = deps.contributorAdmissionImpl ?? ((target, action) =>
     observeContributorAdmission(config.contributorAdmission, target, action, log));
-  const observePr = (pr: OpenPrView, action: Parameters<AdmissionObserver>[1]): Promise<void> =>
-    admission({ owner, repo, prNumber: pr.prNumber, headSha: pr.headSha }, action);
+  const observePr = async (pr: OpenPrView, action: Parameters<AdmissionObserver>[1]): Promise<void> => {
+    const target = { owner, repo, prNumber: pr.prNumber, headSha: pr.headSha };
+    await observeAdmissionDisposition(config.contributorAdmission, target, config.root, log);
+    await admission(target, action);
+  };
 
   const repoDir = repo === localRepoName ? entrypointRepoRoot : join(config.root, "repos", repo);
   // W1-T4460 (design ii): the real default reads this repo's OWN plan fresh off disk, swallowing a
