@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { QuietRoundEndedError, type QuietWatchdogOptions } from "../src/lib/quiet-worker-watchdog.js";
 import * as runTask from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
 
 
 const TASK = "W1-T8008";
@@ -23,6 +23,9 @@ function rig() {
   seed.git("push", "--quiet", "origin", "main");
   const work = gitRepo({ cloneFrom: origin.dir, kind: "t8008-work" });
   const branch = `run-${TASK}-1`;
+  // The harness's git runs without the fixture's env, so the committer is the clone's own config.
+  work.git("config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);
+  work.git("config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email);
   work.git("checkout", "--quiet", "-b", branch);
   work.git("push", "--quiet", "origin", branch);
   return { origin, work, branch };
