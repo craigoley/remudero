@@ -3,14 +3,17 @@
     "canonicalId": "before-your-first-push-not-every-commit-run-node-import-tsx-scri",
     "aliasIds": [
       "supersedes-full-parity-first-push-run-node-import-tsx-scripts-pr",
-      "run-the-shipped-local-gate-before-your-first-push-not-every-comm"
+      "run-the-shipped-local-gate-before-your-first-push-not-every-comm",
+      "doctrine/before-you-push/author-feedback-is-not-hosted-assurance.md",
+      "doctrine/before-you-push/run-the-shipped-local-gate-before-your-first-push-not.md"
     ]
   },
   {
     "canonicalId": "a-baked-path-merge-deploy-dockerfile-deploy-entrypoint-sh-ships",
     "aliasIds": [
       "supersedes-the-rule-above-a-baked-path-merge-ships-itself-auto-a",
-      "a-merge-to-a-baked-path-ships-nothing-until-an-operator-triggers"
+      "a-merge-to-a-baked-path-ships-nothing-until-an-operator-triggers",
+      "doctrine/ci-and-merging/a-merge-to-a-baked-path-ships-nothing-until-an-operator.md"
     ]
   },
   {
@@ -18,7 +21,10 @@
     "aliasIds": [
       "the-rotations-come-in-two-forms-and-every-glob-that-names-only-o",
       "the-control-must-prove-each-form-was-read-and-a-raw-cross-archiv",
-      "and-the-archives-are-not-cumulative-snapshots"
+      "and-the-archives-are-not-cumulative-snapshots",
+      "doctrine/ledger-and-evidence-discipline/and-the-archives-are-not-cumulative-snapshots.md",
+      "doctrine/ledger-and-evidence-discipline/the-control-must-prove-each-form-was-read-and-a-raw-cross.md",
+      "doctrine/ledger-and-evidence-discipline/the-rotations-come-in-two-forms-and-every-glob-that-names.md"
     ]
   },
   {
@@ -26,44 +32,302 @@
     "aliasIds": [
       "d-a-query-can-answer-the-wrong-question-with-a-perfectly-good-ze",
       "e-a-control-proves-the-query-can-see-its-corpus-it-does-not-prov",
-      "i-a-positive-control-proves-the-query-can-see-its-corpus-it-does"
+      "i-a-positive-control-proves-the-query-can-see-its-corpus-it-does",
+      "k-a-rule-21-protocol-run-passing-basetask-alone-reports-three-in",
+      "doctrine/investigation-discipline/a-zero-is-not-a-measurement-until-a-positive-control.md",
+      "doctrine/investigation-discipline/d-a-query-can-answer-the-wrong-question-with-a-perfectly.md",
+      "doctrine/investigation-discipline/e-a-control-proves-the-query-can-see-its-corpus-it-does.md",
+      "doctrine/investigation-discipline/i-a-positive-control-proves-the-query-can-see-its-corpus.md",
+      "doctrine/investigation-discipline/k-a-rule-21-protocol-run-passing-alone-reports-three.md"
     ]
   },
   {
     "canonicalId": "derive-which-tasks-are-merged-from-merged-prs-remudero-task-trai",
     "aliasIds": [
       "derive-which-tasks-are-merged-from-the-remudero-task-trailer-on",
-      "and-a-trailer-only-set-under-credits-because-the-branch-name-is"
+      "and-a-trailer-only-set-under-credits-because-the-branch-name-is",
+      "doctrine/plan-and-task-hygiene/and-a-trailer-only-set-under-credits-because-the-branch.md",
+      "doctrine/plan-and-task-hygiene/derive-which-tasks-are-merged-from-the-trailer-on-merged.md"
     ]
   },
   {
-    "canonicalId": "before-building-a-filed-task-check-both-git-ls-remote-heads-orig",
+    "canonicalId": "before-building-a-filed-task-check-git-ls-remote-origin-refs-rmd",
     "aliasIds": [
-      "the-two-scope-time-checks-as-commands-run-both-before-building-a"
+      "the-two-scope-time-checks-as-commands-run-both-before-building-a",
+      "before-building-a-filed-task-check-both-git-ls-remote-heads-orig",
+      "doctrine/plan-and-task-hygiene/the-two-scope-time-checks-as-commands-run-both-before.md"
     ]
   },
   {
     "canonicalId": "decode-citations-rule-n-master-plan-12-g-n-14-grill-resolved-p48",
     "aliasIds": [
-      "decoding-rule-citations-where-each-family-canonically-lives"
+      "decoding-rule-citations-where-each-family-canonically-lives",
+      "doctrine/plan-and-task-hygiene/decoding-rule-citations-where-each-family-canonically.md"
     ]
   },
   {
     "canonicalId": "space-gh-reads-180-s-apart-never-poll-deny-floor-sh-refuses-a-cl",
     "aliasIds": [
-      "cadence-is-the-budget-not-intent-a-sparse-check-in-is-fine-a-pol"
+      "cadence-is-the-budget-not-intent-a-sparse-check-in-is-fine-a-pol",
+      "doctrine/ci-and-merging/cadence-is-the-budget-not-intent-a-sparse-check-in-is-fine.md"
     ]
   },
   {
     "canonicalId": "two-prs-appending-tests-to-one-file-s-tail-can-conflict-before-a",
     "aliasIds": [
-      "when-two-prs-append-tests-to-the-same-file-s-tail-the-conflict-r"
+      "when-two-prs-append-tests-to-the-same-file-s-tail-the-conflict-r",
+      "doctrine/ci-and-merging/when-two-prs-append-tests-to-the-same-file-s-tail-the.md"
     ]
   },
   {
     "canonicalId": "beside-the-git-grep-l-symbol-caller-sweep-run-the-census-suites",
     "aliasIds": [
-      "j-a-census-test-names-none-of-your-symbols-so-the-caller-sweep-a"
+      "j-a-census-test-names-none-of-your-symbols-so-the-caller-sweep-a",
+      "doctrine/investigation-discipline/j-a-census-test-names-none-of-your-symbols-so-the-caller.md"
+    ]
+  },
+  {
+    "canonicalId": "before-filing-sweep-the-task-s-subject-over-every-open-pr-head-s",
+    "aliasIds": [
+      "sweep-the-subject-over-open-pr-heads-not-only-origin-main-the-id",
+      "doctrine/plan-and-task-hygiene/sweep-the-subject-over-open-pr-heads-not-only-the-id-half.md"
+    ]
+  },
+  {
+    "canonicalId": "before-calling-a-git-fixture-flaky-rerun-it-with-git-config-glob",
+    "aliasIds": [
+      "a-fixture-shelling-git-plumbing-fails-on-every-ci-runner-and-pas",
+      "doctrine/ledger-and-evidence-discipline/a-fixture-shelling-git-plumbing-fails-on-every-ci-runner.md"
+    ]
+  },
+  {
+    "canonicalId": "prove-a-dispatch-change-in-process-with-assertlintclean-never-rm",
+    "aliasIds": [
+      "rmd-drain-dry-run-is-neither-side-effect-free-nor-able-to-see-yo",
+      "doctrine/investigation-discipline/is-neither-side-effect-free-nor-able-to-see-your-branch.md"
+    ]
+  },
+  {
+    "canonicalId": "control-a-multi-form-glob-on-coverage-was-every-form-opened-not",
+    "aliasIds": [
+      "c-a-glob-that-names-one-file-form-answers-from-the-other-without",
+      "doctrine/investigation-discipline/c-a-glob-that-names-one-file-form-answers-from-the-other.md"
+    ]
+  },
+  {
+    "canonicalId": "a-test-run-with-no-tests-summary-is-not-a-result-and-a-summary-o",
+    "aliasIds": [
+      "doctrine/before-you-push/a-test-run-with-no-summary-is-not-a-result-and-a-summary.md"
+    ]
+  },
+  {
+    "canonicalId": "a-conflicting-pr-registers-zero-check-runs-total-0-reads-as-stil",
+    "aliasIds": [
+      "doctrine/ci-and-merging/a-conflicting-pr-registers-zero-check-runs-reads-as-still.md"
+    ]
+  },
+  {
+    "canonicalId": "a-corrected-pr-title-is-observed-by-a-re-run-not-only-by-a-new-s",
+    "aliasIds": [
+      "doctrine/ci-and-merging/a-corrected-pr-title-is-observed-by-a-re-run-not-only-by-a.md"
+    ]
+  },
+  {
+    "canonicalId": "do-not-push-a-fresh-sha-to-clear-a-stale-red-ci-gate-it-self-cle",
+    "aliasIds": [
+      "doctrine/ci-and-merging/do-not-push-a-fresh-sha-to-clear-a-stale-red-it-self.md"
+    ]
+  },
+  {
+    "canonicalId": "gh-pr-create-may-die-on-api-quota-git-push-is-unaffected",
+    "aliasIds": [
+      "doctrine/ci-and-merging/may-die-on-api-quota-git-push-is-unaffected.md"
+    ]
+  },
+  {
+    "canonicalId": "a-fixed-date-constant-compared-against-rows-stamped-at-real-time",
+    "aliasIds": [
+      "doctrine/code-traps/a-fixed-date-constant-compared-against-rows-stamped-at.md"
+    ]
+  },
+  {
+    "canonicalId": "read-re-entrancy-from-process-env-not-an-injected-env-argument-a",
+    "aliasIds": [
+      "doctrine/code-traps/read-re-entrancy-from-not-an-injected-argument-a-spawn.md"
+    ]
+  },
+  {
+    "canonicalId": "a-deps-object-supplying-some-fakes-leaves-every-other-seam-on-it",
+    "aliasIds": [
+      "doctrine/coverage-traps/a-deps-object-supplying-some-fakes-leaves-every-other-seam.md"
+    ]
+  },
+  {
+    "canonicalId": "before-trusting-diff-coverage-ok-prove-the-lcov-instruments-the",
+    "aliasIds": [
+      "doctrine/coverage-traps/before-trusting-prove-the-lcov-instruments-the-changed.md"
+    ]
+  },
+  {
+    "canonicalId": "build-the-lcov-and-the-diff-from-the-same-tree-commit-before-mea",
+    "aliasIds": [
+      "doctrine/coverage-traps/build-the-lcov-and-the-diff-from-the-same-tree-commit.md"
+    ]
+  },
+  {
+    "canonicalId": "diff-coverage-flags-added-lines-so-restructuring-an-untested-reg",
+    "aliasIds": [
+      "doctrine/coverage-traps/flags-added-lines-so-restructuring-an-untested-region.md"
+    ]
+  },
+  {
+    "canonicalId": "a-new-ts-file-s-da-line-0-on-a-doc-comment-or-interface-body-is",
+    "aliasIds": [
+      "doctrine/coverage-traps/in-a-new-file-sandwich-type-only-declarations-between.md"
+    ]
+  },
+  {
+    "canonicalId": "verify-a-new-falsifier-by-deleting-the-fix-and-re-running-fail-n",
+    "aliasIds": [
+      "doctrine/coverage-traps/verify-a-new-falsifier-by-deleting-the-fix-and-re-running.md"
+    ]
+  },
+  {
+    "canonicalId": "when-every-test-injects-a-fake-the-seam-s-default-implementation",
+    "aliasIds": [
+      "doctrine/coverage-traps/when-every-test-injects-a-fake-the-seam-s-default.md"
+    ]
+  },
+  {
+    "canonicalId": "zero-a-da-value-inside-the-target-s-own-sf-block-a-whole-file-re",
+    "aliasIds": [
+      "doctrine/coverage-traps/zero-a-value-inside-the-target-s-own-block-a-whole-file.md"
+    ]
+  },
+  {
+    "canonicalId": "a-a-posix-regex-engine-here-silently-drops-s-b-instead-of-errori",
+    "aliasIds": [
+      "doctrine/investigation-discipline/a-a-posix-regex-engine-here-silently-drops-instead-of.md"
+    ]
+  },
+  {
+    "canonicalId": "a-bound-that-fires-on-a-healthy-condition-is-this-repo-s-recurri",
+    "aliasIds": [
+      "doctrine/investigation-discipline/a-bound-that-fires-on-a-healthy-condition-is-this-repo-s.md"
+    ]
+  },
+  {
+    "canonicalId": "a-catch-returning-a-success-shaped-literal-is-a-claim-name-what",
+    "aliasIds": [
+      "doctrine/investigation-discipline/a-catch-that-returns-a-success-shaped-literal-is-making.md"
+    ]
+  },
+  {
+    "canonicalId": "b-the-grep-in-this-harness-is-a-ugrep-wrapper-with-i-ignore-bina",
+    "aliasIds": [
+      "doctrine/investigation-discipline/b-the-in-this-harness-is-a-ugrep-wrapper-with-ignore.md"
+    ]
+  },
+  {
+    "canonicalId": "f-the-two-sides-of-a-comparison-must-count-the-same-units-ls-cou",
+    "aliasIds": [
+      "doctrine/investigation-discipline/f-the-two-sides-of-a-comparison-must-count-the-same-units.md"
+    ]
+  },
+  {
+    "canonicalId": "g-a-change-that-removes-an-access-path-must-prove-the-replacemen",
+    "aliasIds": [
+      "doctrine/investigation-discipline/g-a-change-that-removes-an-access-path-must-prove-the.md"
+    ]
+  },
+  {
+    "canonicalId": "h-a-gate-run-from-a-checkout-that-is-behind-answers-about-a-file",
+    "aliasIds": [
+      "doctrine/investigation-discipline/h-a-gate-run-from-a-checkout-that-is-behind-answers-about.md"
+    ]
+  },
+  {
+    "canonicalId": "when-a-gate-reads-the-ledger-for-a-record-the-same-function-writ",
+    "aliasIds": [
+      "doctrine/investigation-discipline/when-a-gate-reads-the-ledger-for-a-record-the-same.md"
+    ]
+  },
+  {
+    "canonicalId": "a-ledger-line-must-carry-the-reason-from-the-decision-that-produ",
+    "aliasIds": [
+      "doctrine/ledger-and-evidence-discipline/a-ledger-line-must-carry-the-reason-from-the-decision-that.md"
+    ]
+  },
+  {
+    "canonicalId": "on-a-zero-match-node-test-test-name-pattern-still-emits-ok-1-rel",
+    "aliasIds": [
+      "doctrine/ledger-and-evidence-discipline/on-a-zero-match-still-emits-exclude-the-wrapper-by-the.md"
+    ]
+  },
+  {
+    "canonicalId": "a-contested-reservation-is-never-deleted-and-an-unfiled-one-is-n",
+    "aliasIds": [
+      "doctrine/plan-and-task-hygiene/a-contested-reservation-is-never-deleted-and-an-unfiled.md"
+    ]
+  },
+  {
+    "canonicalId": "a-shard-s-status-field-is-not-a-completion-signal-it-stays-queue",
+    "aliasIds": [
+      "doctrine/plan-and-task-hygiene/a-shard-s-field-is-not-a-completion-signal-it-stays-on.md"
+    ]
+  },
+  {
+    "canonicalId": "before-believing-task-x-is-next-confirm-the-frontier-with-the-re",
+    "aliasIds": [
+      "doctrine/plan-and-task-hygiene/before-believing-task-x-is-next-confirm-the-frontier-with.md"
+    ]
+  },
+  {
+    "canonicalId": "name-a-session-branch-run-taskid-epochms-when-building-a-filed-t",
+    "aliasIds": [
+      "doctrine/plan-and-task-hygiene/name-a-session-branch-when-building-a-filed-task.md"
+    ]
+  },
+  {
+    "canonicalId": "rule15-filing-refuses-a-plan-record-in-files-only-when-an-out-of",
+    "aliasIds": [
+      "doctrine/plan-and-task-hygiene/refuses-a-plan-record-in-only-when-an-out-of-plan-path.md"
+    ]
+  },
+  {
+    "canonicalId": "a-grep-proof-must-match-text-on-one-physical-line-a-yaml-block-s",
+    "aliasIds": [
+      "doctrine/writing-proofs-and-acceptance-criteria/a-proof-must-match-text-on-one-physical-line-a-yaml-block.md"
+    ]
+  },
+  {
+    "canonicalId": "a-unit-test-title-is-matched-as-a-literal-substring-after-escapi",
+    "aliasIds": [
+      "doctrine/writing-proofs-and-acceptance-criteria/a-title-is-matched-as-a-literal-substring-after-escaping.md"
+    ]
+  },
+  {
+    "canonicalId": "every-proof-needs-a-dialect-prefix-unit-test-or-grep-a-bare-titl",
+    "aliasIds": [
+      "doctrine/writing-proofs-and-acceptance-criteria/every-proof-needs-a-dialect-prefix-or-a-bare-title-is.md"
+    ]
+  },
+  {
+    "canonicalId": "require-a-verbatim-grep-rlf-substring-test-hit-a-passing-scoped",
+    "aliasIds": [
+      "doctrine/writing-proofs-and-acceptance-criteria/require-a-verbatim-hit-a-passing-scoped-test-run-is-not.md"
+    ]
+  },
+  {
+    "canonicalId": "the-block-must-parse-before-any-proof-in-it-can-run-check-github",
+    "aliasIds": [
+      "doctrine/writing-proofs-and-acceptance-criteria/the-block-must-parse-before-any-proof-in-it-can-run-check.md"
+    ]
+  },
+  {
+    "canonicalId": "verify-a-grep-proof-with-the-executor-s-real-invocation-grep-arn",
+    "aliasIds": [
+      "doctrine/writing-proofs-and-acceptance-criteria/verify-a-proof-with-the-executor-s-real-invocation-never.md"
     ]
   }
 ]
