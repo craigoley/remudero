@@ -67,7 +67,7 @@ function fixture(opts: { manifest?: Record<string, number>; planOnly?: boolean }
 
 /** Runs main with console output captured. */
 function run(t: { mock: { method: (...a: never[]) => { mock: { calls: { arguments: unknown[] }[] } } } },
-  root: string, deps: Parameters<typeof author.main>[1]) {
+  root: string, deps: Omit<Parameters<typeof author.main>[1], "root">) {
   const logged = t.mock.method(console as never, "log" as never, (() => {}) as never);
   const status = author.main([], { ...deps, root });
   return { status, output: logged.mock.calls.map((c) => c.arguments.join(" ")).join("\n") };
