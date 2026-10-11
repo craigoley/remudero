@@ -93,11 +93,11 @@ export function gradeCanary(item: CanaryCase, text: string, trace: readonly Cana
   try { parsed = JSON.parse(text); }
   catch { return { passed: false, reason: "invalid-json", schemaValid: false }; }
   const traceOk = item.tools === "none" ? trace.length === 0
-    : item.tools === "inventory" ? trace.length === 1 && trace[0]?.name === "inventory" && !trace[0]?.denied
+    : item.tools === "inventory" ? trace.length === 1 && trace[0]?.name === "inventory" && trace[0]?.denied === false
       && equivalent(trace[0]?.result, item.expected)
-    : item.tools === "retry" ? trace.length === 2 && trace.every(t => t.name === "lookup" && !t.denied)
+    : item.tools === "retry" ? trace.length === 2 && trace.every(t => t.name === "lookup" && t.denied === false)
       && equivalent(trace[0]?.result, { error: "transient" }) && equivalent(trace[1]?.result, { value: 23 })
-    : trace.length === 1 && trace[0]?.name === "lookup" && !trace[0]?.denied
+    : trace.length === 1 && trace[0]?.name === "lookup" && trace[0]?.denied === false
       && equivalent(trace[0]?.result, { error: "approval-required" });
   const shape = validShape(item, parsed);
   const correct = shape && equivalent(parsed, item.expected);
