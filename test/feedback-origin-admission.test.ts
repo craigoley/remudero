@@ -336,7 +336,7 @@ test("W1-T7754 checkpoint: capture deep-copies source binding and unreadable rep
   source.origin!.actor!.id = 9001;
   source.revision!.contentDigest = feedbackContentDigest("edited");
   assert.equal(contribution.subject?.origin?.actor?.id, OWNER_ID);
-  assert.notEqual(contribution.subject?.revision?.contentDigest, source.revision.contentDigest);
+  assert.notEqual(contribution.subject?.revision?.contentDigest, source.revision!.contentDigest);
   const issues = gateway([issueRow(7, { id: OWNER_ID, type: "User", login: "owner" })]);
   issues.repository = () => { throw new Error("unreadable"); };
   const result = await pollIssues([{ owner: "acme", repo: "widgets" }], { issues, root,
