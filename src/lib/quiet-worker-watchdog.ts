@@ -22,13 +22,13 @@ import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import type { SpawnWorkerArgs, WorkerResult, WorkerStreamEvent, WorkerStreamObserver } from "./worker.js";
 
 /** One `worker.quiet_bound` row per worker spawn. */
-export const QUIET_BOUND_LEDGER_STEP = "worker.quiet_bound";
+export const QUIET_BASIS_LEDGER_STEP = "worker.quiet_bound";
 /** One row per quiet-worker DECISION, including "left alone" and "judge unavailable". */
 export const QUIET_JUDGED_LEDGER_STEP = "worker.quiet_judged";
 
 /** The quantile of a provider's observed quiet-gap episodes the bound is read at. A statistic over DATA, not a time
  * threshold: nearest-rank, so the bound is always a gap that really happened. */
-export const QUIET_BOUND_QUANTILE = 0.9;
+export const QUIET_QUANTILE = 0.9;
 
 /** The verdicts the judge may return. */
 export type QuietVerdict = "nudge" | "kill_poll_child" | "end_round" | "wait";
@@ -97,7 +97,7 @@ export function deriveQuietBound(
   rows: ReadonlyArray<Record<string, unknown>>,
   provider: string,
   fallbackMs: number,
-  quantile: number = QUIET_BOUND_QUANTILE,
+  quantile: number = QUIET_QUANTILE,
 ): QuietBound {
   const gaps = [...(quietGapsByProvider(rows).get(provider) ?? [])].sort((a, b) => a - b);
   if (gaps.length === 0) return { provider, boundMs: fallbackMs, source: "no_history_fallback", samples: 0 };
@@ -215,7 +215,7 @@ export function finishedRunEvidence(tail: string): { exitMarker?: string; runner
   const hasPass = /(?:^|\n)\s*(?:ℹ\s*)?pass\s+\d+/.test(tail);
   const hasFail = /(?:^|\n)\s*(?:ℹ\s*)?fail\s+\d+/.test(tail);
   const runnerSummary = hasTests && hasPass && hasFail
-    ? tail.split("\n").filter((l) => /^\s*(?:ℹ\s*)?(?:tests|pass|fail)\s+\d+/.test(l)).map((l) => l.trim()).join(" / ")
+    ? tail.split("\n").filter((l) => /^\s*(?:ℹ\s*)?(?:tests|pass|fail)\s+\d+/.test(l)).map((l) => l.trim().replace(/^ℹ\s*/, "")).join(" / ")
     : undefined;
   return { ...(exitMarker ? { exitMarker } : {}), ...(runnerSummary ? { runnerSummary } : {}) };
 }
@@ -504,7 +504,7 @@ export function runQuietWorkerWatchdog(opts: QuietWatchdogOptions): QuietWatchdo
       if (!bound) {
         const provider = opts.provider() ?? "unknown";
         bound = deriveQuietBound(opts.history(), provider, opts.fallbackBoundMs);
-        opts.ledger(QUIET_BOUND_LEDGER_STEP, {
+        opts.ledger(QUIET_BASIS_LEDGER_STEP, {
           provider: bound.provider, bound_ms: bound.boundMs, bound_source: bound.source, samples: bound.samples,
         });
       }
@@ -559,6 +559,7 @@ export function runQuietWorkerWatchdog(opts: QuietWatchdogOptions): QuietWatchdo
       try {
         judgement = await opts.judge(evidence);
       } catch (error) {
+        // A judge that throws is a judge that cannot answer: carried to the `judge_unavailable` row below.
         judgeError = String((error as Error)?.message ?? error);
       }
       if (!judgement) {
@@ -592,7 +593,7 @@ export function runQuietWorkerWatchdog(opts: QuietWatchdogOptions): QuietWatchdo
           kill(cls.pollPid, "SIGTERM");
           record({ ...row, decision: "acted", action: "kill_poll_child", signalled_pid: cls.pollPid, signal: "SIGTERM" });
         } catch (error) {
-          record({ ...row, decision: "action_failed", action: "kill_poll_child", signalled_pid: cls.pollPid, detail: String((error as Error)?.message ?? error) });
+          record({ ...row, decision: "action_failed", action: "kill_poll_child", signalled_pid: cls.pollPid, failed: true, detail: String((error as Error)?.message ?? error) });
         }
         return;
       }
@@ -615,7 +616,7 @@ export function runQuietWorkerWatchdog(opts: QuietWatchdogOptions): QuietWatchdo
         try {
           result = await opts.endRound(judgement.reason);
         } catch (error) {
-          record({ ...row, decision: "action_failed", action: "end_round", detail: String((error as Error)?.message ?? error) });
+          record({ ...row, decision: "action_failed", action: "end_round", failed: true, detail: String((error as Error)?.message ?? error) });
           return;
         }
         if (result.ended) finished = true;
