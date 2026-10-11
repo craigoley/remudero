@@ -607,6 +607,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "dispatch.lifetime_pressure.infra_only",
   "dispatch.cost_of_delay.fallback", // W1-T4064: dispatchValueContextForSelection dedups on the last of
   "dispatch.cost_of_delay.ready", // these two; rotated away, a restart re-logs the same fallback.
+  // W1-T7814: the memory governor's history read calibrates the dispatch memory floor.
+  // Losing its observations would make it relearn from an empty window after each rotation.
+  "dispatch_memory_observed",
   // W1-T316: `escalateLifetimeCapExceeded`'s (run-task.ts) dedup marker, written whether or not
   // delivery succeeds; dropping it re-opens a duplicate lifetime-cap escalation.
   "dispatch.lifetime_capped.escalated",
