@@ -1,3 +1,4 @@
+import { CHECK_PROOF_CHILD_ENTRY, checkProofChildArgv } from "./check-proof.js";
 /**
  * The shared gate-contract module for every machine flow that opens a plan PR (W1-T136: `rmd retro` and
  * `rmd approve`). Two flows once reinvented commit and PR-body hygiene independently and both tripped the
@@ -507,7 +508,6 @@ export { inTreeCheckBudgetMs };
 const LINT_PLAN_SCRIPT = "scripts/lint-plan-precheck.mjs";
 const TASK_ID_SCRIPT = "scripts/task-id-existence-check.mjs";
 const SHARD_CENSUS_TEST = "test/every-shard-on-main-is-lintable.test.ts";
-const RUN_TASK_ENTRY = "src/run-task.ts";
 /** `--require-open-prs` refuses an unreadable open-PR list or base; that is a check that could not run, not a red. */
 export const TASK_ID_UNREADABLE_RE = /REQUIRED \(--require-open-prs\) but|could not read declared plan ids at base/;
 /** check-proof exits that make a PR-body proof red (fail, refused, no match, passes at base too). */
@@ -518,7 +518,6 @@ const LINT_PLAN_ARGV = [LINT_PLAN_SCRIPT];
 const TASK_ID_ARGV = [TASK_ID_SCRIPT, "--base", "origin/main", "--require-open-prs"];
 const taskIdArgv = (headRef?: string): string[] => (headRef ? [...TASK_ID_ARGV, "--head-ref", headRef] : TASK_ID_ARGV);
 const SHARD_CENSUS_ARGV = ["--import", "tsx", "--test", "--test-reporter=tap", SHARD_CENSUS_TEST];
-const checkProofArgv = (proof: string): string[] => ["--import", "tsx", RUN_TASK_ENTRY, "check-proof", proof, "--base", "origin/main"];
 
 function inTreeEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, RMD_SELF_SYNC_DONE: "1" };
@@ -582,7 +581,7 @@ const defaultPreflightChecks = {
   taskIdExistence: (cwd: string, headRef: string | undefined, budgetMs: number): PlanPrPreflightReading =>
     taskIdReading(runInTree(cwd, TASK_ID_SCRIPT, taskIdArgv(headRef), budgetMs)),
   shardCensus: (cwd: string, budgetMs: number): PlanPrPreflightReading => shardCensusReading(runInTree(cwd, SHARD_CENSUS_TEST, SHARD_CENSUS_ARGV, budgetMs)),
-  checkProof: (cwd: string, proof: string, budgetMs: number): ProofCheckStatus => proofCheckStatus(runInTree(cwd, RUN_TASK_ENTRY, checkProofArgv(proof), budgetMs)),
+  checkProof: (cwd: string, proof: string, budgetMs: number): ProofCheckStatus => proofCheckStatus(runInTree(cwd, CHECK_PROOF_CHILD_ENTRY, checkProofChildArgv(proof, "origin/main", cwd), budgetMs)),
 };
 /** A test's stand-ins for any of {@link defaultPreflightChecks}, and for the budget each in-tree check gets. */
 export type PlanPrPreflightChecks = Partial<typeof defaultPreflightChecks> & { budgetMs?: () => number };
@@ -593,7 +592,7 @@ const defaultPreflightChecksAsync = {
   shardCensus: async (cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> =>
     shardCensusReading(await runInTreeAsync(cwd, SHARD_CENSUS_TEST, SHARD_CENSUS_ARGV, budgetMs)),
   checkProof: async (cwd: string, proof: string, budgetMs: number): Promise<ProofCheckStatus> =>
-    proofCheckStatus(await runInTreeAsync(cwd, RUN_TASK_ENTRY, checkProofArgv(proof), budgetMs)),
+    proofCheckStatus(await runInTreeAsync(cwd, CHECK_PROOF_CHILD_ENTRY, checkProofChildArgv(proof, "origin/main", cwd), budgetMs)),
 };
 export type PlanPrPreflightAsyncChecks = Partial<typeof defaultPreflightChecksAsync> & { budgetMs?: () => number };
 

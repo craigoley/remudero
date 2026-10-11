@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/run-task.js";
+import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/lib/check-proof.js";
 
 // ── W1-T2686 ───────────────────────────────────────────────────────────────────────────────────
 //
@@ -267,7 +267,7 @@ test("no source string anywhere still claims a unit-test proof is out of scope b
   //
   // Read the working file directly (not `git show HEAD:...`) — this repo's run-task.ts is large
   // enough that `git show`'s captured stdout can exceed execFileSync's default maxBuffer (ENOBUFS).
-  const source = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+  const source = readFileSync(join(REPO_ROOT, "src", "lib", "check-proof.ts"), "utf8");
   assert.doesNotMatch(source, /NOT COMPARABLE/, "the stale refusal string must not exist anywhere in the verb's source");
   assert.doesNotMatch(
     source,
