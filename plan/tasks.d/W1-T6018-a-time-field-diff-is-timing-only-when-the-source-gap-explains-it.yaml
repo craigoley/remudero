@@ -10,7 +10,7 @@
   band_meaning: blast-radius
   origin: "2026-10-06 core-console architecture plan backlog E15 (shadow follow-up: the TIME_LEAF rule is weak)"
   plan_refs: [W1-T6017]
-  files: [src/lib/view-shadow.ts, test/a-time-field-diff-is-timing-only-when-the-source-gap-explains-it.test.ts]
+  files: [src/lib/view-shadow.ts, test/a-time-field-diff-is-timing-only-when-the-source-gap-explains-it.test.ts, "src/lib/now-view.ts"]
   status: queued
   priority: 3
   attempts: 0
