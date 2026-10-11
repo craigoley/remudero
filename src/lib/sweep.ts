@@ -11590,6 +11590,16 @@ export interface SweepDeps {
   /** W1-T5749 — head-only guard fallback when readLiveStateAtAct is omitted. A changed head
    *  stands down as `sweep.head_moved`; an undefined (unreadable) head leaves the act unchanged. */
   readLiveHeadSha?: (pr: OpenPrView) => string | undefined | Promise<string | undefined>;
+  /** W1-T7734 — THE SAME-PASS RE-READ. When the act-time guard catches a moved head, this reads THAT ONE
+   *  PR again (the PR plus its status rollup, through the caller's `GhCallPacer`) and returns its rebuilt
+   *  view; the walk then re-derives and acts on it in this pass instead of standing down for a whole tick.
+   *  `undefined` means the PR is no longer open. A THROW is a failed read: the guard stands down naming
+   *  the error, and never falls back to the stale snapshot. Omitted, the guard stands down as before. */
+  rereadPrAtAct?: (pr: OpenPrView) => OpenPrView | undefined | Promise<OpenPrView | undefined>;
+  /** W1-T7734 — when the read generation this pass acts on was PUBLISHED (the read plane's
+   *  `publishedAtMs`). `sweep.disposed` rows record `snapshot_age_ms` against it at the moment a PR is
+   *  acted on. Omitted, the age is measured from the pass's own start. */
+  snapshotPublishedAtMs?: number;
   /** W1-T2752 — a SYNCHRONOUS, READ-ONLY admission read consulted immediately before
    *  `blocked-fixable` and `conflicted` invoke {@link dispatchFix}, never a replacement for either
    *  surface's own live-state/claim checks. `buildSweepEffects` supplies it from the SAME
@@ -13528,6 +13538,98 @@ export function emptyDiffSupersedes(pr: OpenPrView, disposition: Disposition): b
     !(pr.ciFailures ?? []).some((failure) => failure.name === "proof-discrimination");
 }
 
+/* ── W1-T7734 — IN-PROCESS MEMOS THE IDLE LIGHT PASS DERIVES ITS CADENCE FROM ──────────────────
+ * Review demand, observed review durations and head pushes are noted by the passes that already see
+ * them, so the daemon's idle branch reads memory and never a ledger union. They are a sliding window of
+ * RECENT samples, not a cap on the cadence derived from them. */
+const IDLE_MEMO_WINDOW = 64;
+export interface IdleLightCadence {
+  eligible: number;
+  /** Median of recent review durations; undefined until one has been observed. */
+  medianReviewMs?: number;
+  /** Head pushes per open-PR-hour over the memo's window; undefined until a push and a window exist. */
+  pushesPerPrHour?: number;
+  /** The derived light-pass interval; undefined when neither input has been observed yet. */
+  cadenceMs?: number;
+}
+const idleMemo: {
+  eligible: number;
+  reviewMs: number[];
+  pushes: Array<{ prNumber: number; atMs: number }>;
+  headByPr: Map<number, string>;
+  openPrs: number;
+  sinceMs?: number;
+} = { eligible: 0, reviewMs: [], pushes: [], headByPr: new Map(), openPrs: 0 };
+
+/** Tests only: the memo is process-wide, like the other pass-level singletons in this file. */
+export function resetIdleReviewMemo(): void {
+  idleMemo.eligible = 0;
+  idleMemo.reviewMs = [];
+  idleMemo.pushes = [];
+  idleMemo.headByPr = new Map();
+  idleMemo.openPrs = 0;
+  idleMemo.sinceMs = undefined;
+}
+
+export function noteIdleReviewDemand(eligible: number, openPrCount: number, observedAtMs: number): void {
+  idleMemo.sinceMs ??= observedAtMs;
+  idleMemo.eligible = Math.max(0, Math.trunc(eligible));
+  idleMemo.openPrs = Math.max(0, Math.trunc(openPrCount));
+}
+
+export function noteReviewDuration(ms: number): void {
+  if (!Number.isFinite(ms) || ms < 0) return;
+  idleMemo.reviewMs.push(ms);
+  if (idleMemo.reviewMs.length > IDLE_MEMO_WINDOW) idleMemo.reviewMs.shift();
+}
+
+/** A PR whose head differs from the one this process last saw for it was pushed to. */
+export function noteHeadObservation(prNumber: number, headSha: string, atMs: number): void {
+  idleMemo.sinceMs ??= atMs;
+  const previous = idleMemo.headByPr.get(prNumber);
+  idleMemo.headByPr.set(prNumber, headSha);
+  if (previous === undefined || previous === headSha) return;
+  idleMemo.pushes.push({ prNumber, atMs });
+  if (idleMemo.pushes.length > IDLE_MEMO_WINDOW) idleMemo.pushes.shift();
+}
+
+/** PURE. The idle light-pass interval: no longer than a typical review (a verdict can land inside it) and
+ *  no longer than half the mean gap between pushes to one PR (a new head is seen before the next one
+ *  replaces it). Whichever inputs are observed bind it; neither observed leaves it undefined. */
+export function deriveIdleLightCadenceMs(input: {
+  reviewDurationsMs: readonly number[];
+  headPushes: number;
+  openPrs: number;
+  windowMs: number;
+}): { cadenceMs?: number; medianReviewMs?: number; pushesPerPrHour?: number } {
+  const sorted = [...input.reviewDurationsMs].sort((a, b) => a - b);
+  const medianReviewMs = sorted.length === 0 ? undefined
+    : sorted.length % 2 === 1 ? sorted[(sorted.length - 1) / 2]
+      : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2;
+  const prHours = input.openPrs * (input.windowMs / 3_600_000);
+  const pushesPerPrHour = input.headPushes > 0 && prHours > 0 ? input.headPushes / prHours : undefined;
+  const bounds: number[] = [];
+  if (medianReviewMs !== undefined && medianReviewMs > 0) bounds.push(medianReviewMs);
+  if (pushesPerPrHour !== undefined) bounds.push(3_600_000 / pushesPerPrHour / 2);
+  return {
+    ...(bounds.length > 0 ? { cadenceMs: Math.min(...bounds) } : {}),
+    ...(medianReviewMs !== undefined ? { medianReviewMs } : {}),
+    ...(pushesPerPrHour !== undefined ? { pushesPerPrHour } : {}),
+  };
+}
+
+/** The daemon's idle read: undefined when no post-review PR is known to wait. Reads memory only. */
+export function readIdleLightCadence(nowMs: number): IdleLightCadence | undefined {
+  if (idleMemo.eligible <= 0) return undefined;
+  const derived = deriveIdleLightCadenceMs({
+    reviewDurationsMs: idleMemo.reviewMs,
+    headPushes: idleMemo.pushes.length,
+    openPrs: idleMemo.openPrs,
+    windowMs: idleMemo.sinceMs === undefined ? 0 : Math.max(0, nowMs - idleMemo.sinceMs),
+  });
+  return { eligible: idleMemo.eligible, ...derived };
+}
+
 /** W1-T5922: `pr@head` arms in flight process-wide, so a light pass and the background full pass never both arm one head. */
 const armsInFlight = new Set<string>();
 
@@ -13956,6 +14058,7 @@ export async function runSweep(
         retryableThrows: prior.reviewRetryableThrows,
       })
     : undefined;
+  if (fullReviewQueueDepth !== undefined) noteIdleReviewDemand(fullReviewQueueDepth, openPrs.length, now);
   const fullReviewLanes = fullReviewQueueDepth === undefined
     ? undefined
     : effectiveReviewWidth(deps, policy, fullReviewQueueDepth, now, ledgerLines, fullRepairActiveWorkers);
@@ -14690,6 +14793,11 @@ export async function runSweep(
     mode: ReviewDispatchMode;
   }> = [];
   const quietContradictoryRows = new Set<number>();
+  // W1-T7734: entries acting on a view read DURING this pass, and when each read happened.
+  const rederivedIndices = new Set<number>();
+  const freshReadAtMs = new Map<number, number>();
+  const snapshotBaseMs = deps.snapshotPublishedAtMs ?? now;
+  const passClockMs = (): number => (deps.now ? deps.now() : systemClock.now());
   // W1-T5030: close ATTEMPTS the stale-proof supersession arm has made this pass.
   let staleProofCloses = 0;
 
@@ -14852,6 +14960,10 @@ export async function runSweep(
         // resetting the moment GitHub goes quiet again.
         ...(pr.mergeState !== undefined ? { merge_state: pr.mergeState } : {}),
         ...(deduped ? { deduped: true } : {}),
+        // W1-T7734: how old the view was when this PR was ACTED on — now minus the generation's publish
+        // time (a re-derived PR: minus its fresh read), read at the write, never at the pass's start.
+        snapshot_age_ms: Math.max(0, passClockMs() - (freshReadAtMs.get(index) ?? snapshotBaseMs)),
+        ...(rederivedIndices.has(index) ? { rederived: true } : {}),
         ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome } : {}),
         ...(actionError ? { action_error: actionError } : {}),
         ...(standDownReason && !deliveredStandDownLogged ? { stand_down_reason: standDownReason } : {}),
@@ -14898,7 +15010,13 @@ export async function runSweep(
 
   log("sweep.pass", { enumerated: openPrs.length, dry_run: deps.dryRun === true });
 
-  for (const prIndex of sweepWalkOrder(openPrs)) {
+  // W1-T7734 — the walk is a queue, so a PR whose head moved under this pass can be put back at the
+  // front once its one fresh read has rebuilt its view. `rederivedPrs` spends that read once per
+  // (PR, pass); `rederivedIndices` marks the entries now acting on a view read during this pass.
+  const walkOrder = sweepWalkOrder(openPrs);
+  const rederivedPrs = new Set<number>();
+  for (let walkStep = 0; walkStep < walkOrder.length; walkStep++) {
+    const prIndex = walkOrder[walkStep];
     // W1-T4470 — HYSTERESIS FIRST, before anything else reads `mergeState`: an `unknown` read
     // (mergeState undefined) inherits the last KNOWN mergeability this exact head proved on a
     // prior pass, so `pr` below is what EVERY downstream read sees — `deriveDisposition`, the
@@ -14906,6 +15024,7 @@ export async function runSweep(
     // `undefined` on a lazy-recompute miss and a conflicted PR (zero check runs, by construction)
     // fell through to the checks-none rules meant for a genuinely mergeable-but-quiet head.
     let { pr, inherited: inheritedMergeState } = withInheritedMergeState(openPrs[prIndex], ledgerLines);
+    noteHeadObservation(pr.prNumber, pr.headSha, passClockMs());
     const priorGardenClose = ledgerLines.findLast(row => row.step === "sweep.disposed" &&
       row.pr_number === pr.prNumber && row.disposition === "stale" && row.acted === true &&
       typeof row.garden_record_refusal === "string");
@@ -15681,17 +15800,55 @@ export async function runSweep(
         try {
           // W1-T5749: the snapshot can outlive its head (#9138 armed, #9155 escalated on dead heads).
           // W1-T5922: a light pass reads the live head for its arm only; its other lanes are unchanged.
-          const guardHead = deps.repairAdmissionSurface !== "light" || disposition === "mergeable";
+          // W1-T7734: a view read during this pass (the re-derive below) needs no second live read.
+          const guardHead = !rederivedIndices.has(prIndex) &&
+            (deps.repairAdmissionSurface !== "light" || disposition === "mergeable");
           const liveAtAct = guardHead ? await deps.readLiveStateAtAct?.(pr) : undefined;
           const liveHead = !guardHead ? undefined : deps.readLiveStateAtAct
             ? liveAtAct?.headSha : await deps.readLiveHeadSha?.(pr);
           if (liveHead !== undefined && liveHead !== pr.headSha) {
+            noteHeadObservation(pr.prNumber, liveHead, passClockMs());
+            const movedRow = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.head_moved",
+              pr_number: pr.prNumber, pr_url: pr.prUrl, disposition, snapshot_head_sha: pr.headSha, live_head_sha: liveHead };
+            const movedFrom = `head moved from ${pr.headSha.slice(0, 8)} to ${liveHead.slice(0, 8)} since this pass's snapshot`;
+            const nextPass = "not acting; the next pass re-derives from the live head";
+            // W1-T7734 — SAME-PASS RE-DERIVE: read THIS PR once more and put it back at the front of the
+            // walk, instead of standing down for a whole tick. Spent once per (PR, pass).
+            let fresh: OpenPrView | undefined;
+            let standDown = `${movedFrom} — ${nextPass}`;
+            let rereadError: string | undefined;
+            if (deps.rereadPrAtAct && !rederivedPrs.has(pr.prNumber)) {
+              rederivedPrs.add(pr.prNumber);
+              try {
+                const reread = await deps.rereadPrAtAct(pr);
+                if (reread === undefined) {
+                  standDown = `${movedFrom} — the re-read found the PR no longer open; not acting`;
+                } else if (reread.headSha !== liveHead) {
+                  standDown = `${movedFrom} and moved again to ${reread.headSha.slice(0, 8)} during the re-read — ${nextPass}`;
+                } else {
+                  fresh = reread;
+                }
+              } catch (error) {
+                // Reason: the error text is recorded as `reread_error` and named in the stand-down sentence.
+                rereadError = String((error as Error)?.message ?? error);
+                standDown = `${movedFrom} — the single-PR re-read failed (${rereadError}); ${nextPass}, never the stale snapshot`;
+              }
+            }
+            if (fresh !== undefined) {
+              appendLine(deps.ledgerPath, { ...movedRow, rederived: true, reread_head_sha: fresh.headSha });
+              byDisposition[disposition]--;
+              openPrs[prIndex] = fresh;
+              rederivedIndices.add(prIndex);
+              freshReadAtMs.set(prIndex, passClockMs());
+              walkOrder.splice(walkStep + 1, 0, prIndex);
+              continue;
+            }
             acted = false;
-            extraDisposedFields = { ...extraDisposedFields, live_head_sha: liveHead };
-            standDownReason = `head moved from ${pr.headSha.slice(0, 8)} to ${liveHead.slice(0, 8)} ` +
-              "since this pass's snapshot — not acting; the next pass re-derives from the live head";
-            appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.head_moved",
-              pr_number: pr.prNumber, pr_url: pr.prUrl, disposition, snapshot_head_sha: pr.headSha, live_head_sha: liveHead });
+            extraDisposedFields = { ...extraDisposedFields, live_head_sha: liveHead,
+              ...(rereadError !== undefined ? { reread_error: rereadError } : {}) };
+            standDownReason = standDown;
+            appendLine(deps.ledgerPath, { ...movedRow, ...(rereadError !== undefined ? { reread_error: rereadError } : {}),
+              ...(rederivedPrs.has(pr.prNumber) ? { rederived: false, stand_down_reason: standDown } : {}) });
           } else switch (disposition) {
             case "mergeable": {
               // ARMING PARITY (see {@link decideSweepArm}): the run flow's capped refusal is
@@ -17360,7 +17517,9 @@ export async function runSweep(
       try {
         if (postReview) {
           try {
+          const reviewStartedAtMs = performance.now();
           await postReview(job.pr, job.mode);
+          noteReviewDuration(performance.now() - reviewStartedAtMs);
           } catch (e) {
             acted = false;
             // W1-T529 — THE ONE THROW THAT MUST NOT LEAVE A DEDUP KEY. Design (v), the
@@ -17797,7 +17956,10 @@ export async function runSweepLightPass(
   deps: SweepDeps,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary[]> {
-  if (openPrs.length === 0) return [await runSweep([], deps, policy)];
+  if (openPrs.length === 0) {
+    noteIdleReviewDemand(0, 0, deps.now ? deps.now() : systemClock.now());
+    return [await runSweep([], deps, policy)];
+  }
   lightPassRefillsClosed = false;
   // W1-T526/W1-T2792 — THE QUEUE-ADMISSION RULE. The light pass admits at most the existing
   // `reviewLanes` semantic width, never the old hidden hard-coded one. Every other PR's own
@@ -17843,6 +18005,8 @@ export async function runSweepLightPass(
     { ...policy, planFilingAdmissionBound: availablePlanFilings }, now, outcomes, semanticBound,
   );
   publishLightPassReviewDemand(demandCandidates, spawning, policy, now, outcomes, deps);
+  // W1-T7734: what this pass leaves waiting is what an idle daemon should keep a light pass running for.
+  noteIdleReviewDemand(Math.max(0, queueDepth - spawning.length), openPrs.length, now);
   lightPassSpawningReservations += spawning.length;
   lightPassPlanFilingReservations += planFilings.length;
   for (const pr of [...spawning, ...planFilings]) lightPassReservedHeads.add(lightPassHeadKey(pr));
@@ -17860,7 +18024,9 @@ export async function runSweepLightPass(
   const basePostReview = deps.postReview;
   const passPostReview: SweepDeps["postReview"] = basePostReview && (async (pr, mode) => {
     try {
+      const reviewStartedAtMs = performance.now();
       await basePostReview(pr, mode);
+      noteReviewDuration(performance.now() - reviewStartedAtMs);
     } catch (e) {
       if (e instanceof GhPaceFloorStandDownError) providerFloorMet = true;
       throw e;
