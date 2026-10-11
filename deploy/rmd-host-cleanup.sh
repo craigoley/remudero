@@ -44,7 +44,7 @@
 # CRON. The schedule and log path live in ONE place: deploy/install-host-units.sh
 # (CLEANUP_CRON_SCHEDULE / RMD_CLEANUP_LOG). Nothing here schedules itself.
 
-# OVERRIDES. Thresholds: IDLE_MINUTES HIGH_WATER ARCHIVE_DAYS DRY_RUN. Roots and probes, so a test
+# OVERRIDES. Thresholds: IDLE_MINUTES HIGH_WATER ARCHIVE_DAYS DRY_RUN. Idle windows have a hard six-hour minimum. Roots and probes, so a test
 # drives a fixture tree instead of the real /tmp and /mnt/rmd, on Linux or macOS:
 #   RMD_CLEANUP_HOME            the home whose ~/*/.claude/{worktrees,projects} are swept
 #   RMD_CLEANUP_WORKTREE_ROOTS  colon-separated roots whose immediate Git worktrees are swept
@@ -54,8 +54,8 @@
 #   RMD_CLEANUP_TMP_ROOTS       colon-separated scratch roots
 #   RMD_CLEANUP_TMP_GLOBS       space-separated basename globs swept directly under those roots
 #   RMD_CLEANUP_BIG_MB          size (MB) at which an idle file under a scratch root is swept
-#   RMD_CLEANUP_TSX_MAX_AGE_HOURS  age (h, positive) past which a file inside a `tsx-*` cache
-#                               directly under a tmp root is pruned (default 24)
+#   RMD_CLEANUP_TSX_MAX_AGE_HOURS  age (h, minimum 6) past which a file inside a `tsx-*` cache
+#                               directly under a tmp root is pruned (default 6)
 #   RMD_CLEANUP_ARCHIVE_ROOT    where transcripts go
 #   RMD_CLEANUP_ROOT_FS         the filesystem being protected (default /)
 #   RMD_CLEANUP_DF              command taking a path and printing `df -Pk`-shaped output for the
@@ -90,7 +90,7 @@
 #                               not mounted) is not swept at all.
 #   RMD_CLEANUP_UID             the identity the pass decides as (default `id -u`)
 #   RMD_CLEANUP_RUNUSER         runs the one repo-writing Git call (fetch) as the repo's owner
-#   RMD_CLEANUP_SCRATCH_IDLE_MINUTES  minimum payload inactivity (default 720)
+#   RMD_CLEANUP_SCRATCH_IDLE_MINUTES  minimum payload inactivity (default 360; cannot be lower)
 #   RMD_CLEANUP_NESTED_COVERAGE_ROOTS  colon-separated roots walked (depth <= 6, same device, no
 #                               symlinks) for `rmd-c-<12 hex>` coverage scratch at ANY depth
 #                               (W1-T5708). Default: the tmp roots, scratch roots and parents, plus
@@ -115,7 +115,7 @@ COVERAGE_PATHS="${RMD_CLEANUP_COVERAGE_PATHS-$CLEAN_HOME/.remudero-coverage}"
 TMP_ROOTS="${RMD_CLEANUP_TMP_ROOTS-/tmp}"                                # [UNVERIFIED]
 TMP_GLOBS="${RMD_CLEANUP_TMP_GLOBS-claude-* rmd-* remudero-* tmp.*}"     # [UNVERIFIED]
 BIG_MB="${RMD_CLEANUP_BIG_MB:-200}"                                      # [UNVERIFIED]
-TSX_MAX_AGE_HOURS="${RMD_CLEANUP_TSX_MAX_AGE_HOURS:-24}"
+TSX_MAX_AGE_HOURS="${RMD_CLEANUP_TSX_MAX_AGE_HOURS:-6}"
 ARCHIVE_ROOT="${RMD_CLEANUP_ARCHIVE_ROOT:-/mnt/rmd/host-cleanup-archive}" # [UNVERIFIED]
 ROOT_FS="${RMD_CLEANUP_ROOT_FS:-/}"
 DF_CMD="${RMD_CLEANUP_DF:-df -Pk}"
@@ -151,7 +151,7 @@ else
   [ "$ROOT_FS" = / ] && NESTED_COVERAGE_ROOTS="$NESTED_COVERAGE_ROOTS:/mnt/rmd"
 fi
 COVERAGE_LOCK_DIR="${RMD_CLEANUP_COVERAGE_LOCK_DIR:-/tmp}"
-SCRATCH_IDLE_MINUTES="${RMD_CLEANUP_SCRATCH_IDLE_MINUTES:-720}"
+SCRATCH_IDLE_MINUTES="${RMD_CLEANUP_SCRATCH_IDLE_MINUTES:-360}"
 DOCKER_CMD="${RMD_CLEANUP_DOCKER:-docker}"
 # Not /tmp: a root-created 0644 lock there could not be opened for write by the user cron, and
 # with fs.protected_regular=2 root cannot O_CREAT-open a user's file in a sticky directory either.
@@ -164,10 +164,16 @@ FLOCK_CMD="${RMD_CLEANUP_FLOCK:-flock}"
 case "$IDLE_MINUTES$HIGH_WATER$ARCHIVE_DAYS$BIG_MB$SCRATCH_IDLE_MINUTES" in
   ""|*[!0-9]*) echo "rmd-host-cleanup: FATAL thresholds must be non-negative integers" >&2; exit 2 ;;
 esac
-# Zero would prune the entry tsx is writing right now, so the tsx age must be a positive integer.
+if [ "$IDLE_MINUTES" -lt 360 ] || [ "$SCRATCH_IDLE_MINUTES" -lt 360 ]; then
+  echo "rmd-host-cleanup: FATAL idle retention must be at least 360 minutes (6h)" >&2; exit 2
+fi
+# TSX cache retention follows the same six-hour floor as other disposable scratch.
 case "$TSX_MAX_AGE_HOURS" in
   ""|*[!0-9]*|0|0*) echo "rmd-host-cleanup: FATAL RMD_CLEANUP_TSX_MAX_AGE_HOURS must be a positive integer" >&2; exit 2 ;;
 esac
+if [ "$TSX_MAX_AGE_HOURS" -lt 6 ]; then
+  echo "rmd-host-cleanup: FATAL RMD_CLEANUP_TSX_MAX_AGE_HOURS must be at least 6" >&2; exit 2
+fi
 case "$ONLY_TMP" in
   0|1) ;;
   *) echo "rmd-host-cleanup: FATAL RMD_CLEANUP_ONLY_TMP must be 0 or 1" >&2; exit 2 ;;

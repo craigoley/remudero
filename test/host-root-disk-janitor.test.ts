@@ -16,6 +16,75 @@ import { join } from "node:path";
 
 import { SCRIPT, age, fixture, git, repos, run, scratchDir, type Fixture } from "./helpers/host-cleanup-fixture.js";
 
+test("janitor refuses cleanup thresholds below six hours", () => {
+  const fx = fixture();
+  const overrides: [Record<string, string>, RegExp][] = [
+    [{ IDLE_MINUTES: "359" }, /idle retention must be at least 360 minutes/],
+    [{ RMD_CLEANUP_SCRATCH_IDLE_MINUTES: "359" }, /idle retention must be at least 360 minutes/],
+    [{ RMD_CLEANUP_TSX_MAX_AGE_HOURS: "5" }, /RMD_CLEANUP_TSX_MAX_AGE_HOURS must be at least 6/],
+  ];
+  for (const [env, expected] of overrides) {
+    const r = run(fx, env);
+    assert.equal(r.status, 2, r.stderr + r.stdout);
+    assert.match(r.stderr, expected);
+  }
+});
+
+test("scratch cleanup uses the six-hour default and preserves anything fresher", () => {
+  const fx = fixture();
+  const old = scratchDir(fx, "old-eight-hours", false);
+  const fresh = scratchDir(fx, "fresh-five-hours", false);
+  age(old, 8);
+  age(fresh, 5);
+
+  const r = run(fx, {
+    RMD_CLEANUP_SCRATCH_ROOTS: fx.scratch,
+    RMD_CLEANUP_TMP_ROOTS: "",
+    RMD_CLEANUP_UID: "0",
+  });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(existsSync(old), false, r.stdout);
+  assert.equal(existsSync(fresh), true, r.stdout);
+  assert.match(r.stdout, new RegExp(`KEEP ${fresh}: written within 360 min`));
+});
+
+test("tsx cache prunes files older than six hours but keeps a recent sibling", () => {
+  const fx = fixture();
+  const cache = join(fx.scratch, "tsx-1000");
+  mkdirSync(cache, { recursive: true });
+  const stale = join(cache, "stale.js");
+  const fresh = join(cache, "fresh.js");
+  writeFileSync(stale, "old cache");
+  writeFileSync(fresh, "recent cache");
+  age(stale, 7);
+  age(fresh, 5);
+
+  const r = run(fx);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(existsSync(stale), false, r.stdout);
+  assert.equal(existsSync(fresh), true, r.stdout);
+  assert.match(r.stdout, new RegExp("PRUNE " + cache + ": .* 1 tsx cache files older than 6 h"));
+});
+
+test("the temp sweep reclaims stale raw Node coverage leaves and keeps younger data", () => {
+  const fx = fixture();
+  const stale = join(fx.scratch, "node-coverage-stale");
+  const fresh = join(fx.scratch, "node-coverage-fresh");
+  mkdirSync(stale);
+  mkdirSync(fresh);
+  writeFileSync(join(stale, "coverage-1-1-0.json"), "{}");
+  writeFileSync(join(fresh, "coverage-2-2-0.json"), "{}");
+  age(stale, 8);
+  age(fresh, 5);
+
+  const r = run(fx, { RMD_CLEANUP_TMP_GLOBS: "node-coverage-*" });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(existsSync(stale), false, r.stdout);
+  assert.equal(existsSync(fresh), true, r.stdout);
+  assert.match(r.stdout, new RegExp(`REMOVE ${stale}`));
+  assert.match(r.stdout, new RegExp(`KEEP ${fresh}: written within 360 min`));
+});
+
 test("W1-T4770: an idle unheld path is removed and a fresh one is kept", () => {
   const fx = fixture();
   const idle = scratchDir(fx, "rmd-idle", true);
@@ -30,7 +99,7 @@ test("W1-T4770: an idle unheld path is removed and a fresh one is kept", () => {
   assert.equal(existsSync(idle), false, "an idle, unheld path must be removed");
   assert.match(r.stdout, new RegExp(`REMOVE ${idle}`));
   assert.equal(existsSync(fresh), true, "a recently written path must be kept");
-  assert.match(r.stdout, new RegExp(`KEEP ${fresh}: written within 720 min`));
+  assert.match(r.stdout, new RegExp(`KEEP ${fresh}: written within 360 min`));
   assert.equal(existsSync(partly), true, "one recent write anywhere under a path keeps all of it");
   assert.equal(existsSync(unmatched), true, "only the configured scratch names are swept");
 });
@@ -298,6 +367,14 @@ test("the hourly temp sweep wrapper runs the janitor in temp-only mode and refus
   assert.equal(ok.status, 0, ok.stderr + ok.stdout);
   assert.match(ok.stdout, /temporary-roots-only mode/);
   assert.equal(existsSync(idle), false, "the wrapper's six-hour default sweeps a 13-hour-old dir");
+
+  const capture = join(fx.root, "capture-cleanup-env.sh");
+  writeFileSync(capture, '#!/usr/bin/env bash\nprintf "%s\\n%s\\n" "$RMD_CLEANUP_TMP_ROOTS" "$RMD_CLEANUP_TMP_GLOBS"\n');
+  chmodSync(capture, 0o755);
+  const defaults = wrapper({ RMD_HOST_CLEANUP_SCRIPT: capture, RMD_CLEANUP_TMP_ROOTS: "", RMD_CLEANUP_TMP_GLOBS: "" });
+  assert.equal(defaults.status, 0, defaults.stderr + defaults.stdout);
+  assert.match(defaults.stdout, /\/mnt\/scratch\/rmd-work-tmp/);
+  assert.match(defaults.stdout, /rmd-\* node-coverage-\*/);
 
   const missing = wrapper({ RMD_HOST_CLEANUP_SCRIPT: join(fx.root, "absent.sh") });
   assert.equal(missing.status, 2);
