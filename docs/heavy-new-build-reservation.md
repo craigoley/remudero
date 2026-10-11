@@ -14,6 +14,16 @@ A nonce and a content hash correlate records; neither authenticates a shared wri
 Cross-account/container readers and network filesystems are not an approved backend.
 The earlier v1 flat files and experimental SQLite journal are not auto-migrated.
 
+Records are complete directory envelopes named `heavy-build-<id>[-closed|-delivered].json`,
+each containing a single `record.json`. A private unique staging directory is fully
+written/flushed before one directory rename publishes it. Every cooperative writer
+publishes a nonempty final envelope, so POSIX rename refuses replacement; concurrent
+writers read the first complete winner. There is no empty final-path claim that a
+killed writer can strand. Existing corrupt/empty envelopes remain UNKNOWN, never
+silently repaired or migrated. Abandoned unpublished `.heavy-ready-stage-*` directories
+are retained bounded census entries; the reader never deletes them or another writer's
+record. Normal publication removes only its own unique staging directory.
+
 ## State and recovery
 
 The logical identity publishes one immutable request. READY time and its expiry
@@ -34,6 +44,14 @@ on a later read/restart, and **does not reopen the hold**. This is at-least-once
 not exactly-once: sinks must deduplicate by event id, and a sink that returns before
 durably accepting its event cannot claim durable external delivery. The receipt only
 certifies this API's successful sink call, not a human notification or finished gate.
+Thenable/async sink returns are not acknowledged: delivery requires synchronous durable
+acceptance, or the escalation stays pending for a supported sink to retry.
+
+Closure's logical time is sampled at the API call; the publication winner is selected
+at the atomic envelope rename. Pre-deadline release can race with expiry: the first
+complete terminal wins, and the loser never overwrites it. `release` returning true
+means an owned closure was recorded/observed, not that the run passed or that the
+winning closure was `released`; expiry or late completion can win `escalated`.
 
 Descriptor reads reject symlinks, FIFOs, unsafe permissions, hardlinks, concurrent
 growth and records over 4096 bytes. The streaming census rejects malformed reserved
@@ -63,3 +81,6 @@ Design references: [AWS transactional outbox guidance](https://docs.aws.amazon.c
 explains the dual-write gap and idempotent consumers;
 [SQLite network filesystem guidance](https://sqlite.org/useovernet.html) documents
 why the private journal pilot is not silently made a shared fleet default.
+The [POSIX rename contract](https://pubs.opengroup.org/onlinepubs/9799919799/functions/rename.html)
+specifies refusal of nonempty target directories. The interruption/race regressions
+verify this publication boundary with the actual native filesystem and fresh processes.

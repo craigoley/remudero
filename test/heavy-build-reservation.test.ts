@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, linkSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
   HEAVY_READY_ESCALATION_MS, heavyNewBuildGate, readHeavyNewBuildHold,
@@ -18,10 +18,14 @@ function fixture(t: TestContext): string {
   return dir;
 }
 function pathFor(handle: HeavyReservationHandle, suffix = ""): string {
-  return join(handle.dir, `heavy-build-${handle.request.id}${suffix}.json`);
+  return join(handle.dir, `heavy-build-${handle.request.id}${suffix}.json`, "record.json");
 }
 function put(path: string, value: unknown): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writeFileSync(path, JSON.stringify(value), { mode: 0o600 });
+}
+function removeEnvelope(path: string): void {
+  rmSync(dirname(path), { recursive: true });
 }
 function hash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -100,7 +104,7 @@ test("heavy READY v2 release retains one immutable terminal record and never ren
   const replay = reserveHeavyNewBuilds("released", "gate", { dir, now: handle.request.expiresAtMs + 2 });
   assert.equal(replay.owned, false);assert.deepEqual(replay.request, handle.request);
   clear(dir, handle.request.expiresAtMs + 2, 1);
-  assert.deepEqual(readdirSync(dir).sort(), [pathFor(handle), pathFor(handle, "-closed")].map(p => p.slice(dir.length + 1)).sort());
+  assert.deepEqual(readdirSync(dir).sort(), [pathFor(handle), pathFor(handle, "-closed")].map(p => dirname(p).slice(dir.length + 1)).sort());
 });
 
 test("heavy READY v2 reader expires a live owner at the exact deadline without rollback resurrection", t => {
@@ -226,8 +230,8 @@ test("heavy READY v2 malformed heavy prefixes and legacy receipt names refuse an
 test("heavy READY v2 orphan closure and delivery receipts refuse a false empty census", t => {
   const dir = fixture(t), now = Date.now();
   for (const suffix of ["-closed", "-delivered"]) {
-    const path = join(dir, `heavy-build-${"b".repeat(64)}${suffix}.json`);
-    put(path, {});unknown(dir, now);assert.equal(existsSync(path), true);rmSync(path);
+    const path = join(dir, `heavy-build-${"b".repeat(64)}${suffix}.json`, "record.json");
+    put(path, {});unknown(dir, now);assert.equal(existsSync(path), true);removeEnvelope(path);
     clear(dir, now, 0);
   }
 });
@@ -235,11 +239,11 @@ test("heavy READY v2 orphan closure and delivery receipts refuse a false empty c
 test("heavy READY v2 delivery acknowledgements without an escalated closure are unavailable", t => {
   const dir = fixture(t), now = Date.now(), handle = reserveHeavyNewBuilds("unchecked-ack", "gate", { dir, now });
   put(pathFor(handle, "-delivered"), { version: 2, closureHash: "unproved", eventId: `${handle.request.id}:escalated` });
-  unknown(dir, now);rmSync(pathFor(handle, "-delivered"));
+  unknown(dir, now);removeEnvelope(pathFor(handle, "-delivered"));
   assert.equal(readHeavyNewBuildHold({ dir, now }).state, "held");
   assert.equal(releaseHeavyNewBuilds(handle, { now }), true);
   put(pathFor(handle, "-delivered"), { version: 2, closureHash: hash(JSON.parse(readFileSync(pathFor(handle, "-closed"), "utf8"))), eventId: `${handle.request.id}:escalated` });
-  unknown(dir, now);rmSync(pathFor(handle, "-delivered"));clear(dir, now, 1);
+  unknown(dir, now);removeEnvelope(pathFor(handle, "-delivered"));clear(dir, now, 1);
 });
 
 test("heavy READY v2 foreign closure nonces hashes and deadline timestamps cannot close admission", t => {
@@ -249,7 +253,7 @@ test("heavy READY v2 foreign closure nonces hashes and deadline timestamps canno
     { ...closure, atMs: handle.request.expiresAtMs }, { ...closure, kind: "escalated", atMs: handle.request.expiresAtMs + 1 }]) {
     put(pathFor(handle, "-closed"), bad);unknown(dir, now);
   }
-  rmSync(pathFor(handle, "-closed"));assert.equal(readHeavyNewBuildHold({ dir, now }).state, "held");
+  removeEnvelope(pathFor(handle, "-closed"));assert.equal(readHeavyNewBuildHold({ dir, now }).state, "held");
 });
 
 test("heavy READY v2 foreign delivery acknowledgements never suppress pending escalation silently", t => {
@@ -406,5 +410,186 @@ test("heavy READY v2 Linux unknown filesystem types never inherit ext4 or XFS ad
       assert.throws(api.heavyNewBuildGate(()=>{}, {dir}), /unavailable/);
     } finally {fs.statfsSync = raw;syncBuiltinESMExports();}
     assert.equal(api.readHeavyNewBuildHold({dir}).state, 'held');
+  `);
+});
+
+function killAtHeavyEnvelopeRename(handle: HeavyReservationHandle, suffix: "-closed" | "-delivered", phase: "before" | "after"): void {
+  const destination = dirname(pathFor(handle, suffix));
+  const child = spawnSync(process.execPath, ["--import", loader, "--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    import fs from 'node:fs';
+    import {syncBuiltinESMExports} from 'node:module';
+    import * as api from ${JSON.stringify(runtime)};
+    const handle = JSON.parse(process.argv[1]), destination = process.argv[2];
+    const suffix = process.argv[3], phase = process.argv[4], dir = handle.dir;
+    const initial = api.readHeavyNewBuildHold({dir, now:handle.request.readyAtMs});
+    assert.equal(initial.state, suffix === '-closed' ? 'held' : 'clear');
+    if (suffix === '-delivered') assert.equal(initial.pendingEscalations, 1);
+    const rename = fs.renameSync;
+    fs.renameSync = (from, to) => {
+      if (String(to) !== destination) return rename(from, to);
+      assert.ok(String(from).startsWith(dir + '/.heavy-ready-stage-'));
+      assert.equal(fs.existsSync(destination), false, 'no final placeholder before publication');
+      const staged = fs.readFileSync(String(from) + '/record.json', 'utf8');
+      const record = JSON.parse(staged);
+      assert.equal(record.version, 2);
+      assert.equal(fs.statSync(String(from) + '/record.json').mode & 0o777, 0o600);
+      assert.equal(fs.statSync(String(from)).mode & 0o077, 0);
+      if (suffix === '-closed') {
+        assert.equal(record.kind, 'escalated');
+        assert.equal(record.atMs, handle.request.expiresAtMs);
+        assert.equal(record.nonce, handle.request.owner.nonce);
+      } else assert.equal(record.eventId, handle.request.id + ':escalated');
+      if (phase === 'after') {
+        rename(from, to);
+        assert.equal(fs.readFileSync(destination + '/record.json', 'utf8'), staged);
+      }
+      fs.writeSync(1, 'heavy-v2-rename-kill-control' + String.fromCharCode(10));
+      process.kill(process.pid, 'SIGKILL');
+      assert.fail('SIGKILL must terminate the publication process');
+    };syncBuiltinESMExports();
+    api.readHeavyNewBuildHold({dir, now:handle.request.expiresAtMs, log:(step, fields) => {
+      assert.equal(step, 'heavy_ready.escalated');
+      assert.equal(fields.event_id, handle.request.id + ':escalated');
+      fs.writeFileSync(dir + '/fixture-sink-receipt.json', JSON.stringify(fields), {mode:0o600, flush:true});
+    }});
+    assert.fail('the exact destination rename boundary must be reached');
+  `, JSON.stringify(handle), destination, suffix, phase], {
+    encoding: "utf8", timeout: 9000,
+    env: { ...process.env, TMPDIR: handle.dir, TSX_DISABLE_CACHE: "1" },
+  });
+  assert.equal(child.error, undefined, child.stderr);
+  assert.equal(child.status, null, child.stderr);
+  assert.equal(child.signal, "SIGKILL", child.stderr);
+  assert.equal(child.stdout.trim(), "heavy-v2-rename-kill-control");
+}
+
+function recoverHeavyEscalationInFreshChild(handle: HeavyReservationHandle, logicalId: string): void {
+  nativeChild(handle.dir, `
+    const original = JSON.parse(process.argv[2]), logicalId = process.argv[3], events = [];
+    const reading = api.readHeavyNewBuildHold({dir, now:original.request.expiresAtMs + 1,
+      log:(step, fields) => events.push({step, fields})});
+    assert.deepEqual(reading, {state:'clear', observed:1, pendingEscalations:0});
+    assert.equal(events.length, 1);
+    assert.equal(events[0].step, 'heavy_ready.escalated');
+    assert.equal(events[0].fields.event_id, original.request.id + ':escalated');
+    assert.equal(events[0].fields.ready_at_ms, original.request.readyAtMs);
+    assert.equal(events[0].fields.expires_at_ms, original.request.expiresAtMs);
+    const replay = api.reserveHeavyNewBuilds(logicalId, original.request.label,
+      {dir, now:original.request.expiresAtMs + 2});
+    assert.equal(replay.owned, false);assert.deepEqual(replay.request, original.request);
+    assert.deepEqual(api.readHeavyNewBuildHold({dir, now:original.request.readyAtMs - 1,
+      log:()=>assert.fail('durable acknowledgement must suppress duplicate delivery')}),
+      {state:'clear', observed:1, pendingEscalations:0});
+  `, [JSON.stringify(handle), logicalId]);
+}
+
+test("heavy READY v2 SIGKILL before closure directory rename leaves no final claim and a fresh reader recovers", { timeout: 10000 }, t => {
+  const dir = fixture(t), logicalId = "kill-before-closure", now = Date.now();
+  const handle = reserveHeavyNewBuilds(logicalId, "gate", { dir, now });
+  const request = readFileSync(pathFor(handle));
+  killAtHeavyEnvelopeRename(handle, "-closed", "before");
+  assert.equal(existsSync(dirname(pathFor(handle, "-closed"))), false);
+  assert.equal(existsSync(dirname(pathFor(handle, "-delivered"))), false);
+  assert.equal(existsSync(join(dir, "fixture-sink-receipt.json")), false);
+  const stages = readdirSync(dir).filter(name => name.startsWith(".heavy-ready-stage-"));
+  assert.equal(stages.length, 1);
+  const staged = JSON.parse(readFileSync(join(dir, stages[0]!, "record.json"), "utf8"));
+  assert.equal(staged.kind, "escalated");assert.equal(staged.atMs, handle.request.expiresAtMs);
+  recoverHeavyEscalationInFreshChild(handle, logicalId);
+  assert.deepEqual(readFileSync(pathFor(handle)), request);
+  assert.equal(JSON.parse(readFileSync(pathFor(handle, "-closed"), "utf8")).atMs, handle.request.expiresAtMs);
+  assert.equal(existsSync(join(dir, stages[0]!, "record.json")), true, "recovery does not delete abandoned provenance");
+});
+
+test("heavy READY v2 SIGKILL before acknowledgement directory rename retries the same event in a fresh reader", { timeout: 10000 }, t => {
+  const dir = fixture(t), logicalId = "kill-before-ack", now = Date.now();
+  const handle = reserveHeavyNewBuilds(logicalId, "gate", { dir, now });
+  clear(dir, handle.request.expiresAtMs, 1, 1);
+  const closed = readFileSync(pathFor(handle, "-closed"));
+  killAtHeavyEnvelopeRename(handle, "-delivered", "before");
+  assert.equal(existsSync(dirname(pathFor(handle, "-delivered"))), false);
+  const firstDelivery = JSON.parse(readFileSync(join(dir, "fixture-sink-receipt.json"), "utf8"));
+  assert.equal(firstDelivery.event_id, `${handle.request.id}:escalated`);
+  const stages = readdirSync(dir).filter(name => name.startsWith(".heavy-ready-stage-"));
+  assert.equal(stages.length, 1);
+  assert.equal(JSON.parse(readFileSync(join(dir, stages[0]!, "record.json"), "utf8")).eventId, firstDelivery.event_id);
+  recoverHeavyEscalationInFreshChild(handle, logicalId);
+  assert.deepEqual(readFileSync(pathFor(handle, "-closed")), closed);
+  const ack = JSON.parse(readFileSync(pathFor(handle, "-delivered"), "utf8"));
+  assert.equal(ack.eventId, firstDelivery.event_id);assert.equal(ack.closureHash, hash(JSON.parse(closed.toString())));
+  assert.equal(existsSync(join(dir, stages[0]!, "record.json")), true);
+});
+
+test("heavy READY v2 SIGKILL after closure directory rename preserves a complete terminal and pending delivery", { timeout: 10000 }, t => {
+  const dir = fixture(t), logicalId = "kill-after-closure", now = Date.now();
+  const handle = reserveHeavyNewBuilds(logicalId, "gate", { dir, now });
+  killAtHeavyEnvelopeRename(handle, "-closed", "after");
+  assert.equal(existsSync(pathFor(handle, "-closed")), true);
+  assert.equal(existsSync(dirname(pathFor(handle, "-delivered"))), false);
+  assert.equal(existsSync(join(dir, "fixture-sink-receipt.json")), false);
+  assert.equal(readdirSync(dir).filter(name => name.startsWith(".heavy-ready-stage-")).length, 0);
+  const closed = readFileSync(pathFor(handle, "-closed"));
+  assert.equal(JSON.parse(closed.toString()).kind, "escalated");
+  clear(dir, now - 1, 1, 1);
+  recoverHeavyEscalationInFreshChild(handle, logicalId);
+  assert.deepEqual(readFileSync(pathFor(handle, "-closed")), closed);
+});
+
+test("heavy READY v2 asynchronous sinks never acknowledge delivery or leak an unhandled rejection", { timeout: 10000 }, t => {
+  const dir = fixture(t), handle = reserveHeavyNewBuilds("async-sink-refusal", "gate", { dir });
+  nativeChild(dir, `
+    const fs = await import('node:fs'), handle = JSON.parse(process.argv[2]);
+    const ack = dir + '/heavy-build-' + handle.request.id + '-delivered.json';
+    const unhandled = [], listener = reason => unhandled.push(reason);
+    process.on('unhandledRejection', listener);
+    try {
+      for (const sink of [async()=> 'not-synchronous', async()=> {throw new Error('asynchronous sink EIO');}]) {
+        assert.deepEqual(api.readHeavyNewBuildHold({dir, now:handle.request.expiresAtMs, log:sink}),
+          {state:'clear', observed:1, pendingEscalations:1});
+        assert.equal(fs.existsSync(ack), false);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(unhandled.length, 0);
+      }
+      const events = [];
+      assert.deepEqual(api.readHeavyNewBuildHold({dir, now:handle.request.readyAtMs - 1,
+        log:(step, fields)=>events.push({step, fields})}), {state:'clear', observed:1, pendingEscalations:0});
+      assert.equal(events.length, 1);assert.equal(events[0].fields.event_id, handle.request.id + ':escalated');
+      assert.equal(fs.existsSync(ack + '/record.json'), true);
+    } finally {process.removeListener('unhandledRejection', listener);}
+  `, [JSON.stringify(handle)]);
+});
+
+test("heavy READY v2 an expiry reader wins a concurrent owner release with one immutable terminal envelope", { timeout: 10000 }, t => {
+  const dir = fixture(t);
+  nativeChild(dir, `
+    import fs from 'node:fs';
+    import {spawnSync} from 'node:child_process';
+    import {syncBuiltinESMExports} from 'node:module';
+    const now = Date.now(), handle = api.reserveHeavyNewBuilds('release-expiry-race', 'gate', {dir, now});
+    const destination = dir + '/heavy-build-' + handle.request.id + '-closed.json';
+    const rename = fs.renameSync;let raced = false;
+    fs.renameSync = (from, to) => {
+      if (String(to) === destination && !raced) {
+        raced = true;
+        assert.equal(JSON.parse(fs.readFileSync(String(from) + '/record.json', 'utf8')).kind, 'released');
+        const child = spawnSync(process.execPath, ['--import', ${JSON.stringify(loader)}, '--input-type=module', '-e',
+          'import assert from "node:assert/strict";import * as api from ' + ${JSON.stringify(JSON.stringify(runtime))} + ';' +
+          'const reading = api.readHeavyNewBuildHold({dir:process.argv[1],now:Number(process.argv[2])});' +
+          'assert.deepEqual(reading,{state:"clear",observed:1,pendingEscalations:1});console.log("expiry-race-control");',
+          dir, String(handle.request.expiresAtMs)], {encoding:'utf8',timeout:5000,env:{...process.env,TMPDIR:dir,TSX_DISABLE_CACHE:'1'}});
+        assert.equal(child.error, undefined, child.stderr);assert.equal(child.signal, null, child.stderr);
+        assert.equal(child.status, 0, child.stderr);assert.equal(child.stdout.trim(), 'expiry-race-control');
+      }
+      return rename(from, to);
+    };syncBuiltinESMExports();
+    try {assert.equal(api.releaseHeavyNewBuilds(handle, {now:now + 1}), true);}
+    finally {fs.renameSync = rename;syncBuiltinESMExports();}
+    assert.equal(raced, true);
+    const terminal = fs.readFileSync(destination + '/record.json', 'utf8');
+    assert.equal(JSON.parse(terminal).kind, 'escalated');assert.equal(JSON.parse(terminal).atMs, handle.request.expiresAtMs);
+    assert.deepEqual(api.readHeavyNewBuildHold({dir,now:now - 1}), {state:'clear',observed:1,pendingEscalations:1});
+    assert.equal(fs.readFileSync(destination + '/record.json', 'utf8'), terminal);
+    assert.equal(fs.readdirSync(dir).filter(name=>name.startsWith('.heavy-ready-stage-')).length, 0);
   `);
 });

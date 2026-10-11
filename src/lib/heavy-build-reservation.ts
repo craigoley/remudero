@@ -1,8 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readSync, realpathSync, statfsSync } from "node:fs";
+import { closeSync, constants, fsyncSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readSync, realpathSync, renameSync, rmSync, statfsSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { join, resolve } from "node:path";
-import { createOrReadPublished } from "./fs-race-safe.js";
+import { dirname, join, resolve } from "node:path";
 import { systemClock } from "./clock.js";
 import { readPidNamespace, testSlotProcessFacts } from "./test-slot.js";
 
@@ -20,14 +19,14 @@ export interface HeavyReservationHandle { dir: string; request: HeavyBuildReserv
 export interface HeavyBuildHold {
   deferred: true; requestId: string; readyAtMs: number; expiresAtMs: number; detail: string;
 }
-interface Closure { version: 2; requestHash: string; nonce: string; kind: "released" | "escalated"; atMs: number }
-type Log = (step: string, fields: Record<string, unknown>) => void;
+interface HeavyReadyClosure { version: 2; requestHash: string; nonce: string; kind: "released" | "escalated"; atMs: number }
+type HeavyReadyLog = (step: string, fields: Record<string, unknown>) => unknown;
 export type HeavyReservationReading =
   | { state: "clear"; observed: number; pendingEscalations: number }
   | { state: "held"; observed: number; pendingEscalations: number; hold: HeavyBuildHold }
   | { state: "unavailable"; reason: string };
 const heavyRecordDigest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-const heavyRecordPath = (dir: string, id: string, suffix = ""): string => join(dir, `heavy-build-${id}${suffix}.json`);
+const heavyRecordPath = (dir: string, id: string, suffix = ""): string => join(dir, `heavy-build-${id}${suffix}.json`, "record.json");
 const heavyErrorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
 // This v2 backend is explicitly single-account, host-local. Nonces/hashes correlate receipts;
@@ -66,23 +65,40 @@ function openHeavyRecord(path: Parameters<typeof openSync>[0]): number {
   return openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
 }
 function readOptionalHeavyRecord(path: string): unknown {
+  try { heavyDirectoryIdentity(dirname(path)); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
   let fd: number;
   try { fd = openHeavyRecord(path); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error("published heavy READY envelope is incomplete");
+    throw error;
+  }
   try { return JSON.parse(readHeavyRecordBounded(fd)); } finally { closeSync(fd); }
+}
+function flushHeavyDirectory(path: string): void {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try { fsyncSync(fd); } finally { closeSync(fd); }
 }
 function publishHeavyRecord(path: string, record: unknown): { created: boolean; value: unknown } {
   const raw = JSON.stringify(record);
   if (Buffer.byteLength(raw) > HEAVY_RECORD_BYTES) throw new Error("heavy READY record exceeds bound");
-  const fs = { openSync: (path: Parameters<typeof openSync>[0], flags: Parameters<typeof openSync>[1], mode?: Parameters<typeof openSync>[2]) =>
-    flags === "r" ? openHeavyRecord(path) : openSync(path, flags, mode), closeSync,
-    readFileSync: ((fd: Parameters<typeof readFileSync>[0], encoding?: unknown) => {
-      if (typeof fd !== "number" || encoding !== "utf8") throw new Error("heavy READY requires its owned descriptor");
-      return readHeavyRecordBounded(fd);
-    }) as typeof readFileSync };
-  const claim = createOrReadPublished(path, 0o600, fs);
-  if (!claim.created) return { created: false, value: JSON.parse(claim.raw) };
-  try { claim.publish(raw); return { created: true, value: record }; } finally { claim.release(); }
+  const existing = readOptionalHeavyRecord(path);
+  if (existing !== undefined) return { created: false, value: existing };
+  const envelope = dirname(path), parent = dirname(envelope);
+  const stage = mkdtempSync(join(parent, ".heavy-ready-stage-"));
+  try {
+    writeFileSync(join(stage, "record.json"), raw, { mode: 0o600, flag: "wx", flush: true });
+    flushHeavyDirectory(stage);
+    try { renameSync(stage, envelope); }
+    catch (error) {
+      if (!["EEXIST", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+      // POSIX rename refuses a nonempty target directory. Cooperative writers publish ONLY
+      // complete nonempty envelopes, never final-path claims; the first complete record wins.
+      return { created: false, value: readOptionalHeavyRecord(path) };
+    }
+    flushHeavyDirectory(parent);
+    return { created: true, value: record };
+  } finally { rmSync(stage, { recursive: true, force: true }); } // Our unique stage only, never another owner's record.
 }
 function validateHeavyRequest(value: unknown): HeavyBuildReservation {
   const r = value as HeavyBuildReservation | undefined;
@@ -94,19 +110,19 @@ function validateHeavyRequest(value: unknown): HeavyBuildReservation {
       typeof r.owner.namespace !== "string" || !r.owner.namespace) throw new Error("malformed heavy READY request");
   return r;
 }
-function validateHeavyClosure(value: unknown, request: HeavyBuildReservation): Closure | undefined {
+function validateHeavyClosure(value: unknown, request: HeavyBuildReservation): HeavyReadyClosure | undefined {
   if (value === undefined) return undefined;
-  const c = value as Closure;
+  const c = value as HeavyReadyClosure;
   if (c.version !== 2 || c.requestHash !== heavyRecordDigest(request) || c.nonce !== request.owner.nonce ||
       !["released", "escalated"].includes(c.kind) || !Number.isSafeInteger(c.atMs) || c.atMs < request.readyAtMs ||
       (c.kind === "released" ? c.atMs >= request.expiresAtMs : c.atMs !== request.expiresAtMs)) throw new Error("foreign or malformed heavy READY closure");
   return c;
 }
-function closeHeavyRequest(dir: string, request: HeavyBuildReservation, now: number): Closure {
+function closeHeavyRequest(dir: string, request: HeavyBuildReservation, now: number): HeavyReadyClosure {
   const existing = validateHeavyClosure(readOptionalHeavyRecord(heavyRecordPath(dir, request.id, "-closed")), request);
   if (existing) return existing;
   const kind = now >= request.expiresAtMs ? "escalated" : "released";
-  const closure: Closure = { version: 2, requestHash: heavyRecordDigest(request), nonce: request.owner.nonce,
+  const closure: HeavyReadyClosure = { version: 2, requestHash: heavyRecordDigest(request), nonce: request.owner.nonce,
     kind, atMs: kind === "escalated" ? request.expiresAtMs : now };
   // One immutable terminal file: release and expiry cannot publish contradictory terminal states.
   return validateHeavyClosure(publishHeavyRecord(heavyRecordPath(dir, request.id, "-closed"), closure).value, request)!;
@@ -153,9 +169,7 @@ function censusHeavyRecords(dir: string): string[] {
       if (++entries > HEAVY_MAX_DIRECTORY_ENTRIES) throw new Error("heavy READY directory census incomplete at bounded entry limit; governed archival required");
       if (!entry.name.startsWith("heavy-build-")) continue;
       const match = /^heavy-build-([a-f0-9]{64})(-(?:closed|delivered))?\.json$/.exec(entry.name);
-      // Atomic publisher stages are not requests; the empty claim itself is still an unreadable record.
-      if (!match && /^heavy-build-[a-f0-9]{64}(?:-(?:closed|delivered))?\.json\.publish-[0-9]+-[a-f0-9-]+$/.test(entry.name)) continue;
-      if (!match || !entry.isFile()) throw new Error("malformed or nonregular heavy READY directory entry");
+      if (!match || !entry.isDirectory()) throw new Error("malformed or nonregular heavy READY directory entry");
       (match[2] ? receipts : requests).add(match[1]!);
     }
     for (const id of receipts) if (!requests.has(id)) throw new Error("orphan heavy READY receipt; census unavailable");
@@ -164,7 +178,7 @@ function censusHeavyRecords(dir: string): string[] {
 }
 
 /** A terminal record is an outbox entry. Delivery is at-least-once, with a stable event id. */
-function deliverHeavyEscalation(dir: string, request: HeavyBuildReservation, closure: Closure, log?: Log): boolean {
+function deliverHeavyEscalation(dir: string, request: HeavyBuildReservation, closure: HeavyReadyClosure, log?: HeavyReadyLog): boolean {
   const ackPath = heavyRecordPath(dir, request.id, "-delivered"), ack = readOptionalHeavyRecord(ackPath);
   const expected = { version: 2, closureHash: heavyRecordDigest(closure), eventId: `${request.id}:escalated` };
   if (ack !== undefined) {
@@ -173,15 +187,20 @@ function deliverHeavyEscalation(dir: string, request: HeavyBuildReservation, clo
   }
   if (!log) return false;
   try {
-    log("heavy_ready.escalated", { event_id: expected.eventId, request_id: request.id,
+    const accepted = log("heavy_ready.escalated", { event_id: expected.eventId, request_id: request.id,
       ready_at_ms: request.readyAtMs, expires_at_ms: request.expiresAtMs, scope: "NEW-implement-only" });
+    if (accepted !== null && (typeof accepted === "object" || typeof accepted === "function") &&
+        typeof (accepted as { then?: unknown }).then === "function") {
+      void Promise.resolve(accepted).catch(() => {});
+      throw new Error("heavy READY delivery requires synchronous durable acceptance");
+    }
     if (heavyRecordDigest(publishHeavyRecord(ackPath, expected).value) !== heavyRecordDigest(expected)) throw new Error("foreign heavy READY delivery acknowledgement");
     return true;
   } catch { return false; /* No acknowledgement: restart/next read retries. Never reopens admission. */ }
 }
 
 /** Unknown never means clear. Closed records are not active-capacity occupants, including on rollback. */
-export function readHeavyNewBuildHold(opts: { dir: string; now?: number; log?: Log }): HeavyReservationReading {
+export function readHeavyNewBuildHold(opts: { dir: string; now?: number; log?: HeavyReadyLog }): HeavyReservationReading {
   try {
     const now = opts.now ?? systemClock.now();
     if (!Number.isSafeInteger(now) || now < 0) throw new Error("invalid heavy READY read time");
@@ -213,7 +232,7 @@ export function readHeavyNewBuildHold(opts: { dir: string; now?: number; log?: L
 }
 
 /** Opt-in composition-root adapter. An absent directory disables it; a configured missing one is UNKNOWN. */
-export function heavyNewBuildGate(log: Log, opts: { dir?: string } = {}): () => HeavyBuildHold | undefined {
+export function heavyNewBuildGate(log: HeavyReadyLog, opts: { dir?: string } = {}): () => HeavyBuildHold | undefined {
   return () => {
     const dir = opts.dir;
     if (dir === undefined) return undefined;
