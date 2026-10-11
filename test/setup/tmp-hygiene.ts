@@ -27,16 +27,44 @@ import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
+import { beforeEach } from "node:test";
 import { isMainThread } from "node:worker_threads";
 // W1-T4805: FIRST import — process-level containment against live GitHub writes (dead push URLs, a
 // sentinel token, no App key). Every runner invocation already `--import`s this file, so it rides along.
-import { appendGitConfigEnv, reapDeadOwnerDirs, setupDirOwnerTag } from "./no-live-remote.js";
+import { appendGitConfigEnv, DEAD_PUSH_ROOT, GH_CONFIG_DIR_PREFIX, GITHUB_PUSH_PREFIXES,
+  reapDeadOwnerDirs, runsTestFilesInThisProcess, setupDirOwnerTag } from "./no-live-remote.js";
 // #7598: pin TMPDIR to its real path before any fixture builds a temp path (macOS /var -> /private/var).
 import "./canonical-tmpdir.js";
 import { installReadMapFromEnv } from "./read-map.js";
 import { admitTestFile } from "../../src/lib/test-file-admission.js";
 import { TEST_PROCESS_MARKER } from "../../src/lib/tmp.js";
 import { reapableTmpPrefix } from "./reapable-prefix.js";
+import { LIVE_WRITE_SENTINEL_TOKEN } from "../../src/lib/live-write-guard.js";
+import { setTestFileSlotScope } from "../../src/lib/test-slot.js";
+
+if (isMainThread && runsTestFilesInThisProcess()) {
+  const missing: string[] = [];
+  if (process.env.GH_TOKEN !== LIVE_WRITE_SENTINEL_TOKEN) missing.push("GH_TOKEN sentinel");
+  const configDir = process.env.GH_CONFIG_DIR;
+  if (!configDir?.startsWith(join(tmpdir(), `${GH_CONFIG_DIR_PREFIX}${setupDirOwnerTag()}`)) ||
+      !fs.existsSync(configDir) || !fs.lstatSync(configDir).isDirectory()) {
+    missing.push("GH_CONFIG_DIR owned by this process");
+  }
+  const count = Number(process.env.GIT_CONFIG_COUNT);
+  const pushPrefixes = new Set<string>();
+  if (Number.isSafeInteger(count) && count > 0) {
+    for (let i = 0; i < count; i += 1) {
+      if (process.env[`GIT_CONFIG_KEY_${i}`] === `url.${DEAD_PUSH_ROOT}.pushInsteadOf`) {
+        pushPrefixes.add(process.env[`GIT_CONFIG_VALUE_${i}`] ?? "");
+      }
+    }
+  }
+  if (!GITHUB_PUSH_PREFIXES.every((prefix) => pushPrefixes.has(prefix))) missing.push("dead push URL config");
+  if (missing.length > 0) throw new Error(`pooled test containment missing: ${missing.join(", ")}`);
+  beforeEach((context) => {
+    if (context.filePath !== undefined) setTestFileSlotScope(context.filePath);
+  });
+}
 
 /**
  * W1-T3069 — REFUSE THE READ-ONLY ESCAPE BEFORE A SINGLE TEST RUNS.
