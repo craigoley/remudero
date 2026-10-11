@@ -1,3 +1,7 @@
+- **Decode citations: "Rule N" = MASTER-PLAN §12; "G-N" = §14 "Grill RESOLVED"; "P48"/"DR-N" =
+  its retro ledger; `rule15-*` names an artifact, not a rule.**
+  *(Index line retired 2026-10-11: the W1-T3323 bullet below only pointed at its table. It is kept verbatim; its id resolves here through `doctrine/merged-rules.json`.)*
+
 - **Decoding rule citations — where each family canonically lives.** "Rule N" / "Standing rule N"
   = MASTER-PLAN **§12** (1–25, plus 3B/8B); the linter enforces several by name — 15:
   `criterionFieldTampered` + `rule15FilingViolation`, 17: `provenanceViolation`, 18:

@@ -10,6 +10,7 @@ import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse } from "yaml";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { finishJudgedRun } from "./helpers/judged-pool-run.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "test-tier-manifest.mjs");
@@ -158,10 +159,10 @@ test("the candidate runner spawns exactly its selected shard and never spawns af
     const status = main(
       ["--root", REPO_ROOT, "--manifest", manifestPath, "--run-candidates", candidatePath, "--shard", `${index}/4`],
       {
-        spawn: (_cmd, childArgs) => {
+        spawn: (_cmd, childArgs, opts) => {
           spawns += 1;
           args = childArgs;
-          return { status: 0 };
+          return finishJudgedRun(childArgs, opts);
         },
       },
     );

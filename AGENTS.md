@@ -12,8 +12,8 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
 
 ## Rule Headlines
 
-- **Run the shipped local gate before your FIRST push, not every commit.**
-- **SUPERSEDES full-parity first push: run `node --import tsx scripts/preflight-author.mjs` on the committed tree; required hosted checks still gate merge.**
+- **Before your FIRST push (not every commit), run `node --import tsx scripts/preflight-author.mjs` on the
+  committed tree; required hosted checks still gate merge.**
 - **A test run with no `# tests` summary is NOT A RESULT, and a summary over an UNVERIFIED FILE LIST
   is not one either — `node --test` given a ghost path returns a green count, silently. `ls` first.**
 - **THE BLOCK MUST PARSE BEFORE ANY PROOF IN IT CAN RUN — check GITHUB'S STORED BODY with
@@ -44,11 +44,10 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   restored is the evidence it is load-bearing.**
 - **ZERO A `DA:` VALUE INSIDE THE TARGET's OWN `SF:` BLOCK — a whole-file replace hits another
   file's identical line number and returns a FALSE `OK`.**
-- **Derive "which tasks are merged" from the `Remudero-Task:` trailer on merged PRs — never from
-  ledger verdict lines.**
-- **AND A TRAILER-ONLY SET UNDER-CREDITS, because the BRANCH NAME is a second, independent credit
-  path.**
-- **THE TWO SCOPE-TIME CHECKS, AS COMMANDS — RUN BOTH BEFORE BUILDING A FILED TASK.**
+- **Derive "which tasks are merged" from merged PRs' `Remudero-Task:` trailer UNIONED with their
+  `run-<taskId>-*` branch — never from ledger verdict lines.**
+- **Before building a filed task, check BOTH `git ls-remote --heads origin 'run-<id>-*'` (in flight?)
+  and merged PRs for an exact `^Remudero-Task: <id>$` trailer (shipped?), never commit subjects.**
 - **Sweep the SUBJECT over open PR heads, not only `origin/main` — the id half already does.**
 - **NAME A SESSION BRANCH `run-<taskId>-<epochMs>` WHEN BUILDING A FILED TASK.**
 - **Before believing "task X is next", confirm the frontier with the repo's own selector —
@@ -60,35 +59,34 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   the record ALONE passes at `verify: auto`.**
 - **A shard's `status:` field is not a completion signal — it stays `queued` on tasks that
   shipped.**
-- **Decoding rule citations — where each family canonically lives.**
+- **Decode citations: "Rule N" = MASTER-PLAN §12; "G-N" = §14 "Grill RESOLVED"; "P48"/"DR-N" =
+  its retro ledger; `rule15-*` names an artifact, not a rule.**
 - **Take the cheap candidate beside a costly one, and name what the costly one now waits for.**
 - **Never fan out update-branch after a main fix: protection is non-strict, and each refresh re-runs
   ~16 min of CI and voids the review.**
 - **Leave a red fleet PR to the fix lane while a round is due or in flight — hand pushes out-race it
   and hide its defects.**
 - **Do NOT push a fresh sha to clear a stale-red `ci-gate` — it self-clears.**
-- **CADENCE IS THE BUDGET, NOT INTENT — a sparse check-in is fine, a poll is not. NOW ENFORCED:**
+- **Space `gh` reads 180 s apart, never poll — `deny-floor.sh` refuses a closer read; GitHub's
+  SECONDARY limit 403s on RATE while `rate_limit` reads full.**
 - **`gh pr create` may die on API quota; git push is unaffected.**
 - **A CONFLICTING PR registers ZERO check runs. `total: 0` reads as "still queued" but means
   `mergeable_state: dirty` — check mergeability before waiting on CI.**
-- **When two PRs append tests to the same file's TAIL, the conflict region can cut just before a
-  SHARED closing `});`**
+- **Two PRs appending tests to one file's TAIL can conflict before a SHARED closing `});` — close
+  the ours-side block yourself; esbuild says only `Unexpected end of file`.**
 - **A corrected PR title is observed by a RE-RUN, not only by a new sha — but `edited` still fires
   nothing.**
-- **A merge to a BAKED path ships nothing until an operator triggers an image rebuild — know which
-  half of your diff you are in before you call a merge "shipped."**
-- **SUPERSEDES THE RULE ABOVE: a baked-path merge ships itself (auto ACR build + recycle); check
-  `docker inspect`.**
+- **A BAKED-path merge (`deploy/Dockerfile`, `deploy/entrypoint.sh`) ships itself by auto ACR build +
+  recycle, not at merge — confirm with `docker inspect` before calling it shipped.**
 - **PRs green on their own bases can cross a ceiling together: a `# fail 0` main red is a ratchet
   collision, and main records it (#10724).**
 - **Main push runs are cancelled while PENDING, so most main commits never get a CI verdict — never
   read CANCELLED as red.**
 - **Compare a base-red PR's failing check to main's FULL check census, not ci-gate's aggregates, or
   every shard red is held.**
-- **The rotations come in TWO FORMS and every glob that names only one answers SILENTLY WRONG. The
-  union is three patterns, never two:**
-- **THE CONTROL MUST PROVE EACH FORM WAS READ, and a raw cross-archive count CANNOT**
-- **And the archives are NOT cumulative snapshots.**
+- **Grep the ledger with `rmd ledger-grep <pat>`; by hand, `zgrep` THREE globs —
+  `state/ledger.*.ndjson.gz state/ledger.*.ndjson state/ledger.ndjson` — with a file count PER
+  FORM as the control, and never delete an archive: each holds history no other file has.**
 - **A ledger line must carry the reason from the DECISION THAT PRODUCED ITS OUTCOME.**
 - **On a zero match, `node --test --test-name-pattern` still emits `ok 1 - <RELATIVE test path>` —
   exclude the wrapper by the RELATIVE path, never the absolute one.**
@@ -99,27 +97,23 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
 - **`rmd drain --dry-run` is neither side-effect-free nor able to see your branch.**
 - **A bound that fires on a HEALTHY condition is this repo's recurring defect — before tuning the
   number, check the population it is meant to separate has ever been observed.**
-- **A ZERO IS NOT A MEASUREMENT UNTIL A POSITIVE CONTROL PROVES THE QUERY COULD SEE ITS CORPUS.
-  RUN ONE ON EVERY SWEEP WHOSE ANSWER YOU INTEND TO ACT ON.**
+- **A ZERO IS NOT A MEASUREMENT until a positive control proves the query saw its corpus — run one on
+  every sweep you will act on. A control proves only that: name the question the query really
+  answers, check the corpus's newest ts covers the window, and re-run a surprise in another ENVIRONMENT.**
 - **(a) A POSIX REGEX ENGINE HERE SILENTLY DROPS `\s`/`\b` INSTEAD OF ERRORING, AND TWO DIFFERENT
   TOOLS DO IT.**
 - **(b) THE `grep` IN THIS HARNESS IS A ugrep WRAPPER WITH `-I` (ignore-binary) INJECTED, so a file
   holding ONE NUL byte is skipped entirely — no output, exit 1, indistinguishable from real
   absence.**
 - **(c) A GLOB THAT NAMES ONE FILE FORM ANSWERS FROM THE OTHER WITHOUT SAYING SO.**
-- **(d) A QUERY CAN ANSWER THE WRONG QUESTION WITH A PERFECTLY GOOD ZERO, AND NO POSITIVE CONTROL
-  SAVES YOU.**
-- **(e) A CONTROL PROVES THE QUERY CAN SEE ITS CORPUS; IT DOES NOT PROVE THE CORPUS IS THE RIGHT ONE
-  — AND RE-RUNNING THE SAME WAY IS NOT A SECOND OPINION.**
 - **(f) THE TWO SIDES OF A COMPARISON MUST COUNT THE SAME UNITS — `ls` COUNTS A DIRECTORY AS ONE
   ENTRY.**
 - **(g) A CHANGE THAT REMOVES AN ACCESS PATH MUST PROVE THE REPLACEMENT FIRST, FROM A NEW SESSION
   — AN EXISTING CONNECTION IS NOT EVIDENCE.**
 - **(h) A GATE RUN FROM A CHECKOUT that is BEHIND answers about a file and a threshold that both
   moved — run it against `origin/main`'s blobs and report the behind-count.**
-- **(i) A POSITIVE CONTROL PROVES THE QUERY CAN SEE ITS CORPUS; IT DOES NOT PROVE THE CORPUS COVERS THE
-  WINDOW.**
-- **(j) A CENSUS TEST NAMES NONE OF YOUR SYMBOLS, SO THE CALLER SWEEP ABOVE CANNOT FIND IT**
+- **Beside the `git grep -l <symbol>` caller sweep, run the census suites your diff joins
+  (`rmd census-membership`) — they WALK a population and name none of your symbols.**
 - **(k) A RULE 21 protocol run passing `{ baseTask }` ALONE reports THREE INDISTINGUISHABLE ZEROS.**
 - **A `catch` returning a success-shaped literal is a CLAIM: name what it collapses, and where remedies
   differ, return a third value the caller sees.**

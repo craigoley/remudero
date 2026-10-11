@@ -1,0 +1,69 @@
+[
+  {
+    "canonicalId": "before-your-first-push-not-every-commit-run-node-import-tsx-scri",
+    "aliasIds": [
+      "supersedes-full-parity-first-push-run-node-import-tsx-scripts-pr",
+      "run-the-shipped-local-gate-before-your-first-push-not-every-comm"
+    ]
+  },
+  {
+    "canonicalId": "a-baked-path-merge-deploy-dockerfile-deploy-entrypoint-sh-ships",
+    "aliasIds": [
+      "supersedes-the-rule-above-a-baked-path-merge-ships-itself-auto-a",
+      "a-merge-to-a-baked-path-ships-nothing-until-an-operator-triggers"
+    ]
+  },
+  {
+    "canonicalId": "grep-the-ledger-with-rmd-ledger-grep-pat-by-hand-zgrep-three-glo",
+    "aliasIds": [
+      "the-rotations-come-in-two-forms-and-every-glob-that-names-only-o",
+      "the-control-must-prove-each-form-was-read-and-a-raw-cross-archiv",
+      "and-the-archives-are-not-cumulative-snapshots"
+    ]
+  },
+  {
+    "canonicalId": "a-zero-is-not-a-measurement-until-a-positive-control-proves-the",
+    "aliasIds": [
+      "d-a-query-can-answer-the-wrong-question-with-a-perfectly-good-ze",
+      "e-a-control-proves-the-query-can-see-its-corpus-it-does-not-prov",
+      "i-a-positive-control-proves-the-query-can-see-its-corpus-it-does"
+    ]
+  },
+  {
+    "canonicalId": "derive-which-tasks-are-merged-from-merged-prs-remudero-task-trai",
+    "aliasIds": [
+      "derive-which-tasks-are-merged-from-the-remudero-task-trailer-on",
+      "and-a-trailer-only-set-under-credits-because-the-branch-name-is"
+    ]
+  },
+  {
+    "canonicalId": "before-building-a-filed-task-check-both-git-ls-remote-heads-orig",
+    "aliasIds": [
+      "the-two-scope-time-checks-as-commands-run-both-before-building-a"
+    ]
+  },
+  {
+    "canonicalId": "decode-citations-rule-n-master-plan-12-g-n-14-grill-resolved-p48",
+    "aliasIds": [
+      "decoding-rule-citations-where-each-family-canonically-lives"
+    ]
+  },
+  {
+    "canonicalId": "space-gh-reads-180-s-apart-never-poll-deny-floor-sh-refuses-a-cl",
+    "aliasIds": [
+      "cadence-is-the-budget-not-intent-a-sparse-check-in-is-fine-a-pol"
+    ]
+  },
+  {
+    "canonicalId": "two-prs-appending-tests-to-one-file-s-tail-can-conflict-before-a",
+    "aliasIds": [
+      "when-two-prs-append-tests-to-the-same-file-s-tail-the-conflict-r"
+    ]
+  },
+  {
+    "canonicalId": "beside-the-git-grep-l-symbol-caller-sweep-run-the-census-suites",
+    "aliasIds": [
+      "j-a-census-test-names-none-of-your-symbols-so-the-caller-sweep-a"
+    ]
+  }
+]
