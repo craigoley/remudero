@@ -43,7 +43,7 @@ test("W1-T7756: admission gardening distinguishes missing evidence from healthy 
   assert.equal(report(truncated).coverage, "unknown");
 });
 
-test("W1-T7756: admission recovery deduplicates persistent causes across PR heads", () => {
+test("W1-T7756: admission recovery deduplicates persistent causes across PR heads", (t) => {
   const first = report();
   const changed = corpus(); changed.data.repository.pullRequests.nodes[1]!.headRefOid = "b".repeat(40);
   const second = report(changed);
@@ -51,15 +51,31 @@ test("W1-T7756: admission recovery deduplicates persistent causes across PR head
   const one = remedy.admissionFlowInventory(first, [], [], now);
   assert.equal(one.candidates.length, 1);
   assert.equal(one.next!.admissionShadow, true);
+  const f = fixture(t);
+  remedy.recordAdmissionFlowProposal(f.deps, one.next!);
+  const nextHead = remedy.admissionFlowInventory(second, [], [], now).next!;
+  remedy.recordAdmissionFlowProposal(f.deps, nextHead);
+  assert.equal(readdirSync(join(f.root, "admission-flow-shadow-intents")).length, 1);
+  assert.equal(f.logs.filter(r => r.step === "admission_flow.proposal_shadow").length, 1);
 });
 
-test("W1-T7756: admission gardening cannot widen trust or bypass required checks", () => {
+test("W1-T7756: admission gardening cannot widen trust or bypass required checks", (t) => {
   const measured = report();
   assert.equal(measured.permission, "not-granted");
   assert.equal(measured.mode, "shadow");
   assert.equal(measured.trusted[0].next, "required-current-head-checks");
   const missingActor = corpus(); missingActor.data.repository.pullRequests.nodes[1]!.author.databaseId = 0;
   assert.equal(report(missingActor).coverage, "unknown");
+  const f = fixture(t), policyBefore = feedbackContentDigest(settings);
+  const spec = remedy.ladderGardenSpec(f.deps, { kind: remedy.FLOW_LADDER,
+    inventory: () => remedy.admissionFlowInventory(measured, [], [], now),
+    sources: { mintTaskId: () => { throw Error("forbidden mint"); }, escalate: () => { throw Error("forbidden owner question"); } } });
+  const action = spec.inventory().next!, plan = { actions: [action], acting: ["draft" as const] };
+  const ws = { root: f.root, branch: "shadow", land: () => { throw Error("forbidden publication"); }, dispose: () => {} };
+  assert.equal(spec.apply(ws, plan, spec.scorecard(spec.inventory(), plan)), undefined);
+  assert.equal(feedbackContentDigest(settings), policyBefore);
+  assert.equal(f.logs[0]!.fields!.permission, "not-granted");
+  assert.equal(f.logs[0]!.fields!.required_checks, "ordinary-current-head-checks-required");
 });
 
 function fixture(t: test.TestContext) {
