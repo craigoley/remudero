@@ -45741,7 +45741,7 @@ function derivedImplementCommit(task: Pick<Task, "id" | "title" | "type">, paths
   return { subject, reason: `no COMMIT_MESSAGE after one re-ask; ${task.id} title and ${paths[0]}` };
 }
 
-function derivedFixCommit(check: string | undefined, prUrl: string): { subject: string; reason: string } | undefined {
+export function derivedFixCommit(check: string | undefined, prUrl: string): { subject: string; reason: string } | undefined {
   const pr = prUrl.match(/\/pull\/(\d+)(?:\/|$)/)?.[1];
   if (check === undefined || check.trim().length === 0 || pr === undefined) return undefined;
   const prefix = "fix: repair ";
