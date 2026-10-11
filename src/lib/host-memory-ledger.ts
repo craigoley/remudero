@@ -326,9 +326,7 @@ export function defaultMemoryLedgerLocation(): { dir: string; scope: "host" | "l
 
 const require = createRequire(import.meta.url);
 
-export class MemoryAdmissionLockBusyError extends Error {
-  constructor() { super("admission-lock-held"); this.name = "MemoryAdmissionLockBusyError"; }
-}
+export const MEMORY_ADMISSION_LOCK_BUSY = "RMD_MEMORY_ADMISSION_LOCK_BUSY";
 
 /** The existing SQLite BEGIN IMMEDIATE contract, without a busy wait or a second reservation store.
  * Its OS lock ends on close or process death. The action is synchronous: never hold it over a spawn or back-off. */
@@ -341,7 +339,7 @@ export function withMemoryAdmissionLock<T>(action: () => T, location = defaultMe
       db.exec("BEGIN IMMEDIATE");
     } catch (error) {
       const code = (error as { errcode?: number }).errcode;
-      if (code === 5 || code === 6) throw new MemoryAdmissionLockBusyError();
+      if (code === 5 || code === 6) throw Object.assign(new Error("admission-lock-held"), { code: MEMORY_ADMISSION_LOCK_BUSY });
       throw new Error(`admission-lock-unavailable: ${String((error as Error).message ?? error)}`);
     }
     const result = action();

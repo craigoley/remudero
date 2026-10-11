@@ -35,6 +35,7 @@ import type { LedgerLine } from "../src/lib/ledger.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs } from "../src/lib/worker.js";
 import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const NOW = Date.parse("2026-10-10T20:00:00.000Z");
@@ -464,6 +465,7 @@ test("memory admission publishes one reservation before a concurrent start can r
 
 async function nativeAdmissionBoundary() {
   const root = fixtureRoot("admission-processes-");
+  const blockedGitHub = ghShim([{ when: "", exit: 77, stderr: "disposable admission control refuses live GitHub" }]);
   const dir = join(root, "host-memory");
   mkdirSync(dir);
   const fixtureLedger = {
@@ -528,7 +530,7 @@ async function nativeAdmissionBoundary() {
       const child = fork(entry, [role], {
         execPath: process.execPath,
         execArgv: ["--import", join(REPO_ROOT, "node_modules", "tsx", "dist", "loader.mjs")],
-        env: { PATH: process.env.PATH, HOME: root, TMPDIR: root, GH_CONFIG_DIR: join(root, "gh"), GIT_TERMINAL_PROMPT: "0" },
+        env: { PATH: `${blockedGitHub.dir}:${process.env.PATH}`, HOME: root, TMPDIR: root, GH_CONFIG_DIR: root, GIT_TERMINAL_PROMPT: "0" },
         stdio: ["ignore", "ignore", "pipe", "ipc"],
       });
       children.push(child); child.stderr?.resume();
@@ -554,7 +556,7 @@ async function nativeAdmissionBoundary() {
     await awaitEvent(() => events.filter(e => e.kind === "released").length === 2);
     const holder = fork(entry, ["holder"], {
       execPath: process.execPath, execArgv: ["--import", join(REPO_ROOT, "node_modules", "tsx", "dist", "loader.mjs")],
-      env: { PATH: process.env.PATH, HOME: root, TMPDIR: root, GH_CONFIG_DIR: join(root, "gh"), GIT_TERMINAL_PROMPT: "0" },
+      env: { PATH: `${blockedGitHub.dir}:${process.env.PATH}`, HOME: root, TMPDIR: root, GH_CONFIG_DIR: root, GIT_TERMINAL_PROMPT: "0" },
       stdio: ["ignore", "ignore", "pipe", "ipc"],
     });
     children.push(holder); holder.stderr?.resume();
@@ -562,12 +564,13 @@ async function nativeAdmissionBoundary() {
     await awaitEvent(() => events.some(e => e.kind === "ready" && e.role === "holder"));
     holder.send({ kind: "go" });
     await awaitEvent(() => events.some(e => e.kind === "held" && e.role === "holder"));
-    assert.throws(() => memoryLedger.withMemoryAdmissionLock(() => "wrong", { dir, scope: "host" }), memoryLedger.MemoryAdmissionLockBusyError,
+    assert.throws(() => memoryLedger.withMemoryAdmissionLock(() => "wrong", { dir, scope: "host" }), { code: memoryLedger.MEMORY_ADMISSION_LOCK_BUSY },
       "a live holder is not reclaimed and the reader never waits synchronously");
     const closed = new Promise<void>(resolve => holder.once("close", () => resolve()));
     holder.kill("SIGKILL"); await closed; // Only this disposable fault-control child; no production process or foreign job.
     assert.equal(memoryLedger.withMemoryAdmissionLock(() => "recovered", { dir, scope: "host" }), "recovered", "verified process death releases the OS lock without deleting a lease");
     assert.throws(() => memoryLedger.withMemoryAdmissionLock(() => "wrong", { dir: join(root, "absent"), scope: "host" }), /admission-lock-unavailable/);
+    assert.deepEqual(blockedGitHub.calls(), [], "no child attempted live GitHub");
   } finally {
     for (const child of children) {
       if (child.exitCode === null && child.signalCode === null) {
@@ -576,6 +579,7 @@ async function nativeAdmissionBoundary() {
       }
     }
     rmSync(root, { recursive: true, force: true });
+    rmSync(blockedGitHub.dir, { recursive: true, force: true });
   }
 }
 

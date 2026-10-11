@@ -19,7 +19,7 @@
 import { join } from "node:path";
 
 import { daemonOwnedProcess, openLearnedReservation, type LearnedReservation } from "./host-memory-learning.js";
-import { MemoryAdmissionLockBusyError, withMemoryAdmissionLock, type WorkerClass } from "./host-memory-ledger.js";
+import { MEMORY_ADMISSION_LOCK_BUSY, withMemoryAdmissionLock, type WorkerClass } from "./host-memory-ledger.js";
 import { rankDemand } from "./host-memory-priority.js";
 import {
   defaultShadowMemoryPorts,
@@ -164,7 +164,8 @@ export async function awaitMemoryAdmission(
               if (admitAs === "fits" && inputs.ledger.state !== "present") throw new Error(`admission-ledger-${inputs.ledger.state}`);
               reservationAttempted = true;
               reservation = request.reserve ? request.reserve() : ports.openReservation({ workerClass: request.workerClass, root });
-              if (!reservation?.published || reservation.id === undefined) throw new Error("admission-reservation-unpublished");
+              if (reservation === undefined || reservation.id === undefined) throw new Error("admission-reservation-unavailable");
+              if (reservation.published !== true) throw new Error("admission-reservation-unpublished");
               if (reservation.estimateMib !== inputs.start.estimateMib) throw new Error("admission-estimate-changed");
               const visible = ports.readLedger(root);
               if (visible?.state !== "present") throw new Error(`admission-ledger-${visible?.state ?? "unreadable"}`);
@@ -187,7 +188,7 @@ export async function awaitMemoryAdmission(
               waiting: waiting.length });
           }
         } catch (error) {
-          if (!(error instanceof MemoryAdmissionLockBusyError)) throw error;
+          if ((error as NodeJS.ErrnoException)?.code !== MEMORY_ADMISSION_LOCK_BUSY) throw error;
           if (!noted) {
             noted = true;
             write({ step: ENFORCE_WAIT_STEP, worker_class: request.workerClass, tier: "uncertain", reasons: ["admission-lock-held"], waiting: waiting.length });
