@@ -1,0 +1,68 @@
+- id: W1-T8245
+  title: "A PAUSE SET FROM OUTSIDE THE FLEET IS AN INCIDENT BY ITS COST, NOT ITS CLOCK — on 2026-10-11 a Codex serve-restoration script paused core five times (01:17, 02:14, 02:52, 11:46, 12:44) for about 181 idle lane-minutes; the pause tiers escalate only at half of a 4-hour maintenance TTL, so none was ever flagged"
+  repo: remudero
+  depends_on: [W1-T7839, W1-T8264, W1-T8235]  # actor evidence from W1-T7839; registers in src/lib/fleet-flow-detectors.ts after W1-T8264; idle cost from W1-T8235
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — recognising a dispatch hold set by something other than the fleet's own automation
+  band_meaning: span
+  origin: "operator ruling 2026-10-11 (\"Release the pause on core. Pause should only impact serve until it's back.\") + detection research: foreign-pause detector"
+  plan_refs: [W1-T4429, W1-T7727, W1-T7839, W1-T2262, W1-T8235]
+  files: [src/lib/foreign-pause-detector.ts, src/lib/fleet-flow-detectors.ts, plan/policy.yaml, test/a-pause-set-from-outside-the-fleet-is-an-incident-by-its-cost.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    OBSERVED, core ledger union 2026-10-10T20:00Z..2026-10-11T19:38Z, read-only:
+      - Five `fleet.pause` rows on instance core, each actor "unknown", host "Remudero" (the host itself, not a
+        container), reason "maintenance: supervised serve restoration window (core only)", sessions
+        operator-serve-restoration-20261011 and ...-supervised-v4 / -v5, at 01:17:50, 02:14:40, 02:52:14, 11:46:29 and
+        12:44:08. They were resumed at 01:48:20, 02:44:48, 03:12:41, 12:29:30 and 12:46:51.
+      - Reconstructed idle lane-minutes with 3 lanes: about 43, 9, 36, 88 and 5.
+      - A person noticed the first at 01:46Z. The operator then ruled that serve work never pauses core, and an
+        operator session released the 11:46 and 12:44 pauses by hand. For the last one it polled the PAUSE flag
+        every 60 s, which is a detector built by hand.
+    READ on origin/main 25067fc89, src/lib/fleet-control.ts: W1-T4429's tiers (`evaluatePauseTier`, :788) escalate a
+    hold at half its expiry and lapse it at expiry. `classifyPauseReason` gives "maintenance" a 4-hour default TTL
+    (`PAUSE_DEFAULT_TTL_MS`). The tiers judge only time and setter liveness, never who set the hold or what it is
+    costing. A live setter's 43-minute pause that idles the fleet is below every tier.
+    W1-T7839 (queued) records verified actor evidence on the pause row and flag. This task consumes it.
+  design: |
+    Operator rulings: no fixed threshold, and a pause is never refused for its actor (W1-T7839). This task detects
+    and names. The remedy is W1-T8262.
+    1. WHO MAY HOLD WHICH INSTANCE. plan/policy.yaml gains `pausePolicy`: per instance, the setter classes that
+       count as the fleet's own automation, recorded with an origin like other policy rows. For core that is the
+       daemon's freshness/restart drain and the host recycle (`deploy/recycle-container.sh`). Every other setter
+       class from W1-T7839's evidence is foreign: human at a terminal, agent session, remote non-interactive, or
+       other host automation. A hold with no actor evidence (written before W1-T7839) is foreign-unverified, never
+       trusted.
+    2. JUDGED BY COST, AGAINST ITS OWN HISTORY. The measure is the idle lane-slot minutes the hold has caused, from
+       W1-T8235's `lane.idle_changed` rows with cause operator_pause and that hold. The bound is `ownHistoryBound`
+       (W1-T8236) over the per-hold idle cost of the instance's automation pauses, so a foreign pause is an incident
+       once it costs more than the fleet's own pauses normally do. The finding is `foreign-pause` with subjects
+       `instance=`, `setter=`, `actor_class=`, `session=` (marked claimed), `reason=`, `expires=` and `since=`.
+    3. A hold that ends before its bound leaves only its measured cost, as idle accounting already records it. It
+       is not an incident.
+    4. REGISTER in FLEET_FLOW_DETECTORS. Its inputs join the census.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Replay the 11:46-12:29 pause
+    with W1-T7839-shaped evidence for a remote non-interactive setter, and a 6-minute recycle-container pause.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-pause-set-from-outside-the-fleet-is-an-incident-by-its-cost.test.ts"
+    - claim: "the 11:46 serve-restoration pause replay fires and names its setter and session"
+      proof: 'grep: test("W1-T8245: the serve-restoration pause replay fires and names its setter" in test/a-pause-set-from-outside-the-fleet-is-an-incident-by-its-cost.test.ts'
+    - claim: "a recycle-container pause is the fleet's own automation and is not foreign"
+      proof: 'grep: test("W1-T8245: a recycle pause is not foreign" in test/a-pause-set-from-outside-the-fleet-is-an-incident-by-its-cost.test.ts'
+    - claim: "a foreign pause below its cost bound is not an incident"
+      proof: 'grep: test("W1-T8245: a foreign pause below its own bound is silent" in test/a-pause-set-from-outside-the-fleet-is-an-incident-by-its-cost.test.ts'
+    - claim: "a hold with no actor evidence is foreign-unverified"
+      proof: 'grep: test("W1-T8245: a hold with no actor evidence is foreign-unverified" in test/a-pause-set-from-outside-the-fleet-is-an-incident-by-its-cost.test.ts'
+    - claim: "the pause policy names who may hold core"
+      proof: 'grep: pausePolicy: in plan/policy.yaml'
+    - claim: "the detector is registered"
+      proof: 'grep: foreignPauseDetector( in src/lib/fleet-flow-detectors.ts'
+  falsifier: |
+    Judge the hold by W1-T4429's TTL tier alone. The 43-minute replay never reaches the halfway point of a 4-hour
+    maintenance TTL, so the first test reads no finding. Treat every PAUSE alike and the recycle test fires.

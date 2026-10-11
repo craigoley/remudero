@@ -1,0 +1,72 @@
+- id: W1-T8240
+  title: "A TASK INTERRUPTED ONLY BY THE HARNESS IS AN INCIDENT — on 2026-10-11 W1-T7742 was breaker-blocked on yields, a claim race, a refused checkpoint push and node_modules refusals, W1-T7837 sat handed-off for 10.7 h while 66 other builds started, and W1-T7952 was passed over 31 times; the ledger held every signal and a person found each one"
+  repo: remudero
+  depends_on: [W1-T8236, W1-T8238]  # registers in src/lib/fleet-flow-detectors.ts after W1-T8238
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — recognising a task the harness keeps interrupting or passing over
+  band_meaning: span
+  origin: "operator request 2026-10-11 (detect, then route): stranded-task detector"
+  plan_refs: [W1-T4678, W1-T4025, W1-T5109, W1-T8164, W1-T8166, W1-T7806, W1-T8008, W1-T8203, W1-T8176]
+  files: [src/lib/stranded-task-detector.ts, src/lib/fleet-flow-detectors.ts, test/a-task-interrupted-only-by-the-harness-is-an-incident.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    WHEN THE SIGNAL EXISTED vs WHEN A PERSON NOTICED (core ledger union 2026-10-10T20:00Z..2026-10-11T19:38Z):
+      - W1-T7742. Verdicts in the window: restart_checkpoint_failed (10-10 21:13:34), freshness_yield (04:49:28,
+        07:03:40). No worker failure. `dispatch.lifetime_pressure.infra_only` (attributable dispatches 0) at 06:33:52
+        and 08:26:39. At 08:35:15 `dispatch.circuit_broken.verified` disposed "escalate", reason "5 dispatch(es) with
+        no new owned PR since (excluded: {worktree.node_modules: 2}) - no cheap disposition applies", which became
+        BLOCKED issue #10825. A person noticed at 13:2xZ, and the operator released it by hand at 16:07:10
+        (`dispatch.breaker_released`, "no worker failure").
+      - W1-T7837. restart_checkpoint_failed 04:51:27, freshness_yield 06:57:07 and 09:02:27, then no start until 19:42
+        while 66 other implement builds started. The only row about it in those 10.7 h was the dispatcher choosing
+        others.
+      - W1-T7952. freshness_yield 12:44:26 and 13:30:31, then passed over by 31 starts to the end of the window.
+      - W1-T7806. restart_checkpoint_failed 19:40 (a refused restart checkpoint), then `failed` at 20:08:38 on a
+        harness stderr budget (stage worker.bounded_output, W1-T8203).
+    The root fixes are filed (#10862, #10866, #10868 and #10916 merged; W1-T8164, W1-T8166, W1-T7806, W1-T8008,
+    W1-T8139 and W1-T8203 queued). Nothing detects the CLASS: a task the harness keeps interrupting or skipping
+    while it makes no progress.
+    The classification already exists: run-task.ts `routeAdaptiveLifetimePressure` writes
+    `dispatch.lifetime_pressure.infra_only` when a task's lifetime pressure has zero attributable dispatches
+    (:51442). Its only reader is its own dedupe.
+  design: |
+    Operator rulings: no fixed threshold, and a non-worker cause is the harness's to fix.
+    1. NON-WORKER INTERRUPTIONS. A terminal verdict counts as non-worker when it is a freshness or recycle yield or
+       handoff, restart_checkpoint_failed, a claim race ("already claimed by another lane"), a toolchain or
+       node_modules refusal, a harness output-budget failure (stage worker.bounded_output), or a run the lock sweep
+       proved orphaned. `dispatch.lifetime_pressure.infra_only` rows are first-class evidence. The classifier lives
+       in this module, and test fixtures pin each class to a 2026-10-11 row.
+    2. TWO SIGNALS, each against the fleet's own history (`ownHistoryBound`, W1-T8236):
+       a. STRANDED. Time since the task's first start of the current episode with no `pr.opened` or merge, while every
+          terminal verdict since then is non-worker. Bound: the p90 of start-to-PR spans of tasks that reached a PR.
+       b. PASSED OVER. Fresh implement starts of tasks at equal or lower plan priority while this task was resumable
+          (its last verdict a handoff or yield) or its breaker was tripped on non-worker evidence only. Bound: the
+          p90 pass-over count of resumable tasks that did resume.
+    3. THE FINDING. `stranded-task` with subjects `task=`, `since=`, `causes=` (counts per non-worker class),
+       `breaker=tripped|clear`, `passed_over=`. A task with any attributable worker failure is out of scope. The
+       breaker and the lifetime judge own that case.
+    4. REGISTER in FLEET_FLOW_DETECTORS. Its inputs join the census.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Replay W1-T7742, W1-T7837 and a
+    control task whose second verdict is a real worker failure.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-task-interrupted-only-by-the-harness-is-an-incident.test.ts"
+    - claim: "the W1-T7742 replay fires before its breaker escalation, naming its non-worker causes"
+      proof: 'grep: test("W1-T8240: the W1-T7742 replay fires and names its non-worker causes" in test/a-task-interrupted-only-by-the-harness-is-an-incident.test.ts'
+    - claim: "the W1-T7837 replay fires on pass-over while it sat handed off"
+      proof: 'grep: test("W1-T8240: the W1-T7837 replay fires on pass-over" in test/a-task-interrupted-only-by-the-harness-is-an-incident.test.ts'
+    - claim: "a task with an attributable worker failure is not a stranded task"
+      proof: 'grep: test("W1-T8240: a task with a worker failure is not stranded" in test/a-task-interrupted-only-by-the-harness-is-an-incident.test.ts'
+    - claim: "each non-worker class is recognised from its 2026-10-11 row shape"
+      proof: 'grep: test("W1-T8240: each non-worker verdict class is recognised" in test/a-task-interrupted-only-by-the-harness-is-an-incident.test.ts'
+    - claim: "the detector is registered"
+      proof: 'grep: strandedTaskDetector( in src/lib/fleet-flow-detectors.ts'
+  falsifier: |
+    Count every terminal verdict as an attempt, as the old breaker did. The control task then fires too, and the
+    worker-failure test fails. Drop the pass-over signal and the W1-T7837 replay, which has no breaker trip and no
+    new verdict for 10.7 h, reads no finding.

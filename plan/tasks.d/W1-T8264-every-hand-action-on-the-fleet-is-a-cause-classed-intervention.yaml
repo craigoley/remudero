@@ -1,0 +1,80 @@
+- id: W1-T8264
+  title: "EVERY HAND ACTION ON THE FLEET IS A CAUSE-CLASSED INTERVENTION — on 2026-10-11 an operator session resumed core, released a breaker, updated branches, pushed fixes and merged PRs by hand, and no row says an intervention happened or what it answered; the fix-lane gardener's own class for this is a causeless `operator-intervention:push` (W1-T7650, 10,034 PR-hours)"
+  repo: remudero
+  depends_on: [W1-T8229, W1-T8240]  # shares src/lib/fix-lane-gardener.ts with W1-T8229; registers in src/lib/fleet-flow-detectors.ts after W1-T8240
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high  # Rule 19: one concern — one row per hand action, classed by the fleet state it answered
+  band_meaning: span
+  origin: "operator rulings 2026-10-09 (a hand-fixed PR is a bug in rmd; operator interventions are the headline signal) + 2026-10-11 detection research: intervention ledger"
+  plan_refs: [W1-T7421, W1-T2697, W1-T3683, W1-T7839, W1-T7721, W1-T4387, W1-T7650]
+  files: [src/lib/operator-interventions.ts, src/lib/fleet-flow-detectors.ts, src/lib/fix-lane-gardener.ts, src/lib/ledger.ts, test/every-hand-action-on-the-fleet-is-a-cause-classed-intervention.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED, core ledger union 2026-10-10T20:00Z..2026-10-11T19:38Z, read-only. Rows written by a non-fleet
+    actor ("unknown" or operator_*) that changed fleet state:
+      - 5 `fleet.pause` + 5 `fleet.resume` on core (a Codex supervisor pausing, sessions resuming).
+      - 1 `dispatch.breaker_released` (W1-T7742, 16:07:10).
+      - 2 `cli.invoked release` and 3 `cli.invoked review`.
+    On GitHub the same day, from the session tracker (~/Remudero/.session-scratch/arch-plan.md):
+      - hand update-branch on #10829 and #10852 (14:3xZ) and #10864 (14:46Z), all main-inherited reds the fix
+        lane worked as their own;
+      - a hand diff-coverage fix on #10866 after its fix round never dispatched;
+      - a hand conflict merge on #10829 (escalated, learnings conflict);
+      - a body rewrite and close/reopen on #10787 (risk-judge escalation);
+      - a push on #10842 (a lint-red scope amendment no lane could repair).
+    None of these wrote a row that says "an intervention happened, answering X". The existing pieces are partial:
+      - hand-run-census.ts (W1-T2697) groups operator CLI verb sequences that recur on distinct days into feedback.
+      - fix-lane-gardener.ts `interventionsFromPullRequest` (:435) reads non-fleet pushes and closes on fleet PRs,
+        once a day, and has been failing every pass since 2026-10-10T18:10Z (W1-T8229).
+      - An intervention with no fix-lane defect before it becomes the class `operator-intervention:<kind>` (:408).
+        That class names the action, not its cause. Machine-filed W1-T7650 ("operator-intervention:push cost
+        10034.12 PR-hours") shows the result: a remedy with nothing to remedy.
+  design: |
+    Operator ruling: every hand action is a defect in rmd. So every intervention is evidence, with no bound.
+    1. ONE ROW SHAPE. New src/lib/operator-interventions.ts defines `operator.intervention` {at, surface: control|pr,
+       action, target, actor, actor_evidence?, cause_class, source}. Register it as a deciding step in ledger.ts.
+       test/ledger-rotation.test.ts re-derives that set.
+    2. CONTROL SURFACE, derived from rows the fleet already writes. `deriveControlInterventions(rows)` takes
+       fleet-control steps (`fleet.pause`, `fleet.resume`, `dispatch.breaker_released`, `automerge.hold_*`, and
+       `cli.invoked` for a declared set of state-changing verbs) whose actor is not fleet automation (not daemon,
+       service, worker, test, or a declared host-automation writer). W1-T7839's actor evidence is carried when
+       present.
+    3. PR SURFACE. The fix-lane gardener's GitHub read adds a non-fleet merge (merged_by) and recognises a hand
+       update-branch: a non-fleet merge commit of main into the head. It appends one `operator.intervention` per
+       finding, deduped by PR and commit or event.
+    4. CAUSE, NOT ACTION. `cause_class` comes from the fleet state the action answered, read from the ledger at or
+       before the action:
+       - a resume takes the class of the hold it ended (foreign-pause:<reason class> or the automation cause);
+       - a release takes the breaker's verified disposition;
+       - a PR action takes the PR's newest `sweep.disposed` blocker, owner and reason signature, with numbers, shas
+         and durations normalised, for example `own-red:fix-lane:deferred-to-full-sweep`, `escalated:none`,
+         `plan-proof-unrunnable:none`.
+       The fix-lane gardener uses the same class in place of `operator-intervention:<kind>`.
+    5. ROUTED. Each new intervention also yields one `incident.event` (kind `intervention`, name = cause_class,
+       fingerprint kind plus name) through W1-T8236's registry. The SRE lane then files one root-cause incident per
+       class (never a second while one is open), and W1-T4387's lifecycle verifies or regresses it after the fix
+       deploys.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Replay 2026-10-11 rows.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/every-hand-action-on-the-fleet-is-a-cause-classed-intervention.test.ts"
+    - claim: "a non-fleet resume becomes one intervention classed by the hold it ended"
+      proof: 'grep: test("W1-T8264: a hand resume is classed by the hold it ended" in test/every-hand-action-on-the-fleet-is-a-cause-classed-intervention.test.ts'
+    - claim: "a hand push on a fleet PR is classed by the PR's disposition at that moment, not by the push"
+      proof: 'grep: test("W1-T8264: a hand push is classed by the disposition it answered" in test/every-hand-action-on-the-fleet-is-a-cause-classed-intervention.test.ts'
+    - claim: "a hand update-branch and a non-fleet merge are recognised"
+      proof: 'grep: test("W1-T8264: a hand update-branch and a hand merge are recognised" in test/every-hand-action-on-the-fleet-is-a-cause-classed-intervention.test.ts'
+    - claim: "fleet automation rows are never interventions"
+      proof: 'grep: test("W1-T8264: fleet automation is never an intervention" in test/every-hand-action-on-the-fleet-is-a-cause-classed-intervention.test.ts'
+    - claim: "each intervention class reaches the SRE lane as one incident fingerprint"
+      proof: 'grep: test("W1-T8264: an intervention class is one incident fingerprint" in test/every-hand-action-on-the-fleet-is-a-cause-classed-intervention.test.ts'
+    - claim: "the control-surface deriver is registered with the SRE lane's detectors"
+      proof: 'grep: deriveControlInterventions( in src/lib/fleet-flow-detectors.ts'
+  falsifier: |
+    Without the deriver, the replayed 12:29 and 12:46 resumes write no `operator.intervention`. Keep the fix-lane
+    gardener's `operator-intervention:<kind>` key and the push test reads the class `operator-intervention:push`.
