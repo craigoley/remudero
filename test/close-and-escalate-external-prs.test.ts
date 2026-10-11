@@ -106,7 +106,7 @@ test("W1-T7755: owner adoption resumes flow with honest required checks", async 
   assert.notEqual(bad.status, "adopted");
 });
 
-test("W1-T7755: stalled source reads terminate with unknown evidence within the bounded attempt", async () => {
+test("W1-T7755: stalled source reads terminate with unknown evidence within the bounded attempt", { timeout: 1_000 }, async () => {
   const started = performance.now(), { store } = memoryStore("rehearsal"), sim = rehearsal();
   const short = { ...settings, policy: { ...settings.policy, maxEvidenceAgeMs: 30 } };
   const result = await executeAdmissionDisposition({ settings: short, target }, store,
