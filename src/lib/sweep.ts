@@ -6851,12 +6851,6 @@ function mainHealthOperatorDetail(observation: MainHealthObservation): string {
  *  still loads, and lint-plan/claims never run on main's push. */
 export const MAIN_GUARD_WORKFLOWS: ReadonlySet<string> = new Set(["main-plan-guard"]);
 
-/** BACKSTOP (W1-T1266): completed main runs whose jobs the observer may read, at most, before
- *  giving up on fallback evidence. The primary control is the first run that carries a required
- *  check, which ends the search; this fires only when main-tripwire, CodeQL and other runs with no
- *  required check crowd the newest completed history, and each candidate costs one jobs read. */
-export const MAIN_HEALTH_FALLBACK_RUN_LIMIT = 5;
-
 /** A superseded, skipped or stale run concluded nothing about the tree. */
 const MAIN_RUN_NON_VERDICT: ReadonlySet<string> = new Set(["CANCELLED", "SKIPPED", "STALE"]);
 
