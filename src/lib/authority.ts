@@ -626,7 +626,9 @@ export function feedbackLineageAuthority(entry: unknown, context: FeedbackAdmiss
     const subject = typeof contribution === "object" && !Array.isArray(contribution)
       ? (contribution as Record<string, unknown>).subject as FeedbackAdmissionSubject | undefined : undefined;
     if (!subject || typeof subject !== "object" || !context.currentSubject) return unresolved("origin-recheck-unavailable");
-    if (feedbackSubjectBinding(subject) !== feedbackSubjectBinding(context.currentSubject)) return unresolved("source-revision-changed");
+    try {
+      if (feedbackSubjectBinding(subject) !== feedbackSubjectBinding(context.currentSubject)) return unresolved("source-revision-changed");
+    } catch { return unresolved("lineage-unreadable"); }
     const decided = classifyContribution(context.currentSubject, "feedback", context.policy, context.memberships ?? [], context.nowMs ?? systemClock.now());
     return { autonomous: decided.outcome === "trusted", reason: decided.reason,
       basis: decided.outcome === "trusted" ? "admitted-contribution" : decided.outcome === "confirmed-external" ? "external-contribution" : "unresolved-origin" };

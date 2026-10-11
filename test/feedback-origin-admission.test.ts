@@ -8,7 +8,7 @@ import { feedbackLineageAuthority } from "../src/lib/authority.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, type AutoTriageInputs } from "../src/lib/auto-triage.js";
 import { classifyContribution, feedbackContentDigest, type AdmissionPolicy, type FeedbackAdmissionSubject } from "../src/lib/contributor-admission.js";
 import {
-  admitFeedbackContribution, captureFeedback, feedbackEntryPath, homeRepoPath, proposeFeedbackWithSummary,
+  admitFeedbackContribution, captureFeedback, feedbackEntryPath, homeRepoPath, inheritFeedbackLineage, proposeFeedbackWithSummary,
   readFeedbackEntry, type FeedbackEntry,
 } from "../src/lib/feedback.js";
 import { ghIssueListGateway, normalizeIssue, pollIssues, type IssueListGateway } from "../src/lib/issues-intake.js";
@@ -387,4 +387,25 @@ test("W1-T7754 checkpoint: malformed shadow lineage is unknown without changing 
   assert.deepEqual(newFeedbackIdsOldestFirst(root, context), ["fb-malformed"]);
   assert.equal(receipts[0].reason, "unreadable-entry");
   assert.equal(receipts[0].would_deny, true);
+});
+
+test("W1-T7754 checkpoint: legacy relay preserves unresolved source instead of fabricating an issue identity", () => {
+  const parent = { id: "fb-old", origin: "issue#12" as const };
+  const lineage = inheritFeedbackLineage(parent, "trusted-summarizer");
+  assert.equal(lineage?.kind, "unresolved");
+  assert.equal(lineage?.subject, undefined);
+  assert.equal(lineage?.admission.outcome, "unknown");
+  assert.equal(lineage?.admission.reason, "legacy-origin-unresolved");
+  assert.deepEqual(lineage?.relayed_by, ["trusted-summarizer"]);
+  assert.equal(lineage?.derived_from, parent.id);
+  assert.equal(inheritFeedbackLineage({ ...parent, origin: "cli" }, "trusted-summarizer"), null);
+});
+
+test("W1-T7754 checkpoint: cyclic public lineage is unknown rather than a global trusted-flow hold", () => {
+  const subject = boundIssue();
+  const cyclic: Record<string, unknown> = { repository: {} };
+  cyclic.origin = cyclic;
+  assert.deepEqual(feedbackLineageAuthority({ contribution: { subject: cyclic } }, {
+    mode: "shadow", policy: POLICY, nowMs: NOW, currentSubject: subject,
+  }), { autonomous: false, basis: "unresolved-origin", reason: "lineage-unreadable" });
 });
