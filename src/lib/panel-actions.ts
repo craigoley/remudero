@@ -32,6 +32,7 @@ import {
   DiscoveryContinuationError,
   MAX_DISCOVERY_PAGE,
   assistantClaimFingerprint,
+  isExactAssistantReceipt,
   readAssistantActionDiscovery,
   type AssistantClaimV2,
   type DiscoveryBudget,
@@ -509,7 +510,10 @@ export function buildAssistantControlReceiptRoute(deps: AssistantControlOptions)
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return sendJson(res, 202, { status: "claimed_unknown", actionId });
         return sendJson(res, 503, { status: "unavailable", actionId, detail: "receipt is unreadable" });
       }
-      if (!isRecord(receipt) || receipt.status !== "completed" || receipt.actionId !== actionId || receipt.instance !== deps.instance || receipt.repository !== (deps.repository ?? undefined)) {
+      const exact = claim.version === ASSISTANT_CLAIM_VERSION
+        ? isExactAssistantReceipt(receipt, { actionId, action: claim.action as AssistantClaimV2["action"], instance: deps.instance, repository: deps.repository ?? null })
+        : isRecord(receipt) && receipt.status === "completed" && receipt.actionId === actionId && receipt.instance === deps.instance && receipt.repository === (deps.repository ?? undefined);
+      if (!exact) {
         return sendJson(res, 503, { status: "unavailable", actionId, detail: "receipt identity is incomplete" });
       }
       sendJson(res, 200, receipt);
@@ -576,7 +580,8 @@ export function buildAssistantControlRoute(deps: AssistantControlOptions): Route
         }
         try {
           const receipt = JSON.parse(readFileSync(paths.receipt, "utf8")) as unknown;
-          if (isRecord(receipt) && receipt.status === "completed" && receipt.actionId === input.actionId && receipt.instance === deps.instance) {
+          // The fingerprint matched, so input.action IS the admitted verb, legacy claims included.
+          if (isExactAssistantReceipt(receipt, { actionId: input.actionId, action: input.action, instance: deps.instance, repository: deps.repository ?? null })) {
             sendJson(res, 200, receipt);
             return;
           }
