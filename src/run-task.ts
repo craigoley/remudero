@@ -2891,7 +2891,8 @@ export function retroErrorLedgerFields(error: unknown): Record<string, unknown> 
 // W1-T2627/W1-T2888: `readWorktreeBase`'s only reader (doctorCommand) moved to
 // src/lib/report-commands.ts, which imports it directly from lib/worker.js.
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
-import { sweepMemoryReservations } from "./lib/host-memory-ledger.js";
+import { memoryStoreReadFailure, readMemoryLedger, sweepMemoryReservations } from "./lib/host-memory-ledger.js";
+import { createMemoryReadTracker, type MemoryReadHold, type MemoryReadSource, type MemoryReadTracker } from "./lib/dispatch-governor.js";
 import { withSyncChildReservation } from "./lib/host-memory-learning.js";
 import { installShadowMemorySink, ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./lib/host-memory-shadow.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
@@ -35460,6 +35461,53 @@ export function memoryGovernorGateFor(
   };
 }
 
+/**
+ * W1-T7720 — THE STREAK TRACKER an unreadable memory reading reports to, wired for one run (daemon or
+ * drain). `memory_read.*` rows land in the ledger under task `GOVERNOR`; the adaptive bound reads the
+ * source's past `memory_read.recovered` durations back from the same ledger; a SUSTAINED streak raises
+ * ONE BLOCKED escalation, its task id carrying the streak start so each streak dedups on its own.
+ */
+export function memoryReadTrackerFor(
+  ledgerPath: string,
+  runId: string,
+  owner: string,
+  repo: string,
+  clock: Clock = systemClock,
+  issues: IssueGateway = ghIssueGateway(owner, repo),
+): MemoryReadTracker {
+  return createMemoryReadTracker(clock, {
+    recoveredDurationsMs: (source: MemoryReadSource) =>
+      readLedgerLines(ledgerPath) // ledger-read-intent: live — the recovered rows of this host's recent streaks.
+        .filter((row) => row.step === "memory_read.recovered" && row.source === source && typeof row.duration_ms === "number")
+        .map((row) => row.duration_ms as number),
+    writeRow: (step, fields) => appendLedger(ledgerPath, { run_id: runId, task_id: "GOVERNOR", step, ...fields }),
+    escalate: (hold: MemoryReadHold) => {
+      const startedAt = fixedClock(hold.streakStartedAtMs).iso();
+      void tryEscalate(
+        {
+          class: "BLOCKED",
+          taskId: `GOVERNOR-MEMORY-${hold.source}-${hold.streakStartedAtMs}`,
+          runId,
+          summary: `host memory ${hold.source} has been unreadable since ${startedAt}: new dispatch is held`,
+          detail:
+            `W1-T7720: the host memory ${hold.source === "probe" ? "probe (/proc/meminfo)" : "reservation store"} has been ` +
+            `unreadable for ${Math.round(hold.ageMs / 1000)} s, past the sustained bound of ` +
+            `${Math.round(hold.boundMs / 1000)} s (${hold.basis}). Short failures keep dispatching; this one ` +
+            `outlived what this fleet has seen recover, so NEW dispatch is held (the sweep and in-flight runs are untouched) ` +
+            `until a read succeeds. Last error: ${hold.error}`,
+          options: [
+            { label: "wait for recovery", detail: "Take no action; the hold releases itself on the first good read." },
+            { label: "repair the reading", detail: "Fix the unreadable source on the host (the error above names it), then dispatch resumes." },
+          ],
+          recommendation: "wait for recovery",
+        },
+        { issues, ledgerPath, runId },
+      );
+    },
+    onSinkError: (label, error) => console.error(`memory_read tracker: ${label} sink failed: ${error instanceof Error ? error.message : String(error)}`),
+  });
+}
+
 /** W1-T5347: how many `MemAvailable` reads one consultation makes before it reports "unreadable". */
 export const MEMORY_READ_ATTEMPTS = 3;
 
@@ -36223,6 +36271,9 @@ async function drainCommand(
         // /proc/meminfo reading per consultation, so the per-lane re-check sees each lane's cost.
         // Holds NEW implement dispatch only — never a running worker or a review.
         checkMemoryGovernor: memoryGovernorGateFor(ledgerPath, runId, undefined, deps.readAvailableMemoryMib),
+        // W1-T7720: an unreadable probe / reservation store is tiered by how long it lasts.
+        memoryReadTracker: memoryReadTrackerFor(ledgerPath, runId, owner, repo),
+        readMemoryStoreFailure: () => memoryStoreReadFailure(readMemoryLedger()),
         checkQuietHours: () =>
           isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         // W1-T2513: `planSnapshot` is the coalescer built above — every lane of a tick shares
@@ -39462,6 +39513,9 @@ export async function daemonCommand(
         // /proc/meminfo reading per consultation, so the per-lane re-check sees each lane's cost.
         // Holds NEW implement dispatch only — never a running worker or a review.
         checkMemoryGovernor: memoryGovernorGateFor(ledgerPath, runId, undefined, deps.readAvailableMemoryMib),
+        // W1-T7720: an unreadable probe / reservation store is tiered by how long it lasts.
+        memoryReadTracker: memoryReadTrackerFor(ledgerPath, runId, target.owner, target.repo),
+        readMemoryStoreFailure: () => memoryStoreReadFailure(readMemoryLedger()),
         checkQuietHours: () =>
           isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
