@@ -35,6 +35,7 @@ import { appendGitConfigEnv, reapDeadOwnerDirs, setupDirOwnerTag } from "./no-li
 import "./canonical-tmpdir.js";
 import { installReadMapFromEnv } from "./read-map.js";
 import { admitTestFile } from "../../src/lib/test-file-admission.js";
+import { TEST_PROCESS_MARKER } from "../../src/lib/tmp.js";
 import { reapableTmpPrefix } from "./reapable-prefix.js";
 
 /**
@@ -172,6 +173,9 @@ const browserCache = process.platform === "darwin" ? join(homedir(), "Library", 
   : process.env.XDG_CACHE_HOME || join(homedir(), ".cache");
 process.env.PLAYWRIGHT_BROWSERS_PATH ??= join(browserCache, "ms-playwright");
 process.env.NODE_TEST_CONTEXT ??= "test-setup";
+// W1-T7808: mark THIS process (not its children: a globalThis flag is not inherited) as a test process, so
+// src/lib/tmp.ts declines a sweep that would default to the machine's real temp root.
+(globalThis as Record<symbol, unknown>)[TEST_PROCESS_MARKER] = true;
 const TEST_HOME_PREFIX = "rmd-test-home-";
 // A worker thread keeps the parent's test HOME: under SHARE_ENV its own would replace the parent's,
 // and its exit would then delete the HOME the parent still reads.
