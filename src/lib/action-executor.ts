@@ -476,7 +476,8 @@ async function dispositionPreflight(settings: AdmissionSettings, target: Admissi
     if (first.state !== "open" || first.merged !== false || first.merged_at !== null) return unknown("ordinary-pr-state-unverified");
     if (target.headSha !== undefined && head.sha !== target.headSha) return unknown("head-changed");
     const assessment = await assessContribution(settings, { ...target, headSha: String(head.sha) }, "disposition", read, clock);
-    if (!assessment?.currentPull) return unknown(assessment?.decision.reason ?? "origin-unreadable");
+    if (assessment === undefined) return unknown("assessment-unavailable");
+    if (assessment.currentPull === undefined) return unknown(assessment.decision.reason);
     if (fingerprint(assessment.currentPull) !== fingerprint(first)) return unknown("ordinary-pr-context-changed");
     const finalRepo = await read(repoPath), currentRepo = dispositionObject(finalRepo.body);
     if (finalRepo.status !== 200 || currentRepo.id !== repo.id || currentRepo.full_name !== slug
