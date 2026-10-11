@@ -11,17 +11,21 @@ import { test } from "node:test";
 import { IMPLEMENT_WAIT_TARGET_CONTRACT } from "../src/run-task.js";
 import { clockFromMillisFn } from "../src/lib/clock.js";
 import { exitCodeFor, RmdError } from "../src/lib/errors.js";
+import { withWorkerPidReport, type WorkerStreamObserver } from "../src/lib/worker.js";
 import {
   classifyProcessTree,
   defaultListProcesses,
   deriveQuietBound,
+  guardSpawnWithQuietWatchdog,
   parseQuietJudgement,
   QUIET_BASIS_LEDGER_STEP,
   QUIET_JUDGED_LEDGER_STEP,
   QuietRoundEndedError,
   runQuietWorkerWatchdog,
   type AwaitedRead,
+  type EndRoundResult,
   type ProcRow,
+  type QuietWatchdogHandle,
   type QuietEvidence,
   type QuietJudgement,
 } from "../src/lib/quiet-worker-watchdog.js";
@@ -372,4 +376,232 @@ test("W1-T7807: an async process listing is awaited and its rejection is ledgere
     assert.equal(rows[1].reason, "process_listing_unavailable");
     assert.match(String(rows[1].detail), /ps unavailable/);
   });
+});
+
+interface ActRig {
+  rows: Array<Record<string, unknown>>;
+  judged: number;
+  clock: { ms: number };
+  dog: QuietWatchdogHandle;
+}
+
+/** The watchdog over the finished-run tree with a judge fixed to `verdict` and the given `kill` / `endRound` seams. */
+function actRig(
+  path: string,
+  verdict: "kill_poll_child" | "end_round",
+  seams: { kill?: (pid: number) => void; endRound?: (reason: string) => Promise<EndRoundResult>; pollMs?: number } = {},
+): ActRig {
+  const out: ActRig = { rows: [], judged: 0, clock: { ms: 0 }, dog: undefined as unknown as QuietWatchdogHandle };
+  out.dog = runQuietWorkerWatchdog({
+    taskId: "W1-T7807", runId: "act-rig", rootPid: () => ROOT, provider: () => "claude",
+    history: () => [], fallbackBoundMs: 60_000, quietFloorMs: 0,
+    clock: clockFromMillisFn(() => out.clock.ms),
+    ledger: (step, extra) => { if (step === QUIET_JUDGED_LEDGER_STEP) out.rows.push(extra); },
+    listProcesses: () => tree(path),
+    judge: async () => { out.judged += 1; return { verdict, reason: `judge chose ${verdict}` }; },
+    kill: seams.kill ?? (() => {}),
+    ...(seams.endRound ? { endRound: seams.endRound } : {}),
+    ...(seams.pollMs ? { pollMs: seams.pollMs } : {}),
+  });
+  return out;
+}
+
+test("W1-T7807: a signal that cannot be delivered to the poll child is ledgered as a failed action", async () => {
+  await withOutputFile(FINISHED_OUTPUT, async (path) => {
+    const r = actRig(path, "kill_poll_child", { kill: () => { throw new Error("EPERM: operation not permitted"); } });
+    r.dog.observer({ kind: "working", tsMs: 0 });
+    r.clock.ms = 100_000;
+    await r.dog.tick();
+    assert.equal(r.rows.length, 1);
+    assert.equal(r.rows[0].decision, "action_failed");
+    assert.equal(r.rows[0].action, "kill_poll_child");
+    assert.equal(r.rows[0].signalled_pid, POLL);
+    assert.equal(r.rows[0].failed, true);
+    assert.match(String(r.rows[0].detail), /EPERM/);
+  });
+});
+
+test("W1-T7807: end_round checkpoints and stops the round, and degrades or fails visibly otherwise", async () => {
+  await withOutputFile(FINISHED_OUTPUT, async (path) => {
+    // No checkpoint path wired: degrades to wait, takes no action.
+    const unwired = actRig(path, "end_round");
+    unwired.dog.observer({ kind: "working", tsMs: 0 });
+    unwired.clock.ms = 100_000;
+    await unwired.dog.tick();
+    assert.equal(unwired.rows[0].decision, "degraded_to_wait");
+    assert.equal(unwired.rows[0].action, "none");
+    assert.match(String(unwired.rows[0].detail), /end_round degraded to wait/);
+
+    // A checkpoint that throws is a failed action, and the watchdog keeps watching.
+    const thrown = actRig(path, "end_round", { endRound: async () => { throw new Error("push refused"); } });
+    thrown.dog.observer({ kind: "working", tsMs: 0 });
+    thrown.clock.ms = 100_000;
+    await thrown.dog.tick();
+    assert.equal(thrown.rows[0].decision, "action_failed");
+    assert.equal(thrown.rows[0].action, "end_round");
+    assert.match(String(thrown.rows[0].detail), /push refused/);
+
+    // A checkpoint that declines (not ended) is a failed action carrying its reason; the next episode is judged again.
+    const declined = actRig(path, "end_round", { endRound: async () => ({ ended: false, reason: "not an implement worker" }) });
+    declined.dog.observer({ kind: "working", tsMs: 0 });
+    declined.clock.ms = 100_000;
+    await declined.dog.tick();
+    assert.equal(declined.rows[0].decision, "action_failed");
+    assert.equal(declined.rows[0].checkpoint_sha, null);
+    assert.equal(declined.rows[0].detail, "not an implement worker");
+    declined.dog.observer({ kind: "working", tsMs: 100_500 });
+    declined.clock.ms = 300_000;
+    await declined.dog.tick();
+    assert.equal(declined.judged, 2, "a declined end_round leaves the watchdog armed");
+
+    // A checkpoint that ended the round is acted, carries its sha, and silences the watchdog for good.
+    const reasons: string[] = [];
+    const ended = actRig(path, "end_round", {
+      endRound: async (reason) => { reasons.push(reason); return { ended: true, checkpointSha: "abc123" }; },
+    });
+    ended.dog.observer({ kind: "working", tsMs: 0 });
+    ended.clock.ms = 100_000;
+    await ended.dog.tick();
+    assert.deepEqual(reasons, ["judge chose end_round"]);
+    assert.equal(ended.rows[0].decision, "acted");
+    assert.equal(ended.rows[0].action, "end_round");
+    assert.equal(ended.rows[0].checkpoint_sha, "abc123");
+    ended.dog.observer({ kind: "working", tsMs: 100_500 });
+    ended.clock.ms = 400_000;
+    await ended.dog.tick();
+    assert.equal(ended.judged, 1, "an ended round is not judged again");
+  });
+});
+
+test("W1-T7807: start polls on a timer until stopped", async () => {
+  await withOutputFile(FINISHED_OUTPUT, async (path) => {
+    const r = actRig(path, "kill_poll_child", { pollMs: 5 });
+    const stop = r.dog.start();
+    try {
+      r.clock.ms = 100_000; // the worker has been quiet since start()
+      for (let i = 0; i < 400 && r.rows.length === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.equal(r.rows.length, 1, "the timer ticked the watchdog without a manual tick");
+      assert.equal(r.rows[0].action, "kill_poll_child");
+    } finally {
+      stop();
+    }
+    r.dog.observer({ kind: "working", tsMs: 100_000 });
+    r.clock.ms = 400_000;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(r.judged, 1, "a stopped watchdog does not tick");
+  });
+});
+
+interface GuardArgs {
+  signal?: AbortSignal;
+  onWorkerPid?: (pid: number) => void;
+  streamObserver?: WorkerStreamObserver;
+  label?: string;
+}
+
+function guardRig() {
+  const events: unknown[] = [];
+  const counts = { started: 0, stopped: 0 };
+  let endedError: QuietRoundEndedError | undefined;
+  let rootPid: number | undefined;
+  const abort = new AbortController();
+  const watchdog: QuietWatchdogHandle = {
+    observer: (event) => { events.push(event); },
+    tick: async () => {},
+    start: () => { counts.started += 1; return () => { counts.stopped += 1; }; },
+  };
+  const guard = {
+    watchdog, abort, onRootPid: (pid: number) => { rootPid = pid; }, ended: () => endedError,
+  };
+  return { events, counts, abort, guard, setEnded: (e: QuietRoundEndedError) => { endedError = e; }, root: () => rootPid };
+}
+
+test("W1-T7807: a guarded spawn feeds the watchdog its stream, its pid and the caller's abort", async () => {
+  const rig2 = guardRig();
+  const seen: GuardArgs[] = [];
+  const callerPids: number[] = [];
+  const callerEvents: unknown[] = [];
+  const caller = new AbortController();
+  const guarded = guardSpawnWithQuietWatchdog(async (args: GuardArgs) => {
+    seen.push(args);
+    args.onWorkerPid?.(4242);
+    args.streamObserver?.({ kind: "working", tsMs: 5 });
+    return `done:${args.label}`;
+  }, rig2.guard);
+  const result = await guarded({
+    label: "x", signal: caller.signal,
+    onWorkerPid: (pid) => { callerPids.push(pid); },
+    streamObserver: (event) => { callerEvents.push(event); },
+  });
+  assert.equal(result, "done:x");
+  assert.equal(seen[0].label, "x", "the caller's other arguments pass through");
+  assert.equal(seen[0].signal, rig2.abort.signal, "the worker is stopped by the guard's own signal");
+  assert.equal(rig2.root(), 4242);
+  assert.deepEqual(callerPids, [4242], "the caller's own pid listener still fires");
+  assert.deepEqual(rig2.events, [{ kind: "working", tsMs: 5 }]);
+  assert.deepEqual(callerEvents, [{ kind: "working", tsMs: 5 }]);
+  assert.deepEqual(rig2.counts, { started: 1, stopped: 1 });
+
+  // A caller abort (and an already-aborted caller) reaches the guard's signal.
+  const late = guardRig();
+  const lateCaller = new AbortController();
+  await guardSpawnWithQuietWatchdog(async () => "ok", late.guard)({ signal: lateCaller.signal });
+  assert.equal(late.abort.signal.aborted, false);
+  lateCaller.abort();
+  assert.equal(late.abort.signal.aborted, true);
+  const pre = guardRig();
+  const preCaller = new AbortController();
+  preCaller.abort();
+  await guardSpawnWithQuietWatchdog(async () => "ok", pre.guard)({ signal: preCaller.signal });
+  assert.equal(pre.abort.signal.aborted, true);
+  assert.equal(pre.counts.stopped, 1);
+
+  // No caller signal, no caller listeners: still guarded.
+  const bare = guardRig();
+  assert.equal(await guardSpawnWithQuietWatchdog(async (args: GuardArgs) => {
+    args.onWorkerPid?.(7);
+    args.streamObserver?.({ kind: "working", tsMs: 1 });
+    return "bare";
+  }, bare.guard)({}), "bare");
+  assert.equal(bare.root(), 7);
+});
+
+test("W1-T7807: a round the watchdog ended surfaces as the quiet error, not as the abort it caused", async () => {
+  const detail = { checkpointSha: "abc123", reason: "the worker cannot resume" };
+
+  // The stream is aborted by end_round and the spawn rejects with the abort.
+  const aborted = guardRig();
+  const endedError = new QuietRoundEndedError(detail);
+  const spawnAborted = guardSpawnWithQuietWatchdog(async () => {
+    aborted.setEnded(endedError);
+    aborted.abort.abort();
+    throw new Error("The operation was aborted");
+  }, aborted.guard);
+  await assert.rejects(spawnAborted({}), (error) => error === endedError);
+  assert.equal(aborted.counts.stopped, 1);
+
+  // The spawn settled normally despite the end_round: the quiet error still wins over the result.
+  const settled = guardRig();
+  const settledError = new QuietRoundEndedError(detail);
+  const spawnSettled = guardSpawnWithQuietWatchdog(async () => { settled.setEnded(settledError); return "result"; }, settled.guard);
+  await assert.rejects(spawnSettled({}), (error) => error === settledError);
+
+  // Without an end_round, the spawn's own failure is untouched and the watchdog is still stopped.
+  const failing = guardRig();
+  const own = new Error("worker crashed");
+  await assert.rejects(guardSpawnWithQuietWatchdog(async () => { throw own; }, failing.guard)({}), (error) => error === own);
+  assert.deepEqual(failing.counts, { started: 1, stopped: 1 });
+});
+
+test("W1-T7807: the contained spawn reports the worker root pid", () => {
+  const calls: unknown[][] = [];
+  const base = (...spawnArgs: unknown[]) => { calls.push(spawnArgs); return { pid: 9001, tag: "spawned" }; };
+  const pids: number[] = [];
+
+  const reported = withWorkerPidReport(base, (pid) => { pids.push(pid); });
+  assert.deepEqual(reported("a", "b"), { pid: 9001, tag: "spawned" }, "the spawned process is returned untouched");
+  assert.deepEqual(calls, [["a", "b"]], "the arguments are forwarded as given");
+  assert.deepEqual(pids, [9001]);
+
+  assert.equal(withWorkerPidReport(base, undefined), base, "with no reporter the spawn is not wrapped");
 });

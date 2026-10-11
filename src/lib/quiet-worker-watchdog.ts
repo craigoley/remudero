@@ -576,7 +576,7 @@ export function runQuietWorkerWatchdog(opts: QuietWatchdogOptions): QuietWatchdo
         record({ ...evidenceFields, decision: "judge_unavailable", verdict: null, action: "none", ...(judgeError ? { detail: judgeError } : {}) });
         return;
       }
-      await act(judgement, cls, rootPid, procs, evidenceFields);
+      await act(judgement, cls, evidenceFields);
     } finally {
       busy = false;
     }
@@ -585,19 +585,13 @@ export function runQuietWorkerWatchdog(opts: QuietWatchdogOptions): QuietWatchdo
   const act = async (
     judgement: QuietJudgement,
     cls: Extract<TreeClassification, { kind: "dead_wait" }>,
-    rootPid: number,
-    procs: readonly ProcRow[],
     evidenceFields: Record<string, unknown>,
   ): Promise<void> => {
     const row = { ...evidenceFields, verdict: judgement.verdict, reason: judgement.reason };
     switch (judgement.verdict) {
       case "kill_poll_child": {
-        // Only the poll shell, only from the root's own tree; never the root, never a pid the tree does not hold.
-        const inTree = cls.pollPid !== rootPid && descendants(rootPid, procs).some((p) => p.pid === cls.pollPid);
-        if (!inTree) {
-          record({ ...row, decision: "refused", action: "none", detail: "poll pid is not a descendant of the worker root" });
-          return;
-        }
+        // Only the poll shell: `classifyProcessTree` picks it from `descendants(rootPid, …)`, which never holds the root
+        // itself, so the signalled pid is by construction a strict descendant of the worker root.
         try {
           kill(cls.pollPid, "SIGTERM");
           record({ ...row, decision: "acted", action: "kill_poll_child", signalled_pid: cls.pollPid, signal: "SIGTERM" });
@@ -649,4 +643,58 @@ export function runQuietWorkerWatchdog(opts: QuietWatchdogOptions): QuietWatchdo
   };
 
   return { observer, tick, start };
+}
+
+/** What the guard needs of a spawn's arguments. */
+export interface QuietGuardableArgs {
+  signal?: AbortSignal;
+  onWorkerPid?: (pid: number) => void;
+  streamObserver?: WorkerStreamObserver;
+}
+
+export interface QuietSpawnGuard {
+  watchdog: QuietWatchdogHandle;
+  /** Aborted by `end_round` (through the watchdog's `endRound`) to stop the worker's stream. */
+  abort: AbortController;
+  /** Receives the worker's root pid once it spawned. */
+  onRootPid: (pid: number) => void;
+  /** The error `end_round` recorded, once it ended the round. */
+  ended: () => QuietRoundEndedError | undefined;
+}
+
+/** Run `rawSpawn` under the quiet-worker watchdog: the stream observer feeds it, the root pid is reported to it, a caller's
+ * abort also stops the worker, and a round `end_round` ended surfaces as {@link QuietRoundEndedError} instead of the abort
+ * it caused. The watchdog polls for exactly the duration of the spawn. */
+export function guardSpawnWithQuietWatchdog<Args extends QuietGuardableArgs, Result>(
+  rawSpawn: (args: Args) => Promise<Result>,
+  guard: QuietSpawnGuard,
+): (args: Args) => Promise<Result> {
+  return async (args) => {
+    const callerSignal = args.signal;
+    if (callerSignal?.aborted) guard.abort.abort();
+    else callerSignal?.addEventListener("abort", () => guard.abort.abort(), { once: true });
+    const stop = guard.watchdog.start();
+    try {
+      const result = await rawSpawn({
+        ...args,
+        signal: guard.abort.signal,
+        onWorkerPid: (pid: number) => {
+          guard.onRootPid(pid);
+          args.onWorkerPid?.(pid);
+        },
+        streamObserver: (event: WorkerStreamEvent) => {
+          guard.watchdog.observer(event);
+          args.streamObserver?.(event);
+        },
+      });
+      const ended = guard.ended();
+      if (ended) throw ended;
+      return result;
+    } catch (error) {
+      // `end_round` aborted this stream on purpose; surface THAT, not the abort it caused.
+      throw guard.ended() ?? error;
+    } finally {
+      stop();
+    }
+  };
 }

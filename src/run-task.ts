@@ -2836,7 +2836,7 @@ import {
   SubscriptionOnlyRefusedError,
   deliverOperatorAnswerToRunningWorker,
 } from "./lib/worker.js";
-import { QuietRoundEndedError, productionQuietWorkerJudge, runQuietWorkerWatchdog } from "./lib/quiet-worker-watchdog.js";
+import { QuietRoundEndedError, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, runQuietWorkerWatchdog } from "./lib/quiet-worker-watchdog.js";
 import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
 import { enrichWorkerStreamEvent } from "./lib/worker-telemetry.js";
 
@@ -17327,17 +17327,13 @@ async function runTask(
         return { ended: true, checkpointSha };
       },
     });
-    if (quietWatchdog && effectiveSpawnArgs.signal) {
-      const callerSignal = effectiveSpawnArgs.signal;
-      if (callerSignal.aborted) quietAbort.abort();
-      else callerSignal.addEventListener("abort", () => quietAbort.abort(), { once: true });
-    }
-    const stopQuietWatchdog = quietWatchdog?.start();
-    return recordBenchmarkWorkerAttempt(() => (async () => {
-      try {
-        const result = await rawSpawn({
+    const watchedSpawn: typeof spawnWorker = quietWatchdog
+      ? guardSpawnWithQuietWatchdog(rawSpawn, {
+          watchdog: quietWatchdog, abort: quietAbort, onRootPid: (pid) => { workerRootPid = pid; }, ended: () => quietEnded,
+        })
+      : rawSpawn;
+    return recordBenchmarkWorkerAttempt(() => watchedSpawn({
       ...effectiveSpawnArgs,
-      ...(quietWatchdog ? { signal: quietAbort.signal, onWorkerPid: (pid: number) => { workerRootPid = pid; } } : {}),
       // A dispatch run builds in its task worktree: its workers reserve (and learn) host memory as "implement".
       workerClass: effectiveSpawnArgs.workerClass ?? "implement",
       // Every dispatch-phase worker inherits the run identity at the ONE wrapper that already owns its state/error telemetry, so the
@@ -17365,7 +17361,6 @@ async function runTask(
       // The selected assignment is authoritative for provider + requested model; the selected
       // model is deliberately not promoted to a served-model receipt.
       streamObserver: (event) => {
-        quietWatchdog?.observer(event);
         baseStreamObserver(attributeWorkerStreamEvent(
           enrichWorkerStreamEvent(event, effectiveSpawnArgs, selectionAssignment), selectionAssignment));
       },
@@ -17374,16 +17369,7 @@ async function runTask(
       // its own `clockBound` (none exist today) is respected; every future dispatch call site
       // through this wrapper is covered without remembering to add it individually.
       clockBound: effectiveSpawnArgs.clockBound ?? { boundMs: workerAbandonMs },
-        });
-        if (quietEnded) throw quietEnded;
-        return result;
-      } catch (error) {
-        // `end_round` aborted this stream on purpose; surface THAT, not the abort it caused.
-        throw quietEnded ?? error;
-      } finally {
-        stopQuietWatchdog?.();
-      }
-    })(), receiptLog, () => selectionAssignment, stopPolling);
+    }), receiptLog, () => selectionAssignment, stopPolling);
   };
   // W1-T143: a raw synchronous write, not console.log — this narration is exactly what the
   // daemon's `runOne` exercises on every dispatch, and console.log's async, non-TTY-buffered

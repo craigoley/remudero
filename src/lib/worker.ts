@@ -2300,6 +2300,20 @@ function sonnetRefusedBeforeTransport(result: WorkerResult): boolean {
     (result.budgetReservedUsd ?? 0) === 0;
 }
 
+/** W1-T7807: wrap a contained spawn so the spawned process's pid is reported to `onWorkerPid` — the root of the process tree
+ * the quiet-worker watchdog reads. With no reporter the spawn is returned untouched. */
+export function withWorkerPidReport<A extends unknown[], R extends { pid: number }>(
+  spawnBase: (...spawnArgs: A) => R,
+  onWorkerPid: ((pid: number) => void) | undefined,
+): (...spawnArgs: A) => R {
+  if (!onWorkerPid) return spawnBase;
+  return (...spawnArgs) => {
+    const spawned = spawnBase(...spawnArgs);
+    onWorkerPid(spawned.pid);
+    return spawned;
+  };
+}
+
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   // The ENFORCE mode of the host memory budget: under the shipped "shadow" mode this returns at once and changes
   // nothing; under "enforce" (an operator ruling in plan/policy.yaml) it waits, tiered and in priority order, while the
@@ -3019,13 +3033,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // SDK (W1-T117).
     const pidRef: { pid?: number } = {};
     const spawnContainedBase = boundContainment.spawn ?? spawnDetachedGroup;
-    const spawnContained: typeof spawnContainedBase = args.onWorkerPid
-      ? (spawnOpts, onStderr, onSpawnError) => {
-          const spawned = spawnContainedBase(spawnOpts, onStderr, onSpawnError);
-          args.onWorkerPid?.(spawned.pid);
-          return spawned;
-        }
-      : spawnContainedBase;
+    const spawnContained: typeof spawnContainedBase = withWorkerPidReport(spawnContainedBase, args.onWorkerPid);
     const teardownContained = args.containment?.teardown ?? ((pgid: number) => void teardownProcessGroup(pgid));
 
     // TRAP (SDK 0.3.209): passing BOTH a `settings` file path and the `sandbox` option throws "Cannot use both …". The
