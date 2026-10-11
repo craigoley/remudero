@@ -1044,7 +1044,7 @@ import {
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
 import { clockFromDateFn, clockFromMillisFn, fixedClock, systemClock, type Clock } from "./lib/clock.js";
-import { feedbackLineagePayload, type AdmissionObserver } from "./lib/contributor-admission.js";
+import { feedbackLineagePayload, observeFeedbackInputs, type AdmissionObserver } from "./lib/contributor-admission.js";
 import { envelope as feedbackLineageEnvelope } from "./lib/untrusted-envelope.js";
 import { observeContributorAdmission } from "./lib/arm-auto-merge.js";
 import {
@@ -6359,9 +6359,11 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
     }
     roundId = `${input.runId ?? input.task.id}:${pr.priorStrikes + 1}:${systemClock.now()}`;
     deps.log("fix.dispatch", { ...roundFields(), verdict_regime: "executed" });
+    await observeFeedbackInputs(input.admission, pr.pendingAnswer?.contributions ?? [], "plan-fix-adoption", deps.log,
+      { read: deps.feedbackRead });
     const report = await deps.spawn(renderFixPrompt({ task: { ...input.task, files }, round: 1, branch: pr.headRefName!,
       harnessCommits: true, evidence: { planGateFindings: [...initial.failures, ...initial.unreadable], ciFailures: pr.ciFailures,
-        constraint: [input.lastRefusal, pr.pendingAnswer?.constraint].filter(Boolean).join("\n\n") || undefined } }));
+        constraint: [input.lastRefusal, feedbackFixConstraint(pr.pendingAnswer)].filter(Boolean).join("\n\n") || undefined } }));
     if (git(["rev-parse", "HEAD"]).trim() !== pr.headSha) return refuse("the worker moved the plan round head");
     const changed = workerChangedPaths(git(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]));
     const outside = changed.filter((path) => !files.includes(path));
@@ -11196,6 +11198,7 @@ export async function runFixRung(opts: {
    * dispatch (W1-T76, unchanged).
    */
   constraint?: string;
+  feedbackContributions?: readonly unknown[];
   /**
    * W1-T100 (the #170 fix): failing required-check name+log-tail evidence for
    * a blocked_ci dispatch — this PR is checks-red with NO review verdict
@@ -12940,6 +12943,7 @@ export async function runFixRung(opts: {
         ? { ...evidenceBase, priorPartialWork: opts.priorPartialWork }
         : evidenceBase;
     const fixMode = deriveFixMode(evidence, PROOF_REPAIR_FIX_MODE_RULES);
+    await observeFeedbackInputs(opts.config.contributorAdmission, opts.feedbackContributions ?? [], "fix-adoption", deps.log);
     // W1-T3727: WHO HOLDS THIS ROUND'S GIT, read once by BOTH the prompt and the tool bound so
     // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.
     const { harnessCommits: fixHarnessOwnsGit, cashTools: fixCashTools } = fixRoundGitOwnership(opts.config);
@@ -44102,6 +44106,12 @@ export function buildEscalationReconcileCandidates(
  * "the arg-builder carries the testable read-only contract; the spawn wrapper is
  * untested by design" split — see spawnSpecialistWorker/spawnReconSpecialist).
  */
+export function feedbackFixConstraint(answer: { constraint: string; contributions?: readonly unknown[] } | undefined): string | undefined {
+  return answer?.contributions?.length
+    ? feedbackLineageEnvelope(feedbackLineagePayload(answer.constraint, answer.contributions), "feedback-entry")
+    : answer?.constraint;
+}
+
 export function buildFixRungDispatchArgs(args: {
   task: { id: string; title: string; acceptance?: AcceptanceCriterion[] };
   runId: string;
@@ -44221,9 +44231,8 @@ export function buildFixRungDispatchArgs(args: {
     strikeCap: args.strikeCap,
     initialReview,
     initialCriterionIndices,
-    constraint: pr.pendingAnswer?.contributions?.length
-      ? feedbackLineageEnvelope(feedbackLineagePayload(pr.pendingAnswer.constraint, pr.pendingAnswer.contributions), "feedback-entry")
-      : pr.pendingAnswer?.constraint,
+    constraint: feedbackFixConstraint(pr.pendingAnswer),
+    feedbackContributions: pr.pendingAnswer?.contributions,
     progressDecision: evidence.progressDecision,
     progressApproach: evidence.progressApproach,
     ciFailures: evidence.ciFailures,
@@ -49187,6 +49196,7 @@ async function triageCommandLocked(
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
+    await observeFeedbackInputs(config.contributorAdmission, entry.contribution ? [entry.contribution] : [], "triage-adoption", log);
 
     // ── THE CROSS-HOST CLAIM (W1-T1132), TAKEN BEFORE THE ARCHITECT CALL ────────────────────
     // HERE, not before the write: the loser's RESEARCH is the actual cost. Everything below this
@@ -53753,6 +53763,8 @@ async function issuesCommand(rest: string[]): Promise<number> {
     ledgerPath,
     runId,
     dryRun,
+    admission: config.contributorAdmission === undefined ? undefined : { ...config.contributorAdmission,
+      record: (step, fields) => appendLedger(ledgerPath, { run_id: runId, step, ...fields }) },
   });
   console.log(`### rmd issues${dryRun ? " --dry-run" : ""}\nissues reviewed: ${renderIssuesSummary(result.summary)}`);
   if (dryRun) {

@@ -66,7 +66,7 @@ import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec } from "./git-push.js";
 import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
-import type { AdmissionObserver } from "./contributor-admission.js";
+import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
 import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
@@ -1339,9 +1339,11 @@ export type PlanScopedFixRoundInput = {
   body: string;
   runId?: string;
   lastRefusal?: string;
+  admission?: AdmissionSettings;
   deps: Pick<BuildSweepEffectsDeps, "log"> & Pick<BodyRepairDeps, "execProof"> & {
     runGit?: (args: string[]) => string;
     preflight?: BuildSweepEffectsDeps["planPrPreflightImpl"];
+    feedbackRead?: AdmissionRead;
     spawn: (prompt: string) => Promise<string>;
     push: (sha: string) => unknown;
     updateMetadata: (metadata: { title: string; body: string }) => Promise<void>;
@@ -3071,7 +3073,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           log,
         };
         return await runPlanScopedFixRound({ pr: { ...pr, headRefName: live.head.ref, ciFailures }, task, worktreePath,
-          title: live.title, body: live.body, runId,
+          title: live.title, body: live.body, runId, admission: config.contributorAdmission,
           lastRefusal: parseLedger(ledgerPath).findLast((l) => l.step === "sweep.plan_round.refused" &&
             l.pr_number === pr.prNumber && l.head_sha === pr.headSha)?.reason,
           deps: roundEffects,

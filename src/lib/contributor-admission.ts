@@ -363,6 +363,33 @@ export async function observeFeedbackSource(
   }
 }
 
+export async function observeFeedbackInputs(
+  settings: AdmissionSettings | undefined, contributions: readonly unknown[], boundary: string, log: AdmissionRecord,
+  deps: { read?: AdmissionRead; clock?: Pick<Clock, "now"> } = {},
+): Promise<void> {
+  if (settings === undefined) return;
+  const seen = new Set<string>();
+  for (const contribution of contributions.slice(0, 8)) {
+    try {
+      const subject = record(contribution).subject as FeedbackAdmissionSubject | undefined;
+      if (!subject || typeof subject !== "object" || Array.isArray(subject)) throw new Error("missing-source-binding");
+      const binding = feedbackSubjectBinding(subject);
+      if (seen.has(binding)) continue;
+      seen.add(binding);
+      await observeFeedbackSource(settings, structuredClone(subject), boundary, log, deps);
+    } catch {
+      try { log("feedback_admission.shadow", { mode: "shadow", boundary, outcome: "unknown", would_deny: true,
+        reason: "lineage-unreadable", policy_version: settings.policy.version }); }
+      catch { /* Lost diagnostic must not turn an observation into a hold. */ }
+    }
+  }
+  if (contributions.length > 8) {
+    try { log("feedback_admission.shadow", { mode: "shadow", boundary, outcome: "unknown", would_deny: true,
+      reason: "lineage-read-bound", policy_version: settings.policy.version }); }
+    catch { /* The bounded observation never filters or discards additional lineage. */ }
+  }
+}
+
 /** Authenticated REST evidence only. An absent field stays absent; a deleted repo stays null.
  * No login, association, branch or target namespace is an authority grant. */
 export function contributionOriginFromRest(row: RestContributionOrigin): ContributionOrigin | undefined {
