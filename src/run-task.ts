@@ -1050,6 +1050,7 @@ import { clockFromDateFn, clockFromMillisFn, fixedClock, systemClock, type Clock
 import { feedbackLineagePayload, feedbackLineageSnapshot, observeFeedbackInputs, observeFeedbackPublication, type AdmissionObserver, type FeedbackAdmissionContext } from "./lib/contributor-admission.js";
 import { envelope as feedbackLineageEnvelope } from "./lib/untrusted-envelope.js";
 import { observeContributorAdmission } from "./lib/arm-auto-merge.js";
+import { observeAdmissionDisposition } from "./lib/action-executor.js";
 import {
   VERIFY_HUMAN_JUDGED_STEP,
   judgeVerifyHumanShard,
@@ -22704,6 +22705,10 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   const runId = `review-PR${view.number}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: reviewKey, step, lane: "review", ...extra });
+  const adoptionComment = flagValue(rest, "--admission-adopt-comment");
+  await observeAdmissionDisposition(config.contributorAdmission,
+    { owner, repo, prNumber: view.number, headSha: view.headRefOid }, config.root, log,
+    adoptionComment === undefined ? undefined : Number(adoptionComment));
   await (deps.contributorAdmission ?? ((target, action) => observeContributorAdmission(config.contributorAdmission, target, action, log)))
     ({ owner, repo, prNumber: view.number, headSha: view.headRefOid }, "review");
   const reviewSubject = resolveReviewSubjectCheckout({
@@ -23246,6 +23251,11 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     statusCheckRollup?: RollupEntry[];
   };
   const config = deps.config ?? loadConfig();
+  const adoptionComment = flagValue(rest, "--admission-adopt-comment");
+  await observeAdmissionDisposition(config.contributorAdmission,
+    { owner, repo, prNumber: view.number, headSha: view.headRefOid }, config.root,
+    (step, fields) => appendLedger(ledgerPathFor(config), { run_id: `dep-disposition-PR${view.number}`, task_id: `dep-review-PR${view.number}`, step, ...fields }),
+    adoptionComment === undefined ? undefined : Number(adoptionComment));
   await (deps.contributorAdmission ?? ((target, action) => observeContributorAdmission(config.contributorAdmission, target, action,
     (step, fields) => appendLedger(ledgerPathFor(config), { run_id: `dep-admission-PR${view.number}`, task_id: `dep-review-PR${view.number}`, step, ...fields }))))
     ({ owner, repo, prNumber: view.number, headSha: view.headRefOid }, "review");
@@ -48167,7 +48177,7 @@ export async function fixCommand(
   const prArg = rest[0];
   // W1-T4077: `--requested` is the console's "Fix now". The operator asking for a fix IS the decision to try
   // again, so the strike count does not turn it into an escalation; every other refusal still applies.
-  const badArg = unknownArgError("fix", rest.slice(1), ["--repo"], ["--requested"]);
+  const badArg = unknownArgError("fix", rest.slice(1), ["--repo", "--admission-adopt-comment"], ["--requested"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -48187,6 +48197,9 @@ export async function fixCommand(
   const operatorRequested = rest.includes("--requested");
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "FIX", step, lane: "fix", ...extra });
+  const adoptionComment = flagValue(rest, "--admission-adopt-comment");
+  await observeAdmissionDisposition(config.contributorAdmission, { owner, repo, prNumber }, config.root, log,
+    adoptionComment === undefined ? undefined : Number(adoptionComment));
   await (deps.contributorAdmission ?? ((target, action) => observeContributorAdmission(config.contributorAdmission, target, action, log)))
     ({ owner, repo, prNumber }, "repair");
 
