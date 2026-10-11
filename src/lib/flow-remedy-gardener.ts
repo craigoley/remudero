@@ -161,7 +161,7 @@ export function recordAdmissionFlowProposal(deps: GardenerDeps, action: FlowActi
       ? "existing-intent-or-lost-acknowledgement" : "intent-unreadable", permission: "not-granted" }); return;
   }
   deps.log("admission_flow.proposal_shadow", { cause: action.price.key, effect, mode: "shadow", permission: "not-granted",
-    remedy_max: 1, owner_judgment_max: 1, original_reason: action.charges[0]?.reason, required_checks: "ordinary-current-head-checks-required" });
+    remedy_max: 1, owner_judgment_max: 1, original_reason: "retained-in-private-intent", required_checks: "ordinary-current-head-checks-required" });
 }
 
 const originOf = (kind: LadderKind, key: string, rung: number) => `${kind.prefix}:${key}${rung > 1 ? `#r${rung}` : ""}`;

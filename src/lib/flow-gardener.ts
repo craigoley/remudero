@@ -202,11 +202,10 @@ export function admissionFlowReport(input: AdmissionFlowInput, ledger: FlowLedge
   report.populationDigest = feedbackContentDigest([...numbers].sort((a, b) => a - b));
   // An owner/scoped-service PR is the production positive control. No affected population is
   // unmeasured, not a measured zero; decoder fixtures are a separate test control.
-  report.coverage = report.trusted.length === 0 || report.affected.length === 0 ? "unmeasured" : "measured";
+  report.coverage = report.trusted.length === 0 || (report.affected.length === 0 && report.terminal.length === 0) ? "unmeasured" : "measured";
   report.reason = report.coverage === "measured" ? "current-corpus-controls" : "population-control-missing";
   if (report.affected.some(r => r.outcome === "unknown")) return unknown("current-origin-unresolved");
-  report.healthy = report.coverage === "measured" && report.affected.every(r => r.outcome !== "unknown" && r.evidence === "current-disposition"
-    && ["would-close", "noop", "adopted", "owner-action"].includes(r.status ?? ""));
+  report.healthy = report.coverage === "measured" && report.affected.length === 0 && report.terminal.length > 0;
   return report;
 }
 
