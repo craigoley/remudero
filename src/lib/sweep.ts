@@ -18077,6 +18077,11 @@ export async function runSweepLightPass(
   const queueDepth = reviewAdmissionQueueDepth(openPrs, policy, now, outcomes);
   // W1-T7095: candidates for the host-memory demand row, read BEFORE this pass reserves its own spawning heads.
   const demandCandidates = openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr)));
+  // W1-T7955: the heads an OVERLAPPING pass already holds, keyed by head (`<pr>@<head>`), never by PR number
+  // alone — a review for an older head is not this head's review. Captured before this pass reserves its own.
+  const heldElsewhere = new Set(
+    openPrs.filter((pr) => lightPassReservedHeads.has(lightPassHeadKey(pr))).map(lightPassHeadKey),
+  );
   const activeWorkers = (deps.readActiveWorkerCount ?? activeWorkerCount)();
   const policySemanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines, activeWorkers);
   const { bound: semanticBound, inFlight: reviewsInFlight } = reviewAdmissionBound(policySemanticBound);
@@ -18206,7 +18211,10 @@ export async function runSweepLightPass(
               // light pass never runs, and both used to write the same sentence.
               standDownReasonFor: (d) =>
                 d === "post-review"
-                  ? (pr.isPlanFiling === true
+                  ? (heldElsewhere.has(lightPassHeadKey(pr))
+                      // W1-T7955: the review is running, admitted by an overlapping pass — not a lost admission.
+                      ? "review already in flight for this head (admitted by an overlapping light pass)"
+                      : pr.isPlanFiling === true
                       ? `not admitted this pass: at most ${availablePlanFilings} plan-filing ` +
                         (availablePlanFilings === policy.planFilingAdmissionBound
                           ? "post-review admissions per light pass"
