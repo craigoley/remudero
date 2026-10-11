@@ -326,7 +326,7 @@ export function defaultMemoryLedgerLocation(): { dir: string; scope: "host" | "l
 
 const require = createRequire(import.meta.url);
 
-export const MEMORY_ADMISSION_LOCK_BUSY = "RMD_MEMORY_ADMISSION_LOCK_BUSY";
+export const MEMORY_ADMISSION_LOCK_BUSY = "ERR_MEMORY_ADMISSION_LOCK_BUSY";
 
 /** The existing SQLite BEGIN IMMEDIATE contract, without a busy wait or a second reservation store.
  * Its OS lock ends on close or process death. The action is synchronous: never hold it over a spawn or back-off. */
