@@ -1,0 +1,88 @@
+- id: W1-T7839
+  title: "A FLEET PAUSE RECORDS WHO REALLY SET IT — on 2026-10-11T01:17:50Z a `fleet.pause` row held core dispatch for 30 min with actor \"unknown\", host \"Remudero\" (the host itself, not a container) and a self-declared session id; nothing on the row, the PAUSE flag or the status surfaces says which person or agent set it"
+  repo: remudero
+  depends_on: [W1-T7721]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — the provenance of a dispatch-halting pause
+  band_meaning: span
+  origin: "operator ruling 2026-10-11: a fleet pause records who really set it (core pause 2026-10-11T01:17:50Z, actor unknown)"
+  plan_refs: [W1-T7721, W1-T2697, W1-T4068, W1-T4429, W1-T2262, W1-T7727, W1-T4244]
+  files: [src/lib/fleet-control.ts, src/run-task.ts, src/lib/panel-actions.ts, src/lib/status-board.ts, src/lib/actor-evidence.ts, src/lib/operator-merge-hold.ts, test/a-fleet-pause-records-who-really-set-it.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED, read from the core ledger archives on the Azure host (read-only) on 2026-10-11:
+      - 2026-10-11T01:17:50.706Z `fleet.pause`: scope instance, instance core, reason "maintenance: supervised
+        serve restoration window (core only)", host "Remudero", actor_pid 3281010, actor "unknown",
+        session_id "operator-serve-restoration-20261011". It held core dispatch until the `fleet.resume` at
+        01:48:20.048Z, which also reads actor "unknown".
+      - The same shape happened again: a pause at 02:14:40.581Z and a resume at 02:44:48.767Z.
+      - "Remudero" is the host's own hostname. Container rows carry a container id (e.g. 7a2db3da497f).
+        session_id is free text from $REMUDERO_SESSION_ID, so it is the caller's own claim and not evidence.
+    CURRENT BEHAVIOUR, read on origin/main d7f527f62:
+      - src/run-task.ts:48144 `pauseCommand` writes the row at src/run-task.ts:48178-48190 (instance) and
+        48154-48164 (--fleet). Its only identity fields are `session_id` and `requested_by_pid`.
+        `resumeFleetCommand` does the same at 48213 and 48226.
+      - The `actor` stamp comes from `deriveLedgerActor` (src/lib/ledger.ts:168-179). It returns "unknown"
+        whenever there is no test, worker, process-actor or Claude marker (CLAUDECODE, CLAUDE_CODE_SESSION_ID)
+        and stdin is not a TTY. That is what a command run over a non-interactive `ssh host '…'` looks like:
+        the calling session's markers do not cross ssh, and no pty is allocated. The process has the evidence
+        (SSH_CONNECTION, the OS user, the parent chain), but nothing records it.
+      - The PAUSE flag `writeFlag` (src/lib/fleet-control.ts:77-89) stores reason, requestedAt, pid, host and
+        sessionId only (`FleetControlInfo`, fleet-control.ts:37-54). `resolvePauseOwnerSessionId`
+        (fleet-control.ts:172-175) prefers the free-text env value. The shared hold's anchor commit body
+        (fleet-control.ts:461-466) records pid@host, session, reason and expiry.
+      - Readers show only the reason. `pauseDetail` (fleet-control.ts:269-273) renders "PAUSE requested:
+        <reason>". GET /v1/control/status returns it as `pauseDetail` (src/lib/panel-actions.ts:198-201,
+        299-300). The board's PAUSE latch (src/lib/status-board.ts:1154-1160) shows the reason and the
+        consequence. None of them can say who set the pause.
+    MIRRORS W1-T7721, which records a verifiable actor on a merge hold. That task adds the injectable
+    actor-evidence seam (OS user, host and container id, tty provenance, session or agent identity). This
+    task reuses that seam instead of building a second one, so it depends on W1-T7721. W1-T2262 attributed
+    the shared ref's anchor. W1-T4429 added the session id. Neither records verified evidence for the
+    instance pause.
+  design: |
+    1. ONE ACTOR SEAM. Reuse W1-T7721's actor-evidence gatherer. If it lands inside
+       src/lib/operator-merge-hold.ts, move it to src/lib/actor-evidence.ts and import it from both, with no
+       behaviour change to the merge hold. The shared module exports `gatherActorEvidence`, and
+       `requestPause` / `requestFleetPause` in fleet-control.ts call it. Add ssh provenance to it: SSH_CONNECTION or SSH_CLIENT present
+       (the client address), and whether a pty was allocated. The evidence is gathered by the writer and
+       never typed by the caller. $REMUDERO_SESSION_ID stays on the row but is labelled as claimed.
+    2. RECORD IT EVERYWHERE THE PAUSE LIVES. The `fleet.pause` and `fleet.resume` rows (instance and
+       --fleet) get an `actor_evidence` object. The PAUSE flag (`FleetControlInfo`) gets the same object. The
+       shared hold's anchor commit body gets one more `actor:` line, appended after the existing lines so
+       `ANCHOR_MESSAGE_RE` still matches. Classify the caller from the evidence: human at a terminal, agent
+       session, remote non-interactive (ssh with no pty), or host automation. A pause is never refused for
+       its actor. It is a safety hold, and this task only records and shows who set it.
+    3. SHOW IT. `pauseDetail`, `FleetControlStatus` (a new `pauseActor` field next to `pauseDetail`) and the
+       board's PAUSE latch row name the actor: OS user, host or container, and caller class, with the claimed
+       session id marked as claimed. A flag or row written before this change reads "actor unrecorded". The
+       console renders this field in remudero-console. That is filed as a CONSOLE-T task after this merges,
+       pinned to the field name this PR ships.
+    Tests go in the new file test/a-fleet-pause-records-who-really-set-it.test.ts, with `test(` titles
+    exactly as in the proofs below. test/a-pause-holds-only-the-instance-it-targets.test.ts and
+    test/pause-hold-is-attributable.test.ts must stay green.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-fleet-pause-records-who-really-set-it.test.ts"
+    - claim: "the pause writer in fleet-control.ts calls the shared actor-evidence gatherer"
+      proof: 'grep: gatherActorEvidence( in src/lib/fleet-control.ts'
+    - claim: "a fleet.pause row records the actor evidence gathered by the writer"
+      proof: 'grep: test("W1-T7839: a pause row records the actor evidence gathered by the writer" in test/a-fleet-pause-records-who-really-set-it.test.ts'
+    - claim: "a pause run over ssh with no terminal is recorded as remote non-interactive, not unknown"
+      proof: 'grep: test("W1-T7839: a pause over ssh with no terminal is recorded as remote, not unknown" in test/a-fleet-pause-records-who-really-set-it.test.ts'
+    - claim: "the PAUSE flag and the shared hold anchor carry the actor"
+      proof: 'grep: test("W1-T7839: the PAUSE flag and the shared hold anchor carry the actor" in test/a-fleet-pause-records-who-really-set-it.test.ts'
+    - claim: "the control status and the board show who set the pause"
+      proof: 'grep: test("W1-T7839: the control status and the board show who set the pause" in test/a-fleet-pause-records-who-really-set-it.test.ts'
+    - claim: "a pause written before this change reads as actor unrecorded"
+      proof: 'grep: test("W1-T7839: a pause flag with no actor reads as actor unrecorded" in test/a-fleet-pause-records-who-really-set-it.test.ts'
+  falsifier: |
+    Leave `pauseCommand`'s row as it is. A pause run with SSH_CONNECTION set, no TTY and no Claude markers then
+    writes actor "unknown" with no evidence object, and the first two tests fail. Leave `writeFlag` and the
+    anchor unchanged: the flag test finds no actor. Leave `pauseDetail` rendering only the reason: the status
+    test sees no actor.

@@ -77,9 +77,9 @@ test("test/the-janitor-reaps-the-state-disks-ad-hoc-top-level.test.ts", () => {
     assert.equal(readFileSync(join(kept, "data"), "utf8"), `${kept.split("/").pop()}\n`, r.stdout);
     assert.ok(r.stdout.includes(`KEEP ${kept}: state-disk deny-list\n`), r.stdout);
   }
-  // a fresh ad-hoc entry is under the 720-minute threshold
+  // a fresh ad-hoc entry is under the six-hour threshold
   assert.equal(existsSync(join(fresh, "data")), true, r.stdout);
-  assert.ok(r.stdout.includes(`KEEP ${fresh}: written within 720 min\n`), r.stdout);
+  assert.ok(r.stdout.includes(`KEEP ${fresh}: written within 360 min\n`), r.stdout);
   // the parent itself is never a unit
   assert.equal(existsSync(disk.state), true);
   assert.ok(r.stdout.includes(`KEEP ${disk.state}: workspace parent root\n`), r.stdout);
