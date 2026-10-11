@@ -1,11 +1,35 @@
 /** Offline CLI preparation and projection. Provider execution requires a separately admitted adapter. */
-import { mkdirSync, readFileSync, writeFileSync, existsSync, realpathSync, statSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, realpathSync, openSync, fstatSync, readSync, closeSync, constants } from "node:fs";
 import { dirname, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canarySuiteDigest, commonCanarySuite, weeklyCanarySuite, MODEL_CANARY_VERSION } from "./model-canary-suite.js";
 import { projectCanaryRuns, type CanaryRun } from "./model-canary-metrics.js";
 import { renderCanaryReport } from "./model-canary-report.js";
 import { retentionCanaryProtocol } from "./model-canary-retention.js";
+
+function boundedInput(input: string): string {
+  const limit = 8 * 1024 * 1024;
+  if (!Number.isInteger(constants.O_NOFOLLOW) || constants.O_NOFOLLOW <= 0
+    || !Number.isInteger(constants.O_NONBLOCK) || constants.O_NONBLOCK <= 0)
+    throw new Error("canary-input-platform-unsupported");
+  const fd = openSync(input, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile()) throw new Error("canary-input-regular-file-required");
+    if (info.size > limit) throw new Error("canary-input-bound");
+    const buffer = Buffer.alloc(limit + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const count = readSync(fd, buffer, length, buffer.length - length, null);
+      if (count === 0) break;
+      length += count;
+    }
+    if (length > limit) throw new Error("canary-input-bound");
+    return buffer.subarray(0, length).toString("utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
 
 function privateOutput(dir: string, name: string, data: string) {
   let parent = resolve(dir);
@@ -42,8 +66,8 @@ export function canaryCommand(argv: readonly string[]) {
     privateOutput(outDir, "model-canary-manifest.json", JSON.stringify(manifest, null, 2) + "\n");
     return { state: manifest.state, suiteHash: manifest.suiteHash };
   }
-  if (!input || statSync(input).size > 8 * 1024 * 1024) throw new Error("canary-input-bound");
-  const value: unknown = JSON.parse(readFileSync(input, "utf8"));
+  if (!input) throw new Error("canary-input-bound");
+  const value: unknown = JSON.parse(boundedInput(input));
   if (!Array.isArray(value)) throw new Error("canary-run-array-required");
   const runs = value as CanaryRun[], projection = projectCanaryRuns(runs);
   privateOutput(outDir, "model-canary-metrics.json", JSON.stringify(projection, null, 2) + "\n");
