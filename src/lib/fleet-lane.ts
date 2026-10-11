@@ -103,8 +103,26 @@ export interface PersistedInboxContent extends ClassificationEvidence {
   ledgerRows: Array<Record<string, unknown>>;
   mergedTaskIds: string[];
   projectionIndeterminate: boolean;
+  /** Retained attention evidence read by the slow lane, never rescanned by a console request. */
+  attentionEvidence?: InboxAttentionEvidence;
   /** The decision and plain-message stores the pass's lanes were built with; absent from a file written before they were carried. */
   stores?: { fleetDecisions: DecisionStore; plainMessages: PlainStore };
+}
+
+export interface InboxAttentionEvidence {
+  archiveLedger: "partial" | "unavailable";
+  releases: Array<[taskId: string, receipt: string]>;
+  judges: Array<[taskId: string, judgement: { decision: string; reason: string }]>;
+}
+
+function validAttentionEvidence(value: InboxAttentionEvidence | undefined, maxTasks: number): InboxAttentionEvidence | undefined {
+  const taskId = (id: unknown) => typeof id === "string" && /^W\d+-T[A-Za-z0-9]+$/.test(id);
+  if (!value || (value.archiveLedger !== "partial" && value.archiveLedger !== "unavailable") ||
+    !Array.isArray(value.releases) || !Array.isArray(value.judges) || value.releases.length > maxTasks || value.judges.length > maxTasks) return undefined;
+  const releasesValid = value.releases.every((row) => Array.isArray(row) && row.length === 2 && taskId(row[0]) && typeof row[1] === "string" && row[1].length <= 512);
+  const judgesValid = value.judges.every((row) => Array.isArray(row) && row.length === 2 && taskId(row[0]) && row[1] && typeof row[1] === "object" &&
+    typeof row[1].decision === "string" && row[1].decision.length <= 64 && typeof row[1].reason === "string" && row[1].reason.length <= 300);
+  return releasesValid && judgesValid ? value : undefined;
 }
 export interface PersistedInbox extends PersistedInboxContent {
   identity: string;
@@ -130,7 +148,7 @@ export function readPersistedInbox(stateDir: string): PersistedInbox | undefined
     const parsed = JSON.parse(raw) as Partial<PersistedInbox>;
     const valid = typeof parsed.identity === "string" && Number.isFinite(Date.parse(parsed.generatedAt ?? "")) && Array.isArray(parsed.proposals) &&
       Array.isArray(parsed.classifications) && Array.isArray(parsed.ledgerRows) && Array.isArray(parsed.mergedTaskIds) && typeof parsed.complete === "boolean";
-    return valid ? (parsed as PersistedInbox) : undefined;
+    return valid ? { ...parsed, attentionEvidence: validAttentionEvidence(parsed.attentionEvidence, parsed.proposals!.length) } as PersistedInbox : undefined;
   } catch {
     // deliberate: a torn or foreign file is no classification, answered as not ready until the next pass rewrites it.
     return undefined;

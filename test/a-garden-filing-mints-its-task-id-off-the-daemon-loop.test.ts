@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 
 import { fixedClock } from "../src/lib/clock.js";
 import { ciFrictionGardenSpec } from "../src/lib/ci-friction-gardener.js";
-import { flowGardenSpec } from "../src/lib/flow-remedy-gardener.js";
+import { FLOW_LADDER, flowGardenSpec, ladderGardenSpec } from "../src/lib/flow-remedy-gardener.js";
 import { runFlowGardener } from "../src/lib/flow-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "../src/lib/gate-gardener.js";
 import {
@@ -152,6 +152,36 @@ test("W1-T7742: every minting gardener files with the async-minted id while the 
   assert.match(readFileSync(join(f.root, f.landings.at(-1)!.paths[0]!), "utf8"), /W1-T9008/);
   assert.equal(branches.length, expected.length);
   assert.ok(branches.every(branch => branch === f.ws.branch));
+});
+
+test("W1-T7742: an admission shadow proposal reserves no task id before apply", async (t) => {
+  const f = fixture(t);
+  mkdirSync(f.deps.stateDir, { recursive: true });
+  let syncMints = 0, asyncMints = 0;
+  const mint = Object.assign(() => { syncMints++; throw new Error("shadow proposal must not reserve"); }, {
+    async: async () => { asyncMints++; throw new Error("shadow proposal must not reserve"); },
+  });
+  const cause = `admission-${"a".repeat(64)}`;
+  const proposal = { class: "draft" as const, target: cause, reason: "shadow proposal", origin: `admission-flow:${cause}`,
+    rung: 1, price: { key: cause, hours: 2, prs: 2, owners: ["admission-shadow"] },
+    charges: [], population: [1, 2], admissionShadow: true };
+  const shadow = ladderGardenSpec(f.deps, { kind: FLOW_LADDER, sources: { mintTaskId: mint },
+    inventory: () => ({ next: proposal, charges: [], episodes: [], priced: [proposal.price], candidates: [proposal.price], ladder: [] }) });
+  const plan = { actions: [proposal], acting: ["draft" as const] };
+  assert.deepEqual(await shadow.prepare!(f.ws, plan, true), []);
+  assert.deepEqual(shadow.prepare!(f.ws, plan, false), []);
+  const result = await runGardenAsync(shadow, f.deps);
+  assert.equal(result.ran, true);
+  assert.equal(result.prUrl, undefined);
+  assert.equal(syncMints, 0);
+  assert.equal(asyncMints, 0);
+  assert.equal(f.landings.length, 0);
+  assert.equal(f.disposed(), 1);
+  assert.equal(existsSync(join(f.root, "plan", "tasks.d")), false);
+  const intent = JSON.parse(readFileSync(join(f.deps.stateDir, "admission-flow-shadow-intents", `${cause}-remedy.json`), "utf8"));
+  assert.equal(intent.permission, "not-granted");
+  assert.equal(intent.effect, "remedy");
+  assert.equal(f.rows.filter(row => row.step === "admission_flow.proposal_shadow").length, 1);
 });
 
 test("W1-T7742: a mint past its bound is abandoned and writes a mint_timed_out row naming the elapsed time and the bound", { timeout: 1000 }, async (t) => {

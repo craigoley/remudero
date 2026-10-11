@@ -15,7 +15,8 @@ import { join } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { GardenMintTimedOutError, prepareGardenTaskIds, recordGardenMintTimeout, type GardenTaskIdMinter, type GardenerDeps } from "./gardener.js";
-import { ghJsonAsync } from "./github-transport.js";
+import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
+import { classifyContribution, feedbackContentDigest, type AdmissionSettings, type AdmissionDecision } from "./contributor-admission.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import { loadPlan } from "./plan.js";
@@ -80,6 +81,185 @@ const READ_STEPS = [
   "pr.opened", "pr.terminal", "sweep.review_eligible", "sweep.review_admitted", "review.posted",
   "automerge.armed", "sweep.update_branch.updated", "fix.dispatch", "review.plan_only_reviewed",
 ];
+export const ADMISSION_FLOW_STEP = "admission_flow.shadow";
+/** PRIMARY CONTROL: selected terminal evidence is normally limited to eight reads per off-loop pass. */
+export const ADMISSION_FLOW_READ_MAX = 8;
+const ADMISSION_FLOW_TIMEOUT_MS = 5_000;
+const dispositionStatuses = new Set(["trusted", "would-close", "pending", "owner-action", "noop", "adopted", "simulated-closed"]);
+const object = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value)
+  ? value as Record<string, unknown> : {};
+const positiveId = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) > 0;
+const databaseId = (value: unknown): number => positiveId(value) ? value
+  : typeof value === "string" && /^[1-9][0-9]*$/.test(value) && positiveId(Number(value)) ? Number(value) : NaN;
+
+export interface AdmissionFlowInput {
+  owner: string; repo: string; settings?: AdmissionSettings;
+  readCorpus?: AdmissionFlowRead;
+  readLedger?: () => FlowLedgerRead;
+}
+export type AdmissionFlowRead = (query: string) => Promise<unknown>;
+export interface AdmissionFlowCorpus { ok: boolean; body?: unknown; observedAtMs: number; policyDigest?: string; reason?: string }
+export interface AdmissionFlowPr {
+  pr: number; itemId: number; actorId: number; head: string; openedAtMs: number;
+  outcome: AdmissionDecision["outcome"]; causeKey: string;
+  evidence: "missing-disposition" | "current-disposition" | "stale-disposition";
+  status?: string; originalReason?: string;
+  observedRollup: "SUCCESS" | "FAILURE" | "PENDING" | "ERROR" | "EXPECTED" | "UNKNOWN";
+  next: "required-current-head-checks" | "bounded-recovery-observation";
+}
+export interface AdmissionFlowReport {
+  mode: "shadow"; permission: "not-granted"; coverage: "not-enabled" | "unknown" | "unmeasured" | "measured";
+  reason: string; healthy: boolean; repositoryId?: number; policyDigest?: string; populationDigest?: string;
+  observedAtMs: number; trusted: AdmissionFlowPr[]; affected: AdmissionFlowPr[];
+  corpusCoverage: AdmissionFlowReport["coverage"];
+  mergeCreditCoverage: "unknown" | "observed-window"; mergeCredits: Record<string, string>;
+  terminal: number[]; attempts: "unknown-from-ledger";
+  healthDomain: "admission-shadow-evidence"; runtimeFlow: "not-certified";
+}
+
+const admissionFlowText: AdmissionFlowRead = async query => JSON.parse(await ghTextAsync(
+  ["api", "graphql", "-f", `query=${query}`], { timeout: ADMISSION_FLOW_TIMEOUT_MS, maxBuffer: 1 << 20 }));
+const admissionReads = new WeakSet<AdmissionFlowRead>();
+
+/** One bounded, read-only corpus request on the existing off-loop pass, never an inbox scanner. */
+export async function readAdmissionFlowCorpus(input: AdmissionFlowInput, selected: readonly number[], clock: Clock = systemClock): Promise<AdmissionFlowCorpus> {
+  const started = clock.now(), settings = input.settings;
+  if (!settings || settings.mode !== "shadow" || settings.disposition !== "shadow") return { ok: false, observedAtMs: started, reason: "not-enabled" };
+  if (!positiveId(settings.repositoryId) || !/^[A-Za-z0-9_.-]+$/.test(input.owner) || !/^[A-Za-z0-9_.-]+$/.test(input.repo)
+    || !settings.policy || !Number.isFinite(settings.policy.maxEvidenceAgeMs) || settings.policy.maxEvidenceAgeMs < 0
+    || selected.length > ADMISSION_FLOW_READ_MAX || selected.some(n => !positiveId(n))) return { ok: false, observedAtMs: started, reason: "invalid-corpus-request" };
+  const read = input.readCorpus ?? admissionFlowText;
+  const policyDigest = feedbackContentDigest(settings);
+  if (admissionReads.has(read)) return { ok: false, observedAtMs: started, reason: "read-still-in-flight" };
+  const fields = "number fullDatabaseId state createdAt headRefOid author{__typename ... on User{databaseId} ... on Bot{databaseId}} repository{databaseId nameWithOwner isPrivate} headRepository{databaseId nameWithOwner isPrivate} commits(last:1){nodes{commit{oid statusCheckRollup{state}}}}";
+  const query = `query{repository(owner:${JSON.stringify(input.owner)},name:${JSON.stringify(input.repo)}){databaseId nameWithOwner isPrivate pullRequests(first:100,states:OPEN){totalCount pageInfo{hasNextPage}nodes{${fields}}} merged:pullRequests(first:100,states:MERGED,orderBy:{field:CREATED_AT,direction:DESC}){pageInfo{hasNextPage}nodes{body headRefName mergedAt}} ${[...new Set(selected)].map(n => `p${n}:pullRequest(number:${n}){${fields}}`).join(" ")}}}`;
+  admissionReads.add(read);
+  const timeout = Math.min(ADMISSION_FLOW_TIMEOUT_MS, Math.max(1, settings.policy.maxEvidenceAgeMs));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const body = await Promise.race([Promise.resolve().then(() => read(query)).finally(() => admissionReads.delete(read)),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("corpus-read-timeout")), timeout); })]);
+    return { ok: true, body, observedAtMs: started, policyDigest };
+  } catch { // Transport, malformed bytes and a stalled read stay unknown; no fresh effect budget.
+    return { ok: false, observedAtMs: started, reason: "corpus-unreadable" };
+  } finally { if (timer !== undefined) clearTimeout(timer); }
+}
+
+/** Current numeric identities control health; stored admission text is never current authority. */
+export function admissionFlowReport(input: AdmissionFlowInput, ledger: FlowLedgerRead, corpus: AdmissionFlowCorpus, nowMs: number): AdmissionFlowReport {
+  const report: AdmissionFlowReport = { mode: "shadow", permission: "not-granted", coverage: "unknown", reason: "evidence-unreadable",
+    healthy: false, observedAtMs: nowMs, trusted: [], affected: [], terminal: [], attempts: "unknown-from-ledger",
+    healthDomain: "admission-shadow-evidence", runtimeFlow: "not-certified", corpusCoverage: "unknown",
+    mergeCreditCoverage: "unknown", mergeCredits: {} };
+  const settings = input.settings;
+  if (!settings || settings.mode !== "shadow" || settings.disposition !== "shadow") return { ...report, coverage: "not-enabled", corpusCoverage: "not-enabled", reason: "not-enabled" };
+  const snapshot = feedbackContentDigest(settings);
+  const unknown = (reason: string): AdmissionFlowReport => ({ ...report, coverage: "unknown", reason });
+  if (!settings.policy || !Array.isArray(settings.policy.ownerIds) || !Array.isArray(settings.policy.organizationIds)
+    || !Array.isArray(settings.policy.services) || typeof settings.policy.version !== "string"
+    || corpus.policyDigest !== snapshot) return unknown("policy-unreadable-or-changed");
+  if (!ledger.ok || !corpus.ok || object(corpus.body).errors !== undefined) return unknown("ledger-or-corpus-unreadable");
+  if (!Number.isFinite(nowMs) || corpus.observedAtMs > nowMs || corpus.observedAtMs < 0
+    || nowMs - corpus.observedAtMs > Math.min(ADMISSION_FLOW_TIMEOUT_MS, settings.policy.maxEvidenceAgeMs)) return unknown("stale-corpus");
+  const repo = object(object(object(corpus.body).data).repository), connection = object(repo.pullRequests);
+  if (repo.databaseId !== settings.repositoryId || !positiveId(repo.databaseId) || repo.nameWithOwner !== `${input.owner}/${input.repo}`
+    || repo.isPrivate !== false || !Array.isArray(connection.nodes) || object(connection.pageInfo).hasNextPage !== false
+    || connection.totalCount !== connection.nodes.length || connection.nodes.length > 100) return unknown("corpus-incomplete-or-private");
+  const dispositionRows = ledger.rows.filter(r => r.step === "contributor_disposition.shadow" && r.mode === "shadow" && r.evidence_domain === "shadow");
+  const numbers = new Set<number>();
+  for (const value of connection.nodes) {
+    const pr = object(value), actor = object(pr.author), target = object(pr.repository), headRepo = object(pr.headRepository);
+    const item = databaseId(pr.fullDatabaseId);
+    const opened = typeof pr.createdAt === "string" ? Date.parse(pr.createdAt) : NaN;
+    if (!positiveId(pr.number) || numbers.has(pr.number) || !positiveId(item) || !positiveId(actor.databaseId)
+      || !["User", "Bot"].includes(String(actor.__typename)) || !positiveId(headRepo.databaseId)
+      || target.databaseId !== repo.databaseId || target.nameWithOwner !== repo.nameWithOwner || target.isPrivate !== false
+      || typeof headRepo.isPrivate !== "boolean" || typeof headRepo.nameWithOwner !== "string" || pr.state !== "OPEN"
+      || typeof pr.headRefOid !== "string" || !/^[a-f0-9]{40}$/i.test(pr.headRefOid)
+      || !Number.isFinite(opened) || opened < 0 || opened > corpus.observedAtMs) return unknown("identity-or-open-context-unreadable");
+    numbers.add(pr.number);
+    const decision = classifyContribution({ repositoryId: settings.repositoryId, prNumber: pr.number, headSha: pr.headRefOid,
+      observedAtMs: corpus.observedAtMs, origin: { actor: { id: actor.databaseId, type: String(actor.__typename) },
+        headRepository: { id: headRepo.databaseId, fullName: headRepo.nameWithOwner }, targetRepository: { id: settings.repositoryId, fullName: String(repo.nameWithOwner) } } },
+    "disposition", settings.policy, [], nowMs);
+    const cause = feedbackContentDigest(["shadow", settings.repositoryId, input.owner, input.repo, pr.number]);
+    const history = dispositionRows.filter(r => r.repository_id === settings.repositoryId && r.pr_number === pr.number && r.cause === cause);
+    if (history.some(r => typeof r.sequence !== "number" || !Number.isSafeInteger(r.sequence) || r.sequence < 0 || !dispositionStatuses.has(String(r.status)) || r.permission !== "not-granted"
+      || !Number.isFinite(tsOf(r)) || tsOf(r) > nowMs || typeof r.head_sha !== "string" || !/^[a-f0-9]{40}$/i.test(r.head_sha))) return unknown("disposition-receipt-unreadable");
+    const latest = [...history].sort((a, b) => Number(b.sequence) - Number(a.sequence) || tsOf(b) - tsOf(a))[0];
+    const evidence = !latest ? "missing-disposition" : latest.head_sha === pr.headRefOid ? "current-disposition" : "stale-disposition";
+    const commits = object(pr.commits).nodes;
+    const commit = Array.isArray(commits) && commits.length === 1 ? object(object(commits[0]).commit) : {};
+    const rollup = String(object(commit.statusCheckRollup).state);
+    const observedRollup = commit.oid === pr.headRefOid && ["SUCCESS", "FAILURE", "PENDING", "ERROR", "EXPECTED"].includes(rollup)
+      ? rollup as AdmissionFlowPr["observedRollup"] : "UNKNOWN";
+    const reasonClass = decision.outcome === "trusted" ? "trusted-flow" : decision.outcome === "unknown" ? "origin-unknown" : "disposition-evidence";
+    const row: AdmissionFlowPr = { pr: pr.number, itemId: item, actorId: actor.databaseId, head: pr.headRefOid, openedAtMs: opened,
+      outcome: decision.outcome, causeKey: `admission-${feedbackContentDigest(["shadow", settings.repositoryId, reasonClass])}`,
+      observedRollup,
+      evidence, ...(latest ? { status: String(latest.status), originalReason: String(latest.original_reason ?? latest.reason) } : {}),
+      next: decision.outcome === "trusted" ? "required-current-head-checks" : "bounded-recovery-observation" };
+    (decision.outcome === "trusted" ? report.trusted : report.affected).push(row);
+  }
+  const historical = [...new Set(dispositionRows.filter(r => r.repository_id === settings.repositoryId && positiveId(r.pr_number)).map(r => Number(r.pr_number)))];
+  if (historical.length > ADMISSION_FLOW_READ_MAX) return unknown("selected-terminal-read-bound");
+  const selected = historical;
+  for (const n of selected.filter(n => !numbers.has(n))) {
+    const current = object(repo[`p${n}`]);
+    if (current.number !== n || !["MERGED", "CLOSED"].includes(String(current.state)) || !positiveId(databaseId(current.fullDatabaseId))
+      || object(current.repository).databaseId !== settings.repositoryId || object(current.repository).nameWithOwner !== repo.nameWithOwner
+      || object(current.repository).isPrivate !== false) return unknown("selected-terminal-unreadable");
+    report.terminal.push(n);
+  }
+  if (feedbackContentDigest(settings) !== snapshot) return unknown("policy-changed");
+  report.repositoryId = settings.repositoryId;
+  report.policyDigest = snapshot;
+  report.populationDigest = feedbackContentDigest([...numbers].sort((a, b) => a - b));
+  const merged = object(repo.merged);
+  if (Array.isArray(merged.nodes) && merged.nodes.length <= 100 && typeof object(merged.pageInfo).hasNextPage === "boolean"
+    && merged.nodes.every(value => { const row = object(value); return typeof row.body === "string" && typeof row.headRefName === "string"
+      && typeof row.mergedAt === "string" && Number.isFinite(Date.parse(row.mergedAt)) && Date.parse(row.mergedAt) >= 0 && Date.parse(row.mergedAt) <= corpus.observedAtMs; })) {
+    report.mergeCreditCoverage = "observed-window";
+    for (const value of merged.nodes) {
+      const row = object(value), branch = /^run-(W[0-9]+-T[0-9]+)-[0-9]+$/.exec(String(row.headRefName));
+      const trailers = [...String(row.body).matchAll(/^Remudero-Task:[ \t]*(W[0-9]+-T[0-9]+)[ \t]*$/gm)].map(match => match[1]!);
+      for (const id of [...trailers, ...(branch ? [branch[1]!] : [])]) {
+        const at = String(row.mergedAt), prior = report.mergeCredits[id];
+        if (prior === undefined || Date.parse(prior) < Date.parse(at)) report.mergeCredits[id] = at;
+      }
+    }
+  }
+  // An owner/scoped-service PR is the production positive control. No affected population is
+  // unmeasured, not a measured zero; decoder fixtures are a separate test control.
+  report.corpusCoverage = report.trusted.length === 0 || (report.affected.length === 0 && report.terminal.length === 0) ? "unmeasured" : "measured";
+  report.coverage = report.corpusCoverage;
+  report.reason = report.coverage === "measured" ? "current-corpus-controls" : "population-control-missing";
+  if (report.affected.some(r => r.outcome === "unknown")) return unknown("current-origin-unresolved");
+  report.healthy = report.coverage === "measured" && report.affected.length === 0 && report.terminal.length > 0;
+  if (report.corpusCoverage === "measured" && !report.healthy) return unknown("open-recovery-not-terminal");
+  return report;
+}
+
+/** Reuses the daily/off-loop gardens and their ledger union, keeping archive loss explicit. */
+export async function observeAdmissionFlow(deps: GardenerDeps, input: AdmissionFlowInput): Promise<AdmissionFlowReport> {
+  const clock = deps.clock ?? systemClock;
+  if (!input.settings || input.settings.mode !== "shadow" || input.settings.disposition !== "shadow") {
+    return admissionFlowReport(input, { ok: false, rows: [], unread: [] }, { ok: false, observedAtMs: clock.now() }, clock.now());
+  }
+  let ledger: FlowLedgerRead;
+  try {
+    ledger = input.readLedger ? input.readLedger() : readLedgerUnionRecordsSync(deps.stateDir,
+      { step: ["contributor_disposition.shadow", ADMISSION_FLOW_STEP], requireArchives: true, refuseIncomplete: true });
+  } catch { // Missing/unreadable history is not healthy flow or a reset of recovery counts.
+    ledger = { ok: false, rows: [], unread: ["ledger-unreadable"] };
+  }
+  const selected = [...new Set(ledger.rows.filter(r => r.step === "contributor_disposition.shadow" && r.evidence_domain === "shadow"
+    && r.repository_id === input.settings?.repositoryId && positiveId(r.pr_number)).map(r => Number(r.pr_number)))].slice(-ADMISSION_FLOW_READ_MAX);
+  const corpus = await readAdmissionFlowCorpus(input, selected, clock);
+  const report = admissionFlowReport(input, ledger, corpus, clock.now());
+  deps.log(ADMISSION_FLOW_STEP, { ...report, recovery_counts: "unknown-from-ledger", owner_override: "preserved" });
+  return report;
+}
 /** Raw-line prefilter: the stage rows, a disposition that carries `arm_surface`, a gardener's filing row. */
 const FLOW_LINE = new RegExp(
   `"step":"(?:${READ_STEPS.map((s) => s.replaceAll(".", "\\.")).join("|")})"|"arm_surface"|"run_id":"GARDEN-[^"]*".*"(?:pr_url|filing_pr)":"https:`,
@@ -130,6 +310,7 @@ export interface FlowGardenSources {
   readCi?: (headSha: string) => Promise<FlowCiReading | undefined>;
   planTasks?: () => FlowPlanTask[];
   mintTaskId: GardenTaskIdMinter;
+  admission?: AdmissionFlowInput;
 }
 
 interface FlowPr {
@@ -378,6 +559,11 @@ export async function runFlowGardener(
     unreadable("state", { error: String((e as Error)?.message ?? e) });
   }
   if (state.lastReportDay === day) return { ran: false, stats: [], filed: [] };
+  if (sources.admission?.settings?.mode === "shadow" && sources.admission.settings.disposition === "shadow") {
+    try { await observeAdmissionFlow(deps, sources.admission); }
+    catch { // A lost shadow diagnostic cannot hold the existing merged-PR report or trusted filing path.
+      unreadable("admission-shadow", { reason: "admission-observation-unavailable" }); }
+  }
   const sinceIso = fixedClock(nowMs - FLOW_READ_DAYS * DAY_MS).iso();
   const ledger = (sources.readLedger ?? ((iso) => readFlowLedger(deps.stateDir, iso)))(sinceIso);
   if (!ledger.ok) {

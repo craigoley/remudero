@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { fixedClock } from "./clock.js";
 import { canarySuiteDigest, type CanaryCase } from "./model-canary-suite.js";
 import { executeCanary, type CanaryPin, type CanaryExecutionPorts } from "./model-canary-runner.js";
+import { canaryTrialBlockId, type CanaryTrialBlock } from "./model-canary-metrics.js";
 
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
 export interface CanarySlot { id: string; caseId: string; pin: CanaryPin; aaLabel: "A" | "B" | null }
@@ -46,6 +47,11 @@ export async function executeCanarySchedule(plan: ReturnType<typeof buildCanaryS
     throw new Error("canary-schedule-changed");
   let completed = 0, skipped = 0;
   for (const slot of plan.slots) {
+    const plannedSlotIds = plan.slots.filter(s => s.caseId === slot.caseId).map(s => s.id);
+    const trial: CanaryTrialBlock = { version: "canary-trial-block-v1", day: plan.day,
+      scheduleDigest: plan.digest, slotId: slot.id, plannedSlotIds, position: plannedSlotIds.indexOf(slot.id),
+      aaLabel: slot.aaLabel,
+      blockId: canaryTrialBlockId(plan.day, plan.suiteHash, slot.caseId, plan.digest, plannedSlotIds) };
     const e = await ports.eligibility(slot);
     if (!e.sourceAdopted || !e.adapterQualified || e.productionBusy || e.squeeze
       || (slot.pin.billing === "subscription" ? !e.spareSubscription : !e.experimentalCashAllowed || e.premium))
@@ -54,7 +60,11 @@ export async function executeCanarySchedule(plan: ReturnType<typeof buildCanaryS
     if (!item || slot.pin.suiteHash !== plan.suiteHash) throw new Error("canary-schedule-slot-invalid");
     if (await ports.claim(slot) !== "claimed") { skipped++; continue; }
     // An exception after claiming leaves ownership held. Never silently retry a possibly billed call.
-    const outcome = await executeCanary(item, slot.pin, ports.ports(slot));
+    const execution = ports.ports(slot);
+    const outcome = await executeCanary(item, slot.pin, { ...execution, save: async (run, grade) => {
+      run.trial = structuredClone(trial);
+      await execution.save(run, grade);
+    } });
     await ports.terminal(slot, outcome); completed++;
     if (outcome.state === "unavailable") return { state: "deferred" as const, completed, skipped, nextSlot: null };
   }

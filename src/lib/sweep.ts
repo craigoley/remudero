@@ -5132,6 +5132,27 @@ function observedPathMatchesRepositoryPath(observedPath: string, repositoryPath:
   return observedPath === repositoryPath || observedPath.endsWith(`/${repositoryPath}`);
 }
 
+/** W1-T8038: the runner's own words for a job killed at its ceiling or cancelled. PRIMARY CONTROL: a
+ *  classifier, not a cap — it decides whether the job log is read beside the annotations. */
+export const RUNNER_TIMEOUT_LINE =
+  /exceeded the maximum execution time|The (?:operation|job|run) was canceled|received a shutdown signal|SHARD HANG\W+the matrix was cancelled/i;
+
+/** W1-T8038: the paths a CI job runs rather than tests: workflows, scripts entry points, test/setup/. */
+export function isCiHarnessPath(path: string): boolean {
+  return /^(?:\.github\/workflows\/[^/]+|scripts\/[^/]+|test\/setup\/.+)$/.test(path.replaceAll("\\", "/"));
+}
+
+function redIsTimedOutOrFileless(
+  failures: readonly CiFailure[],
+  failingTestFiles: readonly string[],
+  failingSourceFiles: readonly string[],
+): boolean {
+  if (failures.some((f) => (f.conclusion ?? "").toUpperCase() === "CANCELLED" || RUNNER_TIMEOUT_LINE.test(f.logTail ?? ""))) {
+    return true;
+  }
+  return failingTestFiles.length === 0 && failingSourceFiles.length === 0;
+}
+
 /** W1-T2671/W1-T2789 — the ONE pure exact-path decision shared by the fix rung and the sweep-level
  *  pre-exhaustion release, so neither caller can reinterpret a weak behind/path signal alone. */
 export function decideRedBaseRefresh(
@@ -5158,14 +5179,22 @@ export function decideRedBaseRefresh(
     else refreshableSourceFiles.add(observedPath);
   }
   const baseChangedFiles = facts.baseChangedFiles;
-  const matchingBaseFiles =
-    facts.behindBy !== undefined && facts.behindBy > 0 && baseChangedFiles !== undefined
-      ? baseChangedFiles.filter((baseFile) =>
-          [...failingTestFiles, ...refreshableSourceFiles].some((failureFile) =>
-            observedPathMatchesRepositoryPath(failureFile, baseFile),
-          ),
-        )
+  const behind = facts.behindBy !== undefined && facts.behindBy > 0 && baseChangedFiles !== undefined;
+  const exactMatches = behind
+    ? baseChangedFiles.filter((baseFile) =>
+        [...failingTestFiles, ...refreshableSourceFiles].some((failureFile) =>
+          observedPathMatchesRepositoryPath(failureFile, baseFile),
+        ),
+      )
+    : [];
+  // W1-T8038: a red that timed out or was cancelled, or names no file, can never match a failing
+  // file — so main changing the HARNESS the job runs (its workflow, a scripts/ entry point, the
+  // test/setup/ helpers) is the only base evidence there is. Any other base change falls through.
+  const harnessMatches =
+    behind && exactMatches.length === 0 && redIsTimedOutOrFileless(failures, failingTestFiles, failingSourceFiles)
+      ? baseChangedFiles.filter(isCiHarnessPath)
       : [];
+  const matchingBaseFiles = exactMatches.length > 0 ? exactMatches : harnessMatches;
   return {
     refresh: matchingBaseFiles.length > 0,
     behindBy: facts.behindBy,
@@ -5218,6 +5247,9 @@ export type CiAnnotationFallback =
   | { outcome: "recovered" }
   | { outcome: "empty" }
   | { outcome: "bare-exit-code" }
+  /** W1-T8038: the annotations held only the runner's own timeout or cancellation lines, which name no
+   *  test, so the job log was read beside them. */
+  | { outcome: "runner-timeout-only" }
   | { outcome: "skipped-limit" }
   | { outcome: "failed"; detail: string };
 
@@ -20358,7 +20390,7 @@ export function diffCoverageReport(failures: readonly CiFailure[]): DiffCoverage
     // The fix prompt uses repository-relative targets. CI can also print an absolute checkout
     // path; retain it here so the red-base refresh can compare its complete source suffix.
     for (const raw of f.logTail.split("\n")) {
-      const absolute = /^\s*-\s+((?:[A-Za-z]:[\\/]|\/)(?:[^\s:]+[\\/])*[^\s:]+\.[cm]?[jt]sx?):(\d+)(?:\s|$)/.exec(raw);
+      const absolute = /^\s*-\s+((?:[A-Za-z]:[\\/]|\/)[^\s:]+\.[cm]?[jt]sx?):(\d+)(?:\s|$)/.exec(raw);
       if (absolute) uncovered.push(`${absolute[1]}:${absolute[2]}`);
     }
     return { check: f.name, uncovered };
