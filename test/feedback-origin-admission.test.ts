@@ -227,6 +227,24 @@ test("W1-T7754 source: positive membership is bounded by pinned policy and faile
   assert.equal(membershipReads, 2);
 });
 
+test("W1-T7754 source: a thrown membership read is unknown and never escapes the shadow observer", async () => {
+  const f = sourceFixture("issue", 9021);
+  f.settings.policy = { ...POLICY, version: "membership-transport-throw", organizationIds: [600] };
+  f.settings.organizations = [{ id: 600, login: "acme" }];
+  let membershipReads = 0;
+  const read: AdmissionRead = path => {
+    if (path.startsWith("orgs/")) { membershipReads++; throw new Error("membership transport offline"); }
+    return f.read(path);
+  };
+  const rows: Record<string, unknown>[] = [];
+  const result = await recheckSource(f.settings, f.subject, "adoption", (_step, fields) => rows.push(fields),
+    { read, clock: { now: () => NOW } });
+  assert.equal(membershipReads, 1);
+  assert.equal(result?.decision.outcome, "unknown");
+  assert.equal(result?.wouldDeny, true);
+  assert.equal(rows.length, 1);
+});
+
 test("W1-T7754 adoption: selected lineage is re-read once and unreadable or over-bound inputs cannot hold effects", async () => {
   const f = sourceFixture(); const rows: Record<string, unknown>[] = [];
   const contribution = { subject: f.subject, admission: { outcome: "trusted" } };
@@ -241,6 +259,8 @@ test("W1-T7754 adoption: selected lineage is re-read once and unreadable or over
   assert.ok(rows.some(row => row.reason === "lineage-read-bound"));
   assert.ok(rows.some(row => row.reason === "lineage-unreadable"));
   await admissionModule.observeFeedbackInputs(f.settings, [{}], "fix", () => { throw new Error("receipt failure"); });
+  await admissionModule.observeFeedbackInputs(f.settings, Array(9).fill({}), "fix", () => { throw new Error("bounded receipt failure"); },
+    { read: () => { assert.fail("missing lineage cannot choose an API path"); } });
   await admissionModule.observeFeedbackInputs(undefined, [contribution], "fix", log,
     { read: () => { assert.fail("absent settings cannot read"); } });
 });
