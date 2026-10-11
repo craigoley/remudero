@@ -3,9 +3,9 @@
  *
  * The floor (`checkMemoryGovernor`, consulted through `memoryGovernorGateFor`) read only /proc/meminfo, on the stated
  * ground that "this fleet's containers carry no memory limit". That has been false since #10371 and #10486: core runs
- * under memory.max 8820 MiB with memory.high 8379 MiB. MEASURED 2026-10-10/11 across 395 core `memory_budget.shadow`
- * rows: host MemAvailable never fell below the 3072 MiB floor (p10 8518-10578 MiB), while the container's own headroom
- * to its ceiling did in 29 of them (p10 3055-3522 MiB). So the floor could not see the pool a new worker actually draws on.
+ * under memory.max 8820 MiB with memory.high 8379 MiB. MEASURED 2026-10-10/11 across 442 core `memory_budget.shadow`
+ * rows: host MemAvailable never fell below the 3072 MiB floor (p10 7275-10578 MiB), while the container's own headroom
+ * to its ceiling did in 44 of them (p10 2630-3522 MiB). So the floor could not see the pool a new worker actually draws on.
  * Each case asserts a field only the container reading, its tiers, or the named ledger row produces.
  */
 import assert from "node:assert/strict";
