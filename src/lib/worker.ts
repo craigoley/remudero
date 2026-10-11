@@ -4254,6 +4254,7 @@ export interface QuestionAnswerEntry {
   /** Non-reversible id of the bearer token that submitted the answer — never the raw token (see lib/panel-actions.ts's
    * `bearerTokenId`). */
   origin: string;
+  contribution?: unknown;
 }
 
 /** Append an operator's ANSWER to the same store `appendQuestion` writes to; the panel's write action is the only caller

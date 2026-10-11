@@ -55,6 +55,8 @@ import { systemClock, type Clock } from "./clock.js";
 import { ghExec, ghTextAsync } from "./github-transport.js";
 import { appendLedger, type LedgerWriterDeps } from "./ledger.js";
 import { appendQuestionAnswer } from "./worker.js";
+import { contributionOriginFromRest, feedbackContentDigest, observeFeedbackSource, readAdmissionRestAsync,
+  type AdmissionRead, type AdmissionSettings, type FeedbackAdmissionSubject } from "./contributor-admission.js";
 import { openLedgerUnion } from "./ledger-union.js";
 import {
   ASK_TYPE_LABEL,
@@ -86,6 +88,7 @@ export interface EscalationIssueComment {
   /** `"User"` or `"Bot"` (GitHub's `user.type`) — a bot commenting as the repo owner (a fleet
    *  automation posting under the same account) is still refused. */
   authorType: string;
+  sourceSubject?: FeedbackAdmissionSubject;
 }
 
 /** One reaction on an OPEN needs-question issue ITSELF (never a comment) — W1-T4676. */
@@ -99,6 +102,7 @@ export interface EscalationIssueReaction {
    *  EscalationIssueComment.authorType}, though a login mismatch alone already excludes the
    *  fleet's own account (see this module's header). */
   authorType: string;
+  sourceSubject?: FeedbackAdmissionSubject;
 }
 
 /** What {@link readEscalationAnswers} needs from GitHub — a NARROWER surface than {@link
@@ -107,6 +111,8 @@ export interface EscalationIssueReaction {
  *  closes, or comments. `listReactions`/`ownerLogin`/`reactPlusOneOnIssue` are OPTIONAL —
  *  omitting all three (every W1-T4471 test double) just reads zero issue-level reactions. */
 export interface EscalationAnswerGateway {
+  readonly admission?: AdmissionSettings;
+  readonly sourceRead?: AdmissionRead;
   /** OPEN issues carrying `label` — the same REST read {@link "./escalate.js".IssueGateway.listOpen}
    *  makes. THROWS on a `gh` read failure; the caller degrades to "nothing new this pass". */
   listOpen(label: string): OpenIssue[] | Promise<OpenIssue[]>;
@@ -138,7 +144,8 @@ interface RestCommentRow {
   id: number;
   body?: string;
   author_association?: string;
-  user?: { login?: string; type?: string } | null;
+  updated_at?: string;
+  user?: { id?: number; login?: string; type?: string } | null;
 }
 
 /** One raw reaction row as GitHub's REST `/issues/{n}/reactions` endpoint returns it — NO
@@ -146,7 +153,8 @@ interface RestCommentRow {
 interface RestReactionRow {
   id: number;
   content?: string;
-  user?: { login?: string; type?: string } | null;
+  created_at?: string;
+  user?: { id?: number; login?: string; type?: string } | null;
 }
 
 /** The real gateway: `gh api`, matching escalate.ts's `ghIssueGateway` REST discipline (never
@@ -164,15 +172,47 @@ export function ghEscalationAnswerGateway(
   // the synchronous one slept through on the daemon loop (a 20.3 s block, live profile 2026-10-07).
   readText: (args: string[]) => Promise<string> = (args) => ghTextAsync(args),
   operatorLogins?: readonly string[],
+  feedback?: { settings: AdmissionSettings; read?: AdmissionRead },
 ): EscalationAnswerGateway {
   const repoArg = `${owner}/${repo}`;
   const run = (args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const parents = new Map<number, FeedbackAdmissionSubject>();
+  let repository: FeedbackAdmissionSubject["repository"];
+  const subject = (kind: FeedbackAdmissionSubject["kind"], sourceRef: string, issueNumber: number,
+    item: RestCommentRow | RestReactionRow, parent?: FeedbackAdmissionSubject): FeedbackAdmissionSubject => ({
+    kind, sourceRef, repository, issueNumber, itemId: item.id, observedAtMs: Date.now(),
+    origin: contributionOriginFromRest(item),
+    revision: "content" in item
+      ? { createdAt: (item as RestReactionRow).created_at, contentDigest: feedbackContentDigest(item.content) }
+      : { updatedAt: (item as RestCommentRow).updated_at, contentDigest: feedbackContentDigest((item as RestCommentRow).body) },
+    ...(parent?.itemId && parent.revision ? { parent: { kind: "issue" as const, itemId: parent.itemId, revision: parent.revision } } : {}),
+  });
   return {
+    admission: feedback?.settings,
+    sourceRead: feedback?.read,
     ownerLogin: owner,
     operatorLogins,
     refusalIssues: ghIssueGatewayAsync(owner, repo, { exec: readText }),
     async listOpen(label) {
-      return parseLabelledIssuesRest(await readText(labelledIssuesRestArgs(repoArg, label, "open")));
+      const raw = await readText(labelledIssuesRestArgs(repoArg, label, "open"));
+      const issues = parseLabelledIssuesRest(raw);
+      if (feedback === undefined) return issues;
+      repository = undefined;
+      parents.clear();
+      try {
+        const response = await (feedback.read ?? readAdmissionRestAsync)(`repos/${repoArg}`);
+        const row = response.body as { id?: number; full_name?: string; private?: boolean } | null;
+        if (response.status === 200 && row?.full_name === repoArg && Number.isSafeInteger(row.id) && row.id! > 0
+          && typeof row.private === "boolean") repository = { id: row.id, fullName: row.full_name, private: row.private };
+      } catch { /* Unreadable identity stays missing; accepted legacy replies still land in shadow. */ }
+      for (const item of splitConcatenatedJsonPages(raw).flatMap(chunk => JSON.parse(chunk)) as Array<RestCommentRow & {
+        number: number; title?: string; labels?: unknown; pull_request?: unknown;
+      }>) {
+        if ("pull_request" in item) continue;
+        parents.set(item.number, { ...subject("issue", `${repoArg}#${item.number}`, item.number, item),
+          revision: { updatedAt: item.updated_at, contentDigest: feedbackContentDigest([item.title, item.body, item.labels]) } });
+      }
+      return issues;
     },
     async listComments(issueNumber) {
       const raw = await readText(["api", `repos/${repoArg}/issues/${issueNumber}/comments?per_page=100`, "--paginate"]);
@@ -187,6 +227,7 @@ export function ghEscalationAnswerGateway(
         authorLogin: r.user?.login ?? "",
         authorAssociation: r.author_association ?? "NONE",
         authorType: r.user?.type ?? "User",
+        ...(feedback === undefined ? {} : { sourceSubject: subject("issue-comment", `${repoArg}#${issueNumber}/comment/${r.id}`, issueNumber, r) }),
       }));
     },
     async listReactions(issueNumber) {
@@ -201,6 +242,7 @@ export function ghEscalationAnswerGateway(
         content: r.content ?? "",
         authorLogin: r.user?.login ?? "",
         authorType: r.user?.type ?? "User",
+        ...(feedback === undefined ? {} : { sourceSubject: subject("issue-reaction", `${repoArg}#${issueNumber}/reaction/${r.id}`, issueNumber, r, parents.get(issueNumber)) }),
       }));
     },
     reactPlusOne(commentId) {
@@ -460,8 +502,17 @@ export async function readEscalationAnswers(
   const recordedOrigins = recordedQuestionStoreOrigins(root);
   /** Land one ACCEPTED answer (a comment or a reaction) in the shared store — design (ii)'s "one
    *  sink, whichever channel answered", now three channels deep. */
-  const landAnswer = (taskId: string, origin: string, answer: string, authorLogin: string) => {
-    const recordedToQuestionStore = appendQuestionAnswer(root, { ts: clock.iso(), task: taskId, answer, origin });
+  const landAnswer = async (taskId: string, origin: string, answer: string, authorLogin: string, subject?: FeedbackAdmissionSubject) => {
+    const observation = gateway.admission === undefined || subject === undefined ? undefined
+      : await observeFeedbackSource(gateway.admission, subject, "question-answer", (step, fields) =>
+        writeLedger(deps.ledgerPath, { ...fields, step, run_id: runId, task_id: taskId }), { read: gateway.sourceRead, clock });
+    const contribution = gateway.admission === undefined ? undefined : {
+      kind: subject?.kind ?? "unresolved", source_ref: subject?.sourceRef ?? origin,
+      ...(subject === undefined ? {} : { subject: structuredClone(subject) }),
+      admission: observation?.decision ?? { outcome: "unknown", reason: "lineage-unreadable" },
+    };
+    const recordedToQuestionStore = appendQuestionAnswer(root, { ts: clock.iso(), task: taskId, answer, origin,
+      ...(contribution === undefined ? {} : { contribution }) });
     writeLedger(deps.ledgerPath, {
       run_id: runId,
       task_id: taskId,
@@ -472,6 +523,7 @@ export async function readEscalationAnswers(
       authority: gateway.operatorLogins === undefined ? "repository-owner" : "configured-operator",
       flows_to: "plan/questions.ndjson",
       recorded_to_question_store: recordedToQuestionStore,
+      ...(contribution === undefined ? {} : { contribution }),
     });
     accepted++;
     recordedOrigins.add(origin);
@@ -508,7 +560,7 @@ export async function readEscalationAnswers(
       }
       const answer = answerTextFor(comment.body, issue.body ?? "");
       if (!answer) continue;
-      landAnswer(taskId, origin, answer, comment.authorLogin);
+      await landAnswer(taskId, origin, answer, comment.authorLogin, comment.sourceSubject);
       try {
         gateway.reactPlusOne(comment.id);
       } catch {
@@ -531,7 +583,7 @@ export async function readEscalationAnswers(
           reaction.authorLogin.toLowerCase() === gateway.ownerLogin?.toLowerCase()) !== undefined) continue;
       const answer = reactionAnswerText(reaction.content, issue.body ?? "");
       if (!answer) continue; // not a +1/-1, or no recoverable recommendation to attach it to
-      landAnswer(taskId, origin, answer, reaction.authorLogin);
+      await landAnswer(taskId, origin, answer, reaction.authorLogin, reaction.sourceSubject);
       try {
         gateway.reactPlusOneOnIssue?.(issue.number);
       } catch {
