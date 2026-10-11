@@ -2034,6 +2034,32 @@ echo "recycle-container: worker smoke PASSED — ${SMOKE_LINE:-exit 0}"
 
 COMMISSION_PHASE="replace"
 
+record_recycled_cadence_child() {
+  local state run_id pid attempt status at
+  state="$(cat "${STATE_DIR}/state/measurement-cadence-child.json" 2>/dev/null)" || return 0
+  run_id="$(printf '%s\n' "${state}" | sed -n 's/.*"runId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  pid="$(printf '%s\n' "${state}" | sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*[,}].*/\1/p')"
+  attempt="$(printf '%s\n' "${state}" | sed -n 's/.*"attempt"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*[,}].*/\1/p')"
+  status="$(printf '%s\n' "${state}" | sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  [ "${status}" = running ] || return 0
+  case "${run_id}" in ''|*[!a-zA-Z0-9_-]*) return 0 ;; esac
+  case "${pid}:${attempt}" in *[!0-9:]*|:*|*:) return 0 ;; esac
+  [ "${pid}" -gt 0 ] && [ "${attempt}" -gt 0 ] || return 0
+  docker exec "${CONTAINER_NAME}" ps -eo pid,etimes,args --no-headers 2>/dev/null \
+    | awk -v pid="${pid}" -v run="${run_id}" '
+        $1 == pid { for (i = 3; i <= NF - 2; i++)
+          if ($i == "--measurement-cadence-child" && $(i + 2) == run) found = 1 }
+        END { exit !found }
+      ' || return 0
+  at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" || return 0
+  printf '{"runId":"%s","pid":%s,"container":"%s","at":"%s","by":"deploy/recycle-container.sh"}\n' \
+    "${run_id}" "${pid}" "${CONTAINER_NAME}" "${at}" \
+    > "${STATE_DIR}/state/measurement-cadence-child.recycled.json" 2>/dev/null || true
+  printf '{"ts":"%s","run_id":"RECYCLE-%s","task_id":"RECYCLE","step":"recycle.cadence_child_killed","lane":"deploy","cadence_run_id":"%s","cadence_pid":%s,"attempt":%s,"container":"%s"}\n' \
+    "${at}" "$$" "${run_id}" "${pid}" "${attempt}" "${CONTAINER_NAME}" \
+    >> "${LEDGER_FILE}" 2>/dev/null || true
+}
+
 # ── 6. STOP + REMOVE THE OLD CONTAINER, CLEAR THE PAUSE, START THE NEW ONE ──────────────────────
 # `docker stop` (not `-f`/`kill`) sends SIGTERM first, giving the daemon's own signal handler a
 # chance to release the drain lock cleanly before this script ever removes the container — the
@@ -2047,6 +2073,7 @@ if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
   # W1-T5281: from here a signal leaves PAUSE engaged — the stop may land even if this script does not.
   RECYCLE_SIGNAL_PHASE="stopping"
   echo "recycle-container: docker stop ${CONTAINER_NAME}"
+  record_recycled_cadence_child
   run_docker_control stop docker stop "${CONTAINER_NAME}"
   echo "recycle-container: docker rm ${CONTAINER_NAME}"
   run_docker_control rm docker rm "${CONTAINER_NAME}"
