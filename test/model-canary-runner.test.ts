@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { executeCanary, type CanaryExecutionPorts } from "../src/lib/model-canary-runner.js";
+import { executeCanary, type CanaryExecutionPorts, type CanaryResponse } from "../src/lib/model-canary-runner.js";
 import { canarySuiteDigest, commonCanarySuite } from "../src/lib/model-canary-suite.js";
 const cases = commonCanarySuite(), pin = { model: "model", route: "subscription", effort: "low", suiteHash: canarySuiteDigest(cases), billing: "subscription" as const };
 const resources = { durationMs: 1, firstTextMs: null, generationMs: null, inputTokens: 1, outputTokens: 1,
@@ -43,15 +43,15 @@ test("canary runner enforces the real wall bound even if transport ignores its a
 });
 test("canary runner observes missing duration and preserves bounded and incomplete responses", async () => {
   let saved = 0;
-  const response = { text: JSON.stringify(cases[0]!.expected), toolCalls: [] as { name: string; args: unknown }[],
-    resources: { ...resources, durationMs: null as number | null } };
+  const response: CanaryResponse = { text: JSON.stringify(cases[0]!.expected), toolCalls: [],
+    resources: { ...resources, durationMs: null } };
   const ports: CanaryExecutionPorts = { monotonicMs: () => 5, admit: async () => ({ state: "admitted" }),
     request: async () => response, save: async () => { saved++; } };
   const complete = await executeCanary(cases[0]!, pin, ports);
   assert.equal(complete.run.verified, true); assert.equal(complete.run.attempts[0]!.durationMs, 0);
   const bounded = await executeCanary(cases[0]!, pin, ports, { maxCalls: 1, wallMs: 100, maxOutputBytes: 1 });
   assert.equal(bounded.reason, "output-bound"); assert.equal(bounded.run.verified, false);
-  response.resources = { ...response.resources, terminal: "error" } as typeof response.resources;
+  response.resources = { ...response.resources, terminal: "error" };
   const incomplete = await executeCanary(cases[0]!, pin, ports);
   assert.equal(incomplete.run.verified, null); assert.equal(incomplete.reason, "error"); assert.equal(saved, 3);
 });
