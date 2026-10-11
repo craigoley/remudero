@@ -265,8 +265,7 @@ test("W1-T7760: the first red never names a commit whose only run was cancelled"
   assert.deepEqual(restricted.span, [c2, c1], "a green run of a workflow without required checks gives a commit no verdict");
 });
 
-test(
-  "W1-T7760: a red main dispatches CI for the cancelled commits since the last green, newest first, each on its own ref",
+test("W1-T7760: a red main dispatches CI for the cancelled commits since the last green, newest first, each on its own ref",
   inScratchDir(async (ledgerPath) => {
     const w = world(2); // G, C1, C2 (both cancelled), R (first completed red), head
     const [c1, c2] = w.cancelled as [string, string];
@@ -298,8 +297,7 @@ test(
   }),
 );
 
-test(
-  "W1-T7760: a probe never re-runs a cancelled push run and never dispatches at main",
+test("W1-T7760: a probe never re-runs a cancelled push run and never dispatches at main",
   inScratchDir(async (ledgerPath) => {
     const w = world(3);
     const lane = fakeLane();
@@ -326,8 +324,7 @@ test(
   }),
 );
 
-test(
-  "W1-T7760: main.repair.located names the bisected first red, proven by completed runs",
+test("W1-T7760: main.repair.located names the bisected first red, proven by completed runs",
   inScratchDir(async (ledgerPath) => {
     const w = world(2);
     const [c1, c2] = w.cancelled as [string, string];
@@ -373,8 +370,7 @@ test(
   }),
 );
 
-test(
-  "W1-T7760: main.repair.located names the completed red itself when every cancelled commit probes green",
+test("W1-T7760: main.repair.located names the completed red itself when every cancelled commit probes green",
   inScratchDir(async (ledgerPath) => {
     const w = world(1);
     const [c1] = w.cancelled as [string];
@@ -392,8 +388,7 @@ test(
   }),
 );
 
-test(
-  "W1-T7760: probes in flight follow observed runner availability and run cost, not a constant",
+test("W1-T7760: probes in flight follow observed runner availability and run cost, not a constant",
   inScratchDir(async (ledgerPath) => {
     // The same span of 7 cancelled commits under two readings of the runners.
     const busy = world(7);
@@ -470,8 +465,7 @@ test("W1-T7760: probe concurrency, price and strategy are readings, never consta
   assert.deepEqual(proven, { state: "proven", offendingSha: span[1]!, parentSha: span[2]! });
 });
 
-test(
-  "W1-T7760: a probe that cannot be dispatched leaves the red unlocated, never named",
+test("W1-T7760: a probe that cannot be dispatched leaves the red unlocated, never named",
   inScratchDir(async (ledgerPath) => {
     const w = world(2);
     w.refuseDispatch = true;
