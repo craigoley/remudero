@@ -170,6 +170,35 @@ test("live-edit ladder: an edit landing after the copy was confirmed is preserve
   assert.equal(w.live.git("show", `${next.ref}:app.txt`), "a later edit", "and was preserved before the restore");
 });
 
+test("live-edit ladder: a staged edit that differs from the working tree gets its own copy", async (t) => {
+  const w = world(t);
+  writeFileSync(join(w.live.dir, "app.txt"), "staged\n");
+  w.live.git("add", "app.txt");
+  writeFileSync(join(w.live.dir, "app.txt"), "worktree\n");
+  const r = await w.rung(T0);
+  assert.equal(w.live.git("show", `${r.ref}:app.txt`), "worktree");
+  assert.equal(w.live.git("show", `${r.ref}-index:app.txt`), "staged", "the index is preserved too");
+  assert.match(readFileSync(join(w.state, r.patch!.replace(/\.patch$/, ".index.patch")), "utf8"), /^\+staged$/m);
+});
+
+test("live-edit ladder: a failed escalation is logged once and retried; a failed notice stays pending", async (t) => {
+  const w = world(t);
+  await w.rung(T0);
+  const down = async (): Promise<string> => { throw new Error("GitHub unavailable"); };
+  const first = await w.rung(T0 + HOUR, { escalate: down });
+  assert.equal(first.issueUrl, undefined);
+  await w.rung(T0 + HOUR + 60_000, { escalate: down });
+  assert.equal(w.steps().filter((s) => s === LIVE_EDIT_STEPS.escalationFailed).length, 1, "one failure row per episode");
+  const restored = await w.rung(T0 + 2 * HOUR, { comment: async () => { throw new Error("GitHub unavailable"); } });
+  assert.equal(restored.restored, true, restored.reason);
+  assert.equal(w.escalations.length, 1, "the retry escalated");
+  const state = JSON.parse(readFileSync(liveEditStatePath(w.state, "daemon-checkout"), "utf8")) as { noticePending?: string };
+  assert.ok(state.noticePending, "an undelivered notice is kept");
+  await w.rung(T0 + 2 * HOUR + 60_000);
+  assert.equal(w.comments.length, 1, "and delivered on the next run");
+  assert.ok(w.steps().includes(LIVE_EDIT_STEPS.noticeDelivered));
+});
+
 test("live-edit ladder: a restore with no voice leaves its notice for the next actor that has one", async (t) => {
   const w = world(t);
   await w.rung(T0, { escalate: undefined, comment: undefined });
