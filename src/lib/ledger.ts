@@ -727,6 +727,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.check_requeue.deferred", // W1-T5920: voids a spent key in that same fold.
   "sweep.ci_gate_reaggregated", // W1-T5958: reaggregatedCiGateKeysFromLedger, once per head and sibling run.
   "main.run_gap.dispatched", // mainRunGapHistoryFromLedger: lost, a gap commit's workflows dispatch again.
+  "main.repair.bisecting", // W1-T7760 mainBisectionFromLedger: lost, a probe in flight is dispatched a second time.
+  "main.repair.probe_concluded", // W1-T7760 mainBisectionFromLedger: lost, a concluded probe is re-run and the bisection restarts.
   "refusal_amendment.drafted", // noPrVerdictRowsFromLedger: lost, a settled no_pr refusal is re-drafted.
   "sre.governor", // governorTiersFromLedger: lost, a stopped runbook re-pauses and re-pages; on change only.
   "sweep.plan_repair", // planRepairHistoryFromLedger: the per-head repair and once-per-PR stale-base key.
