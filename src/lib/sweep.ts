@@ -57,7 +57,8 @@ import {
   type StackPrerequisiteCheck,
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
-import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
+import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair, planHostGapRereview, hostGapProgressInput,
+  type HostGapRereview } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB } from "./host-memory-ledger.js";
 import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
@@ -168,6 +169,7 @@ import type {
   CriterionVerdict,
   PlanCriteriaAtHeadResult,
   ProofExecutor,
+  ProofSkipReason,
   ReviewEvidence,
   ReviewVerdict,
 } from "./review.js";
@@ -362,6 +364,25 @@ function reviewReuseEvidence(input: ReviewReuseDiscriminationInput): ReviewEvide
   };
 }
 
+/** W1-T7837 — THE ONE DEFINITION OF "THIS PROOF NEVER RAN BECAUSE OF THE HOST". A criterion whose
+ *  proof was skipped for a missing runner, a vanished checkout, an incomplete or broken runtime, or no
+ *  execution context — or whose execution threw or could not read the base — says nothing about the PR
+ *  body, so no body edit can change it. {@link assessReviewReuse} (unreadable evidence) and the capped
+ *  block's re-review route both read this predicate, so the two cannot drift. */
+export function isHostGapCriterion(
+  criterion: { readonly proof_exec?: string; readonly proof_skip?: string },
+): boolean {
+  return (
+    criterion.proof_exec === "exec_error" ||
+    criterion.proof_exec === "base_unreadable" ||
+    criterion.proof_skip === "runner-absent" ||
+    criterion.proof_skip === "cwd-missing" ||
+    criterion.proof_skip === "incomplete-run" ||
+    criterion.proof_skip === "runtime-broken" ||
+    criterion.proof_skip === "no-exec-context"
+  );
+}
+
 function assessReviewReuse(
   input: ReviewReuseDiscriminationInput,
   criteria: AcceptanceCriterion[],
@@ -370,16 +391,7 @@ function assessReviewReuse(
   // W1-T4423: a plan-only verdict rests on a lint-plan run this reuse path does not repeat.
   if (computed.planOnly) return { ok: false, reason: "a plan-only verdict needs a full review to re-run lint-plan" };
 
-  const unreadable = computed.criteria.find(
-    (criterion) =>
-      criterion.proof_exec === "exec_error" ||
-      criterion.proof_exec === "base_unreadable" ||
-      criterion.proof_skip === "runner-absent" ||
-      criterion.proof_skip === "cwd-missing" ||
-      criterion.proof_skip === "incomplete-run" ||
-      criterion.proof_skip === "runtime-broken" ||
-      criterion.proof_skip === "no-exec-context",
-  );
+  const unreadable = computed.criteria.find(isHostGapCriterion);
   if (unreadable) {
     return {
       ok: false,
@@ -10848,6 +10860,8 @@ export interface ProofDiscriminationEvidence {
     readonly claim: string;
     readonly proof: string;
     readonly proofExec: NonExecutedProofExecOutcome;
+    /** W1-T7837: WHY the proof did not run, when the review recorded it (absent otherwise). */
+    readonly proofSkip?: ProofSkipReason;
   }>;
 }
 
@@ -10876,7 +10890,8 @@ export function proofDiscriminationEvidenceFromCriteria(
     criterion.proof_exec !== "executed_pass" &&
     criterion.proof_exec !== "executed_fail" &&
     criterion.proof_exec !== "stale_self_path"
-      ? [{ claim: criterion.claim, proof: criterion.proof, proofExec: criterion.proof_exec }]
+      ? [{ claim: criterion.claim, proof: criterion.proof, proofExec: criterion.proof_exec,
+          ...(criterion.proof_skip !== undefined ? { proofSkip: criterion.proof_skip } : {}) }]
       : [],
   );
   return proofs.length > 0 ? { proofs } : undefined;
@@ -11044,9 +11059,54 @@ function criteriaFromLedgerValue(value: unknown): CriterionVerdict[] | undefined
       met: criterion.met,
       reason: criterion.reason,
       proof_exec: criterion.proof_exec,
+      // W1-T7837: the skip reason is what tells a host gap from a stale or prose proof.
+      ...(typeof criterion.proof_skip === "string" ? { proof_skip: criterion.proof_skip as ProofSkipReason } : {}),
     });
   }
   return criteria;
+}
+
+/** W1-T7837: the ledger step that records one host-gap re-review request. {@link priorActionsFromLedger}
+ *  reads it to release the delivered-review key, and {@link hostGapRereviewFacts} to pace the next. */
+export const CAPPED_HOST_GAP_REREVIEW_STEP = "sweep.capped_host_gap_rereview";
+
+const rowMs = (row: Record<string, unknown>): number | undefined => {
+  const at = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
+  return Number.isNaN(at) ? undefined : at;
+};
+
+/** W1-T7837: what this PR head's own ledger history says about pacing its host-gap re-reviews — the
+ *  re-reviews already requested, when the newest review posted, and the longest review duration
+ *  observed for this input (a `review.posted` row less the nearest earlier row that started it: an
+ *  acted post-review disposition or an earlier re-review request). `undefined` where nothing was dated. */
+export function hostGapRereviewFacts(
+  pr: Pick<OpenPrView, "prNumber" | "prUrl" | "headSha">,
+  lines: ReadonlyArray<Record<string, unknown>>,
+): { history: HostGapRereview[]; lastReviewAtMs?: number; observedReviewMs?: number } {
+  const history: HostGapRereview[] = [];
+  let lastReviewAtMs: number | undefined;
+  let observedReviewMs: number | undefined;
+  let startedAtMs: number | undefined;
+  for (const line of lines) {
+    if (line.head_sha !== pr.headSha) continue;
+    const at = rowMs(line);
+    if (line.step === CAPPED_HOST_GAP_REREVIEW_STEP && line.pr_url === pr.prUrl) {
+      if (at !== undefined) {
+        history.push({ atMs: at, skips: Array.isArray(line.skips) ? line.skips.filter((s): s is string => typeof s === "string") : [] });
+        startedAtMs = at;
+      }
+    } else if (line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
+        line.disposition === "post-review" && line.acted === true) {
+      if (at !== undefined) startedAtMs = at;
+    } else if (line.step === "review.posted" && line.pr_url === pr.prUrl && at !== undefined) {
+      lastReviewAtMs = at;
+      if (startedAtMs !== undefined && at >= startedAtMs) {
+        observedReviewMs = Math.max(observedReviewMs ?? 0, at - startedAtMs);
+      }
+      startedAtMs = undefined;
+    }
+  }
+  return { history, lastReviewAtMs, observedReviewMs };
 }
 
 /**
@@ -12522,6 +12582,22 @@ function priorActionsFromLedger(
       typeof line.head_sha === "string"
     ) {
       armed.delete(`${line.pr_number}@${line.head_sha}`);
+      continue;
+    }
+    // W1-T7837 — a host-gap re-review request RELEASES the delivered key of the verdict it supersedes, the way
+    // W1-T5840 releases an overtaken failure: the review claim then admits one fresh review of the same head and
+    // body. A review.posted row after it re-adds the key, so the release lasts one review.
+    if (line.step === CAPPED_HOST_GAP_REREVIEW_STEP) {
+      if (typeof line.task_id === "string" && typeof line.head_sha === "string") {
+        const key = reviewOutcomeKey(
+          line.task_id,
+          typeof line.pr_url === "string" ? line.pr_url : undefined,
+          line.head_sha,
+          typeof line.review_input_digest === "string" ? line.review_input_digest : undefined,
+        );
+        reviewDelivered.delete(key);
+        reviewDeliveredFailureAt.delete(key);
+      }
       continue;
     }
     // W1-T254/W1-T1213: OUTCOME-KEYED, off the review lane's OWN ledger lines — never
@@ -15349,46 +15425,80 @@ export async function runSweep(
     let planShardRepairDue = false;
     if (proofDiscrimination !== undefined && !decideSweepArm(pr, ledgerLines, undefined, readArmLedgerUnion).arm) {
       planProofBlockedPrs.add(pr.prNumber);
-      const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
-      const planRepairCapable = typeof deps.dispatchPlanOnlyRepair === "function";
-      const planRepairStrikes = priorPlanRepairStrikesFromLedger(pr, ledgerLines);
-      const action = deps.fixProgressJudge
-        ? await judgeCappedRepair({ bodyStrikes: pr.priorStrikes, planRepairStrikes }, ceiling, {
-            planRepairCapable, judge: deps.fixProgressJudge,
-            input: { ...buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
-              currentRed: proofDiscrimination.proofs.map(proof => `proof:${proof.proof}`), ledger: ledgerLines,
-              operatorAnswer: pr.pendingAnswer?.constraint }),
-              remedyHistory: ledgerLines.filter(row => row.step === PLAN_REPAIR_DISPATCH_STEP && row.task_id === pr.taskId) },
-            log: (step, fields) => appendLine(deps.ledgerPath, { run_id: deps.runId,
-              task_id: pr.taskId ?? `PR-${pr.prNumber}`, step, ...fields }),
-          })
-        : planCappedRepair({ bodyStrikes: pr.priorStrikes, planRepairStrikes }, ceiling, { planRepairCapable });
-      if ("progress" in action && action.progress) {
-        if (action.progress.verdict === "continue" || action.progress.verdict === "change-approach") {
-          judgedContinue.set(pr.prNumber, action.progress);
-          pr.progressContinue = { reason: action.progress.reason };
-          if (action.progress.verdict === "change-approach") proofDiscrimination.progressApproach = action.progress.approach;
+      // W1-T7837: a verdict whose EVERY proof hit a host gap (runner absent, worktree reclaimed, runtime broken,
+      // no exec context) says nothing about the body, so a body or shard repair cannot help it. It is re-reviewed.
+      const hostGapOnly = proofDiscrimination.proofs.every((proof) =>
+        isHostGapCriterion({ proof_exec: proof.proofExec, proof_skip: proof.proofSkip }));
+      if (hostGapOnly) {
+        const skips = [...new Set(proofDiscrimination.proofs.map((proof) =>
+          proof.proofSkip !== undefined && isHostGapCriterion({ proof_skip: proof.proofSkip }) ? proof.proofSkip : proof.proofExec))].sort();
+        const facts = hostGapRereviewFacts(pr, ledgerLines);
+        const hostGapState = { history: facts.history, skips, lastReviewAtMs: facts.lastReviewAtMs, nowMs: now,
+          observedReviewMs: facts.observedReviewMs ?? policy.pendingCeilingMinutes * 60_000 };
+        const hostGap = await planHostGapRereview(hostGapState, {
+          judge: deps.fixProgressJudge,
+          input: hostGapProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha }, hostGapState),
+          log: (step, fields) => appendLine(deps.ledgerPath, { run_id: deps.runId,
+            task_id: pr.taskId ?? `PR-${pr.prNumber}`, step, ...fields }),
+        });
+        if (hostGap.kind === "rereview") {
+          const reviewKey = reviewOutcomeKeyForPr(pr);
+          if (!deps.dryRun) {
+            appendLine(deps.ledgerPath, { ts: clockFromMillisFn(() => now).iso(), run_id: deps.runId,
+              task_id: reviewOutcomeTaskIdFor(pr), step: CAPPED_HOST_GAP_REREVIEW_STEP, pr_number: pr.prNumber,
+              pr_url: pr.prUrl, head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest, review_key: reviewKey,
+              skips, rereview_ordinal: facts.history.length + 1, reason: hostGap.reason });
+          }
+          prior.reviewDelivered.delete(reviewKey);
+          disposition = "post-review";
+          reason = hostGap.reason;
+        } else {
+          disposition = hostGap.kind === "escalate" ? "blocked-ambiguous" : "wait";
+          reason = hostGap.reason;
+          if (hostGap.progress?.verdict === "unavailable") judgedUnavailable.set(pr.prNumber, hostGap.progress.reason);
         }
-        if (action.progress.verdict === "unavailable") judgedUnavailable.set(pr.prNumber, action.progress.reason);
-      }
-      if (action.kind === "hold") {
-        disposition = "wait";
-        reason = action.reason!;
-      } else
-      if (action.kind === "give_up") {
-        disposition = "blocked-ambiguous";
-        reason = "progress" in action ? action.reason! : planRepairCapable
-          ? `capped review still has non-discriminating proofs, but every repair path is exhausted ` +
-            `(body ${pr.priorStrikes}/${ceiling}, plan-shard repair ${planRepairStrikes}/${MAX_PLAN_REPAIR_STRIKES})`
-          : `capped review still has non-discriminating proofs, but its shared fix budget is exhausted (${pr.priorStrikes}/${ceiling})`;
       } else {
-        disposition = "blocked-fixable";
-        planShardRepairDue = action.kind === "repair_plan_shard";
-        reason = planShardRepairDue
-          ? `capped review still has non-discriminating proofs and the shared fix budget is exhausted ` +
-            `(${pr.priorStrikes}/${ceiling}) — dispatching a plan-only repair of the offending shard ` +
-            `(${planRepairStrikes}/${MAX_PLAN_REPAIR_STRIKES})`
-          : "capped review has only non-discriminating proofs — dispatching the existing bounded fix rung to repair the PR body";
+        const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
+        const planRepairCapable = typeof deps.dispatchPlanOnlyRepair === "function";
+        const planRepairStrikes = priorPlanRepairStrikesFromLedger(pr, ledgerLines);
+        const action = deps.fixProgressJudge
+          ? await judgeCappedRepair({ bodyStrikes: pr.priorStrikes, planRepairStrikes }, ceiling, {
+              planRepairCapable, judge: deps.fixProgressJudge,
+              input: { ...buildFixProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
+                currentRed: proofDiscrimination.proofs.map(proof => `proof:${proof.proof}`), ledger: ledgerLines,
+                operatorAnswer: pr.pendingAnswer?.constraint }),
+                remedyHistory: ledgerLines.filter(row => row.step === PLAN_REPAIR_DISPATCH_STEP && row.task_id === pr.taskId) },
+              log: (step, fields) => appendLine(deps.ledgerPath, { run_id: deps.runId,
+                task_id: pr.taskId ?? `PR-${pr.prNumber}`, step, ...fields }),
+            })
+          : planCappedRepair({ bodyStrikes: pr.priorStrikes, planRepairStrikes }, ceiling, { planRepairCapable });
+        if ("progress" in action && action.progress) {
+          if (action.progress.verdict === "continue" || action.progress.verdict === "change-approach") {
+            judgedContinue.set(pr.prNumber, action.progress);
+            pr.progressContinue = { reason: action.progress.reason };
+            if (action.progress.verdict === "change-approach") proofDiscrimination.progressApproach = action.progress.approach;
+          }
+          if (action.progress.verdict === "unavailable") judgedUnavailable.set(pr.prNumber, action.progress.reason);
+        }
+        if (action.kind === "hold") {
+          disposition = "wait";
+          reason = action.reason!;
+        } else
+        if (action.kind === "give_up") {
+          disposition = "blocked-ambiguous";
+          reason = "progress" in action ? action.reason! : planRepairCapable
+            ? `capped review still has non-discriminating proofs, but every repair path is exhausted ` +
+              `(body ${pr.priorStrikes}/${ceiling}, plan-shard repair ${planRepairStrikes}/${MAX_PLAN_REPAIR_STRIKES})`
+            : `capped review still has non-discriminating proofs, but its shared fix budget is exhausted (${pr.priorStrikes}/${ceiling})`;
+        } else {
+          disposition = "blocked-fixable";
+          planShardRepairDue = action.kind === "repair_plan_shard";
+          reason = planShardRepairDue
+            ? `capped review still has non-discriminating proofs and the shared fix budget is exhausted ` +
+              `(${pr.priorStrikes}/${ceiling}) — dispatching a plan-only repair of the offending shard ` +
+              `(${planRepairStrikes}/${MAX_PLAN_REPAIR_STRIKES})`
+            : "capped review has only non-discriminating proofs — dispatching the existing bounded fix rung to repair the PR body";
+        }
       }
     }
     // W1-T5544 — LADDER RUNG TWO IS NOT STRIKE EXHAUSTION. Two identical refused proof-repair rounds at one head read

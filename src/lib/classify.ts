@@ -349,6 +349,110 @@ export async function judgeCappedRepair(
     progress };
 }
 
+// ── W1-T7837: a capped review whose proofs never ran for a HOST gap ─────────
+
+/** One host-gap re-review this PR head has already been given: when it was requested and the
+ *  grades (proof_skip, else proof_exec) the review it superseded carried. */
+export interface HostGapRereview { atMs: number; skips: readonly string[] }
+
+/** What the host problem behind each grade is — the sentence an escalation carries. */
+export function hostGapProblem(skip: string): string {
+  switch (skip) {
+    case "runner-absent": return "sandbox runner missing";
+    case "cwd-missing": return "review worktree reclaimed";
+    case "runtime-broken": return "runtime broken";
+    case "incomplete-run": return "runtime broken (run ended without its summary)";
+    case "no-exec-context": return "no PR-head checkout to execute in";
+    case "exec_error": return "proof execution threw";
+    case "base_unreadable": return "merge-base checkout unreadable";
+    default: return skip;
+  }
+}
+
+/** The wait before the next host-gap re-review, DERIVED from what the ledger observed: one review's
+ *  duration for this input, grown by each re-review that still graded a host gap. No fixed interval. */
+export function hostGapRereviewWaitMs(observedReviewMs: number, priorRereviews: number): number {
+  return Math.max(0, observedReviewMs) * (priorRereviews + 1);
+}
+
+export interface HostGapRereviewState {
+  /** Re-reviews already requested at this head, oldest first. */
+  history: readonly HostGapRereview[];
+  /** This verdict's host-gap grades. */
+  skips: readonly string[];
+  /** When the newest review at this head posted, if its row was dated. */
+  lastReviewAtMs?: number;
+  /** The longest review duration the ledger observed for this input. */
+  observedReviewMs: number;
+  nowMs: number;
+}
+
+export type HostGapRereviewAction =
+  | { kind: "rereview"; reason: string; progress?: FixProgressResult }
+  | { kind: "hold"; reason: string; progress?: FixProgressResult }
+  | { kind: "escalate"; reason: string; progress?: FixProgressResult };
+
+const sortedUnique = (values: readonly string[]) => [...new Set(values)].sort();
+
+/** The fix-progress judge's input for a persisting host gap: each re-review is a round whose red set
+ *  is the grades it was dispatched against and whose result is the next verdict's grades. Nothing
+ *  was pushed, so every round is a no-op on the branch — the judge decides if the HOST is moving. */
+export function hostGapProgressInput(
+  base: { taskId?: string; prNumber?: number; headSha: string },
+  state: Pick<HostGapRereviewState, "history" | "skips">,
+): FixProgressInput {
+  const currentRed = sortedUnique(state.skips.map((skip) => `host-gap:${skip}`));
+  const rounds = state.history.map((entry, index) => ({
+    id: `host-gap:${index}`, dispatchedHead: base.headSha, pushedHead: base.headSha,
+    redBefore: sortedUnique(entry.skips.map((skip) => `host-gap:${skip}`)), completed: true,
+  }));
+  rounds.forEach((round, index) => Object.assign(round, { redAfter: rounds[index + 1]?.redBefore ?? currentRed }));
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  return { taskId: base.taskId, prNumber: base.prNumber, headSha: base.headSha, strikesSpent: rounds.length, currentRed,
+    rounds: rounds as FixProgressInput["rounds"], formerCeiling: 1,
+    parkedReason: `host-gap-rereview: ${rounds.length} prior re-reviews, none ran a proof`,
+    signals: { noOpRounds: rounds.length,
+      identicalRedSets: rounds.filter((round) => same(round.redBefore, (round as { redAfter?: string[] }).redAfter)).length,
+      identicalDiffs: 0, oscillating: false, refusedRounds: 0, incompleteRounds: 0, reviewerOnlyFailurePersists: 0 } };
+}
+
+/**
+ * W1-T7837 — decide the next step for a capped verdict whose EVERY proof hit a host gap. A body edit
+ * cannot fix a host, so the answer is never a body or shard repair: it is a paced re-review of the
+ * same head and body, or — once a gap has persisted across re-reviews and the fix-progress judge says
+ * so — an escalation naming the host problem. There is no strike cap; the judge is the only brake.
+ */
+export async function planHostGapRereview(
+  state: HostGapRereviewState,
+  opts: { judge?: FixProgressJudge; input: FixProgressInput;
+    log?: (step: string, fields: Record<string, unknown>) => void },
+): Promise<HostGapRereviewAction> {
+  const prior = state.history.length;
+  const problems = sortedUnique(state.skips.map(hostGapProblem)).join(", ");
+  const anchor = Math.max(state.lastReviewAtMs ?? Number.NEGATIVE_INFINITY,
+    ...state.history.map((entry) => entry.atMs));
+  const waitMs = hostGapRereviewWaitMs(state.observedReviewMs, prior);
+  if (Number.isFinite(anchor) && state.nowMs < anchor + waitMs) {
+    return { kind: "hold", reason: `capped review could not run its proofs (${problems}) — a host gap, not a body defect; ` +
+      `re-review ${prior + 1} is paced ${Math.ceil((anchor + waitMs - state.nowMs) / 60_000)}m out ` +
+      `(${Math.ceil(waitMs / 60_000)}m derived from ${prior} prior host-gap re-review(s) and the observed review duration)` };
+  }
+  if (prior >= 1) {
+    const progress = await judgeFixProgress(opts.input, opts.judge);
+    opts.log?.("fix.progress_judged", { site: "host-gap-rereview", pr_number: opts.input.prNumber,
+      head_sha: opts.input.headSha, parked_reason: opts.input.parkedReason, round_count: opts.input.rounds.length,
+      signals: opts.input.signals, ...progress });
+    if (progress.verdict === "unavailable") return { kind: "hold", reason: progress.reason, progress };
+    if (progress.verdict === "escalate") {
+      return { kind: "escalate", progress, reason: `host gap persists across ${prior} re-review(s) — ` +
+        `${state.skips.join(", ")} (${problems}); fix progress loop: ${progress.loop} — ${progress.reason}` };
+    }
+    return { kind: "rereview", progress, reason: `host-gap re-review ${prior + 1}: ${progress.reason}` };
+  }
+  return { kind: "rereview", reason: `capped review could not run its proofs (${problems}) — a host gap a PR-body edit cannot fix; ` +
+    `re-reviewing the same head and body` };
+}
+
 export interface AttemptSuccess {
   success: true;
 }
