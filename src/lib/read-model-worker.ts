@@ -1187,6 +1187,24 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   const unswitched = new Map<string, { builds: number; ms: number }>();
+  const viewBuilds = new Map<ViewUnit, { calls: number; builds: number; ms: number; maxMs: number }>();
+  let viewBuildsFrom = clock.now();
+  function reportViewBuilds(): void {
+    const now = clock.now();
+    if (now - viewBuildsFrom < 10 * 60_000) return;
+    for (const [unit, tally] of viewBuilds) {
+      if (tally.calls === 0 && tally.ms === 0) continue;
+      log("read_model.view_builds", {
+        view: unit.view.name,
+        ...(unit.slot ? { instance: unit.slot.instance.name } : {}),
+        thread: viewsOnly ? "views" : "projector",
+        ...(opts.lane ? { lane: opts.lane } : {}),
+        ...tally, window: [viewBuildsFrom, now],
+      });
+    }
+    viewBuilds.clear();
+    viewBuildsFrom = now;
+  }
   /** When serve last answered a read of each view; a view never read counts from this ticker's start. */
   const readAt = new Map<string, number>();
   const pacedFrom = clock.now();
@@ -1214,15 +1232,19 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     let ready = true;
     let succeeded = false;
     let yielded = 0;
+    let calls = 0;
     const scoped = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
     const buildStartedMs = (unit.startedAt ??= started);
     let live: ReadModelView | undefined;
     try {
       live = viewOf(unit);
       ready = live.prepare?.(scoped, stepsUntil(started + allowanceMs)) ?? true;
-      for (const { key, data, sources } of ready ? live.materialize(scoped) : []) {
-        yielded++;
-        publish(view.name, live.version, key, data, sources, generation, buildStartedMs);
+      if (ready) {
+        calls++;
+        for (const { key, data, sources } of live.materialize(scoped)) {
+          yielded++;
+          publish(view.name, live.version, key, data, sources, generation, buildStartedMs);
+        }
       }
       succeeded = ready && yielded > 0;
     } catch (error) {
@@ -1231,6 +1253,12 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const finished = clock.now();
     if (succeeded) unit.lastBuiltAt = finished;
     unit.costMs = finished - started;
+    const counts = viewBuilds.get(unit) ?? { calls: 0, builds: 0, ms: 0, maxMs: 0 };
+    counts.calls += calls;
+    counts.builds += yielded > 0 ? 1 : 0;
+    counts.ms += unit.costMs;
+    counts.maxMs = Math.max(counts.maxMs, unit.costMs);
+    viewBuilds.set(unit, counts);
     const peakMs = (unit.peakMs = Math.max(unit.peakMs ?? 0, unit.costMs));
     unit.dueAt = ready ? paced(unit, finished) : finished;
     if (ready) {
@@ -1353,6 +1381,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   const postState = (now: number): void => {
+    reportViewBuilds();
     if (clocksMoved || movedReadings.size > 0) {
       clocksMoved = false;
       const bodies = [...movedReadings].map((id) => readings.get(id)!.body);
