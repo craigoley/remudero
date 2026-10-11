@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -73,6 +73,21 @@ test("W1-T6592: an empty coverage file is dropped and lcov is still produced", (
   assert.equal(existsSync(join(dir, "raw", emptyName)), false);
   assert.match(result.output, /FLAKE-RETRY-RECOVERED:.*coverage-999999-1791500613083-0\.json/);
   assert.match(readFileSync(join(dir, "summary"), "utf8"), /FLAKE-RETRY-RECOVERED:.*coverage-999999/);
+});
+
+test("W1-T6592: the rebuild child is launched by a wrapper whose own execution is measured", (t) => {
+  // The other cases blank NODE_V8_COVERAGE, so the wrapper's own lines (the rebuild launch) go
+  // unmeasured. Here the wrapper inherits an enclosing coverage directory, as it does in the
+  // coverage lane; pass one and the rebuild child still get their own values.
+  const dir = fixture(t);
+  const outer = process.env.NODE_V8_COVERAGE || join(dir, "outer");
+  const result = run(dir, { NODE_V8_COVERAGE: outer });
+  assert.equal(result.code, 0, result.output);
+  assert.match(result.output, /FLAKE-RETRY-RECOVERED:.*coverage-999999-1791500613083-0\.json/);
+  assert.match(readFileSync(join(dir, "lcov.info"), "utf8"), /^FNDA:1,firstPass$/m);
+  assert.equal(readFileSync(join(dir, "attempts"), "utf8"), "1");
+  const reports = readdirSync(outer).map((f) => readFileSync(join(outer, f), "utf8"));
+  assert.ok(reports.some((r) => r.includes("test-with-retry.mjs")), "the wrapper must record its own coverage");
 });
 
 test("W1-T6592: a rebuild without source data retries the coverage shard once", (t) => {
