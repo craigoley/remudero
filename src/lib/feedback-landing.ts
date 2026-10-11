@@ -763,6 +763,11 @@ function decideFeedbackStage(git: GitExec, remoteSha: string, localBytes: string
   return mergeFeedbackRecord(upstreamBytes, localBytes);
 }
 
+function hasFeedbackLineage(git: GitExec, blob: string): boolean {
+  try { return parseYaml(git(["cat-file", "-p", blob]))?.contribution != null; }
+  catch { return false; }
+}
+
 /**
  * Whatever `kind.ownedDir` content `origin/<branch>` currently carries — the union half of the
  * writer (W1-T3560 design (i)): every owner's still-pending records, not just this call's own,
@@ -830,7 +835,7 @@ function stageBranchPending(git: GitExec, kind: LandingKind, files: string[], en
       mainBlob = null;
     }
     if (pendingBlob === mainBlob) continue; // already merged into main for real
-    if (mainBlob !== null && isFeedbackRecordPath(kind, f)) {
+    if (mainBlob !== null && isFeedbackRecordPath(kind, f) && hasFeedbackLineage(git, mainBlob)) {
       const decision = decideFeedbackStage(git, mainBlob, git(["cat-file", "-p", pendingBlob]));
       if (decision.kind === "refuse") { refused.push({ path: f, reason: decision.reason }); continue; }
       if (decision.kind === "keep-upstream") continue;
@@ -1148,10 +1153,7 @@ function* landPendingSteps(root: string, kind: LandingKind, opts: LandPendingOpt
           continue;
         }
         if (env && remoteSha !== null && remoteSha !== mainSha && isFeedbackRecordPath(kind, rel)) {
-          let pendingLineage: unknown;
-          try { pendingLineage = parseYaml(git(["cat-file", "-p", remoteSha]))?.contribution; }
-          catch { pendingLineage = undefined; }
-          if (pendingLineage == null) remoteSha = mainSha;
+          if (!hasFeedbackLineage(git, remoteSha)) remoteSha = mainSha;
         }
         if (remoteSha !== null && isFeedbackRecordPath(kind, rel)) {
           const decision = decideFeedbackStage(git, remoteSha, readFileSync(abs, "utf8"));
@@ -1400,13 +1402,21 @@ function* landContentSteps(
         const tmpFile = join(scratchDir as string, `content-${i++}`);
         writeFileSync(tmpFile, content);
         let blobSha = git(["hash-object", "-w", tmpFile], { env }).trim();
+        let mainSha: string | null;
+        try { mainSha = git(["rev-parse", `origin/main:${relPath}`]).trim(); }
+        catch { mainSha = null; }
         let remoteSha: string | null;
         try {
           remoteSha = git(["rev-parse", `:${relPath}`], { env }).trim();
         } catch {
           remoteSha = null; // not on origin/main at all yet
         }
-        if (remoteSha === blobSha) continue; // already identical upstream — nothing to land
+        if (remoteSha === blobSha) {
+          if (mainSha !== blobSha) unlanded.push(relPath);
+          continue;
+        }
+        if (remoteSha !== null && remoteSha !== mainSha && isFeedbackRecordPath(kind, relPath)
+          && !hasFeedbackLineage(git, remoteSha)) remoteSha = mainSha;
         if (remoteSha !== null && isFeedbackRecordPath(kind, relPath)) {
           const decision = decideFeedbackStage(git, remoteSha, content);
           if (decision.kind === "refuse") {
