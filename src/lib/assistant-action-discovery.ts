@@ -16,6 +16,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import { open, opendir, stat, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
@@ -49,7 +50,7 @@ export interface DiscoveryBudget {
   maxTotalBytes: number;
   /** Wall-clock work in one request. */
   maxElapsedMs: number;
-  /** Files examined between cooperative yields to the event loop. */
+  /** Directory entries or claim files examined between cooperative yields to the event loop. */
   yieldEvery: number;
 }
 
@@ -109,7 +110,7 @@ export interface DiscoveryRequest {
   continuation?: string | null;
   budget?: Partial<DiscoveryBudget>;
   clock?: Clock;
-  /** Read-only opener for claim and receipt files; the default is fs/promises `open(path, "r")`. */
+  /** Read-only opener for claim and receipt files; the default refuses nonregular files without blocking open. */
   openFile?: (path: string) => Promise<FileHandle>;
 }
 
@@ -175,7 +176,7 @@ type FileRead =
   | { kind: "changed" }
   | { kind: "unreadable"; reason: string };
 
-const openReadOnly = (path: string): Promise<FileHandle> => open(path, "r");
+const openReadOnly = (path: string): Promise<FileHandle> => open(path, constants.O_RDONLY | constants.O_NONBLOCK);
 
 async function readOpen(handle: FileHandle, maxBytes: number): Promise<FileRead> {
   try {
@@ -298,13 +299,20 @@ export async function readAssistantActionDiscovery(req: DiscoveryRequest): Promi
   const dir = join(req.claimRoot, "state", "assistant-control-actions");
   const stampBefore = await directoryStamp(dir);
   const keys: string[] = [];
+  let listedDirectoryEntries = 0;
   try {
     const handle = await opendir(dir);
     for await (const entry of handle) {
-      if (keys.length >= budget.maxListed) {
+      if (listedDirectoryEntries >= budget.maxListed) {
         limitations.add("corpus_over_listing_bound");
         break;
       }
+      if (listedDirectoryEntries > 0 && listedDirectoryEntries % budget.yieldEvery === 0) await yieldToLoop();
+      if (clock.now() - started >= budget.maxElapsedMs) {
+        limitations.add("time_budget");
+        break;
+      }
+      listedDirectoryEntries++;
       const name = entry.name;
       const match = CLAIM_NAME.exec(name);
       if (match) keys.push(match[1]);
@@ -316,7 +324,7 @@ export async function readAssistantActionDiscovery(req: DiscoveryRequest): Promi
     limitations.add("store_unavailable");
     return answer("unavailable", null);
   }
-  if (limitations.has("corpus_over_listing_bound")) {
+  if (limitations.has("corpus_over_listing_bound") || limitations.has("time_budget")) {
     // An arbitrary listing subset has no stable order to continue from.
     limitations.add("unverifiable_entries");
   }
