@@ -510,7 +510,8 @@ test("W1-T7754 consumers: carried pending content cannot replace main lineage wh
   assert.deepEqual(staged.contribution, original);
 });
 
-test("W1-T7754 consumers: unchanged pending legacy content stays in the receipt without restarting CI", () => {
+for (const malformed of [false, true]) {
+test(`W1-T7754 consumers: unchanged pending legacy ${malformed ? "unreadable" : "plain"} content stays in the receipt without restarting CI`, () => {
   const origin = gitRepo({ bare: true, kind: "admission-no-churn-origin" });
   const seed = gitRepo({ kind: "admission-no-churn-seed" });
   writeFileSync(join(seed.dir, "README.md"), "seed\n");
@@ -521,7 +522,7 @@ test("W1-T7754 consumers: unchanged pending legacy content stays in the receipt 
   const root = gitRepo({ cloneFrom: origin.dir, kind: "admission-no-churn-consumer" });
   mkdirSync(join(root.dir, "plan", "feedback"), { recursive: true });
   const rel = "plan/feedback/fb-legacy.yaml";
-  writeFileSync(join(root.dir, rel), "id: fb-legacy\nraw: unchanged\n");
+  writeFileSync(join(root.dir, rel), malformed ? "id: [\n" : "id: fb-legacy\nraw: unchanged\n");
   const opts = { gh: (args: string[]) => {
     if (args[1] === "list") return "[]";
     if (args[1] === "create") return "https://github.com/acme/widgets/pull/3\n";
@@ -545,8 +546,9 @@ test("W1-T7754 consumers: unchanged pending legacy content stays in the receipt 
   const edited = withLiveWritesAllowed(() => landFeedback(root.dir, opts));
   assert.equal(edited.pushed, true, JSON.stringify(edited));
   assert.notEqual(origin.git("rev-parse", LANDING_BRANCH).trim(), changedHead);
-  assert.equal(origin.git("show", `${LANDING_BRANCH}:${rel}`), editedContent);
+  assert.equal(origin.git("show", `${LANDING_BRANCH}:${rel}`), editedContent.trim());
 });
+}
 
 test("W1-T7754 consumers: actual triage prompt retains original lineage inside its untrusted boundary", () => {
   const contribution = admitFeedbackContribution(boundIssue(), { mode: "shadow", policy: POLICY, nowMs: NOW });
