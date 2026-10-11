@@ -26,7 +26,16 @@ import {
   verifyOptionLink,
   type OptionLinkClaims,
 } from "./escalate.js";
-import { verifiedActor, type Route } from "./service.js";
+import { OPERATOR_SESSION_HEADER, verifiedActor, type Route } from "./service.js";
+import {
+  ASSISTANT_CLAIM_VERSION,
+  DiscoveryContinuationError,
+  MAX_DISCOVERY_PAGE,
+  assistantClaimFingerprint,
+  readAssistantActionDiscovery,
+  type AssistantClaimV2,
+  type DiscoveryBudget,
+} from "./assistant-action-discovery.js";
 import { appendLedger, RISK_OVERRIDE_RECORDED_STEP, RISK_OVERRIDE_REASON_CLASSES, RISK_OVERRIDE_DISPOSITIONS, type RiskOverrideReasonClass, type RiskOverrideDisposition } from "./ledger.js";
 import type { RiskJudgeVerdictLabel } from "./risk-judge.js";
 import { isPaused, isPrActionName, isPrActionSwitchedOff, isQuietHours, isStopped, isSafeTaskId, pauseDetail, requestDrainNow, requestKick, requestPrAction, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail, type FleetControlInfo, type PrActionName, type PrActionRequest, type ResumeResult } from "./fleet-control.js";
@@ -388,6 +397,10 @@ export interface AssistantControlOptions extends Pick<PanelActionDeps, "root" | 
   bootSha?: string;
   afterClaim?: () => void;
   afterEffect?: () => void;
+  /** Server-observed submission time recorded in the claim; unset ⇒ Date.now. */
+  now?: () => number;
+  /** Discovery read bounds (W1-T5399); unset ⇒ DEFAULT_DISCOVERY_BUDGET. */
+  discoveryBudget?: Partial<DiscoveryBudget>;
 }
 
 type AssistantControlAction = "pause" | "resume" | "stop";
@@ -482,7 +495,8 @@ export function buildAssistantControlReceiptRoute(deps: AssistantControlOptions)
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return sendJson(res, 404, { status: "not_found", actionId });
         return sendJson(res, 503, { status: "unavailable", actionId, detail: "claim is unreadable" });
       }
-      if (!isRecord(claim) || typeof claim.actorHash !== "string" || typeof claim.instance !== "string" || typeof claim.fingerprint !== "string") {
+      if (!isRecord(claim) || typeof claim.actorHash !== "string" || typeof claim.instance !== "string" || typeof claim.fingerprint !== "string"
+        || (claim.version !== undefined && (claim.version !== ASSISTANT_CLAIM_VERSION || claim.actionId !== actionId))) {
         return sendJson(res, 503, { status: "unavailable", actionId, detail: "claim identity is incomplete" });
       }
       if (claim.actorHash !== assistantActorHash(actor) || claim.instance !== deps.instance || claim.repository !== (deps.repository ?? null)) {
@@ -533,11 +547,15 @@ export function buildAssistantControlRoute(deps: AssistantControlOptions): Route
       }
       const paths = assistantControlPaths(deps, input.actionId);
       const actorHash = assistantActorHash(operator);
-      const fingerprint = createHash("sha256").update(JSON.stringify({ actorHash, instance: input.instance, repository: deps.repository ?? null, action: input.action, reason: input.reason ?? null })).digest("hex");
+      const fingerprint = assistantClaimFingerprint({ actorHash, instance: input.instance, repository: deps.repository ?? null, action: input.action, reason: input.reason ?? null });
+      // W1-T5399: the complete identity is committed with the claim, before any side effect, so a
+      // fresh device can discover an interrupted action without already knowing its ID.
+      const claim: AssistantClaimV2 = { version: ASSISTANT_CLAIM_VERSION, actionId: input.actionId, action: input.action, actorHash,
+        instance: deps.instance, repository: deps.repository ?? null, submittedAt: new Date((deps.now ?? Date.now)()).toISOString(), fingerprint };
       let admitted = false;
       try {
         mkdirSync(paths.dir, { recursive: true });
-        writeExclusive(paths.claim, JSON.stringify({ fingerprint, actorHash, instance: deps.instance, repository: deps.repository ?? null }));
+        writeExclusive(paths.claim, JSON.stringify(claim));
         syncDirectory(paths.dir);
         admitted = true;
       } catch (error) {
@@ -582,6 +600,50 @@ export function buildAssistantControlRoute(deps: AssistantControlOptions): Route
         sendJson(res, 503, { status: "unknown", actionId: input.actionId, detail: "admitted action has no durable completion receipt; manual reconciliation required" });
       }
     }),
+  };
+}
+
+/** Discovery answers are per-principal: never stored by a shared cache. */
+function sendPrivateJson(res: ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "private, no-store",
+    vary: `authorization, ${OPERATOR_SESSION_HEADER}`,
+  });
+  res.end(JSON.stringify(body));
+}
+
+/**
+ * GET /v1/control/assistant-action/discovery (W1-T5399) — the verified actor's own admitted
+ * actions on this exact target that lack a verified completion receipt. Strictly read-only: it
+ * never prepares, retries or dispatches an action. The actor comes only from verified
+ * authentication; no query parameter or header can name another one.
+ */
+export function buildAssistantActionDiscoveryRoute(deps: AssistantControlOptions): Route {
+  return {
+    method: "GET", path: "/v1/control/assistant-action/discovery", scope: "read",
+    handler: async (req, res) => {
+      const actor = verifiedActor(req);
+      if (!actor) return sendPrivateJson(res, 403, { error: "verified_operator_required" });
+      const params = new URL(req.url ?? "", "http://localhost").searchParams;
+      if ([...params.keys()].some((key) => key !== "limit" && key !== "cursor")) return sendPrivateJson(res, 400, { error: "unknown_discovery_parameter" });
+      const rawLimit = params.get("limit");
+      if (rawLimit !== null && (!/^[0-9]{1,3}$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > MAX_DISCOVERY_PAGE)) {
+        return sendPrivateJson(res, 400, { error: "invalid_limit", detail: `limit must be 1-${MAX_DISCOVERY_PAGE}` });
+      }
+      const cursor = params.get("cursor");
+      if (cursor !== null && !/^[A-Za-z0-9_-]{1,512}$/.test(cursor)) return sendPrivateJson(res, 400, { error: "invalid_continuation" });
+      try {
+        const discovery = await readAssistantActionDiscovery({
+          claimRoot: deps.claimRoot, actorHash: assistantActorHash(actor), instance: deps.instance, repository: deps.repository ?? null,
+          bootSha: deps.bootSha, limit: rawLimit === null ? undefined : Number(rawLimit), continuation: cursor, budget: deps.discoveryBudget,
+        });
+        sendPrivateJson(res, discovery.completeness === "unavailable" ? 503 : 200, discovery);
+      } catch (error) {
+        if (error instanceof DiscoveryContinuationError) return sendPrivateJson(res, 400, { error: "invalid_continuation" });
+        throw error;
+      }
+    },
   };
 }
 
