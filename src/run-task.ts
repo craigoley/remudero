@@ -1403,7 +1403,15 @@ import type { LearningEntry, LearningsIndex, RuleHeadline } from "./lib/learning
 import { assertProvenance, citation } from "./lib/provenance.js";
 import { certainStaleProofs, grepOnlyBaseTargets, isDialectGrepProof, materialiseBaseGrepTree, type BaseGrepTreeReaders } from "./lib/proof-base-stale.js";
 import { loadOperatorNotesForTask, renderOperatorNotes, appendOperatorNote } from "./lib/operator-notes.js";
-import { applyOperatorMergeHold, parseOperatorMergeHoldArgs } from "./lib/operator-merge-hold.js";
+import {
+  applyOperatorMergeHold,
+  authorizeMergeHoldWrite,
+  gatherMergeHoldActor,
+  humanTerminalActorProbe,
+  parseOperatorMergeHoldArgs,
+  realMergeHoldActorProbe,
+  type MergeHoldActorProbe,
+} from "./lib/operator-merge-hold.js";
 import {
   computeMatchedLearningsForArm,
   generateSandboxTask,
@@ -48593,7 +48601,15 @@ export async function awayCommand(rest: string[]): Promise<number> {
  */
 export function mergeHoldCommand(
   rest: string[],
-  deps: { config?: Config; ledgerPath?: string; now?: () => number; isInteractive?: () => boolean } = {},
+  deps: {
+    config?: Config;
+    ledgerPath?: string;
+    now?: () => number;
+    isInteractive?: () => boolean;
+    /** W1-T7721 — where the writer's actor is gathered from. A caller that injects `isInteractive` without a probe
+     *  has taken control of the terminal, so it also gets a human-terminal probe rather than this process's own env. */
+    actorProbe?: MergeHoldActorProbe;
+  } = {},
 ): number {
   const parsed = parseOperatorMergeHoldArgs(rest);
   if (!parsed.ok) {
@@ -48606,10 +48622,25 @@ export function mergeHoldCommand(
     );
     return 2;
   }
+  const actor = gatherMergeHoldActor(
+    deps.actorProbe ?? (deps.isInteractive ? humanTerminalActorProbe() : realMergeHoldActorProbe()),
+  );
+  const authorized = authorizeMergeHoldWrite(parsed.input, actor);
+  if (!authorized.ok) {
+    console.error(`rmd merge-hold: ${authorized.error}`);
+    return 2;
+  }
   const ledgerPath = deps.ledgerPath ?? ledgerPathFor(deps.config ?? loadConfig());
-  const result = applyOperatorMergeHold(ledgerPath, parsed.input, { now: deps.now });
+  const result = applyOperatorMergeHold(ledgerPath, authorized.input, { now: deps.now, actor });
   if (!result.written) {
     console.log(`### rmd merge-hold — ${result.scope} is already released; no ledger row written.`);
+    return 0;
+  }
+  if (authorized.input.authority === "agent-cli") {
+    console.log(
+      `### rmd merge-hold — AGENT NOTE recorded for ${result.scope}; by ${parsed.input.by}: ${parsed.input.reason}. ` +
+        `An agent hold is audit-only (authority agent-cli): it does NOT block auto-merge.`,
+    );
     return 0;
   }
   console.log(
