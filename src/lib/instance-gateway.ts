@@ -62,6 +62,7 @@ import { resolveRepoLayout } from "./repo-layout.js";
 import type { Route } from "./service.js";
 import type { GitHub } from "./status.js";
 import { buildTaskCardRoute } from "./task-card.js";
+import { planFilesIdentity } from "./thread-plan.js";
 
 /** The instance whose state IS the gateway's own config root. */
 export const CORE_INSTANCE = "core";
@@ -266,19 +267,21 @@ export function buildInstanceGatewayRoutes(coreRoutes: readonly Route[], opts: I
       continue;
     }
     const root = instanceStateRoot(instance, stateBase);
+    let planIdentity = planFilesIdentity(root.planPath);
     let plan: Plan = { tasks: [], byId: new Map() };
-    let startupReason: string | undefined;
+    let planReason: string | undefined;
     try {
       plan = (opts.loadPlan ?? loadPlan)(root.planPath);
     } catch (error) {
-      startupReason = `plan ${root.planPath} is unreadable: ${String((error as Error).message ?? error)}`;
-      opts.log?.("serve.instance_unavailable", { instance: instance.name, reason: startupReason });
+      planReason = `plan ${root.planPath} is unreadable: ${String((error as Error).message ?? error)}`;
+      opts.log?.("serve.instance_unavailable", { instance: instance.name, reason: planReason });
     }
     const github: GitHub =
-      startupReason === undefined && opts.github ? opts.github(instance.repo) : { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
+      planReason === undefined && opts.github ? opts.github(instance.repo) : { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
     const board: BoardDeps = { plan, ledgerPath: root.ledgerPath, github };
+    let startupReason: string | undefined;
     let currentAnalyticsSnapshot: () => AnalyticsSnapshot = coldAnalyticsSnapshot;
-    if (startupReason === undefined) {
+    const initializeAnalytics = (): void => {
       try {
         // No core snapshot or core reader is passed across this boundary. Each cache reads only
         // the mounted instance's state/ ledger union and owns its own 15-minute refresh timer.
@@ -292,12 +295,39 @@ export function buildInstanceGatewayRoutes(coreRoutes: readonly Route[], opts: I
         startupReason = `analytics projection for ${instance.name} could not be initialized: ${String((error as Error).message ?? error)}`;
         opts.log?.("serve.instance_unavailable", { instance: instance.name, reason: startupReason });
       }
-    }
+    };
+    if (planReason === undefined) initializeAnalytics();
+    const refreshPlan = (): void => {
+      const identity = planFilesIdentity(root.planPath);
+      if (identity === planIdentity) return;
+      // Remember failed identities too: an unchanged bad edit must not parse or log per request.
+      planIdentity = identity;
+      let next: Plan;
+      try {
+        next = (opts.loadPlan ?? loadPlan)(root.planPath);
+      } catch (error) {
+        const reason = `plan ${root.planPath} is unreadable: ${String((error as Error).message ?? error)}`;
+        if (planReason !== undefined) planReason = reason;
+        opts.log?.("serve.instance_plan_reload_failed", { instance: instance.name, reason });
+        return;
+      }
+      const recovering = planReason !== undefined;
+      board.plan = next;
+      planReason = undefined;
+      if (recovering) {
+        board.github = opts.github ? opts.github(instance.repo) : github;
+        initializeAnalytics();
+      }
+      opts.log?.("serve.instance_plan_reloaded", { instance: instance.name, tasks: next.tasks.length });
+    };
     const probe = opts.probe ?? probeInstanceState;
-    const availability = (): Promise<InstanceAvailability> =>
-      startupReason === undefined ? probe(root) : Promise.resolve({ ok: false, reason: startupReason });
+    const availability = (): Promise<InstanceAvailability> => {
+      refreshPlan();
+      const reason = startupReason ?? planReason;
+      return reason === undefined ? probe(root) : Promise.resolve({ ok: false, reason });
+    };
     const routes = [
-      ...mountUnderInstance(instanceRouteSet(root, board, opts, instance.repo, currentAnalyticsSnapshot), instance.name),
+      ...mountUnderInstance(instanceRouteSet(root, board, opts, instance.repo, () => currentAnalyticsSnapshot()), instance.name),
       // W1-T5339: built from this instance's own state; never core's handlers or core's data.
       ...mountInstanceInboxRoutes({
         instance: instance.name, repository: instance.repo, stateDir: join(root.root, "state"),
