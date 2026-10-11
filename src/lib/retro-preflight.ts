@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 
+import { acquireTestSlotAsync, lowPriorityCommand, TEST_FILE_PEAK_BYTES, testRunArgv, type TestSlotOptions } from "./test-slot.js";
+
 /** PRIMARY CONTROL: maximum combined stdout/stderr bytes retained for one preflight attempt. */
 export const RETRO_PREFLIGHT_CAPTURE_BYTES = 16 * 1024;
 const RETRO_PREFLIGHT_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
@@ -118,10 +120,21 @@ interface AttemptFailure {
   hasSummary: boolean;
 }
 
+/** W1-T6111: what the suite run's host-wide test slot came to, carried onto the attempt row. */
+interface AttemptSlot {
+  outcome: "acquired" | "wait_bound_exceeded" | "slot_unavailable";
+  concurrency: number;
+  waitedMs: number;
+  priority: string;
+  note: string;
+}
+
 interface AttemptResult {
   ok: boolean;
   suiteCount: number;
   elapsedMs: number;
+  /** Absent when no suite run started (enumeration failed, or a synthetic failure). */
+  slot?: AttemptSlot;
   failure?: AttemptFailure;
 }
 
@@ -137,6 +150,8 @@ export interface RunRetroPrepublishPreflightOptions {
   deps?: {
     run?: RetroPrepublishRunner;
     now?: () => number;
+    /** Seams for the host-wide test slot the suite run takes. Production omits this. */
+    testSlot?: Omit<TestSlotOptions, "sleep">;
   };
 }
 
@@ -365,7 +380,12 @@ async function enumerateSuites(worktreePath: string, run: RetroPrepublishRunner)
   return { suites, result: { ...result, stdout, stderr: normalizedOutput(result.stderr) } };
 }
 
-async function runAttempt(worktreePath: string, run: RetroPrepublishRunner, now: () => number): Promise<AttemptResult> {
+async function runAttempt(
+  worktreePath: string,
+  run: RetroPrepublishRunner,
+  now: () => number,
+  testSlot?: Omit<TestSlotOptions, "sleep">,
+): Promise<AttemptResult> {
   const startedAt = now();
   const enumeration = await enumerateSuites(worktreePath, run);
   if (enumeration.result.status !== 0 || enumeration.suites.length === 0) {
@@ -390,29 +410,48 @@ async function runAttempt(worktreePath: string, run: RetroPrepublishRunner, now:
     };
   }
 
-  const result = await run(
-    process.execPath,
-    [
-      "scripts/test-with-retry.mjs",
-      process.execPath,
-      "--test",
-      "--test-reporter=tap",
-      "--import", "tsx",
-      "--import", "./test/setup/tmp-hygiene.ts",
-      ...enumeration.suites,
-    ],
-    commandOptions(worktreePath),
-  );
+  // W1-T6111: the suite run is the heavy part, so it takes a host-wide slot, niced and at the
+  // concurrency the slot grants. The ASYNC acquirer is deliberate: `acquireTestSlot` waits on a
+  // synchronous Atomics.wait, which would freeze the event loop this awaited preflight shares with
+  // the caller. It never throws and never refuses; every outcome runs the suite.
+  const slot = await acquireTestSlotAsync("retro-preflight:plan-reading-suites", {
+    perFileBytes: TEST_FILE_PEAK_BYTES,
+    ...testSlot,
+  });
+  let result: RetroPrepublishCommandResult;
+  let slotRow: AttemptSlot;
+  try {
+    const argv = testRunArgv(
+      [
+        "scripts/test-with-retry.mjs",
+        process.execPath,
+        "--test",
+        "--test-reporter=tap",
+        "--import", "tsx",
+        "--import", "./test/setup/tmp-hygiene.ts",
+        ...enumeration.suites,
+      ],
+      slot.concurrency,
+    );
+    const child = lowPriorityCommand(process.execPath, argv, testSlot?.binaryExists);
+    slotRow = { outcome: slot.outcome, concurrency: slot.concurrency, waitedMs: slot.waitedMs, priority: child.priority, note: slot.note };
+    const options = commandOptions(worktreePath);
+    result = await run(child.file, child.args, { ...options, env: { ...options.env, ...slot.childEnvironment } });
+  } finally {
+    // Pass, fail, timeout and spawn error all leave through here.
+    slot.release();
+  }
   const stdout = normalizedOutput(result.stdout);
   const stderr = normalizedOutput(result.stderr);
   if (result.status === 0) {
-    return { ok: true, suiteCount: enumeration.suites.length, elapsedMs: Math.max(0, now() - startedAt) };
+    return { ok: true, suiteCount: enumeration.suites.length, elapsedMs: Math.max(0, now() - startedAt), slot: slotRow };
   }
   const classified = classifyPreflightOutput(`${stdout}\n${stderr}`);
   return {
     ok: false,
     suiteCount: enumeration.suites.length,
     elapsedMs: Math.max(0, now() - startedAt),
+    slot: slotRow,
     failure: {
       exitClass: exitClass(result, ordinaryTestFailureClass(classified)),
       status: result.status,
@@ -459,6 +498,11 @@ function logAttempt(
     elapsed_ms: result.elapsedMs,
     suite_count: result.suiteCount,
     remote_pr_existed: opts.remotePrExisted,
+    test_slot_outcome: result.slot?.outcome ?? null,
+    test_slot_concurrency: result.slot?.concurrency ?? null,
+    test_slot_waited_ms: result.slot?.waitedMs ?? null,
+    test_slot_priority: result.slot?.priority ?? null,
+    test_slot_note: result.slot?.note ?? null,
     ...provenanceFields(opts.provenance),
   };
   if (result.ok) {
@@ -538,7 +582,7 @@ export async function runRetroPrepublishPreflight(
 ): Promise<RetroPrepublishResult> {
   const run = opts.deps?.run ?? runRetroPrepublishCommand;
   const now = opts.deps?.now ?? Date.now;
-  const first = await runAttempt(opts.worktreePath, run, now);
+  const first = await runAttempt(opts.worktreePath, run, now, opts.deps?.testSlot);
   logAttempt(opts, 1, first);
   if (first.ok) return { ok: true, attempts: 1, suiteCount: first.suiteCount, repaired: false };
 
@@ -593,7 +637,7 @@ export async function runRetroPrepublishPreflight(
     return { ok: false, attempts: 2, suiteCount: first.suiteCount, repaired: true };
   }
 
-  const second = await runAttempt(opts.worktreePath, run, now);
+  const second = await runAttempt(opts.worktreePath, run, now, opts.deps?.testSlot);
   logAttempt(opts, 2, second);
   return { ok: second.ok, attempts: 2, suiteCount: second.suiteCount, repaired: true };
 }

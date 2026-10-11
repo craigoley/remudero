@@ -195,7 +195,7 @@
   "src/lib/reply-interpreter.ts": 104,
   "src/lib/repo-location.ts": 57,
   "src/lib/report-commands.ts": 500,
-  "src/lib/retro-preflight.ts": 119,
+  "src/lib/retro-preflight.ts": 127,
   "src/lib/retro-subprocess.ts": 8,
   "src/lib/retro.ts": 1250,
   "src/lib/review-provider-provenance.ts": 29,

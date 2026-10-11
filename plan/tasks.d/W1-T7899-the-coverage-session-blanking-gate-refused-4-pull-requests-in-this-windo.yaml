@@ -1,0 +1,19 @@
+- id: W1-T7899
+  title: "THE coverage-session-blanking GATE REFUSED 4 PULL REQUESTS IN THIS WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-learning:10516:coverage-session-blanking"
+  ci_learning_prs: [10516, 10779, 10779, 10815]
+  files:
+    - learnings/ci.yaml
+  acceptance:
+    - claim: "the lane that trips the coverage-session-blanking gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
+      proof: "grep: ci-learning:10516:coverage-session-blanking in learnings/ci.yaml"
+  note: "Filed by the ci-learning rung from ci-learning:10516:coverage-session-blanking. The coverage-session-blanking gate went red on #10516 and was repaired; the repair touched test/clock-sweep.test.ts, src/lib/tmp.ts, test/a-budget-check-run-never-writes-the-checkout.test.ts, test/a-census-this-branch-grows-is-refused-before-the-push.test.ts, test/a-fix-round-checks-its-edits-from-a-harness-git-snapshot.test.ts, test/a-net-positive-claude-md-diff-is-not-refused.test.ts, test/census-precheck-counts-the-house-layout-ratchet.test.ts, test/setup/tmp-hygiene.ts. Recommended action: build. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."

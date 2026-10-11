@@ -37,6 +37,7 @@ usage:
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
   rmd progress-watchdog [--json] [--state-root <dir>]   # Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.
   rmd live-edits --tree <daemon-checkout|install-checkout> --checkout <dir> --state-root <dir> [--json]   # Preserve, escalate, then restore tracked edits holding a live checkout behind origin/main.
+  rmd host-alert --state-root <dir> --instance <name> --condition <condition> (--raise <message> | --clear) [--json]   # Count, spool or clear one of the host watchdog's own alarms (crash loop, launcher refusals).
   rmd claim <task-id> [--drop]   # Take (or with --drop, drop) the dispatch claim the fleet honours, for a hand-build.
   rmd routing-ab [--json]   # Compare the arms of each live routing experiment (Sol vs Sonnet) from the ledger union.
   rmd impossible-canary --model <id> [--model <id>]... --scaffold <revision> --grader <executable> [--state-dir <dir>] [--json]   # Run sealed impossible-task canaries per model and count cheating events with exact intervals.
@@ -350,7 +351,17 @@ Preserve, escalate, then restore tracked edits holding a live checkout behind or
 rmd live-edits --tree <daemon-checkout|install-checkout> --checkout <dir> --state-root <dir> [--json]
 ```
 
-2026-10-11: one rung of the live-edit ladder (src/lib/live-edit-ladder.ts) for one live checkout. With tracked edits it always writes them to <state-root>/recovery/live-edits/<tree>/ as a patch and to refs/rmd-recovery/live-edits/<host>/<ts>, read back and re-applied before it counts as a copy. Staleness pressure is the daemon's own freshness pressure (decideFreshnessRestart) from the first reading dirty and behind: at the restart threshold the daemon escalates once; at twice it, and only with a confirmed copy of these exact edits, the tracked paths are restored to HEAD so the checkout can fast-forward. Prints one JSON line with --json (restored:true only when the tree is now clean). This verb never escalates; the daemon posts what it leaves pending. Run by the host watchdog for the daemon checkout and the install checkout.
+2026-10-11: one rung of the live-edit ladder (src/lib/live-edit-ladder.ts) for one live checkout. With tracked edits it always writes them to <state-root>/recovery/live-edits/<tree>/ as a patch and to refs/rmd-recovery/live-edits/<host>/<ts>, read back and re-applied before it counts as a copy. Staleness pressure is the daemon's own freshness pressure (decideFreshnessRestart) from the first reading dirty and behind: at the restart threshold the daemon escalates once; at twice it, and only with a confirmed copy of these exact edits, the tracked paths are restored to HEAD so the checkout can fast-forward. Prints one JSON line with --json (restored:true only when the tree is now clean). The host has no GitHub credential, so this verb spools its escalation and restore notice under <state-root>/escalation-spool/ and the daemon posts them. Run by the host watchdog for the daemon checkout and the install checkout.
+
+### `rmd host-alert`
+
+Count, spool or clear one of the host watchdog's own alarms (crash loop, launcher refusals).
+
+```
+rmd host-alert --state-root <dir> --instance <name> --condition <condition> (--raise <message> | --clear) [--json]
+```
+
+2026-10-11: the host watchdog's entry into src/lib/launcher-host-alerts.ts. --raise records one observation of a condition (crash-loop, units-not-on-main, units-diverged, deploy-code-fetch-failed, deploy-code-diverged, deploy-run-problem) under <state-root>/launcher-alerts/. A refusal is counted per consecutive observed tick: at the deployer's REFUSAL_PERSISTING_AT it writes launcher_alert.persisting, at REFUSAL_ESCALATE_AT it spools one needs-human escalation under <state-root>/escalation-spool/ for the daemon to post (the host has no GitHub credential). A crash loop is spooled on its first observation, because the launcher only names one after its own tiering. --clear ends the run when the launcher sees the step succeed: a still-spooled escalation is withdrawn and one the daemon already opened gets a spooled close. Prints one JSON line with --json.
 
 ### `rmd claim`
 
