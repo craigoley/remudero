@@ -8,6 +8,7 @@ import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
 import { diffEmptyAgainstScope } from "./review.js";
 import { feedbackEntryRepoPath } from "./feedback.js";
 import { envelope } from "./untrusted-envelope.js";
+import { feedbackLineagePayload } from "./contributor-admission.js";
 import type { FeedbackEntry, FeedbackStatus } from "./feedback.js";
 
 /**
@@ -83,7 +84,7 @@ export function missingFeedbackMessage(
  * it to {@link triagePrompt}, or the manifest would attest bytes the worker never received.
  */
 export function feedbackEntryBlock(entry: FeedbackEntry): string {
-  return envelope(entry.raw, "feedback-entry");
+  return envelope(feedbackLineagePayload(entry.raw, entry.contribution ? [entry.contribution] : []), "feedback-entry");
 }
 
 /**

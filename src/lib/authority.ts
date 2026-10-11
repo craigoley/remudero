@@ -68,6 +68,8 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import type { Policy } from "./policy.js";
 import type { LedgerUnionResult } from "./ledger-grep.js";
+import { classifyContribution, feedbackSubjectBinding, type FeedbackAdmissionContext, type FeedbackAdmissionSubject } from "./contributor-admission.js";
+import { systemClock } from "./clock.js";
 
 /** What decides whether a row's write fires. Closed vocabulary — design note (i). */
 export type AuthorityGateKind = "policy" | "ledger-verdict" | "operator-verb" | "sweep-rung" | "always";
@@ -585,6 +587,65 @@ export function authorityTableIds(): string[] {
 /** Every distinct `module` value the table documents — the ratchet's join key. */
 export function authorityTableModules(): Set<string> {
   return new Set(AUTHORITY_TABLE.map((r) => r.module));
+}
+
+// ── W1-T7754: what a feedback entry's lineage may authorize ─────────────────────────────────
+
+/**
+ * The rows above are outward writes. Turning a feedback entry into a task or ruling with no
+ * operator present (the auto-triage rung) is an authority too, and a machine risk judgment of
+ * the TEXT does not prove the INPUT was admitted. So the entry's recorded lineage is read first.
+ * Unknown or external lineage is evidence for owner attention: the entry stays in the inbox and
+ * the operator's hand route (`rmd triage <id>`) still serves it. It never supplies autonomous
+ * authority. A trusted summarizer that relayed the item is not its contributor; only the
+ * `contribution` the capture recorded counts.
+ *
+ * Legacy entries reconcile one at a time. Only an origin naming an outside contribution surface
+ * (`issue`, `issue#<n>`, `comment#...`) with no recorded contribution is unresolved. Operator
+ * capture (`cli`/`ui`) and the fleet's own sensors (`alert#`, `repair#`, `incident#`, ...) stay
+ * usable exactly as before, so historical trusted feedback is never quarantined wholesale.
+ */
+export interface FeedbackLineageAuthority {
+  autonomous: boolean;
+  basis: "admitted-contribution" | "legacy-internal" | "external-contribution" | "unresolved-origin";
+  reason: string;
+}
+
+const OUTSIDE_FEEDBACK_ORIGIN = /^(issue|comment)(#|$)/;
+
+/** PURE. Reads a parsed `plan/feedback/<id>.yaml` record; never trusts a shape it did not check. */
+export function feedbackLineageAuthority(entry: unknown, context: FeedbackAdmissionContext = {}): FeedbackLineageAuthority {
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    return { autonomous: false, basis: "unresolved-origin", reason: "unreadable-entry" };
+  }
+  const record = entry as Record<string, unknown>;
+  const contribution = record.contribution;
+  if (contribution !== undefined && contribution !== null) {
+    const unresolved = (reason: string): FeedbackLineageAuthority => ({ autonomous: false, basis: "unresolved-origin", reason });
+    if (context.mode !== "shadow" || !context.policy) return unresolved("no-admission-policy");
+    const subject = typeof contribution === "object" && !Array.isArray(contribution)
+      ? (contribution as Record<string, unknown>).subject as FeedbackAdmissionSubject | undefined : undefined;
+    if (!subject || typeof subject !== "object" || !context.currentSubject) return unresolved("origin-recheck-unavailable");
+    try {
+      if (feedbackSubjectBinding(subject) !== feedbackSubjectBinding(context.currentSubject)) return unresolved("source-revision-changed");
+    } catch { return { autonomous: false, basis: "unresolved-origin", reason: "lineage-unreadable" }; }
+    const decided = classifyContribution(context.currentSubject, "feedback", context.policy, context.memberships ?? [], context.nowMs ?? systemClock.now());
+    return { autonomous: decided.outcome === "trusted", reason: decided.reason,
+      basis: decided.outcome === "trusted" ? "admitted-contribution" : decided.outcome === "confirmed-external" ? "external-contribution" : "unresolved-origin" };
+  }
+  const origin = typeof record.origin === "string" ? record.origin : "";
+  if (OUTSIDE_FEEDBACK_ORIGIN.test(origin)) return { autonomous: false, basis: "unresolved-origin", reason: "legacy-origin-unresolved" };
+  return { autonomous: true, basis: "legacy-internal", reason: origin ? `legacy-${origin.split("#")[0]}` : "legacy-unlabelled" };
+}
+
+/** Observation only. An absent policy or failed observer cannot change existing effects. */
+export function observeFeedbackAdmission(entry: unknown, context: FeedbackAdmissionContext | undefined, action: string): void {
+  if (context?.mode !== "shadow" || !context.policy) return;
+  const authority = feedbackLineageAuthority(entry, context);
+  try {
+    context.record?.("feedback_admission.shadow", { mode: "shadow", action, would_deny: !authority.autonomous,
+      basis: authority.basis, reason: authority.reason, policy_version: context.policy.version });
+  } catch { /* Diagnostic failure is not effect authority or a global trusted-flow hold. */ }
 }
 
 function getPolicyValue(policy: Policy | undefined, path: string): unknown {
