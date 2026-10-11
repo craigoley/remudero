@@ -1,14 +1,28 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { after, before } from "node:test";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { BROWSER_SKIP, browserTest as test } from "./browser-absence.js";
 import { canaryCommand } from "../src/lib/model-canary-command.js";
 import { renderCanaryReport } from "../src/lib/model-canary-report.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { chromium } from "playwright";
+import { chromium, type Browser } from "playwright";
 import type { CanaryRun } from "../src/lib/model-canary-metrics.js";
+let browser: Browser;
+// Await the PROMISE, never the resolved handle (test/serve-browser-teardown.test.ts): a zero-match
+// `--test-name-pattern` run fires `after` while the launch is still in flight.
+let browserPromise: Promise<Browser> | undefined;
+before(async () => {
+  if (BROWSER_SKIP !== undefined) return;
+  browserPromise = chromium.launch({ args: ["--no-sandbox"] });
+  browser = await browserPromise;
+});
+after(async () => {
+  const launched = await browserPromise;
+  await launched?.close();
+});
 test("canary native preparation produces a pinned inert manifest without exposing held-out answers", () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}canary-manifest-`));
   try {
@@ -27,9 +41,8 @@ test("canary private browser drills from matched metrics to attempts and leaves 
       generationMs: 60, inputTokens: 50, outputTokens: 10, cacheReadTokens: null, cacheWriteTokens: null, reasoningTokens: null,
       usageRatedUsd: .02, billing: route === "azure" ? "api" : "subscription", servedModel }] });
   const injected = '</script><script>window.canaryInjected=true</script>';
-  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage(), errors: string[] = [];
   try {
-    const page = await browser.newPage(), errors: string[] = [];
     page.on("pageerror", e => errors.push(e.message));
     await page.route("**/*", route => route.abort());
     await page.setContent(renderCanaryReport([make("safe", injected, injected), make("unknown", "unknown", null),
@@ -44,7 +57,7 @@ test("canary private browser drills from matched metrics to attempts and leaves 
     assert.equal(await page.locator("#rows tr").count(), 1); assert.equal(await page.locator("#plot circle").count(), 0);
     await page.locator("#basis").selectOption("subscriptionNotional"); assert.equal(await page.locator("#plot circle").count(), 1);
     assert.deepEqual(errors, []);
-  } finally { await browser.close(); }
+  } finally { await page.close(); }
 });
 test("canary private preparation refuses a new directory behind a Git symlink ancestor", () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}canary-output-`));
