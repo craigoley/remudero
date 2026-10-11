@@ -9,6 +9,7 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fixedClock } from "../src/lib/clock.js";
+import { INBOX_STALE_AFTER_MS } from "../src/lib/nav-badge-view.js";
 import { fleetLaneStorePath, persistedInboxPath, readPersistedInbox } from "../src/lib/fleet-lane.js";
 import { inboxThreadId } from "../src/lib/inbox-thread.js";
 import { inboxLegacyView, refreshInboxClassification, type InboxRefreshMemo } from "../src/lib/inbox-view.js";
@@ -106,6 +107,28 @@ test("a stale persisted classification reaches the thread list only qualified", 
   assert.equal(qualified.status, 200);
   assert.equal((qualified.body.source as { state: string }).state, "stale");
   assert.equal(passes(), 0);
+});
+
+test("the attention census refuses a stale persisted classification and recovers on a fresh pass", async (t) => {
+  const { laneDeps } = world(t, ["ruling:a"]);
+  await refreshInboxClassification(laneDeps, {}, fixedClock(Date.now() - 2 * INBOX_STALE_AFTER_MS));
+  const { deps, passes } = freshGeneration(laneDeps);
+  const threads = await get(t, buildInboxThreadsRoute(deps, undefined, { warm: false }), "/v1/inbox/threads?qualified=1");
+  assert.equal(threads.status, 200, "qualified conversations retain readable history");
+  assert.equal((threads.body.source as { state: string }).state, "stale", "the same source is positively expired");
+  const route = buildInboxAttentionCensusRoute(deps);
+  for (const query of ["", "?qualified=1"]) {
+    const stale = await get(t, route, `/v1/inbox/attention-census${query}`);
+    assert.equal(stale.status, 503, "expired classification cannot certify current attention");
+    assert.equal(stale.body.error, "attention_snapshot_stale");
+    assert.equal(stale.body.counts, undefined);
+    assert.equal(stale.body.verifiedCounts, undefined);
+  }
+  await refreshInboxClassification(laneDeps, {}, fixedClock(Date.now()));
+  const fresh = await get(t, route, "/v1/inbox/attention-census?qualified=1");
+  assert.equal(fresh.status, 200, "the same reader recovers from a genuinely fresh persisted pass");
+  assert.equal(fresh.body.countSemantics, "observed_snapshot_not_verified");
+  assert.equal(passes(), 0, "freshness checks never classify on serve's main thread");
 });
 
 test("an inbox request on serve's main thread runs no classification pass", async (t) => {
