@@ -1,0 +1,32 @@
+[
+  {
+    "canonicalId": "before-your-first-push-not-every-commit-run-node-import-tsx-scri",
+    "aliasIds": [
+      "supersedes-full-parity-first-push-run-node-import-tsx-scripts-pr",
+      "run-the-shipped-local-gate-before-your-first-push-not-every-comm"
+    ]
+  },
+  {
+    "canonicalId": "a-baked-path-merge-deploy-dockerfile-deploy-entrypoint-sh-ships",
+    "aliasIds": [
+      "supersedes-the-rule-above-a-baked-path-merge-ships-itself-auto-a",
+      "a-merge-to-a-baked-path-ships-nothing-until-an-operator-triggers"
+    ]
+  },
+  {
+    "canonicalId": "grep-the-ledger-with-rmd-ledger-grep-pat-by-hand-zgrep-three-glo",
+    "aliasIds": [
+      "the-rotations-come-in-two-forms-and-every-glob-that-names-only-o",
+      "the-control-must-prove-each-form-was-read-and-a-raw-cross-archiv",
+      "and-the-archives-are-not-cumulative-snapshots"
+    ]
+  },
+  {
+    "canonicalId": "a-zero-is-not-a-measurement-until-a-positive-control-proves-the",
+    "aliasIds": [
+      "d-a-query-can-answer-the-wrong-question-with-a-perfectly-good-ze",
+      "e-a-control-proves-the-query-can-see-its-corpus-it-does-not-prov",
+      "i-a-positive-control-proves-the-query-can-see-its-corpus-it-does"
+    ]
+  }
+]
