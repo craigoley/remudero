@@ -2355,7 +2355,6 @@ async function readRetainedHumanReleases(deps: PanelGraphDeps) {
       }
     }
   }
-  // A readable retained union supplies positive facts, not proof of complete history.
   const archiveLedger = ledger.unread.length > 0 || ledger.archiveCount === 0 ? "unavailable" as const : "partial" as const;
   return { receipts, judges, archiveLedger };
 }
