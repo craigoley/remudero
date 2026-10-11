@@ -870,10 +870,14 @@ sweep:
     origin: "net-new"
     min: 0
     max: 8192
-  # W1-T7094 — the REPORT-ONLY host-wide memory budget (src/lib/host-memory-shadow.ts). Every row is
-  # a PROPOSAL to calibrate from `memory_budget.shadow` rows, not a ruling. `mode` accepts only off
-  # or shadow: no enforce mode exists, a later task must add one with operator approval, and nothing
-  # switches it on a timer. Read by host-memory-shadow.ts itself, never by validatePolicy.
+  # W1-T7094 — the host-wide memory budget (src/lib/host-memory-shadow.ts). Every row is a PROPOSAL
+  # to calibrate from `memory_budget.shadow` rows, not a ruling. mode accepts off, shadow or enforce.
+  # "shadow" (shipped) records a verdict per start and delays nothing. "enforce"
+  # (src/lib/host-memory-admission.ts, #10730) makes a start that would not fit wait, tiered: one
+  # re-read when only uncertainty tipped it; back-off while reserved work that can free memory still
+  # runs; admitted and named when nothing is left to wait for. Switching to enforce is an operator ruling made by editing this row;
+  # nothing switches it on a timer. Read by host-memory-shadow.ts
+  # itself, never by validatePolicy.
   hostMemoryBudget:
     mode:
       value: "shadow"

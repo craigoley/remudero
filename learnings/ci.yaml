@@ -519,3 +519,26 @@
     the identity step a fix lane must take before pushing, not a verified per-PR cause.
   src: "ci-learning:10671:head-identity-gate"
   cited: "2026-10-11"
+
+- id: coverage-session-blanking-env-form
+  subsystem: ci
+  lifecycle: active
+  files:
+    - "test/**/*.ts"
+    - "test/setup/**"
+    - "src/lib/tmp.ts"
+    - "scripts/coverage-session-blanking-check.mjs"
+  fact: >-
+    The coverage-session-blanking gate refused 4 pull requests in one window, and each was repaired after
+    the refusal. In a test that spawns a nested `node --test` runner or a child that strips NODE_TEST_CONTEXT,
+    blank NODE_V8_COVERAGE with `env.NODE_V8_COVERAGE = undefined` or `env.NODE_V8_COVERAGE = ""` (or the same
+    as an inline object-literal property). Never use `delete env.NODE_V8_COVERAGE`: node re-injects the variable
+    into every child, so the delete is a no-op and the gate reports it as a defect. Before pushing, run
+    `node scripts/coverage-session-blanking-check.mjs` over your own change.
+  evidence: >-
+    The refusals are recorded as ci-learning:10516:coverage-session-blanking (PRs 10516, 10779 (listed twice),
+    10815). Recon did not fetch each PR's failure log or diff, so this entry names the gate's accepted forms and
+    the pre-push check, not a verified per-PR trigger. Whether src/lib/tmp.ts and test/setup/tmp-hygiene.ts were
+    causal or incidental repairs is not established.
+  src: "ci-learning:10516:coverage-session-blanking"
+  cited: "2026-10-11"
