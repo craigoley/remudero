@@ -10,6 +10,7 @@ import { executeAdmissionDisposition, admissionDispositionStore, observeAdmissio
   type AdmissionDispositionReceipt, type AdmissionDispositionStore,
   type AdmissionDispositionSimulation } from "../src/lib/action-executor.js";
 import type { AdmissionRead, AdmissionSettings } from "../src/lib/contributor-admission.js";
+import { assessContribution } from "../src/lib/contributor-admission.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { depReviewCommand, fixCommand, reviewCommand } from "./helpers/run-task-test.js";
 import { buildSweepEffects, DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
@@ -335,4 +336,78 @@ test("W1-T7755: a changed owner instruction and broken observation cannot become
     assert.equal(unknown?.status, "owner-action"); assert.equal(unknown?.permission, "not-granted");
     assert.equal(unknown?.laneReleased, true);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("W1-T7755: invalid private or unreadable ordinary contexts remain distinct unknowns", async () => {
+  const rows = [
+    { ...pull(), head: { ...pull().head, repo: { ...pull().head.repo, private: true } } },
+    { ...pull(), base: { ...pull().base, repo: { ...pull().base.repo, id: 77 } } },
+    { ...pull(), user: { id: 2, type: "User", login: "actor-2" } },
+    { ...pull(), merged: undefined },
+  ];
+  for (const row of rows) {
+    const { store } = memoryStore("rehearsal"), sim = rehearsal();
+    const result = await executeAdmissionDisposition({ settings, target }, store, source(row as ReturnType<typeof pull>), () => {}, clock, sim.simulation);
+    assert.equal(result.status, "pending"); assert.deepEqual(sim.counts(), [0, 0]);
+  }
+  const logged = await executeAdmissionDisposition({ settings, target }, memoryStore().store, source(),
+    () => { throw Error("log failure"); }, clock);
+  assert.equal(logged.status, "would-close"); assert.equal(logged.permission, "not-granted");
+  let elapsed = 0;
+  const expired = await executeAdmissionDisposition({ settings, target }, memoryStore().store,
+    async path => { elapsed = 15_001; return source()(path); }, () => {}, { now: () => NOW + elapsed });
+  assert.equal(expired.status, "pending");
+  for (const failure of [1, 2]) {
+    let reads = 0;
+    const assessment = await assessContribution(settings, target, "disposition", async path => {
+      if (++reads === failure) throw Error("read unavailable"); return source()(path);
+    }, clock);
+    assert.equal(assessment?.decision.outcome, "unknown");
+    assert.equal(assessment?.decision.reason, failure === 1 ? "origin-unreadable" : "origin-recheck-unreadable");
+    assert.equal(assessment?.currentPull, undefined);
+  }
+});
+
+test("W1-T7755: owner instructions cannot borrow user authority or lose durable identity", async () => {
+  const instruction = { id: 9, user: { id: 1, type: "User" }, updated_at: new Date(NOW).toISOString(),
+    issue_url: "https://api.github.com/repos/acme/core/issues/42", body: `Remudero-Admission: adopt 3/42@${sha}` };
+  for (const changed of [{ ...instruction, user: { id: 8, type: "User" } },
+    { ...instruction, user: { id: 1, type: "Bot" } }, { ...instruction, id: 10 },
+    { ...instruction, issue_url: "https://api.github.com/repos/acme/private/issues/42" },
+    { ...instruction, updated_at: "unreadable" }, { ...instruction, body: `Remudero-Admission: adopt 3/42@${"b".repeat(40)}` }]) {
+    const result = await executeAdmissionDisposition({ settings, target, ownerInstructionId: 9 }, memoryStore().store,
+      async path => path.endsWith("/comments/9") ? { status: 200, body: changed } : source()(path), () => {}, clock);
+    assert.equal(result.reason, "owner-instruction-unverified"); assert.notEqual(result.status, "adopted");
+  }
+  const { store, rows } = memoryStore();
+  const adopted = await executeAdmissionDisposition({ settings, target, ownerInstructionId: 9 }, store,
+    async path => path.endsWith("/comments/9") ? { status: 200, body: instruction } : source()(path), () => {}, clock);
+  assert.equal(adopted.status, "adopted");
+  rows.at(-1)!.ownerInstruction!.actorId = 0;
+  const invalid = await executeAdmissionDisposition({ settings, target }, store, source(), () => {}, clock);
+  assert.equal(invalid.reason, "journal-unreadable");
+});
+
+test("W1-T7755: disposition membership negatives need numeric credential controls and scoped services", async () => {
+  for (const control of ["member", "nonmember", "hidden", "wrong-id", "outage"] as const) {
+    const policy = { ...settings, policy: { ...settings.policy, version: `control-${control}`, organizationIds: [5] }, organizations: [{ id: 5, login: "team" }] };
+    const read: AdmissionRead = async path => {
+      if (path === "orgs/team/memberships/actor-8") {
+        if (control === "outage") throw Error("transport");
+        return control === "member" ? { status: 200, body: { state: "active", user: { id: 8 }, organization: { id: 5 } } }
+          : { status: 404, body: {} };
+      }
+      if (path === "user") return { status: 200, body: { id: 99, login: "viewer" } };
+      if (path === "orgs/team/memberships/viewer") return control === "hidden" ? { status: 403, body: {} }
+        : { status: 200, body: { state: "active", user: { id: control === "wrong-id" ? 100 : 99 }, organization: { id: 5 } } };
+      return source()(path);
+    };
+    const { store } = memoryStore("rehearsal"), sim = rehearsal();
+    const result = await executeAdmissionDisposition({ settings: policy, target }, store, read, () => {}, clock, sim.simulation);
+    assert.equal(result.status, control === "member" ? "trusted" : control === "nonmember" ? "simulated-closed" : "pending");
+    assert.deepEqual(sim.counts(), control === "nonmember" ? [1, 1] : [0, 0]);
+  }
+  const narrowed = { ...settings, policy: { ...settings.policy, services: [{ id: 2, actions: ["review" as const] }] } };
+  const result = await executeAdmissionDisposition({ settings: narrowed, target }, memoryStore().store, source(pull(2)), () => {}, clock);
+  assert.equal(result.status, "pending"); assert.equal(result.reason, "service-out-of-scope");
 });
