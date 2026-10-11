@@ -65,6 +65,70 @@ function onDisk(root: string, id: string): Record<string, unknown> {
   return parseYaml(readFileSync(feedbackEntryPath(root, id), "utf8")) as Record<string, unknown>;
 }
 
+function upstreamFixture(calls: string[][]) {
+  return {
+    git: () => "https://github.com/someone-else/otherrepo.git\n",
+    gh: (args: string[]) => {
+      calls.push(args);
+      if (args[1] === "repos/acme/upstream") return JSON.stringify({ default_branch: "main" });
+      if (args[1].includes("git/ref/heads/main")) return JSON.stringify({ object: { sha: "a".repeat(40) } });
+      if (args[1] === "repos/acme/upstream/pulls") return JSON.stringify({ html_url: "https://github.com/acme/upstream/pull/1" });
+      return "{}";
+    },
+  };
+}
+
+test("W1-T7754 checkpoint: no-policy intake preserves legacy selection and writes no admission metadata", async () => {
+  const root = tmpRoot();
+  const result = await pollIssues([{ owner: "acme", repo: "widgets" }], {
+    issues: gateway([issueRow(1, { id: 501, type: "User", login: "someone" })]), root,
+    ledgerPath: join(root, "ledger.ndjson"), runId: "compat", now: () => NOW,
+  });
+  assert.ok(newFeedbackIdsOldestFirst(root).includes(result.created[0].id));
+  assert.equal("contribution" in onDisk(root, result.created[0].id), false);
+});
+
+test("W1-T7754 checkpoint: shadow selection observes without filtering external feedback", async () => {
+  const root = tmpRoot();
+  const result = await pollIssues([{ owner: "acme", repo: "widgets" }], {
+    issues: gateway([issueRow(2, { id: 502, type: "User", login: "someone" })]), root,
+    ledgerPath: join(root, "ledger.ndjson"), runId: "shadow", now: () => NOW,
+    admission: { mode: "shadow", policy: POLICY, nowMs: NOW },
+  });
+  assert.ok(newFeedbackIdsOldestFirst(root).includes(result.created[0].id));
+});
+
+for (const configured of [false, true]) {
+  test(`W1-T7754 checkpoint: ${configured ? "shadow" : "no-policy"} capture preserves upstream effect`, () => {
+    const root = tmpRoot();
+    mkdirSync(join(root, ".remudero"), { recursive: true });
+    writeFileSync(homeRepoPath(root), JSON.stringify({ repo: "acme/upstream" }));
+    const calls: string[][] = [];
+    const entry = captureFeedback(root, {
+      raw: "outside request", origin: "issue#4", land: { stateRoot: root },
+      contribution: { kind: "issue", sourceRef: "acme/widgets#4", observedAtMs: NOW,
+        origin: { actor: { id: 503, type: "User", login: "someone" } } },
+      ...(configured ? { admission: { mode: "shadow" as const, policy: POLICY, nowMs: NOW } } : {}),
+      upstream: upstreamFixture(calls),
+    });
+    assert.equal(entry.upstream?.status, "landed");
+    assert.equal(calls.filter((args) => args[1] === "repos/acme/upstream/pulls").length, 1);
+  });
+}
+
+test("W1-T7754 checkpoint: numeric source identity and actual revision are required even for the owner", () => {
+  const subject = { kind: "issue" as const, sourceRef: "acme/widgets#4", observedAtMs: NOW,
+    origin: { actor: { id: OWNER_ID, type: "User" } } };
+  assert.equal(classifyContribution(subject, "feedback", POLICY, [], NOW).outcome, "unknown");
+});
+
+test("W1-T7754 checkpoint: stored trusted admission is not current authority", () => {
+  const contribution = admitFeedbackContribution({ kind: "issue", sourceRef: "acme/widgets#4", observedAtMs: NOW,
+    origin: { actor: { id: OWNER_ID, type: "User" } } }, { policy: POLICY, nowMs: NOW });
+  contribution.admission.outcome = "trusted";
+  assert.equal(feedbackLineageAuthority({ origin: "issue#4", contribution }).autonomous, false);
+});
+
 test("W1-T7754: a trusted summary cannot launder external contribution origin", async () => {
   const root = tmpRoot();
   const outsider = { id: 9001, type: "User", login: "outsider" };
