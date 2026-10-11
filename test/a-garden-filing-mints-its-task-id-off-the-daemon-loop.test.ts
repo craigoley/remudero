@@ -248,6 +248,37 @@ test("W1-T7742: the mint bound scales with observed mint durations and starts fr
   assert.deepEqual(observed, [200, 60], "real minter options consume the learned bound");
 });
 
+test("W1-T7742: an early mint deadline callback waits for the remaining bound before aborting", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let now = 0;
+  let signal: AbortSignal | undefined;
+  const budget = new GardenMintBudget(() => 100.5);
+  const mint = ciLearningTaskIdMinter("/fixture", undefined, async (_file, _args, opts) => {
+    assert.equal(opts.timeout, 101);
+    signal = opts.signal;
+    return new Promise(() => {});
+  }, { budget, clock: { now: () => now } });
+  const pending = mint.async("fixture");
+  const rejected = assert.rejects(pending, error => {
+    assert.ok(error instanceof GardenMintTimedOutError);
+    assert.equal(error.elapsedMs, 100.5);
+    assert.equal(error.boundMs, 100.5);
+    return true;
+  });
+  assert.ok(signal);
+  now = 40.25;
+  t.mock.timers.tick(101);
+  assert.equal(signal.aborted, false, "the early callback must return without aborting");
+  now = 100.25;
+  t.mock.timers.tick(60);
+  assert.equal(signal.aborted, false, "the remaining 60.25 ms must round up to 61 ms");
+  now = 100.5;
+  t.mock.timers.tick(1);
+  assert.equal(signal.aborted, true, "the rescheduled callback must abort at the bound");
+  await rejected;
+  assert.equal(budget.boundMs(), 100.5, "an expired mint cannot train the learned bound");
+});
+
 test("W1-T7742: a late successful mint files nothing and preserves its held reservation", async (t) => {
   for (const elapsed of [25, 26]) {
     const f = fixture(t);
