@@ -451,7 +451,7 @@ import {
   pendingWorkerBoundaryHandoffs,
   v8HeapStatistics,
 } from "./lib/daemon.js";
-import { sweepStrandedReviewWorktrees } from "./lib/review-worktree-reclaim.js";
+import { holdReviewWorktree, releaseReviewWorktree, sweepStrandedReviewWorktrees } from "./lib/review-worktree-reclaim.js";
 import { sweepReclaimableArtifacts } from "./lib/disk-artifact-reclaim.js";
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
 // (readGhRateLimitRemaining, unrelated cadence, unchanged) — reads BOTH gh api rate_limit
@@ -21619,6 +21619,8 @@ export function materializeReviewWorktree(
     );
   }
   registerReviewerCheckout(worktreePath);
+  // Held until withMaterializedWorktree's teardown: a review slower than the sweep's grace window is still live.
+  holdReviewWorktree(worktreePath);
   return { worktreePath };
 }
 
@@ -21682,6 +21684,8 @@ export async function withMaterializedWorktree<T>(
         // outcome; a stranded worktree here is a startup-prune concern
         // (pruneStaleRuns), never this command's job to retry.
         console.error(`(worktree teardown failed for ${worktreePath}: ${String((e as Error)?.message ?? e)})`);
+      } finally {
+        releaseReviewWorktree(worktreePath);
       }
     }
   }

@@ -21,10 +21,12 @@ import type { Config } from "../src/lib/config.js";
 import { fixedClock } from "../src/lib/clock.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import { worktreesDir } from "../src/lib/worker.js";
-import { daemonCommand } from "../src/run-task.js";
+import { daemonCommand, materializeReviewWorktree, withMaterializedWorktree } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import {
   DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS,
+  holdReviewWorktree,
+  releaseReviewWorktree,
   sweepStrandedReviewWorktrees,
 } from "../src/lib/review-worktree-reclaim.js";
 
@@ -372,5 +374,63 @@ test("the real daemon command supplies the stranded-review-worktree sweep hook �
     if (priorHome === undefined) delete process.env.HOME;
     else process.env.HOME = priorHome;
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// ── A live review is never reclaimed mid-review, however slow (PR #10741, 2026-10-10) ──
+
+test("a review worktree this process still holds survives the sweep past its grace window, and is reclaimed once released", () => {
+  const u = reviewFixture();
+  try {
+    const sha = headSha(u.repoDir);
+    const { name, path } = cutLinkedTree(u, 10741, 3_000_000, sha);
+    const late = fixedClock(3_000_000 + DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS + 7 * 60_000);
+    holdReviewWorktree(path);
+    try {
+      const held = sweepStrandedReviewWorktrees(u.config, collector().log, { clock: late });
+      assert.deepEqual(held.reclaimed, [], "a held worktree is not reclaimed at 37 minutes");
+      assert.deepEqual(held.kept, [{ name, path, reason: "live-review" }]);
+      assert.ok(existsSync(path), "the live review's checkout is still on disk");
+    } finally {
+      releaseReviewWorktree(path);
+    }
+    const released = sweepStrandedReviewWorktrees(u.config, collector().log, { clock: late });
+    assert.deepEqual(released.reclaimed, [name], "once released, the same worktree is reclaimable again");
+    assert.equal(existsSync(path), false);
+  } finally {
+    u.cleanup();
+  }
+});
+
+test("a worktree materializeReviewWorktree returns stays held for the whole withMaterializedWorktree body and is released at teardown", async () => {
+  const u = reviewFixture();
+  try {
+    const sha = headSha(u.repoDir);
+    const prNumber = 10742;
+    execFileSync("git", ["-C", u.originDir, "update-ref", `refs/pull/${prNumber}/head`, sha], { encoding: "utf8" });
+    const made = materializeReviewWorktree(u.config, u.repoDir, prNumber, sha, {
+      fetch: () => {},
+      addWorktree: (repoDir, path, revision) => {
+        execFileSync("git", ["-C", repoDir, "worktree", "add", "--detach", path, revision], { encoding: "utf8", env: GIT_ENV });
+      },
+      revParseHead: (path) => headSha(path),
+    });
+    const path = made.worktreePath;
+    assert.ok(path !== undefined, `materialized: ${JSON.stringify(made.failure)}`);
+    const late = () => fixedClock(Date.now() + DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS + 7 * 60_000);
+    const during = await withMaterializedWorktree(
+      path,
+      u.repoDir,
+      async () => sweepStrandedReviewWorktrees(u.config, collector().log, { clock: late() }),
+      () => {},
+    );
+    assert.deepEqual(during.reclaimed, [], "the sweep never reclaims the checkout a running review still reads");
+    assert.deepEqual(during.kept.map((k) => k.reason), ["live-review"]);
+    assert.ok(existsSync(path));
+    const after = sweepStrandedReviewWorktrees(u.config, collector().log, { clock: late() });
+    assert.equal(after.reclaimed.length, 1, "teardown released the hold, so a checkout its removal left behind is reclaimable");
+    assert.equal(existsSync(path), false);
+  } finally {
+    u.cleanup();
   }
 });
