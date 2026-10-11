@@ -19,7 +19,7 @@ raw: "Reconcile the deployed Azure control plane with the merged automatic
   existing units."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/10255
 summary:
