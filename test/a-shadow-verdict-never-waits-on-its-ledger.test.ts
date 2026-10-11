@@ -241,7 +241,7 @@ test("an unreadable ledger tail names the daemon growth and the serve scenario a
     ].join("\n"),
   }).outcome);
   assert.equal(torn.scenario, "serve-steady", "the torn line did not discard the intact serve row");
-  assert.match((uncertainty(torn, "daemon-growth-unmeasured").detail ?? []).join(" "), /0 daemon\.alive row\(s\)/);
+  assert.match((uncertainty(torn, "daemon-growth-unmeasured").detail ?? []).join(" "), /0 daemon sample row\(s\)/);
 });
 
 test("defaultReadTail returns the whole file when it fits and only whole trailing lines when it does not", () => {
