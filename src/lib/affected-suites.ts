@@ -779,6 +779,7 @@ export function planOnlySelectionOrFull(changed: readonly string[], readListing:
       recentOnly: { floor: [] },
     };
   } catch (err) {
+    // An unreadable listing is a FULL run that names its cause — never an empty or narrower plan-only guess.
     return {
       suites: [],
       fullRun: true,
