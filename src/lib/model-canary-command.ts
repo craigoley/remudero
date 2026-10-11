@@ -51,5 +51,8 @@ export function canaryCommand(argv: readonly string[]) {
   return { state: "private-projection", runs: projection.uniqueRuns };
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url))
-  process.stdout.write(JSON.stringify(canaryCommand(process.argv.slice(2))) + "\n");
+// diff-cov: process-boundary — standalone CLI stdout flush and exit; the native child control proves this entry.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const result = canaryCommand(process.argv.slice(2));
+  process.stdout.write(JSON.stringify(result) + "\n", () => process.exit(0));
+}
