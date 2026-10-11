@@ -327,6 +327,22 @@ test("W1-T7754 answers: edited sources and missing repository identity stay unkn
   }
 });
 
+test("W1-T7754 answers: the real default repository transport captures numeric visibility evidence", async () => {
+  const f = sourceFixture("issue-comment");
+  const shim = ghShim([{ when: "api repos/acme/widgets -i", stdout: `HTTP/2.0 200 OK\n\n${JSON.stringify(f.routes["repos/acme/widgets"])}` }],
+    { kind: "answer-repository-source" });
+  const oldPath = process.env.PATH;
+  try {
+    process.env.PATH = `${shim.dir}:${oldPath}`;
+    const gateway = ghEscalationAnswerGateway("acme", "widgets", async args => JSON.stringify(args[1].includes("comments")
+      ? [f.comment] : [{ ...f.issue, html_url: "https://github.com/acme/widgets/issues/4" }]), ["actor-1"], { settings: f.settings });
+    await gateway.listOpen("fixture");
+    const [comment] = await gateway.listComments(4);
+    assert.deepEqual(comment.sourceSubject?.repository, { id: 100, fullName: "acme/widgets", private: true });
+    assert.equal(shim.calls().length, 1);
+  } finally { process.env.PATH = oldPath; rmSync(shim.dir, { recursive: true, force: true }); }
+});
+
 test("W1-T7754 adoption: selected lineage is re-read once and unreadable or over-bound inputs cannot hold effects", async () => {
   const f = sourceFixture(); const rows: Record<string, unknown>[] = [];
   const contribution = { subject: f.subject, admission: { outcome: "trusted" } };
