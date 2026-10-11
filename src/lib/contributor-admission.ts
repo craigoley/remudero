@@ -185,7 +185,33 @@ export function* contributorAdmissionSteps(
   const actor = subject.origin?.actor;
   const initial = classify(subject, action, settings.policy, [], now());
   if (initial.reason === "membership-unresolved" && actor != null && validId(actor.id) && actor.type === "User") {
-    for (const organizationId of new Set(settings.policy.organizationIds)) {
+    memberships.push(...yield* contributorMembershipSteps(settings, actor, snapshot, read, clock));
+  }
+  try { response = yield* admissionReadStep(read, path); }
+  catch {
+    // A failed recheck invalidates this observation, never a prior trusted result on another PR.
+    finish("origin-recheck-unreadable"); return;
+  }
+  const current = record(response.body);
+  if (response.status !== 200) { finish("origin-recheck-unreadable"); return; }
+  if (record(current.head).sha !== subject.headSha) { finish("head-changed"); return; }
+  if (current.number !== target.prNumber || current.state !== "open"
+    || JSON.stringify(contributionOriginFromRest(current as RestContributionOrigin)) !== JSON.stringify(subject.origin)) {
+    finish("origin-changed"); return;
+  }
+  if (JSON.stringify(settings) !== snapshot) { finish("policy-changed"); return; }
+  if (!fresh(started, now(), settings.policy.maxEvidenceAgeMs)) { finish("stale-action-evidence"); return; }
+  finish();
+}
+
+function* contributorMembershipSteps(
+  settings: AdmissionSettings, actor: ContributionActor & { id?: number }, snapshot: string,
+  read: AdmissionRead, clock: Pick<Clock, "now">,
+): Generator<() => unknown, MembershipEvidence[], unknown> {
+  const memberships: MembershipEvidence[] = [];
+  const now = () => clock.now();
+  if (!validId(actor.id)) return memberships;
+  for (const organizationId of new Set(settings.policy.organizationIds)) {
       const namespace = settings.organizations.find((o) => o.id === organizationId);
       if (!namespace || typeof actor.login !== "string" || !/^[A-Za-z0-9-]+$/.test(actor.login)) continue;
       const key = JSON.stringify([snapshot, actor.id, organizationId]);
@@ -222,27 +248,119 @@ export function* contributorAdmissionSteps(
         verifiedMembers.set(key, evidence);
         break; // One verified admitted membership is sufficient; unrelated org outages add no authority.
       }
-    }
   }
-  try { response = yield* admissionReadStep(read, path); }
-  catch {
-    // A failed recheck invalidates this observation, never a prior trusted result on another PR.
-    finish("origin-recheck-unreadable"); return;
-  }
-  const current = record(response.body);
-  if (response.status !== 200) { finish("origin-recheck-unreadable"); return; }
-  if (record(current.head).sha !== subject.headSha) { finish("head-changed"); return; }
-  if (current.number !== target.prNumber || current.state !== "open"
-    || JSON.stringify(contributionOriginFromRest(current as RestContributionOrigin)) !== JSON.stringify(subject.origin)) {
-    finish("origin-changed"); return;
-  }
-  if (JSON.stringify(settings) !== snapshot) { finish("policy-changed"); return; }
-  if (!fresh(started, now(), settings.policy.maxEvidenceAgeMs)) { finish("stale-action-evidence"); return; }
-  finish();
+  return memberships;
 }
 
 function* admissionReadStep(read: AdmissionRead, path: string): Generator<() => unknown, AdmissionResponse, unknown> {
   return (yield () => read(path)) as AdmissionResponse;
+}
+
+export interface FeedbackSourceObservation {
+  decision: AdmissionDecision;
+  subject?: FeedbackAdmissionSubject;
+  memberships: readonly MembershipEvidence[];
+  wouldDeny: boolean;
+}
+
+async function readFeedbackSourceSubject(
+  expected: FeedbackAdmissionSubject, read: AdmissionRead, now: () => number,
+): Promise<FeedbackAdmissionSubject> {
+  const ref = /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([1-9]\d*)(?:\/comment\/([1-9]\d*))?(?:\/reaction\/([1-9]\d*))?$/.exec(expected.sourceRef)!;
+  const repoPath = `repos/${ref[1]}`;
+  const requireBody = async (path: string): Promise<Record<string, unknown>> => {
+    const response = await read(path);
+    if (response.status !== 200 || Object.keys(record(response.body)).length === 0) throw new Error("source-unreadable");
+    return record(response.body);
+  };
+  const repository = await requireBody(repoPath);
+  if (!validId(repository.id as number) || repository.full_name !== ref[1] || typeof repository.private !== "boolean") {
+    throw new Error("source-unreadable");
+  }
+  const parentPath = ref[3] === undefined ? `${repoPath}/issues/${ref[2]}` : `${repoPath}/issues/comments/${ref[3]}`;
+  let item = await requireBody(parentPath);
+  if (ref[3] === undefined ? item.number !== Number(ref[2]) || "pull_request" in item
+    : item.id !== Number(ref[3]) || item.issue_url !== `https://api.github.com/${repoPath}/issues/${ref[2]}`) {
+    throw new Error("source-context-changed");
+  }
+  const parentRevision: FeedbackRevision = { updatedAt: item.updated_at as string,
+    contentDigest: feedbackContentDigest(ref[3] === undefined ? [item.title, item.body, item.labels] : item.body) };
+  const parentId = item.id as number;
+  if (ref[4] !== undefined) {
+    let reaction: Record<string, unknown> | undefined;
+    for (let page = 1; page <= 3; page++) {
+      const response = await read(`${parentPath}/reactions?per_page=100&page=${page}`);
+      if (response.status !== 200 || !Array.isArray(response.body)) throw new Error("source-unreadable");
+      reaction = response.body.map(record).find(row => row.id === Number(ref[4]));
+      if (reaction || response.body.length < 100) break;
+    }
+    if (!reaction) throw new Error("source-reaction-unresolved");
+    item = reaction;
+  }
+  return { kind: expected.kind, sourceRef: expected.sourceRef,
+    repository: { id: repository.id as number, fullName: repository.full_name as string, private: repository.private },
+    itemId: item.id as number, issueNumber: Number(ref[2]), observedAtMs: now(),
+    origin: contributionOriginFromRest(item as RestContributionOrigin),
+    revision: ref[4] === undefined ? parentRevision
+      : { createdAt: item.created_at as string, contentDigest: feedbackContentDigest(item.content) },
+    ...(ref[4] === undefined ? {} : { parent: { kind: ref[3] === undefined ? "issue" as const : "issue-comment" as const,
+      itemId: parentId, revision: parentRevision } }) };
+}
+
+/** Recheck one selected original source, not an inbox scan. Shadow receipts never authorize an
+ * effect or the publication of private material. A changed/unreadable source remains unknown. */
+export async function observeFeedbackSource(
+  settings: AdmissionSettings | undefined, expected: FeedbackAdmissionSubject, boundary: string,
+  log: AdmissionRecord, deps: { read?: AdmissionRead; clock?: Pick<Clock, "now"> } = {},
+): Promise<FeedbackSourceObservation | undefined> {
+  if (settings === undefined) return undefined;
+  const clock = deps.clock ?? systemClock;
+  const started = clock.now();
+  const snapshot = JSON.stringify(settings);
+  let subject: FeedbackAdmissionSubject | undefined;
+  let memberships: MembershipEvidence[] = [];
+  const finish = (reason?: string): FeedbackSourceObservation => {
+    const decision = reason === undefined ? classifyContribution(subject!, "feedback", settings.policy, memberships, clock.now())
+      : { outcome: "unknown" as const, reason, receiptKey: feedbackContentDigest([expected, snapshot, boundary, reason]) };
+    const result = { decision, subject, memberships, wouldDeny: decision.outcome !== "trusted" };
+    try { log("feedback_admission.shadow", { ...decision, mode: "shadow", boundary, source_kind: expected.kind,
+      source_ref: expected.sourceRef, item_id: expected.itemId, repository_id: expected.repository?.id,
+      policy_version: settings.policy.version, would_deny: result.wouldDeny }); }
+    catch { /* Diagnostic failure is not permission and cannot change shadow effects. */ }
+    return result;
+  };
+  if (settings.mode !== "shadow" || settings.organizations.length > 8
+    || settings.organizations.some(o => !validId(o.id) || !/^[A-Za-z0-9-]+$/.test(o.login))) return finish("invalid-action-config");
+  const initial = classifyContribution({ ...expected, observedAtMs: started }, "feedback", settings.policy, [], started);
+  if (initial.outcome === "unknown" && initial.reason !== "membership-unresolved") return finish(initial.reason);
+  let reads = 0;
+  const read: AdmissionRead = async path => {
+    if (++reads > 16 || !fresh(started, clock.now(), Math.min(settings.policy.maxEvidenceAgeMs, 15_000))) throw new Error("source-read-bound");
+    return (deps.read ?? readAdmissionRestAsync)(path);
+  };
+  try {
+    subject = await readFeedbackSourceSubject(expected, read, () => clock.now());
+    if (feedbackSubjectBinding(subject) !== feedbackSubjectBinding(expected)) return finish("source-revision-changed");
+    const decision = classifyContribution(subject, "feedback", settings.policy, [], clock.now());
+    const actor = subject.origin?.actor;
+    if (decision.reason === "membership-unresolved" && actor) {
+      const steps = contributorMembershipSteps(settings, actor, snapshot, read, clock);
+      let next = steps.next();
+      while (!next.done) {
+        try { next = steps.next(await next.value()); }
+        catch (error) { next = steps.throw(error); }
+      }
+      memberships = next.value;
+    }
+    const current = await readFeedbackSourceSubject(expected, read, () => clock.now());
+    if (feedbackSubjectBinding(current) !== feedbackSubjectBinding(subject)) return finish("source-revision-changed");
+    subject = current;
+    if (JSON.stringify(settings) !== snapshot) return finish("policy-changed");
+    if (!fresh(started, clock.now(), Math.min(settings.policy.maxEvidenceAgeMs, 15_000))) return finish("stale-action-evidence");
+    return finish();
+  } catch {
+    return finish("source-recheck-unavailable");
+  }
 }
 
 /** Authenticated REST evidence only. An absent field stays absent; a deleted repo stays null.
