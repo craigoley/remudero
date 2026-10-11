@@ -16,6 +16,7 @@
 import { execFileSync } from "node:child_process";
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { basename } from "node:path";
+import { systemClock, type Clock } from "./clock.js";
 import { buildRiskJudgeSpawnArgs, resolveRiskJudgeMount, scrubRiskJudgeText } from "./risk-judge.js";
 import { loadMounts, mountsPath, type Mount } from "./mounts.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
@@ -441,7 +442,8 @@ export interface QuietWatchdogOptions {
   fallbackBoundMs: number;
   /** The quiet floor the `worker.state` sensor uses; a quiet episode begins this long after the last activity. */
   quietFloorMs: number;
-  now?: () => number;
+  /** The injected time port (src/lib/clock.ts); defaults to the system clock. */
+  clock?: Clock;
   ledger: (step: string, extra: Record<string, unknown>) => void;
   judge: QuietWorkerJudge;
   listProcesses?: () => ProcRow[];
@@ -469,7 +471,8 @@ const QUIET_WATCHDOG_POLL_MS = 5_000;
 /** THE QUIET-WORKER RUNG. Watches ONE worker spawn: while its stream is quiet past its adaptive bound it inspects the
  * process tree, and only a dead poll loop is put to the judge. Every decision is ledgered as `worker.quiet_judged`. */
 export function runQuietWorkerWatchdog(opts: QuietWatchdogOptions): QuietWatchdogHandle {
-  const now = opts.now ?? Date.now;
+  const clock = opts.clock ?? systemClock;
+  const now = (): number => clock.now();
   const listProcesses = opts.listProcesses ?? defaultListProcesses;
   const kill = opts.kill ?? ((pid, signal) => void process.kill(pid, signal));
   let lastActivityMs = now();
