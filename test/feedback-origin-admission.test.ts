@@ -510,6 +510,37 @@ test("W1-T7754 consumers: carried pending content cannot replace main lineage wh
   assert.deepEqual(staged.contribution, original);
 });
 
+test("W1-T7754 consumers: unchanged pending legacy content stays in the receipt without restarting CI", () => {
+  const origin = gitRepo({ bare: true, kind: "admission-no-churn-origin" });
+  const seed = gitRepo({ kind: "admission-no-churn-seed" });
+  writeFileSync(join(seed.dir, "README.md"), "seed\n");
+  seed.git("add", "-A");
+  seed.git("commit", "--quiet", "-m", "chore: seed");
+  seed.addRemote("origin", origin.dir);
+  seed.git("push", "--quiet", "origin", "main");
+  const root = gitRepo({ cloneFrom: origin.dir, kind: "admission-no-churn-consumer" });
+  mkdirSync(join(root.dir, "plan", "feedback"), { recursive: true });
+  const rel = "plan/feedback/fb-legacy.yaml";
+  writeFileSync(join(root.dir, rel), "id: fb-legacy\nraw: unchanged\n");
+  const opts = { gh: (args: string[]) => {
+    if (args[1] === "list") return "[]";
+    if (args[1] === "create") return "https://github.com/acme/widgets/pull/3\n";
+    assert.fail(`unexpected GitHub effect ${JSON.stringify(args)}`);
+  }, targetRepository: { owner: "acme", repo: "widgets" }, sourceRepository: { owner: "acme", repo: "widgets" } };
+  const first = withLiveWritesAllowed(() => landFeedback(root.dir, opts));
+  assert.equal(first.landed, true, JSON.stringify(first));
+  const head = origin.git("rev-parse", LANDING_BRANCH).trim();
+  const unchanged = withLiveWritesAllowed(() => landFeedback(root.dir, opts));
+  assert.deepEqual(unchanged.files, [rel]);
+  assert.equal(unchanged.pushed, false);
+  assert.equal(origin.git("rev-parse", LANDING_BRANCH).trim(), head);
+  const another = "plan/feedback/fb-next.yaml";
+  writeFileSync(join(root.dir, another), "id: fb-next\nraw: new\n");
+  const changed = withLiveWritesAllowed(() => landFeedback(root.dir, opts));
+  assert.deepEqual(changed.files.sort(), [rel, another].sort());
+  assert.equal(changed.pushed, true);
+});
+
 test("W1-T7754 consumers: actual triage prompt retains original lineage inside its untrusted boundary", () => {
   const contribution = admitFeedbackContribution(boundIssue(), { mode: "shadow", policy: POLICY, nowMs: NOW });
   const entry: FeedbackEntry = { id: "fb-prompt", ts: new Date(NOW).toISOString(), raw: "trusted summary of outside request",
