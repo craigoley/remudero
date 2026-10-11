@@ -7,6 +7,7 @@ import { instanceForStateRoot } from "./deployer.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { captureFeedback, listFeedback, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
 import type { FleetLaneDeps } from "./fleet-lane.js";
+import { evaluateFleetFlowDetectors, type FleetFlowDetector, type FleetFlowInput } from "./fleet-flow-detectors.js";
 import { parseInstanceRegistry, type RegistryInstance } from "./instance-registry.js";
 import {
   type IncidentEvidence,
@@ -15,6 +16,9 @@ import {
 import { readLedgerLines } from "./status.js";
 
 export type { IncidentEvidence } from "./sre-runbooks.js";
+
+/** Individual flow detectors register here when their own tasks land. */
+export const SRE_LANE_DETECTORS: readonly FleetFlowDetector[] = [];
 
 /**
  * lib/sre-lane.ts (W1-T4385) — the SRE gardener's phase 3, in its OWN lane, not inside the core
@@ -25,7 +29,7 @@ export type { IncidentEvidence } from "./sre-runbooks.js";
  * entry per pass via {@link captureFeedback} — the existing feedback -> triage -> plan -> build
  * pipeline builds the rest.
  *
- * INVARIANT: filing feedback is this lane's only write surface besides the allowlisted, reversible
+ * INVARIANT: flow incident rows and filing feedback are this lane's write surfaces besides the allowlisted, reversible
  * runbooks (sre-runbooks.ts, W1-T4386) each incident is handed to first; it never dispatches a build.
  *
  * PACING: never more filings a day than the fleet merged in the last day (mirrors fleet-lane.ts).
@@ -287,6 +291,9 @@ export type SreLaneInput = Pick<FleetLaneDeps, "stateDir" | "mergedLastDay" | "c
   log: (step: string, extra?: Record<string, unknown>) => void;
   /** W1-T4386: the runbook pass is composed at the daemon boundary. Absent, incidents file as before. */
   runbookPass?: (incident: IncidentEvidence) => Promise<RunbookPassResult>;
+  detectors?: readonly FleetFlowDetector[];
+  readFlowRows?: FleetFlowInput["readRows"];
+  writeFlowEvent?: FleetFlowInput["writeEvent"];
 };
 
 export interface SreLanePass {
@@ -307,6 +314,10 @@ export interface SreLanePass {
 export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   if (existsSync(sreLaneOffPath(deps.stateDir))) return { room: 0 };
   const now = (deps.clock ?? systemClock).now();
+  const flowRows = await evaluateFleetFlowDetectors({
+    stateDir: deps.stateDir, nowMs: now, detectors: deps.detectors ?? SRE_LANE_DETECTORS,
+    readRows: deps.readFlowRows, writeEvent: deps.writeFlowEvent,
+  });
   const store = readSreLaneStore(deps.stateDir);
   const withinDay = (ts: string) => now - Date.parse(ts) < DAY_MS;
   const filedToday = Object.values(store).filter((d) => withinDay(d.ts)).length;
@@ -315,7 +326,14 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   if (room <= 0 && !runMatchingRunbook) return { room };
 
   const openOrigins = openIncidentFeedbackOrigins(deps.root);
-  const evidence = aggregateIncidents(deps.readEvents());
+  const events = [...deps.readEvents()];
+  // An injected or lagging incident reader may not yet see this pass's writes. Include each once.
+  for (const row of flowRows) {
+    if (events.some((e) => e.fingerprint === row.fingerprint && e.ts === now && e.message === row.message)) continue;
+    const event = incidentEventFromLedgerRow({ ...row, ts: fixedClock(now).iso() }, deps.root);
+    if (event) events.push(event);
+  }
+  const evidence = aggregateIncidents(events);
   const worst = worstOpenIncident(evidence, (fp) => fingerprintAlreadyOpen(fp, openOrigins, deps.hasOpenTask));
   if (!worst) return { room };
 
