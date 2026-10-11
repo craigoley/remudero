@@ -12,7 +12,7 @@
   plan_refs: [W1-T6362, W1-T5974, W1-T5918, W1-T7697, W1-T7807, W1-T5127, W1-T1046]
   files: [src/run-task.ts, test/a-pending-restart-ends-a-fix-workers-round.test.ts]
   status: queued
-  priority: 2
+  priority: 3  # operator 2026-10-11: ~72-76 fix rounds on 10-11, median under 1 min (longest 7.8), none held a restart or recycle drain
   attempts: 0
   rationale: |
     READ on origin/main 5d117761b:
