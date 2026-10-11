@@ -134,6 +134,8 @@ interface CodexWorkerResult {
   blocks: string[];
   stderr: string;
   outputTruncation?: CodexOutputTruncation;
+  /** W1-T8203: set when stderr passed its retention bound and only its head and tail were kept. */
+  stderrTruncation?: CodexStderrTruncation;
   subtype: string;
   isError: boolean;
   /** W1-T6027: the child's own `exit(code, signal)`, never derived from `subtype`. */
@@ -1989,9 +1991,69 @@ export interface CodexOutputTruncation {
 export const CODEX_WORKER_STDOUT_MAX_BYTES = 1 * 1024 * 1024;
 /** BACKSTOP (W1-T4595): the total stdout one Codex worker may STREAM, against a runaway process. */
 export const CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES = 64 * 1024 * 1024;
-/** PRIMARY CONTROL: stderr is diagnostic evidence, not protocol input, so it receives its own
- * smaller containment ceiling. */
-export const CODEX_WORKER_STDERR_MAX_BYTES = 256 * 1024;
+/** W1-T8203: a MEMORY bound on what is RETAINED of stderr, a share of the stdout retention bound. stderr is
+ * diagnostic evidence (failure tail, retro evidence), never protocol input: passing this keeps the head and the
+ * tail and records the drop. It never tears the worker down and never decides a verdict. */
+export const CODEX_WORKER_STDERR_MAX_BYTES = CODEX_WORKER_STDOUT_MAX_BYTES / 4;
+
+export interface CodexStderrTruncation {
+  limitBytes: number;
+  retainedBytes: number;
+  droppedBytes: number;
+}
+
+/** W1-T8203: bounded stderr retention. Keeps the first quarter of the bound and the last three quarters (the tail
+ * carries the final error); everything between is counted, not held. */
+export class CodexStderrRetainer {
+  private readonly headLimit: number;
+  private readonly tailLimit: number;
+  private head: Buffer[] = [];
+  private headBytes = 0;
+  private tail: Buffer[] = [];
+  private tailBytes = 0;
+  private totalBytes = 0;
+
+  constructor(private readonly limitBytes: number = CODEX_WORKER_STDERR_MAX_BYTES) {
+    this.headLimit = Math.floor(limitBytes / 4);
+    this.tailLimit = limitBytes - this.headLimit;
+  }
+
+  push(chunk: string): void {
+    let buf = Buffer.from(chunk, "utf8");
+    this.totalBytes += buf.length;
+    if (this.headBytes < this.headLimit) {
+      const take = Math.min(buf.length, this.headLimit - this.headBytes);
+      this.head.push(buf.subarray(0, take));
+      this.headBytes += take;
+      buf = buf.subarray(take);
+    }
+    if (buf.length === 0) return;
+    this.tail.push(buf);
+    this.tailBytes += buf.length;
+    while (this.tail.length > 1 && this.tailBytes - this.tail[0].length >= this.tailLimit) {
+      this.tailBytes -= this.tail.shift()!.length;
+    }
+  }
+
+  /** The retained tail, cut to its byte limit. */
+  private tailBuffer(): Buffer {
+    const all = Buffer.concat(this.tail);
+    return all.length > this.tailLimit ? all.subarray(all.length - this.tailLimit) : all;
+  }
+
+  truncation(): CodexStderrTruncation | undefined {
+    if (this.totalBytes <= this.limitBytes) return undefined;
+    const retainedBytes = this.headBytes + this.tailBuffer().length;
+    return { limitBytes: this.limitBytes, retainedBytes, droppedBytes: this.totalBytes - retainedBytes };
+  }
+
+  text(): string {
+    const truncation = this.truncation();
+    const head = Buffer.concat(this.head).toString("utf8");
+    if (!truncation) return head + Buffer.concat(this.tail).toString("utf8");
+    return `${head}\n[... ${truncation.droppedBytes} bytes of stderr dropped ...]\n${this.tailBuffer().toString("utf8")}`;
+  }
+}
 
 /** A worker exceeded a bounded protocol or diagnostic stream before it could return a result. */
 export interface CodexWorkerOutputLimitError extends Error {
@@ -4959,8 +5021,7 @@ async function spawnCodexWorkerInPrivateTemp(
   const stdout = new CodexJsonlAccumulator(startedAt, join(privateTmpDir, "stdout-pending.jsonl"), raw => observeWorkerToolLineage(toolLineage, raw));
   const stdoutDecoder = new StringDecoder("utf8");
   let stdoutBytes = 0;
-  let stderrBytes = 0;
-  let stderr = "";
+  const stderrRetainer = new CodexStderrRetainer();
   let outputLimit: CodexWorkerOutputLimitError | undefined;
   const pidRef: { pid?: number } = {};
   const spawn = args.containment?.spawn ?? spawnDetachedGroup;
@@ -4988,12 +5049,8 @@ async function spawnCodexWorkerInPrivateTemp(
     { command: bin, args: codexExecArgs(args, config, selection), cwd: args.cwd, env: childEnv },
     (chunk) => {
       if (outputLimit || timedOut) return;
-      stderrBytes += Buffer.byteLength(chunk, "utf8");
-      if (stderrBytes > CODEX_WORKER_STDERR_MAX_BYTES) {
-        exceedOutputBudget("stderr", CODEX_WORKER_STDERR_MAX_BYTES, stderrBytes);
-        return;
-      }
-      stderr += chunk;
+      // W1-T8203: stderr past its bound is truncated (head + tail), never a teardown and never a verdict.
+      stderrRetainer.push(chunk);
     },
     args.onSpawnError,
   );
@@ -5049,6 +5106,8 @@ async function spawnCodexWorkerInPrivateTemp(
       step: "worker.output_truncated",
       output_truncation: parsed.outputTruncation,
     });
+    const stderr = stderrRetainer.text();
+    const stderrTruncation = stderrRetainer.truncation();
     // A signal is an error whatever the stream parsed, so is an end with no code: only an observed exit 0 is clean.
     const exitCode = exit.kind === "exit" ? exit.code : null;
     const isError = parsed.isError || exitCode !== 0;
@@ -5066,6 +5125,7 @@ async function spawnCodexWorkerInPrivateTemp(
       text: parsed.text,
       blocks: parsed.blocks,
       ...(parsed.outputTruncation ? { outputTruncation: parsed.outputTruncation } : {}),
+      ...(stderrTruncation ? { stderrTruncation } : {}),
       stderr,
       subtype: isError ? (parsed.isError ? parsed.subtype : `error_exit_${exitCode}`) : "success",
       isError,
@@ -5090,6 +5150,14 @@ async function spawnCodexWorkerInPrivateTemp(
       workerDurationMs: Date.now() - startedAt,
     };
   } finally {
+    // W1-T8203: ledgered beside output_truncation, on success and on a failure that never parsed a result alike.
+    const droppedStderr = stderrRetainer.truncation();
+    if (droppedStderr && args.runId) appendLedger(ledgerPathFor(config), {
+      run_id: args.runId,
+      task_id: args.taskId ?? "unattributed",
+      step: "worker.stderr_truncated",
+      stderr_truncation: droppedStderr,
+    });
     toolLineage.finish(lineageEnd);
     if (timer) clearTimeout(timer);
   }
