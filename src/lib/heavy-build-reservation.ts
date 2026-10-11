@@ -191,7 +191,11 @@ function deliverHeavyEscalation(dir: string, request: HeavyBuildReservation, clo
       ready_at_ms: request.readyAtMs, expires_at_ms: request.expiresAtMs, scope: "NEW-implement-only" });
     if (accepted !== null && (typeof accepted === "object" || typeof accepted === "function") &&
         typeof (accepted as { then?: unknown }).then === "function") {
-      void Promise.resolve(accepted).catch(() => {});
+      void Promise.resolve(accepted).catch(() => {
+        // Async acceptance is already refused below: resolution AND rejection leave the same
+        // durable outbox pending for a supported sink. Consume only its late process rejection,
+        // never turn it into acknowledgement, delivery success or a finished gate.
+      });
       throw new Error("heavy READY delivery requires synchronous durable acceptance");
     }
     if (heavyRecordDigest(publishHeavyRecord(ackPath, expected).value) !== heavyRecordDigest(expected)) throw new Error("foreign heavy READY delivery acknowledgement");
