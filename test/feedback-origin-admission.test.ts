@@ -25,6 +25,8 @@ import type { AdmissionSettings, AdmissionRead, AdmissionDecision } from "../src
 import { ghEscalationAnswerGateway, readEscalationAnswers } from "../src/lib/escalation-answers.js";
 import { renderIssueBody } from "../src/lib/escalate.js";
 import { fixedClock } from "../src/lib/clock.js";
+import { __resetRunningWorkersForTest, createClaudeExecutableCache, CLAUDE_BIN_ENV_OVERRIDE,
+  deliverOperatorAnswerToRunningWorker, spawnWorker, type SpawnWorkerArgs } from "../src/lib/worker.js";
 
 // W1-T7754 — an issue or comment is an outside contribution until the shared classifier admits
 // its ORIGINAL actor. These fixtures drive real captures through pollIssues/captureFeedback and
@@ -361,6 +363,58 @@ test("W1-T7754 adoption: selected lineage is re-read once and unreadable or over
     { read: () => { assert.fail("missing lineage cannot choose an API path"); } });
   await admissionModule.observeFeedbackInputs(undefined, [contribution], "fix", log,
     { read: () => { assert.fail("absent settings cannot read"); } });
+});
+
+test("W1-T7754 adoption: selected legacy lineage is explicitly unknown without inventing a source or holding flow", async () => {
+  const f = sourceFixture(); const rows: Record<string, unknown>[] = [];
+  await admissionModule.observeFeedbackInputs(f.settings, [], "selected-legacy", (_step, fields) => rows.push(fields),
+    { read: () => assert.fail("legacy input cannot choose a REST identity") });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].reason, "lineage-missing");
+  assert.equal(rows[0].outcome, "unknown");
+  assert.equal(rows[0].would_deny, true);
+  assert.equal(rows[0].source_ref, undefined);
+  await admissionModule.observeFeedbackInputs(f.settings, [], "selected-legacy", () => { throw new Error("diagnostic unavailable"); });
+});
+
+test("W1-T7754 delivery: a live worker receives an immutable original lineage envelope, not relayer authority", { timeout: 15_000 }, async () => {
+  __resetRunningWorkersForTest();
+  const dir = tmpRoot(); const settingsFile = join(dir, "worker.json");
+  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }));
+  let started!: () => void, release!: () => void, settled!: () => void;
+  const startedPromise = new Promise<void>(resolve => { started = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const settledPromise = new Promise<void>(resolve => { settled = resolve; });
+  const messages: Array<{ message: { content: string } }> = [];
+  const queryFn = (() => {
+    const gen = (async function* () { started(); await gate;
+      yield { type: "result", subtype: "success", is_error: false, result: "done", session_id: "lineage", total_cost_usd: 0, num_turns: 1 };
+    })();
+    Object.assign(gen, { streamInput: async (stream: AsyncIterable<{ message: { content: string } }>) => {
+      await new Promise<void>(resolve => setImmediate(resolve));
+      for await (const message of stream) messages.push(message);
+    } });
+    return gen;
+  }) as SpawnWorkerArgs["queryFn"];
+  const run = spawnWorker({ cwd: dir, permissionMode: "bypassPermissions", settingsFile, prompt: "fixture",
+    taskId: "W1-LINEAGE", config: { claudeBin: "/unused", root: dir }, queryFn,
+    claudeExecutable: { cache: createClaudeExecutableCache(), deps: { env: { [CLAUDE_BIN_ENV_OVERRIDE]: "/fake/claude" },
+      home: dir, exists: () => true, canExecute: () => true, locations: [] } },
+    keychain: { platform: "linux", readCredentialFile: () => JSON.stringify({ claudeAiOauth: { accessToken: "fixture", expiresAt: 4102444800000 } }) },
+  } as SpawnWorkerArgs);
+  try {
+    await Promise.race([startedPromise, run.then(() => { throw new Error("worker settled before registration"); })]);
+    const contribution = { subject: sourceFixture("issue-comment").subject };
+    const original = JSON.stringify(contribution);
+    assert.equal(deliverOperatorAnswerToRunningWorker("W1-LINEAGE", "use B", {
+      contributions: [contribution], ledger: () => {}, onSteerSettled: settled,
+    } as Parameters<typeof deliverOperatorAnswerToRunningWorker>[2]), "delivered");
+    contribution.subject.origin!.actor!.id = 987;
+    await settledPromise;
+    assert.ok(messages[0].message.content.includes(original));
+    assert.ok(messages[0].message.content.includes("<untrusted_external_data "));
+    assert.ok(messages[0].message.content.includes("use B"));
+  } finally { release(); await run; __resetRunningWorkersForTest(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("W1-T7754 adoption: the actual plan-fix round rechecks and carries original lineage without treating shadow as a gate", async () => {
@@ -995,6 +1049,10 @@ test("W1-T7754 consumers: rebuilt answer-to-fix arguments preserve every origina
     reviewBase: { owner: "acme", repo: "widgets", headCheckoutDir: "/fixture", reviewerMount: {} as never } });
   assert.ok(built.constraint?.includes(JSON.stringify(original)));
   assert.ok(built.constraint?.includes(JSON.stringify(other)));
+  const snapshot = structuredClone(built.feedbackContributions);
+  pending.contributions![0] = { subject: { origin: { actor: { id: 555 } } } };
+  pending.contributions!.push({ kind: "mutated-later" });
+  assert.deepEqual(built.feedbackContributions, snapshot, "an already-built dispatch cannot inherit a later view mutation");
   original.actor!.id = 666;
   assert.notEqual((pending as { contributions?: Array<{ actor: { id: number } }> }).contributions![0].actor.id, 666);
   const rebuilt = operatorVerdictEvidence("W1-FIX", [], answers);
