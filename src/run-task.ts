@@ -12955,6 +12955,7 @@ export async function runFixRung(opts: {
       ? proofRepairStageable
       : [...new Set([
           ...(opts.task.files ?? []), ...(baselineDiffFiles ?? []), ...reachableRemedyFiles.map((file) => file.path),
+          ...(conflictedFilePaths(currentMergeConflict) ?? []),
         ])];
     // A proof-repair round with no test path to stage still runs: it may end in a PROOF_AMENDMENT instead of an edit.
     if (fixHarnessOwnsGit && fixDeclaredPaths.length === 0 && !proofRepairRound) {
