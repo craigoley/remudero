@@ -21,11 +21,11 @@
       - CONTAINMENT. In three of the four hung shards #10880 read, the pooled victim was W1-T5624's
         GH_CONFIG_DIR check. test/setup/no-live-remote.ts loaded before tmp-hygiene.ts set NODE_TEST_CONTEXT,
         so the live-remote containment (sentinel GH_TOKEN, GH_CONFIG_DIR, dead push URLs) was not installed
-        for ANY pooled test. Open PR #10880 (run-unfiled-1791725211000, another session) installs it in a pool
-        runner (runsTestFilesInThisProcess). It adds nothing that FAILS if a future change loses it again: the
+        for ANY pooled test. #10880 (merged 2026-10-11, b834ec926) installs it in a pool runner
+        (runsTestFilesInThisProcess). It adds nothing that FAILS if a future change loses it again: the
         miss was found only because one test happened to assert it.
       - SHARED SLOT STATE. The fourth shard's victim, a-shadow-memory-verdict-never-delays-a-start, is "not
-        explained" by #10880. Hand PR #10883 stubs readReviewDemand in two tests' ports(). That fixes those
+        explained" by #10880. Hand PR #10883 (merged, e08ba40e2) stubs readReviewDemand in two tests' ports(). That fixes those
         two tests, not the class.
     READ on origin/main 90034ae2d:
       - src/lib/test-slot.ts resolveTestSlotDir: under NODE_TEST_CONTEXT it returns one memoized
@@ -43,9 +43,9 @@
     AVOIDED FILES. This task does not touch #10880's files (scripts/pure-test-pool.mjs,
     scripts/test-tier-manifest.mjs, test/setup/no-live-remote.ts, test/pure-test-files-share-one-process.test.ts,
     its new test) or #10883's two test files.
-    PRECONDITION. Build after #10880 merges. The containment check in design 2 reds every pooled run on a main
-    without it. Check first: `git grep -n runsTestFilesInThisProcess origin/main -- test/setup/no-live-remote.ts`
-    must hit. If it does not, report NEEDS_DESIGN naming #10880 rather than building.
+    PRECONDITION, MET. #10880 is on main (b834ec926), so design 2's containment check holds on a current base.
+    If a later main ever loses runsTestFilesInThisProcess from test/setup/no-live-remote.ts, report
+    NEEDS_DESIGN naming that change rather than building.
   design: |
     No new constant or count.
     1. ONE SLOT DIR PER POOLED FILE. When this process runs test files itself (isolation none), the
