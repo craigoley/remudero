@@ -1,0 +1,79 @@
+- id: W1-T8138
+  title: "A REFUSED RECYCLE RETRIES WHEN ITS BLOCKERS SETTLE, AND WAITS AS LONG AS ITS LANES NEED — the deploy supervisor re-tries a refused drift recycle after a fixed 1 h back-off and the script re-pauses the fleet for a fixed 3000 s, so a refusal re-stalls the fleet later on a timer, not on evidence"
+  repo: remudero
+  depends_on: [W1-T8135]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — when a refused recycle tries again, and how long its drain waits, come from evidence
+  band_meaning: span
+  origin: "operator approval 2026-10-11: follow-ups from the recycle-stall fix (hand PR #10925); operator ruling: no hard thresholds"
+  plan_refs: [W1-T2598, W1-T1046, W1-T6062, W1-T5127, W1-T7807, W1-T7697]
+  files: [src/lib/deployer.ts, deploy/recycle-container.sh, test/a-refused-recycle-retries-when-its-blockers-settle.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-11 (core daemon live ledger, read-only): a recycle PAUSE held every lane from about 16:16Z and
+    was refused at 17:08:02Z (`deploy.restart_refused`, "still in flight after 3000s"; "the oldest in-flight work
+    this run observed was 3292s old"). The PAUSE was removed, and the drift recycle can start again only after the
+    back-off below, when it re-pauses the fleet for another full wait whether or not its blockers are still there.
+    READ on origin/main 8bcbc3e10:
+      - src/lib/deployer.ts `IMAGE_RECYCLE_FAILURE_BACKOFF_MS = 60 * 60_000` (:284). decideDeployTrigger (:730)
+        declines an automatic create-drift recycle (:809-812) and an automatic image recycle (:866-869) while
+        `nowMs - lastFailedAtMs` is under it. lastFailedAtMs is the `at` of the DEPLOY_FAILED marker (:2535-2542).
+        A refusal by the script lands in runDeployCycle's backend catch (:1958-1968), which logs
+        `deploy.restart_refused` and calls recordRefusal (:1541).
+      - deploy/recycle-container.sh `WAIT_SECONDS="${RMD_RECYCLE_WAIT_S:-3000}"` (:423), sized once from 115
+        `implement.done` rows on 2026-09-01 (:405-422, RECYCLE_WAIT_DISTRIBUTION_NOTE :429). The drain loop refuses
+        once `waited >= WAIT_SECONDS` (:1828-1853), whatever its blockers are doing.
+      - W1-T6062's refusal escalation (:1484-1495) counts "consecutive backoff windows", so it is tied to the timer.
+    So both halves are fixed numbers. The retry fires on the clock even while the same lane is still running,
+    and the wait is the same for a fleet of 2-minute runs as for one 90-minute run.
+    DEPENDENCY: the sibling task filed with this one (W1-T8135) fixes the double count in worker_lines, which this
+    task's blocker list reads. It edits the same script. Serialized after it.
+  design: |
+    Operator ruling: no hard thresholds. Every bound below is read from data, with its source ledgered, and a
+    no-history case falls back to today's value and says so (`source: "no_history_fallback"`), as W1-T7807 does.
+    1. THE REFUSAL NAMES ITS BLOCKERS. When the script refuses on the drain wait, it writes a machine-readable
+       blocker list beside the refusal: each lock's task id and run_id, and each lane-less worker's pid and kind
+       (review, retro, fix-rung, unknown) with its attribution. runDeployCycle records it on the refusal.
+    2. RETRY ON EVIDENCE, NOT A TIMER. For a refusal of this kind (drain wait), decideDeployTrigger does not use
+       IMAGE_RECYCLE_FAILURE_BACKOFF_MS. It retries on the first watchdog tick at which the ledger shows every named
+       blocker has yielded or finished: a `verdict` row for that run_id, a `run.freshness_handoff` /
+       `worker.recycle_yield` row, the lock gone, or the worker pid gone. A tick that still sees a blocker declines
+       with a reason that names it. Other failure kinds (pull, smoke, health) keep today's back-off; they are not
+       this task.
+    3. AN ADAPTIVE WAIT. The supervisor computes the drain wait and passes it through the existing
+       RMD_RECYCLE_WAIT_S override. It is the time the in-flight lanes are expected to need: for each lane, the
+       remaining time read from the observed `implement.done` worker_duration_ms distribution conditioned on that
+       lane's current age (a high quantile of the runs that were at least that old), taken over all lanes. A lane
+       the quiet-worker watchdog has judged (`worker.quiet_judged`, `worker.recycle_yield`) uses that verdict: a
+       lane that ended its round is not waited for; a lane whose round end failed is waited for its own expected
+       remainder. Ledger `deploy.recycle_wait_derived` with the wait, the per-lane inputs, the sample count and the
+       source.
+    4. THE SCRIPT STOPS CARRYING A SIZED CONSTANT. With no RMD_RECYCLE_WAIT_S from a caller (an operator's hand
+       run), it keeps 3000 s and labels it the no-history fallback in its messages. Update the comment block at
+       :405-422 to say where the wait now comes from.
+    5. W1-T6062's escalation counts consecutive refused ATTEMPTS for the same instance and reason, not timer
+       windows, so it keeps working when retries are no longer hourly.
+    Tests (new file, `test(` titles verbatim as in the proofs below): decideDeployTrigger with a recorded drain
+    refusal and ledger rows for its blockers, and the wait derivation over a fixture `implement.done` population.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-refused-recycle-retries-when-its-blockers-settle.test.ts"
+    - claim: "a drain-refused recycle retries on the first tick at which every named blocker has settled, before an hour"
+      proof: 'grep: test("W1-T8138: a refused recycle retries once its blockers settle" in test/a-refused-recycle-retries-when-its-blockers-settle.test.ts'
+    - claim: "a drain-refused recycle does not retry while a named blocker is still running, even after an hour"
+      proof: 'grep: test("W1-T8138: a refused recycle waits while a blocker still runs" in test/a-refused-recycle-retries-when-its-blockers-settle.test.ts'
+    - claim: "the drain wait is derived from the observed run lengths and the lanes' ages, so two populations give two waits"
+      proof: 'grep: test("W1-T8138: the drain wait follows observed run lengths and lane ages" in test/a-refused-recycle-retries-when-its-blockers-settle.test.ts'
+    - claim: "a lane the watchdog has ended is not waited for"
+      proof: 'grep: test("W1-T8138: a lane whose round the watchdog ended is not waited for" in test/a-refused-recycle-retries-when-its-blockers-settle.test.ts'
+    - claim: "a pull or smoke failure keeps its existing back-off"
+      proof: 'grep: test("W1-T8138: a non-drain failure keeps its back-off" in test/a-refused-recycle-retries-when-its-blockers-settle.test.ts'
+  falsifier: |
+    Keep IMAGE_RECYCLE_FAILURE_BACKOFF_MS for drain refusals: the first test sees the retry declined at 10 minutes
+    with every blocker settled, and the second sees it fire at 61 minutes with a blocker still running. Keep a fixed
+    wait: the third test reads the same wait for both populations.
