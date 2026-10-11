@@ -5,7 +5,7 @@ import {
 } from "../src/lib/classify.js";
 import type { FixProgressInput } from "../src/lib/fix-progress-judge.js";
 import {
-  CAPPED_HOST_GAP_REREVIEW_STEP, DEFAULT_SWEEP_POLICY, cappedProofDiscriminationFromLedger,
+  HOST_GAP_REREVIEW_STEP, DEFAULT_SWEEP_POLICY, cappedProofDiscriminationFromLedger,
   hostGapRereviewFacts, isHostGapCriterion, runSweep, type OpenPrView, type SweepDeps,
 } from "../src/lib/sweep.js";
 
@@ -32,7 +32,7 @@ const postReviewDisposed = (minutesAgo: number): Record<string, unknown> => ({
 });
 
 const rereviewRow = (minutesAgo: number, skips: string[]): Record<string, unknown> => ({
-  ts: at(minutesAgo), task_id: "W1-T7837", step: CAPPED_HOST_GAP_REREVIEW_STEP, pr_number: 10741,
+  ts: at(minutesAgo), task_id: "W1-T7837", step: HOST_GAP_REREVIEW_STEP, pr_number: 10741,
   pr_url: PR_URL, head_sha: HEAD, skips,
 });
 
@@ -77,7 +77,7 @@ test("W1-T7837: a capped review whose proofs all hit a host gap is re-reviewed a
   assert.match(action.reason, /runner-absent|sandbox runner missing/);
   assert.doesNotMatch(action.reason, /repair the PR body/);
   assert.deepEqual(h.effects, ["review:10741"], "one fresh review of the same head, no body or shard repair, no arm");
-  const request = h.rows.find((row) => row.step === CAPPED_HOST_GAP_REREVIEW_STEP);
+  const request = h.rows.find((row) => row.step === HOST_GAP_REREVIEW_STEP);
   assert.equal(request?.head_sha, HEAD);
   assert.equal(request?.pr_url, PR_URL);
   assert.deepEqual(request?.skips, ["runner-absent"]);
@@ -93,7 +93,7 @@ test("W1-T7837: a stale proof beside a host gap still routes to body repair", as
   assert.equal(action.disposition, "blocked-fixable");
   assert.match(action.reason, /repair the PR body/);
   assert.deepEqual(h.effects, ["body"]);
-  assert.equal(h.rows.some((row) => row.step === CAPPED_HOST_GAP_REREVIEW_STEP), false);
+  assert.equal(h.rows.some((row) => row.step === HOST_GAP_REREVIEW_STEP), false);
 });
 
 test("W1-T7837: the ledger evidence keeps the proof skip reason", () => {
@@ -131,7 +131,7 @@ test("W1-T7837: host-gap re-reviews are paced from the observed history", async 
   assert.equal(held.actions[0]!.disposition, "wait");
   assert.match(held.actions[0]!.reason, /host gap/);
   assert.deepEqual(early.effects, []);
-  assert.equal(early.rows.some((row) => row.step === CAPPED_HOST_GAP_REREVIEW_STEP), false);
+  assert.equal(early.rows.some((row) => row.step === HOST_GAP_REREVIEW_STEP), false);
 
   // The same age admits a faster-reviewing input, and a second gap waits twice as long as the first.
   const quick = harness([postReviewDisposed(9), reviewPosted(RUNNER_ABSENT, 5)]);
@@ -164,7 +164,7 @@ test("W1-T7837: a persisting host gap escalates through the fix-progress judge",
   assert.match(escalated.actions[0]!.reason, /sandbox runner missing/);
   assert.equal(escalating.effects.filter((effect) => effect.startsWith("escalate:")).length, 1);
   assert.equal(escalating.effects.some((effect) => effect === "review:10741" || effect === "body"), false);
-  assert.equal(escalating.rows.filter((row) => row.step === CAPPED_HOST_GAP_REREVIEW_STEP).length, 1,
+  assert.equal(escalating.rows.filter((row) => row.step === HOST_GAP_REREVIEW_STEP).length, 1,
     "no further re-review is requested once the judge escalates");
   assert.equal(escalating.rows.find((row) => row.step === "fix.progress_judged")?.site, "host-gap-rereview");
 
@@ -172,7 +172,7 @@ test("W1-T7837: a persisting host gap escalates through the fix-progress judge",
   const resumed = await runSweep([openPr()], continuing.deps);
   assert.equal(resumed.actions[0]!.disposition, "post-review");
   assert.deepEqual(continuing.effects, ["review:10741"]);
-  assert.equal(continuing.rows.filter((row) => row.step === CAPPED_HOST_GAP_REREVIEW_STEP).length, 2);
+  assert.equal(continuing.rows.filter((row) => row.step === HOST_GAP_REREVIEW_STEP).length, 2);
 
   const unavailable = harness(rows(), async () => undefined);
   const held = await runSweep([openPr()], unavailable.deps);
