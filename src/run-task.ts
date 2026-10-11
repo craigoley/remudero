@@ -2940,6 +2940,7 @@ import {
   type SelfSyncDeps,
 } from "./lib/self-sync.js";
 import { LIVE_EDIT_TREES, runLiveEditLadder, withLiveEditLadders, type LiveEditLadderWiring, type LiveEditTree } from "./lib/live-edit-ladder.js";
+import { recoveryRefMaintainer } from "./lib/recovery-refs.js";
 import { checkImageDrift, IMAGE_DRIFT_STEP } from "./lib/image-drift.js";
 import {
   acquireInflightLock,
@@ -7285,6 +7286,8 @@ export function liveEditLadderWiring(config: Config, clock: Clock = systemClock)
     clock,
     escalate: (e) => escalateAsync(e, { issues: issues(), ledgerPath: ledgerPathFor(config), runId: e.runId ?? e.taskId }),
     comment: async (url, body) => { await issues().comment?.(url, body); },
+    recovery: recoveryRefMaintainer((dir) => gitClaimRunnerAsync(dir), join(config.root, "state"),
+      (step, extra) => appendLedger(ledgerPathFor(config), { run_id: "RECOVERY-REFS", task_id: "RECOVERY-REFS", step, ...extra })),
   };
 }
 

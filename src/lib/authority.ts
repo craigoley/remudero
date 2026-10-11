@@ -473,6 +473,18 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
     verb: "rmd pause / rmd resume",
     note: "The one write in this table an operator issues directly, not the drain loop — a durable, explicit halt.",
   },
+  // ── src/lib/recovery-refs.ts ─────────────────────────────────────────────────────────────
+  {
+    id: "recovery-ref-push",
+    action: "publish a host's preserved `refs/rmd-recovery/*` commits to origin create-only, and delete one whose record was escalated, restored and landed on main",
+    module: "src/lib/recovery-refs.ts",
+    symbol: "publishRecoveryRefs / applyRecoveryRetention",
+    boundary: "git-push",
+    gate: "sweep-rung",
+    ledgerSteps: ["recovery_refs.published", "recovery_refs.conflict", "recovery_refs.publish_failed", "recovery_refs.pruned"],
+    verb: "rmd daemon (the live-edit ladder pass beside the freshness read)",
+    note: "Create-only (an empty --force-with-lease): a ref origin already holds at another commit is never moved. Each push passes assertClaimRefPushAllowedAsync.",
+  },
   // ── src/lib/task-id-reservation.ts ───────────────────────────────────────────────────────
   {
     id: "task-id-reservation-ref-push",
