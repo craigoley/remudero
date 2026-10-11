@@ -478,6 +478,7 @@ import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { daemonInstanceRegistryPath, IMAGE_BUILD_SHA_PATH, requestDeploy, runDeployCycle } from "./lib/deployer.js";
 import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
+import { escalationSpoolDrain, spoolingIssueVoice, withEscalationSpoolDrain } from "./lib/host-escalation-spool.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 export { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
@@ -7089,13 +7090,21 @@ export function daemonFreshnessReads(repoDir: string, env: NodeJS.ProcessEnv = p
   return { checkFreshness: read, externalWaitFreshness: ciWaitFreshness(read) };
 }
 
+/** The fleet's own needs-human transport, as the daemon (which holds the App token) speaks it. */
+function fleetIssueGatewayAsync(): AsyncIssueGateway {
+  const self = resolveOwnerRepo();
+  return ghIssueGatewayAsync(self.owner, self.repo);
+}
+
+/** The daemon's drain of what host-side code spooled because it could not post (host-escalation-spool.ts). */
+export function escalationSpoolDrainWiring(config: Config, clock: Clock = systemClock): ReturnType<typeof escalationSpoolDrain> {
+  return escalationSpoolDrain({ stateDir: join(config.root, "state"), ledgerPath: ledgerPathFor(config), issues: fleetIssueGatewayAsync, clock });
+}
+
 /** The daemon's live-edit ladder (live-edit-ladder.ts): its own tree and the install tree, escalating
  *  through the needs-human channel as the fleet's GitHub identity, which the host's watchdog lacks. */
 export function liveEditLadderWiring(config: Config, clock: Clock = systemClock): LiveEditLadderWiring {
-  const issues = () => {
-    const self = resolveOwnerRepo();
-    return ghIssueGatewayAsync(self.owner, self.repo);
-  };
+  const issues = fleetIssueGatewayAsync;
   return {
     daemonRepoDir: repoRoot,
     installRepoDir: resolveInstallRoot(config),
@@ -7107,8 +7116,8 @@ export function liveEditLadderWiring(config: Config, clock: Clock = systemClock)
   };
 }
 
-/** `rmd live-edits`: one rung of the ladder for one tree, run by the host watchdog. It never escalates:
- *  the host's service user has no GitHub credential, so a restore leaves its notice for the daemon. */
+/** `rmd live-edits`: one rung of the ladder for one tree, run by the host watchdog. The host's service
+ *  user has no GitHub credential, so its escalation and restore notice are spooled for the daemon. */
 export async function liveEditsCommand(rest: string[], clock: Clock = systemClock): Promise<number> {
   const badArg = unknownArgError("live-edits", rest, ["--tree", "--checkout", "--state-root"], ["--json"]);
   const tree = flagValue(rest, "--tree") as LiveEditTree | undefined;
@@ -7118,7 +7127,8 @@ export async function liveEditsCommand(rest: string[], clock: Clock = systemCloc
     console.error((badArg ?? `rmd live-edits: --tree (${LIVE_EDIT_TREES.join("|")}), --checkout and --state-root are required`) + "\n" + USAGE);
     return 2;
   }
-  const result = await runLiveEditLadder({ tree, repoDir: checkout, stateDir, host: hostname(), clock, fetch: true });
+  const voice = spoolingIssueVoice(stateDir, { source: "live-edits", host: hostname(), clock });
+  const result = await runLiveEditLadder({ tree, repoDir: checkout, stateDir, host: hostname(), clock, fetch: true, ...voice });
   console.log(rest.includes("--json") ? JSON.stringify(result) : `live-edits ${tree}: tier ${result.tier} -- ${result.reason}`);
   return 0;
 }
@@ -39383,9 +39393,10 @@ export async function daemonCommand(
         // dispatch runs to its verdict first, which is also what bounds the restart rate (measured:
         // the daemon is inside a dispatch 18.2% of wall clock, p50 28.3 min).
         // 2026-10-11: a tracked edit in a live checkout deferred every refresh for five hours, silently.
+        // The same read drains the host-escalation spool: host-side alerts the host itself could not post.
         checkFreshness: testRunnerOnItsOwnCheckout(repoRoot)
           ? daemonFreshnessReads(repoRoot).checkFreshness
-          : withLiveEditLadders(daemonFreshnessReads(repoRoot).checkFreshness, liveEditLadderWiring(config)),
+          : withEscalationSpoolDrain(withLiveEditLadders(daemonFreshnessReads(repoRoot).checkFreshness, liveEditLadderWiring(config)), escalationSpoolDrainWiring(config)),
         readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state")),
         categorizedRefusalRejoinFor: (id) => lastProj?.get(id)?.categorizedRefusalRejoin,
         // impl-FZ / W1-T3554 — PLAN FRESHNESS, on BOTH the self-target and dedicated non-self
@@ -39918,7 +39929,7 @@ async function deployRunCommand(rest: string[]): Promise<number> {
       servePort: resolveServePort([], effectiveConfig.serve?.port),
       uid,
       ledgerPath: ledgerPathFor(effectiveConfig),
-      ...refusalEscalationOrNone(resolveOwnerRepo, ghIssueGateway, ledgerPathFor(effectiveConfig)),
+      ...refusalEscalationOrNone(resolveOwnerRepo, ghIssueGateway, ledgerPathFor(effectiveConfig), { stateDir: join(effectiveConfig.root, "state"), host: hostname() }),
     }),
     // W1-T3694 — THE PRODUCER, WIRED. `realDeployDeps`'s own `daemonAlive` reads ONLY
     // `launchctl list`, which throws on every call on the fleet's only host (Linux has no
@@ -55120,7 +55131,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "live-edits",
     syntax: "rmd live-edits --tree <daemon-checkout|install-checkout> --checkout <dir> --state-root <dir> [--json]",
     summary: "Preserve, escalate, then restore tracked edits holding a live checkout behind origin/main.",
-    detail: "2026-10-11: one rung of the live-edit ladder (src/lib/live-edit-ladder.ts) for one live checkout. With tracked edits it always writes them to <state-root>/recovery/live-edits/<tree>/ as a patch and to refs/rmd-recovery/live-edits/<host>/<ts>, read back and re-applied before it counts as a copy. Staleness pressure is the daemon's own freshness pressure (decideFreshnessRestart) from the first reading dirty and behind: at the restart threshold the daemon escalates once; at twice it, and only with a confirmed copy of these exact edits, the tracked paths are restored to HEAD so the checkout can fast-forward. Prints one JSON line with --json (restored:true only when the tree is now clean). This verb never escalates; the daemon posts what it leaves pending. Run by the host watchdog for the daemon checkout and the install checkout.",
+    detail: "2026-10-11: one rung of the live-edit ladder (src/lib/live-edit-ladder.ts) for one live checkout. With tracked edits it always writes them to <state-root>/recovery/live-edits/<tree>/ as a patch and to refs/rmd-recovery/live-edits/<host>/<ts>, read back and re-applied before it counts as a copy. Staleness pressure is the daemon's own freshness pressure (decideFreshnessRestart) from the first reading dirty and behind: at the restart threshold the daemon escalates once; at twice it, and only with a confirmed copy of these exact edits, the tracked paths are restored to HEAD so the checkout can fast-forward. Prints one JSON line with --json (restored:true only when the tree is now clean). The host has no GitHub credential, so this verb spools its escalation and restore notice under <state-root>/escalation-spool/ and the daemon posts them. Run by the host watchdog for the daemon checkout and the install checkout.",
   },
   {
     name: "claim",
