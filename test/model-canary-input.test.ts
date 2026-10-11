@@ -6,6 +6,19 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { canaryCommand } from "../src/lib/model-canary-command.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+test("canary descriptor input refuses a platform without the required no-follow flag", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}canary-descriptor-flags-`));
+  try {
+    const input = join(dir, "runs.json"); writeFileSync(input, "[]");
+    const script = `import fs from 'node:fs'; import { mock } from 'node:test';
+      const safeFs={...fs,constants:{...fs.constants,O_NOFOLLOW:undefined}};
+      mock.module('node:fs',{namedExports:safeFs,defaultExport:safeFs});
+      const {canaryCommand}=await import('./src/lib/model-canary-command.ts');
+      canaryCommand(['project',${JSON.stringify(join(dir, "out"))},${JSON.stringify(input)}]);`;
+    const child = spawnSync(process.execPath, ["--experimental-test-module-mocks", "--import", "tsx", "--input-type=module", "--eval", script], { encoding: "utf8", timeout: 15_000 });
+    assert.equal(child.status, 1, child.stderr); assert.match(child.stderr, /canary-input-platform-unsupported/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 test("canary descriptor input refuses links directories and oversized files but accepts its exact bound", () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}canary-descriptor-`));
   try {

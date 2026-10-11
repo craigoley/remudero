@@ -9,6 +9,9 @@ import { retentionCanaryProtocol } from "./model-canary-retention.js";
 
 function boundedInput(input: string): string {
   const limit = 8 * 1024 * 1024;
+  if (!Number.isInteger(constants.O_NOFOLLOW) || constants.O_NOFOLLOW <= 0
+    || !Number.isInteger(constants.O_NONBLOCK) || constants.O_NONBLOCK <= 0)
+    throw new Error("canary-input-platform-unsupported");
   const fd = openSync(input, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const info = fstatSync(fd);
