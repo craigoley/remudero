@@ -1,0 +1,52 @@
+- id: W1-T8065
+  title: "A WARM VIEW DOES NOT DISCARD AN EXPENSIVE COLD CACHE — within-generation fast/heavy moves must price factory recreation, not mistake a cheap cached build for a cheap cold rebuild"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: production ticker and existing factory-ownership suite span two named surfaces
+  band_meaning: span
+  origin: "Operator approval 2026-10-11: fix remaining memory and swapping causes, preserve serve, run governed gates and retain the backlog"
+  plan_refs: [W1-T6368, W1-T6019]
+  files: [src/lib/read-model-worker.ts, test/a-view-lane-constructs-only-the-views-it-owns.test.ts]
+  status: queued
+  priority: 2.5
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-11 at 15:07Z in the selected streaming core ledger union after serve restoration:
+    264 view-lane moves, including workstreams 110 (56 up, 54 down), now@console 89 (45 up, 44 down)
+    and repositories 34 (17 up, 17 down). Expensive builds alternate with cheap builds.
+    Current main already drops the departed unit's factory state. It classifies a successful build
+    only by that build's peak call cost. A cheap warm build can therefore return an expensive-to-recreate
+    factory to the other lane, discarding its cache and causing another cold derive.
+    Current-main controls expose this cold/warm oscillation. This is not proof of leaked idle factories,
+    causal production memory savings, a complete day, or a complete history absence.
+    W1-T6019 separately persists measured lane cost across serve restarts; this concern is the price
+    of within-generation recreation. No restart persistence, heap policy or analytics cutover belongs here.
+  design: |
+    Reuse ViewUnit, the existing factory lifecycle and view_lane message. Track the peak call cost through
+    a factory's first successful published build, including bounded prepare slices. Carry this measured
+    cold/recreation scalar across the unit's lane move. Classify by the greater of current peak and known
+    recreation cost; retain current-cost pacing. Keep the measurement scoped to this unit/instance and
+    generation. No shared cache, global pool, new timer, arbitrary hysteresis bound or raised threshold.
+    A temporary warm-only overrun on a cheap-to-recreate factory must still be able to return to fast.
+    Failed or unfinished cold builds cannot certify a successful measurement. Explicit reclaim clears
+    inherited classification and still releases the departed owner's factory. Unrelated instances stay warm.
+    Drive the real ticker and message contract in the existing factory-ownership suite. A receiving lane
+    whose shared inputs are already warm must still honor the source lane's recreation cost. Include staged
+    prepare and reclaim controls. No fact pruning or history trimming; payload/source semantics stay intact.
+  acceptance:
+    - claim: "cheap warm builds preserve the expensive factory's heavy ownership without retaining a duplicate on fast"
+      proof: "unit test: a cache-cold factory stays heavy after its warm build instead of discarding and rebuilding its cache"
+    - claim: "a warm-only overrun can return a cheap factory to fast independently of another instance"
+      proof: "unit test: warm-only overrun and each instance is classified independently"
+    - claim: "bounded preparation is part of the first successful cold build's classification"
+      proof: "unit test: the cold classification includes bounded preparation before the first published body"
+  falsifier: |
+    Remove the cold/recreation cost from routing, or omit it from the lane message. The receiver's cheap
+    warm build then returns to fast and stops its continued owned builds. The first control must fail.
+    Forget earlier preparation slices and the staged-prepare control must fail. Pin every overrun forever
+    and the cheap-factory return control must fail. Run each deliberate breakage against the real ticker,
+    preserving an actual TAP test summary, then restore and repeat.
