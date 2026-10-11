@@ -75,6 +75,11 @@
     bounded-loop positive controls. A fake writer, known-ID-only lookup or fixture directory alone
     is not cross-device acceptance. Verify the route's no-store policy and actual served wiring.
   note: |
+    reservation hand-off: codex/plan-assistant-action-discovery-2026-10-03 -> codex/plan-assistant-discovery-2026-10-11
+
+    This same-chat continuation transfers its original operator-host filing to the fresh branch.
+    The old holder branch is absent remotely and its intact unpushed checkout is preserved;
+    reservation nonce 09d41b0d remains unchanged. This is not a competing takeover or new claim.
     REFRESH 2026-10-11 15:37 UTC: the complete five-open-PR owner corpus and main 975275e4
     were read and each exact head tree was swept for the task ID and discovery subject. W1-T4763
     was a positive control on all six trees; no discovery task or runtime implementation matched.
