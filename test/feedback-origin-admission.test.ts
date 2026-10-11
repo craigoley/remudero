@@ -19,7 +19,7 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { feedbackEntryBlock } from "../src/lib/triage.js";
 import { operatorVerdictEvidence } from "../src/lib/sweep.js";
-import { buildFixRungDispatchArgs, feedbackFixConstraint, runPlanScopedFixRound } from "./helpers/run-task-test.js";
+import { buildFixRungDispatchArgs, feedbackFixConstraint, runPlanScopedFixRound, buildIntakeRungsDaemonHooks } from "./helpers/run-task-test.js";
 import * as admissionModule from "../src/lib/contributor-admission.js";
 import type { AdmissionSettings, AdmissionRead, AdmissionDecision } from "../src/lib/contributor-admission.js";
 
@@ -299,6 +299,29 @@ test("W1-T7754 source: pagination and invalid metadata retain explicit unknown r
   assert.equal((await recheckSource(g.settings, g.subject, "fix", () => {}, { read: g.read, clock: { now: () => NOW } }))?.decision.outcome, "unknown");
   g.settings.organizations = [{ id: 600, login: "../hidden" }];
   assert.equal((await recheckSource(g.settings, g.subject, "fix", () => {}, { read: g.read, clock: { now: () => NOW } }))?.decision.reason, "invalid-action-config");
+});
+
+test("W1-T7754 admission wiring: actual daemon issue intake forwards opt-in policy and ledger receipts", async () => {
+  for (const configured of [false, true]) {
+    const root = tmpRoot(), f = sourceFixture();
+    let captured: Parameters<typeof pollIssues>[1] | undefined;
+    const hooks = buildIntakeRungsDaemonHooks({ config: { root, claudeBin: "/bin/true",
+      ...(configured ? { contributorAdmission: f.settings } : {}) },
+      clock: { now: () => NOW, date: () => new Date(NOW), iso: () => new Date(NOW).toISOString() },
+      loadManagedRepos: () => [{ owner: "acme", repo: "widgets" }],
+      pollIssues: async (_managed, deps) => { captured = deps; return { summary: { polledAt: new Date(NOW).toISOString(),
+        repos: ["acme/widgets"], reviewedCount: 0, createdCount: 0 }, newIssues: [], created: [], skippedExisting: 0 }; },
+    });
+    assert.equal((await hooks.runIntakeRung({ rung: "issues", fire: true, reason: "fixture" })).status, "ok");
+    assert.ok(captured);
+    assert.equal(captured.admission?.policy, configured ? f.settings.policy : undefined);
+    assert.equal(captured.admission?.mode, configured ? "shadow" : undefined);
+    if (configured) {
+      captured.admission!.record!("feedback_admission.shadow", { would_deny: true });
+      const rows = readFileSync(captured.ledgerPath, "utf8").trim().split("\n").map(line => JSON.parse(line));
+      assert.ok(rows.some(row => row.step === "feedback_admission.shadow" && row.task_id === "ISSUES"));
+    }
+  }
 });
 
 function tmpRoot(): string {
