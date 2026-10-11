@@ -53764,7 +53764,7 @@ async function issuesCommand(rest: string[]): Promise<number> {
     runId,
     dryRun,
     admission: config.contributorAdmission === undefined ? undefined : { ...config.contributorAdmission,
-      record: (step, fields) => appendLedger(ledgerPath, { run_id: runId, step, ...fields }) },
+      record: (step, fields) => appendLedger(ledgerPath, { run_id: runId, task_id: "ISSUES", step, ...fields }) },
   });
   console.log(`### rmd issues${dryRun ? " --dry-run" : ""}\nissues reviewed: ${renderIssuesSummary(result.summary)}`);
   if (dryRun) {

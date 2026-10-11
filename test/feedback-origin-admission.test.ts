@@ -19,7 +19,7 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { feedbackEntryBlock } from "../src/lib/triage.js";
 import { operatorVerdictEvidence } from "../src/lib/sweep.js";
-import { buildFixRungDispatchArgs } from "./helpers/run-task-test.js";
+import { buildFixRungDispatchArgs, feedbackFixConstraint, runPlanScopedFixRound } from "./helpers/run-task-test.js";
 import * as admissionModule from "../src/lib/contributor-admission.js";
 import type { AdmissionSettings, AdmissionRead, AdmissionDecision } from "../src/lib/contributor-admission.js";
 
@@ -225,6 +225,58 @@ test("W1-T7754 source: positive membership is bounded by pinned policy and faile
   f.settings.policy.version = "source-cache-case-changed"; failRecheck = false;
   assert.equal((await run())?.decision.reason, "organization-member");
   assert.equal(membershipReads, 2);
+});
+
+test("W1-T7754 adoption: selected lineage is re-read once and unreadable or over-bound inputs cannot hold effects", async () => {
+  const f = sourceFixture(); const rows: Record<string, unknown>[] = [];
+  const contribution = { subject: f.subject, admission: { outcome: "trusted" } };
+  const log = (_step: string, fields: Record<string, unknown>) => rows.push(fields);
+  await admissionModule.observeFeedbackInputs(f.settings, [contribution, structuredClone(contribution)], "adoption", log,
+    { read: f.read, clock: { now: () => NOW } });
+  assert.equal(f.calls.length, 4, "duplicate lineage is one current source, not extra origin scans");
+  assert.equal(rows.length, 1); assert.equal(rows[0].reason, "owner");
+  const cyclic: Record<string, unknown> = {}; cyclic.self = cyclic;
+  await admissionModule.observeFeedbackInputs(f.settings, [{}, { subject: cyclic }, ...Array(9).fill({})], "fix", log,
+    { read: () => { assert.fail("unreadable lineage cannot choose an API path"); }, clock: { now: () => NOW } });
+  assert.ok(rows.some(row => row.reason === "lineage-read-bound"));
+  assert.ok(rows.some(row => row.reason === "lineage-unreadable"));
+  await admissionModule.observeFeedbackInputs(f.settings, [{}], "fix", () => { throw new Error("receipt failure"); });
+  await admissionModule.observeFeedbackInputs(undefined, [contribution], "fix", log,
+    { read: () => { assert.fail("absent settings cannot read"); } });
+});
+
+test("W1-T7754 adoption: the actual plan-fix round rechecks and carries original lineage without treating shadow as a gate", async () => {
+  for (const admitted of [true, false]) {
+    const f = sourceFixture("issue", admitted ? OWNER_ID : 9012);
+    f.issue.updated_at = new Date(Date.now() - 1_000).toISOString();
+    f.subject.revision!.updatedAt = f.issue.updated_at;
+    const contribution = { subject: f.subject, source_ref: f.subject.sourceRef, actor: f.subject.origin?.actor };
+    const rows: Record<string, unknown>[] = []; const prompts: string[] = [];
+    const path = "plan/tasks.d/W1-T9000-fixture.yaml", head = "a".repeat(40);
+    const result = await runPlanScopedFixRound({
+      admission: f.settings, pr: { prNumber: 9000, prUrl: "https://github.com/acme/widgets/pull/9000", headSha: head,
+        headRefName: "fixture", checksState: "red", reviewState: "pending", unmetCriteria: [], priorStrikes: 0,
+        lastActivityAt: new Date().toISOString(), autoMergeArmed: false,
+        pendingAnswer: { constraint: "operator selected answer", contributions: [contribution] } },
+      task: { id: "W1-T9000", title: "fixture", files: [path] }, worktreePath: "/fixture",
+      title: "chore(plan): fixture", body: `## Acceptance\n- the task exists | grep: id: W1-T9000 in ${path}`,
+      deps: { feedbackRead: f.read,
+        runGit: args => args[0] === "rev-parse" ? head : args[0] === "show" ? "- id: W1-T9000\n" : "",
+        preflight: async () => ({ ok: true, failures: [], unreadable: [] }),
+        spawn: async prompt => { prompts.push(prompt); return "COMMIT_MESSAGE: chore(plan): fixture"; },
+        push: () => assert.fail("no source change may push"), updateMetadata: async () => assert.fail("no metadata change"),
+        log: (_step, fields) => { if (fields) rows.push(fields); } },
+    });
+    assert.equal(result.outcome, "refused", "fixture has no changed files, not an admission refusal");
+    assert.equal(prompts.length, 1, "both admitted and external shadow observations preserve dispatch");
+    assert.equal(f.calls.length, 4);
+    assert.ok(rows.some(row => row.boundary === "plan-fix-adoption" && row.would_deny === !admitted));
+    assert.match(prompts[0], /Original contribution lineage/);
+    assert.match(prompts[0], /acme\/widgets#4/);
+    assert.match(prompts[0], /not permission/);
+  }
+  assert.equal(feedbackFixConstraint(undefined), undefined);
+  assert.equal(feedbackFixConstraint({ constraint: "legacy answer" }), "legacy answer");
 });
 
 function tmpRoot(): string {
