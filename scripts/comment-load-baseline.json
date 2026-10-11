@@ -152,6 +152,7 @@
   "src/lib/managed-repos.ts": 20,
   "src/lib/measurement-cadence.ts": 750,
   "src/lib/model-gate.ts": 16,
+  "src/lib/main-health-rung.ts": 500,
   "src/lib/mount-recommender.ts": 195,
   "src/lib/mounts.ts": 259,
   "src/lib/notify.ts": 123,
