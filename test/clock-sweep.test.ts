@@ -450,6 +450,7 @@ test("W1-T4948: real shifted sweep cannot reap a sibling sentinel", () => withCl
     // to sweep a defaulted root under a test runner -- so the child must not inherit the runner's marker.
     const childEnv = { ...opts.env };
     delete childEnv.NODE_TEST_CONTEXT;
+    childEnv.NODE_V8_COVERAGE = undefined;
     execFileSync(file, ["--import", "tsx", "--import", shiftModule, "--input-type=module", "-e", code], {
       cwd: opts.cwd, env: childEnv, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
     });
