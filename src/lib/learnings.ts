@@ -2116,7 +2116,7 @@ export function renderLearningsContext(selected: LearningEntry[]): string {
  * doctrine+matched-learnings pair it always was. W1-T2761 DOES wire the headline HALF into
  * `run-task.ts`'s `implementPromptParts`/`renderAnchorBlock` (via `buildRuleHeadlinesPart`,
  * policy-gated on `workerRuleHeadlines.enabled`); `lookupWorkerRule` now supplies one selected
- * body or learning's evidence to the implement worker's read-only rule tool.
+ * body or learning's evidence to the worker's rule tool; an id the index lacks resolves via `doctrine/merged-rules.json`.
  */
 
 /** One parsed rule bullet. INVARIANT: the headline wrapped in `**` markers, followed by `body`,
@@ -2196,9 +2196,6 @@ export function retrieveRuleBody(index: Map<string, string>, headline: string): 
   return index.get(headline);
 }
 
-/** The merge registry as the worker's store reader sees it. ABSENT means no merge has happened yet,
- *  so every id resolves to itself; an UNREADABLE or malformed registry throws, because collapsing
- *  it to "no merges" would report a retired id as a missing rule when the real fault is the file. */
 function readMergedRuleGroupsFrom(readStoreFile: (target: string) => string): MergedRuleGroup[] {
   let text: string;
   try {
@@ -2217,10 +2214,6 @@ function readMergedRuleGroupsFrom(readStoreFile: (target: string) => string): Me
   return parsed as MergedRuleGroup[];
 }
 
-/** One rule for the worker's read-only rule tool, by stable id, body path or headline phrase. An id
- *  a fold retired from the index (its frozen bullet now sits in a live rule's body) resolves through
- *  `doctrine/merged-rules.json` to that live rule — consulted only when nothing in the index matches,
- *  so a phrase lookup never depends on the registry. */
 export function lookupWorkerRule(
   query: string,
   source: string,
