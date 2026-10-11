@@ -59,6 +59,7 @@ import {
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB } from "./host-memory-ledger.js";
+import type { ContainerMemoryHeadroom } from "./host-memory-shadow.js";
 import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
 } from "./pr-blocker.js";
@@ -18913,27 +18914,44 @@ export function logCostGovernorDeferral(
 export interface MemoryGovernorResult {
   /** true ⇒ the dispatch path MUST defer — do not open a new run this pass. */
   deferred: boolean;
-  /** The observed `MemAvailable` (MiB, read from `/proc/meminfo` — NEVER a cgroup limit; design
-   *  note (6): this fleet's containers carry no memory limit, so a cgroup read reports
-   *  "unbounded" and would authorise every dispatch silently). */
+  /** The smaller of the host's `MemAvailable` and this container's own headroom (MiB): a new worker draws on
+   *  both. Containers have carried memory limits since #10371/#10486, and the host figure cannot see them. */
   observedAvailableMib: number;
   /** The policy floor consulted (`policy.memoryFloorMib`, carried for the ledger line). */
   floorMib: number;
+  /** Set only when a container reading was taken: what each pool showed, and which one decided. */
+  hostAvailableMib?: number;
+  container?: ContainerMemoryHeadroom;
+  binding?: "host" | "container";
+  /** fits; host-short or container-short (deferred); nothing-to-wait-for: the container is short but no live
+   *  work in it can free memory, so waiting cannot help and the dispatch is admitted, named. */
+  tier?: "fits" | "host-short" | "container-short" | "nothing-to-wait-for";
 }
 
 /** The memory governor's pure predicate: STRICTLY BELOW `policy.memoryFloorMib` available, NEW
  *  dispatch is deferred. Same shape and the SAME dispatch-only asymmetry as its two siblings. SHIPS
  *  INERT: the floor defaults to 0 and the observation can never be negative, so this never defers
- *  until an operator raises the floor against a figure not yet measured. DEFER, NEVER KILL. */
+ *  until an operator raises the floor against a figure not yet measured. DEFER, NEVER KILL.
+ *
+ *  TIERED for the container: below the floor it defers only while live work in this container can still free
+ *  memory (`ownWorkLive`, asked only then). With none, waiting cannot help (the daemon's own heap holds the
+ *  shortfall), so the dispatch is admitted and named, never wedged. The host arm is unchanged. */
 export function checkMemoryGovernor(
   availableMib: number,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+  container?: ContainerMemoryHeadroom,
+  ownWorkLive: () => boolean = () => true,
 ): MemoryGovernorResult {
-  return {
-    deferred: availableMib < policy.memoryFloorMib,
-    observedAvailableMib: availableMib,
-    floorMib: policy.memoryFloorMib,
-  };
+  const base = { observedAvailableMib: availableMib, floorMib: policy.memoryFloorMib };
+  if (container === undefined) return { deferred: availableMib < policy.memoryFloorMib, ...base };
+  const bounded = "headroomMib" in container;
+  const binding = bounded && container.headroomMib < availableMib ? "container" : "host";
+  const observed = bounded ? Math.min(availableMib, container.headroomMib) : availableMib;
+  const named = { ...base, observedAvailableMib: observed, hostAvailableMib: availableMib, container, binding } as const;
+  if (availableMib < policy.memoryFloorMib) return { deferred: true, ...named, tier: "host-short" };
+  if (!bounded || container.headroomMib >= policy.memoryFloorMib) return { deferred: false, ...named, tier: "fits" };
+  return ownWorkLive() ? { deferred: true, ...named, tier: "container-short" }
+    : { deferred: false, ...named, tier: "nothing-to-wait-for" };
 }
 
 /** THE OBSERVATION IS LEDGERED ON EVERY CONSULTATION — unlike the two deferral loggers above, this
@@ -18956,6 +18974,16 @@ export function logMemoryObservation(
     observed_available_mib: result.observedAvailableMib,
     memory_floor_mib: result.floorMib,
     deferred: result.deferred,
+    ...(result.container === undefined ? {} : {
+      host_available_mib: result.hostAvailableMib,
+      ...("headroomMib" in result.container ? {
+        container_headroom_mib: result.container.headroomMib,
+        container_ceiling_mib: result.container.ceilingMib,
+        container_working_set_mib: result.container.workingSetMib,
+      } : { container_headroom: "unbounded" in result.container ? "unbounded" : `unread: ${result.container.unread}` }),
+      binding: result.binding,
+      tier: result.tier,
+    }),
   });
 }
 
