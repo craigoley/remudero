@@ -1,5 +1,25 @@
 /** Private measurements: unavailable is never zero; task runs own retry cost. */
+import { createHash } from "node:crypto";
+
 export type CanaryBilling = "api" | "subscription";
+/** One scheduled case across arms. Retention turns and retries stay inside one run. */
+export interface CanaryTrialBlock {
+  version: "canary-trial-block-v1";
+  day: string;
+  scheduleDigest: string;
+  blockId: string;
+  slotId: string;
+  plannedSlotIds: string[];
+  position: number;
+  aaLabel: "A" | "B" | null;
+}
+
+export function canaryTrialBlockId(day: string, suiteHash: string, caseId: string,
+  scheduleDigest: string, plannedSlotIds: readonly string[]): string {
+  return createHash("sha256").update(JSON.stringify([
+    "canary-trial-block-v1", day, suiteHash, caseId, scheduleDigest, plannedSlotIds,
+  ])).digest("hex");
+}
 export interface CanaryAttempt {
   id: string;
   durationMs: number | null;
@@ -28,6 +48,7 @@ export interface CanaryRun {
   attempts: CanaryAttempt[];
   outcomeReason?: string;
   retention?: { turnsObserved: number; violations: number; firstViolationTurn: number | null };
+  trial?: CanaryTrialBlock;
 }
 export const nonnegativeMeasurement = (n: number | null): n is number =>
   n !== null && Number.isFinite(n) && n >= 0;
@@ -72,15 +93,34 @@ export function projectCanaryRuns(input: readonly CanaryRun[]) {
   if (input.length > 8192) throw new Error("canary-projection-bound");
   const runs = new Map<string, CanaryRun>();
   const attemptIds = new Set<string>();
+  const trialSlots = new Set<string>();
   for (const run of input) {
     if (!run.id || !run.caseId || !/^[a-f0-9]{64}$/.test(run.suiteHash) || !run.model || !run.route || !run.effort || !run.family)
       throw new Error("canary-run-identity-invalid");
     if ((run.verified !== null && typeof run.verified !== "boolean")
       || (run.totalDurationMs !== null && !nonnegativeMeasurement(run.totalDurationMs))) throw new Error("canary-run-outcome-invalid");
+    if (run.trial !== undefined) {
+      const t = run.trial, hash = /^[a-f0-9]{64}$/;
+      if (!t || t.version !== "canary-trial-block-v1" || !/^\d{4}-\d{2}-\d{2}$/.test(t.day)
+        || !Number.isFinite(Date.parse(t.day + "T00:00:00Z"))
+        || new Date(t.day + "T00:00:00Z").toISOString().slice(0, 10) !== t.day
+        || !hash.test(t.scheduleDigest) || !hash.test(t.slotId)
+        || !Array.isArray(t.plannedSlotIds) || !t.plannedSlotIds.length || t.plannedSlotIds.length > 128
+        || t.plannedSlotIds.some(id => typeof id !== "string" || !hash.test(id))
+        || new Set(t.plannedSlotIds).size !== t.plannedSlotIds.length
+        || !Number.isInteger(t.position) || t.position < 0 || t.plannedSlotIds[t.position] !== t.slotId
+        || ![null, "A", "B"].includes(t.aaLabel)
+        || t.blockId !== canaryTrialBlockId(t.day, run.suiteHash, run.caseId, t.scheduleDigest, t.plannedSlotIds))
+        throw new Error("canary-trial-block-invalid");
+    }
     const prior = runs.get(run.id);
     if (prior) {
       if (JSON.stringify(prior) !== JSON.stringify(run)) throw new Error("canary-run-conflicting-duplicate");
       continue;
+    }
+    if (run.trial) {
+      if (trialSlots.has(run.trial.slotId)) throw new Error("canary-trial-slot-reused");
+      trialSlots.add(run.trial.slotId);
     }
     if (run.attempts.length > (run.family === "retention" ? 50 : 8)
       || (!run.attempts.length && run.verified !== null)) throw new Error("canary-attempt-bound");
@@ -122,6 +162,8 @@ export function projectCanaryRuns(input: readonly CanaryRun[]) {
       const row = rows[0]!;
       return { suiteHash: row.suiteHash, model: row.model, route: row.route, effort: row.effort, family: row.family,
         tasks: rows.length, distinctCases: new Set(rows.map(r => r.caseId)).size, attempts: attempts.length,
+        trialBlocks: new Set(rows.flatMap(r => r.trial ? [r.trial.blockId] : [])).size,
+        unpairedRuns: rows.filter(r => !r.trial).length,
         unresolved: rows.length - observed, correct, observed, passRate: observed ? correct / observed : null,
         passInterval: canaryPassInterval(correct, observed), intervalBasis: "descriptive-run-not-independent-case" as const,
         durationObserved: durations.length, completionP50Ms: quantile(durations, .5),
