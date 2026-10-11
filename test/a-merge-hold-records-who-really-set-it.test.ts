@@ -49,7 +49,7 @@ function engage(by: string): OperatorMergeHoldInput {
   return { action: "engage", by, reason: "hold for a manual read", authority: "interactive-cli", prNumber: 10339 };
 }
 
-function ledgerFixture(): { dir: string; ledgerPath: string } {
+function scratchDir(): { dir: string; ledgerPath: string } {
   const dir = mkdtempSync(join(tmpdir(), "rmd-who-set-hold-"));
   return { dir, ledgerPath: join(dir, "ledger.ndjson") };
 }
@@ -69,7 +69,7 @@ async function quietly<T>(fn: () => T): Promise<{ result: T; err: string }> {
 }
 
 test("W1-T7721: a merge-hold row records the verifiable actor beside the claimed name", () => {
-  const { dir, ledgerPath } = ledgerFixture();
+  const { dir, ledgerPath } = scratchDir();
   try {
     const actor = gatherMergeHoldActor(humanProbe());
     applyOperatorMergeHold(ledgerPath, engage("Craig Oley"), { now: () => 1, actor });
@@ -96,7 +96,7 @@ test("W1-T7721: a merge-hold row records the verifiable actor beside the claimed
 });
 
 test("W1-T7721: an agent caller naming a human in --by is refused", async () => {
-  const { dir, ledgerPath } = ledgerFixture();
+  const { dir, ledgerPath } = scratchDir();
   try {
     const agent = gatherMergeHoldActor(agentProbe());
     const verdict = authorizeMergeHoldWrite(engage("Craig Oley"), agent);
@@ -122,7 +122,7 @@ test("W1-T7721: an agent caller naming a human in --by is refused", async () => 
 });
 
 test("W1-T7721: an agent hold is never read as a confirmed human hold", async () => {
-  const { dir, ledgerPath } = ledgerFixture();
+  const { dir, ledgerPath } = scratchDir();
   try {
     const { result } = await quietly(() =>
       mergeHoldCommand(["engage", "--pr", "10339", "--by", `agent:${SESSION}`, "--reason", "agent note", "--confirm"], {
@@ -175,7 +175,7 @@ test("W1-T7721: the sweep and the board show who really set a hold", () => {
 });
 
 test("W1-T7721: a human at a real terminal is unchanged", async () => {
-  const { dir, ledgerPath } = ledgerFixture();
+  const { dir, ledgerPath } = scratchDir();
   try {
     const human = gatherMergeHoldActor(humanProbe());
     assert.equal(human.kind, "human");
