@@ -463,6 +463,7 @@ import {
   v8HeapStatistics,
 } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree, sweepStrandedReviewWorktrees } from "./lib/review-worktree-reclaim.js";
+import { withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
 import { sweepReclaimableArtifacts } from "./lib/disk-artifact-reclaim.js";
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
 // (readGhRateLimitRemaining, unrelated cadence, unchanged) — reads BOTH gh api rate_limit
@@ -1860,6 +1861,8 @@ export type FreshTreeReviewSeams = {
   /** Run `rmd review <pr> …` with `cwd` at the fresh worktree. Resolves to the exit code; on a
    *  non-zero exit it first hands `onFailure` the child's bounded stderr tail (W1-T4055). */
   spawnReview: (worktree: string, args: string[], onFailure?: (failure: string) => void) => Promise<number>;
+  /** Tests may replace ownership; production holds the general reaper's real run-lock token. */
+  withWorktreeLease?: <T>(worktree: string, action: () => Promise<T>) => Promise<T>;
   /**
    * Classify the stable reviewer path before an add. `unsafe` deliberately combines a registered
    * path with a wrong ref, a branch checkout, dirt, a missing checkout, or an unreadable registry:
@@ -1985,8 +1988,19 @@ export function buildFreshTreeReviewRunner(
       }
       // RMD_SELF_SYNC_DONE keeps the child from trying to sync a checkout of its own: it is
       // already AT origin/main, and a self-sync attempt there is a refusal and a wasted fetch.
-      return await deps.spawnReview(worktree, [prArg, ...rest], onFailure);
+      const reviewerTree = worktree;
+      const run = async () => {
+        const existing = (deps.inspectExistingWorktree ?? ((dir, path, revision) =>
+          inspectFreshReviewerWorktree(dir, path, revision, deps.git)))(repoDir, reviewerTree, sha);
+        if (existing !== "reusable") {
+          prepared.delete(sha);
+          throw new Error(`cached reviewer worktree at ${reviewerTree} is no longer an exact clean detached checkout of ${sha}`);
+        }
+        return deps.spawnReview(reviewerTree, [prArg, ...rest], onFailure);
+      };
+      return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(reviewerTree, run);
     } catch (err) {
+      prepared.delete(sha);
       // Never a verdict (see the doc above): swallow the failure, but carry WHY so a reader of
       // stderr — not just the caller's silent `undefined` — can tell a fetch/worktree/spawn
       // refusal from the ordinary "no runner wired" case. W1-T4055: and so can the ledger.
