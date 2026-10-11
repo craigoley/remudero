@@ -11068,7 +11068,7 @@ function criteriaFromLedgerValue(value: unknown): CriterionVerdict[] | undefined
 
 /** W1-T7837: the ledger step that records one host-gap re-review request. {@link priorActionsFromLedger}
  *  reads it to release the delivered-review key, and {@link hostGapRereviewFacts} to pace the next. */
-export const CAPPED_HOST_GAP_REREVIEW_STEP = "sweep.capped_host_gap_rereview";
+export const HOST_GAP_REREVIEW_STEP = "sweep.capped_host_gap_rereview";
 
 const rowMs = (row: Record<string, unknown>): number | undefined => {
   const at = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
@@ -11090,7 +11090,7 @@ export function hostGapRereviewFacts(
   for (const line of lines) {
     if (line.head_sha !== pr.headSha) continue;
     const at = rowMs(line);
-    if (line.step === CAPPED_HOST_GAP_REREVIEW_STEP && line.pr_url === pr.prUrl) {
+    if (line.step === HOST_GAP_REREVIEW_STEP && line.pr_url === pr.prUrl) {
       if (at !== undefined) {
         history.push({ atMs: at, skips: Array.isArray(line.skips) ? line.skips.filter((s): s is string => typeof s === "string") : [] });
         startedAtMs = at;
@@ -12587,7 +12587,7 @@ function priorActionsFromLedger(
     // W1-T7837 — a host-gap re-review request RELEASES the delivered key of the verdict it supersedes, the way
     // W1-T5840 releases an overtaken failure: the review claim then admits one fresh review of the same head and
     // body. A review.posted row after it re-adds the key, so the release lasts one review.
-    if (line.step === CAPPED_HOST_GAP_REREVIEW_STEP) {
+    if (line.step === HOST_GAP_REREVIEW_STEP) {
       if (typeof line.task_id === "string" && typeof line.head_sha === "string") {
         const key = reviewOutcomeKey(
           line.task_id,
@@ -15427,11 +15427,12 @@ export async function runSweep(
       planProofBlockedPrs.add(pr.prNumber);
       // W1-T7837: a verdict whose EVERY proof hit a host gap (runner absent, worktree reclaimed, runtime broken,
       // no exec context) says nothing about the body, so a body or shard repair cannot help it. It is re-reviewed.
+      // A grade with NO recorded skip reason (a row predating W1-T305, or a base_unreadable proof) cannot be shown to be
+      // a host gap, so it keeps today's body-repair route.
       const hostGapOnly = proofDiscrimination.proofs.every((proof) =>
-        isHostGapCriterion({ proof_exec: proof.proofExec, proof_skip: proof.proofSkip }));
+        proof.proofSkip !== undefined && isHostGapCriterion({ proof_exec: proof.proofExec, proof_skip: proof.proofSkip }));
       if (hostGapOnly) {
-        const skips = [...new Set(proofDiscrimination.proofs.map((proof) =>
-          proof.proofSkip !== undefined && isHostGapCriterion({ proof_skip: proof.proofSkip }) ? proof.proofSkip : proof.proofExec))].sort();
+        const skips = [...new Set(proofDiscrimination.proofs.map((proof) => proof.proofSkip!))].sort();
         const facts = hostGapRereviewFacts(pr, ledgerLines);
         const hostGapState = { history: facts.history, skips, lastReviewAtMs: facts.lastReviewAtMs, nowMs: now,
           observedReviewMs: facts.observedReviewMs ?? policy.pendingCeilingMinutes * 60_000 };
@@ -15445,7 +15446,7 @@ export async function runSweep(
           const reviewKey = reviewOutcomeKeyForPr(pr);
           if (!deps.dryRun) {
             appendLine(deps.ledgerPath, { ts: clockFromMillisFn(() => now).iso(), run_id: deps.runId,
-              task_id: reviewOutcomeTaskIdFor(pr), step: CAPPED_HOST_GAP_REREVIEW_STEP, pr_number: pr.prNumber,
+              task_id: reviewOutcomeTaskIdFor(pr), step: HOST_GAP_REREVIEW_STEP, pr_number: pr.prNumber,
               pr_url: pr.prUrl, head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest, review_key: reviewKey,
               skips, rereview_ordinal: facts.history.length + 1, reason: hostGap.reason });
           }

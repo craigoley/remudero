@@ -363,7 +363,8 @@ export function hostGapProblem(skip: string): string {
     case "runtime-broken": return "runtime broken";
     case "incomplete-run": return "runtime broken (run ended without its summary)";
     case "no-exec-context": return "no PR-head checkout to execute in";
-    case "exec_error": return "proof execution threw";
+    case "exec_error":
+    case "exec-error": return "proof execution threw";
     case "base_unreadable": return "merge-base checkout unreadable";
     default: return skip;
   }
