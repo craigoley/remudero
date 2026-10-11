@@ -49,3 +49,11 @@
     OPERATOR BUILD: a .github/workflows path routes this to operator-build. Depends on W1-T6083 (#9760,
     open at filing): build after it merges. If W1-T6083 merges WITH a producer after all, retire this as a
     duplicate. The impact arm stays SHADOW; flipping it live is a separate ruling on the shadow record.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/ci.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-10T22:08:30.203Z"
+    pin: "98f8e91bfc907dd14b9503272064cef28d31988f40eaf2bca661167402eaca4e"

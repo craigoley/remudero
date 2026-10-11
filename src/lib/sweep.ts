@@ -59,6 +59,7 @@ import {
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB } from "./host-memory-ledger.js";
+import type { ContainerMemoryHeadroom } from "./host-memory-shadow.js";
 import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
 } from "./pr-blocker.js";
@@ -66,6 +67,8 @@ import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec } from "./git-push.js";
 import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
+import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
+import { observeContributorAdmission } from "./arm-auto-merge.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
 import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
 import { reclaimStaleLock } from "./fs-race-safe.js";
@@ -147,6 +150,7 @@ import {
 import {
   acceptanceBlockDiagnostics,
   automergeHoldFromLedger,
+  describeHoldSetter,
   cappedOverrideFromLedger,
   decideAutoMergeArm,
   extractTaskTrailerId,
@@ -213,6 +217,7 @@ import {
   escalate,
   ghIssueGateway,
   isEscalationJudgeExempt,
+  taskContractRevision,
   tryEscalate,
   type AskType,
   type Escalation,
@@ -373,6 +378,7 @@ function assessReviewReuse(
       criterion.proof_exec === "exec_error" ||
       criterion.proof_exec === "base_unreadable" ||
       criterion.proof_skip === "runner-absent" ||
+      criterion.proof_skip === "cwd-missing" ||
       criterion.proof_skip === "incomplete-run" ||
       criterion.proof_skip === "runtime-broken" ||
       criterion.proof_skip === "no-exec-context",
@@ -1336,9 +1342,11 @@ export type PlanScopedFixRoundInput = {
   body: string;
   runId?: string;
   lastRefusal?: string;
+  admission?: AdmissionSettings;
   deps: Pick<BuildSweepEffectsDeps, "log"> & Pick<BodyRepairDeps, "execProof"> & {
     runGit?: (args: string[]) => string;
     preflight?: BuildSweepEffectsDeps["planPrPreflightImpl"];
+    feedbackRead?: AdmissionRead;
     spawn: (prompt: string) => Promise<string>;
     push: (sha: string) => unknown;
     updateMetadata: (metadata: { title: string; body: string }) => Promise<void>;
@@ -1346,6 +1354,7 @@ export type PlanScopedFixRoundInput = {
 };
 
 export interface BuildSweepEffectsDeps {
+  contributorAdmissionImpl?: AdmissionObserver;
   /** W1-T7096: the daemon and CLI entrypoints ask the production LLM progress judge; a caller that
    *  sets nothing (a fixture) keeps the former fixed bound as an explicit stand-in. */
   productionProgressJudge?: boolean;
@@ -1798,6 +1807,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "readArmTimeline",
   "readActionsStatusSummary", // W1-T5939
   "rerunFailedChecks",
+  // remudero-console #2035: the task contract an escalated fix-progress latch stands on.
+  "readTaskContractRevision",
 ] as const;
 
 export function productionFixProgressJudge(opts: {
@@ -1893,6 +1904,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "escalateRearmExhausted"
   | "readArmTimeline"
   | "readActionsStatusSummary"
+  | "readTaskContractRevision"
 > & {
   /** W1-T3618 — see `reviewerCodeStaleThisPassImpl`. Not a `SweepDeps` member: it is a read-back on
    *  this builder's own return, not an effect the sweep invokes. */
@@ -1994,6 +2006,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       planOnlyFiling: isPlanFiling,
     });
   if (deps.reviewRunner) reviewRunner = deps.reviewRunner;
+
+  const admission: AdmissionObserver = deps.contributorAdmissionImpl ?? ((target, action) =>
+    observeContributorAdmission(config.contributorAdmission, target, action, log));
+  const observePr = (pr: OpenPrView, action: Parameters<AdmissionObserver>[1]): Promise<void> =>
+    admission({ owner, repo, prNumber: pr.prNumber, headSha: pr.headSha }, action);
 
   const repoDir = repo === localRepoName ? entrypointRepoRoot : join(config.root, "repos", repo);
   // W1-T4460 (design ii): the real default reads this repo's OWN plan fresh off disk, swallowing a
@@ -2283,9 +2300,35 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     }
   };
 
+  // The daemon hands each pass its tick's fresh plan; a task missing from it gets ONE re-read per cycle.
+  let reloadedForContract: { plan: Plan | undefined } | undefined;
+  const readTaskContractRevision = (taskId: string): string | undefined => {
+    let task = plan.byId.get(taskId);
+    if (task === undefined) {
+      reloadedForContract ??= { plan: reloadPlanForFix() };
+      task = reloadedForContract.plan?.byId.get(taskId);
+    }
+    return task === undefined ? undefined : taskContractRevision(task);
+  };
+  // The `**Contract:**` line every escalation this sweep opens about a PR carries: the revision of
+  // the task contract the question was asked under. The fix rung's open-escalation probe compares
+  // it with the current revision (openEscalationStandDownReason), so a plan amendment re-admits the
+  // rung while the issue is still open. Empty for a PR whose task is not in the plan: escalate.ts
+  // then omits the line, as it does for any producer without a revision.
+  const contractRevisionFor = (pr: { taskId?: string }): { contractRevision?: string } => {
+    let contractRevision: string | undefined;
+    try {
+      contractRevision = pr.taskId ? readTaskContractRevision(pr.taskId) : undefined;
+    } catch {
+      // An unreadable plan leaves the line off; it never stops the escalation from being filed.
+      contractRevision = undefined;
+    }
+    return contractRevision ? { contractRevision } : {};
+  };
   return {
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
     fixProgressJudge: effectsProgressJudge,
+    readTaskContractRevision,
     // W1-T3618: the entrypoint's freshness gate, surfaced so the lib-built and entrypoint-built
     // effect surfaces stay key-identical (W1-T2890).
     reviewerCodeStaleThisPass: reviewerCodeStaleThisPassImpl,
@@ -2343,6 +2386,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // cannot happen from this adapter but keeps every existing fake/test that returns a plain
     // `ArmOutcome` string compiling and behaving exactly as before) is returned unchanged.
     arm: async (pr, mode) => {
+      if (config.contributorAdmission !== undefined || deps.contributorAdmissionImpl !== undefined) await observePr(pr, "auto-merge");
       if (repoMode === "shadow") {
         log("automerge.shadow_refused", {
           pr_url: pr.prUrl,
@@ -2517,6 +2561,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // the DECISION is read back off the dep-review.decided ledger line it just
     // wrote — the outcome drives the sweep's terminal-vs-hold dedup.
     depReview: async (pr) => {
+      await observePr(pr, "review");
       await depReviewCommand(String(pr.prNumber), ["--repo", repo]);
       const decided = readLedgerLines(ledgerPath)
         .filter((l) => l.step === "dep-review.decided" && l.task_id === `dep-review-PR${pr.prNumber}`)
@@ -2550,6 +2595,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // `sweep.disposed` line — this is a MORE SPECIFIC sibling record, not a
     // replacement for it.
     postReview: async (pr, mode = { kind: "full-review" }) => {
+      await observePr(pr, "review");
       log("sweep.post_review.attempt", {
         pr_number: pr.prNumber,
         pr_url: pr.prUrl,
@@ -2730,6 +2776,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           runId,
           headSha: pr.headSha,
           cause: "ci",
+          ...contractRevisionFor(pr),
           summary: `required check "${check.name}" ${CANCELLED_CHECK_ESCALATION_SUMMARY[kind]} — ${pr.prUrl}`,
           detail:
             `The gate-reconciliation lane (W1-T1223) re-queued required check "${check.name}"'s job once ` +
@@ -2765,6 +2812,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           runId,
           headSha: pr.headSha,
           cause: "ci",
+          ...contractRevisionFor(pr),
           summary: `auto-merge disabled again after ${rearms} sweep re-arms at one head — ${pr.prUrl}`,
           detail: (judgedReason ? `${judgedReason}\n\n` : "") +
             `GitHub disabled auto-merge on ${pr.prUrl} at head ${pr.headSha} after a sweep arm, and the ` +
@@ -2788,6 +2836,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           runId,
           headSha: pr.headSha,
           cause: "ci",
+          ...contractRevisionFor(pr),
           summary: `required check "${check.name}" exhausted its bounded infrastructure retry — ${pr.prUrl}`,
           detail:
             `The failed-CI infrastructure classifier identified ${signature} for check "${check.name}" ` +
@@ -2998,6 +3047,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             ? { headDedup: "independent" as const }
             : {}),
           cause: escalationCause(pr.mergeState === "dirty", isBlockedCi(pr)),
+          ...contractRevisionFor(pr),
           summary: `PR ${pr.prUrl} needs a clarification — ${reason}`,
           detail:
             `${context}The CLARIFICATION-QUESTION rung (W1-T78, ratifies P22's new rung) reconciled open PR #${pr.prNumber} ` +
@@ -3062,7 +3112,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           log,
         };
         return await runPlanScopedFixRound({ pr: { ...pr, headRefName: live.head.ref, ciFailures }, task, worktreePath,
-          title: live.title, body: live.body, runId,
+          title: live.title, body: live.body, runId, admission: config.contributorAdmission,
           lastRefusal: parseLedger(ledgerPath).findLast((l) => l.step === "sweep.plan_round.refused" &&
             l.pr_number === pr.prNumber && l.head_sha === pr.headSha)?.reason,
           deps: roundEffects,
@@ -3079,6 +3129,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     },
 
     dispatchFix: async (pr, evidence, onPhase) => {
+      await observePr(pr, "repair");
       let worktreePath = "";
       let keepWorktree = false;
       // W1-T2609: released in the SAME `finally` below that cleans up `worktreePath` — held for
@@ -4314,6 +4365,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // line for an Architect instead of rewriting it, editing no `claim:`/`proof:`/`satisfied_by:`
     // field. Stable per-task branch name: a second dispatch before the first PR lands DEDUPES.
     dispatchPlanOnlyRepair: async (pr, evidence) => {
+      await observePr(pr, "repair");
       const taskId = pr.taskId;
       const proof0 = evidence.proofs[0];
       if (!taskId || !proof0) return;
@@ -6007,7 +6059,7 @@ export interface OpenPrView {
    *  next fix dispatch VERBATIM, never a silent guess, and routes the PR to `blocked-fixable` even
    *  at cap, so the answer re-arms the rung rather than immediately re-exhausting it. Wired
    *  end-to-end and tested, but nothing populates it today. */
-  pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean; spent?: true };
+  pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean; spent?: true; contributions?: unknown[] };
   /** W1-T176 — true when the ledger already carries a refusal for this exact task/PR/head/body
    *  input. It separates a FIRST-SEEN zero-runs required check, which still routes to post-review,
    *  from a SECOND absence for the unchanged input, which escalates. A transient `gh` error
@@ -6852,12 +6904,6 @@ function mainHealthOperatorDetail(observation: MainHealthObservation): string {
  *  when every required check is green: main-plan-guard is the only push-time witness that the plan
  *  still loads, and lint-plan/claims never run on main's push. */
 export const MAIN_GUARD_WORKFLOWS: ReadonlySet<string> = new Set(["main-plan-guard"]);
-
-/** BACKSTOP (W1-T1266): completed main runs whose jobs the observer may read, at most, before
- *  giving up on fallback evidence. The primary control is the first run that carries a required
- *  check, which ends the search; this fires only when main-tripwire, CodeQL and other runs with no
- *  required check crowd the newest completed history, and each candidate costs one jobs read. */
-export const MAIN_HEALTH_FALLBACK_RUN_LIMIT = 5;
 
 /** A superseded, skipped or stale run concluded nothing about the tree. */
 const MAIN_RUN_NON_VERDICT: ReadonlySet<string> = new Set(["CANCELLED", "SKIPPED", "STALE"]);
@@ -7954,6 +8000,8 @@ export const BASE_RED_REFRESH_STEP = "sweep.base_red.refresh";
 /** W1-T6405 — a red head behind main whose failing test files all pass on current main took that
  *  main: one update-branch per `pr@head`, shared with {@link BASE_RED_REFRESH_STEP}'s once-per-head key. */
 export const BASE_FIXED_REFRESH_STEP = "sweep.base_fixed.refresh";
+/** remudero-console #2035 — an escalated head whose task contract was amended on main took main once. */
+export const CONTRACT_AMENDED_REFRESH_STEP = "sweep.contract_amended.refresh";
 
 /** W1-T6405 — the failing test files of a red head that is BEHIND main and whose every failing test file
  *  a recorded probe found passing at main's CURRENT tip (`clear`, never partial or unrunnable); else
@@ -10799,9 +10847,15 @@ export function operatorVerdictEvidence(
   taskId: string,
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
   questionLines: ReadonlyArray<Record<string, unknown>>,
-): { constraint: string; resetStrikeCounter?: boolean; spent?: true } | undefined {
+): { constraint: string; resetStrikeCounter?: boolean; spent?: true; contributions?: unknown[] } | undefined {
   const parts: string[] = [];
   const evidenceTimes: string[] = [];
+  const contributions: unknown[] = [];
+  const preserve = (line: Record<string, unknown>): void => {
+    if (line.contribution == null) return;
+    try { contributions.push(structuredClone(line.contribution)); }
+    catch { contributions.push({ kind: "unresolved", reason: "lineage-unreadable" }); }
+  };
 
   const feedback = lastMatching(ledgerLines, (l) => l.step === "operator_feedback" && l.task_id === taskId);
   const verdict = typeof feedback?.verdict === "string" ? feedback.verdict : undefined;
@@ -10809,13 +10863,17 @@ export function operatorVerdictEvidence(
   if ((verdict === "wrong" || verdict === "needs-follow-up") && note && note.trim() !== "") {
     parts.push(`Operator marked this run "${verdict}": ${note}`);
     evidenceTimes.push(typeof feedback?.ts === "string" ? feedback.ts : "");
+    preserve(feedback!);
   }
 
   const answerLines = questionLines.filter((l) => l.task === taskId && typeof l.answer === "string" && l.answer.trim() !== "");
   const answers = [...new Set(answerLines.map((l) => (l.answer as string).trim()))];
   if (answers.length === 1) parts.push(answers[0]!);
   else answers.forEach((a, i) => parts.push(`Operator answer ${i + 1} of ${answers.length}: ${a}`));
-  for (const l of answerLines) evidenceTimes.push(typeof l.ts === "string" ? l.ts : "");
+  for (const l of answerLines) {
+    evidenceTimes.push(typeof l.ts === "string" ? l.ts : "");
+    preserve(l);
+  }
 
   if (parts.length === 0) return undefined;
   // A fix round dispatched after the newest answer already carried it; the answer still steers later rounds as
@@ -10823,7 +10881,8 @@ export function operatorVerdictEvidence(
   const lastDispatch = lastMatching(ledgerLines, (l) => l.step === "fix.dispatch" && l.task_id === taskId);
   const newestEvidence = evidenceTimes.reduce((a, b) => (b > a ? b : a), "");
   const spent = typeof lastDispatch?.ts === "string" && newestEvidence !== "" && lastDispatch.ts > newestEvidence;
-  return spent ? { constraint: parts.join("\n\n"), spent: true } : { constraint: parts.join("\n\n") };
+  const evidence = { constraint: parts.join("\n\n"), ...(contributions.length ? { contributions } : {}) };
+  return spent ? { ...evidence, spent: true } : evidence;
 }
 
 /** The block evidence `dispatchFix` carries, GENERALIZED (W1-T100) from a bare unmet array to the
@@ -11006,7 +11065,7 @@ export function diagnoseCappedRoutingBlock(
     return {
       blocked: true,
       precondition: "held",
-      detail: `an automerge hold stands over PR #${pr.prNumber} (engaged by ${hold.by}: ${hold.reason})`,
+      detail: `an automerge hold stands over PR #${pr.prNumber} (engaged by ${describeHoldSetter(hold)}: ${hold.reason})`,
     };
   }
   const proofDiscrimination = cappedProofDiscriminationFromLedger(pr, ledgerLines);
@@ -11391,6 +11450,11 @@ export interface StrikeLadderEffects {
 
 export interface SweepDeps {
   fixProgressJudge?: FixProgressJudge;
+  /** The CURRENT task contract revision ({@link taskContractRevision}) of a plan task on main, or `undefined`
+   *  when the plan does not hold it. An escalated fix-progress latch records the revision it stands on;
+   *  a different one means the plan was amended under it (remudero-console #2035). Omitted: the latch
+   *  holds on its input key alone, as before. */
+  readTaskContractRevision?: (taskId: string) => string | undefined;
   headRehome?: HeadRehomePorts;
   /** The already-listed peers retained when the light pass reconciles one PR at a time. */
   stuckStagePeers?: readonly OpenPrView[];
@@ -11612,6 +11676,16 @@ export interface SweepDeps {
   /** W1-T5749 — head-only guard fallback when readLiveStateAtAct is omitted. A changed head
    *  stands down as `sweep.head_moved`; an undefined (unreadable) head leaves the act unchanged. */
   readLiveHeadSha?: (pr: OpenPrView) => string | undefined | Promise<string | undefined>;
+  /** W1-T7734 — THE SAME-PASS RE-READ. When the act-time guard catches a moved head, this reads THAT ONE
+   *  PR again (the PR plus its status rollup, through the caller's `GhCallPacer`) and returns its rebuilt
+   *  view; the walk then re-derives and acts on it in this pass instead of standing down for a whole tick.
+   *  `undefined` means the PR is no longer open. A THROW is a failed read: the guard stands down naming
+   *  the error, and never falls back to the stale snapshot. Omitted, the guard stands down as before. */
+  rereadPrAtAct?: (pr: OpenPrView) => OpenPrView | undefined | Promise<OpenPrView | undefined>;
+  /** W1-T7734 — when the read generation this pass acts on was PUBLISHED (the read plane's
+   *  `publishedAtMs`). `sweep.disposed` rows record `snapshot_age_ms` against it at the moment a PR is
+   *  acted on. Omitted, the age is measured from the pass's own start. */
+  snapshotPublishedAtMs?: number;
   /** W1-T2752 — a SYNCHRONOUS, READ-ONLY admission read consulted immediately before
    *  `blocked-fixable` and `conflicted` invoke {@link dispatchFix}, never a replacement for either
    *  surface's own live-state/claim checks. `buildSweepEffects` supplies it from the SAME
@@ -13550,6 +13624,98 @@ export function emptyDiffSupersedes(pr: OpenPrView, disposition: Disposition): b
     !(pr.ciFailures ?? []).some((failure) => failure.name === "proof-discrimination");
 }
 
+/* ── W1-T7734 — IN-PROCESS MEMOS THE IDLE LIGHT PASS DERIVES ITS CADENCE FROM ──────────────────
+ * Review demand, observed review durations and head pushes are noted by the passes that already see
+ * them, so the daemon's idle branch reads memory and never a ledger union. They are a sliding window of
+ * RECENT samples, not a cap on the cadence derived from them. */
+const IDLE_MEMO_WINDOW = 64;
+export interface IdleLightCadence {
+  eligible: number;
+  /** Median of recent review durations; undefined until one has been observed. */
+  medianReviewMs?: number;
+  /** Head pushes per open-PR-hour over the memo's window; undefined until a push and a window exist. */
+  pushesPerPrHour?: number;
+  /** The derived light-pass interval; undefined when neither input has been observed yet. */
+  cadenceMs?: number;
+}
+const idleMemo: {
+  eligible: number;
+  reviewMs: number[];
+  pushes: Array<{ prNumber: number; atMs: number }>;
+  headByPr: Map<number, string>;
+  openPrs: number;
+  sinceMs?: number;
+} = { eligible: 0, reviewMs: [], pushes: [], headByPr: new Map(), openPrs: 0 };
+
+/** Tests only: the memo is process-wide, like the other pass-level singletons in this file. */
+export function resetIdleReviewMemo(): void {
+  idleMemo.eligible = 0;
+  idleMemo.reviewMs = [];
+  idleMemo.pushes = [];
+  idleMemo.headByPr = new Map();
+  idleMemo.openPrs = 0;
+  idleMemo.sinceMs = undefined;
+}
+
+export function noteIdleReviewDemand(eligible: number, openPrCount: number, observedAtMs: number): void {
+  idleMemo.sinceMs ??= observedAtMs;
+  idleMemo.eligible = Math.max(0, Math.trunc(eligible));
+  idleMemo.openPrs = Math.max(0, Math.trunc(openPrCount));
+}
+
+export function noteReviewDuration(ms: number): void {
+  if (!Number.isFinite(ms) || ms < 0) return;
+  idleMemo.reviewMs.push(ms);
+  if (idleMemo.reviewMs.length > IDLE_MEMO_WINDOW) idleMemo.reviewMs.shift();
+}
+
+/** A PR whose head differs from the one this process last saw for it was pushed to. */
+export function noteHeadObservation(prNumber: number, headSha: string, atMs: number): void {
+  idleMemo.sinceMs ??= atMs;
+  const previous = idleMemo.headByPr.get(prNumber);
+  idleMemo.headByPr.set(prNumber, headSha);
+  if (previous === undefined || previous === headSha) return;
+  idleMemo.pushes.push({ prNumber, atMs });
+  if (idleMemo.pushes.length > IDLE_MEMO_WINDOW) idleMemo.pushes.shift();
+}
+
+/** PURE. The idle light-pass interval: no longer than a typical review (a verdict can land inside it) and
+ *  no longer than half the mean gap between pushes to one PR (a new head is seen before the next one
+ *  replaces it). Whichever inputs are observed bind it; neither observed leaves it undefined. */
+export function deriveIdleLightCadenceMs(input: {
+  reviewDurationsMs: readonly number[];
+  headPushes: number;
+  openPrs: number;
+  windowMs: number;
+}): { cadenceMs?: number; medianReviewMs?: number; pushesPerPrHour?: number } {
+  const sorted = [...input.reviewDurationsMs].sort((a, b) => a - b);
+  const medianReviewMs = sorted.length === 0 ? undefined
+    : sorted.length % 2 === 1 ? sorted[(sorted.length - 1) / 2]
+      : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2;
+  const prHours = input.openPrs * (input.windowMs / 3_600_000);
+  const pushesPerPrHour = input.headPushes > 0 && prHours > 0 ? input.headPushes / prHours : undefined;
+  const bounds: number[] = [];
+  if (medianReviewMs !== undefined && medianReviewMs > 0) bounds.push(medianReviewMs);
+  if (pushesPerPrHour !== undefined) bounds.push(3_600_000 / pushesPerPrHour / 2);
+  return {
+    ...(bounds.length > 0 ? { cadenceMs: Math.min(...bounds) } : {}),
+    ...(medianReviewMs !== undefined ? { medianReviewMs } : {}),
+    ...(pushesPerPrHour !== undefined ? { pushesPerPrHour } : {}),
+  };
+}
+
+/** The daemon's idle read: undefined when no post-review PR is known to wait. Reads memory only. */
+export function readIdleLightCadence(nowMs: number): IdleLightCadence | undefined {
+  if (idleMemo.eligible <= 0) return undefined;
+  const derived = deriveIdleLightCadenceMs({
+    reviewDurationsMs: idleMemo.reviewMs,
+    headPushes: idleMemo.pushes.length,
+    openPrs: idleMemo.openPrs,
+    windowMs: idleMemo.sinceMs === undefined ? 0 : Math.max(0, nowMs - idleMemo.sinceMs),
+  });
+  return { eligible: idleMemo.eligible, ...derived };
+}
+
 /** W1-T5922: `pr@head` arms in flight process-wide, so a light pass and the background full pass never both arm one head. */
 const armsInFlight = new Set<string>();
 
@@ -13981,6 +14147,7 @@ export async function runSweep(
         retryableThrows: prior.reviewRetryableThrows,
       })
     : undefined;
+  if (fullReviewQueueDepth !== undefined) noteIdleReviewDemand(fullReviewQueueDepth, openPrs.length, now);
   const fullReviewLanes = fullReviewQueueDepth === undefined
     ? undefined
     : effectiveReviewWidth(deps, policy, fullReviewQueueDepth, now, ledgerLines, fullRepairActiveWorkers);
@@ -14715,6 +14882,11 @@ export async function runSweep(
     mode: ReviewDispatchMode;
   }> = [];
   const quietContradictoryRows = new Set<number>();
+  // W1-T7734: entries acting on a view read DURING this pass, and when each read happened.
+  const rederivedIndices = new Set<number>();
+  const freshReadAtMs = new Map<number, number>();
+  const snapshotBaseMs = deps.snapshotPublishedAtMs ?? now;
+  const passClockMs = (): number => (deps.now ? deps.now() : systemClock.now());
   // W1-T5030: close ATTEMPTS the stale-proof supersession arm has made this pass.
   let staleProofCloses = 0;
 
@@ -14775,7 +14947,7 @@ export async function runSweep(
       ? dispatchHold?.reason ?? standDownReason ?? actionError ?? "no dispatch was attempted"
       : undefined;
     const shownReason = mergeHold !== undefined
-      ? `held by ${mergeHold.by}: ${mergeHold.reason} — auto-merge refused until an operator releases it (rmd merge-hold)`
+      ? `held by ${describeHoldSetter(mergeHold)}: ${mergeHold.reason} — auto-merge refused until an operator releases it (rmd merge-hold)`
       : notDispatched !== undefined
         ? `${reason.replace(/\bdispatching\b/g, "would dispatch")} — NOT DISPATCHED this pass: ${notDispatched}`
         : reason;
@@ -14877,6 +15049,10 @@ export async function runSweep(
         // resetting the moment GitHub goes quiet again.
         ...(pr.mergeState !== undefined ? { merge_state: pr.mergeState } : {}),
         ...(deduped ? { deduped: true } : {}),
+        // W1-T7734: how old the view was when this PR was ACTED on — now minus the generation's publish
+        // time (a re-derived PR: minus its fresh read), read at the write, never at the pass's start.
+        snapshot_age_ms: Math.max(0, passClockMs() - (freshReadAtMs.get(index) ?? snapshotBaseMs)),
+        ...(rederivedIndices.has(index) ? { rederived: true } : {}),
         ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome } : {}),
         ...(actionError ? { action_error: actionError } : {}),
         ...(standDownReason && !deliveredStandDownLogged ? { stand_down_reason: standDownReason } : {}),
@@ -14923,7 +15099,13 @@ export async function runSweep(
 
   log("sweep.pass", { enumerated: openPrs.length, dry_run: deps.dryRun === true });
 
-  for (const prIndex of sweepWalkOrder(openPrs)) {
+  // W1-T7734 — the walk is a queue, so a PR whose head moved under this pass can be put back at the
+  // front once its one fresh read has rebuilt its view. `rederivedPrs` spends that read once per
+  // (PR, pass); `rederivedIndices` marks the entries now acting on a view read during this pass.
+  const walkOrder = sweepWalkOrder(openPrs);
+  const rederivedPrs = new Set<number>();
+  for (let walkStep = 0; walkStep < walkOrder.length; walkStep++) {
+    const prIndex = walkOrder[walkStep];
     // W1-T4470 — HYSTERESIS FIRST, before anything else reads `mergeState`: an `unknown` read
     // (mergeState undefined) inherits the last KNOWN mergeability this exact head proved on a
     // prior pass, so `pr` below is what EVERY downstream read sees — `deriveDisposition`, the
@@ -14931,6 +15113,7 @@ export async function runSweep(
     // `undefined` on a lazy-recompute miss and a conflicted PR (zero check runs, by construction)
     // fell through to the checks-none rules meant for a genuinely mergeable-but-quiet head.
     let { pr, inherited: inheritedMergeState } = withInheritedMergeState(openPrs[prIndex], ledgerLines);
+    noteHeadObservation(pr.prNumber, pr.headSha, passClockMs());
     const priorGardenClose = ledgerLines.findLast(row => row.step === "sweep.disposed" &&
       row.pr_number === pr.prNumber && row.disposition === "stale" && row.acted === true &&
       typeof row.garden_record_refusal === "string");
@@ -15706,17 +15889,55 @@ export async function runSweep(
         try {
           // W1-T5749: the snapshot can outlive its head (#9138 armed, #9155 escalated on dead heads).
           // W1-T5922: a light pass reads the live head for its arm only; its other lanes are unchanged.
-          const guardHead = deps.repairAdmissionSurface !== "light" || disposition === "mergeable";
+          // W1-T7734: a view read during this pass (the re-derive below) needs no second live read.
+          const guardHead = !rederivedIndices.has(prIndex) &&
+            (deps.repairAdmissionSurface !== "light" || disposition === "mergeable");
           const liveAtAct = guardHead ? await deps.readLiveStateAtAct?.(pr) : undefined;
           const liveHead = !guardHead ? undefined : deps.readLiveStateAtAct
             ? liveAtAct?.headSha : await deps.readLiveHeadSha?.(pr);
           if (liveHead !== undefined && liveHead !== pr.headSha) {
+            noteHeadObservation(pr.prNumber, liveHead, passClockMs());
+            const movedRow = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.head_moved",
+              pr_number: pr.prNumber, pr_url: pr.prUrl, disposition, snapshot_head_sha: pr.headSha, live_head_sha: liveHead };
+            const movedFrom = `head moved from ${pr.headSha.slice(0, 8)} to ${liveHead.slice(0, 8)} since this pass's snapshot`;
+            const nextPass = "not acting; the next pass re-derives from the live head";
+            // W1-T7734 — SAME-PASS RE-DERIVE: read THIS PR once more and put it back at the front of the
+            // walk, instead of standing down for a whole tick. Spent once per (PR, pass).
+            let fresh: OpenPrView | undefined;
+            let standDown = `${movedFrom} — ${nextPass}`;
+            let rereadError: string | undefined;
+            if (deps.rereadPrAtAct && !rederivedPrs.has(pr.prNumber)) {
+              rederivedPrs.add(pr.prNumber);
+              try {
+                const reread = await deps.rereadPrAtAct(pr);
+                if (reread === undefined) {
+                  standDown = `${movedFrom} — the re-read found the PR no longer open; not acting`;
+                } else if (reread.headSha !== liveHead) {
+                  standDown = `${movedFrom} and moved again to ${reread.headSha.slice(0, 8)} during the re-read — ${nextPass}`;
+                } else {
+                  fresh = reread;
+                }
+              } catch (error) {
+                // Reason: the error text is recorded as `reread_error` and named in the stand-down sentence.
+                rereadError = String((error as Error)?.message ?? error);
+                standDown = `${movedFrom} — the single-PR re-read failed (${rereadError}); ${nextPass}, never the stale snapshot`;
+              }
+            }
+            if (fresh !== undefined) {
+              appendLine(deps.ledgerPath, { ...movedRow, rederived: true, reread_head_sha: fresh.headSha });
+              byDisposition[disposition]--;
+              openPrs[prIndex] = fresh;
+              rederivedIndices.add(prIndex);
+              freshReadAtMs.set(prIndex, passClockMs());
+              walkOrder.splice(walkStep + 1, 0, prIndex);
+              continue;
+            }
             acted = false;
-            extraDisposedFields = { ...extraDisposedFields, live_head_sha: liveHead };
-            standDownReason = `head moved from ${pr.headSha.slice(0, 8)} to ${liveHead.slice(0, 8)} ` +
-              "since this pass's snapshot — not acting; the next pass re-derives from the live head";
-            appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.head_moved",
-              pr_number: pr.prNumber, pr_url: pr.prUrl, disposition, snapshot_head_sha: pr.headSha, live_head_sha: liveHead });
+            extraDisposedFields = { ...extraDisposedFields, live_head_sha: liveHead,
+              ...(rereadError !== undefined ? { reread_error: rereadError } : {}) };
+            standDownReason = standDown;
+            appendLine(deps.ledgerPath, { ...movedRow, ...(rereadError !== undefined ? { reread_error: rereadError } : {}),
+              ...(rederivedPrs.has(pr.prNumber) ? { rederived: false, stand_down_reason: standDown } : {}) });
           } else switch (disposition) {
             case "mergeable": {
               // ARMING PARITY (see {@link decideSweepArm}): the run flow's capped refusal is
@@ -15930,6 +16151,45 @@ export async function runSweep(
               }
               let progressDecision: FixProgressVerdict | undefined;
               let progressParkedReason: string | undefined;
+              // remudero-console #2035: an escalated latch keys on the head and its round history, and a plan
+              // amendment on main moves neither, so it held a PR for 30+ hours after its contract was fixed.
+              // Each latched pass records the contract revision it stands on; when main's differs, take main
+              // into the branch once. The fix rung reads the contract AT THE HEAD (W1-T4073), so only a new
+              // head carries the amendment, and a new head releases every head-keyed hold with it.
+              const refreshAmendedContract = async (
+                latched: readonly Record<string, unknown>[], inputKey: string,
+              ): Promise<string | undefined> => {
+                const current = pr.taskId !== undefined ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
+                const standingOn = latched.findLast(row => typeof row.progress_contract_revision === "string")
+                  ?.progress_contract_revision as string | undefined;
+                const record = (revision: string | undefined) => {
+                  extraDisposedFields = { ...extraDisposedFields, progress_escalated_key: inputKey,
+                    ...(revision !== undefined ? { progress_contract_revision: revision } : {}) };
+                };
+                // First observation (or a latch predating the record): adopt the current contract, change nothing.
+                if (current === undefined || standingOn === undefined || standingOn === current) {
+                  record(standingOn ?? current);
+                  return undefined;
+                }
+                record(standingOn);
+                if (!deps.updateBranch) {
+                  return "task contract amended since this head was escalated — deferred to full sweep (update-branch not available on this pass)";
+                }
+                let outcome: string;
+                try { outcome = await deps.updateBranch(pr); }
+                catch (error) { outcome = `error: ${String(error)}`; }
+                appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+                  step: CONTRACT_AMENDED_REFRESH_STEP, pr_number: pr.prNumber, head_sha: pr.headSha,
+                  escalated_under: standingOn, contract_revision: current, outcome });
+                record(current);
+                if (outcome === "updated" || outcome === "head-moved") {
+                  acted = true;
+                  return `task contract amended since this head was escalated — took main into the branch (${outcome}) ` +
+                    "so the next round works on the amended contract";
+                }
+                return `task contract amended since this head was escalated — branch refresh ${outcome}; ` +
+                  "awaiting new evidence or an operator answer";
+              };
               const askProgress = async (): Promise<boolean> => {
                 progressDecision ??= progressParkedReason ? undefined : judgedContinue.get(pr.prNumber);
                 if (progressDecision) return true;
@@ -15950,11 +16210,14 @@ export async function runSweep(
                     : progressParkedReason?.startsWith("rerun-still-red") || progressParkedReason?.startsWith("amendment-closed") ? 1
                     : fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason: progressParkedReason });
                 const inputKey = createHash("sha256").update(JSON.stringify(input)).digest("hex");
-                if (ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
-                    row.head_sha === pr.headSha && row.progress_escalated_key === inputKey)) {
+                const latched = ledgerLines.filter(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
+                  row.head_sha === pr.headSha && row.progress_escalated_key === inputKey);
+                if (latched.length > 0) {
                   acted = false;
                   spent = false;
                   standDownReason = "this fix progress loop is already escalated; awaiting new evidence or an operator answer";
+                  const amended = await refreshAmendedContract(latched, inputKey);
+                  if (amended !== undefined) standDownReason = amended;
                   return false;
                 }
                 const result = await judgeFixProgress(input, progressJudge);
@@ -15971,7 +16234,9 @@ export async function runSweep(
                 if (result.verdict === "escalate") {
                   const reason = `fix progress loop: ${result.loop} — ${result.reason}`;
                   await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
-                  extraDisposedFields = { ...extraDisposedFields, progress_escalated_key: inputKey };
+                  const contract = pr.taskId !== undefined ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
+                  extraDisposedFields = { ...extraDisposedFields, progress_escalated_key: inputKey,
+                    ...(contract !== undefined ? { progress_contract_revision: contract } : {}) };
                   spent = false;
                   standDownReason = reason;
                   return false;
@@ -17207,6 +17472,7 @@ export async function runSweep(
           pr_url: pr.prUrl,
           head_sha: pr.headSha,
           hold_by: holdToWithdraw.by,
+          ...(holdToWithdraw.actor ? { hold_actor: holdToWithdraw.actor } : {}),
           hold_reason: holdToWithdraw.reason,
         };
         log("automerge.hold_withdrawal", withdrawalLine);
@@ -17385,7 +17651,9 @@ export async function runSweep(
       try {
         if (postReview) {
           try {
+          const reviewStartedAtMs = performance.now();
           await postReview(job.pr, job.mode);
+          noteReviewDuration(performance.now() - reviewStartedAtMs);
           } catch (e) {
             acted = false;
             // W1-T529 — THE ONE THROW THAT MUST NOT LEAVE A DEDUP KEY. Design (v), the
@@ -17822,7 +18090,10 @@ export async function runSweepLightPass(
   deps: SweepDeps,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary[]> {
-  if (openPrs.length === 0) return [await runSweep([], deps, policy)];
+  if (openPrs.length === 0) {
+    noteIdleReviewDemand(0, 0, deps.now ? deps.now() : systemClock.now());
+    return [await runSweep([], deps, policy)];
+  }
   lightPassRefillsClosed = false;
   // W1-T526/W1-T2792 — THE QUEUE-ADMISSION RULE. The light pass admits at most the existing
   // `reviewLanes` semantic width, never the old hidden hard-coded one. Every other PR's own
@@ -17868,6 +18139,8 @@ export async function runSweepLightPass(
     { ...policy, planFilingAdmissionBound: availablePlanFilings }, now, outcomes, semanticBound,
   );
   publishLightPassReviewDemand(demandCandidates, spawning, policy, now, outcomes, deps);
+  // W1-T7734: what this pass leaves waiting is what an idle daemon should keep a light pass running for.
+  noteIdleReviewDemand(Math.max(0, queueDepth - spawning.length), openPrs.length, now);
   lightPassSpawningReservations += spawning.length;
   lightPassPlanFilingReservations += planFilings.length;
   for (const pr of [...spawning, ...planFilings]) lightPassReservedHeads.add(lightPassHeadKey(pr));
@@ -17885,7 +18158,9 @@ export async function runSweepLightPass(
   const basePostReview = deps.postReview;
   const passPostReview: SweepDeps["postReview"] = basePostReview && (async (pr, mode) => {
     try {
+      const reviewStartedAtMs = performance.now();
       await basePostReview(pr, mode);
+      noteReviewDuration(performance.now() - reviewStartedAtMs);
     } catch (e) {
       if (e instanceof GhPaceFloorStandDownError) providerFloorMet = true;
       throw e;
@@ -18772,33 +19047,51 @@ export function logCostGovernorDeferral(
 export interface MemoryGovernorResult {
   /** true ⇒ the dispatch path MUST defer — do not open a new run this pass. */
   deferred: boolean;
-  /** The observed `MemAvailable` (MiB, read from `/proc/meminfo` — NEVER a cgroup limit; design
-   *  note (6): this fleet's containers carry no memory limit, so a cgroup read reports
-   *  "unbounded" and would authorise every dispatch silently). */
+  /** The smaller of the host's `MemAvailable` and this container's own headroom (MiB): a new worker draws on
+   *  both. Containers have carried memory limits since #10371/#10486, and the host figure cannot see them. */
   observedAvailableMib: number;
   /** The policy floor consulted (`policy.memoryFloorMib`, carried for the ledger line). */
   floorMib: number;
+  /** Set only when a container reading was taken: what each pool showed, and which one decided. */
+  hostAvailableMib?: number;
+  container?: ContainerMemoryHeadroom;
+  binding?: "host" | "container";
+  /** fits; host-short or container-short (deferred); nothing-to-wait-for: the container is short but no live
+   *  work in it can free memory, so waiting cannot help and the dispatch is admitted, named. */
+  tier?: "fits" | "host-short" | "container-short" | "nothing-to-wait-for";
 }
 
 /** The memory governor's pure predicate: STRICTLY BELOW `policy.memoryFloorMib` available, NEW
  *  dispatch is deferred. Same shape and the SAME dispatch-only asymmetry as its two siblings. SHIPS
  *  INERT: the floor defaults to 0 and the observation can never be negative, so this never defers
- *  until an operator raises the floor against a figure not yet measured. DEFER, NEVER KILL. */
+ *  until an operator raises the floor against a figure not yet measured. DEFER, NEVER KILL.
+ *
+ *  TIERED for the container: below the floor it defers only while live work in this container can still free
+ *  memory (`ownWorkLive`, asked only then). With none, waiting cannot help (the daemon's own heap holds the
+ *  shortfall), so the dispatch is admitted and named, never wedged. The host arm is unchanged. */
 export function checkMemoryGovernor(
   availableMib: number,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+  container?: ContainerMemoryHeadroom,
+  ownWorkLive: () => boolean = () => true,
 ): MemoryGovernorResult {
-  return {
-    deferred: availableMib < policy.memoryFloorMib,
-    observedAvailableMib: availableMib,
-    floorMib: policy.memoryFloorMib,
-  };
+  const base = { observedAvailableMib: availableMib, floorMib: policy.memoryFloorMib };
+  if (container === undefined) return { deferred: availableMib < policy.memoryFloorMib, ...base };
+  const bounded = "headroomMib" in container;
+  const binding = bounded && container.headroomMib < availableMib ? "container" : "host";
+  const observed = bounded ? Math.min(availableMib, container.headroomMib) : availableMib;
+  const named = { ...base, observedAvailableMib: observed, hostAvailableMib: availableMib, container, binding } as const;
+  if (availableMib < policy.memoryFloorMib) return { deferred: true, ...named, tier: "host-short" };
+  if (!bounded || container.headroomMib >= policy.memoryFloorMib) return { deferred: false, ...named, tier: "fits" };
+  return ownWorkLive() ? { deferred: true, ...named, tier: "container-short" }
+    : { deferred: false, ...named, tier: "nothing-to-wait-for" };
 }
 
 /** THE OBSERVATION IS LEDGERED ON EVERY CONSULTATION — unlike the two deferral loggers above, this
  *  ledgers unconditionally, admitted readings included: a deferral-only row would sample exactly the
- *  population that never happens while the floor ships disabled. NOT registered in `ledger.ts`'s
- *  decision-relevant set, because nothing reads this step back yet — THE READER IS THE OPERATOR.
+ *  population that never happens while the floor ships disabled. Registered in `ledger.ts`'s
+ *  decision-relevant set for the memory governor's history read and dispatch memory floor calibration
+ *  (W1-T7814); rotation keeps a bounded window so it need not relearn from an empty history.
  *  Written WITHOUT the literal comparison expression, because test/ledger-rotation.test.ts derives
  *  that set by scanning this file's TEXT, comments included. */
 export function logMemoryObservation(
@@ -18814,6 +19107,16 @@ export function logMemoryObservation(
     observed_available_mib: result.observedAvailableMib,
     memory_floor_mib: result.floorMib,
     deferred: result.deferred,
+    ...(result.container === undefined ? {} : {
+      host_available_mib: result.hostAvailableMib,
+      ...("headroomMib" in result.container ? {
+        container_headroom_mib: result.container.headroomMib,
+        container_ceiling_mib: result.container.ceilingMib,
+        container_working_set_mib: result.container.workingSetMib,
+      } : { container_headroom: "unbounded" in result.container ? "unbounded" : `unread: ${result.container.unread}` }),
+      binding: result.binding,
+      tier: result.tier,
+    }),
   });
 }
 

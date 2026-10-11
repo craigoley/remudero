@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate as flush } from "node:timers/promises";
@@ -32,7 +32,8 @@ function worker(text: string): WorkerResult {
 }
 
 async function boundaryRun(t: TestContext, boundary: "preopen_gate" | "checkpoint" | "decision" | "worker" | "passed_gate", recycle = false,
-  resumeAfter: boolean | "moved" = false, failure?: "scope" | "push", delayedCheckpointRead = false) {
+  resumeAfter: boolean | "moved" = false, failure?: "scope" | "push", delayedCheckpointRead = false,
+  { mainMoves, refusingGate = false }: { mainMoves?: "clean" | "conflict"; refusingGate?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), "rmd-t7697-boundary-"));
   const origin = gitRepo({ bare: true });
   const seed = gitRepo();
@@ -99,6 +100,16 @@ async function boundaryRun(t: TestContext, boundary: "preopen_gate" | "checkpoin
       return { kind: "fail", failedSteps: ["typecheck"], durationMs: 1 };
     },
   };
+  if (refusingGate) {
+    // The harness's PR push gate refuses every push, as its census precheck refused W1-T7742's checkpoint.
+    const hooks = join(root, "harness-hooks");
+    mkdirSync(hooks);
+    writeFileSync(join(hooks, "pre-push"), "#!/bin/sh\necho 'census-precheck: this branch grows 1 census count' >&2\nexit 1\n");
+    chmodSync(join(hooks, "pre-push"), 0o755);
+    const priorHooks = process.env.RMD_HARNESS_HOOKS_DIR;
+    process.env.RMD_HARNESS_HOOKS_DIR = hooks;
+    t.after(() => { if (priorHooks === undefined) delete process.env.RMD_HARNESS_HOOKS_DIR; else process.env.RMD_HARNESS_HOOKS_DIR = priorHooks; });
+  }
   const outcome = await withLiveWritesAllowed(() => runTask(id, options));
   const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
@@ -126,6 +137,14 @@ async function boundaryRun(t: TestContext, boundary: "preopen_gate" | "checkpoin
   if (resumeAfter) {
     clock++;
     if (resumeAfter === "moved") origin.git("update-ref", `refs/heads/${branch}`, seed.git("rev-parse", "HEAD"));
+    if (mainMoves) {
+      // main moves on while the checkpoint waits: a sibling file merges cleanly, the checkpoint's own file conflicts.
+      mkdirSync(join(seed.dir, "src"), { recursive: true });
+      writeFileSync(join(seed.dir, mainMoves === "clean" ? "src/sibling.ts" : "src/change.ts"), "export const value = 7;\n");
+      seed.git("add", "src");
+      seed.git("commit", "-m", "feat: main moves on");
+      seed.git("push", "origin", "main");
+    }
     gh.addRoute({ when: "pr view", stdout: JSON.stringify({ headRefName: `run-${id}-${clock}`, body: "" }) });
     pending = false;
     let resumedCalls = 0;
@@ -135,6 +154,7 @@ async function boundaryRun(t: TestContext, boundary: "preopen_gate" | "checkpoin
         if (++resumedCalls === 1) return worker("RECON REPORT\nOBSERVED: restored checkpoint\n");
         const restored = await import(pathToFileURL(join(args.cwd, "src/change.ts")).href);
         assert.equal(restored.value, 42, "the resumed worker sees the checkpoint's exported value");
+        if (mainMoves === "clean") assert.equal(existsSync(join(args.cwd, "src/sibling.ts")), true, "the resumed worker builds on current main");
         pending = true;
         return worker("REPORT\nPR_URL: https://github.com/acme/remudero/pull/1\n");
       },
@@ -155,6 +175,17 @@ async function boundaryRun(t: TestContext, boundary: "preopen_gate" | "checkpoin
       .find((row) => row.step === "implement.checkpoint_restored");
     assert.equal(restored?.source_branch, branch);
     assert.equal(restored?.source_head_sha, handoff?.head_sha);
+    if (mainMoves === "conflict") {
+      assert.equal(restored?.base, "checkpoint", "a checkpoint main conflicts with resumes on its own base");
+      assert.deepEqual(restored?.main_conflicts, ["src/change.ts"]);
+      assert.equal(restored?.restored_head_sha, handoff?.head_sha);
+    }
+    if (mainMoves === "clean") {
+      assert.equal(restored?.base, "main");
+      const parents = origin.git("rev-list", "--parents", "-1", String(restored?.restored_head_sha)).trim().split(" ").slice(1);
+      assert.deepEqual(parents, [String(handoff?.head_sha), seed.git("rev-parse", "HEAD").trim()],
+        "main is merged into the checkpoint, never its commits replayed onto main");
+    }
   }
 }
 
@@ -188,6 +219,18 @@ test("checkpoint recovery refuses a remote head that changed after the handoff",
 
 test("a restart arriving during checkpoint judgment still prevents a resumed worker", async (t) => {
   await boundaryRun(t, "checkpoint", false, false, undefined, true);
+});
+
+test("a restored checkpoint main conflicts with resumes on its own base instead of ending the run", async (t) => {
+  await boundaryRun(t, "checkpoint", false, true, undefined, false, { mainMoves: "conflict" });
+});
+
+test("a restored checkpoint merges current main rather than replaying its commits", async (t) => {
+  await boundaryRun(t, "checkpoint", false, true, undefined, false, { mainMoves: "clean" });
+});
+
+test("a restart checkpoint push is not refused by the PR push gate", async (t) => {
+  await boundaryRun(t, "worker", false, false, undefined, false, { refusingGate: true });
 });
 
 test("a pending restart yields before the decision worker resumes", async (t) => {
@@ -363,4 +406,124 @@ test("a pre-pr handoff releases only its exact branch and sha for a fresh daemon
     await flush();
     assert.deepEqual(h.started.map(({ id }) => id), ["A", "C", "D"], "only the exact yielded head releases admission");
   } finally { await h.cleanup(); }
+});
+
+// 2026-10-10 19:38: phase 21 min against a 16 min measured mean, both freed lanes held for good while the run that
+// went on to hold the phase (a refill, 5 min old then) crossed the mean 11 min later. Only a re-decision can see that.
+test("a lane the phase bound holds refills once a refilled sibling outlives the measured run length", async () => {
+  const h = phase(16 * minute);
+  try {
+    await flush();
+    await h.settle("A", 2);
+    await h.settle("B", 4);
+    await h.settle("C", 10);
+    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C", "D", "E", "F"]);
+    await h.settle("D", 17);
+    await h.settle("E", 18);
+    assert.equal(h.started.length, 6, "no sibling has outlived the measured run length yet");
+    await h.tick(26);
+    assert.equal(h.started.length, 6, "F, 16 min old, is not yet past the mean");
+    await h.tick(27);
+    assert.deepEqual(h.started.slice(6), [{ id: "G", age: 27 * minute }, { id: "H", age: 27 * minute }],
+      "both parked lanes refill once F outlives the measured run length");
+    assert.equal(h.rows.some(({ step, extra }) => step === "dispatch.lane_refill_held" && extra?.reason === "phase bound"), false);
+  } finally { await h.cleanup(); }
+});
+
+test("a parked lane ends with the phase when its last sibling settles inside the measured run length", async () => {
+  const h = phase(16 * minute);
+  try {
+    await flush();
+    await h.settle("A", 2);
+    await h.settle("B", 4);
+    await h.settle("C", 10);
+    await h.settle("D", 17);
+    await h.settle("E", 18);
+    assert.deepEqual(h.rows.filter(({ step }) => step === "dispatch.lane_parked").map(({ extra }) => extra?.waiting_on),
+      [["E", "F"], ["F"]]);
+    await h.settle("F", 20);
+    await flush();
+    const held = h.rows.filter(({ step, extra }) => step === "dispatch.lane_refill_held" && extra?.reason === "phase bound");
+    assert.deepEqual(held.map(({ extra }) => extra?.finished_task).sort(), ["D", "E", "F"]);
+    const settled = h.rows.find(({ step }) => step === "dispatch.settled_set");
+    assert.equal(settled?.extra?.dispatched, 6, "the phase settles with no refill; no parked lane strands it");
+  } finally { await h.cleanup(); }
+});
+
+test("a restart decided while lanes are parked drains them", async () => {
+  const h = phase(16 * minute);
+  try {
+    await flush();
+    await h.settle("A", 2);
+    await h.settle("B", 4);
+    await h.tick(8, true);
+    await h.settle("C", 10);
+    await h.settle("D", 17);
+    await h.settle("E", 18);
+    assert.equal(h.rows.filter(({ step }) => step === "dispatch.lane_parked").length, 2);
+    await h.tick(20);
+    assert.equal(h.rows.some(({ step, extra }) => step === "daemon.freshness_decision" && extra?.action === "restart"), true);
+    await flush();
+    const held = h.rows.filter(({ step }) => step === "dispatch.lane_refill_held");
+    assert.deepEqual(held.map(({ extra }) => [extra?.finished_task, extra?.reason]).sort(), [["D", "stale code"], ["E", "stale code"]]);
+    await h.tick(30);
+    assert.equal(h.started.length, 6, "F outliving the mean after the latch cannot renew refill");
+    await h.settle("F", 31);
+    assert.equal((await h.run).stopReason, "stale");
+  } finally { await h.cleanup(); }
+});
+
+// W1-T7837 2026-10-11: its 08:35 run restored checkpoint run-W1-T7837-1791700996261 and yielded again at 09:02 as
+// run-...-1791707730822. The restored branch stayed on origin, so the task read run-branch-already-pushed for good.
+test("a checkpoint branch an older run left never holds a task whose newer checkpoint is resumable", async () => {
+  const receipt = JSON.stringify({ step: "verdict", task_id: "A", verdict: "handed_off", reason: "freshness_yield",
+    branch: "run-A-200", head_sha: stale.oldSha });
+  const h = phase(5 * minute, {
+    readLedgerLines: () => [receipt],
+    readPushedRunBranches: () => `${stale.newSha}\trefs/heads/run-A-100\n${stale.oldSha}\trefs/heads/run-A-200\n` +
+      `${stale.newSha}\trefs/heads/run-A-300\n${stale.newSha}\trefs/heads/run-B-100\n`,
+  });
+  try {
+    await flush();
+    assert.deepEqual(h.started.map(({ id }) => id), ["C", "D", "E"], "a branch pushed after the checkpoint still blocks");
+  } finally { await h.cleanup(); }
+  const superseded = phase(5 * minute, {
+    readLedgerLines: () => [receipt],
+    readPushedRunBranches: () => `${stale.newSha}\trefs/heads/run-A-100\n${stale.oldSha}\trefs/heads/run-A-200\n${stale.newSha}\trefs/heads/run-B-100\n`,
+  });
+  try {
+    await flush();
+    assert.deepEqual(superseded.started.map(({ id }) => id), ["A", "C", "D"], "the older branch was restored or released by a later run");
+  } finally { await superseded.cleanup(); }
+});
+
+// W1-T7806 2026-10-11: a restore that conflicted wrote no_pr restart_checkpoint_restore_failed, which consumed
+// the receipt and left the checkpoint branch blocking its own task.
+test("a failed checkpoint restore leaves the checkpoint resumable", () => {
+  const receipt = JSON.stringify({ step: "verdict", task_id: "A", verdict: "handed_off", reason: "freshness_yield",
+    branch: "run-A-123", head_sha: stale.oldSha });
+  const failedRestore = JSON.stringify({ step: "verdict", task_id: "A", verdict: "no_pr", reason: "restart_checkpoint_restore_failed" });
+  assert.deepEqual(daemon.pendingWorkerBoundaryHandoffs([receipt, failedRestore]).get("A"), { branch: "run-A-123", headSha: stale.oldSha });
+});
+
+// W1-T7747 2026-10-11: its 23:58 handoff waits on W1-T7744; the live ledger keeps the newest 200 verdicts (back to
+// 10-09) and its run.freshness_handoff row was already archived, so its receipt was about to age out.
+test("a parked checkpoint's receipt outlives its verdict row's rotation", async () => {
+  const handoff = { task_id: "A", branch: "run-A-123", head_sha: stale.oldSha };
+  const row = JSON.stringify({ step: "run.freshness_handoff", waiting_on: "worker", ...handoff });
+  assert.deepEqual(daemon.pendingWorkerBoundaryHandoffs([row]).get("A"), { branch: "run-A-123", headSha: stale.oldSha });
+  const postPr = JSON.stringify({ step: "run.freshness_handoff", waiting_on: "ci", ...handoff });
+  assert.equal(daemon.pendingWorkerBoundaryHandoffs([postPr]).size, 0, "a post-PR handoff is no checkpoint receipt");
+  const verdict = JSON.stringify({ step: "verdict", verdict: "handed_off", reason: "freshness_yield", ...handoff });
+  const h = phase(5 * minute, { readLedgerLines: () => ['{"step":"run.freshness_handoff", torn', verdict] });
+  try {
+    await flush();
+    const carried = h.rows.filter(({ step }) => step === "run.freshness_handoff");
+    assert.deepEqual(carried.map(({ extra }) => extra), [{ ...handoff, carried: true }], "boot re-writes the verdict-only receipt");
+  } finally { await h.cleanup(); }
+  const again = phase(5 * minute, { readLedgerLines: () => [verdict, row] });
+  try {
+    await flush();
+    assert.equal(again.rows.filter(({ step }) => step === "run.freshness_handoff").length, 0, "a recorded receipt is not re-written");
+  } finally { await again.cleanup(); }
 });

@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-06: test-cost research (research-selection REPORT, census finding)"
   plan_refs: [W1-T4787, W1-T2680, W1-T6084]
   files: [scripts/diff-class.mjs, test/a-suite-that-lists-only-its-fixtures-is-not-a-tree-walker.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

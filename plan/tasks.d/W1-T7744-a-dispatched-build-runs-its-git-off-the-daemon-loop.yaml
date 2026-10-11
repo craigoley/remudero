@@ -10,7 +10,7 @@
   band_meaning: blast-radius
   origin: "operator session 2026-10-10: core daemon loop-stall investigation (daemon.loop_lag 07:50-09:57Z), operator asked for flow improvements"
   plan_refs: [W1-T5689, W1-T5718, W1-T6120, W1-T6121, W1-T6135, W1-T7534, W1-T7729]
-  files: [src/run-task.ts, src/lib/worktree-git.ts, src/lib/affected-suites.ts, src/lib/git-push.ts, test/a-dispatched-build-runs-its-git-off-the-daemon-loop.test.ts]
+  files: [src/run-task.ts, src/lib/worktree-git.ts, src/lib/affected-suites.ts, src/lib/git-push.ts, test/a-dispatched-build-runs-its-git-off-the-daemon-loop.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts]
   status: queued
   priority: 1
   attempts: 0
@@ -46,6 +46,13 @@
     (b) Move the named sites to awaited `*Async` leaves. There is no new memory, but the 108 sync
         `hostWorktreeGit` sites shrink only as each converted path is reached.
     Either way, the daemon-side `readDispatchFilingSnapshot` gets an awaited form.
+
+    CENSUS ROW (amended 2026-10-10). PR #10753 makes the sync-spawn census in
+    test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts exact: a loop-reachable count BELOW its
+    SYNC_SPAWN_LOOP_BASELINE row fails until the row is lowered, or deleted at 0, in the same PR. So this
+    build lowers the row of every site it converts (`hostWorktreeGit` callers, `checkFixCensusSnapshot`, `readAffectedListings`, `worktreePushExec`, `readDispatchFilingSnapshot`) in that file, in the same PR.
+    The fix lane refuses to stage an undeclared path (W1-T4207), so the file is in `files:`. If #10753 has
+    not merged when this builds, lowering a row still passes the old census, so the step is correct either way.
 
     SERIALIZED: depends on W1-T7743, which depends on W1-T7742. All three edit src/run-task.ts, and parallel agents editing
     one file broke main (#10349 and #10353 were each green and together reddened main, 2026-10-09).

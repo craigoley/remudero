@@ -236,15 +236,24 @@ test("an unreadable diff or selector input is a full selection naming why", asyn
 });
 
 test("every run_check call reaches the ledger with its check name, duration and exit", async () => {
-  const consumer = mkdtempSync(join(tmpdir(), "rmd-ow-affected-consumer-"));
+  const consumer = gitRepo({ kind: "ow-affected-consumer" });
   const root = mkdtempSync(join(tmpdir(), "rmd-ow-affected-root-"));
   try {
-    // A consumer tree (no selector) keeps the fixed whole-tree argv, and is ledgered all the same.
-    const whole = await runCheckIn(consumer, root, "unit_test");
-    assert.deepEqual(whole.argvs, [["node", "--import", "tsx", "--test", "--test-reporter=tap"]]);
-    assert.equal("suites" in whole.result, false);
+    consumer.git("commit", "--quiet", "--allow-empty", "-m", "base");
+    consumer.git("update-ref", "refs/remotes/origin/main", "HEAD");
+    mkdirSync(join(consumer.dir, "test"));
+    writeFileSync(join(consumer.dir, "test", "changed.test.ts"), "export {};\n");
+    const scoped = await runCheckIn(consumer.dir, root, "unit_test");
+    assert.equal(scoped.argvs.length, 1);
+    const concurrency = scoped.argvs[0]![8]!;
+    assert.match(concurrency, /^--test-concurrency=[1-9][0-9]*$/);
+    assert.deepEqual(scoped.argvs, [[
+      "nice", "-n", "10", "node", "--import", "tsx", "--test", "--test-reporter=tap",
+      concurrency, "test/changed.test.ts",
+    ]]);
+    assert.equal(scoped.result.suites, 1);
 
-    const timedOut = await runCheckIn(consumer, root, "typecheck", () => {
+    const timedOut = await runCheckIn(consumer.dir, root, "typecheck", () => {
       throw Object.assign(new Error("spawnSync ETIMEDOUT"), { killed: true, signal: "SIGTERM", code: null });
     });
     assert.equal(timedOut.result.exitCode, 1);
@@ -252,12 +261,13 @@ test("every run_check call reaches the ledger with its check name, duration and 
     const rows = runCheckRows(root);
     assert.equal(rows.length, 2, "two run_check calls are two ledger rows");
     assert.deepEqual(rows.map((r) => [r.check, r.outcome, r.suites, r.exit_code, r.timed_out]), [
-      ["unit_test", "ran", null, 0, false],
+      ["unit_test", "ran", 1, 0, false],
       ["typecheck", "ran", null, 1, true],
     ]);
+    assert.equal(rows[0]!.scope_rule, "consumer: changed tests + changed source basenames");
     for (const row of rows) assert.equal(typeof row.duration_ms, "number");
   } finally {
-    rmSync(consumer, { recursive: true, force: true });
+    consumer.cleanup();
     rmSync(root, { recursive: true, force: true });
   }
 });

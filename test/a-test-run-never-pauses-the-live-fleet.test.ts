@@ -10,12 +10,12 @@ import { LiveWriteBlockedError } from "../src/lib/live-write-guard.js";
 // `fleet.pause` in any live ledger: a worker's test run drove `rmd pause` through main(), whose
 // shared-pause repo follows the cwd — a fleet worktree whose origin is the live repo.
 
-/** Runs `fn` with a `git` on PATH that records every call it receives and exits 0. */
+/** Records every git call and returns a synthetic anchor so this control reaches the push guard. */
 function withRecordingGit(fn: (calls: () => string) => void): void {
   const bin = mkdtempSync(join(tmpdir(), "rmd-live-pause-bin-"));
   const log = join(bin, "calls");
   writeFileSync(log, "");
-  writeFileSync(join(bin, "git"), `#!/bin/sh\necho "$*" >> "${log}"\n`);
+  writeFileSync(join(bin, "git"), `#!/bin/sh\necho "$*" >> "${log}"\nprintf '%s\\n' '1111111111111111111111111111111111111111'\n`);
   chmodSync(join(bin, "git"), 0o755);
   const oldPath = process.env.PATH;
   process.env.PATH = `${bin}:${oldPath ?? ""}`;

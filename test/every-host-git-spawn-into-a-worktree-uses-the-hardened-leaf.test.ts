@@ -25,6 +25,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { maskLiterals, stripComments } from "../src/lib/test-impact-map.js";
+// @ts-ignore the executable .mjs module has no declaration file.
+import { CWD_OPTION_GIT_SPAWN as SHARED_CWD_OPTION_GIT_SPAWN, NOT_A_SPAWN, POSITIONAL_C } from "../scripts/lib/git-spawn-shapes.mjs";
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 
@@ -117,7 +119,12 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/clone-reaper.ts": { count: 2, reason: "CHECKOUT: defaultOriginOf(Async) read a reaped clone's origin (-C dir)" },
   "src/lib/commit-message.ts": { count: 1, reason: "CHECKOUT: readRangeCommitMessages reads the repo root (cwd: repoRoot)" },
   "src/lib/composition-root.ts": { count: 2, reason: "CHECKOUT (W1-T6122's file): realReviewWorktree's repoDir reads/adds against the managed checkout" },
-  "src/lib/containment.ts": { count: 1, reason: "CHECKOUT (W1-T6136): defaultExecutor's git init runs in the probe scratch dir it mkdirs itself" },
+  "src/lib/containment.ts": {
+    count: 2,
+    reason:
+      "CHECKOUT (W1-T6136): defaultExecutor's git init runs in the probe scratch dir it mkdirs itself; " +
+      "W1-T6158 made runWorkerSmoke's inline git init runs in <config.root>/tmp/worker-smoke-<token>/cwd, which it mkdirs itself",
+  },
   "src/lib/deployer.ts": { count: 1, reason: "CHECKOUT: realDeployDeps reads the install checkout (-C o.installPath)" },
   "src/lib/dispatch-claim.ts": { count: 1, reason: "CHECKOUT: gitClaimRunnerAsync runs claim refs in the managed checkout (-C repoDir)" },
   "src/lib/export-gardener.ts": { count: 1, reason: "CHECKOUT: referencesOutside reads the repo root (-C root)" },
@@ -133,7 +140,10 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/fleet-lane.ts": { count: 1, reason: "CHECKOUT: mergedInLastDaySteps reads origin/main in the managed checkout" },
   "src/lib/flow-remedy-gardener.ts": { count: 2, reason: "CHECKOUT: readPlan/ladderGardenSpec read the repo root (-C repoRoot)" },
   "src/lib/gardener-overseer.ts": { count: 1, reason: "CHECKOUT: productionGardenerOverseerPorts reads the repo root" },
-  "src/lib/gate-gardener.ts": { count: 1, reason: "CHECKOUT: defuseCandidates' run(\"git\", …) reads the repo root" },
+  "src/lib/gate-gardener.ts": {
+    count: 2,
+    reason: "CHECKOUT (W1-T6158): defuseCandidates' and confirmDefuse's run(\"git\", …) read the repo root",
+  },
   "src/lib/git-push.ts": {
     count: 6,
     reason:
@@ -164,7 +174,7 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/owner-repo.ts": { count: 3, reason: "CHECKOUT: resolveOwnerRepoAt(Async)/gitFailureReason read a checkout's origin (-C root)" },
   "src/lib/panel-graph.ts": { count: 1, reason: "CHECKOUT: replyRefusal reads the repo root (-C root)" },
   "src/lib/plan-gardener.ts": { count: 4, reason: "CHECKOUT: the plan gardener's origin/main reads at the repo root" },
-  "src/lib/plan-pr-emitter.ts": { count: 8, reason: "CHECKOUT: plan-PR reads in the emitter's cwd and its own preflight worktree (-C repoDir); timeout cleanup uses the hardened leaf" },
+  "src/lib/plan-pr-emitter.ts": { count: 7, reason: "CHECKOUT: plan-PR reads in the emitter's cwd and its own preflight worktree's add (-C repoDir); both preflights remove that worktree through the hardened leaf" },
   "src/lib/plan-pr-merge-safety.ts": {
     count: 2,
     reason: "CHECKOUT (W1-T6136): arm-auto-merge.ts planMergeSafetyInClone binds planSafetyGitSync/Async to <root>/repos/<repo>",
@@ -219,14 +229,17 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
       "in the default spawn; NOT GIT: codexExecArgs's -C is codex's",
   },
   "src/lib/worker.ts": {
-    count: 24,
+    count: 25,
     reason:
-      "CHECKOUT (W1-T6133 converted the WORKTREE sites): defaultLaneListGit lists the managed checkout's " +
-      "registration (cwd: repoDir); the rest are worktreeAdd/Remove, pruneStaleRuns and branch reads of the " +
-      "managed checkout",
+      "CHECKOUT (W1-T6133 converted the WORKTREE sites; W1-T6158 made five more visible): defaultLaneListGit " +
+      "lists the managed checkout's registration (cwd: repoDir); the rest are worktreeAdd, pruneStaleRuns's " +
+      "prune and branch reads, and other branch reads of the managed checkout (every `worktree remove` runs " +
+      "through the hardened leaf), plus defaultReadRemoteHead, " +
+      "readLocalOriginRefHead, defaultCountBehind and ensureWorktreeConfigEnabled (2), which read/configure " +
+      "the managed source checkout (-C repoDir)",
   },
   "src/run-task.ts": {
-    count: 76,
+    count: 75,
     reason:
       "CHECKOUT (W1-T6135): every site classed per function, with the tree it addresses, in RUN_TASK_WIDENED_SITES " +
       "in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts, whose sum this count must equal",
@@ -276,14 +289,10 @@ const LEAF_FILE = "src/lib/worktree-git.ts";
  * callee that is not a node:child_process primitive — a helper or injected seam that binds the tree
  * where the call site cannot show it, as `run("git", …)` in selectOpenWeightUnitTestSuites does.
  */
-export const CWD_OPTION_GIT_SPAWN = /(?<![\w$.])(?<!\bnew\s+)([A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)*)\s*(?:\?\.)?\(\s*(["'`])git\2\s*[,)]/g;
+export const CWD_OPTION_GIT_SPAWN: RegExp = SHARED_CWD_OPTION_GIT_SPAWN;
 
-/** A `-C` argv element: the quoted flag, a comma, then any expression (not a closing bracket). */
-const POSITIONAL_C = /(["'`])-C\1\s*,\s*(?=[^\s\])])/g;
+// POSITIONAL_C and NOT_A_SPAWN live in scripts/lib/git-spawn-shapes.mjs (W1-T6137), shared with the local precheck.
 
-/** Callees that take "git" first but spawn nothing: an error subclass's `super("git", …)`, and
- *  run-task.ts's `keyOf("git", args)`, which only builds a replay cache key. */
-const NOT_A_SPAWN = new Set(["super", "keyOf"]);
 
 export interface WidenedGitSite {
   readonly kind: "-C argv" | "cwd option" | "helper";

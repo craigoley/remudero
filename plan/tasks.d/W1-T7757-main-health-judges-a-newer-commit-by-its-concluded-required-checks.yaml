@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-10: main-red investigation after #10702, operator asked for flow improvements"
   plan_refs: [W1-T5490, W1-T6023, W1-T6077, W1-T6403, W1-T4472]
   files: [src/lib/main-health-rung.ts, src/lib/sweep.ts, test/main-health-judges-a-newer-commit-by-its-concluded-required-checks.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
