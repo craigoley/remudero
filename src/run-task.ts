@@ -533,6 +533,7 @@ import {
   escalationHeadSha,
   escalationContractRevision,
   findDuplicateEscalation,
+  taskContractRevision,
   ghIssueGateway,
   ghIssueGatewayAsync,
   presenceMode,
@@ -1403,7 +1404,15 @@ import type { LearningEntry, LearningsIndex, RuleHeadline } from "./lib/learning
 import { assertProvenance, citation } from "./lib/provenance.js";
 import { certainStaleProofs, grepOnlyBaseTargets, isDialectGrepProof, materialiseBaseGrepTree, type BaseGrepTreeReaders } from "./lib/proof-base-stale.js";
 import { loadOperatorNotesForTask, renderOperatorNotes, appendOperatorNote } from "./lib/operator-notes.js";
-import { applyOperatorMergeHold, parseOperatorMergeHoldArgs } from "./lib/operator-merge-hold.js";
+import {
+  applyOperatorMergeHold,
+  authorizeMergeHoldWrite,
+  gatherMergeHoldActor,
+  humanTerminalActorProbe,
+  parseOperatorMergeHoldArgs,
+  realMergeHoldActorProbe,
+  type MergeHoldActorProbe,
+} from "./lib/operator-merge-hold.js";
 import {
   computeMatchedLearningsForArm,
   generateSandboxTask,
@@ -2881,7 +2890,7 @@ export function retroErrorLedgerFields(error: unknown): Record<string, unknown> 
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 import { sweepMemoryReservations } from "./lib/host-memory-ledger.js";
 import { withSyncChildReservation } from "./lib/host-memory-learning.js";
-import { installShadowMemorySink } from "./lib/host-memory-shadow.js";
+import { installShadowMemorySink, ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./lib/host-memory-shadow.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
 // runaway-turns bound below — see `deriveRunawayTurnBound`'s own doc for why this borrows that
 // row rather than inventing a second, duplicate "N times median" knob just because the unit is
@@ -9567,32 +9576,9 @@ export function unchangedTreeStandDownReason(
   };
 }
 
-/**
- * W1-T3579: one deterministic revision of the CURRENT authoritative task contract the fix rung's
- * open-escalation guard (immediately below) versions its stand-down against — covers task
- * identity, declared `files:`, and every acceptance criterion's `claim`/`proof` pair, never
- * `satisfied_by`/`holdout` or any other decorative/volatile field (a `status`/`attempts` bump on
- * every dispatch must never move this). THE DEFECT THIS CLOSES: PORTAL-T4 (remudero-site PR #21,
- * 2026-09-14) was correctly refused, then a plan-only scope amendment re-authorized the exact same
- * repair on the exact same PR head — and the open-escalation guard, keyed on `headSha` alone,
- * stood the repair down forever because nothing distinguished "a human already answered this
- * question" from "the question changed underneath an open issue". Declared files are sorted
- * first (order is never part of the contract — {@link filesDigest}'s own convention); acceptance
- * pairs are read in DECLARED order, because reordering criteria is itself an amendment a re-admit
- * should notice. PURE: reads nothing off disk — the caller already holds the live `Task`/{@link
- * runFixRung}'s own `opts.task` this rung dispatched against, never a worker report or PR-body
- * prose (design note (i) — recovering it from either would let a worker's own claim decide
- * whether it gets re-admitted).
- */
-export function taskContractRevision(task: {
-  id: string;
-  files?: readonly string[];
-  acceptance?: ReadonlyArray<Pick<AcceptanceCriterion, "claim" | "proof">>;
-}): string {
-  const files = [...(task.files ?? [])].sort();
-  const acceptance = (task.acceptance ?? []).map((c) => ({ claim: c.claim, proof: c.proof }));
-  return sha256Hex(JSON.stringify({ id: task.id, files, acceptance }));
-}
+/** W1-T3579's task contract revision now lives in lib/escalate.ts, so the sweep's progress-judge
+ *  latch and its escalations version themselves by the SAME function the fix rung's guard reads. */
+export { taskContractRevision };
 
 /**
  * W1-T2799 (the fix-rung pre-strike gate's SIXTH reason source, composed into {@link
@@ -35351,11 +35337,11 @@ export function createOpenPrCountObservation(): {
 }
 
 /**
- * W1-T1038 — THE REAL `MemAvailable` PROBE `checkMemoryGovernor` (sweep.ts) consults. Reads
- * `/proc/meminfo` and NEVER a cgroup limit (design note (6), `checkMemoryGovernor`'s own doc):
- * this fleet's containers carry no memory limit (`memory.max` reads `max`), so a cgroup read
- * would report "unbounded" and authorise every dispatch silently, while `/proc/meminfo` reports
- * the real host figure this guard actually wants.
+ * W1-T1038 — THE REAL `MemAvailable` PROBE `checkMemoryGovernor` (sweep.ts) consults: the HOST
+ * figure. It is not the only one. The daemon containers have carried memory limits since #10371 and
+ * #10486 (core: memory.max 8820 MiB, memory.high pinned below it), which `/proc/meminfo` cannot see,
+ * so {@link memoryGovernorGateFor} also reads the container's own headroom
+ * (`readContainerMemoryHeadroom`, the host memory budget's reader) and the floor takes the smaller.
  *
  * `path` defaults to the real file and is injectable so a test can point this at a fixture
  * without touching the live `/proc/meminfo` (test/dispatch-memory-governor.test.ts, "the probe
@@ -35409,10 +35395,15 @@ export function memoryGovernorGateFor(
   ledgerPath: string,
   runId: string,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
-  readAvailableMib: () => number = readAvailableMemoryMib,
+  readAvailableMib?: () => number,
+  // The container's own headroom. An injected host reading (a fixture) reads no container unless one is injected
+  // too, so a test never reads the cgroup of whatever container runs it.
+  readContainer: (() => ContainerMemoryHeadroom) | undefined = readAvailableMib === undefined ? () => readContainerMemoryHeadroom() : undefined,
+  ownWorkLive: () => boolean = () => ownContainerWorkLive(dirname(dirname(ledgerPath))),
 ): () => MemoryGovernorResult | undefined {
   return () => {
-    const result = checkMemoryGovernor(readAvailableMibBounded(readAvailableMib, ledgerPath, runId, policy), policy);
+    const available = readAvailableMibBounded(readAvailableMib ?? readAvailableMemoryMib, ledgerPath, runId, policy);
+    const result = checkMemoryGovernor(available, policy, readContainer?.(), ownWorkLive);
     // EVERY dispatch, including the ones it admits (design (iv)) — never gated on `result.deferred`.
     logMemoryObservation(result, appendLedger, ledgerPath, runId);
     return result.deferred ? result : undefined;
@@ -48584,7 +48575,15 @@ export async function awayCommand(rest: string[]): Promise<number> {
  */
 export function mergeHoldCommand(
   rest: string[],
-  deps: { config?: Config; ledgerPath?: string; now?: () => number; isInteractive?: () => boolean } = {},
+  deps: {
+    config?: Config;
+    ledgerPath?: string;
+    now?: () => number;
+    isInteractive?: () => boolean;
+    /** W1-T7721 — where the writer's actor is gathered from. A caller that injects `isInteractive` without a probe
+     *  has taken control of the terminal, so it also gets a human-terminal probe rather than this process's own env. */
+    actorProbe?: MergeHoldActorProbe;
+  } = {},
 ): number {
   const parsed = parseOperatorMergeHoldArgs(rest);
   if (!parsed.ok) {
@@ -48597,10 +48596,25 @@ export function mergeHoldCommand(
     );
     return 2;
   }
+  const actor = gatherMergeHoldActor(
+    deps.actorProbe ?? (deps.isInteractive ? humanTerminalActorProbe() : realMergeHoldActorProbe()),
+  );
+  const authorized = authorizeMergeHoldWrite(parsed.input, actor);
+  if (!authorized.ok) {
+    console.error(`rmd merge-hold: ${authorized.error}`);
+    return 2;
+  }
   const ledgerPath = deps.ledgerPath ?? ledgerPathFor(deps.config ?? loadConfig());
-  const result = applyOperatorMergeHold(ledgerPath, parsed.input, { now: deps.now });
+  const result = applyOperatorMergeHold(ledgerPath, authorized.input, { now: deps.now, actor });
   if (!result.written) {
     console.log(`### rmd merge-hold — ${result.scope} is already released; no ledger row written.`);
+    return 0;
+  }
+  if (authorized.input.authority === "agent-cli") {
+    console.log(
+      `### rmd merge-hold — AGENT NOTE recorded for ${result.scope}; by ${parsed.input.by}: ${parsed.input.reason}. ` +
+        `An agent hold is audit-only (authority agent-cli): it does NOT block auto-merge.`,
+    );
     return 0;
   }
   console.log(
