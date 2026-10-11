@@ -23,6 +23,7 @@ import { instanceRouteSet, mountUnderInstance } from "../src/lib/instance-gatewa
 import { createService, type Route, type Scope } from "../src/lib/service.js";
 import { isPaused, isStopped } from "../src/lib/fleet-control.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { clockFromMillisFn, systemClock } from "../src/lib/clock.js";
 
 const DISCOVERY = "/v1/control/assistant-action/discovery";
 const ACTION = "/v1/control/assistant-action";
@@ -354,13 +355,13 @@ test("incomplete assistant discovery is not a verified empty pending list", asyn
   let calls = 0;
   let planted = false;
   const changing = await readAssistantActionDiscovery({ claimRoot: shared, actorHash: me, instance: "core", repository: "craigoley/remudero",
-    now: () => {
+    clock: clockFromMillisFn(() => {
       if (++calls === 2) {
         planted = true;
         writeFileSync(join(dir, `${key("arrived-01")}.claim.json`), v2("arrived-01"));
       }
-      return Date.now();
-    } });
+      return systemClock.now();
+    }) });
   assert.ok(planted);
   assert.equal(changing.completeness, "partial");
   assert.ok(changing.limitations.includes("corpus_changed"));
@@ -387,7 +388,7 @@ test("assistant discovery bounds files, time and page size and its continuations
   for (const [label, extra, limitation] of [
     ["file budget", { budget: { maxFiles: 2 } }, "file_budget"],
     ["page size", { limit: 3 }, "page_size"],
-    ["time budget", { budget: { maxElapsedMs: 1_500 }, now: (() => { let t = 0; return () => (t += 1_000); })() }, "time_budget"],
+    ["time budget", { budget: { maxElapsedMs: 1_500 }, clock: clockFromMillisFn((() => { let t = 0; return () => (t += 1_000); })()) }, "time_budget"],
     ["byte budget", { budget: { maxTotalBytes: 1 } }, "byte_budget"],
   ] as const) {
     const seen: string[] = [];

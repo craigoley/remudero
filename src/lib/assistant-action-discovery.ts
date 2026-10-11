@@ -18,6 +18,8 @@
 import { createHash } from "node:crypto";
 import { open, opendir, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { systemClock, type Clock } from "./clock.js";
+import { RmdError } from "./errors.js";
 
 /** The authoritative claim shape POST writes before any side effect. */
 export const ASSISTANT_CLAIM_VERSION = "assistant-claim-v2";
@@ -106,11 +108,13 @@ export interface DiscoveryRequest {
   limit?: number;
   continuation?: string | null;
   budget?: Partial<DiscoveryBudget>;
-  now?: () => number;
+  clock?: Clock;
 }
 
-export class DiscoveryContinuationError extends Error {
-  constructor(options?: { cause?: unknown }) { super("continuation is not valid for this actor and target", options); }
+export class DiscoveryContinuationError extends RmdError {
+  constructor(options?: { cause?: unknown }) {
+    super("usage", 1, "continuation is not valid for this actor and target", options?.cause === undefined ? undefined : { cause: String(options.cause) });
+  }
 }
 
 const CLAIM_NAME = /^([0-9a-f]{64})\.claim\.json$/;
@@ -253,8 +257,8 @@ function yieldToLoop(): Promise<void> {
  */
 export async function readAssistantActionDiscovery(req: DiscoveryRequest): Promise<AssistantActionDiscovery> {
   const budget = { ...DEFAULT_DISCOVERY_BUDGET, ...req.budget };
-  const now = req.now ?? Date.now;
-  const started = now();
+  const clock = req.clock ?? systemClock;
+  const started = clock.now();
   const limit = Math.max(1, Math.min(MAX_DISCOVERY_PAGE, req.limit ?? DEFAULT_DISCOVERY_PAGE));
   const bind = binding(req);
   const resumeAt = req.continuation ? decodeContinuation(bind, req.continuation) : null;
@@ -263,7 +267,7 @@ export async function readAssistantActionDiscovery(req: DiscoveryRequest): Promi
   const answer = (completeness: AssistantActionDiscovery["completeness"], continuation: string | null): AssistantActionDiscovery => ({
     contract: ASSISTANT_DISCOVERY_CONTRACT_VERSION,
     source: { instance: req.instance, repository: req.repository, bootSha: req.bootSha ?? "unknown" },
-    observedAt: new Date(now()).toISOString(),
+    observedAt: clock.iso(),
     completeness: completeness === "complete" && limitations.size > 0 ? "partial" : completeness,
     limitations: [...limitations].sort(),
     pending,
@@ -319,7 +323,7 @@ export async function readAssistantActionDiscovery(req: DiscoveryRequest): Promi
     if (examined > 0) {
       if (examined >= budget.maxFiles) { limitations.add("file_budget"); stoppedEarly = true; break; }
       if (totalBytes >= budget.maxTotalBytes) { limitations.add("byte_budget"); stoppedEarly = true; break; }
-      if (now() - started >= budget.maxElapsedMs) { limitations.add("time_budget"); stoppedEarly = true; break; }
+      if (clock.now() - started >= budget.maxElapsedMs) { limitations.add("time_budget"); stoppedEarly = true; break; }
       if (pending.length >= limit) { limitations.add("page_size"); stoppedEarly = true; break; }
       if (examined % budget.yieldEvery === 0) await yieldToLoop();
     }

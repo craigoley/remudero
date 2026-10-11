@@ -391,14 +391,13 @@ export function buildStopRoute(deps: PanelActionDeps): Route {
 // ── POST /v1/control/assistant-action ───────────────────────────────────────
 
 /** Shared claim root and exact target for the existing panel control helpers (W1-T4763). */
-export interface AssistantControlOptions extends Pick<PanelActionDeps, "root" | "ledgerPath"> {
+export interface AssistantControlOptions extends Pick<PanelActionDeps, "root" | "ledgerPath" | "clock"> {
   claimRoot: string;
   instance: string;
   repository?: string;
   bootSha?: string;
   afterClaim?: () => void;
   afterEffect?: () => void;
-  now?: () => number;
   discoveryBudget?: Partial<DiscoveryBudget>;
 }
 
@@ -551,7 +550,7 @@ export function buildAssistantControlRoute(deps: AssistantControlOptions): Route
       const actorHash = assistantActorHash(operator);
       const fingerprint = assistantClaimFingerprint({ actorHash, instance: input.instance, repository: deps.repository ?? null, action: input.action, reason: input.reason ?? null });
       const claim: AssistantClaimV2 = { version: ASSISTANT_CLAIM_VERSION, actionId: input.actionId, action: input.action, actorHash,
-        instance: deps.instance, repository: deps.repository ?? null, submittedAt: new Date((deps.now ?? Date.now)()).toISOString(), fingerprint };
+        instance: deps.instance, repository: deps.repository ?? null, submittedAt: (deps.clock ?? systemClock).iso(), fingerprint };
       let admitted = false;
       try {
         mkdirSync(paths.dir, { recursive: true });
