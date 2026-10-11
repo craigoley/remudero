@@ -38487,10 +38487,8 @@ export async function daemonCommand(
   const kickCiJudge = ciJudgeIo && singleFlightCiJudge(() => judgeCiEscalation(productionCiJudgePorts({
     owner: self.owner, repo: self.repo, repoRoot: effectiveRepoRoot, stateDir: join(config.root, "state"), log, ...ciJudgeIo,
   })), log);
-  // W1-T7735 — the refresh-overlap judge rules on the sweep's `ask-judge` rows after each sweep, under
-  // the same single-flight, never awaited; the sweep reads its rulings from state/ on the next pass.
   const kickRefreshJudge = ciJudgeIo && singleFlightCiJudge(() => judgeRefreshOverlap(productionRefreshJudgePorts({
-    owner: self.owner, repo: self.repo, repoRoot: effectiveRepoRoot, stateDir: join(config.root, "state"), log,
+    owner: self.owner, repo: self.repo, repoRoot: effectiveRepoRoot, stateDir: join(config.root, "state"), log, // W1-T7735
     readLedger: () => readLedgerLines(ledgerPath),
     ...(ciJudgeIo.ghText ? { ghText: ciJudgeIo.ghText } : {}), ...(ciJudgeIo.spawn ? { spawn: ciJudgeIo.spawn } : {}),
   })), log);
