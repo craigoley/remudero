@@ -106,7 +106,7 @@ import {
 } from "./sweep.js";
 // VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
-import { checkDispatchGovernors, type DispatchGovernorVerdict, type QuietHoursHoldResult } from "./dispatch-governor.js";
+import { checkDispatchGovernors, governorDeferPayload, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
 import { assertRunnable, releasedTaskIds, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { resolveReleasedIds } from "./drain.js";
 import type { StatusProjection } from "./status.js";
@@ -1112,6 +1112,10 @@ export interface DaemonDeps {
    *  `/proc/meminfo` reading per call. Consulted only through `checkDispatchGovernors`, so it holds
    *  NEW dispatch per lane and a throw fails OPEN there. Never consulted from the sweep. Optional. */
   checkMemoryGovernor?: () => MemoryGovernorResult | undefined;
+  /** W1-T7720: the streak tracker the unreadable memory probe / reservation store report to, and the
+   *  store read itself. Both are consulted only through `checkDispatchGovernors`. Optional. */
+  memoryReadTracker?: MemoryReadTracker;
+  readMemoryStoreFailure?: () => string | undefined;
   /** Quiet-hours preference: a defined return defers NEW dispatch only. Routed through the dispatch
    *  governor, never through `checkPause`, so sweep/drainage paths keep running and an unreadable
    *  read fails open in `checkDispatchGovernors` (W1-T2655). */
@@ -2989,6 +2993,8 @@ export async function runDaemon(
         memory_floor_mib: verdict.result.floorMib,
         poll_interval_ms: pollIntervalMs,
       });
+    } else if (verdict.kind === "memory_unreadable") {
+      log("daemon.memory_unreadable", { tick, ...governorDeferPayload(verdict), poll_interval_ms: pollIntervalMs });
     } else if (verdict.kind === "quiet_hours") {
       log("daemon.quiet_hours", {
         tick,

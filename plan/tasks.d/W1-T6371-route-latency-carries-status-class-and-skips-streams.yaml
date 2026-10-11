@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-08: serve CPU and memory plan, console latency (backend half; browser experience is a separate console-side item)"
   plan_refs: []
   files: [src/lib/route-read-rollup.ts, test/route-latency-carries-status-class-and-skips-streams.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |
