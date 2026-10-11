@@ -479,6 +479,7 @@ import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchd
 import { daemonInstanceRegistryPath, IMAGE_BUILD_SHA_PATH, requestDeploy, runDeployCycle } from "./lib/deployer.js";
 import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
 import { escalationSpoolDrain, spoolingIssueVoice, withEscalationSpoolDrain } from "./lib/host-escalation-spool.js";
+import { hostAlertCommandResult } from "./lib/launcher-host-alerts.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 export { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
@@ -7130,6 +7131,20 @@ export async function liveEditsCommand(rest: string[], clock: Clock = systemCloc
   const voice = spoolingIssueVoice(stateDir, { source: "live-edits", host: hostname(), clock });
   const result = await runLiveEditLadder({ tree, repoDir: checkout, stateDir, host: hostname(), clock, fetch: true, ...voice });
   console.log(rest.includes("--json") ? JSON.stringify(result) : `live-edits ${tree}: tier ${result.tier} -- ${result.reason}`);
+  return 0;
+}
+
+export function hostAlertCommand(rest: string[], clock: Clock = systemClock): number {
+  const badArg = unknownArgError("host-alert", rest, ["--state-root", "--instance", "--condition", "--raise"], ["--clear", "--json"]);
+  const result = badArg ?? hostAlertCommandResult(
+    { stateRoot: flagValue(rest, "--state-root"), instance: flagValue(rest, "--instance"), condition: flagValue(rest, "--condition"), message: flagValue(rest, "--raise"), clear: rest.includes("--clear") },
+    { host: hostname(), clock },
+  );
+  if (typeof result === "string") {
+    console.error(`${result}\n${USAGE}`);
+    return 2;
+  }
+  console.log(rest.includes("--json") ? JSON.stringify(result) : `host-alert ${result.condition} (${result.instance}): ${result.tier}, count ${result.count}`);
   return 0;
 }
 
@@ -55134,6 +55149,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "2026-10-11: one rung of the live-edit ladder (src/lib/live-edit-ladder.ts) for one live checkout. With tracked edits it always writes them to <state-root>/recovery/live-edits/<tree>/ as a patch and to refs/rmd-recovery/live-edits/<host>/<ts>, read back and re-applied before it counts as a copy. Staleness pressure is the daemon's own freshness pressure (decideFreshnessRestart) from the first reading dirty and behind: at the restart threshold the daemon escalates once; at twice it, and only with a confirmed copy of these exact edits, the tracked paths are restored to HEAD so the checkout can fast-forward. Prints one JSON line with --json (restored:true only when the tree is now clean). The host has no GitHub credential, so this verb spools its escalation and restore notice under <state-root>/escalation-spool/ and the daemon posts them. Run by the host watchdog for the daemon checkout and the install checkout.",
   },
   {
+    name: "host-alert",
+    syntax: "rmd host-alert --state-root <dir> --instance <name> --condition <condition> (--raise <message> | --clear) [--json]",
+    summary: "Count, spool or clear one of the host watchdog's own alarms (crash loop, launcher refusals).",
+    detail: "2026-10-11: the host watchdog's entry into src/lib/launcher-host-alerts.ts. --raise records one observation of a condition (crash-loop, units-not-on-main, units-diverged, deploy-code-fetch-failed, deploy-code-diverged, deploy-run-problem) under <state-root>/launcher-alerts/. A refusal is counted per consecutive observed tick: at the deployer's REFUSAL_PERSISTING_AT it writes launcher_alert.persisting, at REFUSAL_ESCALATE_AT it spools one needs-human escalation under <state-root>/escalation-spool/ for the daemon to post (the host has no GitHub credential). A crash loop is spooled on its first observation, because the launcher only names one after its own tiering. --clear ends the run when the launcher sees the step succeed: a still-spooled escalation is withdrawn and one the daemon already opened gets a spooled close. Prints one JSON line with --json.",
+  },
+  {
     name: "claim",
     syntax: "rmd claim <task-id> [--drop]",
     summary: "Take (or with --drop, drop) the dispatch claim the fleet honours, for a hand-build.",
@@ -56177,6 +56198,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["routing-ab", async (rest) => await routingAbCommand(rest)],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],
+  ["host-alert", async (rest) => hostAlertCommand(rest)],
   ["claim", (rest) => claimCommand(rest)],
   ["impossible-canary", async (rest) => await impossibleCanaryCommand(rest, (input) => runImpossibleCanary(input))],
   ["benchmark-aa", async (rest) => rest[0] === "prospective" ? await prospectiveAaCommand(rest.slice(1), (input) => runProspectiveAa(input))
