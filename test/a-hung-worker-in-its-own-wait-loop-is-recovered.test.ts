@@ -9,7 +9,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { IMPLEMENT_WAIT_TARGET_CONTRACT } from "../src/run-task.js";
-import { clockFromMillisFn } from "../src/lib/clock.js";
 import {
   classifyProcessTree,
   deriveQuietBound,
@@ -176,7 +175,7 @@ function rig(path: string, judge: (e: QuietEvidence) => Promise<QuietJudgement |
     history: () => history("claude", [40_000, 50_000, 60_000]),
     fallbackBoundMs: FALLBACK_MS,
     quietFloorMs: 30_000,
-    clock: clockFromMillisFn(() => clock.ms),
+    now: () => clock.ms,
     ledger: (step, fields) => rows.push({ step, extra: fields }),
     judge: async (evidence) => {
       judged.push(evidence);
