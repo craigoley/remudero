@@ -139,6 +139,7 @@ test("W1-T7214: an unreadable merge queue still refreshes the oldest ready overl
   assert.equal(queueReads, 2);
   assert.deepEqual(unreadable.updated.map((c) => c.prNumber), [OLDER.prNumber]);
   assert.deepEqual(unreadable.rows.map((r) => [r.step, r.pr_number, r.source]), [
+    ["sweep.refresh.decided", OLDER.prNumber, "light_pass"], // W1-T7735: the value test's row comes first
     ["sweep.update_branch.attempted", OLDER.prNumber, "light_pass"],
     ["sweep.update_branch.updated", OLDER.prNumber, "light_pass"],
   ]);
@@ -150,7 +151,10 @@ test("W1-T7214: a rejected branch update records its error and releases the ligh
   });
   assert.equal(await failed.run(), OLDER.prNumber);
   assert.deepEqual(failed.updated.map((c) => c.prNumber), [OLDER.prNumber]);
-  assert.deepEqual(failed.rows, ["attempted", "error"].map((outcome) => ({
+  // W1-T7735: the value test's decision row precedes the press; the update rows are unchanged.
+  assert.equal(failed.rows[0]?.step, "sweep.refresh.decided");
+  assert.equal(failed.rows[0]?.decision, "refresh");
+  assert.deepEqual(failed.rows.slice(1), ["attempted", "error"].map((outcome) => ({
     run_id: "LIGHT-W1-T7214",
     task_id: OLDER.taskId,
     pr_number: OLDER.prNumber,
