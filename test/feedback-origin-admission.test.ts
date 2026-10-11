@@ -455,7 +455,7 @@ test("W1-T7754 publication: the real async default reads visibility without bloc
 test("W1-T7754 publication: immediate upstream observes private material but shadow preserves the original PR effect", () => {
   const root = tmpRoot(), f = sourceFixture(), rows: Record<string, unknown>[] = [], calls: string[][] = [];
   mkdirSync(join(root, ".remudero"), { recursive: true });
-  writeFileSync(homeRepoPath(root), JSON.stringify({ owner: "acme", repo: "public" }));
+  writeFileSync(homeRepoPath(root), JSON.stringify({ repo: "acme/public" }));
   const entry = captureFeedback(root, { raw: "private-source answer", origin: "issue#4", contribution: f.subject,
     admission: { mode: "shadow", policy: POLICY, nowMs: NOW, record: (_step, fields) => rows.push(fields) },
     land: { stateRoot: root }, upstream: { git: () => "git@github.com:acme/widgets.git",
