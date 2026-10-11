@@ -1,8 +1,5 @@
 #!/usr/bin/env node
-// scripts/generate-agents-md.mjs
-//
 // AGENTS.md generator + drift gate (W1-T3267).
-//
 // CLAUDE.md remains the maintained source of repository workflow doctrine. This script renders the
 // smaller Codex-facing project doc from that source's bolded rule headlines, using the same parser
 // W1-T2508 already shipped in src/lib/learnings.ts. The output is content-only (no timestamp), so
@@ -20,7 +17,6 @@ import { parseRuleHeadlines, renderHeadlineOnlyIndex } from "../src/lib/learning
 
 export const DEFAULT_SOURCE = "CLAUDE.md";
 export const DEFAULT_OUT = "AGENTS.md";
-export const MAX_AGENT_INDEX_TO_SOURCE_RATIO = 0.7;
 
 export function renderAgentsMd(sourceText) {
   const rules = parseRuleHeadlines(sourceText);
@@ -44,17 +40,24 @@ export function renderAgentsMd(sourceText) {
   return lines.join("\n");
 }
 
-export function renderedSizeVerdict(rendered, sourceText, maxRatio = MAX_AGENT_INDEX_TO_SOURCE_RATIO) {
+// SIZE BOUND (W1-T3267 (i): the index grows with headline COUNT, not prose): header + one
+// `- **headline**` line per rule, and smaller than CLAUDE.md. Never a ratio of CLAUDE.md: once
+// W1-T3323 moved the bodies out, compressing CLAUDE.md pushed a ratio UP and refused the cut.
+export function renderedSizeVerdict(rendered, sourceText) {
   const renderedBytes = Buffer.byteLength(rendered, "utf8");
   const sourceBytes = Buffer.byteLength(sourceText, "utf8");
-  const limitBytes = Math.floor(sourceBytes * maxRatio);
-  return {
-    ok: renderedBytes <= limitBytes,
-    renderedBytes,
-    sourceBytes,
-    limitBytes,
-    maxRatio,
-  };
+  const headerBytes = Buffer.byteLength(renderAgentsMd(""), "utf8");
+  const headlineBytes = parseRuleHeadlines(sourceText)
+    .reduce((sum, rule) => sum + Buffer.byteLength(`- **${rule.headline}**\n`, "utf8"), 0);
+  const limitBytes = headerBytes + headlineBytes;
+  let reason;
+  if (renderedBytes > limitBytes) {
+    reason = `carries more than its headlines: ${renderedBytes} bytes > ${limitBytes} bytes ` +
+      `(${headerBytes}-byte header + ${headlineBytes} bytes of headline lines)`;
+  } else if (renderedBytes >= sourceBytes) {
+    reason = `is not smaller than its source: ${renderedBytes} bytes >= ${sourceBytes} bytes`;
+  }
+  return { ok: reason === undefined, reason, renderedBytes, sourceBytes, limitBytes, headerBytes };
 }
 
 function headlineList(markdown) {
@@ -102,11 +105,7 @@ export function main(argv) {
 
   const size = renderedSizeVerdict(fresh, sourceText);
   if (!size.ok) {
-    console.error(
-      `generate-agents-md: ${values.out} is not materially smaller than ${values.source}: ` +
-        `${size.renderedBytes} bytes > ${size.limitBytes} bytes (${size.maxRatio} of ` +
-        `${size.sourceBytes}).`,
-    );
+    console.error(`generate-agents-md: ${values.out} ${size.reason} (source ${values.source}).`);
     process.exitCode = 1;
     return;
   }
