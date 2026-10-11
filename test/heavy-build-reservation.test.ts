@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statfsSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { HeavyReservationHandle } from "../src/lib/heavy-build-reservation.js";
 
@@ -28,16 +28,14 @@ function fixture(t: TestContext): string {
   const temp = realpathSync(tmpdir());
   let root = temp;
   if (process.platform === "linux" && ![0xef53, 0x58465342].includes(statfsSync(temp).type)) {
-    // Stock review bwrap makes /tmp tmpfs but binds its fresh private proof HOME
-    // from real storage. Use ONLY that throwaway directory, never the user's HOME.
-    // Keep the production ext4/XFS guard and the sandbox mounts unchanged.
-    const home = homedir(), st = lstatSync(home);
-    assert.equal(home, resolve(home));assert.equal(realpathSync(home), home);
-    assert.equal(dirname(home), temp);assert.match(basename(home), /^rmd-proof-home-[A-Za-z0-9]{6}$/);
+    // Stock review bwrap makes /tmp tmpfs; test setup replaces HOME there too.
+    // The existing writable checkout bind is real storage. Create only our
+    // unique private fixture beneath it, never change mounts or relax guards.
+    const checkout = realpathSync(process.cwd()), st = lstatSync(checkout);
     assert.ok(st.isDirectory() && !st.isSymbolicLink());
-    assert.equal(st.uid, process.getuid?.());assert.equal(st.mode & 0o777, 0o700);
-    assert.ok([0xef53, 0x58465342].includes(statfsSync(home).type), "proof HOME must be real supported local storage");
-    root = home;
+    assert.equal(st.uid, process.getuid?.());
+    assert.ok([0xef53, 0x58465342].includes(statfsSync(checkout).type), "proof checkout must be real supported local storage");
+    root = checkout;
   }
   const dir = mkdtempSync(join(root, "rmd-heavy-v2-"));
   chmodSync(dir, 0o700);
