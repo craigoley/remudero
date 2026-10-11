@@ -14797,7 +14797,7 @@ export async function runSweep(
   const rederivedIndices = new Set<number>();
   const freshReadAtMs = new Map<number, number>();
   const snapshotBaseMs = deps.snapshotPublishedAtMs ?? now;
-  const passClockMs = (): number => (deps.now ? deps.now() : Date.now());
+  const passClockMs = (): number => (deps.now ? deps.now() : systemClock.now());
   // W1-T5030: close ATTEMPTS the stale-proof supersession arm has made this pass.
   let staleProofCloses = 0;
 
@@ -17957,7 +17957,7 @@ export async function runSweepLightPass(
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary[]> {
   if (openPrs.length === 0) {
-    noteIdleReviewDemand(0, 0, deps.now ? deps.now() : Date.now());
+    noteIdleReviewDemand(0, 0, deps.now ? deps.now() : systemClock.now());
     return [await runSweep([], deps, policy)];
   }
   lightPassRefillsClosed = false;
