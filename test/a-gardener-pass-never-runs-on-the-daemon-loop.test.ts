@@ -57,7 +57,9 @@ test("gardener runtime projects only known fields at persistence and the read bo
   const result = await invokeGardenerRoute(buildGardenersRoute({ stateDir, clock, read: async () => raw }));
   assert.equal(result.status, 200);
   assert.deepEqual(result.body, { ...expected, generatedAt: stamp, coverage: "registered-off-loop",
-    counterWindow: "daemon-run", outcomeAssessment: "not_collected", spend: null });
+    counterWindow: "daemon-run", outcomeAssessment: "not_collected", spend: null,
+    opportunityEvidence: { version: 1, repository: null, readAt: stamp, coverage: "saved-opportunity-registry",
+      countSemantics: "reported_states_not_verified_outcomes", state: "unavailable", reason: "scope_unavailable" } });
   const extraInventory = inventory.map((garden) => ({ ...garden, internalNotes: "not-persisted" }));
   const projectedWriter = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "boot", clock,
     gardens: extraInventory, log: () => {} });
