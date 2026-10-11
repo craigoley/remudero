@@ -171,7 +171,7 @@ describe("W1-T6146: a driver planted in the pinned gitdir's config is refused be
       const keys = rows[0]!.extra.keys as string[];
       assert.ok(keys.includes("filter.x.clean") && keys.includes("merge.m.driver"), `the driver keys are named: ${keys.join(", ")}`);
       assert.deepEqual(noMarkers(tag, ["clean", "smudge", "process", "merge"]), [], "no driver command ran");
-      assert.equal(raw(dir, "ls-files", "--stage", "x.txt"), "", "nothing was staged");
+      assert.equal(raw(dir, "diff", "--cached", "--name-only"), "", "nothing was staged");
     });
   }
 });
