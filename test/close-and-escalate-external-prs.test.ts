@@ -293,3 +293,23 @@ test("W1-T7755: healthy replay does not exhaust unknown recovery or claim a new 
     assert.equal(rows.filter(r => r.status === "owner-action").length, 0);
   }
 });
+
+test("W1-T7755: a changed owner instruction and broken observation cannot become adoption or a hold", async () => {
+  const { store } = memoryStore();
+  for (let i = 0; i < 3; i++) await executeAdmissionDisposition({ settings, target }, store,
+    async () => ({ status: 503, body: {} }), () => {}, clock);
+  let comments = 0;
+  const instruction = { id: 9, user: { id: 1, type: "User" }, updated_at: new Date(NOW).toISOString(),
+    issue_url: "https://api.github.com/repos/acme/core/issues/42", body: `Remudero-Admission: adopt 3/42@${sha}` };
+  const read: AdmissionRead = async path => path.endsWith("/comments/9")
+    ? { status: 200, body: { ...instruction, body: ++comments === 1 ? instruction.body : "withdrawn" } } : source()(path);
+  const changed = await executeAdmissionDisposition({ settings, target, ownerInstructionId: 9 }, store, read, () => {}, clock);
+  assert.equal(changed.reason, "owner-target-changed"); assert.notEqual(changed.status, "adopted");
+  const root = mkdtempSync(join(tmpdir(), "rmd-disposition-broken-"));
+  try {
+    const invalid = structuredClone(settings); (invalid as unknown as Record<string, unknown>).cycle = invalid;
+    const unknown = await observeAdmissionDisposition(invalid, target, root, () => { throw Error("log offline"); }, undefined, source(), clock);
+    assert.equal(unknown?.status, "owner-action"); assert.equal(unknown?.permission, "not-granted");
+    assert.equal(unknown?.laneReleased, true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
