@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 import { feedbackLineageAuthority } from "../src/lib/authority.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, type AutoTriageInputs } from "../src/lib/auto-triage.js";
-import { classifyContribution, type AdmissionPolicy } from "../src/lib/contributor-admission.js";
+import { classifyContribution, feedbackContentDigest, type AdmissionPolicy, type FeedbackAdmissionSubject } from "../src/lib/contributor-admission.js";
 import {
   admitFeedbackContribution, captureFeedback, feedbackEntryPath, homeRepoPath, proposeFeedbackWithSummary,
   readFeedbackEntry, type FeedbackEntry,
@@ -36,14 +36,16 @@ function tmpRoot(): string {
 
 function issueRow(number: number, user: { id: number; type: string; login: string } | undefined, association = "NONE") {
   return {
-    number, title: `issue ${number}`, body: "please change the thing", state: "open",
+    id: 1000 + number, number, title: `issue ${number}`, body: "please change the thing", state: "open",
+    updated_at: new Date(NOW - 1000).toISOString(),
     created_at: "2026-10-10T00:00:00Z", html_url: `https://github.com/acme/widgets/issues/${number}`, labels: [],
     ...(user === undefined ? {} : { user, author_association: association }),
   };
 }
 
 function gateway(rows: ReturnType<typeof issueRow>[]): IssueListGateway {
-  return { list: (owner, repo) => rows.map((row) => normalizeIssue(owner, repo, row)) };
+  return { list: (owner, repo) => rows.map((row) => normalizeIssue(owner, repo, row)),
+    repository: (owner, repo) => ({ id: 100, fullName: `${owner}/${repo}`, private: false }) };
 }
 
 const SUMMARY = {
@@ -134,7 +136,7 @@ test("W1-T7754: a trusted summary cannot launder external contribution origin", 
   const outsider = { id: 9001, type: "User", login: "outsider" };
   const polled = await pollIssues([{ owner: "acme", repo: "widgets" }], {
     issues: gateway([issueRow(42, outsider)]), root, ledgerPath: join(root, "ledger.ndjson"), runId: "r1",
-    now: () => NOW, admission: { policy: POLICY },
+    now: () => NOW, admission: { mode: "shadow", policy: POLICY },
   });
   const [original] = polled.created;
   assert.deepEqual(original.contribution?.actor, outsider, "the issue author is recorded at capture");
@@ -151,14 +153,16 @@ test("W1-T7754: a trusted summary cannot launder external contribution origin", 
   // The relaying bot IS trusted in its own right — which is exactly what would launder the item.
   const botInput = {
     kind: "issue-comment" as const, sourceRef: "acme/widgets#42/comment/5", observedAtMs: NOW,
+    repository: { id: 100, fullName: "acme/widgets", private: false }, itemId: 5, issueNumber: 42,
+    revision: { updatedAt: new Date(NOW - 1000).toISOString(), contentDigest: feedbackContentDigest("summary") },
     origin: { actor: { id: SUMMARIZER_BOT_ID, type: "Bot", login: "rmd-summarizer[bot]" } },
   };
-  assert.equal(admitFeedbackContribution(botInput, { policy: POLICY, nowMs: NOW }).admission.outcome, "trusted");
+  assert.equal(admitFeedbackContribution(botInput, { mode: "shadow", policy: POLICY, nowMs: NOW }).admission.outcome, "trusted");
 
   // Re-filing the summary as feedback inherits the ORIGINAL contributor, not the summarizer's.
   const derived = captureFeedback(root, {
     raw: SUMMARY.headline, origin: "cli", land: { stateRoot: root },
-    contribution: botInput, admission: { policy: POLICY, nowMs: NOW },
+    contribution: botInput, admission: { mode: "shadow", policy: POLICY, nowMs: NOW },
     derivedFrom: { entry: proposed, relayedBy: "rmd-summarizer[bot]" },
   });
   const written = onDisk(root, derived.id).contribution as FeedbackEntry["contribution"];
@@ -169,11 +173,13 @@ test("W1-T7754: a trusted summary cannot launder external contribution origin", 
 
   // The subsequent task proposal: neither entry supplies autonomous authority.
   for (const id of [original.id, derived.id]) {
-    const authority = feedbackLineageAuthority(onDisk(root, id));
+    const authority = feedbackLineageAuthority(onDisk(root, id), { mode: "shadow", policy: POLICY,
+      nowMs: NOW, currentSubject: original.contribution?.subject });
     assert.equal(authority.autonomous, false, `${id} must not authorize autonomous adoption`);
     assert.equal(authority.basis, "external-contribution");
   }
-  assert.deepEqual(newFeedbackIdsOldestFirst(root).filter((id) => id === derived.id), []);
+  assert.deepEqual(newFeedbackIdsOldestFirst(root).filter((id) => id === derived.id), [derived.id],
+    "shadow observation is not live enforcement");
 });
 
 test("W1-T7754: feedback admission preserves trusted and legacy reconciliation flow", async () => {
@@ -181,7 +187,7 @@ test("W1-T7754: feedback admission preserves trusted and legacy reconciliation f
   // An owner-authored issue is admitted by the shared classifier and stays autonomously usable.
   const polled = await pollIssues([{ owner: "acme", repo: "widgets" }], {
     issues: gateway([issueRow(7, { id: OWNER_ID, type: "User", login: "owner" }, "OWNER")]), root,
-    ledgerPath: join(root, "ledger.ndjson"), runId: "r2", now: () => NOW, admission: { policy: POLICY },
+    ledgerPath: join(root, "ledger.ndjson"), runId: "r2", now: () => NOW, admission: { mode: "shadow", policy: POLICY },
   });
   const [owned] = polled.created;
   assert.equal(owned.contribution?.admission.outcome, "trusted");
@@ -203,8 +209,8 @@ test("W1-T7754: feedback admission preserves trusted and legacy reconciliation f
   for (const id of ["fb-legacy-cli", "fb-legacy-incident", "fb-legacy-bare", owned.id, cli.id]) {
     assert.ok(candidates.includes(id), `${id} remains an autonomous candidate`);
   }
-  // Only the one legacy issue whose author was never recorded waits for the owner.
-  assert.equal(candidates.includes("fb-legacy-issue"), false);
+  // Unknown origin does not grant pure authority, but no-policy selection remains unchanged.
+  assert.equal(candidates.includes("fb-legacy-issue"), true);
   assert.deepEqual(feedbackLineageAuthority(onDisk(root, "fb-legacy-issue")),
     { autonomous: false, basis: "unresolved-origin", reason: "legacy-origin-unresolved" });
   assert.equal(feedbackLineageAuthority(onDisk(root, "fb-legacy-cli")).basis, "legacy-internal");
@@ -223,16 +229,16 @@ test("W1-T7754: unresolved origin never supplies autonomous task authority", asy
   });
   const noActor = await pollIssues([{ owner: "acme", repo: "gadgets" }], {
     issues: gateway([issueRow(2, undefined)]), root,
-    ledgerPath: join(root, "ledger.ndjson"), runId: "r3", now: () => NOW, admission: { policy: POLICY },
+    ledgerPath: join(root, "ledger.ndjson"), runId: "r3", now: () => NOW, admission: { mode: "shadow", policy: POLICY },
   });
   const orgPolicy: AdmissionPolicy = { ...POLICY, organizationIds: [600] };
   const unresolved = await pollIssues([{ owner: "acme", repo: "sprockets" }], {
     issues: gateway([issueRow(3, { id: 502, type: "User", login: "maybe-member" })]), root,
-    ledgerPath: join(root, "ledger.ndjson"), runId: "r3", now: () => NOW, admission: { policy: orgPolicy },
+    ledgerPath: join(root, "ledger.ndjson"), runId: "r3", now: () => NOW, admission: { mode: "shadow", policy: orgPolicy },
   });
   const reasons = [noPolicy, noActor, unresolved].map((r) => r.created[0].contribution?.admission);
   assert.deepEqual(reasons.map((a) => [a?.outcome, a?.reason]), [
-    ["unknown", "no-admission-policy"], ["unknown", "missing-origin"], ["unknown", "membership-unresolved"],
+    [undefined, undefined], ["unknown", "missing-origin"], ["unknown", "membership-unresolved"],
   ]);
   for (const r of [noPolicy, noActor, unresolved]) {
     const authority = feedbackLineageAuthority(onDisk(root, r.created[0].id));
@@ -240,29 +246,102 @@ test("W1-T7754: unresolved origin never supplies autonomous task authority", asy
     assert.equal(authority.basis, "unresolved-origin");
   }
 
-  // Effect trap: the autonomous rung has nothing it may adopt, so it never fires.
-  assert.deepEqual(newFeedbackIdsOldestFirst(root), []);
+  // Separate the hypothetical authority decision from actual shadow effects.
+  assert.equal(newFeedbackIdsOldestFirst(root).length, 3);
   const decision = decideAutoTriage(triageInputs(newFeedbackIdsOldestFirst(root)));
-  assert.equal(decision.fire, false);
+  assert.equal(decision.fire, true, "shadow-only does not claim to have blocked adoption");
 
-  // Effect trap: an unresolved contribution is never published to a home repo either.
+  // No-config upstream behavior is preserved. All outward calls use a fixture, not GitHub.
   mkdirSync(join(root, ".remudero"), { recursive: true });
   writeFileSync(homeRepoPath(root), JSON.stringify({ repo: "acme/upstream" }));
   const ghCalls: string[][] = [];
   const entry = captureFeedback(root, {
     raw: "relayed outside request", origin: "issue#4", land: { stateRoot: root },
     contribution: { kind: "issue", sourceRef: "acme/widgets#4", observedAtMs: NOW, origin: { actor: { id: 503, type: "User", login: "x" } } },
-    upstream: {
-      git: () => "https://github.com/someone-else/otherrepo.git\n",
-      gh: (args) => { ghCalls.push(args); throw new Error("gh must not be called"); },
-    },
+    upstream: upstreamFixture(ghCalls),
   });
-  assert.deepEqual(ghCalls, []);
-  assert.equal(entry.upstream?.status, "withheld");
+  assert.equal(ghCalls.length, 5);
+  assert.equal(entry.upstream?.status, "landed");
 
   // The shared classifier evaluates a feedback subject only for the feedback action.
   const subject = { kind: "issue" as const, sourceRef: "acme/widgets#4", observedAtMs: NOW,
     origin: { actor: { id: OWNER_ID, type: "User" } } };
   assert.equal(classifyContribution(subject, "auto-merge", POLICY, [], NOW).reason, "invalid-context");
+  assert.equal(classifyContribution(subject, "feedback", POLICY, [], NOW).outcome, "unknown",
+    "owner identity does not invent a missing source revision");
+});
+
+function boundIssue(): FeedbackAdmissionSubject {
+  return { kind: "issue", sourceRef: "acme/widgets#4", observedAtMs: NOW,
+    repository: { id: 100, fullName: "acme/widgets", private: true }, itemId: 1004, issueNumber: 4,
+    revision: { updatedAt: new Date(NOW - 1000).toISOString(), contentDigest: feedbackContentDigest("source body") },
+    origin: { actor: { id: OWNER_ID, type: "User", login: "owner" } } };
+}
+
+test("W1-T7754 checkpoint: authority re-evaluates a fresh bound source and rejects revisions and stale evidence", () => {
+  const subject = boundIssue();
+  const contribution = admitFeedbackContribution(subject, { mode: "shadow", policy: POLICY, nowMs: NOW });
+  const entry = { origin: "issue#4", contribution };
+  const context = { mode: "shadow" as const, policy: POLICY, nowMs: NOW, currentSubject: subject };
+  assert.equal(feedbackLineageAuthority(entry, context).autonomous, true);
+  assert.equal(feedbackLineageAuthority(entry, { ...context, currentSubject: undefined }).reason, "origin-recheck-unavailable");
+  for (const currentSubject of [
+    { ...subject, itemId: 1005 },
+    { ...subject, repository: { ...subject.repository, id: 101 } },
+    { ...subject, revision: { ...subject.revision, contentDigest: feedbackContentDigest("edited body") } },
+    { ...subject, revision: { ...subject.revision, updatedAt: new Date(NOW).toISOString() } },
+    { ...subject, origin: { actor: { id: 9001, type: "User" } } },
+  ]) assert.equal(feedbackLineageAuthority(entry, { ...context, currentSubject }).reason, "source-revision-changed");
+  assert.equal(feedbackLineageAuthority(entry, { ...context, nowMs: NOW + 60_001 }).reason, "stale-origin");
+  contribution.admission.outcome = "confirmed-external";
+  assert.equal(feedbackLineageAuthority(entry, context).autonomous, true, "stored outcome is not current authority");
+});
+
+test("W1-T7754 checkpoint: reaction identity uses created_at and separately binds derived parent revision", () => {
+  const parent = boundIssue();
+  const subject: FeedbackAdmissionSubject = { ...parent, kind: "issue-reaction", sourceRef: "acme/widgets#4/reaction/81",
+    itemId: 81, revision: { createdAt: new Date(NOW - 500).toISOString(), contentDigest: feedbackContentDigest("+1") },
+    parent: { kind: "issue", itemId: 1004, revision: parent.revision! } };
   assert.equal(classifyContribution(subject, "feedback", POLICY, [], NOW).outcome, "trusted");
+  assert.equal(classifyContribution({ ...subject, parent: undefined }, "feedback", POLICY, [], NOW).reason, "invalid-parent-revision");
+  assert.equal(classifyContribution({ ...subject, revision: { ...subject.revision, updatedAt: new Date(NOW).toISOString() } },
+    "feedback", POLICY, [], NOW).reason, "invalid-source-revision");
+  const comment: FeedbackAdmissionSubject = { ...subject, kind: "issue-comment-reaction", sourceRef: "acme/widgets#4/comment/9/reaction/81",
+    parent: { kind: "issue-comment", itemId: 9, revision: parent.revision! } };
+  assert.equal(classifyContribution(comment, "feedback", POLICY, [], NOW).outcome, "trusted");
+  assert.equal(classifyContribution({ ...comment, parent: { ...comment.parent!, itemId: 10 } },
+    "feedback", POLICY, [], NOW).reason, "invalid-parent-revision");
+});
+
+test("W1-T7754 checkpoint: shadow selection records would-deny but diagnostic failure cannot hold the queue", () => {
+  const root = tmpRoot();
+  const subject = boundIssue();
+  subject.origin = { actor: { id: 9001, type: "User" } };
+  const entry = captureFeedback(root, { raw: "outside request", origin: "issue#4", land: { stateRoot: root },
+    contribution: subject, admission: { mode: "shadow", policy: POLICY, nowMs: NOW } });
+  const receipts: Record<string, unknown>[] = [];
+  const context = { mode: "shadow" as const, policy: POLICY, currentSubject: subject, nowMs: NOW,
+    record: (_step: string, fields: Record<string, unknown>) => { receipts.push(fields); } };
+  assert.ok(newFeedbackIdsOldestFirst(root, context).includes(entry.id));
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0].would_deny, true);
+  assert.equal(receipts[0].basis, "external-contribution");
+  assert.ok(newFeedbackIdsOldestFirst(root, { ...context, record: () => { throw new Error("receipt unavailable"); } }).includes(entry.id));
+});
+
+test("W1-T7754 checkpoint: capture deep-copies source binding and unreadable repository metadata stays unknown", async () => {
+  const root = tmpRoot();
+  const source = boundIssue();
+  const contribution = admitFeedbackContribution(source, { mode: "shadow", policy: POLICY, nowMs: NOW });
+  source.origin!.actor!.id = 9001;
+  source.revision!.contentDigest = feedbackContentDigest("edited");
+  assert.equal(contribution.subject?.origin?.actor?.id, OWNER_ID);
+  assert.notEqual(contribution.subject?.revision?.contentDigest, source.revision.contentDigest);
+  const issues = gateway([issueRow(7, { id: OWNER_ID, type: "User", login: "owner" })]);
+  issues.repository = () => { throw new Error("unreadable"); };
+  const result = await pollIssues([{ owner: "acme", repo: "widgets" }], { issues, root,
+    ledgerPath: join(root, "ledger.ndjson"), runId: "unreadable", now: () => NOW,
+    admission: { mode: "shadow", policy: POLICY } });
+  assert.equal(result.created[0].contribution?.admission.reason, "invalid-source-identity");
+  assert.ok(newFeedbackIdsOldestFirst(root).includes(result.created[0].id));
 });

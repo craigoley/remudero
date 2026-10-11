@@ -1,12 +1,13 @@
 import { execFileSync } from "node:child_process";
 import { ghExec } from "./github-transport.js";
 import { createHash, randomBytes } from "node:crypto";
-import { feedbackLineageAuthority } from "./authority.js";
+import { feedbackLineageAuthority, observeFeedbackAdmission } from "./authority.js";
 import { fixedClock, systemClock } from "./clock.js";
 import {
-  classifyContribution, type AdmissionDecision, type AdmissionPolicy, type ContributionActor, type ContributionOrigin,
-  type FeedbackAdmissionSubject, type MembershipEvidence,
+  classifyContribution, type AdmissionDecision, type ContributionActor,
+  type FeedbackAdmissionSubject, type FeedbackAdmissionContext,
 } from "./contributor-admission.js";
+export type { FeedbackAdmissionContext } from "./contributor-admission.js";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -100,12 +101,12 @@ export interface FeedbackEntry {
   expansion?: FeedbackExpansion | null;
   /** Present ONLY when a home-repo pointer (W1-T397) is configured AND this checkout is not
    * itself the home repo. `status: "landed"` once a PR carries this entry; `"unreachable"` on
-   * any failure, with `error` naming why; `"withheld"` for unadmitted lineage (W1-T7754).
+   * any failure, with `error` naming why.
    * The entry is always captured locally first. */
   upstream?: {
     /** "owner/repo" of the configured home repo. */
     home: string;
-    status: "landed" | "unreachable" | "withheld";
+    status: "landed" | "unreachable";
     pr_url?: string;
     error?: string;
   };
@@ -715,7 +716,7 @@ export interface FeedbackContributionAdmission {
 }
 
 export interface FeedbackContribution {
-  kind: FeedbackAdmissionSubject["kind"];
+  kind: FeedbackAdmissionSubject["kind"] | "unresolved";
   source_ref: string;
   url: string | null;
   /** The ORIGINAL contributor as GitHub reported it, never a relaying identity. */
@@ -725,21 +726,11 @@ export interface FeedbackContribution {
   admission: FeedbackContributionAdmission;
   relayed_by: string[];
   derived_from: string | null;
+  subject?: FeedbackAdmissionSubject;
 }
 
-export interface FeedbackContributionInput {
-  kind: FeedbackAdmissionSubject["kind"];
-  sourceRef: string;
+export interface FeedbackContributionInput extends FeedbackAdmissionSubject {
   url?: string;
-  origin?: ContributionOrigin;
-  observedAtMs: number;
-}
-
-/** No policy means `unknown` (`no-admission-policy`), never an implicit trust grant. */
-export interface FeedbackAdmissionContext {
-  policy?: AdmissionPolicy;
-  memberships?: readonly MembershipEvidence[];
-  nowMs?: number;
 }
 
 function copyActor(actor: ContributionActor | null | undefined): ContributionActor | null {
@@ -756,8 +747,13 @@ export function admitFeedbackContribution(input: FeedbackContributionInput, cont
   const subject: FeedbackAdmissionSubject = {
     kind: input.kind, sourceRef: input.sourceRef, observedAtMs: input.observedAtMs,
     ...(input.origin === undefined ? {} : { origin: input.origin }),
+    ...(input.repository === undefined ? {} : { repository: input.repository }),
+    ...(input.itemId === undefined ? {} : { itemId: input.itemId }),
+    ...(input.issueNumber === undefined ? {} : { issueNumber: input.issueNumber }),
+    ...(input.revision === undefined ? {} : { revision: input.revision }),
+    ...(input.parent === undefined ? {} : { parent: input.parent }),
   };
-  const decision: AdmissionDecision = context.policy === undefined
+  const decision: AdmissionDecision = context.mode !== "shadow" || context.policy === undefined
     ? { outcome: "unknown", reason: "no-admission-policy",
       receiptKey: createHash("sha256").update(JSON.stringify([subject, "feedback", "no-admission-policy"])).digest("hex") }
     : classifyContribution(subject, "feedback", context.policy, context.memberships ?? [], context.nowMs ?? systemClock.now());
@@ -772,6 +768,7 @@ export function admitFeedbackContribution(input: FeedbackContributionInput, cont
       policy_version: context.policy?.version ?? null },
     relayed_by: [],
     derived_from: null,
+    subject: structuredClone(subject),
   };
 }
 
@@ -781,13 +778,13 @@ export function inheritFeedbackLineage(
   parent: Pick<FeedbackEntry, "id" | "origin" | "contribution">, relayedBy: string,
 ): FeedbackContribution | null {
   if (parent.contribution) {
-    return { ...parent.contribution, relayed_by: [...(parent.contribution.relayed_by ?? []), relayedBy],
+    return { ...structuredClone(parent.contribution), relayed_by: [...(parent.contribution.relayed_by ?? []), relayedBy],
       derived_from: parent.contribution.derived_from ?? parent.id };
   }
   const legacy = feedbackLineageAuthority(parent);
   if (legacy.autonomous) return null;
   return {
-    kind: "issue", source_ref: String(parent.origin), url: null, actor: null, association: null, observed_at: "",
+    kind: "unresolved", source_ref: String(parent.origin), url: null, actor: null, association: null, observed_at: "",
     admission: { outcome: "unknown", reason: legacy.reason, receipt_key: "", policy_version: null },
     relayed_by: [relayedBy], derived_from: parent.id,
   };
@@ -868,7 +865,8 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
   // W1-T7754: lineage is decided BEFORE the entry is written, landed or published upstream.
   const contribution = opts.derivedFrom !== undefined
     ? inheritFeedbackLineage(opts.derivedFrom.entry, opts.derivedFrom.relayedBy)
-    : opts.contribution !== undefined ? admitFeedbackContribution(opts.contribution, opts.admission) : null;
+    : opts.admission?.mode === "shadow" && opts.contribution !== undefined
+      ? admitFeedbackContribution(opts.contribution, opts.admission) : null;
   let entry: FeedbackEntry = {
     id,
     ts: new Date().toISOString(),
@@ -885,6 +883,7 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
     ...(contribution === null ? {} : { contribution }),
   };
   writeFileSync(feedbackEntryPath(root, id), stringifyYaml(entry));
+  observeFeedbackAdmission(entry, opts.admission, "capture");
   try {
     landFeedback(root, opts.land ?? {});
   } catch {
@@ -895,13 +894,8 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
     if (home) {
       const git = opts.upstream?.git ?? defaultUpstreamGit(root);
       const current = resolveCurrentRepoFromGit(git);
-      const lineage = feedbackLineageAuthority(entry);
-      if (!isUpstreamSelfTarget(current, home) && !lineage.autonomous) {
-        // An unadmitted outside contribution is owner-attention evidence, not content to publish.
-        entry = { ...entry, upstream: { home: `${home.owner}/${home.repo}`, status: "withheld",
-          error: `contribution lineage ${lineage.basis}: ${lineage.reason}` } };
-        writeFileSync(feedbackEntryPath(root, id), stringifyYaml(entry));
-      } else if (!isUpstreamSelfTarget(current, home)) {
+      if (!isUpstreamSelfTarget(current, home)) {
+        observeFeedbackAdmission(entry, opts.admission, "upstream-capture");
         const gh = opts.upstream?.gh ?? defaultUpstreamGh();
         const { prUrl, error } = openUpstreamFeedbackPr(home, id, stringifyYaml(entry), gh);
         entry = {

@@ -68,6 +68,8 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import type { Policy } from "./policy.js";
 import type { LedgerUnionResult } from "./ledger-grep.js";
+import { classifyContribution, feedbackSubjectBinding, type FeedbackAdmissionContext, type FeedbackAdmissionSubject } from "./contributor-admission.js";
+import { systemClock } from "./clock.js";
 
 /** What decides whether a row's write fires. Closed vocabulary — design note (i). */
 export type AuthorityGateKind = "policy" | "ledger-verdict" | "operator-verb" | "sweep-rung" | "always";
@@ -612,24 +614,36 @@ export interface FeedbackLineageAuthority {
 const OUTSIDE_FEEDBACK_ORIGIN = /^(issue|comment)(#|$)/;
 
 /** PURE. Reads a parsed `plan/feedback/<id>.yaml` record; never trusts a shape it did not check. */
-export function feedbackLineageAuthority(entry: unknown): FeedbackLineageAuthority {
+export function feedbackLineageAuthority(entry: unknown, context: FeedbackAdmissionContext = {}): FeedbackLineageAuthority {
   if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
     return { autonomous: false, basis: "unresolved-origin", reason: "unreadable-entry" };
   }
   const record = entry as Record<string, unknown>;
   const contribution = record.contribution;
   if (contribution !== undefined && contribution !== null) {
-    const admission = typeof contribution === "object" && !Array.isArray(contribution)
-      ? (contribution as Record<string, unknown>).admission : undefined;
-    const decided = typeof admission === "object" && admission !== null ? admission as Record<string, unknown> : {};
-    const reason = typeof decided.reason === "string" ? decided.reason : "missing-admission";
-    if (decided.outcome === "trusted") return { autonomous: true, basis: "admitted-contribution", reason };
-    if (decided.outcome === "confirmed-external") return { autonomous: false, basis: "external-contribution", reason };
-    return { autonomous: false, basis: "unresolved-origin", reason };
+    const unresolved = (reason: string): FeedbackLineageAuthority => ({ autonomous: false, basis: "unresolved-origin", reason });
+    if (context.mode !== "shadow" || !context.policy) return unresolved("no-admission-policy");
+    const subject = typeof contribution === "object" && !Array.isArray(contribution)
+      ? (contribution as Record<string, unknown>).subject as FeedbackAdmissionSubject | undefined : undefined;
+    if (!subject || typeof subject !== "object" || !context.currentSubject) return unresolved("origin-recheck-unavailable");
+    if (feedbackSubjectBinding(subject) !== feedbackSubjectBinding(context.currentSubject)) return unresolved("source-revision-changed");
+    const decided = classifyContribution(context.currentSubject, "feedback", context.policy, context.memberships ?? [], context.nowMs ?? systemClock.now());
+    return { autonomous: decided.outcome === "trusted", reason: decided.reason,
+      basis: decided.outcome === "trusted" ? "admitted-contribution" : decided.outcome === "confirmed-external" ? "external-contribution" : "unresolved-origin" };
   }
   const origin = typeof record.origin === "string" ? record.origin : "";
   if (OUTSIDE_FEEDBACK_ORIGIN.test(origin)) return { autonomous: false, basis: "unresolved-origin", reason: "legacy-origin-unresolved" };
   return { autonomous: true, basis: "legacy-internal", reason: origin ? `legacy-${origin.split("#")[0]}` : "legacy-unlabelled" };
+}
+
+/** Observation only. An absent policy or failed observer cannot change existing effects. */
+export function observeFeedbackAdmission(entry: unknown, context: FeedbackAdmissionContext | undefined, action: string): void {
+  if (context?.mode !== "shadow" || !context.policy) return;
+  const authority = feedbackLineageAuthority(entry, context);
+  try {
+    context.record?.("feedback_admission.shadow", { mode: "shadow", action, would_deny: !authority.autonomous,
+      basis: authority.basis, reason: authority.reason, policy_version: context.policy.version });
+  } catch { /* Diagnostic failure is not effect authority or a global trusted-flow hold. */ }
 }
 
 function getPolicyValue(policy: Policy | undefined, path: string): unknown {

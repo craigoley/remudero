@@ -7,7 +7,8 @@ import { classifyPushFailure } from "./task-id-reservation.js";
 import { assertClaimRefPushAllowed, assertClaimRefPushAllowedAsync } from "./live-write-guard.js";
 import { hostWorktreeGit } from "./worktree-git.js";
 import { parse as parseYaml } from "yaml";
-import { feedbackLineageAuthority } from "./authority.js";
+import { observeFeedbackAdmission } from "./authority.js";
+import type { FeedbackAdmissionContext } from "./contributor-admission.js";
 
 /**
  * The daemon's second work-generating rung (recon-DC #2): claims and fires at most one feedback
@@ -795,12 +796,10 @@ export function decideAutoTriage(i: AutoTriageInputs): AutoTriageDecision {
  * and {@link oldestFeedbackAgeMs} (age) build on this single walk. Reads each entry's own
  * `status:`, never a classification report.
  *
- * W1-T7754: this rung adopts feedback with no operator present, so it also reads the entry's
- * recorded contribution lineage. An entry whose lineage is unknown or external is owner-attention
- * evidence: it stays at `status: new` for the hand route and is never an autonomous candidate.
+ * W1-T7754: explicit shadow policy observes lineage; it never filters the legacy queue.
  * Why: docs/forensics/auto-triage.md#feedbackentriesoldestfirst.
  */
-function feedbackEntriesOldestFirst(root: string): Array<{ id: string; ts: string }> {
+function feedbackEntriesOldestFirst(root: string, admission?: FeedbackAdmissionContext): Array<{ id: string; ts: string }> {
   const dir = join(root, "plan", "feedback");
   if (!existsSync(dir)) return [];
   const out: Array<{ id: string; ts: string }> = [];
@@ -813,14 +812,12 @@ function feedbackEntriesOldestFirst(root: string): Array<{ id: string; ts: strin
       continue; // an unreadable entry is skipped, never a reason to refuse the whole sweep
     }
     if (!/^status:\s*new\s*$/m.test(text)) continue;
-    let record: unknown;
-    try {
-      record = parseYaml(text);
-    } catch (error) {
-      // Unparseable lineage cannot authorize autonomous adoption; the hand route still sees it.
-      record = { contribution: { admission: { outcome: "unknown", reason: `unparseable-entry: ${String(error)}` } } };
+    if (admission?.mode === "shadow") {
+      let record: unknown;
+      try { record = parseYaml(text); }
+      catch { record = null; }
+      observeFeedbackAdmission(record, admission, "autonomous-selection");
     }
-    if (!feedbackLineageAuthority(record).autonomous) continue;
     const ts = text.match(/^ts:\s*(\S+)\s*$/m)?.[1] ?? "";
     out.push({ id: name.replace(/\.yaml$/, ""), ts });
   }
@@ -846,8 +843,8 @@ export function feedbackStatusOnMain(root: string, feedbackId: string): string |
 
 /** Feedback ids at `status: new`, oldest first — the count half of
  *  {@link feedbackEntriesOldestFirst}'s one read; see {@link oldestFeedbackAgeMs} for the age half. */
-export function newFeedbackIdsOldestFirst(root: string): string[] {
-  return feedbackEntriesOldestFirst(root).map((e) => e.id);
+export function newFeedbackIdsOldestFirst(root: string, admission?: FeedbackAdmissionContext): string[] {
+  return feedbackEntriesOldestFirst(root, admission).map((e) => e.id);
 }
 
 /**

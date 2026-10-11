@@ -31,14 +31,35 @@ export interface AdmissionSubject {
   observedAtMs: number;
   origin?: ContributionOrigin;
 }
-/** W1-T7754: an issue or issue comment entering the feedback inbox. It has no head commit or head
- * repository; `sourceRef` names the ORIGINAL item (`owner/repo#n`, `.../comment/<id>`), never the
- * summarizer or bot that relayed it. Only the "feedback" action evaluates this shape. */
+export interface FeedbackRevision { updatedAt?: string; createdAt?: string; contentDigest?: string }
+/** Actual REST item identity, not a fabricated PR head. Reactions bind their derived parent separately. */
 export interface FeedbackAdmissionSubject {
-  kind: "issue" | "issue-comment";
+  kind: "issue" | "issue-comment" | "issue-reaction" | "issue-comment-reaction";
   sourceRef: string;
+  repository?: ContributionRepository & { private?: boolean };
+  itemId?: number;
+  issueNumber?: number;
+  revision?: FeedbackRevision;
+  parent?: { kind: "issue" | "issue-comment"; itemId: number; revision: FeedbackRevision };
   observedAtMs: number;
   origin?: ContributionOrigin;
+}
+export interface FeedbackAdmissionContext {
+  mode?: "shadow";
+  policy?: AdmissionPolicy;
+  memberships?: readonly MembershipEvidence[];
+  nowMs?: number;
+  currentSubject?: FeedbackAdmissionSubject;
+  record?: AdmissionRecord;
+}
+
+export function feedbackContentDigest(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+export function feedbackSubjectBinding(subject: FeedbackAdmissionSubject): string {
+  return feedbackContentDigest([subject.kind, subject.sourceRef, subject.repository, subject.itemId,
+    subject.issueNumber, subject.revision, subject.parent, subject.origin]);
 }
 /** A credential-capable resolver must verify this state: a 403/404 alone does not prove
  * non-membership in a private organization. Unreadable or permission-ambiguous reads are unknown. */
@@ -253,11 +274,28 @@ export function classifyContribution(
   if (!Number.isFinite(nowMs) || nowMs < 0) return decision("unknown", "invalid-context");
   if (pr === undefined) {
     const item = subject as FeedbackAdmissionSubject;
-    // A feedback item is evaluated for the feedback action only, and names its original source.
-    if (action !== "feedback" || (item.kind !== "issue" && item.kind !== "issue-comment")
-      || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#\d+(\/comment\/\d+)?$/.test(item.sourceRef)) {
-      return decision("unknown", "invalid-context");
+    if (action !== "feedback") return decision("unknown", "invalid-context");
+    const ref = /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([1-9]\d*)(?:\/comment\/([1-9]\d*))?(?:\/reaction\/([1-9]\d*))?$/.exec(item.sourceRef);
+    const reaction = item.kind === "issue-reaction" || item.kind === "issue-comment-reaction";
+    const comment = item.kind === "issue-comment" || item.kind === "issue-comment-reaction";
+    if (!ref || !["issue", "issue-comment", "issue-reaction", "issue-comment-reaction"].includes(item.kind)
+      || comment !== (ref[3] !== undefined) || reaction !== (ref[4] !== undefined)
+      || !validId(item.repository?.id) || item.repository?.fullName !== ref[1]
+      || !validId(item.itemId) || item.issueNumber !== Number(ref[2])
+      || (reaction ? item.itemId !== Number(ref[4]) : comment && item.itemId !== Number(ref[3]))) {
+      return decision("unknown", "invalid-source-identity");
     }
+    const validRevision = (revision: FeedbackRevision | undefined, isReaction = false): boolean => {
+      const timestamp = isReaction ? revision?.createdAt : revision?.updatedAt;
+      const time = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
+      return Number.isFinite(time) && time >= 0 && time <= item.observedAtMs
+        && /^[a-f0-9]{64}$/.test(revision?.contentDigest ?? "")
+        && (!isReaction || revision?.updatedAt === undefined);
+    };
+    if (!validRevision(item.revision, reaction)) return decision("unknown", "invalid-source-revision");
+    if (reaction && (!item.parent || item.parent.kind !== (comment ? "issue-comment" : "issue")
+      || !validId(item.parent.itemId) || (comment && item.parent.itemId !== Number(ref[3]))
+      || !validRevision(item.parent.revision))) return decision("unknown", "invalid-parent-revision");
   } else if (!validId(pr.repositoryId) || !validId(pr.prNumber) || !/^[a-f0-9]{40}$/i.test(pr.headSha)) {
     return decision("unknown", "invalid-context");
   }
