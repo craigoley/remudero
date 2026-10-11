@@ -164,6 +164,69 @@ test("W1-T7754 source: unreadable REST, permission ambiguity, comment reparentin
   assert.ok(count <= 5, "reaction lookup is capped, not a repository scanner");
 });
 
+test("W1-T7754 source: real default transport leaves the event loop responsive while a GitHub child is in flight", async () => {
+  const f = sourceFixture();
+  const shim = ghShim(Object.entries(f.routes).map(([path, body]) => ({ when: `api ${path} -i`,
+    stdout: `HTTP/2.0 200 OK\n\n${JSON.stringify(body)}`, ...(path === "repos/acme/widgets" ? { delaySeconds: 0.15 } : {}) })),
+  { kind: "feedback-action-source" });
+  const previousPath = process.env.PATH;
+  try {
+    process.env.PATH = `${shim.dir}:${previousPath}`;
+    let finished = false;
+    const pending = recheckSource(f.settings, f.subject, "direct-adoption", () => {}, { clock: { now: () => NOW } })
+      .finally(() => { finished = true; });
+    const until = Date.now() + 2_000;
+    while (!shim.events().some(e => e.phase === "start") && Date.now() < until) await new Promise(r => setTimeout(r, 5));
+    assert.equal(finished, false);
+    const events = shim.events();
+    assert.ok(events.some(e => e.phase === "start" && !events.some(end => end.phase === "end" && end.id === e.id)),
+      "not merely a promise around an already-completed synchronous child");
+    assert.equal((await pending)?.decision.reason, "owner");
+    assert.equal(shim.calls().length, 4);
+  } finally { process.env.PATH = previousPath; rmSync(shim.dir, { recursive: true, force: true }); }
+});
+
+test("W1-T7754 source: real default failed and malformed responses cannot grant trust or hold shadow effects", async () => {
+  const previousPath = process.env.PATH;
+  for (const route of [
+    { stdout: "HTTP/2.0 403 Forbidden\n\n{}", exit: 1 },
+    { stdout: "HTTP/2.0 200 OK\n\nnot-json" },
+    { stderr: "transport offline", exit: 1 },
+  ]) {
+    const shim = ghShim([{ when: "", ...route }], { kind: "feedback-action-failure" });
+    try {
+      process.env.PATH = `${shim.dir}:${previousPath}`;
+      const f = sourceFixture();
+      const result = await recheckSource(f.settings, f.subject, "adoption", () => { throw new Error("receipt offline"); },
+        { clock: { now: () => NOW } });
+      assert.equal(result?.decision.outcome, "unknown");
+      assert.equal(shim.calls().length, 1);
+    } finally { process.env.PATH = previousPath; rmSync(shim.dir, { recursive: true, force: true }); }
+  }
+});
+
+test("W1-T7754 source: positive membership is bounded by pinned policy and failed rechecks never reuse trust", async () => {
+  const f = sourceFixture("issue", 9011);
+  f.settings.policy = { ...POLICY, version: "source-cache-case", organizationIds: [600] };
+  f.settings.organizations = [{ id: 600, login: "acme" }];
+  let membershipReads = 0, failRecheck = false, repoReads = 0;
+  const read: AdmissionRead = path => {
+    if (path.startsWith("orgs/")) { membershipReads++; return { status: 200,
+      body: { state: "active", user: { id: 9011 }, organization: { id: 600 } } }; }
+    if (path === "repos/acme/widgets" && ++repoReads % 2 === 0 && failRecheck) throw new Error("recheck failed");
+    return f.read(path);
+  };
+  const run = () => recheckSource(f.settings, f.subject, "fix", () => {}, { read, clock: { now: () => NOW } });
+  assert.equal((await run())?.decision.reason, "organization-member");
+  assert.equal((await run())?.decision.reason, "organization-member");
+  assert.equal(membershipReads, 1);
+  failRecheck = true;
+  assert.equal((await run())?.decision.outcome, "unknown");
+  f.settings.policy.version = "source-cache-case-changed"; failRecheck = false;
+  assert.equal((await run())?.decision.reason, "organization-member");
+  assert.equal(membershipReads, 2);
+});
+
 function tmpRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "rmd-feedback-origin-"));
   mkdirSync(join(root, "plan", "feedback"), { recursive: true });
