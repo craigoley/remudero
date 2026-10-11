@@ -18938,8 +18938,9 @@ export function checkMemoryGovernor(
 
 /** THE OBSERVATION IS LEDGERED ON EVERY CONSULTATION — unlike the two deferral loggers above, this
  *  ledgers unconditionally, admitted readings included: a deferral-only row would sample exactly the
- *  population that never happens while the floor ships disabled. NOT registered in `ledger.ts`'s
- *  decision-relevant set, because nothing reads this step back yet — THE READER IS THE OPERATOR.
+ *  population that never happens while the floor ships disabled. Registered in `ledger.ts`'s
+ *  decision-relevant set for the memory governor's history read and dispatch memory floor calibration
+ *  (W1-T7814); rotation keeps a bounded window so it need not relearn from an empty history.
  *  Written WITHOUT the literal comparison expression, because test/ledger-rotation.test.ts derives
  *  that set by scanning this file's TEXT, comments included. */
 export function logMemoryObservation(
