@@ -1,0 +1,11 @@
+diff --git a/learnings/ci.yaml b/learnings/ci.yaml
+index 1111111..2222222 100644
+--- a/learnings/ci.yaml
++++ b/learnings/ci.yaml
+@@ -0,0 +1,6 @@
++- id: coverage-session-blanking-env-form
++  subsystem: ci
++  lifecycle: active
++  files: ["test/**/*.ts", scripts/coverage-session-blanking-check.mjs]
++  fact: Blank NODE_V8_COVERAGE with undefined or an empty string, never delete.
++  src: "ci-learning:10516:coverage-session-blanking"
