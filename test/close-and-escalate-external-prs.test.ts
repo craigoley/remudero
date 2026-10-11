@@ -411,3 +411,12 @@ test("W1-T7755: disposition membership negatives need numeric credential control
   const result = await executeAdmissionDisposition({ settings: narrowed, target }, memoryStore().store, source(pull(2)), () => {}, clock);
   assert.equal(result.status, "pending"); assert.equal(result.reason, "service-out-of-scope");
 });
+
+test("W1-T7755: a fresh existing owner comment is adoptable on the first observation", async () => {
+  const instruction = { id: 9, user: { id: 1, type: "User" }, updated_at: new Date(NOW - 1_000).toISOString(),
+    issue_url: "https://api.github.com/repos/acme/core/issues/42", body: `Remudero-Admission: adopt 3/42@${sha}` };
+  const result = await executeAdmissionDisposition({ settings, target, ownerInstructionId: 9 }, memoryStore().store,
+    async path => path.endsWith("/comments/9") ? { status: 200, body: instruction } : source()(path), () => {}, clock);
+  assert.equal(result.status, "adopted"); assert.equal(result.evidence, "fresh");
+  assert.equal(result.requiredChecks, "ordinary-current-head-checks-required");
+});
