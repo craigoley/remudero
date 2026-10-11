@@ -41,7 +41,7 @@ function fixture(t: TestContext, rowMs: number, own = false) {
   assert.deepEqual(states.map((state) => state.lease), ["held", "held"]);
   const queries: string[] = [];
   const wrapped = new Set<ReadModelDb>();
-  const keys = ["", "part=tasks", `id=${ID}&instance=%63onsole-east`, "instance=offline", "instance=unknown", "instance="];
+  const keys = ["", "part=tasks", `id=${ID}&instance=%63onsole-east`, "instance=offline", "instance=unknown", "instance=", "instance=core"];
   const view: ReadModelView = { name: VIEW, version: 1, materialize: ({ instances: slots }) => {
     for (const { state, db } of slots) {
       if (!db || wrapped.has(db)) continue;
@@ -67,7 +67,7 @@ function fixture(t: TestContext, rowMs: number, own = false) {
         data: [{ taskId: ID, status: "legacy" }], asOfMs: NOW, ...extra,
       } }), true);
       const state = (JSON.parse(readFileSync(viewShadowPath(stateDir), "utf8")) as Record<string, ViewShadowState>)[VIEW]!;
-      return { diffs: state.diffs, queries: [...queries] };
+      return { diffs: state.diffs, queries: [...queries], lastRealMs: state.lastRealMs, streakSamples: state.streakSamples };
     },
     instanceKey: keys[2]!,
   };
@@ -86,6 +86,8 @@ test("test/shadow-evidence-reads-only-the-key-s-own-instance.test.ts", async (t)
       const result = f.compare(f.instanceKey, scenario.extra);
       assert.deepEqual(result.diffs, { real: 1, legacy_horizon: 0, timing: 0, dedupe: 0 });
       assert.deepEqual(result.queries, Array(scenario.queries).fill(INSTANCE));
+      assert.equal(result.lastRealMs, NOW);
+      assert.equal(result.streakSamples, 0);
     });
     await t.test(`${scenario.name}: own rows explain the diff`, (t) => {
       const f = fixture(t, scenario.rowMs, true);
@@ -93,6 +95,21 @@ test("test/shadow-evidence-reads-only-the-key-s-own-instance.test.ts", async (t)
       assert.equal(result.diffs.real, 0);
       assert.equal(result.diffs[scenario.classification], 1);
       assert.deepEqual(result.queries, Array(scenario.queries).fill(INSTANCE));
+    });
+    await t.test(`${scenario.name}: the home instance also rejects foreign rows`, (t) => {
+      const f = fixture(t, scenario.rowMs, true);
+      const result = f.compare("instance=core", scenario.extra);
+      assert.deepEqual(result.diffs, { real: 1, legacy_horizon: 0, timing: 0, dedupe: 0 });
+      assert.deepEqual(result.queries, Array(scenario.queries).fill("core"));
+      assert.equal(result.lastRealMs, NOW);
+      assert.equal(result.streakSamples, 0);
+    });
+    await t.test(`${scenario.name}: the home instance's own rows explain the diff`, (t) => {
+      const f = fixture(t, scenario.rowMs);
+      const result = f.compare("instance=core", scenario.extra);
+      assert.equal(result.diffs.real, 0);
+      assert.equal(result.diffs[scenario.classification], 1);
+      assert.deepEqual(result.queries, Array(scenario.queries).fill("core"));
     });
   }
 });
