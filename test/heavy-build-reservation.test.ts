@@ -383,6 +383,9 @@ test("heavy READY v2 the 257th active request makes the bounded census unavailab
 
 test("heavy READY v2 unset default configuration disables only this adapter in a native process", { timeout: 10000 }, t => {
   const dir = fixture(t);reserveHeavyNewBuilds("not-the-default-slot", "gate", { dir });
+  // Also exercise the default argument in this instrumented process, not only its child.
+  assert.equal(heavyNewBuildGate(() => assert.fail("disabled adapter must not log"))(), undefined);
+  assert.equal(readHeavyNewBuildHold({ dir }).state, "held", "disabling an adapter cannot close the real request");
   nativeChild(dir, `
     assert.equal(api.readHeavyNewBuildHold({dir}).state, 'held');
     delete process.env.RMD_HEAVY_READY_DIR;
