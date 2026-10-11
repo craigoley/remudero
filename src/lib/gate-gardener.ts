@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { fixedClock, systemClock } from "./clock.js";
@@ -59,10 +60,23 @@ export const DEFUSE_VERDICTS_FILE = "gate-gardener-defuse-verdicts.json";
 const DEFUSE_RUN_TIMEOUT_MS = 15 * 60_000;
 type DefuseVerdict = "confirmed" | "shifted_passed" | "control_failed";
 
-/** Run `file` under the repo's own test invocation plus scripts/clock-shift.mjs. A nonzero exit is
- *  a red suite; a run killed or never started has no exit status and is rethrown, never read as red. */
-export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number): boolean {
-  const env: NodeJS.ProcessEnv = { ...process.env, FK_SHIFT_DAYS: String(shiftDays) };
+export interface ShiftedSuiteMeasurement { passed: boolean; pass: number; tests: number }
+interface ShiftedSuiteOptions {
+  execFile?: (command: string, args: string[], options: {
+    cwd: string; env: NodeJS.ProcessEnv; encoding: "utf8"; stdio: "pipe"; timeout: number; maxBuffer: number;
+  }) => string;
+}
+
+export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number, options: ShiftedSuiteOptions & { measure: true }): ShiftedSuiteMeasurement;
+export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number, options?: ShiftedSuiteOptions & { measure?: false }): boolean;
+/** Shared runner: only a complete TAP verdict proves a crossing (W1-T7812). */
+export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number, {
+  execFile = execFileSync,
+  measure = false,
+}: ShiftedSuiteOptions & { measure?: boolean } = {}): ShiftedSuiteMeasurement | boolean {
+  readFileSync(resolve(repoRoot, file)); // Node can report a green wrapper for a missing test path.
+  const privateRoot = mkdtempSync(join(tmpdir(), "rmd-shifted-suite-"));
+  const env: NodeJS.ProcessEnv = { ...process.env, FK_SHIFT_DAYS: String(shiftDays), TMPDIR: privateRoot };
   delete env.RMD_SELF_SYNC_DONE; // the test setup refuses to load under it (W1-T3069)
   delete env.NODE_TEST_CONTEXT; // inherited from a parent `node --test`, it makes this run report nothing and exit 0
   const args = ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--import", "./scripts/clock-shift.mjs", file];
@@ -70,12 +84,35 @@ export function runSuiteShifted(repoRoot: string, file: string, shiftDays: numbe
   const load = readHostLoad();
   const child = lowPriorityCommand(process.execPath, testRunArgv(args, testRunConcurrency(load, defaultTestSlots(load.cores))));
   try {
-    execFileSync(child.file, child.args, { cwd: repoRoot, env, stdio: "ignore", timeout: DEFUSE_RUN_TIMEOUT_MS });
-    return true;
-  } catch (e) {
-    if (typeof (e as { status?: unknown }).status === "number") return false;
-    throw e;
+    let output: string;
+    let status = 0;
+    try {
+      output = execFile(child.file, child.args, { cwd: repoRoot, env, encoding: "utf8", stdio: "pipe", timeout: DEFUSE_RUN_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 });
+    } catch (error) {
+      const failure = error as { status?: unknown; signal?: unknown; stdout?: string | Buffer };
+      if (typeof failure.status !== "number" || failure.signal) throw error;
+      status = failure.status;
+      output = String(failure.stdout ?? "");
+    }
+    const count = (name: string): number => {
+      const match = new RegExp(`^# ${name} (\\d+)\\s*$`, "m").exec(output);
+      if (!match) throw new Error(`shifted suite ${file}: no # ${name} TAP summary`);
+      return Number(match[1]);
+    };
+    const tests = count("tests"), pass = count("pass"), fail = count("fail"), cancelled = count("cancelled");
+    if (tests === 0 || cancelled > 0 || pass + fail === 0 || tests < pass + fail || (status !== 0 && fail === 0) || (status === 0 && fail > 0)) {
+      throw new Error(`shifted suite ${file}: incomplete TAP verdict (exit ${status}, tests ${tests}, pass ${pass}, fail ${fail}, cancelled ${cancelled})`);
+    }
+    const measurement = { passed: status === 0, pass, tests };
+    return measure ? measurement : measurement.passed;
+  } finally {
+    rmSync(privateRoot, { recursive: true, force: true });
   }
+}
+
+/** Census adapter; the gardener keeps its existing boolean seam. */
+export function runSuiteShiftedMeasured(repoRoot: string, file: string, shiftDays: number, options: ShiftedSuiteOptions = {}): ShiftedSuiteMeasurement {
+  return runSuiteShifted(repoRoot, file, shiftDays, { ...options, measure: true });
 }
 
 export type GateEdit =
