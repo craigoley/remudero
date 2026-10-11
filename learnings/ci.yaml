@@ -499,3 +499,31 @@
     shared refusal reason, so this entry names the shared pre-push steps, not a verified per-PR cause.
   src: "ci-learning:6058:ci-gate"
   cited: "2026-10-09"
+
+- id: scan-gate-refusals-repaired-by-hand
+  subsystem: ci
+  lifecycle: active
+  files:
+    - "scripts/comment-load-baseline.json"
+    - "scripts/source-size-baseline.json"
+    - "scripts/test-tier-manifest.json"
+    - "src/run-task.ts"
+    - "src/lib/policy.ts"
+    - "src/lib/dep-review.ts"
+    - "plan/tasks.d/**"
+    - "test/**"
+  fact: >-
+    The Scan gate refused 11 pull requests in one window, and each was repaired after the refusal.
+    Before the first push, a worker runs the two cheap ratchets over its own change,
+    `npm run --silent comment-load-signal` and `npm run --silent source-size-ratchet`, and records any
+    BLOCKED baseline line they print. A worker on a change that touches plan/ also runs
+    `npm run --silent rule15-precheck`, and a change that touches src/run-task.ts, src/lib/policy.ts,
+    src/lib/dep-review.ts, or a new test/ file runs `rmd census-membership` and the suites it names.
+    Those are the steps a fix or implementation lane skips before its first push.
+  evidence: >-
+    The Scan refusals are recorded as ci-learning:10339:Scan (PRs 10339, 10350, 10374, 10392, 10470,
+    10474, 10479, 10482, 10484; 10474 and 10482 each appear twice in the source list). Recon did not
+    establish each PR's Scan failure reason, merge status, or affected lane, so this entry names the
+    shared pre-push steps, not a verified per-PR cause.
+  src: "ci-learning:10339:Scan"
+  cited: "2026-10-11"

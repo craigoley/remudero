@@ -97,6 +97,7 @@
         "rerun-the-job-not-the-run",
         "rollup-dedupe-by-latest-attempt",
         "rule-checks-gate-census-and-plan-scope-refusals",
+        "scan-gate-refusals-repaired-by-hand",
         "skipped-check-deadlock",
         "squash-trailer-gate-task-authoring-lane",
         "strikes-exhausted-counts-rows",
