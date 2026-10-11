@@ -312,6 +312,8 @@ export const REFRESH_JUDGE_HEADS_FILE = "refresh-judge-heads.json";
 export const REFRESH_JUDGE_MAX_PER_PASS = 2;
 /** BACKSTOP: each diff is cut here before it reaches the prompt; the cut is marked, never silent. */
 export const REFRESH_JUDGE_MAX_DIFF_CHARS = 30_000;
+/** BACKSTOP: the heads file keeps at most this many rulings, newest last. */
+export const REFRESH_JUDGE_HEADS_CAP = 500;
 
 /** One ask: a decision row with `decision: ask-judge` the judge has not ruled on. */
 export interface RefreshJudgeAsk {
@@ -432,10 +434,14 @@ export async function judgeRefreshOverlap(ports: RefreshJudgePorts): Promise<{ o
       verdict = "judge-unavailable";
       ports.log("refresh_judge.failed", { pr: ask.prNumber, head_sha: ask.headSha, error: String((error as Error)?.message ?? error) });
     }
+    delete heads[key]; // re-inserted below, so the cap drops the oldest ruling, never this one
     heads[key] = verdict;
     judged[key] = verdict;
     ports.log("refresh_judge.ruled", { pr: ask.prNumber, head_sha: ask.headSha, verdict });
   }
+  // BACKSTOP on file size: keep the newest rulings; a dropped one is only re-judged if asked again.
+  const keys = Object.keys(heads);
+  for (const key of keys.slice(0, Math.max(0, keys.length - REFRESH_JUDGE_HEADS_CAP))) delete heads[key];
   const path = join(ports.stateDir, REFRESH_JUDGE_HEADS_FILE);
   writeFileSync(`${path}.tmp`, JSON.stringify(heads) + "\n");
   renameSync(`${path}.tmp`, path);
