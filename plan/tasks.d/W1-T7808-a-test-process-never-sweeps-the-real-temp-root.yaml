@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-10: #10719 (W1-T4064 daemon test deleted its own plan under a shifted clock); approved 2026-10-10"
   plan_refs: [W1-T115, W1-T131, W1-T320, W1-T3065, W1-T4948, W1-T4064]
   files: [src/lib/tmp.ts, test/setup/tmp-hygiene.ts, test/a-test-process-never-sweeps-the-real-temp-root.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

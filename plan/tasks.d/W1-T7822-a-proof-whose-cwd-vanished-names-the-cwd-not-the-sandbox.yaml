@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-10: PR #10741's review proofs failed when the review worktree was reclaimed mid-review (the reclaim race is open PR #10770); filed at operator request 2026-10-10"
   plan_refs: [W1-T6124, W1-T305, W1-T4587]
   files: [src/lib/review.ts, src/lib/sweep.ts, test/a-proof-whose-cwd-vanished-names-the-cwd-not-the-sandbox.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

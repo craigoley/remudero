@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-10: throughput study (ledger union 05:53-15:39Z, 38 PRs merged 10:00-15:39Z), operator asked for flow improvements"
   plan_refs: [W1-T5749, W1-T5789, W1-T5922, W1-T5931, W1-T2852, W1-T4732, W1-T5491, W1-T3275, W1-T100, W1-T147]
   files: [src/lib/sweep.ts, src/lib/daemon.ts, src/run-task.ts, src/lib/open-prs-rest.ts, test/the-sweep-sees-a-new-head-in-the-same-pass.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
