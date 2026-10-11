@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { resolve } from "node:path";
+import { defaultIsPidAlive } from "./drain-lock.js";
 import { createOrReadPublished, isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 
 interface ReviewerLease {
@@ -13,6 +14,10 @@ interface ReviewerLease {
 }
 
 const borrowers = new Map<string, { owner: ReviewerLease; raw: string; count: number }>();
+
+function staleLease(owner: ReviewerLease): boolean {
+  return isHolderStale(owner, { isPidAlive: defaultIsPidAlive });
+}
 
 function parseLease(raw: string): ReviewerLease {
   const value = JSON.parse(raw) as ReviewerLease;
@@ -47,8 +52,8 @@ function claim(path: string): { owner: ReviewerLease; raw: string; count: number
       return { owner, raw, count: 0 };
     }
     const holder = parseLease(publication.raw);
-    if (!isHolderStale(holder)) throw new Error("reviewer worktree is leased by another owner");
-    const reclaimed = reclaimStaleLock(lock, { parseHolder: parseLease, isStale: isHolderStale,
+    if (!staleLease(holder)) throw new Error("reviewer worktree is leased by another owner");
+    const reclaimed = reclaimStaleLock(lock, { parseHolder: parseLease, isStale: staleLease,
       onReclaim: () => {}, onLostReclaim: () => {} });
     if (reclaimed.outcome === "live") throw new Error("reviewer worktree is leased by another owner");
   }

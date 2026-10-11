@@ -59,11 +59,34 @@ test("reviewer native failure releases only its own lease and preserves the orig
 
 test("foreign and corrupt reviewer claims refuse without executing or deleting their holder", async (t) => {
   const f = fixture(t);
-  for (const raw of [JSON.stringify(foreign()), "not-json", JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })]) {
+  for (const raw of [JSON.stringify(foreign()), JSON.stringify({ ...foreign(), host: "a-different-host" }),
+    "not-json", JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })]) {
     writeFileSync(f.lock, raw); let called = false;
     await assert.rejects(withReviewerWorktreeLease(f.path, async () => { called = true; }));
     assert.equal(called, false); assert.equal(readFileSync(f.lock, "utf8"), raw);
   }
+});
+
+test("the shipped fresh reviewer runner refuses a dirty cached tree before starting another native review", async (t) => {
+  const repo = gitRepo({ kind: "reviewer-runner-dirty-cache" }); t.after(() => repo.cleanup());
+  writeFileSync(join(repo.dir, "review-source.txt"), "clean source\n");
+  repo.git("add", "review-source.txt"); repo.git("commit", "--quiet", "-m", "seed reviewer source");
+  repo.addRemote("origin", repo.dir); repo.git("branch", "-M", "main");
+  mkdirSync(join(repo.dir, "node_modules"));
+  const root = makeTempDir("reviewer-runner-dirty-cache"); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const sha = repo.git("rev-parse", "HEAD"); let calls = 0;
+  const runner = buildFreshTreeReviewRunner(repo.dir, {
+    git: (args) => spawnGit(args), worktreeRoot: root,
+    addWorktree: (dir, path, head) => { spawnGit(["-C", dir, "worktree", "add", "--detach", path, head]); },
+    spawnReview: async () => { calls++; return 0; },
+  });
+  assert.equal(await runner("10783", [], { originMainSha: sha }), 0);
+  const path = join(root, `reviewer-${sha.slice(0, 12)}`);
+  writeFileSync(join(path, "review-source.txt"), "unreviewed changed source\n");
+  let failure = "";
+  assert.equal(await runner("10783", [], { originMainSha: sha }, (why) => { failure = why; }), undefined);
+  assert.match(failure, /cached reviewer worktree.*no longer an exact clean detached checkout/);
+  assert.equal(calls, 1); assert.equal(existsSync(`${path}.lock`), false);
 });
 
 test("a replacement reviewer claim survives release and invalidates a success-shaped callback", async (t) => {
