@@ -14,7 +14,7 @@ import { join } from "node:path";
 
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
-import { prepareGardenTaskIds, recordGardenMintTimeout, type GardenTaskIdMinter, type GardenerDeps } from "./gardener.js";
+import { GardenMintTimedOutError, prepareGardenTaskIds, recordGardenMintTimeout, type GardenTaskIdMinter, type GardenerDeps } from "./gardener.js";
 import { ghJsonAsync } from "./github-transport.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
@@ -448,6 +448,7 @@ async function fileRegressions(
   const filed = { ...(state.filed ?? {}) };
   const filings = [...(state.filings ?? [])].slice(-30);
   const keys: string[] = [];
+  let decided = true;
   const population = regressed.map((s) => s.current!.p50 - s.baseline!.p50);
   for (const stat of regressed) {
     const planned = tasks.find((t) => t.origin === origin(stat.key) && !closed(t));
@@ -470,12 +471,13 @@ async function fileRegressions(
       deps.log(FLOW_REGRESSION_FILED_STEP, { key: stat.key, task_id: landed.taskId, filing_pr: landed.prUrl, slowest: stat.slowest.map((s) => s.pr) });
     } catch (e) {
       recordGardenMintTimeout(e, "flow", deps.log);
+      if (e instanceof GardenMintTimedOutError) decided = false;
       deps.log(FLOW_FILING_FAILED_STEP, { key: stat.key, error: String((e as Error)?.message ?? e) });
     }
   }
   state.filed = filed;
   state.filings = filings;
-  return { decided: true, keys };
+  return { decided, keys };
 }
 
 async function landFollowUp(

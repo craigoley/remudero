@@ -68,6 +68,19 @@ function asyncOnly(ids: string[]) {
   return { mint, branches };
 }
 
+function flowRegressionRows(): Record<string, unknown>[] {
+  const rows: Record<string, unknown>[] = [];
+  for (let i = 0; i < 10; i++) {
+    const merged = NOW - (i < 6 ? (2 + i % 5) * 24 * HOUR : (i - 5) * HOUR);
+    const ready = (i < 6 ? 10 : 30) * 60_000;
+    const task_id = `W1-T${8000 + i}`, pr_url = `https://github.com/acme/remudero/pull/${8000 + i}`;
+    rows.push({ step: "pr.opened", task_id, run_id: `${task_id}-1`, pr_url, ts: new Date(merged - 45 * 60_000).toISOString(), plan_only: true, head_sha: `head${i}` },
+      { step: "review.posted", task_id, pr_url, state: "success", ts: new Date(merged - ready).toISOString(), head_sha: `head${i}` },
+      { step: "pr.terminal", pr_url, state: "merged", merged_at: new Date(merged).toISOString(), ts: new Date(merged + 1000).toISOString() });
+  }
+  return rows;
+}
+
 test("W1-T7742: a runGardenAsync pass reserves its task id through the async minter and never the sync one", async (t) => {
   const f = fixture(t);
   const { mint, branches } = asyncOnly(["W1-T9001"]);
@@ -134,16 +147,7 @@ test("W1-T7742: every minting gardener files with the async-minted id while the 
   await fileConsumerVia(async () => ({ ...f.ws, land: async (landing) => f.ws.land(landing), dispose: async () => f.ws.dispose() }), mint, f.deps.log)({ host: "azure", device: "root", consumer: "worktrees", origin: "host-resource:azure:worktrees", attribution: { consumer: "worktrees", growthKbPerHour: 800000, share: 0.8, spanHours: 72, points: 144, janitorPasses: 12 } });
   assert.match(readFileSync(join(f.root, f.landings.at(-1)!.paths[0]!), "utf8"), /W1-T9007/);
 
-  const rows: Record<string, unknown>[] = [];
-  for (let i = 0; i < 10; i++) {
-    const merged = NOW - (i < 6 ? (2 + i % 5) * 24 * HOUR : (i - 5) * HOUR);
-    const ready = (i < 6 ? 10 : 30) * 60_000;
-    const task_id = `W1-T${8000 + i}`, pr_url = `https://github.com/acme/remudero/pull/${8000 + i}`;
-    rows.push({ step: "pr.opened", task_id, run_id: `${task_id}-1`, pr_url, ts: new Date(merged - 45 * 60_000).toISOString(), plan_only: true, head_sha: `head${i}` },
-      { step: "review.posted", task_id, pr_url, state: "success", ts: new Date(merged - ready).toISOString(), head_sha: `head${i}` },
-      { step: "pr.terminal", pr_url, state: "merged", merged_at: new Date(merged).toISOString(), ts: new Date(merged + 1000).toISOString() });
-  }
-  const flow = await runFlowGardener(f.deps, { mintTaskId: mint, readLedger: () => ({ ok: true, rows, unread: [] }), readCi: async () => undefined, planTasks: () => [] });
+  const flow = await runFlowGardener(f.deps, { mintTaskId: mint, readLedger: () => ({ ok: true, rows: flowRegressionRows(), unread: [] }), readCi: async () => undefined, planTasks: () => [] });
   assert.equal(flow.filed.length, 1);
   assert.match(readFileSync(join(f.root, f.landings.at(-1)!.paths[0]!), "utf8"), /W1-T9008/);
   assert.equal(branches.length, expected.length);
@@ -167,6 +171,31 @@ test("W1-T7742: a mint past its bound is abandoned and writes a mint_timed_out r
   assert.equal(existsSync(join(f.deps.stateDir, `${s.name}-gardener.json`)), false, "no completed fingerprint or retry backoff is recorded");
   const retry = asyncOnly(["W1-T9001"]);
   assert.equal((await runGardenAsync(spec(retry.mint), f.deps)).prUrl, PR, "the next pass retries the same inputs");
+});
+
+test("W1-T7742: a flow mint timeout retries on the next pass with the same inputs", async (t) => {
+  const f = fixture(t);
+  let attempts = 0;
+  const mint = Object.assign(() => assert.fail("sync mint reached the flow pass"), {
+    async: async () => {
+      if (++attempts === 1) throw new GardenMintTimedOutError(25, 25);
+      return "W1-T9001";
+    },
+  });
+  const sources = { mintTaskId: mint, readLedger: () => ({ ok: true as const, rows: flowRegressionRows(), unread: [] }), readCi: async () => undefined, planTasks: () => [] };
+  const first = await runFlowGardener(f.deps, sources);
+  assert.deepEqual(first.filed, []);
+  assert.equal(f.landings.length, 0);
+  assert.equal(existsSync(join(f.root, "plan", "tasks.d")), false);
+  assert.deepEqual(f.rows.find(row => row.step === "garden.mint_timed_out")?.fields,
+    { spec: "flow", elapsed_ms: 25, bound_ms: 25 });
+  assert.equal(f.disposed(), 1);
+  const retry = await runFlowGardener(f.deps, sources);
+  assert.equal(attempts, 2);
+  assert.equal(retry.filed.length, 1);
+  assert.equal(f.landings.length, 1);
+  assert.equal(f.disposed(), 2);
+  assert.match(readFileSync(join(f.root, f.landings[0]!.paths[0]!), "utf8"), /W1-T9001/);
 });
 
 test("W1-T7742: the mint bound scales with observed mint durations and starts from the poll interval", async () => {

@@ -38062,9 +38062,9 @@ export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => 
 export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBuildContext, opts: { hourly?: boolean } = {}): RegisteredGardenPass | Promise<RegisteredGardenPass> {
   const { config, repoRoot, owner, repo, log, raiseDuplicate } = ctx;
   const stateDir = join(config.root, "state");
-  const gardenMinter = () => ciLearningTaskIdMinter(repoRoot, log, undefined, {
+  const mintOptions = {
     pollIntervalMs: ctx.pollIntervalMs === undefined ? undefined : () => ctx.pollIntervalMs!,
-  });
+  };
   const deps = (garden: Parameters<typeof gardenCheckout>[0]["name"], escalate?: (e: Escalation) => string): GardenerDeps => ({
     stateDir,
     repoRoot,
@@ -38102,14 +38102,14 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // or scorecard covers is filed through the machine-filing path, bounded by the queue and the day's merges.
     case "scout": {
       const d = deps("scout");
-      return gardenPass(scoutGardenSpec(d, { mintTaskId: gardenMinter() }), d);
+      return gardenPass(scoutGardenSpec(d, { mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions) }), d);
     }
     // W1-T4116: the gates tighten, refresh and propose demoting themselves from their own
     // measurements. The ratchets are ES modules, so the garden starts once they have loaded.
     case "gate": {
       const d = deps("gate");
       return loadGateProbes(repoRoot).then(
-        (probes) => gardenPass(gateGardenSpec(d, probes, { mintTaskId: gardenMinter() }), d),
+        (probes) => gardenPass(gateGardenSpec(d, probes, { mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions) }), d),
         (e: unknown) => {
           log("gate.gardener_failed", { error: String((e as Error)?.message ?? e) });
           return noPass;
@@ -38192,14 +38192,14 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         gateFireRates: () => readGateFireRateReport(stateDir),
         planState: () => readCiFrictionPlanState(repoRoot),
         ownerSearch: gitCiFrictionOwnerSearch((args) => execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 })),
-        mintTaskId: gardenMinter(),
+        mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
       };
       return gardenPass(ciFrictionGardenSpec(d, sources), d);
     }
     case "flow-remedy": {
       const d = deps("flow-remedy", raiseDuplicate);
       return gardenPass(flowGardenSpec(d, {
-        owner, repo, mintTaskId: gardenMinter(),
+        owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
         escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log }),
       }), d);
     }
@@ -38208,7 +38208,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "fix-lane": {
       const d = deps("fix-lane", raiseDuplicate);
       return gardenPass(fixLaneGardenSpec(d, {
-        owner, repo, mintTaskId: gardenMinter(),
+        owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
         escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log }),
       }), d);
     }
@@ -38221,10 +38221,10 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         openWorkspace: daemonGardenWorkspace(ctx, "selector-shadow"),
         log,
       };
-      return selectorShadowGardenPass(d, owner, repo, gardenMinter());
+      return selectorShadowGardenPass(d, owner, repo, ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions));
     }
     case "flow":
-      return flowGardenPass(deps("flow"), owner, repo, gardenMinter());
+      return flowGardenPass(deps("flow"), owner, repo, ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions));
     case "evidence-coverage":
       return withDue(() => {
         try {
@@ -38251,7 +38251,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
         mainHistory: (sinceIso) => readMainHistory(repoRoot, sinceIso),
         planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
-        mintTaskId: gardenMinter(),
+        mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
         fileExists: (file) => existsSync(join(repoRoot, file)),
       };
       return gardenPass(hotFileGardenSpec(d, sources), d);
@@ -38277,7 +38277,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // W1-T4804: host disk, swap and inodes are projected to full from the heartbeat history and
     // answered in tiers against each host's own janitor cadence. Off: state/HOST_RESOURCE_OFF.
     case "host-resource": {
-      const mintTaskId = gardenMinter();
+      const mintTaskId = ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions);
       const ports = {
         stateDir,
         log,
