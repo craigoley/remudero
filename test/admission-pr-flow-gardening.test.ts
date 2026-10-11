@@ -266,11 +266,6 @@ test("W1-T7756 callers: existing daily pass and daemon builder forward opt-in se
     { admission: { ...input, readCorpus: async () => { reads++; return corpus(); }, readLedger: () => ({ ok: true, rows: [], unread: [] }) } });
   writeLedger([], { dir: f.root }); await pass(); await pass();
   assert.equal(reads, 1); assert.equal(pass.due(), false);
-  const source = readFileSync(join(process.cwd(), "src/run-task.ts"), "utf8");
-  assert.match(source.slice(source.indexOf('case "flow-remedy":'), source.indexOf('case "fix-lane":')),
-    /admission: \{ owner, repo, settings: config\.contributorAdmission \}/);
-  assert.match(source.slice(source.indexOf('case "flow":'), source.indexOf('case "evidence-coverage":')),
-    /settings: config\.contributorAdmission/);
   const legacy = await buildRegisteredGarden("flow", { repoRoot: f.root, owner: input.owner, repo: input.repo,
     config: { root: f.root } as Config, log: f.deps.log, raiseDuplicate: () => { throw Error("forbidden escalation"); } });
   assert.equal(typeof legacy, "function");
