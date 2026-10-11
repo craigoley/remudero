@@ -111,7 +111,7 @@ export function fixture(): Fixture {
       RMD_CLEANUP_WORKTREE_ROOTS: "",
       RMD_CLEANUP_COVERAGE_PATHS: "",
       RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT: join(root, "wt-archive"),
-      IDLE_MINUTES: "720",
+      IDLE_MINUTES: "360",
     },
   };
 }

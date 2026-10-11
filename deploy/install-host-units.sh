@@ -1557,7 +1557,11 @@ if [ -n "$CLEANUP_PATH" ]; then
     TMP_SWEEP_CRON_CONTENT="$(printf 'SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n%s\n' "$TMP_SWEEP_CRON_LINE")"
   fi
   CLEANUP_LOG="${RMD_CLEANUP_LOG:-$(dirname "$CLEANUP_PATH")/host-cleanup.log}"
-  CLEANUP_CRON_LINE="${CLEANUP_CRON_SCHEDULE} ${CLEANUP_PATH} >> ${CLEANUP_LOG} 2>&1"
+  # Include the service user's disposable worktree root in the same guarded six-hour janitor.
+  # It is separate from /mnt/scratch/worktrees, and omitting it left stale linked trees in rmd-work
+  # accumulating indefinitely. Keep the roots overrideable for hosts with a different layout.
+  CLEANUP_WORKTREE_ROOTS="${RMD_CLEANUP_WORKTREE_ROOTS-/mnt/scratch/worktrees:/home/${SERVICE_USER}/rmd-work}"
+  CLEANUP_CRON_LINE="${CLEANUP_CRON_SCHEDULE} RMD_CLEANUP_WORKTREE_ROOTS=${CLEANUP_WORKTREE_ROOTS} ${CLEANUP_PATH} >> ${CLEANUP_LOG} 2>&1"
   CRONTAB_CMD="${RMD_CRONTAB_CMD-crontab}"
 
   crontab_read() {
