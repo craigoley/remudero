@@ -39,6 +39,7 @@ import { RmdError } from "./errors.js";
 import { isTaskShardName } from "./task-shard-name.js";
 import { budgetedSpawn, inTreeCheckBudgetMs, killBudgetLeftovers, waitForProcessGroupExit } from "./in-tree-budget.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
+import { lowPriorityCommand, testRunArgv } from "./test-slot.js";
 
 const PLAN_TASK_SHARD_PREFIX = ["plan", "tasks.d"].join("/") + "/";
 
@@ -524,6 +525,14 @@ function inTreeEnv(): NodeJS.ProcessEnv {
   delete env.NODE_TEST_CONTEXT; // a nested `node --test` under a test runner otherwise reports to the parent, not to stdout
   return env;
 }
+function inTreeCommand(cwd: string, relPath: string, argv: string[]) {
+  const env = inTreeEnv();
+  if (relPath !== SHARD_CENSUS_TEST) return { file: process.execPath, args: argv, env };
+  delete env.RMD_SELF_SYNC_DONE;
+  const setup = "./test/setup/tmp-hygiene.ts";
+  const args = existsSync(join(cwd, setup)) ? [...argv.slice(0, 2), "--import", setup, ...argv.slice(2)] : argv;
+  return { ...lowPriorityCommand(process.execPath, testRunArgv(args, 1)), env };
+}
 const absentFromTree = (relPath: string): PlanPrPreflightReading => ({ status: null, output: `${relPath} is absent from the tree` });
 const taskIdReading = (r: PlanPrPreflightReading): PlanPrPreflightReading =>
   r.status === 1 && TASK_ID_UNREADABLE_RE.test(r.output) ? { ...r, status: null } : r;
@@ -533,7 +542,8 @@ const shardCensusReading = (r: PlanPrPreflightReading): PlanPrPreflightReading =
 /** Run a script the tree itself carries; a tree without it is a check that cannot run. Killed at `budgetMs`. */
 function runInTree(cwd: string, relPath: string, argv: string[], budgetMs: number): PlanPrPreflightReading {
   if (!existsSync(join(cwd, relPath))) return absentFromTree(relPath);
-  const r = spawnSync(process.execPath, argv, { cwd, encoding: "utf8", maxBuffer: 1 << 26, env: inTreeEnv(), ...budgetedSpawn(budgetMs) });
+  const { file, args, env } = inTreeCommand(cwd, relPath, argv);
+  const r = spawnSync(file, args, { cwd, encoding: "utf8", maxBuffer: 1 << 26, env, ...budgetedSpawn(budgetMs) });
   const output = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
   if ((r.error as NodeJS.ErrnoException | undefined)?.code !== "ETIMEDOUT") return { status: r.status, output };
   killBudgetLeftovers(r.pid);
@@ -560,7 +570,8 @@ async function runChildAsync(file: string, args: string[], cwd: string, env?: No
 }
 async function runInTreeAsync(cwd: string, relPath: string, argv: string[], budgetMs: number): Promise<PlanPrPreflightReading> {
   if (!existsSync(join(cwd, relPath))) return absentFromTree(relPath);
-  return runChildAsync(process.execPath, argv, cwd, inTreeEnv(), budgetMs);
+  const { file, args, env } = inTreeCommand(cwd, relPath, argv);
+  return runChildAsync(file, args, cwd, env, budgetMs);
 }
 
 const proofCheckStatus = (r: PlanPrPreflightReading): ProofCheckStatus => (r.timedOutMs === undefined ? r.status : { timedOutMs: r.timedOutMs });

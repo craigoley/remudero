@@ -37,8 +37,9 @@ import { asyncGit, parseAdvanceCommits } from "./self-sync.js";
  *
  * TWO ACTORS, ONE RECORD. The host watchdog runs this through `rmd live-edits` for both trees; the
  * daemon runs it in its freshness read. Both share `<state>/live-edits/<tree>.json`, every step is
- * idempotent, and only an actor handed `escalate` speaks: the host's service user has no GitHub
- * credential, so a restore it performs leaves `noticePending` for the daemon to post.
+ * idempotent, and only an actor handed `escalate` speaks. The host's service user has no GitHub
+ * credential, so the watchdog's `escalate`/`comment` spool into host-escalation-spool.ts and the daemon
+ * posts them; a notice neither could deliver yet stays `noticePending`.
  */
 export type LiveEditTree = "daemon-checkout" | "install-checkout";
 export const LIVE_EDIT_TREES: readonly LiveEditTree[] = ["daemon-checkout", "install-checkout"];

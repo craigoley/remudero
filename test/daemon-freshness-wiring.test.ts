@@ -10,6 +10,7 @@ import { daemonCommand } from "../src/run-task.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import type { RunResult } from "../src/run-task.js";
 import { requestStop, stopDetail } from "../src/lib/fleet-control.js";
+import { DEPLOY_RESTART_SCORE_THRESHOLD } from "../src/lib/deploy-judge.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // ── W1-T126's MISSING PRODUCER ────────────────────────────────────────────────────────────────
@@ -61,6 +62,7 @@ test("adapter: every 'I could not tell' status fails SAFE (no restart) — guard
 });
 
 test("W1-T3756: each not-stale arm names itself", async () => {
+  const now = new Date();
   const docsOnly: ServiceFreshness = {
     status: "assessed",
     dirty: false,
@@ -69,7 +71,11 @@ test("W1-T3756: each not-stale arm names itself", async () => {
   const cases: Array<[ServiceFreshness, Record<string, unknown>]> = [
     [{ status: "guarded" }, { arm: "unassessed", service_status: "guarded" }],
     [{ status: "degraded", reason: "fetch failed" }, { arm: "unassessed", service_status: "degraded", detail: "fetch failed" }],
-    [{ ...CLEAN_BEHIND, dirty: true }, { arm: "dirty", old_sha: "a".repeat(40), new_sha: "b".repeat(40) }],
+    [{ ...CLEAN_BEHIND, dirty: true, dirty_paths: ["README.md"] }, {
+      arm: "dirty", old_sha: "a".repeat(40), new_sha: "b".repeat(40), dirty_paths: ["README.md"],
+      behind: true, stale_since_ms: now.getTime(), weight: DEPLOY_RESTART_SCORE_THRESHOLD.value,
+      age_pressure: 0, pressure: DEPLOY_RESTART_SCORE_THRESHOLD.value,
+    }],
     [{ status: "assessed", dirty: false, behind: null }, { arm: "up_to_date" }],
     [docsOnly, { arm: "immaterial", old_sha: "c".repeat(40), new_sha: "d".repeat(40) }],
   ];
@@ -88,6 +94,7 @@ test("W1-T3756: each not-stale arm names itself", async () => {
       refreshMerged: () => () => true,
       runOne: async (id) => okResult(id),
       sleep: async () => {},
+      now: () => now,
       log: (step, data = {}) => logs.push({ step, data }),
       checkFreshness: () => freshness,
       checkStop: () => (++ticks >= 3 ? (requestStop(root, "test done"), stopDetail(root)) : undefined),

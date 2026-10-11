@@ -45,7 +45,7 @@ import type { BenchmarkCohortPassResult } from "./benchmark-cohort.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
-import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, INSTALL_INPUTS_RELEASE, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
+import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DEPLOY_RESTART_SCORE_THRESHOLD, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, INSTALL_INPUTS_RELEASE, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import {
   nextRunnable,
@@ -848,7 +848,8 @@ export interface DaemonOpts {
  * supplies it (W1-T3756). */
 export type DaemonFreshnessNotStale =
   | { arm: "unassessed"; serviceStatus: "guarded" | "degraded"; detail?: string }
-  | { arm: "dirty"; oldSha?: string; newSha?: string }
+  | { arm: "dirty"; oldSha?: string; newSha?: string; behind?: boolean; dirty_paths?: readonly string[];
+      changes?: readonly DeployWorthChange[] }
   | { arm: "up_to_date" }
   | { arm: "immaterial"; oldSha: string; newSha: string };
 
@@ -2856,6 +2857,7 @@ export async function runDaemon(
   let lastAdvanceAtMs: number | undefined;
   let advancesCoalesced = 0;
   let freshnessHeld = false;
+  const dirtyBlockedShas = new Set<string>();
   const completedSweeps: Array<{ outcome: SweepCycleOutcome | undefined; durationMs: number }> = [];
   let latestSweepOutcome: SweepCycleOutcome | undefined;
   let staleReviewerAction: StaleReviewerRecurrenceAction = { kind: "silent" };
@@ -3231,19 +3233,34 @@ export async function runDaemon(
   const logNotStaleFreshness = (freshness: DaemonFreshness | undefined): void => {
     if (!freshness || freshness.stale || !freshness.notStale) return;
     const outcome = freshness.notStale;
+    let pressureEvidence: Record<string, unknown> = {};
+    if (outcome.arm === "dirty" && outcome.behind && outcome.newSha) {
+      const nowMs = daemonClock.now();
+      observeFreshnessAdvance(outcome.newSha, nowMs);
+      const { decision, withheldEvidence } = scoreFreshness(outcome.changes, nowMs);
+      pressureEvidence = { behind: true, stale_since_ms: staleSinceMs, weight: decision.weight,
+        age_pressure: decision.agePressure, pressure: decision.pressure, ...withheldEvidence };
+      if (decision.pressure >= DEPLOY_RESTART_SCORE_THRESHOLD.value && !dirtyBlockedShas.has(outcome.newSha)) {
+        dirtyBlockedShas.add(outcome.newSha);
+        log("daemon.freshness_blocked_dirty", { old_sha: outcome.oldSha, new_sha: outcome.newSha,
+          dirty_paths: outcome.dirty_paths, ...pressureEvidence });
+      }
+    }
     log("daemon.freshness_not_stale", {
       arm: outcome.arm,
       ...(outcome.arm === "unassessed" ? { service_status: outcome.serviceStatus } : {}),
       ...(outcome.arm === "unassessed" && outcome.detail ? { detail: outcome.detail } : {}),
       ...(outcome.arm === "dirty" && outcome.oldSha ? { old_sha: outcome.oldSha } : {}),
       ...(outcome.arm === "dirty" && outcome.newSha ? { new_sha: outcome.newSha } : {}),
+      ...(outcome.arm === "dirty" && outcome.dirty_paths ? { dirty_paths: outcome.dirty_paths } : {}),
+      ...pressureEvidence,
       ...(outcome.arm === "immaterial" ? { old_sha: outcome.oldSha, new_sha: outcome.newSha } : {}),
     });
   };
 
   // W1-T6093: remember observations at both the first-cycle guard and the shared decision boundary.
   const observeFreshnessAdvance = (newSha: string, nowMs: number, heldSinceMs?: number): void => {
-    staleSinceMs ??= Math.min(nowMs, heldSinceMs ?? nowMs);
+    staleSinceMs = Math.min(staleSinceMs ?? nowMs, heldSinceMs ?? nowMs);
     if (newSha !== lastAdvanceSha) {
       lastAdvanceSha = newSha;
       lastAdvanceAtMs = nowMs;
@@ -3251,10 +3268,7 @@ export async function runDaemon(
     }
   };
 
-  // W1-T4945/W1-T6093: score the advance, then coalesce change-driven restarts within bounded staleness.
-  const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, siblingInFlight = false): "restart" | "defer" => {
-    const nowMs = daemonClock.now();
-    observeFreshnessAdvance(freshness.newSha, nowMs, freshness.staleSinceMs);
+  const scoreFreshness = (changes: readonly DeployWorthChange[] | undefined, nowMs: number, siblingInFlight = false) => {
     const staleAtMs = staleSinceMs!;
     const busy =
       siblingInFlight ||
@@ -3274,8 +3288,17 @@ export async function runDaemon(
               withheld_unreadable: withheld.unreadable,
               ...(withheld.unparseable > 0 ? { withheld_reviews_unparseable: withheld.unparseable } : {}),
             };
-    const decision = decideFreshnessRestart({ changes: freshness.changes, busy, staleSinceMs: staleAtMs, nowMs, state: freshnessPressure, withheldReviews });
+    const decision = decideFreshnessRestart({ changes, busy, staleSinceMs: staleAtMs, nowMs, state: freshnessPressure, withheldReviews });
     freshnessPressure = decision.state;
+    return { decision, busy, withheldEvidence };
+  };
+
+  // W1-T4945/W1-T6093: score the advance, then coalesce change-driven restarts within bounded staleness.
+  const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, siblingInFlight = false): "restart" | "defer" => {
+    const nowMs = daemonClock.now();
+    observeFreshnessAdvance(freshness.newSha, nowMs, freshness.staleSinceMs);
+    const staleAtMs = staleSinceMs!;
+    const { decision, busy, withheldEvidence } = scoreFreshness(freshness.changes, nowMs, siblingInFlight);
     const coalesced = coalesceFreshnessRestart({
       decision, newSha: freshness.newSha, lastAdvanceAtMs: lastAdvanceAtMs!,
       staleSinceMs: staleAtMs, nowMs, window: FRESHNESS_COALESCE_WINDOW_MS, installInputsChanged: changesInstallInputs(freshness.changes),
@@ -5542,6 +5565,7 @@ export async function runDaemon(
       const paused = deps.checkPause?.();
       // W1-T5083: the same restart decision the top of tick asks; a sibling in flight makes it busy.
       const freshness = refillClosed || phaseBound ? undefined : freshnessReadsAsync ? settledFreshness : (deps.checkFreshness?.() as DaemonFreshness | undefined);
+      if (!freshnessReadsAsync) logNotStaleFreshness(freshness);
       const freshnessAction = freshness?.stale ? decideFreshness(freshness, true) : undefined;
       // W1-T6274: a restart decided here holds every later refill this phase and ends it in the freshness stop.
       if (freshnessAction === "restart" && freshness?.stale) {

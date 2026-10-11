@@ -117,6 +117,12 @@ jobs:
           ! is_dispatch_stalled "unknown" || fail "an unreadable dispatch verdict must stay silent, not alarm"
           echo "self-check: build arm discriminates, and stays silent on building and unknown"
 
+          is_spool_undelivered() { case "$1" in UNDELIVERED*) return 0 ;; *) return 1 ;; esac; }
+          is_spool_undelivered "UNDELIVERED — 1 host-side escalation(s) pending" || fail "an UNDELIVERED spool verdict did not read as undelivered"
+          ! is_spool_undelivered "ok" || fail "an empty spool raised the spool arm"
+          ! is_spool_undelivered "pending — 1 host-side escalation(s) spooled since the previous beat" || fail "a just-spooled entry raised the spool arm before the daemon had a tick"
+          echo "self-check: spool arm raises only an undelivered host-side escalation"
+
           # (ii) the beat script parses, and reports the three states it exists to separate.
           bash -n scripts/fleet-heartbeat.sh || fail "scripts/fleet-heartbeat.sh does not parse"
           work=$(mktemp -d)
@@ -162,6 +168,24 @@ jobs:
           # goes silent here and reads identically to a power cut; this one must still report.
           beat brokeninstall | grep -q '^daemon_verdict=live$' || fail "the broken-install beat lost the daemon signal it must still carry"
           echo "self-check: the beat script separates healthy / dead-daemon / broken-install"
+
+          # (ii.a) 2026-10-11: a host-side escalation the daemon has not posted. Just spooled, it is
+          # pending; once a daemon drain pass has run after it and it is still there, UNDELIVERED.
+          # Each beat is captured whole and grepped from a here-string, never piped into `grep -q`:
+          # the payload is long, and a reader that exits early would SIGPIPE the beat under pipefail.
+          seed spooled 45 healthy
+          mkdir -p "$work/spooled/root/state/escalation-spool"
+          printf '{"firstAt":"%s","lastAt":"%s","headline":"deploy-run: image recycle keeps being refused"}\n' "$(iso_ago 600)" "$(iso_ago 600)" \
+            > "$work/spooled/root/state/escalation-spool/escalate-0123456789abcdef.json"
+          spool_beat="$(beat spooled)"
+          grep -q '^escalation_spool_verdict=pending' <<<"$spool_beat" || fail "a just-spooled host escalation did not read as pending"
+          grep -q '^escalation_spool_entry=.*image recycle keeps being refused' <<<"$spool_beat" || fail "the beat dropped the spooled escalation's headline"
+          printf '%s\n' "$(iso_ago 60)" > "$work/spooled/root/state/escalation-spool/.drain-pass"
+          spool_beat="$(beat spooled)"
+          grep -q '^escalation_spool_verdict=UNDELIVERED' <<<"$spool_beat" || fail "an entry a later drain pass could not post did not read as UNDELIVERED"
+          spool_beat="$(beat healthy)"
+          grep -q '^escalation_spool_verdict=ok$' <<<"$spool_beat" || fail "an empty spool did not read as ok"
+          echo "self-check: the beat separates an empty / pending / undelivered host escalation spool"
 
           # (ii.b) THE DEPLOY-SUPERVISOR TICK (W1-T2349). The daemon and install fields above can
           # all read healthy while the SEPARATE deploy-supervisor cycle has stopped ticking — that
@@ -240,6 +264,9 @@ jobs:
           is_daemon_stale() { case "$1" in STALE*) return 0 ;; *) return 1 ;; esac; }
           daemon_expected() { case " ${DAEMON_EXPECTED_BRANCHES} " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
           is_dispatch_stalled() { case "$1" in STALLED*) return 0 ;; *) return 1 ;; esac; }
+          # 2026-10-11: host-side escalations the daemon could not post (src/lib/host-escalation-spool.ts).
+          # The beat names UNDELIVERED only on the daemon's own evidence, so this arm has no timeout.
+          is_spool_undelivered() { case "$1" in UNDELIVERED*) return 0 ;; *) return 1 ;; esac; }
 
           # THE LOOP NEVER EXITS EARLY, IN EITHER DIRECTION, AND THAT IS THE FIX. A `break` or an
           # `exit 1` on the first stale branch would hide every host after it; an early success on
@@ -266,6 +293,7 @@ jobs:
             sup_verdict=$(printf '%s\n' "$payload" | sed -n 's/^supervisor_verdict=//p' | tail -n 1)
             dmn_verdict=$(printf '%s\n' "$payload" | sed -n 's/^daemon_verdict=//p' | tail -n 1)
             dsp_verdict=$(printf '%s\n' "$payload" | sed -n 's/^dispatch_verdict=//p' | tail -n 1)
+            spool_verdict=$(printf '%s\n' "$payload" | sed -n 's/^escalation_spool_verdict=//p' | tail -n 1)
 
             # THE CONDITION LEADS THE REPORT, NAMED EXPLICITLY (design note vi) — this workflow's
             # issue title reads "the machine has stopped reporting", which is WRONG for a fresh
@@ -286,6 +314,9 @@ jobs:
             elif is_supervisor_stale "$sup_verdict"; then
               kind="SUPERVISOR_STALE"
               condition="DEPLOY-SUPERVISOR STALE — the beat is fresh but the deploy cycle has stopped: ${sup_verdict}"
+            elif is_spool_undelivered "$spool_verdict"; then
+              kind="SPOOL_UNDELIVERED"
+              condition="HOST ESCALATIONS UNDELIVERED — the host spooled alerts the daemon has not posted: ${spool_verdict}"
             else
               kind="FRESH"
               condition="fresh — beat ${age_m}m old, deploy-supervisor ${sup_verdict:-unknown}"
@@ -321,6 +352,9 @@ jobs:
             elif is_supervisor_stale "$sup_verdict"; then
               stale=$(( stale + 1 ))
               echo "heartbeat-watch: DEPLOY-SUPERVISOR STALE — '${branch}': ${sup_verdict}" >&2
+            elif is_spool_undelivered "$spool_verdict"; then
+              stale=$(( stale + 1 ))
+              echo "heartbeat-watch: HOST ESCALATIONS UNDELIVERED — '${branch}': ${spool_verdict}" >&2
             else
               echo "heartbeat-watch: fresh — '${branch}' is ${age_m} minute(s) old."
             fi
@@ -380,6 +414,7 @@ jobs:
               BUILD_STALLED)     echo "fleet-heartbeat ($1): the daemon is alive but has dispatched nothing" ;;
               DAEMON_STALE)      echo "fleet-heartbeat ($1): the beat is fresh but the daemon has stopped polling" ;;
               SUPERVISOR_STALE)  echo "fleet-heartbeat ($1): the deploy cycle has stopped" ;;
+              SPOOL_UNDELIVERED) echo "fleet-heartbeat ($1): host-side escalations are not reaching GitHub" ;;
               *)                 echo "fleet-heartbeat ($1): unhealthy" ;;
             esac
           }
