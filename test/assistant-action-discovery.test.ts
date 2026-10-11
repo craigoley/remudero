@@ -386,6 +386,15 @@ test("assistant discovery bounds files, time and page size and its continuations
   assert.equal(whole.pending.length, 7);
   assert.equal(whole.completeness, "complete");
 
+  const immediate = t.mock.method(globalThis, "setImmediate");
+  const yielding = await readAssistantActionDiscovery({ ...base, budget: { yieldEvery: 1 } });
+  assert.equal(immediate.mock.callCount(), ids.length - 1, "each inter-file boundary yields to the event loop");
+  assert.deepEqual(yielding.pending, whole.pending, "cooperative yields preserve every discovered action");
+  assert.equal(yielding.completeness, "complete");
+  assert.deepEqual(yielding.limitations, []);
+  assert.equal(yielding.continuation, null);
+  immediate.mock.restore();
+
   for (const [label, extra, limitation] of [
     ["file budget", { budget: { maxFiles: 2 } }, "file_budget"],
     ["page size", { limit: 3 }, "page_size"],
@@ -415,6 +424,91 @@ test("assistant discovery bounds files, time and page size and its continuations
   await assert.rejects(readAssistantActionDiscovery({ ...base, actorHash: actorHash("operator:other"), continuation: first.continuation }), /continuation/);
   await assert.rejects(readAssistantActionDiscovery({ ...base, instance: "site", continuation: first.continuation }), /continuation/);
   await assert.rejects(readAssistantActionDiscovery({ ...base, continuation: "not-a-cursor" }), /continuation/);
+});
+
+test("assistant discovery marks a capped directory listing partial without a continuation", async (t) => {
+  const shared = root();
+  t.after(() => rmSync(shared, { recursive: true, force: true }));
+  const dir = claimsDir(shared);
+  mkdirSync(dir, { recursive: true });
+  const me = actorHash("operator:test");
+  const ids = ["listing-bound-01", "listing-bound-02"];
+  for (const actionId of ids) {
+    writeFileSync(join(dir, `${key(actionId)}.claim.json`), JSON.stringify({ version: "assistant-claim-v2", actionId,
+      action: "pause", actorHash: me, instance: "core", repository: null,
+      submittedAt: new Date().toISOString(), fingerprint: "f".repeat(64) }));
+  }
+  const request = { claimRoot: shared, actorHash: me, instance: "core", repository: null };
+  const whole = await readAssistantActionDiscovery(request);
+  assert.equal(whole.completeness, "complete");
+  assert.deepEqual(whole.pending.map((entry) => entry.actionId).sort(), ids);
+  assert.deepEqual(whole.limitations, []);
+
+  for (const maxListed of [0, 1]) {
+    const capped = await readAssistantActionDiscovery({ ...request, budget: { maxListed } });
+    assert.equal(capped.completeness, "partial");
+    assert.deepEqual(capped.limitations, ["corpus_over_listing_bound", "unverifiable_entries"]);
+    assert.equal(capped.pending.length, maxListed, "the reader only examines the admitted listing subset");
+    for (const entry of capped.pending) assert.ok(ids.includes(entry.actionId));
+    assert.equal(capped.continuation, null, "an arbitrary listing subset has no stable continuation");
+    assert.equal(capped.verifiedEmpty, false, "even a zero-entry listing cannot certify an empty store");
+  }
+});
+
+test("assistant discovery rejects invalid page limits with a private response", async (t) => {
+  const shared = root();
+  t.after(() => rmSync(shared, { recursive: true, force: true }));
+  const server = await listen(routes({ root: shared, ledgerPath: ledger(shared), claimRoot: shared, instance: "core" }));
+  t.after(() => close(server.server));
+  for (const limit of ["1", "100"]) {
+    const valid = await discover(server.base, "device-b", `?limit=${limit}`);
+    assert.equal(valid.response.status, 200);
+    assert.equal(valid.body.verifiedEmpty, true);
+  }
+  for (const limit of ["", "0", "101", "1000", "-1", "1.5", "abc"]) {
+    const invalid = await discover(server.base, "device-b", `?limit=${limit}`);
+    assert.equal(invalid.response.status, 400, `limit=${limit}`);
+    assert.deepEqual(invalid.body, { error: "invalid_limit", detail: "limit must be 1-100" });
+    assert.equal(invalid.response.headers.get("cache-control"), "private, no-store");
+  }
+  assert.equal(existsSync(claimsDir(shared)), false, "valid and invalid reads never initialize a claim store");
+  assert.deepEqual(controlRows(shared), [], "page validation never dispatches a control action");
+});
+
+test("a claim whose handle fails to read is unreadable and its descriptor is closed", async (t) => {
+  const shared = root();
+  t.after(() => rmSync(shared, { recursive: true, force: true }));
+  const dir = claimsDir(shared);
+  mkdirSync(dir, { recursive: true });
+  const me = actorHash("operator:test");
+  const actionId = "read-fails-01";
+  writeFileSync(join(dir, `${key(actionId)}.claim.json`), JSON.stringify({ version: "assistant-claim-v2", actionId,
+    action: "pause", actorHash: me, instance: "core", repository: null,
+    submittedAt: new Date().toISOString(), fingerprint: "f".repeat(64) }));
+  const request = { claimRoot: shared, actorHash: me, instance: "core", repository: null };
+  const healthy = await readAssistantActionDiscovery(request);
+  assert.equal(healthy.completeness, "complete");
+  assert.deepEqual(healthy.pending.map((entry) => entry.actionId), [actionId]);
+
+  let reads = 0;
+  let closes = 0;
+  const openFile = async (path: string) => {
+    const handle = await open(path, "r");
+    const realClose = handle.close.bind(handle);
+    handle.read = async () => {
+      reads++;
+      throw Object.assign(new Error("EIO: i/o error, read"), { code: "EIO" });
+    };
+    handle.close = async () => { await realClose(); closes++; };
+    return handle;
+  };
+  const failing = await readAssistantActionDiscovery({ ...request, openFile });
+  assert.equal(reads, 1, "the read operation really failed after the file was opened and statted");
+  assert.equal(closes, 1, "the failing read still releases its real descriptor");
+  assert.equal(failing.completeness, "partial");
+  assert.deepEqual(failing.limitations, ["unreadable_entries"]);
+  assert.deepEqual(failing.pending, [], "an unreadable claim is never certified as pending");
+  assert.equal(failing.verifiedEmpty, false);
 });
 
 test("a claim whose handle fails to close is an unreadable entry, never a crashed or empty discovery", async (t) => {
