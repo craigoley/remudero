@@ -503,14 +503,39 @@ function validateDispositionHistory(history: readonly AdmissionDispositionReceip
 
 export function admissionDispositionStore(root: string, domain: DispositionDomain = "shadow"): AdmissionDispositionStore {
   const directory = join(root, "state", "contributor-disposition", domain);
-  const paths = async (cause: string): Promise<string> => {
-    if (!isAbsolute(root) || !/^[a-f0-9]{64}$/.test(cause)) throw new Error("disposition-path-invalid");
-    for (const path of [root, join(root, "state"), join(root, "state", "contributor-disposition"), directory, join(directory, cause)]) {
-      await mkdir(path, { recursive: true, mode: 0o700 });
-      const stat = await lstat(path);
-      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("disposition-path-untrusted");
+  const ensureDirectory = async (path: string, create: boolean): Promise<boolean> => {
+    let created = false;
+    if (create) {
+      try { await mkdir(path, { mode: 0o700 }); created = true; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
     }
-    return join(directory, cause);
+    const stat = await lstat(path);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("disposition-path-untrusted");
+    return created;
+  };
+  const paths = async (cause: string, initialize: boolean): Promise<{ path: string; created: boolean }> => {
+    if (!isAbsolute(root) || !/^[a-f0-9]{64}$/.test(cause)) throw new Error("disposition-path-invalid");
+    await ensureDirectory(root, false);
+    for (const path of [join(root, "state"), join(root, "state", "contributor-disposition"), directory]) {
+      await ensureDirectory(path, initialize);
+    }
+    const registration = join(directory, `${cause}.registered`);
+    let created = false;
+    if (initialize) {
+      let handle;
+      try { handle = await open(registration, "wx", 0o600); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+      if (handle) {
+        try { await handle.writeFile(JSON.stringify({ version: 1, domain, cause })); await handle.sync(); }
+        finally { await handle.close(); }
+        await ensureDirectory(join(directory, cause), true);
+        created = true;
+      }
+    }
+    const registered = await readFile(registration);
+    if (registered !== JSON.stringify({ version: 1, domain, cause })) throw new Error("disposition-registration-unreadable");
+    await ensureDirectory(join(directory, cause), false);
+    return { path: join(directory, cause), created };
   };
   const readFile = async (path: string): Promise<string | undefined> => {
     let handle;
@@ -524,21 +549,24 @@ export function admissionDispositionStore(root: string, domain: DispositionDomai
   };
   return { domain,
     load: async cause => {
-      const path = await paths(cause), rows: AdmissionDispositionReceipt[] = [];
+      const { path, created } = await paths(cause, true), rows: AdmissionDispositionReceipt[] = [];
       let missing = false;
       for (let sequence = 0; sequence <= 16; sequence++) {
         const text = await readFile(join(path, `${sequence}.json`));
         if (text === undefined) { missing = true; continue; }
         if (missing || sequence === 16) throw new Error("disposition-record-gap-or-bound");
-        rows.push(JSON.parse(text) as AdmissionDispositionReceipt);
+        const envelope = JSON.parse(text) as { receipt: AdmissionDispositionReceipt; sha256: string };
+        if (!envelope.receipt || envelope.sha256 !== dispositionHash(envelope.receipt)) throw new Error("disposition-record-integrity");
+        rows.push(envelope.receipt);
       }
+      if (rows.length === 0 && !created) throw new Error("disposition-history-missing");
       validateDispositionHistory(rows, domain, cause);
       return rows;
     },
     append: async receipt => {
-      const path = await paths(receipt.cause), temporary = join(path, `.pending-${randomUUID()}`);
+      const { path } = await paths(receipt.cause, false), temporary = join(path, `.pending-${randomUUID()}`);
       const handle = await open(temporary, "wx", 0o600);
-      try { await handle.writeFile(JSON.stringify(receipt)); await handle.sync(); }
+      try { await handle.writeFile(JSON.stringify({ receipt, sha256: dispositionHash(receipt) })); await handle.sync(); }
       finally { await handle.close(); }
       try {
         await link(temporary, join(path, `${receipt.sequence}.json`));
