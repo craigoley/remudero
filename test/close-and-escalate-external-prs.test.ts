@@ -110,8 +110,13 @@ test("W1-T7755: owner adoption resumes flow with honest required checks", async 
 test("W1-T7755: stalled source reads terminate with unknown evidence within the bounded attempt", { timeout: 1_000 }, async () => {
   const started = performance.now(), { store } = memoryStore("rehearsal"), sim = rehearsal();
   const short = { ...settings, policy: { ...settings.policy, maxEvidenceAgeMs: 30 } };
-  const result = await executeAdmissionDisposition({ settings: short, target }, store,
+  const attempt = executeAdmissionDisposition({ settings: short, target }, store,
     () => new Promise(() => {}), () => {}, clock, sim.simulation);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const result = await Promise.race([attempt, new Promise<undefined>(resolve => { timer = setTimeout(resolve, 200); })]);
+  if (timer !== undefined) clearTimeout(timer);
+  assert.notEqual(result, undefined, "a source that never settles cannot retain the observer lane");
+  assert.ok(result);
   assert.equal(result.status, "pending"); assert.equal(result.permission, "not-granted");
   assert.ok(performance.now() - started < 1_000);
   assert.deepEqual(sim.counts(), [0, 0]);
