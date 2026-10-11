@@ -252,7 +252,6 @@ export interface ReadModelLaneMove {
   heavy: boolean;
   dueAt: number;
   costMs?: number;
-  /** Recreating a factory loses its warm cache; preserve that measured cost across its lane move. */
   coldCostMs?: number;
 }
 
