@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -103,6 +103,7 @@ test("W1-T8047: a pooled process without containment fails naming what is missin
       ['process.env.GH_TOKEN = "wrong-sentinel";', ["GH_TOKEN"]],
       ['delete process.env.GH_CONFIG_DIR;', ["GH_CONFIG_DIR"]],
       ['process.env.GH_CONFIG_DIR = ' + JSON.stringify(dir) + ';', ["GH_CONFIG_DIR"]],
+      ['process.env.GH_CONFIG_DIR += "/../" + ' + JSON.stringify(basename(dir)) + ';', ["GH_CONFIG_DIR"]],
       ['process.env.GH_CONFIG_DIR += "-missing";', ["GH_CONFIG_DIR"]],
       ['process.env.GIT_CONFIG_COUNT = "0";', ["dead push URL config"]],
       ...["https://github.com/", "git@github.com:", "ssh://git@github.com/"].map((prefix): [string, string[]] => [
@@ -141,6 +142,10 @@ test("W1-T8047: isolated files and configured slot directories retain their beha
     assert.equal(isolated.status, 0, isolated.stdout + isolated.stderr);
     const configured = run(slotFixtures(dir, true), { ...childEnv(), RMD_TEST_SLOT_DIR: join(dir, "slots") });
     assert.equal(configured.status, 0, configured.stdout + configured.stderr);
+    const tempAlias = join(dir, "tmp");
+    symlinkSync(tmpdir(), tempAlias, "junction");
+    const aliased = run(slotFixtures(dir, true), { ...childEnv(), TMPDIR: tempAlias });
+    assert.equal(aliased.status, 0, aliased.stdout + aliased.stderr);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

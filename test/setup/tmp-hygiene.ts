@@ -26,7 +26,7 @@
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { homedir, tmpdir } from "node:os";
-import { join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { beforeEach } from "node:test";
 import { isMainThread } from "node:worker_threads";
 // W1-T4805: FIRST import — process-level containment against live GitHub writes (dead push URLs, a
@@ -46,8 +46,9 @@ if (isMainThread && runsTestFilesInThisProcess()) {
   const missing: string[] = [];
   if (process.env.GH_TOKEN !== LIVE_WRITE_SENTINEL_TOKEN) missing.push("GH_TOKEN sentinel");
   const configDir = process.env.GH_CONFIG_DIR;
-  if (!configDir?.startsWith(join(tmpdir(), `${GH_CONFIG_DIR_PREFIX}${setupDirOwnerTag()}`)) ||
-      !fs.existsSync(configDir) || !fs.lstatSync(configDir).isDirectory()) {
+  if (!configDir || !basename(configDir).startsWith(`${GH_CONFIG_DIR_PREFIX}${setupDirOwnerTag()}`) ||
+      !fs.lstatSync(configDir, { throwIfNoEntry: false })?.isDirectory() ||
+      dirname(fs.realpathSync(configDir)) !== tmpdir()) {
     missing.push("GH_CONFIG_DIR owned by this process");
   }
   const count = Number(process.env.GIT_CONFIG_COUNT);
