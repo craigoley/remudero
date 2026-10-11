@@ -1,9 +1,9 @@
 # Bounded heavy READY reservations, v2
 
 This is an **opt-in, host-local, single-account** reader/producer foundation, not a
-live fleet rollout. `RMD_HEAVY_READY_DIR` must name a pre-existing canonical private
+live fleet rollout. The explicitly supplied `dir` must name a pre-existing canonical private
 directory owned by the consumer account (0700; regular single-link records 0600).
-An unset setting disables the adapter. An explicitly configured missing, malformed,
+An absent `dir` disables the adapter. An explicitly configured missing, malformed,
 unreadable, oversized or incomplete store is UNKNOWN, never an empty observation.
 The adapter throws a named observation error for the caller to defer NEW admission.
 It does not write PAUSE, QUIET_HOURS, STOP, restart containers, kill work, change
@@ -45,7 +45,7 @@ pretends to measure worker capacity. No active or closed record is automatically
 ## Publication and rollout sequence
 
 1. Publish/validate this foundation, including real default-reader failure controls.
-2. Wire its callback at NEW implement admission boundaries only, with per-lane and
+2. Register an explicit configuration setting and wire its callback at NEW implement admission boundaries only, with per-lane and
    post-async-refill rechecks. Tick-level retro, triage, review, SRE and serving gates
    must not consume it. Active workers settle without cancellation.
 3. Verify all relevant consumers and the chosen trust/filesystem boundary in a fresh

@@ -3,6 +3,7 @@ import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, opendi
 import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { createOrReadPublished } from "./fs-race-safe.js";
+import { systemClock } from "./clock.js";
 import { readPidNamespace, testSlotProcessFacts } from "./test-slot.js";
 
 /** Human-approved READY-to-escalation SLA. A repair/restart never renews it. */
@@ -119,7 +120,7 @@ function heavyOwnerIdentity(): HeavyBuildReservation["owner"] {
 
 /** Explicit directory only. Immutable request history survives release, expiry and producer retry. */
 export function reserveHeavyNewBuilds(logicalId: string, label: string, opts: { dir: string; now?: number }): HeavyReservationHandle {
-  const now = opts.now ?? Date.now();
+  const now = opts.now ?? systemClock.now();
   if (!logicalId || logicalId.length > 512 || !Number.isSafeInteger(now) || now < 0) throw new Error("invalid heavy READY identity/time");
   mkdirSync(opts.dir, { mode: 0o700, recursive: true });
   const identity = heavyDirectoryIdentity(opts.dir), id = heavyRecordDigest(logicalId);
@@ -133,7 +134,7 @@ export function reserveHeavyNewBuilds(logicalId: string, label: string, opts: { 
 /** Only the actual minting process can release. Late completion records escalation, not success. */
 export function releaseHeavyNewBuilds(handle: HeavyReservationHandle, opts: { now?: number } = {}): boolean {
   if (!handle.owned) return false;
-  const now = opts.now ?? Date.now(), identity = heavyDirectoryIdentity(handle.dir);
+  const now = opts.now ?? systemClock.now(), identity = heavyDirectoryIdentity(handle.dir);
   const current = validateHeavyRequest(readOptionalHeavyRecord(heavyRecordPath(handle.dir, handle.request.id)));
   const actual = heavyOwnerIdentity();
   if (heavyRecordDigest(current) !== heavyRecordDigest(handle.request) || current.owner.pid !== actual.pid || current.owner.start !== actual.start ||
@@ -182,7 +183,7 @@ function deliverHeavyEscalation(dir: string, request: HeavyBuildReservation, clo
 /** Unknown never means clear. Closed records are not active-capacity occupants, including on rollback. */
 export function readHeavyNewBuildHold(opts: { dir: string; now?: number; log?: Log }): HeavyReservationReading {
   try {
-    const now = opts.now ?? Date.now();
+    const now = opts.now ?? systemClock.now();
     if (!Number.isSafeInteger(now) || now < 0) throw new Error("invalid heavy READY read time");
     const identity = heavyDirectoryIdentity(opts.dir), ids = censusHeavyRecords(opts.dir);
     let hold: HeavyBuildHold | undefined, active = 0, pendingEscalations = 0;
@@ -211,10 +212,10 @@ export function readHeavyNewBuildHold(opts: { dir: string; now?: number; log?: L
   } catch (error) { return { state: "unavailable", reason: heavyErrorMessage(error) }; }
 }
 
-/** Opt-in composition-root adapter. Unset is disabled; explicitly configured but missing is UNKNOWN. */
+/** Opt-in composition-root adapter. An absent directory disables it; a configured missing one is UNKNOWN. */
 export function heavyNewBuildGate(log: Log, opts: { dir?: string } = {}): () => HeavyBuildHold | undefined {
   return () => {
-    const dir = opts.dir ?? process.env.RMD_HEAVY_READY_DIR;
+    const dir = opts.dir;
     if (dir === undefined) return undefined;
     const reading = readHeavyNewBuildHold({ dir, log });
     if (reading.state === "unavailable") {

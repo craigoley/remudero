@@ -374,14 +374,12 @@ test("heavy READY v2 unset default configuration disables only this adapter in a
   `);
 });
 
-test("heavy READY v2 the native default adapter uses explicit environment while options take precedence", { timeout: 10000 }, t => {
+test("heavy READY v2 the native adapter reads only its explicitly supplied directory", { timeout: 10000 }, t => {
   const dir = fixture(t), handle = reserveHeavyNewBuilds("environment-opt-in", "gate", { dir });
   nativeChild(dir, `
-    process.env.RMD_HEAVY_READY_DIR = dir;
-    assert.equal(api.heavyNewBuildGate(()=>{})()?.requestId, process.argv[2]);
-    process.env.RMD_HEAVY_READY_DIR = dir + '/missing';
+    assert.equal(api.heavyNewBuildGate(()=>{})(), undefined);
     assert.equal(api.heavyNewBuildGate(()=>{}, {dir})()?.requestId, process.argv[2]);
-    assert.throws(api.heavyNewBuildGate(()=>{}), /unavailable/);
+    assert.throws(api.heavyNewBuildGate(()=>{}, {dir:dir+'/missing'}), /unavailable/);
   `, [handle.request.id]);
 });
 
