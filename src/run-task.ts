@@ -38119,6 +38119,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       const d = deps("flow-remedy", raiseDuplicate);
       return gardenPass(flowGardenSpec(d, {
         owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot, log),
+        admission: { owner, repo, settings: config.contributorAdmission },
         escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log }),
       }), d);
     }
@@ -38143,7 +38144,8 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       return selectorShadowGardenPass(d, owner, repo, ciLearningTaskIdMinter(repoRoot, log));
     }
     case "flow":
-      return flowGardenPass(deps("flow"), owner, repo, ciLearningTaskIdMinter(repoRoot, log));
+      return flowGardenPass(deps("flow"), owner, repo, ciLearningTaskIdMinter(repoRoot, log),
+        { admission: { owner, repo, settings: config.contributorAdmission } });
     case "evidence-coverage":
       return withDue(() => {
         try {

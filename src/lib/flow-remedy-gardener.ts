@@ -15,6 +15,8 @@ import { loadPlanFromYaml } from "./plan.js";
 import { PR_BLOCKERS, type PrBlocker } from "./pr-blocker.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import type { LedgerRecord } from "./retro.js";
+import { ADMISSION_FLOW_STEP, observeAdmissionFlow, type AdmissionFlowInput, type AdmissionFlowReport } from "./flow-gardener.js";
+import { feedbackContentDigest } from "./contributor-admission.js";
 
 export interface PrOutcome { state: "open" | "closed" | "merged"; at?: string; mergedBy?: string }
 export interface Charge { pr: number; key: string; start: number; end: number; hours: number; reason: string; owner: string }
@@ -28,6 +30,7 @@ interface Prior { task: CiFrictionRemedyTask; effect?: RemedyEffect }
 export interface FlowAction extends GardenAction<"draft"> {
   price: Price; origin: string; rung: number; prior?: Prior; escalation?: string;
   charges: Charge[]; population: number[];
+  admissionShadow?: boolean;
 }
 export interface Inventory {
   charges: Charge[]; episodes: Episode[]; priced: Price[]; candidates: Price[];
@@ -42,6 +45,7 @@ export interface FlowGardenSources {
   ownerSearch?: OwnerSearch;
   draftShard?: (action: FlowAction, taskId: string) => string;
   escalate?: (escalation: Escalation) => string | null;
+  admission?: AdmissionFlowInput;
 }
 
 /**
@@ -67,6 +71,8 @@ export interface LadderKind {
   escalationSummary: (cause: string) => string;
   /** Files a remedy may own when no source file mentions the cause's text. */
   fallbackFiles?: readonly string[];
+  /** Admission proposals have a one-remedy/one-owner-judgment shadow budget, not live effects. */
+  shadowAdmission?: boolean;
 }
 
 export const FLOW_LADDER: LadderKind = {
@@ -78,6 +84,85 @@ export const FLOW_LADDER: LadderKind = {
   evidenceLine: (pr, hours, reason) => `- PR #${pr}: ${hours.toFixed(2)} PR-hours — ${reason}`,
   escalationSummary: cause => `Flow blocker: ${cause} still costs PR-hours`,
 };
+
+export const ADMISSION_FLOW_LADDER: LadderKind = { ...FLOW_LADDER, prefix: "admission-flow", shadowAdmission: true };
+
+/** Distinct PR episodes, not retries, head pushes or repeated receipt rows, measure recurrence. */
+export interface AdmissionRecurrenceSample {
+  atMs: number; repositoryId: number; policyDigest: string; populationDigest: string;
+  coverage: string; domain: "shadow"; population: number[]; episodes: string[];
+}
+export function admissionRecurrence(samples: readonly AdmissionRecurrenceSample[], mergedAtMs: number, nowMs: number): RemedyEffect {
+  const unmeasured: RemedyEffect = { verdict: "unmeasurable", before: { k: 0, n: 0 }, after: { k: 0, n: 0 }, windowDays: 0, z: 0,
+    reason: "unknown: no comparable controlled before/after windows and actual remedy merge" };
+  const span = Math.min(nowMs - mergedAtMs, CI_FRICTION_EFFECT_MAX_WINDOW_MS);
+  if (!Number.isFinite(span) || span <= 0) return unmeasured;
+  const before = samples.filter(s => s.atMs >= mergedAtMs - span && s.atMs < mergedAtMs);
+  const after = samples.filter(s => s.atMs >= mergedAtMs && s.atMs <= nowMs);
+  const all = [...before, ...after], control = before[0];
+  if (!control || !after.length || all.some(s => s.domain !== "shadow" || s.coverage !== "measured"
+    || s.repositoryId !== control.repositoryId || s.policyDigest !== control.policyDigest || s.populationDigest !== control.populationDigest
+    || feedbackContentDigest([...s.population].sort((a, b) => a - b)) !== s.populationDigest)) return unmeasured;
+  const distinct = (rows: readonly AdmissionRecurrenceSample[]) => new Set(rows.flatMap(s => s.episodes));
+  const beforeEpisodes = distinct(before), afterEpisodes = distinct(after);
+  // A persistent old episode is not a new recurrence; retain its cause separately in the ladder.
+  const k = [...afterEpisodes].filter(id => !beforeEpisodes.has(id)).length;
+  const result = { before: { k: beforeEpisodes.size, n: control.population.length }, after: { k, n: control.population.length },
+    windowDays: span / 86_400_000, z: 0 };
+  if (result.before.n === 0 || result.before.k === 0) return { ...unmeasured, ...result };
+  const persistent = [...afterEpisodes].some(id => beforeEpisodes.has(id));
+  return { ...result, verdict: !persistent && k < result.before.k ? "credit" : "debit",
+    reason: `observed distinct-episode recurrence: ${result.before.k}/${result.before.n} before, ${k}/${result.after.n} after; persistent ${persistent}; equal windows, no causal claim` };
+}
+
+function admissionEffect(records: readonly LedgerRecord[], cause: string, merge: number, now: number): RemedyEffect {
+  const samples: AdmissionRecurrenceSample[] = [];
+  for (const row of records.filter(r => r.step === ADMISSION_FLOW_STEP)) {
+    if (row.mode !== "shadow" || row.coverage !== "measured" || !Number.isSafeInteger(row.repositoryId)
+      || typeof row.policyDigest !== "string" || !/^[a-f0-9]{64}$/.test(row.policyDigest)
+      || typeof row.populationDigest !== "string" || !/^[a-f0-9]{64}$/.test(row.populationDigest)
+      || !Array.isArray(row.trusted) || !Array.isArray(row.affected) || !Number.isFinite(row.observedAtMs)) continue;
+    const prs = [...row.trusted, ...row.affected] as AdmissionFlowReport["affected"];
+    if (prs.some(r => !Number.isSafeInteger(r.pr) || r.pr <= 0 || !Number.isSafeInteger(r.itemId) || r.itemId <= 0
+      || !/^admission-[a-f0-9]{64}$/.test(r.causeKey))) continue;
+    samples.push({ atMs: Number(row.observedAtMs), repositoryId: Number(row.repositoryId), policyDigest: row.policyDigest,
+      populationDigest: row.populationDigest, coverage: row.coverage, domain: "shadow", population: prs.map(r => r.pr),
+      episodes: row.affected.filter((r: AdmissionFlowReport["affected"][number]) => r.causeKey === cause).map((r: AdmissionFlowReport["affected"][number]) => `${r.itemId}:${cause}`) });
+  }
+  return admissionRecurrence(samples, merge, now);
+}
+
+/** Typed cause keys enter the ONE ladder directly, never through the free-text SHA normalizer. */
+export function admissionFlowInventory(report: AdmissionFlowReport, records: readonly LedgerRecord[], tasks: readonly CiFrictionRemedyTask[], nowMs: number): Inventory {
+  const eligible = report.coverage === "measured" ? report.affected.filter(r => r.evidence !== "current-disposition" || r.status === "owner-action") : [];
+  const episodes: Episode[] = eligible.map(r => ({ pr: r.pr, key: r.causeKey, owner: "admission-shadow", start: r.openedAtMs, end: nowMs,
+    outcome: "unknown", eligible: true, charges: [{ pr: r.pr, key: r.causeKey, start: r.openedAtMs, end: nowMs,
+      hours: (nowMs - r.openedAtMs) / 3_600_000, reason: r.originalReason ?? r.evidence, owner: "admission-shadow" }] }));
+  const inv = ladderOf(ADMISSION_FLOW_LADDER, episodes, records, tasks, nowMs);
+  if (inv.next) { inv.next.admissionShadow = true; inv.next.reason = `${inv.next.price.key}: observed open exposure, not causal attribution; shadow proposal only`; }
+  return inv;
+}
+
+/** Write intent before any diagnostic acknowledgement; lost acknowledgement never resets it. */
+export function recordAdmissionFlowProposal(deps: GardenerDeps, action: FlowAction): void {
+  if (!/^admission-[a-f0-9]{64}$/.test(action.price.key) || action.admissionShadow !== true || ![1, 2].includes(action.rung)) {
+    deps.log("admission_flow.proposal_unknown", { reason: "invalid-proposal", permission: "not-granted" }); return;
+  }
+  const effect = action.escalation ? "owner-judgment" : "remedy";
+  const dir = join(deps.stateDir, "admission-flow-shadow-intents");
+  const token = join(dir, `${action.price.key}-${effect}.json`);
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(token, JSON.stringify({ version: "admission-flow-intent-v1", mode: "shadow", effect, cause: action.price.key,
+      origin: action.origin, permission: "not-granted", originalReasons: action.charges.map(c => c.reason), atMs: (deps.clock ?? systemClock).now() }) + "\n", { flag: "wx" });
+  } catch (error) {
+    // EEXIST includes unreadable/corrupt existing tokens: never delete them into a fresh budget.
+    deps.log("admission_flow.proposal_unknown", { cause: action.price.key, reason: (error as NodeJS.ErrnoException).code === "EEXIST"
+      ? "existing-intent-or-lost-acknowledgement" : "intent-unreadable", permission: "not-granted" }); return;
+  }
+  deps.log("admission_flow.proposal_shadow", { cause: action.price.key, effect, mode: "shadow", permission: "not-granted",
+    remedy_max: 1, owner_judgment_max: 1, original_reason: action.charges[0]?.reason, required_checks: "ordinary-current-head-checks-required" });
+}
 
 const originOf = (kind: LadderKind, key: string, rung: number) => `${kind.prefix}:${key}${rung > 1 ? `#r${rung}` : ""}`;
 const parseOrigin = (kind: LadderKind, origin: string) =>
@@ -280,7 +365,7 @@ export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonl
       const merge = Date.parse(top.mergedAt);
       if (!Number.isFinite(merge)) state = "in_progress";
       else {
-        effect = effectOf(charges, price.key, merge, now);
+        effect = kind.shadowAdmission ? admissionEffect(records, price.key, merge, now) : effectOf(charges, price.key, merge, now);
         state = effect.verdict === "pending" ? "measuring" : effect.verdict === "debit" ? "draft" : "resolved";
         if (state === "draft") { rung++; prior = { task: top, effect }; }
       }
@@ -288,7 +373,7 @@ export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonl
     const origin = originOf(kind, price.key, rung);
     if (receipts.has(origin) && !mine.some(t => t.origin === origin)) state = "in_progress";
     if (escalated.has(origin)) state = "escalated";
-    if (state === "draft" && rung >= CI_FRICTION_ESCALATE_RUNG) state = "escalate";
+    if (state === "draft" && rung >= (kind.shadowAdmission ? 2 : CI_FRICTION_ESCALATE_RUNG)) state = "escalate";
     ladder.push({ cause: price.key, state, rung, effect });
     if (!next && (state === "draft" || state === "escalate")) {
       next = { class: "draft", target: origin, origin, rung, price, prior,
@@ -370,6 +455,7 @@ export function ladderGardenSpec(deps: GardenerDeps, input: LadderSpecInput): Ga
     apply: (ws, plan) => {
       const action = plan.actions[0];
       if (!action) return undefined;
+      if (action.admissionShadow) { recordAdmissionFlowProposal(deps, action); return undefined; }
       if (action.escalation) {
         const escalation: Escalation = { class: "BLOCKED", taskId: `${kind.stem}-${slug(action.price.key, 60)}`,
           summary: kind.escalationSummary(action.price.key), detail: `${action.reason}\n${action.escalation}\n${action.prior?.effect?.reason ?? ""}`,
@@ -407,16 +493,40 @@ export function ladderGardenSpec(deps: GardenerDeps, input: LadderSpecInput): Ga
 /** W1-T5538: prices observed PR waits and files one admitted remedy for an unowned or uncleared cause. */
 export function flowGardenSpec(deps: GardenerDeps, sources: FlowGardenSources): GardenSpec<"draft", Inventory, FlowAction, GardenCheckout> {
   const clock = deps.clock ?? systemClock;
+  const inventory = (): Inventory => {
+    const records = sources.ledgerRecords ? sources.ledgerRecords() : readLadderRecords(deps.stateDir, FLOW_LADDER);
+    const plan = sources.planState ? sources.planState() : readLadderPlan(deps.repoRoot, FLOW_LADDER);
+    if (plan.degraded) deps.log("flow.origins_degraded", { reason: plan.degraded });
+    if (plan.unreadable?.length) throw new Error(`flow plan shards unreadable: ${plan.unreadable.join(", ")}`);
+    const prs = [...new Set(episodesOf(records, new Map(), clock.now()).filter(e => e.outcome === "open" && e.owner !== "NONE").map(e => e.pr))];
+    const outcomes = sources.prOutcomes ? sources.prOutcomes(prs) : readOutcomes(prs, sources);
+    return inventoryOf(records, plan.tasks, outcomes, clock.now());
+  };
+  const admission = sources.admission;
+  const enabled = admission?.settings?.mode === "shadow" && admission.settings.disposition === "shadow";
   return ladderGardenSpec(deps, {
     kind: FLOW_LADDER, sources,
-    inventory: () => {
-      const records = sources.ledgerRecords ? sources.ledgerRecords() : readLadderRecords(deps.stateDir, FLOW_LADDER);
-      const plan = sources.planState ? sources.planState() : readLadderPlan(deps.repoRoot, FLOW_LADDER);
-      if (plan.degraded) deps.log("flow.origins_degraded", { reason: plan.degraded });
-      if (plan.unreadable?.length) throw new Error(`flow plan shards unreadable: ${plan.unreadable.join(", ")}`);
-      const prs = [...new Set(episodesOf(records, new Map(), clock.now()).filter(e => e.outcome === "open" && e.owner !== "NONE").map(e => e.pr))];
-      const outcomes = sources.prOutcomes ? sources.prOutcomes(prs) : readOutcomes(prs, sources);
-      return inventoryOf(records, plan.tasks, outcomes, clock.now());
-    },
+    inventory,
+    ...(enabled ? { inventoryAsync: async (): Promise<Inventory> => {
+      const ordinary = inventory();
+      try {
+        const report = await observeAdmissionFlow(deps, admission);
+        const records = sources.ledgerRecords ? sources.ledgerRecords() : readLadderRecords(deps.stateDir, ADMISSION_FLOW_LADDER, [ADMISSION_FLOW_STEP]);
+        const plan = sources.planState ? sources.planState() : readLadderPlan(deps.repoRoot, ADMISSION_FLOW_LADDER);
+        if (plan.degraded || plan.unreadable?.length) throw new Error("admission-plan-unreadable");
+        const shadow = admissionFlowInventory(report, records, plan.tasks, clock.now());
+        if (shadow.next) {
+          const effect = shadow.next.escalation ? "owner-judgment" : "remedy";
+          const token = join(deps.stateDir, "admission-flow-shadow-intents", `${shadow.next.price.key}-${effect}.json`);
+          // A previous intent, readable or not, is a spent proposal budget, not an open-PR hold.
+          if (existsSync(token)) shadow.next = undefined;
+        }
+        return { ...ordinary, episodes: [...ordinary.episodes, ...shadow.episodes], charges: [...ordinary.charges, ...shadow.charges],
+          priced: [...ordinary.priced, ...shadow.priced], candidates: [...ordinary.candidates, ...shadow.candidates],
+          ladder: [...ordinary.ladder, ...shadow.ladder], next: ordinary.next ?? shadow.next };
+      } catch { // Admission evidence loss holds only its proposal; ordinary trusted flow remains available.
+        deps.log("admission_flow.proposal_unknown", { reason: "admission-inventory-unreadable", permission: "not-granted" }); return ordinary;
+      }
+    } } : {}),
   });
 }
