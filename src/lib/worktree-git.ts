@@ -27,6 +27,9 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
  *      is refused ({@link WorktreeConfigRefusedError}), and `credential.helper` is reset and re-added
  *      from HARNESS state only — system/global helpers, or the daemon's socket helper.
  *
+ *   5. NEUTRALISES every attribute-named driver the config defines (W1-T6146): filter clean/smudge/process
+ *      and merge drivers, by name, at command-line precedence.
+ *
  * WHAT IT DELIBERATELY KEEPS: system and global config (daemon-owned), and the pinned gitdir's config
  * keys that (4) admits, so pushes authenticate exactly as before.
  */
@@ -347,6 +350,33 @@ function harnessCredentialConfig(entries: readonly ConfigEntry[]): Array<[string
   return [...out, ["core.askPass", ""], ["http.extraHeader", ""]];
 }
 
+/** W1-T6146 — the attribute-named drivers a config source defines, neutralised at command-line precedence.
+ *  A tracked `.gitattributes` (`* filter=x`, `f merge=m`) names a driver and git runs whatever command a config
+ *  file gives it, as the daemon: `filter.<d>.clean|smudge|process` on add/status/diff/checkout/rebase, and
+ *  `merge.<d>.driver` on a merge or rebase. Config keys cannot be wildcarded, so each driver name the listing
+ *  holds (any scope) is overridden: a filter becomes the identity (`cat`, no `process`, not `required`, so the
+ *  stored blob is the file's own bytes and the call does not fail), a merge driver becomes `false`, so a path
+ *  that needs it conflicts as a NAMED failure rather than merging silently. The pinned local and worktree files
+ *  are already refused above; this closes the system/global scope (e.g. `git lfs install`'s filter.lfs.*),
+ *  which only the daemon writes. An `include.path` inside system/global is not listed (`--no-includes`) and is
+ *  the accepted residual. */
+function driverNeutralisation(entries: readonly ConfigEntry[]): Array<[string, string]> {
+  const filters = new Set<string>();
+  const mergers = new Set<string>();
+  for (const { key } of entries) {
+    const f = /^filter\.(.+)\.(?:clean|smudge|process|required)$/.exec(key);
+    if (f) filters.add(f[1]!);
+    const m = /^merge\.(.+)\.driver$/.exec(key);
+    if (m) mergers.add(m[1]!);
+  }
+  const out: Array<[string, string]> = [];
+  for (const d of [...filters].sort()) {
+    out.push([`filter.${d}.clean`, "cat"], [`filter.${d}.smudge`, "cat"], [`filter.${d}.process`, ""], [`filter.${d}.required`, "false"]);
+  }
+  for (const d of [...mergers].sort()) out.push([`merge.${d}.driver`, "false"]);
+  return out;
+}
+
 const CONFIG_LIST_ARGS = ["config", "--list", "--show-scope", "--null", "--no-includes"];
 const CONFIG_READ_TIMEOUT_MS = 30_000;
 
@@ -366,7 +396,7 @@ function vetted(pin: PinnedWorktreeGit, listing: string, log: WorktreeGitLog, ha
     log("worktree_git.config_refused", { worktree: pin.worktree, git_dir: pin.gitDir, keys });
     throw new WorktreeConfigRefusedError(pin.worktree, keys);
   }
-  return harnessCredentialConfig(entries);
+  return [...harnessCredentialConfig(entries), ...driverNeutralisation(entries)];
 }
 
 /** Vet the pinned repository's own config before a call (W1-T6148); returns the overrides it adds. */
