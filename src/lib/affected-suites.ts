@@ -41,6 +41,10 @@ export interface AffectedSelection {
   /** THE FLOOR: suites to run, sorted. Empty when `fullRun` — the full suite needs no list. */
   suites: string[];
   fullRun: boolean;
+  /** W1-T7809 — the author lane's plan-only arm: `suites` are the readers of a changed shard plus the
+   *  plan-integrity suites, and plan lint (`lint-plan:fast`) is part of the selection. */
+  planOnly?: boolean;
+  lintPlanFast?: boolean;
   /** One line per decision: why each suite was selected, or which file forced a full run. */
   reasons: string[];
   /** THE NARROW CANDIDATE, measured in shadow only: the floor's import-graph arm replaced by the
@@ -730,6 +734,57 @@ export function readAffectedListings(repoRoot: string, changed: readonly string[
     return [...census, ...prose];
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** W1-T7809 — whether every changed path is under plan/: the diff the author lane sizes by shard reach. */
+export function isPlanOnlyDiff(changed: readonly string[]): boolean {
+  return changed.length > 0 && changed.every((f) => f.startsWith("plan/"));
+}
+
+/** diff-class's plan-only listing for `repoRoot`: the suites that read a changed shard plus the
+ *  plan-integrity suites. Reads no git; a listing that fails or overruns THROWS. */
+export function readPlanOnlyListing(repoRoot: string, changed: readonly string[]): string[] {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-only-`));
+  try {
+    const list = join(dir, "changed.txt");
+    writeFileSync(list, changed.join("\n") + "\n");
+    const env = affectedListingEnv(join(dir, "home"));
+    const diffClass = join(HARNESS_ROOT, "scripts", "diff-class.mjs");
+    return listingLines(spawnSync(
+      process.execPath,
+      ["--import", "tsx", diffClass, "--list-plan-only-suites", "--changed-files", list, "--plan-reading-root", realpathSync(repoRoot)],
+      { cwd: HARNESS_ROOT, env, encoding: "utf8", timeout: AFFECTED_LISTING_TIMEOUT_MS },
+    ), "diff-class --list-plan-only-suites");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** W1-T7809 — the AUTHOR selection for a plan-only diff: plan lint (`lintPlanFast`) plus the suites in
+ *  `listing`. Unlike {@link affectedSelectionOrFull} it is not the census floor plus every `loadPlan` caller,
+ *  and an unreadable listing is a named FULL run, never a narrower guess. */
+export function planOnlySelectionOrFull(changed: readonly string[], readListing: () => string[]): AffectedSelection {
+  try {
+    const suites = [...new Set(readListing())].sort();
+    return {
+      suites,
+      fullRun: false,
+      planOnly: true,
+      lintPlanFast: true,
+      reasons: [
+        `plan-only: every changed path is under plan/ — lint-plan:fast plus ${suites.length} suite(s) that read a changed shard or are plan-integrity suites`,
+        ...changed.map((f) => `plan-only: ${f}`),
+      ],
+      recentOnly: { floor: [] },
+    };
+  } catch (err) {
+    return {
+      suites: [],
+      fullRun: true,
+      reasons: [`full run: the plan-only listing could not be read — ${(err as Error).message}`],
+      recentOnly: { floor: [] },
+    };
   }
 }
 
