@@ -12,7 +12,7 @@
   plan_refs: [W1-T3275, W1-T3297, W1-T4085, W1-T4970, W1-T6372, W1-T3091]
   files: [src/lib/github-transport.ts, src/run-task.ts, test/next-task-id-waits-for-the-shared-read-floor.test.ts]
   status: queued
-  priority: 2
+  priority: 1
   attempts: 0
   rationale: |
     READ on origin/main cb58d3155 (2026-10-11).

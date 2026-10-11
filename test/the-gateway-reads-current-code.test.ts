@@ -437,3 +437,38 @@ test("W1-T4229: rmd serve reports its checkout on /v1/daemon-health and drains i
   assert.deepEqual(dueExits, [0], "unwatched and behind: the server drains and the process exits for the restart");
   assert.equal(dueServer.listening, false);
 });
+
+test("rmd serve's stale-code gate compares the boot sha against the caller's resolveCurrentSha, not a fresh git read", async () => {
+  // ServeDeps.resolveCurrentSha was declared, documented and set by a dozen suites, yet never handed
+  // to the gate: the gate re-read this checkout's real HEAD, so a caller's "current sha" did nothing.
+  // Here the boot sha IS this checkout's HEAD; only the caller says the code moved. The gate must act
+  // on the caller's answer: stale, an unreadable diff to an unknown sha reads as relevant, nobody is
+  // watching, so the server drains and exits for the restart.
+  const moved = "d".repeat(40);
+  let recheck: () => void = () => {};
+  const exits: number[] = [];
+  const quiet = { ...BEHIND, restartDue: false, state: { ...BEHIND.state, behindBy: 0 } };
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const server = buildServeServer({
+    ...serveDeps(quiet, { scheduleRecheck: (run) => ((recheck = run), () => {}), exit: (c) => exits.push(c) }),
+    resolveCurrentSha: () => moved,
+    log: (step, extra) => void rows.push({ step, extra }),
+  });
+  await listening(server);
+  const closed = new Promise<"closed">((resolve) => server.once("close", () => resolve("closed")));
+  // A BOUND, NOT A SLEEP: the exit waits on one async `git diff`; without the wiring it never comes.
+  let bound: ReturnType<typeof setTimeout> | undefined;
+  const gaveUp = new Promise<"gave-up">((resolve) => { bound = setTimeout(() => resolve("gave-up"), 15_000); });
+  try {
+    recheck();
+    const outcome = await Promise.race([closed, gaveUp]);
+    assert.equal(outcome, "closed", `the gate never acted on the caller's current sha; rows: ${JSON.stringify(rows.map((r) => r.step))}`);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(exits, [0]);
+    const decision = rows.find((r) => r.step === "serve.stale_code_exit");
+    assert.equal(decision?.extra?.currentSha, moved, "the exit decision names the caller's sha as current");
+  } finally {
+    clearTimeout(bound);
+    server.close();
+  }
+});

@@ -74,3 +74,36 @@ test("a superseded rule never ships beside its successor in the index", () => {
   const stacked = indexRules().filter((r) => /SUPERSEDES/.test(r.headline)).map((r) => r.headline.slice(0, 70));
   assert.deepEqual(stacked, [], "merge the superseded line into its successor instead of prefixing SUPERSEDES");
 });
+
+// "The headline is the whole rule: obey it unopened." Three shapes defer a headline's instruction to
+// somewhere a reader of the index never looks, and all are mechanical enough to pin: a headline
+// ENDING ON A COLON (its instruction is the body), one pointing at ANOTHER LINE ("above", "below"),
+// and one OPENING ON "AND" as the continuation of its neighbour — a fold or reorder moves either
+// neighbour out from under it.
+function deferringHeadlines(rules: RuleHeadline[]): string[] {
+  return rules
+    .filter((r) => /:\s*$/.test(r.headline) || /\b(above|below)\b/i.test(r.headline) || /^and\b/i.test(r.headline))
+    .map((r) => r.headline.slice(0, 70));
+}
+
+test("an index headline states its instruction — none ends on a colon, points at another line or opens on AND", () => {
+  const rules = indexRules();
+  assert.ok(rules.length >= 50, `positive control: the real index must be measured; got ${rules.length}`);
+  assert.deepEqual(deferringHeadlines(rules), [], "fold the instruction into the headline (round 2, 2026-10-11)");
+});
+
+test("an index headline states its instruction — CONTROL: every deferring shape is caught", () => {
+  const rules = parseRuleHeadlines(
+    "## S\n\n- **NOW ENFORCED:** → doctrine/s/a.md\n- **SO THE SWEEP ABOVE CANNOT FIND IT** → doctrine/s/b.md\n" +
+      "- **AND A TRAILER-ONLY SET UNDER-CREDITS** → doctrine/s/c.md\n" +
+      "- **See the rule below.** → doctrine/s/d.md\n" +
+      "- **Run `rmd x`: it reads the union, and a sandbox is no stand-in.** → doctrine/s/e.md\n",
+  );
+  // The last one is the HEALTHY arm: a colon mid-headline, and "and"/"stand" mid-sentence, are fine.
+  assert.deepEqual(deferringHeadlines(rules), [
+    "NOW ENFORCED:",
+    "SO THE SWEEP ABOVE CANNOT FIND IT",
+    "AND A TRAILER-ONLY SET UNDER-CREDITS",
+    "See the rule below.",
+  ]);
+});

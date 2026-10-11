@@ -44,11 +44,10 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   restored is the evidence it is load-bearing.**
 - **ZERO A `DA:` VALUE INSIDE THE TARGET's OWN `SF:` BLOCK — a whole-file replace hits another
   file's identical line number and returns a FALSE `OK`.**
-- **Derive "which tasks are merged" from the `Remudero-Task:` trailer on merged PRs — never from
-  ledger verdict lines.**
-- **AND A TRAILER-ONLY SET UNDER-CREDITS, because the BRANCH NAME is a second, independent credit
-  path.**
-- **THE TWO SCOPE-TIME CHECKS, AS COMMANDS — RUN BOTH BEFORE BUILDING A FILED TASK.**
+- **Derive "which tasks are merged" from merged PRs' `Remudero-Task:` trailer UNIONED with their
+  `run-<taskId>-*` branch — never from ledger verdict lines.**
+- **Before building a filed task, check BOTH `git ls-remote --heads origin 'run-<id>-*'` (in flight?)
+  and merged PRs for an exact `^Remudero-Task: <id>$` trailer (shipped?), never commit subjects.**
 - **Sweep the SUBJECT over open PR heads, not only `origin/main` — the id half already does.**
 - **NAME A SESSION BRANCH `run-<taskId>-<epochMs>` WHEN BUILDING A FILED TASK.**
 - **Before believing "task X is next", confirm the frontier with the repo's own selector —
@@ -60,19 +59,21 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   the record ALONE passes at `verify: auto`.**
 - **A shard's `status:` field is not a completion signal — it stays `queued` on tasks that
   shipped.**
-- **Decoding rule citations — where each family canonically lives.**
+- **Decode citations: "Rule N" = MASTER-PLAN §12; "G-N" = §14 "Grill RESOLVED"; "P48"/"DR-N" =
+  its retro ledger; `rule15-*` names an artifact, not a rule.**
 - **Take the cheap candidate beside a costly one, and name what the costly one now waits for.**
 - **Never fan out update-branch after a main fix: protection is non-strict, and each refresh re-runs
   ~16 min of CI and voids the review.**
 - **Leave a red fleet PR to the fix lane while a round is due or in flight — hand pushes out-race it
   and hide its defects.**
 - **Do NOT push a fresh sha to clear a stale-red `ci-gate` — it self-clears.**
-- **CADENCE IS THE BUDGET, NOT INTENT — a sparse check-in is fine, a poll is not. NOW ENFORCED:**
+- **Space `gh` reads 180 s apart, never poll — `deny-floor.sh` refuses a closer read; GitHub's
+  SECONDARY limit 403s on RATE while `rate_limit` reads full.**
 - **`gh pr create` may die on API quota; git push is unaffected.**
 - **A CONFLICTING PR registers ZERO check runs. `total: 0` reads as "still queued" but means
   `mergeable_state: dirty` — check mergeability before waiting on CI.**
-- **When two PRs append tests to the same file's TAIL, the conflict region can cut just before a
-  SHARED closing `});`**
+- **Two PRs appending tests to one file's TAIL can conflict before a SHARED closing `});` — close
+  the ours-side block yourself; esbuild says only `Unexpected end of file`.**
 - **A corrected PR title is observed by a RE-RUN, not only by a new sha — but `edited` still fires
   nothing.**
 - **A BAKED-path merge (`deploy/Dockerfile`, `deploy/entrypoint.sh`) ships itself by auto ACR build +
@@ -111,7 +112,8 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   — AN EXISTING CONNECTION IS NOT EVIDENCE.**
 - **(h) A GATE RUN FROM A CHECKOUT that is BEHIND answers about a file and a threshold that both
   moved — run it against `origin/main`'s blobs and report the behind-count.**
-- **(j) A CENSUS TEST NAMES NONE OF YOUR SYMBOLS, SO THE CALLER SWEEP ABOVE CANNOT FIND IT**
+- **Beside the `git grep -l <symbol>` caller sweep, run the census suites your diff joins
+  (`rmd census-membership`) — they WALK a population and name none of your symbols.**
 - **(k) A RULE 21 protocol run passing `{ baseTask }` ALONE reports THREE INDISTINGUISHABLE ZEROS.**
 - **A `catch` returning a success-shaped literal is a CLAIM: name what it collapses, and where remedies
   differ, return a third value the caller sees.**
