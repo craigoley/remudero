@@ -366,8 +366,9 @@ export function childGardenPassSpawn(
   const reserve = opts.reserve ??
     (() => (daemonOwnedProcess() ? openLearnedReservation({ workerClass: "garden", root }) : undefined));
   return async (name, args) => {
-    await awaitMemoryAdmission({ workerClass: "garden", root, taskId: "GARDEN", runId: `garden-${name}` }, opts.admission);
-    const reservation = reserve();
+    const admission = await awaitMemoryAdmission({ workerClass: "garden", root, taskId: "GARDEN", runId: `garden-${name}`, reserve }, opts.admission);
+    const reservation = "reservation" in admission ? admission.reservation :
+      admission.kind === "error" && admission.reservationAttempted ? undefined : reserve();
     // The same counterfactual row a worker start writes, so a garden start's fit is measured before any ruling.
     if (reservation) {
       recordShadowMemoryVerdict({ workerClass: "garden", reservationId: reservation.id, estimateMib: reservation.estimateMib, root,

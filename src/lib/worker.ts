@@ -2321,14 +2321,15 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // The ENFORCE mode of the host memory budget: under the shipped "shadow" mode this returns at once and changes
   // nothing; under "enforce" (an operator ruling in plan/policy.yaml) it waits, tiered and in priority order, while the
   // start would not fit. It never throws, and an error admits the start (host-memory-admission.ts).
-  await awaitMemoryAdmission({
+  const admission = await awaitMemoryAdmission({
     workerClass: workerClassOf(args),
     root: () => (args.config ?? loadConfig()).root,
     ...(args.runId ? { runId: args.runId } : {}),
     ...(args.taskId ? { taskId: args.taskId } : {}),
   }, args.memoryShadow);
   const releaseWorkerOccupancy = claimWorkerOccupancy();
-  const memoryReservation = openOccupancyReservation({ workerClass: workerClassOf(args), root: args.config?.root });
+  const memoryReservation = ("reservation" in admission ? admission.reservation : undefined) ??
+    openOccupancyReservation({ workerClass: workerClassOf(args), root: args.config?.root });
   const boundContainment = reservationBoundContainment(args.containment, memoryReservation);
   try {
   // Validate-before-spawn guard, enforced at the spawn boundary rather than by caller convention. TRAP: `claude -p` SILENTLY
