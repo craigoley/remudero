@@ -30,7 +30,7 @@ test("a held green PR's sweep row names the hold and its owner, not arming", asy
   const [row] = readLedgerLines(d.ledgerPath).filter((r) => r.step === "sweep.disposed");
   assert.equal(row?.blocker, "operator-hold");
   assert.equal(row?.blocker_owner, "operator");
-  assert.match(String(row?.reason), /held by Craig Oley: hold pending W1-T7092 corrections/);
+  assert.match(String(row?.reason), /held by Craig Oley \(actor unrecorded\): hold pending W1-T7092 corrections/);
   assert.doesNotMatch(String(row?.reason), /arming auto-merge/);
 });
 

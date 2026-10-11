@@ -5976,6 +5976,63 @@ export interface AutomergeHold {
   by: string;
   /** Why — mirroring {@link CappedOverride.reason}. */
   reason: string;
+  /** W1-T7721 — the evidence the WRITER gathered about who really ran the command (never typed by the caller).
+   *  Absent on rows older than the field, which every surface reads as "actor unrecorded". */
+  actor?: MergeHoldActor;
+}
+
+/** W1-T7721 — verifiable provenance of a merge-hold write, gathered by the writer beside the free-text `by`. */
+export interface MergeHoldActor {
+  /** `agent` when an agent/session marker was present or the process ran inside a container; else `human`. */
+  kind: "human" | "agent";
+  os_user: string;
+  host: string;
+  /** Container id when the writer ran inside one. */
+  container_id?: string;
+  /** Agent/session identity when one was present in the environment. */
+  session?: string;
+  /** Names of the agent/session env markers found (CLAUDECODE, REMUDERO_RUN_ID, ...). */
+  agent_markers: string[];
+  tty: { stdin: boolean; stdout: boolean };
+  /** Parent process names, nearest first. */
+  parents: string[];
+}
+
+function readMergeHoldActor(raw: unknown): MergeHoldActor | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const a = raw as Record<string, unknown>;
+  if ((a.kind !== "human" && a.kind !== "agent") || typeof a.os_user !== "string" || typeof a.host !== "string") {
+    return undefined;
+  }
+  const tty = (a.tty ?? {}) as Record<string, unknown>;
+  return {
+    kind: a.kind,
+    os_user: a.os_user,
+    host: a.host,
+    ...(typeof a.container_id === "string" ? { container_id: a.container_id } : {}),
+    ...(typeof a.session === "string" ? { session: a.session } : {}),
+    agent_markers: Array.isArray(a.agent_markers) ? a.agent_markers.filter((m): m is string => typeof m === "string") : [],
+    tty: { stdin: tty.stdin === true, stdout: tty.stdout === true },
+    parents: Array.isArray(a.parents) ? a.parents.filter((m): m is string => typeof m === "string") : [],
+  };
+}
+
+/** W1-T7721 — true when the recorded actor contradicts the claimed `by`: an agent wrote a row naming something
+ *  other than its own `agent:<session>` identity. An unrecorded actor is not a mismatch, merely unknown. */
+export function holdClaimMismatch(hold: Pick<AutomergeHold, "by" | "actor">): boolean {
+  return hold.actor !== undefined && hold.actor.kind === "agent" && !/^agent:\S+/.test(hold.by);
+}
+
+/** W1-T7721 — who set a hold, for every surface that names it. Never the bare claimed name when an actor exists. */
+export function describeHoldSetter(hold: Pick<AutomergeHold, "by" | "actor">): string {
+  const actor = hold.actor;
+  if (!actor) return `${hold.by} (actor unrecorded)`;
+  const where = actor.container_id ? `${actor.host} (container ${actor.container_id})` : actor.host;
+  if (actor.kind === "agent") {
+    const who = `agent session ${actor.session ?? "unidentified"} as ${actor.os_user} on ${where}`;
+    return holdClaimMismatch(hold) ? `${hold.by} (claimed); written by ${who}` : `${hold.by} (${who})`;
+  }
+  return `${hold.by} (human ${actor.os_user} on ${where})`;
 }
 
 /** Recover the current auto-merge hold for `prNumber`, last one wins, over the WHOLE ledger rather than a sha-bound
@@ -6000,7 +6057,8 @@ export function automergeHoldFromLedger(
     if (!scopedToThisPr) continue;
     if (line.step === "automerge.hold_engaged" && isConfirmedHumanAuthority(line)) {
       if (typeof line.by === "string" && typeof line.reason === "string" && line.by && line.reason) {
-        held = { by: line.by, reason: line.reason };
+        const actor = readMergeHoldActor(line.hold_actor);
+        held = { by: line.by, reason: line.reason, ...(actor ? { actor } : {}) };
       }
       continue;
     }

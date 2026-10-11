@@ -533,6 +533,7 @@ import {
   escalationHeadSha,
   escalationContractRevision,
   findDuplicateEscalation,
+  taskContractRevision,
   ghIssueGateway,
   ghIssueGatewayAsync,
   presenceMode,
@@ -625,7 +626,7 @@ import {
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
 import { ghEscalationAnswerGateway, readEscalationAnswers, type EscalationAnswerGateway } from "./lib/escalation-answers.js";
 import { loadManagedRepos, ManagedReposError, type ManagedRepo } from "./lib/managed-repos.js";
-import { mergedHeadTypechecks, probeOpenPrMerges, type MergedTypecheckPorts } from "./lib/merge-probe.js";
+import { mergedHeadTypechecks, probeMerge, probeOpenPrMerges, type MergedTypecheckPorts } from "./lib/merge-probe.js";
 import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
 import {
   captureFeedback,
@@ -649,6 +650,7 @@ import {
   ciLearningMergedOriginsAsync,
   ciLearningPendingOrigins,
   findPendingLandingPr,
+  landFeedbackStatusContent,
   landCiLearningShards,
   landCiLearningShardsAsync,
   landPlanReconcileShards,
@@ -658,6 +660,7 @@ import {
   sweepFeedbackLandingAsync,
   type LandCiLearningShardsOptions,
   type LandFeedbackResult,
+  type LandFeedbackOpts,
   type LandingReviewRequest,
   type SweepFeedbackLandingOpts,
 } from "./lib/feedback-landing.js";
@@ -1044,7 +1047,8 @@ import {
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
 import { clockFromDateFn, clockFromMillisFn, fixedClock, systemClock, type Clock } from "./lib/clock.js";
-import type { AdmissionObserver } from "./lib/contributor-admission.js";
+import { feedbackLineagePayload, feedbackLineageSnapshot, observeFeedbackInputs, observeFeedbackPublication, type AdmissionObserver, type FeedbackAdmissionContext } from "./lib/contributor-admission.js";
+import { envelope as feedbackLineageEnvelope } from "./lib/untrusted-envelope.js";
 import { observeContributorAdmission } from "./lib/arm-auto-merge.js";
 import {
   VERIFY_HUMAN_JUDGED_STEP,
@@ -1400,7 +1404,15 @@ import type { LearningEntry, LearningsIndex, RuleHeadline } from "./lib/learning
 import { assertProvenance, citation } from "./lib/provenance.js";
 import { certainStaleProofs, grepOnlyBaseTargets, isDialectGrepProof, materialiseBaseGrepTree, type BaseGrepTreeReaders } from "./lib/proof-base-stale.js";
 import { loadOperatorNotesForTask, renderOperatorNotes, appendOperatorNote } from "./lib/operator-notes.js";
-import { applyOperatorMergeHold, parseOperatorMergeHoldArgs } from "./lib/operator-merge-hold.js";
+import {
+  applyOperatorMergeHold,
+  authorizeMergeHoldWrite,
+  gatherMergeHoldActor,
+  humanTerminalActorProbe,
+  parseOperatorMergeHoldArgs,
+  realMergeHoldActorProbe,
+  type MergeHoldActorProbe,
+} from "./lib/operator-merge-hold.js";
 import {
   computeMatchedLearningsForArm,
   generateSandboxTask,
@@ -2144,7 +2156,6 @@ export function readyDraftViaGh(
     });
 }
 
-const baseReproductionExecFile = promisify(execFile);
 let baseReproductionQueue: Promise<void> = Promise.resolve();
 const baseReproductionHostCache = new Map<string, BaseProbeFile>();
 
@@ -2180,8 +2191,12 @@ export function buildBaseReproductionProbe(
       let setupError: string | undefined;
       let created = false;
       let timeoutMs: number | undefined;
+      // Seam argv opens with -C and a directory; the default runs the rest through the hardened leaf pinned to that
+      // directory. In a fix round it is the fix worktree itself, so the leaf's pin, not its writable `.git` pointer,
+      // names the repository.
       const git = deps.git ?? (async (args: string[], timeout: number) => {
-        await baseReproductionExecFile("git", args, { timeout, killSignal: "SIGKILL", maxBuffer: 1 << 26 });
+        const [, dir, ...rest] = args;
+        await hostWorktreeGitAsync(dir!, rest, { stdio: "ignore", timeout, killSignal: "SIGKILL", maxBuffer: 1 << 26 });
       });
       const remove = deps.remove ?? rmAsync;
       const unreadable = (file: string, detail: { reason: string }): BaseProbeFile =>
@@ -2878,7 +2893,7 @@ export function retroErrorLedgerFields(error: unknown): Record<string, unknown> 
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 import { sweepMemoryReservations } from "./lib/host-memory-ledger.js";
 import { withSyncChildReservation } from "./lib/host-memory-learning.js";
-import { installShadowMemorySink } from "./lib/host-memory-shadow.js";
+import { installShadowMemorySink, ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./lib/host-memory-shadow.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
 // runaway-turns bound below — see `deriveRunawayTurnBound`'s own doc for why this borrows that
 // row rather than inventing a second, duplicate "N times median" knob just because the unit is
@@ -4973,6 +4988,57 @@ export function branchPrTitle(worktreePath: string): string | undefined {
   }
 }
 
+/** Where {@link restoreBoundaryCheckpoint} left a fresh run's branch: on current main, or on the checkpoint's
+ *  own base when main conflicts with it (naming those paths, or why the merge could not be read). */
+export type BoundaryCheckpointRestore =
+  | { base: "main"; headSha: string }
+  | { base: "checkpoint"; headSha: string; mainConflicts: string[]; reason?: string };
+
+/**
+ * A restart checkpoint is RESTORED BY MERGE, never replayed: the fresh branch becomes the checkpoint's
+ * head with current main merged in (the checkpoint is the first parent, so its commits keep their shas).
+ * When main conflicts, the branch stays on the checkpoint's own base and the run goes on; the conflict
+ * reaches the PR, whose merge-conflict repair rounds resolve it. Why: a cherry-pick onto a moved main
+ * conflicted and ended W1-T7806 and W1-T7766 `restart_checkpoint_restore_failed`, stranding paid work.
+ * Only a remote head that moved since the handoff still refuses — that is someone else's work.
+ */
+export async function restoreBoundaryCheckpoint(
+  checkpoint: { branch: string; headSha: string },
+  taskId: string,
+  git: (args: string[]) => Promise<string>,
+): Promise<BoundaryCheckpointRestore> {
+  const remoteHead = (await git(["ls-remote", "origin", `refs/heads/${checkpoint.branch}`])).trim().split(/\s+/)[0];
+  if (remoteHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved; refusing to replay a different worker's work");
+  await git(["fetch", "origin", checkpoint.branch]);
+  const fetchedHead = (await git(["rev-parse", "FETCH_HEAD"])).trim();
+  if (fetchedHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved during fetch");
+  const mainSha = (await git(["rev-parse", "HEAD"])).trim();
+  const base = (await git(["merge-base", checkpoint.headSha, mainSha])).trim();
+  if (base === checkpoint.headSha) return { base: "main", headSha: mainSha }; // main already carries it
+  if (base === mainSha) {
+    await git(["reset", "--hard", "--quiet", checkpoint.headSha]); // it already sits on current main
+    return { base: "main", headSha: checkpoint.headSha };
+  }
+  const probe = await probeMerge({ headSha: checkpoint.headSha, mainSha, git: async (args) => {
+    try {
+      return { status: 0, stdout: await git([...args]) };
+    } catch (error) {
+      // merge-tree exits 1 on a conflict with the tree and the conflicted paths still on stdout.
+      const failed = error as { code?: unknown; stdout?: unknown };
+      return { status: typeof failed.code === "number" ? failed.code : null, stdout: typeof failed.stdout === "string" ? failed.stdout : "" };
+    }
+  } });
+  if (probe.verdict !== "clean") {
+    await git(["reset", "--hard", "--quiet", checkpoint.headSha]);
+    return { base: "checkpoint", headSha: checkpoint.headSha, mainConflicts: probe.verdict === "conflict" ? probe.paths : [],
+      ...(probe.verdict === "unreadable" ? { reason: probe.reason } : {}) };
+  }
+  const merged = (await git(["commit-tree", probe.tree, "-p", checkpoint.headSha, "-p", mainSha, "-m",
+    `wip: merge main into the restored checkpoint\n\nRemudero-Task: ${taskId}`])).trim();
+  await git(["reset", "--hard", "--quiet", merged]);
+  return { base: "main", headSha: merged };
+}
+
 /**
  * W1-T1012 (THE FIX IS AT THE WRITE): append the `Remudero-Task: <id>` trailer to the
  * worktree's CURRENT last commit — the record `gh pr merge --squash` actually keeps.
@@ -6358,9 +6424,11 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
     }
     roundId = `${input.runId ?? input.task.id}:${pr.priorStrikes + 1}:${systemClock.now()}`;
     deps.log("fix.dispatch", { ...roundFields(), verdict_regime: "executed" });
+    await observeFeedbackInputs(input.admission, pr.pendingAnswer?.contributions ?? [], "plan-fix-adoption", deps.log,
+      deps.feedbackRead);
     const report = await deps.spawn(renderFixPrompt({ task: { ...input.task, files }, round: 1, branch: pr.headRefName!,
       harnessCommits: true, evidence: { planGateFindings: [...initial.failures, ...initial.unreadable], ciFailures: pr.ciFailures,
-        constraint: [input.lastRefusal, pr.pendingAnswer?.constraint].filter(Boolean).join("\n\n") || undefined } }));
+        constraint: [input.lastRefusal, feedbackFixConstraint(pr.pendingAnswer)].filter(Boolean).join("\n\n") || undefined } }));
     if (git(["rev-parse", "HEAD"]).trim() !== pr.headSha) return refuse("the worker moved the plan round head");
     const changed = workerChangedPaths(git(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]));
     const outside = changed.filter((path) => !files.includes(path));
@@ -9562,32 +9630,9 @@ export function unchangedTreeStandDownReason(
   };
 }
 
-/**
- * W1-T3579: one deterministic revision of the CURRENT authoritative task contract the fix rung's
- * open-escalation guard (immediately below) versions its stand-down against — covers task
- * identity, declared `files:`, and every acceptance criterion's `claim`/`proof` pair, never
- * `satisfied_by`/`holdout` or any other decorative/volatile field (a `status`/`attempts` bump on
- * every dispatch must never move this). THE DEFECT THIS CLOSES: PORTAL-T4 (remudero-site PR #21,
- * 2026-09-14) was correctly refused, then a plan-only scope amendment re-authorized the exact same
- * repair on the exact same PR head — and the open-escalation guard, keyed on `headSha` alone,
- * stood the repair down forever because nothing distinguished "a human already answered this
- * question" from "the question changed underneath an open issue". Declared files are sorted
- * first (order is never part of the contract — {@link filesDigest}'s own convention); acceptance
- * pairs are read in DECLARED order, because reordering criteria is itself an amendment a re-admit
- * should notice. PURE: reads nothing off disk — the caller already holds the live `Task`/{@link
- * runFixRung}'s own `opts.task` this rung dispatched against, never a worker report or PR-body
- * prose (design note (i) — recovering it from either would let a worker's own claim decide
- * whether it gets re-admitted).
- */
-export function taskContractRevision(task: {
-  id: string;
-  files?: readonly string[];
-  acceptance?: ReadonlyArray<Pick<AcceptanceCriterion, "claim" | "proof">>;
-}): string {
-  const files = [...(task.files ?? [])].sort();
-  const acceptance = (task.acceptance ?? []).map((c) => ({ claim: c.claim, proof: c.proof }));
-  return sha256Hex(JSON.stringify({ id: task.id, files, acceptance }));
-}
+/** W1-T3579's task contract revision now lives in lib/escalate.ts, so the sweep's progress-judge
+ *  latch and its escalations version themselves by the SAME function the fix rung's guard reads. */
+export { taskContractRevision };
 
 /**
  * W1-T2799 (the fix-rung pre-strike gate's SIXTH reason source, composed into {@link
@@ -11195,6 +11240,7 @@ export async function runFixRung(opts: {
    * dispatch (W1-T76, unchanged).
    */
   constraint?: string;
+  feedbackContributions?: readonly unknown[];
   /**
    * W1-T100 (the #170 fix): failing required-check name+log-tail evidence for
    * a blocked_ci dispatch — this PR is checks-red with NO review verdict
@@ -12939,6 +12985,7 @@ export async function runFixRung(opts: {
         ? { ...evidenceBase, priorPartialWork: opts.priorPartialWork }
         : evidenceBase;
     const fixMode = deriveFixMode(evidence, PROOF_REPAIR_FIX_MODE_RULES);
+    await observeFeedbackInputs(opts.config.contributorAdmission, opts.feedbackContributions ?? [], "fix-adoption", deps.log);
     // W1-T3727: WHO HOLDS THIS ROUND'S GIT, read once by BOTH the prompt and the tool bound so
     // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.
     const { harnessCommits: fixHarnessOwnsGit, cashTools: fixCashTools } = fixRoundGitOwnership(opts.config);
@@ -19188,14 +19235,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const checkpoint = pendingWorkerBoundaryHandoffs(readLedgerRawLines(ledgerPath)).get(taskId);
     if (checkpoint) {
       try {
-        const remoteHead = (await hostWorktreeGitAsync(worktreePath, ["ls-remote", "origin", `refs/heads/${checkpoint.branch}`])).trim().split(/\s+/)[0];
-        if (remoteHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved; refusing to replay a different worker's work");
-        await hostWorktreeGitAsync(worktreePath, ["fetch", "origin", checkpoint.branch]);
-        const fetchedHead = (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "FETCH_HEAD"])).trim();
-        if (fetchedHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved during fetch");
-        const commits = (await hostWorktreeGitAsync(worktreePath, ["rev-list", "--reverse", "--no-merges", `origin/main..${checkpoint.headSha}`])).trim();
-        if (commits) await hostWorktreeGitAsync(worktreePath, ["cherry-pick", ...commits.split("\n")]);
-        log("implement.checkpoint_restored", { source_branch: checkpoint.branch, source_head_sha: checkpoint.headSha, branch });
+        const restored = await restoreBoundaryCheckpoint(checkpoint, taskId, (args) => hostWorktreeGitAsync(worktreePath, args));
+        log("implement.checkpoint_restored", { source_branch: checkpoint.branch, source_head_sha: checkpoint.headSha, branch,
+          base: restored.base, restored_head_sha: restored.headSha,
+          ...(restored.base === "checkpoint" ? { main_conflicts: restored.mainConflicts, merge_unreadable: restored.reason } : {}) });
       } catch (error) {
         log("verdict", { verdict: "no_pr", reason: "restart_checkpoint_restore_failed", branch,
           source_branch: checkpoint.branch, detail: String((error as Error)?.message ?? error), cost_usd: costUsd });
@@ -19628,7 +19671,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
             throw new Error(`restart checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}`);
           }
         }
-        await gitPushRunBranchAsync(worktreePath);
+        await gitPushRunBranchAsync(worktreePath, { prGates: false }); // a checkpoint opens no PR: see worktreePushExecAsync
       } catch (error) {
         log("verdict", { verdict: "no_pr", reason: "restart_checkpoint_failed", waiting_on: waitingOn,
           detail: String((error as Error)?.message ?? error), branch, cost_usd: costUsd, ...terminalVerdictFields(impl) });
@@ -32567,6 +32610,7 @@ export function buildIntakeRungsDaemonHooks(deps: {
           ledgerPath,
           runId,
           dryRun: false,
+          admission: feedbackIntakeAdmission(config, ledgerPath, runId),
         });
         return {
           rung,
@@ -35343,11 +35387,11 @@ export function createOpenPrCountObservation(): {
 }
 
 /**
- * W1-T1038 — THE REAL `MemAvailable` PROBE `checkMemoryGovernor` (sweep.ts) consults. Reads
- * `/proc/meminfo` and NEVER a cgroup limit (design note (6), `checkMemoryGovernor`'s own doc):
- * this fleet's containers carry no memory limit (`memory.max` reads `max`), so a cgroup read
- * would report "unbounded" and authorise every dispatch silently, while `/proc/meminfo` reports
- * the real host figure this guard actually wants.
+ * W1-T1038 — THE REAL `MemAvailable` PROBE `checkMemoryGovernor` (sweep.ts) consults: the HOST
+ * figure. It is not the only one. The daemon containers have carried memory limits since #10371 and
+ * #10486 (core: memory.max 8820 MiB, memory.high pinned below it), which `/proc/meminfo` cannot see,
+ * so {@link memoryGovernorGateFor} also reads the container's own headroom
+ * (`readContainerMemoryHeadroom`, the host memory budget's reader) and the floor takes the smaller.
  *
  * `path` defaults to the real file and is injectable so a test can point this at a fixture
  * without touching the live `/proc/meminfo` (test/dispatch-memory-governor.test.ts, "the probe
@@ -35401,10 +35445,15 @@ export function memoryGovernorGateFor(
   ledgerPath: string,
   runId: string,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
-  readAvailableMib: () => number = readAvailableMemoryMib,
+  readAvailableMib?: () => number,
+  // The container's own headroom. An injected host reading (a fixture) reads no container unless one is injected
+  // too, so a test never reads the cgroup of whatever container runs it.
+  readContainer: (() => ContainerMemoryHeadroom) | undefined = readAvailableMib === undefined ? () => readContainerMemoryHeadroom() : undefined,
+  ownWorkLive: () => boolean = () => ownContainerWorkLive(dirname(dirname(ledgerPath))),
 ): () => MemoryGovernorResult | undefined {
   return () => {
-    const result = checkMemoryGovernor(readAvailableMibBounded(readAvailableMib, ledgerPath, runId, policy), policy);
+    const available = readAvailableMibBounded(readAvailableMib ?? readAvailableMemoryMib, ledgerPath, runId, policy);
+    const result = checkMemoryGovernor(available, policy, readContainer?.(), ownWorkLive);
     // EVERY dispatch, including the ones it admits (design (iv)) — never gated on `result.deferred`.
     logMemoryObservation(result, appendLedger, ledgerPath, runId);
     return result.deferred ? result : undefined;
@@ -39073,6 +39122,7 @@ export async function daemonCommand(
   const feedbackLandingRungs = target.isSelf
     ? feedbackLandingSweepRungs(repoRoot, {
         log,
+        ...(config.contributorAdmission === undefined ? {} : { publication: { mode: "shadow" as const, record: log } }),
         ledgerLines: () => readLedgerLines(ledgerPath),
         requestReview: requestLandingReview,
         // W1-T5460: drain the console decisions `rmd serve` queued under the same state root.
@@ -39703,7 +39753,8 @@ export async function daemonCommand(
           targetCheckoutRoot,
           () => activePlanRef.current,
           // W1-T4471: the one real wiring of the owner-reply reader.
-          ghEscalationAnswerGateway(target.owner, target.repo, undefined, config.operatorGithubLogins),
+          ghEscalationAnswerGateway(target.owner, target.repo, undefined, config.operatorGithubLogins,
+            config.contributorAdmission === undefined ? undefined : { settings: config.contributorAdmission }),
           gitCredentialSocket?.socketPath,
           servedTickRead(onePassPerGeneration(() => tickReadGeneration, readPlane?.read,
             () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined }), { log }),
@@ -44101,6 +44152,12 @@ export function buildEscalationReconcileCandidates(
  * "the arg-builder carries the testable read-only contract; the spawn wrapper is
  * untested by design" split — see spawnSpecialistWorker/spawnReconSpecialist).
  */
+export function feedbackFixConstraint(answer: { constraint: string; contributions?: readonly unknown[] } | undefined): string | undefined {
+  return answer?.contributions?.length
+    ? feedbackLineageEnvelope(feedbackLineagePayload(answer.constraint, answer.contributions), "feedback-entry")
+    : answer?.constraint;
+}
+
 export function buildFixRungDispatchArgs(args: {
   task: { id: string; title: string; acceptance?: AcceptanceCriterion[] };
   runId: string;
@@ -44116,7 +44173,7 @@ export function buildFixRungDispatchArgs(args: {
   pr: {
     headSha: string;
     reviewSummary?: string;
-    pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean };
+    pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean; contributions?: unknown[] };
     checksState?: OpenPrView["checksState"];
     redRequiredChecks?: readonly string[];
   };
@@ -44220,7 +44277,8 @@ export function buildFixRungDispatchArgs(args: {
     strikeCap: args.strikeCap,
     initialReview,
     initialCriterionIndices,
-    constraint: pr.pendingAnswer?.constraint,
+    constraint: feedbackFixConstraint(pr.pendingAnswer),
+    feedbackContributions: pr.pendingAnswer?.contributions === undefined ? undefined : feedbackLineageSnapshot(pr.pendingAnswer.contributions),
     progressDecision: evidence.progressDecision,
     progressApproach: evidence.progressApproach,
     ciFailures: evidence.ciFailures,
@@ -44630,9 +44688,8 @@ function readOwnerHasTrackedWork(ownerPath: string): boolean {
 }
 
 export function removeAbandonedFixWorktreeOwner(repoDir: string, worktreePath: string): void {
-  execFileSync("git", ["-C", repoDir, "worktree", "remove", worktreePath], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  // No --force: a dirty owner is refused. The fix clone is pinned through the hardened leaf.
+  hostWorktreeGit(repoDir, ["worktree", "remove", worktreePath]);
   removeRunLock(worktreePath);
   removeWorktreeBase(worktreePath);
 }
@@ -48567,7 +48624,15 @@ export async function awayCommand(rest: string[]): Promise<number> {
  */
 export function mergeHoldCommand(
   rest: string[],
-  deps: { config?: Config; ledgerPath?: string; now?: () => number; isInteractive?: () => boolean } = {},
+  deps: {
+    config?: Config;
+    ledgerPath?: string;
+    now?: () => number;
+    isInteractive?: () => boolean;
+    /** W1-T7721 — where the writer's actor is gathered from. A caller that injects `isInteractive` without a probe
+     *  has taken control of the terminal, so it also gets a human-terminal probe rather than this process's own env. */
+    actorProbe?: MergeHoldActorProbe;
+  } = {},
 ): number {
   const parsed = parseOperatorMergeHoldArgs(rest);
   if (!parsed.ok) {
@@ -48580,10 +48645,25 @@ export function mergeHoldCommand(
     );
     return 2;
   }
+  const actor = gatherMergeHoldActor(
+    deps.actorProbe ?? (deps.isInteractive ? humanTerminalActorProbe() : realMergeHoldActorProbe()),
+  );
+  const authorized = authorizeMergeHoldWrite(parsed.input, actor);
+  if (!authorized.ok) {
+    console.error(`rmd merge-hold: ${authorized.error}`);
+    return 2;
+  }
   const ledgerPath = deps.ledgerPath ?? ledgerPathFor(deps.config ?? loadConfig());
-  const result = applyOperatorMergeHold(ledgerPath, parsed.input, { now: deps.now });
+  const result = applyOperatorMergeHold(ledgerPath, authorized.input, { now: deps.now, actor });
   if (!result.written) {
     console.log(`### rmd merge-hold — ${result.scope} is already released; no ledger row written.`);
+    return 0;
+  }
+  if (authorized.input.authority === "agent-cli") {
+    console.log(
+      `### rmd merge-hold — AGENT NOTE recorded for ${result.scope}; by ${parsed.input.by}: ${parsed.input.reason}. ` +
+        `An agent hold is audit-only (authority agent-cli): it does NOT block auto-merge.`,
+    );
     return 0;
   }
   console.log(
@@ -48859,7 +48939,7 @@ export function renderFeedbackReconcile(result: ReconcileFeedbackLandingResult, 
  * ({@link reconcileFeedbackLanding}, lib/feedback-reconcile.ts) — this hub does no scanning or
  * classification of its own; it only parses argv and calls the library's one entry point.
  */
-export async function feedbackReconcileCommand(rest: string[]): Promise<number> {
+export async function feedbackReconcileCommand(rest: string[], configOverride?: Config, gh?: LandFeedbackOpts["gh"]): Promise<number> {
   const badArg = unknownArgError("feedback-reconcile", rest, ["--root", "--checkout"], ["--apply"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -48886,12 +48966,17 @@ export async function feedbackReconcileCommand(rest: string[]): Promise<number> 
   const checkoutRoot = checkoutArg !== undefined ? resolve(checkoutArg) : repoRoot;
   const apply = rest.includes("--apply");
 
-  const ledgerPath = ledgerPathFor(loadConfig());
+  const reconcileConfig = configOverride ?? loadConfig();
+  const ledgerPath = ledgerPathFor(reconcileConfig);
   const result = reconcileFeedbackLanding({
     roots,
     checkoutRoot,
     apply,
+    gh,
     ledgerLines: () => readLedgerLines(ledgerPath),
+    ...(reconcileConfig.contributorAdmission === undefined ? {} : { land: (root: string, relPath: string, content: string, opts: LandFeedbackOpts) =>
+      landFeedbackStatusContent(root, relPath, content, { ...opts, publication: { mode: "shadow", record: (step, fields) =>
+        appendLedger(ledgerPath, { step, task_id: "CLI", run_id: "feedback-reconcile", ...fields }) } }) }),
   });
   console.log(renderFeedbackReconcile(result, apply));
   if (result.error) {
@@ -49184,6 +49269,7 @@ async function triageCommandLocked(
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
+    await observeFeedbackInputs(config.contributorAdmission, entry.contribution ? [entry.contribution] : [], "triage-adoption", log);
 
     // ── THE CROSS-HOST CLAIM (W1-T1132), TAKEN BEFORE THE ARCHITECT CALL ────────────────────
     // HERE, not before the write: the loser's RESEARCH is the actual cost. Everything below this
@@ -49356,6 +49442,8 @@ async function triageCommandLocked(
         }),
     });
     const { decision, changedFiles } = loop.decision;
+    await observeFeedbackInputs(config.contributorAdmission, entry.contribution ? [entry.contribution] : [],
+      `triage-${decision.action}-adoption`, log);
 
     // W1-T985 — THE RARE-OVERLAP ADVISORY, AT THE POINT THE FILED SHARD IS ON DISK. The advisory
     // shipped 2026-08-16 (W1-T533) and gained its only reader the same day (W1-T917,
@@ -49504,6 +49592,8 @@ async function triageCommandLocked(
       }
     }
 
+    await observeFeedbackPublication(config.contributorAdmission === undefined ? undefined : { mode: "shadow", record: log },
+      entry.contribution ? [entry.contribution] : [], `${owner}/${repo}`, "triage-publication");
     await gitPushRunBranchAsync(worktreePath);
 
     // The title is the SAME header string that just went into the commit, split off
@@ -53715,6 +53805,11 @@ export async function alertFixCommand(rest: string[], deps: AlertFixCommandDeps 
   return 0;
 }
 
+export function feedbackIntakeAdmission(config: Pick<Config, "contributorAdmission">, ledgerPath: string, runId: string): FeedbackAdmissionContext | undefined {
+  return config.contributorAdmission === undefined ? undefined : { ...config.contributorAdmission,
+    record: (step, fields) => appendLedger(ledgerPath, { run_id: runId, task_id: "ISSUES", step, ...fields }) };
+}
+
 /**
  * `rmd issues [--dry-run]` — issues intake (W1-T57, MASTER-PLAN §5D lane 3): poll open issues
  * for every repo in `.remudero/managed-repos.json` via `gh api` (lib/issues-intake.ts), create a
@@ -53750,6 +53845,7 @@ async function issuesCommand(rest: string[]): Promise<number> {
     ledgerPath,
     runId,
     dryRun,
+    admission: feedbackIntakeAdmission(config, ledgerPath, runId),
   });
   console.log(`### rmd issues${dryRun ? " --dry-run" : ""}\nissues reviewed: ${renderIssuesSummary(result.summary)}`);
   if (dryRun) {

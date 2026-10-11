@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator session 2026-10-06: test-cost research (research-coverage REPORT, redundancy item 2 and ranked item 6)"
   plan_refs: [W1-T2643, W1-T2644, W1-T2478, W1-T5693]
-  files: [test/the-census-admission-set-is-derived-not-enumerated.test.ts, test/the-census-roster-is-named-not-numbered.test.ts, test/fast-gate-admits-the-census-class.test.ts, scripts/test-tier-manifest.json, scripts/census-precheck-parity-baseline.json, test/the-gate-admission-population-is-checked-from-one-scan.test.ts]
+  files: [test/fast-gate-admits-the-census-class.test.ts, scripts/test-tier-manifest.json, scripts/census-precheck-parity-baseline.json, test/the-gate-admission-population-is-checked-from-one-scan.test.ts, src/lib/ci-parity.ts]
   status: queued
   priority: 3
   attempts: 0
