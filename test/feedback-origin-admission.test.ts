@@ -20,7 +20,7 @@ import { gitRepo } from "./helpers/git-repo.js";
 import { feedbackEntryBlock } from "../src/lib/triage.js";
 import { operatorVerdictEvidence } from "../src/lib/sweep.js";
 import { buildFixRungDispatchArgs, feedbackFixConstraint, runPlanScopedFixRound, buildIntakeRungsDaemonHooks,
-  feedbackReconcileCommand, ledgerPathFor } from "./helpers/run-task-test.js";
+  feedbackReconcileCommand, ledgerPathFor, watchDispatchSpawn } from "./helpers/run-task-test.js";
 import * as admissionModule from "../src/lib/contributor-admission.js";
 import type { AdmissionSettings, AdmissionRead, AdmissionDecision } from "../src/lib/contributor-admission.js";
 import { ghEscalationAnswerGateway, readEscalationAnswers } from "../src/lib/escalation-answers.js";
@@ -510,6 +510,9 @@ test("W1-T7754 delivery: a live worker receives an immutable original lineage en
   const startedPromise = new Promise<void>(resolve => { started = resolve; });
   const gate = new Promise<void>(resolve => { release = resolve; });
   const settledPromise = new Promise<void>(resolve => { settled = resolve; });
+  const machineMessage = "Watchdog: the runner has exited; inspect its exit result";
+  let machineSettled!: () => void;
+  const machineSettledPromise = new Promise<void>(resolve => { machineSettled = resolve; });
   const messages: Array<{ message: { content: string } }> = [];
   const queryFn = (() => {
     const gen = (async function* () { started(); await gate;
@@ -517,7 +520,10 @@ test("W1-T7754 delivery: a live worker receives an immutable original lineage en
     })();
     Object.assign(gen, { streamInput: async (stream: AsyncIterable<{ message: { content: string } }>) => {
       await new Promise<void>(resolve => setImmediate(resolve));
-      for await (const message of stream) messages.push(message);
+      for await (const message of stream) {
+        messages.push(message);
+        if (message.message.content === machineMessage) machineSettled();
+      }
     } });
     return gen;
   }) as unknown as SpawnWorkerArgs["queryFn"];
@@ -539,6 +545,22 @@ test("W1-T7754 delivery: a live worker receives an immutable original lineage en
     assert.ok(messages[0].message.content.includes(original));
     assert.ok(messages[0].message.content.includes("<untrusted_external_data "));
     assert.ok(messages[0].message.content.includes("use B"));
+    let nudge: ((message: string) => Promise<string> | string) | undefined;
+    watchDispatchSpawn(spawnWorker, {
+      enabled: true, taskId: "W1-LINEAGE", runId: "lineage-fixture", ledgerPath: join(dir, "ledger.jsonl"),
+      fallbackBoundMs: 60_000, spawnArgs: { cwd: dir, settingsFile }, task: { files: [], acceptance: [] },
+      provider: () => "claude", log: () => {},
+    }, {
+      judge: async () => undefined,
+      runWatchdog: options => {
+        nudge = options.nudge;
+        return { observer: () => {}, tick: async () => {}, start: () => () => {} };
+      },
+    });
+    assert.ok(nudge, "the current production adapter wires the default delivery helper");
+    assert.equal(await nudge(machineMessage), "delivered");
+    await machineSettledPromise;
+    assert.equal(messages[1].message.content, machineMessage, "a measured machine nudge keeps its exact legacy bytes");
   } finally { release(); await run; __resetRunningWorkersForTest(); rmSync(dir, { recursive: true, force: true }); }
 });
 
