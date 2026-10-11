@@ -29,7 +29,7 @@ test("test/a-heredoc-body-that-names-gh-is-not-a-gh-call.test.ts", () => {
   withFloor((fire, stamp) => {
     const before = statSync(stamp).mtimeMs;
     for (const reader of ["python3 -", "cat > /tmp/source.txt"]) {
-      for (const delimiter of ["EOF", "'EOF'", '"EOF"']) {
+      for (const delimiter of ["EOF", "'EOF'", '"EOF"', "\\EOF"]) {
         const result = fire(`${reader} <<${delimiter}\n# over the async gh transport\nEOF`);
         assert.equal(result.status, 0, String(result.stderr));
         assert.equal(statSync(stamp).mtimeMs, before, "data must not consume the cadence window");
@@ -53,7 +53,7 @@ test("test/a-heredoc-body-that-names-gh-is-not-a-gh-call.test.ts", () => {
 test("a heredoc fed to an interpreter that runs gh is still a gh call", () => {
   withFloor((fire) => {
     for (const reader of ["bash", "sh", "zsh", "/bin/bash", "env bash", "ssh host bash -s", "ssh host"]) {
-      for (const delimiter of ["EOF", "'EOF'"]) {
+      for (const delimiter of ["EOF", "'EOF'", '"EOF"', "\\EOF"]) {
         const command = `${reader} <<${delimiter}\ngh pr view 1\nEOF`;
         const result = fire(command);
         assert.equal(result.status, 2, command);
