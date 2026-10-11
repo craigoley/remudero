@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import * as ciParity from "../src/lib/ci-parity.js";
+import { finishJudgedRun } from "./helpers/judged-pool-run.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PINNED_BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -67,6 +68,7 @@ function coverageSpawn(onShard: (call: Call, shard: number) => void = () => {}) 
       const rawDir = opts!.env!.NODE_V8_COVERAGE!;
       mkdirSync(rawDir, { recursive: true });
       writeFileSync(join(rawDir, `coverage-${shard}-0000000000000-0.json`), "{}\n");
+      finishJudgedRun(args, opts);
       return { status: 0, stdout: "# tests 1\n# pass 1\n# fail 0\n", stderr: "" };
     }
     if (args.some((a) => a.endsWith("coverage-merge-ratchet.mjs"))) {

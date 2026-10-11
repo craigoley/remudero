@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-11: tests and preflight never write into the checkout (an agent deleted fold-debt-CLAUDE-md-*.yaml files by hand on 2026-10-10)"
   plan_refs: [W1-T3320, W1-T2831, W1-T503, W1-T3341]
   files: [scripts/claude-md-budget-ratchet.mjs, test/a-budget-check-run-never-writes-the-checkout.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

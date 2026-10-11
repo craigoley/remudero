@@ -338,8 +338,8 @@ export interface ServeDeps {
   operatorIdentity?: OperatorIdentityConfig;
   /** The key-set fetch and clock the operator provider uses — injectable so a test is hermetic. */
   operatorIdentityIo?: { fetchImpl?: typeof fetch; clock?: Clock };
-  /** W1-T2562: re-resolve the CURRENT on-disk sha for the shell's staleness chip. Defaults to
-   *  {@link resolveConsoleSha} — the same primitive {@link gateStaleCodeExit} compares against. */
+  /** W1-T2562: re-resolve the CURRENT on-disk sha. Handed to {@link gateStaleCodeExit}, which
+   *  compares {@link consoleSha} against it; absent, the gate calls {@link resolveConsoleSha}. */
   resolveCurrentSha?: () => string;
   /** `planSource` (W1-T5639) qualifies `plan`: absent, the plan is trusted as it always was. */
   board: BoardDeps & Pick<PlanSourceHolder, "planSource">;
@@ -2856,7 +2856,7 @@ function assembleServeRoutes(
   const hostLegacy = hostLegacyView({ control: controlStatusDeps, account: accountUsageDeps, providerRouting: { root: deps.fleetControlRoot, ...deps.providerRouting }, skillsRoot: deps.questionsRoot },
     () => readModel?.body(HOST_VIEW_NAME)?.body.data as HostViewData | undefined);
   // W1-T5055: the analytics view's legacy side merges serve's own per-instance caches, as the worker merges their snapshots.
-  const analyticsLegacy = analyticsLegacyView({ scopes: () => navBadgeScopes().map((scope) => ({ instanceId: scope.instanceId, analytics: scope.analytics })) });
+  const analyticsLegacy = analyticsLegacyView({ scopes: () => navBadgeScopes().map((scope) => ({ instanceId: scope.instanceId, repository: scope.repository, analytics: scope.analytics })) });
   // The shadow compares the worker's badge with the undecorated legacy one; only the served badge carries decisions.
   const shadowed = withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name], onServed: routeReads.served,
     readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME, TASK_VIEW_NAME],
@@ -3220,6 +3220,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     ...(keepWarm ? { github: { serve: keepWarm, ...walk } } : {}), ...deps.readModel }));
   const staleExit = gateStaleCodeExit({
     bootSha: consoleSha,
+    // The caller's "current sha" is what the gate compares against; absent, the gate re-reads git.
+    ...(deps.resolveCurrentSha ? { resolveCurrentSha: deps.resolveCurrentSha } : {}),
     log: deps.log,
     beforeExit: () => {
       readModel?.stop();

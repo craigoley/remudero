@@ -11,7 +11,7 @@
   band_meaning: blast-radius
   origin: "Operator-approved contributor-safety briefs; 2026-10-10 instruction to file admission, close-and-escalate and PR-flow gardener work, preserve owner override and trusted flow, and start implementation without settings or infrastructure changes."
   files: [src/lib/contributor-admission.ts, src/lib/open-prs-rest.ts, test/contributor-admission.test.ts, test/open-prs-rest.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

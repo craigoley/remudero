@@ -33,7 +33,7 @@ import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/ada
 import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { fixRoundBaseHead } from "./lib/fix-round-base.js";
 import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapplyPorts } from "./lib/fix-round-reapply.js";
-import { productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
+import { productionDispatchBreakJudge, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
   type BaseChangedFiles, type JobRequeueOutcome } from "./lib/sweep.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor, type GhAsyncExecutor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
@@ -118,7 +118,7 @@ export {
 };
 // W1-T4678: the cheap-lane read BEFORE `escalateCircuitBreak` above — see stall-verifier.ts's
 // own doc for why this reads the evidence rather than paging straight from a tripped breaker.
-import { stallShardFingerprint, verifyStalledTask } from "./lib/stall-verifier.js";
+import { judgeDispatchBreak, stallShardFingerprint, verifyStalledTask, type DispatchBreakJudge } from "./lib/stall-verifier.js";
 // Compatibility re-export target: lib/arm-auto-merge" (W1-T2887) — the auto-merge arm cluster
 // (armAutoMerge/armAutoMergeDetailed/attemptArm/armAutoMergeAtOpen/disarmAutoMerge/
 // armIfVerdictPermits/realArmDeps and their classifiers) moved to src/lib/arm-auto-merge.ts;
@@ -280,6 +280,17 @@ export const IMPLEMENT_REFUSAL_REPORT_CONTRACT = [
   "  never approves work, changes declared scope, or authorizes a retry.",
   "- If you refuse criterion N, do not state `Criterion N: COMPLETE`, `IMPLEMENTED`, or `SATISFIED`",
   "  in the PR body. That explicit contradiction fails review.",
+].join("\n");
+
+/**
+ * W1-T7807: the one line that PREVENTS the shape the quiet-worker watchdog recovers from. W1-T7734's worker polled
+ * `until grep -q "^ℹ duration_ms" <output>` for a reporter line a finished run never printed, and sat quiet ~55 minutes.
+ * Appended beside {@link IMPLEMENT_REFUSAL_REPORT_CONTRACT} at both sites that use it (first prompt and compaction anchor).
+ */
+export const IMPLEMENT_WAIT_TARGET_CONTRACT = [
+  "",
+  "# WAITING ON A BACKGROUND RUN",
+  "- A wait on a background test run waits on the RUNNER'S EXIT (the process, or the `[exited with code N]` marker in its output), never on a reporter-specific line such as `duration_ms`.",
 ].join("\n");
 
 /**
@@ -478,6 +489,8 @@ import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { daemonInstanceRegistryPath, IMAGE_BUILD_SHA_PATH, requestDeploy, runDeployCycle } from "./lib/deployer.js";
 import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
+import { escalationSpoolDrain, spoolingIssueVoice, withEscalationSpoolDrain } from "./lib/host-escalation-spool.js";
+import { hostAlertCommandResult } from "./lib/launcher-host-alerts.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 export { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
@@ -520,6 +533,7 @@ import {
   escalationHeadSha,
   escalationContractRevision,
   findDuplicateEscalation,
+  taskContractRevision,
   ghIssueGateway,
   ghIssueGatewayAsync,
   presenceMode,
@@ -612,7 +626,7 @@ import {
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
 import { ghEscalationAnswerGateway, readEscalationAnswers, type EscalationAnswerGateway } from "./lib/escalation-answers.js";
 import { loadManagedRepos, ManagedReposError, type ManagedRepo } from "./lib/managed-repos.js";
-import { mergedHeadTypechecks, probeOpenPrMerges, type MergedTypecheckPorts } from "./lib/merge-probe.js";
+import { mergedHeadTypechecks, probeMerge, probeOpenPrMerges, type MergedTypecheckPorts } from "./lib/merge-probe.js";
 import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
 import {
   captureFeedback,
@@ -636,6 +650,7 @@ import {
   ciLearningMergedOriginsAsync,
   ciLearningPendingOrigins,
   findPendingLandingPr,
+  landFeedbackStatusContent,
   landCiLearningShards,
   landCiLearningShardsAsync,
   landPlanReconcileShards,
@@ -645,6 +660,7 @@ import {
   sweepFeedbackLandingAsync,
   type LandCiLearningShardsOptions,
   type LandFeedbackResult,
+  type LandFeedbackOpts,
   type LandingReviewRequest,
   type SweepFeedbackLandingOpts,
 } from "./lib/feedback-landing.js";
@@ -1031,8 +1047,10 @@ import {
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
 import { clockFromDateFn, clockFromMillisFn, fixedClock, systemClock, type Clock } from "./lib/clock.js";
-import type { AdmissionObserver } from "./lib/contributor-admission.js";
+import { feedbackLineagePayload, feedbackLineageSnapshot, observeFeedbackInputs, observeFeedbackPublication, type AdmissionObserver, type FeedbackAdmissionContext } from "./lib/contributor-admission.js";
+import { envelope as feedbackLineageEnvelope } from "./lib/untrusted-envelope.js";
 import { observeContributorAdmission } from "./lib/arm-auto-merge.js";
+import { observeAdmissionDisposition } from "./lib/action-executor.js";
 import {
   VERIFY_HUMAN_JUDGED_STEP,
   judgeVerifyHumanShard,
@@ -1339,6 +1357,7 @@ import {
   readRiskPolicy,
   realRiskJudge,
   resolveRiskJudgeMount,
+  riskJudgeDiffInputBudget,
   riskJudgeSpendCollector,
   runRiskJudge,
   type RiskJudgeChangedFile,
@@ -1346,6 +1365,7 @@ import {
   type RiskJudgeInput,
   type RiskJudgeVerdict,
   type RiskPolicy,
+  withoutRiskJudgePatches,
 } from "./lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "./lib/shadow-judge.js";
 import { evaluateRiskJudgeDisposition } from "./lib/risk-judge-eval.js";
@@ -1387,7 +1407,15 @@ import type { LearningEntry, LearningsIndex, RuleHeadline } from "./lib/learning
 import { assertProvenance, citation } from "./lib/provenance.js";
 import { certainStaleProofs, grepOnlyBaseTargets, isDialectGrepProof, materialiseBaseGrepTree, type BaseGrepTreeReaders } from "./lib/proof-base-stale.js";
 import { loadOperatorNotesForTask, renderOperatorNotes, appendOperatorNote } from "./lib/operator-notes.js";
-import { applyOperatorMergeHold, parseOperatorMergeHoldArgs } from "./lib/operator-merge-hold.js";
+import {
+  applyOperatorMergeHold,
+  authorizeMergeHoldWrite,
+  gatherMergeHoldActor,
+  humanTerminalActorProbe,
+  parseOperatorMergeHoldArgs,
+  realMergeHoldActorProbe,
+  type MergeHoldActorProbe,
+} from "./lib/operator-merge-hold.js";
 import {
   computeMatchedLearningsForArm,
   generateSandboxTask,
@@ -1620,7 +1648,7 @@ import {
   checkCostGovernor,
   checkMemoryGovernor,
   checkQueueGovernor,
-  readFixHostPressure,
+  productionFixPressure,
   deriveQueueGovernorTrailingFlow,
   isFleetOwnedRunBranch,
   cancelledRequiredCheckNames,
@@ -1759,6 +1787,7 @@ import {
   readIdleLightCadence,
 } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
+import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
 import { applyDaemonMemoryPolicy, createDaemonMemoryGovernor, readDaemonMemoryPolicy } from "./lib/daemon-memory-policy.js";
 import { workerThreads, type TrackedWorker } from "./lib/worker-heaps.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
@@ -2131,7 +2160,6 @@ export function readyDraftViaGh(
     });
 }
 
-const baseReproductionExecFile = promisify(execFile);
 let baseReproductionQueue: Promise<void> = Promise.resolve();
 const baseReproductionHostCache = new Map<string, BaseProbeFile>();
 
@@ -2167,8 +2195,12 @@ export function buildBaseReproductionProbe(
       let setupError: string | undefined;
       let created = false;
       let timeoutMs: number | undefined;
+      // Seam argv opens with -C and a directory; the default runs the rest through the hardened leaf pinned to that
+      // directory. In a fix round it is the fix worktree itself, so the leaf's pin, not its writable `.git` pointer,
+      // names the repository.
       const git = deps.git ?? (async (args: string[], timeout: number) => {
-        await baseReproductionExecFile("git", args, { timeout, killSignal: "SIGKILL", maxBuffer: 1 << 26 });
+        const [, dir, ...rest] = args;
+        await hostWorktreeGitAsync(dir!, rest, { stdio: "ignore", timeout, killSignal: "SIGKILL", maxBuffer: 1 << 26 });
       });
       const remove = deps.remove ?? rmAsync;
       const unreadable = (file: string, detail: { reason: string }): BaseProbeFile =>
@@ -2710,16 +2742,28 @@ export function handedOffHeadRiskJudge(
   return riskJudgeHandedOffHead((pr, signal) => {
     const task = pr.taskId === undefined ? undefined : plan.byId.get(pr.taskId);
     const spend = riskJudgeSpendCollector();
+    let viewRead: Promise<RiskJudgeChangeView> | undefined;
+    const readViewOnce = (): Promise<RiskJudgeChangeView> => (viewRead ??= (async () => readChangeView(pr.prUrl))());
     return {
       input: {
         change: { description: `${task?.title ?? `PR #${pr.prNumber}`} — ${pr.prUrl}`, files: task?.files },
         gatesState: { review_state: pr.reviewState, checks_state: pr.checksState, owner: "sweep (handed-off head)" },
         planContext: { taskId: pr.taskId, taskType: task?.type },
       },
-      config: { confidenceThreshold: readRiskPolicy(policyPath(repoRoot)).confidenceThreshold },
+      config: (() => {
+        const riskPolicy = readRiskPolicy(policyPath(repoRoot));
+        return { confidenceThreshold: riskPolicy.confidenceThreshold, borderlineBand: riskPolicy.borderlineBand };
+      })(),
       orchestrator: {
         spend,
         log,
+        // W1-T7724: the change view is read ONCE per head; the description tier shows its counts and the diff
+        // tier (an uncertain `low`) reads its patches from the same read — no second GitHub call.
+        diffSource: {
+          read: readViewOnce,
+          inputBudgetChars: (tier1Chars) =>
+            riskJudgeDiffInputBudget(resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot))))(tier1Chars),
+        },
         judge: async (input) => {
           const settingsFile = renderWorkerSettings({
             templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
@@ -2727,7 +2771,7 @@ export function handedOffHeadRiskJudge(
             outPath: join(config.root, "tmp", `risk-judge-settings-${runId}.json`),
           });
           const mount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
-          const judged = { ...input, change: { ...input.change, changeView: await readChangeView(pr.prUrl) } };
+          const judged = { ...input, change: { ...input.change, changeView: withoutRiskJudgePatches(await readViewOnce()) } };
           return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend, signal })(judged);
         },
         escalate: (verdict, action) =>
@@ -2826,7 +2870,11 @@ import {
   type WorkerStreamEvent, type WorkerSelectionAssignment,
   WorkerAbandonedError,
   SubscriptionOnlyRefusedError,
+  deliverOperatorAnswerToRunningWorker,
 } from "./lib/worker.js";
+import {
+  QuietRoundEndedError, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, runQuietWorkerWatchdog, type QuietWorkerJudge,
+} from "./lib/quiet-worker-watchdog.js";
 import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
 import { enrichWorkerStreamEvent } from "./lib/worker-telemetry.js";
 
@@ -2859,9 +2907,10 @@ export function retroErrorLedgerFields(error: unknown): Record<string, unknown> 
 // W1-T2627/W1-T2888: `readWorktreeBase`'s only reader (doctorCommand) moved to
 // src/lib/report-commands.ts, which imports it directly from lib/worker.js.
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
-import { sweepMemoryReservations } from "./lib/host-memory-ledger.js";
+import { memoryStoreReadFailure, readMemoryLedger, sweepMemoryReservations } from "./lib/host-memory-ledger.js";
+import { createMemoryReadTracker, type MemoryReadHold, type MemoryReadSource, type MemoryReadTracker } from "./lib/dispatch-governor.js";
 import { withSyncChildReservation } from "./lib/host-memory-learning.js";
-import { installShadowMemorySink } from "./lib/host-memory-shadow.js";
+import { installShadowMemorySink, ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./lib/host-memory-shadow.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
 // runaway-turns bound below — see `deriveRunawayTurnBound`'s own doc for why this borrows that
 // row rather than inventing a second, duplicate "N times median" knob just because the unit is
@@ -2907,6 +2956,7 @@ import {
   type SelfSyncDeps,
 } from "./lib/self-sync.js";
 import { LIVE_EDIT_TREES, runLiveEditLadder, withLiveEditLadders, type LiveEditLadderWiring, type LiveEditTree } from "./lib/live-edit-ladder.js";
+import { recoveryRefMaintainer } from "./lib/recovery-refs.js";
 import { checkImageDrift, IMAGE_DRIFT_STEP } from "./lib/image-drift.js";
 import {
   acquireInflightLock,
@@ -3290,6 +3340,113 @@ export function attributeWorkerStreamEvent(
     routedProvider: event.routedProvider ?? assignment.selected.provider,
     routedModel: event.routedModel ?? assignment.selected.model,
   };
+}
+
+/** The stream observer one dispatch spawn hands its worker: enrich, attribute to the spawn's assignment, then forward. */
+export function dispatchStreamObserver(
+  base: WorkerStreamObserver,
+  spawn: Pick<SpawnWorkerArgs, "model" | "mountProvider">,
+  assignment: () => Pick<WorkerSelectionAssignment, "id" | "requested" | "selected"> | undefined,
+): WorkerStreamObserver {
+  return (event) => {
+    const current = assignment();
+    base(attributeWorkerStreamEvent(enrichWorkerStreamEvent(event, spawn, current), current));
+  };
+}
+
+/** W1-T7807: run `rawSpawn` under the quiet-worker watchdog when `watch.enabled` (a real dispatch spawn has a process tree to
+ * read; an injected one has none). `seams` default to the real ledger read, judge, nudge and checkpoint-and-push path. */
+export function watchDispatchSpawn(
+  rawSpawn: typeof spawnWorker,
+  watch: {
+    enabled: boolean;
+    taskId: string;
+    runId: string;
+    ledgerPath: string;
+    fallbackBoundMs: number;
+    spawnArgs: Pick<SpawnWorkerArgs, "cwd" | "settingsFile" | "workerClass">;
+    task: Pick<ReturnType<typeof selectTask>, "files" | "acceptance">;
+    provider: () => string | undefined;
+    log: (step: string, fields: Record<string, unknown>) => void;
+    /** The daemon's recycle-PAUSE reader: a pending recycle ends the round on the checkpoint path. */
+    recyclePending?: () => string | undefined;
+  },
+  seams: {
+    runWatchdog?: typeof runQuietWorkerWatchdog;
+    readRows?: typeof readLedgerUnionRecordsSync;
+    judge?: QuietWorkerJudge;
+    deliver?: typeof deliverOperatorAnswerToRunningWorker;
+    hasUncommittedChanges?: typeof worktreeHasUncommittedChanges;
+    commit?: typeof commitWorkerEdits;
+    push?: typeof gitPushRunBranchAsync;
+    headSha?: (cwd: string) => string;
+  } = {},
+): typeof spawnWorker {
+  if (!watch.enabled) return rawSpawn;
+  const { taskId, spawnArgs, task, log } = watch;
+  const state: { rootPid?: number; ended?: QuietRoundEndedError } = {};
+  const abort = new AbortController();
+  const watchdogOptions: Parameters<typeof runQuietWorkerWatchdog>[0] = {
+    taskId,
+    runId: watch.runId,
+    rootPid: () => state.rootPid,
+    provider: watch.provider,
+    history: () => {
+      const read = (seams.readRows ?? readLedgerUnionRecordsSync)(dirname(watch.ledgerPath), { step: ["worker.state", "worker.assignment"] });
+      return read.ok ? read.rows : [];
+    },
+    fallbackBoundMs: watch.fallbackBoundMs,
+    quietFloorMs: DEFAULT_WORKER_QUIET_FLOOR_MS,
+    ledger: (step, fields) => log(step, fields),
+    judge: seams.judge ?? productionQuietWorkerJudge({ cwd: spawnArgs.cwd, settingsFile: spawnArgs.settingsFile }),
+    nudge: (message) => (seams.deliver ?? deliverOperatorAnswerToRunningWorker)(taskId, message, { ledger: (event, fields) => log(event, fields ?? {}) })
+      === "delivered" ? "delivered" : "unsupported",
+    ...(watch.recyclePending ? { recyclePending: watch.recyclePending } : {}),
+    endRound: async (reason, trigger) => {
+      if ((spawnArgs.workerClass ?? "implement") !== "implement") return { ended: false, reason: "not an implement worker" };
+      const cwd = spawnArgs.cwd;
+      try {
+        // The W1-T7697 checkpoint path (yieldAtWorkerBoundary): retain the disk work, push it, then release the lane.
+        if ((seams.hasUncommittedChanges ?? worktreeHasUncommittedChanges)(cwd)) {
+          const checkpoint = (seams.commit ?? commitWorkerEdits)(cwd, task.files ?? [],
+            `wip: yield at ${trigger === "recycle" ? "container recycle" : "quiet worker"}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume\nfailed: none\n\nRemudero-Task: ${taskId}`,
+            {}, task.acceptance);
+          if (!checkpoint.committed || checkpoint.undeclared.length > 0) {
+            return { ended: false, reason: `checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}` };
+          }
+        }
+        await (seams.push ?? gitPushRunBranchAsync)(cwd);
+      } catch (error) {
+        return { ended: false, reason: `checkpoint failed: ${String((error as Error)?.message ?? error)}` };
+      }
+      const checkpointSha = (seams.headSha ?? ((dir: string) => hostWorktreeGit(dir, ["rev-parse", "HEAD"]).trim()))(cwd);
+      state.ended = new QuietRoundEndedError({ checkpointSha, reason, ...(trigger ? { trigger } : {}) });
+      abort.abort();
+      return { ended: true, checkpointSha };
+    },
+  };
+  // Direct call on the run path; a test may substitute the runner through the seam.
+  const watchdog = seams.runWatchdog ? seams.runWatchdog(watchdogOptions) : runQuietWorkerWatchdog(watchdogOptions);
+  return guardSpawnWithQuietWatchdog(rawSpawn, {
+    watchdog, abort, onRootPid: (pid) => { state.rootPid = pid; }, ended: () => state.ended,
+  });
+}
+
+/** The rows a round ended mid-stream writes. A recycle's is the W1-T7697 freshness yield taken mid-round: the same
+ * `run.freshness_handoff` receipt and `freshness_yield` verdict as `yieldAtWorkerBoundary`, so the next run restores the
+ * pushed checkpoint (`pendingWorkerBoundaryHandoffs`) instead of starting over. */
+export function roundEndedHandoffRows(
+  detail: QuietRoundEndedError["detail"],
+  branch: string,
+): Array<{ step: string; fields: Record<string, unknown> }> {
+  const headSha = detail.checkpointSha ?? null;
+  if (detail.trigger !== "recycle") {
+    return [{ step: "verdict", fields: { verdict: "handed_off", reason: "quiet_worker_round_ended", branch, head_sha: headSha, detail: detail.reason } }];
+  }
+  return [
+    { step: "run.freshness_handoff", fields: { waiting_on: "worker_round", branch, head_sha: headSha, trigger: "recycle", detail: detail.reason } },
+    { step: "verdict", fields: { verdict: "handed_off", reason: "freshness_yield", waiting_on: "worker_round", branch, head_sha: headSha, detail: detail.reason } },
+  ];
 }
 
 const WORKER_TELEMETRY_TEXT_MAX_CHARS = 240;
@@ -4869,6 +5026,57 @@ export function branchPrTitle(worktreePath: string): string | undefined {
   }
 }
 
+/** Where {@link restoreBoundaryCheckpoint} left a fresh run's branch: on current main, or on the checkpoint's
+ *  own base when main conflicts with it (naming those paths, or why the merge could not be read). */
+export type BoundaryCheckpointRestore =
+  | { base: "main"; headSha: string }
+  | { base: "checkpoint"; headSha: string; mainConflicts: string[]; reason?: string };
+
+/**
+ * A restart checkpoint is RESTORED BY MERGE, never replayed: the fresh branch becomes the checkpoint's
+ * head with current main merged in (the checkpoint is the first parent, so its commits keep their shas).
+ * When main conflicts, the branch stays on the checkpoint's own base and the run goes on; the conflict
+ * reaches the PR, whose merge-conflict repair rounds resolve it. Why: a cherry-pick onto a moved main
+ * conflicted and ended W1-T7806 and W1-T7766 `restart_checkpoint_restore_failed`, stranding paid work.
+ * Only a remote head that moved since the handoff still refuses — that is someone else's work.
+ */
+export async function restoreBoundaryCheckpoint(
+  checkpoint: { branch: string; headSha: string },
+  taskId: string,
+  git: (args: string[]) => Promise<string>,
+): Promise<BoundaryCheckpointRestore> {
+  const remoteHead = (await git(["ls-remote", "origin", `refs/heads/${checkpoint.branch}`])).trim().split(/\s+/)[0];
+  if (remoteHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved; refusing to replay a different worker's work");
+  await git(["fetch", "origin", checkpoint.branch]);
+  const fetchedHead = (await git(["rev-parse", "FETCH_HEAD"])).trim();
+  if (fetchedHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved during fetch");
+  const mainSha = (await git(["rev-parse", "HEAD"])).trim();
+  const base = (await git(["merge-base", checkpoint.headSha, mainSha])).trim();
+  if (base === checkpoint.headSha) return { base: "main", headSha: mainSha }; // main already carries it
+  if (base === mainSha) {
+    await git(["reset", "--hard", "--quiet", checkpoint.headSha]); // it already sits on current main
+    return { base: "main", headSha: checkpoint.headSha };
+  }
+  const probe = await probeMerge({ headSha: checkpoint.headSha, mainSha, git: async (args) => {
+    try {
+      return { status: 0, stdout: await git([...args]) };
+    } catch (error) {
+      // merge-tree exits 1 on a conflict with the tree and the conflicted paths still on stdout.
+      const failed = error as { code?: unknown; stdout?: unknown };
+      return { status: typeof failed.code === "number" ? failed.code : null, stdout: typeof failed.stdout === "string" ? failed.stdout : "" };
+    }
+  } });
+  if (probe.verdict !== "clean") {
+    await git(["reset", "--hard", "--quiet", checkpoint.headSha]);
+    return { base: "checkpoint", headSha: checkpoint.headSha, mainConflicts: probe.verdict === "conflict" ? probe.paths : [],
+      ...(probe.verdict === "unreadable" ? { reason: probe.reason } : {}) };
+  }
+  const merged = (await git(["commit-tree", probe.tree, "-p", checkpoint.headSha, "-p", mainSha, "-m",
+    `wip: merge main into the restored checkpoint\n\nRemudero-Task: ${taskId}`])).trim();
+  await git(["reset", "--hard", "--quiet", merged]);
+  return { base: "main", headSha: merged };
+}
+
 /**
  * W1-T1012 (THE FIX IS AT THE WRITE): append the `Remudero-Task: <id>` trailer to the
  * worktree's CURRENT last commit — the record `gh pr merge --squash` actually keeps.
@@ -5527,10 +5735,17 @@ function changeViewFromRows(response: unknown): RiskJudgeChangeView {
     filename?: string;
     additions?: number;
     deletions?: number;
+    patch?: unknown;
   }>;
+  // W1-T7724: each row's `patch` rides on the view, so the diff tier needs no second GitHub read.
   const files: RiskJudgeChangedFile[] = rows
-    .filter((r): r is { filename: string; additions?: number; deletions?: number } => typeof r.filename === "string")
-    .map((r) => ({ path: r.filename, additions: r.additions ?? 0, deletions: r.deletions ?? 0 }));
+    .filter((r): r is { filename: string; additions?: number; deletions?: number; patch?: unknown } => typeof r.filename === "string")
+    .map((r) => ({
+      path: r.filename,
+      additions: r.additions ?? 0,
+      deletions: r.deletions ?? 0,
+      ...(typeof r.patch === "string" ? { patch: r.patch } : {}),
+    }));
   return boundRiskJudgeChangeView(files);
 }
 
@@ -6254,9 +6469,11 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
     }
     roundId = `${input.runId ?? input.task.id}:${pr.priorStrikes + 1}:${systemClock.now()}`;
     deps.log("fix.dispatch", { ...roundFields(), verdict_regime: "executed" });
+    await observeFeedbackInputs(input.admission, pr.pendingAnswer?.contributions ?? [], "plan-fix-adoption", deps.log,
+      deps.feedbackRead);
     const report = await deps.spawn(renderFixPrompt({ task: { ...input.task, files }, round: 1, branch: pr.headRefName!,
       harnessCommits: true, evidence: { planGateFindings: [...initial.failures, ...initial.unreadable], ciFailures: pr.ciFailures,
-        constraint: [input.lastRefusal, pr.pendingAnswer?.constraint].filter(Boolean).join("\n\n") || undefined } }));
+        constraint: [input.lastRefusal, feedbackFixConstraint(pr.pendingAnswer)].filter(Boolean).join("\n\n") || undefined } }));
     if (git(["rev-parse", "HEAD"]).trim() !== pr.headSha) return refuse("the worker moved the plan round head");
     const changed = workerChangedPaths(git(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]));
     const outside = changed.filter((path) => !files.includes(path));
@@ -7089,13 +7306,21 @@ export function daemonFreshnessReads(repoDir: string, env: NodeJS.ProcessEnv = p
   return { checkFreshness: read, externalWaitFreshness: ciWaitFreshness(read) };
 }
 
+/** The fleet's own needs-human transport, as the daemon (which holds the App token) speaks it. */
+function fleetIssueGatewayAsync(): AsyncIssueGateway {
+  const self = resolveOwnerRepo();
+  return ghIssueGatewayAsync(self.owner, self.repo);
+}
+
+/** The daemon's drain of what host-side code spooled because it could not post (host-escalation-spool.ts). */
+export function escalationSpoolDrainWiring(config: Config, clock: Clock = systemClock): ReturnType<typeof escalationSpoolDrain> {
+  return escalationSpoolDrain({ stateDir: join(config.root, "state"), ledgerPath: ledgerPathFor(config), issues: fleetIssueGatewayAsync, clock });
+}
+
 /** The daemon's live-edit ladder (live-edit-ladder.ts): its own tree and the install tree, escalating
  *  through the needs-human channel as the fleet's GitHub identity, which the host's watchdog lacks. */
 export function liveEditLadderWiring(config: Config, clock: Clock = systemClock): LiveEditLadderWiring {
-  const issues = () => {
-    const self = resolveOwnerRepo();
-    return ghIssueGatewayAsync(self.owner, self.repo);
-  };
+  const issues = fleetIssueGatewayAsync;
   return {
     daemonRepoDir: repoRoot,
     installRepoDir: resolveInstallRoot(config),
@@ -7104,11 +7329,13 @@ export function liveEditLadderWiring(config: Config, clock: Clock = systemClock)
     clock,
     escalate: (e) => escalateAsync(e, { issues: issues(), ledgerPath: ledgerPathFor(config), runId: e.runId ?? e.taskId }),
     comment: async (url, body) => { await issues().comment?.(url, body); },
+    recovery: recoveryRefMaintainer((dir) => gitClaimRunnerAsync(dir), join(config.root, "state"),
+      (step, extra) => appendLedger(ledgerPathFor(config), { run_id: "RECOVERY-REFS", task_id: "RECOVERY-REFS", step, ...extra })),
   };
 }
 
-/** `rmd live-edits`: one rung of the ladder for one tree, run by the host watchdog. It never escalates:
- *  the host's service user has no GitHub credential, so a restore leaves its notice for the daemon. */
+/** `rmd live-edits`: one rung of the ladder for one tree, run by the host watchdog. The host's service
+ *  user has no GitHub credential, so its escalation and restore notice are spooled for the daemon. */
 export async function liveEditsCommand(rest: string[], clock: Clock = systemClock): Promise<number> {
   const badArg = unknownArgError("live-edits", rest, ["--tree", "--checkout", "--state-root"], ["--json"]);
   const tree = flagValue(rest, "--tree") as LiveEditTree | undefined;
@@ -7118,8 +7345,23 @@ export async function liveEditsCommand(rest: string[], clock: Clock = systemCloc
     console.error((badArg ?? `rmd live-edits: --tree (${LIVE_EDIT_TREES.join("|")}), --checkout and --state-root are required`) + "\n" + USAGE);
     return 2;
   }
-  const result = await runLiveEditLadder({ tree, repoDir: checkout, stateDir, host: hostname(), clock, fetch: true });
+  const voice = spoolingIssueVoice(stateDir, { source: "live-edits", host: hostname(), clock });
+  const result = await runLiveEditLadder({ tree, repoDir: checkout, stateDir, host: hostname(), clock, fetch: true, ...voice });
   console.log(rest.includes("--json") ? JSON.stringify(result) : `live-edits ${tree}: tier ${result.tier} -- ${result.reason}`);
+  return 0;
+}
+
+export function hostAlertCommand(rest: string[], clock: Clock = systemClock): number {
+  const badArg = unknownArgError("host-alert", rest, ["--state-root", "--instance", "--condition", "--raise"], ["--clear", "--json"]);
+  const result = badArg ?? hostAlertCommandResult(
+    { stateRoot: flagValue(rest, "--state-root"), instance: flagValue(rest, "--instance"), condition: flagValue(rest, "--condition"), message: flagValue(rest, "--raise"), clear: rest.includes("--clear") },
+    { host: hostname(), clock },
+  );
+  if (typeof result === "string") {
+    console.error(`${result}\n${USAGE}`);
+    return 2;
+  }
+  console.log(rest.includes("--json") ? JSON.stringify(result) : `host-alert ${result.condition} (${result.instance}): ${result.tier}, count ${result.count}`);
   return 0;
 }
 
@@ -9435,32 +9677,9 @@ export function unchangedTreeStandDownReason(
   };
 }
 
-/**
- * W1-T3579: one deterministic revision of the CURRENT authoritative task contract the fix rung's
- * open-escalation guard (immediately below) versions its stand-down against — covers task
- * identity, declared `files:`, and every acceptance criterion's `claim`/`proof` pair, never
- * `satisfied_by`/`holdout` or any other decorative/volatile field (a `status`/`attempts` bump on
- * every dispatch must never move this). THE DEFECT THIS CLOSES: PORTAL-T4 (remudero-site PR #21,
- * 2026-09-14) was correctly refused, then a plan-only scope amendment re-authorized the exact same
- * repair on the exact same PR head — and the open-escalation guard, keyed on `headSha` alone,
- * stood the repair down forever because nothing distinguished "a human already answered this
- * question" from "the question changed underneath an open issue". Declared files are sorted
- * first (order is never part of the contract — {@link filesDigest}'s own convention); acceptance
- * pairs are read in DECLARED order, because reordering criteria is itself an amendment a re-admit
- * should notice. PURE: reads nothing off disk — the caller already holds the live `Task`/{@link
- * runFixRung}'s own `opts.task` this rung dispatched against, never a worker report or PR-body
- * prose (design note (i) — recovering it from either would let a worker's own claim decide
- * whether it gets re-admitted).
- */
-export function taskContractRevision(task: {
-  id: string;
-  files?: readonly string[];
-  acceptance?: ReadonlyArray<Pick<AcceptanceCriterion, "claim" | "proof">>;
-}): string {
-  const files = [...(task.files ?? [])].sort();
-  const acceptance = (task.acceptance ?? []).map((c) => ({ claim: c.claim, proof: c.proof }));
-  return sha256Hex(JSON.stringify({ id: task.id, files, acceptance }));
-}
+/** W1-T3579's task contract revision now lives in lib/escalate.ts, so the sweep's progress-judge
+ *  latch and its escalations version themselves by the SAME function the fix rung's guard reads. */
+export { taskContractRevision };
 
 /**
  * W1-T2799 (the fix-rung pre-strike gate's SIXTH reason source, composed into {@link
@@ -11068,6 +11287,7 @@ export async function runFixRung(opts: {
    * dispatch (W1-T76, unchanged).
    */
   constraint?: string;
+  feedbackContributions?: readonly unknown[];
   /**
    * W1-T100 (the #170 fix): failing required-check name+log-tail evidence for
    * a blocked_ci dispatch — this PR is checks-red with NO review verdict
@@ -11506,6 +11726,14 @@ export async function runFixRung(opts: {
   // strike reverts to whichever mode its now-computable state derives.
   let currentMergeConflict = opts.mergeConflict;
   const consecutiveMergeRefusalReasons: string[] = [];
+  /** #10787: ends merge-conflict mode once the merge is proven done, so the next round derives its red. */
+  const leaveMergeMode = (site: string, headSha: string | undefined): void => {
+    if (currentMergeConflict === undefined) return;
+    deps.log("fix.merge_mode_cleared", { site, strike: strikes, head_sha: headSha,
+      conflicted_files: conflictedFilePaths(currentMergeConflict), current_red: (currentCiFailures ?? []).map((f) => f.name) });
+    currentMergeConflict = undefined;
+    consecutiveMergeRefusalReasons.length = 0;
+  };
   // W1-T296: the head THIS INVOCATION's own most recent strike produced —
   // `undefined` until the first round's push+review completes below, which
   // is exactly the "first round has no prior head" contract
@@ -12804,6 +13032,7 @@ export async function runFixRung(opts: {
         ? { ...evidenceBase, priorPartialWork: opts.priorPartialWork }
         : evidenceBase;
     const fixMode = deriveFixMode(evidence, PROOF_REPAIR_FIX_MODE_RULES);
+    await observeFeedbackInputs(opts.config.contributorAdmission, opts.feedbackContributions ?? [], "fix-adoption", deps.log);
     // W1-T3727: WHO HOLDS THIS ROUND'S GIT, read once by BOTH the prompt and the tool bound so
     // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.
     const { harnessCommits: fixHarnessOwnsGit, cashTools: fixCashTools } = fixRoundGitOwnership(opts.config);
@@ -12907,6 +13136,11 @@ export async function runFixRung(opts: {
         strike: attempt,
         ...(merged.reason ? { reason: merged.reason } : {}),
       });
+      // #10787: main is already in the branch and a red is known — route to it: no strike, no refused round.
+      if (merged.reason === MERGE_UP_TO_DATE_REASON && noReviewYet && (currentCiFailures?.length ?? 0) > 0) {
+        leaveMergeMode("rung.merge_up_to_date", priorHeadSha);
+        continue;
+      }
       if (!merged.started) {
         const refusal = merged.reason ?? "the merge of current main did not start (no reason reported)";
         consecutiveMergeRefusalReasons.push(refusal);
@@ -13585,6 +13819,9 @@ export async function runFixRung(opts: {
           deps.log("fix.ci_failures_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
         }
       }
+      // #10787: named checks that RAN red prove GitHub computed the merge ref (a dirty PR runs none), so the next
+      // round targets that red instead of re-merging main; the pre-strike gate re-probes mergeability first.
+      if (ciGateState(ci) === "red" && (currentCiFailures?.length ?? 0) > 0) leaveMergeMode("rung.ci_red", ciGateSha(ci));
 
       // W1-T2328 SITE — THE CI-LOG VERDICT-UNCHANGED CHECK, RIGHT AFTER THE REFRESH ABOVE: this
       // strike's push landed and CI re-ran, but did the finding set actually MOVE? Comparing
@@ -13673,11 +13910,7 @@ export async function runFixRung(opts: {
       continue; // The next judgment sees the refreshed red set and this round's finding.
     }
 
-    // W1-T106: CI reaching green at all means GitHub could compute a merge
-    // ref — the conflict is resolved enough for a check to run — so the NEXT
-    // strike (if the review that follows still fails) is never re-dispatched
-    // as merge-conflict mode again; it reverts to whichever mode the now-real
-    // review verdict derives, exactly like `noReviewYet`'s own reversion.
+    // W1-T106: green CI proves the merge ref computes, so merge mode ends (a named red ends it above, #10787).
     currentMergeConflict = undefined;
 
     // W1-T3501: judge the CURRENT PR BODY — the artifact the authoritative
@@ -17165,6 +17398,8 @@ async function runTask(
     /** W1-T1045: override the resolved clock bound (ms) — the SAME injection convention as
      *  every other opt-in seam above. Default: `policy.values.workerAbandon`, read below. */
     workerAbandonMs?: number;
+    /** W1-T7807: override the quiet-worker watchdog's no-history fallback bound (ms). Default: `policy.values.workerStall`. */
+    workerStallMs?: number;
     /** W1-T2847: overrides `plan/policy.yaml`'s `sweep.armAdhocLaneReap` for the ad-hoc lane reap
      *  rung — the same `?? loadDefaultPolicy()` seam `workerAbandonMs` above uses, so a test can
      *  drive both arms without editing the shipped policy file. */
@@ -17261,6 +17496,8 @@ async function runTask(
   // (recon/implement/diagnose/decision-resume) gets it BY CONSTRUCTION, the same rationale
   // `onSpawnError`/`workerStateSensor.observer` already state for that wrapper.
   const workerAbandonMs = opts.workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon;
+  // W1-T7807: the policy `workerStall` row is the quiet-worker watchdog's no-history fallback bound.
+  const workerStallFallbackMs = opts.workerStallMs ?? loadDefaultPolicy().values.workerStall;
 
   // W1-T2528: not routed through `nextLaneEpochMs` — `taskId` is already the per-rung
   // component, and same-taskId reruns are refused earlier by the dispatch claim/inflight check.
@@ -17307,7 +17544,12 @@ async function runTask(
     let selectionAssignment: Parameters<NonNullable<SpawnWorkerArgs["onSelectionAssignment"]>>[0] | undefined;
     const baseStreamObserver = effectiveSpawnArgs.streamObserver ?? workerStateSensor.observer;
     const receiptLog: typeof log = callerOwnsBenchmarkReceipt(effectiveSpawnArgs) ? () => {} : log; // W1-T4613: fixWorkerReceipt owns it
-    return recordBenchmarkWorkerAttempt(() => rawSpawn({
+    // W1-T7807: the quiet-worker watchdog rides every REAL dispatch spawn (an injected spawn has no process tree to read).
+    const watchedSpawn = watchDispatchSpawn(rawSpawn, {
+      enabled: !opts.spawn, taskId, runId, ledgerPath, fallbackBoundMs: workerStallFallbackMs, spawnArgs: effectiveSpawnArgs, task, log,
+      provider: () => selectionAssignment?.selected.provider, recyclePending: opts.externalWaitRecycle,
+    });
+    return recordBenchmarkWorkerAttempt(() => watchedSpawn({
       ...effectiveSpawnArgs,
       // A dispatch run builds in its task worktree: its workers reserve (and learn) host memory as "implement".
       workerClass: effectiveSpawnArgs.workerClass ?? "implement",
@@ -17335,14 +17577,13 @@ async function runTask(
       // Keep provider/model attribution specific to THIS spawn, not the run's initial mount.
       // The selected assignment is authoritative for provider + requested model; the selected
       // model is deliberately not promoted to a served-model receipt.
-      streamObserver: (event) => baseStreamObserver(attributeWorkerStreamEvent(
-        enrichWorkerStreamEvent(event, effectiveSpawnArgs, selectionAssignment), selectionAssignment)),
+      streamObserver: dispatchStreamObserver(baseStreamObserver, effectiveSpawnArgs, () => selectionAssignment),
       // W1-T1045: every real dispatch spawn gets the clock bound BY CONSTRUCTION — the SAME
       // wrap-once rationale as `onSpawnError`/`streamObserver` above. A caller that already set
       // its own `clockBound` (none exist today) is respected; every future dispatch call site
       // through this wrapper is covered without remembering to add it individually.
       clockBound: effectiveSpawnArgs.clockBound ?? { boundMs: workerAbandonMs },
-      }), receiptLog, () => selectionAssignment, stopPolling);
+    }), receiptLog, () => selectionAssignment, stopPolling);
   };
   // W1-T143: a raw synchronous write, not console.log — this narration is exactly what the
   // daemon's `runOne` exercises on every dispatch, and console.log's async, non-TTY-buffered
@@ -19041,14 +19282,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const checkpoint = pendingWorkerBoundaryHandoffs(readLedgerRawLines(ledgerPath)).get(taskId);
     if (checkpoint) {
       try {
-        const remoteHead = (await hostWorktreeGitAsync(worktreePath, ["ls-remote", "origin", `refs/heads/${checkpoint.branch}`])).trim().split(/\s+/)[0];
-        if (remoteHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved; refusing to replay a different worker's work");
-        await hostWorktreeGitAsync(worktreePath, ["fetch", "origin", checkpoint.branch]);
-        const fetchedHead = (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "FETCH_HEAD"])).trim();
-        if (fetchedHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved during fetch");
-        const commits = (await hostWorktreeGitAsync(worktreePath, ["rev-list", "--reverse", "--no-merges", `origin/main..${checkpoint.headSha}`])).trim();
-        if (commits) await hostWorktreeGitAsync(worktreePath, ["cherry-pick", ...commits.split("\n")]);
-        log("implement.checkpoint_restored", { source_branch: checkpoint.branch, source_head_sha: checkpoint.headSha, branch });
+        const restored = await restoreBoundaryCheckpoint(checkpoint, taskId, (args) => hostWorktreeGitAsync(worktreePath, args));
+        log("implement.checkpoint_restored", { source_branch: checkpoint.branch, source_head_sha: checkpoint.headSha, branch,
+          base: restored.base, restored_head_sha: restored.headSha,
+          ...(restored.base === "checkpoint" ? { main_conflicts: restored.mainConflicts, merge_unreadable: restored.reason } : {}) });
       } catch (error) {
         log("verdict", { verdict: "no_pr", reason: "restart_checkpoint_restore_failed", branch,
           source_branch: checkpoint.branch, detail: String((error as Error)?.message ?? error), cost_usd: costUsd });
@@ -19420,7 +19657,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const ruleToolPointer = ruleLookup
       ? `\nTo read a doctrine rule by id or phrase, or a learning's evidence by learnings#id, call ${WORKER_RULE_TOOL_NAME}.`
       : "";
-    const prompt = `${renderedImplementPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
+    const prompt = `${renderedImplementPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${IMPLEMENT_WAIT_TARGET_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -19452,7 +19689,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // drill will send. `ruleHeadlinesPart` is the SAME string the turn-0 prompt above just
     // carried (design (iii)) — never re-derived, so a compaction can never re-inject a
     // headline index that drifted from what turn 0 actually said.
-    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart, harnessOwnsGit)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
+    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart, harnessOwnsGit)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${IMPLEMENT_WAIT_TARGET_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
     log("anchor.built", { anchor });
 
     // ── Implement + DIAGNOSE-THEN-RETRY (W1-T7B — Standing rule 14: the CALL SITE is the
@@ -19481,7 +19718,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
             throw new Error(`restart checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}`);
           }
         }
-        await gitPushRunBranchAsync(worktreePath);
+        await gitPushRunBranchAsync(worktreePath, { prGates: false }); // a checkpoint opens no PR: see worktreePushExecAsync
       } catch (error) {
         log("verdict", { verdict: "no_pr", reason: "restart_checkpoint_failed", waiting_on: waitingOn,
           detail: String((error as Error)?.message ?? error), branch, cost_usd: costUsd, ...terminalVerdictFields(impl) });
@@ -20899,11 +21136,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const riskJudgeSpend = riskJudgeSpendCollector();
     let primaryRiskServedModel: string | null = null;
     let judgedRiskInput = riskJudgeInput;
+    // W1-T7724: the view is read ONCE; the diff tier (a second judgment of an uncertain `low`) reuses its patches.
+    let readChangeViewOnce: RiskJudgeChangeView | undefined;
     const judgeWithChangeView = async (input: RiskJudgeInput): Promise<RiskJudgeVerdict> => {
-      const view = changeView(prUrl);
+      const view = (readChangeViewOnce ??= changeView(prUrl));
       judgedRiskInput = {
         ...input,
-        change: { ...input.change, changeView: view },
+        change: { ...input.change, changeView: withoutRiskJudgePatches(view) },
       };
       return realRiskJudge({
         mount: riskJudgeMount, cwd: worktreePath, settingsFile, spend: riskJudgeSpend,
@@ -20917,6 +21156,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const riskJudgeResult = await runRiskJudge(riskJudgeInput, {
       judge: judgeWithChangeView,
       spend: riskJudgeSpend,
+      diffSource: {
+        read: () => readChangeViewOnce ?? changeView(prUrl),
+        inputBudgetChars: riskJudgeDiffInputBudget(riskJudgeMount),
+      },
       escalate: async (verdict, action) => {
         // W1-T125 shape, retargeted by W1-T975: this run itself never arms until
         // AFTER the risk judge proceeds (see the deferred arm call further down),
@@ -20966,6 +21209,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // read live above) is the one this unattended caller applies — no longer the module's
       // own DEFAULT_CONFIDENCE_THRESHOLD literal, unreachable from outside risk-judge.ts.
       confidenceThreshold: riskPolicy.confidenceThreshold,
+      borderlineBand: riskPolicy.borderlineBand,
     });
     if (riskJudgeResult.verdict.availability !== "unavailable") {
       await runShadowJudge({
@@ -21108,6 +21352,15 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     say(`verdict: ${terminalVerdict} (${outcome.reason}) — PR left OPEN: ${prUrl}`);
     return { taskId, runId, prUrl, merged: false, costUsd, verdict: terminalVerdict };
   } catch (err) {
+    // W1-T7807: the quiet-worker watchdog's `end_round` verdict (or a pending recycle) stopped this round AFTER pushing a
+    // checkpoint. That is a handoff, never a failure, and the worktree is kept exactly as the freshness yield keeps it.
+    if (err instanceof QuietRoundEndedError) {
+      for (const row of roundEndedHandoffRows(err.detail, branch)) {
+        log(row.step, row.step === "verdict" ? { ...row.fields, cost_usd: costUsd, ...terminalVerdictFields(null) } : row.fields);
+      }
+      say(`verdict: handed_off — ${err.detail.trigger === "recycle" ? "a pending recycle" : "the quiet-worker watchdog"} ended the round (${err.detail.reason})`);
+      return { taskId, runId, merged: false, costUsd, verdict: "handed_off" };
+    }
     // W1-T1045: the clock-bound watchdog (worker.ts) aborted a silent dispatch spawn — NAME it
     // and return a terminal verdict rather than falling through to the generic `run.error` +
     // re-throw below, which would leave this run's promise REJECTED instead of resolved: exactly
@@ -22501,6 +22754,10 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   const runId = `review-PR${view.number}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: reviewKey, step, lane: "review", ...extra });
+  const adoptionComment = flagValue(rest, "--admission-adopt-comment");
+  await observeAdmissionDisposition(config.contributorAdmission,
+    { owner, repo, prNumber: view.number, headSha: view.headRefOid }, config.root, log,
+    adoptionComment === undefined ? undefined : Number(adoptionComment));
   await (deps.contributorAdmission ?? ((target, action) => observeContributorAdmission(config.contributorAdmission, target, action, log)))
     ({ owner, repo, prNumber: view.number, headSha: view.headRefOid }, "review");
   const reviewSubject = resolveReviewSubjectCheckout({
@@ -23043,6 +23300,11 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     statusCheckRollup?: RollupEntry[];
   };
   const config = deps.config ?? loadConfig();
+  const adoptionComment = flagValue(rest, "--admission-adopt-comment");
+  await observeAdmissionDisposition(config.contributorAdmission,
+    { owner, repo, prNumber: view.number, headSha: view.headRefOid }, config.root,
+    (step, fields) => appendLedger(ledgerPathFor(config), { run_id: `dep-disposition-PR${view.number}`, task_id: `dep-review-PR${view.number}`, step, ...fields }),
+    adoptionComment === undefined ? undefined : Number(adoptionComment));
   await (deps.contributorAdmission ?? ((target, action) => observeContributorAdmission(config.contributorAdmission, target, action,
     (step, fields) => appendLedger(ledgerPathFor(config), { run_id: `dep-admission-PR${view.number}`, task_id: `dep-review-PR${view.number}`, step, ...fields }))))
     ({ owner, repo, prNumber: view.number, headSha: view.headRefOid }, "review");
@@ -32468,6 +32730,7 @@ export function buildIntakeRungsDaemonHooks(deps: {
           ledgerPath,
           runId,
           dryRun: false,
+          admission: feedbackIntakeAdmission(config, ledgerPath, runId),
         });
         return {
           rung,
@@ -34986,12 +35249,15 @@ export function breakerDetailDep(
  * it to `verifyStalledTask` (stall-verifier.ts). The plan calls for an offline replay before
  * activating dispositions, so every tripped breaker still follows the established backstop
  * escalation path. A provisional `requeue` verdict must not silently leave the breaker tripped.
+ *
+ * W1-T7742: with `judge` wired, the page waits on {@link judgeDispatchBreak}: a `continue` ruling resets
+ * the streak instead of halting the task; `escalate`, or no usable ruling, pages exactly as before.
  */
 export function onCircuitBreakWithVerifier(
   gate: Pick<ReturnType<typeof breakerGateFor>, "detailFor">,
   projFor: (taskId: string) => { prState?: string; merged?: boolean } | undefined,
-  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
-): (task: Task) => void {
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway; judge?: DispatchBreakJudge },
+): (task: Task) => Promise<void> | void {
   return (task) => {
     const detail = gate.detailFor(task.id);
     const proj = projFor(task.id);
@@ -35001,7 +35267,7 @@ export function onCircuitBreakWithVerifier(
     if (proj?.merged) prStates.push("merged");
     else if (proj?.prState === "OPEN") prStates.push("open");
     else if (proj?.prState === "CLOSED") prStates.push("closed_unmerged");
-    verifyStalledTask(
+    const stall = verifyStalledTask(
       task.id,
       {
         freshCount: detail.freshCount,
@@ -35012,7 +35278,11 @@ export function onCircuitBreakWithVerifier(
       },
       { repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId },
     );
-    escalateCircuitBreak(task, { owner: ctx.owner, repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, issues: ctx.issues });
+    const page = () => escalateCircuitBreak(task, { owner: ctx.owner, repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, issues: ctx.issues });
+    if (!ctx.judge) return page();
+    // Settles off the selection pass; a throw anywhere still pages (the judge route never throws on its own).
+    return judgeDispatchBreak(task, detail, stall.verdict, { repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, judge: ctx.judge })
+      .then((decision) => { if (decision === "escalate") page(); }, page);
   };
 }
 
@@ -35158,7 +35428,7 @@ function queueGovernorGateFor(
       trailingMergedCount: flow.trailingMergedCount, readHeadroom: () => readMemoryHeadroomFraction(),
     });
     const result = checkQueueGovernor(owned, policy, {
-      pressure: readFixHostPressure(policy.memoryFloorMib),
+      pressure: productionFixPressure(policy.memoryFloorMib, ledgerPath),
       foreignOpenCount: foreign,
       trailingMergedCount: flow.trailingMergedCount,
       trailingOpenedCount: flow.trailingOpenedCount,
@@ -35170,7 +35440,8 @@ function queueGovernorGateFor(
       observed_open_count: owned, measured_bound: result.measuredBound, wip_limit: result.wipLimit,
       trailing_merged_count: flow.trailingMergedCount, trailing_opened_count: flow.trailingOpenedCount,
       pressure_available_mib: result.pressure?.availableMib, pressure_floor_mib: result.pressure?.floorMib,
-      pressure_reason: result.pressure?.reason,
+      pressure_reason: result.pressure?.reason, pressure_binding: result.pressure?.binding, pressure_tier: result.pressure?.tier,
+      pressure_host_available_mib: result.pressure?.hostAvailableMib,
       tier: result.tier, deferred: result.deferred });
     if (!result.deferred) {
       admission = result;
@@ -35244,11 +35515,11 @@ export function createOpenPrCountObservation(): {
 }
 
 /**
- * W1-T1038 — THE REAL `MemAvailable` PROBE `checkMemoryGovernor` (sweep.ts) consults. Reads
- * `/proc/meminfo` and NEVER a cgroup limit (design note (6), `checkMemoryGovernor`'s own doc):
- * this fleet's containers carry no memory limit (`memory.max` reads `max`), so a cgroup read
- * would report "unbounded" and authorise every dispatch silently, while `/proc/meminfo` reports
- * the real host figure this guard actually wants.
+ * W1-T1038 — THE REAL `MemAvailable` PROBE `checkMemoryGovernor` (sweep.ts) consults: the HOST
+ * figure. It is not the only one. The daemon containers have carried memory limits since #10371 and
+ * #10486 (core: memory.max 8820 MiB, memory.high pinned below it), which `/proc/meminfo` cannot see,
+ * so {@link memoryGovernorGateFor} also reads the container's own headroom
+ * (`readContainerMemoryHeadroom`, the host memory budget's reader) and the floor takes the smaller.
  *
  * `path` defaults to the real file and is injectable so a test can point this at a fixture
  * without touching the live `/proc/meminfo` (test/dispatch-memory-governor.test.ts, "the probe
@@ -35302,14 +35573,66 @@ export function memoryGovernorGateFor(
   ledgerPath: string,
   runId: string,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
-  readAvailableMib: () => number = readAvailableMemoryMib,
+  readAvailableMib?: () => number,
+  // The container's own headroom. An injected host reading (a fixture) reads no container unless one is injected
+  // too, so a test never reads the cgroup of whatever container runs it.
+  readContainer: (() => ContainerMemoryHeadroom) | undefined = readAvailableMib === undefined ? () => readContainerMemoryHeadroom() : undefined,
+  ownWorkLive: () => boolean = () => ownContainerWorkLive(dirname(dirname(ledgerPath))),
 ): () => MemoryGovernorResult | undefined {
   return () => {
-    const result = checkMemoryGovernor(readAvailableMibBounded(readAvailableMib, ledgerPath, runId, policy), policy);
+    const available = readAvailableMibBounded(readAvailableMib ?? readAvailableMemoryMib, ledgerPath, runId, policy);
+    const result = checkMemoryGovernor(available, policy, readContainer?.(), ownWorkLive);
     // EVERY dispatch, including the ones it admits (design (iv)) — never gated on `result.deferred`.
     logMemoryObservation(result, appendLedger, ledgerPath, runId);
     return result.deferred ? result : undefined;
   };
+}
+
+/**
+ * W1-T7720 — THE STREAK TRACKER an unreadable memory reading reports to, wired for one run (daemon or
+ * drain). `memory_read.*` rows land in the ledger under task `GOVERNOR`; the adaptive bound reads the
+ * source's past `memory_read.recovered` durations back from the same ledger; a SUSTAINED streak raises
+ * ONE BLOCKED escalation, its task id carrying the streak start so each streak dedups on its own.
+ */
+export function memoryReadTrackerFor(
+  ledgerPath: string,
+  runId: string,
+  owner: string,
+  repo: string,
+  clock: Clock = systemClock,
+  issues: IssueGateway = ghIssueGateway(owner, repo),
+): MemoryReadTracker {
+  return createMemoryReadTracker(clock, {
+    recoveredDurationsMs: (source: MemoryReadSource) =>
+      readLedgerLines(ledgerPath) // ledger-read-intent: live — the recovered rows of this host's recent streaks.
+        .filter((row) => row.step === "memory_read.recovered" && row.source === source && typeof row.duration_ms === "number")
+        .map((row) => row.duration_ms as number),
+    writeRow: (step, fields) => appendLedger(ledgerPath, { run_id: runId, task_id: "GOVERNOR", step, ...fields }),
+    escalate: (hold: MemoryReadHold) => {
+      const startedAt = fixedClock(hold.streakStartedAtMs).iso();
+      void tryEscalate(
+        {
+          class: "BLOCKED",
+          taskId: `GOVERNOR-MEMORY-${hold.source}-${hold.streakStartedAtMs}`,
+          runId,
+          summary: `host memory ${hold.source} has been unreadable since ${startedAt}: new dispatch is held`,
+          detail:
+            `W1-T7720: the host memory ${hold.source === "probe" ? "probe (/proc/meminfo)" : "reservation store"} has been ` +
+            `unreadable for ${Math.round(hold.ageMs / 1000)} s, past the sustained bound of ` +
+            `${Math.round(hold.boundMs / 1000)} s (${hold.basis}). Short failures keep dispatching; this one ` +
+            `outlived what this fleet has seen recover, so NEW dispatch is held (the sweep and in-flight runs are untouched) ` +
+            `until a read succeeds. Last error: ${hold.error}`,
+          options: [
+            { label: "wait for recovery", detail: "Take no action; the hold releases itself on the first good read." },
+            { label: "repair the reading", detail: "Fix the unreadable source on the host (the error above names it), then dispatch resumes." },
+          ],
+          recommendation: "wait for recovery",
+        },
+        { issues, ledgerPath, runId },
+      );
+    },
+    onSinkError: (label, error) => console.error(`memory_read tracker: ${label} sink failed: ${error instanceof Error ? error.message : String(error)}`),
+  });
 }
 
 /** W1-T5347: how many `MemAvailable` reads one consultation makes before it reports "unreadable". */
@@ -36055,7 +36378,8 @@ async function drainCommand(
         // evaluation the predicate above answered from — never a second call.
         breakerDetail: breakerDetailDep(breakerGate),
         // W1-T4678: reads the evidence before paging — see onCircuitBreakWithVerifier's own doc.
-        onCircuitBreak: onCircuitBreakWithVerifier(breakerGate, (id) => lastProj?.get(id), { owner, repo, ledgerPath, runId }),
+        onCircuitBreak: onCircuitBreakWithVerifier(breakerGate, (id) => lastProj?.get(id), { owner, repo, ledgerPath, runId,
+          judge: productionDispatchBreakJudge({ cwd: repoRoot, settingsFile: join(repoRoot, "settings", "worker.json") }) }),
         // W1-T4025: repeated attributable lifetime pressure is a sensor, not a refusal wall. The
         // drain flushes one bounded batch after the pass and routes it through the existing judge;
         // a judge/proposal failure is logged and does not hold this or a sibling task.
@@ -36075,6 +36399,9 @@ async function drainCommand(
         // /proc/meminfo reading per consultation, so the per-lane re-check sees each lane's cost.
         // Holds NEW implement dispatch only — never a running worker or a review.
         checkMemoryGovernor: memoryGovernorGateFor(ledgerPath, runId, undefined, deps.readAvailableMemoryMib),
+        // W1-T7720: an unreadable probe / reservation store is tiered by how long it lasts.
+        memoryReadTracker: memoryReadTrackerFor(ledgerPath, runId, owner, repo),
+        readMemoryStoreFailure: () => memoryStoreReadFailure(readMemoryLedger()),
         checkQuietHours: () =>
           isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         // W1-T2513: `planSnapshot` is the coalescer built above — every lane of a tick shares
@@ -38327,7 +38654,7 @@ export function orphanSweepRunActive(
  *  one unresolved request per thread). `liveThreads` is a test seam. */
 export function daemonMemoryTelemetryReader(
   bootHeadSha: string | undefined,
-  opts: { generation?: string; liveThreads?: () => readonly TrackedWorker[] } = {},
+  opts: { generation?: string; liveThreads?: () => readonly TrackedWorker[]; footprint?: DaemonFootprint; clock?: Clock } = {},
 ): (() => Record<string, unknown>) & { afterRow: () => void } {
   const threadHeaps = workerHeapReadings({
     live: opts.liveThreads ?? workerThreads().live,
@@ -38340,7 +38667,12 @@ export function daemonMemoryTelemetryReader(
       workload: () => ({ active_workers: activeWorkerCount(), in_flight_reviews: inFlightReviewCount() }),
       bootHeadSha,
     });
-    return { ...memory, ...threadHeaps.fields(memory) };
+    // The same reading, kept as the daemon's own rolling footprint for the memory budget (daemon-footprint.ts). A
+    // failed persist keeps the sample in memory and rides the row.
+    const kept = opts.footprint?.record({
+      at: (opts.clock ?? systemClock).now(), bytes: memory.rss_bytes + (memory.vm_swap_bytes ?? 0), pid: process.pid,
+    });
+    return { ...memory, ...threadHeaps.fields(memory), ...(kept && !kept.persisted ? { footprint_persist: `error:${kept.reason}` } : {}) };
   };
   return Object.assign(read, { afterRow: () => threadHeaps.refresh() });
 }
@@ -38978,6 +39310,7 @@ export async function daemonCommand(
   const feedbackLandingRungs = target.isSelf
     ? feedbackLandingSweepRungs(repoRoot, {
         log,
+        ...(config.contributorAdmission === undefined ? {} : { publication: { mode: "shadow" as const, record: log } }),
         ledgerLines: () => readLedgerLines(ledgerPath),
         requestReview: requestLandingReview,
         // W1-T5460: drain the console decisions `rmd serve` queued under the same state root.
@@ -39204,6 +39537,9 @@ export async function daemonCommand(
       (inlineProducer ??= createTickReadProducer(readOptions, { log }))(input),
   });
   const loopTelemetry = startReadPlaneTelemetry();
+  // The daemon's rolling rss+swap samples, kept across rotations and restarts for the memory budget's daemon split.
+  const daemonFootprint = createDaemonFootprint(daemonFootprintPath(join(config.root, "state")));
+  installDaemonFootprint(daemonFootprint);
   try {
     try { await gardenerRuntime.flush(); } catch { log("garden.telemetry_failed", { reason: "runtime-inventory-write-failed" }); }
     const summary = await runDaemonFn(
@@ -39222,7 +39558,7 @@ export async function daemonCommand(
           ledgerPath, statusPath, log,
         }) : undefined,
         readLoopTelemetry: loopTelemetry.sample,
-        readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha, { generation: runId }),
+        readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha, { generation: runId, footprint: daemonFootprint }),
         memoryGovernor: createDaemonMemoryGovernor({ policy: memoryPolicyRead.policy }),
         lastStepBeforeBlock: () => lastReadPlaneStep,
         idleStarvedSupervised: process.env.RMD_IDLE_STARVED_SUPERVISED === "1" && !target.isSelf && !flagValue(rest, "--plan"),
@@ -39289,6 +39625,7 @@ export async function daemonCommand(
           repo: target.repo,
           ledgerPath,
           runId,
+          judge: productionDispatchBreakJudge({ cwd: repoRoot, settingsFile: join(repoRoot, "settings", "worker.json") }),
         }),
         // W1-T4025: repeated attributable lifetime pressure is a sensor, not a refusal wall. The
         // daemon flushes one bounded batch after the pass and routes it through the existing judge;
@@ -39317,6 +39654,9 @@ export async function daemonCommand(
         // /proc/meminfo reading per consultation, so the per-lane re-check sees each lane's cost.
         // Holds NEW implement dispatch only — never a running worker or a review.
         checkMemoryGovernor: memoryGovernorGateFor(ledgerPath, runId, undefined, deps.readAvailableMemoryMib),
+        // W1-T7720: an unreadable probe / reservation store is tiered by how long it lasts.
+        memoryReadTracker: memoryReadTrackerFor(ledgerPath, runId, target.owner, target.repo),
+        readMemoryStoreFailure: () => memoryStoreReadFailure(readMemoryLedger()),
         checkQuietHours: () =>
           isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
@@ -39443,9 +39783,10 @@ export async function daemonCommand(
         // dispatch runs to its verdict first, which is also what bounds the restart rate (measured:
         // the daemon is inside a dispatch 18.2% of wall clock, p50 28.3 min).
         // 2026-10-11: a tracked edit in a live checkout deferred every refresh for five hours, silently.
+        // The same read drains the host-escalation spool: host-side alerts the host itself could not post.
         checkFreshness: testRunnerOnItsOwnCheckout(repoRoot)
           ? daemonFreshnessReads(repoRoot).checkFreshness
-          : withLiveEditLadders(daemonFreshnessReads(repoRoot).checkFreshness, liveEditLadderWiring(config)),
+          : withEscalationSpoolDrain(withLiveEditLadders(daemonFreshnessReads(repoRoot).checkFreshness, liveEditLadderWiring(config)), escalationSpoolDrainWiring(config)),
         readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state")),
         categorizedRefusalRejoinFor: (id) => lastProj?.get(id)?.categorizedRefusalRejoin,
         // impl-FZ / W1-T3554 — PLAN FRESHNESS, on BOTH the self-target and dedicated non-self
@@ -39607,7 +39948,8 @@ export async function daemonCommand(
           targetCheckoutRoot,
           () => activePlanRef.current,
           // W1-T4471: the one real wiring of the owner-reply reader.
-          ghEscalationAnswerGateway(target.owner, target.repo, undefined, config.operatorGithubLogins),
+          ghEscalationAnswerGateway(target.owner, target.repo, undefined, config.operatorGithubLogins,
+            config.contributorAdmission === undefined ? undefined : { settings: config.contributorAdmission }),
           gitCredentialSocket?.socketPath,
           servedTickRead(onePassPerGeneration(() => tickReadGeneration, readPlane?.read,
             () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined }), { log }),
@@ -39978,7 +40320,7 @@ async function deployRunCommand(rest: string[]): Promise<number> {
       servePort: resolveServePort([], effectiveConfig.serve?.port),
       uid,
       ledgerPath: ledgerPathFor(effectiveConfig),
-      ...refusalEscalationOrNone(resolveOwnerRepo, ghIssueGateway, ledgerPathFor(effectiveConfig)),
+      ...refusalEscalationOrNone(resolveOwnerRepo, ghIssueGateway, ledgerPathFor(effectiveConfig), { stateDir: join(effectiveConfig.root, "state"), host: hostname() }),
     }),
     // W1-T3694 — THE PRODUCER, WIRED. `realDeployDeps`'s own `daemonAlive` reads ONLY
     // `launchctl list`, which throws on every call on the fleet's only host (Linux has no
@@ -44005,6 +44347,12 @@ export function buildEscalationReconcileCandidates(
  * "the arg-builder carries the testable read-only contract; the spawn wrapper is
  * untested by design" split — see spawnSpecialistWorker/spawnReconSpecialist).
  */
+export function feedbackFixConstraint(answer: { constraint: string; contributions?: readonly unknown[] } | undefined): string | undefined {
+  return answer?.contributions?.length
+    ? feedbackLineageEnvelope(feedbackLineagePayload(answer.constraint, answer.contributions), "feedback-entry")
+    : answer?.constraint;
+}
+
 export function buildFixRungDispatchArgs(args: {
   task: { id: string; title: string; acceptance?: AcceptanceCriterion[] };
   runId: string;
@@ -44020,7 +44368,7 @@ export function buildFixRungDispatchArgs(args: {
   pr: {
     headSha: string;
     reviewSummary?: string;
-    pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean };
+    pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean; contributions?: unknown[] };
     checksState?: OpenPrView["checksState"];
     redRequiredChecks?: readonly string[];
   };
@@ -44124,7 +44472,8 @@ export function buildFixRungDispatchArgs(args: {
     strikeCap: args.strikeCap,
     initialReview,
     initialCriterionIndices,
-    constraint: pr.pendingAnswer?.constraint,
+    constraint: feedbackFixConstraint(pr.pendingAnswer),
+    feedbackContributions: pr.pendingAnswer?.contributions === undefined ? undefined : feedbackLineageSnapshot(pr.pendingAnswer.contributions),
     progressDecision: evidence.progressDecision,
     progressApproach: evidence.progressApproach,
     ciFailures: evidence.ciFailures,
@@ -44534,9 +44883,8 @@ function readOwnerHasTrackedWork(ownerPath: string): boolean {
 }
 
 export function removeAbandonedFixWorktreeOwner(repoDir: string, worktreePath: string): void {
-  execFileSync("git", ["-C", repoDir, "worktree", "remove", worktreePath], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  // No --force: a dirty owner is refused. The fix clone is pinned through the hardened leaf.
+  hostWorktreeGit(repoDir, ["worktree", "remove", worktreePath]);
   removeRunLock(worktreePath);
   removeWorktreeBase(worktreePath);
 }
@@ -45645,7 +45993,7 @@ function derivedImplementCommit(task: Pick<Task, "id" | "title" | "type">, paths
   return { subject, reason: `no COMMIT_MESSAGE after one re-ask; ${task.id} title and ${paths[0]}` };
 }
 
-function derivedFixCommit(check: string | undefined, prUrl: string): { subject: string; reason: string } | undefined {
+export function derivedFixCommit(check: string | undefined, prUrl: string): { subject: string; reason: string } | undefined {
   const pr = prUrl.match(/\/pull\/(\d+)(?:\/|$)/)?.[1];
   if (check === undefined || check.trim().length === 0 || pr === undefined) return undefined;
   const prefix = "fix: repair ";
@@ -47948,7 +48296,7 @@ export async function fixCommand(
   const prArg = rest[0];
   // W1-T4077: `--requested` is the console's "Fix now". The operator asking for a fix IS the decision to try
   // again, so the strike count does not turn it into an escalation; every other refusal still applies.
-  const badArg = unknownArgError("fix", rest.slice(1), ["--repo"], ["--requested"]);
+  const badArg = unknownArgError("fix", rest.slice(1), ["--repo", "--admission-adopt-comment"], ["--requested"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -47968,6 +48316,9 @@ export async function fixCommand(
   const operatorRequested = rest.includes("--requested");
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "FIX", step, lane: "fix", ...extra });
+  const adoptionComment = flagValue(rest, "--admission-adopt-comment");
+  await observeAdmissionDisposition(config.contributorAdmission, { owner, repo, prNumber }, config.root, log,
+    adoptionComment === undefined ? undefined : Number(adoptionComment));
   await (deps.contributorAdmission ?? ((target, action) => observeContributorAdmission(config.contributorAdmission, target, action, log)))
     ({ owner, repo, prNumber }, "repair");
 
@@ -48471,7 +48822,15 @@ export async function awayCommand(rest: string[]): Promise<number> {
  */
 export function mergeHoldCommand(
   rest: string[],
-  deps: { config?: Config; ledgerPath?: string; now?: () => number; isInteractive?: () => boolean } = {},
+  deps: {
+    config?: Config;
+    ledgerPath?: string;
+    now?: () => number;
+    isInteractive?: () => boolean;
+    /** W1-T7721 — where the writer's actor is gathered from. A caller that injects `isInteractive` without a probe
+     *  has taken control of the terminal, so it also gets a human-terminal probe rather than this process's own env. */
+    actorProbe?: MergeHoldActorProbe;
+  } = {},
 ): number {
   const parsed = parseOperatorMergeHoldArgs(rest);
   if (!parsed.ok) {
@@ -48484,10 +48843,25 @@ export function mergeHoldCommand(
     );
     return 2;
   }
+  const actor = gatherMergeHoldActor(
+    deps.actorProbe ?? (deps.isInteractive ? humanTerminalActorProbe() : realMergeHoldActorProbe()),
+  );
+  const authorized = authorizeMergeHoldWrite(parsed.input, actor);
+  if (!authorized.ok) {
+    console.error(`rmd merge-hold: ${authorized.error}`);
+    return 2;
+  }
   const ledgerPath = deps.ledgerPath ?? ledgerPathFor(deps.config ?? loadConfig());
-  const result = applyOperatorMergeHold(ledgerPath, parsed.input, { now: deps.now });
+  const result = applyOperatorMergeHold(ledgerPath, authorized.input, { now: deps.now, actor });
   if (!result.written) {
     console.log(`### rmd merge-hold — ${result.scope} is already released; no ledger row written.`);
+    return 0;
+  }
+  if (authorized.input.authority === "agent-cli") {
+    console.log(
+      `### rmd merge-hold — AGENT NOTE recorded for ${result.scope}; by ${parsed.input.by}: ${parsed.input.reason}. ` +
+        `An agent hold is audit-only (authority agent-cli): it does NOT block auto-merge.`,
+    );
     return 0;
   }
   console.log(
@@ -48763,7 +49137,7 @@ export function renderFeedbackReconcile(result: ReconcileFeedbackLandingResult, 
  * ({@link reconcileFeedbackLanding}, lib/feedback-reconcile.ts) — this hub does no scanning or
  * classification of its own; it only parses argv and calls the library's one entry point.
  */
-export async function feedbackReconcileCommand(rest: string[]): Promise<number> {
+export async function feedbackReconcileCommand(rest: string[], configOverride?: Config, gh?: LandFeedbackOpts["gh"]): Promise<number> {
   const badArg = unknownArgError("feedback-reconcile", rest, ["--root", "--checkout"], ["--apply"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -48790,12 +49164,17 @@ export async function feedbackReconcileCommand(rest: string[]): Promise<number> 
   const checkoutRoot = checkoutArg !== undefined ? resolve(checkoutArg) : repoRoot;
   const apply = rest.includes("--apply");
 
-  const ledgerPath = ledgerPathFor(loadConfig());
+  const reconcileConfig = configOverride ?? loadConfig();
+  const ledgerPath = ledgerPathFor(reconcileConfig);
   const result = reconcileFeedbackLanding({
     roots,
     checkoutRoot,
     apply,
+    gh,
     ledgerLines: () => readLedgerLines(ledgerPath),
+    ...(reconcileConfig.contributorAdmission === undefined ? {} : { land: (root: string, relPath: string, content: string, opts: LandFeedbackOpts) =>
+      landFeedbackStatusContent(root, relPath, content, { ...opts, publication: { mode: "shadow", record: (step, fields) =>
+        appendLedger(ledgerPath, { step, task_id: "CLI", run_id: "feedback-reconcile", ...fields }) } }) }),
   });
   console.log(renderFeedbackReconcile(result, apply));
   if (result.error) {
@@ -49088,6 +49467,7 @@ async function triageCommandLocked(
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
+    await observeFeedbackInputs(config.contributorAdmission, entry.contribution ? [entry.contribution] : [], "triage-adoption", log);
 
     // ── THE CROSS-HOST CLAIM (W1-T1132), TAKEN BEFORE THE ARCHITECT CALL ────────────────────
     // HERE, not before the write: the loser's RESEARCH is the actual cost. Everything below this
@@ -49260,6 +49640,8 @@ async function triageCommandLocked(
         }),
     });
     const { decision, changedFiles } = loop.decision;
+    await observeFeedbackInputs(config.contributorAdmission, entry.contribution ? [entry.contribution] : [],
+      `triage-${decision.action}-adoption`, log);
 
     // W1-T985 — THE RARE-OVERLAP ADVISORY, AT THE POINT THE FILED SHARD IS ON DISK. The advisory
     // shipped 2026-08-16 (W1-T533) and gained its only reader the same day (W1-T917,
@@ -49408,6 +49790,8 @@ async function triageCommandLocked(
       }
     }
 
+    await observeFeedbackPublication(config.contributorAdmission === undefined ? undefined : { mode: "shadow", record: log },
+      entry.contribution ? [entry.contribution] : [], `${owner}/${repo}`, "triage-publication");
     await gitPushRunBranchAsync(worktreePath);
 
     // The title is the SAME header string that just went into the commit, split off
@@ -53619,6 +54003,11 @@ export async function alertFixCommand(rest: string[], deps: AlertFixCommandDeps 
   return 0;
 }
 
+export function feedbackIntakeAdmission(config: Pick<Config, "contributorAdmission">, ledgerPath: string, runId: string): FeedbackAdmissionContext | undefined {
+  return config.contributorAdmission === undefined ? undefined : { ...config.contributorAdmission,
+    record: (step, fields) => appendLedger(ledgerPath, { run_id: runId, task_id: "ISSUES", step, ...fields }) };
+}
+
 /**
  * `rmd issues [--dry-run]` — issues intake (W1-T57, MASTER-PLAN §5D lane 3): poll open issues
  * for every repo in `.remudero/managed-repos.json` via `gh api` (lib/issues-intake.ts), create a
@@ -53654,6 +54043,7 @@ async function issuesCommand(rest: string[]): Promise<number> {
     ledgerPath,
     runId,
     dryRun,
+    admission: feedbackIntakeAdmission(config, ledgerPath, runId),
   });
   console.log(`### rmd issues${dryRun ? " --dry-run" : ""}\nissues reviewed: ${renderIssuesSummary(result.summary)}`);
   if (dryRun) {
@@ -55180,7 +55570,13 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "live-edits",
     syntax: "rmd live-edits --tree <daemon-checkout|install-checkout> --checkout <dir> --state-root <dir> [--json]",
     summary: "Preserve, escalate, then restore tracked edits holding a live checkout behind origin/main.",
-    detail: "2026-10-11: one rung of the live-edit ladder (src/lib/live-edit-ladder.ts) for one live checkout. With tracked edits it always writes them to <state-root>/recovery/live-edits/<tree>/ as a patch and to refs/rmd-recovery/live-edits/<host>/<ts>, read back and re-applied before it counts as a copy. Staleness pressure is the daemon's own freshness pressure (decideFreshnessRestart) from the first reading dirty and behind: at the restart threshold the daemon escalates once; at twice it, and only with a confirmed copy of these exact edits, the tracked paths are restored to HEAD so the checkout can fast-forward. Prints one JSON line with --json (restored:true only when the tree is now clean). This verb never escalates; the daemon posts what it leaves pending. Run by the host watchdog for the daemon checkout and the install checkout.",
+    detail: "2026-10-11: one rung of the live-edit ladder (src/lib/live-edit-ladder.ts) for one live checkout. With tracked edits it always writes them to <state-root>/recovery/live-edits/<tree>/ as a patch and to refs/rmd-recovery/live-edits/<host>/<ts>, read back and re-applied before it counts as a copy. Staleness pressure is the daemon's own freshness pressure (decideFreshnessRestart) from the first reading dirty and behind: at the restart threshold the daemon escalates once; at twice it, and only with a confirmed copy of these exact edits, the tracked paths are restored to HEAD so the checkout can fast-forward. Prints one JSON line with --json (restored:true only when the tree is now clean). The host has no GitHub credential, so this verb spools its escalation and restore notice under <state-root>/escalation-spool/ and the daemon posts them. Run by the host watchdog for the daemon checkout and the install checkout.",
+  },
+  {
+    name: "host-alert",
+    syntax: "rmd host-alert --state-root <dir> --instance <name> --condition <condition> (--raise <message> | --clear) [--json]",
+    summary: "Count, spool or clear one of the host watchdog's own alarms (crash loop, launcher refusals).",
+    detail: "2026-10-11: the host watchdog's entry into src/lib/launcher-host-alerts.ts. --raise records one observation of a condition (crash-loop, units-not-on-main, units-diverged, deploy-code-fetch-failed, deploy-code-diverged, deploy-run-problem) under <state-root>/launcher-alerts/. A refusal is counted per consecutive observed tick: at the deployer's REFUSAL_PERSISTING_AT it writes launcher_alert.persisting, at REFUSAL_ESCALATE_AT it spools one needs-human escalation under <state-root>/escalation-spool/ for the daemon to post (the host has no GitHub credential). A crash loop is spooled on its first observation, because the launcher only names one after its own tiering. --clear ends the run when the launcher sees the step succeed: a still-spooled escalation is withdrawn and one the daemon already opened gets a spooled close. Prints one JSON line with --json.",
   },
   {
     name: "claim",
@@ -55397,7 +55793,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "doctor",
     syntax: "rmd doctor [--json]",
     summary: "One local, read-only health check with a meaningful exit code (0/1/2).",
-    detail: "W1-T1047: ONE local, read-only health check with a meaningful exit code (0 OK / 1 any WARN / 2 any FAIL; bad args exit 64, so exit 2 always means a check failed and never a typo). NO NETWORK and NO HEALTHY DAEMON REQUIRED — every check reads the ledger, state/, plan/, /proc or ps, so it answers from a cold ssh session while remudero-serve is down and the API budget is exhausted, which is exactly when the console-side checks are unavailable. Checks: ledger freshness (newest daemon.* row vs two poll intervals), dispatch stall (eligible pool vs THIS host's own observed cadence, reusing deriveQueueHead/deriveDispatchCadence with a LOCALLY-derived merged set), dispatch liveness (consecutive daemon.alive rows stuck in the sweep phase), pause honoured (PAUSE held while dispatch continued — W1-T1065/#2298 files the tick defect, doctor only reports), lock-vs-process divergence, lane-less workers (#2251's 7200s threshold, reused not re-derived), stale git index.lock (report only; W1-T1036 owns reclamation), disk headroom, and memory/swap from /proc/meminfo (never the cgroup limit — this container is unlimited, so memory.max reads `max` and would report unbounded headroom on a host that already froze). EVERY check prints its measured value beside its threshold; one summary line first, short enough for a cron subject. READ-ONLY: --fix is refused by name, because every repair path already has an owner and a second actor mutating state a live daemon depends on is the measured hazard.",
+    detail: "W1-T1047: ONE local, read-only health check with a meaningful exit code (0 OK / 1 any WARN / 2 any FAIL; bad args exit 64, so exit 2 always means a check failed and never a typo). NO NETWORK and NO HEALTHY DAEMON REQUIRED — every check reads the ledger, state/, plan/, /proc or ps, so it answers from a cold ssh session while remudero-serve is down and the API budget is exhausted, which is exactly when the console-side checks are unavailable. Checks: ledger freshness (newest daemon.* row vs two poll intervals), dispatch stall (eligible pool vs THIS host's own observed cadence, reusing deriveQueueHead/deriveDispatchCadence with a LOCALLY-derived merged set), dispatch liveness (consecutive daemon.alive rows stuck in the sweep phase), pause honoured (PAUSE held while dispatch continued — W1-T1065/#2298 files the tick defect, doctor only reports), lock-vs-process divergence, lane-less workers (#2251's 7200s threshold, reused not re-derived), stale git index.lock (report only; W1-T1036 owns reclamation), disk headroom, and memory/swap from /proc/meminfo (the HOST's, never a container's cgroup — the measured freeze was host-wide, and one container's memory.max/memory.high headroom cannot show a host that already froze; the dispatch floor reads the container's own headroom beside it). EVERY check prints its measured value beside its threshold; one summary line first, short enough for a cron subject. READ-ONLY: --fix is refused by name, because every repair path already has an owner and a second actor mutating state a live daemon depends on is the measured hazard.",
   },
   {
     name: "status",
@@ -56226,6 +56622,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["routing-ab", async (rest) => await routingAbCommand(rest)],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],
+  ["host-alert", async (rest) => hostAlertCommand(rest)],
   ["claim", (rest) => claimCommand(rest)],
   ["impossible-canary", async (rest) => await impossibleCanaryCommand(rest, (input) => runImpossibleCanary(input))],
   ["benchmark-aa", async (rest) => rest[0] === "prospective" ? await prospectiveAaCommand(rest.slice(1), (input) => runProspectiveAa(input))

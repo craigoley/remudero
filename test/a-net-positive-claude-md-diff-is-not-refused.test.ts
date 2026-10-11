@@ -294,7 +294,14 @@ test("W1-T2831: no override exists — the script offers no flag, env read or tr
   // The only env read is the documented BASE_SHA fallback, and it selects the COMPARAND — it
   // cannot make a net-positive diff pass, which the next assertion drives rather than assumes.
   const envReads = src.match(/env\.[A-Z_]+/g) ?? [];
-  assert.deepEqual([...new Set(envReads)], ["env.BASE_SHA"], "BASE_SHA is the only env read");
+  // W1-T7841 added two more reads, both on the FILING side only: GITHUB_ACTIONS and
+  // NODE_TEST_CONTEXT decide whether a run RECORDS fold debt (resolveFeedbackDir), never whether
+  // growth is accepted. BASE_SHA stays the only read that touches the comparand.
+  assert.deepEqual(
+    [...new Set(envReads)].sort(),
+    ["env.BASE_SHA", "env.GITHUB_ACTIONS", "env.NODE_TEST_CONTEXT"],
+    "BASE_SHA is the only comparand read; GITHUB_ACTIONS/NODE_TEST_CONTEXT only gate filing",
+  );
   assert.deepEqual(evaluateNetBytes(101, 100).length, 1, "and growth is refused regardless of it");
 
   // THE OPTION TRIPWIRE, AND WHY IT NOW ALLOWLISTS RATHER THAN COUNTS. A flat "exactly two options"

@@ -560,6 +560,7 @@ export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number
  */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "run.start",
+  "memory_read.recovered", // W1-T7720: past recovery durations derive the sustained-unreadable bound.
   "sweep.fix.owner_residue_preserved", // W1-T6434: the next fix round reads the preserved patch it names.
   "automerge.rearmed_after_disarm",
   "automerge.rearm_exhausted",
@@ -591,6 +592,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // both read it as forward progress, resetting a halted task's breaker. Rotated away, a released
   // task's next restart would seed straight back from the still-live `dispatch.circuit_broken` row above.
   "dispatch.breaker_released",
+  "dispatch.breaker_judged", // W1-T7742: a judge's continue resets the streak like a release; its rulings dedup.
+  "run.freshness_handoff", // W1-T7747: a parked checkpoint's resume receipt (daemon.ts pendingWorkerBoundaryHandoffs).
   // W1-T2910: `status.ts`'s projection reads this row to derive an independent-failure block and
   // clears it on a later dispatch (src/lib/status.ts, the `line.step === "dispatch.blocked_independent"`
   // arm). Rotated away, a block that was recorded stops being visible and the subtree is re-dispatched
@@ -607,6 +610,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "dispatch.lifetime_pressure.infra_only",
   "dispatch.cost_of_delay.fallback", // W1-T4064: dispatchValueContextForSelection dedups on the last of
   "dispatch.cost_of_delay.ready", // these two; rotated away, a restart re-logs the same fallback.
+  // W1-T7814: the memory governor's history read calibrates the dispatch memory floor.
+  // Losing its observations would make it relearn from an empty window after each rotation.
+  "dispatch_memory_observed",
   // W1-T316: `escalateLifetimeCapExceeded`'s (run-task.ts) dedup marker, written whether or not
   // delivery succeeds; dropping it re-opens a duplicate lifetime-cap escalation.
   "dispatch.lifetime_capped.escalated",

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -17,7 +17,9 @@ const read = (path: string): string => existsSync(path) ? readFileSync(path, "ut
 // All repository commands are simulated: this suite also runs in workers forbidden to run git/gh.
 // The generated launcher and, in the separation proof, bin/rmd and deploy-run are real.
 function fixture(t: TestContext) {
-  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}deploy-code-`));
+  // The real path: deploy-run finds its own checkout through node's resolved module path, so on macOS
+  // (/tmp and /var are symlinks into /private) an unresolved root would never match what it reports.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}deploy-code-`)));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const state = join(root, "state-root");
   const daemon = join(state, "remudero");
@@ -30,8 +32,8 @@ function fixture(t: TestContext) {
   writeFileSync(join(daemon, "version"), "old");
   // The launcher also asks `rmd progress-watchdog` for a verdict (W1-T5688) before the deploy tick; that
   // read-only call is not a deploy, so the stub answers it with no verdict and does not record it. The same
-  // holds for `rmd live-edits` (2026-10-11), the live-edit ladder a dirty tree is handed to: not deploy logic.
-  executable(join(daemon, "bin", "rmd"), `#!/usr/bin/env bash\ncase "$1" in progress-watchdog|live-edits) exit 0;; esac\nprintf '%s %s cwd=%s\\n' "$(cat '${daemon}/version')" "$*" "$PWD" >> '${deployed}'\n`);
+  // holds for `rmd live-edits` and `rmd host-alert` (2026-10-11), the live-edit ladder and the watchdog's alarms.
+  executable(join(daemon, "bin", "rmd"), `#!/usr/bin/env bash\ncase "$1" in progress-watchdog|live-edits|host-alert) exit 0;; esac\nprintf '%s %s cwd=%s\\n' "$(cat '${daemon}/version')" "$*" "$PWD" >> '${deployed}'\n`);
   executable(join(install, "bin", "rmd"), `#!/usr/bin/env bash\necho install-invoked >> '${deployed}'\n`);
   executable(join(stubs, "git"), `#!/usr/bin/env bash
 printf '%s\\n' "$*" >> '${calls}'
