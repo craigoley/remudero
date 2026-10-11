@@ -3,7 +3,7 @@ import { test } from "node:test";
 import type { FixProgressInput } from "../src/lib/fix-progress-judge.js";
 import {
   HOST_GAP_REREVIEW_STEP, DEFAULT_SWEEP_POLICY, cappedProofDiscriminationFromLedger,
-  hostGapProgressInput, hostGapRereviewFacts, hostGapRereviewWaitMs, isHostGapCriterion, planHostGapRereview, runSweep,
+  hostGapProblem, hostGapProgressInput, hostGapRereviewFacts, hostGapRereviewWaitMs, isHostGapCriterion, planHostGapRereview, runSweep,
   type HostGapRereviewState, type OpenPrView, type SweepDeps,
 } from "../src/lib/sweep.js";
 
@@ -143,6 +143,21 @@ test("W1-T7837: host-gap re-reviews are paced from the observed history", async 
   const later = await planHostGapRereview({ ...state, nowMs: NOW + 9 * MIN },
     { input, judge: async () => ({ verdict: "continue", reason: "ok" }) });
   assert.equal(later.kind, "rereview");
+});
+
+test("W1-T7837: every host-gap grade names its own host problem", () => {
+  const expected: Record<string, string> = {
+    "runner-absent": "sandbox runner missing",
+    "cwd-missing": "review worktree reclaimed",
+    "runtime-broken": "runtime broken",
+    "incomplete-run": "runtime broken (run ended without its summary)",
+    "no-exec-context": "no PR-head checkout to execute in",
+    exec_error: "proof execution threw",
+    "exec-error": "proof execution threw",
+    base_unreadable: "merge-base checkout unreadable",
+  };
+  for (const [skip, problem] of Object.entries(expected)) assert.equal(hostGapProblem(skip), problem, skip);
+  assert.equal(hostGapProblem("something-new"), "something-new", "an unknown grade is named as itself");
 });
 
 test("W1-T7837: a persisting host gap escalates through the fix-progress judge", async () => {
