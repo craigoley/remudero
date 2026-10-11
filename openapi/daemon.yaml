@@ -1187,6 +1187,49 @@ components:
         actionId: { type: string }
         detail: { type: string }
 
+    AssistantActionDiscovery:
+      type: object
+      description: >
+        The verified actor's own admitted actions on this exact target that lack a verified
+        completion receipt. Read-only evidence, never permission to retry. Only a cursor-less,
+        complete answer with verifiedEmpty true certifies that nothing is pending; partial and
+        unavailable answers never do.
+      required: [contract, source, observedAt, completeness, limitations, pending, continuation, verifiedEmpty]
+      properties:
+        contract: { type: string, enum: [assistant-action-discovery-v1] }
+        source:
+          type: object
+          required: [instance, repository, bootSha]
+          properties:
+            instance: { type: string }
+            repository: { type: [string, "null"] }
+            bootSha: { type: string }
+        observedAt: { type: string, format: date-time }
+        completeness: { type: string, enum: [complete, partial, unavailable] }
+        limitations:
+          type: array
+          items:
+            type: string
+            enum: [legacy_claims_without_identity, unreadable_entries, oversized_entries, unsupported_entries,
+              unverifiable_entries, corpus_changed, corpus_over_listing_bound, file_budget, byte_budget,
+              time_budget, page_size, store_unavailable]
+        pending:
+          type: array
+          items:
+            type: object
+            required: [actionId, action, instance, repository, submittedAt, status]
+            properties:
+              actionId: { type: string }
+              action: { type: string, enum: [pause, resume, stop] }
+              instance: { type: string }
+              repository: { type: [string, "null"] }
+              submittedAt: { type: string, format: date-time }
+              status: { type: string, enum: [claimed_unknown, receipt_unverified] }
+        continuation:
+          type: [string, "null"]
+          description: Opaque, bound to the verified actor and exact target; discloses no store path.
+        verifiedEmpty: { type: boolean }
+
     AnswerQuestionRequest:
       type: object
       description: >
@@ -11964,6 +12007,42 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/AssistantControlLookup" }
 
+  /v1/control/assistant-action/discovery:
+    get:
+      summary: Discover the verified operator's interrupted core assistant actions without resubmitting them.
+      description: >
+        Requires a verified operator session; the actor is never read from a parameter or header.
+        Returns only that actor's own claims on this exact target that lack a verified completion
+        receipt. Never prepares, retries or dispatches an action.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100 }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string, maxLength: 512 }
+      responses:
+        "200":
+          description: Discovery answer; check completeness and continuation before trusting an empty list.
+          headers:
+            Cache-Control:
+              schema: { type: string, enum: ["private, no-store"] }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantActionDiscovery" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503":
+          description: The claim store is unavailable; nothing is certified.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantActionDiscovery" }
+
   /v1/questions/answer:
     post:
       summary: Answer a QUESTION-contract entry (MASTER-PLAN §2), attributed to the panel's bearer.
@@ -12702,6 +12781,43 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AssistantControlLookup" }
+
+  /v1/i/{instance}/control/assistant-action/discovery:
+    get:
+      summary: Discover the verified operator's interrupted actions for this instance without resubmitting them.
+      description: Requires a verified operator session; scoped to this instance's repository and the verified actor.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: instance
+          in: path
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100 }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string, maxLength: 512 }
+      responses:
+        "200":
+          description: Discovery answer; check completeness and continuation before trusting an empty list.
+          headers:
+            Cache-Control:
+              schema: { type: string, enum: ["private, no-store"] }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantActionDiscovery" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503":
+          description: The claim store is unavailable; nothing is certified.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantActionDiscovery" }
 
   /v1/i/{instance}/operator-agent/ask:
     post:
