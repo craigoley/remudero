@@ -36,7 +36,7 @@ const manifest = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "test-ti
   main: (argv: string[], opts: { spawn: (cmd: string, args: string[], o: SpawnSyncOptions) => unknown; env?: NodeJS.ProcessEnv }) => number;
 };
 const retry = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "test-with-retry.mjs")).href)) as {
-  failedFilesOf: (output: string, cwd?: string) => string[];
+  failedFilesOf: (attempt: { output: string; unreported?: string[] }, cwd?: string) => string[];
 };
 const flakeScreen = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "flake-screen.mjs")).href)) as {
   runTestFile: (file: string, root?: string) => Promise<{ ok: boolean; output: string }>;
@@ -288,7 +288,12 @@ test("unit test: the judge joins any node --test argv with its reporters still p
   ]);
   assert.deepEqual(pool.testFilesInArgv(["--test-reporter-destination=coverage/test-durations.json", "test/x.test.ts"], root), ["test/x.test.ts"]);
 
-  const output = "ok 1 - a\ntest-judge: UNREPORTED FILE test/b.test.ts\ntest-judge: UNREPORTED FILE /elsewhere/c.test.ts\n";
-  assert.deepEqual(pool.unreportedFilesIn(output), ["test/b.test.ts", "/elsewhere/c.test.ts"]);
-  assert.deepEqual(retry.failedFilesOf(output, "/repo"), ["test/b.test.ts"], "a file outside the checkout is never retried");
+  const output = "ok 1 - a\ntest-judge: UNREPORTED FILE test/b-exits.test.ts\ntest-judge: UNREPORTED FILE test/no-such.test.ts\n";
+  assert.deepEqual(pool.unreportedFilesIn(output), ["test/b-exits.test.ts", "test/no-such.test.ts"]);
+  // Read from a wrapped runner's output, only files that exist are retried: a test of the judge prints
+  // judge lines about fixture files that are not this checkout's.
+  assert.deepEqual(retry.failedFilesOf({ output }, root), ["test/b-exits.test.ts"]);
+  // An attempt the wrapper judged itself trusts its own verdict, never the lines its tests printed.
+  assert.deepEqual(retry.failedFilesOf({ output, unreported: [join(root, "test/c-after.test.ts")] }, root), ["test/c-after.test.ts"]);
+  assert.deepEqual(retry.failedFilesOf({ output: "", unreported: ["/elsewhere/c.test.ts"] }, root), [], "a file outside the checkout is never retried");
 });

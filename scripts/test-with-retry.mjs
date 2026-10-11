@@ -52,7 +52,7 @@
 // task (the retry always fires on a non-zero first attempt, same as today).
 
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -344,7 +344,7 @@ async function runOnce(cmd, args, env = process.env) {
   const files = testFilesInArgv(args, process.cwd());
   const first = await runChild(cmd, judgedNodeTestArgs(args, judged.args), { ...env, ...judged.env });
   const lines = [];
-  const { status } = closeJudgedRun(judged, files, {
+  const { status, verdict } = closeJudgedRun(judged, files, {
     status: first.code,
     pool: args.includes(POOL_ISOLATION_FLAG),
     root: process.cwd(),
@@ -354,13 +354,20 @@ async function runOnce(cmd, args, env = process.env) {
       process.stderr.write(`${line}\n`);
     },
   });
-  return { code: status, output: `${first.output}\n${lines.join("\n")}\n` };
+  return { code: status, output: `${first.output}\n${lines.join("\n")}\n`, unreported: verdict.missing };
 }
 
-/** The files a failed attempt names: each `not ok` file, and each file the judge never heard finish. */
-export function failedFilesOf(output, cwd = process.cwd()) {
-  const unreported = unreportedFilesIn(output).map((file) => (isAbsolute(file) ? relative(cwd, file) : file).split(sep).join("/"));
-  return [...new Set([...parseFailingTestFiles(output, cwd), ...unreported.filter((rel) => rel !== ".." && !rel.startsWith("../"))])].sort();
+/**
+ * The files a failed attempt names: each `not ok` file, and each file the judge never heard finish.
+ * An attempt this wrapper judged itself carries its verdict's `unreported` list, and only that list
+ * is trusted: the output also holds what the tests printed, and a test of the judge prints judge lines
+ * about its own fixture files. A wrapped runner that judges its own children (the tier manifest) is
+ * read from its output, keeping only files that exist here.
+ */
+export function failedFilesOf(attempt, cwd = process.cwd()) {
+  const named = attempt.unreported ?? unreportedFilesIn(attempt.output).filter((file) => existsSync(resolve(cwd, file)));
+  const unreported = named.map((file) => (isAbsolute(file) ? relative(cwd, file) : file).split(sep).join("/"));
+  return [...new Set([...parseFailingTestFiles(attempt.output, cwd), ...unreported.filter((rel) => rel !== ".." && !rel.startsWith("../"))])].sort();
 }
 
 function runChild(cmd, args, env = process.env) {
@@ -556,7 +563,7 @@ export async function main(argv) {
 
   const firstPassElapsedMs = Date.now() - startedAt;
   const firstNames = parseFailingTestNames(first.output);
-  const failedFiles = failedFilesOf(first.output);
+  const failedFiles = failedFilesOf(first);
   recordFlakeEvidence("first attempt failed", firstNames);
   appendFlakeLedger(parseFailingTestEntries(first.output), "first attempt failed");
 
