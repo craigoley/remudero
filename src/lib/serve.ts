@@ -338,8 +338,8 @@ export interface ServeDeps {
   operatorIdentity?: OperatorIdentityConfig;
   /** The key-set fetch and clock the operator provider uses — injectable so a test is hermetic. */
   operatorIdentityIo?: { fetchImpl?: typeof fetch; clock?: Clock };
-  /** W1-T2562: re-resolve the CURRENT on-disk sha for the shell's staleness chip. Defaults to
-   *  {@link resolveConsoleSha} — the same primitive {@link gateStaleCodeExit} compares against. */
+  /** W1-T2562: re-resolve the CURRENT on-disk sha. Handed to {@link gateStaleCodeExit}, which
+   *  compares {@link consoleSha} against it; absent, the gate calls {@link resolveConsoleSha}. */
   resolveCurrentSha?: () => string;
   /** `planSource` (W1-T5639) qualifies `plan`: absent, the plan is trusted as it always was. */
   board: BoardDeps & Pick<PlanSourceHolder, "planSource">;
@@ -3220,6 +3220,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     ...(keepWarm ? { github: { serve: keepWarm, ...walk } } : {}), ...deps.readModel }));
   const staleExit = gateStaleCodeExit({
     bootSha: consoleSha,
+    // The caller's "current sha" is what the gate compares against; absent, the gate re-reads git.
+    ...(deps.resolveCurrentSha ? { resolveCurrentSha: deps.resolveCurrentSha } : {}),
     log: deps.log,
     beforeExit: () => {
       readModel?.stop();
