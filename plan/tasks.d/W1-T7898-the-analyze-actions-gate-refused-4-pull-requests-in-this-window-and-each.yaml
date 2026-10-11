@@ -1,0 +1,19 @@
+- id: W1-T7898
+  title: "THE Analyze (actions) GATE REFUSED 4 PULL REQUESTS IN THIS WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-learning:10578:Analyze (actions)"
+  ci_learning_prs: [10578, 10628, 10671, 10671]
+  files:
+    - learnings/ci.yaml
+  acceptance:
+    - claim: "the lane that trips the Analyze (actions) gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
+      proof: "grep: ci-learning:10578:Analyze (actions) in learnings/ci.yaml"
+  note: "Filed by the ci-learning rung from ci-learning:10578:Analyze (actions). The Analyze (actions) gate went red on #10578 and was repaired; the repair touched plan/tasks.d/W1-T6117-triage-post-pr-handoff-crash-safe.yaml, scripts/test-tier-manifest.json, src/lib/main-health-rung.ts, src/lib/sweep.ts, src/run-task.ts, test/a-capped-proof-repair-amends-the-plan-not-the-pr-body.test.ts, test/a-gardener-capture-never-defers-the-deploy-code-refresh.test.ts, test/a-red-main-stands-down-every-fix-it-could-have-caused.test.ts, test/a-starved-plan-pr-preflight-leg-times-out-and-is-asked-again.test.ts. Recommended action: unclear. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
