@@ -5,10 +5,23 @@ import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import {
-  HEAVY_READY_ESCALATION_MS, heavyNewBuildGate, readHeavyNewBuildHold,
-  releaseHeavyNewBuilds, reserveHeavyNewBuilds, type HeavyReservationHandle,
-} from "../src/lib/heavy-build-reservation.js";
+import type { HeavyReservationHandle } from "../src/lib/heavy-build-reservation.js";
+
+type HeavyBuildAPI = typeof import("../src/lib/heavy-build-reservation.js");
+// A newly introduced module is genuinely absent at merge base, not a broken toolchain.
+// Make that absence a named feature assertion; real import/loader failures still throw.
+const heavySource = new URL("../src/lib/heavy-build-reservation.ts", import.meta.url);
+const heavyAPI: HeavyBuildAPI | undefined = existsSync(heavySource)
+  ? await import("../src/lib/heavy-build-reservation.js") : undefined;
+function requireHeavyAPI(): HeavyBuildAPI {
+  assert.ok(heavyAPI, "heavy READY v2 implementation is absent in this Git tree");
+  return heavyAPI;
+}
+const HEAVY_READY_ESCALATION_MS = heavyAPI?.HEAVY_READY_ESCALATION_MS ?? Number.NaN;
+const heavyNewBuildGate: HeavyBuildAPI["heavyNewBuildGate"] = (...args) => requireHeavyAPI().heavyNewBuildGate(...args);
+const readHeavyNewBuildHold: HeavyBuildAPI["readHeavyNewBuildHold"] = (...args) => requireHeavyAPI().readHeavyNewBuildHold(...args);
+const releaseHeavyNewBuilds: HeavyBuildAPI["releaseHeavyNewBuilds"] = (...args) => requireHeavyAPI().releaseHeavyNewBuilds(...args);
+const reserveHeavyNewBuilds: HeavyBuildAPI["reserveHeavyNewBuilds"] = (...args) => requireHeavyAPI().reserveHeavyNewBuilds(...args);
 
 function fixture(t: TestContext): string {
   // macOS /var is an alias: give the canonical-directory guard a real path.
