@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
@@ -92,15 +92,7 @@ test("claude-md-budget-ratchet CLI: a malformed capBytes never prints a cap figu
 // ── The real committed CLAUDE.md + its committed baseline: currently within budget (what CI checks) ─
 
 test("the REAL committed CLAUDE.md is currently within the recorded size budget cap", () => {
-  // The §8A net-byte rule may route fold debt on a CLAUDE.md-growing branch; without
-  // --feedback-dir that filing lands in the tracked plan/feedback/ and dirties the tree.
-  const inbox = mkdtempSync(join(tmpdir(), "claude-md-budget-ratchet-inbox-"));
-  let result: SpawnSyncReturns<string>;
-  try {
-    result = spawnSync(process.execPath, [SCRIPT, "--feedback-dir", inbox], { cwd: REPO_ROOT, encoding: "utf8" });
-  } finally {
-    rmSync(inbox, { recursive: true, force: true });
-  }
+  const result = spawnSync(process.execPath, [SCRIPT], { cwd: REPO_ROOT, encoding: "utf8" });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   // The absolute cap and §8A's per-change net-byte rule are separate contracts. A current
   // change may be routed as fold debt and still be below the absolute cap; this assertion owns
