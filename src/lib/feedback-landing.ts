@@ -1128,13 +1128,23 @@ function* landPendingSteps(root: string, kind: LandingKind, opts: LandPendingOpt
       ];
       for (const [rel, abs] of candidates) {
         const localSha = git(["hash-object", abs]).trim();
+        if (env) {
+          try { if (git(["rev-parse", `origin/main:${rel}`]).trim() === localSha) continue; }
+          catch { /* Still pending: absence on main is not absence from the landing index. */ }
+        }
         let remoteSha: string | null;
         try {
           remoteSha = git(["rev-parse", env ? `:${rel}` : `origin/main:${rel}`], env ? { env } : undefined).trim();
         } catch {
           remoteSha = null; // not on origin/main at all yet
         }
-        if (remoteSha === localSha) continue;
+        if (remoteSha === localSha) {
+          if (env) {
+            if (!sources.has(rel)) files.push(rel);
+            sources.set(rel, abs);
+          }
+          continue;
+        }
         if (remoteSha !== null && isFeedbackRecordPath(kind, rel)) {
           const decision = decideFeedbackStage(git, remoteSha, readFileSync(abs, "utf8"));
           if (decision.kind === "refuse") {
