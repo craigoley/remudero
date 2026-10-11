@@ -1432,10 +1432,7 @@ export function seedCountFromCircuitBreak(
   // The ONE helper reading `task` as well as `task_id` — see {@link LedgerIndex} for why the bucket is keyed on
   // both, which is what keeps this scan's row set unchanged.
   for (const line of indexedTaskRows(lines, taskId, index)) {
-    if (
-      line.task_id === taskId &&
-      (line.step === "pr.opened" || isMergeCreditLine(line) || line.step === "dispatch.breaker_released")
-    ) {
+    if (line.task_id === taskId && isDispatchStreakReset(line)) {
       seed = undefined; // forward progress — the same reset the counter itself applies
       continue;
     }
@@ -1457,8 +1454,8 @@ const INFRASTRUCTURE_REFUSAL_VERDICTS: ReadonlySet<string> = new Set([
   "task_already_merged",
 ]);
 
-/** These also consume no task attempt for lifetime judgment, but the existing dispatch breaker
- * counts them. Keep the two decisions separate so a new terminal verdict cannot reset its streak. */
+/** These consume no task attempt for lifetime judgment, nor (W1-T7742) for the streak breaker
+ *  through {@link streakRefusal}; each EXCLUDES a run and never resets a streak. */
 const LIFETIME_ONLY_REFUSAL_VERDICTS: ReadonlySet<string> = new Set([
   "blocked_git_fetch", "blocked_inflight", "handed_off",
 ]);
@@ -1482,6 +1479,28 @@ export function infrastructureRefusal(line: Record<string, unknown>): string | u
 export function lifetimeInfrastructureRefusal(line: Record<string, unknown>): string | undefined {
   return infrastructureRefusal(line) ??
     (typeof line.verdict === "string" && LIFETIME_ONLY_REFUSAL_VERDICTS.has(line.verdict) ? line.verdict : undefined);
+}
+
+/** The harness's own restart checkpoint failing to save or restore ends a run no worker failed. */
+const HARNESS_CHECKPOINT_NO_PR_REASONS: ReadonlySet<string> = new Set(["restart_checkpoint_failed", "restart_checkpoint_restore_failed"]);
+
+/** W1-T7742: the streak breaker spends its budget only on a run whose WORKER tried and failed. A yield to a
+ *  restart, a lost claim race, a fetch or infrastructure refusal, or the harness failing its own checkpoint
+ *  is excluded by name. MEASURED 2026-10-11: W1-T7742 tripped at 5 with not one of its seven runs a worker
+ *  failure (two node_modules refusals, a claim race, a refused checkpoint push, two restart yields). */
+export function streakRefusal(line: Record<string, unknown>): string | undefined {
+  return lifetimeInfrastructureRefusal(line) ??
+    (line.verdict === "no_pr" && typeof line.reason === "string" && HARNESS_CHECKPOINT_NO_PR_REASONS.has(line.reason) ? line.reason : undefined);
+}
+
+/** The ledger step of the dispatch-break judge's ruling ({@link judgeDispatchBreak}, stall-verifier.ts). */
+export const DISPATCH_BREAKER_JUDGED_STEP = "dispatch.breaker_judged";
+
+/** Rows that end a streak: a new owned PR, a merge credit, an operator's `rmd release` (W1-T4691), or the
+ *  dispatch-break judge ruling the attempts so far are worth continuing (W1-T7742). */
+export function isDispatchStreakReset(line: Record<string, unknown>): boolean {
+  return line.step === "pr.opened" || isMergeCreditLine(line) || line.step === "dispatch.breaker_released" ||
+    (line.step === "dispatch.breaker_judged" && line.decision === "continue");
 }
 
 /** Options shared by {@link orphanedRunIds} and every counter built on it — never widened for
@@ -1597,6 +1616,8 @@ interface DispatchStreakTally {
   count: number;
   excludedDispatches: number;
   excludedByReason: Record<string, number>;
+  /** The newest reset row's identity: a count that dropped when it changed is that reset, not a rotation. */
+  lastReset?: string;
 }
 
 /** `taskId`'s rows in timestamp order. A rotation union is live-first, then newest-first
@@ -1637,25 +1658,21 @@ function dispatchStreakTally(
   // A run's terminal verdict follows its start, so collect exclusions before counting starts.
   const refusalByRunId = new Map<string, string>();
   for (const line of rows) {
-    if (
-      line.task_id === taskId &&
-      line.step === "verdict" &&
-      infrastructureRefusal(line) !== undefined &&
-      typeof line.run_id === "string"
-    ) {
-      refusalByRunId.set(line.run_id, infrastructureRefusal(line)!);
-    }
+    const refusal = line.task_id === taskId && line.step === "verdict" ? streakRefusal(line) : undefined;
+    if (refusal !== undefined && typeof line.run_id === "string") refusalByRunId.set(line.run_id, refusal);
   }
   const orphanRunIds = orphanedRunIds(lines, taskId, index, opts);
   let count = 0;
   let excludedDispatches = 0;
   let excludedByReason: Record<string, number> = {};
+  let lastReset: string | undefined;
   for (const line of rows) {
     if (line.task_id !== taskId) continue;
-    if (line.step === "pr.opened" || isMergeCreditLine(line) || line.step === "dispatch.breaker_released") {
-      count = 0; // forward progress — a new PR, a credited merge, or an operator release resets the streak
+    if (isDispatchStreakReset(line)) {
+      count = 0; // forward progress — a new PR, a credited merge, an operator release, or a judge's continue
       excludedDispatches = 0;
       excludedByReason = {};
+      lastReset = `${String(line.step)}|${String(line.run_id)}|${String(line.ts)}`;
     } else if (line.step === "run.start") {
       const reason = typeof line.run_id === "string"
         ? refusalByRunId.get(line.run_id) ?? (orphanRunIds.has(line.run_id) ? "orphaned_run" : undefined)
@@ -1669,7 +1686,7 @@ function dispatchStreakTally(
       count++;
     }
   }
-  return { count, excludedDispatches, excludedByReason };
+  return { count, excludedDispatches, excludedByReason, lastReset };
 }
 
 export function dispatchesWithoutNewOwnedPr(
@@ -1885,10 +1902,12 @@ export function isOrphanFaultTripped(
 export interface DispatchBreakerCache {
   /** @internal highest per-task `dispatchesWithoutNewOwnedPr` count observed while the ledger was readable. */
   lastCounts: Map<string, number>;
+  /** @internal the newest streak-reset row each `lastCounts` entry was observed under (W1-T7742). */
+  lastResets?: Map<string, string | undefined>;
 }
 
 export function createDispatchBreakerCache(): DispatchBreakerCache {
-  return { lastCounts: new Map() };
+  return { lastCounts: new Map(), lastResets: new Map() };
 }
 
 /**
@@ -1947,7 +1966,8 @@ export function evaluateDispatchBreakerDetailed(
   const lines = opts.snapshot?.lines ?? readLedgerLines(ledgerPath, ledgerFs);
   // R-23: ONE pass to bucket, then per-task lookups — the helpers below otherwise walk the whole array each.
   const index = opts.snapshot?.index ?? buildLedgerIndex(lines);
-  const { count: freshCount, excludedDispatches, excludedByReason } = dispatchStreakTally(lines, taskId, index);
+  const { count: freshCount, excludedDispatches, excludedByReason, lastReset } = dispatchStreakTally(lines, taskId, index);
+  const resetKeys = (cache.lastResets ??= new Map());
   let priorCount = cache.lastCounts.get(taskId);
   // W1-T2425: FIRST OBSERVATION OF THIS TASK IN THIS PROCESS — seed the baseline from the breaker's own on-disk
   // record so the regression arm below is reachable across a restart. Only ever on a MISS (a live process's own
@@ -1962,12 +1982,15 @@ export function evaluateDispatchBreakerDetailed(
   const hasNewOwnedPr = lastPrOpened(lines, taskId, index) !== undefined;
   const base = { freshCount, excludedDispatches, excludedByReason, maxDispatches, priorCount, hasNewOwnedPr };
 
-  if (priorCount !== undefined && freshCount + excludedDispatches < priorCount && !hasNewOwnedPr) {
+  // W1-T7742: a reset written since the prior observation (a release, a judge's continue) explains the drop.
+  const resetSincePrior = resetKeys.has(taskId) && resetKeys.get(taskId) !== lastReset;
+  if (priorCount !== undefined && freshCount + excludedDispatches < priorCount && !hasNewOwnedPr && !resetSincePrior) {
     // count regressed with nothing in the ledger to explain it — runs now excluded as infrastructure DO explain it
     return { ...base, state: "indeterminate", ledgerState: "indeterminate" };
   }
 
   cache.lastCounts.set(taskId, freshCount);
+  resetKeys.set(taskId, lastReset);
   const ledgerState: DispatchBreakerState = freshCount >= maxDispatches ? "tripped" : "clear";
   if (ledgerState !== "tripped" || !("openHeadBranches" in opts)) {
     return { ...base, state: ledgerState, ledgerState };
