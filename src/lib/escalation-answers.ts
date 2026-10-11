@@ -180,7 +180,7 @@ export function ghEscalationAnswerGateway(
   let repository: FeedbackAdmissionSubject["repository"];
   const subject = (kind: FeedbackAdmissionSubject["kind"], sourceRef: string, issueNumber: number,
     item: RestCommentRow | RestReactionRow, parent?: FeedbackAdmissionSubject): FeedbackAdmissionSubject => ({
-    kind, sourceRef, repository, issueNumber, itemId: item.id, observedAtMs: Date.now(),
+    kind, sourceRef, repository, issueNumber, itemId: item.id, observedAtMs: systemClock.now(),
     origin: contributionOriginFromRest(item),
     revision: "content" in item
       ? { createdAt: (item as RestReactionRow).created_at, contentDigest: feedbackContentDigest(item.content) }
@@ -505,7 +505,7 @@ export async function readEscalationAnswers(
   const landAnswer = async (taskId: string, origin: string, answer: string, authorLogin: string, subject?: FeedbackAdmissionSubject) => {
     const observation = gateway.admission === undefined || subject === undefined ? undefined
       : await observeFeedbackSource(gateway.admission, subject, "question-answer", (step, fields) =>
-        writeLedger(deps.ledgerPath, { ...fields, step, run_id: runId, task_id: taskId }), { read: gateway.sourceRead, clock });
+        writeLedger(deps.ledgerPath, { ...fields, step, run_id: runId, task_id: taskId }), gateway.sourceRead, clock);
     const contribution = gateway.admission === undefined ? undefined : {
       kind: subject?.kind ?? "unresolved", source_ref: subject?.sourceRef ?? origin,
       ...(subject === undefined ? {} : { subject: structuredClone(subject) }),

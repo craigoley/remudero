@@ -767,7 +767,7 @@ function decideFeedbackStage(git: GitExec, remoteSha: string, localBytes: string
 
 function hasFeedbackLineage(git: GitExec, blob: string): boolean {
   try { return parseYaml(git(["cat-file", "-p", blob]))?.contribution != null; }
-  catch { return false; }
+  catch { /* Presence is not authority: unreadable bytes get an independent unknown publication receipt. */ return false; }
 }
 
 /**
@@ -990,9 +990,9 @@ function* finishLanding(
       const content = landingTreeContent(git, b);
       for (const path of paths.slice(0, 9)) {
         try { contributions.push((parseYaml(content.head(path) ?? "") as { contribution?: unknown } | null)?.contribution); }
-        catch { contributions.push(undefined); }
+        catch { contributions.push({ kind: "unresolved", reason: "lineage-bytes-unreadable" }); }
       }
-    } catch { contributions.push(undefined); }
+    } catch { contributions.push({ kind: "unresolved", reason: "landing-tree-unreadable" }); }
     const steps = feedbackPublicationSteps(opts.publication, contributions,
       kind.targetRepository === undefined ? undefined : repoKey(kind.targetRepository), "landing-publication");
     let next = steps.next();
@@ -1428,7 +1428,7 @@ function* landContentSteps(
         let blobSha = git(["hash-object", "-w", tmpFile], { env }).trim();
         let mainSha: string | null;
         try { mainSha = git(["rev-parse", `origin/main:${relPath}`]).trim(); }
-        catch { mainSha = null; }
+        catch { /* Preserve pending staging when main is unreadable; publication evidence is rechecked separately. */ mainSha = null; }
         let remoteSha: string | null;
         try {
           remoteSha = git(["rev-parse", `:${relPath}`], { env }).trim();

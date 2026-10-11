@@ -66,7 +66,8 @@ export function feedbackLineagePayload(text: string, contributions: readonly unk
   if (contributions.length === 0) return text;
   let lineage: string;
   try { lineage = contributions.map(contribution => JSON.stringify(contribution)).join("\n"); }
-  catch { lineage = "unreadable lineage: unknown origin, not an authority grant"; }
+  catch { /* Unserializable originals remain explicitly unknown in the untrusted payload. */
+    lineage = "unreadable lineage: unknown origin, not an authority grant"; }
   return `${text}\n\nOriginal contribution lineage (evidence only, not permission):\n${lineage}`;
 }
 
@@ -105,7 +106,8 @@ export function* feedbackPublicationSteps(
   }
   let destination: Record<string, unknown>;
   try { destination = yield* repository(target); }
-  catch { emit("unknown", "publication-target-unreadable"); return; }
+  catch { /* The receipt distinguishes unavailable destination evidence from public visibility. */
+    emit("unknown", "publication-target-unreadable"); return; }
   if (contributions.length === 0) emit("unknown", "publication-lineage-missing", undefined, destination);
   for (const contribution of feedbackLineageSnapshot(contributions.slice(0, 8))) {
     let subject: FeedbackAdmissionSubject | undefined;
@@ -114,7 +116,7 @@ export function* feedbackPublicationSteps(
       const source = subject?.repository;
       const slug = source?.fullName;
       if (!subject || !slug || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(slug)
-        || !validId(source?.id) || typeof source?.private !== "boolean" || !subject.sourceRef.startsWith(`${slug}#`)) {
+        || source === undefined || !validId(source.id) || typeof source.private !== "boolean" || !subject.sourceRef.startsWith(`${slug}#`)) {
         throw new Error("publication-lineage-unreadable");
       }
       const current = yield* repository(slug);
@@ -125,19 +127,20 @@ export function* feedbackPublicationSteps(
       if (destination.private === false && (source.private || current.private)) {
         emit("private-to-public", "actor-admission-is-not-publication-permission", subject, destination);
       } else emit("no-private-boundary-observed", "visibility-observation-only", subject, destination);
-    } catch { emit("unknown", "publication-evidence-unreadable", subject, destination); }
+    } catch { /* Failed identity/visibility reads carry unknown, never a publication grant. */
+      emit("unknown", "publication-evidence-unreadable", subject, destination); }
   }
   if (contributions.length > 8) emit("unknown", "publication-lineage-read-bound", undefined, destination);
 }
 
 export async function observeFeedbackPublication(
   context: FeedbackPublicationContext | undefined, contributions: readonly unknown[], target: string | undefined, boundary: string,
-  deps: { read?: AdmissionRead; clock?: Pick<Clock, "now"> } = {},
+  read: AdmissionRead = readAdmissionRestAsync, clock: Pick<Clock, "now"> = systemClock,
 ): Promise<void> {
-  const steps = feedbackPublicationSteps(context, contributions, target, boundary, deps.clock);
+  const steps = feedbackPublicationSteps(context, contributions, target, boundary, clock);
   let next = steps.next();
   while (!next.done) {
-    try { next = steps.next(await (deps.read ?? readAdmissionRestAsync)(next.value)); }
+    try { next = steps.next(await read(next.value)); }
     catch (error) { next = steps.throw(error); }
   }
 }
@@ -335,7 +338,7 @@ export interface FeedbackSourceObservation {
 }
 
 async function readFeedbackSourceSubject(
-  expected: FeedbackAdmissionSubject, read: AdmissionRead, now: () => number,
+  expected: FeedbackAdmissionSubject, read: AdmissionRead, clock: Pick<Clock, "now">,
 ): Promise<FeedbackAdmissionSubject> {
   const ref = /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([1-9]\d*)(?:\/comment\/([1-9]\d*))?(?:\/reaction\/([1-9]\d*))?$/.exec(expected.sourceRef)!;
   const repoPath = `repos/${ref[1]}`;
@@ -370,7 +373,7 @@ async function readFeedbackSourceSubject(
   }
   return { kind: expected.kind, sourceRef: expected.sourceRef,
     repository: { id: repository.id as number, fullName: repository.full_name as string, private: repository.private },
-    itemId: item.id as number, issueNumber: Number(ref[2]), observedAtMs: now(),
+    itemId: item.id as number, issueNumber: Number(ref[2]), observedAtMs: clock.now(),
     origin: contributionOriginFromRest(item as RestContributionOrigin),
     revision: ref[4] === undefined ? parentRevision
       : { createdAt: item.created_at as string, contentDigest: feedbackContentDigest(item.content) },
@@ -382,10 +385,9 @@ async function readFeedbackSourceSubject(
  * effect or the publication of private material. A changed/unreadable source remains unknown. */
 export async function observeFeedbackSource(
   settings: AdmissionSettings | undefined, expected: FeedbackAdmissionSubject, boundary: string,
-  log: AdmissionRecord, deps: { read?: AdmissionRead; clock?: Pick<Clock, "now"> } = {},
+  log: AdmissionRecord, sourceRead: AdmissionRead = readAdmissionRestAsync, clock: Pick<Clock, "now"> = systemClock,
 ): Promise<FeedbackSourceObservation | undefined> {
   if (settings === undefined) return undefined;
-  const clock = deps.clock ?? systemClock;
   const started = clock.now();
   const snapshot = JSON.stringify(settings);
   let subject: FeedbackAdmissionSubject | undefined;
@@ -407,10 +409,10 @@ export async function observeFeedbackSource(
   let reads = 0;
   const read: AdmissionRead = async path => {
     if (++reads > 16 || !fresh(started, clock.now(), Math.min(settings.policy.maxEvidenceAgeMs, 15_000))) throw new Error("source-read-bound");
-    return (deps.read ?? readAdmissionRestAsync)(path);
+    return sourceRead(path);
   };
   try {
-    subject = await readFeedbackSourceSubject(expected, read, () => clock.now());
+    subject = await readFeedbackSourceSubject(expected, read, clock);
     if (feedbackSubjectBinding(subject) !== feedbackSubjectBinding(expected)) return finish("source-revision-changed");
     const decision = classifyContribution(subject, "feedback", settings.policy, [], clock.now());
     const actor = subject.origin?.actor;
@@ -423,20 +425,21 @@ export async function observeFeedbackSource(
       }
       memberships = next.value;
     }
-    const current = await readFeedbackSourceSubject(expected, read, () => clock.now());
+    const current = await readFeedbackSourceSubject(expected, read, clock);
     if (feedbackSubjectBinding(current) !== feedbackSubjectBinding(subject)) return finish("source-revision-changed");
     subject = current;
     if (JSON.stringify(settings) !== snapshot) return finish("policy-changed");
     if (!fresh(started, clock.now(), Math.min(settings.policy.maxEvidenceAgeMs, 15_000))) return finish("stale-action-evidence");
     return finish();
   } catch {
+    // The returned observation retains transport/revision failure as unknown with its own reason.
     return finish("source-recheck-unavailable");
   }
 }
 
 export async function observeFeedbackInputs(
   settings: AdmissionSettings | undefined, contributions: readonly unknown[], boundary: string, log: AdmissionRecord,
-  deps: { read?: AdmissionRead; clock?: Pick<Clock, "now"> } = {},
+  read: AdmissionRead = readAdmissionRestAsync, clock: Pick<Clock, "now"> = systemClock,
 ): Promise<void> {
   if (settings === undefined) return;
   if (contributions.length === 0) {
@@ -453,7 +456,7 @@ export async function observeFeedbackInputs(
       const binding = feedbackSubjectBinding(subject);
       if (seen.has(binding)) continue;
       seen.add(binding);
-      await observeFeedbackSource(settings, structuredClone(subject), boundary, log, deps);
+      await observeFeedbackSource(settings, structuredClone(subject), boundary, log, read, clock);
     } catch {
       try { log("feedback_admission.shadow", { mode: "shadow", boundary, outcome: "unknown", would_deny: true,
         reason: "lineage-unreadable", policy_version: settings.policy.version }); }
@@ -510,7 +513,7 @@ export function classifyContribution(
     const comment = item.kind === "issue-comment" || item.kind === "issue-comment-reaction";
     if (!ref || !["issue", "issue-comment", "issue-reaction", "issue-comment-reaction"].includes(item.kind)
       || comment !== (ref[3] !== undefined) || reaction !== (ref[4] !== undefined)
-      || !validId(item.repository?.id) || item.repository?.fullName !== ref[1]
+      || item.repository == null || !validId(item.repository.id) || item.repository.fullName !== ref[1]
       || !validId(item.itemId) || item.issueNumber !== Number(ref[2])
       || (reaction ? item.itemId !== Number(ref[4]) : comment && item.itemId !== Number(ref[3]))) {
       return decision("unknown", "invalid-source-identity");

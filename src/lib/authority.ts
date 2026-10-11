@@ -628,7 +628,7 @@ export function feedbackLineageAuthority(entry: unknown, context: FeedbackAdmiss
     if (!subject || typeof subject !== "object" || !context.currentSubject) return unresolved("origin-recheck-unavailable");
     try {
       if (feedbackSubjectBinding(subject) !== feedbackSubjectBinding(context.currentSubject)) return unresolved("source-revision-changed");
-    } catch { return unresolved("lineage-unreadable"); }
+    } catch { return { autonomous: false, basis: "unresolved-origin", reason: "lineage-unreadable" }; }
     const decided = classifyContribution(context.currentSubject, "feedback", context.policy, context.memberships ?? [], context.nowMs ?? systemClock.now());
     return { autonomous: decided.outcome === "trusted", reason: decided.reason,
       basis: decided.outcome === "trusted" ? "admitted-contribution" : decided.outcome === "confirmed-external" ? "external-contribution" : "unresolved-origin" };

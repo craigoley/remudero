@@ -815,7 +815,7 @@ function feedbackEntriesOldestFirst(root: string, admission?: FeedbackAdmissionC
     if (admission?.mode === "shadow") {
       let record: unknown;
       try { record = parseYaml(text); }
-      catch { record = null; }
+      catch { /* The shared observer classifies parse failure as unreadable-entry, never trusted absence. */ record = null; }
       observeFeedbackAdmission(record, admission, "autonomous-selection");
     }
     const ts = text.match(/^ts:\s*(\S+)\s*$/m)?.[1] ?? "";

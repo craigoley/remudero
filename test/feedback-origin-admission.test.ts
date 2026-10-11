@@ -47,8 +47,15 @@ const POLICY: AdmissionPolicy = {
 type SourceObservation = { decision: AdmissionDecision; subject?: FeedbackAdmissionSubject; wouldDeny: boolean };
 const recheckSource = (...args: [AdmissionSettings | undefined, FeedbackAdmissionSubject, string,
   (step: string, fields: Record<string, unknown>) => void, { read?: AdmissionRead; clock?: { now(): number } }?]) =>
-  (admissionModule as unknown as { observeFeedbackSource: (...params: typeof args) => Promise<SourceObservation | undefined> })
-    .observeFeedbackSource(...args);
+  admissionModule.observeFeedbackSource(args[0], args[1], args[2], args[3], args[4]?.read, args[4]?.clock);
+
+const observeInputs = (...args: [AdmissionSettings | undefined, readonly unknown[], string,
+  (step: string, fields: Record<string, unknown>) => void, { read?: AdmissionRead; clock?: { now(): number } }?]) =>
+  admissionModule.observeFeedbackInputs(args[0], args[1], args[2], args[3], args[4]?.read, args[4]?.clock);
+
+const observePublication = (...args: [admissionModule.FeedbackPublicationContext | undefined, readonly unknown[], string | undefined,
+  string, { read?: AdmissionRead; clock?: { now(): number } }?]) =>
+  admissionModule.observeFeedbackPublication(args[0], args[1], args[2], args[3], args[4]?.read, args[4]?.clock);
 
 function sourceFixture(kind: FeedbackAdmissionSubject["kind"] = "issue", actorId = OWNER_ID) {
   const actor = { id: actorId, type: "User", login: `actor-${actorId}` };
@@ -350,32 +357,32 @@ test("W1-T7754 adoption: selected lineage is re-read once and unreadable or over
   const f = sourceFixture(); const rows: Record<string, unknown>[] = [];
   const contribution = { subject: f.subject, admission: { outcome: "trusted" } };
   const log = (_step: string, fields: Record<string, unknown>) => rows.push(fields);
-  await admissionModule.observeFeedbackInputs(f.settings, [contribution, structuredClone(contribution)], "adoption", log,
+  await observeInputs(f.settings, [contribution, structuredClone(contribution)], "adoption", log,
     { read: f.read, clock: { now: () => NOW } });
   assert.equal(f.calls.length, 4, "duplicate lineage is one current source, not extra origin scans");
   assert.equal(rows.length, 1); assert.equal(rows[0].reason, "owner");
   const cyclic: Record<string, unknown> = {}; cyclic.self = cyclic;
-  await admissionModule.observeFeedbackInputs(f.settings, [{}, { subject: cyclic }, ...Array(9).fill({})], "fix", log,
+  await observeInputs(f.settings, [{}, { subject: cyclic }, ...Array(9).fill({})], "fix", log,
     { read: () => { assert.fail("unreadable lineage cannot choose an API path"); }, clock: { now: () => NOW } });
   assert.ok(rows.some(row => row.reason === "lineage-read-bound"));
   assert.ok(rows.some(row => row.reason === "lineage-unreadable"));
-  await admissionModule.observeFeedbackInputs(f.settings, [{}], "fix", () => { throw new Error("receipt failure"); });
-  await admissionModule.observeFeedbackInputs(f.settings, Array(9).fill({}), "fix", () => { throw new Error("bounded receipt failure"); },
+  await observeInputs(f.settings, [{}], "fix", () => { throw new Error("receipt failure"); });
+  await observeInputs(f.settings, Array(9).fill({}), "fix", () => { throw new Error("bounded receipt failure"); },
     { read: () => { assert.fail("missing lineage cannot choose an API path"); } });
-  await admissionModule.observeFeedbackInputs(undefined, [contribution], "fix", log,
+  await observeInputs(undefined, [contribution], "fix", log,
     { read: () => { assert.fail("absent settings cannot read"); } });
 });
 
 test("W1-T7754 adoption: selected legacy lineage is explicitly unknown without inventing a source or holding flow", async () => {
   const f = sourceFixture(); const rows: Record<string, unknown>[] = [];
-  await admissionModule.observeFeedbackInputs(f.settings, [], "selected-legacy", (_step, fields) => rows.push(fields),
+  await observeInputs(f.settings, [], "selected-legacy", (_step, fields) => rows.push(fields),
     { read: () => assert.fail("legacy input cannot choose a REST identity") });
   assert.equal(rows.length, 1);
   assert.equal(rows[0].reason, "lineage-missing");
   assert.equal(rows[0].outcome, "unknown");
   assert.equal(rows[0].would_deny, true);
   assert.equal(rows[0].source_ref, undefined);
-  await admissionModule.observeFeedbackInputs(f.settings, [], "selected-legacy", () => { throw new Error("diagnostic unavailable"); });
+  await observeInputs(f.settings, [], "selected-legacy", () => { throw new Error("diagnostic unavailable"); });
 });
 
 test("W1-T7754 publication: owner admission is not private-source publication permission", async () => {
@@ -409,7 +416,7 @@ test("W1-T7754 publication: unknown, changed, bounded and lost evidence never be
     const rows: Record<string, unknown>[] = []; let now = NOW, reads = 0, targets = 0;
     const contributions = arm === "missing" ? [] : arm === "bound" ? Array(9).fill({ subject: f.subject })
       : arm === "snapshot" ? [{ subject: () => {} }] : [{ subject: f.subject }];
-    await admissionModule.observeFeedbackPublication({ mode: arm === "invalid-mode" ? "invalid" as "shadow" : "shadow",
+    await observePublication({ mode: arm === "invalid-mode" ? "invalid" as "shadow" : "shadow",
       record: (_step, fields) => { rows.push(fields); if (arm === "lost-receipt") throw new Error("log unavailable"); } },
     contributions, arm === "invalid-target" ? "../private" : "acme/public", "fault-publication", {
       clock: { now: () => now }, read: path => {
@@ -429,7 +436,7 @@ test("W1-T7754 publication: unknown, changed, bounded and lost evidence never be
     assert.ok(rows.every(row => row.permission === "not-granted"));
     if (arm === "bound") assert.ok(rows.some(row => row.reason === "publication-lineage-read-bound"));
   }
-  await admissionModule.observeFeedbackPublication(undefined, [{ subject: f.subject }], "acme/public", "off", {
+  await observePublication(undefined, [{ subject: f.subject }], "acme/public", "off", {
     read: () => assert.fail("no-policy publication is unchanged") });
   assert.deepEqual(admissionModule.feedbackLineageSnapshot([() => {}]), [{ kind: "unresolved", reason: "lineage-unreadable" }]);
 });
@@ -443,7 +450,7 @@ test("W1-T7754 publication: the real async default reads visibility without bloc
   try {
     process.env.PATH = `${shim.dir}:${oldPath}`;
     let done = false;
-    const pending = admissionModule.observeFeedbackPublication({ mode: "shadow", record: (_step, fields) => rows.push(fields) },
+    const pending = observePublication({ mode: "shadow", record: (_step, fields) => rows.push(fields) },
       [{ subject: f.subject }], "acme/public", "real-default").finally(() => { done = true; });
     await new Promise<void>(resolve => setTimeout(resolve, 30));
     assert.equal(done, false);
@@ -484,11 +491,10 @@ test("W1-T7754 publication: the actual cross-root CLI forwards shadow context in
   const config = { root: state, claudeBin: "/unused", contributorAdmission: f.settings };
   writeFileSync(join(root, "plan/feedback/fb-crossroot.yaml"), stringifyYaml({ id: "fb-crossroot", ts: new Date(NOW).toISOString(),
     raw: "private source", origin: "issue#4", status: "new", attachments: [], contribution: { subject: f.subject } }));
-  const result = await withLiveWritesAllowed(() => feedbackReconcileCommand(["--root", `source=${root}`, "--checkout", checkout.dir, "--apply"], {
-    config, gh: args => { if (args[0] === "pr" && args[1] === "list") return "[]";
+  const result = await withLiveWritesAllowed(() => feedbackReconcileCommand(["--root", `source=${root}`, "--checkout", checkout.dir, "--apply"], config,
+    args => { if (args[0] === "pr" && args[1] === "list") return "[]";
       if (args[0] === "pr" && args[1] === "create") return "https://github.com/acme/public/pull/1";
-      assert.fail(`unexpected external effect ${JSON.stringify(args)}`); },
-  }));
+      assert.fail(`unexpected external effect ${JSON.stringify(args)}`); }));
   assert.equal(result, 0);
   assert.ok(origin.git("show", `${LANDING_BRANCH}:plan/feedback/fb-crossroot.yaml`).includes("private source"));
   const rows = readFileSync(ledgerPathFor(config), "utf8").trim().split("\n").map(line => JSON.parse(line));
