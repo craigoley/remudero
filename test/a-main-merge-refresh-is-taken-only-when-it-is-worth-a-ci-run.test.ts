@@ -7,14 +7,23 @@
  * `sweep.refresh.decided` row; board-wide requests are paced one per pass.
  */
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import {
   decideRefresh,
+  judgeRefreshOverlap,
   nextRefreshRequest,
+  parseRefreshJudgeReply,
+  pendingRefreshJudgeAsks,
+  readRefreshJudgeVerdict,
   REFRESH_DECIDED_STEP,
+  REFRESH_JUDGE_OFF_FILE,
   refreshRequestRow,
 } from "../src/lib/refresh-value.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { runLightPassReadyRefresh, type ArmedStalledPr } from "../src/lib/sweep.js";
 import {
   DEFAULT_SWEEP_POLICY,
@@ -226,4 +235,49 @@ test("W1-T7735: a board-wide refresh request is paced through the daemon lane, n
   ];
   assert.equal(nextRefreshRequest(requests, prs)?.request.requestId, "c");
   assert.equal(nextRefreshRequest([requests[1]!], prs), undefined);
+});
+
+test("W1-T7735: the overlap judge rules once per head, its failure is judge-unavailable, and its off switch is visible", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t7735-`));
+  try {
+    const ask = (prNumber: number) => ({ step: REFRESH_DECIDED_STEP, decision: "ask-judge", pr_number: prNumber,
+      head_sha: `head${prNumber}`, overlap_files: ["package.json"] });
+    const replies: Record<number, string | Error> = { 7020: '{"verdict": "overlap"}', 7021: "no json here", 7022: new Error("model down") };
+    const prompts: string[] = [];
+    const ports = (ledger: Record<string, unknown>[]) => ({
+      stateDir,
+      asks: () => pendingRefreshJudgeAsks(ledger, stateDir),
+      prDiff: async () => "diff --git a/src/mine.ts b/src/mine.ts",
+      mainDiff: async () => "diff --git a/package.json b/package.json",
+      judge: async (prompt: string) => {
+        prompts.push(prompt);
+        const pr = Number(/pull request #(\d+)/.exec(prompt)?.[1]);
+        const reply = replies[pr]!;
+        if (reply instanceof Error) throw reply;
+        return reply;
+      },
+      log: () => {},
+      maxPerPass: 5,
+    });
+    const ledger = [ask(7020), ask(7021), ask(7022)];
+    await judgeRefreshOverlap(ports(ledger));
+    assert.equal(readRefreshJudgeVerdict(stateDir, 7020, "head7020"), "overlap");
+    assert.equal(readRefreshJudgeVerdict(stateDir, 7021, "head7021"), "judge-unavailable", "a malformed reply is visible, never a guess");
+    assert.equal(readRefreshJudgeVerdict(stateDir, 7022, "head7022"), "judge-unavailable", "a failed call is visible, never a guess");
+    assert.equal(readRefreshJudgeVerdict(stateDir, 7023, "head7023"), undefined, "an unasked head has no ruling");
+    assert.match(prompts[0]!, /UNTRUSTED DATA/);
+    // A ruled head is never judged again.
+    await judgeRefreshOverlap(ports(ledger));
+    assert.equal(prompts.length, 3);
+    // The off switch: no call, and every ruling reads judge-unavailable.
+    writeFileSync(join(stateDir, REFRESH_JUDGE_OFF_FILE), "");
+    const off = await judgeRefreshOverlap(ports([ask(7024)]));
+    assert.equal(off.off, true);
+    assert.equal(prompts.length, 3);
+    assert.equal(readRefreshJudgeVerdict(stateDir, 7020, "head7020"), "judge-unavailable");
+    assert.equal(parseRefreshJudgeReply('{"verdict": "independent"}'), "independent");
+    assert.equal(parseRefreshJudgeReply('{"verdict": "skip everything"}'), "judge-unavailable");
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
 });
