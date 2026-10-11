@@ -21,13 +21,13 @@ function scratch(t: TestContext): string {
   return dir;
 }
 
-function recycle(t: TestContext, opts: { state?: Partial<MeasurementCadenceChildState>; process?: string; blocked?: "marker" | "ledger"; absent?: boolean } = {}) {
+function recycle(t: TestContext, opts: { state?: Partial<MeasurementCadenceChildState>; stateText?: string; process?: string; blocked?: "marker" | "ledger"; absent?: boolean } = {}) {
   const dir = scratch(t);
   const stateDir = join(dir, "state");
   const bin = join(dir, "bin");
   const home = join(dir, "home");
   for (const path of [stateDir, bin, home, join(dir, "tmp")]) mkdirSync(path);
-  if (!opts.absent) writeFileSync(join(stateDir, "measurement-cadence-child.json"), JSON.stringify({ ...DEAD, ...opts.state }, null, 2));
+  if (!opts.absent) writeFileSync(join(stateDir, "measurement-cadence-child.json"), opts.stateText ?? JSON.stringify({ ...DEAD, ...opts.state }, null, 2));
   const marker = join(stateDir, "measurement-cadence-child.recycled.json");
   const ledger = join(stateDir, "ledger.ndjson");
   if (opts.blocked) mkdirSync(opts.blocked === "marker" ? marker : ledger);
@@ -83,6 +83,20 @@ test("W1-T7691: a recycle records the live cadence child it is about to kill", (
   assert.equal(killed[0].ts, marker.at);
 });
 
+test("a recycle recognizes formatted running state with either numeric field last", (t) => {
+  for (const state of [
+    { runId: RUN, status: "running", attempt: 1, pid: 42 },
+    { runId: RUN, status: "running", pid: 42, attempt: 1 },
+  ]) {
+    const r = recycle(t, { stateText: JSON.stringify(state, null, 2) });
+    const marker = JSON.parse(readFileSync(join(r.dir, "marker-before-stop"), "utf8"));
+    assert.equal(marker.runId, RUN);
+    assert.equal(marker.pid, 42);
+    const rows = readFileSync(join(r.dir, "ledger-before-stop"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(rows.filter((row) => row.step === "recycle.cadence_child_killed" && row.attempt === 1).length, 1);
+  }
+});
+
 test("a recycle records only a running state and the exact live cadence run and pid", (t) => {
   for (const opts of [
     { absent: true }, { state: { status: "done" as const } }, { process: "" },
@@ -134,6 +148,7 @@ test("W1-T7691: the restart row names a recycle kill and leaves an unexplained d
   assert.equal(matched.row.previous_run_id, RUN);
   assert.equal(matched.row.previous_pid, 42);
   assert.equal(matched.row.attempt, 2);
+  assert.equal(matched.row.previous_rule, "restart_once");
   assert.match(String(matched.row.previous_detail), /^container remudero recycled at 2026-10-10T09:55:20Z/);
   for (const marker of [undefined, { ...MARKER, runId: "OTHER" }, { ...MARKER, pid: 99 }, "{bad json", { runId: RUN, pid: 42 }]) {
     const unmatched = await boot(t, marker);
@@ -148,8 +163,28 @@ test("a recycled second attempt is discarded with its cause and consumes no thir
     const discarded = await boot(t, marker, 2);
     assert.equal(discarded.row.outcome, "discarded");
     assert.equal(discarded.row.previous_cause, marker ? "recycled" : "unexplained");
+    assert.equal(discarded.row.previous_rule, "discard");
     assert.equal(discarded.spawned, 0);
   }
+});
+
+test("a consumed recycle marker cannot relabel the restarted attempt's later death", async (t) => {
+  const dir = scratch(t);
+  const statePath = join(dir, "measurement-cadence-child.json");
+  const markerPath = join(dir, "measurement-cadence-child.recycled.json");
+  writeFileSync(statePath, JSON.stringify(DEAD));
+  writeFileSync(markerPath, JSON.stringify(MARKER));
+  const runner = measurementCadenceChildRunner({ statePath, spawn: () => 43, isAlive: () => false });
+  const restarted = runner.start({ fire: false });
+  assert.equal(restarted.kind, "restarted");
+  assert.equal(restarted.previous?.cause, "recycled");
+  assert.ok(restarted.settled);
+  await assert.rejects(restarted.settled, /exited without a result/);
+  assert.equal(existsSync(markerPath), false);
+  const discarded = runner.start({ fire: false });
+  assert.equal(discarded.kind, "discarded");
+  assert.equal(discarded.previous?.pid, 43);
+  assert.equal(discarded.previous?.cause, "unexplained");
 });
 
 test("an unreadable recycle marker and failed removal do not prevent cadence recovery", async (t) => {

@@ -2036,7 +2036,7 @@ COMMISSION_PHASE="replace"
 
 record_recycled_cadence_child() {
   local state run_id pid attempt status at
-  state="$(cat "${STATE_DIR}/state/measurement-cadence-child.json" 2>/dev/null)" || return 0
+  state="$(tr '\n' ' ' < "${STATE_DIR}/state/measurement-cadence-child.json" 2>/dev/null)" || return 0
   run_id="$(printf '%s\n' "${state}" | sed -n 's/.*"runId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
   pid="$(printf '%s\n' "${state}" | sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*[,}].*/\1/p')"
   attempt="$(printf '%s\n' "${state}" | sed -n 's/.*"attempt"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*[,}].*/\1/p')"
