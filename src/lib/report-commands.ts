@@ -391,7 +391,7 @@ export interface JudgedInflightLocks {
   unverifiable: UnverifiableLock[];
 }
 
-export interface JudgeInflightLocksDeps {
+export interface InflightLockProbes {
   /** This process's hostname. Defaults to `os.hostname()`. */
   hostname?: () => string;
   /** Host-namespace pid probe, for locks written by THIS host. */
@@ -442,12 +442,12 @@ export function defaultPidAliveInContainer(containerId: string, pid: number): bo
  * W1-T978 owns reclamation, and a false "stale" invites deleting a live run's lock. A lock that cannot be
  * parsed is in neither set, so the caller still counts it as having no live holder.
  */
-export function judgeInflightLocks(inflightDir: string, deps: JudgeInflightLocksDeps = {}): JudgedInflightLocks {
+export function judgeInflightLocks(inflightDir: string, probes: InflightLockProbes = {}): JudgedInflightLocks {
   const live: LiveInflightRun[] = [];
   const unverifiable: UnverifiableLock[] = [];
   if (!existsSync(inflightDir)) return { live, unverifiable };
-  const myHost = (deps.hostname ?? osHostname)();
-  const isPidAlive = deps.isPidAlive ?? defaultIsPidAlive;
+  const myHost = (probes.hostname ?? osHostname)();
+  const isPidAlive = probes.isPidAlive ?? defaultIsPidAlive;
   let containers: RunningContainer[] | undefined;
   let containersRead = false;
   for (const entry of readdirSync(inflightDir)) {
@@ -461,11 +461,11 @@ export function judgeInflightLocks(inflightDir: string, deps: JudgeInflightLocks
       continue;
     }
     if (!containersRead) {
-      containers = (deps.listContainers ?? defaultListContainers)();
+      containers = (probes.listContainers ?? defaultListContainers)();
       containersRead = true;
     }
     const ctr = containers?.find((c) => c.hostname === info.host);
-    const alive = ctr ? (deps.pidAliveInContainer ?? defaultPidAliveInContainer)(ctr.id, info.pid) : undefined;
+    const alive = ctr ? (probes.pidAliveInContainer ?? defaultPidAliveInContainer)(ctr.id, info.pid) : undefined;
     if (alive === true) live.push(run);
     else if (alive === undefined) unverifiable.push({ taskId, host: info.host });
   }
