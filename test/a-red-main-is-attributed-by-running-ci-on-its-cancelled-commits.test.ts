@@ -639,7 +639,10 @@ test("W1-T7760: a probe ref left by an earlier probe of the same commit is reuse
     throw new Error("HTTP 403 Resource not accessible by integration");
   }) as GhApiFetcher;
   const before = calls.length;
-  await assert.rejects(restMainProbes(OWNER, REPO, forbidden).dispatch(probeSha), /HTTP 403/);
+  // `dispatch` returns an Awaitable, which `assert.rejects` has no overload for: await it inside an async block.
+  await assert.rejects(async () => {
+    await restMainProbes(OWNER, REPO, forbidden).dispatch(probeSha);
+  }, /HTTP 403/);
   assert.equal(calls.length, before + 1, "no workflow is dispatched when the ref could not be created");
 });
 
