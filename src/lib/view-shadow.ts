@@ -407,6 +407,30 @@ function classifyList(legacy: readonly unknown[], view: readonly unknown[], ev: 
   return { classification: top, reason: `every listed id differing or moved is explained (${breakdown})` };
 }
 
+/** An instant from an ISO string or an epoch-ms number; null for anything else. */
+function instantMs(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/**
+ * Whether the sources' as-of gap explains a time leaf's two values: both are instants (or both are
+ * ages/durations in ms) and either sit within the gap of each other, or the side read LATER holds the newer
+ * value and it was stamped inside the gap (after the earlier read, by the later one): a reading rewritten
+ * between the two reads (a value the earlier read lacked, as `explainOrder` treats a missing row, is older
+ * than any). A time value days wrong, or one that is not a time at all, is not explained.
+ */
+function timeDiffWithin(legacy: unknown, view: unknown, legacyAsOfMs: number, viewAsOfMs: number): boolean {
+  const lacks = (value: unknown): boolean => value === null || value === undefined;
+  const [a, b] = [lacks(legacy) ? Number.NEGATIVE_INFINITY : instantMs(legacy), lacks(view) ? Number.NEGATIVE_INFINITY : instantMs(view)];
+  if (a === null || b === null || (a === b)) return false;
+  if (Math.abs(a - b) <= Math.abs(legacyAsOfMs - viewAsOfMs)) return true;
+  const [lateSeen, earlySeen, early, late] = legacyAsOfMs > viewAsOfMs ? [a, b, viewAsOfMs, legacyAsOfMs] : [b, a, legacyAsOfMs, viewAsOfMs];
+  return lateSeen > earlySeen && lateSeen > early && lateSeen <= late;
+}
+
 /**
  * Classifies one differing path. Checked in order, each on its own evidence: `dedupe`, then `timing`,
  * then `legacy_horizon`; anything left is `real`. A diff is judged on its own ids or members only, so a
@@ -434,8 +458,10 @@ export function classifyShadowDiff(diff: ShadowFieldDiff, ev: ShadowEvidence): {
   }
   const agesDiffer = ev.legacyAsOfMs !== null && ev.viewAsOfMs !== null && ev.legacyAsOfMs !== ev.viewAsOfMs;
   const leaf = diff.path.split(/[.[]/).at(-1) ?? "";
-  if (agesDiffer && (TIME_LEAF.test(leaf) || any(ev.namedInGap))) {
-    return { classification: "timing", reason: `sources ${Math.abs(ev.legacyAsOfMs! - ev.viewAsOfMs!)} ms apart; ${ev.rowsInGap} row(s) landed between` };
+  if (agesDiffer) {
+    const gapMs = Math.abs(ev.legacyAsOfMs! - ev.viewAsOfMs!);
+    const explained = any(ev.namedInGap) || (TIME_LEAF.test(leaf) && timeDiffWithin(legacy, view, ev.legacyAsOfMs!, ev.viewAsOfMs!));
+    if (explained) return { classification: "timing", reason: `sources ${gapMs} ms apart; ${ev.rowsInGap} row(s) landed between` };
   }
   if (ev.legacyHorizonMs !== undefined && any(ev.namedBeforeHorizon)) {
     return { classification: "legacy_horizon", reason: "a row older than the legacy horizon names it (ruling Q1: the view is right)" };
