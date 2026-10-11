@@ -6,11 +6,20 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { makeTempDir } from "../src/lib/tmp.js";
-import { withReviewerWorktreeLease } from "../src/lib/reviewer-worktree-lease.js";
 import { reviewAdvanceIsMaterial } from "../src/lib/self-sync.js";
 import { reapStaleWorktrees } from "../src/lib/worker.js";
 import { buildFreshTreeReviewRunner } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
+
+// check-proof transplants the test into main. An absent new production module is an explicit
+// failing feature assertion; a real import/toolchain error on a present module still propagates.
+const leaseSource = fileURLToPath(new URL("../src/lib/reviewer-worktree-lease.ts", import.meta.url));
+const leaseModule = existsSync(leaseSource) ? await import("../src/lib/reviewer-worktree-lease.js") : undefined;
+
+async function withReviewerWorktreeLease<T>(path: string, action: () => Promise<T>): Promise<T> {
+  assert.ok(leaseModule, "the production reviewer ownership module must exist");
+  return leaseModule.withReviewerWorktreeLease(path, action);
+}
 
 function fixture(t: { after: (fn: () => void) => void }) {
   const root = makeTempDir("reviewer-lease");
@@ -112,6 +121,7 @@ test("missing roots and symbolic or nonregular lease paths cannot acquire review
 });
 
 test("a naturally exited real reviewer lease owner can be reclaimed without a live-owner override", async (t) => {
+  assert.ok(leaseModule, "the production reviewer ownership module must exist");
   const f = fixture(t); const root = dirname(dirname(fileURLToPath(import.meta.url)));
   const module = JSON.stringify(join(root, "src/lib/reviewer-worktree-lease.ts"));
   const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
