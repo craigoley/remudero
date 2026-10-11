@@ -118,15 +118,15 @@ export function admissionRecurrence(samples: readonly AdmissionRecurrenceSample[
 function admissionEffect(records: readonly LedgerRecord[], cause: string, merge: number, now: number): RemedyEffect {
   const samples: AdmissionRecurrenceSample[] = [];
   for (const row of records.filter(r => r.step === ADMISSION_FLOW_STEP)) {
-    if (row.mode !== "shadow" || row.coverage !== "measured" || !Number.isSafeInteger(row.repositoryId)
+    if (row.mode !== "shadow" || row.corpusCoverage !== "measured" || !Number.isSafeInteger(row.repositoryId)
       || typeof row.policyDigest !== "string" || !/^[a-f0-9]{64}$/.test(row.policyDigest)
       || typeof row.populationDigest !== "string" || !/^[a-f0-9]{64}$/.test(row.populationDigest)
-      || !Array.isArray(row.trusted) || !Array.isArray(row.affected) || !Number.isFinite(row.observedAtMs)) continue;
+      || !Array.isArray(row.trusted) || !Array.isArray(row.affected) || !Number.isFinite(row.observedAtMs)) return admissionRecurrence([], merge, now);
     const prs = [...row.trusted, ...row.affected] as AdmissionFlowReport["affected"];
     if (prs.some(r => !Number.isSafeInteger(r.pr) || r.pr <= 0 || !Number.isSafeInteger(r.itemId) || r.itemId <= 0
-      || !/^admission-[a-f0-9]{64}$/.test(r.causeKey))) continue;
+      || !/^admission-[a-f0-9]{64}$/.test(r.causeKey))) return admissionRecurrence([], merge, now);
     samples.push({ atMs: Number(row.observedAtMs), repositoryId: Number(row.repositoryId), policyDigest: row.policyDigest,
-      populationDigest: row.populationDigest, coverage: row.coverage, domain: "shadow", population: prs.map(r => r.pr),
+      populationDigest: row.populationDigest, coverage: "measured", domain: "shadow", population: prs.map(r => r.pr),
       episodes: row.affected.filter((r: AdmissionFlowReport["affected"][number]) => r.causeKey === cause).map((r: AdmissionFlowReport["affected"][number]) => `${r.itemId}:${cause}`) });
   }
   return admissionRecurrence(samples, merge, now);
@@ -134,7 +134,7 @@ function admissionEffect(records: readonly LedgerRecord[], cause: string, merge:
 
 /** Typed cause keys enter the ONE ladder directly, never through the free-text SHA normalizer. */
 export function admissionFlowInventory(report: AdmissionFlowReport, records: readonly LedgerRecord[], tasks: readonly CiFrictionRemedyTask[], nowMs: number): Inventory {
-  const eligible = report.coverage === "measured" ? report.affected.filter(r => r.evidence !== "current-disposition" || r.status === "owner-action") : [];
+  const eligible = report.corpusCoverage === "measured" ? report.affected.filter(r => r.evidence !== "current-disposition" || r.status === "owner-action") : [];
   const episodes: Episode[] = eligible.map(r => ({ pr: r.pr, key: r.causeKey, owner: "admission-shadow", start: r.openedAtMs, end: nowMs,
     outcome: "unknown", eligible: true, charges: [{ pr: r.pr, key: r.causeKey, start: r.openedAtMs, end: nowMs,
       hours: (nowMs - r.openedAtMs) / 3_600_000, reason: r.originalReason ?? r.evidence, owner: "admission-shadow" }] }));
@@ -514,7 +514,11 @@ export function flowGardenSpec(deps: GardenerDeps, sources: FlowGardenSources): 
         const records = sources.ledgerRecords ? sources.ledgerRecords() : readLadderRecords(deps.stateDir, ADMISSION_FLOW_LADDER, [ADMISSION_FLOW_STEP]);
         const plan = sources.planState ? sources.planState() : readLadderPlan(deps.repoRoot, ADMISSION_FLOW_LADDER);
         if (plan.degraded || plan.unreadable?.length) throw new Error("admission-plan-unreadable");
-        const shadow = admissionFlowInventory(report, records, plan.tasks, clock.now());
+        // The default plan status/trailer-only history cannot manufacture a build merge. A
+        // bounded current PR window credits both the exact trailer and independent run branch;
+        // a missing/older credit holds only the next admission rung as unmeasured.
+        const tasks = sources.planState ? plan.tasks : plan.tasks.map(t => ({ ...t, mergedAt: report.mergeCredits[t.id] }));
+        const shadow = admissionFlowInventory(report, records, tasks, clock.now());
         if (shadow.next) {
           const effect = shadow.next.escalation ? "owner-judgment" : "remedy";
           const token = join(deps.stateDir, "admission-flow-shadow-intents", `${shadow.next.price.key}-${effect}.json`);

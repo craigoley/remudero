@@ -103,12 +103,15 @@ export interface AdmissionFlowPr {
   outcome: AdmissionDecision["outcome"]; causeKey: string;
   evidence: "missing-disposition" | "current-disposition" | "stale-disposition";
   status?: string; originalReason?: string;
+  observedRollup: "SUCCESS" | "FAILURE" | "PENDING" | "ERROR" | "EXPECTED" | "UNKNOWN";
   next: "required-current-head-checks" | "bounded-recovery-observation";
 }
 export interface AdmissionFlowReport {
   mode: "shadow"; permission: "not-granted"; coverage: "not-enabled" | "unknown" | "unmeasured" | "measured";
   reason: string; healthy: boolean; repositoryId?: number; policyDigest?: string; populationDigest?: string;
   observedAtMs: number; trusted: AdmissionFlowPr[]; affected: AdmissionFlowPr[];
+  corpusCoverage: AdmissionFlowReport["coverage"];
+  mergeCreditCoverage: "unknown" | "observed-window"; mergeCredits: Record<string, string>;
   terminal: number[]; attempts: "unknown-from-ledger";
   healthDomain: "admission-shadow-evidence"; runtimeFlow: "not-certified";
 }
@@ -127,8 +130,8 @@ export async function readAdmissionFlowCorpus(input: AdmissionFlowInput, selecte
   const read = input.readCorpus ?? admissionFlowText;
   const policyDigest = feedbackContentDigest(settings);
   if (admissionReads.has(read)) return { ok: false, observedAtMs: started, reason: "read-still-in-flight" };
-  const fields = "number fullDatabaseId state createdAt headRefOid author{__typename ... on User{databaseId} ... on Bot{databaseId}} repository{databaseId nameWithOwner isPrivate} headRepository{databaseId nameWithOwner isPrivate}";
-  const query = `query{repository(owner:${JSON.stringify(input.owner)},name:${JSON.stringify(input.repo)}){databaseId nameWithOwner isPrivate pullRequests(first:100,states:OPEN){totalCount pageInfo{hasNextPage}nodes{${fields}}} ${[...new Set(selected)].map(n => `p${n}:pullRequest(number:${n}){${fields}}`).join(" ")}}}`;
+  const fields = "number fullDatabaseId state createdAt headRefOid author{__typename ... on User{databaseId} ... on Bot{databaseId}} repository{databaseId nameWithOwner isPrivate} headRepository{databaseId nameWithOwner isPrivate} commits(last:1){nodes{commit{oid statusCheckRollup{state}}}}";
+  const query = `query{repository(owner:${JSON.stringify(input.owner)},name:${JSON.stringify(input.repo)}){databaseId nameWithOwner isPrivate pullRequests(first:100,states:OPEN){totalCount pageInfo{hasNextPage}nodes{${fields}}} merged:pullRequests(first:100,states:MERGED,orderBy:{field:CREATED_AT,direction:DESC}){pageInfo{hasNextPage}nodes{body headRefName mergedAt}} ${[...new Set(selected)].map(n => `p${n}:pullRequest(number:${n}){${fields}}`).join(" ")}}}`;
   admissionReads.add(read);
   const timeout = Math.min(ADMISSION_FLOW_TIMEOUT_MS, Math.max(1, settings.policy.maxEvidenceAgeMs));
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -145,9 +148,10 @@ export async function readAdmissionFlowCorpus(input: AdmissionFlowInput, selecte
 export function admissionFlowReport(input: AdmissionFlowInput, ledger: FlowLedgerRead, corpus: AdmissionFlowCorpus, nowMs: number): AdmissionFlowReport {
   const report: AdmissionFlowReport = { mode: "shadow", permission: "not-granted", coverage: "unknown", reason: "evidence-unreadable",
     healthy: false, observedAtMs: nowMs, trusted: [], affected: [], terminal: [], attempts: "unknown-from-ledger",
-    healthDomain: "admission-shadow-evidence", runtimeFlow: "not-certified" };
+    healthDomain: "admission-shadow-evidence", runtimeFlow: "not-certified", corpusCoverage: "unknown",
+    mergeCreditCoverage: "unknown", mergeCredits: {} };
   const settings = input.settings;
-  if (!settings || settings.mode !== "shadow" || settings.disposition !== "shadow") return { ...report, coverage: "not-enabled", reason: "not-enabled" };
+  if (!settings || settings.mode !== "shadow" || settings.disposition !== "shadow") return { ...report, coverage: "not-enabled", corpusCoverage: "not-enabled", reason: "not-enabled" };
   const snapshot = feedbackContentDigest(settings);
   const unknown = (reason: string): AdmissionFlowReport => ({ ...report, coverage: "unknown", reason });
   if (!settings.policy || !Array.isArray(settings.policy.ownerIds) || !Array.isArray(settings.policy.organizationIds)
@@ -183,9 +187,15 @@ export function admissionFlowReport(input: AdmissionFlowInput, ledger: FlowLedge
       || !Number.isFinite(tsOf(r)) || tsOf(r) > nowMs || typeof r.head_sha !== "string" || !/^[a-f0-9]{40}$/i.test(r.head_sha))) return unknown("disposition-receipt-unreadable");
     const latest = [...history].sort((a, b) => Number(b.sequence) - Number(a.sequence) || tsOf(b) - tsOf(a))[0];
     const evidence = !latest ? "missing-disposition" : latest.head_sha === pr.headRefOid ? "current-disposition" : "stale-disposition";
+    const commits = object(pr.commits).nodes;
+    const commit = Array.isArray(commits) && commits.length === 1 ? object(object(commits[0]).commit) : {};
+    const rollup = String(object(commit.statusCheckRollup).state);
+    const observedRollup = commit.oid === pr.headRefOid && ["SUCCESS", "FAILURE", "PENDING", "ERROR", "EXPECTED"].includes(rollup)
+      ? rollup as AdmissionFlowPr["observedRollup"] : "UNKNOWN";
     const reasonClass = decision.outcome === "trusted" ? "trusted-flow" : decision.outcome === "unknown" ? "origin-unknown" : "disposition-evidence";
     const row: AdmissionFlowPr = { pr: pr.number, itemId: item, actorId: actor.databaseId, head: pr.headRefOid, openedAtMs: opened,
       outcome: decision.outcome, causeKey: `admission-${feedbackContentDigest(["shadow", settings.repositoryId, reasonClass])}`,
+      observedRollup,
       evidence, ...(latest ? { status: String(latest.status), originalReason: String(latest.original_reason ?? latest.reason) } : {}),
       next: decision.outcome === "trusted" ? "required-current-head-checks" : "bounded-recovery-observation" };
     (decision.outcome === "trusted" ? report.trusted : report.affected).push(row);
@@ -204,12 +214,28 @@ export function admissionFlowReport(input: AdmissionFlowInput, ledger: FlowLedge
   report.repositoryId = settings.repositoryId;
   report.policyDigest = snapshot;
   report.populationDigest = feedbackContentDigest([...numbers].sort((a, b) => a - b));
+  const merged = object(repo.merged);
+  if (Array.isArray(merged.nodes) && merged.nodes.length <= 100 && typeof object(merged.pageInfo).hasNextPage === "boolean"
+    && merged.nodes.every(value => { const row = object(value); return typeof row.body === "string" && typeof row.headRefName === "string"
+      && typeof row.mergedAt === "string" && Number.isFinite(Date.parse(row.mergedAt)) && Date.parse(row.mergedAt) >= 0 && Date.parse(row.mergedAt) <= corpus.observedAtMs; })) {
+    report.mergeCreditCoverage = "observed-window";
+    for (const value of merged.nodes) {
+      const row = object(value), branch = /^run-(W[0-9]+-T[0-9]+)-[0-9]+$/.exec(String(row.headRefName));
+      const trailers = [...String(row.body).matchAll(/^Remudero-Task:[ \t]*(W[0-9]+-T[0-9]+)[ \t]*$/gm)].map(match => match[1]!);
+      for (const id of [...trailers, ...(branch ? [branch[1]!] : [])]) {
+        const at = String(row.mergedAt), prior = report.mergeCredits[id];
+        if (prior === undefined || Date.parse(prior) < Date.parse(at)) report.mergeCredits[id] = at;
+      }
+    }
+  }
   // An owner/scoped-service PR is the production positive control. No affected population is
   // unmeasured, not a measured zero; decoder fixtures are a separate test control.
-  report.coverage = report.trusted.length === 0 || (report.affected.length === 0 && report.terminal.length === 0) ? "unmeasured" : "measured";
+  report.corpusCoverage = report.trusted.length === 0 || (report.affected.length === 0 && report.terminal.length === 0) ? "unmeasured" : "measured";
+  report.coverage = report.corpusCoverage;
   report.reason = report.coverage === "measured" ? "current-corpus-controls" : "population-control-missing";
   if (report.affected.some(r => r.outcome === "unknown")) return unknown("current-origin-unresolved");
   report.healthy = report.coverage === "measured" && report.affected.length === 0 && report.terminal.length > 0;
+  if (report.corpusCoverage === "measured" && !report.healthy) return unknown("open-recovery-not-terminal");
   return report;
 }
 
