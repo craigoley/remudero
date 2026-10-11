@@ -17,6 +17,9 @@ import { mergeFeedbackRecord } from "../src/lib/feedback-record-merge.js";
 import { LANDING_BRANCH, landFeedback, landFeedbackStatusContent, sweepFeedbackLanding } from "../src/lib/feedback-landing.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { feedbackEntryBlock } from "../src/lib/triage.js";
+import { operatorVerdictEvidence } from "../src/lib/sweep.js";
+import { buildFixRungDispatchArgs } from "./helpers/run-task-test.js";
 
 // W1-T7754 — an issue or comment is an outside contribution until the shared classifier admits
 // its ORIGINAL actor. These fixtures drive real captures through pollIssues/captureFeedback and
@@ -505,4 +508,38 @@ test("W1-T7754 consumers: carried pending content cannot replace main lineage wh
   const staged = parseYaml(origin.git("show", `${LANDING_BRANCH}:${rel}`));
   assert.equal(staged.status, "accepted");
   assert.deepEqual(staged.contribution, original);
+});
+
+test("W1-T7754 consumers: actual triage prompt retains original lineage inside its untrusted boundary", () => {
+  const contribution = admitFeedbackContribution(boundIssue(), { mode: "shadow", policy: POLICY, nowMs: NOW });
+  const entry: FeedbackEntry = { id: "fb-prompt", ts: new Date(NOW).toISOString(), raw: "trusted summary of outside request",
+    status: "new", origin: "issue#4", attachments: [], proposal_pr: null, contribution };
+  const block = feedbackEntryBlock(entry);
+  const position = block.indexOf(JSON.stringify(contribution));
+  assert.ok(position > block.indexOf("<untrusted_external_data "));
+  assert.ok(position < block.indexOf("</untrusted_external_data "));
+  assert.ok(block.includes(entry.raw));
+});
+
+test("W1-T7754 consumers: rebuilt answer-to-fix arguments preserve every original source even when text deduplicates", () => {
+  const original = admitFeedbackContribution(boundIssue(), { mode: "shadow", policy: POLICY, nowMs: NOW });
+  const other = structuredClone(original);
+  other.actor = { id: 9001, type: "User" };
+  const answers = [original, other].map(contribution => ({ task: "W1-FIX", answer: "use B", ts: new Date(NOW).toISOString(),
+    origin: "trusted-relay", contribution }));
+  const pending = operatorVerdictEvidence("W1-FIX", [], answers);
+  assert.ok(pending);
+  assert.deepEqual((pending as { contributions?: unknown[] }).contributions, [original, other]);
+  const built = buildFixRungDispatchArgs({ task: { id: "W1-FIX", title: "fix", type: "implement", verify: "auto", acceptance: [] } as never,
+    runId: "fix", prUrl: "https://github.com/acme/widgets/pull/1", branch: "fixture", worktreePath: "/fixture",
+    mount: { provider: "claude", model: "fixture" } as never, settingsFile: "/fixture/settings", config: {} as never,
+    budgetUsd: 1, strikeCap: 1, evidence: { unmetCriteria: [] }, pr: { headSha: "a".repeat(40), pendingAnswer: pending },
+    reviewBase: { owner: "acme", repo: "widgets", headCheckoutDir: "/fixture", reviewerMount: {} as never } });
+  assert.ok(built.constraint?.includes(JSON.stringify(original)));
+  assert.ok(built.constraint?.includes(JSON.stringify(other)));
+  original.actor!.id = 666;
+  assert.notEqual((pending as { contributions?: Array<{ actor: { id: number } }> }).contributions![0].actor.id, 666);
+  const rebuilt = operatorVerdictEvidence("W1-FIX", [], answers);
+  assert.equal((rebuilt as { contributions?: Array<{ actor: { id: number } }> }).contributions![0].actor.id, 666);
+  assert.equal(operatorVerdictEvidence("W1-FIX", [], [{ task: "W1-FIX", answer: "use B" }])?.constraint, "use B");
 });
