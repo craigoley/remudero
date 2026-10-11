@@ -14,7 +14,7 @@ import {
 } from "./ci-friction-gardener.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec, Outcome } from "./gardener.js";
-import { gardenLedgerBucket } from "./gardener.js";
+import { prepareGardenTaskIds, gardenLedgerBucket, type GardenTaskIdMinter } from "./gardener.js";
 import { ledgerLivePath, ledgerRotationEntries } from "./ledger-union.js";
 import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -307,7 +307,7 @@ export interface HotFileGardenSources {
   /** Every `origin:` the plan already holds. */
   planOrigins: () => readonly string[];
   /** THE RESERVATION PATH (`ciLearningTaskIdMinter`, run-task.ts), never `max(id)+1`. */
-  mintTaskId: (filingBranch?: string) => string;
+  mintTaskId: GardenTaskIdMinter;
   /** Whether a ledger-named file still exists in the checkout; a deleted file needs no restructuring. */
   fileExists?: (file: string) => boolean;
 }
@@ -395,11 +395,12 @@ export function hotFileGardenSpec(
       ranked: inv.ranked.slice(0, SCORECARD_FILES).map((p) => ({ ...p, remedy: hotFileRemedy(p.file) ?? null })),
       tracked: inv.tracked,
     }),
-    apply: (ws, plan) => {
+    prepare: (ws, plan, async) => prepareGardenTaskIds(ws, plan.actions.length ? 1 : 0, sources.mintTaskId, async),
+    apply: (ws, plan, _scorecard, heldIds) => {
       const action = plan.actions[0];
       if (!action) return undefined;
       if (!ws.branch) throw new Error("hot-file gardener: filing workspace has no branch for task-id reservation");
-      const taskId = sources.mintTaskId(ws.branch);
+      const taskId = (heldIds ?? prepareGardenTaskIds(ws, 1, sources.mintTaskId) as string[])[0]!;
       const contents = hotFileShardYaml(action.price, taskId);
       const verdict = ciFrictionRecordVerdict(contents, `hot-file:${taskId}`);
       if (!verdict.ok) throw new Error(`hot-file gardener: drafted record failed lint (${verdict.reason})`);
