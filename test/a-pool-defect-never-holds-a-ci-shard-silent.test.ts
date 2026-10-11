@@ -22,6 +22,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import * as noLiveRemote from "./setup/no-live-remote.js";
 import { LIVE_WRITE_SENTINEL_TOKEN } from "../src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { finishJudgedRun } from "./helpers/judged-pool-run.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -175,7 +176,7 @@ test("unit test: a fast-tier run carries a per-test timeout scaled from the tier
     writeFileSync(join(root, "scripts", "test-tier-manifest.json"), JSON.stringify({ thresholdMs: 40, files: { "test/slow.test.ts": 9000 } }));
 
     const fastCalls: string[][] = [];
-    assert.equal(tiers.main(["--root", root, "--run", "fast"], { spawn: (_c, args) => (fastCalls.push(args), { status: 0 }), env: {} }), 0);
+    assert.equal(tiers.main(["--root", root, "--run", "fast"], { spawn: (_c, args, o) => (fastCalls.push(args), finishJudgedRun(args, o)), env: {} }), 0);
     assert.equal(fastCalls.length, 2, "the pool and the isolated rest");
     for (const args of fastCalls) {
       assert.ok(args.includes(`--test-timeout=${40 * factor}`), args.join(" "));
