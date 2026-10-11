@@ -81,7 +81,7 @@ export async function withReviewerWorktreeLease<T>(worktree: string, action: () 
     assertDirectory(path);
     if (readFileSync(`${path}.lock`, "utf8") !== held.raw)
       throw new Error("reviewer worktree lease changed before release");
-  } catch (error) { releaseFailure = { error }; }
+  } catch (error) { releaseFailure = { error: error }; }
   held.count--;
   if (held.count === 0) {
     borrowers.delete(path);
@@ -90,7 +90,7 @@ export async function withReviewerWorktreeLease<T>(worktree: string, action: () 
         isStale: (owner) => owner.run_id === held.owner.run_id && owner.pid === held.owner.pid,
         onReclaim: () => {}, onLostReclaim: () => {} });
       if (released.outcome !== "reclaimed") throw new Error("reviewer lease release did not remove its own claim");
-    } catch (error) { releaseFailure ??= { error }; }
+    } catch (error) { releaseFailure ??= { error: error }; }
   }
   if (outcome.kind === "failed" && releaseFailure !== undefined)
     throw new AggregateError([outcome.error, releaseFailure.error], "review and lease release failed");
