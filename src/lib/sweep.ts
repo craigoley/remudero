@@ -6018,7 +6018,7 @@ export interface OpenPrView {
    *  next fix dispatch VERBATIM, never a silent guess, and routes the PR to `blocked-fixable` even
    *  at cap, so the answer re-arms the rung rather than immediately re-exhausting it. Wired
    *  end-to-end and tested, but nothing populates it today. */
-  pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean; spent?: true };
+  pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean; spent?: true; contributions?: unknown[] };
   /** W1-T176 — true when the ledger already carries a refusal for this exact task/PR/head/body
    *  input. It separates a FIRST-SEEN zero-runs required check, which still routes to post-review,
    *  from a SECOND absence for the unchanged input, which escalates. A transient `gh` error
@@ -10777,9 +10777,15 @@ export function operatorVerdictEvidence(
   taskId: string,
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
   questionLines: ReadonlyArray<Record<string, unknown>>,
-): { constraint: string; resetStrikeCounter?: boolean; spent?: true } | undefined {
+): { constraint: string; resetStrikeCounter?: boolean; spent?: true; contributions?: unknown[] } | undefined {
   const parts: string[] = [];
   const evidenceTimes: string[] = [];
+  const contributions: unknown[] = [];
+  const preserve = (line: Record<string, unknown>): void => {
+    if (line.contribution == null) return;
+    try { contributions.push(structuredClone(line.contribution)); }
+    catch { contributions.push({ kind: "unresolved", reason: "lineage-unreadable" }); }
+  };
 
   const feedback = lastMatching(ledgerLines, (l) => l.step === "operator_feedback" && l.task_id === taskId);
   const verdict = typeof feedback?.verdict === "string" ? feedback.verdict : undefined;
@@ -10787,13 +10793,17 @@ export function operatorVerdictEvidence(
   if ((verdict === "wrong" || verdict === "needs-follow-up") && note && note.trim() !== "") {
     parts.push(`Operator marked this run "${verdict}": ${note}`);
     evidenceTimes.push(typeof feedback?.ts === "string" ? feedback.ts : "");
+    preserve(feedback!);
   }
 
   const answerLines = questionLines.filter((l) => l.task === taskId && typeof l.answer === "string" && l.answer.trim() !== "");
   const answers = [...new Set(answerLines.map((l) => (l.answer as string).trim()))];
   if (answers.length === 1) parts.push(answers[0]!);
   else answers.forEach((a, i) => parts.push(`Operator answer ${i + 1} of ${answers.length}: ${a}`));
-  for (const l of answerLines) evidenceTimes.push(typeof l.ts === "string" ? l.ts : "");
+  for (const l of answerLines) {
+    evidenceTimes.push(typeof l.ts === "string" ? l.ts : "");
+    preserve(l);
+  }
 
   if (parts.length === 0) return undefined;
   // A fix round dispatched after the newest answer already carried it; the answer still steers later rounds as
@@ -10801,7 +10811,8 @@ export function operatorVerdictEvidence(
   const lastDispatch = lastMatching(ledgerLines, (l) => l.step === "fix.dispatch" && l.task_id === taskId);
   const newestEvidence = evidenceTimes.reduce((a, b) => (b > a ? b : a), "");
   const spent = typeof lastDispatch?.ts === "string" && newestEvidence !== "" && lastDispatch.ts > newestEvidence;
-  return spent ? { constraint: parts.join("\n\n"), spent: true } : { constraint: parts.join("\n\n") };
+  const evidence = { constraint: parts.join("\n\n"), ...(contributions.length ? { contributions } : {}) };
+  return spent ? { ...evidence, spent: true } : evidence;
 }
 
 /** The block evidence `dispatchFix` carries, GENERALIZED (W1-T100) from a bare unmet array to the

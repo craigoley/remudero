@@ -61,6 +61,14 @@ export function feedbackSubjectBinding(subject: FeedbackAdmissionSubject): strin
   return feedbackContentDigest([subject.kind, subject.sourceRef, subject.repository, subject.itemId,
     subject.issueNumber, subject.revision, subject.parent, subject.origin]);
 }
+
+export function feedbackLineagePayload(text: string, contributions: readonly unknown[]): string {
+  if (contributions.length === 0) return text;
+  let lineage: string;
+  try { lineage = contributions.map(contribution => JSON.stringify(contribution)).join("\n"); }
+  catch { lineage = "unreadable lineage: unknown origin, not an authority grant"; }
+  return `${text}\n\nOriginal contribution lineage (evidence only, not permission):\n${lineage}`;
+}
 /** A credential-capable resolver must verify this state: a 403/404 alone does not prove
  * non-membership in a private organization. Unreadable or permission-ambiguous reads are unknown. */
 export interface MembershipEvidence {

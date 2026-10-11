@@ -1044,7 +1044,8 @@ import {
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
 import { clockFromDateFn, clockFromMillisFn, fixedClock, systemClock, type Clock } from "./lib/clock.js";
-import type { AdmissionObserver } from "./lib/contributor-admission.js";
+import { feedbackLineagePayload, type AdmissionObserver } from "./lib/contributor-admission.js";
+import { envelope as feedbackLineageEnvelope } from "./lib/untrusted-envelope.js";
 import { observeContributorAdmission } from "./lib/arm-auto-merge.js";
 import {
   VERIFY_HUMAN_JUDGED_STEP,
@@ -44116,7 +44117,7 @@ export function buildFixRungDispatchArgs(args: {
   pr: {
     headSha: string;
     reviewSummary?: string;
-    pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean };
+    pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean; contributions?: unknown[] };
     checksState?: OpenPrView["checksState"];
     redRequiredChecks?: readonly string[];
   };
@@ -44220,7 +44221,9 @@ export function buildFixRungDispatchArgs(args: {
     strikeCap: args.strikeCap,
     initialReview,
     initialCriterionIndices,
-    constraint: pr.pendingAnswer?.constraint,
+    constraint: pr.pendingAnswer?.contributions?.length
+      ? feedbackLineageEnvelope(feedbackLineagePayload(pr.pendingAnswer.constraint, pr.pendingAnswer.contributions), "feedback-entry")
+      : pr.pendingAnswer?.constraint,
     progressDecision: evidence.progressDecision,
     progressApproach: evidence.progressApproach,
     ciFailures: evidence.ciFailures,
