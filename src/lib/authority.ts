@@ -587,6 +587,51 @@ export function authorityTableModules(): Set<string> {
   return new Set(AUTHORITY_TABLE.map((r) => r.module));
 }
 
+// ── W1-T7754: what a feedback entry's lineage may authorize ─────────────────────────────────
+
+/**
+ * The rows above are outward writes. Turning a feedback entry into a task or ruling with no
+ * operator present (the auto-triage rung) is an authority too, and a machine risk judgment of
+ * the TEXT does not prove the INPUT was admitted. So the entry's recorded lineage is read first.
+ * Unknown or external lineage is evidence for owner attention: the entry stays in the inbox and
+ * the operator's hand route (`rmd triage <id>`) still serves it. It never supplies autonomous
+ * authority. A trusted summarizer that relayed the item is not its contributor; only the
+ * `contribution` the capture recorded counts.
+ *
+ * Legacy entries reconcile one at a time. Only an origin naming an outside contribution surface
+ * (`issue`, `issue#<n>`, `comment#...`) with no recorded contribution is unresolved. Operator
+ * capture (`cli`/`ui`) and the fleet's own sensors (`alert#`, `repair#`, `incident#`, ...) stay
+ * usable exactly as before, so historical trusted feedback is never quarantined wholesale.
+ */
+export interface FeedbackLineageAuthority {
+  autonomous: boolean;
+  basis: "admitted-contribution" | "legacy-internal" | "external-contribution" | "unresolved-origin";
+  reason: string;
+}
+
+const OUTSIDE_FEEDBACK_ORIGIN = /^(issue|comment)(#|$)/;
+
+/** PURE. Reads a parsed `plan/feedback/<id>.yaml` record; never trusts a shape it did not check. */
+export function feedbackLineageAuthority(entry: unknown): FeedbackLineageAuthority {
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    return { autonomous: false, basis: "unresolved-origin", reason: "unreadable-entry" };
+  }
+  const record = entry as Record<string, unknown>;
+  const contribution = record.contribution;
+  if (contribution !== undefined && contribution !== null) {
+    const admission = typeof contribution === "object" && !Array.isArray(contribution)
+      ? (contribution as Record<string, unknown>).admission : undefined;
+    const decided = typeof admission === "object" && admission !== null ? admission as Record<string, unknown> : {};
+    const reason = typeof decided.reason === "string" ? decided.reason : "missing-admission";
+    if (decided.outcome === "trusted") return { autonomous: true, basis: "admitted-contribution", reason };
+    if (decided.outcome === "confirmed-external") return { autonomous: false, basis: "external-contribution", reason };
+    return { autonomous: false, basis: "unresolved-origin", reason };
+  }
+  const origin = typeof record.origin === "string" ? record.origin : "";
+  if (OUTSIDE_FEEDBACK_ORIGIN.test(origin)) return { autonomous: false, basis: "unresolved-origin", reason: "legacy-origin-unresolved" };
+  return { autonomous: true, basis: "legacy-internal", reason: origin ? `legacy-${origin.split("#")[0]}` : "legacy-unlabelled" };
+}
+
 function getPolicyValue(policy: Policy | undefined, path: string): unknown {
   if (!policy) return undefined;
   let cur: unknown = policy.values;

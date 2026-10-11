@@ -1,6 +1,7 @@
 import { ghExec } from "./github-transport.js";
 import { appendLedger } from "./ledger.js";
-import { captureFeedback, feedbackEntryPath, type FeedbackEntry } from "./feedback.js";
+import { captureFeedback, feedbackEntryPath, type FeedbackAdmissionContext, type FeedbackEntry } from "./feedback.js";
+import { contributionOriginFromRest, type ContributionOrigin, type RestContributionOrigin } from "./contributor-admission.js";
 import { existsSync } from "node:fs";
 import type { ManagedRepo } from "./managed-repos.js";
 
@@ -43,6 +44,9 @@ export interface RawIssue {
   createdAt: string;
   url: string;
   labels: string[];
+  /** W1-T7754: the issue's ORIGINAL author and association, as GitHub reported them. Absent when
+   *  the response carried neither; never filled in from the poller's own identity. */
+  origin?: ContributionOrigin;
 }
 
 /**
@@ -75,9 +79,12 @@ interface GhIssueJson {
    * them apart; only entries WITHOUT it are real issues.
    */
   pull_request?: unknown;
+  user?: RestContributionOrigin["user"];
+  author_association?: string;
 }
 
 export function normalizeIssue(owner: string, repo: string, raw: GhIssueJson): RawIssue {
+  const origin = contributionOriginFromRest({ user: raw.user, author_association: raw.author_association });
   return {
     owner,
     repo,
@@ -88,6 +95,7 @@ export function normalizeIssue(owner: string, repo: string, raw: GhIssueJson): R
     createdAt: raw.created_at ?? "",
     url: raw.html_url ?? "",
     labels: (raw.labels ?? []).map((l) => (typeof l === "string" ? l : (l.name ?? ""))).filter((l) => l.length > 0),
+    ...(origin === undefined ? {} : { origin }),
   };
 }
 
@@ -158,6 +166,9 @@ export interface IssuesIntakeDeps {
   now?: () => number;
   /** Preview only: fetch + summarize, create NOTHING, write no ledger line. Mirrors rmd ops --dry-run. */
   dryRun?: boolean;
+  /** W1-T7754: the admission policy each issue's original author is classified under. Absent ⇒
+   *  every issue records `unknown` lineage and waits for owner attention. */
+  admission?: FeedbackAdmissionContext;
 }
 
 export interface IssuesIntakeResult {
@@ -204,6 +215,14 @@ export async function pollIssues(managedRepos: ManagedRepo[], deps: IssuesIntake
           id,
           raw: renderIssueRaw(issue),
           origin: `issue#${issue.number}`,
+          contribution: {
+            kind: "issue",
+            sourceRef: `${issue.owner}/${issue.repo}#${issue.number}`,
+            ...(issue.url ? { url: issue.url } : {}),
+            ...(issue.origin === undefined ? {} : { origin: issue.origin }),
+            observedAtMs: now,
+          },
+          admission: { nowMs: now, ...deps.admission },
         }),
       );
     }

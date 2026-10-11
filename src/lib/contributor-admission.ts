@@ -31,6 +31,15 @@ export interface AdmissionSubject {
   observedAtMs: number;
   origin?: ContributionOrigin;
 }
+/** W1-T7754: an issue or issue comment entering the feedback inbox. It has no head commit or head
+ * repository; `sourceRef` names the ORIGINAL item (`owner/repo#n`, `.../comment/<id>`), never the
+ * summarizer or bot that relayed it. Only the "feedback" action evaluates this shape. */
+export interface FeedbackAdmissionSubject {
+  kind: "issue" | "issue-comment";
+  sourceRef: string;
+  observedAtMs: number;
+  origin?: ContributionOrigin;
+}
 /** A credential-capable resolver must verify this state: a 403/404 alone does not prove
  * non-membership in a private organization. Unreadable or permission-ambiguous reads are unknown. */
 export interface MembershipEvidence {
@@ -230,7 +239,7 @@ const fresh = (observed: number, now: number, age: number): boolean =>
  * policy and authenticated, fresh API evidence; action-time enforcement is a separate task.
  * A receipt fingerprints what was evaluated, never permits replay on another head or policy. */
 export function classifyContribution(
-  subject: AdmissionSubject, action: AdmissionAction, policy: AdmissionPolicy,
+  subject: AdmissionSubject | FeedbackAdmissionSubject, action: AdmissionAction, policy: AdmissionPolicy,
   memberships: readonly MembershipEvidence[], nowMs: number,
 ): AdmissionDecision {
   const decision = (outcome: AdmissionDecision["outcome"], reason: string): AdmissionDecision => ({
@@ -240,20 +249,32 @@ export function classifyContribution(
   if (!policy.version.trim() || !Number.isFinite(policy.maxEvidenceAgeMs) || policy.maxEvidenceAgeMs < 0
     || policy.ownerIds.length === 0 || !policy.ownerIds.every(validId) || !policy.organizationIds.every(validId)
     || !policy.services.every((service) => validId(service.id))) return decision("unknown", "invalid-policy");
-  if (!Number.isFinite(nowMs) || nowMs < 0 || !validId(subject.repositoryId) || !validId(subject.prNumber)
-    || !/^[a-f0-9]{40}$/i.test(subject.headSha)) return decision("unknown", "invalid-context");
+  const pr = "sourceRef" in subject ? undefined : subject;
+  if (!Number.isFinite(nowMs) || nowMs < 0) return decision("unknown", "invalid-context");
+  if (pr === undefined) {
+    const item = subject as FeedbackAdmissionSubject;
+    // A feedback item is evaluated for the feedback action only, and names its original source.
+    if (action !== "feedback" || (item.kind !== "issue" && item.kind !== "issue-comment")
+      || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#\d+(\/comment\/\d+)?$/.test(item.sourceRef)) {
+      return decision("unknown", "invalid-context");
+    }
+  } else if (!validId(pr.repositoryId) || !validId(pr.prNumber) || !/^[a-f0-9]{40}$/i.test(pr.headSha)) {
+    return decision("unknown", "invalid-context");
+  }
   if (!fresh(subject.observedAtMs, nowMs, policy.maxEvidenceAgeMs)) return decision("unknown", "stale-origin");
   const origin = subject.origin;
   if (origin === undefined) return decision("unknown", "missing-origin");
   const actor = origin.actor;
   if (actor == null) return decision("unknown", "missing-actor");
   if (!validId(actor.id) || (actor.type !== "User" && actor.type !== "Bot")) return decision("unknown", "invalid-actor");
-  const headRepository = origin.headRepository;
-  if (headRepository == null) return decision("unknown", "missing-head-repository");
-  if (!validId(headRepository.id)) return decision("unknown", "invalid-head-repository");
-  const targetRepository = origin.targetRepository;
-  if (targetRepository == null) return decision("unknown", "missing-target-repository");
-  if (targetRepository.id !== subject.repositoryId) return decision("unknown", "target-mismatch");
+  if (pr !== undefined) {
+    const headRepository = origin.headRepository;
+    if (headRepository == null) return decision("unknown", "missing-head-repository");
+    if (!validId(headRepository.id)) return decision("unknown", "invalid-head-repository");
+    const targetRepository = origin.targetRepository;
+    if (targetRepository == null) return decision("unknown", "missing-target-repository");
+    if (targetRepository.id !== pr.repositoryId) return decision("unknown", "target-mismatch");
+  }
   if ((actor.type === "Bot" && policy.ownerIds.includes(actor.id))
     || (actor.type === "User" && policy.services.some((service) => service.id === actor.id))) {
     return decision("unknown", "identity-type-mismatch");

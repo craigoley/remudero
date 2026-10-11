@@ -1,6 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { ghExec } from "./github-transport.js";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { feedbackLineageAuthority } from "./authority.js";
+import {
+  classifyContribution, type AdmissionDecision, type AdmissionPolicy, type ContributionActor, type ContributionOrigin,
+  type FeedbackAdmissionSubject, type MembershipEvidence,
+} from "./contributor-admission.js";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -94,11 +99,13 @@ export interface FeedbackEntry {
   expansion?: FeedbackExpansion | null;
   /** Present ONLY when a home-repo pointer (W1-T397) is configured AND this checkout is not
    * itself the home repo. `status: "landed"` once a PR carries this entry; `"unreachable"` on
-   * any failure, with `error` naming why. The entry is always captured locally first. */
+   * any failure, with `error` naming why; `"withheld"` (W1-T7754) when the entry's contribution
+   * lineage is unknown or external, so it is never published onward without owner attention.
+   * The entry is always captured locally first. */
   upstream?: {
     /** "owner/repo" of the configured home repo. */
     home: string;
-    status: "landed" | "unreachable";
+    status: "landed" | "unreachable" | "withheld";
     pr_url?: string;
     error?: string;
   };
@@ -111,6 +118,11 @@ export interface FeedbackEntry {
    * REPLIES TO, via `POST /v1/escalation/reply` — a DIFFERENT edge than `reply_to`, which names
    * another feedback entry rather than a thread. `null`/absent when none was supplied. */
   thread_id?: string | null;
+  /** W1-T7754: the ORIGINAL outside item (issue or issue comment) this entry carries, with its
+   * actor and the shared classifier's admission. It survives every status write, summary and
+   * re-filing ({@link inheritFeedbackLineage}). Absent on legacy and internally produced entries;
+   * `feedbackLineageAuthority` (authority.ts) reconciles those one at a time. */
+  contribution?: FeedbackContribution | null;
 }
 
 // ── Decision summaries (W1-T313) ─────────────────────────────────────────────
@@ -695,6 +707,108 @@ function resolveAttachments(root: string, id: string, inputs: string[]): string[
   return out;
 }
 
+// ── Contribution lineage (W1-T7754) ──────────────────────────────────────────
+//
+// An issue or comment is an outside contribution until the shared classifier admits its ORIGINAL
+// actor. That lineage is recorded at capture, before landing or upstream publishing, and is
+// inherited by anything derived from the entry. A summarizer or relay bot is recorded under
+// `relayed_by`; it never becomes the contributor.
+
+/** The shared classifier's verdict on a contribution, as written to the entry. */
+export interface FeedbackContributionAdmission {
+  outcome: AdmissionDecision["outcome"];
+  reason: string;
+  receipt_key: string;
+  policy_version: string | null;
+}
+
+/** One entry's recorded outside-contribution lineage. */
+export interface FeedbackContribution {
+  kind: FeedbackAdmissionSubject["kind"];
+  /** The original item: `owner/repo#n` or `owner/repo#n/comment/<id>`. */
+  source_ref: string;
+  url: string | null;
+  /** The ORIGINAL contributor as GitHub reported it, never a relaying identity. */
+  actor: ContributionActor | null;
+  association: string | null;
+  observed_at: string;
+  admission: FeedbackContributionAdmission;
+  /** Identities that relayed this lineage onward (summaries, re-filings), oldest first. */
+  relayed_by: string[];
+  /** The entry this lineage was first captured on, when this entry is derived from it. */
+  derived_from: string | null;
+}
+
+/** What an intake knows about the original outside item at capture time. */
+export interface FeedbackContributionInput {
+  kind: FeedbackAdmissionSubject["kind"];
+  sourceRef: string;
+  url?: string;
+  origin?: ContributionOrigin;
+  observedAtMs: number;
+}
+
+/** The explicit admission policy and evidence a contribution is evaluated under. No policy means
+ *  the outcome is `unknown` (`no-admission-policy`), never an implicit trust grant. */
+export interface FeedbackAdmissionContext {
+  policy?: AdmissionPolicy;
+  memberships?: readonly MembershipEvidence[];
+  nowMs?: number;
+}
+
+function copyActor(actor: ContributionActor | null | undefined): ContributionActor | null {
+  if (actor == null) return null;
+  return {
+    ...(actor.id === undefined ? {} : { id: actor.id }),
+    ...(actor.type === undefined ? {} : { type: actor.type }),
+    ...(actor.login === undefined ? {} : { login: actor.login }),
+  };
+}
+
+/** Evaluate one outside item with the shared {@link classifyContribution} for the `feedback`
+ *  action and return the lineage to record. Pure apart from the default clock. */
+export function admitFeedbackContribution(input: FeedbackContributionInput, context: FeedbackAdmissionContext = {}): FeedbackContribution {
+  const subject: FeedbackAdmissionSubject = {
+    kind: input.kind, sourceRef: input.sourceRef, observedAtMs: input.observedAtMs,
+    ...(input.origin === undefined ? {} : { origin: input.origin }),
+  };
+  const decision: AdmissionDecision = context.policy === undefined
+    ? { outcome: "unknown", reason: "no-admission-policy",
+      receiptKey: createHash("sha256").update(JSON.stringify([subject, "feedback", "no-admission-policy"])).digest("hex") }
+    : classifyContribution(subject, "feedback", context.policy, context.memberships ?? [], context.nowMs ?? Date.now());
+  return {
+    kind: input.kind,
+    source_ref: input.sourceRef,
+    url: input.url ?? null,
+    actor: copyActor(input.origin?.actor),
+    association: input.origin?.association ?? null,
+    observed_at: Number.isFinite(input.observedAtMs) ? new Date(input.observedAtMs).toISOString() : "",
+    admission: { outcome: decision.outcome, reason: decision.reason, receipt_key: decision.receiptKey,
+      policy_version: context.policy?.version ?? null },
+    relayed_by: [],
+    derived_from: null,
+  };
+}
+
+/** The lineage an entry derived from `parent` must carry. A recorded contribution is inherited
+ *  unchanged, with `relayedBy` appended. An unresolved legacy parent yields an unknown
+ *  contribution. A legacy internal parent yields `null`, so the derived entry stays internal. */
+export function inheritFeedbackLineage(
+  parent: Pick<FeedbackEntry, "id" | "origin" | "contribution">, relayedBy: string,
+): FeedbackContribution | null {
+  if (parent.contribution) {
+    return { ...parent.contribution, relayed_by: [...(parent.contribution.relayed_by ?? []), relayedBy],
+      derived_from: parent.contribution.derived_from ?? parent.id };
+  }
+  const legacy = feedbackLineageAuthority(parent);
+  if (legacy.autonomous) return null;
+  return {
+    kind: "issue", source_ref: String(parent.origin), url: null, actor: null, association: null, observed_at: "",
+    admission: { outcome: "unknown", reason: legacy.reason, receipt_key: "", policy_version: null },
+    relayed_by: [relayedBy], derived_from: parent.id,
+  };
+}
+
 export interface CaptureFeedbackOptions {
   raw: string;
   attachments?: string[];
@@ -726,6 +840,14 @@ export interface CaptureFeedbackOptions {
    * UNTOUCHED ({@link findFeedbackBySubmissionKey}); `undefined` always files fresh. Why: the
    * reasoning against reusing `id` for dedup is archived in docs/forensics/feedback.md. */
   submissionKey?: string;
+  /** W1-T7754: the original outside item this capture carries (an issue or issue comment). It is
+   *  classified by {@link admitFeedbackContribution} before landing or upstream publishing. */
+  contribution?: FeedbackContributionInput;
+  /** W1-T7754: the policy and evidence `contribution` is classified under. */
+  admission?: FeedbackAdmissionContext;
+  /** W1-T7754: this capture re-files another entry's content (a summary, a relay). The parent's
+   *  lineage is inherited, `relayedBy` is recorded beside it, and `contribution` is ignored. */
+  derivedFrom?: { entry: Pick<FeedbackEntry, "id" | "origin" | "contribution">; relayedBy: string };
 }
 
 /** Find an existing feedback entry by its console-minted `submission_key` (W1-T2302) —
@@ -761,6 +883,10 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
   const id = opts.id ?? generateFeedbackId();
   mkdirSync(feedbackDir(root), { recursive: true });
   const attachments = resolveAttachments(root, id, opts.attachments ?? []);
+  // W1-T7754: lineage is decided BEFORE the entry is written, landed or published upstream.
+  const contribution = opts.derivedFrom !== undefined
+    ? inheritFeedbackLineage(opts.derivedFrom.entry, opts.derivedFrom.relayedBy)
+    : opts.contribution !== undefined ? admitFeedbackContribution(opts.contribution, opts.admission) : null;
   let entry: FeedbackEntry = {
     id,
     ts: new Date().toISOString(),
@@ -774,6 +900,7 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
     expansion: opts.expansion ?? null,
     submission_key: opts.submissionKey ?? null,
     thread_id: opts.threadId ?? null,
+    ...(contribution === null ? {} : { contribution }),
   };
   writeFileSync(feedbackEntryPath(root, id), stringifyYaml(entry));
   try {
@@ -786,7 +913,13 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
     if (home) {
       const git = opts.upstream?.git ?? defaultUpstreamGit(root);
       const current = resolveCurrentRepoFromGit(git);
-      if (!isUpstreamSelfTarget(current, home)) {
+      const lineage = feedbackLineageAuthority(entry);
+      if (!isUpstreamSelfTarget(current, home) && !lineage.autonomous) {
+        // An unadmitted outside contribution is owner-attention evidence, not content to publish.
+        entry = { ...entry, upstream: { home: `${home.owner}/${home.repo}`, status: "withheld",
+          error: `contribution lineage ${lineage.basis}: ${lineage.reason}` } };
+        writeFileSync(feedbackEntryPath(root, id), stringifyYaml(entry));
+      } else if (!isUpstreamSelfTarget(current, home)) {
         const gh = opts.upstream?.gh ?? defaultUpstreamGh();
         const { prUrl, error } = openUpstreamFeedbackPr(home, id, stringifyYaml(entry), gh);
         entry = {

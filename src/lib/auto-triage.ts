@@ -6,6 +6,8 @@ import { fixedClock } from "./clock.js";
 import { classifyPushFailure } from "./task-id-reservation.js";
 import { assertClaimRefPushAllowed, assertClaimRefPushAllowedAsync } from "./live-write-guard.js";
 import { hostWorktreeGit } from "./worktree-git.js";
+import { parse as parseYaml } from "yaml";
+import { feedbackLineageAuthority } from "./authority.js";
 
 /**
  * The daemon's second work-generating rung (recon-DC #2): claims and fires at most one feedback
@@ -790,8 +792,12 @@ export function decideAutoTriage(i: AutoTriageInputs): AutoTriageDecision {
 
 /**
  * The one read of `<root>/plan/feedback/*.yaml` — both {@link newFeedbackIdsOldestFirst} (count)
- * and {@link oldestFeedbackAgeMs} (age) build on this single walk. Reads only each entry's own
+ * and {@link oldestFeedbackAgeMs} (age) build on this single walk. Reads each entry's own
  * `status:`, never a classification report.
+ *
+ * W1-T7754: this rung adopts feedback with no operator present, so it also reads the entry's
+ * recorded contribution lineage. An entry whose lineage is unknown or external is owner-attention
+ * evidence: it stays at `status: new` for the hand route and is never an autonomous candidate.
  * Why: docs/forensics/auto-triage.md#feedbackentriesoldestfirst.
  */
 function feedbackEntriesOldestFirst(root: string): Array<{ id: string; ts: string }> {
@@ -807,6 +813,14 @@ function feedbackEntriesOldestFirst(root: string): Array<{ id: string; ts: strin
       continue; // an unreadable entry is skipped, never a reason to refuse the whole sweep
     }
     if (!/^status:\s*new\s*$/m.test(text)) continue;
+    let record: unknown;
+    try {
+      record = parseYaml(text);
+    } catch (error) {
+      // Unparseable lineage cannot authorize autonomous adoption; the hand route still sees it.
+      record = { contribution: { admission: { outcome: "unknown", reason: `unparseable-entry: ${String(error)}` } } };
+    }
+    if (!feedbackLineageAuthority(record).autonomous) continue;
     const ts = text.match(/^ts:\s*(\S+)\s*$/m)?.[1] ?? "";
     out.push({ id: name.replace(/\.yaml$/, ""), ts });
   }
