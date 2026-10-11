@@ -7,6 +7,8 @@ import { spawnSync } from "node:child_process";
 import { canaryCommand } from "../src/lib/model-canary-command.js";
 import { renderCanaryReport } from "../src/lib/model-canary-report.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { chromium } from "playwright";
+import type { CanaryRun } from "../src/lib/model-canary-metrics.js";
 test("canary native preparation produces a pinned inert manifest without exposing held-out answers", () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}canary-manifest-`));
   try {
@@ -17,6 +19,32 @@ test("canary native preparation produces a pinned inert manifest without exposin
     assert.equal(manifest.cash.experimentDailyCapUsd, 0); assert.ok(manifest.tasks.every((t: Record<string, unknown>) => !("expected" in t)));
     assert.throws(() => canaryCommand(["prepare", dir]), /EEXIST/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test("canary private browser drills from matched metrics to attempts and leaves unknown identity unplotted", async () => {
+  const make = (id: string, model: string, servedModel: string | null, route = "azure"): CanaryRun => ({ id,
+    caseId: "schema-deploy", suiteHash: "a".repeat(64), model, route, effort: "low", family: "schema", verified: true,
+    totalDurationMs: 100, attempts: [{ id: id + "-attempt", terminal: "complete", durationMs: 90, firstTextMs: 20,
+      generationMs: 60, inputTokens: 50, outputTokens: 10, cacheReadTokens: null, cacheWriteTokens: null, reasoningTokens: null,
+      usageRatedUsd: .02, billing: route === "azure" ? "api" : "subscription", servedModel }] });
+  const injected = '</script><script>window.canaryInjected=true</script>';
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage(), errors: string[] = [];
+    page.on("pageerror", e => errors.push(e.message));
+    await page.route("**/*", route => route.abort());
+    await page.setContent(renderCanaryReport([make("safe", injected, injected), make("unknown", "unknown", null),
+      make("other", "other-route", "other-route", "subscription")]));
+    assert.equal(await page.locator("#rows tr").count(), 2); assert.equal(await page.locator("#plot circle").count(), 1);
+    await page.locator("#plot circle").focus(); await page.keyboard.press("Enter");
+    assert.ok((await page.locator("#detail").innerText()).includes(injected));
+    await page.locator("#detail summary").click(); assert.equal(await page.locator("#detail details[open]").count(), 1);
+    assert.ok((await page.locator("#detail").innerText()).includes("Attempt resources"));
+    assert.equal(await page.evaluate(() => Object.hasOwn(window, "canaryInjected")), false);
+    await page.locator("#route").selectOption("subscription");
+    assert.equal(await page.locator("#rows tr").count(), 1); assert.equal(await page.locator("#plot circle").count(), 0);
+    await page.locator("#basis").selectOption("subscriptionNotional"); assert.equal(await page.locator("#plot circle").count(), 1);
+    assert.deepEqual(errors, []);
+  } finally { await browser.close(); }
 });
 test("canary private preparation refuses a new directory behind a Git symlink ancestor", () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}canary-output-`));
