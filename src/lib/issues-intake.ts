@@ -44,8 +44,7 @@ export interface RawIssue {
   createdAt: string;
   url: string;
   labels: string[];
-  /** W1-T7754: the issue's ORIGINAL author and association, as GitHub reported them. Absent when
-   *  the response carried neither; never filled in from the poller's own identity. */
+  /** W1-T7754: the issue's original author as GitHub reported it, never the poller's identity. */
   origin?: ContributionOrigin;
 }
 
@@ -166,8 +165,7 @@ export interface IssuesIntakeDeps {
   now?: () => number;
   /** Preview only: fetch + summarize, create NOTHING, write no ledger line. Mirrors rmd ops --dry-run. */
   dryRun?: boolean;
-  /** W1-T7754: the admission policy each issue's original author is classified under. Absent ⇒
-   *  every issue records `unknown` lineage and waits for owner attention. */
+  /** W1-T7754: absent ⇒ every issue records `unknown` lineage for owner attention. */
   admission?: FeedbackAdmissionContext;
 }
 

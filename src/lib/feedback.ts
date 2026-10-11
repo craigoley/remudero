@@ -99,8 +99,7 @@ export interface FeedbackEntry {
   expansion?: FeedbackExpansion | null;
   /** Present ONLY when a home-repo pointer (W1-T397) is configured AND this checkout is not
    * itself the home repo. `status: "landed"` once a PR carries this entry; `"unreachable"` on
-   * any failure, with `error` naming why; `"withheld"` (W1-T7754) when the entry's contribution
-   * lineage is unknown or external, so it is never published onward without owner attention.
+   * any failure, with `error` naming why; `"withheld"` for unadmitted lineage (W1-T7754).
    * The entry is always captured locally first. */
   upstream?: {
     /** "owner/repo" of the configured home repo. */
@@ -118,10 +117,8 @@ export interface FeedbackEntry {
    * REPLIES TO, via `POST /v1/escalation/reply` — a DIFFERENT edge than `reply_to`, which names
    * another feedback entry rather than a thread. `null`/absent when none was supplied. */
   thread_id?: string | null;
-  /** W1-T7754: the ORIGINAL outside item (issue or issue comment) this entry carries, with its
-   * actor and the shared classifier's admission. It survives every status write, summary and
-   * re-filing ({@link inheritFeedbackLineage}). Absent on legacy and internally produced entries;
-   * `feedbackLineageAuthority` (authority.ts) reconciles those one at a time. */
+  /** W1-T7754: the original outside item, its actor and admission; survives status writes and
+   *  re-filing. Absent on legacy/internal entries, which authority.ts reconciles per item. */
   contribution?: FeedbackContribution | null;
 }
 
@@ -707,14 +704,8 @@ function resolveAttachments(root: string, id: string, inputs: string[]): string[
   return out;
 }
 
-// ── Contribution lineage (W1-T7754) ──────────────────────────────────────────
-//
-// An issue or comment is an outside contribution until the shared classifier admits its ORIGINAL
-// actor. That lineage is recorded at capture, before landing or upstream publishing, and is
-// inherited by anything derived from the entry. A summarizer or relay bot is recorded under
-// `relayed_by`; it never becomes the contributor.
+// ── Contribution lineage (W1-T7754): a summarizer or relay is `relayed_by`, never the contributor.
 
-/** The shared classifier's verdict on a contribution, as written to the entry. */
 export interface FeedbackContributionAdmission {
   outcome: AdmissionDecision["outcome"];
   reason: string;
@@ -722,10 +713,8 @@ export interface FeedbackContributionAdmission {
   policy_version: string | null;
 }
 
-/** One entry's recorded outside-contribution lineage. */
 export interface FeedbackContribution {
   kind: FeedbackAdmissionSubject["kind"];
-  /** The original item: `owner/repo#n` or `owner/repo#n/comment/<id>`. */
   source_ref: string;
   url: string | null;
   /** The ORIGINAL contributor as GitHub reported it, never a relaying identity. */
@@ -733,13 +722,10 @@ export interface FeedbackContribution {
   association: string | null;
   observed_at: string;
   admission: FeedbackContributionAdmission;
-  /** Identities that relayed this lineage onward (summaries, re-filings), oldest first. */
   relayed_by: string[];
-  /** The entry this lineage was first captured on, when this entry is derived from it. */
   derived_from: string | null;
 }
 
-/** What an intake knows about the original outside item at capture time. */
 export interface FeedbackContributionInput {
   kind: FeedbackAdmissionSubject["kind"];
   sourceRef: string;
@@ -748,8 +734,7 @@ export interface FeedbackContributionInput {
   observedAtMs: number;
 }
 
-/** The explicit admission policy and evidence a contribution is evaluated under. No policy means
- *  the outcome is `unknown` (`no-admission-policy`), never an implicit trust grant. */
+/** No policy means `unknown` (`no-admission-policy`), never an implicit trust grant. */
 export interface FeedbackAdmissionContext {
   policy?: AdmissionPolicy;
   memberships?: readonly MembershipEvidence[];
@@ -765,8 +750,7 @@ function copyActor(actor: ContributionActor | null | undefined): ContributionAct
   };
 }
 
-/** Evaluate one outside item with the shared {@link classifyContribution} for the `feedback`
- *  action and return the lineage to record. Pure apart from the default clock. */
+/** Classify one outside item for the `feedback` action; returns the lineage to record. */
 export function admitFeedbackContribution(input: FeedbackContributionInput, context: FeedbackAdmissionContext = {}): FeedbackContribution {
   const subject: FeedbackAdmissionSubject = {
     kind: input.kind, sourceRef: input.sourceRef, observedAtMs: input.observedAtMs,
@@ -790,9 +774,8 @@ export function admitFeedbackContribution(input: FeedbackContributionInput, cont
   };
 }
 
-/** The lineage an entry derived from `parent` must carry. A recorded contribution is inherited
- *  unchanged, with `relayedBy` appended. An unresolved legacy parent yields an unknown
- *  contribution. A legacy internal parent yields `null`, so the derived entry stays internal. */
+/** A derived entry keeps `parent`'s contributor and admission and appends `relayedBy`; an
+ *  unresolved legacy parent yields `unknown`, a legacy internal parent `null`. */
 export function inheritFeedbackLineage(
   parent: Pick<FeedbackEntry, "id" | "origin" | "contribution">, relayedBy: string,
 ): FeedbackContribution | null {
@@ -840,13 +823,11 @@ export interface CaptureFeedbackOptions {
    * UNTOUCHED ({@link findFeedbackBySubmissionKey}); `undefined` always files fresh. Why: the
    * reasoning against reusing `id` for dedup is archived in docs/forensics/feedback.md. */
   submissionKey?: string;
-  /** W1-T7754: the original outside item this capture carries (an issue or issue comment). It is
-   *  classified by {@link admitFeedbackContribution} before landing or upstream publishing. */
+  /** W1-T7754: the original outside item, classified before landing or upstream publishing. */
   contribution?: FeedbackContributionInput;
   /** W1-T7754: the policy and evidence `contribution` is classified under. */
   admission?: FeedbackAdmissionContext;
-  /** W1-T7754: this capture re-files another entry's content (a summary, a relay). The parent's
-   *  lineage is inherited, `relayedBy` is recorded beside it, and `contribution` is ignored. */
+  /** W1-T7754: re-filed content (a summary) inherits the parent's lineage; `contribution` is ignored. */
   derivedFrom?: { entry: Pick<FeedbackEntry, "id" | "origin" | "contribution">; relayedBy: string };
 }
 
