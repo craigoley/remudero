@@ -16,7 +16,7 @@ raw: "Core harness repair: observed on remudero-console API-T40 PR #1493. The
   dirty-worktree refusal."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/10440
 summary: null

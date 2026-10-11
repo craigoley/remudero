@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-10: merge-hold identity (PR #10339 hold, 2026-10-09T13:30:46Z, host fa3e9bb4d422)"
   plan_refs: [W1-T3601, W1-T2581, W1-T2719, W1-T4244, W1-T1000002, W1-T100]
   files: [src/lib/operator-merge-hold.ts, src/run-task.ts, src/lib/review.ts, src/lib/status-board.ts, src/lib/sweep.ts, test/a-merge-hold-records-who-really-set-it.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

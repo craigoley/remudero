@@ -830,3 +830,14 @@ export function readMemoryLedger(deps: HostMemoryLedgerOptions = {}): HostMemory
     return undefined;
   }
 }
+
+/**
+ * W1-T7720: why the reservation store could not be READ, or `undefined` when it could. A missing,
+ * reset or present store is a reading; only `state: "unreadable"` — or a read that returned nothing at
+ * all (`readMemoryLedger` records a diagnostic and yields `undefined`) — is a read FAILURE. Pure.
+ */
+export function memoryStoreReadFailure(reading: HostMemoryReading | undefined): string | undefined {
+  if (reading === undefined) return "reservation store read returned no reading";
+  if (reading.state !== "unreadable") return undefined;
+  return reading.reason ?? "reservation store unreadable";
+}

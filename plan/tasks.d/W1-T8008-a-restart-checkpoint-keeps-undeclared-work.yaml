@@ -1,0 +1,79 @@
+- id: W1-T8008
+  title: "A RESTART CHECKPOINT NEVER LOSES WORK OVER UNDECLARED FILES — the W1-T7697 checkpoint commits only paths under task.files and then refuses the whole yield when the worker touched any other path, so W1-T7808 (10-10 22:26Z) and W1-T7837 (10-11 04:51Z) ended no_pr restart_checkpoint_failed and nothing was pushed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a checkpoint keeps every worker change; scope stays the PR path's to judge
+  band_meaning: span
+  origin: "operator approval 2026-10-11 (coordinator follow-up): restart checkpoints lose work over undeclared files"
+  plan_refs: [W1-T7697, W1-T5534, W1-T7959, W1-T401, W1-T502]
+  files: [src/run-task.ts, test/a-restart-checkpoint-keeps-undeclared-work.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED in the core daemon's live ledger (/mnt/rmd/state2/state/ledger.ndjson on the host, read 2026-10-11).
+    Two `verdict` rows have verdict no_pr and reason restart_checkpoint_failed:
+      - 2026-10-10T22:26:25Z, W1-T7808, waiting_on worker, branch run-W1-T7808-1791670926020:
+        "restart checkpoint refused: test/clock-sweep.test.ts"
+      - 2026-10-11T04:51:27Z, W1-T7837, waiting_on worker, branch run-W1-T7837-1791691978673:
+        "restart checkpoint refused: src/lib/ledger.ts, test/classify.test.ts,
+        test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts"
+    The window holds 8 such rows. Five were the checkpoint push refused by the harness's pre-push census gate.
+    Merged #10862 (c542f1ba7) fixed that class by skipping the PR gate on a checkpoint push (`prGates: false`).
+    It did not touch the undeclared refusal.
+    READ on origin/main c542f1ba7 (which includes #10862), src/run-task.ts:
+      - `yieldAtWorkerBoundary` (W1-T7697) calls `commitWorkerEdits(worktreePath, task.files ?? [], ...)`. Then
+        `if (!checkpoint.committed || checkpoint.undeclared.length > 0) throw new Error(\`restart checkpoint
+        refused: ...\`)`. The throw lands BEFORE `gitPushRunBranchAsync`. So even the declared paths
+        commitWorkerEdits did commit are never pushed. The run logs no_pr, and the paid work stays only in a
+        worktree that a released lane does not own.
+      - The quiet-worker `endRound` checkpoint (the same W1-T7697 path, "wip: yield at quiet worker") applies the
+        same `undeclared.length > 0` refusal and returns `checkpoint refused: ...`.
+      - commitWorkerEdits stages only declared paths, plus the regenerable, proof-matched-test and
+        additive-registration exceptions. Every other path is returned in `undeclared` and left uncommitted.
+    THE ORDINARY PUSH PATH ALREADY DECIDED THIS THE OTHER WAY. Before a PR push, the run diffs against the merge
+    base and logs `scope_guard.overrun` with reason "pushed and flagged rather than refused: the branch is the only
+    evidence ...". The PR-side scope advisory (W1-T401) and the scope-amendment path (W1-T5534, and W1-T7959 for
+    linting the amendment) then judge it. A checkpoint is strictly earlier than that push, so it must not be
+    stricter than it.
+    #10862 (merged) also edits src/run-task.ts: it restores a checkpoint by merge (`restoreBoundaryCheckpoint`) and
+    skips the PR gate on the checkpoint push. This task builds on it. It touches neither restore nor the push gate.
+  design: |
+    1. A CHECKPOINT KEEPS EVERYTHING. Both W1-T7697 checkpoint sites (`yieldAtWorkerBoundary`, and the quiet-worker
+       `endRound`) commit every worker change, declared or not. Do this through an option on commitWorkerEdits
+       (e.g. `{ checkpoint: true }`) that stages the undeclared paths as well, after its existing
+       conflict-marker and unresolved-merge refusals. Those refusals still decline by name, because a conflicted
+       file cannot be committed. A checkpoint never drops a path silently.
+    2. THE UNDECLARED PATHS ARE NAMED. The handoff ledger rows (`run.freshness_handoff`, and the `verdict` row
+       with reason freshness_yield) carry `undeclared_paths` with the exact list. On the quiet-worker path, the
+       QuietRoundEndedError receipt carries the same list. The checkpoint commit message's [remudero-context]
+       block names them too, so the resumed worker sees what it wrote outside scope.
+    3. SCOPE STAYS WHERE IT IS ENFORCED. A resumed run reaches the ordinary push path, where `scope_guard.overrun`,
+       the review advisory and the scope-amendment route judge the out-of-scope paths exactly as for an
+       uninterrupted run. Add no new scope gate at the checkpoint. Do not weaken the PR-time scope checks.
+    4. The only checkpoint refusals left are the ones git itself forces (conflict markers, unresolved merge
+       paths) and a failed push. Each still logs no_pr restart_checkpoint_failed with its reason, as today.
+    Tests go in a new file, test/a-restart-checkpoint-keeps-undeclared-work.test.ts, with `test(` titles verbatim
+    as in the proofs below. Use a real gitRepo() fixture with a bare origin. A worker change holding one declared
+    and one undeclared file must reach the origin branch in one checkpoint commit.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-restart-checkpoint-keeps-undeclared-work.test.ts"
+    - claim: "a yield checkpoint with an undeclared file commits and pushes both files and hands off"
+      proof: 'grep: test("W1-T8008: a yield checkpoint keeps and pushes undeclared work" in test/a-restart-checkpoint-keeps-undeclared-work.test.ts'
+    - claim: "the handoff rows name the undeclared paths"
+      proof: 'grep: test("W1-T8008: the handoff names the undeclared paths" in test/a-restart-checkpoint-keeps-undeclared-work.test.ts'
+    - claim: "the quiet-worker checkpoint keeps undeclared work the same way"
+      proof: 'grep: test("W1-T8008: a quiet-worker checkpoint keeps undeclared work" in test/a-restart-checkpoint-keeps-undeclared-work.test.ts'
+    - claim: "a conflicted file still refuses the checkpoint by name"
+      proof: 'grep: test("W1-T8008: a conflicted file still refuses the checkpoint" in test/a-restart-checkpoint-keeps-undeclared-work.test.ts'
+  falsifier: |
+    Leave the `undeclared.length > 0` throw in yieldAtWorkerBoundary. The fixture's origin branch then never
+    receives the checkpoint, and the run returns no_pr, as for W1-T7808 and W1-T7837, so the first test fails.
+    Commit the undeclared paths without recording them, and the second test finds no `undeclared_paths`. Fix only
+    one of the two sites, and the third test fails. Stage conflicted files too, and the fourth test sees a
+    committed conflict marker.

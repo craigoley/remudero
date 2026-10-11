@@ -16,7 +16,7 @@ raw: "Cross-repo planning blocker: running rmd plan mode create from
   successor."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/10727
 summary:
