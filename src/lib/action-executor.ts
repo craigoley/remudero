@@ -28,11 +28,16 @@ import {
   type AutomationPreflightResult,
   type DelegationRiskTier,
 } from "./automation-action.js";
-import type { Clock } from "./clock.js";
+import { systemClock, type Clock } from "./clock.js";
+import { createHash, randomUUID } from "node:crypto";
+import { constants } from "node:fs";
+import { open, mkdir, lstat, link, unlink } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
 import { isPrActionSwitchedOff, isSafeTaskId, isStopped, type PrActionName } from "./fleet-control.js";
 import { armKick, armPause, armPrAction, armResume, prActionSwitchedOffDetail, type PanelActionDeps, type PanelLedgerRow } from "./panel-actions.js";
 import { writeTierSatisfies, type WriteTier } from "./service.js";
-import type { AdmissionSettings, AdmissionTarget, AdmissionRead, AdmissionRecord } from "./contributor-admission.js";
+import { assessContribution, classifyContribution, readAdmissionRestAsync, type AdmissionSettings,
+  type AdmissionTarget, type AdmissionRead, type AdmissionRecord, type AdmissionAssessment } from "./contributor-admission.js";
 
 export const ACTION_CATALOGUE_VERSION = "action-catalogue-v1" as const;
 /** Every capability under this prefix is the executor's: an uncatalogued one is `no-executor`, never self-reported. */
@@ -258,6 +263,8 @@ export interface AdmissionDispositionReceipt {
   sequence: number;
   previous: string;
   firstReason: string;
+  reason: string;
+  stage: "identity" | "close" | "escalation" | "terminal";
   status: AdmissionDispositionStatus;
   repositoryId: number;
   prNumber: number;
@@ -296,9 +303,254 @@ export interface AdmissionDispositionResult {
 }
 
 export async function executeAdmissionDisposition(
-  _request: AdmissionDispositionRequest, _store: AdmissionDispositionStore, _read: AdmissionRead,
-  _record: AdmissionRecord, _clock: Pick<Clock, "now">, _simulation?: AdmissionDispositionSimulation,
+  request: AdmissionDispositionRequest, store: AdmissionDispositionStore, sourceRead: AdmissionRead,
+  record: AdmissionRecord, clock: Pick<Clock, "now">, simulation?: AdmissionDispositionSimulation,
 ): Promise<AdmissionDispositionResult> {
-  return { status: "not-enabled", reason: "not-enabled", permission: "not-granted", laneReleased: true,
-    requiredChecks: "ordinary-current-head-checks-required" };
+  const { settings, target } = request;
+  const result = (status: AdmissionDispositionStatus, reason: string,
+    receipt?: AdmissionDispositionReceipt): AdmissionDispositionResult => {
+    const value: AdmissionDispositionResult = { status, reason, permission: "not-granted", laneReleased: status !== "pending",
+      requiredChecks: "ordinary-current-head-checks-required", ...(receipt ? { receipt } : {}) };
+    try { record("contributor_disposition.shadow", { status, reason, permission: value.permission,
+      mode: "shadow", evidence_domain: store.domain, admission_lane_released: value.laneReleased,
+      repository_id: settings?.repositoryId, pr_number: target.prNumber, head_sha: receipt?.headSha,
+      cause: receipt?.cause, sequence: receipt?.sequence, first_reason: receipt?.firstReason }); }
+    catch { /* A lost diagnostic neither grants permission nor changes the ordinary PR flow. */ }
+    return value;
+  };
+  if (!settings || settings.mode !== "shadow" || settings.disposition !== "shadow") {
+    return { status: "not-enabled", reason: "not-enabled", permission: "not-granted", laneReleased: true,
+      requiredChecks: "ordinary-current-head-checks-required" };
+  }
+  if (!positiveId(settings.repositoryId) || !positiveId(target.prNumber)
+    || !/^[A-Za-z0-9_.-]+$/.test(target.owner) || !/^[A-Za-z0-9_.-]+$/.test(target.repo)
+    || (target.headSha !== undefined && !/^[a-f0-9]{40}$/i.test(target.headSha))) return result("owner-action", "invalid-target");
+  if (store.domain !== "shadow" && store.domain !== "rehearsal"
+    || (store.domain === "rehearsal") !== (simulation?.domain === "rehearsal")) return result("owner-action", "domain-mismatch");
+  const cause = dispositionHash([store.domain, settings.repositoryId, target.owner, target.repo, target.prNumber]);
+  let history: readonly AdmissionDispositionReceipt[];
+  try { history = await store.load(cause); validateDispositionHistory(history, store.domain, cause); }
+  catch { /* Missing/corrupt/incomplete history is unknown, never a fresh effect budget. */
+    return result("owner-action", "journal-unreadable"); }
+  let last = history.at(-1);
+  const started = clock.now();
+  const policy = dispositionHash(settings);
+  let reads = 0;
+  const read: AdmissionRead = async path => {
+    if (++reads > 32 || !withinDispositionTime(started, clock.now(), settings.policy.maxEvidenceAgeMs)) {
+      throw new Error("disposition-read-bound");
+    }
+    return sourceRead(path);
+  };
+  const commit = async (status: AdmissionDispositionStatus, reason: string, stage: AdmissionDispositionReceipt["stage"],
+    counts: Partial<Pick<AdmissionDispositionReceipt, "identityAttempts" | "reconciliationAttempts" | "closeAttempts" | "escalationAttempts">> = {},
+    itemId?: number): Promise<AdmissionDispositionReceipt> => {
+    const row: AdmissionDispositionReceipt = { version: "admission-disposition-v1", domain: store.domain, cause,
+      sequence: history.length, previous: last ? dispositionHash(last) : "root", firstReason: last?.firstReason ?? "selected-origin-reconciliation",
+      status, reason, stage, repositoryId: settings.repositoryId, prNumber: target.prNumber,
+      ...(itemId === undefined ? last?.itemId === undefined ? {} : { itemId: last.itemId } : { itemId }),
+      ...(target.headSha === undefined ? {} : { headSha: target.headSha }), policy, atMs: clock.now(),
+      identityAttempts: last?.identityAttempts ?? 0, reconciliationAttempts: last?.reconciliationAttempts ?? 0,
+      closeAttempts: last?.closeAttempts ?? 0, escalationAttempts: last?.escalationAttempts ?? 0, ...counts };
+    validateDispositionHistory([...history, row], store.domain, cause);
+    await store.append(row);
+    history = [...history, row]; last = row;
+    return row;
+  };
+  const terminal = async (reason: string) => result("owner-action", reason, await commit("owner-action", reason, "terminal"));
+  try {
+    if (last?.status === "simulated-closed" || last?.status === "noop") return result(last.status, last.reason, last);
+    if (request.ownerInstructionId !== undefined) {
+      if (!positiveId(request.ownerInstructionId)) return result("owner-action", "invalid-owner-instruction", last);
+      const preflight = await dispositionPreflight(settings, target, read, clock);
+      if (!preflight.assessment || preflight.status === "noop") return result("owner-action", preflight.reason, last);
+      const response = await read(`repos/${target.owner}/${target.repo}/issues/comments/${request.ownerInstructionId}`);
+      const instruction = dispositionObject(response.body), actor = dispositionObject(instruction.user);
+      const revised = typeof instruction.updated_at === "string" ? Date.parse(instruction.updated_at) : NaN;
+      if (response.status !== 200 || instruction.id !== request.ownerInstructionId || actor.type !== "User"
+        || !settings.policy.ownerIds.includes(actor.id as number)
+        || instruction.issue_url !== `https://api.github.com/repos/${target.owner}/${target.repo}/issues/${target.prNumber}`
+        || !Number.isFinite(revised) || revised < (last?.atMs ?? started) || revised > clock.now()
+        || clock.now() - revised > settings.policy.maxEvidenceAgeMs
+        || instruction.body !== `Remudero-Admission: adopt ${settings.repositoryId}/${target.prNumber}@${preflight.assessment.subject.headSha}`) {
+        return result("owner-action", "owner-instruction-unverified", last);
+      }
+      const final = await dispositionPreflight(settings, target, read, clock);
+      if (!final.assessment || final.binding !== preflight.binding || dispositionHash(settings) !== policy) {
+        return result("owner-action", "owner-target-changed", last);
+      }
+      return result("adopted", "owner-current-head-adoption", await commit("adopted", "owner-current-head-adoption", "terminal", {}, final.itemId));
+    }
+    if (last?.status === "owner-action") return result("owner-action", last.reason, last);
+    const escalateSimulation = async (): Promise<AdmissionDispositionResult> => {
+      const intent = await commit("pending", "simulated-escalation-intent", "escalation", { escalationAttempts: 1 });
+      try { await simulation!.simulateEscalation(intent); }
+      catch { /* Lost acknowledgement is pending reconciliation; never blindly repeat the escalation. */
+        return result("pending", "simulated-escalation-ambiguous", intent); }
+      return result("simulated-closed", "simulated-close-and-escalation-confirmed",
+        await commit("simulated-closed", "simulated-close-and-escalation-confirmed", "terminal"));
+    };
+    if (last?.closeAttempts === 1) {
+      if (!simulation) return result("owner-action", "domain-mismatch", last);
+      if (last.reconciliationAttempts >= 2) return terminal("ambiguous-effect-exhausted");
+      const pending = await commit("pending", "simulated-effect-reconciliation", last.stage,
+        { reconciliationAttempts: last.reconciliationAttempts + 1 });
+      let evidence: { closed: boolean; escalated: boolean };
+      try { evidence = await simulation.reconcile(pending); }
+      catch { /* Unreadable simulated effect evidence remains unknown within the same cumulative budget. */
+        return pending.reconciliationAttempts >= 2 ? terminal("ambiguous-effect-exhausted") : result("pending", "simulated-reconciliation-unreadable", pending); }
+      if (evidence.closed !== true || pending.escalationAttempts === 1 && evidence.escalated !== true) {
+        return pending.reconciliationAttempts >= 2 ? terminal("ambiguous-effect-exhausted") : result("pending", "simulated-effect-unresolved", pending);
+      }
+      if (pending.escalationAttempts === 0) return escalateSimulation();
+      return result("simulated-closed", "simulated-close-and-escalation-confirmed",
+        await commit("simulated-closed", "simulated-close-and-escalation-confirmed", "terminal"));
+    }
+    if ((last?.identityAttempts ?? 0) >= 3) return terminal("identity-recovery-exhausted");
+    await commit("pending", "identity-assessment-intent", "identity", { identityAttempts: (last?.identityAttempts ?? 0) + 1 });
+    const preflight = await dispositionPreflight(settings, target, read, clock);
+    if (preflight.status === "pending") {
+      return last!.identityAttempts >= 3 ? terminal(preflight.reason)
+        : result("pending", preflight.reason, await commit("pending", preflight.reason, "identity"));
+    }
+    if (preflight.status === "trusted" || preflight.status === "noop") {
+      return result(preflight.status, preflight.reason, await commit(preflight.status, preflight.reason, "terminal", {}, preflight.itemId));
+    }
+    if (!simulation) return result("would-close", preflight.reason, await commit("would-close", preflight.reason, "terminal", {}, preflight.itemId));
+    const intent = await commit("pending", "simulated-close-intent", "close", { closeAttempts: 1 }, preflight.itemId);
+    const current = await dispositionPreflight(settings, target, read, clock);
+    if (current.status !== "would-close" || current.binding !== preflight.binding || dispositionHash(settings) !== policy) {
+      return terminal("close-preflight-changed");
+    }
+    try { await simulation.simulateClose(intent); }
+    catch { /* A lost close response is NOT proof that the simulated effect never ran. */
+      return result("pending", "simulated-close-ambiguous", intent); }
+    return escalateSimulation();
+  } catch {
+    // Persistence or preflight failure releases only this observer lane, without granting permission or claiming a durable terminal.
+    return result("owner-action", "disposition-unavailable", last);
+  }
+}
+
+const positiveId = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) > 0;
+const dispositionHash = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const dispositionObject = (value: unknown): Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+const withinDispositionTime = (started: number, now: number, age: number): boolean =>
+  Number.isFinite(started) && now >= started && now - started <= Math.min(age, 15_000);
+
+async function dispositionPreflight(settings: AdmissionSettings, target: AdmissionTarget, read: AdmissionRead,
+  clock: Pick<Clock, "now">): Promise<{ status: "trusted" | "pending" | "noop" | "would-close"; reason: string;
+    assessment?: AdmissionAssessment; binding?: string; itemId?: number }> {
+  const unknown = (reason: string) => ({ status: "pending" as const, reason });
+  const slug = `${target.owner}/${target.repo}`, repoPath = `repos/${slug}`, policy = dispositionHash(settings);
+  try {
+    const repository = await read(repoPath), repo = dispositionObject(repository.body);
+    if (repository.status !== 200 || repo.id !== settings.repositoryId || repo.full_name !== slug
+      || repo.private !== false || repo.archived === true) return unknown("public-target-unverified");
+    const response = await read(`${repoPath}/pulls/${target.prNumber}`), first = dispositionObject(response.body);
+    if (response.status !== 200 || !positiveId(first.id) || first.number !== target.prNumber) return unknown("ordinary-pr-unverified");
+    const fingerprint = (pull: Record<string, unknown>) => {
+      const head = dispositionObject(pull.head), base = dispositionObject(pull.base);
+      return dispositionHash([pull.id, pull.number, pull.state, pull.merged, pull.merged_at, pull.user, head, base]);
+    };
+    const head = dispositionObject(first.head), base = dispositionObject(first.base), headRepo = dispositionObject(head.repo), baseRepo = dispositionObject(base.repo);
+    if (baseRepo.id !== settings.repositoryId || baseRepo.full_name !== slug || baseRepo.private !== false
+      || !positiveId(headRepo.id) || headRepo.private !== false || typeof headRepo.full_name !== "string"
+      || !/^[a-f0-9]{40}$/i.test(String(head.sha)) || typeof head.ref !== "string" || typeof base.ref !== "string") {
+      return unknown("ordinary-public-context-unverified");
+    }
+    if (first.state === "closed" || first.merged === true || typeof first.merged_at === "string") {
+      return { status: "noop", reason: "already-terminal", itemId: first.id };
+    }
+    if (first.state !== "open" || first.merged !== false || first.merged_at !== null) return unknown("ordinary-pr-state-unverified");
+    if (target.headSha !== undefined && head.sha !== target.headSha) return unknown("head-changed");
+    const assessment = await assessContribution(settings, { ...target, headSha: String(head.sha) }, "disposition", read, clock);
+    if (!assessment?.currentPull) return unknown(assessment?.decision.reason ?? "origin-unreadable");
+    if (fingerprint(assessment.currentPull) !== fingerprint(first)) return unknown("ordinary-pr-context-changed");
+    const finalRepo = await read(repoPath), currentRepo = dispositionObject(finalRepo.body);
+    if (finalRepo.status !== 200 || currentRepo.id !== repo.id || currentRepo.full_name !== slug
+      || currentRepo.private !== false || currentRepo.archived === true || dispositionHash(settings) !== policy) return unknown("target-or-policy-changed");
+    const decision = classifyContribution(assessment.subject, "disposition", settings.policy, assessment.memberships, clock.now());
+    if (decision.outcome === "unknown") return unknown(decision.reason);
+    return { status: decision.outcome === "trusted" ? "trusted" : "would-close", reason: decision.reason,
+      assessment, binding: fingerprint(assessment.currentPull), itemId: first.id };
+  } catch {
+    // HTTP, identity and freshness failures are unknown; none is confirmed external on timeout.
+    return unknown("origin-unreadable");
+  }
+}
+
+function validateDispositionHistory(history: readonly AdmissionDispositionReceipt[], domain: DispositionDomain, cause: string): void {
+  if (history.length > 16) throw new Error("disposition-history-bound");
+  let prior: AdmissionDispositionReceipt | undefined;
+  for (const row of history) {
+    if (row.version !== "admission-disposition-v1" || row.domain !== domain || row.cause !== cause
+      || row.sequence !== (prior ? prior.sequence + 1 : 0) || row.previous !== (prior ? dispositionHash(prior) : "root")
+      || !positiveId(row.repositoryId) || !positiveId(row.prNumber) || !Number.isFinite(row.atMs)
+      || !/^[a-f0-9]{64}$/.test(row.policy) || !/^[a-z-]{1,80}$/.test(row.firstReason) || !/^[a-z-]{1,80}$/.test(row.reason)
+      || !["pending", "trusted", "would-close", "owner-action", "noop", "adopted", "simulated-closed"].includes(row.status)
+      || !["identity", "close", "escalation", "terminal"].includes(row.stage)
+      || (row.status === "simulated-closed" && domain !== "rehearsal")) throw new Error("disposition-history-invalid");
+    for (const [field, ceiling] of [["identityAttempts", 3], ["reconciliationAttempts", 2], ["closeAttempts", 1], ["escalationAttempts", 1]] as const) {
+      if (!Number.isInteger(row[field]) || row[field] < (prior?.[field] ?? 0) || row[field] > ceiling) throw new Error("disposition-budget-invalid");
+    }
+    if (prior && (row.firstReason !== prior.firstReason || row.repositoryId !== prior.repositoryId
+      || row.prNumber !== prior.prNumber || prior.itemId !== undefined && row.itemId !== prior.itemId)) throw new Error("disposition-cause-changed");
+    prior = row;
+  }
+}
+
+export function admissionDispositionStore(root: string, domain: DispositionDomain = "shadow"): AdmissionDispositionStore {
+  const directory = join(root, "state", "contributor-disposition", domain);
+  const paths = async (cause: string): Promise<string> => {
+    if (!isAbsolute(root) || !/^[a-f0-9]{64}$/.test(cause)) throw new Error("disposition-path-invalid");
+    for (const path of [root, join(root, "state"), join(root, "state", "contributor-disposition"), directory, join(directory, cause)]) {
+      await mkdir(path, { recursive: true, mode: 0o700 });
+      const stat = await lstat(path);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("disposition-path-untrusted");
+    }
+    return join(directory, cause);
+  };
+  const readFile = async (path: string): Promise<string | undefined> => {
+    let handle;
+    try { handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile() || stat.size > 4096) throw new Error("disposition-record-unreadable");
+      return await handle.readFile("utf8");
+    } finally { await handle.close(); }
+  };
+  return { domain,
+    load: async cause => {
+      const path = await paths(cause), rows: AdmissionDispositionReceipt[] = [];
+      let missing = false;
+      for (let sequence = 0; sequence <= 16; sequence++) {
+        const text = await readFile(join(path, `${sequence}.json`));
+        if (text === undefined) { missing = true; continue; }
+        if (missing || sequence === 16) throw new Error("disposition-record-gap-or-bound");
+        rows.push(JSON.parse(text) as AdmissionDispositionReceipt);
+      }
+      validateDispositionHistory(rows, domain, cause);
+      return rows;
+    },
+    append: async receipt => {
+      const path = await paths(receipt.cause), temporary = join(path, `.pending-${randomUUID()}`);
+      const handle = await open(temporary, "wx", 0o600);
+      try { await handle.writeFile(JSON.stringify(receipt)); await handle.sync(); }
+      finally { await handle.close(); }
+      try {
+        await link(temporary, join(path, `${receipt.sequence}.json`));
+        const dir = await open(path, "r");
+        try { await dir.sync(); } finally { await dir.close(); }
+      } finally { await unlink(temporary); }
+    } };
+}
+
+export async function observeAdmissionDisposition(settings: AdmissionSettings | undefined, target: AdmissionTarget,
+  root: string, record: AdmissionRecord, ownerInstructionId?: number,
+  read: AdmissionRead = readAdmissionRestAsync, clock: Pick<Clock, "now"> = systemClock): Promise<AdmissionDispositionResult | undefined> {
+  if (!settings || settings.disposition !== "shadow") return undefined;
+  return executeAdmissionDisposition({ settings, target, ownerInstructionId }, admissionDispositionStore(root), read, record, clock);
 }
