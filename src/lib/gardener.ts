@@ -558,7 +558,7 @@ export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W ex
   /** Every action any class could take now. Called after the class draws, with the same rng. */
   candidates: (inventory: I, rng: () => number) => A[];
   scorecard: (inventory: I, plan: GardenPlan<C, A>) => Record<string, unknown>;
-  /** Make the plan's changes in the workspace; return what to land, or undefined if nothing changed. */
+  /** Reserve the plan's IDs before apply; actions that file nothing reserve nothing. */
   prepare?(workspace: W, plan: GardenPlan<C, A>, async: boolean): readonly string[] | Promise<readonly string[]>;
   apply: (workspace: W, plan: GardenPlan<C, A>, scorecard: Record<string, unknown>, heldIds?: readonly string[]) => { paths: string[]; title: string; body: string } | undefined;
   /** A garden that files plan shards names lint-plan's verdict on its landing here, normally

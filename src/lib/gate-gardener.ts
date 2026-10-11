@@ -235,17 +235,21 @@ function prepareDefuseTaskIds(ws: GardenCheckout, count: number, deps: GardenerD
   }), async);
 }
 
+function assertDefuseAdmission(action: GateGardenAction, deps: GardenerDeps, sources: GateDefuseSources): void {
+  const draft = renderDefuseShard(action, "NEW-1");
+  if (draft.refused) throw new Error(`gate gardener: defuse shard refused (${draft.refused})`);
+  const plan = loadPlanFromYaml(draft.text, "defuse-admission");
+  const reasons = (sources.admissionViolations ?? machineFilingAdmissionViolations)(plan.tasks[0]!, {
+    plan, releasedIds: new Set(), pathExists: (path) => existsSync(join(deps.repoRoot, path)),
+  });
+  if (reasons.length) throw new Error(`gate gardener: defuse shard refused (machine-filing-admission: ${reasons.join("; ")})`);
+}
+
 function applyDefuseActions(ws: GardenCheckout, actions: GateGardenAction[], deps: GardenerDeps, sources: GateDefuseSources, heldIds?: readonly string[]) {
   if (!ws.branch) throw new Error("gate gardener: filing workspace has no branch for task-id reservation");
   const paths: string[] = [];
   for (const [index, action] of actions.entries()) {
-    const draft = renderDefuseShard(action, "NEW-1");
-    if (draft.refused) throw new Error(`gate gardener: defuse shard refused (${draft.refused})`);
-    const plan = loadPlanFromYaml(draft.text, "defuse-admission");
-    const reasons = (sources.admissionViolations ?? machineFilingAdmissionViolations)(plan.tasks[0]!, {
-      plan, releasedIds: new Set(), pathExists: (path) => existsSync(join(deps.repoRoot, path)),
-    });
-    if (reasons.length) throw new Error(`gate gardener: defuse shard refused (machine-filing-admission: ${reasons.join("; ")})`);
+    assertDefuseAdmission(action, deps, sources);
     const taskId = heldIds ? heldIds[index] : (prepareDefuseTaskIds(ws, 1, deps, sources) as string[])[0];
     if (!taskId) throw new Error("gate gardener: task-id reservation returned no held id");
     const rendered = renderDefuseShard(action, taskId);
@@ -435,7 +439,11 @@ export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes, sources: 
     metric: (inv) => inv.tally,
     candidates: (inv) => inv.candidates,
     scorecard: (inv, plan) => ({ candidates: inv.candidates.length, tally: inv.tally, proposed: plan.actions.length }),
-    prepare: (ws, plan, async) => prepareDefuseTaskIds(ws, plan.acting[0] === "defuse" ? plan.actions.length : 0, deps, sources, async),
+    prepare: (ws, plan, async) => {
+      const actions = plan.acting[0] === "defuse" ? plan.actions : [];
+      for (const action of actions) assertDefuseAdmission(action, deps, sources);
+      return prepareDefuseTaskIds(ws, actions.length, deps, sources, async);
+    },
     apply: (ws, plan, _scorecard, heldIds) => {
       if (plan.acting[0] === "defuse") return applyDefuseActions(ws, plan.actions, deps, sources, heldIds);
       const heading = `## Pass ${clock.iso()}`;

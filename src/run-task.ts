@@ -26004,11 +26004,13 @@ const gardenMintBudgets = new Map<string, GardenMintBudget>();
 
 export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields: Record<string, unknown>) => void,
   executeAsync: (file: string, args: string[], options: { maxBuffer: number; timeout: number; killSignal: "SIGKILL"; signal: AbortSignal }) => Promise<{ stdout: string; stderr?: string }> = execFilePromise,
-  opts: { budget?: GardenMintBudget; clock?: Pick<Clock, "now">; pollIntervalMs?: () => number } = {}):
+  opts: { budget?: GardenMintBudget; clock?: Pick<Clock, "now">; pollIntervalMs?: () => number;
+    loadPolicy?: () => { values: Pick<Policy["values"], "pollIntervalMs"> } } = {}):
   ((filingBranch?: string) => string) & { async: (filingBranch: string) => Promise<string> } {
   let budget = opts.budget ?? gardenMintBudgets.get(root);
   if (!budget) {
-    budget = new GardenMintBudget(opts.pollIntervalMs ?? (() => loadDefaultPolicy().values.pollIntervalMs));
+    const readPolicy = opts.loadPolicy ?? loadDefaultPolicy;
+    budget = new GardenMintBudget(opts.pollIntervalMs ?? (() => readPolicy().values.pollIntervalMs));
     gardenMintBudgets.set(root, budget);
   }
   const mintBudget = budget;
@@ -26081,6 +26083,7 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
           if ("say" in row) console.log(row.say);
           else log?.(row.step, row.fields);
         }
+        if (now() - started >= bound) throw new GardenMintTimedOutError(now() - started, bound);
         if (result.timedOut) throw new GardenMintTimedOutError(now() - started, bound);
         if (result.error !== undefined) throw new Error(result.error);
         mintBudget.observe(now() - started);
@@ -37732,7 +37735,9 @@ export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => 
 export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBuildContext, opts: { hourly?: boolean } = {}): RegisteredGardenPass | Promise<RegisteredGardenPass> {
   const { config, repoRoot, owner, repo, log, raiseDuplicate } = ctx;
   const stateDir = join(config.root, "state");
-  const gardenMinter = () => ciLearningTaskIdMinter(repoRoot, log, undefined, { pollIntervalMs: () => ctx.pollIntervalMs ?? loadDefaultPolicy().values.pollIntervalMs });
+  const gardenMinter = () => ciLearningTaskIdMinter(repoRoot, log, undefined, {
+    pollIntervalMs: ctx.pollIntervalMs === undefined ? undefined : () => ctx.pollIntervalMs!,
+  });
   const deps = (garden: Parameters<typeof gardenCheckout>[0]["name"], escalate?: (e: Escalation) => string): GardenerDeps => ({
     stateDir,
     repoRoot,

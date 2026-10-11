@@ -189,6 +189,54 @@ test("W1-T7742: the mint bound scales with observed mint durations and starts fr
   assert.deepEqual(observed, [200, 60], "real minter options consume the learned bound");
 });
 
+test("W1-T7742: a late successful mint files nothing and preserves its held reservation", async (t) => {
+  for (const elapsed of [25, 26]) {
+    const f = fixture(t);
+    const reservation = join(f.root, "held-reservation.json");
+    const budget = new GardenMintBudget(() => 25);
+    let now = 0;
+    const mint = ciLearningTaskIdMinter(f.root, undefined, async () => {
+      writeFileSync(reservation, JSON.stringify({ id: "W1-T9001", branch: f.ws.branch }));
+      now = elapsed;
+      return { stdout: JSON.stringify({ id: "W1-T9001", rows: [] }) };
+    }, { budget, clock: { now: () => now } });
+    const s = spec(mint);
+    const result = await runGardenAsync(s, f.deps);
+    assert.equal(result.prUrl, undefined);
+    assert.equal(existsSync(join(f.root, "change.txt")), false);
+    assert.equal(f.landings.length, 0);
+    assert.equal(f.disposed(), 1);
+    assert.deepEqual(JSON.parse(readFileSync(reservation, "utf8")), { id: "W1-T9001", branch: f.ws.branch });
+    assert.deepEqual(f.rows.find(row => row.step === "garden.mint_timed_out")?.fields,
+      { spec: s.name, elapsed_ms: elapsed, bound_ms: 25 });
+    assert.equal(budget.boundMs(), 25, "a late success cannot train the next mint's bound");
+    assert.equal(existsSync(join(f.deps.stateDir, `${s.name}-gardener.json`)), false);
+  }
+});
+
+test("W1-T7742: the initial mint deadline reads injected policy unless the daemon supplies its cadence", async (t) => {
+  const f = fixture(t);
+  const bounds: number[] = [];
+  let pollIntervalMs = 1200;
+  const execute = async (_file: string, _args: string[], opts: { timeout: number }) => {
+    bounds.push(opts.timeout);
+    return { stdout: JSON.stringify({ id: "W1-T9001", rows: [] }) };
+  };
+  const mint = ciLearningTaskIdMinter(f.root, undefined, execute, {
+    clock: fixedClock(0), loadPolicy: () => ({ values: { pollIntervalMs } }),
+  });
+  await mint.async(f.ws.branch!);
+  pollIntervalMs = 2400;
+  await mint.async(f.ws.branch!);
+  const override = fixture(t);
+  const daemonMint = ciLearningTaskIdMinter(override.root, undefined, execute, {
+    clock: fixedClock(0), pollIntervalMs: () => 1800,
+    loadPolicy: () => assert.fail("an explicit daemon cadence must bypass policy reads"),
+  });
+  await daemonMint.async(override.ws.branch!);
+  assert.deepEqual(bounds, [1200, 2400, 1800]);
+});
+
 test("W1-T7742: an expired reservation child is killed while the loop stays responsive", async (t) => {
   const f = fixture(t);
   const marker = join(f.root, "started");
@@ -264,4 +312,31 @@ test("W1-T7742: partial scout preparation writes no shards and releases the work
   assert.equal(f.landings.length, 0);
   assert.deepEqual(await prepareGardenTaskIds({ branch: undefined }, 0, mint, true), []);
   assert.throws(() => prepareGardenTaskIds({}, 1, mint), /no branch/);
+});
+
+test("W1-T7742: a refused defuse batch reserves no task ids", async (t) => {
+  const f = fixture(t);
+  const { mint, branches } = asyncOnly(["W1-T9001", "W1-T9002"]);
+  const actions = ["test/fixture.test.ts", "test/other.test.ts"].map(file => ({
+    class: "defuse" as const, target: `expiring-fixture:${file}`, reason: "expires soon", file,
+    edit: { kind: "defuse" as const, leadDays: 21, urgent: true, finding: {
+      file, line: 1, stamp: new Date(NOW).toISOString(), field: "ts", threshold: "30 days",
+      expiresAt: NOW + HOUR, daysLeft: 1,
+    } },
+  }));
+  const gate = gateGardenSpec(f.deps, await loadGateProbes(process.cwd()), {
+    mintTaskId: mint, admissionViolations: task => task.files?.includes("test/other.test.ts") ? ["fixture refused"] : [],
+  });
+  gate.classes = ["defuse"];
+  gate.cheapFingerprint = () => "cheap";
+  gate.inventory = () => ({ candidates: actions, tally: { trials: 0, successes: 0 } });
+  gate.fingerprint = () => "full";
+  gate.candidates = () => actions;
+  gate.scorecard = () => ({});
+  await runGardenAsync(gate, f.deps);
+  assert.deepEqual(branches, [], "admission must finish before the first reservation");
+  assert.equal(existsSync(join(f.root, "plan", "tasks.d")), false);
+  assert.equal(f.landings.length, 0);
+  assert.equal(f.disposed(), 1);
+  assert.match(String(f.rows.find(row => row.step === "gate.garden_filing_failed")?.fields?.reason), /fixture refused/);
 });
