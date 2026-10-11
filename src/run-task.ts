@@ -1044,7 +1044,7 @@ import {
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
 import { clockFromDateFn, clockFromMillisFn, fixedClock, systemClock, type Clock } from "./lib/clock.js";
-import { feedbackLineagePayload, observeFeedbackInputs, type AdmissionObserver } from "./lib/contributor-admission.js";
+import { feedbackLineagePayload, observeFeedbackInputs, type AdmissionObserver, type FeedbackAdmissionContext } from "./lib/contributor-admission.js";
 import { envelope as feedbackLineageEnvelope } from "./lib/untrusted-envelope.js";
 import { observeContributorAdmission } from "./lib/arm-auto-merge.js";
 import {
@@ -32572,6 +32572,7 @@ export function buildIntakeRungsDaemonHooks(deps: {
           ledgerPath,
           runId,
           dryRun: false,
+          admission: feedbackIntakeAdmission(config, ledgerPath, runId),
         });
         return {
           rung,
@@ -53728,6 +53729,11 @@ export async function alertFixCommand(rest: string[], deps: AlertFixCommandDeps 
   return 0;
 }
 
+export function feedbackIntakeAdmission(config: Pick<Config, "contributorAdmission">, ledgerPath: string, runId: string): FeedbackAdmissionContext | undefined {
+  return config.contributorAdmission === undefined ? undefined : { ...config.contributorAdmission,
+    record: (step, fields) => appendLedger(ledgerPath, { run_id: runId, task_id: "ISSUES", step, ...fields }) };
+}
+
 /**
  * `rmd issues [--dry-run]` — issues intake (W1-T57, MASTER-PLAN §5D lane 3): poll open issues
  * for every repo in `.remudero/managed-repos.json` via `gh api` (lib/issues-intake.ts), create a
@@ -53763,8 +53769,7 @@ async function issuesCommand(rest: string[]): Promise<number> {
     ledgerPath,
     runId,
     dryRun,
-    admission: config.contributorAdmission === undefined ? undefined : { ...config.contributorAdmission,
-      record: (step, fields) => appendLedger(ledgerPath, { run_id: runId, task_id: "ISSUES", step, ...fields }) },
+    admission: feedbackIntakeAdmission(config, ledgerPath, runId),
   });
   console.log(`### rmd issues${dryRun ? " --dry-run" : ""}\nissues reviewed: ${renderIssuesSummary(result.summary)}`);
   if (dryRun) {
