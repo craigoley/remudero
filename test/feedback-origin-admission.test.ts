@@ -539,6 +539,13 @@ test("W1-T7754 consumers: unchanged pending legacy content stays in the receipt 
   const changed = withLiveWritesAllowed(() => landFeedback(root.dir, opts));
   assert.deepEqual(changed.files.sort(), [rel, another].sort());
   assert.equal(changed.pushed, true);
+  const changedHead = origin.git("rev-parse", LANDING_BRANCH).trim();
+  const editedContent = "id: fb-legacy\nraw: edited\n";
+  writeFileSync(join(root.dir, rel), editedContent);
+  const edited = withLiveWritesAllowed(() => landFeedback(root.dir, opts));
+  assert.equal(edited.pushed, true, JSON.stringify(edited));
+  assert.notEqual(origin.git("rev-parse", LANDING_BRANCH).trim(), changedHead);
+  assert.equal(origin.git("show", `${LANDING_BRANCH}:${rel}`), editedContent);
 });
 
 test("W1-T7754 consumers: actual triage prompt retains original lineage inside its untrusted boundary", () => {
