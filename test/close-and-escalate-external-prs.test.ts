@@ -466,3 +466,27 @@ test("W1-T7755: CLI owner comment forwarding preserves current-head checks and o
     } finally { process.env.PATH = previousPath; rmSync(root, { recursive: true, force: true }); rmSync(shim.dir, { recursive: true, force: true }); }
   }
 });
+
+test("W1-T7755: stalled disposable acknowledgements retain intent and terminate bounded recovery", { timeout: 1_500 }, async () => {
+  for (const stalled of ["close", "escalation", "reconciliation"] as const) {
+    const { store, rows } = memoryStore("rehearsal");
+    let closes = 0, escalations = 0;
+    const short = { ...settings, policy: { ...settings.policy, maxEvidenceAgeMs: 30 } };
+    const never = () => new Promise<void>(() => {});
+    const simulation: AdmissionDispositionSimulation = { domain: "rehearsal",
+      simulateClose: async () => { closes++; if (stalled === "close") return never();
+        if (stalled === "reconciliation") throw Error("lost close acknowledgement"); },
+      simulateEscalation: async () => { escalations++; if (stalled === "escalation") return never(); },
+      reconcile: async () => { if (stalled === "reconciliation") await never(); return { closed: false, escalated: false }; } };
+    let result;
+    for (let i = 0; i < 4; i++) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      result = await Promise.race([executeAdmissionDisposition({ settings: short, target }, store, source(), () => {}, clock, simulation),
+        new Promise<undefined>(resolve => { timer = setTimeout(resolve, 200); })]);
+      if (timer !== undefined) clearTimeout(timer);
+      assert.ok(result, `${stalled} must not leave the observer waiting indefinitely`);
+    }
+    assert.equal(result!.status, "owner-action"); assert.equal(result!.laneReleased, true);
+    assert.equal(closes, 1); assert.ok(escalations <= 1); assert.equal(rows.at(-1)!.reconciliationAttempts, 2);
+  }
+});
