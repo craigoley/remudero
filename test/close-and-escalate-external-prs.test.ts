@@ -490,3 +490,21 @@ test("W1-T7755: stalled disposable acknowledgements retain intent and terminate 
     assert.equal(closes, 1); assert.ok(escalations <= 1); assert.equal(rows.at(-1)!.reconciliationAttempts, 2);
   }
 });
+
+test("W1-T7755: cumulative source-read ceiling remains unknown rather than a wider effect budget", async () => {
+  const policy = { ...settings, policy: { ...settings.policy, organizationIds: [5, 6, 7, 8, 9, 10, 11, 12], version: "read-ceiling" },
+    organizations: Array.from({ length: 8 }, (_, i) => ({ id: 5 + i, login: `team${5 + i}` })) };
+  let reads = 0;
+  const read: AdmissionRead = async path => {
+    reads++;
+    if (path === "user") return { status: 200, body: { id: 99, login: "viewer" } };
+    const member = /^orgs\/team(\d+)\/memberships\/(.+)$/.exec(path);
+    if (member) return member[2] === "viewer" ? { status: 200, body: {
+      state: "active", user: { id: 99 }, organization: { id: Number(member[1]) } } } : { status: 404, body: {} };
+    return source()(path);
+  };
+  const sim = rehearsal(), { store } = memoryStore("rehearsal");
+  const result = await executeAdmissionDisposition({ settings: policy, target }, store, read, () => {}, clock, sim.simulation);
+  assert.equal(result.status, "owner-action"); assert.equal(result.permission, "not-granted");
+  assert.equal(reads, 32); assert.deepEqual(sim.counts(), [0, 0]);
+});
