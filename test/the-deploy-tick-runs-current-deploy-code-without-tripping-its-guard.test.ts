@@ -30,8 +30,8 @@ function fixture(t: TestContext) {
   writeFileSync(join(daemon, "version"), "old");
   // The launcher also asks `rmd progress-watchdog` for a verdict (W1-T5688) before the deploy tick; that
   // read-only call is not a deploy, so the stub answers it with no verdict and does not record it. The same
-  // holds for `rmd live-edits` (2026-10-11), the live-edit ladder a dirty tree is handed to: not deploy logic.
-  executable(join(daemon, "bin", "rmd"), `#!/usr/bin/env bash\ncase "$1" in progress-watchdog|live-edits) exit 0;; esac\nprintf '%s %s cwd=%s\\n' "$(cat '${daemon}/version')" "$*" "$PWD" >> '${deployed}'\n`);
+  // holds for `rmd live-edits` and `rmd host-alert` (2026-10-11), the live-edit ladder and the watchdog's alarms.
+  executable(join(daemon, "bin", "rmd"), `#!/usr/bin/env bash\ncase "$1" in progress-watchdog|live-edits|host-alert) exit 0;; esac\nprintf '%s %s cwd=%s\\n' "$(cat '${daemon}/version')" "$*" "$PWD" >> '${deployed}'\n`);
   executable(join(install, "bin", "rmd"), `#!/usr/bin/env bash\necho install-invoked >> '${deployed}'\n`);
   executable(join(stubs, "git"), `#!/usr/bin/env bash
 printf '%s\\n' "$*" >> '${calls}'
