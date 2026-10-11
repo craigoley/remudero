@@ -189,6 +189,18 @@ test("W1-T7727: a target that cannot be resolved unambiguously changes nothing",
       refusal: /state_dir of 2 instances/,
     },
     { name: "an unreadable registry", fx: () => makeFixture((dir) => `not a registry ${dir}\n`), as: "core", args: ["pause"], refusal: /cannot tell which instance/ },
+    {
+      name: "a registry file that cannot be read",
+      fx: () => {
+        const fx = makeFixture();
+        const path = daemonInstanceRegistryPath(fx.checkout);
+        renameSync(path, `${path}.unavailable`);
+        return fx;
+      },
+      as: "core",
+      args: ["pause", "--instance", "core"],
+      refusal: /instance registry .* is unreadable/,
+    },
   ];
   for (const c of cases) {
     const fx = c.fx();
@@ -282,6 +294,9 @@ test("W1-T7727: resolvePauseTarget names the registry instance, or refuses", () 
   const dir = "/srv/fixture";
   const text = registryText(dir);
   const reach = () => true;
+  const missingRegistry = resolvePauseTarget({ configRoot: `${dir}/core`, instance: "core", registryPath: "missing-registry", dirExists: reach });
+  assert.equal(missingRegistry.ok, false, "a missing registry is not an empty registry or a config-root fallback");
+  assert.match(missingRegistry.ok ? "" : missingRegistry.refusal, /instance registry missing-registry is unreadable/);
   assert.deepEqual(resolvePauseTarget({ configRoot: `${dir}/core/`, registryText: text, registryPath: "r", dirExists: reach }), {
     ok: true,
     target: { instance: "core", root: `${dir}/core/`, resolvedBy: "config-root" },
