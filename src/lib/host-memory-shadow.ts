@@ -30,9 +30,10 @@
  *
  * THE CONTAINER CEILING JUDGES ITS OWN PRESSURE. The container check defers when the projected working set (working set +
  * the claims above + the daemon's typical growth) crosses the LEARNED PRESSURE ONSET: the working set at which this
- * container last hit pressure AT ITS CEILING. A sighting is the cgroup crossing its memory.high since the instance's
- * previous verdict (memory.events `high`) while its OWN pressure is past the host's thresholds (its memory.pressure, or
- * its memory.stat pswpin rate). Each sighting's distance below the ceiling halves every {@link ONSET_HALF_LIFE_MS}, so
+ * container last hit pressure AT ITS CEILING. A sighting is the cgroup crossing its memory.high (memory.events `high`)
+ * within the minute before a verdict that finds its OWN tasks stalled past the host's PSI thresholds (its
+ * memory.pressure). Its own swap-in rate is read and reported, but places no onset: it ran at 500-1800 pages/s with no
+ * crossing at all (the host's reclaim). Each sighting's distance below the ceiling halves every {@link ONSET_HALF_LIFE_MS}, so
  * the onset relaxes back to memory.high; with no sighting it IS memory.high. Only when the container's pressure cannot be
  * read does the static `containerReserveMib` below memory.high apply. The host's swap-in and PSI keep their own arms.
  * Neither they nor the container's own swap-in alone can place the onset: on 2026-10-11 they did not track this
@@ -248,7 +249,8 @@ export type ContainerPressureInput =
     swapIn: { pagesPerSec: number } | { unmeasured: string };
     /** memory.pressure. */
     psi: { someAvg10: number; fullAvg10?: number } | { unread: string };
-    /** memory.events `high` crossings since the instance's previous verdict; null when unmeasured. */
+    /** memory.events `high` crossings since the instance's previous verdict, when that was within
+     *  {@link CROSSING_WINDOW_MS}; null when unmeasured or older. */
     ceilingCrossings: number | null;
     /** Earlier sightings, from the instance's store. The one this reading shows, if any, is added by the verdict. */
     onsets: ContainerOnset[];
@@ -557,6 +559,9 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
 /** A sighting's distance below the ceiling halves every this long, so the onset relaxes back toward memory.high when
  *  the container stops showing pressure. A proposal, like every number here: the shadow rows calibrate it. */
 export const ONSET_HALF_LIFE_MS = 60 * 60_000;
+/** A crossing is tied to the stall a verdict reads only within the kernel's longest short PSI window (avg60): an older
+ *  prior's crossings may have come and gone before the stall it shows. */
+export const CROSSING_WINDOW_MS = 60_000;
 
 /** This container's own pressure in one snapshot: past the policy's swap-in or PSI thresholds, or unread. */
 function containerPressureOf(input: ShadowInputs["containerPressure"], policy: HostMemoryBudgetPolicy): {
@@ -573,10 +578,10 @@ function containerPressureOf(input: ShadowInputs["containerPressure"], policy: H
     const why = `${(input.swapIn as { unmeasured: string }).unmeasured}; ${(input.psi as { unread: string }).unread}`;
     return { pressed: false, sighted: false, swapIn, psi, onsets: input.onsets, unread: why };
   }
-  const pressed = (swapIn ?? 0) > policy.swapInPagesPerSecMax ||
-    (psi !== null && (psi.someAvg10 > policy.psiSomeAvg10Max || (psi.fullAvg10 ?? 0) > policy.psiFullAvg10Max));
-  // At its ceiling: the cgroup itself crossed memory.high while it stalled. Pressure with no crossing is the host's.
-  return { pressed, sighted: pressed && (input.ceilingCrossings ?? 0) > 0, swapIn, psi, onsets: input.onsets };
+  const stalled = psi !== null && (psi.someAvg10 > policy.psiSomeAvg10Max || (psi.fullAvg10 ?? 0) > policy.psiFullAvg10Max);
+  const pressed = stalled || (swapIn ?? 0) > policy.swapInPagesPerSecMax;
+  // At its ceiling: the cgroup itself crossed memory.high while its tasks stalled. Without a crossing it is the host's.
+  return { pressed, sighted: stalled && (input.ceilingCrossings ?? 0) > 0, swapIn, psi, onsets: input.onsets };
 }
 
 /**
@@ -904,7 +909,7 @@ function readContainerPressure(
     else swapIn = { pagesPerSec: Math.max(0, pswpin - prior.pswpin) / ((now - prior.at) / 1000) };
   }
   // A counter that went down belongs to a new cgroup (the container was recreated): its whole count is new.
-  const crossings = high === undefined || !fresh || prior!.high === undefined ? null
+  const crossings = high === undefined || !fresh || prior!.high === undefined || now - prior!.at > CROSSING_WINDOW_MS ? null
     : high >= prior!.high ? high - prior!.high : high;
   const reading: ContainerPressureInput = {
     swapIn,

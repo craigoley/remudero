@@ -118,7 +118,7 @@ test("a sighting at the ceiling lowers the onset to its working set, and the ons
   assert.equal(several.numbers.containerOnsetMib, 7000);
 });
 
-test("pressure counts as a sighting only with a crossing of the container's own memory.high", () => {
+test("a stall counts as a sighting only with a crossing of the container's own memory.high", () => {
   // The container's own swap-in at 1295 pages/s, as at 14:57:06Z, with no crossing: the host's reclaim, not the ceiling.
   const hostReclaim = evaluateShadowMemory(inputs({ ...CALM, swapIn: { pagesPerSec: 1295.9 }, ceilingCrossings: 0 }), POLICY);
   assert.equal(hostReclaim.numbers.containerPressed, true);
@@ -133,10 +133,13 @@ test("pressure counts as a sighting only with a crossing of the container's own 
   assert.deepEqual(atCeiling.reasons, ["container-ceiling"]);
   assert.deepEqual(atCeiling.numbers.containerPsi, { someAvg10: 17.37, fullAvg10: 12.95 });
 
-  // A crossing with no stall is page cache reclaimed at the ceiling: no sighting.
+  // A crossing with no stall is page cache reclaimed at the ceiling: no sighting. Nor is swap-in alone, with a crossing.
   const cacheOnly = evaluateShadowMemory(inputs({ ...CALM, ceilingCrossings: 300 }), POLICY);
   assert.equal(cacheOnly.numbers.containerSighted, false);
   assert.deepEqual(cacheOnly.reasons, []);
+  const swapOnly = evaluateShadowMemory(inputs({ ...CALM, swapIn: { pagesPerSec: 1862.8 }, ceilingCrossings: 300 }), POLICY);
+  assert.equal(swapOnly.numbers.containerPressed, true);
+  assert.equal(swapOnly.numbers.containerSighted, false, "swap-in is reported but places no onset");
 });
 
 function reading(): HostMemoryReading {
@@ -242,6 +245,9 @@ test("a missing, torn or stale store measures no rate and no crossing, and an un
   assert.equal(torn.containerSwapInPagesPerSec, null);
   const stale = verdict(cgroup({ [STORE]: JSON.stringify({ prior: { at: NOW - 3_600_000, pswpin: 1, high: 1 } }) }));
   assert.equal(stale.containerSighted, false, "a stale prior shows no crossing, so the pressure is not placed");
+  const minuteOld = verdict(cgroup({ [STORE]: JSON.stringify({ prior: { at: NOW - 90_000, pswpin: 1, high: 1 } }) }));
+  assert.equal(minuteOld.containerSighted, false, "a crossing older than the PSI window is not tied to this stall");
+  assert.ok((minuteOld.containerSwapInPagesPerSec as number) > 0, "while the swap-in rate is still measured over it");
 
   // Recreated container: its counter restarted below the stored one, so its whole count is new.
   const recreated = verdict(cgroup({ "/sys/fs/cgroup/memory.events": "high 7\n",
