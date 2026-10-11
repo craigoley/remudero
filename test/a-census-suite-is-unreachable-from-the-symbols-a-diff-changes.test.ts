@@ -102,8 +102,13 @@ test("W1-T2680: the three suites that went red in CI on 2026-09-05, after a call
   // text is reachable only this way. Asserted as a population so the claim cannot quietly decay to
   // one lucky file.
   // W1-T4563: codex-model-console and console-token-refresh read serve.ts only for the retired
-  // console shell; two suites that still read it as text replace them, keeping a population of three.
-  const stillReadServe = ["test/a-successful-leaf-check-is-not-a-full-sweep.test.ts", "test/provider-routing-console.test.ts", "test/runtime-adoption-is-reported-not-gated.test.ts"];
+  // console shell; suites that still read it as text replace them.
+  // W1-T6092: runtime-adoption-is-reported-not-gated was in this list only because the old
+  // `enumeratesPopulation` counted a `readdirSync` over its own mkdtemp fixture; it never reads the
+  // real serve.ts (it writes a synthetic one into a tmp tree), so it is not a reader and no longer
+  // joins -- the very over-listing W1-T6092 removes. The population is the suites that spell the
+  // real path inside a `readFileSync(` call.
+  const stillReadServe = ["test/a-successful-leaf-check-is-not-a-full-sweep.test.ts", "test/provider-routing-console.test.ts"];
   for (const suite of stillReadServe) {
     assert.ok(serveChange.includes(suite), `${suite} reads serve.ts as text and no symbol sweep can reach it`);
   }
