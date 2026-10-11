@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -17,3 +17,13 @@
     - claim: "the lane that trips the coverage-session-blanking gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
       proof: "grep: ci-learning:10516:coverage-session-blanking in learnings/ci.yaml"
   note: "Filed by the ci-learning rung from ci-learning:10516:coverage-session-blanking. The coverage-session-blanking gate went red on #10516 and was repaired; the repair touched test/clock-sweep.test.ts, src/lib/tmp.ts, test/a-budget-check-run-never-writes-the-checkout.test.ts, test/a-census-this-branch-grows-is-refused-before-the-push.test.ts, test/a-fix-round-checks-its-edits-from-a-harness-git-snapshot.test.ts, test/a-net-positive-claude-md-diff-is-not-refused.test.ts, test/census-precheck-counts-the-house-layout-ratchet.test.ts, test/setup/tmp-hygiene.ts. Recommended action: build. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.91
+    reasons:
+      - "The filed plan scopes the remedy to a matched learning in learnings/ci.yaml and supplies a grep-prefixed acceptance proof for its identifier."
+      - "The supplied scope describes recording a CI lesson; it names no sensitive access, deletion, irreversible action, policy change, or operator-only decision."
+      - "The family has 18 merged tasks and 1 declined task; the supplied filing-time gates report no adverse result. No diff or actual-change view is supplied, so implementation correctness remains unverified."
+    judged_at: "2026-10-11T08:37:23.692Z"
+    pin: "cbbdd367ac163306d00d814052d2be4952372beea6dea8cae9b787f2e1266535"
