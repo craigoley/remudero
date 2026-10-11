@@ -72,18 +72,50 @@ test(`${proof}: a heavy cold unit starts heavy after restart while its last warm
   const moved = first.fast.posts.find((m) => m.type === "view_lane" && m.instance === "core");
   assert.ok(moved && moved.type === "view_lane" && moved.heavy);
   first.heavy.ticker.lane(moved);
+  f.advance(500);
+  first.heavy.tick();
   costs.core = 5;
+  f.advance(500);
   first.heavy.tick();
   first.stop();
-  const restarted = f.start({ core: 5, site: 5 });
+  const nextCosts = { core: 80, site: 5 }, restarted = f.start(nextCosts);
   restarted.fast.tick();
   assert.deepEqual(restarted.fast.builds, ["site"], "known expensive recreation cannot run on fast after restart");
   restarted.heavy.tick();
   assert.deepEqual(restarted.heavy.builds, ["core"]);
   assert.ok(restarted.heavy.posts.some((m) => m.type === "body" && m.entry.key === "instance=core"));
+  nextCosts.core = 5;
+  f.advance(500);
+  restarted.heavy.tick();
   const record = JSON.parse(f.db().meta(key("core"))!);
   assert.equal(record.costMs, 5, "pacing is current build cost, not the cold classification");
   assert.equal(record.coldCostMs, 80, "recreation cost survives both generations");
+});
+
+test(`${proof}: the first heavy pass is budgeted by recent build costs rather than the restored cold classification`, (t) => {
+  const f = fixture(t), costs = { core: 80, site: 80 }, first = f.start(costs);
+  first.fast.tick();
+  first.fast.tick();
+  for (const move of first.fast.posts) if (move.type === "view_lane") first.heavy.ticker.lane(move);
+  f.advance(500);
+  first.heavy.tick();
+  first.heavy.tick();
+  costs.core = 5;
+  costs.site = 5;
+  f.advance(500);
+  first.heavy.tick();
+  first.heavy.tick();
+  for (const instance of ["core", "site"]) {
+    const saved = JSON.parse(f.db().meta(key(instance))!);
+    assert.equal(saved.costMs, 5);
+    assert.equal(saved.coldCostMs, 80);
+  }
+  first.stop();
+  const second = f.start({ core: 60, site: 5 });
+  second.fast.tick();
+  assert.deepEqual(second.fast.builds, []);
+  second.heavy.tick();
+  assert.deepEqual(second.heavy.builds, ["core", "site"], "after 60ms the recent 5ms cost fits; an 80ms cold estimate would defer site");
 });
 
 test(`${proof}: known affordable units share their first restarted pass instead of overshooting as unmeasured`, (t) => {
@@ -94,6 +126,34 @@ test(`${proof}: known affordable units share their first restarted pass instead 
   const second = f.start({ core: 20, site: 20 });
   second.fast.tick();
   assert.deepEqual(second.fast.builds, ["core", "site"], "both known costs fit the restarted pass");
+});
+
+test(`${proof}: a new successful cold build replaces the restored estimate rather than latching an old expensive generation forever`, (t) => {
+  const f = fixture(t), first = f.start({ core: 80, site: 5 });
+  first.fast.tick();
+  first.stop();
+  const improved = f.start({ core: 5, site: 5 });
+  improved.fast.tick();
+  assert.deepEqual(improved.fast.builds, ["site"], "the first restarted pass still honors the known heavy estimate");
+  const restored = improved.fast.posts.find((m) => m.type === "view_lane" && m.instance === "core");
+  assert.ok(restored && restored.type === "view_lane" && restored.restoredCost);
+  improved.heavy.ticker.lane(restored);
+  improved.heavy.tick();
+  const record = JSON.parse(f.db().meta(key("core"))!);
+  assert.equal(record.coldCostMs, 5, "fresh recreation replaces a prior generation's cold estimate");
+  const back = improved.heavy.posts.find((m) => m.type === "view_lane" && m.instance === "core" && !m.heavy);
+  assert.ok(back && back.type === "view_lane", "a now-affordable factory may return to fast");
+  improved.fast.ticker.lane(back);
+  f.advance(500);
+  improved.fast.tick();
+  assert.equal(improved.fast.builds.filter((name) => name === "core").length, 1);
+  assert.equal(JSON.parse(f.db().meta(key("core"))!).coldCostMs, 5);
+  improved.stop();
+  const next = f.start({ core: 5, site: 5 });
+  next.fast.tick();
+  assert.deepEqual(next.fast.builds, ["core", "site"], "the next generation starts from the new affordable estimate");
+  next.heavy.tick();
+  assert.deepEqual(next.heavy.builds, []);
 });
 
 test(`${proof}: costs written by the current generation cannot grant a peer lane ownership before its handoff`, (t) => {

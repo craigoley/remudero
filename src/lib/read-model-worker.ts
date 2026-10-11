@@ -253,6 +253,7 @@ export interface ReadModelLaneMove {
   dueAt: number;
   costMs?: number;
   coldCostMs?: number;
+  restoredCost?: boolean;
 }
 
 export interface ReadModelViewContext {
@@ -698,6 +699,7 @@ interface ViewUnit {
   coldCostMs?: number;
   slot?: Slot;
   costSeeded?: boolean;
+  restoredColdCost?: boolean;
   storedCost?: string;
   storedCostIno?: string;
   /** What its last build call took (absent until one ran); `startedAt` is the first call of a bounded build in flight. */
@@ -1119,12 +1121,13 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
           (saved.coldCostMs !== undefined && (typeof saved.coldCostMs !== "number" || !Number.isFinite(saved.coldCostMs) || saved.coldCostMs < 0))) continue;
         unit.costMs = saved.costMs;
         unit.coldCostMs = saved.coldCostMs;
+        unit.restoredColdCost = true;
         unit.heavy = Math.max(saved.costMs, saved.coldCostMs ?? 0) > soloMs;
         unit.storedCost = raw;
         unit.storedCostIno = slots[0]?.ino;
         if (opts.lane === "fast" && unit.heavy) opts.post({ type: "view_lane", view: unit.view.name,
           ...(unit.slot ? { instance: unit.slot.instance.name } : {}), heavy: true, dueAt: unit.dueAt,
-          costMs: unit.costMs, ...(unit.coldCostMs === undefined ? {} : { coldCostMs: unit.coldCostMs }) });
+          costMs: unit.costMs, restoredCost: true, ...(unit.coldCostMs === undefined ? {} : { coldCostMs: unit.coldCostMs }) });
       } catch (error) {
         log("read_model.view_cost_read_failed", { view: unit.view.name, ...(unit.slot ? { instance: unit.slot.instance.name } : {}), error: (error as Error).message });
       }
@@ -1311,7 +1314,9 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     viewBuilds.set(unit, counts);
     const peakMs = (unit.peakMs = Math.max(unit.peakMs ?? 0, unit.costMs));
     if (unit.cold && succeeded) {
-      unit.coldCostMs = Math.max(unit.coldCostMs ?? 0, peakMs);
+      // Previous-generation estimates expire at recreation; a same-generation warm peer keeps its sender's cost.
+      unit.coldCostMs = unit.restoredColdCost ? peakMs : Math.max(unit.coldCostMs ?? 0, peakMs);
+      unit.restoredColdCost = undefined;
       unit.cold = undefined;
     }
     const laneCostMs = Math.max(peakMs, unit.coldCostMs ?? 0);
@@ -1564,6 +1569,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       for (const unit of units) {
         if (move.view !== undefined && (unit.view.name !== move.view || unit.slot?.instance.name !== move.instance)) continue;
         unit.costSeeded = true;
+        unit.restoredColdCost = move.restoredCost === true;
         Object.assign(unit, { heavy: move.heavy, dueAt: move.dueAt, coldCostMs: move.coldCostMs }, move.costMs === undefined ? {} : { costMs: move.costMs });
         letGo(unit);
       }
