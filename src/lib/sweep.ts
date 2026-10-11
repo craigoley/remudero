@@ -149,6 +149,7 @@ import {
 import {
   acceptanceBlockDiagnostics,
   automergeHoldFromLedger,
+  describeHoldSetter,
   cappedOverrideFromLedger,
   decideAutoMergeArm,
   extractTaskTrailerId,
@@ -10997,7 +10998,7 @@ export function diagnoseCappedRoutingBlock(
     return {
       blocked: true,
       precondition: "held",
-      detail: `an automerge hold stands over PR #${pr.prNumber} (engaged by ${hold.by}: ${hold.reason})`,
+      detail: `an automerge hold stands over PR #${pr.prNumber} (engaged by ${describeHoldSetter(hold)}: ${hold.reason})`,
     };
   }
   const proofDiscrimination = cappedProofDiscriminationFromLedger(pr, ledgerLines);
@@ -14871,7 +14872,7 @@ export async function runSweep(
       ? dispatchHold?.reason ?? standDownReason ?? actionError ?? "no dispatch was attempted"
       : undefined;
     const shownReason = mergeHold !== undefined
-      ? `held by ${mergeHold.by}: ${mergeHold.reason} — auto-merge refused until an operator releases it (rmd merge-hold)`
+      ? `held by ${describeHoldSetter(mergeHold)}: ${mergeHold.reason} — auto-merge refused until an operator releases it (rmd merge-hold)`
       : notDispatched !== undefined
         ? `${reason.replace(/\bdispatching\b/g, "would dispatch")} — NOT DISPATCHED this pass: ${notDispatched}`
         : reason;
@@ -17352,6 +17353,7 @@ export async function runSweep(
           pr_url: pr.prUrl,
           head_sha: pr.headSha,
           hold_by: holdToWithdraw.by,
+          ...(holdToWithdraw.actor ? { hold_actor: holdToWithdraw.actor } : {}),
           hold_reason: holdToWithdraw.reason,
         };
         log("automerge.hold_withdrawal", withdrawalLine);
