@@ -127,6 +127,8 @@ import {
   type WorkerKeychainSummary,
 } from "./worker-home.js";
 import { awaitMemoryAdmission, type AdmissionPorts } from "./host-memory-admission.js";
+import { feedbackLineagePayload, feedbackLineageSnapshot } from "./contributor-admission.js";
+import { envelope as feedbackLineageEnvelope } from "./untrusted-envelope.js";
 import { openLearnedReservation, type LearnedReservation, type LearnedReservationOptions } from "./host-memory-learning.js";
 import type { HostMemoryLedgerOptions, MemoryReservationHandle, WorkerClass } from "./host-memory-ledger.js";
 import { recordShadowMemoryVerdict } from "./host-memory-shadow.js";
@@ -4254,6 +4256,7 @@ export interface QuestionAnswerEntry {
   /** Non-reversible id of the bearer token that submitted the answer — never the raw token (see lib/panel-actions.ts's
    * `bearerTokenId`). */
   origin: string;
+  contribution?: unknown;
 }
 
 /** Append an operator's ANSWER to the same store `appendQuestion` writes to; the panel's write action is the only caller
@@ -4315,15 +4318,18 @@ export function deliverOperatorAnswerToRunningWorker(
   answerText: string,
   opts: {
     ledger?: (event: string, extra?: Record<string, unknown>) => void;
+    contributions?: readonly unknown[];
     onSteerSettled?: () => void; // TEST-ONLY: fires once the streamInput call above settles, so a test can await that instead of guessing a tick count.
   } = {},
 ): OperatorAnswerDeliveryOutcome {
   const handle = runningWorkers.get(taskId);
   if (!handle) return "no-running-worker";
   const ledger = opts.ledger ?? ((message, extra) => console.error(message, extra));
+  const contributions = feedbackLineageSnapshot(opts.contributions ?? []);
   const sdkMessage: SDKUserMessage = {
     type: "user",
-    message: { role: "user", content: answerText },
+    message: { role: "user", content: contributions.length
+      ? feedbackLineageEnvelope(feedbackLineagePayload(answerText, contributions), "feedback-entry") : answerText },
     parent_tool_use_id: null,
     priority: "next",
   };
