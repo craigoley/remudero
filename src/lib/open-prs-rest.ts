@@ -427,10 +427,6 @@ export function fetchSinglePrRest(
   };
 }
 
-/** W1-T7734 — {@link fetchSinglePrRest} over an awaited transport: the sweep's same-pass re-read of ONE PR
- *  whose head moved under it. Same mapping, same `state` token, same rollup composition; only the I/O is
- *  non-blocking, so the caller can hand it to the daemon's `GhCallPacer`. A failed read THROWS: the
- *  caller names the error and stands down, and must never substitute the stale snapshot. */
 export async function fetchSinglePrRestAsync(
   owner: string,
   repo: string,
