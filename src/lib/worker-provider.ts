@@ -3782,15 +3782,20 @@ export function selectOpenWeightUnitTestSuites(cwd: string, spawn: PreflightSpaw
   const consumer = !existsSync(join(root, OPENWEIGHT_UNIT_TEST_SELECTOR_MARKER));
   let base: string;
   let changed: string[];
+  let tracked: string[];
   try {
     base = run("git", ["merge-base", "origin/main", "HEAD"]).trim();
+    const paths = consumer ? (text: string) => text.split("\0").filter(Boolean) : lines;
+    const untracked = paths(run("git", ["ls-files", ...(consumer ? ["-z"] : []), "--others", "--exclude-standard"]));
+    changed = [...new Set([
+      ...paths(run("git", ["diff", "--name-only", ...(consumer ? ["-z", "--diff-filter=ACMRT"] : []), base])),
+      ...untracked,
+    ])].sort();
+    tracked = paths(run("git", ["ls-files", ...(consumer ? ["-z"] : ["--", "src", "scripts", "bin", "test"])]));
     if (consumer) {
-      const paths = (text: string) => text.split("\0").filter(Boolean);
-      const untracked = paths(run("git", ["ls-files", "-z", "--others", "--exclude-standard"]));
-      changed = [...new Set([...paths(run("git", ["diff", "--name-only", "-z", "--diff-filter=ACMRT", base])), ...untracked])];
       const sourceNames = new Set(changed.filter((path) => !CONSUMER_UNIT_TEST_SUITE.test(path) && /\.(?:[cm]?[jt]s|[jt]sx)$/.test(path))
         .map((path) => basename(path).replace(/\.[^.]+$/, "")));
-      const candidates = [...new Set([...paths(run("git", ["ls-files", "-z"])), ...untracked])];
+      const candidates = [...new Set([...tracked, ...untracked])];
       const suites = candidates.filter((path) => CONSUMER_UNIT_TEST_SUITE.test(path) && existsSync(join(root, path)) &&
         (changed.includes(path) || sourceNames.has(basename(path).replace(/\.(?:test|spec)\.[^.]+$/, "")))).sort();
       for (const suite of suites) openWeightContainedPath(root, suite);
@@ -3804,10 +3809,6 @@ export function selectOpenWeightUnitTestSuites(cwd: string, spawn: PreflightSpaw
       return { suites: suites.map((path) => path.startsWith("-") ? `./${path}` : path),
         fullRun: false, reasons: [CONSUMER_UNIT_TEST_SCOPE_RULE], recentOnly: { floor: [] } };
     }
-    changed = [...new Set([
-      ...lines(run("git", ["diff", "--name-only", base])),
-      ...lines(run("git", ["ls-files", "--others", "--exclude-standard"])),
-    ])].sort();
   } catch (err) {
     // No readable diff means no narrow answer: a FULL selection naming why, which then refuses.
     return fullSelection(`the worktree's diff could not be read — ${(err as Error).message}`);
@@ -3818,7 +3819,7 @@ export function selectOpenWeightUnitTestSuites(cwd: string, spawn: PreflightSpaw
     const symbolless = symbollessSourceFiles(changed, diff, readFile);
     const symbols = symbolless.length > 0 ? [] : changedSymbols(diff, readFile);
     const files = new Map<string, string>();
-    for (const path of lines(run("git", ["ls-files", "--", "src", "scripts", "bin", "test"]))) {
+    for (const path of tracked) {
       if (!/\.(?:ts|mts|mjs|js|cjs)$/.test(path) || !existsSync(join(root, path))) continue;
       files.set(path, readFile(path));
     }
