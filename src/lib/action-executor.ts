@@ -386,7 +386,7 @@ export async function executeAdmissionDisposition(
       if (response.status !== 200 || instruction.id !== request.ownerInstructionId || actor.type !== "User"
         || !settings.policy.ownerIds.includes(actor.id as number)
         || instruction.issue_url !== `https://api.github.com/repos/${target.owner}/${target.repo}/issues/${target.prNumber}`
-        || !Number.isFinite(revised) || revised < (last?.atMs ?? started) || revised > clock.now()
+        || !Number.isFinite(revised) || (last !== undefined && revised < last.atMs) || revised > clock.now()
         || clock.now() - revised > settings.policy.maxEvidenceAgeMs
         || instruction.body !== `Remudero-Admission: adopt ${settings.repositoryId}/${target.prNumber}@${preflight.assessment.subject.headSha}`) {
         return result("owner-action", "owner-instruction-unverified", last);

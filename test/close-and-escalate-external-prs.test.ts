@@ -420,3 +420,44 @@ test("W1-T7755: a fresh existing owner comment is adoptable on the first observa
   assert.equal(result.status, "adopted"); assert.equal(result.evidence, "fresh");
   assert.equal(result.requiredChecks, "ordinary-current-head-checks-required");
 });
+
+test("W1-T7755: CLI owner comment forwarding preserves current-head checks and ordinary effects", async () => {
+  for (const caller of ["review", "dep-review", "fix"] as const) {
+    const root = mkdtempSync(join(tmpdir(), "rmd-disposition-owner-cli-"));
+    const sourceHead = caller === "review" ? execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim() : sha;
+    const instruction = { id: 9, user: { id: 1, type: "User" }, updated_at: new Date().toISOString(),
+      issue_url: "https://api.github.com/repos/acme/core/issues/42", body: `Remudero-Admission: adopt 3/42@${sourceHead}` };
+    const shim = ghShim([{ when: "api repos/acme/core/pulls/42 -i", stdout: `HTTP/2 200 OK\n\n${JSON.stringify(pull(8, sourceHead))}` },
+      { when: "api repos/acme/core -i", stdout: 'HTTP/2 200 OK\n\n{"id":3,"full_name":"acme/core","private":false}' },
+      { when: "api repos/acme/core/issues/comments/9 -i", stdout: `HTTP/2 200 OK\n\n${JSON.stringify(instruction)}` }]);
+    const previousPath = process.env.PATH, config = { root, contributorAdmission: settings, claudeBin: "/bin/true" } as Config;
+    let ordinary = false;
+    try {
+      process.env.PATH = `${shim.dir}:${previousPath}`;
+      if (caller === "dep-review") {
+        await assert.rejects(depReviewCommand("42", ["--repo", "acme/core", "--admission-adopt-comment", "9"], { config,
+          contributorAdmission: async () => {}, gh: () => ({ number: 42, url: "https://github.com/acme/core/pull/42", headRefOid: sha }),
+          prDiff: () => { ordinary = true; throw Error("ordinary effect trap"); } }));
+      } else if (caller === "fix") {
+        assert.equal(await fixCommand(["42", "--admission-adopt-comment", "9"], { config,
+          self: { owner: "acme", repo: "core" }, contributorAdmission: async () => {},
+          fetch: () => { ordinary = true; throw Error("ordinary effect trap"); } }), 1);
+      } else {
+        await assert.rejects(reviewCommand("42", ["--repo", "acme/core", "--admission-adopt-comment", "9"], {
+          loadConfig: () => config, resolveOwnerRepo: () => ({ owner: "acme", repo: "core" }), contributorAdmission: async () => {},
+          fetchView: () => ({ ...pull(8, sourceHead), body: "Remudero-Task: W1-T7755", html_url: "https://github.com/acme/core/pull/42" }),
+          reviewerCodeFreshness: () => ({ status: "fresh", codeSha: sha, originMainSha: sha, advance: "none" }),
+          postReviewPending: async () => ({ posted: true }) as never, fetchHead: () => {},
+          materialize: () => { ordinary = true; throw Error("ordinary effect trap"); } }));
+      }
+      assert.equal(ordinary, true, caller);
+      assert.equal(shim.calls().filter(call => call === "api repos/acme/core/issues/comments/9 -i").length, 2);
+      assert.ok(shim.calls().every(call => !/--method|-X|pr close|issue comment/.test(call)));
+      const base = join(root, "state", "contributor-disposition", "shadow");
+      const directory = readdirSync(base).find(name => /^[a-f0-9]{64}$/.test(name))!;
+      const receipt = JSON.parse(readFileSync(join(base, directory, "0.json"), "utf8")).receipt;
+      assert.equal(receipt.status, "adopted"); assert.equal(receipt.ownerInstruction.commentId, 9);
+      assert.equal(receipt.headSha, sourceHead);
+    } finally { process.env.PATH = previousPath; rmSync(root, { recursive: true, force: true }); rmSync(shim.dir, { recursive: true, force: true }); }
+  }
+});
