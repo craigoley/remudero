@@ -405,9 +405,41 @@ deploy_code_clean() {
     return 1
   fi
   if [ -n "$edits" ]; then
+    # 2026-10-11 -- A TRACKED EDIT DEFERRED THIS FOR FIVE HOURS, SILENTLY. Tracked edits now climb the
+    # live-edit ladder (src/lib/live-edit-ladder.ts), asked once per tick: preserved at once, escalated
+    # by the daemon at its own restart pressure, restored to HEAD at twice it from a confirmed copy only.
+    if [ "${LIVE_EDITS_ASKED:-0}" != 1 ] && printf '%s\n' "$edits" | awk 'NF && substr($0, 1, 2) != "??" { t = 1 } END { exit !t }'; then
+      LIVE_EDITS_ASKED=1
+      if live_edits_ladder daemon-checkout "$code" &&
+         edits="$(GIT_OPTIONAL_LOCKS=0 git -C "$code" status --porcelain --untracked-files=all 2>/dev/null)" &&
+         [ -z "$(printf '%s\n' "$edits" | awk 'index($0, "?? plan/feedback/") != 1 && NF')" ]; then
+        echo "rmd-relaunch: deploy code -- live edits restored from a confirmed copy; proceeding."
+        return 0
+      fi
+    fi
     echo "rmd-relaunch: deploy code -- local edits; deferring without discarding them." >&2
     return 1
   fi
+}
+
+# One rung of the ladder for one live tree, through the same CLI the progress verdict uses. Returns 0
+# only when it restored that tree; prints its one-line verdict either way.
+live_edits_ladder() {
+  local tree="$1" dir="$2" rmd="$STATE_DIR/remudero/bin/rmd" out line tmo=()
+  if [ ! -x "$rmd" ]; then
+    echo "rmd-relaunch: live edits -- $rmd missing; the ${tree} defers unrecorded." >&2
+    return 1
+  fi
+  command -v timeout >/dev/null 2>&1 && tmo=(timeout 120)
+  if ! out="$(cd "$STATE_DIR/remudero" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" live-edits \
+      --tree "$tree" --checkout "$dir" --state-root "$STATE_DIR/state" --json 2>/dev/null)"; then
+    echo "rmd-relaunch: live edits -- the ladder for the ${tree} failed; deferring." >&2
+    return 1
+  fi
+  line="$(printf '%s\n' "$out" | grep -E '^\{' | tail -n 1 || true)"
+  echo "rmd-relaunch: live edits -- ${tree}: ${line:-no verdict}"
+  case "$line" in *'"restored":true'*) return 0 ;; esac
+  return 1
 }
 
 refresh_deploy_code() {
@@ -938,15 +970,15 @@ converge_host_units() {
       date -u +%s > "\$refusal_since" 2>/dev/null || true
       rm -f "\$refusal_alerted" 2>/dev/null || true
     fi
-    refused_at=\$(cat "\$refusal_since" 2>/dev/null || echo "")
-    now=\$(date -u +%s 2>/dev/null || echo "")
-    case "\$refused_at:\$now" in *[!0-9:]*) : ;; *)
-      if [ -n "\$refused_at" ] && [ -n "\$now" ] && [ "\$((now - refused_at))" -ge 21600 ] && [ ! -e "\$refusal_alerted" ]; then
-        echo "rmd-relaunch: ALERT host unit convergence has been refused for at least 6 hours; tracked paths: \$tracked_changes" >&2
-        : > "\$refusal_alerted" 2>/dev/null || true
-      fi
-    ;; esac
-    return 0
+    # 2026-10-11 -- THE STAMP RAISED NOTHING: it fed one stderr line at a fixed six hours, into a journal
+    # nobody reads, and the five-hour incident ended before it. The install checkout now climbs the same
+    # live-edit ladder as the daemon's tree (live_edits_ladder): preserved at once, escalated by the
+    # daemon, and restored to HEAD only from a confirmed copy -- after which this converge proceeds.
+    if ! live_edits_ladder install-checkout "\$CHECKOUT" ||
+       [ -n "\$(git -C "\$CHECKOUT" status --porcelain --untracked-files=no 2>/dev/null || echo unreadable)" ]; then
+      return 0
+    fi
+    echo "rmd-relaunch: units -- the live-edit ladder restored the tracked edits from a confirmed copy; converging."
   fi
   rm -f "\$refusal_since" "\$refusal_alerted" 2>/dev/null || true
 

@@ -360,13 +360,92 @@ export function withoutRelativePathLiterals(content) {
 // Why: docs/forensics/diff-class.md#enumeratespopulation-the-removed-glob-clause.
 export function enumeratesPopulation(content) {
   return (
-    /\bls-files\b/.test(content) ||
-    /\breaddirSync\b|\breaddir\b/.test(content) ||
-    /\bglobSync\b|\bglob\(/.test(content) ||
+    lsFilesWalksRepo(content) ||
+    enumerationCalls(content, /\b(?:readdirSync|readdir|globSync|glob)\s*\(/g).some((arg) => rootIsRepo(arg, content)) ||
     // `git grep` as an argv element enumerates the files it matches: #10092's census
     // (`["grep", "-lF", HELPER, "--", "test/*.test.ts"]`) was invisible to the three arms above.
     /["'`]grep["'`]\s*,/.test(content)
   );
+}
+
+// ── W1-T6092: A CENSUS SUITE WALKS THE REPOSITORY, NOT ANY DIRECTORY ───────────────────────────
+// `readdirSync(mkdtemp-dir)` lists the suite's OWN fixture. Counting it made run-task,
+// live-write-guard-command-sites and recycle-container (~400 s) join every src change's census set.
+// A call counts only when its ROOT is the repository; a root this scan cannot resolve (a helper's
+// parameter, a variable declared elsewhere) still counts — over-listing costs one suite, under-listing
+// is the silent miss this verb exists to end (W1-T4787: walkers through a helper must stay selected).
+
+/** Evidence that a path expression is rooted in the repository. */
+const REPO_ROOT_MARKER = /\bREPO_ROOT\b|\bprocess\.cwd\s*\(|\bimport\.meta\b|\b(?:repoRoot|repoDir|projectRoot)\b/;
+/** Evidence that a path expression is rooted in a scratch/fixture directory. */
+const FIXTURE_ROOT_MARKER = /\bmkdtemp(?:Sync)?\b|\btmpdir\s*\(|\bos\.tmpdir\b|tmp|fixture|scratch|sandbox/i;
+
+/** The first-argument text of every call matching `callRe` (a /g regexp ending at the open paren). */
+function enumerationCalls(content, callRe) {
+  const args = [];
+  for (const m of content.matchAll(callRe)) {
+    let depth = 0;
+    let quote = "";
+    let i = m.index + m[0].length;
+    const start = i;
+    for (; i < content.length; i++) {
+      const c = content[i];
+      if (quote) {
+        if (c === "\\") i++;
+        else if (c === quote) quote = "";
+        continue;
+      }
+      if (c === '"' || c === "'" || c === "`") quote = c;
+      else if (c === "(" || c === "[" || c === "{") depth++;
+      else if (c === ")" || c === "]" || c === "}") {
+        if (depth === 0) break;
+        depth--;
+      } else if (c === "," && depth === 0) break;
+    }
+    args.push(content.slice(start, i));
+  }
+  return args;
+}
+
+/** The initialiser text of every `const|let|var <name> = ...;` declaration of `name` in `content`. */
+function initialisersOf(name, content) {
+  const out = [];
+  const re = new RegExp(`\\b(?:const|let|var)\\s+${name}\\b\\s*(?::[^=\\n]+)?=\\s*`, "g");
+  for (const m of content.matchAll(re)) {
+    const rest = content.slice(m.index + m[0].length);
+    const end = rest.search(/;|\n\s*\n/);
+    out.push(end === -1 ? rest.slice(0, 400) : rest.slice(0, Math.min(end, 400)));
+  }
+  return out;
+}
+
+/** Whether the path expression `expr` resolves to the repository (true) or to a fixture (false). */
+function rootIsRepo(expr, content, depth = 0, seen = new Set()) {
+  if (REPO_ROOT_MARKER.test(expr)) return true;
+  if (FIXTURE_ROOT_MARKER.test(expr)) return false;
+  if (depth < 5) {
+    const names = [...new Set(expr.replace(/["'`](?:\\.|[^"'`\\])*["'`]/g, " ").match(/\b[A-Za-z_$][\w$]*\b/g) ?? [])]
+      .filter((n) => !seen.has(n) && !/^(?:join|resolve|dirname|normalize|relative|path|posix|new|URL|fileURLToPath|String|as|const|let|var)$/.test(n));
+    let resolvedFixture = false;
+    for (const name of names) {
+      const inits = initialisersOf(name, content);
+      if (inits.length === 0) continue;
+      const next = new Set(seen).add(name);
+      if (inits.some((init) => rootIsRepo(init, content, depth + 1, next))) return true;
+      resolvedFixture = true;
+    }
+    if (resolvedFixture) return false;
+  }
+  return true; // unresolved (a literal repo area, a parameter, an import): conservative
+}
+
+/** `git ls-files` counts unless its `cwd` option is a fixture repository. */
+function lsFilesWalksRepo(content) {
+  for (const m of content.matchAll(/\bls-files\b/g)) {
+    const cwd = /\bcwd\s*:\s*([^,}\n]+)/.exec(content.slice(m.index, m.index + 300));
+    if (!cwd || rootIsRepo(cwd[1], content)) return true;
+  }
+  return false;
 }
 
 /**

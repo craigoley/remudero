@@ -438,6 +438,7 @@ export type ServiceFreshness =
   | {
       status: "assessed";
       dirty: boolean;
+      dirty_paths?: string[];
       // What the advance touched; `undefined` means unreadable, which reads as material (W1-T2964).
       behind: {
         oldSha: string;
@@ -586,8 +587,9 @@ async function assessFetchedServiceAsync(repoDir: string, git: AsyncGitRunner): 
   } catch (err) {
     return { status: "degraded", reason: `could not resolve HEAD/origin/main in ${repoDir}: ${String(err)}` };
   }
-  const dirty = (await git(["status", "--porcelain", "-uno"])).trim().length > 0;
-  if (headSha === originSha) return { status: "assessed", dirty, behind: null };
+  const dirty_paths = (await git(["status", "--porcelain", "-uno"])).split("\n").filter(Boolean).map((line) => line.slice(3));
+  const dirty = dirty_paths.length > 0;
+  if (headSha === originSha) return { status: "assessed", dirty, ...(dirty ? { dirty_paths } : {}), behind: null };
   let changedPaths: string[] | undefined;
   let diffUnreadable: string | undefined;
   try {
@@ -610,6 +612,7 @@ async function assessFetchedServiceAsync(repoDir: string, git: AsyncGitRunner): 
   return {
     status: "assessed",
     dirty,
+    ...(dirty ? { dirty_paths } : {}),
     behind: {
       oldSha: headSha,
       newSha: originSha,
@@ -635,8 +638,9 @@ function assessFetchedService(repoDir: string, git: GitRunner): ServiceFreshness
   // intersecting against the incoming diff, as `checkCliFreshness` above does for a different
   // reason, W1-T446) can only ever PERMIT a restart the entrypoint can complete, never one it
   // would refuse. Why: docs/forensics/self-sync.md#checkservicefreshness-the--uno-alignment.
-  const dirty = git(["status", "--porcelain", "-uno"]).trim().length > 0;
-  if (headSha === originSha) return { status: "assessed", dirty, behind: null };
+  const dirty_paths = git(["status", "--porcelain", "-uno"]).split("\n").filter(Boolean).map((line) => line.slice(3));
+  const dirty = dirty_paths.length > 0;
+  if (headSha === originSha) return { status: "assessed", dirty, ...(dirty ? { dirty_paths } : {}), behind: null };
   // WHAT the advance touched, not merely THAT it happened (W1-T2964): `undefined` when unreadable,
   // which `advanceIsMaterial` treats as material, so a degraded read never suppresses a restart.
   let changedPaths: string[] | undefined;
@@ -664,6 +668,7 @@ function assessFetchedService(repoDir: string, git: GitRunner): ServiceFreshness
   return {
     status: "assessed",
     dirty,
+    ...(dirty ? { dirty_paths } : {}),
     behind: {
       oldSha: headSha,
       newSha: originSha,
@@ -679,10 +684,9 @@ function assessFetchedService(repoDir: string, git: GitRunner): ServiceFreshness
  * Not {@link checkCliFreshness}, which cannot answer this on a container — it refuses a detached
  * HEAD (how the daemon boots) with no sha pair, and it mutates, which a daemon must never do.
  *
- * Every non-`assessed` status maps to `{ stale: false }`: "I could not tell" is never a restart
- * trigger. A dirty tree is also never stale — entrypoint.sh refuses to sync one, so a restarted
- * container would come back on the same sha and loop (the relaunch storm `DaemonStopReason`'s doc
- * forbids). `installNeeded` stays unset: `serviceFreshnessGate` already installs on every boot.
+ * Unassessed and dirty trees never trigger a restart: entrypoint.sh refuses to sync dirty trees.
+ * A material dirty advance still reports behind evidence, so its age counts when it becomes clean.
+ * `installNeeded` stays unset: `serviceFreshnessGate` already installs on every boot.
  * Why: docs/forensics/self-sync.md#daemonfreshnessfromservice.
  */
 export function daemonFreshnessFromService(svc: ServiceFreshness) {
@@ -695,7 +699,11 @@ export function daemonFreshnessFromService(svc: ServiceFreshness) {
       stale: false,
       notStale: {
         arm: "dirty",
+        behind: svc.behind !== null && advanceIsMaterial(svc.behind.changedPaths),
+        // PRIMARY CONTROL: match the live-edit ladder's 20-path ledger display bound.
+        ...(svc.dirty_paths ? { dirty_paths: svc.dirty_paths.slice(0, 20) } : {}),
         ...(svc.behind ? { oldSha: svc.behind.oldSha, newSha: svc.behind.newSha } : {}),
+        ...(svc.behind?.changes ? { changes: svc.behind.changes } : {}),
       },
     } as const;
   }

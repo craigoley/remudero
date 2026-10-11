@@ -59,7 +59,7 @@ test("two concurrent freshness reads of one checkout spawn one git fetch and bot
   assert.equal(started, 1);
   assert.deepEqual(results, [
     { status: "assessed", dirty: false, behind: null },
-    { status: "assessed", dirty: true, behind: null },
+    { status: "assessed", dirty: true, dirty_paths: ["README.md"], behind: null },
   ]);
   assert.equal(firstAssessments, 3);
   assert.equal(secondAssessments, 3);
