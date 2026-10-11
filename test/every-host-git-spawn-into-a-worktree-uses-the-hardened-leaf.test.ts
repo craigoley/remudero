@@ -25,6 +25,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { maskLiterals, stripComments } from "../src/lib/test-impact-map.js";
+// @ts-ignore the executable .mjs module has no declaration file.
+import { CWD_OPTION_GIT_SPAWN as SHARED_CWD_OPTION_GIT_SPAWN, NOT_A_SPAWN, POSITIONAL_C } from "../scripts/lib/git-spawn-shapes.mjs";
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 
@@ -276,14 +278,10 @@ const LEAF_FILE = "src/lib/worktree-git.ts";
  * callee that is not a node:child_process primitive — a helper or injected seam that binds the tree
  * where the call site cannot show it, as `run("git", …)` in selectOpenWeightUnitTestSuites does.
  */
-export const CWD_OPTION_GIT_SPAWN = /(?<![\w$.])(?<!\bnew\s+)([A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)*)\s*(?:\?\.)?\(\s*(["'`])git\2\s*[,)]/g;
+export const CWD_OPTION_GIT_SPAWN: RegExp = SHARED_CWD_OPTION_GIT_SPAWN;
 
-/** A `-C` argv element: the quoted flag, a comma, then any expression (not a closing bracket). */
-const POSITIONAL_C = /(["'`])-C\1\s*,\s*(?=[^\s\])])/g;
+// POSITIONAL_C and NOT_A_SPAWN live in scripts/lib/git-spawn-shapes.mjs (W1-T6137), shared with the local precheck.
 
-/** Callees that take "git" first but spawn nothing: an error subclass's `super("git", …)`, and
- *  run-task.ts's `keyOf("git", args)`, which only builds a replay cache key. */
-const NOT_A_SPAWN = new Set(["super", "keyOf"]);
 
 export interface WidenedGitSite {
   readonly kind: "-C argv" | "cwd option" | "helper";
