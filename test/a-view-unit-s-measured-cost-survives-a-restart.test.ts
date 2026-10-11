@@ -104,6 +104,7 @@ test(`${proof}: costs written by the current generation cannot grant a peer lane
   const move = first.fast.posts.find((m) => m.type === "view_lane" && m.instance === "core");
   assert.ok(move && move.type === "view_lane");
   first.heavy.ticker.lane(move);
+  f.advance(500);
   first.heavy.tick();
   assert.deepEqual(first.heavy.builds, ["core"]);
 });
