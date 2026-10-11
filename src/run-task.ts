@@ -3350,7 +3350,7 @@ export function watchDispatchSpawn(
   const { taskId, spawnArgs, task, log } = watch;
   const state: { rootPid?: number; ended?: QuietRoundEndedError } = {};
   const abort = new AbortController();
-  const watchdog = (seams.runWatchdog ?? runQuietWorkerWatchdog)({
+  const watchdogOptions: Parameters<typeof runQuietWorkerWatchdog>[0] = {
     taskId,
     runId: watch.runId,
     rootPid: () => state.rootPid,
@@ -3387,7 +3387,9 @@ export function watchDispatchSpawn(
       abort.abort();
       return { ended: true, checkpointSha };
     },
-  });
+  };
+  // Direct call on the run path; a test may substitute the runner through the seam.
+  const watchdog = seams.runWatchdog ? seams.runWatchdog(watchdogOptions) : runQuietWorkerWatchdog(watchdogOptions);
   return guardSpawnWithQuietWatchdog(rawSpawn, {
     watchdog, abort, onRootPid: (pid) => { state.rootPid = pid; }, ended: () => state.ended,
   });
