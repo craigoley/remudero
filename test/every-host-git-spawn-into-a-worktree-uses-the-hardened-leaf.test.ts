@@ -119,7 +119,12 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/clone-reaper.ts": { count: 2, reason: "CHECKOUT: defaultOriginOf(Async) read a reaped clone's origin (-C dir)" },
   "src/lib/commit-message.ts": { count: 1, reason: "CHECKOUT: readRangeCommitMessages reads the repo root (cwd: repoRoot)" },
   "src/lib/composition-root.ts": { count: 2, reason: "CHECKOUT (W1-T6122's file): realReviewWorktree's repoDir reads/adds against the managed checkout" },
-  "src/lib/containment.ts": { count: 1, reason: "CHECKOUT (W1-T6136): defaultExecutor's git init runs in the probe scratch dir it mkdirs itself" },
+  "src/lib/containment.ts": {
+    count: 2,
+    reason:
+      "CHECKOUT (W1-T6136): defaultExecutor's git init runs in the probe scratch dir it mkdirs itself; " +
+      "W1-T6158 made runWorkerSmoke's inline git init runs in <config.root>/tmp/worker-smoke-<token>/cwd, which it mkdirs itself",
+  },
   "src/lib/deployer.ts": { count: 1, reason: "CHECKOUT: realDeployDeps reads the install checkout (-C o.installPath)" },
   "src/lib/dispatch-claim.ts": { count: 1, reason: "CHECKOUT: gitClaimRunnerAsync runs claim refs in the managed checkout (-C repoDir)" },
   "src/lib/export-gardener.ts": { count: 1, reason: "CHECKOUT: referencesOutside reads the repo root (-C root)" },
@@ -135,7 +140,10 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/fleet-lane.ts": { count: 1, reason: "CHECKOUT: mergedInLastDaySteps reads origin/main in the managed checkout" },
   "src/lib/flow-remedy-gardener.ts": { count: 2, reason: "CHECKOUT: readPlan/ladderGardenSpec read the repo root (-C repoRoot)" },
   "src/lib/gardener-overseer.ts": { count: 1, reason: "CHECKOUT: productionGardenerOverseerPorts reads the repo root" },
-  "src/lib/gate-gardener.ts": { count: 1, reason: "CHECKOUT: defuseCandidates' run(\"git\", …) reads the repo root" },
+  "src/lib/gate-gardener.ts": {
+    count: 2,
+    reason: "CHECKOUT (W1-T6158): defuseCandidates' and confirmDefuse's run(\"git\", …) read the repo root",
+  },
   "src/lib/git-push.ts": {
     count: 6,
     reason:
@@ -221,11 +229,13 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
       "in the default spawn; NOT GIT: codexExecArgs's -C is codex's",
   },
   "src/lib/worker.ts": {
-    count: 24,
+    count: 29,
     reason:
-      "CHECKOUT (W1-T6133 converted the WORKTREE sites): defaultLaneListGit lists the managed checkout's " +
-      "registration (cwd: repoDir); the rest are worktreeAdd/Remove, pruneStaleRuns and branch reads of the " +
-      "managed checkout",
+      "CHECKOUT (W1-T6133 converted the WORKTREE sites; W1-T6158 made five more visible): defaultLaneListGit " +
+      "lists the managed checkout's registration (cwd: repoDir); the rest are worktreeAdd/Remove, " +
+      "pruneStaleRuns and branch reads of the managed checkout, plus defaultReadRemoteHead, " +
+      "readLocalOriginRefHead, defaultCountBehind and ensureWorktreeConfigEnabled (2), which read/configure " +
+      "the managed source checkout (-C repoDir)",
   },
   "src/run-task.ts": {
     count: 76,
