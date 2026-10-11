@@ -377,6 +377,30 @@ test("W1-T7754 adoption: selected legacy lineage is explicitly unknown without i
   await admissionModule.observeFeedbackInputs(f.settings, [], "selected-legacy", () => { throw new Error("diagnostic unavailable"); });
 });
 
+test("W1-T7754 publication: owner admission is not private-source publication permission", async () => {
+  const run = async (privateSource: boolean | undefined, privateTarget: boolean | undefined, throws = false) => {
+    const rows: Record<string, unknown>[] = []; const f = sourceFixture();
+    f.subject.repository!.private = privateSource;
+    const fn = (admissionModule as unknown as { feedbackPublicationSteps: (...args: unknown[]) => Generator<() => unknown, void, unknown> }).feedbackPublicationSteps;
+    const steps = fn({ mode: "shadow", record: (_step: string, fields: Record<string, unknown>) => rows.push(fields) },
+      [{ subject: f.subject, admission: { outcome: "trusted", reason: "owner" } }], "acme/public", "fixture-publication",
+      (path: string) => { if (throws) throw new Error("offline"); return { status: 200, body: path === "repos/acme/public"
+        ? { id: 200, full_name: "acme/public", private: privateTarget }
+        : { id: 100, full_name: "acme/widgets", private: privateSource } }; }, { now: () => NOW });
+    let next = steps.next();
+    while (!next.done) { try { next = steps.next(await next.value()); } catch (error) { next = steps.throw(error); } }
+    return rows;
+  };
+  assert.equal((await run(true, false))[0].outcome, "private-to-public");
+  assert.equal((await run(true, false))[0].would_deny, true);
+  assert.equal((await run(false, false))[0].outcome, "no-private-boundary-observed");
+  assert.equal((await run(false, false))[0].permission, "not-granted");
+  assert.equal((await run(true, true))[0].would_deny, false);
+  for (const rows of [await run(undefined, false), await run(true, undefined), await run(true, false, true)]) {
+    assert.equal(rows[0].outcome, "unknown"); assert.equal(rows[0].would_deny, true);
+  }
+});
+
 test("W1-T7754 delivery: a live worker receives an immutable original lineage envelope, not relayer authority", { timeout: 15_000 }, async () => {
   __resetRunningWorkersForTest();
   const dir = tmpRoot(); const settingsFile = join(dir, "worker.json");
