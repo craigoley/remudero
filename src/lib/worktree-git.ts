@@ -429,6 +429,8 @@ export interface HostWorktreeGitOptions {
   input?: string;
   /** Kills the call past this many milliseconds, as `execFileSync`'s own `timeout` does. */
   timeout?: number;
+  /** The signal `timeout` kills with (node's default is SIGTERM). */
+  killSignal?: NodeJS.Signals;
   /** `latin1` maps each stdout byte to one char, so `Buffer.from(out, "latin1")` is the bytes exactly: a blob read
    *  must reach its reader as a checkout writes it, and a UTF-8 decode rewrites an invalid sequence. Default utf8. */
   encoding?: "utf8" | "latin1";
@@ -446,6 +448,7 @@ function spawnOptions(pin: PinnedWorktreeGit, opts: HostWorktreeGitOptions, over
     ...(opts.maxBuffer === undefined ? {} : { maxBuffer: opts.maxBuffer }),
     ...(opts.input === undefined ? {} : { input: opts.input }),
     ...(opts.timeout === undefined ? {} : { timeout: opts.timeout }),
+    ...(opts.killSignal === undefined ? {} : { killSignal: opts.killSignal }),
   };
 }
 
