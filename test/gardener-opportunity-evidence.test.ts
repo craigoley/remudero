@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -52,6 +53,24 @@ test("gardener opportunities preserve missing unreadable malformed and oversized
   await rm(f.path); await mkdir(f.path); assert.equal(await reason(), "unreadable");
   await rm(f.path, { recursive: true }); await writeFile(f.path, "not-a-directory");
   assert.equal((await readGardenerOpportunityEvidence(f.path, repository, clock)).state, "unavailable");
+});
+
+test("gardener opportunities refuse a real named pipe without waiting for a writer", async (t) => {
+  const f = await fixture(t);
+  await f.write([row()]);
+  assert.equal((await readGardenerOpportunityEvidence(f.dir, repository, clock)).state, "reported", "the ordinary file is a positive control");
+  await rm(f.path);
+  execFileSync("mkfifo", [f.path]);
+  const module = new URL("../src/lib/gardener-opportunity-evidence.ts", import.meta.url).href;
+  const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval",
+    `import { readGardenerOpportunityEvidence } from ${JSON.stringify(module)};
+     console.log(JSON.stringify(await readGardenerOpportunityEvidence(${JSON.stringify(f.dir)}, ${JSON.stringify(repository)})));`],
+    { encoding: "utf8", timeout: 5000 });
+  assert.equal(child.error, undefined, "nonregular input must not hang in open before the type check");
+  assert.equal(child.status, 0, child.stderr);
+  const result = JSON.parse(child.stdout);
+  assert.equal(result.state, "unavailable"); assert.equal(result.reason, "unreadable");
+  assert.equal(result.total, undefined);
 });
 
 test("gardener opportunities refuse an entire mixed invalid duplicate or future corpus", () => {

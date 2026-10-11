@@ -1,3 +1,4 @@
+import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
@@ -58,7 +59,8 @@ export function projectGardenerOpportunityEvidence(raw: unknown, repository: str
 export async function readGardenerOpportunityEvidence(stateDir: string, repository?: string, clock: Clock = systemClock, openFile: typeof open = open): Promise<GardenerOpportunityEvidence> {
   if (!isOpportunityRepository(repository)) return unavailableOpportunityEvidence(null, clock, "scope_unavailable");
   try {
-    const handle = await openFile(join(stateDir, OPPORTUNITY_EVIDENCE_FILE), "r");
+    // Refuse FIFOs after opening without waiting indefinitely for an external writer.
+    const handle = await openFile(join(stateDir, OPPORTUNITY_EVIDENCE_FILE), constants.O_RDONLY | constants.O_NONBLOCK);
     try {
       const before = await handle.stat();
       if (!before.isFile()) return unavailableOpportunityEvidence(repository, clock, "unreadable");
