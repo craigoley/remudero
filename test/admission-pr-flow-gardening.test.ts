@@ -32,7 +32,8 @@ const report = (body: unknown = corpus(), ledger: flow.FlowLedgerRead = { ok: tr
 
 test("W1-T7756: admission gardening distinguishes missing evidence from healthy flow", () => {
   const measured = report();
-  assert.equal(measured.coverage, "measured");
+  assert.equal(measured.coverage, "unknown");
+  assert.equal(measured.corpusCoverage, "measured");
   assert.equal(measured.trusted.length, 1);
   assert.equal(measured.affected.length, 1);
   assert.equal(measured.affected[0].evidence, "missing-disposition");
@@ -140,7 +141,7 @@ test("W1-T7756 default: bounded real async child is read-only and the event loop
     const events = shim.events();
     assert.ok(events.some(e => e.phase === "start")); assert.equal(events.some(e => e.phase === "end"), false);
     const read = await pending; assert.equal(read.ok, true);
-    assert.equal(flow.admissionFlowReport(input, { ok: true, rows: [], unread: [] }, read, now).coverage, "measured");
+    assert.equal(flow.admissionFlowReport(input, { ok: true, rows: [], unread: [] }, read, now).corpusCoverage, "measured");
     assert.equal(shim.calls().length, 1); assert.match(shim.calls()[0]!, /first:100/); assert.match(shim.calls()[0]!, /p2:pullRequest/);
     assert.ok(shim.calls().every(call => !/mutation|--method|-X|pr close|issue comment/.test(call)));
     shim.addRoute({ when: "api graphql", stdout: "malformed" });
@@ -314,4 +315,26 @@ test("W1-T7756 recurrence ladder: actual merged remedy and controlled snapshots 
   assert.equal(remedy.admissionFlowInventory(measured, [], [task], now).next, undefined, "unmeasured evidence does not create a second remedy");
   const corrupt = [{ step: flow.ADMISSION_FLOW_STEP, mode: "shadow", coverage: "measured", trusted: null }];
   assert.equal(remedy.admissionFlowInventory(measured, corrupt, [task], now).next, undefined);
+});
+
+test("W1-T7756 credit: actual anchored trailers OR run branches supply merge credit, not plan status", () => {
+  const current = corpus();
+  const merged = { pageInfo: { hasNextPage: true }, nodes: [
+    { body: "Remudero-Task: W1-T9999", headRefName: "ordinary", mergedAt: fixedClock(now - 1_000).iso() },
+    { body: "no trailer", headRefName: "run-W1-T9998-12345", mergedAt: fixedClock(now - 2_000).iso() },
+    { body: "quoted Remudero-Task: W1-T8888", headRefName: "other", mergedAt: fixedClock(now - 3_000).iso() },
+  ] };
+  const measured = report({ data: { repository: { ...current.data.repository, merged } } });
+  assert.equal(measured.mergeCreditCoverage, "observed-window");
+  assert.deepEqual(Object.keys(measured.mergeCredits).sort(), ["W1-T9998", "W1-T9999"]);
+  assert.equal(report().mergeCreditCoverage, "unknown");
+});
+
+test("W1-T7756 progress: current rollup is an observation, never a required-check waiver", () => {
+  const current = corpus();
+  const nodes = current.data.repository.pullRequests.nodes.map(p => ({ ...p, commits: { nodes: [{ commit: { oid: p.headRefOid, statusCheckRollup: { state: "PENDING" } } }] } }));
+  const measured = report({ data: { repository: { ...current.data.repository, pullRequests: { ...current.data.repository.pullRequests, nodes } } } });
+  assert.equal(measured.trusted[0]!.observedRollup, "PENDING");
+  assert.equal(measured.trusted[0]!.next, "required-current-head-checks");
+  assert.equal(measured.runtimeFlow, "not-certified"); assert.equal(measured.healthy, false);
 });
