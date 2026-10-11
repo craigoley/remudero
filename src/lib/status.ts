@@ -1977,7 +1977,6 @@ export function evaluateDispatchBreakerDetailed(
     if (seeded !== undefined) {
       priorCount = seeded;
       cache.lastCounts.set(taskId, seeded);
-      resetKeys.set(taskId, lastReset);
     }
   }
   const hasNewOwnedPr = lastPrOpened(lines, taskId, index) !== undefined;

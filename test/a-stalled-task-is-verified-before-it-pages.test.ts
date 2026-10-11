@@ -11,6 +11,7 @@ import { onCircuitBreakWithVerifier } from "../src/run-task.js";
 import type { Task } from "../src/lib/plan.js";
 import {
   decideStallVerdict,
+  dispatchBreakAttempts,
   fingerprintStallEvidence,
   STALL_VERIFIED_STEP,
   stallShardFingerprint,
@@ -323,4 +324,27 @@ test("W1-T7742: the production dispatch-break judge asks the risk mount with no 
   const failed = productionDispatchBreakJudge({ cwd: ".", settingsFile: "settings/worker.json",
     mount: { model: "m", effort: "low", maxTurns: 1, contextBudget: 1 }, spawn: async () => ({ text: "", subtype: "error_max_turns" }) as never });
   assert.equal(await failed(input), undefined);
+});
+
+test("W1-T7742: the dispatch-break judge reads only the attempts since the streak last reset", () => {
+  const rows: Record<string, unknown>[] = [
+    { run_id: "W1-R-0", task_id: "W1-R", step: "verdict", verdict: "no_pr", reason: "before the release" },
+    { run_id: "W1-R-1", task_id: "W1-R", step: "verdict", verdict: "failed", reason: "before the release" },
+    { run_id: "OP", task_id: "W1-R", step: "dispatch.breaker_released" },
+    { run_id: "W1-R-2", task_id: "W1-R", step: "verdict", verdict: "no_pr", reason: "after the release", cost_usd: 0.5 },
+    { run_id: "W1-R-3", task_id: "W1-R", step: "verdict", verdict: "handed_off", reason: "freshness_yield" },
+    { run_id: "J", task_id: "W1-R", step: DISPATCH_BREAKER_JUDGED_STEP, decision: "escalate" },
+    { run_id: "W1-R-4", task_id: "W1-R", step: "verdict", verdict: "no_pr", reason: "x".repeat(400) },
+    { run_id: "W1-OTHER-0", task_id: "W1-OTHER", step: "verdict", verdict: "no_pr" },
+  ];
+  const attempts = dispatchBreakAttempts(rows, "W1-R");
+  assert.deepEqual(attempts.map((attempt) => attempt.runId), ["W1-R-2", "W1-R-4"],
+    "a release resets the judged history; a yield is excluded; an escalate ruling resets nothing");
+  assert.deepEqual(attempts[0], { runId: "W1-R-2", verdict: "no_pr", reason: "after the release", costUsd: 0.5 });
+  assert.equal(attempts[1]?.reason?.length, 300, "a long reason is bounded before it reaches the prompt");
+
+  const afterContinue = dispatchBreakAttempts([...rows,
+    { run_id: "J2", task_id: "W1-R", step: DISPATCH_BREAKER_JUDGED_STEP, decision: "continue" },
+    { run_id: "W1-R-5", task_id: "W1-R", step: "verdict", verdict: "no_pr" }], "W1-R");
+  assert.deepEqual(afterContinue, [{ runId: "W1-R-5", verdict: "no_pr" }], "a continue ruling starts the next judgment from zero");
 });
