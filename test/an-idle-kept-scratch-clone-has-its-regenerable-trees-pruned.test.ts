@@ -89,7 +89,7 @@ test("test/an-idle-kept-scratch-clone-has-its-regenerable-trees-pruned.test.ts",
     assert.equal(existsSync(join(u.repo, "node_modules", "pkg", "index.js")), true, r.stdout);
     assert.ok(!r.stdout.includes(`PRUNE ${u.repo}`), r.stdout);
   }
-  assert.ok(r.stdout.includes(`KEEP ${fresh.unit}: written within 720 min`), r.stdout);
+  assert.ok(r.stdout.includes(`KEEP ${fresh.unit}: written within 360 min`), r.stdout);
   assert.ok(r.stdout.includes(`KEEP ${live.unit}: held open by a process`), r.stdout);
 });
 

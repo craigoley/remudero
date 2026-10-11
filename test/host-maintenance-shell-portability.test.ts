@@ -372,7 +372,7 @@ test("empty scratch membership preserves whole-unit safety on the real host shel
       const r = sweep(shell, fx);
       assert.doesNotMatch(r.stderr, /unbound variable|syntax error/, `${at}:\n${r.stderr}`);
       assert.equal(r.status, 0, `${at}:\n${r.stderr}${r.stdout}`);
-      assert.ok(r.stdout.includes(`KEEP ${fresh.unit}: written within 720 min`), `${at}:\n${r.stdout}`);
+      assert.ok(r.stdout.includes(`KEEP ${fresh.unit}: written within 360 min`), `${at}:\n${r.stdout}`);
       assert.ok(r.stdout.includes(`KEEP ${held.unit}: held open by a process`), `${at}:\n${r.stdout}`);
       assert.ok(r.stdout.includes(`KEEP ${marked.unit}: scratch keep marker`), `${at}:\n${r.stdout}`);
       for (const u of [fresh, held, marked]) {

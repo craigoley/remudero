@@ -32,7 +32,7 @@ test("a stale tsx cache file is pruned while a fresh one and the cache directory
   assert.equal(existsSync(c.stale), false, `the 30 h entry is pruned: ${r.stdout}`);
   assert.equal(readFileSync(c.fresh, "utf8"), '{"code":"fresh"}', "the fresh entry stays");
   assert.equal(lstatSync(c.dir).isDirectory(), true, "the cache directory itself is never removed");
-  assert.match(r.stdout, new RegExp(`PRUNE ${c.dir}: [1-9][0-9]* bytes, 1 tsx cache files older than 24 h`));
+  assert.match(r.stdout, new RegExp(`PRUNE ${c.dir}: [1-9][0-9]* bytes, 1 tsx cache files older than 6 h`));
   assert.match(r.stdout, /rmd-host-cleanup: pruned 1 stale tsx cache files \([1-9][0-9]* bytes\)/);
   assert.ok(r.stdout.includes(`KEEP ${c.dir}: tsx cache directory`), r.stdout);
 });

@@ -858,7 +858,9 @@ export type DaemonFreshnessNotStale =
  * dependency tree never survives into the relaunched process (W1-T151). */
 export type DaemonFreshness =
   | { stale: false; notStale?: DaemonFreshnessNotStale }
-  | { stale: true; oldSha: string; newSha: string; installNeeded?: boolean; changes?: readonly DeployWorthChange[] };
+  | { stale: true; oldSha: string; newSha: string; installNeeded?: boolean; changes?: readonly DeployWorthChange[];
+      /** The tree was behind before this reading could say so (a live edit held it, live-edit-ladder.ts). */
+      staleSinceMs?: number };
 
 /** W1-T5282 — the real wiring's reading is awaited, its `git fetch` off the loop; a sync reading stays sync. */
 /** W1-T5723: start, adopt, restart or discard the cadence child; only its settle is detached. */
@@ -1397,6 +1399,11 @@ export interface DaemonDeps {
    *  lane must stay single-threaded and never runs from here. Forensics: docs/forensics/daemon.md.
    *  W1-T4053: only a freshness drain passes a {@link LightPassScope}; every other caller passes nothing. */
   sweepLight?: (scope?: LightPassScope) => Promise<void> | void;
+  /** W1-T7734 — eligible review demand the last passes left waiting, and the light-pass interval derived
+   *  from observed review duration and head churn. Memory only, never a ledger read. `undefined` or
+   *  `eligible <= 0` is no demand: the idle branch sleeps as it always has. A `cadenceMs` that is
+   *  `undefined` (nothing observed yet) leaves the idle sleep a single poll interval. */
+  readIdleReviewDemand?: () => { eligible: number; cadenceMs?: number; medianReviewMs?: number; pushesPerPrHour?: number } | undefined;
   /** Called exactly once, when a block classifies as a genuine blocker — one or more tasks
    *  transitively depend on the blocked task. The real command escalates naming the dependents.
    *  Optional: omitted, a genuine blocker still halts the loop, it just opens no issue (W1-T46). */
@@ -3235,8 +3242,8 @@ export async function runDaemon(
   };
 
   // W1-T6093: remember observations at both the first-cycle guard and the shared decision boundary.
-  const observeFreshnessAdvance = (newSha: string, nowMs: number): void => {
-    staleSinceMs ??= nowMs;
+  const observeFreshnessAdvance = (newSha: string, nowMs: number, heldSinceMs?: number): void => {
+    staleSinceMs ??= Math.min(nowMs, heldSinceMs ?? nowMs);
     if (newSha !== lastAdvanceSha) {
       lastAdvanceSha = newSha;
       lastAdvanceAtMs = nowMs;
@@ -3247,7 +3254,7 @@ export async function runDaemon(
   // W1-T4945/W1-T6093: score the advance, then coalesce change-driven restarts within bounded staleness.
   const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, siblingInFlight = false): "restart" | "defer" => {
     const nowMs = daemonClock.now();
-    observeFreshnessAdvance(freshness.newSha, nowMs);
+    observeFreshnessAdvance(freshness.newSha, nowMs, freshness.staleSinceMs);
     const staleAtMs = staleSinceMs!;
     const busy =
       siblingInFlight ||
@@ -4242,7 +4249,7 @@ export async function runDaemon(
       // (W1-T312, W1-T380, W1-T382). One-shot: the three-clocks guard (W1-T126) fires at the next
       // tick boundary, and the operator holds above still outrank it (W1-T936).
       if (cyclesEntered === 0) {
-        observeFreshnessAdvance(freshness.newSha, daemonClock.now());
+        observeFreshnessAdvance(freshness.newSha, daemonClock.now(), freshness.staleSinceMs);
         log("daemon.freshness_deferred", {
           old_sha: freshness.oldSha,
           new_sha: freshness.newSha,
@@ -4406,6 +4413,52 @@ export async function runDaemon(
     const restartInterphaseReviewClock = (): void => {
       if (!interphaseReviewClock && !backgroundSweepOwnsTheTicker()) {
         interphaseReviewClock = startInterphaseReviewClock(deps, pollIntervalMs, log);
+      }
+    };
+
+    // W1-T7734 — THE IDLE SLEEP IS NOT BLIND WHILE A POST-REVIEW PR WAITS. The clock above stops before this
+    // sleep (it would overlap the passes below), so the sleep itself runs the light pass, at a cadence
+    // derived from observed review duration and head churn rather than once per poll interval.
+    // The final chunk ends the sleep, because the next tick's full pass is the pass that follows it.
+    const sleepIdleWithReviewDemand = async (): Promise<void> => {
+      let demand: ReturnType<NonNullable<DaemonDeps["readIdleReviewDemand"]>>;
+      try {
+        demand = deps.sweepLight ? deps.readIdleReviewDemand?.() : undefined;
+      } catch (e) {
+        log("daemon.idle_light_pass.demand_unreadable", { error: String((e as Error)?.message ?? e) });
+        demand = undefined;
+      }
+      if (!demand || !(demand.eligible > 0) || demand.cadenceMs === undefined || !(demand.cadenceMs < pollIntervalMs)) {
+        await sleepUntilSweepWake(pollIntervalMs);
+        return;
+      }
+      let remainingMs = pollIntervalMs;
+      let passes = 0;
+      let cadenceMs: number = demand.cadenceMs;
+      while (remainingMs > 0) {
+        const chunkMs = Math.min(cadenceMs, remainingMs);
+        const slept = await sleepUntilSweepWake(chunkMs);
+        remainingMs -= chunkMs;
+        if (slept === "wake" || remainingMs <= 0) return;
+        if (deps.checkStop?.() || deps.checkPause?.()) return;
+        passes += 1;
+        log("daemon.idle_light_pass", {
+          eligible: demand.eligible, cadence_ms: cadenceMs, median_review_ms: demand.medianReviewMs,
+          pushes_per_pr_hour: demand.pushesPerPrHour, poll_interval_ms: pollIntervalMs, pass: passes,
+        });
+        try {
+          await deps.sweepLight!({ reviewOnly: true });
+        } catch (e) {
+          log("daemon.sweep_light.failed", { phase: "idle", error: String((e as Error)?.message ?? e) });
+        }
+        const next = deps.readIdleReviewDemand?.();
+        if (!next || !(next.eligible > 0)) {
+          // The demand cleared: nothing waits any more, so the rest of the sleep is the ordinary one.
+          await sleepUntilSweepWake(remainingMs);
+          return;
+        }
+        demand = next;
+        cadenceMs = next.cadenceMs ?? cadenceMs;
       }
     };
 
@@ -5247,7 +5300,7 @@ export async function runDaemon(
         }
       }
       if (await stopInterphaseReviewClock()) continue;
-      await sleepUntilSweepWake(pollIntervalMs);
+      await sleepIdleWithReviewDemand();
       continue;
     }
 

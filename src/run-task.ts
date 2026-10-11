@@ -512,6 +512,7 @@ import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js
 import {
   deliversRealtime,
   escalate,
+  escalateAsync,
   escalateWithJudge,
   escalateWithSummary,
   escalationCause,
@@ -542,6 +543,7 @@ import {
   fetchOpenPrsRestSteps,
   type OpenPrRest,
   fetchSinglePrRest,
+  fetchSinglePrRestAsync,
   hydrateMergeConflictEvidenceSteps,
   hydratePlanFilingFilesSteps,
   hydrateSupersessionVerdictsSteps,
@@ -1029,6 +1031,8 @@ import {
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
 import { clockFromDateFn, clockFromMillisFn, fixedClock, systemClock, type Clock } from "./lib/clock.js";
+import type { AdmissionObserver } from "./lib/contributor-admission.js";
+import { observeContributorAdmission } from "./lib/arm-auto-merge.js";
 import {
   VERIFY_HUMAN_JUDGED_STEP,
   judgeVerifyHumanShard,
@@ -1752,6 +1756,7 @@ import {
   clearedConflictEscalationCause,
   type FixRoundBranchClaim,
   inFlightReviewCount,
+  readIdleLightCadence,
 } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
 import { applyDaemonMemoryPolicy, createDaemonMemoryGovernor, readDaemonMemoryPolicy } from "./lib/daemon-memory-policy.js";
@@ -2897,9 +2902,11 @@ import {
   checkServiceFreshness,
   checkServiceFreshnessAsync,
   daemonFreshnessFromService,
+  testRunnerOnItsOwnCheckout,
   type ReviewerCodeFreshness,
   type SelfSyncDeps,
 } from "./lib/self-sync.js";
+import { LIVE_EDIT_TREES, runLiveEditLadder, withLiveEditLadders, type LiveEditLadderWiring, type LiveEditTree } from "./lib/live-edit-ladder.js";
 import { checkImageDrift, IMAGE_DRIFT_STEP } from "./lib/image-drift.js";
 import {
   acquireInflightLock,
@@ -7080,6 +7087,40 @@ export function ciWaitFreshness(read: () => DaemonFreshness | Promise<DaemonFres
 export function daemonFreshnessReads(repoDir: string, env: NodeJS.ProcessEnv = process.env, deps: SelfSyncDeps = {}) {
   const read = (): Promise<DaemonFreshness> => checkServiceFreshnessAsync(repoDir, env, deps).then(daemonFreshnessFromService);
   return { checkFreshness: read, externalWaitFreshness: ciWaitFreshness(read) };
+}
+
+/** The daemon's live-edit ladder (live-edit-ladder.ts): its own tree and the install tree, escalating
+ *  through the needs-human channel as the fleet's GitHub identity, which the host's watchdog lacks. */
+export function liveEditLadderWiring(config: Config, clock: Clock = systemClock): LiveEditLadderWiring {
+  const issues = () => {
+    const self = resolveOwnerRepo();
+    return ghIssueGatewayAsync(self.owner, self.repo);
+  };
+  return {
+    daemonRepoDir: repoRoot,
+    installRepoDir: resolveInstallRoot(config),
+    stateDir: join(config.root, "state"),
+    host: hostname(),
+    clock,
+    escalate: (e) => escalateAsync(e, { issues: issues(), ledgerPath: ledgerPathFor(config), runId: e.runId ?? e.taskId }),
+    comment: async (url, body) => { await issues().comment?.(url, body); },
+  };
+}
+
+/** `rmd live-edits`: one rung of the ladder for one tree, run by the host watchdog. It never escalates:
+ *  the host's service user has no GitHub credential, so a restore leaves its notice for the daemon. */
+export async function liveEditsCommand(rest: string[], clock: Clock = systemClock): Promise<number> {
+  const badArg = unknownArgError("live-edits", rest, ["--tree", "--checkout", "--state-root"], ["--json"]);
+  const tree = flagValue(rest, "--tree") as LiveEditTree | undefined;
+  const checkout = flagValue(rest, "--checkout");
+  const stateDir = flagValue(rest, "--state-root");
+  if (badArg || !tree || !LIVE_EDIT_TREES.includes(tree) || !checkout || !stateDir) {
+    console.error((badArg ?? `rmd live-edits: --tree (${LIVE_EDIT_TREES.join("|")}), --checkout and --state-root are required`) + "\n" + USAGE);
+    return 2;
+  }
+  const result = await runLiveEditLadder({ tree, repoDir: checkout, stateDir, host: hostname(), clock, fetch: true });
+  console.log(rest.includes("--json") ? JSON.stringify(result) : `live-edits ${tree}: tier ${result.tier} -- ${result.reason}`);
+  return 0;
 }
 
 // EXPORTED INLINE, not on the tail export list its sibling `waitForCiGreen` rides: that list is the
@@ -21957,6 +21998,7 @@ export function repairRetroChangesetClaim(
  * be a brand-new, never-invoked-under-test line this same gate would then flag).
  */
 interface ReviewCommandDeps {
+  contributorAdmission?: AdmissionObserver;
   fetchView?: (args: string[]) => unknown;
   loadConfig?: () => Config;
   materialize?: typeof materializeReviewWorktree;
@@ -22459,6 +22501,8 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   const runId = `review-PR${view.number}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: reviewKey, step, lane: "review", ...extra });
+  await (deps.contributorAdmission ?? ((target, action) => observeContributorAdmission(config.contributorAdmission, target, action, log)))
+    ({ owner, repo, prNumber: view.number, headSha: view.headRefOid }, "review");
   const reviewSubject = resolveReviewSubjectCheckout({
     config,
     rest,
@@ -22884,6 +22928,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
  * `which claude`, which does not exist on a CI runner.
  */
 export interface DepReviewDeps {
+  contributorAdmission?: AdmissionObserver;
   clock?: Clock;
   gh?: (args: string[]) => unknown;
   prDiff?: (prUrl: string) => string;
@@ -22997,10 +23042,13 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     author?: { login?: string };
     statusCheckRollup?: RollupEntry[];
   };
+  const config = deps.config ?? loadConfig();
+  await (deps.contributorAdmission ?? ((target, action) => observeContributorAdmission(config.contributorAdmission, target, action,
+    (step, fields) => appendLedger(ledgerPathFor(config), { run_id: `dep-admission-PR${view.number}`, task_id: `dep-review-PR${view.number}`, step, ...fields }))))
+    ({ owner, repo, prNumber: view.number, headSha: view.headRefOid }, "review");
   const diff = (deps.prDiff ?? ((u: string) => ghExec(["pr", "diff", u], { encoding: "utf8", maxBuffer: 1 << 26 })))(view.url);
   const inputDigest = reviewInputDigest(view.headRefOid, view.body ?? "", DEP_REVIEW_ENGINE_REVISION);
 
-  const config = deps.config ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
   const clock = deps.clock ?? systemClock;
   const runId = `dep-review-PR${view.number}-${clock.now()}`;
@@ -39334,7 +39382,10 @@ export async function daemonCommand(
         // test/daemon-freshness-wiring.test.ts's ordering test. So no idle gate has to be added: a
         // dispatch runs to its verdict first, which is also what bounds the restart rate (measured:
         // the daemon is inside a dispatch 18.2% of wall clock, p50 28.3 min).
-        checkFreshness: daemonFreshnessReads(repoRoot).checkFreshness,
+        // 2026-10-11: a tracked edit in a live checkout deferred every refresh for five hours, silently.
+        checkFreshness: testRunnerOnItsOwnCheckout(repoRoot)
+          ? daemonFreshnessReads(repoRoot).checkFreshness
+          : withLiveEditLadders(daemonFreshnessReads(repoRoot).checkFreshness, liveEditLadderWiring(config)),
         readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state")),
         categorizedRefusalRejoinFor: (id) => lastProj?.get(id)?.categorizedRefusalRejoin,
         // impl-FZ / W1-T3554 — PLAN FRESHNESS, on BOTH the self-target and dedicated non-self
@@ -39498,8 +39549,9 @@ export async function daemonCommand(
           // W1-T4471: the one real wiring of the owner-reply reader.
           ghEscalationAnswerGateway(target.owner, target.repo, undefined, config.operatorGithubLogins),
           gitCredentialSocket?.socketPath,
-          onePassPerGeneration(() => tickReadGeneration, readPlane?.read,
+          servedTickRead(onePassPerGeneration(() => tickReadGeneration, readPlane?.read,
             () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined }), { log }),
+            () => tickReadGeneration),
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -39523,6 +39575,9 @@ export async function daemonCommand(
           // A run in flight starves the full sweep, so the light pass also watches main.
           mainHealthRung,
         ),
+        // W1-T7734: the idle sleep runs the light pass while review demand waits, at a cadence the sweep
+        // derives from observed review duration and head churn. Reads the sweep's in-process memo only.
+        readIdleReviewDemand: () => readIdleLightCadence(systemClock.now()),
         // W1-T117/W1-T356: the per-poll half of the orphan sweep — the SAME `sweepOrphans`
         // closure daemonBoot already runs once, above, wired here so a stray from a run that
         // ended BETWEEN polls (not only at the last boot) is still found within one cycle.
@@ -43256,6 +43311,69 @@ export function buildOpenPrViewsAsync(
     ciFailures: deps.fetchCiFailureEvidence ?? deps.fetchCiFailureEvidenceAsync ?? fetchCiFailuresAsync,
     requiredContexts: deps.readRequiredContextsAsync ?? readRequiredStatusCheckContextsAsync,
   }));
+}
+
+/**
+ * W1-T7734 — THE SWEEP'S SAME-PASS RE-READ OF ONE PR. The act-time guard caught a moved head; this reads
+ * that PR (and its rollup) once more THROUGH THE DAEMON'S PACER, rebuilds its `OpenPrView` with the same
+ * producer a whole pass uses, and carries the board-wide facts one PR's read cannot recompute. `undefined`
+ * is a PR that is no longer open. A failed read THROWS, so the sweep names the error and stands down.
+ */
+/** W1-T7734: stamps the facts a pass is served with the publish time of the generation they came from, so
+ *  `sweep.disposed` can record how old the view was when a PR was acted on. A read taken for this pass alone
+ *  (no published generation was served) is stamped with the moment it was requested. */
+export function servedTickRead<T extends object>(
+  serve: () => Promise<T | undefined>,
+  published: () => ReadGeneration<T> | undefined,
+): () => Promise<(T & { servedPublishedAtMs?: number }) | undefined> {
+  return async () => {
+    const before = published();
+    const requestedAtMs = systemClock.now();
+    const facts = await serve();
+    if (facts === undefined) return undefined;
+    return { ...facts, servedPublishedAtMs: before !== undefined && facts === before.facts ? before.publishedAtMs : requestedAtMs };
+  };
+}
+
+export function buildRereadPrAtAct(
+  owner: string,
+  repo: string,
+  ledgerPath: string,
+  opts: {
+    pacer?: GhCallPacer;
+    fetchAsync?: GhApiFetcher;
+    views?: Omit<NonNullable<Parameters<typeof buildOpenPrViewsAsync>[3]>, "openPrRows" | "fetchAsync" | "pacer">;
+  } = {},
+): (pr: OpenPrView) => Promise<OpenPrView | undefined> {
+  const read: GhApiFetcher = opts.fetchAsync ??((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit));
+  return async (pr) => {
+    const checkRuns = new Map<string, unknown>();
+    const row = await paceGhEntryAsync(opts.pacer, isGhRateLimitError, () =>
+      fetchSinglePrRestAsync(owner, repo, pr.prNumber, async (args, onRateLimit) => {
+        const response = await read(args, onRateLimit);
+        if (args[1]?.includes("/check-runs?")) checkRuns.set(args[1], response);
+        return response;
+      }));
+    if (row.state !== "OPEN") return undefined;
+    if (row.statusCheckRollup) {
+      attachPostedGateIds(row.statusCheckRollup, checkRuns.get(checkRunsRestArgs(owner, repo, row.headRefOid)[1]));
+    }
+    const views = await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
+      ...opts.views, fetchAsync: read, pacer: opts.pacer, openPrRows: [row],
+    });
+    const view = views.find((candidate) => candidate.prNumber === pr.prNumber);
+    if (!view) throw new Error(`the rebuilt view list did not contain PR #${pr.prNumber}`);
+    // Head-independent facts the whole-board producer and the credit projection computed for this PR.
+    return {
+      ...view,
+      supersededBy: view.supersededBy ?? pr.supersededBy,
+      supersessionVerdict: view.supersessionVerdict ?? pr.supersessionVerdict,
+      taskMergedBy: pr.taskMergedBy,
+      planResequenceIneligible: pr.planResequenceIneligible,
+      planResequenceUnmetDependencies: pr.planResequenceUnmetDependencies,
+      planResequenceHeld: pr.planResequenceHeld,
+    };
+  };
 }
 
 /**
@@ -47019,7 +47137,9 @@ export function buildSweepHook(
   escalationAnswerGateway?: EscalationAnswerGateway,
   // W1-T5115: the daemon's git credential socket. Omitted ⇒ fix workers keep the ambient helper.
   gitCredentialSocketPath?: string,
-  tickReadFor?: () => TickReadFacts | undefined | Promise<TickReadFacts | undefined>,
+  // W1-T7734: `servedPublishedAtMs` is when the generation these facts came from was published.
+  tickReadFor?: () => (TickReadFacts & { servedPublishedAtMs?: number }) | undefined |
+    Promise<(TickReadFacts & { servedPublishedAtMs?: number }) | undefined>,
 ): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
@@ -47159,6 +47279,13 @@ export function buildSweepHook(
         withFullSweepRepairAdmission({
           ...effects,
           readLiveStateAtAct: effects.readLiveState,
+          // W1-T7734: a head that moved under this pass is re-read (paced) and re-derived in this pass.
+          rereadPrAtAct: buildRereadPrAtAct(owner, repo, ledgerPath, {
+            pacer,
+            views: { planFilingFileCache, onPlanFilingClassification: reportPlanFilingClassification, isMerged,
+              readMainPlan: resolvedReadMainPlan },
+          }),
+          ...(tickRead?.servedPublishedAtMs !== undefined ? { snapshotPublishedAtMs: tickRead.servedPublishedAtMs } : {}),
           ledgerPath,
           runId,
           log,
@@ -47541,6 +47668,11 @@ export function buildSweepLightHook(
             actionable: (d) => lightPassActionable(d, fixRungAllowed, false, !reviewOnly),
             // W1-T5922: the arm's own reads, wired as the full hook wires them.
             readLiveStateAtAct: effects.readLiveState,
+            // W1-T7734: the light pass re-derives a moved head in-pass too, as the full pass does.
+            rereadPrAtAct: buildRereadPrAtAct(owner, repo, ledgerPath, {
+              views: { planFilingFileCache, onPlanFilingClassification: reportPlanFilingClassification, isMerged,
+                readMainPlan: resolvedReadMainPlan },
+            }),
             judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, activePlan, ledgerPath, runId, log),
             ...codeScanningJudgeDeps(owner, repo, config, activePlan, runId, log),
             // W1-T528: `runSweepLightPass` fans ONE `runSweep` call out PER open PR, concurrently
@@ -47751,7 +47883,7 @@ export async function fixCommand(
   //
   // `self` is the checkout's owner/repo, otherwise read from `origin`. A sandboxed checkout has no
   // origin remote, so a test that drives this verb end to end must be able to name the slug itself.
-  deps: { config?: Config; fetch?: GhApiFetcher; route?: typeof routeFix; self?: { owner: string; repo: string } } = {},
+  deps: { config?: Config; fetch?: GhApiFetcher; route?: typeof routeFix; self?: { owner: string; repo: string }; contributorAdmission?: AdmissionObserver } = {},
 ): Promise<number> {
   const prArg = rest[0];
   // W1-T4077: `--requested` is the console's "Fix now". The operator asking for a fix IS the decision to try
@@ -47776,6 +47908,8 @@ export async function fixCommand(
   const operatorRequested = rest.includes("--requested");
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "FIX", step, lane: "fix", ...extra });
+  await (deps.contributorAdmission ?? ((target, action) => observeContributorAdmission(config.contributorAdmission, target, action, log)))
+    ({ owner, repo, prNumber }, "repair");
 
   let raw: RawOpenPr & { state?: string };
   try {
@@ -54983,6 +55117,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T5687: reads the deduplicated union of every ledger archive and the live ledger and prints one verdict: PROGRESSING, IDLE (no open PRs), STALLED (newest progress row over 15 min old: capture-diagnostics; over 30 min: recycle), CRASH_LOOP (3 or more daemon.paths boots in 15 min that never reached daemon.boot: hold-revive) or UNKNOWN (no rows or no open-PR count; never a silent none). Progress is ONLY a sweep.pass, review.posted or verdict.merged row: daemon.* and runtime.* rows are a pulse, not progress, which is why the 318-minute crash loop of 2026-10-03 read live to every daemon-prefix reader. The open-PR count is the newest sweep.pass row's enumerated field. On capture-diagnostics it writes one bundle (ledger tail, docker ps, the tenant's docker logs --tail, the verdict) under <state>/diagnostics/progress-<ts>/, at most one per 15 min. It recycles nothing; the host launcher acting on recycle / hold-revive is W1-T5688.",
   },
   {
+    name: "live-edits",
+    syntax: "rmd live-edits --tree <daemon-checkout|install-checkout> --checkout <dir> --state-root <dir> [--json]",
+    summary: "Preserve, escalate, then restore tracked edits holding a live checkout behind origin/main.",
+    detail: "2026-10-11: one rung of the live-edit ladder (src/lib/live-edit-ladder.ts) for one live checkout. With tracked edits it always writes them to <state-root>/recovery/live-edits/<tree>/ as a patch and to refs/rmd-recovery/live-edits/<host>/<ts>, read back and re-applied before it counts as a copy. Staleness pressure is the daemon's own freshness pressure (decideFreshnessRestart) from the first reading dirty and behind: at the restart threshold the daemon escalates once; at twice it, and only with a confirmed copy of these exact edits, the tracked paths are restored to HEAD so the checkout can fast-forward. Prints one JSON line with --json (restored:true only when the tree is now clean). This verb never escalates; the daemon posts what it leaves pending. Run by the host watchdog for the daemon checkout and the install checkout.",
+  },
+  {
     name: "claim",
     syntax: "rmd claim <task-id> [--drop]",
     summary: "Take (or with --drop, drop) the dispatch claim the fleet honours, for a hand-build.",
@@ -56025,6 +56165,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
   ["routing-ab", async (rest) => await routingAbCommand(rest)],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
+  ["live-edits", async (rest) => await liveEditsCommand(rest)],
   ["claim", (rest) => claimCommand(rest)],
   ["impossible-canary", async (rest) => await impossibleCanaryCommand(rest, (input) => runImpossibleCanary(input))],
   ["benchmark-aa", async (rest) => rest[0] === "prospective" ? await prospectiveAaCommand(rest.slice(1), (input) => runProspectiveAa(input))
