@@ -882,7 +882,7 @@ function startMeasurementCadenceChild(
   log("measurement_cadence.child", {
     outcome: outcome.kind, run_id: outcome.runId, pid: outcome.pid, attempt: outcome.attempt, reason,
     previous_run_id: outcome.previous?.runId, previous_pid: outcome.previous?.pid,
-    previous_rule: outcome.previous?.rule, previous_detail: outcome.previous?.detail,
+    previous_rule: outcome.previous?.rule, previous_detail: outcome.previous?.detail, previous_cause: outcome.previous?.cause,
   });
   if (!outcome.settled) return;
   detachSweepAction(

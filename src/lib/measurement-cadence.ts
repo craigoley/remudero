@@ -2,7 +2,7 @@ import { reconcilePlan } from "./plan-reconcile.js";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { setPriority as osSetPriority } from "node:os";
 import { promisify } from "node:util";
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { getHeapStatistics } from "node:v8";
 import { dirname, join, posix, relative } from "node:path";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -3446,7 +3446,7 @@ export type MeasurementCadenceChildOutcome =
       pid: number;
       attempt: number;
       /** The dead run this outcome replaced or dropped, and the rule that decided it. */
-      previous?: { runId: string; pid: number; rule: "restart_once" | "discard" | "unreadable"; detail?: string };
+      previous?: { runId: string; pid: number; rule: "restart_once" | "discard" | "unreadable"; cause?: "recycled" | "unexplained"; detail?: string };
       /** Settles with the child's result row; absent for a discard that started nothing. */
       settled?: Promise<MeasurementCadenceRunResult>;
     };
@@ -3478,6 +3478,26 @@ function readChildState(path: string): ChildStateRead {
 
 function writeChildState(path: string, state: MeasurementCadenceChildState): void {
   writeAtomic(path, `${JSON.stringify(state)}\n`);
+}
+
+function childDeathCause(statePath: string, state: MeasurementCadenceChildState): { cause: "recycled" | "unexplained"; detail: string } {
+  const path = `${statePath.replace(/\.json$/, "")}.recycled.json`;
+  let marker: { runId?: unknown; pid?: unknown; container?: unknown; at?: unknown } | undefined;
+  try {
+    marker = JSON.parse(readFileSync(path, "utf8"));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") process.stderr.write(`measurement cadence recycle marker unreadable: ${String(e)}\n`);
+  } finally {
+    try {
+      unlinkSync(path);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") process.stderr.write(`measurement cadence recycle marker removal failed: ${String(e)}\n`);
+    }
+  }
+  const detail = measurementCadenceChildDeathDetail(statePath);
+  return marker?.runId === state.runId && marker.pid === state.pid && typeof marker.container === "string" && typeof marker.at === "string"
+    ? { cause: "recycled", detail: `container ${marker.container} recycled at ${marker.at}; ${detail}` }
+    : { cause: "unexplained", detail };
 }
 
 /** `kill(pid, 0)`: EPERM still means a live process owned by someone else. */
@@ -3544,14 +3564,14 @@ export function measurementCadenceChildRunner(opts: {
       if (isAlive(state.pid)) {
         return { kind: "adopted", runId: state.runId, pid: state.pid, attempt: state.attempt, settled: settle(state.runId, state.pid) };
       }
-      const detail = measurementCadenceChildDeathDetail(opts.statePath);
+      const { cause, detail } = childDeathCause(opts.statePath, state);
       if (state.attempt < MEASUREMENT_CADENCE_CHILD_MAX_ATTEMPTS) {
         const attempt = state.attempt + 1;
         const { pid, settled } = launch(state.runId, attempt);
-        return { kind: "restarted", runId: state.runId, pid, attempt, settled, previous: { runId: state.runId, pid: state.pid, rule: "restart_once", detail } };
+        return { kind: "restarted", runId: state.runId, pid, attempt, settled, previous: { runId: state.runId, pid: state.pid, rule: "restart_once", cause, detail } };
       }
       writeChildState(opts.statePath, { ...state, status: "discarded", error: `child ${state.pid} died on attempt ${state.attempt}: ${detail}` });
-      const previous = { runId: state.runId, pid: state.pid, rule: "discard" as const, detail };
+      const previous = { runId: state.runId, pid: state.pid, rule: "discard" as const, cause, detail };
       return fire ? startFresh(previous) : { kind: "discarded", runId: state.runId, pid: state.pid, attempt: state.attempt, previous };
     },
   };
