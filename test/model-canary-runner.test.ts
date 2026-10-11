@@ -31,7 +31,9 @@ test("canary runner refuses capacity before transport and preserves an unmeasura
 });
 test("canary runner enforces the real wall bound even if transport ignores its abort signal", async () => {
   let saves = 0;
-  const ports: CanaryExecutionPorts = { monotonicMs: () => performance.now(), admit: async () => ({ state: "admitted" }),
+  // A frozen clock keeps the pre-request clock checks from tripping "wall-bound" on a slow runner before
+  // any attempt exists; only the real abort timer (the behaviour under test) can end this run.
+  const ports: CanaryExecutionPorts = { monotonicMs: () => 0, admit: async () => ({ state: "admitted" }),
     request: async () => new Promise(() => {}), save: async r => { saves++; assert.equal(r.attempts[0]!.terminal, "timeout"); } };
   const r = await executeCanary(cases[0]!, pin, ports, { maxCalls: 1, wallMs: 10, maxOutputBytes: 64 });
   assert.equal(r.reason, "transport-timeout"); assert.equal(r.run.verified, null); assert.equal(saves, 1);
