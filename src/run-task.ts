@@ -1647,7 +1647,7 @@ import {
   checkCostGovernor,
   checkMemoryGovernor,
   checkQueueGovernor,
-  readFixHostPressure,
+  productionFixPressure,
   deriveQueueGovernorTrailingFlow,
   isFleetOwnedRunBranch,
   cancelledRequiredCheckNames,
@@ -35341,7 +35341,7 @@ function queueGovernorGateFor(
       trailingMergedCount: flow.trailingMergedCount, readHeadroom: () => readMemoryHeadroomFraction(),
     });
     const result = checkQueueGovernor(owned, policy, {
-      pressure: readFixHostPressure(policy.memoryFloorMib),
+      pressure: productionFixPressure(policy.memoryFloorMib, ledgerPath),
       foreignOpenCount: foreign,
       trailingMergedCount: flow.trailingMergedCount,
       trailingOpenedCount: flow.trailingOpenedCount,
@@ -35353,7 +35353,8 @@ function queueGovernorGateFor(
       observed_open_count: owned, measured_bound: result.measuredBound, wip_limit: result.wipLimit,
       trailing_merged_count: flow.trailingMergedCount, trailing_opened_count: flow.trailingOpenedCount,
       pressure_available_mib: result.pressure?.availableMib, pressure_floor_mib: result.pressure?.floorMib,
-      pressure_reason: result.pressure?.reason,
+      pressure_reason: result.pressure?.reason, pressure_binding: result.pressure?.binding, pressure_tier: result.pressure?.tier,
+      pressure_host_available_mib: result.pressure?.hostAvailableMib,
       tier: result.tier, deferred: result.deferred });
     if (!result.deferred) {
       admission = result;
@@ -55698,7 +55699,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "doctor",
     syntax: "rmd doctor [--json]",
     summary: "One local, read-only health check with a meaningful exit code (0/1/2).",
-    detail: "W1-T1047: ONE local, read-only health check with a meaningful exit code (0 OK / 1 any WARN / 2 any FAIL; bad args exit 64, so exit 2 always means a check failed and never a typo). NO NETWORK and NO HEALTHY DAEMON REQUIRED — every check reads the ledger, state/, plan/, /proc or ps, so it answers from a cold ssh session while remudero-serve is down and the API budget is exhausted, which is exactly when the console-side checks are unavailable. Checks: ledger freshness (newest daemon.* row vs two poll intervals), dispatch stall (eligible pool vs THIS host's own observed cadence, reusing deriveQueueHead/deriveDispatchCadence with a LOCALLY-derived merged set), dispatch liveness (consecutive daemon.alive rows stuck in the sweep phase), pause honoured (PAUSE held while dispatch continued — W1-T1065/#2298 files the tick defect, doctor only reports), lock-vs-process divergence, lane-less workers (#2251's 7200s threshold, reused not re-derived), stale git index.lock (report only; W1-T1036 owns reclamation), disk headroom, and memory/swap from /proc/meminfo (never the cgroup limit — this container is unlimited, so memory.max reads `max` and would report unbounded headroom on a host that already froze). EVERY check prints its measured value beside its threshold; one summary line first, short enough for a cron subject. READ-ONLY: --fix is refused by name, because every repair path already has an owner and a second actor mutating state a live daemon depends on is the measured hazard.",
+    detail: "W1-T1047: ONE local, read-only health check with a meaningful exit code (0 OK / 1 any WARN / 2 any FAIL; bad args exit 64, so exit 2 always means a check failed and never a typo). NO NETWORK and NO HEALTHY DAEMON REQUIRED — every check reads the ledger, state/, plan/, /proc or ps, so it answers from a cold ssh session while remudero-serve is down and the API budget is exhausted, which is exactly when the console-side checks are unavailable. Checks: ledger freshness (newest daemon.* row vs two poll intervals), dispatch stall (eligible pool vs THIS host's own observed cadence, reusing deriveQueueHead/deriveDispatchCadence with a LOCALLY-derived merged set), dispatch liveness (consecutive daemon.alive rows stuck in the sweep phase), pause honoured (PAUSE held while dispatch continued — W1-T1065/#2298 files the tick defect, doctor only reports), lock-vs-process divergence, lane-less workers (#2251's 7200s threshold, reused not re-derived), stale git index.lock (report only; W1-T1036 owns reclamation), disk headroom, and memory/swap from /proc/meminfo (the HOST's, never a container's cgroup — the measured freeze was host-wide, and one container's memory.max/memory.high headroom cannot show a host that already froze; the dispatch floor reads the container's own headroom beside it). EVERY check prints its measured value beside its threshold; one summary line first, short enough for a cron subject. READ-ONLY: --fix is refused by name, because every repair path already has an owner and a second actor mutating state a live daemon depends on is the measured hazard.",
   },
   {
     name: "status",

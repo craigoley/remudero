@@ -144,8 +144,8 @@ export function judgeDiskHeadroom(freeBytes: number | undefined, totalBytes?: nu
 }
 
 // Why: the measured ~4%-available freeze with no OOM signal — docs/forensics/doctor.md#judgememory.
-/** Memory and swap, read from `/proc/meminfo` rather than the cgroup limit (this container's
- *  `memory.max` reads the literal string `max`). A measured freeze at ~4% available with zero
+/** Memory and swap, read from `/proc/meminfo` rather than a cgroup limit: the freeze was the host's,
+ *  and one container's memory.max/memory.high headroom cannot show it. A measured freeze at ~4% available with zero
  *  swap logged nothing — a reclaim livelock never arms the OOM killer — so absent swap is part of
  *  the judgement, not a footnote. FALSIFIER: test/doctor.test.ts. */
 export const MEM_FAIL_FRACTION = 0.1;
