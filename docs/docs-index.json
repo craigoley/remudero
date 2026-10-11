@@ -632,6 +632,12 @@
       "grepHint": "Gate garden log"
     },
     {
+      "path": "docs/heavy-new-build-reservation.md",
+      "title": "Bounded heavy READY reservations, v2",
+      "summary": "This is an opt-in, host-local, single-account reader/producer foundation, not a",
+      "grepHint": "Bounded heavy READY reservations, v2"
+    },
+    {
       "path": "docs/knowledge-garden-log.md",
       "title": "Knowledge garden log",
       "summary": "Each section is one pass of the knowledge gardener (W1-T4095): what it changed and how the knowledge base scored.",
