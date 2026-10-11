@@ -108,6 +108,15 @@ test("canary durable owner refuses public git symlinked and nonprivate directori
   assert.throws(() => new CanarySlotOwner(join(dir, "missing")), /ENOENT/);
 }));
 
+test("canary durable owner canonicalizes an ancestor alias while retaining private leaf ownership", () => fixture(dir => {
+  const root = join(dir, "real"), alias = join(dir, "alias"), leaf = join(root, "private");
+  mkdirSync(root, { mode: 0o700 }); mkdirSync(leaf, { mode: 0o700 }); symlinkSync(root, alias);
+  const owner = new CanarySlotOwner(join(alias, "private"));
+  try { assert.equal(owner.claim(slots()[0]), "claimed"); }
+  finally { owner.close(); }
+  assert.equal(statSync(join(leaf, "model-canary-slots.sqlite")).mode & 0o777, 0o600);
+}));
+
 test("canary durable owner preserves an actual invalid-schema initialization failure and closes its database", () => fixture(dir => {
   const db = new DatabaseSync(join(dir, "model-canary-slots.sqlite"));
   db.exec("CREATE TABLE canary_slots_v1(id TEXT PRIMARY KEY)"); db.close();

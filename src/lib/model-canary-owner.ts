@@ -1,7 +1,7 @@
 /** Durable canary ownership. No provider execution, stale-claim reclamation or schedule activation. */
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, realpathSync, statSync } from "node:fs";
+import { chmodSync, existsSync, realpathSync, lstatSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { CanarySlot, CanarySchedulePorts } from "./model-canary-schedule.js";
 
@@ -27,8 +27,9 @@ export class CanarySlotOwner {
   private readonly owner = randomUUID();
 
   constructor(privateDirectory: string) {
-    const dir = resolve(privateDirectory), info = statSync(dir);
-    if (!info.isDirectory() || realpathSync(dir) !== dir || (info.mode & 0o077) !== 0
+    const requested = resolve(privateDirectory), dir = realpathSync(requested), info = statSync(dir);
+    // Canonicalize ancestor aliases such as macOS /var; the requested leaf must be a directory.
+    if (!lstatSync(requested).isDirectory() || !info.isDirectory() || (info.mode & 0o077) !== 0
       || (process.geteuid && info.uid !== process.geteuid())) throw new Error("canary-owner-private-directory-required");
     for (let parent = dir; ; parent = dirname(parent)) {
       if (existsSync(join(parent, ".git"))) throw new Error("canary-owner-directory-inside-git");
