@@ -11531,6 +11531,14 @@ export async function runFixRung(opts: {
   // strike reverts to whichever mode its now-computable state derives.
   let currentMergeConflict = opts.mergeConflict;
   const consecutiveMergeRefusalReasons: string[] = [];
+  /** #10787: ends merge-conflict mode once the merge is proven done, so the next round derives its red. */
+  const leaveMergeMode = (site: string, headSha: string | undefined): void => {
+    if (currentMergeConflict === undefined) return;
+    deps.log("fix.merge_mode_cleared", { site, strike: strikes, head_sha: headSha,
+      conflicted_files: conflictedFilePaths(currentMergeConflict), current_red: (currentCiFailures ?? []).map((f) => f.name) });
+    currentMergeConflict = undefined;
+    consecutiveMergeRefusalReasons.length = 0;
+  };
   // W1-T296: the head THIS INVOCATION's own most recent strike produced —
   // `undefined` until the first round's push+review completes below, which
   // is exactly the "first round has no prior head" contract
@@ -12932,6 +12940,11 @@ export async function runFixRung(opts: {
         strike: attempt,
         ...(merged.reason ? { reason: merged.reason } : {}),
       });
+      // #10787: main is already in the branch and a red is known — route to it: no strike, no refused round.
+      if (merged.reason === MERGE_UP_TO_DATE_REASON && noReviewYet && (currentCiFailures?.length ?? 0) > 0) {
+        leaveMergeMode("rung.merge_up_to_date", priorHeadSha);
+        continue;
+      }
       if (!merged.started) {
         const refusal = merged.reason ?? "the merge of current main did not start (no reason reported)";
         consecutiveMergeRefusalReasons.push(refusal);
@@ -13610,6 +13623,9 @@ export async function runFixRung(opts: {
           deps.log("fix.ci_failures_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
         }
       }
+      // #10787: named checks that RAN red prove GitHub computed the merge ref (a dirty PR runs none), so the next
+      // round targets that red instead of re-merging main; the pre-strike gate re-probes mergeability first.
+      if (ciGateState(ci) === "red" && (currentCiFailures?.length ?? 0) > 0) leaveMergeMode("rung.ci_red", ciGateSha(ci));
 
       // W1-T2328 SITE — THE CI-LOG VERDICT-UNCHANGED CHECK, RIGHT AFTER THE REFRESH ABOVE: this
       // strike's push landed and CI re-ran, but did the finding set actually MOVE? Comparing
@@ -13698,11 +13714,7 @@ export async function runFixRung(opts: {
       continue; // The next judgment sees the refreshed red set and this round's finding.
     }
 
-    // W1-T106: CI reaching green at all means GitHub could compute a merge
-    // ref — the conflict is resolved enough for a check to run — so the NEXT
-    // strike (if the review that follows still fails) is never re-dispatched
-    // as merge-conflict mode again; it reverts to whichever mode the now-real
-    // review verdict derives, exactly like `noReviewYet`'s own reversion.
+    // W1-T106: green CI proves the merge ref computes, so merge mode ends (a named red ends it above, #10787).
     currentMergeConflict = undefined;
 
     // W1-T3501: judge the CURRENT PR BODY — the artifact the authoritative
