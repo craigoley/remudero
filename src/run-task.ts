@@ -192,7 +192,7 @@ import { mergedInLastDayAsync } from "./lib/fleet-lane.js";
 import { startDaemonSreLane } from "./lib/daemon.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
+import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDue, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { gardenSchedule } from "./lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "./lib/gardener-runtime.js";
@@ -26311,15 +26311,41 @@ export function ciLearningPlanOrigins(root: string): string[] {
   }
 }
 
-/** THE RESERVATION PATH, never a counter: the same `reserveTaskIdRemote` + `gitRemoteRefReserver`
- *  pair `next-task-id --reserve` uses, so a machine-filed id races the fleet's own ids correctly.
- *  FAIL-CLOSED by inheritance — an unreachable origin throws here rather than minting optimistically. */
+const gardenMintBudgets = new Map<string, GardenMintBudget>();
+
+/** The shared reservation path, with a learned deadline for CLI pushes and daemon children.
+ *  Budgets survive rebuilding a spec; a timeout never releases an id that may already be held. */
+
 export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields: Record<string, unknown>) => void,
-  executeAsync: (file: string, args: string[], options: { maxBuffer: number }) => Promise<{ stdout: string; stderr?: string }> = execFilePromise):
+  executeAsync: (file: string, args: string[], options: { maxBuffer: number; timeout: number; killSignal: "SIGKILL"; signal: AbortSignal }) => Promise<{ stdout: string; stderr?: string }> = execFilePromise,
+  opts: { budget?: GardenMintBudget; clock?: Pick<Clock, "now">; pollIntervalMs?: () => number;
+    loadPolicy?: () => { values: Pick<Policy["values"], "pollIntervalMs"> } } = {}):
   ((filingBranch?: string) => string) & { async: (filingBranch: string) => Promise<string> } {
+  let budget = opts.budget ?? gardenMintBudgets.get(root);
+  if (!budget) {
+    const readPolicy = opts.loadPolicy ?? loadDefaultPolicy;
+    budget = new GardenMintBudget(opts.pollIntervalMs ?? (() => readPolicy().values.pollIntervalMs));
+    gardenMintBudgets.set(root, budget);
+  }
+  const mintBudget = budget;
+  const clock = opts.clock ?? clockFromMillisFn(() => performance.now());
+  const now = () => clock.now();
   const mintSync = (filingBranch?: string) => {
-    const mint = mintNextTaskIdWithHistory({ planPath: join(root, "plan", "tasks.yaml"), repoRoot: root });
-    const runGit = (args: string[]) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
+    const started = now();
+    const bound = mintBudget.boundMs();
+    const runGit = (args: string[]) => {
+      const remaining = bound - (now() - started);
+      if (remaining <= 0) throw new GardenMintTimedOutError(now() - started, bound);
+      const result = spawnSync("git", args, { cwd: root, encoding: "utf8", timeout: Math.ceil(remaining), killSignal: "SIGKILL" });
+      if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") throw new GardenMintTimedOutError(now() - started, bound);
+      return result;
+    };
+    const mint = mintNextTaskIdWithHistory({ planPath: join(root, "plan", "tasks.yaml"), repoRoot: root,
+      gitRunner: (args) => {
+        const result = runGit(args);
+        if (result.status !== 0) throw new Error(result.stderr || String(result.error));
+        return result.stdout;
+      } });
     // The bridge supplies its actual landing identity, even when this manual command starts from
     // main. Reserving under the checkout's source branch would create a holder claim its true
     // landing branch cannot satisfy.
@@ -26327,31 +26353,61 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
       mint.n,
       gatedRemoteRefReserver({ run: gitRunAdapter(runGit), filingBranch, lane: "ci-learning", log }),
     );
+    if (now() - started >= bound) throw new GardenMintTimedOutError(now() - started, bound);
+    mintBudget.observe(now() - started);
     return held.taskId;
   };
   return Object.assign(mintSync, {
     async: async (filingBranch: string): Promise<string> => {
-      const { stdout, stderr } = await executeAsync(process.execPath, ["--import", import.meta.resolve("tsx"),
-        "--input-type=module", "--eval",
-        `import { format } from "node:util";
-         const rows = [];
-         console.log = (...args) => rows.push({ say: format(...args) });
-         const { ciLearningTaskIdMinter } = await import(${JSON.stringify(import.meta.url)});
-         try {
-           const id = ciLearningTaskIdMinter(process.argv[1], (step, fields) => rows.push({ step, fields }))(process.argv[2]);
-           process.stdout.write(JSON.stringify({ id, rows }));
-         } catch (error) {
-           process.stdout.write(JSON.stringify({ error: String(error?.message ?? error), rows }));
-         }`, root, filingBranch], { maxBuffer: 1 << 26 });
-      const result = JSON.parse(stdout) as { id: string; error?: string;
-        rows: Array<{ say: string } | { step: string; fields: Record<string, unknown> }> };
-      if (stderr) process.stderr.write(stderr);
-      for (const row of result.rows) {
-        if ("say" in row) console.log(row.say);
-        else log?.(row.step, row.fields);
+      const started = now();
+      const bound = mintBudget.boundMs();
+      const controller = new AbortController();
+      let timer: ReturnType<typeof setTimeout>;
+      const expired = new Promise<never>((_, reject) => {
+        const expire = () => {
+          const remaining = bound - (now() - started);
+          if (remaining > 0) {
+            timer = setTimeout(expire, Math.ceil(remaining));
+            return;
+          }
+          reject(new GardenMintTimedOutError(now() - started, bound));
+          controller.abort();
+        };
+        timer = setTimeout(expire, Math.ceil(bound));
+      });
+      try {
+        const { stdout, stderr } = await Promise.race([executeAsync(process.execPath, ["--import", import.meta.resolve("tsx"),
+          "--input-type=module", "--eval",
+          `import { format } from "node:util";
+           const rows = [];
+           console.log = (...args) => rows.push({ say: format(...args) });
+           const { ciLearningTaskIdMinter } = await import(${JSON.stringify(import.meta.url)});
+           const { GardenMintBudget } = await import(${JSON.stringify(new URL("./lib/gardener.js", import.meta.url).href)});
+           try {
+             const id = ciLearningTaskIdMinter(process.argv[1], (step, fields) => rows.push({ step, fields }), undefined,
+               { budget: new GardenMintBudget(() => ${JSON.stringify(bound)}) })(process.argv[2]);
+             process.stdout.write(JSON.stringify({ id, rows }));
+           } catch (error) {
+             process.stdout.write(JSON.stringify({ error: String(error?.message ?? error), timedOut: error?.name === "GardenMintTimedOutError", rows }));
+           }`, root, filingBranch], { maxBuffer: 1 << 26, timeout: Math.ceil(bound), killSignal: "SIGKILL", signal: controller.signal }), expired]);
+        const result = JSON.parse(stdout) as { id: string; error?: string; timedOut?: boolean;
+          rows: Array<{ say: string } | { step: string; fields: Record<string, unknown> }> };
+        if (stderr) process.stderr.write(stderr);
+        for (const row of result.rows) {
+          if ("say" in row) console.log(row.say);
+          else log?.(row.step, row.fields);
+        }
+        if (now() - started >= bound) throw new GardenMintTimedOutError(now() - started, bound);
+        if (result.timedOut) throw new GardenMintTimedOutError(now() - started, bound);
+        if (result.error !== undefined) throw new Error(result.error);
+        mintBudget.observe(now() - started);
+        return result.id;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code === "ETIMEDOUT" || (error as { killed?: boolean })?.killed) throw new GardenMintTimedOutError(now() - started, bound);
+        throw error;
+      } finally {
+        clearTimeout(timer!);
       }
-      if (result.error !== undefined) throw new Error(result.error);
-      return result.id;
     },
   });
 }
@@ -38038,6 +38094,7 @@ function refreshKnowledgeAssertions(root: string): string[] {
 
 /** What {@link buildRegisteredGarden} builds a garden over: the daemon's own config, repo and ledger writers. */
 export interface GardenBuildContext {
+  pollIntervalMs?: number;
   config: Config;
   repoRoot: string;
   owner: string;
@@ -38057,6 +38114,9 @@ export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => 
 export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBuildContext, opts: { hourly?: boolean } = {}): RegisteredGardenPass | Promise<RegisteredGardenPass> {
   const { config, repoRoot, owner, repo, log, raiseDuplicate } = ctx;
   const stateDir = join(config.root, "state");
+  const mintOptions = {
+    pollIntervalMs: ctx.pollIntervalMs === undefined ? undefined : () => ctx.pollIntervalMs!,
+  };
   const deps = (garden: Parameters<typeof gardenCheckout>[0]["name"], escalate?: (e: Escalation) => string): GardenerDeps => ({
     stateDir,
     repoRoot,
@@ -38094,14 +38154,14 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // or scorecard covers is filed through the machine-filing path, bounded by the queue and the day's merges.
     case "scout": {
       const d = deps("scout");
-      return gardenPass(scoutGardenSpec(d, { mintTaskId: ciLearningTaskIdMinter(repoRoot, log) }), d);
+      return gardenPass(scoutGardenSpec(d, { mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions) }), d);
     }
     // W1-T4116: the gates tighten, refresh and propose demoting themselves from their own
     // measurements. The ratchets are ES modules, so the garden starts once they have loaded.
     case "gate": {
       const d = deps("gate");
       return loadGateProbes(repoRoot).then(
-        (probes) => gardenPass(gateGardenSpec(d, probes), d),
+        (probes) => gardenPass(gateGardenSpec(d, probes, { mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions) }), d),
         (e: unknown) => {
           log("gate.gardener_failed", { error: String((e as Error)?.message ?? e) });
           return noPass;
@@ -38184,14 +38244,14 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         gateFireRates: () => readGateFireRateReport(stateDir),
         planState: () => readCiFrictionPlanState(repoRoot),
         ownerSearch: gitCiFrictionOwnerSearch((args) => execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 })),
-        mintTaskId: ciLearningTaskIdMinter(repoRoot, log),
+        mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
       };
       return gardenPass(ciFrictionGardenSpec(d, sources), d);
     }
     case "flow-remedy": {
       const d = deps("flow-remedy", raiseDuplicate);
       return gardenPass(flowGardenSpec(d, {
-        owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot, log),
+        owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
         admission: { owner, repo, settings: config.contributorAdmission },
         escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log }),
       }), d);
@@ -38201,7 +38261,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "fix-lane": {
       const d = deps("fix-lane", raiseDuplicate);
       return gardenPass(fixLaneGardenSpec(d, {
-        owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot, log),
+        owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
         escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log }),
       }), d);
     }
@@ -38214,10 +38274,10 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         openWorkspace: daemonGardenWorkspace(ctx, "selector-shadow"),
         log,
       };
-      return selectorShadowGardenPass(d, owner, repo, ciLearningTaskIdMinter(repoRoot, log));
+      return selectorShadowGardenPass(d, owner, repo, ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions));
     }
     case "flow":
-      return flowGardenPass(deps("flow"), owner, repo, ciLearningTaskIdMinter(repoRoot, log),
+      return flowGardenPass(deps("flow"), owner, repo, ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
         { admission: { owner, repo, settings: config.contributorAdmission } });
     case "evidence-coverage":
       return withDue(() => {
@@ -38245,7 +38305,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
         mainHistory: (sinceIso) => readMainHistory(repoRoot, sinceIso),
         planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
-        mintTaskId: ciLearningTaskIdMinter(repoRoot, log),
+        mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
         fileExists: (file) => existsSync(join(repoRoot, file)),
       };
       return gardenPass(hotFileGardenSpec(d, sources), d);
@@ -38271,7 +38331,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // W1-T4804: host disk, swap and inodes are projected to full from the heartbeat history and
     // answered in tiers against each host's own janitor cadence. Off: state/HOST_RESOURCE_OFF.
     case "host-resource": {
-      const mintTaskId = ciLearningTaskIdMinter(repoRoot, log);
+      const mintTaskId = ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions);
       const ports = {
         stateDir,
         log,
@@ -38280,7 +38340,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         openIncidentOrigins: () => openIncidentFeedbackOrigins(repoRoot),
         escalate: raiseDuplicate,
         planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
-        fileConsumer: fileConsumerVia(daemonGardenWorkspace(ctx, "host-resource"), mintTaskId),
+        fileConsumer: fileConsumerVia(daemonGardenWorkspace(ctx, "host-resource"), mintTaskId, log),
       };
       return async () => {
         try {
@@ -38934,7 +38994,7 @@ export async function daemonCommand(
     escalate({ ...e, runId }, { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId });
   const requestShardRepair = shardRepairRequester(join(config.root, "state"), log);
   const reportPlanQuarantine = quarantineReporter(log, raiseDuplicate, requestShardRepair);
-  const gardenContext: GardenBuildContext = { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate };
+  const gardenContext: GardenBuildContext = { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate, pollIntervalMs: opts.pollIntervalMs };
   const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
     ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
   const gardenPassSpawn = daemonGardenPassSpawn(log, injectedPassSpawn);
