@@ -35,7 +35,7 @@ function launcher(t: TestContext) {
   const revivals = join(root, "revivals");
   for (const dir of [stubs, join(daemon, ".git"), join(daemon, "bin"), join(daemon, "src"), join(install, ".git"), join(install, "deploy"), join(state, "state", "inflight"), join(state, "worktrees")]) mkdirSync(dir, { recursive: true });
   writeFileSync(join(daemon, "src", "run-task.ts"), "export {};\n");
-  executable(join(daemon, "bin", "rmd"), `#!/usr/bin/env bash\n[ "$1" = progress-watchdog ] && exit 0\nprintf '%s\\n' "$*" >> '${deployed}'\n`);
+  executable(join(daemon, "bin", "rmd"), `#!/usr/bin/env bash\ncase "$1" in progress-watchdog|host-alert) exit 0;; esac\nprintf '%s\\n' "$*" >> '${deployed}'\n`);
   executable(join(install, "deploy", "recycle-container.sh"), `#!/usr/bin/env bash\necho "container=$RMD_DAEMON_CONTAINER verdict=\${RMD_RECYCLE_VERDICT:-none}" >> '${recycled}'\nexit 0\n`);
   executable(join(stubs, "git"), `#!/usr/bin/env bash
 if [ "$1" = -C ]; then tree="$2"; shift 2; else tree="$PWD"; fi

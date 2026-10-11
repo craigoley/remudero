@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-10: a plan-only filing preflight selected 467 suites (Mac load ~11); approved 2026-10-10"
   plan_refs: [W1-T5895, W1-T5902, W1-T6090, W1-T2680, W1-T4952, W1-T7766]
   files: [scripts/preflight-author.mjs, src/lib/affected-suites.ts, scripts/diff-class.mjs, test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

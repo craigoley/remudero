@@ -9,13 +9,13 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 // A NAMESPACE import, so the file still LOADS on a tree without the shared constant and fails by
 // assertion there: a load error would read as an environment gap, not a red.
 import * as workerProvider from "../src/lib/worker-provider.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const { OPENWEIGHT_CHECKS, spawnOpenWeightWorker } = workerProvider;
 
@@ -95,20 +95,31 @@ async function unitTestArgvIn(cwd: string): Promise<readonly string[]> {
 }
 
 test("a unit_test check loads the setup guards only in a tree that carries the setup file", async () => {
-  const consumer = mkdtempSync(join(tmpdir(), "rmd-ow-no-setup-"));
-  const guarded = mkdtempSync(join(tmpdir(), "rmd-ow-with-setup-"));
+  const consumer = gitRepo({ kind: "ow-no-setup" });
+  const guarded = gitRepo({ kind: "ow-with-setup" });
   try {
-    mkdirSync(join(guarded, "test", "setup"), { recursive: true });
-    writeFileSync(join(guarded, "test", "setup", "tmp-hygiene.ts"), "export {};\n");
+    mkdirSync(join(guarded.dir, "test", "setup"), { recursive: true });
+    writeFileSync(join(guarded.dir, "test", "setup", "tmp-hygiene.ts"), "export {};\n");
+    for (const repo of [consumer, guarded]) {
+      repo.git("add", "-A");
+      repo.git("commit", "--quiet", "--allow-empty", "-m", "base");
+      repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+      mkdirSync(join(repo.dir, "test"), { recursive: true });
+      writeFileSync(join(repo.dir, "test", "changed.test.ts"), "export {};\n");
+    }
 
-    // A consumer repo (no setup file) runs exactly main's argv: a missing --import would fail to load.
-    assert.deepEqual(await unitTestArgvIn(consumer), ["node", "--import", "tsx", "--test", "--test-reporter=tap"]);
-    // A tree that carries the file runs under it, after tsx, as package.json's test:ci does.
-    assert.deepEqual(await unitTestArgvIn(guarded), [
-      "node", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--test", "--test-reporter=tap",
-    ]);
+    for (const repo of [consumer, guarded]) {
+      const argv = await unitTestArgvIn(repo.dir);
+      const concurrency = argv.at(-2)!;
+      assert.match(concurrency, /^--test-concurrency=[1-9][0-9]*$/, "consumer concurrency is explicitly bounded by host load");
+      assert.deepEqual(argv, [
+        "nice", "-n", "10", "node", "--import", "tsx",
+        ...(repo === guarded ? ["--import", "./test/setup/tmp-hygiene.ts"] : []),
+        "--test", "--test-reporter=tap", concurrency, "test/changed.test.ts",
+      ]);
+    }
   } finally {
-    rmSync(consumer, { recursive: true, force: true });
-    rmSync(guarded, { recursive: true, force: true });
+    consumer.cleanup();
+    guarded.cleanup();
   }
 });
