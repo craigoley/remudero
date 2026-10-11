@@ -5451,6 +5451,8 @@ export async function runDaemon(
     const admittedUnderLatch = new Set<string>();
     const liveHoldouts = (): string[] => [...inFlightTasks].filter((t) => restartHoldouts.has(t.id)).map((t) => t.id);
     const restartHeldByHoldout = (): boolean => liveHoldouts().length > 0;
+    const phaseBoundHolds = (): boolean => !inFlightFreshness && daemonClock.now() - dispatchPhaseStartedAtMs > refillBoundMs &&
+      ![...inFlightTasks].some(slowLane);
     const latchRestart = (freshness: Extract<DaemonFreshness, { stale: true }>): void => {
       if (!inFlightFreshness) {
         restartWait.decidedAtMs = daemonClock.now();
@@ -5466,6 +5468,11 @@ export async function runDaemon(
     // W1-T5282: a lane's refill is synchronous and cannot await a fetch, so with an awaited reader it reads the
     // latest reading settled since this tick began: the admission read above, then each dispatch tick's.
     let settledFreshness = selfFreshness;
+    const parkedLanes: Array<{ lane: number; finished: Task; wake: (next: Promise<Task | undefined>) => void }> = [];
+    const wakeParkedLanes = (): void => {
+      if (inFlightTasks.size > 0 && !refillClosed && phaseBoundHolds()) return;
+      for (const { lane, finished, wake } of parkedLanes.splice(0)) wake(Promise.resolve().then(() => decideRefill(lane, finished)));
+    };
     const refillLane = (lane: number, finished: Task, outcome: PromiseSettledResult<RunResult>): Task | undefined | Promise<Task | undefined> => {
       inFlightTasks.delete(finished);
       restartHoldouts.delete(finished.id);
@@ -5477,14 +5484,24 @@ export async function runDaemon(
       // W1-T4662: `handed_off` (a healthy freshness yield) deliberately does NOT match here — only
       // a genuine, repeated `blocked_transient` API failure closes this lane's refill.
       else if (outcome.value.verdict === "blocked_transient") refillClosed ??= "blocked_transient";
+      const decision = decideRefill(lane, finished);
+      wakeParkedLanes();
+      return decision;
+    };
+    const decideRefill = (lane: number, finished: Task): Task | undefined | Promise<Task | undefined> => {
       const phaseAgeMs = daemonClock.now() - dispatchPhaseStartedAtMs;
       if (inFlightFreshness && !restartHeldByHoldout()) refillClosed ??= "stale code";
-      if (!inFlightFreshness && phaseAgeMs > refillBoundMs && ![...inFlightTasks].some(slowLane)) refillClosed ??= "phase bound";
-      const governed = refillClosed ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
+      const phaseBound = !refillClosed && phaseBoundHolds() ? "phase bound" : undefined;
+      if (phaseBound && measuredRefillBound && inFlightTasks.size > 0) {
+        log("dispatch.lane_parked", { lane, finished_task: finished.id, reason: phaseBound, phase_age_ms: phaseAgeMs,
+          refill_bound_ms: refillBoundMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
+        return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, wake }));
+      }
+      const governed = refillClosed || phaseBound ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
       const stopped = deps.checkStop?.();
       const paused = deps.checkPause?.();
       // W1-T5083: the same restart decision the top of tick asks; a sibling in flight makes it busy.
-      const freshness = refillClosed ? undefined : freshnessReadsAsync ? settledFreshness : (deps.checkFreshness?.() as DaemonFreshness | undefined);
+      const freshness = refillClosed || phaseBound ? undefined : freshnessReadsAsync ? settledFreshness : (deps.checkFreshness?.() as DaemonFreshness | undefined);
       const freshnessAction = freshness?.stale ? decideFreshness(freshness, true) : undefined;
       // W1-T6274: a restart decided here holds every later refill this phase and ends it in the freshness stop.
       if (freshnessAction === "restart" && freshness?.stale) {
@@ -5493,6 +5510,7 @@ export async function runDaemon(
       }
       let reason =
         refillClosed ??
+        phaseBound ??
         (opts.max !== undefined && attempted.length >= opts.max ? "max reached" : undefined) ??
         holdWorkerAdmission("lane-refill")?.reason ??
         (stopped ? `stop: ${stopped}` : undefined) ??
@@ -5586,6 +5604,7 @@ export async function runDaemon(
         latchRestart(freshness);
         if (!restartHeldByHoldout()) refillClosed ??= "stale code";
       }
+      wakeParkedLanes();
     };
     // The restart runs once every lane below settles; until then each due tick names the lanes it waits on.
     const reportRestartWait = (decided: Extract<DaemonFreshness, { stale: true }>): void => {
@@ -5605,6 +5624,7 @@ export async function runDaemon(
       });
     };
     const onDispatchTick = deps.checkFreshness ? (): void | Promise<void> => {
+      wakeParkedLanes();
       if (inFlightFreshness && inFlightTasks.size > 0) return reportRestartWait(inFlightFreshness);
       if (inFlightFreshness || inFlightTasks.size === 0 || deps.checkPause?.()) return;
       const read = deps.checkFreshness!();

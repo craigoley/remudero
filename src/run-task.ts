@@ -19430,9 +19430,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     let impl!: WorkerResult;
     // W1-T7697: retain disk work before releasing a lane; a failed checkpoint is never a handoff.
     const yieldAtWorkerBoundary = async (waitingOn: string): Promise<RunResult | undefined> => {
-      // W1-T7806: report the boundary, then read the daemon's latch as well as this run's own reading.
+      // Daemon lanes share its restart decision; a second freshness read cannot override the latch.
+      const freshness = opts.laneRestart ? opts.laneRestart.restartLatched() : await opts.externalWaitFreshness?.();
       opts.laneRestart?.boundaryReached();
-      const freshness = (await opts.externalWaitFreshness?.()) ?? opts.laneRestart?.restartLatched();
       const recycle = freshness ? undefined : opts.externalWaitRecycle?.();
       if (!freshness && !recycle) return undefined;
       try {
