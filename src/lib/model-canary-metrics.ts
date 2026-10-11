@@ -26,6 +26,8 @@ export interface CanaryRun {
   verified: boolean | null;
   totalDurationMs: number | null;
   attempts: CanaryAttempt[];
+  outcomeReason?: string;
+  retention?: { turnsObserved: number; violations: number; firstViolationTurn: number | null };
 }
 export const nonnegativeMeasurement = (n: number | null): n is number =>
   n !== null && Number.isFinite(n) && n >= 0;
@@ -80,7 +82,8 @@ export function projectCanaryRuns(input: readonly CanaryRun[]) {
       if (JSON.stringify(prior) !== JSON.stringify(run)) throw new Error("canary-run-conflicting-duplicate");
       continue;
     }
-    if (run.attempts.length > 8 || (!run.attempts.length && run.verified !== null)) throw new Error("canary-attempt-bound");
+    if (run.attempts.length > (run.family === "retention" ? 50 : 8)
+      || (!run.attempts.length && run.verified !== null)) throw new Error("canary-attempt-bound");
     for (const attempt of run.attempts) {
       if (!attempt.id || attemptIds.has(attempt.id)) throw new Error("canary-attempt-identity-reused");
       attemptIds.add(attempt.id);
@@ -88,6 +91,12 @@ export function projectCanaryRuns(input: readonly CanaryRun[]) {
         attempt.outputTokens, attempt.cacheReadTokens, attempt.cacheWriteTokens, attempt.reasoningTokens, attempt.usageRatedUsd])
         if (value !== null && !nonnegativeMeasurement(value)) throw new Error("canary-measurement-invalid");
       if (!["api", "subscription"].includes(attempt.billing)) throw new Error("canary-billing-invalid");
+      if (!["complete", "error", "timeout"].includes(attempt.terminal)) throw new Error("canary-terminal-invalid");
+      if (attempt.servedModel !== null && (typeof attempt.servedModel !== "string" || !attempt.servedModel.trim()))
+        throw new Error("canary-served-model-invalid");
+      for (const value of [attempt.inputTokens, attempt.outputTokens, attempt.cacheReadTokens,
+        attempt.cacheWriteTokens, attempt.reasoningTokens])
+        if (value !== null && !Number.isSafeInteger(value)) throw new Error("canary-token-count-invalid");
     }
     runs.set(run.id, run);
   }
@@ -120,7 +129,7 @@ export function projectCanaryRuns(input: readonly CanaryRun[]) {
         firstTextObserved: first.length, firstTextP50Ms: quantile(first, .5),
         servedIdentityKnown: attempts.filter(a => a.servedModel !== null).length,
         servedMismatch: attempts.filter(a => a.servedModel !== null && a.servedModel !== row.model).length,
-        identityComparable: attempts.every(a => a.servedModel === row.model),
+        identityComparable: attempts.length > 0 && attempts.every(a => a.servedModel === row.model),
         failedAttempts: attempts.filter(a => a.terminal !== "complete").length,
         apiEstimate: cost("api"), subscriptionNotional: cost("subscription"), invoiceUsd: null };
     }) };

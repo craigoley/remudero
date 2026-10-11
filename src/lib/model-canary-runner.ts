@@ -15,6 +15,8 @@ export interface CanaryRequest {
   history: readonly { response: string; toolResults: readonly CanaryToolEvent[] }[];
   signal: AbortSignal;
   maxOutputBytes: number;
+  /** Native message roles, for the weekly retention protocol; never concatenate this into tool authority. */
+  conversation?: readonly { role: "system" | "user" | "assistant"; content: string }[];
 }
 /** Production admission must reserve the existing allowance BEFORE transport, on every call. */
 export interface CanaryExecutionPorts {
@@ -22,6 +24,16 @@ export interface CanaryExecutionPorts {
   request(input: CanaryRequest): Promise<CanaryResponse>;
   save(run: CanaryRun, grade: { passed: boolean; reason: string; schemaValid: boolean } | null): Promise<void>;
   monotonicMs(): number;
+}
+
+async function untilAbort<T>(signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
+  if (signal.aborted) throw new Error("canary-wall-bound");
+  let onAbort: () => void = () => {};
+  const expiry = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(new Error("canary-wall-bound")); signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try { return await Promise.race([operation(), expiry]); }
+  finally { signal.removeEventListener("abort", onAbort); }
 }
 
 export async function executeCanary(item: CanaryCase, pin: CanaryPin, ports: CanaryExecutionPorts,
@@ -36,18 +48,20 @@ export async function executeCanary(item: CanaryCase, pin: CanaryPin, ports: Can
     route: pin.route, effort: pin.effort, family: item.family, verified: null, totalDurationMs: null, attempts: [] };
   const trace: CanaryToolEvent[] = [], history: { response: string; toolResults: CanaryToolEvent[] }[] = [];
   const tool = canaryTools(item);
-  let grade: ReturnType<typeof gradeCanary> | null = null, reason = "call-bound";
+  let grade: ReturnType<typeof gradeCanary> | null = null, reason = "call-bound", transportError: unknown;
   try {
     for (let call = 0; call < limits.maxCalls; call++) {
       if (abort.signal.aborted || ports.monotonicMs() - started >= limits.wallMs) { reason = "wall-bound"; break; }
-      const admission = await ports.admit(pin, abort.signal);
+      const admission = await untilAbort(abort.signal, () => ports.admit(pin, abort.signal));
       if (admission.state === "refused") { reason = admission.reason; break; }
+      if (abort.signal.aborted || ports.monotonicMs() - started >= limits.wallMs) { reason = "wall-bound"; break; }
       const requestStarted = ports.monotonicMs();
       const pending: CanaryAttempt = { id: randomUUID(), durationMs: null, firstTextMs: null, generationMs: null,
         inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheWriteTokens: null, reasoningTokens: null,
         usageRatedUsd: null, billing: pin.billing, servedModel: null, terminal: "error" };
       run.attempts.push(pending);
-      const response = await ports.request({ prompt: item.prompt, pin, history, signal: abort.signal, maxOutputBytes: limits.maxOutputBytes });
+      const response = await untilAbort(abort.signal, () => ports.request({ prompt: item.prompt, pin, history,
+        signal: abort.signal, maxOutputBytes: limits.maxOutputBytes }));
       Object.assign(pending, response.resources);
       if (pending.durationMs === null) {
         const observed = ports.monotonicMs() - requestStarted;
@@ -67,11 +81,13 @@ export async function executeCanary(item: CanaryCase, pin: CanaryPin, ports: Can
     reason = abort.signal.aborted ? "transport-timeout" : "transport-error";
     const pending = run.attempts.at(-1);
     if (pending && abort.signal.aborted) pending.terminal = "timeout";
-    await ports.save({ ...run, totalDurationMs: null }, null);
-    return { state: "unavailable" as const, reason, run, error };
+    transportError = error;
   } finally { clearTimeout(timer); }
   const elapsed = ports.monotonicMs() - started;
   run.totalDurationMs = Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : null;
-  if (run.attempts.length) await ports.save(run, grade);
-  return { state: run.verified === null ? "unavailable" as const : "scored" as const, reason, run, trace, grade };
+  run.outcomeReason = reason;
+  // Refusals are part of availability coverage too, with zero provider attempts.
+  await ports.save(run, grade);
+  return { state: run.verified === null ? "unavailable" as const : "scored" as const, reason, run, trace, grade,
+    error: transportError };
 }

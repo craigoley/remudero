@@ -26,6 +26,18 @@ test("canary runner refuses capacity before transport and preserves an unmeasura
   ports.admit = async () => ({ state: "admitted" });
   const failed = await executeCanary(cases[0]!, pin, ports); assert.equal(failed.run.verified, null); assert.equal(failed.reason, "transport-error");
   assert.equal(failed.run.attempts.length, 1); assert.equal(failed.run.attempts[0]!.usageRatedUsd, null);
-  assert.equal(saves, 1); assert.equal(calls, 1);
+  assert.equal(saves, 2); assert.equal(calls, 1);
   await assert.rejects(() => executeCanary(cases[0]!, pin, ports, { maxCalls: 9, wallMs: 1, maxOutputBytes: 1 }), /bound-invalid/);
+});
+test("canary runner enforces the real wall bound even if transport ignores its abort signal", async () => {
+  let saves = 0;
+  const ports: CanaryExecutionPorts = { monotonicMs: () => performance.now(), admit: async () => ({ state: "admitted" }),
+    request: async () => new Promise(() => {}), save: async r => { saves++; assert.equal(r.attempts[0]!.terminal, "timeout"); } };
+  const r = await executeCanary(cases[0]!, pin, ports, { maxCalls: 1, wallMs: 10, maxOutputBytes: 64 });
+  assert.equal(r.reason, "transport-timeout"); assert.equal(r.run.verified, null); assert.equal(saves, 1);
+  assert.equal(r.run.attempts[0]!.usageRatedUsd, null); assert.ok(r.run.totalDurationMs! >= 0);
+  ports.request = async () => ({ text: JSON.stringify(cases[0]!.expected), toolCalls: [], resources });
+  ports.save = async () => { saves++; throw new Error("durable-write-refused"); };
+  await assert.rejects(() => executeCanary(cases[0]!, pin, ports), /durable-write-refused/);
+  assert.equal(saves, 2);
 });

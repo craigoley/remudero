@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -16,6 +16,14 @@ test("canary native preparation produces a pinned inert manifest without exposin
     assert.equal(manifest.dailyCases, 12); assert.equal(manifest.cash.globalDailyCapUsd, 25);
     assert.equal(manifest.cash.experimentDailyCapUsd, 0); assert.ok(manifest.tasks.every((t: Record<string, unknown>) => !("expected" in t)));
     assert.throws(() => canaryCommand(["prepare", dir]), /EEXIST/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test("canary private preparation refuses a new directory behind a Git symlink ancestor", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}canary-output-`));
+  try {
+    mkdirSync(join(dir, "repo/.git"), { recursive: true }); symlinkSync(join(dir, "repo"), join(dir, "link"));
+    assert.throws(() => canaryCommand(["prepare", join(dir, "link/new")]), /inside-git/);
+    assert.throws(() => canaryCommand(["prepare", dir, "extra"]), /usage/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 test("canary report has metric and run drilldowns and scripts cannot be injected through model names", () => {

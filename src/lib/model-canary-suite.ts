@@ -81,6 +81,9 @@ function validShape(item: CanaryCase, parsed: unknown): parsed is Record<string,
   if (item.family === "tools") return typeof parsed.quantity === "number" && Number.isSafeInteger(parsed.quantity);
   if (item.family === "recovery") return ["complete", "blocked", "approval-required"].includes(String(parsed.status))
     && (parsed.value === null || typeof parsed.value === "number");
+  if (item.family === "retention") return typeof parsed.turn === "number" && Number.isSafeInteger(parsed.turn)
+    && typeof parsed.key === "string" && (parsed.answer === null || typeof parsed.answer === "number")
+    && (parsed.source === null || typeof parsed.source === "string");
   return parsed.finding === null || typeof parsed.finding === "string";
 }
 

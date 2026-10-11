@@ -5,9 +5,13 @@ import { fileURLToPath } from "node:url";
 import { canarySuiteDigest, commonCanarySuite, weeklyCanarySuite, MODEL_CANARY_VERSION } from "./model-canary-suite.js";
 import { projectCanaryRuns, type CanaryRun } from "./model-canary-metrics.js";
 import { renderCanaryReport } from "./model-canary-report.js";
+import { retentionCanaryProtocol } from "./model-canary-retention.js";
 
 function privateOutput(dir: string, name: string, data: string) {
-  let parent = existsSync(dir) ? realpathSync(dir) : resolve(dir);
+  let parent = resolve(dir);
+  // Resolve the first existing ancestor too: a new directory below a symlink is not private.
+  while (!existsSync(parent)) parent = dirname(parent);
+  parent = realpathSync(parent);
   while (true) {
     if (existsSync(join(parent, ".git"))) throw new Error("canary-output-inside-git");
     const next = dirname(parent); if (next === parent) break; parent = next;
@@ -18,7 +22,8 @@ function privateOutput(dir: string, name: string, data: string) {
 
 export function canaryCommand(argv: readonly string[]) {
   const [command, outDir, input] = argv;
-  if (!outDir || !["prepare", "project"].includes(command ?? "") || argv.length > 3)
+  if (!outDir || !["prepare", "project"].includes(command ?? "")
+    || argv.length !== (command === "prepare" ? 2 : 3))
     throw new Error("usage: model-canary-command prepare <private-out-dir> | project <private-out-dir> <run-array.json>");
   if (command === "prepare") {
     const daily = commonCanarySuite(), weekly = weeklyCanarySuite();
@@ -28,7 +33,12 @@ export function canaryCommand(argv: readonly string[]) {
       limits: { concurrency: 1, maxCallsDailyCase: 3, wallMs: 60_000, maxOutputBytes: 16_384 },
       cash: { globalDailyCapUsd: 25, experimentDailyCapUsd: 0, premiumCashEligible: false },
       requires: ["published-source", "qualified-adapter", "capacity-admission", "shared-owner", "agreed-experiment-budget"],
-      deeperWeekly: { patchExecution: "pending-isolated-scorer", retention25And50Turns: "pending-multiturn-adapter", cacheProfiles: "pending-real-transport-coverage" } };
+      retentionProtocols: [25, 50].map(turns => {
+        const p = retentionCanaryProtocol(turns as 25 | 50);
+        return { turns, suiteHash: p.suiteHash, instruction: p.instruction,
+          prompts: p.cases.map(c => ({ id: c.id, prompt: c.prompt })), sampleUnit: "whole-conversation" };
+      }),
+      deeperWeekly: { patchExecution: "pending-isolated-scorer", retention25And50Turns: "native-protocol-prepared-adapter-pending", cacheProfiles: "pending-real-transport-coverage" } };
     privateOutput(outDir, "model-canary-manifest.json", JSON.stringify(manifest, null, 2) + "\n");
     return { state: manifest.state, suiteHash: manifest.suiteHash };
   }
