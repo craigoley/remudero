@@ -23181,7 +23181,7 @@ export function defaultNodePinSyncIo(
         git(["worktree", "add", "--quiet", "-B", headRef, tree, headSha]);
         writeFileSync(join(tree, ".nvmrc"), nvmrc);
         git(["add", ".nvmrc"], tree);
-        git(["-c", "user.name=remudero", "-c", "user.email=remudero@users.noreply.github.com", "commit", "--quiet", "-m", subject], tree);
+        git(["-c", "user.name=remudero-fleet[bot]", "-c", "user.email=remudero-fleet[bot]@users.noreply.github.com", "commit", "--quiet", "-m", subject], tree);
         const pushedSha = git(["rev-parse", "HEAD"], tree).trim();
         gitPushRunBranch(tree, { expectedHeadSha: pushedSha });
         return pushedSha;
