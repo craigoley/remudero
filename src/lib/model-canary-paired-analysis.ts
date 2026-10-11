@@ -2,6 +2,10 @@
 import { projectCanaryRuns, type CanaryRun } from "./model-canary-metrics.js";
 
 type Metric = "correct" | "durationMs" | "inputTokens" | "outputTokens" | "usageRatedUsd";
+interface MetricCoverage {
+  plannedPairs: number; observedPairs: number; observedCases: number;
+  caseBalancedMeanDifference: number | null; uncertainty: null; inference: "descriptive-only";
+}
 const metrics: Metric[] = ["correct", "durationMs", "inputTokens", "outputTokens", "usageRatedUsd"];
 const configuration = (run: CanaryRun) => JSON.stringify([run.model, run.route, run.effort, run.attempts[0]?.billing ?? null]);
 
@@ -94,7 +98,7 @@ export function analyzeCanaryPairs(input: readonly CanaryRun[]) {
           observedPairs: [...byCase.values()].reduce((n, v) => n + v.length, 0), observedCases: byCase.size,
           caseBalancedMeanDifference: caseMeans.length ? caseMeans.reduce((a, b) => a + b, 0) / caseMeans.length : null,
           uncertainty: null, inference: "descriptive-only" }];
-      })),
+      })) as Record<Metric, MetricCoverage>,
     })),
   };
 }

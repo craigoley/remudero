@@ -82,3 +82,27 @@ test("private canary report consumes actual paired analysis and keeps incomplete
   assert.match(html, /uncertainty and winners remain unavailable/);
   assert.equal(JSON.parse(renderCanaryReport(rows.slice(0, 1)).match(/<script type="application\/json" id="data">([^<]+)<\/script>/)![1]!).analysis.exclusions.length, 1);
 });
+
+test("paired canary analysis refuses incomplete authority and incompatible family or A/A membership", () => {
+  const family = block(); family[1]!.family = "evidence";
+  assert.equal(analyzeCanaryPairs(family).exclusions[0]!.reason, "mixed-family-block");
+  const mode = block(); mode[1]!.trial!.aaLabel = "A";
+  assert.equal(analyzeCanaryPairs(mode).exclusions[0]!.reason, "mixed-analysis-mode");
+  const absent = block(); absent[1]!.attempts = []; absent[1]!.verified = null;
+  assert.equal(analyzeCanaryPairs(absent).exclusions[0]!.reason, "billing-scope-unavailable");
+  const duplicateArm = block(); duplicateArm[1]!.model = duplicateArm[0]!.model;
+  duplicateArm[1]!.attempts[0]!.servedModel = duplicateArm[0]!.model;
+  assert.equal(analyzeCanaryPairs(duplicateArm).exclusions[0]!.reason, "arm-multiplicity-unproven");
+});
+
+test("paired canary analysis retains task duration and unavailable totals independently", () => {
+  const rows = block(); rows[1]!.totalDurationMs = null;
+  rows[1]!.attempts[0]!.outputTokens = Number.MAX_SAFE_INTEGER;
+  rows[1]!.attempts.push({ ...rows[1]!.attempts[0]!, id: "retry-overflow" });
+  rows[1]!.attempts[0]!.usageRatedUsd = null;
+  const c = analyzeCanaryPairs(rows).comparisons[0]!;
+  assert.equal(c.metrics.durationMs.caseBalancedMeanDifference, null);
+  assert.equal(c.metrics.outputTokens.caseBalancedMeanDifference, null);
+  assert.equal(c.metrics.usageRatedUsd.observedPairs, 0);
+  assert.equal(c.metrics.correct.observedPairs, 1);
+});
