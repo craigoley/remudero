@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-10: coverage shard 1/8 runs test/retro-marker-atomic.test.ts alone while the others run 415-593 files; approved 2026-10-10"
   plan_refs: [W1-T4071, W1-T5923, W1-T6174, W1-T6173, W1-T5902]
   files: [scripts/test-tier-manifest.mjs, src/lib/test-gardener.ts, test/the-coverage-duration-adopter-refuses-an-outlier-its-history-contradicts.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

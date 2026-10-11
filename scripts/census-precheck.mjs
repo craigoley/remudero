@@ -694,6 +694,40 @@ function addsMatch({ changed, readHead, readBase }, scope, scan) {
   });
 }
 
+/**
+ * W1-T6137: the host-worktree-git trigger reads the census's own git-spawn shapes from
+ * scripts/lib/git-spawn-shapes.mjs (one definition, no copied regex). The module is loaded once, and a load
+ * failure is kept rather than thrown here so one broken module cannot take the whole precheck down: the trigger
+ * rethrows it, and evaluateAdmittedCensusSuites reports that as `unmeasured` with its reason.
+ */
+let gitSpawnShapesModule = null;
+let gitSpawnShapesError = null;
+try {
+  gitSpawnShapesModule = await import("./lib/git-spawn-shapes.mjs");
+} catch (e) {
+  gitSpawnShapesError = e;
+}
+
+function loadGitSpawnShapes() {
+  if (gitSpawnShapesModule === null) {
+    throw new Error(`git-spawn shapes (scripts/lib/git-spawn-shapes.mjs) could not be loaded: ${gitSpawnShapesError?.message ?? gitSpawnShapesError}`);
+  }
+  return gitSpawnShapesModule;
+}
+
+/** True when the diff touches the leaf, the census, or the shared shapes, or adds a src/ git spawn of any shape the census counts. */
+export function gitSpawnTrigger(input, load = loadGitSpawnShapes) {
+  const shapes = load();
+  if (input.changed.some((p) => GIT_LEAF_CENSUS_PATHS.includes(p))) return true;
+  return addsMatch(input, CLOCK_SCOPE_RE, shapes.gitSpawnShapeMatches);
+}
+
+const GIT_LEAF_CENSUS_PATHS = [
+  "src/lib/worktree-git.ts",
+  "scripts/lib/git-spawn-shapes.mjs",
+  "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts",
+];
+
 /** W1-T5692: these slower censuses join the same child when changed source adds a literal. */
 export const PRECHECK_TRIGGERED_SUITES = [
   { testFile: "test/ledger-rotation.test.ts", script: "census:ledger-rotation", trigger: stepTrigger,
@@ -741,9 +775,7 @@ export const PRECHECK_TRIGGERED_SUITES = [
     remedy: "inject `spawn` into preflightCommand / `dispatch` into main, or prove the invariant through preflightSummaryTarget" },
   // W1-T6106: a host git spawn into a worker worktree must go through src/lib/worktree-git.ts.
   { testFile: "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts", script: "census:host-worktree-git",
-    trigger: (input) =>
-      input.changed.includes("src/lib/worktree-git.ts") ||
-      addsMatch(input, CLOCK_SCOPE_RE, (text) => text.split("\n").filter((line) => /"-C",\s*(?:wt|worktreePath|[\w$]+\.worktreePath|worktreeRoot|batchWorktree|ownerPath)\b/.test(line))),
+    trigger: (input) => gitSpawnTrigger(input),
     remedy: "route the spawn through hostWorktreeGit (src/lib/worktree-git.ts), or name it in that suite's RAW_SITE_EXCEPTIONS with its reason" },
 ];
 
