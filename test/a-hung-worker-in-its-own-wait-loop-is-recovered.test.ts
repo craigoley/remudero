@@ -787,9 +787,9 @@ test("W1-T7807: the contained spawn reports the worker root pid", () => {
 
 const JUDGE_EVIDENCE: QuietEvidence = {
   taskId: "W1-T7807", runId: "W1-T7807-judge", provider: "claude", quietMs: 3_300_000, boundMs: 1_800_000,
-  boundSource: "fallback", boundSamples: 0, basis: "finished_run", pollArgv: "tail -f out.log",
+  boundSource: "no_history_fallback", boundSamples: 0, basis: "finished_run", pollArgv: "tail -f out.log",
   nudgeAvailable: true,
-} as QuietEvidence;
+};
 
 test("W1-T7807: the production quiet judge spawns the risk-judge mount with the evidence and parses its verdict", async () => {
   const spawned: Array<Record<string, unknown>> = [];
