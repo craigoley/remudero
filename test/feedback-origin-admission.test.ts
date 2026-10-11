@@ -20,6 +20,8 @@ import { gitRepo } from "./helpers/git-repo.js";
 import { feedbackEntryBlock } from "../src/lib/triage.js";
 import { operatorVerdictEvidence } from "../src/lib/sweep.js";
 import { buildFixRungDispatchArgs } from "./helpers/run-task-test.js";
+import * as admissionModule from "../src/lib/contributor-admission.js";
+import type { AdmissionSettings, AdmissionRead, AdmissionDecision } from "../src/lib/contributor-admission.js";
 
 // W1-T7754 — an issue or comment is an outside contribution until the shared classifier admits
 // its ORIGINAL actor. These fixtures drive real captures through pollIssues/captureFeedback and
@@ -35,6 +37,132 @@ const POLICY: AdmissionPolicy = {
   services: [{ id: SUMMARIZER_BOT_ID, actions: ["feedback"] }],
   maxEvidenceAgeMs: 60_000,
 };
+
+type SourceObservation = { decision: AdmissionDecision; subject?: FeedbackAdmissionSubject; wouldDeny: boolean };
+const recheckSource = (...args: [AdmissionSettings | undefined, FeedbackAdmissionSubject, string,
+  (step: string, fields: Record<string, unknown>) => void, { read?: AdmissionRead; clock?: { now(): number } }?]) =>
+  (admissionModule as unknown as { observeFeedbackSource: (...params: typeof args) => Promise<SourceObservation | undefined> })
+    .observeFeedbackSource(...args);
+
+function sourceFixture(kind: FeedbackAdmissionSubject["kind"] = "issue", actorId = OWNER_ID) {
+  const actor = { id: actorId, type: "User", login: `actor-${actorId}` };
+  const repository = { id: 100, full_name: "acme/widgets", private: true };
+  const issue = { ...issueRow(4, actor), author_association: "NONE" };
+  const comment = { id: 9, user: actor, body: "answer", updated_at: issue.updated_at,
+    issue_url: "https://api.github.com/repos/acme/widgets/issues/4", author_association: "NONE" };
+  const reaction = { id: 81, user: actor, content: "+1", created_at: issue.updated_at };
+  const isComment = kind.includes("comment"), isReaction = kind.includes("reaction");
+  const issueRevision = { updatedAt: issue.updated_at, contentDigest: feedbackContentDigest([issue.title, issue.body, issue.labels]) };
+  const commentRevision = { updatedAt: comment.updated_at, contentDigest: feedbackContentDigest(comment.body) };
+  const subject: FeedbackAdmissionSubject = { kind,
+    sourceRef: `acme/widgets#4${isComment ? "/comment/9" : ""}${isReaction ? "/reaction/81" : ""}`,
+    observedAtMs: NOW - 120_000, repository: { id: 100, fullName: "acme/widgets", private: true },
+    itemId: isReaction ? 81 : isComment ? 9 : 1004, issueNumber: 4,
+    revision: isReaction ? { createdAt: reaction.created_at, contentDigest: feedbackContentDigest(reaction.content) }
+      : isComment ? commentRevision : issueRevision,
+    ...(isReaction ? { parent: { kind: isComment ? "issue-comment" as const : "issue" as const,
+      itemId: isComment ? 9 : 1004, revision: isComment ? commentRevision : issueRevision } } : {}),
+    origin: { actor, ...(!isReaction ? { association: "NONE" } : {}) } };
+  const routes: Record<string, unknown> = {
+    "repos/acme/widgets": repository, "repos/acme/widgets/issues/4": issue,
+    "repos/acme/widgets/issues/comments/9": comment,
+    "repos/acme/widgets/issues/4/reactions?per_page=100&page=1": [reaction],
+    "repos/acme/widgets/issues/comments/9/reactions?per_page=100&page=1": [reaction],
+  };
+  const calls: string[] = [];
+  const read: AdmissionRead = async path => { calls.push(path); return { status: 200, body: routes[path] }; };
+  const settings: AdmissionSettings = { mode: "shadow", repositoryId: 200, policy: { ...POLICY }, organizations: [] };
+  return { settings, subject, routes, calls, read, issue, comment, reaction };
+}
+
+for (const kind of ["issue", "issue-comment", "issue-reaction", "issue-comment-reaction"] as const) {
+  test(`W1-T7754 source: ${kind} re-reads actual identity and revision without inventing a PR head`, async () => {
+    const f = sourceFixture(kind); const rows: Record<string, unknown>[] = [];
+    const result = await recheckSource(f.settings, f.subject, "direct-adoption", (_step, fields) => rows.push(fields),
+      { read: f.read, clock: { now: () => NOW } });
+    assert.equal(result?.decision.reason, "owner");
+    assert.equal(result?.subject?.observedAtMs, NOW, "fresh read, not the stale capture timestamp");
+    assert.deepEqual(result?.subject?.revision, f.subject.revision);
+    assert.equal(result?.wouldDeny, false);
+    assert.equal(rows.length, 1);
+    assert.ok(f.calls.filter(p => p === "repos/acme/widgets").length === 2);
+    assert.equal(f.calls.some(p => /pulls|\/reactions\/81/.test(p)), false);
+  });
+}
+
+test("W1-T7754 source: absent policy does no reads and malformed identities cannot choose an API path", async () => {
+  const f = sourceFixture();
+  assert.equal(await recheckSource(undefined, f.subject, "adoption", () => {}, { read: f.read }), undefined);
+  assert.equal(f.calls.length, 0);
+  for (const subject of [{ ...f.subject, sourceRef: "../private#4" }, { ...f.subject, itemId: undefined }]) {
+    assert.equal((await recheckSource(f.settings, subject, "adoption", () => {}, { read: f.read, clock: { now: () => NOW } }))?.decision.outcome, "unknown");
+  }
+  assert.equal(f.calls.length, 0);
+});
+
+test("W1-T7754 source: source edits, numeric identity drift and changed reaction parents invalidate adoption", async () => {
+  for (const mutate of [
+    (f: ReturnType<typeof sourceFixture>) => { f.issue.body = "edited"; },
+    (f: ReturnType<typeof sourceFixture>) => { f.issue.id = 1005; },
+    (f: ReturnType<typeof sourceFixture>) => { f.issue.user = { id: 9001, type: "User", login: "actor-9001" }; },
+    (f: ReturnType<typeof sourceFixture>) => { f.routes["repos/acme/widgets"] = { id: 101, full_name: "acme/widgets", private: true }; },
+  ]) {
+    const f = sourceFixture(); mutate(f);
+    assert.equal((await recheckSource(f.settings, f.subject, "adoption", () => {}, { read: f.read, clock: { now: () => NOW } }))?.decision.reason, "source-revision-changed");
+  }
+  const f = sourceFixture("issue-comment-reaction"); f.comment.body = "edited parent";
+  assert.equal((await recheckSource(f.settings, f.subject, "fix", () => {}, { read: f.read, clock: { now: () => NOW } }))?.decision.reason, "source-revision-changed");
+});
+
+test("W1-T7754 source: membership negatives require an identity-bound credential positive control", async () => {
+  for (const control of [false, true]) {
+    const f = sourceFixture("issue", 9001);
+    f.settings.policy = { ...POLICY, organizationIds: [600] }; f.settings.organizations = [{ id: 600, login: "acme" }];
+    const read: AdmissionRead = path => {
+      if (path === "orgs/acme/memberships/actor-9001") return { status: 404, body: {} };
+      if (path === "user") return { status: 200, body: { id: 88, login: "credential" } };
+      if (path === "orgs/acme/memberships/credential") return { status: 200,
+        body: { state: "active", user: { id: control ? 88 : 89 }, organization: { id: 600 } } };
+      return f.read(path);
+    };
+    assert.equal((await recheckSource(f.settings, f.subject, "adoption", () => {}, { read, clock: { now: () => NOW } }))?.decision.outcome,
+      control ? "confirmed-external" : "unknown");
+  }
+});
+
+test("W1-T7754 source: edits during membership, policy changes and deadline expiry remain unknown", async () => {
+  for (const arm of ["source", "policy", "clock"] as const) {
+    const f = sourceFixture("issue", 9001); let now = NOW;
+    f.settings.policy = { ...POLICY, version: `race-${arm}`, organizationIds: [600] };
+    f.settings.organizations = [{ id: 600, login: "acme" }];
+    const read: AdmissionRead = path => {
+      if (path.startsWith("orgs/")) {
+        if (arm === "source") f.issue.body = "changed while resolving membership";
+        if (arm === "policy") f.settings.policy.version = "changed-policy";
+        if (arm === "clock") now += 60_001;
+        return { status: 200, body: { state: "active", user: { id: 9001 }, organization: { id: 600 } } };
+      }
+      return f.read(path);
+    };
+    const result = await recheckSource(f.settings, f.subject, "adoption", () => {}, { read, clock: { now: () => now } });
+    assert.equal(result?.decision.outcome, "unknown", arm);
+  }
+});
+
+test("W1-T7754 source: unreadable REST, permission ambiguity, comment reparenting and bounded reaction misses stay unknown", async () => {
+  for (const read of [async () => { throw new Error("offline"); }, async () => ({ status: 403, body: {} }),
+    async () => ({ status: 200, body: undefined })] satisfies AdmissionRead[]) {
+    const f = sourceFixture();
+    assert.equal((await recheckSource(f.settings, f.subject, "adoption", () => {}, { read, clock: { now: () => NOW } }))?.decision.outcome, "unknown");
+  }
+  const f = sourceFixture("issue-comment"); f.comment.issue_url = "https://api.github.com/repos/acme/widgets/issues/5";
+  assert.equal((await recheckSource(f.settings, f.subject, "adoption", () => {}, { read: f.read, clock: { now: () => NOW } }))?.decision.outcome, "unknown");
+  const missing = sourceFixture("issue-reaction"); let count = 0;
+  const read: AdmissionRead = path => { count++; return path.includes("reactions?")
+    ? { status: 200, body: Array.from({ length: 100 }, (_, i) => ({ id: 200 + i })) } : missing.read(path); };
+  assert.equal((await recheckSource(missing.settings, missing.subject, "fix", () => {}, { read, clock: { now: () => NOW } }))?.decision.outcome, "unknown");
+  assert.ok(count <= 5, "reaction lookup is capped, not a repository scanner");
+});
 
 function tmpRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "rmd-feedback-origin-"));
