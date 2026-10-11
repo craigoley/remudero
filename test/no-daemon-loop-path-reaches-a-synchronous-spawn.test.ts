@@ -224,7 +224,7 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   readRunBranchClosedPrsOutput: 1,
   readTaskPrecondition: 1,
   readyDraftViaGh: 1,
-  realArmDeps: 5,
+  realArmDeps: 6, // +1 2026-10-11: the closing-reference guard reads the PR body before a sync arm (ghJson handed over)
   realDeployDeps: 1,
   realReviewWorktree: 1,
   realSharedPauseGitDeps: 1,
