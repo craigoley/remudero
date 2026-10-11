@@ -402,6 +402,76 @@ test("W1-T7754 publication: owner admission is not private-source publication pe
   }
 });
 
+test("W1-T7754 publication: unknown, changed, bounded and lost evidence never becomes permission", async () => {
+  const f = sourceFixture();
+  for (const arm of ["missing", "bound", "source-outage", "source-id", "target-id", "deadline", "lost-receipt", "invalid-target", "invalid-mode", "snapshot"] as const) {
+    const rows: Record<string, unknown>[] = []; let now = NOW, reads = 0, targets = 0;
+    const contributions = arm === "missing" ? [] : arm === "bound" ? Array(9).fill({ subject: f.subject })
+      : arm === "snapshot" ? [{ subject: () => {} }] : [{ subject: f.subject }];
+    await admissionModule.observeFeedbackPublication({ mode: arm === "invalid-mode" ? "invalid" as "shadow" : "shadow",
+      record: (_step, fields) => { rows.push(fields); if (arm === "lost-receipt") throw new Error("log unavailable"); } },
+    contributions, arm === "invalid-target" ? "../private" : "acme/public", "fault-publication", {
+      clock: { now: () => now }, read: path => {
+        reads++;
+        if (path === "repos/acme/public") {
+          targets++;
+          if (arm === "deadline" && targets === 2) now += 5_001;
+          return { status: 200, body: { id: arm === "target-id" && targets === 2 ? 201 : 200, full_name: "acme/public", private: false } };
+        }
+        if (arm === "source-outage") throw new Error("source offline");
+        if (arm === "deadline") now += 5_001;
+        return { status: 200, body: { id: arm === "source-id" ? 101 : 100, full_name: "acme/widgets", private: true } };
+      },
+    });
+    assert.ok(reads <= 17, arm);
+    assert.ok(rows.some(row => row.outcome === (arm === "lost-receipt" || arm === "bound" ? "private-to-public" : "unknown")), arm);
+    assert.ok(rows.every(row => row.permission === "not-granted"));
+    if (arm === "bound") assert.ok(rows.some(row => row.reason === "publication-lineage-read-bound"));
+  }
+  await admissionModule.observeFeedbackPublication(undefined, [{ subject: f.subject }], "acme/public", "off", {
+    read: () => assert.fail("no-policy publication is unchanged") });
+  assert.deepEqual(admissionModule.feedbackLineageSnapshot([() => {}]), [{ kind: "unresolved", reason: "lineage-unreadable" }]);
+});
+
+test("W1-T7754 publication: the real async default reads visibility without blocking the loop or changing effects", async () => {
+  const f = sourceFixture(); const rows: Record<string, unknown>[] = [];
+  const shim = ghShim(["public", "widgets"].map(repo => ({ when: `api repos/acme/${repo} -i`, delaySeconds: 0.1,
+    stdout: `HTTP/2 200 OK\n\n${JSON.stringify({ id: repo === "public" ? 200 : 100, full_name: `acme/${repo}`, private: repo !== "public" })}` })),
+    { kind: "publication-default" });
+  const oldPath = process.env.PATH;
+  try {
+    process.env.PATH = `${shim.dir}:${oldPath}`;
+    let done = false;
+    const pending = admissionModule.observeFeedbackPublication({ mode: "shadow", record: (_step, fields) => rows.push(fields) },
+      [{ subject: f.subject }], "acme/public", "real-default").finally(() => { done = true; });
+    await new Promise<void>(resolve => setTimeout(resolve, 30));
+    assert.equal(done, false);
+    await pending;
+    assert.equal(rows[0].outcome, "private-to-public");
+    assert.equal(shim.calls().length, 3);
+  } finally { process.env.PATH = oldPath; rmSync(shim.dir, { recursive: true, force: true }); }
+});
+
+test("W1-T7754 publication: immediate upstream observes private material but shadow preserves the original PR effect", () => {
+  const root = tmpRoot(), f = sourceFixture(), rows: Record<string, unknown>[] = [], calls: string[][] = [];
+  mkdirSync(join(root, ".remudero"), { recursive: true });
+  writeFileSync(homeRepoPath(root), JSON.stringify({ owner: "acme", repo: "public" }));
+  const entry = captureFeedback(root, { raw: "private-source answer", origin: "issue#4", contribution: f.subject,
+    admission: { mode: "shadow", policy: POLICY, nowMs: NOW, record: (_step, fields) => rows.push(fields) },
+    land: { stateRoot: root }, upstream: { git: () => "git@github.com:acme/widgets.git",
+      gh: args => { calls.push(args);
+        if (args[1] === "repos/acme/widgets") return JSON.stringify({ id: 100, full_name: "acme/widgets", private: true });
+        if (args[1] === "repos/acme/public") return JSON.stringify({ id: 200, full_name: "acme/public", private: false, default_branch: "main" });
+        if (args[1] === "repos/acme/public/git/ref/heads/main") return JSON.stringify({ object: { sha: "a".repeat(40) } });
+        if (args[1] === "repos/acme/public/pulls") return JSON.stringify({ html_url: "https://github.com/acme/public/pull/1" });
+        return "{}";
+      } } });
+  assert.equal(entry.upstream?.status, "landed");
+  assert.ok(rows.some(row => row.boundary === "upstream-publication" && row.outcome === "private-to-public"));
+  assert.equal(calls.filter(args => args[1] === "repos/acme/public/pulls").length, 1);
+  assert.deepEqual(readFeedbackEntry(root, entry.id).contribution, entry.contribution);
+});
+
 test("W1-T7754 delivery: a live worker receives an immutable original lineage envelope, not relayer authority", { timeout: 15_000 }, async () => {
   __resetRunningWorkersForTest();
   const dir = tmpRoot(); const settingsFile = join(dir, "worker.json");
