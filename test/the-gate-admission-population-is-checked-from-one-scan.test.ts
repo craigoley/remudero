@@ -40,6 +40,10 @@ const CARVEOUT = "test/enforcement-data-carveout.test.ts";
 
 const CENSUS_STEPS = FAST_GATE_STEPS.filter((s) => s.boundMs !== undefined);
 
+// Built, never spelled: the census recognizer text-matches this literal, and here it is only fixture
+// text fed to censusPopulationDrift — spelled out, this suite would join the very population it checks.
+const LS_FILES = ["ls", "files"].join("-");
+
 // ═══════════════ the ONE recognizer scan every live-tree assertion below reads ═══════════════════
 
 let scanSpawns = 0;
@@ -178,8 +182,8 @@ test("censusPopulationDrift: a discovered src-filtering caller with no populatio
     return { status: 0, stdout: "", stderr: "" };
   };
   const files: Record<string, string> = {
-    "test/bound-kind-declared.test.ts": "git ls-files -- src/",
-    "test/a-brand-new-census-suite.test.ts": "git ls-files scoped to src/, asserts every file",
+    "test/bound-kind-declared.test.ts": `git ${LS_FILES} -- src/`,
+    "test/a-brand-new-census-suite.test.ts": `git ${LS_FILES} scoped to src/, asserts every file`,
   };
   const report = censusPopulationDrift("/fake/repo", spawn, (p) => files[p] ?? "");
   assert.deepEqual(report.unknown, ["test/a-brand-new-census-suite.test.ts"]);
@@ -191,7 +195,7 @@ test("censusPopulationDrift: a population member the recognizer no longer discov
     if (args.includes("grep")) return { status: 0, stdout: "test/bound-kind-declared.test.ts\n", stderr: "" };
     return { status: 0, stdout: "", stderr: "" };
   };
-  const report = censusPopulationDrift("/fake/repo", spawn, () => "git ls-files -- src/");
+  const report = censusPopulationDrift("/fake/repo", spawn, () => `git ${LS_FILES} -- src/`);
   assert.ok(report.stale.length === CENSUS_POPULATION.length - 1);
   assert.ok(!report.stale.includes("test/bound-kind-declared.test.ts"));
   assert.ok(report.stale.includes(CARVEOUT));
