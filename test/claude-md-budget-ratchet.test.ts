@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // ── W1-T503: CLAUDE.md SIZE AS A CI RATCHET (MASTER-PLAN §8A) ────────────────────────────────────
 //
@@ -94,7 +95,7 @@ test("claude-md-budget-ratchet CLI: a malformed capBytes never prints a cap figu
 test("the REAL committed CLAUDE.md is currently within the recorded size budget cap", () => {
   // The §8A net-byte rule may route fold debt on a CLAUDE.md-growing branch; without
   // --feedback-dir that filing lands in the tracked plan/feedback/ and dirties the tree.
-  const inbox = mkdtempSync(join(tmpdir(), "claude-md-budget-ratchet-inbox-"));
+  const inbox = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}claude-md-budget-ratchet-inbox-`));
   let result: SpawnSyncReturns<string>;
   try {
     result = spawnSync(process.execPath, [SCRIPT, "--feedback-dir", inbox], { cwd: REPO_ROOT, encoding: "utf8" });
