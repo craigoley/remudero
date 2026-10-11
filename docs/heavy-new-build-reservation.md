@@ -24,6 +24,14 @@ silently repaired or migrated. Abandoned unpublished `.heavy-ready-stage-*` dire
 are retained bounded census entries; the reader never deletes them or another writer's
 record. Normal publication removes only its own unique staging directory.
 
+A failure after rename (parent-directory flush or staging cleanup) can report a
+refusal even though a complete winner is already visible. Recovery reads that
+unchanged winner; it never rolls back publication or renews READY. A producer retry
+returns `owned: false`, not a newly releasable grant, so the original fixed expiry
+remains the recovery bound when the minting call lost its handle. Native process
+interruption and injected post-rename I/O failures are tested; power-loss persistence
+is not claimed as a tested outcome.
+
 ## State and recovery
 
 The logical identity publishes one immutable request. READY time and its expiry

@@ -242,7 +242,14 @@ export function heavyNewBuildGate(log: HeavyReadyLog, opts: { dir?: string } = {
     if (dir === undefined) return undefined;
     const reading = readHeavyNewBuildHold({ dir, log });
     if (reading.state === "unavailable") {
-      log("heavy_ready.unavailable", { reason: reading.reason, scope: "NEW-implement-only" });
+      const diagnostic = log("heavy_ready.unavailable", { reason: reading.reason, scope: "NEW-implement-only" });
+      if (diagnostic !== null && (typeof diagnostic === "object" || typeof diagnostic === "function") &&
+          typeof (diagnostic as { then?: unknown }).then === "function") {
+        void Promise.resolve(diagnostic).catch(() => {
+          // Diagnostic acceptance is unsupported and cannot clear UNKNOWN: both late resolution
+          // and rejection keep the named observation refusal below, without an orphan rejection.
+        });
+      }
       throw new Error(`heavy READY observation unavailable: ${reading.reason}`);
     }
     return reading.state === "held" ? reading.hold : undefined;

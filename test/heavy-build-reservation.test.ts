@@ -593,3 +593,137 @@ test("heavy READY v2 an expiry reader wins a concurrent owner release with one i
     assert.equal(fs.readdirSync(dir).filter(name=>name.startsWith('.heavy-ready-stage-')).length, 0);
   `);
 });
+
+test("heavy READY v2 a rejected async UNKNOWN diagnostic preserves the named refusal without creating state", { timeout: 10000 }, t => {
+  const dir = fixture(t);
+  nativeChild(dir, `
+    import fs from 'node:fs';
+    const missing = dir + '/configured-async-missing', before = fs.readdirSync(dir).sort();
+    assert.deepEqual(api.readHeavyNewBuildHold({dir}), {state:'clear', observed:0, pendingEscalations:0});
+    assert.equal(api.heavyNewBuildGate(()=>assert.fail('healthy empty directory must not log'), {dir})(), undefined);
+    assert.equal(fs.existsSync(missing), false);
+    const events = [], unhandled = [], listener = reason => unhandled.push(reason);
+    process.on('unhandledRejection', listener);
+    try {
+      const gate = api.heavyNewBuildGate((step, fields) => {
+        events.push({step, fields});
+        return Promise.reject(new Error('fixture UNKNOWN diagnostic async EIO'));
+      }, {dir:missing});
+      for (let i = 0; i < 2; i++) {
+        assert.throws(gate, /^Error: heavy READY observation unavailable: .*ENOENT/);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(unhandled.length, 0);
+        assert.equal(fs.existsSync(missing), false);
+        assert.deepEqual(fs.readdirSync(dir).sort(), before);
+      }
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(unhandled.length, 0);assert.equal(events.length, 2);
+      for (const event of events) {
+        assert.equal(event.step, 'heavy_ready.unavailable');
+        assert.equal(event.fields.scope, 'NEW-implement-only');
+        assert.match(event.fields.reason, /ENOENT/);
+      }
+      assert.deepEqual(api.readHeavyNewBuildHold({dir}), {state:'clear', observed:0, pendingEscalations:0});
+    } finally {process.removeListener('unhandledRejection', listener);}
+  `);
+});
+
+function verifyHeavyPostRenameRequestFault(dir: string, fault: "parent-fsync" | "stage-cleanup"): void {
+  const logicalId = `post-rename-${fault}`;
+  nativeChild(dir, `
+    import fs from 'node:fs';
+    import {createHash} from 'node:crypto';
+    import {syncBuiltinESMExports} from 'node:module';
+    const fault = process.argv[2], logicalId = 'post-rename-' + fault, now = Date.now();
+    const controlDir = dir + '/fixture-positive-control';
+    const control = api.reserveHeavyNewBuilds('unfaulted-publication', 'gate', {dir:controlDir, now});
+    assert.equal(control.owned, true);
+    assert.equal(api.readHeavyNewBuildHold({dir:controlDir, now}).state, 'held');
+    assert.equal(api.releaseHeavyNewBuilds(control, {now:now + 1}), true);
+    assert.deepEqual(api.readHeavyNewBuildHold({dir:controlDir, now}), {state:'clear', observed:1, pendingEscalations:0});
+    const id = createHash('sha256').update(JSON.stringify(logicalId)).digest('hex');
+    const destination = dir + '/heavy-build-' + id + '.json', recordPath = destination + '/record.json';
+    const root = fs.statSync(dir), rename = fs.renameSync, fsync = fs.fsyncSync, remove = fs.rmSync;
+    let published = false, stage, winner, faultCount = 0, renameCount = 0;
+    fs.renameSync = (from, to) => {
+      if (String(to) !== destination) return rename(from, to);
+      assert.equal(fs.existsSync(destination), false);
+      stage = String(from);assert.ok(stage.startsWith(dir + '/.heavy-ready-stage-'));
+      winner = fs.readFileSync(stage + '/record.json', 'utf8');
+      rename(from, to);published = true;renameCount++;
+      assert.equal(fs.readFileSync(recordPath, 'utf8'), winner);
+    };
+    fs.fsyncSync = fd => {
+      const actual = fs.fstatSync(fd);
+      if (fault === 'parent-fsync' && published && actual.isDirectory() && actual.dev === root.dev && actual.ino === root.ino) {
+        faultCount++;
+        throw Object.assign(new Error('fixture post-rename parent-fsync EIO'), {code:'EIO'});
+      }
+      return fsync(fd);
+    };
+    fs.rmSync = (path, options) => {
+      if (fault === 'stage-cleanup' && published && String(path) === stage) {
+        assert.equal(fs.existsSync(stage), false, 'rename already moved the complete stage');
+        faultCount++;
+        throw Object.assign(new Error('fixture post-rename stage-cleanup EIO'), {code:'EIO'});
+      }
+      return remove(path, options);
+    };syncBuiltinESMExports();
+    try {
+      assert.throws(() => api.reserveHeavyNewBuilds(logicalId, 'gate', {dir, now}), error =>
+        error.code === 'EIO' && error.message === 'fixture post-rename ' + fault + ' EIO');
+      assert.equal(faultCount, 1);assert.equal(renameCount, 1);assert.equal(published, true);
+      assert.equal(fs.statSync(destination).isDirectory(), true);
+      assert.equal(fs.readFileSync(recordPath, 'utf8'), winner);
+      const original = JSON.parse(winner);
+      assert.equal(original.readyAtMs, now);assert.equal(original.expiresAtMs, now + api.HEAVY_READY_ESCALATION_MS);
+      assert.equal(original.owner.pid, process.pid);
+      assert.equal(fs.existsSync(stage), false);
+      assert.deepEqual(fs.readdirSync(dir).sort(), ['fixture-positive-control', 'heavy-build-' + id + '.json'].sort());
+    } finally {
+      fs.renameSync = rename;fs.fsyncSync = fsync;fs.rmSync = remove;syncBuiltinESMExports();
+    }
+    const reading = api.readHeavyNewBuildHold({dir, now});
+    assert.equal(reading.state, 'held');assert.equal(reading.hold.requestId, id);
+    assert.equal(reading.hold.readyAtMs, now);assert.equal(reading.hold.expiresAtMs, now + api.HEAVY_READY_ESCALATION_MS);
+    assert.equal(fs.readFileSync(recordPath, 'utf8'), winner);
+  `, [fault]);
+  const recordPath = join(dir, `heavy-build-${hash(logicalId)}.json`, "record.json");
+  const winner = readFileSync(recordPath, "utf8");
+  nativeChild(dir, `
+    import fs from 'node:fs';
+    const winner = process.argv[2], logicalId = process.argv[3], original = JSON.parse(winner);
+    const recordPath = dir + '/heavy-build-' + original.id + '.json/record.json';
+    assert.notEqual(process.pid, original.owner.pid, 'recovery must use a fresh real process');
+    assert.equal(fs.readFileSync(recordPath, 'utf8'), winner);
+    const reading = api.readHeavyNewBuildHold({dir, now:original.expiresAtMs - 1});
+    assert.equal(reading.state, 'held');assert.equal(reading.observed, 1);assert.equal(reading.pendingEscalations, 0);
+    assert.equal(reading.hold.requestId, original.id);
+    assert.equal(reading.hold.readyAtMs, original.readyAtMs);assert.equal(reading.hold.expiresAtMs, original.expiresAtMs);
+    const retry = api.reserveHeavyNewBuilds(logicalId, original.label, {dir, now:original.expiresAtMs + 1});
+    assert.equal(retry.owned, false);assert.deepEqual(retry.request, original);
+    assert.equal(api.releaseHeavyNewBuilds(retry, {now:original.expiresAtMs + 1}), false);
+    assert.equal(fs.existsSync(dir + '/heavy-build-' + original.id + '-closed.json'), false);
+    assert.equal(fs.readFileSync(recordPath, 'utf8'), winner);
+    assert.deepEqual(api.readHeavyNewBuildHold({dir, now:original.expiresAtMs}), {state:'clear', observed:1, pendingEscalations:1});
+    const closedPath = dir + '/heavy-build-' + original.id + '-closed.json/record.json';
+    const closed = fs.readFileSync(closedPath, 'utf8'), closure = JSON.parse(closed);
+    assert.equal(closure.kind, 'escalated');assert.equal(closure.atMs, original.expiresAtMs);
+    assert.equal(closure.nonce, original.owner.nonce);
+    assert.deepEqual(api.readHeavyNewBuildHold({dir, now:original.readyAtMs - 1}), {state:'clear', observed:1, pendingEscalations:1});
+    const replay = api.reserveHeavyNewBuilds(logicalId, original.label, {dir, now:original.expiresAtMs + 2});
+    assert.equal(replay.owned, false);assert.deepEqual(replay.request, original);
+    assert.equal(fs.readFileSync(recordPath, 'utf8'), winner);assert.equal(fs.readFileSync(closedPath, 'utf8'), closed);
+    assert.equal(fs.existsSync(dir + '/heavy-build-' + original.id + '-delivered.json'), false);
+    assert.equal(fs.readdirSync(dir).filter(name=>name.startsWith('.heavy-ready-stage-')).length, 0);
+  `, [winner, logicalId]);
+  assert.equal(readFileSync(recordPath, "utf8"), winner);
+}
+
+test("heavy READY v2 parent fsync failure after request rename preserves the winner and refuses retry renewal", { timeout: 10000 }, t => {
+  verifyHeavyPostRenameRequestFault(fixture(t), "parent-fsync");
+});
+
+test("heavy READY v2 cleanup failure after request rename preserves the winner and refuses retry renewal", { timeout: 10000 }, t => {
+  verifyHeavyPostRenameRequestFault(fixture(t), "stage-cleanup");
+});
