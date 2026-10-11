@@ -3062,7 +3062,7 @@ function assembleServeRoutes(
       clock: deps.incidents?.clock,
       readStore: deps.incidents?.readStore,
     }),
-    buildGardenersRoute({ stateDir: dirname(deps.ledgerPath) }),
+    buildGardenersRoute({ stateDir: dirname(deps.ledgerPath), repository: deps.assistantRepository }),
   ];
   const routes = boundConsoleReadRoutes(rawRoutes, deps, CONSOLE_READ_ROUTE_BUDGET_MS, memory && { registry: memory, scope: "core" },
     readModel && { source: readModel, instance: deps.instances?.coreInstance ?? CORE_INSTANCE });
