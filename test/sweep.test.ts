@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { DEFAULT_ESTIMATE_MIB } from "../src/lib/host-memory-ledger.js";
 import { LiveWriteBlockedError, withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { classifyUpdateBranchFailure, reviewAttemptsForInput, updateBranchViaGh } from "./helpers/run-task-test.js";
 import { test } from "node:test";
@@ -3524,15 +3525,17 @@ test("runSweep: no postReview dep wired -> ledgered stand-down, no crash, no esc
 //    stall without also re-asserting the now-superseded "every eligible PR reviews every pass"
 //    behavior.
 
-test("runSweepLightPass: fires runSweep once PER open PR, CONCURRENTLY — a slow action for one PR never blocks another PR's own action from completing (the #707-adjacent stall this closes)", async () => {
+test("runSweepLightPass: fires runSweep once PER open PR, CONCURRENTLY — a slow action for one PR never blocks another PR's own action from completing (the #707-adjacent stall this closes) [controlled healthy pressure]", async () => {
   const lp = ledgerPath();
   let releaseSlow: (() => void) | undefined;
   const slowGate = new Promise<void>((resolve) => {
     releaseSlow = resolve;
   });
   const order: number[] = [];
+  let pressureReads = 0;
   const deps = fakeDeps({
     ledgerPath: lp,
+    readFixPressure: () => { pressureReads++; return { availableMib: DEFAULT_SWEEP_POLICY.memoryFloorMib + 2 * DEFAULT_ESTIMATE_MIB.fix, floorMib: DEFAULT_SWEEP_POLICY.memoryFloorMib }; },
     fixProgressJudge: async () => ({ verdict: "continue", reason: "this light-pass fixture explicitly permits the repair" }),
     postReview: async (p) => {
       await slowGate; // the ONE admitted PR's "review" never resolves until released
@@ -3554,13 +3557,14 @@ test("runSweepLightPass: fires runSweep once PER open PR, CONCURRENTLY — a slo
   // let alone recorded here — until PR 584's gate released; runSweepLightPass reaches it anyway.
   await new Promise((resolve) => setImmediate(resolve));
   try {
+    assert.ok(pressureReads > 0, "the concurrent repair consumes its explicit healthy pressure input");
     assert.deepEqual(order, [11], "the fast PR's fix dispatch completed while the slow PR's review was still in flight");
   } finally {
     // Always release, even if the assertion above throws — an unreleased gate would leave this
     // PR's review key claimed in the module-level mutex for the rest of THIS file's test run.
     releaseSlow?.();
+    await pending;
   }
-  await pending;
   assert.deepEqual(order, [11, 584], "the slow PR's review still completes once released");
 });
 
