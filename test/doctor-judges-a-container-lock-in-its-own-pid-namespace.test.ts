@@ -11,7 +11,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { judgeInflightLocks } from "../src/lib/report-commands.js";
+import { defaultListContainers, defaultPidAliveInContainer, judgeInflightLocks } from "../src/lib/report-commands.js";
+
+type ExecFileSync = typeof import("node:child_process").execFileSync;
+
+function dockerExecutor(reply: (args: readonly string[]) => string): {
+  calls: Array<{ file: string; args: string[]; options: unknown }>;
+  run: ExecFileSync;
+} {
+  const calls: Array<{ file: string; args: string[]; options: unknown }> = [];
+  const run = ((file: string, args: readonly string[], options: unknown) => {
+    calls.push({ file, args: [...args], options });
+    return reply(args);
+  }) as unknown as ExecFileSync;
+  return { calls, run };
+}
 
 function fixture(locks: Array<{ task: string; pid: number; host: string }>): string {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t6261-`));
@@ -34,6 +48,44 @@ const HOST_DEPS = {
   listContainers: () => [CTR],
   pidAliveInContainer: (id: string, pid: number) => (id === CTR.id ? pid === 114 : undefined),
 };
+
+test("W1-T6261: default Docker container listing injects and records the process boundary", () => {
+  const docker = dockerExecutor((args) => args[0] === "ps"
+    ? "c1\nc2\n"
+    : "c1 ctr1\nmalformed\nc2 ctr2\nextra words here\n");
+  assert.deepEqual(defaultListContainers(docker.run), [
+    { id: "c1", hostname: "ctr1" },
+    { id: "c2", hostname: "ctr2" },
+  ]);
+  assert.deepEqual(docker.calls.map(({ file, args }) => ({ file, args })), [
+    { file: "docker", args: ["ps", "-q"] },
+    { file: "docker", args: ["inspect", "-f", "{{.Id}} {{.Config.Hostname}}", "c1", "c2"] },
+  ]);
+  assert.deepEqual(docker.calls[0].options, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000 });
+});
+
+test("W1-T6261: an empty or unreadable Docker listing is distinguished", () => {
+  const empty = dockerExecutor(() => "\n");
+  assert.deepEqual(defaultListContainers(empty.run), []);
+  assert.deepEqual(empty.calls.map(({ args }) => args), [["ps", "-q"]]);
+
+  const failed = dockerExecutor(() => { throw new Error("docker unavailable"); });
+  assert.equal(defaultListContainers(failed.run), undefined);
+});
+
+test("W1-T6261: container pid probes preserve alive, dead, and unanswered outcomes", () => {
+  const alive = dockerExecutor(() => "");
+  assert.equal(defaultPidAliveInContainer("c1", 114.9, alive.run), true);
+  assert.deepEqual(alive.calls.map(({ file, args }) => ({ file, args })), [
+    { file: "docker", args: ["exec", "c1", "sh", "-c", "[ -e /proc/114 ]"] },
+  ]);
+
+  const dead = dockerExecutor(() => { throw Object.assign(new Error("pid absent"), { status: 1 }); });
+  assert.equal(defaultPidAliveInContainer("c1", 115, dead.run), false);
+
+  const unanswered = dockerExecutor(() => { throw Object.assign(new Error("docker failed"), { status: 125 }); });
+  assert.equal(defaultPidAliveInContainer("c1", 116, unanswered.run), undefined);
+});
 
 test("W1-T6261: a container lock is judged in its own pid namespace", async () => {
   const root = fixture([

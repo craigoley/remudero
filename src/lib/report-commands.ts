@@ -402,16 +402,16 @@ export interface InflightLockProbes {
   pidAliveInContainer?: (containerId: string, pid: number) => boolean | undefined;
 }
 
-function dockerOut(args: string[]): string {
-  return execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000 });
+function dockerOut(args: string[], runExecFileSync: typeof execFileSync = execFileSync): string {
+  return runExecFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000 });
 }
 
 /** The same probe deploy/recycle-container.sh uses (W1-T3611): running containers and their hostnames. */
-export function defaultListContainers(): RunningContainer[] | undefined {
+export function defaultListContainers(runExecFileSync: typeof execFileSync = execFileSync): RunningContainer[] | undefined {
   try {
-    const ids = dockerOut(["ps", "-q"]).split("\n").map((l) => l.trim()).filter(Boolean);
+    const ids = dockerOut(["ps", "-q"], runExecFileSync).split("\n").map((l) => l.trim()).filter(Boolean);
     if (ids.length === 0) return [];
-    const rows = dockerOut(["inspect", "-f", "{{.Id}} {{.Config.Hostname}}", ...ids]);
+    const rows = dockerOut(["inspect", "-f", "{{.Id}} {{.Config.Hostname}}", ...ids], runExecFileSync);
     return rows
       .split("\n")
       .map((l) => l.trim().split(/\s+/))
@@ -424,9 +424,13 @@ export function defaultListContainers(): RunningContainer[] | undefined {
   }
 }
 
-export function defaultPidAliveInContainer(containerId: string, pid: number): boolean | undefined {
+export function defaultPidAliveInContainer(
+  containerId: string,
+  pid: number,
+  runExecFileSync: typeof execFileSync = execFileSync,
+): boolean | undefined {
   try {
-    dockerOut(["exec", containerId, "sh", "-c", `[ -e /proc/${Math.trunc(pid)} ]`]);
+    dockerOut(["exec", containerId, "sh", "-c", `[ -e /proc/${Math.trunc(pid)} ]`], runExecFileSync);
     return true;
   } catch (e) {
     // `[ -e ]` answers through its exit code: 1 is a real "no such pid in that namespace". Any other
