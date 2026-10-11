@@ -10,8 +10,8 @@ export const OPPORTUNITY_EVIDENCE_MAX_ROWS = 512;
 export const OPPORTUNITY_STATES = ["pending", "filed", "merged", "deployed", "measured-helped", "measured-hurt", "expired", "unavailable"] as const;
 export type OpportunityState = typeof OPPORTUNITY_STATES[number];
 export type OpportunityEvidenceReason = "scope_unavailable" | "not_collected" | "unreadable" | "malformed" | "oversized" | "repository_mismatch" | "clock_skew" | "corpus_changed";
-type Identity = { version: 1; repository: string | null; readAt: string; coverage: "saved-opportunity-registry"; countSemantics: "reported_states_not_verified_outcomes" };
-export type GardenerOpportunityEvidence = Identity & (
+type OpportunityEvidenceIdentity = { version: 1; repository: string | null; readAt: string; coverage: "saved-opportunity-registry"; countSemantics: "reported_states_not_verified_outcomes" };
+export type GardenerOpportunityEvidence = OpportunityEvidenceIdentity & (
   | { state: "unavailable"; reason: OpportunityEvidenceReason }
   | { state: "reported"; total: number; counts: Record<OpportunityState, number>; oldestReconciledAt: string | null; latestReconciledAt: string | null }
 );
@@ -20,7 +20,7 @@ const isOpportunityText = (v: unknown): v is string => typeof v === "string" && 
 const isOpportunityStamp = (v: unknown): v is string => typeof v === "string" && Number.isFinite(Date.parse(v));
 const isOpportunityRepository = (v: unknown): v is string => typeof v === "string" && v.length <= 257 &&
   /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(v) && !v.split("/").some((part) => part === "." || part === "..");
-const opportunityEvidenceIdentity = (repository: string | null, clock: Clock): Identity => ({ version: 1, repository, readAt: clock.iso(),
+const opportunityEvidenceIdentity = (repository: string | null, clock: Clock): OpportunityEvidenceIdentity => ({ version: 1, repository, readAt: clock.iso(),
   coverage: "saved-opportunity-registry", countSemantics: "reported_states_not_verified_outcomes" });
 const unavailableOpportunityEvidence = (repository: string | null, clock: Clock, reason: OpportunityEvidenceReason): GardenerOpportunityEvidence =>
   ({ ...opportunityEvidenceIdentity(repository, clock), state: "unavailable", reason });
