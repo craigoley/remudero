@@ -266,6 +266,21 @@ import {
 } from "./main-run-gaps.js";
 import { mutationVerdictRunIdsFromLedger, pullMutationVerdicts, readMutationVerdictZip } from "./mutation-verdict-pull.js";
 import {
+  decideRefresh,
+  nextRefreshRequest,
+  pendingRefreshRequests,
+  readRefreshJudgeVerdict,
+  refreshBenefitWeight,
+  refreshDecisionRecorded,
+  refreshDecisionRow,
+  refreshOutcomeRows,
+  type RefreshJudgeVerdict,
+  type RefreshOverlapKind,
+  type RefreshPath,
+  type RefreshValue,
+  type RefreshValueInput,
+} from "./refresh-value.js";
+import {
   REFUSAL_AMENDMENT_MAX_AGE_MS,
   REFUSAL_AMENDMENT_STEP,
   draftRefusalAmendment,
@@ -1754,6 +1769,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "repushAbsent",
   "updateBranch",
   "mergeQueue", // W1-T5903: the behind-main refresh stands down under a merge queue
+  "readProtectionStrict", // W1-T7735: staleness alone buys nothing under non-strict protection
+  "refreshJudgeVerdict", // W1-T7735: the overlap judge's ruling, read from its heads file
   "readPrFileSource", // W1-T6022
   "captureRepairFeedback",
   "disarmAutoMerge",
@@ -1858,6 +1875,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "repushAbsent"
   | "updateBranch"
   | "mergeQueue"
+  | "readProtectionStrict"
+  | "refreshJudgeVerdict"
   | "readPrFileSource"
   | "readyDraft"
   | "draftRefusalAmendments"
@@ -4011,6 +4030,22 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
     // W1-T5903 — the queue tests the merged result, so staleness against main is the queue's job.
     mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
+
+    // W1-T7735 — main's protection `strict` flag; runSweep reads it once per pass. An unread flag is
+    // `undefined`, which keeps the staleness refresh rather than silently dropping it.
+    readProtectionStrict: () => {
+      try {
+        const checks = ghJsonForBuild(["api", `repos/${owner}/${repo}/branches/main/protection/required_status_checks`]) as
+          { strict?: unknown } | undefined;
+        return typeof checks?.strict === "boolean" ? checks.strict : undefined;
+      } catch (error) {
+        log("sweep.refresh.strict_unread", { error: String((error as Error)?.message ?? error) });
+        return undefined;
+      }
+    },
+
+    // W1-T7735 — the overlap judge writes its rulings to state/; the sweep only reads them.
+    refreshJudgeVerdict: (prNumber, headSha) => readRefreshJudgeVerdict(join(config.root, "state"), prNumber, headSha),
 
     // W1-T6022 — a source at one head never changes, so a read is kept; a failed one is not.
     readPrFileSource: (pr, path) => {
@@ -10220,7 +10255,7 @@ export function selectUpdateBranchDecision(
   queuedPrNumbers: ReadonlySet<number> = new Set(),
   baseChangedFilesByPr?: ReadonlyMap<number, BaseChangedFiles>,
   ready?: ReadyRefreshFacts,
-): { target: ArmedStalledPr | undefined; pendingGuard?: ArmedStalledPr } {
+): { target: ArmedStalledPr | undefined; pendingGuard?: ArmedStalledPr; ordered?: ArmedStalledPr[] } {
   // W1-T1212: the UNION of two disjoint-by-construction predicates, never a widening of either. A
   // PR named by both contributes ONE candidate; the first writer wins, and which shape wins
   // carries no meaning the comparator below reads.
@@ -10252,7 +10287,119 @@ export function selectUpdateBranchDecision(
     ? oldestActivityFirst(commonEligible.map((s) => byNumber.get(s.prNumber)!), now) : undefined;
   const pendingGuard = withoutPendingGuard?.checksState === "pending"
     ? commonEligible.find((s) => s.prNumber === withoutPendingGuard.prNumber) : undefined;
-  return { target, ...(pendingGuard ? { pendingGuard } : {}) };
+  // W1-T7735: the rest of the eligible set in the same oldest-first order, so a target the value test
+  // declines yields to the next candidate instead of holding the slot every pass.
+  const ordered: ArmedStalledPr[] = [];
+  const remaining = [...eligible];
+  while (remaining.length > 0) {
+    const next = oldestActivityFirst(remaining.map((s) => byNumber.get(s.prNumber)!), now);
+    const index = remaining.findIndex((s) => s.prNumber === next?.prNumber);
+    ordered.push(...remaining.splice(index < 0 ? 0 : index, 1));
+  }
+  return { target, ordered, ...(pendingGuard ? { pendingGuard } : {}) };
+}
+
+/** W1-T7735 — what one refresh candidate's trigger says about its overlap with main's delta, in the
+ *  terms {@link decideRefresh} weighs. A trigger that repairs a fault only main can fix (a stale gate,
+ *  a stale merge ref) or a shared file is `direct`; a base-path or test-literal hit, or an unknown file
+ *  list, is `ambiguous`; distance or GitHub's `behind` alone is `staleness`. */
+export function refreshOverlapOf(
+  candidate: Pick<ArmedStalledPr, "updateReason" | "matchingBaseFiles"> & { staleWorkflow?: string },
+  view: Pick<OpenPrView, "changedFiles"> | undefined,
+): { overlap: RefreshOverlapKind; files: string[] } {
+  const files = [...(candidate.matchingBaseFiles ?? [])];
+  switch (candidate.updateReason) {
+    case "stale-gate":
+      return { overlap: "direct", files: candidate.staleWorkflow === undefined ? files : [candidate.staleWorkflow] };
+    case "stale-blocked":
+    case "distance-overlap":
+      return { overlap: "direct", files };
+    case "ready-overlap": {
+      const own = new Set(view?.changedFiles ?? []);
+      return { overlap: files.some((f) => own.has(f)) ? "direct" : "ambiguous", files };
+    }
+    case "distance":
+    case "distance-baseline":
+    case "distance-unknown":
+    case "ready-unknown":
+      return { overlap: "ambiguous", files };
+    case "armed-stalled":
+    case "distance-ceiling":
+      return { overlap: "staleness", files };
+    default:
+      return { overlap: files.length > 0 ? "ambiguous" : "none", files };
+  }
+}
+
+/** W1-T7735 — the facts every value test in one pass shares: strictness (read once), the CI queue
+ *  depth of this snapshot, the observed CI minutes and the learned benefit weight. */
+export interface RefreshPassFacts {
+  strict: boolean | undefined;
+  ciQueueDepth: number;
+  ciMinutes?: number;
+  benefitWeight: number;
+  judge: (prNumber: number, headSha: string) => RefreshJudgeVerdict | undefined;
+}
+
+export async function readRefreshPassFacts(
+  openPrs: readonly OpenPrView[],
+  deps: Pick<SweepDeps, "readProtectionStrict" | "refreshJudgeVerdict" | "refreshCiMinutes">,
+  ledgerLines: readonly Record<string, unknown>[],
+): Promise<RefreshPassFacts> {
+  let strict: boolean | undefined;
+  try {
+    strict = await deps.readProtectionStrict?.();
+  } catch (error) {
+    // Unread strictness keeps the pre-W1-T7735 staleness refresh; the row records `strict: null`.
+    strict = undefined;
+    void error;
+  }
+  const judge = deps.refreshJudgeVerdict;
+  return {
+    strict,
+    ciQueueDepth: openPrs.filter((pr) => pr.checksState === "pending").length,
+    ...(deps.refreshCiMinutes === undefined ? {} : { ciMinutes: deps.refreshCiMinutes }),
+    benefitWeight: refreshBenefitWeight(ledgerLines),
+    judge: judge ?? (() => "judge-unavailable"),
+  };
+}
+
+/** W1-T7735 — ONE value test for one candidate on one path: the input, the value, and the
+ *  `sweep.refresh.decided` row (`undefined` when this exact decision is already on the ledger). */
+export function refreshValueFor(
+  candidate: ArmedStalledPr,
+  view: OpenPrView | undefined,
+  path: RefreshPath,
+  facts: RefreshPassFacts,
+  ledgerLines: readonly Record<string, unknown>[],
+  runId: string,
+  extra: { ciInFlight?: boolean; baseRedRepair?: boolean; forcedBy?: string; requestId?: string; reason?: string } = {},
+): { value: RefreshValue; row: ReturnType<typeof refreshDecisionRow> | undefined } {
+  const { overlap, files } = refreshOverlapOf(candidate as ArmedStalledPr & { staleWorkflow?: string }, view);
+  const input: RefreshValueInput = {
+    path,
+    reason: extra.reason ?? extra.forcedBy ?? candidate.updateReason ?? "unknown",
+    overlap,
+    overlapFiles: files,
+    strict: facts.strict,
+    ciInFlight: extra.ciInFlight ?? view?.checksState === "pending",
+    ...(extra.baseRedRepair === undefined ? {} : { baseRedRepair: extra.baseRedRepair }),
+    judge: facts.judge(candidate.prNumber, candidate.headSha),
+    ciQueueDepth: facts.ciQueueDepth,
+    ...(facts.ciMinutes === undefined ? {} : { ciMinutes: facts.ciMinutes }),
+    benefitWeight: facts.benefitWeight,
+  };
+  const forced = extra.forcedBy !== undefined;
+  const value: RefreshValue = forced
+    ? { ...decideRefresh(input), decision: "refresh", why: `forced by ${extra.forcedBy}` }
+    : decideRefresh(input);
+  const row = refreshDecisionRow({
+    runId, prNumber: candidate.prNumber, headSha: candidate.headSha, input, value,
+    ...(candidate.taskId === undefined ? {} : { taskId: candidate.taskId }),
+    ...(extra.forcedBy === undefined ? {} : { forcedBy: extra.forcedBy }),
+    ...(extra.requestId === undefined ? {} : { requestId: extra.requestId }),
+  });
+  return { value, row: refreshDecisionRecorded(ledgerLines, row) ? undefined : row };
 }
 
 /** One PR {@link redPrWithStaleGate} selected — sibling to {@link ArmedStalledPr}, carrying the
@@ -11654,6 +11801,17 @@ export interface SweepDeps {
    *  {@link selectUpdateBranchTarget} chose: never a loop, never a second attempt this pass. A
    *  `"conflict"` outcome is REPORTED and never retried by this call. */
   updateBranch?: (pr: ArmedStalledPr) => UpdateBranchOutcome | Promise<UpdateBranchOutcome>;
+  /** W1-T7735 — main's branch protection `strict` flag, read ONCE per pass and memoised. `false`
+   *  makes staleness alone worth nothing to `decideRefresh`; omitted or `undefined` is unread and
+   *  keeps the staleness refresh. */
+  readProtectionStrict?: () => boolean | undefined | Promise<boolean | undefined>;
+  /** W1-T7735 — the overlap judge's ruling for one PR head; `undefined` while it has not ruled.
+   *  Omitted, every ambiguous overlap reads `judge-unavailable`, a visible value on the row. */
+  refreshJudgeVerdict?: (prNumber: number, headSha: string) => RefreshJudgeVerdict | undefined;
+  /** W1-T7735 — the observed median CI start-to-green in minutes, the refresh's predicted cost. */
+  refreshCiMinutes?: number;
+  /** W1-T7735 — the closed PRs this tick already read, for `sweep.refresh.outcome`. */
+  closedPrs?: readonly ClosedPrFact[];
   /** W1-T5903 — whether the PR's base branch requires a merge queue. When it does, the queue tests
    *  the merged result, so the behind-main distance refresh ({@link openPrsBehindMain}) stands down
    *  for that PR. Omitted or throwing reads as "no queue": the pre-queue behaviour is unchanged. */
@@ -13841,6 +13999,7 @@ export async function runSweep(
         // This pass's ONE base-red refresh went to another PR: the next pass takes this one.
         if (baseRedRefreshPr !== undefined && baseRedRefreshPr !== pr.prNumber) return;
         baseRedRefreshPr = pr.prNumber;
+        await decideRefreshSlot(slotCandidate(pr), "base-fixed", { baseRedRepair: true, reason: "fixed-on-main" });
         try { outcome = await deps.updateBranch(pr); }
         catch (error) { outcome = `error: ${String(error)}`; }
         appendLine(deps.ledgerPath, baseFixedRefreshRow(deps.runId, pr, mainTipSha, fixedFiles, outcome));
@@ -14148,6 +14307,22 @@ export async function runSweep(
     return row;
   };
   let baseRedRefreshPr: number | undefined;
+  // W1-T7735 — the refresh value test's per-pass facts, read at most once (strictness is one read),
+  // and the one helper every slot below consults before it presses update-branch.
+  let refreshPassFacts: Promise<RefreshPassFacts> | undefined;
+  const refreshFactsOnce = () => (refreshPassFacts ??= readRefreshPassFacts(openPrs, deps, ledgerLines));
+  const decideRefreshSlot = async (
+    candidate: ArmedStalledPr,
+    path: RefreshPath,
+    extra: Parameters<typeof refreshValueFor>[6] = {},
+  ): Promise<boolean> => {
+    const view = openPrs.find((p) => p.prNumber === candidate.prNumber);
+    const { value, row } = refreshValueFor(candidate, view, path, await refreshFactsOnce(), ledgerLines, deps.runId, extra);
+    if (row) appendLine(deps.ledgerPath, row);
+    return value.decision === "refresh";
+  };
+  const slotCandidate = (pr: OpenPrView): ArmedStalledPr =>
+    ({ prNumber: pr.prNumber, prUrl: pr.prUrl, ...(pr.taskId === undefined ? {} : { taskId: pr.taskId }), headSha: pr.headSha });
   // W1-T5349 — the plan-repair rung's once-per-head record, folded once per pass.
   const planRepairHistory = planRepairHistoryFromLedger(ledgerLines);
   const planRoundFacts = new Map<number, PlanRepairFacts>();
@@ -14180,7 +14355,8 @@ export async function runSweep(
     try {
       result =
         decision.signature === "base-red"
-          ? { outcome: deps.updateBranch ? await deps.updateBranch(pr) : "unwired" }
+          ? { outcome: deps.updateBranch && await decideRefreshSlot(slotCandidate(pr), "plan-repair", { baseRedRepair: true, reason: "plan-repair base-red" })
+            ? await deps.updateBranch(pr) : "unwired" }
           : await deps.repairPlanPr(pr, decision);
     } catch (e) {
       result = { outcome: "error", reason: String((e as Error)?.message ?? e) };
@@ -16389,7 +16565,8 @@ export async function runSweep(
                 const decidedSha = mainLatestRun?.decidedBySha ?? mainSha;
                 const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, check_name: baseRed.check, main_sha: mainSha,
                   ...(decidedSha !== mainSha ? { main_decided_by_sha: decidedSha } : {}) };
-                if (baseRed.kind === "refresh" && deps.updateBranch && baseRedRefreshPr === undefined) {
+                if (baseRed.kind === "refresh" && deps.updateBranch && baseRedRefreshPr === undefined &&
+                  await decideRefreshSlot(slotCandidate(pr), "base-red", { baseRedRepair: true, reason: `base-red: ${baseRed.check}` })) {
                   baseRedRefreshPr = pr.prNumber;
                   let outcome: string;
                   try {
@@ -16635,7 +16812,8 @@ export async function runSweep(
                 const fixedOnMain = !previouslyReproduced && (deps.behindMainByPr?.get(pr.prNumber) ?? 0) > 0;
                 if (verdict === "clear" && (previouslyReproduced || fixedOnMain) && !baseRedHistory.refreshed.has(key)) {
                   acted = false;
-                  if (deps.updateBranch && baseRedRefreshPr === undefined) {
+                  if (deps.updateBranch && baseRedRefreshPr === undefined && await decideRefreshSlot(slotCandidate(pr),
+                    fixedOnMain ? "base-fixed" : "base-red", { baseRedRepair: true, reason: fixedOnMain ? "fixed-on-main" : "base-reproduction-clear" })) {
                     baseRedRefreshPr = pr.prNumber;
                     let outcome: string;
                     try { outcome = await deps.updateBranch(pr); }
@@ -17753,7 +17931,7 @@ export async function runSweep(
       deps.baseChangedFilesByPr,
       readyFacts,
     );
-    const { target, pendingGuard } = decision;
+    const { pendingGuard } = decision;
     if (pendingGuard && !recordedPendingGuards.has(JSON.stringify([pendingGuard.prUrl, pendingGuard.prNumber, pendingGuard.headSha]))) {
       appendLine(deps.ledgerPath, {
         run_id: deps.runId, task_id: pendingGuard.taskId ?? "SWEEP",
@@ -17763,8 +17941,42 @@ export async function runSweep(
         pr_number: pendingGuard.prNumber, pr_url: pendingGuard.prUrl, head_sha: pendingGuard.headSha,
         update_reason: pendingGuard.updateReason,
         counterfactual_selected_without_pending_guard: true,
-        selected_refresh_head: target?.headSha ?? null,
+        selected_refresh_head: decision.target?.headSha ?? null,
       });
+    }
+    // W1-T7735 — THE VALUE TEST IN FRONT OF THE BUTTON. Each eligible candidate, oldest first, is
+    // weighed by `decideRefresh(` until one is worth its CI run; a declined one yields the slot. A PR
+    // whose CI is in flight is refreshed only on the judge's `overlap`. Still AT MOST ONE press.
+    for (const row of refreshOutcomeRows(ledgerLines, {
+      open: new Map(openPrs.map((pr) => [pr.prNumber, pr])),
+      closed: new Map((deps.closedPrs ?? []).map((c) => [c.prNumber, c.state])),
+    }, deps.runId)) appendLine(deps.ledgerPath, row);
+    let target: ArmedStalledPr | undefined;
+    for (const candidate of decision.ordered ?? (decision.target ? [decision.target] : [])) {
+      if (await decideRefreshSlot(candidate, "general", { ciInFlight: false })) {
+        target = candidate;
+        break;
+      }
+    }
+    if (!target && pendingGuard && await decideRefreshSlot(pendingGuard, "general", { ciInFlight: true })) target = pendingGuard;
+    // W1-T7735 — THE PACED REQUEST LANE. A board-wide refresh is a set of `sweep.refresh.requested`
+    // rows, never a fan-out: this pass consumes at most ONE, closest to merge first, and only when no
+    // other refresh took the slot. The request is the operator's ask, so it is forced past the value
+    // test, but its decision row still records what the value test would have weighed.
+    if (!target) {
+      const inFlight = deps.inFlightTaskIds ?? new Set<string>();
+      const next = nextRefreshRequest(pendingRefreshRequests(ledgerLines), refreshPrs.filter((pr) => {
+        const runTaskId = taskIdFromRunBranch(pr.headRefName);
+        return pr.isDraft !== true && (runTaskId === undefined || !inFlight.has(runTaskId));
+      }));
+      if (next) {
+        const behindBy = behindMainByPr.get(next.pr.prNumber);
+        const requested: ArmedStalledPr = { ...slotCandidate(next.pr), ...(behindBy === undefined ? {} : { behindBy }) };
+        await decideRefreshSlot(requested, "request", {
+          forcedBy: `request:${next.request.requestedBy}`, requestId: next.request.requestId, reason: "board-wide request",
+        });
+        target = requested;
+      }
     }
     if (target) {
       // W1-T1212: a `StaleGatePr` (never `armedButStalled`'s own shape) carries the ONE extra
@@ -17843,7 +18055,7 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
   openPrs: readonly OpenPrView[],
   deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "mergeQueue" | "readActionsStatusSummary" |
     "readPrFileSource" | "behindMainByPr" | "baseChangedFilesByPr" | "inFlightTaskIds" | "now" | "readLedger" |
-    "appendLine" | "dryRun">,
+    "appendLine" | "dryRun" | "readProtectionStrict" | "refreshJudgeVerdict" | "refreshCiMinutes">,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<number | undefined> {
   const updateBranch = deps.updateBranch;
@@ -17896,8 +18108,21 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
       const runTaskId = taskIdFromRunBranch(view.headRefName);
       return view.checksState !== "pending" && (runTaskId === undefined || !inFlight.has(runTaskId));
     });
-    const winner = oldestActivityFirst(eligible.map((c) => byNumber.get(c.prNumber)!), now);
-    const target = eligible.find((c) => c.prNumber === winner?.prNumber);
+    // W1-T7735: each eligible ready-overlap PR, oldest first, passes the same value test the full
+    // sweep's slot does; the first one worth its CI run is the pass's ONE refresh.
+    let target: ArmedStalledPr | undefined;
+    if (eligible.length > 0) {
+      const facts = await readRefreshPassFacts(openPrs, deps, ledgerLines);
+      const remaining = [...eligible];
+      while (remaining.length > 0 && target === undefined) {
+        const next = oldestActivityFirst(remaining.map((c) => byNumber.get(c.prNumber)!), now);
+        const candidate = remaining.splice(Math.max(0, remaining.findIndex((c) => c.prNumber === next?.prNumber)), 1)[0]!;
+        const { value, row } = refreshValueFor(candidate, byNumber.get(candidate.prNumber), "ready-light", facts, ledgerLines, deps.runId,
+          { ciInFlight: false });
+        if (row) appendLine(deps.ledgerPath, { ...row, source: "light_pass" });
+        if (value.decision === "refresh") target = candidate;
+      }
+    }
     if (!target) return undefined;
     const row = {
       run_id: deps.runId, task_id: target.taskId ?? "SWEEP", pr_number: target.prNumber, pr_url: target.prUrl,
