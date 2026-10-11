@@ -290,6 +290,43 @@ test("W1-T7754 answers: real comment and reaction bindings survive the durable s
   }
 });
 
+test("W1-T7754 answers: edited sources and missing repository identity stay unknown without holding configured human replies", async () => {
+  for (const fault of ["repository", "transport", "edit"] as const) {
+    const root = mkdtempSync(join(tmpdir(), "rmd-answer-unknown-"));
+    const f = sourceFixture("issue-comment");
+    f.issue.body = renderIssueBody({ class: "BLOCKED", taskId: "W1-T9000", summary: "fixture", detail: "fixture",
+      options: [{ label: "retry", detail: "fixture" }], recommendation: "retry" });
+    f.comment.body = "retry";
+    let repoReads = 0;
+    const read: AdmissionRead = path => {
+      if (path === "repos/acme/widgets") {
+        repoReads++;
+        if (fault === "repository") return { status: 403, body: {} };
+        if (fault === "transport") throw new Error("repository identity unavailable");
+        if (repoReads === 2) f.comment.body = "changed after answer capture";
+      }
+      return f.read(path);
+    };
+    const gateway = (ghEscalationAnswerGateway as unknown as (...args: unknown[]) => ReturnType<typeof ghEscalationAnswerGateway>)(
+      "acme", "widgets", async (args: string[]) => JSON.stringify(args[1].includes("comments") ? [f.comment]
+        : args[1].includes("reactions") ? [] : [{ ...f.issue, html_url: "https://github.com/acme/widgets/issues/4" }]),
+      ["actor-1"], { settings: f.settings, read });
+    gateway.reactPlusOne = () => {};
+    try {
+      const result = await readEscalationAnswers(root, "fixture", gateway,
+        { ledgerPath: join(root, "ledger.ndjson") }, fixedClock(NOW));
+      assert.equal(result.accepted, 1, "shadow diagnostics are not a new configured-human gate");
+      const answer = JSON.parse(readFileSync(join(root, "plan/questions.ndjson"), "utf8"));
+      assert.equal(answer.answer, "retry");
+      assert.equal(answer.contribution.admission.outcome, "unknown");
+      if (fault === "edit") {
+        assert.equal(answer.contribution.admission.reason, "source-revision-changed");
+        assert.equal(answer.contribution.subject.revision.contentDigest, feedbackContentDigest("retry"));
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
 test("W1-T7754 adoption: selected lineage is re-read once and unreadable or over-bound inputs cannot hold effects", async () => {
   const f = sourceFixture(); const rows: Record<string, unknown>[] = [];
   const contribution = { subject: f.subject, admission: { outcome: "trusted" } };
