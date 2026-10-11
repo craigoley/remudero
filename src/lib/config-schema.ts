@@ -280,6 +280,7 @@ export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
   configField("contributorAdmission", "AdmissionSettings", true, undefined, "config.json", "Opt-in shadow contributor evaluation; no enforcement or production identity defaults.", {
     kind: "object", fields: [
       configField("mode", '"shadow"', false, undefined, "config.json", "Observation only.", { kind: "enum", values: ["shadow"] }),
+      configField("disposition", '"shadow"', true, undefined, "config.json", "Opt-in durable shadow disposition; no remote writes.", { kind: "enum", values: ["shadow"] }),
       configField("repositoryId", "number", false, undefined, "config.json", "Authenticated target repository id.", numberShape),
       configField("policy", "AdmissionPolicy", false, undefined, "config.json", "Explicit numeric identity policy.", { kind: "object", fields: [
         configField("version", "string", false, undefined, "config.json", "Policy revision.", stringShape),
@@ -288,7 +289,7 @@ export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
         configField("maxEvidenceAgeMs", "number", false, undefined, "config.json", "Evidence freshness ceiling.", numberShape),
         configField("services", "ServiceGrant[]", false, undefined, "config.json", "Action-scoped bot ids.", { kind: "array", element: { kind: "object", fields: [
           configField("id", "number", false, undefined, "config.json", "Bot id.", numberShape),
-          configField("actions", "AdmissionAction[]", false, undefined, "config.json", "Scoped actions.", { kind: "array", element: { kind: "enum", values: ["review", "repair", "auto-merge", "feedback"] } }),
+          configField("actions", "AdmissionAction[]", false, undefined, "config.json", "Scoped actions.", { kind: "array", element: { kind: "enum", values: ["review", "repair", "auto-merge", "feedback", "disposition"] } }),
         ] } }),
       ] }),
       configField("organizations", "OrganizationNamespace[]", false, undefined, "config.json", "REST namespaces verified against numeric organization ids.", { kind: "array", element: { kind: "object", fields: [

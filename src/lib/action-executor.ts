@@ -32,6 +32,7 @@ import type { Clock } from "./clock.js";
 import { isPrActionSwitchedOff, isSafeTaskId, isStopped, type PrActionName } from "./fleet-control.js";
 import { armKick, armPause, armPrAction, armResume, prActionSwitchedOffDetail, type PanelActionDeps, type PanelLedgerRow } from "./panel-actions.js";
 import { writeTierSatisfies, type WriteTier } from "./service.js";
+import type { AdmissionSettings, AdmissionTarget, AdmissionRead, AdmissionRecord } from "./contributor-admission.js";
 
 export const ACTION_CATALOGUE_VERSION = "action-catalogue-v1" as const;
 /** Every capability under this prefix is the executor's: an uncatalogued one is `no-executor`, never self-reported. */
@@ -246,4 +247,58 @@ export function executeCatalogueAction(request: CatalogueExecutionRequest): Cata
     request.appendReceipt(receipt, { ...tag, evidence_source: EXECUTOR_EVIDENCE_CODE, ...rowFields });
   }
   return { disposition: completion.disposition === "completed" ? "completed" : "refused", receipt, admission, ...preflight, ...executor };
+}
+
+export type DispositionDomain = "shadow" | "rehearsal";
+export type AdmissionDispositionStatus = "not-enabled" | "trusted" | "would-close" | "pending" | "owner-action" | "noop" | "adopted" | "simulated-closed";
+export interface AdmissionDispositionReceipt {
+  version: "admission-disposition-v1";
+  domain: DispositionDomain;
+  cause: string;
+  sequence: number;
+  previous: string;
+  firstReason: string;
+  status: AdmissionDispositionStatus;
+  repositoryId: number;
+  prNumber: number;
+  itemId?: number;
+  headSha?: string;
+  policy: string;
+  atMs: number;
+  identityAttempts: number;
+  reconciliationAttempts: number;
+  closeAttempts: number;
+  escalationAttempts: number;
+}
+export interface AdmissionDispositionStore {
+  domain: DispositionDomain;
+  load: (cause: string) => Promise<readonly AdmissionDispositionReceipt[]>;
+  append: (receipt: AdmissionDispositionReceipt) => Promise<void>;
+}
+export interface AdmissionDispositionSimulation {
+  domain: "rehearsal";
+  simulateClose: (receipt: AdmissionDispositionReceipt) => Promise<void>;
+  simulateEscalation: (receipt: AdmissionDispositionReceipt) => Promise<void>;
+  reconcile: (receipt: AdmissionDispositionReceipt) => Promise<{ closed: boolean; escalated: boolean }>;
+}
+export interface AdmissionDispositionRequest {
+  settings?: AdmissionSettings;
+  target: AdmissionTarget;
+  ownerInstructionId?: number;
+}
+export interface AdmissionDispositionResult {
+  status: AdmissionDispositionStatus;
+  reason: string;
+  permission: "not-granted";
+  laneReleased: boolean;
+  requiredChecks: "ordinary-current-head-checks-required";
+  receipt?: AdmissionDispositionReceipt;
+}
+
+export async function executeAdmissionDisposition(
+  _request: AdmissionDispositionRequest, _store: AdmissionDispositionStore, _read: AdmissionRead,
+  _record: AdmissionRecord, _clock: Pick<Clock, "now">, _simulation?: AdmissionDispositionSimulation,
+): Promise<AdmissionDispositionResult> {
+  return { status: "not-enabled", reason: "not-enabled", permission: "not-granted", laneReleased: true,
+    requiredChecks: "ordinary-current-head-checks-required" };
 }
