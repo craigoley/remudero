@@ -213,12 +213,12 @@ async function preserve(d: LiveEditRungInput, git: AsyncGitRunner, snap: Snapsho
   const dir = join(d.stateDir, "recovery", "live-edits", d.tree);
   mkdirSync(dir, { recursive: true });
   const keep = join(dirname(dir), ".rmd-scratch-keep");
-  if (!existsSync(keep)) writeFileSync(keep, "live-edit ladder: preserved live-checkout edits\n", { flush: true });
+  writeFileSync(keep, "live-edit ladder: preserved live-checkout edits\n", { flush: true });
   const host = d.host.replace(/[^A-Za-z0-9._-]/g, "_") || "host";
   const ts = stamp(d.clock.iso());
   const base = `${host}-${ts}-${snap.worktreeTree.slice(0, 12)}`;
   const patch = join(dir, `${base}.patch`);
-  if (existsSync(patch)) throw new Error(`patch ${patch} already exists`);
+  writeFileSync(patch, "", { flag: "wx" }); // claims the name: a second actor's same-second copy fails here, never overwrites
   await writeAndConfirmPatch(git, snap.head, snap.worktreeTree, patch);
   const ref = `${LIVE_EDIT_RECOVERY_REF_PREFIX}/${host}/${ts}`;
   await recoveryRef(git, ref, snap.head, snap.worktreeTree, `chore(recovery): preserve live edits in the ${d.tree}`);
