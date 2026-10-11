@@ -15,6 +15,8 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { shortPathWhenTooLong } from "./short-path-root.js";
 import { acquireTestSlot, lowPriorityCommand, TEST_FILE_PEAK_BYTES, testRunArgv, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
+// @ts-expect-error The test judge is a plain .mjs script (ci runs it under plain node) and intentionally has no TS declaration file.
+import { closeJudgedRun, judgedNodeTestArgs, prepareJudgedRun } from "../../scripts/pure-test-pool.mjs";
 // W1-T3099: the judge's own two primitives, imported rather than re-derived.
 import { criterionFieldTampered, planOnlyDiff } from "./review.js";
 
@@ -920,8 +922,8 @@ function coverageShardSelectionArgs(repoRoot: string, shard: number, base: strin
   ];
 }
 
-function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly string[], concurrency: number): string[] {
-  return testRunArgv([
+function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly string[], concurrency: number, judgedArgs: readonly string[] = []): string[] {
+  return testRunArgv(judgedNodeTestArgs([
     "--enable-source-maps",
     "--experimental-test-coverage",
     "--test-coverage-exclude=test/**",
@@ -937,8 +939,12 @@ function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly
     "--import",
     TMP_HYGIENE_IMPORT,
     ...testFiles,
-  ], concurrency);
+  ], judgedArgs), concurrency);
 }
+
+interface JudgedRunVerdict { complete: boolean }
+interface JudgedRun { args: string[]; env: Record<string, string> }
+type CloseJudgedRun = (judged: JudgedRun, files: readonly string[], opts: { status: number; root: string; role: string; prefix: string; log: (line: string) => void }) => { verdict: JudgedRunVerdict; line: string };
 
 function coverageRawDirHasArtifact(rawDir: string): boolean {
   try {
@@ -1006,15 +1012,25 @@ function testWithCoverageShards(
     }
     // Low priority, bounded concurrency, and a heartbeat on the host-wide slot at every shard (W1 test-slot).
     slot.refresh();
-    const child = lowPriorityCommand(process.execPath, coverageShardArgs(shardRoot, shard, testFiles, slot.concurrency), testSlot.binaryExists);
+    // Judged (scripts/pure-test-pool.mjs): node reports a file whose own child exits 0 part-way as
+    // `ok`, so a shard passes only when every file it was given reached its own summary.
+    // Its files live in this run's own scratch, not os.tmpdir(): the shard's TMPDIR is scratchDir too.
+    const judged = (prepareJudgedRun as (opts: { makeDir: () => string }) => JudgedRun & { cleanup: () => void })({
+      makeDir: () => mkdtempSync(join(scratchDir, "rmd-pool-run-")),
+    });
+    const child = lowPriorityCommand(process.execPath, coverageShardArgs(shardRoot, shard, testFiles, slot.concurrency, judged.args), testSlot.binaryExists);
     const res = spawn(child.file, child.args, {
       cwd: repoRoot,
-      env: { TMPDIR: scratchDir, NODE_V8_COVERAGE: rawDir },
+      env: { TMPDIR: scratchDir, NODE_V8_COVERAGE: rawDir, ...judged.env },
+    });
+    const judge = (closeJudgedRun as CloseJudgedRun)(judged, testFiles, {
+      status: res.status ?? 1, root: repoRoot, role: `coverage shard ${shard}/${CI_COVERAGE_SHARD_COUNT}`, prefix: "coverage-ratchet", log: () => {},
     });
     const spawnFailed = spawnFailureDetail(label, res);
     if (spawnFailed) return { ok: false, detail: spawnFailed };
     const output = `${res.stdout ?? ""}${res.stderr ?? ""}`;
-    if (res.status !== 0) return { ok: false, detail: `FAIL — ${label}\n${output.trim()}` };
+    if (res.status !== 0) return { ok: false, detail: `FAIL — ${label}\n${output.trim()}\n${judge.line}` };
+    if (!judge.verdict.complete) return { ok: false, detail: `FAIL — ${label}\n${judge.line}` };
     if (!coverageOutputHasTestSummary(output)) {
       return { ok: false, detail: `FAIL — coverage-ratchet: shard ${shard}/${CI_COVERAGE_SHARD_COUNT} produced no # tests summary; refusing to fold an unverified shard into the coverage total.` };
     }

@@ -58,6 +58,7 @@ import { fileURLToPath } from "node:url";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { gitOrThrow } from "./lib/git.mjs";
 import { newTestCoverage, renderCoverageSummary } from "./coverage-merge-ratchet.mjs";
+import { closeJudgedRun, judgedNodeTestArgs, POOL_ISOLATION_FLAG, prepareJudgedRun, testFilesInArgv, unreportedFilesIn } from "./pure-test-pool.mjs";
 
 /**
  * W1-T2715 — A TEST THAT WRITES INTO THE TRACKED TREE IS OBSERVED BY EVERY OTHER WORKER, and the
@@ -324,7 +325,51 @@ export function coverageRetryInvocation(cmd, args, failedFiles, env = process.en
   return { cmd, args: [...withTapReporter(cmd, retained), ...failedFiles], env: { ...env, NODE_V8_COVERAGE: "" } };
 }
 
-function runOnce(cmd, args, env = process.env) {
+/**
+ * A PASS IS A RUN THAT FINISHED (2026-10-11 follow-up to #10894). Every attempt this wrapper spawns
+ * that is itself a `node --test` run — `test:ci`, the coverage shard's instrumented pass, every
+ * failed-file retry — is judged by scripts/pure-test-pool.mjs: it passes only when every test file it
+ * names reached its own summary with `# fail 0`. Node reports a file whose child exits 0 part-way as
+ * `ok`, so exit 0 alone is not a pass. A file the judge names as unreported is one this wrapper
+ * retries, like a file with a `not ok`. A wrapped runner that is not `node --test` itself
+ * (scripts/test-tier-manifest.mjs) judges its own children and prints the same lines.
+ */
+function isNodeTestRun(cmd, args) {
+  return isNodeCommand(cmd) && args.includes("--test");
+}
+
+async function runOnce(cmd, args, env = process.env) {
+  if (!isNodeTestRun(cmd, args)) return runChild(cmd, args, env);
+  const judged = prepareJudgedRun();
+  const files = testFilesInArgv(args, process.cwd());
+  let first;
+  try {
+    first = await runChild(cmd, judgedNodeTestArgs(args, judged.args), { ...env, ...judged.env });
+  } catch (error) {
+    judged.cleanup();
+    throw error;
+  }
+  const lines = [];
+  const { status } = closeJudgedRun(judged, files, {
+    status: first.code,
+    pool: args.includes(POOL_ISOLATION_FLAG),
+    root: process.cwd(),
+    role: "node --test",
+    log: (line) => {
+      lines.push(line);
+      process.stderr.write(`${line}\n`);
+    },
+  });
+  return { code: status, output: `${first.output}\n${lines.join("\n")}\n` };
+}
+
+/** The files a failed attempt names: each `not ok` file, and each file the judge never heard finish. */
+export function failedFilesOf(output, cwd = process.cwd()) {
+  const unreported = unreportedFilesIn(output).map((file) => (isAbsolute(file) ? relative(cwd, file) : file).split(sep).join("/"));
+  return [...new Set([...parseFailingTestFiles(output, cwd), ...unreported.filter((rel) => rel !== ".." && !rel.startsWith("../"))])].sort();
+}
+
+function runChild(cmd, args, env = process.env) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { stdio: ["inherit", "pipe", "pipe"], env });
     let combined = "";
@@ -469,7 +514,8 @@ async function recoverEmptyCoverage(treeBefore, first, cmd, args, rawDir) {
   }
   if (dropped.length === 0 || !coverageOptions(args).output) return reportTrackedTreeDirt(treeBefore, first.code);
   const env = { ...process.env, NODE_V8_COVERAGE: "" };
-  const rebuilt = await runOnce(process.execPath, ["--expose-internals", fileURLToPath(import.meta.url), "--rebuild-coverage", rawDir, ...args], env);
+  // The rebuild is this script, not a test run, even though the coverage command's own args ride along.
+  const rebuilt = await runChild(process.execPath, ["--expose-internals", fileURLToPath(import.meta.url), "--rebuild-coverage", rawDir, ...args], env);
   let code = rebuilt.code;
   if (code === 1) {
     console.log(`FLAKE-RETRY: coverage rebuild failed — retrying the coverage shard once — ${dropped.join(", ")}`);
@@ -516,7 +562,7 @@ export async function main(argv) {
 
   const firstPassElapsedMs = Date.now() - startedAt;
   const firstNames = parseFailingTestNames(first.output);
-  const failedFiles = parseFailingTestFiles(first.output);
+  const failedFiles = failedFilesOf(first.output);
   recordFlakeEvidence("first attempt failed", firstNames);
   appendFlakeLedger(parseFailingTestEntries(first.output), "first attempt failed");
 
