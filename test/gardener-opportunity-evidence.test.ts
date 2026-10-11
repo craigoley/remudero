@@ -100,6 +100,15 @@ test("gardener opportunities refuse a descriptor that changes or grows while rea
   assert.equal(grew.state === "unavailable" && grew.reason, "oversized");
 });
 
+test("gardener opportunities do not mislabel a non-parser failure as malformed JSON", async (t) => {
+  const f = await fixture(t); await f.write([row()]);
+  let reads = 0;
+  const failingClock = { ...clock, iso() { if (++reads === 1) throw new Error("PRIVATE clock failure"); return stamp; } };
+  const result = await readGardenerOpportunityEvidence(f.dir, repository, failingClock);
+  assert.equal(result.state === "unavailable" && result.reason, "unreadable");
+  assert.ok(!JSON.stringify(result).includes("PRIVATE"));
+});
+
 test("gardener route keeps valid process receipts when independent opportunity evidence is absent or malformed", async (t) => {
   const f = await fixture(t);
   const writer = createGardenerRuntimeWriter({ stateDir: f.dir, repository, daemonRunId: "boot-1", clock,

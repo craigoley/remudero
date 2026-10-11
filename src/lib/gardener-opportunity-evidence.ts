@@ -76,9 +76,13 @@ export async function readGardenerOpportunityEvidence(stateDir: string, reposito
         return unavailable(repository, clock, "corpus_changed");
       }
       try { return projectGardenerOpportunityEvidence(JSON.parse(bytes.subarray(0, size).toString("utf8")), repository, clock); }
-      catch { return unavailable(repository, clock, "malformed"); }
+      catch (error) {
+        if (error instanceof SyntaxError) return unavailable(repository, clock, "malformed");
+        throw error;
+      }
     } finally { await handle.close(); }
   } catch (error) {
-    return unavailable(repository, clock, (error as NodeJS.ErrnoException)?.code === "ENOENT" ? "not_collected" : "unreadable");
+    const reason = (error as NodeJS.ErrnoException)?.code === "ENOENT" ? "not_collected" : "unreadable";
+    return unavailable(repository, clock, reason);
   }
 }
