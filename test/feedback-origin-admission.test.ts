@@ -279,6 +279,28 @@ test("W1-T7754 adoption: the actual plan-fix round rechecks and carries original
   assert.equal(feedbackFixConstraint({ constraint: "legacy answer" }), "legacy answer");
 });
 
+test("W1-T7754 source: pagination and invalid metadata retain explicit unknown rather than an empty success", async () => {
+  const f = sourceFixture("issue-reaction");
+  const page2 = "repos/acme/widgets/issues/4/reactions?per_page=100&page=2";
+  f.routes["repos/acme/widgets/issues/4/reactions?per_page=100&page=1"] = Array.from({ length: 100 }, (_, i) => ({ id: 1000 + i }));
+  f.routes[page2] = [f.reaction];
+  assert.equal((await recheckSource(f.settings, f.subject, "fix", () => {}, { read: f.read, clock: { now: () => NOW } }))?.decision.reason, "owner");
+  assert.equal(f.calls.filter(path => path === page2).length, 2);
+  for (const body of [[], {}, undefined]) {
+    const g = sourceFixture("issue-reaction");
+    g.routes["repos/acme/widgets/issues/4/reactions?per_page=100&page=1"] = body;
+    assert.equal((await recheckSource(g.settings, g.subject, "fix", () => {}, { read: g.read, clock: { now: () => NOW } }))?.decision.outcome, "unknown");
+  }
+  for (const repository of [{ id: 100, full_name: "acme/other", private: true }, { id: 100, full_name: "acme/widgets" }]) {
+    const g = sourceFixture(); g.routes["repos/acme/widgets"] = repository;
+    assert.equal((await recheckSource(g.settings, g.subject, "fix", () => {}, { read: g.read, clock: { now: () => NOW } }))?.decision.outcome, "unknown");
+  }
+  const g = sourceFixture(); g.routes["repos/acme/widgets/issues/4"] = { ...g.issue, pull_request: {} };
+  assert.equal((await recheckSource(g.settings, g.subject, "fix", () => {}, { read: g.read, clock: { now: () => NOW } }))?.decision.outcome, "unknown");
+  g.settings.organizations = [{ id: 600, login: "../hidden" }];
+  assert.equal((await recheckSource(g.settings, g.subject, "fix", () => {}, { read: g.read, clock: { now: () => NOW } }))?.decision.reason, "invalid-action-config");
+});
+
 function tmpRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "rmd-feedback-origin-"));
   mkdirSync(join(root, "plan", "feedback"), { recursive: true });

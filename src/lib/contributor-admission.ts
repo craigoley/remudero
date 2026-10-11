@@ -185,7 +185,7 @@ export function* contributorAdmissionSteps(
   const actor = subject.origin?.actor;
   const initial = classify(subject, action, settings.policy, [], now());
   if (initial.reason === "membership-unresolved" && actor != null && validId(actor.id) && actor.type === "User") {
-    memberships.push(...yield* contributorMembershipSteps(settings, actor, snapshot, read, clock));
+    memberships.push(...yield* contributorMembershipSteps(settings, { ...actor, id: actor.id }, snapshot, read, clock));
   }
   try { response = yield* admissionReadStep(read, path); }
   catch {
@@ -205,12 +205,11 @@ export function* contributorAdmissionSteps(
 }
 
 function* contributorMembershipSteps(
-  settings: AdmissionSettings, actor: ContributionActor & { id?: number }, snapshot: string,
+  settings: AdmissionSettings, actor: ContributionActor & { id: number }, snapshot: string,
   read: AdmissionRead, clock: Pick<Clock, "now">,
 ): Generator<() => unknown, MembershipEvidence[], unknown> {
   const memberships: MembershipEvidence[] = [];
   const now = () => clock.now();
-  if (!validId(actor.id)) return memberships;
   for (const organizationId of new Set(settings.policy.organizationIds)) {
       const namespace = settings.organizations.find((o) => o.id === organizationId);
       if (!namespace || typeof actor.login !== "string" || !/^[A-Za-z0-9-]+$/.test(actor.login)) continue;
@@ -343,8 +342,8 @@ export async function observeFeedbackSource(
     if (feedbackSubjectBinding(subject) !== feedbackSubjectBinding(expected)) return finish("source-revision-changed");
     const decision = classifyContribution(subject, "feedback", settings.policy, [], clock.now());
     const actor = subject.origin?.actor;
-    if (decision.reason === "membership-unresolved" && actor) {
-      const steps = contributorMembershipSteps(settings, actor, snapshot, read, clock);
+    if (decision.reason === "membership-unresolved" && actor && validId(actor.id)) {
+      const steps = contributorMembershipSteps(settings, { ...actor, id: actor.id }, snapshot, read, clock);
       let next = steps.next();
       while (!next.done) {
         try { next = steps.next(await next.value()); }
