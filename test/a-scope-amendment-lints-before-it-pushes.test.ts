@@ -181,6 +181,24 @@ test("scope lint does not repair inherited provenance while raising risk", () =>
     ["provenance"]);
 });
 
+test("scope lint raises a block scalar risk without removing the following field", () => {
+  for (const scalar of ["|-", ">-", "|- # Rule 19: one concern", ">- # keep this comment"]) {
+    const text = shard.replace("risk: medium  # Rule 19: one concern", `risk: ${scalar}\n    medium`);
+    const baseTask = parseTasksFromYaml(text, shardPath)[0];
+    assert.equal(baseTask.risk, "medium");
+    assert.equal(lintTask(baseTask).ok, true, "positive control: the base shard is valid");
+    const f = fixture(text);
+    assert.equal(requestScopeAmendment(f.request, f.deps).kind, "created");
+    const task = parseTasksFromYaml(f.pushed[0], shardPath)[0];
+    assert.equal(task.risk, "high");
+    assert.equal(task.origin, baseTask.origin, "raising risk preserves the next field");
+    assert.equal(task.band_meaning, "span");
+    assert.equal(lintTask(task, { riskTransition: { baseTask } }).ok, true);
+    assert.equal(f.pushed[0].includes("one concern"), false);
+    if (scalar.includes("keep this comment")) assert.ok(f.pushed[0].includes("keep this comment"));
+  }
+});
+
 test("scope lint refuses an unreadable task schema before any effects", () => {
   for (const text of [shard.replace("type: implement", "type: unknown"),
     shard.replace("  origin:", "  band_meaning: unknown\n  origin:"),

@@ -604,9 +604,11 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
       const band = baseTask.band_meaning === undefined ? `${indent}band_meaning: span\n` : "";
       const edits: Array<{ start: number; end: number; replacement: string }> = [];
       if (isScalar(risk)) {
-        const end = text.indexOf("\n", risk.range![1]);
+        const block = risk.type === "BLOCK_LITERAL" || risk.type === "BLOCK_FOLDED";
+        const end = block ? risk.range![1] - (text[risk.range![1] - 1] === "\n" ? 1 : 0) :
+          text.indexOf("\n", risk.range![1]);
         const lineEnd = end < 0 ? text.length : end;
-        const tail = text.slice(risk.range![1], lineEnd);
+        const tail = block ? (risk.comment ? `  #${risk.comment}` : "") : text.slice(risk.range![1], lineEnd);
         edits.push({ start: risk.range![0], end: lineEnd,
           replacement: "high" + (/one concern/i.test(tail) ? `  # ${riskRaise}` : tail) });
         if (band) edits.push({ start: filesLine, end: filesLine, replacement: band });
