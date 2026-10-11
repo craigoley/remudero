@@ -359,7 +359,7 @@ test("W1-T7754 checkpoint: default repository transport really spawns a containe
     try {
       const repository = await ghIssueListGateway().repository!("acme", "widgets");
       assert.equal(shim.calls().length, 1, "the default adapter was exercised, not injected");
-      assert.deepEqual(shim.calls()[0].slice(0, 3), ["api", "repos/acme/widgets", "-i"]);
+      assert.equal(shim.calls()[0], "api repos/acme/widgets -i");
       assert.deepEqual(repository, stdout.includes('"id":100') ? { id: 100, fullName: "acme/widgets", private: true } : undefined);
     } finally {
       process.env.PATH = oldPath;
