@@ -141,7 +141,7 @@ const BASELINE_COMMAND_NAMES = [
   "impossible-canary", "inbox", "inbox-bakeoff", "init", "install-checkout", "issues",
   "garden",
   "knowledge",
-  "learnings", "ledger-compact", "ledger-grep", "lint-plan", "memory-lint", "merge-hold", "mcp", "next-task-id", "note", "notify", "onboard", "ops", "pause",
+  "learnings", "ledger-compact", "ledger-grep", "lint-plan", "live-edits", "memory-lint", "merge-hold", "mcp", "next-task-id", "note", "notify", "onboard", "ops", "pause",
   "peek", "plan", "plan-reconcile", "preflight", "progress-watchdog", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",
   "pr-owner",
   "read-model",
@@ -177,6 +177,7 @@ const BASELINE_COMMAND_NAMES = [
 // W1-T5114: `garden` — one pass of one registered gardener, the daemon's off-loop child — joins the registry.
 // W1-T5687: `progress-watchdog` — the read-only progress verdict of a stalled sweep — joins the registry.
 // W1-T5859: `claim` — a hand build takes the fleet's dispatch claim (`rmd claim <task-id>`) — joins the registry.
+// 2026-10-11: `live-edits` — one rung of the live-checkout edit ladder, run by the host watchdog — joins the registry.
 // W1-T5533: `hand-worktree` — a hand build's run-<taskId>-<epochMs> worktree in one command — joins the registry.
 test("COMMANDS carries the reviewed command-name inventory", () => {
   // The reviewed edit is the NAME added to the list above, beside its line of provenance. No count
