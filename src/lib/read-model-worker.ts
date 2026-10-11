@@ -1835,7 +1835,7 @@ export function runReadModelWorker(
     }
     port.postMessage(m);
   };
-  const slowLaneConfig = data.slowLane && { ...data.slowLane, analytics: data.slowLane.analytics ?? { instances: data.instances.map((i) => ({ name: i.name, stateDir: i.ledgerDir })) } };
+  const slowLaneConfig = data.slowLane && { ...data.slowLane, analytics: data.slowLane.analytics ?? { instances: data.instances.map((i) => ({ name: i.name, stateDir: i.ledgerDir, repository: i.repo })) } };
   if (slowLaneConfig) slowLane = threadSlowLane({ config: slowLaneConfig, log, onBodies: (built) => views.accept(built), onSnapshot: (write) => views.snapshot(write) });
   const oracleRunner = threadOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), log });
   const ticker = createReadModelTicker({

@@ -1,0 +1,2 @@
+- claim: the coverage-session-blanking gate lesson is present in a matched learning
+  proof: "grep: ci-learning:10516:coverage-session-blanking in learnings/ci.yaml"

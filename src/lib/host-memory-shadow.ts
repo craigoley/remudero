@@ -24,6 +24,9 @@
  * rss+swap over the last hour less its latest sample, and the rest, which competes with the trees' tails for the one
  * allowance. Too few samples: its whole growth is typical. The HOST check applies the same rule across every live tree
  * and every measured daemon: all typical parts, plus the one largest tail.
+ * The samples are the daemon's own rolling footprint (daemon-footprint.ts), kept across ledger rotations and daemon
+ * restarts; the live ledger's tail, which a rotation cuts and a restart's new pid filters, is read only when it holds
+ * more of the last hour than the footprint does (before the daemon has written one).
  *
  * NEVER WAITS. No lock is taken; a ledger reader that reports a held lock (EWOULDBLOCK/EAGAIN/EBUSY), an errno, or a
  * missing/unreadable/reset store yields a verdict naming that state as an uncertainty that WIDENS the margin. It is
@@ -60,6 +63,7 @@ import {
   type YieldDecision,
 } from "./host-memory-priority.js";
 import { classEstimate, classTypical } from "./host-memory-learning.js";
+import { readDaemonFootprint, type FootprintSample } from "./daemon-footprint.js";
 import { DAEMON_PID_ENV, type LedgerLine } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { installPolicyPath } from "./policy.js";
@@ -96,7 +100,8 @@ export interface HostMemoryBudgetPolicy {
   uncertaintyMarginMib: number;
   /** The daemon growth assumed for an instance whose history is too short or unreadable. */
   daemonGrowthUnmeasuredMib: number;
-  /** daemon.alive rows in the last hour below which growth is "unmeasured". */
+  /** The daemon's rss+swap samples in the last hour (its persisted footprint, daemon-footprint.ts, or the ledger tail's
+   *  daemon.alive/daemon.tick rows) below which its growth is not split: it all counts as typical. */
   daemonGrowthMinSamples: number;
   /** A prior swap-in sample older than this is stale: the rate is reported unmeasured. */
   staleReadingMs: number;
@@ -207,6 +212,8 @@ export interface ShadowInputs {
   daemonGrowth: Array<{
     instance: string; samples: number; growthMib?: number; typicalMib?: number; reason?: string; basis?: string;
     typicalBasis?: string; own?: boolean;
+    /** What the daemon's persisted footprint held for this verdict (daemon-footprint.ts), or why it was unread. */
+    footprint?: string;
   }>;
   serve: { scenario: ServeScenario; basis: string };
   /** The learned review estimate, for the counterfactual review (W1-T7095). Absent: the class default. */
@@ -948,14 +955,28 @@ export function daemonGrowthOf(
 ): { samples: number; growthMib?: number; typicalMib?: number; reason?: string } {
   const recent = rows.filter((r) => DAEMON_SAMPLE_STEPS.has(r.step) && r.bytes !== undefined && now - r.at <= HOUR_MS &&
     (pid === undefined || r.pid === undefined || r.pid === pid));
-  if (recent.length < minSamples) return { samples: recent.length, reason: `${recent.length} daemon sample row(s) in the last hour` };
-  const bytes = recent.map((r) => r.bytes!);
+  return seriesGrowth(recent.map((r) => r.bytes!), minSamples, "daemon sample row(s)");
+}
+
+/** The same split over the daemon's persisted footprint: every sample of the last hour, across restarts (a restarted
+ *  daemon climbs back toward the instance's footprint, so a prior pid's samples still say what is typical). */
+export function footprintGrowthOf(
+  samples: readonly FootprintSample[], now: number, minSamples: number,
+): { samples: number; growthMib?: number; typicalMib?: number; reason?: string } {
+  const recent = samples.filter((s) => s.at <= now && now - s.at <= HOUR_MS);
+  return seriesGrowth(recent.map((s) => s.bytes), minSamples, "daemon footprint sample(s)");
+}
+
+function seriesGrowth(
+  bytes: readonly number[], minSamples: number, unit: string,
+): { samples: number; growthMib?: number; typicalMib?: number; reason?: string } {
+  if (bytes.length < minSamples) return { samples: bytes.length, reason: `${bytes.length} ${unit} in the last hour` };
   const latest = bytes.at(-1)!;
   const sorted = [...bytes].sort((a, b) => a - b);
   const mid = sorted.length >> 1;
   const median = sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
   const growthMib = Math.max(0, Math.max(...bytes) - latest) / MIB;
-  return { samples: recent.length, growthMib, typicalMib: Math.min(growthMib, Math.max(0, median - latest) / MIB) };
+  return { samples: bytes.length, growthMib, typicalMib: Math.min(growthMib, Math.max(0, median - latest) / MIB) };
 }
 
 /**
@@ -1010,7 +1031,7 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
   }));
   const instance = instanceOf(ports, start.root);
   const tail = readTailRows(ports, start.root);
-  const own = { ...ownDaemonGrowth(ports, tail, now, policy), instance, own: true };
+  const own = { ...ownDaemonGrowth(ports, tail, now, policy, start.root), instance, own: true };
   // Another instance's heartbeats live in its own ledger, out of reach from here: named, never assumed flat.
   const others = [...new Set(entries.map((e) => e.owner.split("@")[0]!))].filter((name) => name !== instance)
     .map((name) => ({ instance: name, samples: 0, reason: "its daemon.alive rows are not readable from this instance" }));
@@ -1071,41 +1092,61 @@ function rotationOf(ports: ShadowMemoryPorts, root: string): number | undefined 
   }
 }
 
+type SeriesGrowth = { samples: number; growthMib?: number; typicalMib?: number; reason?: string };
+
+/**
+ * The daemon's rss+swap series for this instance: its persisted footprint (daemon-footprint.ts), unless the ledger tail
+ * holds more of the last hour (only before the daemon has written a footprint). `footprint` names what the store held.
+ */
+function daemonSeries(
+  ports: ShadowMemoryPorts, tail: ReturnType<typeof readTailRows>, now: number, minSamples: number, root: string, pid?: number,
+): { series: SeriesGrowth; basis: string; footprint: string } {
+  const store = readDaemonFootprint(join(root, "state"), ports.readFile);
+  const fromStore = "unread" in store ? undefined : footprintGrowthOf(store.samples, now, minSamples);
+  const footprint = "unread" in store ? `unread: ${store.unread}` : `${store.source}: ${fromStore!.samples} sample(s) in the last hour`;
+  const fromTail = "unread" in tail ? undefined : daemonGrowthOf(tail.rows, now, minSamples, pid);
+  if (fromStore && (!fromTail || fromStore.samples >= fromTail.samples)) {
+    return { series: fromStore, basis: "daemon footprint", footprint };
+  }
+  if (fromTail) return { series: fromTail, basis: "daemon.alive rows", footprint };
+  return { series: { samples: 0, reason: `ledger tail unreadable: ${(tail as { unread: string }).unread}` }, basis: "none", footprint };
+}
+
 /** This instance's daemon growth: measured from the daemon's /proc status when its pid is known and readable, else from
- *  the daemon.alive rows in the tail, else unmeasured with the reasons for both. */
+ *  its sample series (above), else unmeasured with the reasons for both. */
 function ownDaemonGrowth(
   ports: ShadowMemoryPorts,
   tail: ReturnType<typeof readTailRows>,
   now: number,
   policy: HostMemoryBudgetPolicy,
-): { samples: number; growthMib?: number; typicalMib?: number; reason?: string; basis?: string; typicalBasis?: string } {
+  root: string,
+): SeriesGrowth & { basis?: string; typicalBasis?: string; footprint?: string } {
   let procReason: string;
   const pid = ports.daemonPid();
+  const { series, basis, footprint } = daemonSeries(ports, tail, now, policy.daemonGrowthMinSamples, root, pid);
   if (pid === undefined) procReason = "no daemon pid in this process";
   else {
     try {
       const measured = daemonGrowthFromStatus(ports.readFile(`/proc/${pid}/status`));
       if (measured) {
-        // The peak is the proc's; how much of the climb back to it is typical comes from the sample rows.
-        const series = "unread" in tail ? undefined : daemonGrowthOf(tail.rows, now, policy.daemonGrowthMinSamples, pid);
-        const typical = series?.typicalMib === undefined ? undefined : Math.min(measured.growthMib, series.typicalMib);
+        // The peak is the proc's; how much of the climb back to it is typical comes from the sample series.
+        const typical = series.typicalMib === undefined ? undefined : Math.min(measured.growthMib, series.typicalMib);
+        const unit = basis === "daemon footprint" ? "footprint sample(s)" : "sample row(s)";
         return {
           samples: 1, growthMib: measured.growthMib, ...(typical !== undefined ? { typicalMib: typical } : {}),
           basis: `proc ${pid}: VmHWM ${Math.round(measured.peakMib)} MiB - VmRSS ${Math.round(measured.residentMib)} MiB`,
-          typicalBasis: typical !== undefined ? `median of ${series!.samples} sample row(s)`
-            : `all typical: ${series?.reason ?? "ledger tail unreadable"}`,
+          typicalBasis: typical !== undefined ? `median of ${series.samples} ${unit}` : `all typical: ${series.reason}`,
+          footprint,
         };
       }
       procReason = `proc ${pid}: no VmHWM/VmRSS`;
     } catch (error) {
-      // The pid exited or /proc is unreadable: named below, and the row series is tried instead.
+      // The pid exited or /proc is unreadable: named below, and the sample series is tried instead.
       procReason = `proc ${pid}: ${reasonOf(error)}`;
     }
   }
-  if ("unread" in tail) return { samples: 0, reason: `${procReason}; ledger tail unreadable: ${tail.unread}` };
-  const rows = daemonGrowthOf(tail.rows, now, policy.daemonGrowthMinSamples);
-  if (rows.growthMib !== undefined) return { ...rows, basis: "daemon.alive rows" };
-  return { ...rows, reason: `${procReason}; ${rows.reason}` };
+  if (series.growthMib !== undefined) return { ...series, basis, footprint };
+  return { ...series, reason: `${procReason}; ${series.reason}`, footprint };
 }
 
 // ── the recorder: never in the path ───────────────────────────────────────────────────────────────────────────────

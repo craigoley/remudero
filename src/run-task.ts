@@ -33,7 +33,7 @@ import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/ada
 import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { fixRoundBaseHead } from "./lib/fix-round-base.js";
 import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapplyPorts } from "./lib/fix-round-reapply.js";
-import { productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
+import { productionDispatchBreakJudge, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
   type BaseChangedFiles, type JobRequeueOutcome } from "./lib/sweep.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor, type GhAsyncExecutor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
@@ -118,7 +118,7 @@ export {
 };
 // W1-T4678: the cheap-lane read BEFORE `escalateCircuitBreak` above — see stall-verifier.ts's
 // own doc for why this reads the evidence rather than paging straight from a tripped breaker.
-import { stallShardFingerprint, verifyStalledTask } from "./lib/stall-verifier.js";
+import { judgeDispatchBreak, stallShardFingerprint, verifyStalledTask, type DispatchBreakJudge } from "./lib/stall-verifier.js";
 // Compatibility re-export target: lib/arm-auto-merge" (W1-T2887) — the auto-merge arm cluster
 // (armAutoMerge/armAutoMergeDetailed/attemptArm/armAutoMergeAtOpen/disarmAutoMerge/
 // armIfVerdictPermits/realArmDeps and their classifiers) moved to src/lib/arm-auto-merge.ts;
@@ -1050,6 +1050,7 @@ import { clockFromDateFn, clockFromMillisFn, fixedClock, systemClock, type Clock
 import { feedbackLineagePayload, feedbackLineageSnapshot, observeFeedbackInputs, observeFeedbackPublication, type AdmissionObserver, type FeedbackAdmissionContext } from "./lib/contributor-admission.js";
 import { envelope as feedbackLineageEnvelope } from "./lib/untrusted-envelope.js";
 import { observeContributorAdmission } from "./lib/arm-auto-merge.js";
+import { observeAdmissionDisposition } from "./lib/action-executor.js";
 import {
   VERIFY_HUMAN_JUDGED_STEP,
   judgeVerifyHumanShard,
@@ -1356,6 +1357,7 @@ import {
   readRiskPolicy,
   realRiskJudge,
   resolveRiskJudgeMount,
+  riskJudgeDiffInputBudget,
   riskJudgeSpendCollector,
   runRiskJudge,
   type RiskJudgeChangedFile,
@@ -1363,6 +1365,7 @@ import {
   type RiskJudgeInput,
   type RiskJudgeVerdict,
   type RiskPolicy,
+  withoutRiskJudgePatches,
 } from "./lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "./lib/shadow-judge.js";
 import { evaluateRiskJudgeDisposition } from "./lib/risk-judge-eval.js";
@@ -1645,7 +1648,7 @@ import {
   checkCostGovernor,
   checkMemoryGovernor,
   checkQueueGovernor,
-  readFixHostPressure,
+  productionFixPressure,
   deriveQueueGovernorTrailingFlow,
   isFleetOwnedRunBranch,
   cancelledRequiredCheckNames,
@@ -1784,6 +1787,7 @@ import {
   readIdleLightCadence,
 } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
+import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
 import { applyDaemonMemoryPolicy, createDaemonMemoryGovernor, readDaemonMemoryPolicy } from "./lib/daemon-memory-policy.js";
 import { workerThreads, type TrackedWorker } from "./lib/worker-heaps.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
@@ -2738,16 +2742,28 @@ export function handedOffHeadRiskJudge(
   return riskJudgeHandedOffHead((pr, signal) => {
     const task = pr.taskId === undefined ? undefined : plan.byId.get(pr.taskId);
     const spend = riskJudgeSpendCollector();
+    let viewRead: Promise<RiskJudgeChangeView> | undefined;
+    const readViewOnce = (): Promise<RiskJudgeChangeView> => (viewRead ??= (async () => readChangeView(pr.prUrl))());
     return {
       input: {
         change: { description: `${task?.title ?? `PR #${pr.prNumber}`} — ${pr.prUrl}`, files: task?.files },
         gatesState: { review_state: pr.reviewState, checks_state: pr.checksState, owner: "sweep (handed-off head)" },
         planContext: { taskId: pr.taskId, taskType: task?.type },
       },
-      config: { confidenceThreshold: readRiskPolicy(policyPath(repoRoot)).confidenceThreshold },
+      config: (() => {
+        const riskPolicy = readRiskPolicy(policyPath(repoRoot));
+        return { confidenceThreshold: riskPolicy.confidenceThreshold, borderlineBand: riskPolicy.borderlineBand };
+      })(),
       orchestrator: {
         spend,
         log,
+        // W1-T7724: the change view is read ONCE per head; the description tier shows its counts and the diff
+        // tier (an uncertain `low`) reads its patches from the same read — no second GitHub call.
+        diffSource: {
+          read: readViewOnce,
+          inputBudgetChars: (tier1Chars) =>
+            riskJudgeDiffInputBudget(resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot))))(tier1Chars),
+        },
         judge: async (input) => {
           const settingsFile = renderWorkerSettings({
             templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
@@ -2755,7 +2771,7 @@ export function handedOffHeadRiskJudge(
             outPath: join(config.root, "tmp", `risk-judge-settings-${runId}.json`),
           });
           const mount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
-          const judged = { ...input, change: { ...input.change, changeView: await readChangeView(pr.prUrl) } };
+          const judged = { ...input, change: { ...input.change, changeView: withoutRiskJudgePatches(await readViewOnce()) } };
           return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend, signal })(judged);
         },
         escalate: (verdict, action) =>
@@ -5699,10 +5715,17 @@ function changeViewFromRows(response: unknown): RiskJudgeChangeView {
     filename?: string;
     additions?: number;
     deletions?: number;
+    patch?: unknown;
   }>;
+  // W1-T7724: each row's `patch` rides on the view, so the diff tier needs no second GitHub read.
   const files: RiskJudgeChangedFile[] = rows
-    .filter((r): r is { filename: string; additions?: number; deletions?: number } => typeof r.filename === "string")
-    .map((r) => ({ path: r.filename, additions: r.additions ?? 0, deletions: r.deletions ?? 0 }));
+    .filter((r): r is { filename: string; additions?: number; deletions?: number; patch?: unknown } => typeof r.filename === "string")
+    .map((r) => ({
+      path: r.filename,
+      additions: r.additions ?? 0,
+      deletions: r.deletions ?? 0,
+      ...(typeof r.patch === "string" ? { patch: r.patch } : {}),
+    }));
   return boundRiskJudgeChangeView(files);
 }
 
@@ -21093,11 +21116,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const riskJudgeSpend = riskJudgeSpendCollector();
     let primaryRiskServedModel: string | null = null;
     let judgedRiskInput = riskJudgeInput;
+    // W1-T7724: the view is read ONCE; the diff tier (a second judgment of an uncertain `low`) reuses its patches.
+    let readChangeViewOnce: RiskJudgeChangeView | undefined;
     const judgeWithChangeView = async (input: RiskJudgeInput): Promise<RiskJudgeVerdict> => {
-      const view = changeView(prUrl);
+      const view = (readChangeViewOnce ??= changeView(prUrl));
       judgedRiskInput = {
         ...input,
-        change: { ...input.change, changeView: view },
+        change: { ...input.change, changeView: withoutRiskJudgePatches(view) },
       };
       return realRiskJudge({
         mount: riskJudgeMount, cwd: worktreePath, settingsFile, spend: riskJudgeSpend,
@@ -21111,6 +21136,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const riskJudgeResult = await runRiskJudge(riskJudgeInput, {
       judge: judgeWithChangeView,
       spend: riskJudgeSpend,
+      diffSource: {
+        read: () => readChangeViewOnce ?? changeView(prUrl),
+        inputBudgetChars: riskJudgeDiffInputBudget(riskJudgeMount),
+      },
       escalate: async (verdict, action) => {
         // W1-T125 shape, retargeted by W1-T975: this run itself never arms until
         // AFTER the risk judge proceeds (see the deferred arm call further down),
@@ -21160,6 +21189,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // read live above) is the one this unattended caller applies — no longer the module's
       // own DEFAULT_CONFIDENCE_THRESHOLD literal, unreachable from outside risk-judge.ts.
       confidenceThreshold: riskPolicy.confidenceThreshold,
+      borderlineBand: riskPolicy.borderlineBand,
     });
     if (riskJudgeResult.verdict.availability !== "unavailable") {
       await runShadowJudge({
@@ -22703,6 +22733,10 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   const runId = `review-PR${view.number}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: reviewKey, step, lane: "review", ...extra });
+  const adoptionComment = flagValue(rest, "--admission-adopt-comment");
+  await observeAdmissionDisposition(config.contributorAdmission,
+    { owner, repo, prNumber: view.number, headSha: view.headRefOid }, config.root, log,
+    adoptionComment === undefined ? undefined : Number(adoptionComment));
   await (deps.contributorAdmission ?? ((target, action) => observeContributorAdmission(config.contributorAdmission, target, action, log)))
     ({ owner, repo, prNumber: view.number, headSha: view.headRefOid }, "review");
   const reviewSubject = resolveReviewSubjectCheckout({
@@ -23245,6 +23279,11 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     statusCheckRollup?: RollupEntry[];
   };
   const config = deps.config ?? loadConfig();
+  const adoptionComment = flagValue(rest, "--admission-adopt-comment");
+  await observeAdmissionDisposition(config.contributorAdmission,
+    { owner, repo, prNumber: view.number, headSha: view.headRefOid }, config.root,
+    (step, fields) => appendLedger(ledgerPathFor(config), { run_id: `dep-disposition-PR${view.number}`, task_id: `dep-review-PR${view.number}`, step, ...fields }),
+    adoptionComment === undefined ? undefined : Number(adoptionComment));
   await (deps.contributorAdmission ?? ((target, action) => observeContributorAdmission(config.contributorAdmission, target, action,
     (step, fields) => appendLedger(ledgerPathFor(config), { run_id: `dep-admission-PR${view.number}`, task_id: `dep-review-PR${view.number}`, step, ...fields }))))
     ({ owner, repo, prNumber: view.number, headSha: view.headRefOid }, "review");
@@ -35133,12 +35172,15 @@ export function breakerDetailDep(
  * it to `verifyStalledTask` (stall-verifier.ts). The plan calls for an offline replay before
  * activating dispositions, so every tripped breaker still follows the established backstop
  * escalation path. A provisional `requeue` verdict must not silently leave the breaker tripped.
+ *
+ * W1-T7742: with `judge` wired, the page waits on {@link judgeDispatchBreak}: a `continue` ruling resets
+ * the streak instead of halting the task; `escalate`, or no usable ruling, pages exactly as before.
  */
 export function onCircuitBreakWithVerifier(
   gate: Pick<ReturnType<typeof breakerGateFor>, "detailFor">,
   projFor: (taskId: string) => { prState?: string; merged?: boolean } | undefined,
-  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
-): (task: Task) => void {
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway; judge?: DispatchBreakJudge },
+): (task: Task) => Promise<void> | void {
   return (task) => {
     const detail = gate.detailFor(task.id);
     const proj = projFor(task.id);
@@ -35148,7 +35190,7 @@ export function onCircuitBreakWithVerifier(
     if (proj?.merged) prStates.push("merged");
     else if (proj?.prState === "OPEN") prStates.push("open");
     else if (proj?.prState === "CLOSED") prStates.push("closed_unmerged");
-    verifyStalledTask(
+    const stall = verifyStalledTask(
       task.id,
       {
         freshCount: detail.freshCount,
@@ -35159,7 +35201,11 @@ export function onCircuitBreakWithVerifier(
       },
       { repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId },
     );
-    escalateCircuitBreak(task, { owner: ctx.owner, repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, issues: ctx.issues });
+    const page = () => escalateCircuitBreak(task, { owner: ctx.owner, repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, issues: ctx.issues });
+    if (!ctx.judge) return page();
+    // Settles off the selection pass; a throw anywhere still pages (the judge route never throws on its own).
+    return judgeDispatchBreak(task, detail, stall.verdict, { repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, judge: ctx.judge })
+      .then((decision) => { if (decision === "escalate") page(); }, page);
   };
 }
 
@@ -35305,7 +35351,7 @@ function queueGovernorGateFor(
       trailingMergedCount: flow.trailingMergedCount, readHeadroom: () => readMemoryHeadroomFraction(),
     });
     const result = checkQueueGovernor(owned, policy, {
-      pressure: readFixHostPressure(policy.memoryFloorMib),
+      pressure: productionFixPressure(policy.memoryFloorMib, ledgerPath),
       foreignOpenCount: foreign,
       trailingMergedCount: flow.trailingMergedCount,
       trailingOpenedCount: flow.trailingOpenedCount,
@@ -35317,7 +35363,8 @@ function queueGovernorGateFor(
       observed_open_count: owned, measured_bound: result.measuredBound, wip_limit: result.wipLimit,
       trailing_merged_count: flow.trailingMergedCount, trailing_opened_count: flow.trailingOpenedCount,
       pressure_available_mib: result.pressure?.availableMib, pressure_floor_mib: result.pressure?.floorMib,
-      pressure_reason: result.pressure?.reason,
+      pressure_reason: result.pressure?.reason, pressure_binding: result.pressure?.binding, pressure_tier: result.pressure?.tier,
+      pressure_host_available_mib: result.pressure?.hostAvailableMib,
       tier: result.tier, deferred: result.deferred });
     if (!result.deferred) {
       admission = result;
@@ -36254,7 +36301,8 @@ async function drainCommand(
         // evaluation the predicate above answered from — never a second call.
         breakerDetail: breakerDetailDep(breakerGate),
         // W1-T4678: reads the evidence before paging — see onCircuitBreakWithVerifier's own doc.
-        onCircuitBreak: onCircuitBreakWithVerifier(breakerGate, (id) => lastProj?.get(id), { owner, repo, ledgerPath, runId }),
+        onCircuitBreak: onCircuitBreakWithVerifier(breakerGate, (id) => lastProj?.get(id), { owner, repo, ledgerPath, runId,
+          judge: productionDispatchBreakJudge({ cwd: repoRoot, settingsFile: join(repoRoot, "settings", "worker.json") }) }),
         // W1-T4025: repeated attributable lifetime pressure is a sensor, not a refusal wall. The
         // drain flushes one bounded batch after the pass and routes it through the existing judge;
         // a judge/proposal failure is logged and does not hold this or a sibling task.
@@ -38525,7 +38573,7 @@ export function orphanSweepRunActive(
  *  one unresolved request per thread). `liveThreads` is a test seam. */
 export function daemonMemoryTelemetryReader(
   bootHeadSha: string | undefined,
-  opts: { generation?: string; liveThreads?: () => readonly TrackedWorker[] } = {},
+  opts: { generation?: string; liveThreads?: () => readonly TrackedWorker[]; footprint?: DaemonFootprint; clock?: Clock } = {},
 ): (() => Record<string, unknown>) & { afterRow: () => void } {
   const threadHeaps = workerHeapReadings({
     live: opts.liveThreads ?? workerThreads().live,
@@ -38538,7 +38586,12 @@ export function daemonMemoryTelemetryReader(
       workload: () => ({ active_workers: activeWorkerCount(), in_flight_reviews: inFlightReviewCount() }),
       bootHeadSha,
     });
-    return { ...memory, ...threadHeaps.fields(memory) };
+    // The same reading, kept as the daemon's own rolling footprint for the memory budget (daemon-footprint.ts). A
+    // failed persist keeps the sample in memory and rides the row.
+    const kept = opts.footprint?.record({
+      at: (opts.clock ?? systemClock).now(), bytes: memory.rss_bytes + (memory.vm_swap_bytes ?? 0), pid: process.pid,
+    });
+    return { ...memory, ...threadHeaps.fields(memory), ...(kept && !kept.persisted ? { footprint_persist: `error:${kept.reason}` } : {}) };
   };
   return Object.assign(read, { afterRow: () => threadHeaps.refresh() });
 }
@@ -39403,6 +39456,9 @@ export async function daemonCommand(
       (inlineProducer ??= createTickReadProducer(readOptions, { log }))(input),
   });
   const loopTelemetry = startReadPlaneTelemetry();
+  // The daemon's rolling rss+swap samples, kept across rotations and restarts for the memory budget's daemon split.
+  const daemonFootprint = createDaemonFootprint(daemonFootprintPath(join(config.root, "state")));
+  installDaemonFootprint(daemonFootprint);
   try {
     try { await gardenerRuntime.flush(); } catch { log("garden.telemetry_failed", { reason: "runtime-inventory-write-failed" }); }
     const summary = await runDaemonFn(
@@ -39421,7 +39477,7 @@ export async function daemonCommand(
           ledgerPath, statusPath, log,
         }) : undefined,
         readLoopTelemetry: loopTelemetry.sample,
-        readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha, { generation: runId }),
+        readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha, { generation: runId, footprint: daemonFootprint }),
         memoryGovernor: createDaemonMemoryGovernor({ policy: memoryPolicyRead.policy }),
         lastStepBeforeBlock: () => lastReadPlaneStep,
         idleStarvedSupervised: process.env.RMD_IDLE_STARVED_SUPERVISED === "1" && !target.isSelf && !flagValue(rest, "--plan"),
@@ -39488,6 +39544,7 @@ export async function daemonCommand(
           repo: target.repo,
           ledgerPath,
           runId,
+          judge: productionDispatchBreakJudge({ cwd: repoRoot, settingsFile: join(repoRoot, "settings", "worker.json") }),
         }),
         // W1-T4025: repeated attributable lifetime pressure is a sensor, not a refusal wall. The
         // daemon flushes one bounded batch after the pass and routes it through the existing judge;
@@ -48158,7 +48215,7 @@ export async function fixCommand(
   const prArg = rest[0];
   // W1-T4077: `--requested` is the console's "Fix now". The operator asking for a fix IS the decision to try
   // again, so the strike count does not turn it into an escalation; every other refusal still applies.
-  const badArg = unknownArgError("fix", rest.slice(1), ["--repo"], ["--requested"]);
+  const badArg = unknownArgError("fix", rest.slice(1), ["--repo", "--admission-adopt-comment"], ["--requested"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -48178,6 +48235,9 @@ export async function fixCommand(
   const operatorRequested = rest.includes("--requested");
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "FIX", step, lane: "fix", ...extra });
+  const adoptionComment = flagValue(rest, "--admission-adopt-comment");
+  await observeAdmissionDisposition(config.contributorAdmission, { owner, repo, prNumber }, config.root, log,
+    adoptionComment === undefined ? undefined : Number(adoptionComment));
   await (deps.contributorAdmission ?? ((target, action) => observeContributorAdmission(config.contributorAdmission, target, action, log)))
     ({ owner, repo, prNumber }, "repair");
 
@@ -55652,7 +55712,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "doctor",
     syntax: "rmd doctor [--json]",
     summary: "One local, read-only health check with a meaningful exit code (0/1/2).",
-    detail: "W1-T1047: ONE local, read-only health check with a meaningful exit code (0 OK / 1 any WARN / 2 any FAIL; bad args exit 64, so exit 2 always means a check failed and never a typo). NO NETWORK and NO HEALTHY DAEMON REQUIRED — every check reads the ledger, state/, plan/, /proc or ps, so it answers from a cold ssh session while remudero-serve is down and the API budget is exhausted, which is exactly when the console-side checks are unavailable. Checks: ledger freshness (newest daemon.* row vs two poll intervals), dispatch stall (eligible pool vs THIS host's own observed cadence, reusing deriveQueueHead/deriveDispatchCadence with a LOCALLY-derived merged set), dispatch liveness (consecutive daemon.alive rows stuck in the sweep phase), pause honoured (PAUSE held while dispatch continued — W1-T1065/#2298 files the tick defect, doctor only reports), lock-vs-process divergence, lane-less workers (#2251's 7200s threshold, reused not re-derived), stale git index.lock (report only; W1-T1036 owns reclamation), disk headroom, and memory/swap from /proc/meminfo (never the cgroup limit — this container is unlimited, so memory.max reads `max` and would report unbounded headroom on a host that already froze). EVERY check prints its measured value beside its threshold; one summary line first, short enough for a cron subject. READ-ONLY: --fix is refused by name, because every repair path already has an owner and a second actor mutating state a live daemon depends on is the measured hazard.",
+    detail: "W1-T1047: ONE local, read-only health check with a meaningful exit code (0 OK / 1 any WARN / 2 any FAIL; bad args exit 64, so exit 2 always means a check failed and never a typo). NO NETWORK and NO HEALTHY DAEMON REQUIRED — every check reads the ledger, state/, plan/, /proc or ps, so it answers from a cold ssh session while remudero-serve is down and the API budget is exhausted, which is exactly when the console-side checks are unavailable. Checks: ledger freshness (newest daemon.* row vs two poll intervals), dispatch stall (eligible pool vs THIS host's own observed cadence, reusing deriveQueueHead/deriveDispatchCadence with a LOCALLY-derived merged set), dispatch liveness (consecutive daemon.alive rows stuck in the sweep phase), pause honoured (PAUSE held while dispatch continued — W1-T1065/#2298 files the tick defect, doctor only reports), lock-vs-process divergence, lane-less workers (#2251's 7200s threshold, reused not re-derived), stale git index.lock (report only; W1-T1036 owns reclamation), disk headroom, and memory/swap from /proc/meminfo (the HOST's, never a container's cgroup — the measured freeze was host-wide, and one container's memory.max/memory.high headroom cannot show a host that already froze; the dispatch floor reads the container's own headroom beside it). EVERY check prints its measured value beside its threshold; one summary line first, short enough for a cron subject. READ-ONLY: --fix is refused by name, because every repair path already has an owner and a second actor mutating state a live daemon depends on is the measured hazard.",
   },
   {
     name: "status",
