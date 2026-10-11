@@ -940,7 +940,7 @@ function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly
   ], judgedArgs), concurrency);
 }
 
-/** The slice of scripts/pure-test-pool.mjs (the test judge) a coverage shard uses. */
+// The slice of scripts/pure-test-pool.mjs (the test judge) a coverage shard uses.
 interface JudgedRun { args: string[]; env: Record<string, string>; cleanup: () => void }
 interface TestJudge {
   prepareJudgedRun(opts: { makeDir: () => string }): JudgedRun;
@@ -949,8 +949,8 @@ interface TestJudge {
     { verdict: { complete: boolean }; line: string };
 }
 
-/** Loaded when a coverage leaf runs, never at import: a sandbox that copies only src/ (the mutation
- *  detectors in test/ledger-rotation.test.ts) still imports this module. A plain .mjs, so no types. */
+// Loaded when a coverage leaf runs, never at import: a sandbox that copies only src/ (the mutation
+// detectors in test/ledger-rotation.test.ts) still imports this module. A plain .mjs, so no types.
 function loadTestJudge(): TestJudge {
   return require("../../scripts/pure-test-pool.mjs") as TestJudge;
 }
