@@ -1,5 +1,12 @@
-- **Before building a filed task, check BOTH `git ls-remote --heads origin 'run-<id>-*'` (in flight?)
-  and merged PRs for an exact `^Remudero-Task: <id>$` trailer (shipped?), never commit subjects.**
+- **Before building a filed task, check `git ls-remote origin 'refs/rmd-dispatch/<id>' 'refs/heads/run-<id>-*'`
+  (claimed or in flight?) and merged PRs for an exact `^Remudero-Task: <id>$` trailer (shipped?), never commit subjects.**
+  A DISPATCH CLAIM PRECEDES THE BRANCH: the fleet takes `refs/rmd-dispatch/<id>` before any spend
+  (`dispatchClaimRef`, `src/lib/dispatch-claim.ts`, W1-T1268 #2668), and that namespace is invisible
+  to `git ls-remote --heads`, so a run that has claimed but not yet pushed reads as free to the
+  heads-only check. A filed task is dispatched within minutes; hand-build it only when the fleet
+  cannot (2026-09-22: a hand-built remudero-console #1634 duplicated the fleet's #1633 for CONSOLE-T38
+  and was closed as a leftover). *(Claim ref folded into the headline 2026-10-11.)*
+
   *(Index line retired 2026-10-11: the W1-T3323 bullet below named its two commands only in its body. It is kept verbatim; its id resolves here through `doctrine/merged-rules.json`.)*
 
 - **THE TWO SCOPE-TIME CHECKS, AS COMMANDS — RUN BOTH BEFORE BUILDING A FILED TASK.** a minted id is not evidence the work is unclaimed; these answer different questions:
