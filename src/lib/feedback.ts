@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { ghExec } from "./github-transport.js";
 import { createHash, randomBytes } from "node:crypto";
 import { feedbackLineageAuthority } from "./authority.js";
+import { fixedClock, systemClock } from "./clock.js";
 import {
   classifyContribution, type AdmissionDecision, type AdmissionPolicy, type ContributionActor, type ContributionOrigin,
   type FeedbackAdmissionSubject, type MembershipEvidence,
@@ -759,14 +760,14 @@ export function admitFeedbackContribution(input: FeedbackContributionInput, cont
   const decision: AdmissionDecision = context.policy === undefined
     ? { outcome: "unknown", reason: "no-admission-policy",
       receiptKey: createHash("sha256").update(JSON.stringify([subject, "feedback", "no-admission-policy"])).digest("hex") }
-    : classifyContribution(subject, "feedback", context.policy, context.memberships ?? [], context.nowMs ?? Date.now());
+    : classifyContribution(subject, "feedback", context.policy, context.memberships ?? [], context.nowMs ?? systemClock.now());
   return {
     kind: input.kind,
     source_ref: input.sourceRef,
     url: input.url ?? null,
     actor: copyActor(input.origin?.actor),
     association: input.origin?.association ?? null,
-    observed_at: Number.isFinite(input.observedAtMs) ? new Date(input.observedAtMs).toISOString() : "",
+    observed_at: Number.isFinite(input.observedAtMs) ? fixedClock(input.observedAtMs).iso() : "",
     admission: { outcome: decision.outcome, reason: decision.reason, receipt_key: decision.receiptKey,
       policy_version: context.policy?.version ?? null },
     relayed_by: [],
