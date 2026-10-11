@@ -1,6 +1,6 @@
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, judgeFixProgress, parseFixProgressVerdict,
-  type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict } from "./fix-progress-judge.js";
+  type FixProgressJudge, type FixProgressVerdict } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
 import { createHeadRehomePorts, headIdentityRed, headRehomePlan, rehomeBody, type HeadRehomePorts } from "./head-rehome.js";
@@ -58,7 +58,10 @@ import {
   type StackPrerequisiteCheck,
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
-import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
+import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair, planHostGapRereview, hostGapProgressInput,
+  type HostGapRereview } from "./classify.js";
+// W1-T7837: the host-gap pacing helpers are surfaced here so the route's tests reach them through the sweep.
+export { hostGapProgressInput, hostGapRereviewWaitMs, planHostGapRereview, type HostGapRereviewState } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB } from "./host-memory-ledger.js";
 import { ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./host-memory-shadow.js";
 import {
@@ -385,97 +388,6 @@ export function isHostGapCriterion(
     criterion.proof_skip === "runtime-broken" ||
     criterion.proof_skip === "no-exec-context"
   );
-}
-
-/** One host-gap re-review already given this head: when requested, and the grades the superseded review carried. */
-export interface HostGapRereview { atMs: number; skips: readonly string[] }
-
-/** The host problem behind a grade — the sentence an escalation carries. */
-export function hostGapProblem(skip: string): string {
-  switch (skip) {
-    case "runner-absent": return "sandbox runner missing";
-    case "cwd-missing": return "review worktree reclaimed";
-    case "runtime-broken": return "runtime broken";
-    case "incomplete-run": return "runtime broken (run ended without its summary)";
-    case "no-exec-context": return "no PR-head checkout to execute in";
-    case "exec_error":
-    case "exec-error": return "proof execution threw";
-    case "base_unreadable": return "merge-base checkout unreadable";
-    default: return skip;
-  }
-}
-
-/** Wait before the next host-gap re-review: one observed review duration, grown by each prior re-review. */
-export function hostGapRereviewWaitMs(observedReviewMs: number, priorRereviews: number): number {
-  return Math.max(0, observedReviewMs) * (priorRereviews + 1);
-}
-
-export interface HostGapRereviewState {
-  history: readonly HostGapRereview[];
-  skips: readonly string[];
-  lastReviewAtMs?: number;
-  observedReviewMs: number;
-  nowMs: number;
-}
-
-export type HostGapRereviewAction =
-  | { kind: "rereview"; reason: string; progress?: FixProgressResult }
-  | { kind: "hold"; reason: string; progress?: FixProgressResult }
-  | { kind: "escalate"; reason: string; progress?: FixProgressResult };
-
-const sortedUnique = (values: readonly string[]) => [...new Set(values)].sort();
-
-/** Fix-progress judge input for a persisting host gap: each re-review is a no-op round on the branch. */
-export function hostGapProgressInput(
-  base: { taskId?: string; prNumber?: number; headSha: string },
-  state: Pick<HostGapRereviewState, "history" | "skips">,
-): FixProgressInput {
-  const currentRed = sortedUnique(state.skips.map((skip) => `host-gap:${skip}`));
-  const rounds = state.history.map((entry, index) => ({
-    id: `host-gap:${index}`, dispatchedHead: base.headSha, pushedHead: base.headSha,
-    redBefore: sortedUnique(entry.skips.map((skip) => `host-gap:${skip}`)), completed: true,
-  }));
-  rounds.forEach((round, index) => Object.assign(round, { redAfter: rounds[index + 1]?.redBefore ?? currentRed }));
-  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
-  return { taskId: base.taskId, prNumber: base.prNumber, headSha: base.headSha, strikesSpent: rounds.length, currentRed,
-    rounds: rounds as FixProgressInput["rounds"], formerCeiling: 1,
-    parkedReason: `host-gap-rereview: ${rounds.length} prior re-reviews, none ran a proof`,
-    signals: { noOpRounds: rounds.length,
-      identicalRedSets: rounds.filter((round) => same(round.redBefore, (round as { redAfter?: string[] }).redAfter)).length,
-      identicalDiffs: 0, oscillating: false, refusedRounds: 0, incompleteRounds: 0, reviewerOnlyFailurePersists: 0 } };
-}
-
-/** W1-T7837 — next step for a capped verdict whose every proof hit a host gap: never a body or shard
- *  repair, but a paced re-review of the same head, or an escalation once the fix-progress judge says so. */
-export async function planHostGapRereview(
-  state: HostGapRereviewState,
-  opts: { judge?: FixProgressJudge; input: FixProgressInput;
-    log?: (step: string, fields: Record<string, unknown>) => void },
-): Promise<HostGapRereviewAction> {
-  const prior = state.history.length;
-  const problems = sortedUnique(state.skips.map(hostGapProblem)).join(", ");
-  const anchor = Math.max(state.lastReviewAtMs ?? Number.NEGATIVE_INFINITY,
-    ...state.history.map((entry) => entry.atMs));
-  const waitMs = hostGapRereviewWaitMs(state.observedReviewMs, prior);
-  if (Number.isFinite(anchor) && state.nowMs < anchor + waitMs) {
-    return { kind: "hold", reason: `capped review could not run its proofs (${problems}) — a host gap, not a body defect; ` +
-      `re-review ${prior + 1} is paced ${Math.ceil((anchor + waitMs - state.nowMs) / 60_000)}m out ` +
-      `(${Math.ceil(waitMs / 60_000)}m derived from ${prior} prior host-gap re-review(s) and the observed review duration)` };
-  }
-  if (prior >= 1) {
-    const progress = await judgeFixProgress(opts.input, opts.judge);
-    opts.log?.("fix.progress_judged", { site: "host-gap-rereview", pr_number: opts.input.prNumber,
-      head_sha: opts.input.headSha, parked_reason: opts.input.parkedReason, round_count: opts.input.rounds.length,
-      signals: opts.input.signals, ...progress });
-    if (progress.verdict === "unavailable") return { kind: "hold", reason: progress.reason, progress };
-    if (progress.verdict === "escalate") {
-      return { kind: "escalate", progress, reason: `host gap persists across ${prior} re-review(s) — ` +
-        `${state.skips.join(", ")} (${problems}); fix progress loop: ${progress.loop} — ${progress.reason}` };
-    }
-    return { kind: "rereview", progress, reason: `host-gap re-review ${prior + 1}: ${progress.reason}` };
-  }
-  return { kind: "rereview", reason: `capped review could not run its proofs (${problems}) — a host gap a PR-body edit cannot fix; ` +
-    `re-reviewing the same head and body` };
 }
 
 function assessReviewReuse(
