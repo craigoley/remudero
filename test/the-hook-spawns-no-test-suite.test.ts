@@ -46,6 +46,7 @@ function fixture(opts: { untieredFile: boolean; ghostRow?: boolean }) {
   copyFileSync(HOOK, join(work.dir, "hooks", "pre-push"));
   chmodSync(join(work.dir, "hooks", "pre-push"), 0o755);
   copyFileSync(join(REPO_ROOT, "scripts", "test-tier-manifest.mjs"), join(work.dir, "scripts", "test-tier-manifest.mjs"));
+  copyFileSync(join(REPO_ROOT, "scripts", "pure-test-pool.mjs"), join(work.dir, "scripts", "pure-test-pool.mjs")); // W1-T6085: sibling import
   writeFileSync(join(work.dir, "scripts", "rule15-precheck.mjs"), "process.exit(0)\n");
   writeFileSync(
     join(work.dir, "scripts", "test-tier-manifest.json"),
