@@ -858,7 +858,9 @@ export type DaemonFreshnessNotStale =
  * dependency tree never survives into the relaunched process (W1-T151). */
 export type DaemonFreshness =
   | { stale: false; notStale?: DaemonFreshnessNotStale }
-  | { stale: true; oldSha: string; newSha: string; installNeeded?: boolean; changes?: readonly DeployWorthChange[] };
+  | { stale: true; oldSha: string; newSha: string; installNeeded?: boolean; changes?: readonly DeployWorthChange[];
+      /** The tree was behind before this reading could say so (a live edit held it, live-edit-ladder.ts). */
+      staleSinceMs?: number };
 
 /** W1-T5282 — the real wiring's reading is awaited, its `git fetch` off the loop; a sync reading stays sync. */
 /** W1-T5723: start, adopt, restart or discard the cadence child; only its settle is detached. */
@@ -3235,8 +3237,8 @@ export async function runDaemon(
   };
 
   // W1-T6093: remember observations at both the first-cycle guard and the shared decision boundary.
-  const observeFreshnessAdvance = (newSha: string, nowMs: number): void => {
-    staleSinceMs ??= nowMs;
+  const observeFreshnessAdvance = (newSha: string, nowMs: number, heldSinceMs?: number): void => {
+    staleSinceMs ??= Math.min(nowMs, heldSinceMs ?? nowMs);
     if (newSha !== lastAdvanceSha) {
       lastAdvanceSha = newSha;
       lastAdvanceAtMs = nowMs;
@@ -3247,7 +3249,7 @@ export async function runDaemon(
   // W1-T4945/W1-T6093: score the advance, then coalesce change-driven restarts within bounded staleness.
   const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, siblingInFlight = false): "restart" | "defer" => {
     const nowMs = daemonClock.now();
-    observeFreshnessAdvance(freshness.newSha, nowMs);
+    observeFreshnessAdvance(freshness.newSha, nowMs, freshness.staleSinceMs);
     const staleAtMs = staleSinceMs!;
     const busy =
       siblingInFlight ||
@@ -4242,7 +4244,7 @@ export async function runDaemon(
       // (W1-T312, W1-T380, W1-T382). One-shot: the three-clocks guard (W1-T126) fires at the next
       // tick boundary, and the operator holds above still outrank it (W1-T936).
       if (cyclesEntered === 0) {
-        observeFreshnessAdvance(freshness.newSha, daemonClock.now());
+        observeFreshnessAdvance(freshness.newSha, daemonClock.now(), freshness.staleSinceMs);
         log("daemon.freshness_deferred", {
           old_sha: freshness.oldSha,
           new_sha: freshness.newSha,
