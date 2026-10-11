@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -17,7 +17,9 @@ const read = (path: string): string => existsSync(path) ? readFileSync(path, "ut
 // All repository commands are simulated: this suite also runs in workers forbidden to run git/gh.
 // The generated launcher and, in the separation proof, bin/rmd and deploy-run are real.
 function fixture(t: TestContext) {
-  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}deploy-code-`));
+  // The real path: deploy-run finds its own checkout through node's resolved module path, so on macOS
+  // (/tmp and /var are symlinks into /private) an unresolved root would never match what it reports.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}deploy-code-`)));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const state = join(root, "state-root");
   const daemon = join(state, "remudero");

@@ -59,6 +59,7 @@ import {
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB } from "./host-memory-ledger.js";
+import type { ContainerMemoryHeadroom } from "./host-memory-shadow.js";
 import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
 } from "./pr-blocker.js";
@@ -66,7 +67,7 @@ import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec } from "./git-push.js";
 import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
-import type { AdmissionObserver } from "./contributor-admission.js";
+import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
 import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
@@ -149,6 +150,7 @@ import {
 import {
   acceptanceBlockDiagnostics,
   automergeHoldFromLedger,
+  describeHoldSetter,
   cappedOverrideFromLedger,
   decideAutoMergeArm,
   extractTaskTrailerId,
@@ -1339,9 +1341,11 @@ export type PlanScopedFixRoundInput = {
   body: string;
   runId?: string;
   lastRefusal?: string;
+  admission?: AdmissionSettings;
   deps: Pick<BuildSweepEffectsDeps, "log"> & Pick<BodyRepairDeps, "execProof"> & {
     runGit?: (args: string[]) => string;
     preflight?: BuildSweepEffectsDeps["planPrPreflightImpl"];
+    feedbackRead?: AdmissionRead;
     spawn: (prompt: string) => Promise<string>;
     push: (sha: string) => unknown;
     updateMetadata: (metadata: { title: string; body: string }) => Promise<void>;
@@ -3071,7 +3075,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           log,
         };
         return await runPlanScopedFixRound({ pr: { ...pr, headRefName: live.head.ref, ciFailures }, task, worktreePath,
-          title: live.title, body: live.body, runId,
+          title: live.title, body: live.body, runId, admission: config.contributorAdmission,
           lastRefusal: parseLedger(ledgerPath).findLast((l) => l.step === "sweep.plan_round.refused" &&
             l.pr_number === pr.prNumber && l.head_sha === pr.headSha)?.reason,
           deps: roundEffects,
@@ -6018,7 +6022,7 @@ export interface OpenPrView {
    *  next fix dispatch VERBATIM, never a silent guess, and routes the PR to `blocked-fixable` even
    *  at cap, so the answer re-arms the rung rather than immediately re-exhausting it. Wired
    *  end-to-end and tested, but nothing populates it today. */
-  pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean; spent?: true };
+  pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean; spent?: true; contributions?: unknown[] };
   /** W1-T176 — true when the ledger already carries a refusal for this exact task/PR/head/body
    *  input. It separates a FIRST-SEEN zero-runs required check, which still routes to post-review,
    *  from a SECOND absence for the unchanged input, which escalates. A transient `gh` error
@@ -10777,9 +10781,15 @@ export function operatorVerdictEvidence(
   taskId: string,
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
   questionLines: ReadonlyArray<Record<string, unknown>>,
-): { constraint: string; resetStrikeCounter?: boolean; spent?: true } | undefined {
+): { constraint: string; resetStrikeCounter?: boolean; spent?: true; contributions?: unknown[] } | undefined {
   const parts: string[] = [];
   const evidenceTimes: string[] = [];
+  const contributions: unknown[] = [];
+  const preserve = (line: Record<string, unknown>): void => {
+    if (line.contribution == null) return;
+    try { contributions.push(structuredClone(line.contribution)); }
+    catch { contributions.push({ kind: "unresolved", reason: "lineage-unreadable" }); }
+  };
 
   const feedback = lastMatching(ledgerLines, (l) => l.step === "operator_feedback" && l.task_id === taskId);
   const verdict = typeof feedback?.verdict === "string" ? feedback.verdict : undefined;
@@ -10787,13 +10797,17 @@ export function operatorVerdictEvidence(
   if ((verdict === "wrong" || verdict === "needs-follow-up") && note && note.trim() !== "") {
     parts.push(`Operator marked this run "${verdict}": ${note}`);
     evidenceTimes.push(typeof feedback?.ts === "string" ? feedback.ts : "");
+    preserve(feedback!);
   }
 
   const answerLines = questionLines.filter((l) => l.task === taskId && typeof l.answer === "string" && l.answer.trim() !== "");
   const answers = [...new Set(answerLines.map((l) => (l.answer as string).trim()))];
   if (answers.length === 1) parts.push(answers[0]!);
   else answers.forEach((a, i) => parts.push(`Operator answer ${i + 1} of ${answers.length}: ${a}`));
-  for (const l of answerLines) evidenceTimes.push(typeof l.ts === "string" ? l.ts : "");
+  for (const l of answerLines) {
+    evidenceTimes.push(typeof l.ts === "string" ? l.ts : "");
+    preserve(l);
+  }
 
   if (parts.length === 0) return undefined;
   // A fix round dispatched after the newest answer already carried it; the answer still steers later rounds as
@@ -10801,7 +10815,8 @@ export function operatorVerdictEvidence(
   const lastDispatch = lastMatching(ledgerLines, (l) => l.step === "fix.dispatch" && l.task_id === taskId);
   const newestEvidence = evidenceTimes.reduce((a, b) => (b > a ? b : a), "");
   const spent = typeof lastDispatch?.ts === "string" && newestEvidence !== "" && lastDispatch.ts > newestEvidence;
-  return spent ? { constraint: parts.join("\n\n"), spent: true } : { constraint: parts.join("\n\n") };
+  const evidence = { constraint: parts.join("\n\n"), ...(contributions.length ? { contributions } : {}) };
+  return spent ? { ...evidence, spent: true } : evidence;
 }
 
 /** The block evidence `dispatchFix` carries, GENERALIZED (W1-T100) from a bare unmet array to the
@@ -10984,7 +10999,7 @@ export function diagnoseCappedRoutingBlock(
     return {
       blocked: true,
       precondition: "held",
-      detail: `an automerge hold stands over PR #${pr.prNumber} (engaged by ${hold.by}: ${hold.reason})`,
+      detail: `an automerge hold stands over PR #${pr.prNumber} (engaged by ${describeHoldSetter(hold)}: ${hold.reason})`,
     };
   }
   const proofDiscrimination = cappedProofDiscriminationFromLedger(pr, ledgerLines);
@@ -14858,7 +14873,7 @@ export async function runSweep(
       ? dispatchHold?.reason ?? standDownReason ?? actionError ?? "no dispatch was attempted"
       : undefined;
     const shownReason = mergeHold !== undefined
-      ? `held by ${mergeHold.by}: ${mergeHold.reason} — auto-merge refused until an operator releases it (rmd merge-hold)`
+      ? `held by ${describeHoldSetter(mergeHold)}: ${mergeHold.reason} — auto-merge refused until an operator releases it (rmd merge-hold)`
       : notDispatched !== undefined
         ? `${reason.replace(/\bdispatching\b/g, "would dispatch")} — NOT DISPATCHED this pass: ${notDispatched}`
         : reason;
@@ -17339,6 +17354,7 @@ export async function runSweep(
           pr_url: pr.prUrl,
           head_sha: pr.headSha,
           hold_by: holdToWithdraw.by,
+          ...(holdToWithdraw.actor ? { hold_actor: holdToWithdraw.actor } : {}),
           hold_reason: holdToWithdraw.reason,
         };
         log("automerge.hold_withdrawal", withdrawalLine);
@@ -18913,27 +18929,44 @@ export function logCostGovernorDeferral(
 export interface MemoryGovernorResult {
   /** true ⇒ the dispatch path MUST defer — do not open a new run this pass. */
   deferred: boolean;
-  /** The observed `MemAvailable` (MiB, read from `/proc/meminfo` — NEVER a cgroup limit; design
-   *  note (6): this fleet's containers carry no memory limit, so a cgroup read reports
-   *  "unbounded" and would authorise every dispatch silently). */
+  /** The smaller of the host's `MemAvailable` and this container's own headroom (MiB): a new worker draws on
+   *  both. Containers have carried memory limits since #10371/#10486, and the host figure cannot see them. */
   observedAvailableMib: number;
   /** The policy floor consulted (`policy.memoryFloorMib`, carried for the ledger line). */
   floorMib: number;
+  /** Set only when a container reading was taken: what each pool showed, and which one decided. */
+  hostAvailableMib?: number;
+  container?: ContainerMemoryHeadroom;
+  binding?: "host" | "container";
+  /** fits; host-short or container-short (deferred); nothing-to-wait-for: the container is short but no live
+   *  work in it can free memory, so waiting cannot help and the dispatch is admitted, named. */
+  tier?: "fits" | "host-short" | "container-short" | "nothing-to-wait-for";
 }
 
 /** The memory governor's pure predicate: STRICTLY BELOW `policy.memoryFloorMib` available, NEW
  *  dispatch is deferred. Same shape and the SAME dispatch-only asymmetry as its two siblings. SHIPS
  *  INERT: the floor defaults to 0 and the observation can never be negative, so this never defers
- *  until an operator raises the floor against a figure not yet measured. DEFER, NEVER KILL. */
+ *  until an operator raises the floor against a figure not yet measured. DEFER, NEVER KILL.
+ *
+ *  TIERED for the container: below the floor it defers only while live work in this container can still free
+ *  memory (`ownWorkLive`, asked only then). With none, waiting cannot help (the daemon's own heap holds the
+ *  shortfall), so the dispatch is admitted and named, never wedged. The host arm is unchanged. */
 export function checkMemoryGovernor(
   availableMib: number,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+  container?: ContainerMemoryHeadroom,
+  ownWorkLive: () => boolean = () => true,
 ): MemoryGovernorResult {
-  return {
-    deferred: availableMib < policy.memoryFloorMib,
-    observedAvailableMib: availableMib,
-    floorMib: policy.memoryFloorMib,
-  };
+  const base = { observedAvailableMib: availableMib, floorMib: policy.memoryFloorMib };
+  if (container === undefined) return { deferred: availableMib < policy.memoryFloorMib, ...base };
+  const bounded = "headroomMib" in container;
+  const binding = bounded && container.headroomMib < availableMib ? "container" : "host";
+  const observed = bounded ? Math.min(availableMib, container.headroomMib) : availableMib;
+  const named = { ...base, observedAvailableMib: observed, hostAvailableMib: availableMib, container, binding } as const;
+  if (availableMib < policy.memoryFloorMib) return { deferred: true, ...named, tier: "host-short" };
+  if (!bounded || container.headroomMib >= policy.memoryFloorMib) return { deferred: false, ...named, tier: "fits" };
+  return ownWorkLive() ? { deferred: true, ...named, tier: "container-short" }
+    : { deferred: false, ...named, tier: "nothing-to-wait-for" };
 }
 
 /** THE OBSERVATION IS LEDGERED ON EVERY CONSULTATION — unlike the two deferral loggers above, this
@@ -18956,6 +18989,16 @@ export function logMemoryObservation(
     observed_available_mib: result.observedAvailableMib,
     memory_floor_mib: result.floorMib,
     deferred: result.deferred,
+    ...(result.container === undefined ? {} : {
+      host_available_mib: result.hostAvailableMib,
+      ...("headroomMib" in result.container ? {
+        container_headroom_mib: result.container.headroomMib,
+        container_ceiling_mib: result.container.ceilingMib,
+        container_working_set_mib: result.container.workingSetMib,
+      } : { container_headroom: "unbounded" in result.container ? "unbounded" : `unread: ${result.container.unread}` }),
+      binding: result.binding,
+      tier: result.tier,
+    }),
   });
 }
 

@@ -39,6 +39,10 @@ export function staticControlPlaneVerdict(repoRoot) {
   return { ok: registryGaps.length === 0 && parity.ok, registryGaps, parityProblems: parity.problems };
 }
 
+/**
+ * runCapabilitySnapshot is a RUNNER: a function returning { status, stdout?, stderr? }. It is called exactly once,
+ * only when the diff touches a capability-snapshot input.
+ */
 export function runCiControlPlanePrecheck({ base = "origin/main", repoRoot = process.cwd(), readChangedFiles = changedFiles, runCapabilitySnapshot = undefined, log = console.log, error = console.error } = {}) {
   let files;
   try {
@@ -68,7 +72,8 @@ export function runCiControlPlanePrecheck({ base = "origin/main", repoRoot = pro
     }
   }
   if (capability) {
-    const result = runCapabilitySnapshot ?? (() => spawnSync(process.execPath, ["--import", "tsx", "scripts/generate-capability-snapshot.mjs", "--check"], { cwd: repoRoot, encoding: "utf8" }))();
+    const runner = runCapabilitySnapshot ?? (() => spawnSync(process.execPath, ["--import", "tsx", "scripts/generate-capability-snapshot.mjs", "--check"], { cwd: repoRoot, encoding: "utf8" }));
+    const result = runner();
     if (result.status !== 0) {
       error(`ci-control-plane-precheck: REFUSED -- capability snapshot is stale; run 'npm run capability-snapshot' and commit its outputs.\n${`${result.stdout ?? ""}${result.stderr ?? ""}`.trim()}`);
       return 1;
