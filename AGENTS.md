@@ -13,7 +13,7 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
 ## Rule Headlines
 
 - **Run the shipped local gate before your FIRST push, not every commit.**
-- **SUPERSEDES the full-parity first-push obligation: run `node --import tsx scripts/preflight-author.mjs` on the committed tree; required hosted full-suite and coverage checks still gate merge.**
+- **SUPERSEDES full-parity first push: run `node --import tsx scripts/preflight-author.mjs` on the committed tree; required hosted checks still gate merge.**
 - **A test run with no `# tests` summary is NOT A RESULT, and a summary over an UNVERIFIED FILE LIST
   is not one either — `node --test` given a ghost path returns a green count, silently. `ls` first.**
 - **THE BLOCK MUST PARSE BEFORE ANY PROOF IN IT CAN RUN — check GITHUB'S STORED BODY with
@@ -61,8 +61,11 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
 - **A shard's `status:` field is not a completion signal — it stays `queued` on tasks that
   shipped.**
 - **Decoding rule citations — where each family canonically lives.**
-- **Take the cheap candidate a record prices beside a costly one — and name what the costly one
-  now waits for.**
+- **Take the cheap candidate beside a costly one, and name what the costly one now waits for.**
+- **Never fan out update-branch after a main fix: protection is non-strict, and each refresh re-runs
+  ~16 min of CI and voids the review.**
+- **Leave a red fleet PR to the fix lane while a round is due or in flight — hand pushes out-race it
+  and hide its defects.**
 - **Do NOT push a fresh sha to clear a stale-red `ci-gate` — it self-clears.**
 - **CADENCE IS THE BUDGET, NOT INTENT — a sparse check-in is fine, a poll is not. NOW ENFORCED:**
 - **`gh pr create` may die on API quota; git push is unaffected.**
@@ -76,6 +79,12 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   half of your diff you are in before you call a merge "shipped."**
 - **SUPERSEDES THE RULE ABOVE: a baked-path merge ships itself (auto ACR build + recycle); check
   `docker inspect`.**
+- **PRs green on their own bases can cross a ceiling together: a `# fail 0` main red is a ratchet
+  collision, and main records it (#10724).**
+- **Main push runs are cancelled while PENDING, so most main commits never get a CI verdict — never
+  read CANCELLED as red.**
+- **Compare a base-red PR's failing check to main's FULL check census, not ci-gate's aggregates, or
+  every shard red is held.**
 - **The rotations come in TWO FORMS and every glob that names only one answers SILENTLY WRONG. The
   union is three patterns, never two:**
 - **THE CONTROL MUST PROVE EACH FORM WAS READ, and a raw cross-archive count CANNOT**
@@ -112,10 +121,12 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   WINDOW.**
 - **(j) A CENSUS TEST NAMES NONE OF YOUR SYMBOLS, SO THE CALLER SWEEP ABOVE CANNOT FIND IT**
 - **(k) A RULE 21 protocol run passing `{ baseTask }` ALONE reports THREE INDISTINGUISHABLE ZEROS.**
-- **A `catch` that returns a success-shaped literal is making a CLAIM: name the outcomes it collapses, and
-  where two remedies differ, the answer is a third value the caller can see — never a comment asserting the
-  collapse is fine. Reasoning vocabulary (fail-soft, degrade, treat as, unknown) does NOT track correctness.
-  diff-coverage is the gate for NEW conflations, forcing tests per arm and thus naming outcomes.**
+- **A `catch` returning a success-shaped literal is a CLAIM: name what it collapses, and where remedies
+  differ, return a third value the caller sees.**
+- **A clock-shifted run failing ENOENT on its own fixture is the boot temp sweep, not a time bomb —
+  use a private TMPDIR.**
+- **Judge main from its newest commit with genuine evidence — its head alone reads undetermined
+  forever under steady merges.**
 - **Read re-entrancy from `process.env`, not an injected `env` argument — a spawn writes a child's
   environment and cannot reach a parameter.**
 - **A fixed date constant compared against rows stamped at REAL time is a time bomb; the signature
