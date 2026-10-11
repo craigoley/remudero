@@ -231,7 +231,13 @@ export function riskJudgeDiffInputBudget(mount: Pick<Mount, "contextBudget">): (
   return (tier1PromptChars) => Math.max(0, mount.contextBudget * RISK_JUDGE_CHARS_PER_TOKEN - tier1PromptChars);
 }
 
-const RISK_JUDGE_TEST_PATH_RE = /(^|\/)(test|tests|__tests__)\/|\.(test|spec)\.[A-Za-z0-9]+$/;
+/** Is this path a test file: under a `test`/`tests`/`__tests__` directory, or named `*.test.*` / `*.spec.*`. */
+function isRiskJudgeTestPath(path: string): boolean {
+  const segments = path.split("/");
+  if (segments.slice(0, -1).some((seg) => seg === "test" || seg === "tests" || seg === "__tests__")) return true;
+  const name = segments[segments.length - 1] ?? "";
+  return name.includes(".test.") || name.includes(".spec.");
+}
 const RISK_JUDGE_HUNK_HEADER_LINE_CAP = 160;
 
 function patchHunkHeaders(patch: string, room: number): string[] {
@@ -259,8 +265,8 @@ export function boundRiskJudgeDiff(view: RiskJudgeChangeView, budgetChars: numbe
   const ordered = view.files
     .map((f, index) => ({ f, index }))
     .sort((a, b) => {
-      const testA = RISK_JUDGE_TEST_PATH_RE.test(a.f.path) ? 1 : 0;
-      const testB = RISK_JUDGE_TEST_PATH_RE.test(b.f.path) ? 1 : 0;
+      const testA = isRiskJudgeTestPath(a.f.path) ? 1 : 0;
+      const testB = isRiskJudgeTestPath(b.f.path) ? 1 : 0;
       if (testA !== testB) return testA - testB;
       const sizeA = a.f.additions + a.f.deletions;
       const sizeB = b.f.additions + b.f.deletions;
