@@ -592,6 +592,10 @@ function watchGitStub(): string {
     '    for b in ${STUB_STALLED:-}; do',
     '      if [ "$b" = "$ref" ]; then printf "dispatch_verdict=STALLED — last build dispatch 6h25m ago\\n"; fi',
     "    done",
+    // 2026-10-11: STUB_SPOOL is `name:verdict-word` pairs; the beat carries that spool verdict.
+    '    for e in ${STUB_SPOOL:-}; do',
+    '      if [ "${e%%:*}" = "$ref" ]; then printf "escalation_spool_verdict=%s — 1 host-side escalation(s)\\n" "${e#*:}"; fi',
+    "    done",
     "    ;;",
     "esac",
     "exit 0",
@@ -617,6 +621,8 @@ function runWatch(opts: {
   daemonExpectedBranches?: string;
   /** Branches whose beat is fresh but whose `dispatch_verdict` reports a stalled build. */
   stalledBranches?: string;
+  /** `name:verdict` pairs: the escalation spool verdict each branch's beat carries. */
+  spool?: string;
   mutate?: [string, string];
 }): Watch {
   const dir = mkdtempSync(join(tmpdir(), "heartbeat-watch-"));
@@ -651,6 +657,7 @@ function runWatch(opts: {
       DAEMON_EXPECTED_BRANCHES: opts.daemonExpectedBranches ?? "",
       STUB_BRANCHES: opts.stub,
       STUB_STALLED: opts.stalledBranches ?? "",
+      STUB_SPOOL: opts.spool ?? "",
     },
   });
   const reportPath = join(dir, "heartbeat-report.txt");
@@ -1112,6 +1119,19 @@ test("W1-T3367 (falsifier): an EMPTY ledger falls back to the unscoped delivery 
     calls.some((c) => c.includes("--source fleet-heartbeat") && c.includes("--title")),
     `the fallback must still file something: ${JSON.stringify(calls)}`,
   );
+});
+
+test("a fresh beat carrying UNDELIVERED host-side escalations raises its own arm; a just-spooled one does not", () => {
+  const w = runWatch({ branches: HOST_A, stub: `${HOST_A}:60`, spool: `${HOST_A}:UNDELIVERED` });
+  assert.equal(w.status, 1, "host-side alerts the daemon could not post are a finding");
+  assert.match(w.stderr, /HOST ESCALATIONS UNDELIVERED — 'heartbeat-azure'/);
+  assert.equal(w.state, `${HOST_A}\tSPOOL_UNDELIVERED\n`);
+  assert.match(w.branchReports[HOST_A] ?? "", /^Condition: HOST ESCALATIONS UNDELIVERED/m);
+  const pending = runWatch({ branches: HOST_A, stub: `${HOST_A}:60`, spool: `${HOST_A}:pending` });
+  assert.equal(pending.status, 0, "an entry spooled since the last beat waits for the daemon's next tick");
+  assert.equal(pending.state, `${HOST_A}\tFRESH\n`);
+  const { calls } = runDeliver(`${HOST_A}\tSPOOL_UNDELIVERED\n`, { branchReports: { [HOST_A]: "a\n" } });
+  assert.ok(calls.some((c) => c.includes(`fleet-heartbeat:${HOST_A}`) && c.includes("host-side escalations are not reaching GitHub")), JSON.stringify(calls));
 });
 
 // ── W1-T4804: swap, inodes, total size and the janitor's last result ───────────────────────────
