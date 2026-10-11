@@ -46,10 +46,14 @@ if (isMainThread && runsTestFilesInThisProcess()) {
   const missing: string[] = [];
   if (process.env.GH_TOKEN !== LIVE_WRITE_SENTINEL_TOKEN) missing.push("GH_TOKEN sentinel");
   const configDir = process.env.GH_CONFIG_DIR;
-  if (!configDir || !basename(configDir).startsWith(`${GH_CONFIG_DIR_PREFIX}${setupDirOwnerTag()}`) ||
-      !fs.lstatSync(configDir, { throwIfNoEntry: false })?.isDirectory() ||
-      dirname(fs.realpathSync(configDir)) !== tmpdir()) {
-    missing.push("GH_CONFIG_DIR owned by this process");
+  try {
+    if (!configDir || !basename(configDir).startsWith(`${GH_CONFIG_DIR_PREFIX}${setupDirOwnerTag()}`) ||
+        !fs.lstatSync(configDir, { throwIfNoEntry: false })?.isDirectory() ||
+        dirname(fs.realpathSync(configDir)) !== tmpdir()) {
+      missing.push("GH_CONFIG_DIR owned by this process");
+    }
+  } catch (error) {
+    missing.push(`GH_CONFIG_DIR unreadable: ${String(error)}`);
   }
   const count = Number(process.env.GIT_CONFIG_COUNT);
   const pushPrefixes = new Set<string>();

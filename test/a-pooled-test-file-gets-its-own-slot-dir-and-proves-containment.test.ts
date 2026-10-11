@@ -27,6 +27,14 @@ function run(files: string[], env: NodeJS.ProcessEnv, pooled = true, preload = s
   ], { cwd: root, env, encoding: "utf8", timeout: 30_000 });
 }
 
+function assertPassed(result: ReturnType<typeof run>): void {
+  assert.equal(result.error, undefined, String(result.error));
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /^# tests 3$/m);
+  assert.match(result.stdout, /^# pass 3$/m);
+  assert.match(result.stdout, /^# fail 0$/m);
+}
+
 function slotFixtures(dir: string, shared: boolean): string[] {
   const imports = `
     import assert from "node:assert/strict";
@@ -77,11 +85,7 @@ function slotFixtures(dir: string, shared: boolean): string[] {
 test("W1-T8047: two pooled files do not share slot-dir state", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-pool-8047-"));
   try {
-    const result = run(slotFixtures(dir, true), childEnv());
-    assert.equal(result.error, undefined, String(result.error));
-    assert.equal(result.status, 0, result.stdout + result.stderr);
-    assert.match(result.stdout, /# tests 3/);
-    assert.match(result.stdout, /# fail 0/);
+    assertPassed(run(slotFixtures(dir, true), childEnv()));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -105,7 +109,14 @@ test("W1-T8047: a pooled process without containment fails naming what is missin
       ['process.env.GH_CONFIG_DIR = ' + JSON.stringify(dir) + ';', ["GH_CONFIG_DIR"]],
       ['process.env.GH_CONFIG_DIR += "/../" + ' + JSON.stringify(basename(dir)) + ';', ["GH_CONFIG_DIR"]],
       ['process.env.GH_CONFIG_DIR += "-missing";', ["GH_CONFIG_DIR"]],
+      ['renameSync(process.env.GH_CONFIG_DIR, ' + JSON.stringify(join(dir, "linked-config")) + '); ' +
+        'symlinkSync(' + JSON.stringify(join(dir, "linked-config")) + ', process.env.GH_CONFIG_DIR, "junction");',
+        ["GH_CONFIG_DIR"]],
+      ['process.env.GH_CONFIG_DIR = ' + JSON.stringify(fixture + "/") +
+        ' + basename(process.env.GH_CONFIG_DIR); delete process.env.GH_TOKEN; process.env.GIT_CONFIG_COUNT = "0";',
+        ["GH_CONFIG_DIR", "GH_TOKEN", "dead push URL config", "ENOTDIR"]],
       ['process.env.GIT_CONFIG_COUNT = "0";', ["dead push URL config"]],
+      ['process.env.GIT_CONFIG_COUNT = "invalid";', ["dead push URL config"]],
       ...["https://github.com/", "git@github.com:", "ssh://git@github.com/"].map((prefix): [string, string[]] => [
         `for (let i = 0; i < Number(process.env.GIT_CONFIG_COUNT); i++) {
           if (process.env[\`GIT_CONFIG_VALUE_\${i}\`] === ${JSON.stringify(prefix)}) delete process.env[\`GIT_CONFIG_KEY_\${i}\`];
@@ -118,6 +129,8 @@ test("W1-T8047: a pooled process without containment fails naming what is missin
       const preload = join(dir, "withhold.mjs");
       writeFileSync(preload, `
         import ${sourceUrl("test/setup/no-live-remote.ts")};
+        import { renameSync, symlinkSync } from "node:fs";
+        import { basename } from "node:path";
         ${withhold}
         await import(${sourceUrl("test/setup/tmp-hygiene.ts")});
       `);
@@ -138,14 +151,11 @@ test("W1-T8047: a pooled process without containment fails naming what is missin
 test("W1-T8047: isolated files and configured slot directories retain their behavior", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-pool-preserved-8047-"));
   try {
-    const isolated = run(slotFixtures(dir, false), childEnv(), false);
-    assert.equal(isolated.status, 0, isolated.stdout + isolated.stderr);
-    const configured = run(slotFixtures(dir, true), { ...childEnv(), RMD_TEST_SLOT_DIR: join(dir, "slots") });
-    assert.equal(configured.status, 0, configured.stdout + configured.stderr);
+    assertPassed(run(slotFixtures(dir, false), childEnv(), false));
+    assertPassed(run(slotFixtures(dir, true), { ...childEnv(), RMD_TEST_SLOT_DIR: join(dir, "slots") }));
     const tempAlias = join(dir, "tmp");
     symlinkSync(tmpdir(), tempAlias, "junction");
-    const aliased = run(slotFixtures(dir, true), { ...childEnv(), TMPDIR: tempAlias });
-    assert.equal(aliased.status, 0, aliased.stdout + aliased.stderr);
+    assertPassed(run(slotFixtures(dir, true), { ...childEnv(), TMPDIR: tempAlias }));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
