@@ -224,7 +224,7 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   readRunBranchClosedPrsOutput: 1,
   readTaskPrecondition: 1,
   readyDraftViaGh: 1,
-  realArmDeps: 7,
+  realArmDeps: 5,
   realDeployDeps: 1,
   realReviewWorktree: 1,
   realSharedPauseGitDeps: 1,

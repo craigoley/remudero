@@ -48,6 +48,9 @@ export interface FleetControlInfo {
    *  (design (ii), {@link evaluatePauseTier}). Only ever set on a PAUSE. */
   expiresAt?: string | null;
   indefinite?: boolean;
+  /** W1-T7727 — the registry instance this PAUSE holds, when the CLI resolved one (see
+   *  pause-target.ts). A flag lives under ONE instance's state root, so this only names it. */
+  instance?: string;
 }
 
 export function stopFilePath(root: string): string {
@@ -68,6 +71,7 @@ interface PauseFlagExtra {
   sessionId: string;
   expiresAt: string | null;
   indefinite: boolean;
+  instance?: string;
 }
 
 function writeFlag(path: string, reason: string | undefined, extra?: PauseFlagExtra): FleetControlInfo {
@@ -77,6 +81,7 @@ function writeFlag(path: string, reason: string | undefined, extra?: PauseFlagEx
     pid: process.pid,
     host: hostname(),
     ...(extra ? { sessionId: extra.sessionId, expiresAt: extra.expiresAt, indefinite: extra.indefinite } : {}),
+    ...(extra?.instance === undefined ? {} : { instance: extra.instance }),
   };
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(info, null, 2));
@@ -174,6 +179,8 @@ function resolvePauseOwnerSessionId(): string {
 export interface RequestPauseOptions {
   until?: string;
   now?: Date;
+  /** W1-T7727 — the registry instance being paused, recorded in the flag. */
+  instance?: string;
 }
 
 /**
@@ -194,9 +201,36 @@ export function requestPause(
   const now = options?.now ?? systemClock.date();
   const { expiresAt, indefinite } = resolvePauseExpiry(reason, options?.until, now);
   const sessionId = resolvePauseOwnerSessionId();
-  const info = writeFlag(pauseFilePath(root), reason, { sessionId, expiresAt, indefinite });
+  const info = writeFlag(pauseFilePath(root), reason, { sessionId, expiresAt, indefinite, instance: options?.instance });
   if (deps) writeSharedPause(deps, { reason, expiresAt, indefinite, sessionId });
   return info;
+}
+
+/** What {@link requestFleetPause} pushed: the same owner/reason/expiry a PAUSE flag records. */
+export interface FleetPauseResult {
+  pushed: boolean;
+  sessionId: string;
+  expiresAt: string | null;
+  indefinite: boolean;
+}
+
+/**
+ * W1-T7727 — `rmd pause --fleet`: the EXPLICIT fleet-wide hold. It pushes `refs/rmd-pause/hold`
+ * (every daemon on every host that shares this origin reads it — core, site, console and any other
+ * instance) and writes no local flag. The default `rmd pause` never reaches this: it holds one
+ * instance (pause-target.ts). Unlike the instance pause it is not best-effort: a push that did not
+ * land held nothing, and the caller says so.
+ */
+export function requestFleetPause(deps: SharedPauseGitDeps, reason?: string, options?: RequestPauseOptions): FleetPauseResult {
+  const now = options?.now ?? systemClock.date();
+  const { expiresAt, indefinite } = resolvePauseExpiry(reason, options?.until, now);
+  const sessionId = resolvePauseOwnerSessionId();
+  return { pushed: writeSharedPause(deps, { reason, expiresAt, indefinite, sessionId }), sessionId, expiresAt, indefinite };
+}
+
+/** W1-T7727 — `rmd resume --fleet`: delete the fleet-wide hold, touching no instance's flags. */
+export function resumeFleetWide(deps: SharedPauseGitDeps): boolean {
+  return clearSharedPause(deps);
 }
 
 /** Gate predicate: existence alone, independent of whether the JSON parses (fail CLOSED). */
@@ -275,9 +309,10 @@ export interface ResumeResult {
 }
 
 /**
- * `rmd resume` — clear BOTH flags. Idempotent; a resume with nothing to clear is not an error.
- * `deps`, when supplied (the real CLI path), also clears the shared cross-host hold — design (iv):
- * `rmd resume` remains the ONLY thing that clears a pause, local or shared alike. BEST-EFFORT for
+ * `rmd resume` — clear BOTH flags of ONE instance root. Idempotent; a resume with nothing to clear is
+ * not an error. W1-T7727: the CLI no longer passes `deps`, so `rmd resume` never clears the fleet-wide
+ * hold (that is `rmd resume --fleet`, {@link resumeFleetWide}); a caller that does pass `deps` keeps
+ * the W1-T1216 behavior of also clearing the shared hold. BEST-EFFORT for
  * the same reason `requestPause`'s push is: the local clears above always run first and always
  * land regardless of whether origin is reachable, so an operator resuming a disconnected host
  * still gets THEIR OWN host moving again.
@@ -537,6 +572,8 @@ function parseSharedPauseAnchor(stdout: string): SharedPauseAnchorInfo | null {
  *  through to `deps.mintAnchor` — see {@link SharedPauseMintInfo}. */
 export function writeSharedPause(deps: SharedPauseGitDeps, info?: SharedPauseMintInfo): boolean {
   const anchor = deps.mintAnchor(info);
+  // An empty source in <source>:<ref> is Git's delete syntax, not a pause.
+  if (anchor.trim() === "") return false;
   return deps.run(["push", "origin", `${anchor}:${sharedPauseRef()}`]).status === 0;
 }
 
@@ -693,12 +730,12 @@ function sharedPauseReadDetail(ls: SharedPauseLsRemote, anchor: SharedPauseAncho
           : "";
       return (
         `PAUSE held on ${sharedPauseRef()} — set by pid ${anchor.pid}@${anchor.host} at ` +
-        `${anchor.timestamp}${reasonPart}${untilPart} — run \`rmd resume\` to clear`
+        `${anchor.timestamp}${reasonPart}${untilPart} — run \`rmd resume --fleet\` to clear`
       );
     }
     return (
       `PAUSE held on ${sharedPauseRef()} — UNATTRIBUTABLE (anchor ${ls.sha} unreadable, setter ` +
-      "cannot be recovered) — run `rmd resume` to clear"
+      "cannot be recovered) — run `rmd resume --fleet` to clear"
     );
   }
   if (ls.status !== 0) {

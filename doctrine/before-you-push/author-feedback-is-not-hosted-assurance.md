@@ -1,4 +1,4 @@
-- **SUPERSEDES the full-parity first-push obligation: run `node --import tsx scripts/preflight-author.mjs` on the committed tree; required hosted full-suite and coverage checks still gate merge.**
+- **SUPERSEDES full-parity first push: run `node --import tsx scripts/preflight-author.mjs` on the committed tree; required hosted checks still gate merge.**
 
 The hand route previously paid for a full instrumented suite locally and again in GitHub. Its
 20-GiB scratch admission requirement made a source change depend on Mac disk capacity, even when
