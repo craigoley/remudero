@@ -1639,6 +1639,7 @@ import {
   readyDraftPullRequest,
   DEFAULT_SWEEP_POLICY,
   decideRedBaseRefresh,
+  RUNNER_TIMEOUT_LINE,
   prAddedLinesFromPullFiles,
   failingSourceFilesFromCiFailures,
   failingTestFilesFromCiFailures,
@@ -42102,6 +42103,12 @@ function stepErrorContext(lines: readonly string[]): number[] {
 }
 
 export function extractCiFailureRegion(log: string, tailLines: number): string {
+  const pool = poolVerdictRetention();
+  for (const line of log.split("\n")) pool.push(line);
+  return pool.wrap(extractCiFailureRegionBase(log, tailLines));
+}
+
+function extractCiFailureRegionBase(log: string, tailLines: number): string {
   const lines = log.split("\n").map((line) => line.replace(ACTIONS_LOG_TIMESTAMP, ""));
   const kept = new Set<number>();
   const isRetryLine = (line: string) => CI_FLAKE_RETRY_LINE.test(line);
@@ -42198,6 +42205,31 @@ export function gateVerdictRetention(): { push(line: string): void; wrap(region:
   };
 }
 
+/** W1-T8038: the pure-test-pool verdict lines — pool failed, also fails isolated, passes isolated, POOL DEFECT
+ *  with its leaker and victim, and each judged run's complete/FAILED line. Locate-probe chatter is not one. */
+const CI_POOL_VERDICT_LINE =
+  /^pure-test-pool: (?:the pool of \d+ file\(s\) failed|the pooled files also fail|every pooled file passes|POOL DEFECT|[A-Za-z]+ run complete|[A-Za-z]+ RUN )/;
+/** PRIMARY CONTROL: pool verdict lines kept, one copy each. A shard prints a handful; this only bounds a runaway. */
+export const MAX_RETAINED_POOL_LINES = 24;
+export const RETAINED_POOL_HEADER = "--- pure-test-pool verdict line(s) retained from earlier in this job ---";
+
+/** Like {@link gateVerdictRetention}: the pool's verdict lines ride along wherever they sit in the job, because
+ *  a shard cancelled at its ceiling prints them far above the runner's own cancel marker. */
+export function poolVerdictRetention(): { push(line: string): void; wrap(region: string): string } {
+  const kept: string[] = [];
+  return {
+    push(line) {
+      const trimmed = line.replace(ACTIONS_LOG_TIMESTAMP, "").trim();
+      if (CI_POOL_VERDICT_LINE.test(trimmed) && kept.length < MAX_RETAINED_POOL_LINES && !kept.includes(trimmed)) kept.push(trimmed);
+    },
+    wrap(region) {
+      const have = new Set(region.split("\n").map((l) => l.trim()));
+      const missing = kept.filter((line) => !have.has(line));
+      return missing.length === 0 ? region : [RETAINED_POOL_HEADER, ...missing, "", region].join("\n");
+    },
+  };
+}
+
 export function ciFailureRegionReducer(tailLines: number): { push(rawLine: string): void; finish(): string } {
   const regionCap = Math.max(1, tailLines);
   const remedyCap = MAX_RETAINED_REMEDY_LINES + regionCap;
@@ -42213,6 +42245,7 @@ export function ciFailureRegionReducer(tailLines: number): { push(rawLine: strin
   let inTapFailure = false;
   let failingTestsState: "unseen" | "open" | "closed" = "unseen";
   const verdict = gateVerdictRetention();
+  const pool = poolVerdictRetention();
   const select = (at: number, line: string): void => {
     let slot = selected.length;
     while (slot > 0 && selected[slot - 1].index >= at) {
@@ -42227,6 +42260,7 @@ export function ciFailureRegionReducer(tailLines: number): { push(rawLine: strin
       index += 1;
       const line = rawLine.replace(ACTIONS_LOG_TIMESTAMP, "");
       verdict.push(line);
+      pool.push(line);
       const trimmedRaw = rawLine.trim();
       if (remedies.length < remedyCap && remedyGeneratorNamedInLog(rawLine) !== undefined && !remedies.includes(trimmedRaw)) {
         remedies.push(trimmedRaw);
@@ -42262,7 +42296,7 @@ export function ciFailureRegionReducer(tailLines: number): { push(rawLine: strin
             : tail.join("\n").trim();
       const seen = new Set(region.split("\n").map((l) => l.trim()).filter((l) => remedyGeneratorNamedInLog(l) !== undefined));
       const retained = remedies.filter((l) => !seen.has(l)).slice(0, MAX_RETAINED_REMEDY_LINES);
-      return verdict.wrap(retained.length === 0 ? region : [RETAINED_REMEDY_HEADER, ...retained, "", region].join("\n"));
+      return verdict.wrap(pool.wrap(retained.length === 0 ? region : [RETAINED_REMEDY_HEADER, ...retained, "", region].join("\n")));
     },
   };
 }
@@ -42343,13 +42377,22 @@ function* ciFailuresSteps(
     // Hoisted out of the `try` so the fallback can reach it after the read has already failed.
     const jobId = checkJobId(c);
     let annotationFallback: CiAnnotationFallback | undefined;
+    let runnerTimeoutLines: string | undefined;
     if (jobId && annotationReads < fetch.annotationReadLimit) {
       try {
         annotationReads += 1;
         const messages = (yield* step(() => fetch.fetchAnnotations(owner, repo, jobId))).filter((m) => m.trim() !== "");
         const evidence = messages.filter((m) => !isBareExitCodeAnnotation(m));
         const bareExitOnly = messages.length > 0 && evidence.length === 0;
-        if (evidence.length > 0) {
+        // W1-T8038: a job killed at its ceiling annotates only the runner's own timeout lines, which name no test.
+        // They are kept, and the job log is read beside them below.
+        if (evidence.length > 0 && evidence.every((m) => RUNNER_TIMEOUT_LINE.test(m))) {
+          runnerTimeoutLines = evidence.join("\n").split("\n").slice(-tailLines).join("\n");
+          logTail = runnerTimeoutLines;
+          logUnavailable = undefined;
+          tailSource = "annotations";
+          annotationFallback = { outcome: "runner-timeout-only" };
+        } else if (evidence.length > 0) {
           logTail = evidence.join("\n").split("\n").slice(-tailLines).join("\n");
           logUnavailable = undefined;
           tailSource = "annotations";
@@ -42376,7 +42419,7 @@ function* ciFailuresSteps(
     } else if (jobId) {
       annotationFallback = { outcome: "skipped-limit" };
     }
-    if (jobId && (logTail.trim() === "" || annotationFallback?.outcome === "bare-exit-code")) {
+    if (jobId && (logTail.trim() === "" || annotationFallback?.outcome === "bare-exit-code" || runnerTimeoutLines !== undefined)) {
       try {
         const readRegion = fetch.readJobLogRegion;
         if (readRegion) logTail = yield* step(() => readRegion(owner, repo, jobId, tailLines));
@@ -42389,8 +42432,15 @@ function* ciFailuresSteps(
           for (const line of out.split("\n")) verdict.push(line.replace(ACTIONS_LOG_TIMESTAMP, ""));
           logTail = verdict.wrap(retainGeneratorRemediesForRegion(out, extracted));
         }
-        logUnavailable = logTail.trim() === "" ? { kind: "empty-log" } : undefined;
-        if (logUnavailable === undefined) tailSource = "log";
+        if (runnerTimeoutLines !== undefined) {
+          // The runner line stays beside the region so the timeout stays visible; an empty log keeps the annotations.
+          logTail = logTail.trim() === "" ? runnerTimeoutLines : `${runnerTimeoutLines}\n${logTail}`;
+          logUnavailable = undefined;
+          tailSource = logTail === runnerTimeoutLines ? "annotations" : "log";
+        } else {
+          logUnavailable = logTail.trim() === "" ? { kind: "empty-log" } : undefined;
+          if (logUnavailable === undefined) tailSource = "log";
+        }
       } catch (err) {
         let detail = "unknown error";
         try {
@@ -42401,8 +42451,15 @@ function* ciFailuresSteps(
         } catch {
           /* keep the placeholder — a cause is still named, which is the whole point */
         }
-        logUnavailable = { kind: "fetch-failed", detail };
-        logTail = "";
+        if (runnerTimeoutLines !== undefined) {
+          // The log could not be read, but the runner's own timeout lines were: keep exactly what was read before.
+          logTail = runnerTimeoutLines;
+          logUnavailable = undefined;
+          tailSource = "annotations";
+        } else {
+          logUnavailable = { kind: "fetch-failed", detail };
+          logTail = "";
+        }
       }
     }
     failures.push({
