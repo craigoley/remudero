@@ -71,7 +71,13 @@ export function renderAcceptanceBlock(criteria: AcceptanceCriterion[]): string {
     }
     lines.push(`- ${claim} | ${proof}`);
   }
-  return lines.join("\n");
+  const block = lines.join("\n"), parsed = parseAcceptanceBlock(block);
+  const lost = criteria.findIndex((criterion, index) => !criterion.proof.trim() ||
+    parsed[index]?.claim !== criterion.claim || parsed[index]?.proof !== criterion.proof);
+  if (parsed.length !== criteria.length || lost >= 0) {
+    throw new Error(`renderAcceptanceBlock: lossless round trip refused at criterion ${lost >= 0 ? lost + 1 : parsed.length + 1}; preserve every authored claim and proof`);
+  }
+  return block;
 }
 
 // ── 2. "Ensure judgeable" repair (the #394 backstop) ─────────────────────────────────────────
