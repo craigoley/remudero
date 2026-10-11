@@ -429,3 +429,58 @@ test("a restart decided while lanes are parked drains them", async () => {
     assert.equal((await h.run).stopReason, "stale");
   } finally { await h.cleanup(); }
 });
+
+// W1-T7837 2026-10-11: its 08:35 run restored checkpoint run-W1-T7837-1791700996261 and yielded again at 09:02 as
+// run-...-1791707730822. The restored branch stayed on origin, so the task read run-branch-already-pushed for good.
+test("a checkpoint branch an older run left never holds a task whose newer checkpoint is resumable", async () => {
+  const receipt = JSON.stringify({ step: "verdict", task_id: "A", verdict: "handed_off", reason: "freshness_yield",
+    branch: "run-A-200", head_sha: stale.oldSha });
+  const h = phase(5 * minute, {
+    readLedgerLines: () => [receipt],
+    readPushedRunBranches: () => `${stale.newSha}\trefs/heads/run-A-100\n${stale.oldSha}\trefs/heads/run-A-200\n` +
+      `${stale.newSha}\trefs/heads/run-A-300\n${stale.newSha}\trefs/heads/run-B-100\n`,
+  });
+  try {
+    await flush();
+    assert.deepEqual(h.started.map(({ id }) => id), ["C", "D", "E"], "a branch pushed after the checkpoint still blocks");
+  } finally { await h.cleanup(); }
+  const superseded = phase(5 * minute, {
+    readLedgerLines: () => [receipt],
+    readPushedRunBranches: () => `${stale.newSha}\trefs/heads/run-A-100\n${stale.oldSha}\trefs/heads/run-A-200\n${stale.newSha}\trefs/heads/run-B-100\n`,
+  });
+  try {
+    await flush();
+    assert.deepEqual(superseded.started.map(({ id }) => id), ["A", "C", "D"], "the older branch was restored or released by a later run");
+  } finally { await superseded.cleanup(); }
+});
+
+// W1-T7806 2026-10-11: a restore that conflicted wrote no_pr restart_checkpoint_restore_failed, which consumed
+// the receipt and left the checkpoint branch blocking its own task.
+test("a failed checkpoint restore leaves the checkpoint resumable", () => {
+  const receipt = JSON.stringify({ step: "verdict", task_id: "A", verdict: "handed_off", reason: "freshness_yield",
+    branch: "run-A-123", head_sha: stale.oldSha });
+  const failedRestore = JSON.stringify({ step: "verdict", task_id: "A", verdict: "no_pr", reason: "restart_checkpoint_restore_failed" });
+  assert.deepEqual(daemon.pendingWorkerBoundaryHandoffs([receipt, failedRestore]).get("A"), { branch: "run-A-123", headSha: stale.oldSha });
+});
+
+// W1-T7747 2026-10-11: its 23:58 handoff waits on W1-T7744; the live ledger keeps the newest 200 verdicts (back to
+// 10-09) and its run.freshness_handoff row was already archived, so its receipt was about to age out.
+test("a parked checkpoint's receipt outlives its verdict row's rotation", async () => {
+  const handoff = { task_id: "A", branch: "run-A-123", head_sha: stale.oldSha };
+  const row = JSON.stringify({ step: "run.freshness_handoff", waiting_on: "worker", ...handoff });
+  assert.deepEqual(daemon.pendingWorkerBoundaryHandoffs([row]).get("A"), { branch: "run-A-123", headSha: stale.oldSha });
+  const postPr = JSON.stringify({ step: "run.freshness_handoff", waiting_on: "ci", ...handoff });
+  assert.equal(daemon.pendingWorkerBoundaryHandoffs([postPr]).size, 0, "a post-PR handoff is no checkpoint receipt");
+  const verdict = JSON.stringify({ step: "verdict", verdict: "handed_off", reason: "freshness_yield", ...handoff });
+  const h = phase(5 * minute, { readLedgerLines: () => [verdict] });
+  try {
+    await flush();
+    const carried = h.rows.filter(({ step }) => step === "run.freshness_handoff");
+    assert.deepEqual(carried.map(({ extra }) => extra), [{ ...handoff, carried: true }], "boot re-writes the verdict-only receipt");
+  } finally { await h.cleanup(); }
+  const again = phase(5 * minute, { readLedgerLines: () => [verdict, row] });
+  try {
+    await flush();
+    assert.equal(again.rows.filter(({ step }) => step === "run.freshness_handoff").length, 0, "a recorded receipt is not re-written");
+  } finally { await again.cleanup(); }
+});
