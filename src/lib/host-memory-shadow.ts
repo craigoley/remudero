@@ -878,6 +878,7 @@ function readContainerPressure(
     pswpin = raw === undefined ? undefined : Number(raw);
     swapIn = { unmeasured: "no pswpin in memory.stat" };
   } catch (error) {
+    // No memory.stat: the container's swap-in is unmeasured and named; its PSI may still show its pressure.
     swapIn = { unmeasured: reasonOf(error) };
   }
   let high: number | undefined;
