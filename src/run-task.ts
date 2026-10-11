@@ -222,7 +222,7 @@ import { realThreadDecider, registryThreadItems, type ThreadDecisionContext } fr
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
-import { checkpointRemaining, isWipSubject, judgeCheckpointStop, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
+import { checkpointRemaining, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
 import { PREOPEN_GATE_STEP, renderPreopenGatePrompt, runPreopenGate, type PreopenGateResult } from "./lib/preopen-gate.js";
 import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
@@ -4961,15 +4961,17 @@ export function lastCommitSubject(worktreePath: string): string | undefined {
   }
 }
 
-/** A build PR's title: the branch's newest non-checkpoint subject, never a `wip:` one (#10482). */
-export function branchPrTitle(worktreePath: string): string | undefined {
+/** Filed builds take their title from the task; callers without a task retain branch-subject titles. */
+export function branchPrTitle(worktreePath: string, task?: Pick<Task, "id" | "title">): string | undefined {
   try {
     const subjects = hostWorktreeGit(worktreePath, ["log", "--format=%s", "origin/main..HEAD"]).split("\n");
+    if (task) return prTitleForTask(subjects, task);
     return prTitleFromBranchCommits(subjects) ?? lastCommitSubject(worktreePath);
   } catch (e) {
-    // An unreadable range falls back to the tip subject, the pre-#10482 behaviour.
+    // An unreadable range uses the tip for type/scope; the task still supplies a filed build's words.
     void e;
-    return lastCommitSubject(worktreePath);
+    const tip = lastCommitSubject(worktreePath);
+    return task ? prTitleForTask(tip ? [tip] : [], task) : tip;
   }
 }
 
@@ -20432,7 +20434,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
       try {
         // W1-T6034: the filed proofs run as awaited children, off the daemon loop.
-        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, branchPrTitle(worktreePath), opts.prOpenProofRunner, true);
+        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true);
       } catch (err) {
         if (!(err instanceof PrOpenRefusedError)) throw err;
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
