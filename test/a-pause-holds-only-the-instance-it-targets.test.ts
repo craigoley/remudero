@@ -294,7 +294,7 @@ test("W1-T7727: resolvePauseTarget names the registry instance, or refuses", () 
   const dir = "/srv/fixture";
   const text = registryText(dir);
   const reach = () => true;
-  const missingRegistry = resolvePauseTarget({ configRoot: `${dir}/core`, instance: "core", registryPath: "missing-registry", dirExists: reach });
+  const missingRegistry = resolvePauseTarget({ configRoot: `${dir}/core`, instance: "core", registryText: undefined, registryPath: "missing-registry", dirExists: reach });
   assert.equal(missingRegistry.ok, false, "a missing registry is not an empty registry or a config-root fallback");
   assert.match(missingRegistry.ok ? "" : missingRegistry.refusal, /instance registry missing-registry is unreadable/);
   assert.deepEqual(resolvePauseTarget({ configRoot: `${dir}/core/`, registryText: text, registryPath: "r", dirExists: reach }), {
