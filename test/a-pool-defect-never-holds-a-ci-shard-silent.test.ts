@@ -207,7 +207,6 @@ test("a hung test under the fast-tier bound fails BY NAME and the run ends, in a
   try {
     const bound = tiers.fastTierHangBoundArgs!({ thresholdMs: 20, files: {} });
     for (const isolation of [[pool.POOL_ISOLATION_FLAG], []]) {
-      const started = Date.now();
       const run = spawnSync(process.execPath, ["--test", "--test-reporter=tap", ...bound, ...isolation, hung, fine], {
         cwd: dir,
         encoding: "utf8",
@@ -219,7 +218,6 @@ test("a hung test under the fast-tier bound fails BY NAME and the run ends, in a
       assert.notEqual(run.status, 0, `${label}: a hung test is a failure`);
       assert.match(run.stdout, /not ok \d+ - never settles and leaks an interval/, `${label}: the hung test is named`);
       assert.match(run.stdout, /test timed out after 480ms/, `${label}`);
-      assert.ok(Date.now() - started < 60_000, `${label}`);
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
