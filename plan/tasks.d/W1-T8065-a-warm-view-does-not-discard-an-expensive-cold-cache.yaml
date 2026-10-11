@@ -6,7 +6,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 10.00
-  risk: medium
+  risk: high  # Rule 19: production ticker and existing factory-ownership suite span two named surfaces
   band_meaning: span
   origin: "Operator approval 2026-10-11: fix remaining memory and swapping causes, preserve serve, run governed gates and retain the backlog"
   plan_refs: [W1-T6368, W1-T6019]
@@ -41,7 +41,7 @@
     - claim: "cheap warm builds preserve the expensive factory's heavy ownership without retaining a duplicate on fast"
       proof: "unit test: a cache-cold factory stays heavy after its warm build instead of discarding and rebuilding its cache"
     - claim: "a warm-only overrun can return a cheap factory to fast independently of another instance"
-      proof: "unit test: a cheap factory can return to fast after a warm-only overrun and each instance is classified independently"
+      proof: "unit test: warm-only overrun and each instance is classified independently"
     - claim: "bounded preparation is part of the first successful cold build's classification"
       proof: "unit test: the cold classification includes bounded preparation before the first published body"
   falsifier: |
