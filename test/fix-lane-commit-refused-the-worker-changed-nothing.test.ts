@@ -27,12 +27,14 @@ function failedReview(): ReviewVerdict & { headSha: string; reviewerOutcome: str
   return { state: "failure", criteria: [criterion], testTheater: false, summary: "blocked", floorDegraded: false, capped: false, keywordOnly: false, planOnly: false, headSha: "head-a", reviewerOutcome: "failure" };
 }
 
-function rung(answer: string) {
+function rung(answer: string, retryCommits = true) {
   const root = mkdtempSync(join(tmpdir(), "rmd-w1-t7748-"));
   const lines: Array<{ step: string } & Record<string, unknown>> = [];
   const spawns: SpawnWorkerArgs[] = [];
   let commits = 0;
-  const issues: IssueGateway = { create: () => "https://github.com/acme/remudero/issues/1", listOpen: (): OpenIssue[] => [], comment: () => {} };
+  let pushes = 0;
+  let issuesCreated = 0;
+  const issues: IssueGateway = { create: () => { issuesCreated++; return "https://github.com/acme/remudero/issues/1"; }, listOpen: (): OpenIssue[] => [], comment: () => {} };
   const run = {
     taskId: "W1-T7748X", runId: "W1-T7748X-run",
     task: { id: "W1-T7748X", title: "the fix lands", files: ["src/run-task.ts"] },
@@ -48,9 +50,9 @@ function rung(answer: string) {
         return worker(spawns.length === 1 ? "REPORT\nFIX_OUTCOME: FIXED\nCOMMIT_MESSAGE: fix(ci): repair it" : answer);
       },
       waitForCiGreen: async () => "green" as const,
-      runReview: async () => failedReview(),
+      runReview: async () => ({ ...failedReview(), state: "success" as const, criteria: [], reviewerOutcome: "success" }),
       fetchPrBody: async () => "REPORT",
-      push: () => {},
+      push: () => { pushes++; },
       issues,
       ledgerPath: join(root, "ledger.ndjson"),
       log: (step: string, extra?: Record<string, unknown>) => lines.push({ step, ...(extra ?? {}) }),
@@ -59,22 +61,44 @@ function rung(answer: string) {
       worktreeHasUncommittedChanges: () => false,
       harnessCommitForShellLessWorker: (input: Parameters<typeof harnessCommitForShellLessWorker>[0]) =>
         harnessCommitForShellLessWorker(input, {
-          commit: () => (++commits === 1
+          commit: () => (++commits === 1 || !retryCommits
             ? { committed: false, undeclared: [], reason: "the worker changed nothing" }
             : { committed: true, sha: "new-head", undeclared: [] }),
           ahead: () => 1,
         }),
     },
   };
-  return { run, lines, spawns };
+  return { run, lines, spawns, effects: () => ({ commits, pushes, issuesCreated }) };
 }
 
 test("W1-T7748: fix-lane-commit-refused-the-worker-changed-nothing clears without a person", async () => {
   const resumed = rung("FIX_OUTCOME: FIXED\nCOMMIT_MESSAGE: fix(ci): repair it");
-  await runFixRung(resumed.run);
+  const result = await runFixRung(resumed.run);
+  assert.equal(result.outcome, "fixed");
+  assert.deepEqual(resumed.effects(), { commits: 2, pushes: 1, issuesCreated: 0 });
   assert.equal(resumed.spawns.length, 2, "one fix round, then ONE resume");
   assert.equal(resumed.spawns[1]!.resumeSessionId, "fix-session");
   assert.match(resumed.spawns[1]!.prompt, /NO change against the branch head/);
+  assert.ok(resumed.spawns[1]!.prompt.startsWith(resumed.spawns[0]!.prompt), "fresh sessions retain the assignment");
   assert.ok(resumed.lines.some((l) => l.step === "fix.changed_nothing_requested"));
+  assert.ok(resumed.lines.some((l) => l.step === "fix.changed_nothing_answered" && l.outcome === "spawned"));
   assert.equal(resumed.lines.some((l) => l.step === "fix.commit_refused"), false, "the resumed edit lands the round");
+});
+
+test("an unchanged retry remains refused and is never pushed", async () => {
+  const resumed = rung("FIX_OUTCOME: FIXED\nCOMMIT_MESSAGE: fix(ci): repair it", false);
+  const result = await runFixRung(resumed.run);
+  assert.notEqual(result.outcome, "fixed");
+  assert.equal(resumed.spawns.length, 2, "the no-change retry is bounded to one");
+  assert.equal(resumed.effects().pushes, 0);
+  assert.ok(resumed.lines.some((l) => l.step === "fix.commit_refused" && l.reason === "the worker changed nothing"));
+});
+
+test("a retry can correct its fixed claim to needs design without a commit", async () => {
+  const resumed = rung("FIX_OUTCOME: NEEDS_DESIGN the repair needs a policy decision");
+  const result = await runFixRung(resumed.run);
+  assert.equal(result.outcome, "needs_design");
+  assert.equal(result.reason, "the repair needs a policy decision");
+  assert.deepEqual(resumed.effects(), { commits: 1, pushes: 0, issuesCreated: 0 });
+  assert.equal(resumed.spawns.length, 2);
 });

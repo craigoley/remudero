@@ -13290,10 +13290,15 @@ export async function runFixRung(opts: {
         { prUrl: opts.prUrl, roundId });
       const nudged = await spawnFixWorkerBounded(
         { ...deps, spawn: nudgeReceipt.spawn },
-        { ...fixArgs, prompt: CHANGED_NOTHING_RESUME_PROMPT, resumeSessionId: fixResult.sessionId },
+        { ...fixArgs, prompt: `${fixArgs.prompt}\n\n${CHANGED_NOTHING_RESUME_PROMPT}`, resumeSessionId: fixResult.sessionId },
         { runId: opts.runId, taskId: opts.taskId, snapshot: { headSha: priorHeadSha, failingChecks: (priorCiFailures ?? []).map((f) => f.name) } },
       );
       const reply = nudged.kind === "spawned" ? deps.account(nudged.result) : undefined;
+      deps.log("fix.changed_nothing_answered", {
+        strike: attempt, round, outcome: nudged.kind,
+        ...(reply ? { ...nudgeReceipt.ledgerFields(reply), session_id: reply.sessionId,
+          cost_usd: reply.costUsd, num_turns: reply.numTurns } : {}),
+      });
       if (reply) {
         harnessCommitRefusalReason = undefined;
         harnessCommitUndeclared = [];
