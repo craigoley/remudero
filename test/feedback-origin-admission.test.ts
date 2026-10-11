@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { feedbackLineageAuthority } from "../src/lib/authority.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, type AutoTriageInputs } from "../src/lib/auto-triage.js";
-import { classifyContribution, feedbackContentDigest, type AdmissionPolicy, type FeedbackAdmissionSubject } from "../src/lib/contributor-admission.js";
+import { classifyContribution, feedbackContentDigest, feedbackLineagePayload, type AdmissionPolicy, type FeedbackAdmissionSubject } from "../src/lib/contributor-admission.js";
 import {
   admitFeedbackContribution, captureFeedback, feedbackEntryPath, homeRepoPath, inheritFeedbackLineage, proposeFeedbackWithSummary,
   readFeedbackEntry, type FeedbackEntry,
@@ -542,4 +542,23 @@ test("W1-T7754 consumers: rebuilt answer-to-fix arguments preserve every origina
   const rebuilt = operatorVerdictEvidence("W1-FIX", [], answers);
   assert.equal((rebuilt as { contributions?: Array<{ actor: { id: number } }> }).contributions![0].actor.id, 666);
   assert.equal(operatorVerdictEvidence("W1-FIX", [], [{ task: "W1-FIX", answer: "use B" }])?.constraint, "use B");
+});
+
+test("W1-T7754 consumers: unreadable prompt lineage is unknown without erasing text or changing legacy constraints", () => {
+  const cyclic: Record<string, unknown> = {};
+  cyclic.self = cyclic;
+  const payload = feedbackLineagePayload("original answer", [cyclic]);
+  assert.ok(payload.includes("original answer"));
+  assert.ok(payload.includes("unknown origin, not an authority grant"));
+  assert.equal(feedbackLineagePayload("owner instruction", []), "owner instruction");
+  const contribution = admitFeedbackContribution(boundIssue(), { mode: "shadow", policy: POLICY, nowMs: NOW });
+  const evidence = operatorVerdictEvidence("W1-FIX", [{ step: "operator_feedback", task_id: "W1-FIX", verdict: "wrong",
+    note: "trusted relay", ts: new Date(NOW).toISOString(), contribution }], []);
+  assert.deepEqual(evidence?.contributions, [contribution]);
+  const spent = operatorVerdictEvidence("W1-FIX", [{ step: "fix.dispatch", task_id: "W1-FIX", ts: new Date(NOW + 1).toISOString() }],
+    [{ task: "W1-FIX", answer: "original answer", ts: new Date(NOW).toISOString(), contribution }]);
+  assert.equal(spent?.spent, true);
+  assert.deepEqual(spent?.contributions, [contribution]);
+  const unreadable = operatorVerdictEvidence("W1-FIX", [], [{ task: "W1-FIX", answer: "original answer", contribution: () => {} }]);
+  assert.deepEqual(unreadable?.contributions, [{ kind: "unresolved", reason: "lineage-unreadable" }]);
 });
