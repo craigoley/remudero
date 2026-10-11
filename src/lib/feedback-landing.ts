@@ -1105,9 +1105,10 @@ function* landPendingSteps(root: string, kind: LandingKind, opts: LandPendingOpt
     // local copy that sits at an earlier §7B lifecycle position — reported below, never dropped
     // in the caller's tree. Every other path (attachments, a stray non-yaml file, and every
     // `decisions`/`ci-learning` family) keeps the exact pre-fix inequality behaviour.
-    const scanLocalUnlanded = (): { files: string[]; sources: Map<string, string>; refused: FeedbackRefusal[] } => {
+    const scanLocalUnlanded = (): { files: string[]; sources: Map<string, string>; contents: Map<string, string>; refused: FeedbackRefusal[] } => {
       const files: string[] = [];
       const sources = new Map<string, string>();
+      const contents = new Map<string, string>();
       const refused: FeedbackRefusal[] = [];
       const candidates: Array<[string, string]> = [
         ...listDirtyRelFiles(root, kind.ownedDir, git).map((rel): [string, string] => [rel, join(root, rel)]),
@@ -1129,11 +1130,12 @@ function* landPendingSteps(root: string, kind: LandingKind, opts: LandPendingOpt
             continue;
           }
           if (decision.kind === "keep-upstream") continue;
+          if (decision.content !== undefined) contents.set(rel, decision.content);
         }
         if (!sources.has(rel)) files.push(rel);
         sources.set(rel, abs); // a queued decision, listed last, wins over a disk copy of its path
       }
-      return { files, sources, refused };
+      return { files, sources, contents, refused };
     };
     const initialScan = scanLocalUnlanded();
     if (initialScan.files.length === 0) {
@@ -1159,9 +1161,15 @@ function* landPendingSteps(root: string, kind: LandingKind, opts: LandPendingOpt
       if (!pending.ok) throw new Error(pending.reason);
       git(["read-tree", "origin/main"], { env });
       if (pending.tipSha) stageBranchPending(git, kind, pending.files, env);
-      const { files: unlanded, sources, refused } = scanLocalUnlanded();
+      const { files: unlanded, sources, contents, refused } = scanLocalUnlanded();
       for (const rel of unlanded) {
-        const blobSha = git(["hash-object", "-w", sources.get(rel) as string], { env }).trim();
+        let source = sources.get(rel) as string;
+        const content = contents.get(rel);
+        if (content !== undefined) {
+          source = join(scratchDir as string, `lineage-${unlanded.indexOf(rel)}`);
+          writeFileSync(source, content);
+        }
+        const blobSha = git(["hash-object", "-w", source], { env }).trim();
         git(["update-index", "--add", "--cacheinfo", `100644,${blobSha},${rel}`], { env });
       }
       const treeSha = git(["write-tree"], { env }).trim();
@@ -1354,11 +1362,12 @@ function* landContentSteps(
       // `remoteSha === blobSha` identity check this loop used before.
       const refused: FeedbackRefusal[] = [];
       let i = 0;
-      for (const { relPath, content } of inputs) {
+      for (const { relPath, content: inputContent } of inputs) {
+        let content = inputContent;
         // A scratch tmp file, never inside root — hash-object just needs a path to read from.
         const tmpFile = join(scratchDir as string, `content-${i++}`);
         writeFileSync(tmpFile, content);
-        const blobSha = git(["hash-object", "-w", tmpFile], { env }).trim();
+        let blobSha = git(["hash-object", "-w", tmpFile], { env }).trim();
         let remoteSha: string | null;
         try {
           remoteSha = git(["rev-parse", `origin/main:${relPath}`]).trim();
@@ -1373,6 +1382,11 @@ function* landContentSteps(
             continue;
           }
           if (decision.kind === "keep-upstream") continue;
+          if (decision.content !== undefined) {
+            content = decision.content;
+            writeFileSync(tmpFile, content);
+            blobSha = git(["hash-object", "-w", tmpFile], { env }).trim();
+          }
         }
         git(["update-index", "--add", "--cacheinfo", `100644,${blobSha},${relPath}`], { env });
         unlanded.push(relPath);
