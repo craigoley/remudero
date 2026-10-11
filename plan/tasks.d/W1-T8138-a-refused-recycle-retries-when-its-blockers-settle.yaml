@@ -19,7 +19,7 @@
     was refused at 17:08:02Z (`deploy.restart_refused`, "still in flight after 3000s"; "the oldest in-flight work
     this run observed was 3292s old"). The PAUSE was removed, and the drift recycle can start again only after the
     back-off below, when it re-pauses the fleet for another full wait whether or not its blockers are still there.
-    READ on origin/main 8bcbc3e10:
+    READ on origin/main 5d117761b:
       - src/lib/deployer.ts `IMAGE_RECYCLE_FAILURE_BACKOFF_MS = 60 * 60_000` (:284). decideDeployTrigger (:730)
         declines an automatic create-drift recycle (:809-812) and an automatic image recycle (:866-869) while
         `nowMs - lastFailedAtMs` is under it. lastFailedAtMs is the `at` of the DEPLOY_FAILED marker (:2535-2542).

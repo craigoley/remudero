@@ -15,27 +15,25 @@
   priority: 1
   attempts: 0
   rationale: |
-    READ on origin/main 8bcbc3e10.
-      - src/run-task.ts watchDispatchSpawn's `endRound` (:3402-3424, W1-T7807) commits the worker's edits as
+    READ on origin/main 5d117761b, which includes hand PR #10925 (merged 18:00:13Z, during this filing).
+      - src/run-task.ts watchDispatchSpawn's `endRound` (:3405, W1-T7807) commits the worker's edits as
         "wip: yield at quiet worker", pushes the run branch, and throws QuietRoundEndedError with the checkpoint sha.
-      - runTaskBody's catch (:21336-21341) then logs ONE row: `verdict` handed_off, reason
-        quiet_worker_round_ended, with branch and head_sha. No `run.freshness_handoff` row is written.
+      - runTaskBody's catch (:21357) logs the rows roundEndedHandoffRows (:3438, added by #10925) returns. For
+        trigger "recycle" (#10925) that is a `run.freshness_handoff` receipt with waiting_on worker_round plus a
+        freshness_yield verdict, so the recycle case is covered. For the QUIET case (no trigger) it is ONE row:
+        `verdict` handed_off, reason quiet_worker_round_ended, with branch and head_sha, and no receipt.
       - src/lib/daemon.ts pendingWorkerBoundaryHandoffs (:247-263) treats a row as a receipt only when it is a
         `run.freshness_handoff` row whose waiting_on is not pr or ci, or a `verdict` handed_off with reason
         freshness_yield and no pr_url (:252-253). Every other `verdict` row runs `pending.delete(row.task_id)`
         (:256). So the quiet verdict is not a receipt and also deletes any earlier one.
-      - The next run's restore (src/run-task.ts:19262, `pendingWorkerBoundaryHandoffs(...).get(taskId)`) then finds
+      - The next run's restore (src/run-task.ts:19282, `pendingWorkerBoundaryHandoffs(...).get(taskId)`) then finds
         no checkpoint, and the run starts from main. The pushed work is lost on resume.
       - The daemon's own copy of the receipts is read ONCE at boot: `resumableHandoffs` (daemon.ts:3129) feeds
         runBranchStateFrom (:1520) at :5000 and :5632. A freshness yield happens just before a restart, so a boot
         read sees it. A quiet round end happens at any time. Its pushed run-<id>-<epoch> branch is then not in
         the resumable set until the next boot, so it can hold the task as `run-branch-already-pushed` (:1568).
-    OPEN PR #10925 (run-unfiled, head 7a479923c, NOT merged at filing) moves this verdict into a new
-    `roundEndedHandoffRows` in src/run-task.ts. For a pending container recycle (trigger "recycle") it writes a
-    `run.freshness_handoff` receipt with waiting_on worker_round plus a freshness_yield verdict, so the recycle case
-    is covered there. The quiet case (no trigger) still writes the single quiet_worker_round_ended verdict, so this
-    gap remains on #10925's head. This task changes only the READER side in src/lib/daemon.ts and never edits
-    src/run-task.ts, so it builds the same way whether or not #10925 has merged.
+    This task changes only the READER side in src/lib/daemon.ts. It does not edit src/run-task.ts, so the
+    quiet verdict keeps its own reason in the ledger.
     DEPENDENCY: W1-T7806 (queued, in flight on run-W1-T7806-1791732012710) edits runDaemon's dispatch block in the
     same file. Serialized after it (parallel agents on one file broke main, #10349 and #10353).
     W1-T8008 (queued) changes what the quiet checkpoint COMMITS (undeclared paths). It does not touch the receipt

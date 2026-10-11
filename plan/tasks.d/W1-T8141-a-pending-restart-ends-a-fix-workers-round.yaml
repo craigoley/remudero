@@ -15,17 +15,17 @@
   priority: 2
   attempts: 0
   rationale: |
-    READ on origin/main 8bcbc3e10:
-      - runFixRung (src/run-task.ts:11217) spawns fix workers for the sweep's fix lane. None of its spawns pass
-        through watchDispatchSpawn (:3359), whose only caller is the dispatch path (:17528), so neither the W1-T7807
-        quiet watchdog nor open PR #10925's recycle round end ever sees a fix worker. Its `endRound` also returns
+    READ on origin/main 5d117761b:
+      - runFixRung (src/run-task.ts:11237) spawns fix workers for the sweep's fix lane. None of its spawns pass
+        through watchDispatchSpawn (:3359), whose only caller is the dispatch path (:17548), so neither the W1-T7807
+        quiet watchdog nor #10925's recycle round end (merged 2026-10-11) ever sees a fix worker. Its `endRound` also returns
         "not an implement worker" for any other worker class.
       - The only recycle yield in the sweep is a RESUMED CI wait (src/lib/sweep.ts:3880, W1-T5127). A fix worker
         mid-round has none.
       - deploy/recycle-container.sh counts a fix-rung worker (`*sweep-fix-settings-*`, :1790) as lane-less busy until
         it is 7200 s old, and its `fix-branch--*` lock as lane-holding. So a recycle waits for it, then refuses.
       - When a fix worker is killed anyway (a restart, a recycle past its wait), W1-T6362 preserves the dead owner's
-        staged diff with preserveTrackedDirtyPatch (:44951) and offers it to the next round. That is recovery after
+        staged diff with preserveTrackedDirtyPatch (:44972) and offers it to the next round. That is recovery after
         a kill, not a yield. Unstaged edits and the round's reasoning are lost, and the round is charged.
     The sibling task filed with this one ends an IMPLEMENT worker's round for a latched daemon restart. This task is
     the fix-rung half.

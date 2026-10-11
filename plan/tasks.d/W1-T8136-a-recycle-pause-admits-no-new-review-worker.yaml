@@ -20,7 +20,7 @@
     `sweep.review_admitted`, 2 `sweep.review_started`, 15 `daemon.sweep_light.review_only` and 2
     `daemon.review_clock.pass` rows. The refusal listed a codex review of #10919 that was 5 s old (pids 173795 and
     173802) as an in-flight lane-less worker.
-    READ on origin/main 8bcbc3e10, src/lib/daemon.ts:
+    READ on origin/main 5d117761b, src/lib/daemon.ts:
       - The FULL pass under a recycle PAUSE already closes review admission. W1-T5804 runs it with
         `recyclePause` (:2375), and its `continueReviewAdmissions` gate is false while checkPause is set (:2398).
       - The light pass does not. Under any PAUSE (`lightHalt`, :2274-2306) W1-T5343 runs ONE review-only pass while

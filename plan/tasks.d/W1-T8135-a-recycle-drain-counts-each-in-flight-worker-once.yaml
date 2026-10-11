@@ -26,7 +26,7 @@
       - pid 173802, 5 s old: `/opt/remudero-image-clis/node_modules/@openai/codex-linux-x64/vendor/.../bin/codex exec`
         with the same arguments. This is the native child of 173795, the same review.
     So 1 lane plus 1 review read as 1 + 3.
-    READ on origin/main 8bcbc3e10, deploy/recycle-container.sh:
+    READ on origin/main 5d117761b, deploy/recycle-container.sh:
       - worker_lines (:1411-1420) is `ps -eo pid,etimes,args` filtered by
         `claude --output-format|codex exec|node .*run-task[.]ts[[:space:]]+retro`. It reads no ppid and no cwd, so
         it cannot tell a lane's own worker from a lane-less one, or a wrapper from its child.
