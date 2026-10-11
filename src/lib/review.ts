@@ -5991,7 +5991,7 @@ export interface MergeHoldActor {
   container_id?: string;
   /** Agent/session identity when one was present in the environment. */
   session?: string;
-  /** Names of the agent/session env markers found (CLAUDECODE, RMD_RUN_ID, ...). */
+  /** Names of the agent/session env markers found (CLAUDECODE, REMUDERO_RUN_ID, ...). */
   agent_markers: string[];
   tty: { stdin: boolean; stdout: boolean };
   /** Parent process names, nearest first. */

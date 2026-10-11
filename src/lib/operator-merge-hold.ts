@@ -88,7 +88,7 @@ export function parseOperatorMergeHoldArgs(args: string[]): ParsedOperatorMergeH
 }
 
 /** Env keys whose presence marks an agent/session caller. */
-const AGENT_ENV_EXACT = ["CLAUDECODE", "RMD_RUN_ID", "RMD_WORKER", "AI_AGENT"];
+const AGENT_ENV_EXACT = ["CLAUDECODE", "REMUDERO_RUN_ID", "REMUDERO_WORKER_SCOPE", "AI_AGENT"];
 const AGENT_ENV_PREFIX = "CLAUDE_CODE_";
 
 /** The facts the actor is gathered from — an injectable seam so the real process is read exactly once. */
@@ -164,7 +164,7 @@ export function gatherMergeHoldActor(probe: MergeHoldActorProbe = realMergeHoldA
     .filter((k) => probe.env[k] !== undefined && probe.env[k] !== "" && (AGENT_ENV_EXACT.includes(k) || k.startsWith(AGENT_ENV_PREFIX)))
     .sort();
   const containerId = probe.containerId();
-  const session = probe.env.CLAUDE_CODE_SESSION_ID || probe.env.RMD_RUN_ID || undefined;
+  const session = probe.env.CLAUDE_CODE_SESSION_ID || probe.env.REMUDERO_RUN_ID || undefined;
   return {
     kind: markers.length > 0 || containerId !== undefined ? "agent" : "human",
     os_user: probe.osUser(),
