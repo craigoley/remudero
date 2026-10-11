@@ -946,6 +946,33 @@ const CAUSE_LINE_RE = /^\*\*Cause:\*\*\s*(\S+)\s*$/m;
  *  opened by a producer this task did not migrate, like {@link HEAD_SHA_LINE_RE}/{@link
  *  CAUSE_LINE_RE}. Exported (unlike its two siblings) so a test can drive both arms of this
  *  validator directly by identifier — see test/fix-rung-open-escalation-stand-down.test.ts. */
+/**
+ * W1-T3579: one deterministic revision of the CURRENT authoritative task contract the fix rung's
+ * open-escalation guard (immediately below) versions its stand-down against — covers task
+ * identity, declared `files:`, and every acceptance criterion's `claim`/`proof` pair, never
+ * `satisfied_by`/`holdout` or any other decorative/volatile field (a `status`/`attempts` bump on
+ * every dispatch must never move this). THE DEFECT THIS CLOSES: PORTAL-T4 (remudero-site PR #21,
+ * 2026-09-14) was correctly refused, then a plan-only scope amendment re-authorized the exact same
+ * repair on the exact same PR head — and the open-escalation guard, keyed on `headSha` alone,
+ * stood the repair down forever because nothing distinguished "a human already answered this
+ * question" from "the question changed underneath an open issue". Declared files are sorted
+ * first (order is never part of the contract — {@link filesDigest}'s own convention); acceptance
+ * pairs are read in DECLARED order, because reordering criteria is itself an amendment a re-admit
+ * should notice. PURE: reads nothing off disk — the caller already holds the live `Task`/{@link
+ * runFixRung}'s own `opts.task` this rung dispatched against, never a worker report or PR-body
+ * prose (design note (i) — recovering it from either would let a worker's own claim decide
+ * whether it gets re-admitted).
+ */
+export function taskContractRevision(task: {
+  id: string;
+  files?: readonly string[];
+  acceptance?: ReadonlyArray<{ claim: string; proof: string }>;
+}): string {
+  const files = [...(task.files ?? [])].sort();
+  const acceptance = (task.acceptance ?? []).map((c) => ({ claim: c.claim, proof: c.proof }));
+  return createHash("sha256").update(JSON.stringify({ id: task.id, files, acceptance })).digest("hex");
+}
+
 export const CONTRACT_REVISION_LINE_RE = /^\*\*Contract:\*\*\s*(\S+)\s*$/m;
 
 /** The `**Head:** <sha>` sha an already-open issue's body carries, or `undefined` (W1-T2799). Reads
