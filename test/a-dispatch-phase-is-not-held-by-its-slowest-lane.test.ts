@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate as flush } from "node:timers/promises";
@@ -32,7 +32,8 @@ function worker(text: string): WorkerResult {
 }
 
 async function boundaryRun(t: TestContext, boundary: "preopen_gate" | "checkpoint" | "decision" | "worker" | "passed_gate", recycle = false,
-  resumeAfter: boolean | "moved" = false, failure?: "scope" | "push", delayedCheckpointRead = false) {
+  resumeAfter: boolean | "moved" = false, failure?: "scope" | "push", delayedCheckpointRead = false,
+  { mainMoves, refusingGate = false }: { mainMoves?: "clean" | "conflict"; refusingGate?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), "rmd-t7697-boundary-"));
   const origin = gitRepo({ bare: true });
   const seed = gitRepo();
@@ -99,6 +100,16 @@ async function boundaryRun(t: TestContext, boundary: "preopen_gate" | "checkpoin
       return { kind: "fail", failedSteps: ["typecheck"], durationMs: 1 };
     },
   };
+  if (refusingGate) {
+    // The harness's PR push gate refuses every push, as its census precheck refused W1-T7742's checkpoint.
+    const hooks = join(root, "harness-hooks");
+    mkdirSync(hooks);
+    writeFileSync(join(hooks, "pre-push"), "#!/bin/sh\necho 'census-precheck: this branch grows 1 census count' >&2\nexit 1\n");
+    chmodSync(join(hooks, "pre-push"), 0o755);
+    const priorHooks = process.env.RMD_HARNESS_HOOKS_DIR;
+    process.env.RMD_HARNESS_HOOKS_DIR = hooks;
+    t.after(() => { if (priorHooks === undefined) delete process.env.RMD_HARNESS_HOOKS_DIR; else process.env.RMD_HARNESS_HOOKS_DIR = priorHooks; });
+  }
   const outcome = await withLiveWritesAllowed(() => runTask(id, options));
   const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
@@ -126,6 +137,14 @@ async function boundaryRun(t: TestContext, boundary: "preopen_gate" | "checkpoin
   if (resumeAfter) {
     clock++;
     if (resumeAfter === "moved") origin.git("update-ref", `refs/heads/${branch}`, seed.git("rev-parse", "HEAD"));
+    if (mainMoves) {
+      // main moves on while the checkpoint waits: a sibling file merges cleanly, the checkpoint's own file conflicts.
+      mkdirSync(join(seed.dir, "src"), { recursive: true });
+      writeFileSync(join(seed.dir, mainMoves === "clean" ? "src/sibling.ts" : "src/change.ts"), "export const value = 7;\n");
+      seed.git("add", "src");
+      seed.git("commit", "-m", "feat: main moves on");
+      seed.git("push", "origin", "main");
+    }
     gh.addRoute({ when: "pr view", stdout: JSON.stringify({ headRefName: `run-${id}-${clock}`, body: "" }) });
     pending = false;
     let resumedCalls = 0;
@@ -135,6 +154,7 @@ async function boundaryRun(t: TestContext, boundary: "preopen_gate" | "checkpoin
         if (++resumedCalls === 1) return worker("RECON REPORT\nOBSERVED: restored checkpoint\n");
         const restored = await import(pathToFileURL(join(args.cwd, "src/change.ts")).href);
         assert.equal(restored.value, 42, "the resumed worker sees the checkpoint's exported value");
+        if (mainMoves === "clean") assert.equal(existsSync(join(args.cwd, "src/sibling.ts")), true, "the resumed worker builds on current main");
         pending = true;
         return worker("REPORT\nPR_URL: https://github.com/acme/remudero/pull/1\n");
       },
@@ -155,6 +175,17 @@ async function boundaryRun(t: TestContext, boundary: "preopen_gate" | "checkpoin
       .find((row) => row.step === "implement.checkpoint_restored");
     assert.equal(restored?.source_branch, branch);
     assert.equal(restored?.source_head_sha, handoff?.head_sha);
+    if (mainMoves === "conflict") {
+      assert.equal(restored?.base, "checkpoint", "a checkpoint main conflicts with resumes on its own base");
+      assert.deepEqual(restored?.main_conflicts, ["src/change.ts"]);
+      assert.equal(restored?.restored_head_sha, handoff?.head_sha);
+    }
+    if (mainMoves === "clean") {
+      assert.equal(restored?.base, "main");
+      const parents = origin.git("rev-list", "--parents", "-1", String(restored?.restored_head_sha)).trim().split(" ").slice(1);
+      assert.deepEqual(parents, [String(handoff?.head_sha), seed.git("rev-parse", "HEAD").trim()],
+        "main is merged into the checkpoint, never its commits replayed onto main");
+    }
   }
 }
 
@@ -188,6 +219,18 @@ test("checkpoint recovery refuses a remote head that changed after the handoff",
 
 test("a restart arriving during checkpoint judgment still prevents a resumed worker", async (t) => {
   await boundaryRun(t, "checkpoint", false, false, undefined, true);
+});
+
+test("a restored checkpoint main conflicts with resumes on its own base instead of ending the run", async (t) => {
+  await boundaryRun(t, "checkpoint", false, true, undefined, false, { mainMoves: "conflict" });
+});
+
+test("a restored checkpoint merges current main rather than replaying its commits", async (t) => {
+  await boundaryRun(t, "checkpoint", false, true, undefined, false, { mainMoves: "clean" });
+});
+
+test("a restart checkpoint push is not refused by the PR push gate", async (t) => {
+  await boundaryRun(t, "worker", false, false, undefined, false, { refusingGate: true });
 });
 
 test("a pending restart yields before the decision worker resumes", async (t) => {
