@@ -135,16 +135,19 @@ export function isRmdOwnedTempName(name: string): boolean {
  * Every test that boots `daemonCommand` or `main()` reaches `sweepStaleTempDirs()` with no `root`, i.e.
  * on `tmpdir()`: the operator Mac's or the host's real temp root, holding other sessions' rmd-* dirs.
  * Under a clock that moves `Date.now` but not the file clock it also ages the test's OWN fixture past
- * the ceiling and deletes it (#10719). Under `NODE_TEST_CONTEXT` (set by `node --test` itself and by
- * test/setup/tmp-hygiene.ts) a sweep that names no root therefore declines; a sweep handed an explicit
- * `root` is a dir the caller chose and owns, so it runs exactly as in production.
+ * the ceiling and deletes it (#10719). In a process that test/setup/tmp-hygiene.ts has marked as a test
+ * process (an in-process flag on `globalThis`, deliberately NOT an env var, so a spawned child that did
+ * not load the setup is never marked) a sweep that names no root therefore declines; a sweep handed an
+ * explicit `root` is a dir the caller chose and owns, so it runs exactly as in production.
  *
  * Returns the refusal text, or `undefined` when the sweep may proceed.
  */
+export const TEST_PROCESS_MARKER = Symbol.for("rmd.test-process");
+
 function testContextRefusal(opts: TempSweepOpts): string | undefined {
   if (opts.root !== undefined) return undefined;
-  if (process.env.NODE_TEST_CONTEXT === undefined || process.env.NODE_TEST_CONTEXT === "") return undefined;
-  return "refused: running under NODE_TEST_CONTEXT with no explicit root, so the sweep would scan the real temp root";
+  if ((globalThis as Record<symbol, unknown>)[TEST_PROCESS_MARKER] !== true) return undefined;
+  return "refused: running in a test process with no explicit root, so the sweep would scan the real temp root";
 }
 
 /** Default age ceiling for {@link sweepStaleTempDirs}: 24 hours. */
