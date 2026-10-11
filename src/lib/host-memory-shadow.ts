@@ -730,6 +730,43 @@ function readContainer(read: ShadowMemoryPorts["readFile"]): ShadowInputs["conta
   };
 }
 
+/** A daemon container's own memory headroom: min(memory.high, memory.max) less its working set (memory.current less
+ *  inactive_file). `unbounded` when neither limit is set; `unread` with the reason when the cgroup cannot be read. */
+export type ContainerMemoryHeadroom =
+  | { headroomMib: number; ceilingMib: number; workingSetMib: number }
+  | { unbounded: true }
+  | { unread: string };
+
+/**
+ * This container's own headroom, as the container check above measures it: min(memory.high, memory.max) less the
+ * working set (memory.current less inactive_file). The dispatch memory floor reads it beside the host's MemAvailable.
+ */
+export function readContainerMemoryHeadroom(
+  read: ShadowMemoryPorts["readFile"] = (path) => readFileSync(path, "utf8"),
+): ContainerMemoryHeadroom {
+  const container = readContainer(read);
+  if ("unread" in container) return container;
+  const limits = [container.maxMib, container.highMib ?? null].filter((v): v is number => v !== null);
+  if (limits.length === 0) return { unbounded: true };
+  const ceilingMib = Math.min(...limits);
+  const workingSetMib = Math.max(0, container.currentMib - (container.reclaimableMib ?? 0));
+  return { headroomMib: ceilingMib - workingSetMib, ceilingMib, workingSetMib };
+}
+
+/** Whether THIS container holds live, unreleased reserved work whose end can free memory. An unreadable reservation
+ *  ledger shows none, so the dispatch floor does not wait on work it cannot see: it fails open, and names its tier. */
+export function ownContainerWorkLive(
+  root: string,
+  readLedger: (root: string) => HostMemoryReading | undefined = (r) => readMemoryLedger({ root: r }),
+): boolean {
+  try {
+    return (readLedger(root)?.entries ?? []).some((entry) => entry.status === "owned" && !entry.occupancyReleased);
+  } catch (error) {
+    void error; // No reading: no live work can be shown, so the container tier admits as nothing-to-wait-for.
+    return false;
+  }
+}
+
 /** memory.high and inactive_file. Either one unreadable is simply absent: the ceiling stays memory.max and nothing is
  *  subtracted, which can only make the verdict stricter. */
 function containerReclaim(read: ShadowMemoryPorts["readFile"]): { highMib?: number | null; reclaimableMib?: number } {
