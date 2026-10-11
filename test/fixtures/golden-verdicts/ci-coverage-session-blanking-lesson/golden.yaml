@@ -1,0 +1,14 @@
+violation: none
+rule: >
+  W1-T7899: a CI lesson's cited incident must be a real, executable proof against
+  the active learnings entry. This verdict covers the coverage-session-blanking
+  lesson added to learnings/ci.yaml, whose proof grep matches on one line.
+verdict:
+  state: success
+  capped: false
+  testTheater: false
+  criteriaTampered: false
+arm: true
+criteria:
+  - met: true
+    proof_exec: executed_pass

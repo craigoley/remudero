@@ -44,7 +44,20 @@
 # CRON. The schedule and log path live in ONE place: deploy/install-host-units.sh
 # (CLEANUP_CRON_SCHEDULE / RMD_CLEANUP_LOG). Nothing here schedules itself.
 
-# OVERRIDES. Thresholds: IDLE_MINUTES HIGH_WATER ARCHIVE_DAYS DRY_RUN. Idle windows have a hard six-hour minimum. Roots and probes, so a test
+# RETENTION FOLLOWS DISK PRESSURE IN TIERS (retention_window). Each pass reads every watched
+# filesystem (RMD_CLEANUP_WATCH_FS, plus RMD_CLEANUP_ROOT_FS at HIGH_WATER) and takes the one
+# closest to its mark. One that is past its minimum free space counts as at its mark. The idle
+# window is then:
+#   20+ points below the mark: 48 h · 10-19: 24 h · 5-9: 12 h · under 5, past it, or df unreadable: 6 h
+# On the Azure root (mark 85%) that is 48 h under 65% used, 24 h at 65-74%, 12 h at 75-79%, and 6 h
+# from 80%. Six hours is the floor, never a target: it protects work that could still be live, so
+# no tier and no override goes under it. A pass re-reads the disks, so the window widens again on
+# its own once space comes back. Scratch-unit idleness and the tsx cache age follow the same window
+# unless pinned. A pinned value under six hours is logged as CLAMP and raised to six hours. It is
+# not FATAL: a janitor that refuses to start reclaims nothing while the disk fills.
+
+# OVERRIDES. Thresholds: IDLE_MINUTES (pins the idle window instead of the tier; empty = tiered)
+# HIGH_WATER ARCHIVE_DAYS DRY_RUN. Roots and probes, so a test
 # drives a fixture tree instead of the real /tmp and /mnt/rmd, on Linux or macOS:
 #   RMD_CLEANUP_HOME            the home whose ~/*/.claude/{worktrees,projects} are swept
 #   RMD_CLEANUP_WORKTREE_ROOTS  colon-separated roots whose immediate Git worktrees are swept
@@ -54,8 +67,9 @@
 #   RMD_CLEANUP_TMP_ROOTS       colon-separated scratch roots
 #   RMD_CLEANUP_TMP_GLOBS       space-separated basename globs swept directly under those roots
 #   RMD_CLEANUP_BIG_MB          size (MB) at which an idle file under a scratch root is swept
-#   RMD_CLEANUP_TSX_MAX_AGE_HOURS  age (h, minimum 6) past which a file inside a `tsx-*` cache
-#                               directly under a tmp root is pruned (default 6)
+#   RMD_CLEANUP_TSX_MAX_AGE_HOURS  pins the age (h; under 6 is clamped to 6) past which a file
+#                               inside a `tsx-*` cache directly under a tmp root is pruned
+#                               (default: the idle window)
 #   RMD_CLEANUP_ARCHIVE_ROOT    where transcripts go
 #   RMD_CLEANUP_ROOT_FS         the filesystem being protected (default /)
 #   RMD_CLEANUP_DF              command taking a path and printing `df -Pk`-shaped output for the
@@ -90,7 +104,8 @@
 #                               not mounted) is not swept at all.
 #   RMD_CLEANUP_UID             the identity the pass decides as (default `id -u`)
 #   RMD_CLEANUP_RUNUSER         runs the one repo-writing Git call (fetch) as the repo's owner
-#   RMD_CLEANUP_SCRATCH_IDLE_MINUTES  minimum payload inactivity (default 360; cannot be lower)
+#   RMD_CLEANUP_SCRATCH_IDLE_MINUTES  pins scratch-unit payload inactivity (default: the idle
+#                               window; under 360 is clamped to 360)
 #   RMD_CLEANUP_NESTED_COVERAGE_ROOTS  colon-separated roots walked (depth <= 6, same device, no
 #                               symlinks) for `rmd-c-<12 hex>` coverage scratch at ANY depth
 #                               (W1-T5708). Default: the tmp roots, scratch roots and parents, plus
@@ -102,7 +117,8 @@
 #   RMD_CLEANUP_FLOCK           flock command (tests may simulate an unavailable lock)
 set -uo pipefail
 
-IDLE_MINUTES="${IDLE_MINUTES:-360}"      # 6 h, as requested by the operator
+FLOOR_MINUTES=360                        # 6 h: the protective floor for anything that could be live work
+IDLE_MINUTES="${IDLE_MINUTES:-}"         # empty: tiered on disk pressure (retention_window)
 HIGH_WATER="${HIGH_WATER:-85}"           # [UNVERIFIED] percent of / at which a pass fails
 ARCHIVE_DAYS="${ARCHIVE_DAYS:-30}"       # [UNVERIFIED] archive retention
 DRY_RUN="${DRY_RUN:-0}"
@@ -115,7 +131,7 @@ COVERAGE_PATHS="${RMD_CLEANUP_COVERAGE_PATHS-$CLEAN_HOME/.remudero-coverage}"
 TMP_ROOTS="${RMD_CLEANUP_TMP_ROOTS-/tmp}"                                # [UNVERIFIED]
 TMP_GLOBS="${RMD_CLEANUP_TMP_GLOBS-claude-* rmd-* remudero-* tmp.*}"     # [UNVERIFIED]
 BIG_MB="${RMD_CLEANUP_BIG_MB:-200}"                                      # [UNVERIFIED]
-TSX_MAX_AGE_HOURS="${RMD_CLEANUP_TSX_MAX_AGE_HOURS:-6}"
+TSX_MAX_AGE_HOURS="${RMD_CLEANUP_TSX_MAX_AGE_HOURS:-}"  # empty: the idle window
 ARCHIVE_ROOT="${RMD_CLEANUP_ARCHIVE_ROOT:-/mnt/rmd/host-cleanup-archive}" # [UNVERIFIED]
 ROOT_FS="${RMD_CLEANUP_ROOT_FS:-/}"
 DF_CMD="${RMD_CLEANUP_DF:-df -Pk}"
@@ -151,7 +167,7 @@ else
   [ "$ROOT_FS" = / ] && NESTED_COVERAGE_ROOTS="$NESTED_COVERAGE_ROOTS:/mnt/rmd"
 fi
 COVERAGE_LOCK_DIR="${RMD_CLEANUP_COVERAGE_LOCK_DIR:-/tmp}"
-SCRATCH_IDLE_MINUTES="${RMD_CLEANUP_SCRATCH_IDLE_MINUTES:-360}"
+SCRATCH_IDLE_MINUTES="${RMD_CLEANUP_SCRATCH_IDLE_MINUTES:-}"  # empty: the idle window
 DOCKER_CMD="${RMD_CLEANUP_DOCKER:-docker}"
 # Not /tmp: a root-created 0644 lock there could not be opened for write by the user cron, and
 # with fs.protected_regular=2 root cannot O_CREAT-open a user's file in a sticky directory either.
@@ -161,19 +177,18 @@ fi
 LOCK_FILE="${RMD_CLEANUP_LOCK_FILE:-$SCRIPT_DIR/rmd-host-cleanup.lock}"
 FLOCK_CMD="${RMD_CLEANUP_FLOCK:-flock}"
 
-case "$IDLE_MINUTES$HIGH_WATER$ARCHIVE_DAYS$BIG_MB$SCRATCH_IDLE_MINUTES" in
+case "$HIGH_WATER$ARCHIVE_DAYS$BIG_MB" in
   ""|*[!0-9]*) echo "rmd-host-cleanup: FATAL thresholds must be non-negative integers" >&2; exit 2 ;;
 esac
-if [ "$IDLE_MINUTES" -lt 360 ] || [ "$SCRATCH_IDLE_MINUTES" -lt 360 ]; then
-  echo "rmd-host-cleanup: FATAL idle retention must be at least 360 minutes (6h)" >&2; exit 2
-fi
-# TSX cache retention follows the same six-hour floor as other disposable scratch.
-case "$TSX_MAX_AGE_HOURS" in
-  ""|*[!0-9]*|0|0*) echo "rmd-host-cleanup: FATAL RMD_CLEANUP_TSX_MAX_AGE_HOURS must be a positive integer" >&2; exit 2 ;;
+# A pinned window must be a number (a typo is refused, not guessed at); how SMALL it is is not
+# refused here, it is clamped to the floor below.
+case "$IDLE_MINUTES$SCRATCH_IDLE_MINUTES" in
+  *[!0-9]*) echo "rmd-host-cleanup: FATAL thresholds must be non-negative integers" >&2; exit 2 ;;
 esac
-if [ "$TSX_MAX_AGE_HOURS" -lt 6 ]; then
-  echo "rmd-host-cleanup: FATAL RMD_CLEANUP_TSX_MAX_AGE_HOURS must be at least 6" >&2; exit 2
-fi
+case "$TSX_MAX_AGE_HOURS" in
+  "") ;;
+  *[!0-9]*|0|0*) echo "rmd-host-cleanup: FATAL RMD_CLEANUP_TSX_MAX_AGE_HOURS must be a positive integer" >&2; exit 2 ;;
+esac
 case "$ONLY_TMP" in
   0|1) ;;
   *) echo "rmd-host-cleanup: FATAL RMD_CLEANUP_ONLY_TMP must be 0 or 1" >&2; exit 2 ;;
@@ -207,6 +222,18 @@ if [ "$root_watched" = 0 ]; then
 fi
 
 log() { printf '%s\n' "$*"; }
+
+# retention_window <points below the mark> — the idle window in minutes. Tiered, never under six
+# hours. Twin of retention_window in deploy/mac/tmp-reclaim.sh: change the two together.
+retention_window() {
+  local headroom="$1"
+  if [ "$headroom" -ge 20 ]; then echo 2880
+  elif [ "$headroom" -ge 10 ]; then echo 1440
+  elif [ "$headroom" -ge 5 ]; then echo 720
+  else echo "$FLOOR_MINUTES"
+  fi
+}
+fmt_minutes() { if [ $(( $1 % 60 )) = 0 ]; then printf '%s h' "$(( $1 / 60 ))"; else printf '%s min' "$1"; fi; }
 
 # The lock is created once (O_EXCL, so never through a symlink) and then opened READ-ONLY: flock
 # needs no write access, so whichever identity created it, any mode the other can read works, and
@@ -617,7 +644,7 @@ keep_scratch_for_repo() {
 # 29 GB root disk (root at 91%). scratch_guard keeps `tsx-*` whole — removing the directory under a
 # running build is never right — and nothing pruned INSIDE it. tsx (4.x) writes flat, write-once
 # files and treats a missing one as a cache miss (recompile, rewrite), so a stale FILE is safely
-# disposable while the directory stays. Only regular files older than TSX_MAX_AGE_HOURS go, then
+# disposable while the directory stays. Only regular files older than TSX_MAX_AGE_MINUTES go, then
 # empty subdirectories equally old (never the cache directory itself). find runs with -P (the
 # default: no symlink is followed, and -type f never matches one) and -xdev (no other filesystem
 # is entered). No per-file lsof check: tsx reads an entry and closes it, and unlinking a file a
@@ -626,7 +653,7 @@ TSX_PRUNED_COUNT=0
 TSX_PRUNED_BYTES=0
 prune_tsx_cache() {
   local dir="$1" minutes stats count bytes
-  minutes=$(( TSX_MAX_AGE_HOURS * 60 ))
+  minutes="$TSX_MAX_AGE_MINUTES"
   if [ -L "$dir" ] || [ ! -d "$dir" ]; then log "KEEP $dir: not a regular directory"; return; fi
   if [ "$OPEN_OK" != 1 ]; then log "KEEP $dir: lsof failed (fail closed)"; return; fi
   if ! stats="$(find "$dir" -xdev -type f -mmin "+$minutes" -exec du -k {} + 2>/dev/null \
@@ -635,7 +662,7 @@ prune_tsx_cache() {
   fi
   count="${stats%% *}"; bytes="${stats##* }"
   if [ "${count:-0}" -gt 0 ]; then
-    log "PRUNE $dir: ${bytes} bytes, ${count} tsx cache files older than ${TSX_MAX_AGE_HOURS} h"
+    log "PRUNE $dir: ${bytes} bytes, ${count} tsx cache files older than $(fmt_minutes "$TSX_MAX_AGE_MINUTES")"
     if act find "$dir" -xdev -type f -mmin "+$minutes" -delete; then
       TSX_PRUNED_COUNT=$((TSX_PRUNED_COUNT + count)); TSX_PRUNED_BYTES=$((TSX_PRUNED_BYTES + bytes))
     fi
@@ -643,7 +670,7 @@ prune_tsx_cache() {
   if [ -n "$(find "$dir" -xdev -mindepth 1 -type d -empty -mmin "+$minutes" -print -quit 2>/dev/null)" ]; then
     act find "$dir" -xdev -mindepth 1 -depth -type d -empty -mmin "+$minutes" -delete
   fi
-  log "KEEP $dir: tsx cache directory (entries newer than ${TSX_MAX_AGE_HOURS} h stay)"
+  log "KEEP $dir: tsx cache directory (entries newer than $(fmt_minutes "$TSX_MAX_AGE_MINUTES") stay)"
 }
 
 # W1-T5634. A unit another unit borrows objects from (objects/info/alternates) is kept: removing it
@@ -938,6 +965,55 @@ judge_filesystems() {
 
 # ── the pass ──
 before_pct="$(df_field pct)"; before_avail="$(df_field avail)"
+
+# The tightest watched filesystem picks the tier: TIER_HEADROOM points below its mark (0 when it is
+# past its minimum free space), TIER_WHY saying which one. No readable filesystem is the floor.
+# RMD_CLEANUP_ROOT_FS reuses the pass's own "before" reading rather than asking df again.
+TIER_HEADROOM=""; TIER_WHY="no watched filesystem readable"
+for i in "${!W_PATH[@]}"; do
+  [ -e "${W_PATH[$i]}" ] || continue
+  if [ "${W_PATH[$i]}" = "$ROOT_FS" ]; then
+    t_pct="$before_pct"; t_avail="$before_avail"
+  else
+    t_row="$($DF_CMD "${W_PATH[$i]}" 2>/dev/null | awk 'NR==2 { gsub("%","",$5); print $5, $4 }')"
+    t_pct=""; t_avail=""; read -r t_pct t_avail <<<"$t_row"
+  fi
+  case "${t_pct:-x}${t_avail:-x}" in *[!0-9]*) continue ;; esac
+  t_head=$(( W_PCT[i] - 10#$t_pct ))
+  if [ "$(( 10#$t_avail ))" -lt "${W_FREE_KB[$i]}" ] && [ "$t_head" -gt 0 ]; then t_head=0; fi
+  if [ -z "$TIER_HEADROOM" ] || [ "$t_head" -lt "$TIER_HEADROOM" ]; then
+    TIER_HEADROOM="$t_head"
+    TIER_WHY="${W_PATH[$i]} ${t_pct}% used, mark $(printf '%s%%' "${W_PCT[$i]}")${W_FREE_TXT[$i]:+/${W_FREE_TXT[$i]}}"
+  fi
+done
+TIER_MINUTES="$(retention_window "${TIER_HEADROOM:-0}")"
+
+# pin_window <name> <shown value> <minutes> — sets PINNED to a pinned window, raised to the floor
+# (and logged as CLAMP) when it is under it.
+pin_window() {
+  PINNED=$(( 10#$3 ))
+  if [ "$PINNED" -lt "$FLOOR_MINUTES" ]; then
+    log "CLAMP $1=$2: under the six-hour floor; using $(fmt_minutes "$FLOOR_MINUTES")"
+    PINNED="$FLOOR_MINUTES"
+  fi
+}
+if [ -n "$IDLE_MINUTES" ]; then
+  pin_window IDLE_MINUTES "$IDLE_MINUTES min" "$IDLE_MINUTES"; IDLE_MINUTES="$PINNED"; IDLE_SOURCE="pinned by IDLE_MINUTES"
+else
+  IDLE_MINUTES="$TIER_MINUTES"; IDLE_SOURCE="tiered: tightest is $TIER_WHY"
+fi
+if [ -n "$SCRATCH_IDLE_MINUTES" ]; then
+  pin_window RMD_CLEANUP_SCRATCH_IDLE_MINUTES "$SCRATCH_IDLE_MINUTES min" "$SCRATCH_IDLE_MINUTES"; SCRATCH_IDLE_MINUTES="$PINNED"
+else
+  SCRATCH_IDLE_MINUTES="$IDLE_MINUTES"
+fi
+if [ -n "$TSX_MAX_AGE_HOURS" ]; then
+  pin_window RMD_CLEANUP_TSX_MAX_AGE_HOURS "$TSX_MAX_AGE_HOURS h" "$(( 10#$TSX_MAX_AGE_HOURS * 60 ))"; TSX_MAX_AGE_MINUTES="$PINNED"
+else
+  TSX_MAX_AGE_MINUTES="$IDLE_MINUTES"
+fi
+log "rmd-host-cleanup: retention idle $(fmt_minutes "$IDLE_MINUTES"), scratch $(fmt_minutes "$SCRATCH_IDLE_MINUTES"), tsx $(fmt_minutes "$TSX_MAX_AGE_MINUTES") ($IDLE_SOURCE)"
+
 snapshot_open
 [ "$OPEN_OK" = 1 ] || log "REFUSE sweeps: lsof failed — keeping everything (fail closed)"
 

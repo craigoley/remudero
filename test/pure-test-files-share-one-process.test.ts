@@ -148,7 +148,8 @@ test("unit test: a pool failure re-runs the pool isolated and names the file tha
   const reruns = calls.filter((c) => c.role === "rerun");
   assert.deepEqual(reruns, [{ files: ["test/a.test.ts", "test/b.test.ts", "test/c.test.ts"], pool: false, role: "rerun" }]);
   assert.ok(log.some((l) => l.includes("POOL DEFECT") && l.includes("leaking file: test/b.test.ts")), log.join("\n"));
-  assert.equal(calls.at(-1)?.role, "rest", "the non-pooled file still runs after the defect is named");
+  const roles = calls.map((c) => c.role);
+  assert.ok(roles.includes("rest") && roles.indexOf("rest") < roles.indexOf("locate"), "the non-pooled file runs before the leak is located");
 });
 
 test("unit test: a pooled file that also fails isolated is a test failure, not a pool defect", () => {

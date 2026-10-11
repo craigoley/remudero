@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-07: doctor WARN lock-vs-process on a live W1-T6248 run"
   plan_refs: [W1-T1109, W1-T3611, W1-T978]
   files: [src/lib/report-commands.ts, test/doctor-judges-a-container-lock-in-its-own-pid-namespace.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |
