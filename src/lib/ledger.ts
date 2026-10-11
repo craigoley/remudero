@@ -848,14 +848,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T5903: runSweep reads this row back to write ONE skipped_queue row per PR and head; dropping
   // it on rotation would re-log the same stand-down every pass.
   "sweep.update_branch.skipped_queue",
-  // W1-T7735 (refresh-value.ts): `refreshDecisionRecorded` reads `decided` back so one decision per
-  // head is written once, `refreshOutcomeRows` joins `outcome` to it once, `refreshBenefitWeight`
-  // learns from `outcome`, and `pendingRefreshRequests` reads `requested` until a decision consumes
-  // it. Dropping any of them on rotation re-logs a decision, re-joins an outcome, forgets the learned
-  // weight, or loses an operator's queued request.
-  "sweep.refresh.decided",
-  "sweep.refresh.outcome",
-  "sweep.refresh.requested",
+  "sweep.refresh.decided", // W1-T7735: refreshDecisionRecorded reads it back, one decision per head
+  "sweep.refresh.outcome", // W1-T7735: refreshOutcomeRows joins once; refreshBenefitWeight learns from it
+  "sweep.refresh.requested", // W1-T7735: pendingRefreshRequests keeps a queued request until consumed
   // W1-T1235: `latestGhRateLimitRefusalsFromLedger` (run-task.ts) reads the newest row per bucket
   // for `rmd status`'s GITHUB BUCKETS section. Kept here, not in the render set, because GitHub's
   // resets outlast RENDER_STEP_RETENTION_WINDOW_MS and an operator needs the LAST refusal however
