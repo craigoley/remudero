@@ -48,7 +48,7 @@ const FRESH_REVIEWER = "the reviewer-<sha> tree at origin/main the harness runs 
 const HARNESS_SITES: Readonly<Record<string, { count: number; reason: string }>> = {
   inspectFreshReviewerWorktree: { count: 3, reason: `${FRESH_REVIEWER}; its git is the injected seam` },
   buildFreshTreeReviewRunner: { count: 1, reason: `${FRESH_REVIEWER}: the fetch into repoRoot` },
-  buildBaseReproductionProbe: { count: 4, reason: "the base-reproduction probe's clone: prune, add and remove of its origin/main tree" },
+  buildBaseReproductionProbe: { count: 3, reason: "seam argv for its git seam (prune, add and remove of its origin/main tree), whose default runs the leaf" },
   buildSweepEffects: { count: 1, reason: `the fresh-tree runner's git seam over repoRoot; ${FRESH_REVIEWER}` },
   syncPlanFromOrigin: { count: 4, reason: CLONE },
   planSyncGitRunnerAsync: { count: 1, reason: CLONE },
@@ -97,7 +97,6 @@ const HARNESS_SITES: Readonly<Record<string, { count: number; reason: string }>>
   resolveMergeLogReadOptions: { count: 1, reason: OWN },
   creditEvidenceRootFor: { count: 1, reason: OWN },
   registeredFixWorktreeOwner: { count: 2, reason: FIX_CLONE },
-  removeAbandonedFixWorktreeOwner: { count: 2, reason: FIX_CLONE },
   refCommitMatchesDirtyRecovery: { count: 6, reason: FIX_CLONE },
   preserveFixHead: { count: 6, reason: FIX_CLONE },
   publishAbandonedFixOwnerAhead: { count: 2, reason: FIX_CLONE },
@@ -121,7 +120,7 @@ const CONVERTED = [
   "readRegistrationChanges", "captureRegisteredFixOwnerSnapshot", "temporaryIndexTree",
   "preserveStagedFixOwnerResidue", "readFixOwnerResidue", "readTrackedDirtyOwnerPatch", "preserveTrackedDirtyPatch",
   "resetTrackedDirtyFixOwner", "checkoutFixHeadRef", "createFixRungWorktree", "triageCommandLocked", "planCommand",
-  "defaultShardGitRunner",
+  "defaultShardGitRunner", "removeAbandonedFixWorktreeOwner",
 ] as const;
 
 /** Raw git sites and leaf calls per top-level declaration of `text`. */

@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 
 import { fixedClock, systemClock } from "./clock.js";
 import { checkoutHeadStamp } from "./checkout-head.js";
-import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec, Outcome } from "./gardener.js";
+import { prepareGardenTaskIds, type GardenTaskIdMinter, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec, type Outcome } from "./gardener.js";
 import { gateFireRatesPath, type GateFireRate, type GateFireRateReport } from "./gate-fire-rate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -45,7 +45,7 @@ export interface GateDefuseSources {
   thresholdDays?: number;
   leadDays?: number;
   openOrigins?: () => string[];
-  mintTaskId?: (branch: string) => string;
+  mintTaskId?: GardenTaskIdMinter;
   admissionViolations?: typeof machineFilingAdmissionViolations;
   execFile?: (command: string, args: string[], options: { cwd: string; encoding: "utf8" }) => string;
   /** Runs one test file with the clock shifted `shiftDays` ahead: true when it passes. Throws when
@@ -222,22 +222,35 @@ export function renderDefuseShard(action: GateGardenAction, taskId: string) {
   });
 }
 
-function applyDefuseActions(ws: GardenCheckout, actions: GateGardenAction[], deps: GardenerDeps, sources: GateDefuseSources) {
-  if (!ws.branch) throw new Error("gate gardener: filing workspace has no branch for task-id reservation");
-  const paths: string[] = [];
-  for (const action of actions) {
-    const draft = renderDefuseShard(action, "NEW-1");
-    if (draft.refused) throw new Error(`gate gardener: defuse shard refused (${draft.refused})`);
-    const plan = loadPlanFromYaml(draft.text, "defuse-admission");
-    const reasons = (sources.admissionViolations ?? machineFilingAdmissionViolations)(plan.tasks[0]!, {
-      plan, releasedIds: new Set(), pathExists: (path) => existsSync(join(deps.repoRoot, path)),
-    });
-    if (reasons.length) throw new Error(`gate gardener: defuse shard refused (machine-filing-admission: ${reasons.join("; ")})`);
-    const args = ["--import", "tsx", join(deps.repoRoot, "src/run-task.ts"), "next-task-id", "--reserve", "--branch", ws.branch];
-    const output = sources.mintTaskId ? undefined : sources.execFile
+function prepareDefuseTaskIds(ws: GardenCheckout, count: number, deps: GardenerDeps, sources: GateDefuseSources, async = false) {
+  if (async && count > 0 && !sources.mintTaskId) throw new Error("gate gardener: async task-id minter is required for defuse filing");
+  return prepareGardenTaskIds(ws, count, sources.mintTaskId ?? ((branch) => {
+    const args = ["--import", "tsx", join(deps.repoRoot, "src/run-task.ts"), "next-task-id", "--reserve", "--branch", branch];
+    const output = sources.execFile
       ? sources.execFile(process.execPath, args, { cwd: deps.repoRoot, encoding: "utf8" })
       : execFileSync(process.execPath, args, { cwd: deps.repoRoot, encoding: "utf8" });
-    const taskId = sources.mintTaskId ? sources.mintTaskId(ws.branch) : /^RESERVED (W1-T\d+) on origin/m.exec(output!)?.[1];
+    const id = /^RESERVED (W1-T\d+) on origin/m.exec(output)?.[1];
+    if (!id) throw new Error("gate gardener: task-id reservation returned no held id");
+    return id;
+  }), async);
+}
+
+function assertDefuseAdmission(action: GateGardenAction, deps: GardenerDeps, sources: GateDefuseSources): void {
+  const draft = renderDefuseShard(action, "NEW-1");
+  if (draft.refused) throw new Error(`gate gardener: defuse shard refused (${draft.refused})`);
+  const plan = loadPlanFromYaml(draft.text, "defuse-admission");
+  const reasons = (sources.admissionViolations ?? machineFilingAdmissionViolations)(plan.tasks[0]!, {
+    plan, releasedIds: new Set(), pathExists: (path) => existsSync(join(deps.repoRoot, path)),
+  });
+  if (reasons.length) throw new Error(`gate gardener: defuse shard refused (machine-filing-admission: ${reasons.join("; ")})`);
+}
+
+function applyDefuseActions(ws: GardenCheckout, actions: GateGardenAction[], deps: GardenerDeps, sources: GateDefuseSources, heldIds?: readonly string[]) {
+  if (!ws.branch) throw new Error("gate gardener: filing workspace has no branch for task-id reservation");
+  const paths: string[] = [];
+  for (const [index, action] of actions.entries()) {
+    assertDefuseAdmission(action, deps, sources);
+    const taskId = heldIds ? heldIds[index] : (prepareDefuseTaskIds(ws, 1, deps, sources) as string[])[0];
     if (!taskId) throw new Error("gate gardener: task-id reservation returned no held id");
     const rendered = renderDefuseShard(action, taskId);
     if (rendered.refused) throw new Error(`gate gardener: defuse shard refused (${rendered.refused})`);
@@ -426,8 +439,13 @@ export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes, sources: 
     metric: (inv) => inv.tally,
     candidates: (inv) => inv.candidates,
     scorecard: (inv, plan) => ({ candidates: inv.candidates.length, tally: inv.tally, proposed: plan.actions.length }),
-    apply: (ws, plan) => {
-      if (plan.acting[0] === "defuse") return applyDefuseActions(ws, plan.actions, deps, sources);
+    prepare: (ws, plan, async) => {
+      const actions = plan.acting[0] === "defuse" ? plan.actions : [];
+      for (const action of actions) assertDefuseAdmission(action, deps, sources);
+      return prepareDefuseTaskIds(ws, actions.length, deps, sources, async);
+    },
+    apply: (ws, plan, _scorecard, heldIds) => {
+      if (plan.acting[0] === "defuse") return applyDefuseActions(ws, plan.actions, deps, sources, heldIds);
       const heading = `## Pass ${clock.iso()}`;
       const paths = applyGateActions(ws.root, plan.actions, heading, probes);
       return { paths, title: `chore(gates): the gate gardener proposes to ${plan.acting[0]} ${plan.actions.length} gate row(s)`, body: prBody(plan.actions, heading) };

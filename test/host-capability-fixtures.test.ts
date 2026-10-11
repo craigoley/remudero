@@ -136,6 +136,14 @@ const CHMOD_REMEDY =
  */
 const DECLARED: readonly Declared[] = [
   {
+    kind: "chmod", file: "heavy-build-reservation.test.ts", key: "0o644", count: 1,
+    reason: "The READY reader refuses group/world-readable record modes by descriptor stat before parsing. This explicit policy is independent of uid, not an EACCES assertion.",
+  },
+  {
+    kind: "chmod", file: "heavy-build-reservation.test.ts", key: "0o600", count: 1,
+    reason: "Restores the same READY record to its supported private mode after the uid-independent policy refusal; the default reader then positively observes its held request.",
+  },
+  {
     kind: "chmod",
     file: "routing-quarantine-resolution.test.ts",
     key: "0o644",

@@ -1,0 +1,93 @@
+- id: W1-T8088
+  title: "A RE-RUN REVIEW NEVER TAKES OVER A DEAD OWNER'S PENDING — postReviewPending no-ops on a claim younger than REVIEW_LOCK_TTL_MS even when the sweep has proven its owner dead, so the dead owner's record stays latest and every pass re-derives \"remudero-review owner proven dead — re-running the review lane\" while the re-run is already in flight (PR #10848: 39 minutes, a needs-human issue, a blocked fix rung)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the pending-review claim passes to the re-run when its owner is proven dead
+  band_meaning: span
+  origin: "operator approval 2026-10-11 (\"go with all your recommendations\"): review-owner-dead loop, PRs #10783, #10848, #10862"
+  plan_refs: [W1-T2844, W1-T3647, W1-T913, W1-T6047, W1-T6053, W1-T7955, W1-T2753]
+  files: [src/lib/review.ts, test/a-re-run-review-takes-over-a-dead-owners-pending.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-11 in the core daemon's ledger union (~/Remudero-notes/flow-remeasure-2026-10-11/union.ndjson.gz).
+    PR #10848 (W1-T7724):
+      - A review process, pid 1105572, posted `review.pending_posted` for head 37d03bc at 12:38:00Z
+        (`owner_pid` 1105572). Its worker was killed at 13:07:04Z (`worker_orphan_killed`), and the
+        review process exited. That record stayed the latest pending record for the head.
+      - Daemon pid 1248718 judged that owner dead. At 13:10:45Z it wrote `sweep.review_admitted`, a
+        `sweep.disposed` with acted=true and "remudero-review owner proven dead — re-running the review lane
+        on #10848", and `sweep.review_started`. The re-run ran until 13:50:57Z (`worker_duration_ms` 2347437).
+      - The re-run wrote NO new `review.pending_posted`: at 13:10:46Z the dead claim was 32.7 minutes old,
+        inside the 42-minute TTL, so the post was a no-op. So every later pass read the same dead record and
+        re-derived "owner proven dead — re-running the review lane". Its stand-down said "duplicate review
+        key" (13:12:27Z), then "not admitted this pass: semantic post-review admission bound N", repeat_streak
+        up to 7, for a review that was running in this same process.
+      - `pr.stuck` fired at 13:40:28Z ("awaiting-review for 33 minutes (BACKSTOP 30)"), and needs-human issue
+        #10874 opened at 13:41:14Z. At 14:00Z the fix rung stood down twice on "a needs-human escalation for
+        this exact (task, PR, head …) is ALREADY OPEN".
+    PR #10862: re-run admitted at 13:17:12Z under the same reason. At 13:24:51Z the stand-down read "a verdict
+    was already DELIVERED" (W1-T6047's path).
+    PR #10783: 83 dead-owner rows from 02:00 to 04:11Z. Every one held "freshness recovery backoff remains
+    inside the 60m pending ceiling … awaiting proven freshness" (W1-T6053's open cause). Admission came only
+    under a new daemon pid at 04:10:38Z.
+    THE PATH, read on origin/main 363991c2a (symbol names, not line numbers):
+      - `buildOpenPrViews` (src/run-task.ts) sets `reviewPendingOwnerDead` when
+        `assessPendingReviewOwner` (src/lib/review.ts, W1-T2844) proves the latest pending record's owner
+        dead. The `post-review` row in src/lib/sweep.ts then writes the "owner proven dead — re-running"
+        reason.
+      - `postReviewPending` (src/lib/review.ts) is the one pending-post entry point the re-run calls. It
+        no-ops on a same-input claim whose ledger `ts` is younger than `REVIEW_LOCK_TTL_MS` (42 min,
+        W1-T3647). The shared-status arm does the same for a foreign `owned by run X` status. Neither arm
+        consults the owner assessment the sweep already made. A claim the sweep has PROVEN dead is held as
+        if it were live until 42 minutes pass, so the dead owner stays recorded for the whole re-run.
+    W1-T2844 made the SWEEP trust proof of death over the clock. This task makes the pending CLAIM do the
+    same. Unchanged: W1-T3647's fail-toward-holding for an owner this process cannot prove dead, because
+    "unknown" is not "dead".
+    NOT THIS TASK: W1-T7955 names an overlapping light pass's reservation in the stand-down text, and W1-T6053
+    owns the freshness-backoff hold seen on #10783. Both stay as filed.
+  design: |
+    1. TAKE OVER A PROVEN-DEAD CLAIM INSIDE THE TTL. In `postReviewPending`, when the prior same-input
+       pending record is inside `REVIEW_LOCK_TTL_MS` and `assessPendingReviewOwner` returns "dead", fall
+       through to the takeover. Do not no-op. The new post names what it took over from, and its
+       description says the prior owner is proven dead, not that the claim is ">= 42m old". The
+       `review.pending_posted` row carries this process's owner identity (`owner_pid`, `owner_started_at`,
+       host), as every new writer does.
+    2. THE SHARED-STATUS ARM AGREES. A foreign `owned by run X` status inside the TTL is taken over when the
+       ledger's latest pending record for run X on this head is proven dead by the same assessment.
+       Otherwise it holds, as today.
+    3. "unknown" STILL HOLDS. A record with no owner identity, a foreign host, or an unreadable age keeps
+       W1-T3647's no-op.
+    4. THE NEXT PASS READS THE TRUTH. After the takeover, `lastPendingReviewStatusFromLedger` returns the
+       re-run's record and `assessPendingReviewOwner` reads it "active". The sweep then derives `wait`
+       ("a review is already in flight"), not "owner proven dead — re-running".
+    Thread the owner assessment through `PostReviewPendingOpts` as an optional seam, defaulting to
+    `assessPendingReviewOwner`, so tests inject "dead", "active" and "unknown" without a real pid.
+    Tests go in the new file test/a-re-run-review-takes-over-a-dead-owners-pending.test.ts, with `test(` titles
+    exactly as in the proofs below. test/review-status-pending.test.ts and
+    test/a-review-lock-older-than-its-ttl-is-reclaimable.test.ts must stay green.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-re-run-review-takes-over-a-dead-owners-pending.test.ts"
+    - claim: "a same-input pending claim younger than REVIEW_LOCK_TTL_MS whose owner is proven dead is taken over, and the new review.pending_posted row carries the live owner's identity"
+      proof: 'grep: test("W1-T8088: a pending claim whose owner is proven dead is taken over inside the TTL" in test/a-re-run-review-takes-over-a-dead-owners-pending.test.ts'
+    - claim: "a foreign shared remudero-review status naming a run whose ledger owner is proven dead is taken over too"
+      proof: 'grep: test("W1-T8088: the shared status naming a dead owner run is taken over too" in test/a-re-run-review-takes-over-a-dead-owners-pending.test.ts'
+    - claim: "a claim whose owner is unknown, not proven dead, still no-ops inside the TTL"
+      proof: 'grep: test("W1-T8088: a claim whose owner is not proven dead still holds inside the TTL" in test/a-re-run-review-takes-over-a-dead-owners-pending.test.ts'
+    - claim: "a dead owner's pending is admitted to the review lane, with a sweep.review_admitted row, and after the takeover the next pass derives wait for the in-flight review, not owner proven dead"
+      proof: 'grep: test("W1-T8088: a dead owner is re-reviewed once, and the next pass reads the review in flight" in test/a-re-run-review-takes-over-a-dead-owners-pending.test.ts'
+  falsifier: |
+    Leave `postReviewPending`'s TTL no-op ahead of the owner assessment. The re-run's pending is then refused
+    as "already pending … no-op", the dead record stays latest, and the next pass re-derives "owner proven
+    dead — re-running", as #10848 did from 13:12 to 13:50Z. The takeover and next-pass tests fail. Take over
+    on "unknown" as well, and the holds-inside-the-TTL test fails.
+  note: |
+    SEPARATE FINDING, NOT IN THIS TASK'S SCOPE: `pr.stuck`'s awaiting-review BACKSTOP 30 opened needs-human
+    issue #10874 while a review was running (39 minutes). That issue then blocked the fix rung. It is reported
+    to the operator as its own item.

@@ -24,6 +24,7 @@ import { availableParallelism } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isMainModule, parseArgv } from "./lib/argv.mjs";
+import { closeJudgedRun, judgedNodeTestArgs, prepareJudgedRun } from "./pure-test-pool.mjs";
 import {
   COVERAGE_SHARD_WORKERS,
   DEFAULT_CI_SHARD_COUNT,
@@ -53,17 +54,22 @@ export function screenBudgetMs(root = ROOT) {
   return Math.max(0, ...shards.map((files) => predictMakespanMs(files, manifest, COVERAGE_SHARD_WORKERS)));
 }
 
-/** One `node --test` run of `file`, with the same preloads the suite runs under. */
+/** One `node --test` run of `file`, with the same preloads the suite runs under. Judged
+ *  (scripts/pure-test-pool.mjs): a run whose file exits 0 before its own summary is a failed run. */
 export function runTestFile(file, root = ROOT) {
   return new Promise((done) => {
-    const args = ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--test-reporter=tap", file];
+    const judged = prepareJudgedRun();
+    const args = judgedNodeTestArgs(["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--test-reporter=tap", file], judged.args);
     // A run under a parent `node --test` inherits NODE_TEST_CONTEXT and reports to it, exiting 0 on a failure.
     const { NODE_TEST_CONTEXT: _parent, ...env } = process.env;
-    const child = spawnChild(process.execPath, args, { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawnChild(process.execPath, args, { cwd: root, env: { ...env, ...judged.env }, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     child.stdout.on("data", (chunk) => (output += chunk));
     child.stderr.on("data", (chunk) => (output += chunk));
-    child.on("close", (code) => done({ ok: code === 0, output }));
+    child.on("close", (code, signal) => {
+      const judge = closeJudgedRun(judged, [file], { status: code ?? (signal ? 1 : 0), root, role: "screen", prefix: "flake-screen", log: () => {} });
+      done({ ok: judge.status === 0, output: `${output}\n${judge.line}\n` });
+    });
   });
 }
 

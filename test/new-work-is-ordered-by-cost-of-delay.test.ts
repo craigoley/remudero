@@ -294,3 +294,40 @@ test("W1-T4064: the daemon reads filing dates from the plan path it was given", 
     repo.cleanup();
   }
 });
+
+// 2026-10-11: W1-T7742, W1-T7837 and W1-T7952 lost every lane to fresh tasks of equal priority because each
+// restart yield, claim race and infra refusal spent a stride. The breaker's exclusion set now applies here.
+const interrupted = task("W1-T1071");
+const peer = task("W1-T9071");
+const peerDates = new Map([...filed, [interrupted.id, NOW - DAY], [peer.id, NOW - DAY]]);
+const runOf = (id: string, runId: string, verdict: Record<string, unknown> | undefined) => [
+  { step: "run.start", task_id: id, run_id: runId, task_class: "src", ts: new Date(NOW - DAY).toISOString() },
+  ...(verdict ? [{ step: "verdict", task_id: id, run_id: runId, ts: new Date(NOW - DAY + 60_000).toISOString(), ...verdict }] : []),
+];
+const nonWorkerRuns = [
+  { verdict: "handed_off", reason: "freshness_yield" },
+  { verdict: "handed_off", reason: "freshness_yield" },
+  { verdict: "blocked_inflight", stage: "dispatch.claim" },
+  { verdict: "no_pr", reason: "restart_checkpoint_failed" },
+  { verdict: "failed", stage: "worktree.node_modules" },
+].flatMap((verdict, i) => runOf(interrupted.id, `${interrupted.id}-yield-${i}`, verdict));
+
+/** Strides a task has consumed: its pass is (1 + consumed) / score. */
+const consumed = (context: ReturnType<typeof calibrate>, id: string) =>
+  Math.round(context.stridePassByTaskId!.get(id)! * context.costOfDelayByTaskId!.get(id)! - 1);
+
+test("a run no worker tried spends no dispatch stride", () => {
+  const after = calibrate([interrupted, peer], [...history, ...nonWorkerRuns], peerDates);
+  assert.equal(consumed(after, interrupted.id), 0);
+  assert.equal(after.stridePassByTaskId!.get(interrupted.id), after.stridePassByTaskId!.get(peer.id));
+  assert.equal(dispatchOrder([peer, interrupted], after)[0].id, interrupted.id,
+    "five restart yields and refusals must not rank a task behind a never-dispatched equal");
+});
+
+test("a worker's own failure and an unfinished run still spend a dispatch stride", () => {
+  const workerFailed = runOf(interrupted.id, `${interrupted.id}-worker`, { verdict: "no_pr", reason: "no-diff" });
+  const unfinished = runOf(interrupted.id, `${interrupted.id}-running`, undefined);
+  const after = calibrate([interrupted, peer], [...history, ...nonWorkerRuns, ...workerFailed, ...unfinished], peerDates);
+  assert.equal(consumed(after, interrupted.id), 2);
+  assert.equal(dispatchOrder([interrupted, peer], after)[0].id, peer.id);
+});

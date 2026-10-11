@@ -233,10 +233,10 @@ export function bodyVsDiffContractLines(): string[] {
  * closing them. Four were repaired by hand and needed no judgement — #4330, #4324, #4343 and #4333
  * were red on ratchets the change itself moved and never recorded.
  *
- * AND THE HOUSE RULE CANNOT REACH A WORKER. CLAUDE.md's first bullet is "run the shipped local gate
- * before your FIRST push", and its own header states a dispatched worker never sees the file, since
- * `spawnWorker` passes `settingSources: []`. A rule only humans read cannot bind the lane that keeps
- * breaking it — precisely what that header warns about.
+ * AND THE HOUSE RULE CANNOT REACH A WORKER. CLAUDE.md's first bullet is "before your FIRST push, run
+ * `scripts/preflight-author.mjs`", and its own header states a dispatched worker never loads the
+ * file, since `spawnWorker` passes `settingSources: []`. A rule only humans read cannot bind the lane
+ * that keeps breaking it — precisely what that header warns about.
  */
 export function ratchetContractLines(): string[] {
   /*

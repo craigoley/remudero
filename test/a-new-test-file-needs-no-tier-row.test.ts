@@ -83,7 +83,11 @@ function hookFixture(files: Record<string, number>): { root: string; cleanup: ()
   git(root, ["config", "core.hooksPath", "hooks"]);
   execFileSync("chmod", ["+x", join(root, "hooks", "pre-commit")]);
   git(root, ["add", "-A"]);
-  git(root, ["commit", "-q", "-m", "fixture base"]);
+  // The base commit is setup, not the commit under test: it stages the copied scripts, and the hook's
+  // mkdtemp half would then run over them (scripts/pure-test-pool.mjs makes its judged-run temp dir
+  // with mkdtempSync) without the mkdtemp checker this fixture does not carry. The hook runs on the
+  // test's own commit below.
+  git(root, ["commit", "-q", "--no-verify", "-m", "fixture base"]);
   return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 

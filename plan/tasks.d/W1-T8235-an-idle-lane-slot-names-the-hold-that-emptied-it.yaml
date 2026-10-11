@@ -1,0 +1,82 @@
+- id: W1-T8235
+  title: "IDLE ACCOUNTING SAW 33 IDLE MINUTES ON A DAY THAT LOST HUNDREDS — it counts a minute only when ZERO builds run, samples only when a tick dispatches, and has one `pause` cause for an operator pause and a recycle drain alike; account idle LANE SLOTS, sampled at every lane change, by the hold that emptied them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — what an idle lane-minute is and which hold it is charged to
+  band_meaning: span
+  origin: "2026-10-11 detection research: pause, recycle-drain and restart idle time was invisible to the fleet's own accounting"
+  plan_refs: [W1-T4837, W1-T4939, W1-T4416, W1-T7697, W1-T7839, W1-T8197]
+  files: [src/lib/idle-lane-accounting.ts, src/lib/daemon.ts, test/an-idle-lane-slot-names-the-hold-that-emptied-it.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED, core ledger union 2026-10-10T20:00Z..2026-10-11T19:38Z, read-only:
+      - The `lane.idle_summary` rows add up to about 33 idle minutes: 26.34 pause plus 0.14 unknown at 13:06, 3.63
+        unknown at 16:02, 2.33 at 03:52, 0.83 at 09:57. The 01:54 and 17:14 windows read 0.
+      - Reconstructed from implement `run.start`/`verdict` pairs with 3 dispatch lanes: about 181 idle lane-minutes
+        across the five core pauses (01:17-01:48, 02:14-02:44, 02:52-03:12, 11:46-12:29, 12:44-12:46), and about
+        92 across the recycle drain 16:16-17:08, where 2 lanes sat empty behind one long worker. The restart-churn
+        analysis (~/Remudero-notes/restart-churn-2026-10-11/) puts restarts and recycles at 880 idle lane-minutes,
+        25% of capacity.
+      - `dispatch.lane_refill_held` reasons in the window: "stale code" 14, "phase bound" 9 (plus 10
+        `dispatch.lane_parked`), "fleet PAUSE hold: ... supervised serve restoration" 5, "fleet PAUSE hold: ...
+        container recycle" 3, "governor: queue" 2. None of them reaches an idle cause.
+    WHY, on origin/main 25067fc89:
+      - src/lib/idle-lane-accounting.ts:80 `idleLaneCauseOf` returns null whenever `busyLanes > 0`. Two empty lanes
+        beside one busy lane are "not idle".
+      - src/lib/daemon.ts:5536 samples `sampleIdleLane(admitted.length, ...)` once per dispatching tick. The tick
+        then awaits its lanes, often for an hour. Lanes that free and are held from refill inside that wait are
+        never sampled.
+      - IDLE_LANE_CAUSES (:19) has one `pause`, and `idleLaneCauseForStep` (:138) maps only `daemon.pause`, the wip
+        and queue governor, value refusals, admission and headroom. An operator's pause, a recycle drain, a
+        freshness restart latch, a phase bound and a boot gate are indistinguishable or unknown.
+      - Nothing is charged while no daemon process exists (between an exit and the next boot's first dispatch).
+  design: |
+    No threshold is involved. This task only measures, and the detector that judges it is a separate task.
+    1. THE UNIT IS A LANE-SLOT MINUTE. Idle slots = the lanes the daemon would fill right now (its own dispatch
+       capacity for this tick, the same figure the refill path uses) minus implement lanes in flight, while
+       dispatchable work exists. A busy lane never hides an empty one.
+    2. SAMPLE AT EVERY LANE CHANGE: a lane frees, a refill starts, a refill is held (with its reason), a tick
+       dispatches, a pause tick. Pass the in-flight lane count, not the tick's admitted count.
+    3. NAMED HOLDS. Causes grow to: operator_pause (a PAUSE whose reason is not the fleet's own automation),
+       recycle_drain (PAUSE "container recycle"), freshness_drain (stale code or a restart latch), phase_bound,
+       boot_gate, governor (wip, queue, cost, headroom), claim_race, value_refusal, selection_empty, restart, and
+       unknown. Map each from the step or refill-held reason the daemon already writes. Keep `unknown` unfolded.
+    4. RESTART IS CHARGED. At boot, the interval from the previous process's last idle sample in the ledger union
+       to this process's first dispatch is charged to `restart` (or `boot_gate` once the gate is up), at the
+       previous sample's busy count.
+    5. THE ROW. `lane.idle_summary` keeps its fields and meaning for display. It adds `capacity`,
+       `slot_minutes_by_cause` and `holds` (for each pause-type cause: reason, setter pid, session id and actor as
+       recorded on the PAUSE flag; W1-T7839 adds verified actor evidence later), so a detector can name the hold.
+    6. TRANSITIONS ARE ROWS. When the (cause, idle slots, hold) triple changes, ledger one `lane.idle_changed`
+       {cause, idle_slots, capacity, dispatchable, hold} row. Write it on change only, never per tick, so a detector
+       can measure any window exactly without hourly granularity.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Replay the 16:16-17:08 shape:
+    three lanes, one worker runs through, two free at 16:18 and 16:24, and refill is held by the recycle PAUSE
+    until 17:08.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/an-idle-lane-slot-names-the-hold-that-emptied-it.test.ts"
+    - claim: "two idle lanes beside one busy lane are charged"
+      proof: 'grep: test("W1-T8235: two idle lanes beside one busy lane are charged" in test/an-idle-lane-slot-names-the-hold-that-emptied-it.test.ts'
+    - claim: "a lane that frees inside a dispatching tick is sampled when it frees"
+      proof: 'grep: test("W1-T8235: a lane freed mid-tick is sampled when it frees" in test/an-idle-lane-slot-names-the-hold-that-emptied-it.test.ts'
+    - claim: "an operator pause and a recycle drain are charged to different causes"
+      proof: 'grep: test("W1-T8235: an operator pause and a recycle drain are different causes" in test/an-idle-lane-slot-names-the-hold-that-emptied-it.test.ts'
+    - claim: "a refill held for phase bound or stale code is charged to that cause"
+      proof: 'grep: test("W1-T8235: a held refill names its phase-bound or stale-code cause" in test/an-idle-lane-slot-names-the-hold-that-emptied-it.test.ts'
+    - claim: "the gap across a daemon restart is charged to restart"
+      proof: 'grep: test("W1-T8235: the gap across a restart is charged to restart" in test/an-idle-lane-slot-names-the-hold-that-emptied-it.test.ts'
+    - claim: "a change of cause or idle slots writes one lane.idle_changed row and an unchanged tick writes none"
+      proof: 'grep: test("W1-T8235: a hold change writes one lane\.idle_changed row" in test/an-idle-lane-slot-names-the-hold-that-emptied-it.test.ts'
+    - claim: "the 2026-10-11 recycle-drain replay charges its idle slots to recycle_drain"
+      proof: 'grep: test("W1-T8235: the recycle-drain replay is charged to recycle_drain" in test/an-idle-lane-slot-names-the-hold-that-emptied-it.test.ts'
+  falsifier: |
+    Keep `idleLaneCauseOf`'s busy>0 early return and the per-tick sample. The replay then charges 0 minutes, as the
+    live 17:14 row did, and the first and last tests fail. Keep the single `pause` cause and the third test cannot
+    tell the operator pause from the recycle drain.
