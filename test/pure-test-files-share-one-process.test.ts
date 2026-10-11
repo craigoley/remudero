@@ -204,7 +204,7 @@ test("unit test: --run fast spawns the pool with isolation off and the leftovers
   const [first, second] = calls as [string[], string[]];
   assert.ok(first.includes(pool.POOL_ISOLATION_FLAG));
   assert.ok(isJudgedRun(first), "the pool run is judged by its summary, not its exit status alone");
-  assert.ok(!isJudgedRun(second), "the shard's ordinary isolated rest is not a pool-ladder run");
+  assert.ok(isJudgedRun(second), "the shard's ordinary isolated rest is judged by its summary too");
   assert.deepEqual(first.filter((a) => a.endsWith(".test.ts")), ["test/a.test.ts", "test/b.test.ts"]);
   assert.ok(!second.includes(pool.POOL_ISOLATION_FLAG));
   assert.deepEqual(second.filter((a) => a.endsWith(".test.ts")), ["test/env.test.ts"]);

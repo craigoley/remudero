@@ -2361,6 +2361,10 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
       if (!threads) return;
       const classified = await inboxRead(deps, readPlanSnapshot);
       if (!classified) return void inboxNotReady(res);
+      if (classified.classifiedAt !== undefined && systemClock.now() - Date.parse(classified.classifiedAt) > INBOX_STALE_AFTER_MS) {
+        sendJson(res, 503, { error: "attention_snapshot_stale", detail: "The slow lane's Inbox classification is stale; a fresh classification is required before reporting current attention counts." });
+        return;
+      }
       const plan = classified.plan();
       const planSource = deps.readPlanSource?.();
       const ledger = await readLedgerUnionRecordsMemoized(dirname(deps.ledgerPath), attentionLedgerMemo(deps), {
