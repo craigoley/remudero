@@ -176,7 +176,6 @@ export function gitPushRunBranch(worktreePath: string, opts: PushRunBranchOpts =
 export interface PushRunBranchAsyncOpts extends Omit<PushRunBranchOpts, "capture" | "exec"> {
   exec?: PushExecAsync;
   capture?: GitCaptureAsync;
-  /** False only for a restart checkpoint: it opens no PR, and its resumed run's PR push still runs the gate. */
   prGates?: boolean;
 }
 
@@ -606,9 +605,7 @@ export function worktreePushExec(worktreePath: string): PushExec {
   };
 }
 
-/** {@link worktreePushExec} off the event loop. `prGates: false` skips the harness's pre-push gate, whose
- *  checks are the ones CI runs on a PR: a restart checkpoint opens none, and W1-T7742's census refusal of
- *  one discarded $3.98 of work its resumed run would have finished and pushed through the gate. */
+/** {@link worktreePushExec} off the event loop; `prGates: false` (a restart checkpoint, which opens no PR) skips the PR gate. */
 export function worktreePushExecAsync(worktreePath: string, { prGates = true }: { prGates?: boolean } = {}): PushExecAsync {
   return async (_file, args, opts) => {
     const pushArgs = leafArgs(worktreePath, args);
