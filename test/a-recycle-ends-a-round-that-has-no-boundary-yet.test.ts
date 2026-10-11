@@ -66,8 +66,8 @@ test("recycle-yield: a pending recycle ends a busy round on the checkpoint path"
   // No recycle pending: an active worker is left entirely alone.
   r.clock.ms = 1_000;
   await r.dog.tick();
-  assert.deepEqual(calls, []);
-  assert.deepEqual(r.rows, []);
+  assert.equal(calls.length, 0);
+  assert.equal(r.rows.length, 0);
 
   // The recycle's PAUSE appears while the worker is still talking: the round ends at the next tick, not at a boundary.
   pending = RECYCLE;
