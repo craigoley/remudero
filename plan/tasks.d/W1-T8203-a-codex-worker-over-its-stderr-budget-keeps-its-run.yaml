@@ -1,0 +1,64 @@
+- id: W1-T8203
+  title: "A CODEX WORKER OVER ITS STDERR BUDGET KEEPS ITS RUN — W1-T6352 made stdout's retention budget truncate instead of fail, but stderr still tears the worker down past the fixed CODEX_WORKER_STDERR_MAX_BYTES (256 KiB): W1-T7806's build ended `failed` at 2026-10-11T20:08:38Z on 277,986 bytes of stderr, its work discarded and charged as a worker failure"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — a diagnostic-stream size bound truncates the retained text and never decides the run
+  band_meaning: span
+  origin: "operator approval 2026-10-11 (coordinator follow-up during the restart-churn filing): live W1-T7806 failure 20:08:38Z"
+  plan_refs: [W1-T6352, W1-T4595, W1-T3490, W1-T3502, W1-T3787, W1-T7806]
+  files: [src/lib/worker-provider.ts, test/a-codex-worker-over-its-stderr-budget-keeps-its-run.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-11 (core ledger /mnt/rmd/state2/state/ledger.ndjson, a bounded niced tail grep, read-only):
+      20:08:38.912Z `worker.attempt` W1-T7806 run W1-T7806-1791749048467, success false, worker_failure
+        spawn-threw-before-result, error "Codex worker stderr output exceeded its 262144-byte retention budget".
+      20:08:38.913Z `verdict` failed, reason "Codex worker stderr output exceeded its 262144-byte retention budget
+        (277986 bytes observed)", stage worker.bounded_output, stream stderr, limit_bytes 262144, observed_bytes 277986.
+    W1-T7806 is a priority-1 restart-churn task. The run's work was discarded, and the failure counts toward the
+    task's breaker and stride, for 13,842 bytes of diagnostic output over a fixed constant.
+    READ on origin/main 233304449 (src/lib/worker-provider.ts):
+      - `CODEX_WORKER_STDERR_MAX_BYTES = 256 * 1024` (:1994), documented as "stderr is diagnostic evidence, not protocol
+        input, so it receives its own smaller containment ceiling".
+      - The spawn's stderr handler (:4988-4996) adds each chunk's bytes. Past that constant it calls
+        `exceedOutputBudget("stderr", ...)` (:4993), which builds a CodexWorkerOutputLimitError (reasonClass
+        bounded_output, :2030-2049) and tears down the worker's process group (:4975-4985). The run then ends `failed`.
+      - W1-T6352 (merged) fixed the same defect for STDOUT: past CODEX_WORKER_STDOUT_MAX_BYTES (:1989) stdout is
+        retained head and tail or spilled, an `outputTruncation` {limitBytes, retainedBytes, droppedBytes, spilledBytes}
+        is recorded (:2101-2150, ledgered at :5046-5050), and the worker's own exit decides the verdict. Its shard named
+        only stdout, so the stderr path kept the old failure. The stdout STREAM backstop (:1991, a runaway process at
+        64 MiB) is a separate question and is not changed here.
+  design: |
+    Operator rulings: no fixed byte constant decides a run's fate; any bound is a memory bound, derived and not
+    decisive.
+    1. STDERR TRUNCATES, NEVER FAILS. Past the stderr retention bound, keep the head and the tail of stderr (the
+       tail carries the final error) with an explicit marker naming the dropped byte count. Do not tear down the
+       worker. Its own exit and result decide the verdict, as W1-T6352 does for stdout.
+    2. Record it like stdout. A `stderrTruncation` {limitBytes, retainedBytes, droppedBytes} on the parsed result,
+       ledgered beside `output_truncation` on the run's receipt, so the size stays visible.
+    3. The retention bound is a memory bound only. Size it from what a run's stderr is used for (the failure tail
+       and the retro evidence), as a share of the stdout retention bound, not as a new independent constant. Nothing
+       compares stderr bytes to a number to choose a verdict.
+    4. A worker with no parseable result still fails as today. The truncation then rides on that failure's evidence.
+    Tests (new file, `test(` titles verbatim as in the proofs below) drive the Codex spawn with an injected contained
+    spawn that writes more stderr than the bound, then exits 0 with a valid result.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-codex-worker-over-its-stderr-budget-keeps-its-run.test.ts"
+    - claim: "a Codex worker whose stderr passes the bound and that exits with a valid result keeps its result"
+      proof: 'grep: test("W1-T8203: stderr over the bound keeps the worker result" in test/a-codex-worker-over-its-stderr-budget-keeps-its-run.test.ts'
+    - claim: "the retained stderr keeps the head and the tail and names the dropped bytes"
+      proof: 'grep: test("W1-T8203: retained stderr keeps head and tail with the dropped count" in test/a-codex-worker-over-its-stderr-budget-keeps-its-run.test.ts'
+    - claim: "the stderr truncation is recorded on the run's receipt"
+      proof: 'grep: test("W1-T8203: the stderr truncation is ledgered" in test/a-codex-worker-over-its-stderr-budget-keeps-its-run.test.ts'
+    - claim: "the worker process is not torn down for stderr volume"
+      proof: 'grep: test("W1-T8203: stderr volume never tears the worker down" in test/a-codex-worker-over-its-stderr-budget-keeps-its-run.test.ts'
+  falsifier: |
+    Keep the stderr handler as on main: the first test's worker is torn down at the bound and the spawn rejects with
+    CodexWorkerOutputLimitError stream stderr, so no result is returned. Truncate from the tail only: the second
+    test's final error line is missing from the retained stderr.

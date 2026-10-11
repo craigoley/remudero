@@ -6824,13 +6824,28 @@ export interface MainHealthRunHistoryEntry {
 }
 
 export interface MainHealthFirstRedCommit {
+  /** The oldest commit after the last green whose CI COMPLETED red: a cancelled run is never named. */
   readonly headSha: string;
+  /** The newest commit whose CI completed green before it. */
   readonly afterGreenSha: string;
   readonly runUrl?: string;
   readonly pullRequest?: MainHealthPullRequestRef;
+  /** W1-T7760 — the UNATTRIBUTED span: first-parent commits strictly between `afterGreenSha` and
+   *  `headSha` that have no completed verdict, newest first. Present only when main's first-parent
+   *  chain was supplied; empty means `headSha` is the first red, non-empty means any of them may be. */
+  readonly span?: readonly string[];
+}
+
+/** W1-T7760 — what bounds the first-red walk: the workflows that carry required checks, and main's
+ *  first-parent commits (newest first) from `headSha` back to at least `afterGreenSha`. */
+export interface MainHealthFirstRedOptions {
+  readonly requiredWorkflows?: ReadonlySet<string>;
+  readonly firstParentOrder?: readonly string[];
 }
 
 export interface MainHealthEnrichment {
+  /** W1-T7760: workflows learned to carry required checks; the first-red walk reads only their runs. */
+  readonly requiredWorkflows?: ReadonlySet<string>;
   readonly ciFailures?: readonly CiFailure[];
   readonly ciFailuresUnavailable?: string;
   readonly runHistory?: readonly MainHealthRunHistoryEntry[];
@@ -6884,13 +6899,36 @@ export function mainHealthFailingTestTitles(
 /** A run that concluded red about the tree. A CANCELLED (or skipped, or stale) run concluded nothing,
  *  so it is never the first red: 63 of main's newest 100 CI runs on 2026-10-10 were cancelled while
  *  pending, and counting them named a new innocent "offending merge" on every pass. */
-function mainRunConcludedRed(run: MainHealthRunHistoryEntry): boolean {
+export function mainRunConcludedRed(run: MainHealthRunHistoryEntry): boolean {
   return mainRunIsVerdict(run) && mainHealthFailureConclusion(run.conclusion);
 }
 
-export function mainHealthFirstRedCommitFromRunHistory(
+/** W1-T7760 — the first-parent commits strictly between `afterGreenSha` and `headSha` (newest first)
+ *  that have NO completed verdict in `history`: every one of them may be where main turned red.
+ *  Undefined when `order` does not hold both ends, because a span that was not read is not an empty one. */
+export function mainHealthUnattributedSpan(
+  order: readonly string[],
+  boundary: Pick<MainHealthFirstRedCommit, "headSha" | "afterGreenSha">,
   history: readonly MainHealthRunHistoryEntry[],
+): string[] | undefined {
+  const redAt = order.indexOf(boundary.headSha);
+  const greenAt = order.indexOf(boundary.afterGreenSha);
+  if (redAt < 0 || greenAt <= redAt) return undefined;
+  const concluded = new Set(history.filter(mainRunIsVerdict).map((run) => run.headSha));
+  return order.slice(redAt + 1, greenAt).filter((sha) => !concluded.has(sha));
+}
+
+export function mainHealthFirstRedCommitFromRunHistory(
+  allHistory: readonly MainHealthRunHistoryEntry[],
+  options: MainHealthFirstRedOptions = {},
 ): MainHealthFirstRedCommit | "window-exhausted" | undefined {
+  // Only a workflow that carries required checks can say a commit is green or red: CodeQL going
+  // green on a commit whose CI was cancelled is not a green main.
+  const workflows = options.requiredWorkflows;
+  const history =
+    workflows && workflows.size > 0
+      ? allHistory.filter((run) => run.workflowName === undefined || workflows.has(run.workflowName))
+      : allHistory;
   if (!history.some(mainRunConcludedRed)) return undefined;
   if (!history.some((run) => mainHealthSuccessConclusion(run.conclusion))) return "window-exhausted";
   let greenSha: string | undefined;
@@ -6901,11 +6939,13 @@ export function mainHealthFirstRedCommitFromRunHistory(
     }
     if (greenSha && mainRunConcludedRed(run)) {
       const [pullRequest] = run.pullRequests ?? [];
+      const boundary = { headSha: run.headSha, afterGreenSha: greenSha };
+      const span = options.firstParentOrder ? mainHealthUnattributedSpan(options.firstParentOrder, boundary, history) : undefined;
       return {
-        headSha: run.headSha,
-        afterGreenSha: greenSha,
+        ...boundary,
         ...(run.url ? { runUrl: run.url } : {}),
         ...(pullRequest ? { pullRequest } : {}),
+        ...(span ? { span } : {}),
       };
     }
   }
@@ -6936,7 +6976,9 @@ export function enrichMainHealthObservation(
   let firstRedCommit: MainHealthFirstRedCommit | undefined;
   let runHistoryWindowExhausted: boolean | undefined;
   if (enrichment.runHistory) {
-    const boundary = mainHealthFirstRedCommitFromRunHistory(enrichment.runHistory);
+    const boundary = mainHealthFirstRedCommitFromRunHistory(enrichment.runHistory, {
+      ...(enrichment.requiredWorkflows ? { requiredWorkflows: enrichment.requiredWorkflows } : {}),
+    });
     if (boundary === "window-exhausted") {
       runHistoryWindowExhausted = true;
     } else {
@@ -6987,7 +7029,7 @@ export const MAIN_GUARD_WORKFLOWS: ReadonlySet<string> = new Set(["main-plan-gua
 /** A superseded, skipped or stale run concluded nothing about the tree. */
 const MAIN_RUN_NON_VERDICT: ReadonlySet<string> = new Set(["CANCELLED", "SKIPPED", "STALE"]);
 
-function mainRunIsVerdict(run: MainHealthRunHistoryEntry): boolean {
+export function mainRunIsVerdict(run: MainHealthRunHistoryEntry): boolean {
   const conclusion = (run.conclusion ?? "").toUpperCase();
   return conclusion !== "" && !MAIN_RUN_NON_VERDICT.has(conclusion);
 }
