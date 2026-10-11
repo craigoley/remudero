@@ -114,7 +114,7 @@ test("W1-T7755: stalled source reads terminate with unknown evidence within the 
   const attempt = executeAdmissionDisposition({ settings: short, target }, store,
     () => new Promise(() => {}), () => {}, clock, sim.simulation);
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const result = await Promise.race([attempt, new Promise<undefined>(resolve => { timer = setTimeout(resolve, 200); })]);
+  const result = await Promise.race([attempt, new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), 200); })]);
   if (timer !== undefined) clearTimeout(timer);
   assert.notEqual(result, undefined, "a source that never settles cannot retain the observer lane");
   assert.ok(result);
@@ -483,7 +483,7 @@ test("W1-T7755: stalled disposable acknowledgements retain intent and terminate 
     for (let i = 0; i < 4; i++) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       result = await Promise.race([executeAdmissionDisposition({ settings: short, target }, store, source(), () => {}, clock, simulation),
-        new Promise<undefined>(resolve => { timer = setTimeout(resolve, 200); })]);
+        new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), 200); })]);
       if (timer !== undefined) clearTimeout(timer);
       assert.ok(result, `${stalled} must not leave the observer waiting indefinitely`);
     }
