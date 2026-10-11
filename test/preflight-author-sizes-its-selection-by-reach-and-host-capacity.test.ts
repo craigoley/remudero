@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -152,6 +154,44 @@ test("W1-T7809: the same selection fits a larger host and not a smaller one", ()
   assert.ok(shortStep.budgetMs < large.budgetMs);
   // An unmeasured file is never free: it prices at the manifest median, floor above zero.
   assert.ok(author.capacityVerdict(["test/unknown.test.ts"], { files: {} }, large).costMs > 0);
+});
+
+test("W1-T7809: a plan-only selection that names no suite runs no tests and says plan lint is its check", (t) => {
+  const f = fixture({ planOnly: true });
+  const select = () => ({ fullRun: false, planOnly: true, lintPlanFast: true, suites: [], reasons: ["fixture"], recentOnly: { floor: [] } });
+  const { status, output } = run(t as never, f.root, { select });
+  assert.equal(status, 0);
+  const receipt = f.receipt();
+  assert.equal(receipt.selection, "plan-only");
+  assert.match(receipt.affectedTestsNotRunReason, /plan-only selection named no suite/);
+  assert.match(output, /affected-tests: NOT RUN — the plan-only selection named no suite; lint-plan-fast is the check/);
+  assert.deepEqual(receipt.steps.map((s: { name: string }) => s.name), ["census-precheck", "static-preflight", "lint-plan-fast"]);
+});
+
+test("W1-T7809: an unreadable plan-only listing is a named full run, never a narrower guess", () => {
+  const selection = affected.planOnlySelectionOrFull([SHARD], () => { throw new Error("listing exploded"); });
+  assert.equal(selection.fullRun, true);
+  assert.deepEqual(selection.suites, []);
+  assert.equal(selection.planOnly, undefined);
+  assert.equal(selection.reasons.length, 1);
+  assert.match(selection.reasons[0], /full run: the plan-only listing could not be read — listing exploded/);
+  assert.deepEqual(selection.recentOnly.floor, []);
+});
+
+test("W1-T7809: diff-class --list-plan-only-suites prints nothing and exits 1 when the listing cannot be read", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-plan-only-fail-"));
+  try {
+    const list = join(dir, "changed.txt");
+    writeFileSync(list, SHARD + "\n");
+    const r = spawnSync(process.execPath, ["--import", "tsx", join(ROOT, "scripts/diff-class.mjs"), "--list-plan-only-suites",
+      "--changed-files", list, "--plan-reading-root", join(dir, "does-not-exist")], { cwd: ROOT, encoding: "utf8" });
+    assert.equal(r.status, 1);
+    assert.equal(r.stdout, "");
+    assert.match(r.stderr, /diff-class: FAILED to enumerate the plan-only suite set/);
+    assert.match(r.stderr, /printing NOTHING — a caller reading zero lines here must fail closed\./);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("W1-T7809: an over-capacity receipt never records the affected tests as passed", (t) => {
