@@ -53,6 +53,9 @@ interface InvariantRule {
   id: string;
   /** The long window's width; the short confirmation window is always 1/12th of this. */
   longMs: number;
+  /** W1-T8233: the ledger steps `bad` reads. A census asserts each has a writer outside this module, so a
+   *  rule can never again watch a step nothing writes. */
+  inputs: readonly string[];
   bad: (window: readonly IncidentInvariantRow[]) => RuleVerdict;
 }
 
@@ -107,18 +110,30 @@ export const LEGACY_RELIEF_HEADROOM = 0.25;
 /** The `dispatch.settled_set` step (dispatch-overlap.ts's `settledSetPayload`) already reports a
  *  `fulfilled` count per pass; this rule sums it across the window rather than re-deriving it. */
 const DISPATCH_SETTLED_SET_STEP = "dispatch.settled_set";
-/** Not yet ledgered by any writer in this repo (a queue-depth-by-priority snapshot is W1-T4385's
- *  own follow-up) — this rule reads the row shape it needs and simply never fires until something
- *  ledgers one, exactly like every other rule here degrades to "no evidence, no fire" on a cold
- *  ledger. */
-const QUEUE_PRIORITY_SNAPSHOT_STEP = "queue.priority_snapshot";
+/** W1-T8233: dispatch-stall used to read `queue.priority_snapshot`, which nothing ever wrote, so the rule
+ *  could not fire (2026-10-11: a 52-minute recycle hold and four core pauses passed silently). It now reads
+ *  the daemon's own hold rows — each says dispatchable work was being held back — and the implement
+ *  `run.start` rows that prove work began. */
+const RUN_START_STEP = "run.start";
+const IMPLEMENT_RUN_TYPE = "implement";
+const DAEMON_PAUSE_STEP = "daemon.pause";
+const LANE_REFILL_HELD_STEP = "dispatch.lane_refill_held";
+const LANE_IDLE_SUMMARY_STEP = "lane.idle_summary";
+/** W1-T4102's `EventLoopLag` reading (daemon-health.ts), ledgered once a minute (declared before the rule
+ *  table because a rule's `inputs` read it at module load). */
+export const RUNTIME_LOOP_LAG_STEP = "runtime.loop_lag";
 
 // PRIMARY CONTROL: the loop-lag rule's own bad/good line. W1-T4102's own bound: "a bare 401 took
 // 1-20s" was already the incident; 500ms p99 is well inside "fine" and well outside "the event
 // loop is fine."
 export const LOOP_LAG_P99_BOUND_MS = 500;
 
-const MERGE_READY_STEP = "queue.merge_ready";
+/** W1-T8233: green work waiting is the sweep's own `sweep.disposed` row with the awaiting-arm blocker
+ *  (`queue.merge_ready` was never written). Merges are ledgered as `verdict.merged`; `pr.merged` is kept
+ *  as a second witness. */
+const SWEEP_DISPOSED_STEP = "sweep.disposed";
+const AWAITING_ARM_BLOCKER = "awaiting-arm";
+const VERDICT_MERGED_STEP = "verdict.merged";
 const MERGE_STEP = "pr.merged";
 
 /** The serve.memory rows in `window` that read a headroom: a null one (no cgroup) is no evidence. */
@@ -135,22 +150,30 @@ const RULES: readonly InvariantRule[] = [
     // so a rule bound to a single miss would fire on ordinary dispatch spacing — this needs a
     // window wide enough that a truly quiet queue is the only way to read fulfilled=0 throughout.
     longMs: 2 * 60 * 60_000,
+    inputs: [DAEMON_PAUSE_STEP, LANE_REFILL_HELD_STEP, LANE_IDLE_SUMMARY_STEP, RUN_START_STEP, DISPATCH_SETTLED_SET_STEP],
     bad: (window) => {
-      const queuedPriorityOne = window
-        .filter((row) => row.step === QUEUE_PRIORITY_SNAPSHOT_STEP)
-        .reduce((max, row) => Math.max(max, numberField(row, "queuedPriority1")), 0);
+      const held = window.filter(
+        (row) =>
+          row.step === DAEMON_PAUSE_STEP ||
+          row.step === LANE_REFILL_HELD_STEP ||
+          (row.step === LANE_IDLE_SUMMARY_STEP && numberField(row, "idle_minutes") > 0),
+      ).length;
+      const implementStarts = window.filter(
+        (row) => row.step === RUN_START_STEP && row.type === IMPLEMENT_RUN_TYPE,
+      ).length;
       const fulfilled = window
         .filter((row) => row.step === DISPATCH_SETTLED_SET_STEP)
         .reduce((sum, row) => sum + numberField(row, "fulfilled"), 0);
       return {
-        bad: queuedPriorityOne > 0 && fulfilled === 0,
-        message: `queued priority-1 tasks=${queuedPriorityOne}, fulfilled dispatches=${fulfilled}`,
+        bad: held > 0 && implementStarts === 0 && fulfilled === 0,
+        message: `dispatch hold rows=${held}, implement run starts=${implementStarts}, fulfilled dispatches=${fulfilled}`,
       };
     },
   },
   {
     id: REPEATED_REFUSAL_RULE_ID,
     longMs: 30 * 60_000,
+    inputs: ["*_refused"],
     bad: (window) => {
       const counts = new Map<string, { step: string; reason: string; count: number }>();
       for (const row of window) {
@@ -179,6 +202,7 @@ const RULES: readonly InvariantRule[] = [
     // Fifteen minutes, sampled once a minute (serve.ts's timer) — enough samples that one noisy
     // minute cannot alone carry both the long AND the short (75s) window.
     longMs: 15 * 60_000,
+    inputs: [RUNTIME_LOOP_LAG_STEP],
     bad: (window) => {
       const p99s = window
         .filter((row) => row.step === RUNTIME_LOOP_LAG_STEP)
@@ -193,11 +217,16 @@ const RULES: readonly InvariantRule[] = [
   {
     id: NO_MERGES_WITH_GREEN_QUEUE_RULE_ID,
     longMs: 4 * 60 * 60_000,
+    inputs: [SWEEP_DISPOSED_STEP, VERDICT_MERGED_STEP, MERGE_STEP],
     bad: (window) => {
-      const greenQueued = window
-        .filter((row) => row.step === MERGE_READY_STEP)
-        .reduce((max, row) => Math.max(max, numberField(row, "count")), 0);
-      const merges = window.filter((row) => row.step === MERGE_STEP).length;
+      const awaitingArm = new Set<string>();
+      for (const row of window) {
+        if (row.step !== SWEEP_DISPOSED_STEP || row.blocker !== AWAITING_ARM_BLOCKER) continue;
+        const pr = row.pr_number;
+        awaitingArm.add(typeof pr === "number" || typeof pr === "string" ? String(pr) : "unknown");
+      }
+      const greenQueued = awaitingArm.size;
+      const merges = window.filter((row) => row.step === VERDICT_MERGED_STEP || row.step === MERGE_STEP).length;
       return {
         bad: greenQueued > 0 && merges === 0,
         message: `green-queued=${greenQueued}, merges=${merges}`,
@@ -209,6 +238,7 @@ const RULES: readonly InvariantRule[] = [
     // Short window = 1.5 sample periods, so it holds the latest sample even when the timer drifts.
     // It reads headroom alone: a relief with nothing to drop is exactly the case that must still fire.
     longMs: 18 * SERVE_MEMORY_SAMPLE_MS,
+    inputs: [SERVE_MEMORY_STEP, SERVE_MEMORY_RELIEVED_STEP],
     bad: (window) => {
       const readings = headroomReadings(window);
       const best = readings.length > 0 ? Math.max(...readings) : 1;
@@ -228,6 +258,7 @@ const RULES: readonly InvariantRule[] = [
     // measured non-stall gap is 12.3 min). A row in the window (serve's own minute row, which also
     // lands in the 75s short window) proves the ledger is live; an empty ledger is no evidence.
     longMs: 15 * 60_000,
+    inputs: [`${DAEMON_STEP_PREFIX}*`, RUNTIME_LOOP_LAG_STEP],
     bad: (window) => {
       const daemonRows = window.filter((row) => stringField(row, "step")?.startsWith(DAEMON_STEP_PREFIX));
       const newest = window.at(-1);
@@ -241,6 +272,12 @@ const RULES: readonly InvariantRule[] = [
     },
   },
 ];
+
+/** W1-T8233: every rule id and the ledger steps its `bad` reads (a trailing `*` is a step prefix, a leading
+ *  `*` a suffix), for the census that asserts each has a writer. */
+export const INCIDENT_RULE_INPUTS: Readonly<Record<string, readonly string[]>> = Object.fromEntries(
+  RULES.map((rule) => [rule.id, rule.inputs]),
+);
 
 /**
  * Evaluate every rule over `rows` at instant `nowMs`. A rule fires (and appears in the returned
@@ -287,9 +324,6 @@ export function invariantFindingLedgerLine(finding: InvariantFinding, nowMs: num
 }
 
 // ── event-loop lag (design (i)) ──────────────────────────────────────────────────────────────
-
-/** W1-T4102's `EventLoopLag` reading (daemon-health.ts), ledgered once a minute. */
-export const RUNTIME_LOOP_LAG_STEP = "runtime.loop_lag";
 
 /** One {@link EventLoopLag} reading as the `runtime.loop_lag` ledger row serve.ts's timer
  *  appends — the design's "ledger `runtime.loop_lag` p99 once a minute", reusing the SAME
