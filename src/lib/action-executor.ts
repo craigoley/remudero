@@ -365,7 +365,7 @@ export async function executeAdmissionDisposition(
   };
   const terminal = async (reason: string) => result("owner-action", reason, await commit("owner-action", reason, "terminal"));
   try {
-    if (last?.status === "simulated-closed" || last?.status === "noop") return result(last.status, last.reason, last);
+    if (last?.status === "simulated-closed" || last?.status === "noop") return result(last.status, last.reason, last, "retained");
     if (request.ownerInstructionId !== undefined) {
       if (!positiveId(request.ownerInstructionId)) return result("owner-action", "invalid-owner-instruction", last);
       const preflight = await dispositionPreflight(settings, target, read, clock);
@@ -382,12 +382,16 @@ export async function executeAdmissionDisposition(
         return result("owner-action", "owner-instruction-unverified", last);
       }
       const final = await dispositionPreflight(settings, target, read, clock);
-      if (!final.assessment || final.binding !== preflight.binding || dispositionHash(settings) !== policy) {
+      const finalInstruction = await read(`repos/${target.owner}/${target.repo}/issues/comments/${request.ownerInstructionId}`);
+      if (!final.assessment || final.binding !== preflight.binding || dispositionHash(settings) !== policy
+        || finalInstruction.status !== 200 || dispositionHash(finalInstruction.body) !== dispositionHash(instruction)) {
         return result("owner-action", "owner-target-changed", last);
       }
-      return result("adopted", "owner-current-head-adoption", await commit("adopted", "owner-current-head-adoption", "terminal", {}, final.itemId, final.assessment.subject.headSha));
+      return result("adopted", "owner-current-head-adoption", await commit("adopted", "owner-current-head-adoption", "terminal", {}, final.itemId, final.assessment.subject.headSha), "fresh");
     }
-    if (last?.status === "owner-action") return result("owner-action", last.reason, last);
+    if (last?.status === "owner-action" || last?.status === "trusted" || last?.status === "would-close" || last?.status === "adopted") {
+      return result(last.status, last.reason, last, "retained");
+    }
     const escalateSimulation = async (): Promise<AdmissionDispositionResult> => {
       const intent = await commit("pending", "simulated-escalation-intent", "escalation", { escalationAttempts: 1 });
       try { await simulation!.simulateEscalation(intent); }
@@ -420,9 +424,9 @@ export async function executeAdmissionDisposition(
         : result("pending", preflight.reason, await commit("pending", preflight.reason, "identity"));
     }
     if (preflight.status === "trusted" || preflight.status === "noop") {
-      return result(preflight.status, preflight.reason, await commit(preflight.status, preflight.reason, "terminal", {}, preflight.itemId, preflight.assessment?.subject.headSha));
+      return result(preflight.status, preflight.reason, await commit(preflight.status, preflight.reason, "terminal", {}, preflight.itemId, preflight.assessment?.subject.headSha), "fresh");
     }
-    if (!simulation) return result("would-close", preflight.reason, await commit("would-close", preflight.reason, "terminal", {}, preflight.itemId, preflight.assessment?.subject.headSha));
+    if (!simulation) return result("would-close", preflight.reason, await commit("would-close", preflight.reason, "terminal", {}, preflight.itemId, preflight.assessment?.subject.headSha), "fresh");
     const intent = await commit("pending", "simulated-close-intent", "close", { closeAttempts: 1 }, preflight.itemId, preflight.assessment?.subject.headSha);
     const current = await dispositionPreflight(settings, target, read, clock);
     if (current.status !== "would-close" || current.binding !== preflight.binding || dispositionHash(settings) !== policy) {
