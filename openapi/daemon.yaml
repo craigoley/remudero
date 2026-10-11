@@ -6540,6 +6540,82 @@ components:
           enum: [not_collected]
         spend:
           type: "null"
+        opportunityEvidence:
+          $ref: "#/components/schemas/GardenerOpportunityEvidence"
+
+    GardenerOpportunityEvidence:
+      description: >
+        Independent saved opportunity registry, not the registered off-loop gardener inventory.
+        All counts are stored classifications, not newly verified PR/deployment/benefit evidence.
+        No cost or causal improvement claim is made. Missing, mixed, invalid or oversized
+        registries are unavailable, not zero. Empty arrays have no reconciliation timestamp.
+      oneOf:
+        - $ref: "#/components/schemas/GardenerOpportunityReport"
+        - $ref: "#/components/schemas/GardenerOpportunityUnavailable"
+
+    GardenerOpportunityReport:
+      type: object
+      required: [version, repository, readAt, coverage, countSemantics, state, total, counts, oldestReconciledAt, latestReconciledAt]
+      properties:
+        version:
+          type: integer
+          enum: [1]
+        repository:
+          type: string
+        readAt:
+          type: string
+          format: date-time
+        coverage:
+          type: string
+          enum: [saved-opportunity-registry]
+        countSemantics:
+          type: string
+          enum: [reported_states_not_verified_outcomes]
+        state:
+          type: string
+          enum: [reported]
+        total:
+          type: integer
+          minimum: 0
+          maximum: 512
+        counts:
+          type: object
+          required: [pending, filed, merged, deployed, measured-helped, measured-hurt, expired, unavailable]
+          additionalProperties:
+            type: integer
+            minimum: 0
+            maximum: 512
+        oldestReconciledAt:
+          type: [string, "null"]
+          format: date-time
+        latestReconciledAt:
+          type: [string, "null"]
+          format: date-time
+
+    GardenerOpportunityUnavailable:
+      type: object
+      required: [version, repository, readAt, coverage, countSemantics, state, reason]
+      properties:
+        version:
+          type: integer
+          enum: [1]
+        repository:
+          type: [string, "null"]
+        readAt:
+          type: string
+          format: date-time
+        coverage:
+          type: string
+          enum: [saved-opportunity-registry]
+        countSemantics:
+          type: string
+          enum: [reported_states_not_verified_outcomes]
+        state:
+          type: string
+          enum: [unavailable]
+        reason:
+          type: string
+          enum: [scope_unavailable, not_collected, unreadable, malformed, oversized, repository_mismatch, clock_skew, corpus_changed]
 
     GardenersUnavailable:
       type: object
@@ -15842,6 +15918,8 @@ paths:
         /v1/i/{instance}/gardeners reads that instance's state and verifies repository identity.
         Missing telemetry is 503 not_collected, never an empty or healthy inventory. No ledger
         scan, GitHub query, model invocation, or control mutation occurs during this read.
+        Optional opportunityEvidence reads only the independent persisted opportunity registry
+        with a 512 KiB/512-row bound and its own reconciliation timestamps and limitations.
       security:
         - bearerRead: []
       responses:

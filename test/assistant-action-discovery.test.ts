@@ -2,7 +2,7 @@
 // interrupted assistant control action — read-only, actor- and target-scoped, bounded — and
 // nothing it reads ever prepares, retries or dispatches an action.
 import assert from "node:assert/strict";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFileSync, spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -388,17 +388,22 @@ test("assistant discovery bounds files, time and page size and its continuations
 
   const immediate = t.mock.method(globalThis, "setImmediate");
   const yielding = await readAssistantActionDiscovery({ ...base, budget: { yieldEvery: 1 } });
-  assert.equal(immediate.mock.callCount(), ids.length - 1, "each inter-file boundary yields to the event loop");
+  assert.equal(immediate.mock.callCount(), 2 * (ids.length - 1), "each inter-entry and inter-file boundary yields to the event loop");
   assert.deepEqual(yielding.pending, whole.pending, "cooperative yields preserve every discovered action");
   assert.equal(yielding.completeness, "complete");
   assert.deepEqual(yielding.limitations, []);
   assert.equal(yielding.continuation, null);
   immediate.mock.restore();
 
+  // This case exercises file-read time after a complete listing. Enumeration deadlines have
+  // their own receipt-only falsifier; advancing on every clock call would stop that phase first.
+  let elapsed = 0;
+  const readingClock = clockFromMillisFn(() => elapsed);
+  const timedOpen = async (path: string) => { const handle = await open(path, "r"); elapsed += 1000; return handle; };
   for (const [label, extra, limitation] of [
     ["file budget", { budget: { maxFiles: 2 } }, "file_budget"],
     ["page size", { limit: 3 }, "page_size"],
-    ["time budget", { budget: { maxElapsedMs: 1_500 }, clock: clockFromMillisFn((() => { let t = 0; return () => (t += 1_000); })()) }, "time_budget"],
+    ["time budget", { budget: { maxElapsedMs: 1_500 }, clock: readingClock, openFile: timedOpen }, "time_budget"],
     ["byte budget", { budget: { maxTotalBytes: 1 } }, "byte_budget"],
   ] as const) {
     const seen: string[] = [];
@@ -453,6 +458,70 @@ test("assistant discovery marks a capped directory listing partial without a con
     assert.equal(capped.continuation, null, "an arbitrary listing subset has no stable continuation");
     assert.equal(capped.verifiedEmpty, false, "even a zero-entry listing cannot certify an empty store");
   }
+});
+
+test("assistant discovery listing budget counts receipts temporary files and unknown entries", async (t) => {
+  for (const suffix of [".receipt.json", ".receipt.json.00000000-0000-0000-0000-000000000000.tmp", ".unknown"]) {
+    const shared = root();
+    t.after(() => rmSync(shared, { recursive: true, force: true }));
+    const dir = claimsDir(shared); mkdirSync(dir, { recursive: true });
+    for (let i = 0; i < 12; i++) writeFileSync(join(dir, `${key(`listing-entry-${i}`)}${suffix}`), "{}");
+    const request = { claimRoot: shared, actorHash: actorHash("operator:test"), instance: "core", repository: null };
+    const whole = await readAssistantActionDiscovery({ ...request, budget: { maxListed: 12 } });
+    assert.ok(!whole.limitations.includes("corpus_over_listing_bound"), "the exact-bound corpus is completely enumerable");
+    if (suffix !== ".unknown") assert.equal(whole.verifiedEmpty, true, "a complete receipt-only corpus is the positive control");
+    const capped = await readAssistantActionDiscovery({ ...request, budget: { maxListed: 2 } });
+    assert.equal(capped.completeness, "partial");
+    assert.ok(capped.limitations.includes("corpus_over_listing_bound"));
+    assert.equal(capped.verifiedEmpty, false); assert.equal(capped.continuation, null);
+    assert.deepEqual(controlRows(shared), [], "enumeration never performs an action");
+  }
+});
+
+test("assistant discovery elapsed budget bounds receipt-only directory enumeration", async (t) => {
+  const shared = root(); t.after(() => rmSync(shared, { recursive: true, force: true }));
+  const dir = claimsDir(shared); mkdirSync(dir, { recursive: true });
+  for (let i = 0; i < 12; i++) writeFileSync(join(dir, `${key(`elapsed-entry-${i}`)}.receipt.json`), "{}");
+  const request = { claimRoot: shared, actorHash: actorHash("operator:test"), instance: "core", repository: null };
+  assert.equal((await readAssistantActionDiscovery(request)).verifiedEmpty, true);
+  let ticks = 0;
+  const capped = await readAssistantActionDiscovery({ ...request, budget: { maxElapsedMs: 2 }, clock: clockFromMillisFn(() => ++ticks) });
+  assert.equal(capped.completeness, "partial"); assert.ok(capped.limitations.includes("time_budget"));
+  assert.ok(capped.limitations.includes("unverifiable_entries"));
+  assert.equal(capped.verifiedEmpty, false); assert.equal(capped.continuation, null);
+});
+
+test("assistant discovery cooperatively yields while enumerating receipts without claims", async (t) => {
+  const shared = root(); t.after(() => rmSync(shared, { recursive: true, force: true }));
+  const dir = claimsDir(shared); mkdirSync(dir, { recursive: true });
+  for (let i = 0; i < 8; i++) writeFileSync(join(dir, `${key(`yield-entry-${i}`)}.receipt.json`), "{}");
+  const immediate = t.mock.method(globalThis, "setImmediate");
+  const result = await readAssistantActionDiscovery({ claimRoot: shared, actorHash: actorHash("operator:test"), instance: "core", repository: null,
+    budget: { yieldEvery: 1 } });
+  assert.equal(result.verifiedEmpty, true);
+  assert.equal(immediate.mock.callCount(), 7, "every inter-entry boundary yields even when there are no claim files to read");
+  immediate.mock.restore();
+});
+
+test("assistant discovery refuses a real claim named pipe without waiting for a writer", async (t) => {
+  const shared = root(); t.after(() => rmSync(shared, { recursive: true, force: true }));
+  const dir = claimsDir(shared); mkdirSync(dir, { recursive: true });
+  const actionId = "fifo-discovery-01", path = join(dir, `${key(actionId)}.claim.json`);
+  const request = { claimRoot: shared, actorHash: actorHash("operator:test"), instance: "core", repository: null };
+  writeFileSync(path, JSON.stringify({ version: "assistant-claim-v2", actionId, action: "pause", actorHash: request.actorHash,
+    instance: "core", repository: null, submittedAt: new Date().toISOString(), fingerprint: "f".repeat(64) }));
+  assert.deepEqual((await readAssistantActionDiscovery(request)).pending.map(row => row.actionId), [actionId], "regular claim is the positive control");
+  rmSync(path); execFileSync("mkfifo", [path]);
+  const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval",
+    `import { readAssistantActionDiscovery } from "./src/lib/assistant-action-discovery.ts";
+     console.log(JSON.stringify(await readAssistantActionDiscovery(${JSON.stringify(request)})));`],
+    { cwd: process.cwd(), encoding: "utf8", timeout: 5000 });
+  assert.equal(child.error, undefined, "nonregular claim must not block in open before stat can reject it");
+  assert.equal(child.status, 0, child.stderr);
+  const result: AssistantActionDiscovery = JSON.parse(child.stdout);
+  assert.equal(result.completeness, "partial"); assert.deepEqual(result.limitations, ["unreadable_entries"]);
+  assert.deepEqual(result.pending, []); assert.equal(result.verifiedEmpty, false);
+  assert.deepEqual(controlRows(shared), []);
 });
 
 test("assistant discovery rejects invalid page limits with a private response", async (t) => {
