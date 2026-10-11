@@ -2856,7 +2856,7 @@ function assembleServeRoutes(
   const hostLegacy = hostLegacyView({ control: controlStatusDeps, account: accountUsageDeps, providerRouting: { root: deps.fleetControlRoot, ...deps.providerRouting }, skillsRoot: deps.questionsRoot },
     () => readModel?.body(HOST_VIEW_NAME)?.body.data as HostViewData | undefined);
   // W1-T5055: the analytics view's legacy side merges serve's own per-instance caches, as the worker merges their snapshots.
-  const analyticsLegacy = analyticsLegacyView({ scopes: () => navBadgeScopes().map((scope) => ({ instanceId: scope.instanceId, analytics: scope.analytics })) });
+  const analyticsLegacy = analyticsLegacyView({ scopes: () => navBadgeScopes().map((scope) => ({ instanceId: scope.instanceId, repository: scope.repository, analytics: scope.analytics })) });
   // The shadow compares the worker's badge with the undecorated legacy one; only the served badge carries decisions.
   const shadowed = withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name], onServed: routeReads.served,
     readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME, TASK_VIEW_NAME],
