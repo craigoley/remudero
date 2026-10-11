@@ -42,6 +42,7 @@ function run(
   delete env.GITHUB_ACTIONS;
   delete env.NODE_TEST_CONTEXT;
   delete env.BASE_SHA;
+  env.NODE_V8_COVERAGE = ""; // delete is a no-op under a coverage session; blank it so the child never enrols
   for (const [k, v] of Object.entries(envOverrides)) {
     if (v === undefined) delete env[k];
     else env[k] = v;
