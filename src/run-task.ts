@@ -48913,7 +48913,7 @@ export async function feedbackReconcileCommand(rest: string[], configOverride?: 
     ledgerLines: () => readLedgerLines(ledgerPath),
     ...(reconcileConfig.contributorAdmission === undefined ? {} : { land: (root: string, relPath: string, content: string, opts: LandFeedbackOpts) =>
       landFeedbackStatusContent(root, relPath, content, { ...opts, publication: { mode: "shadow", record: (step, fields) =>
-        appendLedger(ledgerPath, { step, task_id: "FEEDBACK-RECONCILE", run_id: "feedback-reconcile", ...fields }) } }) }),
+        appendLedger(ledgerPath, { step, task_id: "CLI", run_id: "feedback-reconcile", ...fields }) } }) }),
   });
   console.log(renderFeedbackReconcile(result, apply));
   if (result.error) {
