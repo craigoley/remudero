@@ -1,0 +1,82 @@
+- id: W1-T8038
+  title: "A SHARD CANCELLED AT ITS TIMEOUT REACHES THE FIX WORKER WITH NO SIGNATURE — on 2026-10-11 PR #10829's ci-log fix round recorded ci_failures [ci, ci-shard (7/8), ci-shard (8/8)] all with signature null, though the shard logs named a pooled not ok and a pure-test-pool POOL DEFECT line; the worker got nothing and answered NEEDS_DESIGN"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the evidence a cancelled or timed-out check hands the fix lane
+  band_meaning: span
+  origin: "operator approval 2026-10-11: file the fix-lane follow-ups from the PR #10829 / #10852 ci-shard (7/8)|(8/8) timeouts after the W1-T6085 pure-test pool (#10834)"
+  plan_refs: [W1-T6085, W1-T94, W1-T2291, W1-T3345, W1-T1223]
+  files: [src/run-task.ts, src/lib/ci-friction-gardener.ts, test/a-shard-cancelled-at-its-timeout-names-its-failure.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-11 in the core daemon's live ledger (/mnt/rmd/state2/state/ledger.ndjson on the host).
+      - PR #10829 (W1-T7899), head 3c92df1. sweep.disposed 13:11:39Z: "ci failed on 3c92df1; ci-shard (7/8)
+        failed on 3c92df1; ci-shard (8/8) failed on 3c92df1 — ci-log fix, fix round 1".
+      - fix.dispatch 13:14:41Z (round DAEMON-1791724008163:1:1791724326546, mode ci-log) carries
+        ci_failures [{check: "ci", signature: null}, {check: "ci-shard (7/8)", signature: null},
+        {check: "ci-shard (8/8)", signature: null}].
+      - fix.done 13:14:41Z: fix_outcome NEEDS_DESIGN. Its followups: "rerun the failed CI jobs on the same head
+        to determine whether the shard timeouts recur" and "investigate the full shard logs".
+    The shards were cancelled at ci.yml's 35-minute timeout-minutes. The shard logs named the cause: a pooled
+    `not ok`, the isolated re-run passing, and "pure-test-pool: POOL DEFECT ... leaking file ... first failing
+    alongside it" (scripts/pure-test-pool.mjs runShardWithPool / locateLeak, #10834). The same hang hit #10765,
+    #10852, #10854, #10858 and #10864 that day (sweep.disposed reasons; #10880's commit message).
+    READ on origin/main 90034ae2d:
+      - src/run-task.ts ciFailuresSteps reads the check run's ANNOTATIONS first. A non-bare annotation becomes
+        the whole logTail (tailSource "annotations") and the job log is never read. Only the bare
+        "Process completed with exit code N" annotation falls through to the log (isBareExitCodeAnnotation). A
+        cancelled job's annotations are the runner's own lines (the job exceeded its maximum execution time;
+        the operation was canceled), which name no test.
+      - src/lib/ci-friction-gardener.ts ciFailureSignature / testRunnerFailureSignature return undefined for
+        such a tail. Its failure filter (/not ok|✖|FAIL|fail(?:ed|ure)?\b|Error|refused|BLOCKED/) matches
+        neither runner line. run-task.ts then writes `ciFailureSignature(f.logTail) ?? null`.
+      - The `ci` aggregator keeps the red when a shard is CANCELLED (sweep.ts aggregatorRedBecauseOfShard). Its
+        log is ci.yml's SHARD HANG block. That block says "THE TESTS DID NOT RUN", which was false here: the
+        tests ran and one failed pooled. Its signature is null for the same reason.
+    The builder confirms which source each null came from before changing anything. Either the annotations
+    held only runner lines, or the region reducer dropped the pool lines. Name it in the PR body.
+    OVERLAP. Open PR #10880 (run-unfiled, another session) bounds locateLeak and runs the rest before it, so a
+    shard no longer hangs silent. It does not change what the fix lane reads from a red or cancelled shard.
+    This task does not touch scripts/pure-test-pool.mjs, scripts/test-tier-manifest.mjs or .github/.
+  design: |
+    No new constant or count. Classify by what the log says.
+    1. FETCH. In ciFailuresSteps, an annotation set that holds only the runner's own cancellation or timeout
+       lines is treated like the bare exit-code case. The job log region is read as well. The runner line is
+       kept beside the region so the timeout stays visible. A readable log is never displaced by annotations.
+    2. REGION. extractCiFailureRegion and ciFailureRegionReducer retain the `pure-test-pool:` verdict lines
+       (pool failed, also fail isolated, POOL DEFECT with leaker and victim). They are retained the way
+       FLAKE-RETRY lines already are: one copy each, wherever they sit in the job.
+    3. SIGNATURE. ciFailureSignature names, in this order:
+       a. a POOL DEFECT line, by its leaking and victim files;
+       b. a pooled `not ok` whose isolated re-run passed, by the failing file, marked as a pool failure;
+       c. a job killed at its ceiling after a complete passing summary, as "timed out after a passing summary";
+       d. a job killed at its ceiling with no summary, by the last started unfinished test if the log names
+          one, else "timed out with no test result".
+       A check whose log was readable and red never gets a null signature again. A log that could not be read
+       keeps its logUnavailable cause. That case is not a signature.
+    4. The fix.dispatch row's ci_failures then carries these signatures unchanged (run-task.ts maps
+       ciFailureSignature). The fix prompt's evidence (ciFailurePromptEvidence) carries the retained lines.
+    Tests go in a new file, test/a-shard-cancelled-at-its-timeout-names-its-failure.test.ts, with `test(`
+    titles verbatim as in the proofs below. Drive fetchCiFailuresAsync with injected fetchAnnotations and
+    fetchJobLog fakes that replay the 10-11 shape: annotations holding only the runner's timeout lines, and a
+    job log with the pooled not ok, the isolated pass summary, the POOL DEFECT line and the cancel marker.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-shard-cancelled-at-its-timeout-names-its-failure.test.ts"
+    - claim: "a cancelled check whose annotations only name the runner timeout has its job log read"
+      proof: 'grep: test("W1-T8038: a timed-out shard whose annotations only name the timeout reads its job log" in test/a-shard-cancelled-at-its-timeout-names-its-failure.test.ts'
+    - claim: "a pool defect line names the leaking and victim files in the signature"
+      proof: 'grep: test("W1-T8038: a pool defect names its leaking and victim files in the signature" in test/a-shard-cancelled-at-its-timeout-names-its-failure.test.ts'
+    - claim: "a shard cancelled at its ceiling after a passing summary is classified, never null"
+      proof: 'grep: test("W1-T8038: a shard cancelled after a passing summary reads as timed out after a passing summary" in test/a-shard-cancelled-at-its-timeout-names-its-failure.test.ts'
+  falsifier: |
+    Leave ciFailuresSteps taking any non-bare annotation as the whole tail. The timed-out fixture's logTail is
+    then only the runner lines, and the first test fails. Drop the pure-test-pool retention or the POOL DEFECT
+    arm, and the signature test reads a null or a bare file. Remove the passing-summary arm, and the third test
+    reads undefined, which is the 10-11 null.

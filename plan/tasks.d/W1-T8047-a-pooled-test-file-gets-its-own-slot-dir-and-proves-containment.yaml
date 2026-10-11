@@ -1,0 +1,78 @@
+- id: W1-T8047
+  title: "EVERY FILE IN A POOLED TEST PROCESS SHARES ONE SLOT DIR, AND NOTHING PROVES THE POOL IS CONTAINED — resolveTestSlotDir memoizes one test-process dir, so under --experimental-test-isolation=none the review-demand state and the host-memory reservation ledger written by one pooled file are read by the next (2026-10-11: a-shadow-memory-verdict-never-delays-a-start failed pooled), and a pool that ran without its live-remote containment went unnoticed until shards hung"
+  repo: remudero
+  depends_on: [W1-T6085]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — a pooled test process isolates each file's slot state and proves its containment
+  band_meaning: span
+  origin: "operator approval 2026-10-11: file the fix-lane follow-ups from the PR #10829 / #10852 ci-shard (7/8)|(8/8) timeouts after the W1-T6085 pure-test pool (#10834); slot-dir class named by the coordinating session after hand PR #10883"
+  plan_refs: [W1-T6085, W1-T4805, W1-T5624]
+  files: [src/lib/test-slot.ts, test/setup/tmp-hygiene.ts, test/a-pooled-test-file-gets-its-own-slot-dir-and-proves-containment.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-11. The W1-T6085 pure-test pool (#10834, merged 11:10Z) runs about 1,800 fast-tier files,
+    a shard's admitted set at a time, in ONE `node --test --experimental-test-isolation=none` process
+    (scripts/test-tier-manifest.mjs spawnTestFiles). Two failures followed:
+      - CONTAINMENT. In three of the four hung shards #10880 read, the pooled victim was W1-T5624's
+        GH_CONFIG_DIR check. test/setup/no-live-remote.ts loaded before tmp-hygiene.ts set NODE_TEST_CONTEXT,
+        so the live-remote containment (sentinel GH_TOKEN, GH_CONFIG_DIR, dead push URLs) was not installed
+        for ANY pooled test. Open PR #10880 (run-unfiled-1791725211000, another session) installs it in a pool
+        runner (runsTestFilesInThisProcess). It adds nothing that FAILS if a future change loses it again: the
+        miss was found only because one test happened to assert it.
+      - SHARED SLOT STATE. The fourth shard's victim, a-shadow-memory-verdict-never-delays-a-start, is "not
+        explained" by #10880. Hand PR #10883 stubs readReviewDemand in two tests' ports(). That fixes those
+        two tests, not the class.
+    READ on origin/main 90034ae2d:
+      - src/lib/test-slot.ts resolveTestSlotDir: under NODE_TEST_CONTEXT it returns one memoized
+        `testProcessSlotDir` (mkdtemp, scope "test-process"). test/setup/tmp-hygiene.ts sets
+        `process.env.NODE_TEST_CONTEXT ??= "test-setup"`, so a pool runner takes this arm too: one dir for
+        every pooled file.
+      - src/lib/host-memory-priority.ts defaultLedgerLocation() and readReviewDemand's demandDir resolve
+        under that slot dir, as does the host-memory reservation ledger openOccupancyReservation writes
+        (src/lib/worker.ts → src/lib/host-memory-ledger.ts). Roughly 31 test files run runSweepLightPass
+        without a reviewDemand seam. In a pool, one file's demand rows are the next file's input.
+    The census (scripts/pure-test-pool.mjs POOL_REFUSALS) cannot see this statically: the default is reached
+    through src imports, not written in the test file.
+    NOT FILED HERE. A census refusal of `new Worker(`, from the 10-11 brief. The worker-thread test's pooled
+    failure was the missing containment that #10880 installs, not the worker itself.
+    AVOIDED FILES. This task does not touch #10880's files (scripts/pure-test-pool.mjs,
+    scripts/test-tier-manifest.mjs, test/setup/no-live-remote.ts, test/pure-test-files-share-one-process.test.ts,
+    its new test) or #10883's two test files.
+    PRECONDITION. Build after #10880 merges. The containment check in design 2 reds every pooled run on a main
+    without it. Check first: `git grep -n runsTestFilesInThisProcess origin/main -- test/setup/no-live-remote.ts`
+    must hit. If it does not, report NEEDS_DESIGN naming #10880 rather than building.
+  design: |
+    No new constant or count.
+    1. ONE SLOT DIR PER POOLED FILE. When this process runs test files itself (isolation none), the
+       "test-process" arm of resolveTestSlotDir returns a dir owned by the CURRENT test file, never one shared
+       by the process. One candidate: tmp-hygiene.ts registers a root-level hook that, on each test whose
+       file differs from the last, tells test-slot.ts to start a fresh scope. TestContext carries the file.
+       Prove the mechanism in a throwaway pooled run before committing it (global rule). A file-per-child run
+       (isolation on) keeps today's behaviour byte for byte. A process with a configured RMD_TEST_SLOT_DIR
+       keeps today's behaviour too.
+    2. A POOL PROVES ITS CONTAINMENT. In a process that runs test files itself, tmp-hygiene.ts asserts at load
+       that the live-remote containment is in force: the sentinel GH_TOKEN, a GH_CONFIG_DIR this process owns,
+       and the dead push URL config. If any is missing, it throws with a message naming each missing piece.
+       Every pooled file then fails by name, loudly, at once. It never runs the pool without containment.
+    Tests go in a new file, test/a-pooled-test-file-gets-its-own-slot-dir-and-proves-containment.test.ts,
+    with `test(` titles verbatim as in the proofs below. Spawn a real `node --test
+    --experimental-test-isolation=none` child over two scratch fixture test files, using the same `--import`
+    setup the shard uses. File A writes review-demand state through the default location. File B asserts it
+    sees none. Separately, spawn a pooled child with containment withheld and assert it fails, naming the
+    missing piece. These spawn real children on purpose: a fake cannot show what a shared process leaks.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-pooled-test-file-gets-its-own-slot-dir-and-proves-containment.test.ts"
+    - claim: "two files pooled in one process do not see each other's slot-dir state"
+      proof: 'grep: test("W1-T8047: two pooled files do not share slot-dir state" in test/a-pooled-test-file-gets-its-own-slot-dir-and-proves-containment.test.ts'
+    - claim: "a pooled process without live-remote containment fails by name before any test runs"
+      proof: 'grep: test("W1-T8047: a pooled process without containment fails naming what is missing" in test/a-pooled-test-file-gets-its-own-slot-dir-and-proves-containment.test.ts'
+  falsifier: |
+    Keep the one memoized test-process dir. Pooled file B then reads file A's demand row, and the first test
+    fails. That is the shadow-memory victim's shape. Drop the load-time assertion, and the containment-withheld
+    child runs its tests green, so the second test fails.
