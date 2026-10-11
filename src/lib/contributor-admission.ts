@@ -120,7 +120,8 @@ export function* feedbackPublicationSteps(
       const current = yield* repository(slug);
       if (current.id !== source.id) throw new Error("publication-source-identity-changed");
       const finalTarget = yield* repository(target);
-      if (feedbackContentDigest(finalTarget) !== feedbackContentDigest(destination)) throw new Error("publication-target-changed");
+      if (finalTarget.id !== destination.id || finalTarget.private !== destination.private
+        || !fresh(started, clock.now(), 5_000)) throw new Error("publication-target-changed");
       if (destination.private === false && (source.private || current.private)) {
         emit("private-to-public", "actor-admission-is-not-publication-permission", subject, destination);
       } else emit("no-private-boundary-observed", "visibility-observation-only", subject, destination);

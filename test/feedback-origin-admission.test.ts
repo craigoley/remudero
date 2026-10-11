@@ -420,7 +420,7 @@ test("W1-T7754 delivery: a live worker receives an immutable original lineage en
       for await (const message of stream) messages.push(message);
     } });
     return gen;
-  }) as SpawnWorkerArgs["queryFn"];
+  }) as unknown as SpawnWorkerArgs["queryFn"];
   const run = spawnWorker({ cwd: dir, permissionMode: "bypassPermissions", settingsFile, prompt: "fixture",
     taskId: "W1-LINEAGE", config: { claudeBin: "/unused", root: dir }, queryFn,
     claudeExecutable: { cache: createClaudeExecutableCache(), deps: { env: { [CLAUDE_BIN_ENV_OVERRIDE]: "/fake/claude" },
@@ -925,6 +925,9 @@ for (const path of ["disk", "status-content", "queued", "pending-disk", "pending
     const seed = gitRepo({ kind: "admission-seed" });
     const rel = "plan/feedback/fb-lineage.yaml";
     const original = admitFeedbackContribution(boundIssue(), { mode: "shadow", policy: POLICY, nowMs: NOW });
+    original.subject!.repository!.fullName = "acme/private";
+    original.subject!.sourceRef = "acme/private#4";
+    const observations: Record<string, unknown>[] = [];
     mkdirSync(join(seed.dir, "plan", "feedback"), { recursive: true });
     const originalContent = stringifyYaml({ id: "fb-lineage", status: "new", contribution: original });
     if (path.startsWith("pending-")) writeFileSync(join(seed.dir, "README.md"), "seed\n");
@@ -936,12 +939,15 @@ for (const path of ["disk", "status-content", "queued", "pending-disk", "pending
     const root = gitRepo({ cloneFrom: origin.dir, kind: "admission-consumer" });
     const content = stringifyYaml({ id: "fb-lineage", status: "accepted", summary: { headline: "trusted relay" } });
     const gh = (args: string[]) => {
+      if (args[0] === "api") return JSON.stringify(args[1] === "repos/acme/widgets"
+        ? { id: 200, full_name: "acme/widgets", private: false } : { id: 100, full_name: "acme/private", private: true });
       if (args[0] === "pr" && args[1] === "list") return "[]";
       if (args[0] === "pr" && args[1] === "create") return "https://github.com/acme/widgets/pull/1\n";
       assert.fail(`unexpected GitHub effect ${JSON.stringify(args)}`);
     };
     const opts = { gh, targetRepository: { owner: "acme", repo: "widgets" },
-      sourceRepository: { owner: "acme", repo: "widgets" } };
+      sourceRepository: { owner: "acme", repo: "widgets" },
+      publication: { mode: "shadow" as const, record: (_step: string, fields: Record<string, unknown>) => observations.push(fields) } };
     const result = withLiveWritesAllowed(() => {
       if (path.startsWith("pending-")) {
         const first = landFeedbackStatusContent(root.dir, rel, originalContent, opts);
@@ -963,6 +969,8 @@ for (const path of ["disk", "status-content", "queued", "pending-disk", "pending
     const staged = parseYaml(origin.git("show", `${LANDING_BRANCH}:${rel}`));
     assert.equal(staged.status, "accepted");
     assert.deepEqual(staged.contribution, original);
+    assert.ok(observations.some(row => row.outcome === "private-to-public" && row.would_deny === true), path);
+    assert.ok(observations.every(row => row.permission === "not-granted"));
   });
 }
 

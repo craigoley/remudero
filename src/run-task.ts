@@ -649,6 +649,7 @@ import {
   ciLearningMergedOriginsAsync,
   ciLearningPendingOrigins,
   findPendingLandingPr,
+  landFeedbackStatusContent,
   landCiLearningShards,
   landCiLearningShardsAsync,
   landPlanReconcileShards,
@@ -658,6 +659,7 @@ import {
   sweepFeedbackLandingAsync,
   type LandCiLearningShardsOptions,
   type LandFeedbackResult,
+  type LandFeedbackOpts,
   type LandingReviewRequest,
   type SweepFeedbackLandingOpts,
 } from "./lib/feedback-landing.js";
