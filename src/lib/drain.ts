@@ -11,7 +11,7 @@ import type { RunResult } from "./run-result.js";
 import { headroomExhausted, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
-import { checkDispatchGovernors, governorDeferPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict } from "./dispatch-governor.js";
+import { checkDispatchGovernors, consultMemoryReads, governorDeferPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadHold, type MemoryReadTracker } from "./dispatch-governor.js";
 import { releasedTaskIds, unmetDependencies, unmetTaskPrecondition, type Plan, type Task, type TaskPreconditionOptions, type UnmetTaskPrecondition } from "./plan.js";
 import {
   NO_OBSERVED_SCOPE,
@@ -1374,6 +1374,9 @@ export interface DrainDeps extends TaskPreconditionOptions {
    *  W1-T5404, once per single-lane pass in `runDrain`; a throw fails OPEN at both. Never consulted
    *  from the sweep. Optional. */
   checkMemoryGovernor?: () => MemoryGovernorResult | undefined;
+  /** W1-T7720: the unreadable-memory streak tracker and the reservation-store read — see {@link DispatchGovernorDeps}. */
+  memoryReadTracker?: MemoryReadTracker;
+  readMemoryStoreFailure?: () => string | undefined;
   /** The QUIET-HOURS hold, read per single-lane pass and per lane through `checkDispatchGovernors`.
    *  A throw fails open in both loops; the single-lane pass logs the error (W1-T5657). */
   checkQuietHours?: DispatchGovernorDeps["checkQuietHours"];
@@ -1627,13 +1630,11 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     }
 
     // HOST MEMORY FLOOR (W1-T5404): ordered after queue as `checkDispatchGovernors` orders it. A
-    // throw FAILS OPEN, as it does there — logged, then this pass dispatches as if admitted.
-    let memoryGoverned: MemoryGovernorResult | undefined;
-    try {
-      memoryGoverned = deps.checkMemoryGovernor?.();
-    } catch (e) {
-      log("drain.memory_governor.unreadable", { error: e instanceof Error ? e.message : String(e) });
-    }
+    // TRANSIENT throw FAILS OPEN, as it does there — logged, then this pass dispatches as if admitted.
+    // W1-T7720: a SUSTAINED unreadable streak (the same tracker the daemon path uses) holds the pass.
+    const memoryRead = consultMemoryReads(deps);
+    if (memoryRead.probeError !== undefined) log("drain.memory_governor.unreadable", { error: memoryRead.probeError });
+    const memoryGoverned: MemoryGovernorResult | undefined = memoryRead.governed;
     if (memoryGoverned) {
       log("drain.memory_governor", {
         observed_available_mib: memoryGoverned.observedAvailableMib,
@@ -1643,6 +1644,11 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
         "memory_governor_deferred",
         `${memoryGoverned.observedAvailableMib} MiB available below the ${memoryGoverned.floorMib} MiB memory floor — new dispatch deferred`,
       );
+    }
+
+    if (memoryRead.hold) {
+      log("drain.memory_unreadable", governorDeferPayload({ kind: "memory_unreadable", hold: memoryRead.hold }));
+      return summary("memory_governor_deferred", memoryUnreadableDetail(memoryRead.hold, "new dispatch deferred"));
     }
 
     let quietHours: ReturnType<NonNullable<DrainDeps["checkQuietHours"]>>;
@@ -1913,6 +1919,12 @@ function readPassGovernor<T>(
   }
 }
 
+/** W1-T7720 — the stop detail of a SUSTAINED unreadable memory reading: the source, the streak age, and
+ *  the derived bound in force with its basis. */
+function memoryUnreadableDetail(hold: MemoryReadHold, tail: string): string {
+  return `memory ${hold.source} unreadable for ${hold.ageMs} ms, past the ${Math.round(hold.boundMs)} ms sustained bound (${hold.basis}): ${hold.error} — ${tail}`;
+}
+
 /** W1-T5482 — the stop of a lane pass whose EVERY lane `verdict` refused at admission: the gate that
  *  held, its reading worded as the pass-level checks word it. An unreadable reading is the deferral
  *  of the gate it came from, with the error kept in the detail. */
@@ -1934,6 +1946,8 @@ function allLanesHeldStop(verdict: DispatchGovernorVerdict): { stopReason: StopR
         stopReason: "memory_governor_deferred",
         stopDetail: `${verdict.result.observedAvailableMib} MiB available below the ${verdict.result.floorMib} MiB memory floor — ${tail}`,
       };
+    case "memory_unreadable":
+      return { stopReason: "memory_governor_deferred", stopDetail: memoryUnreadableDetail(verdict.hold, tail) };
     case "quiet_hours":
       return {
         stopReason: "quiet_hours_deferred",

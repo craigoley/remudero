@@ -2299,17 +2299,33 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
   // The daemon hands each pass its tick's fresh plan; a task missing from it gets ONE re-read per cycle.
   let reloadedForContract: { plan: Plan | undefined } | undefined;
+  const readTaskContractRevision = (taskId: string): string | undefined => {
+    let task = plan.byId.get(taskId);
+    if (task === undefined) {
+      reloadedForContract ??= { plan: reloadPlanForFix() };
+      task = reloadedForContract.plan?.byId.get(taskId);
+    }
+    return task === undefined ? undefined : taskContractRevision(task);
+  };
+  // The `**Contract:**` line every escalation this sweep opens about a PR carries: the revision of
+  // the task contract the question was asked under. The fix rung's open-escalation probe compares
+  // it with the current revision (openEscalationStandDownReason), so a plan amendment re-admits the
+  // rung while the issue is still open. Empty for a PR whose task is not in the plan: escalate.ts
+  // then omits the line, as it does for any producer without a revision.
+  const contractRevisionFor = (pr: { taskId?: string }): { contractRevision?: string } => {
+    let contractRevision: string | undefined;
+    try {
+      contractRevision = pr.taskId ? readTaskContractRevision(pr.taskId) : undefined;
+    } catch {
+      // An unreadable plan leaves the line off; it never stops the escalation from being filed.
+      contractRevision = undefined;
+    }
+    return contractRevision ? { contractRevision } : {};
+  };
   return {
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
     fixProgressJudge: effectsProgressJudge,
-    readTaskContractRevision: (taskId) => {
-      let task = plan.byId.get(taskId);
-      if (task === undefined) {
-        reloadedForContract ??= { plan: reloadPlanForFix() };
-        task = reloadedForContract.plan?.byId.get(taskId);
-      }
-      return task === undefined ? undefined : taskContractRevision(task);
-    },
+    readTaskContractRevision,
     // W1-T3618: the entrypoint's freshness gate, surfaced so the lib-built and entrypoint-built
     // effect surfaces stay key-identical (W1-T2890).
     reviewerCodeStaleThisPass: reviewerCodeStaleThisPassImpl,
@@ -2757,6 +2773,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           runId,
           headSha: pr.headSha,
           cause: "ci",
+          ...contractRevisionFor(pr),
           summary: `required check "${check.name}" ${CANCELLED_CHECK_ESCALATION_SUMMARY[kind]} — ${pr.prUrl}`,
           detail:
             `The gate-reconciliation lane (W1-T1223) re-queued required check "${check.name}"'s job once ` +
@@ -2792,6 +2809,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           runId,
           headSha: pr.headSha,
           cause: "ci",
+          ...contractRevisionFor(pr),
           summary: `auto-merge disabled again after ${rearms} sweep re-arms at one head — ${pr.prUrl}`,
           detail: (judgedReason ? `${judgedReason}\n\n` : "") +
             `GitHub disabled auto-merge on ${pr.prUrl} at head ${pr.headSha} after a sweep arm, and the ` +
@@ -2815,6 +2833,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           runId,
           headSha: pr.headSha,
           cause: "ci",
+          ...contractRevisionFor(pr),
           summary: `required check "${check.name}" exhausted its bounded infrastructure retry — ${pr.prUrl}`,
           detail:
             `The failed-CI infrastructure classifier identified ${signature} for check "${check.name}" ` +
@@ -3025,6 +3044,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             ? { headDedup: "independent" as const }
             : {}),
           cause: escalationCause(pr.mergeState === "dirty", isBlockedCi(pr)),
+          ...contractRevisionFor(pr),
           summary: `PR ${pr.prUrl} needs a clarification — ${reason}`,
           detail:
             `${context}The CLARIFICATION-QUESTION rung (W1-T78, ratifies P22's new rung) reconciled open PR #${pr.prNumber} ` +

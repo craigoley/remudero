@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 1.13
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "fix-lane:commit-refused:no anchored COMMIT_MESSAGE line in the report"

@@ -174,7 +174,7 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/owner-repo.ts": { count: 3, reason: "CHECKOUT: resolveOwnerRepoAt(Async)/gitFailureReason read a checkout's origin (-C root)" },
   "src/lib/panel-graph.ts": { count: 1, reason: "CHECKOUT: replyRefusal reads the repo root (-C root)" },
   "src/lib/plan-gardener.ts": { count: 4, reason: "CHECKOUT: the plan gardener's origin/main reads at the repo root" },
-  "src/lib/plan-pr-emitter.ts": { count: 8, reason: "CHECKOUT: plan-PR reads in the emitter's cwd and its own preflight worktree (-C repoDir); timeout cleanup uses the hardened leaf" },
+  "src/lib/plan-pr-emitter.ts": { count: 7, reason: "CHECKOUT: plan-PR reads in the emitter's cwd and its own preflight worktree's add (-C repoDir); both preflights remove that worktree through the hardened leaf" },
   "src/lib/plan-pr-merge-safety.ts": {
     count: 2,
     reason: "CHECKOUT (W1-T6136): arm-auto-merge.ts planMergeSafetyInClone binds planSafetyGitSync/Async to <root>/repos/<repo>",
@@ -229,16 +229,17 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
       "in the default spawn; NOT GIT: codexExecArgs's -C is codex's",
   },
   "src/lib/worker.ts": {
-    count: 29,
+    count: 25,
     reason:
       "CHECKOUT (W1-T6133 converted the WORKTREE sites; W1-T6158 made five more visible): defaultLaneListGit " +
-      "lists the managed checkout's registration (cwd: repoDir); the rest are worktreeAdd/Remove, " +
-      "pruneStaleRuns and branch reads of the managed checkout, plus defaultReadRemoteHead, " +
+      "lists the managed checkout's registration (cwd: repoDir); the rest are worktreeAdd, pruneStaleRuns's " +
+      "prune and branch reads, and other branch reads of the managed checkout (every `worktree remove` runs " +
+      "through the hardened leaf), plus defaultReadRemoteHead, " +
       "readLocalOriginRefHead, defaultCountBehind and ensureWorktreeConfigEnabled (2), which read/configure " +
       "the managed source checkout (-C repoDir)",
   },
   "src/run-task.ts": {
-    count: 76,
+    count: 75,
     reason:
       "CHECKOUT (W1-T6135): every site classed per function, with the tree it addresses, in RUN_TASK_WIDENED_SITES " +
       "in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts, whose sum this count must equal",
