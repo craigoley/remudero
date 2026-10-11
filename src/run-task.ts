@@ -543,6 +543,7 @@ import {
   fetchOpenPrsRestSteps,
   type OpenPrRest,
   fetchSinglePrRest,
+  fetchSinglePrRestAsync,
   hydrateMergeConflictEvidenceSteps,
   hydratePlanFilingFilesSteps,
   hydrateSupersessionVerdictsSteps,
@@ -1755,6 +1756,7 @@ import {
   clearedConflictEscalationCause,
   type FixRoundBranchClaim,
   inFlightReviewCount,
+  readIdleLightCadence,
 } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
 import { applyDaemonMemoryPolicy, createDaemonMemoryGovernor, readDaemonMemoryPolicy } from "./lib/daemon-memory-policy.js";
@@ -39547,8 +39549,9 @@ export async function daemonCommand(
           // W1-T4471: the one real wiring of the owner-reply reader.
           ghEscalationAnswerGateway(target.owner, target.repo, undefined, config.operatorGithubLogins),
           gitCredentialSocket?.socketPath,
-          onePassPerGeneration(() => tickReadGeneration, readPlane?.read,
+          servedTickRead(onePassPerGeneration(() => tickReadGeneration, readPlane?.read,
             () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined }), { log }),
+            () => tickReadGeneration),
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -39572,6 +39575,9 @@ export async function daemonCommand(
           // A run in flight starves the full sweep, so the light pass also watches main.
           mainHealthRung,
         ),
+        // W1-T7734: the idle sleep runs the light pass while review demand waits, at a cadence the sweep
+        // derives from observed review duration and head churn. Reads the sweep's in-process memo only.
+        readIdleReviewDemand: () => readIdleLightCadence(systemClock.now()),
         // W1-T117/W1-T356: the per-poll half of the orphan sweep — the SAME `sweepOrphans`
         // closure daemonBoot already runs once, above, wired here so a stray from a run that
         // ended BETWEEN polls (not only at the last boot) is still found within one cycle.
@@ -43305,6 +43311,69 @@ export function buildOpenPrViewsAsync(
     ciFailures: deps.fetchCiFailureEvidence ?? deps.fetchCiFailureEvidenceAsync ?? fetchCiFailuresAsync,
     requiredContexts: deps.readRequiredContextsAsync ?? readRequiredStatusCheckContextsAsync,
   }));
+}
+
+/**
+ * W1-T7734 — THE SWEEP'S SAME-PASS RE-READ OF ONE PR. The act-time guard caught a moved head; this reads
+ * that PR (and its rollup) once more THROUGH THE DAEMON'S PACER, rebuilds its `OpenPrView` with the same
+ * producer a whole pass uses, and carries the board-wide facts one PR's read cannot recompute. `undefined`
+ * is a PR that is no longer open. A failed read THROWS, so the sweep names the error and stands down.
+ */
+/** W1-T7734: stamps the facts a pass is served with the publish time of the generation they came from, so
+ *  `sweep.disposed` can record how old the view was when a PR was acted on. A read taken for this pass alone
+ *  (no published generation was served) is stamped with the moment it was requested. */
+export function servedTickRead<T extends object>(
+  serve: () => Promise<T | undefined>,
+  published: () => ReadGeneration<T> | undefined,
+): () => Promise<(T & { servedPublishedAtMs?: number }) | undefined> {
+  return async () => {
+    const before = published();
+    const requestedAtMs = systemClock.now();
+    const facts = await serve();
+    if (facts === undefined) return undefined;
+    return { ...facts, servedPublishedAtMs: before !== undefined && facts === before.facts ? before.publishedAtMs : requestedAtMs };
+  };
+}
+
+export function buildRereadPrAtAct(
+  owner: string,
+  repo: string,
+  ledgerPath: string,
+  opts: {
+    pacer?: GhCallPacer;
+    fetchAsync?: GhApiFetcher;
+    views?: Omit<NonNullable<Parameters<typeof buildOpenPrViewsAsync>[3]>, "openPrRows" | "fetchAsync" | "pacer">;
+  } = {},
+): (pr: OpenPrView) => Promise<OpenPrView | undefined> {
+  const read: GhApiFetcher = opts.fetchAsync ??((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit));
+  return async (pr) => {
+    const checkRuns = new Map<string, unknown>();
+    const row = await paceGhEntryAsync(opts.pacer, isGhRateLimitError, () =>
+      fetchSinglePrRestAsync(owner, repo, pr.prNumber, async (args, onRateLimit) => {
+        const response = await read(args, onRateLimit);
+        if (args[1]?.includes("/check-runs?")) checkRuns.set(args[1], response);
+        return response;
+      }));
+    if (row.state !== "OPEN") return undefined;
+    if (row.statusCheckRollup) {
+      attachPostedGateIds(row.statusCheckRollup, checkRuns.get(checkRunsRestArgs(owner, repo, row.headRefOid)[1]));
+    }
+    const views = await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
+      ...opts.views, fetchAsync: read, pacer: opts.pacer, openPrRows: [row],
+    });
+    const view = views.find((candidate) => candidate.prNumber === pr.prNumber);
+    if (!view) throw new Error(`the rebuilt view list did not contain PR #${pr.prNumber}`);
+    // Head-independent facts the whole-board producer and the credit projection computed for this PR.
+    return {
+      ...view,
+      supersededBy: view.supersededBy ?? pr.supersededBy,
+      supersessionVerdict: view.supersessionVerdict ?? pr.supersessionVerdict,
+      taskMergedBy: pr.taskMergedBy,
+      planResequenceIneligible: pr.planResequenceIneligible,
+      planResequenceUnmetDependencies: pr.planResequenceUnmetDependencies,
+      planResequenceHeld: pr.planResequenceHeld,
+    };
+  };
 }
 
 /**
@@ -47068,7 +47137,9 @@ export function buildSweepHook(
   escalationAnswerGateway?: EscalationAnswerGateway,
   // W1-T5115: the daemon's git credential socket. Omitted ⇒ fix workers keep the ambient helper.
   gitCredentialSocketPath?: string,
-  tickReadFor?: () => TickReadFacts | undefined | Promise<TickReadFacts | undefined>,
+  // W1-T7734: `servedPublishedAtMs` is when the generation these facts came from was published.
+  tickReadFor?: () => (TickReadFacts & { servedPublishedAtMs?: number }) | undefined |
+    Promise<(TickReadFacts & { servedPublishedAtMs?: number }) | undefined>,
 ): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
@@ -47208,6 +47279,13 @@ export function buildSweepHook(
         withFullSweepRepairAdmission({
           ...effects,
           readLiveStateAtAct: effects.readLiveState,
+          // W1-T7734: a head that moved under this pass is re-read (paced) and re-derived in this pass.
+          rereadPrAtAct: buildRereadPrAtAct(owner, repo, ledgerPath, {
+            pacer,
+            views: { planFilingFileCache, onPlanFilingClassification: reportPlanFilingClassification, isMerged,
+              readMainPlan: resolvedReadMainPlan },
+          }),
+          ...(tickRead?.servedPublishedAtMs !== undefined ? { snapshotPublishedAtMs: tickRead.servedPublishedAtMs } : {}),
           ledgerPath,
           runId,
           log,
@@ -47590,6 +47668,11 @@ export function buildSweepLightHook(
             actionable: (d) => lightPassActionable(d, fixRungAllowed, false, !reviewOnly),
             // W1-T5922: the arm's own reads, wired as the full hook wires them.
             readLiveStateAtAct: effects.readLiveState,
+            // W1-T7734: the light pass re-derives a moved head in-pass too, as the full pass does.
+            rereadPrAtAct: buildRereadPrAtAct(owner, repo, ledgerPath, {
+              views: { planFilingFileCache, onPlanFilingClassification: reportPlanFilingClassification, isMerged,
+                readMainPlan: resolvedReadMainPlan },
+            }),
             judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, activePlan, ledgerPath, runId, log),
             ...codeScanningJudgeDeps(owner, repo, config, activePlan, runId, log),
             // W1-T528: `runSweepLightPass` fans ONE `runSweep` call out PER open PR, concurrently

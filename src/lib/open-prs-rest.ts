@@ -427,6 +427,21 @@ export function fetchSinglePrRest(
   };
 }
 
+export async function fetchSinglePrRestAsync(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  fetch: GhApiFetcher,
+): Promise<OpenPrRest & { state: string }> {
+  const row = (await fetch(singlePrRestArgs(owner, repo, prNumber))) as RestPullRow;
+  const pr = mapRestPr(row);
+  return {
+    ...pr,
+    state: prStateFromRest(row),
+    statusCheckRollup: await rollupForAsync(owner, repo, pr.headRefOid, fetch),
+  };
+}
+
 /** W1-T511: `ghLiveState`'s (run-task.ts) REST substitute — one fetch, no rollup. Not
  *  {@link fetchSinglePrRest}, which also fetches the head's two rollup endpoints: the post-review
  *  disposition this replaces reads exactly one field, so an unasked-for rollup would triple the cost of

@@ -1399,6 +1399,11 @@ export interface DaemonDeps {
    *  lane must stay single-threaded and never runs from here. Forensics: docs/forensics/daemon.md.
    *  W1-T4053: only a freshness drain passes a {@link LightPassScope}; every other caller passes nothing. */
   sweepLight?: (scope?: LightPassScope) => Promise<void> | void;
+  /** W1-T7734 — eligible review demand the last passes left waiting, and the light-pass interval derived
+   *  from observed review duration and head churn. Memory only, never a ledger read. `undefined` or
+   *  `eligible <= 0` is no demand: the idle branch sleeps as it always has. A `cadenceMs` that is
+   *  `undefined` (nothing observed yet) leaves the idle sleep a single poll interval. */
+  readIdleReviewDemand?: () => { eligible: number; cadenceMs?: number; medianReviewMs?: number; pushesPerPrHour?: number } | undefined;
   /** Called exactly once, when a block classifies as a genuine blocker — one or more tasks
    *  transitively depend on the blocked task. The real command escalates naming the dependents.
    *  Optional: omitted, a genuine blocker still halts the loop, it just opens no issue (W1-T46). */
@@ -4411,6 +4416,52 @@ export async function runDaemon(
       }
     };
 
+    // W1-T7734 — THE IDLE SLEEP IS NOT BLIND WHILE A POST-REVIEW PR WAITS. The clock above stops before this
+    // sleep (it would overlap the passes below), so the sleep itself runs the light pass, at a cadence
+    // derived from observed review duration and head churn rather than once per poll interval.
+    // The final chunk ends the sleep, because the next tick's full pass is the pass that follows it.
+    const sleepIdleWithReviewDemand = async (): Promise<void> => {
+      let demand: ReturnType<NonNullable<DaemonDeps["readIdleReviewDemand"]>>;
+      try {
+        demand = deps.sweepLight ? deps.readIdleReviewDemand?.() : undefined;
+      } catch (e) {
+        log("daemon.idle_light_pass.demand_unreadable", { error: String((e as Error)?.message ?? e) });
+        demand = undefined;
+      }
+      if (!demand || !(demand.eligible > 0) || demand.cadenceMs === undefined || !(demand.cadenceMs < pollIntervalMs)) {
+        await sleepUntilSweepWake(pollIntervalMs);
+        return;
+      }
+      let remainingMs = pollIntervalMs;
+      let passes = 0;
+      let cadenceMs: number = demand.cadenceMs;
+      while (remainingMs > 0) {
+        const chunkMs = Math.min(cadenceMs, remainingMs);
+        const slept = await sleepUntilSweepWake(chunkMs);
+        remainingMs -= chunkMs;
+        if (slept === "wake" || remainingMs <= 0) return;
+        if (deps.checkStop?.() || deps.checkPause?.()) return;
+        passes += 1;
+        log("daemon.idle_light_pass", {
+          eligible: demand.eligible, cadence_ms: cadenceMs, median_review_ms: demand.medianReviewMs,
+          pushes_per_pr_hour: demand.pushesPerPrHour, poll_interval_ms: pollIntervalMs, pass: passes,
+        });
+        try {
+          await deps.sweepLight!({ reviewOnly: true });
+        } catch (e) {
+          log("daemon.sweep_light.failed", { phase: "idle", error: String((e as Error)?.message ?? e) });
+        }
+        const next = deps.readIdleReviewDemand?.();
+        if (!next || !(next.eligible > 0)) {
+          // The demand cleared: nothing waits any more, so the rest of the sleep is the ordinary one.
+          await sleepUntilSweepWake(remainingMs);
+          return;
+        }
+        demand = next;
+        cadenceMs = next.cadenceMs ?? cadenceMs;
+      }
+    };
+
     if (bootGateTrigger === undefined) {
       await bootReviewPass;
       for (const cadence of BOOT_GATED_CADENCES) if (deps[cadence]) deferBootCadence(cadence);
@@ -5249,7 +5300,7 @@ export async function runDaemon(
         }
       }
       if (await stopInterphaseReviewClock()) continue;
-      await sleepUntilSweepWake(pollIntervalMs);
+      await sleepIdleWithReviewDemand();
       continue;
     }
 
