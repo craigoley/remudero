@@ -373,6 +373,7 @@ function assessReviewReuse(
       criterion.proof_exec === "exec_error" ||
       criterion.proof_exec === "base_unreadable" ||
       criterion.proof_skip === "runner-absent" ||
+      criterion.proof_skip === "cwd-missing" ||
       criterion.proof_skip === "incomplete-run" ||
       criterion.proof_skip === "runtime-broken" ||
       criterion.proof_skip === "no-exec-context",
