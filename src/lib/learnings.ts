@@ -2115,7 +2115,7 @@ export function renderLearningsContext(selected: LearningEntry[]): string {
  * doctrine+matched-learnings pair it always was. W1-T2761 DOES wire the headline HALF into
  * `run-task.ts`'s `implementPromptParts`/`renderAnchorBlock` (via `buildRuleHeadlinesPart`,
  * policy-gated on `workerRuleHeadlines.enabled`); `lookupWorkerRule` now supplies one selected
- * body or learning's evidence to the implement worker's read-only rule tool.
+ * body or learning's evidence to the worker's rule tool; an id the index lacks resolves via `doctrine/merged-rules.json`.
  */
 
 /** One parsed rule bullet. INVARIANT: the headline wrapped in `**` markers, followed by `body`,
@@ -2195,6 +2195,26 @@ export function retrieveRuleBody(index: Map<string, string>, headline: string): 
   return index.get(headline);
 }
 
+export const MERGED_RULES_FILE = "doctrine/merged-rules.json";
+
+function readMergedRuleGroupsFrom(readStoreFile: (target: string) => string): Array<{ canonicalId: string; aliasIds: string[] }> {
+  let text: string;
+  try {
+    text = readStoreFile(MERGED_RULES_FILE);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return [];
+    throw new LearningsError(`lookupWorkerRule: ${MERGED_RULES_FILE} is unreadable: ${String(error)}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new LearningsError(`lookupWorkerRule: ${MERGED_RULES_FILE} is not JSON: ${String(error)}`);
+  }
+  if (!Array.isArray(parsed)) throw new LearningsError(`lookupWorkerRule: ${MERGED_RULES_FILE} is not an array`);
+  return parsed as Array<{ canonicalId: string; aliasIds: string[] }>;
+}
+
 export function lookupWorkerRule(
   query: string,
   source: string,
@@ -2223,6 +2243,10 @@ export function lookupWorkerRule(
       || rule.headline.replace(/\s+/g, " ").toLowerCase().includes(folded);
   });
   if (matches.length > 1) throw new LearningsError(`lookupWorkerRule: ambiguous phrase "${requested}"`);
+  if (matches.length === 0) {
+    const group = readMergedRuleGroupsFrom(readStoreFile).find((g) => g.aliasIds.includes(requested));
+    if (group !== undefined) matches.push(...rules.filter((rule) => idFor(rule.headline) === group.canonicalId));
+  }
   const rule = matches[0];
   if (rule === undefined) return undefined;
   const pointer = parseRuleBodyPointer(rule.body);
