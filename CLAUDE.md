@@ -1,17 +1,17 @@
 # remudero — Claude rules
 
-Always-on **workflow** rules, by the question you're asking; knowledge lives in `learnings/*.yaml`,
-`plan/`, `MASTER-PLAN.md`, `DECISIONS.md` and `LEARNINGS.md`. Nothing here is a gate; a rule that
-needs one gets a filed task.
+Always-on **workflow** rules by the question you're asking; knowledge lives in `learnings/*.yaml`,
+`plan/`, `MASTER-PLAN.md`, `DECISIONS.md`, `LEARNINGS.md`. Nothing here is a gate; a rule needing one
+gets a filed task.
 
 **THIS FILE IS AN INDEX, AND THE ARROW IS AN INSTRUCTION TO YOU.** **The headline is the whole rule:
 obey it unopened.** Its `→ doctrine/<section>/<rule>.md` body is the evidence.
 
 **Upkeep (§8A):** interactive sessions pay per byte; workers never load it (`settingSources: []`).
 A new rule is three edits: headline + pointer here, its body file, `npm run agents-md`. A fold keeps
-the instruction in the headline. A frozen W1-T3323 row leaves the index only by moving VERBATIM into
-the body of the rule now carrying its instruction, its id aliased in `doctrine/merged-rules.json`.
-Cite symbol names, not line numbers, and the earning PR.
+the instruction in the headline; a frozen W1-T3323 row leaves only VERBATIM in the body of the live
+rule carrying its instruction, its id aliased in `doctrine/merged-rules.json`. Cite symbols, not
+line numbers, and the earning PR.
 
 ## Before you push
 
@@ -56,11 +56,10 @@ Cite symbol names, not line numbers, and the earning PR.
 
 ## Plan and task hygiene
 
-- **Derive "which tasks are merged" from the `Remudero-Task:` trailer on merged PRs — never from
-  ledger verdict lines.** → doctrine/plan-and-task-hygiene/derive-which-tasks-are-merged-from-the-trailer-on-merged.md
-- **AND A TRAILER-ONLY SET UNDER-CREDITS, because the BRANCH NAME is a second, independent credit
-  path.** → doctrine/plan-and-task-hygiene/and-a-trailer-only-set-under-credits-because-the-branch.md
-- **THE TWO SCOPE-TIME CHECKS, AS COMMANDS — RUN BOTH BEFORE BUILDING A FILED TASK.** → doctrine/plan-and-task-hygiene/the-two-scope-time-checks-as-commands-run-both-before.md
+- **Derive "which tasks are merged" from merged PRs' `Remudero-Task:` trailer UNIONED with their
+  `run-<taskId>-*` branch — never from ledger verdict lines.** → doctrine/plan-and-task-hygiene/derive-merged-tasks.md
+- **Before building a filed task, check BOTH `git ls-remote --heads origin 'run-<id>-*'` (in flight?)
+  and merged PRs for an exact `^Remudero-Task: <id>$` trailer (shipped?), never commit subjects.** → doctrine/plan-and-task-hygiene/run-both-scope-checks.md
 - **Sweep the SUBJECT over open PR heads, not only `origin/main` — the id half already does.** → doctrine/plan-and-task-hygiene/sweep-the-subject-over-open-pr-heads-not-only-the-id-half.md
 - **NAME A SESSION BRANCH `run-<taskId>-<epochMs>` WHEN BUILDING A FILED TASK.** → doctrine/plan-and-task-hygiene/name-a-session-branch-when-building-a-filed-task.md
 - **Before believing "task X is next", confirm the frontier with the repo's own selector —
@@ -72,7 +71,8 @@ Cite symbol names, not line numbers, and the earning PR.
   the record ALONE passes at `verify: auto`.** → doctrine/plan-and-task-hygiene/refuses-a-plan-record-in-only-when-an-out-of-plan-path.md
 - **A shard's `status:` field is not a completion signal — it stays `queued` on tasks that
   shipped.** → doctrine/plan-and-task-hygiene/a-shard-s-field-is-not-a-completion-signal-it-stays-on.md
-- **Decoding rule citations — where each family canonically lives.** → doctrine/plan-and-task-hygiene/decoding-rule-citations-where-each-family-canonically.md
+- **Decode citations: "Rule N" = MASTER-PLAN §12; "G-N" = §14 "Grill RESOLVED"; "P48"/"DR-N" =
+  its retro ledger; `rule15-*` names an artifact, not a rule.** → doctrine/plan-and-task-hygiene/decode-rule-citations.md
 - **Take the cheap candidate beside a costly one, and name what the costly one now waits for.** → doctrine/plan-and-task-hygiene/take-the-cheap-candidate.md
 - **Never fan out update-branch after a main fix: protection is non-strict, and each refresh re-runs
   ~16 min of CI and voids the review.** → doctrine/plan-and-task-hygiene/never-fan-out-update-branch.md
@@ -82,12 +82,13 @@ Cite symbol names, not line numbers, and the earning PR.
 ## CI and merging
 
 - **Do NOT push a fresh sha to clear a stale-red `ci-gate` — it self-clears.** → doctrine/ci-and-merging/do-not-push-a-fresh-sha-to-clear-a-stale-red-it-self.md
-- **CADENCE IS THE BUDGET, NOT INTENT — a sparse check-in is fine, a poll is not. NOW ENFORCED:** → doctrine/ci-and-merging/cadence-is-the-budget-not-intent-a-sparse-check-in-is-fine.md
+- **Space `gh` reads 180 s apart, never poll — `deny-floor.sh` refuses a closer read; GitHub's
+  SECONDARY limit 403s on RATE while `rate_limit` reads full.** → doctrine/ci-and-merging/gh-read-cadence.md
 - **`gh pr create` may die on API quota; git push is unaffected.** → doctrine/ci-and-merging/may-die-on-api-quota-git-push-is-unaffected.md
 - **A CONFLICTING PR registers ZERO check runs. `total: 0` reads as "still queued" but means
   `mergeable_state: dirty` — check mergeability before waiting on CI.** → doctrine/ci-and-merging/a-conflicting-pr-registers-zero-check-runs-reads-as-still.md
-- **When two PRs append tests to the same file's TAIL, the conflict region can cut just before a
-  SHARED closing `});`** → doctrine/ci-and-merging/when-two-prs-append-tests-to-the-same-file-s-tail-the.md
+- **Two PRs appending tests to one file's TAIL can conflict before a SHARED closing `});` — close
+  the ours-side block yourself; esbuild says only `Unexpected end of file`.** → doctrine/ci-and-merging/close-the-ours-side-block.md
 - **A corrected PR title is observed by a RE-RUN, not only by a new sha — but `edited` still fires
   nothing.** → doctrine/ci-and-merging/a-corrected-pr-title-is-observed-by-a-re-run-not-only-by-a.md
 - **A BAKED-path merge (`deploy/Dockerfile`, `deploy/entrypoint.sh`) ships itself by auto ACR build +
@@ -132,7 +133,8 @@ Cite symbol names, not line numbers, and the earning PR.
   — AN EXISTING CONNECTION IS NOT EVIDENCE.** → doctrine/investigation-discipline/g-a-change-that-removes-an-access-path-must-prove-the.md
 - **(h) A GATE RUN FROM A CHECKOUT that is BEHIND answers about a file and a threshold that both
   moved — run it against `origin/main`'s blobs and report the behind-count.** → doctrine/investigation-discipline/h-a-gate-run-from-a-checkout-that-is-behind-answers-about.md
-- **(j) A CENSUS TEST NAMES NONE OF YOUR SYMBOLS, SO THE CALLER SWEEP ABOVE CANNOT FIND IT** → doctrine/investigation-discipline/j-a-census-test-names-none-of-your-symbols-so-the-caller.md
+- **Beside the `git grep -l <symbol>` caller sweep, run the census suites your diff joins
+  (`rmd census-membership`) — they WALK a population and name none of your symbols.** → doctrine/investigation-discipline/run-the-census-suites.md
 - **(k) A RULE 21 protocol run passing `{ baseTask }` ALONE reports THREE INDISTINGUISHABLE ZEROS.** → doctrine/investigation-discipline/k-a-rule-21-protocol-run-passing-alone-reports-three.md
 - **A `catch` returning a success-shaped literal is a CLAIM: name what it collapses, and where remedies
   differ, return a third value the caller sees.** → doctrine/investigation-discipline/a-catch-that-returns-a-success-shaped-literal-is-making.md
