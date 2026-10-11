@@ -71,9 +71,9 @@ export const SPAWN_REACHING = new Map([
 ]);
 
 /**
- * RUN, BUT EXPECTED TO FAIL SHIFTED. Each of these compares a shifted `Date.now()` against a clock
- * a clock this probe does not shift, so it fails for a reason that is not a fixture bomb. Each reason names
- * the MECHANISM, because "flaky" is not a reason and would rot into a silent mute.
+ * RUN, BUT EXPECTED TO FAIL SHIFTED. Each of these compares a shifted `Date.now()` against a
+ * clock this probe does not shift, so it fails for a reason that is not a fixture bomb. Each
+ * reason names the MECHANISM, because "flaky" is not a reason and would rot into a silent mute.
  *
  * They are still RUN — that is the point. If one starts PASSING shifted, its stated mechanism no
  * longer holds, the entry has rotted, and {@link classifySweep} surfaces it as STALE rather than

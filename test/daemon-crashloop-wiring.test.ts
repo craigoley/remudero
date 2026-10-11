@@ -39,8 +39,9 @@ function fixtureHome(): { home: string; root: string; planPath: string } {
   // AGE (`now() - mtimeMs > maxAgeMs`, default 24h). Every mkdirSync/writeFileSync above this
   // line updates `home`'s own mtime to the REAL OS clock. Since W1-T6035 the clock-shift probe
   // shifts fs stat times in this process, but a child process's clock still does not move, and the
-  // explicit stamp below pins the age to the injected clock either way. Before W1-T6035 (mtimes
-  // were not shiftable) the real mtime read as ancient under clock-sweep's future shift, so the daemon's own real housekeeping sweep
+  // explicit stamp below pins the age to the injected clock either way. Before W1-T6035 the real
+  // mtime read as ancient under clock-sweep's future shift, so the daemon's own real housekeeping
+  // sweep
   // deletes this fixture (ledger, seeded boots, everything under `root`) before the test's own
   // `daemonCommand` call ever reaches `crashLoopCheck`. Stamping `home`'s mtime from the
   // (possibly shifted) injected clock — LAST, after every write under it, so a later
