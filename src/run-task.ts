@@ -476,7 +476,7 @@ import {
 import { makeTempDir, sweepStaleTempDirs, sweepStaleTempDirsAsync, withTempDir, type TempSweepOpts, type TempSweepSummary } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
-import { IMAGE_BUILD_SHA_PATH, requestDeploy, runDeployCycle } from "./lib/deployer.js";
+import { daemonInstanceRegistryPath, IMAGE_BUILD_SHA_PATH, requestDeploy, runDeployCycle } from "./lib/deployer.js";
 import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
@@ -2936,12 +2936,15 @@ import {
   pauseDetail,
   pendingKicks,
   pendingPrActions,
+  requestFleetPause,
   requestPause,
   requestStop,
   resumeFleet,
+  resumeFleetWide,
   sharedPauseRef,
   stopDetail,
 } from "./lib/fleet-control.js";
+import { resolvePauseTarget, type PauseTarget } from "./lib/pause-target.js";
 import {
   readGithubWebhookSecret,
   resolveGithubWebhookSecretFilePath,
@@ -48091,58 +48094,142 @@ async function stopCommand(rest: string[]): Promise<number> {
 }
 
 /**
- * `rmd pause [--reason <text>]` — drain-and-hold (W1-T11). Writes the PAUSE flag
- * file. No new task spawns after the current tick, but an in-flight task ALWAYS
- * runs to full completion (verdict + merge) — the drain loop only checks between
- * iterations, never mid-task.
+ * W1-T7727 — the instance a `rmd pause` / `rmd resume` acts on, or a printed refusal. Resolved
+ * through the checkout's instance registry and this process's `config.root` (pause-target.ts),
+ * never the cwd, the repository, the hostname or a pid. A refusal returns before anything is written.
+ */
+function pauseTargetOrRefuse(verb: "pause" | "resume", rest: string[], config: Config): PauseTarget | undefined {
+  // `RMD_INSTANCE_REGISTRY` is the override the shell readers already honor (install-host-units.sh,
+  // host-update.sh, recycle-container.sh); otherwise the checkout's own registry.
+  const override = process.env.RMD_INSTANCE_REGISTRY?.trim();
+  const registryPath = override ? override : daemonInstanceRegistryPath(repoRoot);
+  let registryText: string | undefined;
+  try {
+    registryText = readFileSync(registryPath, "utf8");
+  } catch {
+    registryText = undefined; // resolvePauseTarget refuses on an unreadable registry, naming the path.
+  }
+  const resolution = resolvePauseTarget({
+    configRoot: config.root,
+    instance: flagValue(rest, "--instance"),
+    registryText,
+    registryPath,
+  });
+  if (resolution.ok) return resolution.target;
+  console.error(`### rmd ${verb} — REFUSED: ${resolution.refusal}.`);
+  return undefined;
+}
+
+/**
+ * `rmd pause [--instance <name>] [--reason <text>]` — drain-and-hold ONE instance (W1-T11).
+ * Writes that instance's PAUSE flag under its own state root. No new spawn after the current
+ * tick; an in-flight task ALWAYS runs to completion (verdict + merge).
  *
- * W1-T1216: ALSO pushes the shared cross-host hold (`refs/rmd-pause/hold`) so a daemon on
- * another host — one that would otherwise never see this host's `state/PAUSE` file — refuses to
- * dispatch too. BEST-EFFORT: `requestPause`'s local write always lands first regardless of
- * whether this push does, so an operator on a disconnected host still pauses THEIR OWN daemon.
+ * W1-T7727: the default holds ONLY the targeted instance. Core, site and console share a
+ * checkout and an origin, so the W1-T1216 push of `refs/rmd-pause/hold` that this verb used to
+ * make held all of them (and every other host's daemon). That fleet-wide hold is now its own
+ * explicit act, `rmd pause --fleet`, which writes no instance flag.
  */
 async function pauseCommand(rest: string[]): Promise<number> {
   const config = loadConfig();
+  const runId = `FLEET-${Date.now()}`;
   const reason = flagValue(rest, "--reason");
-  const info = requestPause(config.root, reason, realDeps().sharedPauseGit);
-  const ledgerPath = ledgerPathFor(config);
-  appendLedger(ledgerPath, {
-    run_id: `FLEET-${Date.now()}`,
+  if (rest.includes("--fleet")) {
+    if (flagValue(rest, "--instance") !== undefined) {
+      console.error("### rmd pause — REFUSED: --fleet holds every instance; it cannot be combined with --instance — nothing was changed.");
+      return 2;
+    }
+    const result = requestFleetPause(realDeps().sharedPauseGit, reason);
+    appendLedger(ledgerPathFor(config), {
+      run_id: runId,
+      task_id: "FLEET",
+      step: "fleet.pause",
+      scope: "fleet",
+      pushed: result.pushed,
+      reason: reason ?? null,
+      session_id: result.sessionId,
+      expires_at: result.expiresAt,
+      requested_by_pid: process.pid,
+    });
+    if (!result.pushed) {
+      console.error(`### rmd pause --fleet — the push of ${sharedPauseRef()} did not report success; this result does NOT certify the fleet-wide hold state.`);
+      return 1;
+    }
+    console.log(
+      `### rmd pause --fleet — FLEET-WIDE hold pushed to ${sharedPauseRef()}: every instance on every host that shares ` +
+        "this origin holds new spawns until `rmd resume --fleet`.",
+    );
+    return 0;
+  }
+  const target = pauseTargetOrRefuse("pause", rest, config);
+  if (!target) return 2;
+  const info = requestPause(target.root, reason, undefined, { instance: target.instance });
+  appendLedger(ledgerPathFor({ ...config, root: target.root }), {
+    run_id: runId,
     task_id: "FLEET",
     step: "fleet.pause",
+    scope: "instance",
+    instance: target.instance,
+    root: target.root,
+    resolved_by: target.resolvedBy,
     reason: reason ?? null,
+    session_id: info.sessionId ?? null,
+    expires_at: info.expiresAt ?? null,
     requested_by_pid: info.pid,
   });
   console.log(
-    `### rmd pause — PAUSE flag written (drain-and-hold) and pushed to ${sharedPauseRef()} for ` +
-      `every host to see. Any in-flight task still reaches merge; no new task spawns until \`rmd resume\`.`,
+    `### rmd pause — instance '${target.instance}' (${target.root}) is PAUSED (drain-and-hold). Its in-flight task still ` +
+      `reaches merge; it spawns nothing new until \`rmd resume --instance ${target.instance}\`. No other instance is held.`,
   );
   return 0;
 }
 
 /**
- * `rmd resume` — clears BOTH the STOP and PAUSE flags (W1-T11). Idempotent.
+ * `rmd resume [--instance <name>]` — clears ONE instance's STOP and PAUSE flags (W1-T11). Idempotent.
  *
- * W1-T1216: ALSO clears the shared cross-host hold (`refs/rmd-pause/hold`) — design (iv): `rmd
- * resume` remains the ONLY thing that clears a pause, local or shared alike. BEST-EFFORT for the
- * same reason `pauseCommand`'s push is: the local clears always land first regardless of origin
- * reachability, so an operator resuming a disconnected host still gets it moving again.
+ * W1-T7727: it never deletes the fleet-wide `refs/rmd-pause/hold` — that hold may be another
+ * operator's, and only `rmd resume --fleet` clears it. It says so, without a remote read.
  */
-async function resumeFleetCommand(): Promise<number> {
+async function resumeFleetCommand(rest: string[] = []): Promise<number> {
   const config = loadConfig();
-  const result = resumeFleet(config.root, realDeps().sharedPauseGit);
-  const ledgerPath = ledgerPathFor(config);
-  appendLedger(ledgerPath, {
-    run_id: `FLEET-${Date.now()}`,
+  const runId = `FLEET-${Date.now()}`;
+  if (rest.includes("--fleet")) {
+    if (flagValue(rest, "--instance") !== undefined) {
+      console.error("### rmd resume — REFUSED: --fleet clears the fleet-wide hold only; it cannot be combined with --instance — nothing was changed.");
+      return 2;
+    }
+    const cleared = resumeFleetWide(realDeps().sharedPauseGit);
+    appendLedger(ledgerPathFor(config), {
+      run_id: runId,
+      task_id: "FLEET",
+      step: "fleet.resume",
+      scope: "fleet",
+      cleared_shared_pause: cleared,
+    });
+    console.log(`### rmd resume --fleet — ${sharedPauseRef()} ${cleared ? "deleted" : "NOT deleted (the push did not land)"}; no instance flag was touched.`);
+    return cleared ? 0 : 1;
+  }
+  const target = pauseTargetOrRefuse("resume", rest, config);
+  if (!target) return 2;
+  const result = resumeFleet(target.root);
+  appendLedger(ledgerPathFor({ ...config, root: target.root }), {
+    run_id: runId,
     task_id: "FLEET",
     step: "fleet.resume",
+    scope: "instance",
+    instance: target.instance,
+    root: target.root,
+    resolved_by: target.resolvedBy,
     cleared_stop: result.clearedStop,
     cleared_pause: result.clearedPause,
-    cleared_shared_pause: result.clearedSharedPause ?? null,
   });
   console.log(
-    `### rmd resume — cleared: stop=${result.clearedStop} pause=${result.clearedPause} ` +
-      `shared=${result.clearedSharedPause}. The fleet is clear to spawn again.`,
+    `### rmd resume — instance '${target.instance}' cleared: stop=${result.clearedStop} pause=${result.clearedPause}. ` +
+      "No other instance was touched.",
+  );
+  console.log(
+    `### rmd resume — the fleet-wide hold (${sharedPauseRef()}) is NOT cleared by an instance resume; if one stands, ` +
+      `'${target.instance}' stays held until \`rmd resume --fleet\` (\`rmd status\` shows it).`,
   );
   return 0;
 }
@@ -55156,11 +55243,11 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "pause",
-    syntax: "rmd pause [--reason <text>]",
-    summary: "Fleet control: persistent drain-and-hold until `rmd resume`.",
-    detail: "fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.",
+    syntax: "rmd pause [--instance <name>] [--reason <text>] | rmd pause --fleet [--reason <text>]",
+    summary: "Fleet control: drain-and-hold ONE instance until `rmd resume`; --fleet holds every instance.",
+    detail: "fleet control: PERSISTENT drain-and-hold of ONE instance — the one --instance names, else the instance whose registry state_dir is this config.root; an unresolvable target refuses before writing. In-flight completes, no new spawns; survives across runs until `rmd resume`. --fleet is the separate, explicit fleet-wide hold (refs/rmd-pause/hold), cleared only by `rmd resume --fleet`.",
   },
-  { name: "resume", syntax: "rmd resume", summary: "Fleet control: clear PAUSE (and any STOP); spawns resume.", detail: "fleet control: clear PAUSE (and any STOP); spawns resume" },
+  { name: "resume", syntax: "rmd resume [--instance <name>] | rmd resume --fleet", summary: "Fleet control: clear ONE instance's PAUSE (and any STOP); --fleet clears the fleet-wide hold.", detail: "fleet control: clear the targeted instance's PAUSE (and any STOP), resolved as `rmd pause` resolves it; never deletes the fleet-wide hold, which only `rmd resume --fleet` clears" },
   {
     name: "away",
     syntax: "rmd away [on|off]",
@@ -55647,7 +55734,11 @@ function logCliInvocation(cmd: string | undefined, argv: string[], stateRootOver
     // Do not create either HOME config or an override's state/ directory before deploy-run validates
     // the path. The supervisor's explicit-root path is intentionally not logged at this seam.
     if (stateRootOverride !== undefined) return;
-    appendLedger(ledgerPathFor(loadConfig()), {
+    const config = loadConfig();
+    // A missing pause/resume root must reach target validation still missing. Invocation
+    // telemetry must not recreate it and turn an unavailable state mount into a local target.
+    if ((cmd === "pause" || cmd === "resume") && !existsSync(config.root)) return;
+    appendLedger(ledgerPathFor(config), {
       run_id: `CLI-${Date.now()}`,
       task_id: "CLI",
       step: "cli.invoked",
@@ -56025,7 +56116,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ],
   ["stop", async (rest) => await stopCommand(rest)],
   ["pause", async (rest) => await pauseCommand(rest)],
-  ["resume", async () => await resumeFleetCommand()],
+  ["resume", async (rest) => await resumeFleetCommand(rest)],
   ["away", async (rest) => await awayCommand(rest)],
   [
     "correct",

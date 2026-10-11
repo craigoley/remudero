@@ -1204,15 +1204,16 @@ function buildLatchRows(
   }
 
   // Shared cross-host PAUSE hold (W1-T2264) — `refs/rmd-pause/hold`, a git ref every row above is blind to, read via
-  // ONE `ls-remote`. DEDUP, LOCAL FIRST: `rmd pause` writes the local flag AND pushes this ref, so a self-paused host
-  // would show its hold twice.
+  // ONE `ls-remote`. Since W1-T7727 only `rmd pause --fleet` writes it (a plain `rmd pause` holds one instance's local
+  // flag). LOCAL FIRST: this instance's own PAUSE row already says it is held, so the fleet-wide row appears once that
+  // flag is gone; the gate (checkSharedPause) reads the same order.
   if (!rows.some((r) => r.name === "PAUSE")) {
     const sharedPause = readSharedPauseState();
     if (sharedPause === "held") {
       rows.push({
         name: "SHARED_PAUSE",
         consequence:
-          `no new task spawns fleet-wide until \`rmd resume\` clears ${sharedPauseRef()} — ` +
+          `no new task spawns fleet-wide until \`rmd resume --fleet\` clears ${sharedPauseRef()} — ` +
           "any in-flight task still completes",
       });
     } else if (sharedPause === "unreachable") {
