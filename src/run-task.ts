@@ -35423,17 +35423,16 @@ export function memoryReadTrackerFor(
   runId: string,
   owner: string,
   repo: string,
-  now: () => number = Date.now,
+  clock: Clock = systemClock,
 ): MemoryReadTracker {
-  return createMemoryReadTracker({
-    now,
+  return createMemoryReadTracker(clock, {
     recoveredDurationsMs: (source: MemoryReadSource) =>
       readLedgerLines(ledgerPath) // ledger-read-intent: live — the recovered rows of this host's recent streaks.
         .filter((row) => row.step === "memory_read.recovered" && row.source === source && typeof row.duration_ms === "number")
         .map((row) => row.duration_ms as number),
     writeRow: (step, fields) => appendLedger(ledgerPath, { run_id: runId, task_id: "GOVERNOR", step, ...fields }),
     escalate: (hold: MemoryReadHold) => {
-      const startedAt = new Date(hold.streakStartedAtMs).toISOString();
+      const startedAt = fixedClock(hold.streakStartedAtMs).iso();
       void tryEscalate(
         {
           class: "BLOCKED",

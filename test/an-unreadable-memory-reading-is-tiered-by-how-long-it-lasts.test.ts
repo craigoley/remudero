@@ -23,6 +23,7 @@ import {
   type MemoryReadHold,
   type MemoryReadSource,
 } from "../src/lib/dispatch-governor.js";
+import type { Clock } from "../src/lib/clock.js";
 import { memoryStoreReadFailure, type HostMemoryReading } from "../src/lib/host-memory-ledger.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { runDrain, type DrainDeps } from "../src/lib/drain.js";
@@ -39,8 +40,12 @@ function fixture(history: Partial<Record<MemoryReadSource, number[]>> = {}) {
   const clock = { now: 1_000_000 };
   const rows: Row[] = [];
   const escalations: MemoryReadHold[] = [];
-  const tracker = createMemoryReadTracker({
+  const port: Clock = {
     now: () => clock.now,
+    date: () => new Date(clock.now),
+    iso: () => new Date(clock.now).toISOString(),
+  };
+  const tracker = createMemoryReadTracker(port, {
     recoveredDurationsMs: (source) => [
       ...(history[source] ?? []),
       ...rows.filter((r) => r.step === "memory_read.recovered" && r.fields.source === source).map((r) => r.fields.duration_ms as number),

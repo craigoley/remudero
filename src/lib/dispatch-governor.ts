@@ -20,7 +20,11 @@
  * THE GOVERNOR RESULT TYPES stay in sweep.ts and are imported here type-only — this module owns the
  * DECISION, never the shapes.
  */
+import { fixedClock, type Clock } from "./clock.js";
 import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
+
+/** An epoch-ms instant as ISO-8601, via the Clock port (clock.ts, pure) rather than a bare Date site. */
+const isoAt = (ms: number): string => fixedClock(ms).iso();
 
 
 
@@ -190,7 +194,7 @@ export function governorDeferPayload(verdict: DispatchGovernorVerdict): Record<s
     return {
       source: verdict.hold.source,
       error: verdict.hold.error,
-      streak_started_at: new Date(verdict.hold.streakStartedAtMs).toISOString(),
+      streak_started_at: isoAt(verdict.hold.streakStartedAtMs),
       streak_age_ms: verdict.hold.ageMs,
       sustained_bound_ms: verdict.hold.boundMs,
       sustained_bound_basis: verdict.hold.basis,
@@ -231,8 +235,12 @@ export interface MemoryReadHold {
   basis: string;
 }
 
-export interface MemoryReadTrackerDeps {
-  now: () => number;
+/**
+ * Where a tracker's OUTPUT goes (rows, the escalation, sink failures) and where its recovery HISTORY
+ * comes from. Time is NOT here: the tracker reads it through the shared {@link Clock} port, its own
+ * first parameter, so a test freezes it with the same fake clock every other module takes.
+ */
+export interface MemoryReadSinks {
   /** Durations (ms) of this source's past recovered streaks — the `memory_read.recovered` ledger rows. */
   recoveredDurationsMs: (source: MemoryReadSource) => readonly number[];
   /** Appends a `memory_read.*` ledger row. */
@@ -310,7 +318,7 @@ interface OpenStreak {
 }
 
 /** One tracker per process and call site; both sources share it, each with its own streak. */
-export function createMemoryReadTracker(deps: MemoryReadTrackerDeps): MemoryReadTracker {
+export function createMemoryReadTracker(clock: Clock, sinks: MemoryReadSinks): MemoryReadTracker {
   const streaks = new Map<MemoryReadSource, OpenStreak>();
   const instants: number[] = [];
   const sink = <T>(label: string, fn: () => T): T | undefined => {
@@ -319,13 +327,13 @@ export function createMemoryReadTracker(deps: MemoryReadTrackerDeps): MemoryRead
     } catch (e) {
       // The governor must never throw out of a dispatch decision because a ledger, history or
       // escalation sink failed; the failure is handed to onSinkError rather than erased.
-      deps.onSinkError?.(label, e);
+      sinks.onSinkError?.(label, e);
       return undefined;
     }
   };
   return {
     observe() {
-      const at = deps.now();
+      const at = clock.now();
       if (instants[instants.length - 1] === at) return;
       instants.push(at);
       if (instants.length > OBSERVATION_WINDOW) instants.shift();
@@ -334,32 +342,32 @@ export function createMemoryReadTracker(deps: MemoryReadTrackerDeps): MemoryRead
       const open = streaks.get(source);
       if (!open) return;
       streaks.delete(source);
-      const durationMs = Math.max(0, deps.now() - open.startedAtMs);
+      const durationMs = Math.max(0, clock.now() - open.startedAtMs);
       sink("row", () =>
-        deps.writeRow("memory_read.recovered", {
+        sinks.writeRow("memory_read.recovered", {
           source,
           duration_ms: durationMs,
-          streak_started_at: new Date(open.startedAtMs).toISOString(),
+          streak_started_at: isoAt(open.startedAtMs),
           held: open.escalated,
         }),
       );
     },
     unreadable(source, error) {
-      const nowMs = deps.now();
+      const nowMs = clock.now();
       let open = streaks.get(source);
       if (!open) {
         const started: OpenStreak = { startedAtMs: nowMs, escalated: false };
         open = started;
         streaks.set(source, started);
         sink("row", () =>
-          deps.writeRow("memory_read.unreadable", {
+          sinks.writeRow("memory_read.unreadable", {
             source,
             error,
-            streak_started_at: new Date(started.startedAtMs).toISOString(),
+            streak_started_at: isoAt(started.startedAtMs),
           }),
         );
       }
-      const history = sink("history", () => deps.recoveredDurationsMs(source)) ?? [];
+      const history = sink("history", () => sinks.recoveredDurationsMs(source)) ?? [];
       const { boundMs, basis } = deriveSustainedBound(history, observedTickCadenceMs(instants));
       const ageMs = nowMs - open.startedAtMs;
       if (boundMs === undefined || !(ageMs > boundMs)) return undefined;
@@ -369,14 +377,14 @@ export function createMemoryReadTracker(deps: MemoryReadTrackerDeps): MemoryRead
         open.escalated = true;
         const delivered =
           sink("escalate", () => {
-            deps.escalate(hold);
+            sinks.escalate(hold);
             return true;
           }) === true;
         sink("row", () =>
-          deps.writeRow("memory_read.sustained", {
+          sinks.writeRow("memory_read.sustained", {
             source,
             error,
-            streak_started_at: new Date(hold.streakStartedAtMs).toISOString(),
+            streak_started_at: isoAt(hold.streakStartedAtMs),
             streak_age_ms: ageMs,
             sustained_bound_ms: boundMs,
             sustained_bound_basis: basis,
@@ -419,6 +427,7 @@ export function consultMemoryReads(deps: DispatchGovernorDeps): {
     try {
       failure = deps.readMemoryStoreFailure();
     } catch (e) {
+      // A throwing store read IS a failure, not an absence: its message becomes the streak's error.
       failure = errorMessage(e);
     }
     if (failure === undefined) tracker.readable("store");
