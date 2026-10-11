@@ -283,6 +283,17 @@ export const IMPLEMENT_REFUSAL_REPORT_CONTRACT = [
 ].join("\n");
 
 /**
+ * W1-T7807: the one line that PREVENTS the shape the quiet-worker watchdog recovers from. W1-T7734's worker polled
+ * `until grep -q "^ℹ duration_ms" <output>` for a reporter line a finished run never printed, and sat quiet ~55 minutes.
+ * Appended beside {@link IMPLEMENT_REFUSAL_REPORT_CONTRACT} at both sites that use it (first prompt and compaction anchor).
+ */
+export const IMPLEMENT_WAIT_TARGET_CONTRACT = [
+  "",
+  "# WAITING ON A BACKGROUND RUN",
+  "- A wait on a background test run waits on the RUNNER'S EXIT (the process, or the `[exited with code N]` marker in its output), never on a reporter-specific line such as `duration_ms`.",
+].join("\n");
+
+/**
  * THE TWO CONFORMING SESSION-BRANCH FORMS (W1-T3388). CLAUDE.md's own rule names
  * `run-<taskId>-<epochMs>` but binds it only "WHEN BUILDING A FILED TASK" — PR 5106 was an
  * ad-hoc repair with no filed task and therefore no id to put there, so an agent that read the
@@ -2821,7 +2832,9 @@ import {
   type WorkerStreamEvent, type WorkerSelectionAssignment,
   WorkerAbandonedError,
   SubscriptionOnlyRefusedError,
+  deliverOperatorAnswerToRunningWorker,
 } from "./lib/worker.js";
+import { QuietRoundEndedError, productionQuietWorkerJudge, runQuietWorkerWatchdog } from "./lib/quiet-worker-watchdog.js";
 import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
 import { enrichWorkerStreamEvent } from "./lib/worker-telemetry.js";
 
@@ -17217,6 +17230,8 @@ async function runTask(
   // (recon/implement/diagnose/decision-resume) gets it BY CONSTRUCTION, the same rationale
   // `onSpawnError`/`workerStateSensor.observer` already state for that wrapper.
   const workerAbandonMs = opts.workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon;
+  // W1-T7807: the policy `workerStall` row is the quiet-worker watchdog's no-history fallback bound.
+  const workerStallFallbackMs = loadDefaultPolicy().values.workerStall;
 
   // W1-T2528: not routed through `nextLaneEpochMs` — `taskId` is already the per-rung
   // component, and same-taskId reruns are refused earlier by the dispatch claim/inflight check.
@@ -17263,8 +17278,59 @@ async function runTask(
     let selectionAssignment: Parameters<NonNullable<SpawnWorkerArgs["onSelectionAssignment"]>>[0] | undefined;
     const baseStreamObserver = effectiveSpawnArgs.streamObserver ?? workerStateSensor.observer;
     const receiptLog: typeof log = callerOwnsBenchmarkReceipt(effectiveSpawnArgs) ? () => {} : log; // W1-T4613: fixWorkerReceipt owns it
-    return recordBenchmarkWorkerAttempt(() => rawSpawn({
+    // W1-T7807: the quiet-worker watchdog rides every REAL dispatch spawn (an injected spawn has no process tree to read).
+    let workerRootPid: number | undefined;
+    let quietEnded: QuietRoundEndedError | undefined;
+    const quietAbort = new AbortController();
+    const quietWatchdog = opts.spawn ? undefined : runQuietWorkerWatchdog({
+      taskId,
+      runId,
+      rootPid: () => workerRootPid,
+      provider: () => selectionAssignment?.selected.provider,
+      history: () => {
+        const read = readLedgerUnionRecordsSync(dirname(ledgerPath), { step: ["worker.state", "worker.assignment"] });
+        return read.ok ? read.rows : [];
+      },
+      fallbackBoundMs: workerStallFallbackMs,
+      quietFloorMs: DEFAULT_WORKER_QUIET_FLOOR_MS,
+      ledger: (step, fields) => log(step, fields),
+      judge: productionQuietWorkerJudge({ cwd: effectiveSpawnArgs.cwd, settingsFile: effectiveSpawnArgs.settingsFile }),
+      nudge: (message) => deliverOperatorAnswerToRunningWorker(taskId, message, { ledger: (event, fields) => log(event, fields ?? {}) }) === "delivered"
+        ? "delivered" : "unsupported",
+      endRound: async (reason) => {
+        if ((effectiveSpawnArgs.workerClass ?? "implement") !== "implement") return { ended: false, reason: "not an implement worker" };
+        const cwd = effectiveSpawnArgs.cwd;
+        try {
+          // The W1-T7697 checkpoint path (yieldAtWorkerBoundary): retain the disk work, push it, then release the lane.
+          if (worktreeHasUncommittedChanges(cwd)) {
+            const checkpoint = commitWorkerEdits(cwd, task.files ?? [],
+              `wip: yield at quiet worker\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume\nfailed: none\n\nRemudero-Task: ${taskId}`,
+              {}, task.acceptance);
+            if (!checkpoint.committed || checkpoint.undeclared.length > 0) {
+              return { ended: false, reason: `checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}` };
+            }
+          }
+          await gitPushRunBranchAsync(cwd);
+        } catch (error) {
+          return { ended: false, reason: `checkpoint failed: ${String((error as Error)?.message ?? error)}` };
+        }
+        const checkpointSha = hostWorktreeGit(cwd, ["rev-parse", "HEAD"]).trim();
+        quietEnded = new QuietRoundEndedError({ checkpointSha, reason });
+        quietAbort.abort();
+        return { ended: true, checkpointSha };
+      },
+    });
+    if (quietWatchdog && effectiveSpawnArgs.signal) {
+      const callerSignal = effectiveSpawnArgs.signal;
+      if (callerSignal.aborted) quietAbort.abort();
+      else callerSignal.addEventListener("abort", () => quietAbort.abort(), { once: true });
+    }
+    const stopQuietWatchdog = quietWatchdog?.start();
+    return recordBenchmarkWorkerAttempt(() => (async () => {
+      try {
+        const result = await rawSpawn({
       ...effectiveSpawnArgs,
+      ...(quietWatchdog ? { signal: quietAbort.signal, onWorkerPid: (pid: number) => { workerRootPid = pid; } } : {}),
       // A dispatch run builds in its task worktree: its workers reserve (and learn) host memory as "implement".
       workerClass: effectiveSpawnArgs.workerClass ?? "implement",
       // Every dispatch-phase worker inherits the run identity at the ONE wrapper that already owns its state/error telemetry, so the
@@ -17291,14 +17357,26 @@ async function runTask(
       // Keep provider/model attribution specific to THIS spawn, not the run's initial mount.
       // The selected assignment is authoritative for provider + requested model; the selected
       // model is deliberately not promoted to a served-model receipt.
-      streamObserver: (event) => baseStreamObserver(attributeWorkerStreamEvent(
-        enrichWorkerStreamEvent(event, effectiveSpawnArgs, selectionAssignment), selectionAssignment)),
+      streamObserver: (event) => {
+        quietWatchdog?.observer(event);
+        baseStreamObserver(attributeWorkerStreamEvent(
+          enrichWorkerStreamEvent(event, effectiveSpawnArgs, selectionAssignment), selectionAssignment));
+      },
       // W1-T1045: every real dispatch spawn gets the clock bound BY CONSTRUCTION — the SAME
       // wrap-once rationale as `onSpawnError`/`streamObserver` above. A caller that already set
       // its own `clockBound` (none exist today) is respected; every future dispatch call site
       // through this wrapper is covered without remembering to add it individually.
       clockBound: effectiveSpawnArgs.clockBound ?? { boundMs: workerAbandonMs },
-      }), receiptLog, () => selectionAssignment, stopPolling);
+        });
+        if (quietEnded) throw quietEnded;
+        return result;
+      } catch (error) {
+        // `end_round` aborted this stream on purpose; surface THAT, not the abort it caused.
+        throw quietEnded ?? error;
+      } finally {
+        stopQuietWatchdog?.();
+      }
+    })(), receiptLog, () => selectionAssignment, stopPolling);
   };
   // W1-T143: a raw synchronous write, not console.log — this narration is exactly what the
   // daemon's `runOne` exercises on every dispatch, and console.log's async, non-TTY-buffered
@@ -19376,7 +19454,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const ruleToolPointer = ruleLookup
       ? `\nTo read a doctrine rule by id or phrase, or a learning's evidence by learnings#id, call ${WORKER_RULE_TOOL_NAME}.`
       : "";
-    const prompt = `${renderedImplementPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
+    const prompt = `${renderedImplementPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${IMPLEMENT_WAIT_TARGET_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -19408,7 +19486,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // drill will send. `ruleHeadlinesPart` is the SAME string the turn-0 prompt above just
     // carried (design (iii)) — never re-derived, so a compaction can never re-inject a
     // headline index that drifted from what turn 0 actually said.
-    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart, harnessOwnsGit)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
+    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart, harnessOwnsGit)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${IMPLEMENT_WAIT_TARGET_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
     log("anchor.built", { anchor });
 
     // ── Implement + DIAGNOSE-THEN-RETRY (W1-T7B — Standing rule 14: the CALL SITE is the
@@ -21064,6 +21142,14 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     say(`verdict: ${terminalVerdict} (${outcome.reason}) — PR left OPEN: ${prUrl}`);
     return { taskId, runId, prUrl, merged: false, costUsd, verdict: terminalVerdict };
   } catch (err) {
+    // W1-T7807: the quiet-worker watchdog's `end_round` verdict stopped this round AFTER pushing a checkpoint. That is a
+    // handoff (resumable from the branch), never a failure, and the worktree is kept exactly as the freshness yield keeps it.
+    if (err instanceof QuietRoundEndedError) {
+      log("verdict", { verdict: "handed_off", reason: "quiet_worker_round_ended", branch, head_sha: err.detail.checkpointSha ?? null,
+        detail: err.detail.reason, cost_usd: costUsd, ...terminalVerdictFields(null) });
+      say(`verdict: handed_off — the quiet-worker watchdog ended the round (${err.detail.reason})`);
+      return { taskId, runId, merged: false, costUsd, verdict: "handed_off" };
+    }
     // W1-T1045: the clock-bound watchdog (worker.ts) aborted a silent dispatch spawn — NAME it
     // and return a terminal verdict rather than falling through to the generic `run.error` +
     // re-throw below, which would leave this run's promise REJECTED instead of resolved: exactly

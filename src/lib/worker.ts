@@ -1236,6 +1236,9 @@ export interface SpawnWorkerArgs {
    * not have fired when the catch runs, so a holder is read too early exactly when the spawn failed fastest. Wired here but
    * destined for run-task.ts's ledger, which worker.ts cannot reach. Omitted swallows the error as before (W1-T442). */
   onSpawnError?: (err: NodeJS.ErrnoException) => void;
+  /** Receives the worker's bound ROOT pid the moment the SDK spawns it — the same pid `pidRef` tears down. The quiet-worker
+   * watchdog reads the process tree under it (W1-T7807). Must not throw. Omitted leaves behaviour byte-identical. */
+  onWorkerPid?: (pid: number) => void;
   /** Injectable seam: override the SDK's own `query()` entry point. Omitted means the real SDK `query`, a live `claude`
    * subprocess. Tests inject a fake async iterable so the process-group teardown wiring is exercised end to end, on both
    * paths, with no real binary (W1-T117). */
@@ -3015,7 +3018,14 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // group never outlives its own teardown. That closure also owns stderr piping, because a custom spawn gets none from the
     // SDK (W1-T117).
     const pidRef: { pid?: number } = {};
-    const spawnContained = boundContainment.spawn ?? spawnDetachedGroup;
+    const spawnContainedBase = boundContainment.spawn ?? spawnDetachedGroup;
+    const spawnContained: typeof spawnContainedBase = args.onWorkerPid
+      ? (spawnOpts, onStderr, onSpawnError) => {
+          const spawned = spawnContainedBase(spawnOpts, onStderr, onSpawnError);
+          args.onWorkerPid?.(spawned.pid);
+          return spawned;
+        }
+      : spawnContainedBase;
     const teardownContained = args.containment?.teardown ?? ((pgid: number) => void teardownProcessGroup(pgid));
 
     // TRAP (SDK 0.3.209): passing BOTH a `settings` file path and the `sandbox` option throws "Cannot use both …". The
