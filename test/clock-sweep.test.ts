@@ -446,8 +446,12 @@ test("W1-T4948: real shifted sweep cannot reap a sibling sentinel", () => withCl
     mkdirSync(victim);
     utimesSync(victim, aged, aged);
     const code = `import { sweepStaleTempDirs } from ${JSON.stringify(tmpModule)}; sweepStaleTempDirs();`;
+    // W1-T7808: this child stands in for a production sweep over a private root, and the lib now refuses
+    // to sweep a defaulted root under a test runner -- so the child must not inherit the runner's marker.
+    const childEnv = { ...opts.env };
+    delete childEnv.NODE_TEST_CONTEXT;
     execFileSync(file, ["--import", "tsx", "--import", shiftModule, "--input-type=module", "-e", code], {
-      cwd: opts.cwd, env: opts.env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+      cwd: opts.cwd, env: childEnv, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
     });
     sweptPrivateVictim = !existsSync(victim);
     assert.equal(existsSync(sibling), true, "the real shifted sweep must not see a sibling of its private TMPDIR");
