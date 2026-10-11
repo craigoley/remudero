@@ -5132,7 +5132,8 @@ function observedPathMatchesRepositoryPath(observedPath: string, repositoryPath:
   return observedPath === repositoryPath || observedPath.endsWith(`/${repositoryPath}`);
 }
 
-/** W1-T8038: the runner's own words for a job killed at its ceiling or cancelled. */
+/** W1-T8038: the runner's own words for a job killed at its ceiling or cancelled. PRIMARY CONTROL: a
+ *  classifier, not a cap — it decides whether the job log is read beside the annotations. */
 export const RUNNER_TIMEOUT_LINE =
   /exceeded the maximum execution time|The (?:operation|job|run) was canceled|received a shutdown signal|SHARD HANG\W+the matrix was cancelled/i;
 
