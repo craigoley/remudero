@@ -104,7 +104,7 @@ import { buildActionResultsRoute } from "./action-results.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, rotationStampIso } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
-import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type PersistedInbox } from "./fleet-lane.js";
+import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type InboxAttentionEvidence, type PersistedInbox } from "./fleet-lane.js";
 import { inboxOwner } from "./inbox-owner.js";
 import { projectProposalHumanGates } from "./ask-classification.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage, type PlainStore } from "./inbox-plain.js";
@@ -1824,6 +1824,7 @@ export interface ClassifiedInbox {
   classifications: InboxClassification[];
   ledgerLines: LedgerLines;
   projection: Map<string, StatusProjection>;
+  attentionEvidence?: InboxAttentionEvidence;
 }
 
 function statStamp(path: string): string | undefined {
@@ -2115,8 +2116,10 @@ export async function classifyAllProposalsSliced(
   const state = inboxClassifyState(deps);
   const retained = await readRetainedHumanReleases(deps);
   const fp = inboxFingerprint(deps, state, readPlanSnapshot, retained.receipts);
+  const attentionEvidence = attentionEvidenceFor(retained, fp.ledgerLines);
   const reused = reusableResult(state, fp);
-  if (reused !== undefined) return reused;
+  if (reused !== undefined) return JSON.stringify(reused.attentionEvidence) === JSON.stringify(attentionEvidence)
+    ? reused : { ...reused, attentionEvidence };
   if (state.pending !== undefined && state.pending.generation === state.generation && state.pending.key === fp.key && state.pending.plan === fp.plan) return state.pending.promise;
   const generation = state.generation = {};
   const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.archiveReleases);
@@ -2126,7 +2129,7 @@ export async function classifyAllProposalsSliced(
       if (i > 0) await yieldNow();
       for (const proposal of pass.proposals.slice(i, i + INBOX_CLASSIFY_SLICE)) classifications.push(pass.classifyOne(proposal));
     }
-    const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications, ledgerLines: fp.ledgerLines, projection: fp.projection };
+    const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications, ledgerLines: fp.ledgerLines, projection: fp.projection, attentionEvidence };
     if (state.generation === generation) state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: systemClock.now() };
     return result;
   };
@@ -2338,17 +2341,36 @@ function humanReleaseReceipt(row: Record<string, unknown>): string {
  * in the classifier fingerprint and must not be scanned a second time on each Inbox read. */
 async function readRetainedHumanReleases(deps: PanelGraphDeps) {
   const ledger = await readLedgerUnionRecordsMemoized(dirname(deps.ledgerPath), attentionLedgerMemo(deps), {
-    step: ["ratify.approved"], readLiveRecords: () => [], refuseIncomplete: true,
+    step: ["ratify.approved", "verify_human.judged"], readLiveRecords: () => [], refuseIncomplete: true,
   });
   const receipts = new Map<string, string>();
+  const judges = new Map<string, { decision: string; reason: string }>();
   if (ledger.ok) {
     for (const row of ledger.rows) {
       if (row.step === "ratify.approved" && row.released === "verify-human" && typeof row.task_id === "string") {
-        receipts.set(row.task_id, humanReleaseReceipt(row));
+        receipts.set(row.task_id, humanReleaseReceipt(row).slice(0, 512));
+      }
+      if (row.step === "verify_human.judged" && typeof row.task_id === "string" && typeof row.judge_decision === "string" && typeof row.judge_reason === "string") {
+        judges.set(row.task_id, { decision: row.judge_decision.slice(0, 64), reason: row.judge_reason.slice(0, 300) });
       }
     }
   }
-  return { receipts };
+  // A readable retained union supplies positive facts, not proof of complete history.
+  const archiveLedger = ledger.unread.length > 0 || ledger.archiveCount === 0 ? "unavailable" as const : "partial" as const;
+  return { receipts, judges, archiveLedger };
+}
+
+function attentionEvidenceFor(retained: Awaited<ReturnType<typeof readRetainedHumanReleases>>, live: LedgerLines): InboxAttentionEvidence {
+  const releases = new Map(retained.receipts);
+  const judges = new Map(retained.judges);
+  for (const row of live) {
+    if (typeof row.task_id !== "string") continue;
+    if (row.step === "ratify.approved" && row.released === "verify-human") releases.set(row.task_id, humanReleaseReceipt(row).slice(0, 512));
+    if (row.step === "verify_human.judged" && typeof row.judge_decision === "string" && typeof row.judge_reason === "string") {
+      judges.set(row.task_id, { decision: row.judge_decision.slice(0, 64), reason: row.judge_reason.slice(0, 300) });
+    }
+  }
+  return { archiveLedger: retained.archiveLedger, releases: [...releases], judges: [...judges] };
 }
 
 /** GET /v1/inbox/attention-census — read-only, core-scoped, source-qualified. */
@@ -2356,40 +2378,33 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
   return {
     method: "GET", path: "/v1/inbox/attention-census", scope: "read",
     handler: async (_req, res) => {
+      res.setHeader("cache-control", "private, no-store");
       if (refusePlanSourceUnavailable(deps, res)) return;
       const threads = readThreadsOr500(deps, res);
       if (!threads) return;
       const classified = await inboxRead(deps, readPlanSnapshot);
       if (!classified) return void inboxNotReady(res);
-      if (classified.classifiedAt !== undefined && systemClock.now() - Date.parse(classified.classifiedAt) > INBOX_STALE_AFTER_MS) {
+      const builtAtMs = systemClock.now();
+      const classifiedAtMs = Date.parse(classified.classifiedAt ?? "");
+      if (!Number.isFinite(classifiedAtMs) || classifiedAtMs > builtAtMs) {
+        sendJson(res, 503, { error: "attention_snapshot_invalid", detail: "The Inbox classification time is missing or ahead of this read; wait for a valid slow-lane classification." });
+        return;
+      }
+      if (builtAtMs - classifiedAtMs > INBOX_STALE_AFTER_MS) {
         sendJson(res, 503, { error: "attention_snapshot_stale", detail: "The slow lane's Inbox classification is stale; a fresh classification is required before reporting current attention counts." });
         return;
       }
       const plan = classified.plan();
       const planSource = deps.readPlanSource?.();
-      const ledger = await readLedgerUnionRecordsMemoized(dirname(deps.ledgerPath), attentionLedgerMemo(deps), {
-        step: ["ratify.approved", "verify_human.judged"],
-        refuseIncomplete: true,
-      });
-      const releasedTaskIds = new Set<string>();
-      const releaseReceipts = new Map<string, string>();
-      const judgeByTask = new Map<string, { decision: string; reason: string }>();
-      for (const row of classified.ledgerLines) {
-        if (row.step === "ratify.approved" && row.released === "verify-human" && typeof row.task_id === "string") {
-          releasedTaskIds.add(row.task_id);
-          releaseReceipts.set(row.task_id, humanReleaseReceipt(row));
-        }
+      const evidence = classified.attentionEvidence;
+      if (!evidence) {
+        res.setHeader("retry-after", "5");
+        sendJson(res, 503, { error: "attention_evidence_pending", detail: "The slow lane has not persisted attention evidence yet; no request-time history scan or empty count is substituted." });
+        return;
       }
-      for (const row of ledger.rows) {
-        if (typeof row.task_id !== "string") continue;
-        if (row.step === "ratify.approved" && row.released === "verify-human") {
-          releasedTaskIds.add(row.task_id);
-          releaseReceipts.set(row.task_id, humanReleaseReceipt(row));
-        }
-        if (row.step === "verify_human.judged" && typeof row.judge_decision === "string" && typeof row.judge_reason === "string") {
-          judgeByTask.set(row.task_id, { decision: row.judge_decision, reason: row.judge_reason });
-        }
-      }
+      const releaseReceipts = new Map(evidence.releases);
+      const releasedTaskIds = new Set(releaseReceipts.keys());
+      const judgeByTask = new Map(evidence.judges);
       const { registryPath } = inboxInputPaths(deps);
       const registryStamp = statStamp(registryPath);
       const registryParse = parseProposalRegistryResult(readFileIfExists(registryPath));
@@ -2407,11 +2422,13 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
           plan: planSource?.state === "stale" ? "partial" : "observed", registry: registryParse.kind === "fault" ? "partial" : sourceState(registryStamp), liveLedger: sourceState(liveStamp),
           // Reading every retained rotation proves positive receipts, never absence before the oldest
           // retained file. Until a durable continuity index exists, history cannot certify a zero.
-          archiveLedger: ledger.unread.length > 0 || ledger.archiveCount === 0 ? "unavailable" : "partial",
+          archiveLedger: evidence.archiveLedger,
           githubProjection: projectionPartial ? "partial" : "observed",
         },
       });
-      sendJson(res, 200, planSource === undefined ? census : { ...census, planSource });
+      const builtAt = fixedClock(builtAtMs).iso();
+      const source = { state: "fresh" as const, classifiedAt: classified.classifiedAt!, builtAt, verifiedAt: builtAt, ageMs: builtAtMs - classifiedAtMs };
+      sendJson(res, 200, { ...census, source, ...(planSource === undefined ? {} : { planSource }) });
     },
   };
 }
@@ -2481,6 +2498,7 @@ interface InboxRead {
   plan: () => Plan;
   lanes: () => ReturnType<typeof inboxLanes>;
   classifiedAt?: string;
+  attentionEvidence?: InboxAttentionEvidence;
 }
 
 interface SlowLaneInbox extends InboxRead {
@@ -2508,6 +2526,7 @@ function slowLaneInboxOf(deps: PanelGraphDeps, persisted: PersistedInbox): SlowL
   let lanes: { key: string; built: ReturnType<typeof inboxLanes> } | undefined;
   return {
     ...classified, classified, persisted, generatedAt: persisted.generatedAt, classifiedAt: persisted.generatedAt,
+    attentionEvidence: persisted.attentionEvidence,
     mergedTaskIds: new Set(persisted.mergedTaskIds), projectionIndeterminate: persisted.projectionIndeterminate,
     plan: () => deps.readPlanSnapshot?.() ?? loadPlan(deps.planPath),
     lanes: () => {
@@ -2523,8 +2542,10 @@ async function inboxRead(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): P
   if (deps.inboxFromSlowLane) return readSlowLaneInbox(deps);
   const classified = await classifyAllProposalsSliced(deps, readPlanSnapshot);
   const projection = [...classified.projection.values()];
+  const held = peekClassifiedInboxStamped(deps);
   return {
     ...classified, plan: () => classified.plan, lanes: () => inboxLanes(classified, deps.inboxRoot),
+    classifiedAt: fixedClock(held?.classifiedAtMs ?? systemClock.now()).iso(),
     mergedTaskIds: new Set([...classified.projection].filter(([, value]) => value.merged).map(([id]) => id)), projectionIndeterminate: projection.some((value) => value.indeterminate === true),
   };
 }
