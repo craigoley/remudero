@@ -340,18 +340,20 @@ export async function executeAdmissionDisposition(
   const started = clock.now();
   const policy = dispositionHash(settings);
   let reads = 0;
-  const read: AdmissionRead = async path => {
-    if (++reads > 32 || !withinDispositionTime(started, clock.now(), settings.policy.maxEvidenceAgeMs)) {
-      throw new Error("disposition-read-bound");
-    }
+  const bounded = async <T>(effect: () => Promise<T>): Promise<T> => {
+    if (!withinDispositionTime(started, clock.now(), settings.policy.maxEvidenceAgeMs)) throw new Error("disposition-attempt-bound");
     const remaining = Math.min(settings.policy.maxEvidenceAgeMs, 15_000) - (clock.now() - started);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      return await Promise.race([Promise.resolve().then(() => sourceRead(path)),
-        new Promise<Awaited<ReturnType<AdmissionRead>>>((_, reject) => {
-          timer = setTimeout(() => reject(new Error("disposition-read-timeout")), Math.min(5_000, Math.max(1, remaining)));
+      return await Promise.race([Promise.resolve().then(effect),
+        new Promise<T>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("disposition-attempt-timeout")), Math.min(5_000, Math.max(1, remaining)));
         })]);
     } finally { if (timer !== undefined) clearTimeout(timer); }
+  };
+  const read: AdmissionRead = async path => {
+    if (++reads > 32) throw new Error("disposition-read-bound");
+    return bounded(() => sourceRead(path));
   };
   const commit = async (status: AdmissionDispositionStatus, reason: string, stage: AdmissionDispositionReceipt["stage"],
     counts: Partial<Pick<AdmissionDispositionReceipt, "identityAttempts" | "reconciliationAttempts" | "closeAttempts" | "escalationAttempts">> = {},
@@ -406,7 +408,7 @@ export async function executeAdmissionDisposition(
     }
     const escalateSimulation = async (): Promise<AdmissionDispositionResult> => {
       const intent = await commit("pending", "simulated-escalation-intent", "escalation", { escalationAttempts: 1 });
-      try { await simulation!.simulateEscalation(intent); }
+      try { await bounded(() => simulation!.simulateEscalation(intent)); }
       catch { /* Lost acknowledgement is pending reconciliation; never blindly repeat the escalation. */
         return result("pending", "simulated-escalation-ambiguous", intent); }
       return result("simulated-closed", "simulated-close-and-escalation-confirmed",
@@ -418,7 +420,7 @@ export async function executeAdmissionDisposition(
       const pending = await commit("pending", "simulated-effect-reconciliation", last.stage,
         { reconciliationAttempts: last.reconciliationAttempts + 1 });
       let evidence: { closed: boolean; escalated: boolean };
-      try { evidence = await simulation.reconcile(pending); }
+      try { evidence = await bounded(() => simulation.reconcile(pending)); }
       catch { /* Unreadable simulated effect evidence remains unknown within the same cumulative budget. */
         return pending.reconciliationAttempts >= 2 ? terminal("ambiguous-effect-exhausted") : result("pending", "simulated-reconciliation-unreadable", pending); }
       if (evidence.closed !== true || pending.escalationAttempts === 1 && evidence.escalated !== true) {
@@ -444,7 +446,7 @@ export async function executeAdmissionDisposition(
     if (current.status !== "would-close" || current.binding !== preflight.binding || dispositionHash(settings) !== policy) {
       return terminal("close-preflight-changed");
     }
-    try { await simulation.simulateClose(intent); }
+    try { await bounded(() => simulation.simulateClose(intent)); }
     catch { /* A lost close response is NOT proof that the simulated effect never ran. */
       return result("pending", "simulated-close-ambiguous", intent); }
     return escalateSimulation();
