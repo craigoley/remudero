@@ -17,10 +17,10 @@ import { pendingWorkerBoundaryHandoffs } from "../src/lib/daemon.js";
 import type { DispatchClaimReserver } from "../src/lib/dispatch-claim.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import * as watchdog from "../src/lib/quiet-worker-watchdog.js";
 import {
   QUIET_JUDGED_LEDGER_STEP,
   QuietRoundEndedError,
-  RECYCLE_YIELD_LEDGER_STEP,
   runQuietWorkerWatchdog,
   type EndRoundResult,
   type QuietWatchdogHandle,
@@ -29,10 +29,14 @@ import {
 import type { GitHub } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { spawnWorker, WorkerResult } from "../src/lib/worker.js";
-import { roundEndedHandoffRows, runTask, watchDispatchSpawn } from "../src/run-task.js";
+import * as runTaskModule from "../src/run-task.js";
+import { runTask, watchDispatchSpawn } from "../src/run-task.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
+// Namespace reads, not named imports: on a tree without the fix the file still loads and each test fails on its own.
+const RECYCLE_YIELD_LEDGER_STEP = watchdog.RECYCLE_YIELD_LEDGER_STEP;
+const roundEndedHandoffRows: typeof runTaskModule.roundEndedHandoffRows = (...args) => runTaskModule.roundEndedHandoffRows(...args);
 const RECYCLE = "PAUSE requested: container recycle (deploy/recycle-container.sh)";
 const SHA = "d".repeat(40);
 
