@@ -88,6 +88,8 @@ const dispositionStatuses = new Set(["trusted", "would-close", "pending", "owner
 const object = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value)
   ? value as Record<string, unknown> : {};
 const positiveId = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) > 0;
+const databaseId = (value: unknown): number => positiveId(value) ? value
+  : typeof value === "string" && /^[1-9][0-9]*$/.test(value) && positiveId(Number(value)) ? Number(value) : NaN;
 
 export interface AdmissionFlowInput {
   owner: string; repo: string; settings?: AdmissionSettings;
@@ -120,6 +122,7 @@ export async function readAdmissionFlowCorpus(input: AdmissionFlowInput, selecte
   const started = clock.now(), settings = input.settings;
   if (!settings || settings.mode !== "shadow" || settings.disposition !== "shadow") return { ok: false, observedAtMs: started, reason: "not-enabled" };
   if (!positiveId(settings.repositoryId) || !/^[A-Za-z0-9_.-]+$/.test(input.owner) || !/^[A-Za-z0-9_.-]+$/.test(input.repo)
+    || !settings.policy || !Number.isFinite(settings.policy.maxEvidenceAgeMs) || settings.policy.maxEvidenceAgeMs < 0
     || selected.length > ADMISSION_FLOW_READ_MAX || selected.some(n => !positiveId(n))) return { ok: false, observedAtMs: started, reason: "invalid-corpus-request" };
   const read = input.readCorpus ?? admissionFlowText;
   const policyDigest = feedbackContentDigest(settings);
@@ -127,10 +130,11 @@ export async function readAdmissionFlowCorpus(input: AdmissionFlowInput, selecte
   const fields = "number fullDatabaseId state createdAt headRefOid author{__typename ... on User{databaseId} ... on Bot{databaseId}} repository{databaseId nameWithOwner isPrivate} headRepository{databaseId nameWithOwner isPrivate}";
   const query = `query{repository(owner:${JSON.stringify(input.owner)},name:${JSON.stringify(input.repo)}){databaseId nameWithOwner isPrivate pullRequests(first:100,states:OPEN){totalCount pageInfo{hasNextPage}nodes{${fields}}} ${[...new Set(selected)].map(n => `p${n}:pullRequest(number:${n}){${fields}}`).join(" ")}}}`;
   admissionReads.add(read);
+  const timeout = Math.min(ADMISSION_FLOW_TIMEOUT_MS, Math.max(1, settings.policy.maxEvidenceAgeMs));
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const body = await Promise.race([Promise.resolve().then(() => read(query)).finally(() => admissionReads.delete(read)),
-      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("corpus-read-timeout")), ADMISSION_FLOW_TIMEOUT_MS); })]);
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("corpus-read-timeout")), timeout); })]);
     return { ok: true, body, observedAtMs: started, policyDigest };
   } catch { // Transport, malformed bytes and a stalled read stay unknown; no fresh effect budget.
     return { ok: false, observedAtMs: started, reason: "corpus-unreadable" };
@@ -160,8 +164,7 @@ export function admissionFlowReport(input: AdmissionFlowInput, ledger: FlowLedge
   const numbers = new Set<number>();
   for (const value of connection.nodes) {
     const pr = object(value), actor = object(pr.author), target = object(pr.repository), headRepo = object(pr.headRepository);
-    const item = positiveId(pr.fullDatabaseId) ? pr.fullDatabaseId
-      : typeof pr.fullDatabaseId === "string" && /^[1-9][0-9]*$/.test(pr.fullDatabaseId) ? Number(pr.fullDatabaseId) : NaN;
+    const item = databaseId(pr.fullDatabaseId);
     const opened = typeof pr.createdAt === "string" ? Date.parse(pr.createdAt) : NaN;
     if (!positiveId(pr.number) || numbers.has(pr.number) || !positiveId(item) || !positiveId(actor.databaseId)
       || !["User", "Bot"].includes(String(actor.__typename)) || !positiveId(headRepo.databaseId)
@@ -192,8 +195,9 @@ export function admissionFlowReport(input: AdmissionFlowInput, ledger: FlowLedge
   const selected = historical;
   for (const n of selected.filter(n => !numbers.has(n))) {
     const current = object(repo[`p${n}`]);
-    if (current.number !== n || !["MERGED", "CLOSED"].includes(String(current.state)) || !positiveId(Number(current.fullDatabaseId))
-      || object(current.repository).databaseId !== settings.repositoryId) return unknown("selected-terminal-unreadable");
+    if (current.number !== n || !["MERGED", "CLOSED"].includes(String(current.state)) || !positiveId(databaseId(current.fullDatabaseId))
+      || object(current.repository).databaseId !== settings.repositoryId || object(current.repository).nameWithOwner !== repo.nameWithOwner
+      || object(current.repository).isPrivate !== false) return unknown("selected-terminal-unreadable");
     report.terminal.push(n);
   }
   if (feedbackContentDigest(settings) !== snapshot) return unknown("policy-changed");

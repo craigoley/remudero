@@ -11,6 +11,7 @@ import type { GardenerDeps } from "../src/lib/gardener.js";
 import type { LedgerRecord } from "../src/lib/retro.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
+import { gitRepo } from "./helpers/git-repo.js";
 import { flowGardenPass } from "../src/lib/garden-registry.js";
 import { buildRegisteredGarden } from "../src/run-task.js";
 import type { Config } from "../src/lib/config-schema.js";
@@ -255,4 +256,62 @@ test("W1-T7756 callers: existing daily pass and daemon builder forward opt-in se
   const legacy = await buildRegisteredGarden("flow", { repoRoot: f.root, owner: input.owner, repo: input.repo,
     config: { root: f.root } as Config, log: f.deps.log, raiseDuplicate: () => { throw Error("forbidden escalation"); } });
   assert.equal(typeof legacy, "function");
+});
+
+test("W1-T7756 production: both registered gardens use the bounded corpus without activating a scheduler", async (t) => {
+  const repo = gitRepo({ kind: "admission-garden-defaults" }); t.after(() => repo.cleanup());
+  repo.addRemote("origin", repo.dir); repo.git("fetch", "origin");
+  const state = join(repo.dir, "state");
+  writeLedger([], { dir: state, rotations: [{ at: fixedClock(now - 2_000).iso(), rows: [] }, { at: fixedClock(now - 3_000).iso(), rows: [], gz: true }] });
+  const ownerOnly = corpus(); ownerOnly.data.repository.pullRequests.nodes[1]!.author.databaseId = 7;
+  const shim = ghShim([{ when: "api graphql", stdout: JSON.stringify(ownerOnly) }]); t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
+  const prior = process.env.PATH, logs: string[] = [];
+  try {
+    process.env.PATH = `${shim.dir}:${prior}`;
+    for (const name of ["flow", "flow-remedy"] as const) {
+      const pass = await buildRegisteredGarden(name, { repoRoot: repo.dir, owner: input.owner, repo: input.repo,
+        config: { root: repo.dir, contributorAdmission: settings } as Config,
+        log: step => logs.push(step), raiseDuplicate: () => { throw Error("forbidden external escalation"); } });
+      await pass();
+    }
+    assert.equal(logs.filter(step => step === flow.ADMISSION_FLOW_STEP).length, 2);
+    assert.equal(shim.calls().length, 2); assert.ok(shim.calls().every(call => call.startsWith("api graphql") && !/mutation|--method|-X/.test(call)));
+    assert.equal(logs.some(step => step === "admission_flow.proposal_shadow"), false);
+  } finally { process.env.PATH = prior; }
+});
+
+test("W1-T7756 bounds: stalled reads stay single-flight after timeout and policy changes invalidate the response", async () => {
+  let finish!: (body: unknown) => void, calls = 0;
+  const short: AdmissionSettings = { ...settings, policy: { ...settings.policy, maxEvidenceAgeMs: 20 } };
+  const read: flow.AdmissionFlowRead = () => { calls++; return new Promise(resolve => { finish = resolve; }); };
+  const selected = { ...input, settings: short, readCorpus: read };
+  assert.equal((await flow.readAdmissionFlowCorpus(selected, [], fixedClock(now))).ok, false);
+  assert.equal((await flow.readAdmissionFlowCorpus(selected, [], fixedClock(now))).reason, "read-still-in-flight");
+  assert.equal(calls, 1); finish(corpus()); await new Promise<void>(resolve => setImmediate(resolve));
+  const mutable = structuredClone(settings);
+  const changed = await flow.readAdmissionFlowCorpus({ ...input, settings: mutable, readCorpus: async () => { mutable.policy.version = "new-version"; return corpus(); } }, [], fixedClock(now));
+  assert.equal(flow.admissionFlowReport({ ...input, settings: mutable }, { ok: true, rows: [], unread: [] }, changed, now).coverage, "unknown");
+});
+
+test("W1-T7756 proposals: invalid or unwritable intents are unknown without publishing a task or question", (t) => {
+  const f = fixture(t), action = remedy.admissionFlowInventory(report(), [], [], now).next!;
+  remedy.recordAdmissionFlowProposal(f.deps, { ...action, rung: 3 });
+  assert.equal(f.logs[0]!.fields!.reason, "invalid-proposal");
+  const path = join(f.root, "file-not-directory"); writeFileSync(path, "held");
+  remedy.recordAdmissionFlowProposal({ ...f.deps, stateDir: path }, action);
+  assert.equal(f.logs[1]!.fields!.reason, "intent-unreadable"); assert.equal(readFileSync(path, "utf8"), "held");
+});
+
+test("W1-T7756 recurrence ladder: actual merged remedy and controlled snapshots bound the second rung", () => {
+  const measured = report(corpus(), { ok: true, rows: [disposition()], unread: [] });
+  const action = remedy.admissionFlowInventory(measured, [], [], now).next!, merge = now - 3_600_000;
+  const before = { ...measured, observedAtMs: merge - 1_000 }, after = { ...measured, observedAtMs: merge + 1_000 };
+  const rows = [before, after].map(r => ({ step: flow.ADMISSION_FLOW_STEP, ...r }));
+  const task = { id: "W1-T9999", origin: action.origin, status: "queued", files: ["src/lib/flow-gardener.ts"], mergedAt: fixedClock(merge).iso() };
+  const inv = remedy.admissionFlowInventory(measured, rows, [task], now);
+  assert.equal(inv.next!.rung, 2); assert.equal(inv.next!.admissionShadow, true); assert.ok(inv.next!.escalation);
+  assert.equal(inv.ladder[0]!.effect!.verdict, "debit");
+  assert.equal(remedy.admissionFlowInventory(measured, [], [task], now).next, undefined, "unmeasured evidence does not create a second remedy");
+  const corrupt = [{ step: flow.ADMISSION_FLOW_STEP, mode: "shadow", coverage: "measured", trusted: null }];
+  assert.equal(remedy.admissionFlowInventory(measured, corrupt, [task], now).next, undefined);
 });

@@ -152,9 +152,9 @@ export function recordAdmissionFlowProposal(deps: GardenerDeps, action: FlowActi
   const dir = join(deps.stateDir, "admission-flow-shadow-intents");
   const token = join(dir, `${action.price.key}-${effect}.json`);
   try {
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(token, JSON.stringify({ version: "admission-flow-intent-v1", mode: "shadow", effect, cause: action.price.key,
-      origin: action.origin, permission: "not-granted", originalReasons: action.charges.map(c => c.reason), atMs: (deps.clock ?? systemClock).now() }) + "\n", { flag: "wx" });
+      origin: action.origin, permission: "not-granted", originalReasons: action.charges.map(c => c.reason), atMs: (deps.clock ?? systemClock).now() }) + "\n", { flag: "wx", mode: 0o600 });
   } catch (error) {
     // EEXIST includes unreadable/corrupt existing tokens: never delete them into a fresh budget.
     deps.log("admission_flow.proposal_unknown", { cause: action.price.key, reason: (error as NodeJS.ErrnoException).code === "EEXIST"
