@@ -41,6 +41,7 @@ test("W1-T7756: admission gardening distinguishes missing evidence from healthy 
   assert.equal(report(undefined, { ok: false, rows: [], unread: ["ledger"] }).coverage, "unknown");
   const truncated = corpus(); truncated.data.repository.pullRequests.pageInfo.hasNextPage = true;
   assert.equal(report(truncated).coverage, "unknown");
+  assert.equal(report(truncated).corpusCoverage, "unknown");
 });
 
 test("W1-T7756: admission recovery deduplicates persistent causes across PR heads", (t) => {
