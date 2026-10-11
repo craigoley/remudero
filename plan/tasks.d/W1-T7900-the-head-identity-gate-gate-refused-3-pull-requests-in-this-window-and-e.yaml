@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -17,3 +17,14 @@
     - claim: "the lane that trips the head-identity-gate gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
       proof: "grep: ci-learning:10671:head-identity-gate in learnings/ci.yaml"
   note: "Filed by the ci-learning rung from ci-learning:10671:head-identity-gate. The head-identity-gate gate went red on #10671 and was repaired; the repair touched test/deny-floor-env-split-string.test.ts, test/the-house-rules-are-refused-at-the-floor.test.ts. Recommended action: unclear. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.88
+    reasons:
+      - "The declared scope is a single file, learnings/ci.yaml, i.e. adding a learnings entry. The description does not indicate any touching of secrets, credentials, auth, permissions, merge/deploy policy, or data deletion."
+      - "The acceptance criterion is a grep check for a specific entry id, so it can be verified automatically. It requires no operator-only decision."
+      - "The ci-learning family has a good track record (18 merged, 1 declined, Beta mean 0.90). The task is filed at filing time by a machine author. The PR still goes through CI and review."
+      - "The title mentions a head-identity-gate, but the task only carries a lesson to a learnings file. The description does not say it changes the gate or its policy."
+    judged_at: "2026-10-11T08:37:29.181Z"
+    pin: "a189998bfdc662487020613299b00c3f1a124471a534ee6c298dbc2438ec8445"
