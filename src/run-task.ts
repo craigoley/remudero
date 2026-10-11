@@ -625,7 +625,7 @@ import {
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
 import { ghEscalationAnswerGateway, readEscalationAnswers, type EscalationAnswerGateway } from "./lib/escalation-answers.js";
 import { loadManagedRepos, ManagedReposError, type ManagedRepo } from "./lib/managed-repos.js";
-import { mergedHeadTypechecks, probeOpenPrMerges, type MergedTypecheckPorts } from "./lib/merge-probe.js";
+import { mergedHeadTypechecks, probeMerge, probeOpenPrMerges, type MergedTypecheckPorts } from "./lib/merge-probe.js";
 import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
 import {
   captureFeedback,
@@ -4974,6 +4974,57 @@ export function branchPrTitle(worktreePath: string): string | undefined {
     void e;
     return lastCommitSubject(worktreePath);
   }
+}
+
+/** Where {@link restoreBoundaryCheckpoint} left a fresh run's branch: on current main, or on the checkpoint's
+ *  own base when main conflicts with it (naming those paths, or why the merge could not be read). */
+export type BoundaryCheckpointRestore =
+  | { base: "main"; headSha: string }
+  | { base: "checkpoint"; headSha: string; mainConflicts: string[]; reason?: string };
+
+/**
+ * A restart checkpoint is RESTORED BY MERGE, never replayed: the fresh branch becomes the checkpoint's
+ * head with current main merged in (the checkpoint is the first parent, so its commits keep their shas).
+ * When main conflicts, the branch stays on the checkpoint's own base and the run goes on; the conflict
+ * reaches the PR, whose merge-conflict repair rounds resolve it. Why: a cherry-pick onto a moved main
+ * conflicted and ended W1-T7806 and W1-T7766 `restart_checkpoint_restore_failed`, stranding paid work.
+ * Only a remote head that moved since the handoff still refuses — that is someone else's work.
+ */
+export async function restoreBoundaryCheckpoint(
+  checkpoint: { branch: string; headSha: string },
+  taskId: string,
+  git: (args: string[]) => Promise<string>,
+): Promise<BoundaryCheckpointRestore> {
+  const remoteHead = (await git(["ls-remote", "origin", `refs/heads/${checkpoint.branch}`])).trim().split(/\s+/)[0];
+  if (remoteHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved; refusing to replay a different worker's work");
+  await git(["fetch", "origin", checkpoint.branch]);
+  const fetchedHead = (await git(["rev-parse", "FETCH_HEAD"])).trim();
+  if (fetchedHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved during fetch");
+  const mainSha = (await git(["rev-parse", "HEAD"])).trim();
+  const base = (await git(["merge-base", checkpoint.headSha, mainSha])).trim();
+  if (base === checkpoint.headSha) return { base: "main", headSha: mainSha }; // main already carries it
+  if (base === mainSha) {
+    await git(["reset", "--hard", "--quiet", checkpoint.headSha]); // it already sits on current main
+    return { base: "main", headSha: checkpoint.headSha };
+  }
+  const probe = await probeMerge({ headSha: checkpoint.headSha, mainSha, git: async (args) => {
+    try {
+      return { status: 0, stdout: await git([...args]) };
+    } catch (error) {
+      // merge-tree exits 1 on a conflict with the tree and the conflicted paths still on stdout.
+      const failed = error as { code?: unknown; stdout?: unknown };
+      return { status: typeof failed.code === "number" ? failed.code : null, stdout: typeof failed.stdout === "string" ? failed.stdout : "" };
+    }
+  } });
+  if (probe.verdict !== "clean") {
+    await git(["reset", "--hard", "--quiet", checkpoint.headSha]);
+    return { base: "checkpoint", headSha: checkpoint.headSha, mainConflicts: probe.verdict === "conflict" ? probe.paths : [],
+      ...(probe.verdict === "unreadable" ? { reason: probe.reason } : {}) };
+  }
+  const merged = (await git(["commit-tree", probe.tree, "-p", checkpoint.headSha, "-p", mainSha, "-m",
+    `wip: merge main into the restored checkpoint\n\nRemudero-Task: ${taskId}`])).trim();
+  await git(["reset", "--hard", "--quiet", merged]);
+  return { base: "main", headSha: merged };
 }
 
 /**
@@ -19195,14 +19246,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const checkpoint = pendingWorkerBoundaryHandoffs(readLedgerRawLines(ledgerPath)).get(taskId);
     if (checkpoint) {
       try {
-        const remoteHead = (await hostWorktreeGitAsync(worktreePath, ["ls-remote", "origin", `refs/heads/${checkpoint.branch}`])).trim().split(/\s+/)[0];
-        if (remoteHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved; refusing to replay a different worker's work");
-        await hostWorktreeGitAsync(worktreePath, ["fetch", "origin", checkpoint.branch]);
-        const fetchedHead = (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "FETCH_HEAD"])).trim();
-        if (fetchedHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved during fetch");
-        const commits = (await hostWorktreeGitAsync(worktreePath, ["rev-list", "--reverse", "--no-merges", `origin/main..${checkpoint.headSha}`])).trim();
-        if (commits) await hostWorktreeGitAsync(worktreePath, ["cherry-pick", ...commits.split("\n")]);
-        log("implement.checkpoint_restored", { source_branch: checkpoint.branch, source_head_sha: checkpoint.headSha, branch });
+        const restored = await restoreBoundaryCheckpoint(checkpoint, taskId, (args) => hostWorktreeGitAsync(worktreePath, args));
+        log("implement.checkpoint_restored", { source_branch: checkpoint.branch, source_head_sha: checkpoint.headSha, branch,
+          base: restored.base, restored_head_sha: restored.headSha,
+          ...(restored.base === "checkpoint" ? { main_conflicts: restored.mainConflicts, merge_unreadable: restored.reason } : {}) });
       } catch (error) {
         log("verdict", { verdict: "no_pr", reason: "restart_checkpoint_restore_failed", branch,
           source_branch: checkpoint.branch, detail: String((error as Error)?.message ?? error), cost_usd: costUsd });
@@ -19635,7 +19682,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
             throw new Error(`restart checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}`);
           }
         }
-        await gitPushRunBranchAsync(worktreePath);
+        await gitPushRunBranchAsync(worktreePath, { prGates: false }); // a checkpoint opens no PR: see worktreePushExecAsync
       } catch (error) {
         log("verdict", { verdict: "no_pr", reason: "restart_checkpoint_failed", waiting_on: waitingOn,
           detail: String((error as Error)?.message ?? error), branch, cost_usd: costUsd, ...terminalVerdictFields(impl) });

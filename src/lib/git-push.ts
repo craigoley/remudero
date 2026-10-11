@@ -176,6 +176,8 @@ export function gitPushRunBranch(worktreePath: string, opts: PushRunBranchOpts =
 export interface PushRunBranchAsyncOpts extends Omit<PushRunBranchOpts, "capture" | "exec"> {
   exec?: PushExecAsync;
   capture?: GitCaptureAsync;
+  /** False only for a restart checkpoint: it opens no PR, and its resumed run's PR push still runs the gate. */
+  prGates?: boolean;
 }
 
 /**
@@ -188,7 +190,7 @@ export async function gitPushRunBranchAsync(worktreePath: string, opts: PushRunB
   await runStepsAsync(
     pushRunBranchSteps(worktreePath, opts, {
       capture: opts.capture ?? worktreeGitCaptureAsync(worktreePath),
-      exec: opts.exec ?? worktreePushExecAsync(worktreePath),
+      exec: opts.exec ?? worktreePushExecAsync(worktreePath, { prGates: opts.prGates }),
     }),
   );
 }
@@ -604,11 +606,13 @@ export function worktreePushExec(worktreePath: string): PushExec {
   };
 }
 
-/** {@link worktreePushExec} off the event loop. */
-export function worktreePushExecAsync(worktreePath: string): PushExecAsync {
+/** {@link worktreePushExec} off the event loop. `prGates: false` skips the harness's pre-push gate, whose
+ *  checks are the ones CI runs on a PR: a restart checkpoint opens none, and W1-T7742's census refusal of
+ *  one discarded $3.98 of work its resumed run would have finished and pushed through the gate. */
+export function worktreePushExecAsync(worktreePath: string, { prGates = true }: { prGates?: boolean } = {}): PushExecAsync {
   return async (_file, args, opts) => {
     const pushArgs = leafArgs(worktreePath, args);
-    const gate = await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGitAsync(worktreePath, a)));
+    const gate = prGates ? await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGitAsync(worktreePath, a))) : undefined;
     if (gate) {
       try {
         const out = await withGateHome(gate, (env) => new Promise<{ stdout: string; stderr: string }>((resolveGate, reject) => {
