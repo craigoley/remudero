@@ -26,6 +26,7 @@ import type { AdmissionSettings, AdmissionRead, AdmissionDecision } from "../src
 import { ghEscalationAnswerGateway, readEscalationAnswers } from "../src/lib/escalation-answers.js";
 import { renderIssueBody } from "../src/lib/escalate.js";
 import { fixedClock } from "../src/lib/clock.js";
+import { resolveProducerIdentity } from "../src/lib/producer-identity.js";
 import { __resetRunningWorkersForTest, createClaudeExecutableCache, CLAUDE_BIN_ENV_OVERRIDE,
   deliverOperatorAnswerToRunningWorker, spawnWorker, type SpawnWorkerArgs } from "../src/lib/worker.js";
 
@@ -500,6 +501,8 @@ test("W1-T7754 publication: the actual cross-root CLI forwards shadow context in
   const rows = readFileSync(ledgerPathFor(config), "utf8").trim().split("\n").map(line => JSON.parse(line));
   assert.ok(rows.some(row => row.step === "feedback_publication.shadow" && row.reason === "publication-target-unresolved"));
   assert.ok(rows.every(row => row.permission === "not-granted"));
+  assert.ok(rows.every(row => resolveProducerIdentity(row.task_id).id === "cli"));
+  assert.ok(rows.every(row => row.run_id === "feedback-reconcile"));
 });
 
 test("W1-T7754 delivery: a live worker receives an immutable original lineage envelope, not relayer authority", { timeout: 15_000 }, async () => {
