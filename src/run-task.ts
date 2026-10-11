@@ -48876,7 +48876,7 @@ export function renderFeedbackReconcile(result: ReconcileFeedbackLandingResult, 
  * ({@link reconcileFeedbackLanding}, lib/feedback-reconcile.ts) — this hub does no scanning or
  * classification of its own; it only parses argv and calls the library's one entry point.
  */
-export async function feedbackReconcileCommand(rest: string[]): Promise<number> {
+export async function feedbackReconcileCommand(rest: string[], deps: { config?: Config; gh?: LandFeedbackOpts["gh"] } = {}): Promise<number> {
   const badArg = unknownArgError("feedback-reconcile", rest, ["--root", "--checkout"], ["--apply"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -48903,12 +48903,13 @@ export async function feedbackReconcileCommand(rest: string[]): Promise<number> 
   const checkoutRoot = checkoutArg !== undefined ? resolve(checkoutArg) : repoRoot;
   const apply = rest.includes("--apply");
 
-  const reconcileConfig = loadConfig();
+  const reconcileConfig = deps.config ?? loadConfig();
   const ledgerPath = ledgerPathFor(reconcileConfig);
   const result = reconcileFeedbackLanding({
     roots,
     checkoutRoot,
     apply,
+    gh: deps.gh,
     ledgerLines: () => readLedgerLines(ledgerPath),
     ...(reconcileConfig.contributorAdmission === undefined ? {} : { land: (root: string, relPath: string, content: string, opts: LandFeedbackOpts) =>
       landFeedbackStatusContent(root, relPath, content, { ...opts, publication: { mode: "shadow", record: (step, fields) =>

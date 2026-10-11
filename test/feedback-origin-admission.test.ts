@@ -19,7 +19,8 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { feedbackEntryBlock } from "../src/lib/triage.js";
 import { operatorVerdictEvidence } from "../src/lib/sweep.js";
-import { buildFixRungDispatchArgs, feedbackFixConstraint, runPlanScopedFixRound, buildIntakeRungsDaemonHooks } from "./helpers/run-task-test.js";
+import { buildFixRungDispatchArgs, feedbackFixConstraint, runPlanScopedFixRound, buildIntakeRungsDaemonHooks,
+  feedbackReconcileCommand, ledgerPathFor } from "./helpers/run-task-test.js";
 import * as admissionModule from "../src/lib/contributor-admission.js";
 import type { AdmissionSettings, AdmissionRead, AdmissionDecision } from "../src/lib/contributor-admission.js";
 import { ghEscalationAnswerGateway, readEscalationAnswers } from "../src/lib/escalation-answers.js";
@@ -453,6 +454,7 @@ test("W1-T7754 publication: the real async default reads visibility without bloc
 });
 
 test("W1-T7754 publication: immediate upstream observes private material but shadow preserves the original PR effect", () => {
+  for (const outage of [false, true]) {
   const root = tmpRoot(), f = sourceFixture(), rows: Record<string, unknown>[] = [], calls: string[][] = [];
   mkdirSync(join(root, ".remudero"), { recursive: true });
   writeFileSync(homeRepoPath(root), JSON.stringify({ repo: "acme/public" }));
@@ -460,16 +462,38 @@ test("W1-T7754 publication: immediate upstream observes private material but sha
     admission: { mode: "shadow", policy: POLICY, nowMs: NOW, record: (_step, fields) => rows.push(fields) },
     land: { stateRoot: root }, upstream: { git: () => "git@github.com:acme/widgets.git",
       gh: args => { calls.push(args);
-        if (args[1] === "repos/acme/widgets") return JSON.stringify({ id: 100, full_name: "acme/widgets", private: true });
+        if (args[1] === "repos/acme/widgets") { if (outage) throw new Error("visibility offline");
+          return JSON.stringify({ id: 100, full_name: "acme/widgets", private: true }); }
         if (args[1] === "repos/acme/public") return JSON.stringify({ id: 200, full_name: "acme/public", private: false, default_branch: "main" });
         if (args[1] === "repos/acme/public/git/ref/heads/main") return JSON.stringify({ object: { sha: "a".repeat(40) } });
         if (args[1] === "repos/acme/public/pulls") return JSON.stringify({ html_url: "https://github.com/acme/public/pull/1" });
         return "{}";
       } } });
   assert.equal(entry.upstream?.status, "landed");
-  assert.ok(rows.some(row => row.boundary === "upstream-publication" && row.outcome === "private-to-public"));
+  assert.ok(rows.some(row => row.boundary === "upstream-publication" && row.outcome === (outage ? "unknown" : "private-to-public")));
   assert.equal(calls.filter(args => args[1] === "repos/acme/public/pulls").length, 1);
   assert.deepEqual(readFeedbackEntry(root, entry.id).contribution, entry.contribution);
+  }
+});
+
+test("W1-T7754 publication: the actual cross-root CLI forwards shadow context into the unchanged landing effect", async () => {
+  const origin = gitRepo({ bare: true, kind: "crossroot-publication-origin" }), seed = gitRepo({ kind: "crossroot-publication-seed" });
+  seed.addRemote("origin", origin.dir); seed.git("push", "--quiet", "origin", "main");
+  const checkout = gitRepo({ cloneFrom: origin.dir, kind: "crossroot-publication-checkout" });
+  const root = tmpRoot(), f = sourceFixture(), state = tmpRoot();
+  const config = { root: state, claudeBin: "/unused", contributorAdmission: f.settings };
+  writeFileSync(join(root, "plan/feedback/fb-crossroot.yaml"), stringifyYaml({ id: "fb-crossroot", ts: new Date(NOW).toISOString(),
+    raw: "private source", origin: "issue#4", status: "new", attachments: [], contribution: { subject: f.subject } }));
+  const result = await withLiveWritesAllowed(() => feedbackReconcileCommand(["--root", `source=${root}`, "--checkout", checkout.dir, "--apply"], {
+    config, gh: args => { if (args[0] === "pr" && args[1] === "list") return "[]";
+      if (args[0] === "pr" && args[1] === "create") return "https://github.com/acme/public/pull/1";
+      assert.fail(`unexpected external effect ${JSON.stringify(args)}`); },
+  }));
+  assert.equal(result, 0);
+  assert.ok(origin.git("show", `${LANDING_BRANCH}:plan/feedback/fb-crossroot.yaml`).includes("private source"));
+  const rows = readFileSync(ledgerPathFor(config), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  assert.ok(rows.some(row => row.step === "feedback_publication.shadow" && row.reason === "publication-target-unresolved"));
+  assert.ok(rows.every(row => row.permission === "not-granted"));
 });
 
 test("W1-T7754 delivery: a live worker receives an immutable original lineage envelope, not relayer authority", { timeout: 15_000 }, async () => {
@@ -1088,11 +1112,14 @@ test(`W1-T7754 consumers: ${writer} unchanged pending legacy ${malformed ? "unre
   const root = gitRepo({ cloneFrom: origin.dir, kind: "admission-no-churn-consumer" });
   mkdirSync(join(root.dir, "plan", "feedback"), { recursive: true });
   const rel = "plan/feedback/fb-legacy.yaml";
+  const observations: Record<string, unknown>[] = [];
   const opts = { gh: (args: string[]) => {
+    if (args[0] === "api") return JSON.stringify({ id: 100, full_name: "acme/widgets", private: false });
     if (args[1] === "list") return "[]";
     if (args[1] === "create") return "https://github.com/acme/widgets/pull/3\n";
     assert.fail(`unexpected GitHub effect ${JSON.stringify(args)}`);
-  }, targetRepository: { owner: "acme", repo: "widgets" }, sourceRepository: { owner: "acme", repo: "widgets" } };
+  }, targetRepository: { owner: "acme", repo: "widgets" }, sourceRepository: { owner: "acme", repo: "widgets" },
+    publication: { mode: "shadow" as const, record: (_step: string, fields: Record<string, unknown>) => observations.push(fields) } };
   const stateRoot = tmpRoot();
   const land = (path: string, content: string) => withLiveWritesAllowed(() => {
     if (writer === "status-content") return landFeedbackStatusContent(root.dir, path, content, opts);
@@ -1111,6 +1138,7 @@ test(`W1-T7754 consumers: ${writer} unchanged pending legacy ${malformed ? "unre
   assert.deepEqual(unchanged.files, [rel]);
   assert.equal(unchanged.pushed, false);
   assert.equal(origin.git("rev-parse", LANDING_BRANCH).trim(), head);
+  assert.ok(observations.some(row => row.outcome === "unknown"), "unreadable/legacy bytes are not a publication grant");
   const another = "plan/feedback/fb-next.yaml";
   const changed = land(another, "id: fb-next\nraw: new\n");
   assert.deepEqual(changed.files.sort(), writer === "status-content" ? [another] : [rel, another].sort());
