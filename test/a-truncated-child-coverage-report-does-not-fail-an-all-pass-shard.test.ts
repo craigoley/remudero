@@ -38,7 +38,10 @@ test("an all-pass suite whose child was killed mid-write", () => {
 function run(dir: string) {
   // An enclosing coverage run's directory passes through to the wrapper ITSELF, so its recovery lines are
   // measured (blanked when there is none); the wrapper sets each pass's and the rebuild's own value.
-  const env: NodeJS.ProcessEnv = { ...process.env, NODE_V8_COVERAGE: process.env.NODE_V8_COVERAGE ?? "", GITHUB_STEP_SUMMARY: join(dir, "summary") };
+  const env: NodeJS.ProcessEnv = { ...process.env, GITHUB_STEP_SUMMARY: join(dir, "summary") };
+  env.NODE_V8_COVERAGE = ""; // blanked, never deleted: a deleted key is re-injected into the child
+  const outer = process.env.NODE_V8_COVERAGE;
+  if (outer) env.NODE_V8_COVERAGE = outer;
   delete env.NODE_TEST_CONTEXT;
   delete env.TEST_RETRY;
   delete env.TEST_RETRY_BUDGET_SECONDS;
