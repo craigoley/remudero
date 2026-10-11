@@ -272,6 +272,7 @@ export interface AdmissionDispositionReceipt {
   itemId?: number;
   headSha?: string;
   expectedHeadSha?: string;
+  ownerInstruction?: { commentId: number; actorId: number; updatedAt: string; contentDigest: string };
   policy: string;
   atMs: number;
   identityAttempts: number;
@@ -343,11 +344,19 @@ export async function executeAdmissionDisposition(
     if (++reads > 32 || !withinDispositionTime(started, clock.now(), settings.policy.maxEvidenceAgeMs)) {
       throw new Error("disposition-read-bound");
     }
-    return sourceRead(path);
+    const remaining = Math.min(settings.policy.maxEvidenceAgeMs, 15_000) - (clock.now() - started);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([Promise.resolve().then(() => sourceRead(path)),
+        new Promise<Awaited<ReturnType<AdmissionRead>>>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("disposition-read-timeout")), Math.min(5_000, Math.max(1, remaining)));
+        })]);
+    } finally { if (timer !== undefined) clearTimeout(timer); }
   };
   const commit = async (status: AdmissionDispositionStatus, reason: string, stage: AdmissionDispositionReceipt["stage"],
     counts: Partial<Pick<AdmissionDispositionReceipt, "identityAttempts" | "reconciliationAttempts" | "closeAttempts" | "escalationAttempts">> = {},
-    itemId?: number, observedHead?: string): Promise<AdmissionDispositionReceipt> => {
+    itemId?: number, observedHead?: string,
+    ownerInstruction?: AdmissionDispositionReceipt["ownerInstruction"]): Promise<AdmissionDispositionReceipt> => {
     const row: AdmissionDispositionReceipt = { version: "admission-disposition-v1", domain: store.domain, cause,
       sequence: history.length, previous: last ? dispositionHash(last) : "root", firstReason: last?.firstReason ?? "selected-origin-reconciliation",
       ...(last?.originalReason !== undefined ? { originalReason: last.originalReason }
@@ -355,7 +364,8 @@ export async function executeAdmissionDisposition(
       status, reason, stage, repositoryId: settings.repositoryId, prNumber: target.prNumber,
       ...(itemId === undefined ? last?.itemId === undefined ? {} : { itemId: last.itemId } : { itemId }),
       ...(observedHead === undefined ? last?.headSha === undefined ? {} : { headSha: last.headSha } : { headSha: observedHead }),
-      ...(target.headSha === undefined ? {} : { expectedHeadSha: target.headSha }), policy, atMs: clock.now(),
+      ...(target.headSha === undefined ? {} : { expectedHeadSha: target.headSha }),
+      ...(ownerInstruction === undefined ? {} : { ownerInstruction: { ...ownerInstruction } }), policy, atMs: clock.now(),
       identityAttempts: last?.identityAttempts ?? 0, reconciliationAttempts: last?.reconciliationAttempts ?? 0,
       closeAttempts: last?.closeAttempts ?? 0, escalationAttempts: last?.escalationAttempts ?? 0, ...counts };
     validateDispositionHistory([...history, row], store.domain, cause);
@@ -387,7 +397,9 @@ export async function executeAdmissionDisposition(
         || finalInstruction.status !== 200 || dispositionHash(finalInstruction.body) !== dispositionHash(instruction)) {
         return result("owner-action", "owner-target-changed", last);
       }
-      return result("adopted", "owner-current-head-adoption", await commit("adopted", "owner-current-head-adoption", "terminal", {}, final.itemId, final.assessment.subject.headSha), "fresh");
+      return result("adopted", "owner-current-head-adoption", await commit("adopted", "owner-current-head-adoption", "terminal", {}, final.itemId,
+        final.assessment.subject.headSha, { commentId: request.ownerInstructionId, actorId: actor.id as number,
+          updatedAt: instruction.updated_at as string, contentDigest: createHash("sha256").update(instruction.body as string).digest("hex") }), "fresh");
     }
     if (last?.status === "owner-action" || last?.status === "trusted" || last?.status === "would-close" || last?.status === "adopted") {
       return result(last.status, last.reason, last, "retained");
@@ -505,6 +517,12 @@ function validateDispositionHistory(history: readonly AdmissionDispositionReceip
       || row.originalReason !== undefined && !/^[a-z-]{1,80}$/.test(row.originalReason)
       || row.headSha !== undefined && !/^[a-f0-9]{40}$/i.test(row.headSha)
       || (row.status === "simulated-closed" && (domain !== "rehearsal" || row.closeAttempts !== 1 || row.escalationAttempts !== 1 || row.stage !== "terminal"))) throw new Error("disposition-history-invalid");
+    if (row.status === "adopted" && row.ownerInstruction === undefined) throw new Error("disposition-adoption-unbound");
+    if (row.ownerInstruction !== undefined && (row.status !== "adopted" || !positiveId(row.ownerInstruction.commentId)
+      || !positiveId(row.ownerInstruction.actorId) || !Number.isFinite(Date.parse(row.ownerInstruction.updatedAt))
+      || Date.parse(row.ownerInstruction.updatedAt) > row.atMs || !/^[a-f0-9]{64}$/.test(row.ownerInstruction.contentDigest))) {
+      throw new Error("disposition-adoption-invalid");
+    }
     for (const [field, ceiling] of [["identityAttempts", 3], ["reconciliationAttempts", 2], ["closeAttempts", 1], ["escalationAttempts", 1]] as const) {
       if (!Number.isInteger(row[field]) || row[field] < (prior?.[field] ?? 0) || row[field] > ceiling) throw new Error("disposition-budget-invalid");
     }
