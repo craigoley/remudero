@@ -12,7 +12,7 @@
   plan_refs: [W1-T7697, W1-T7806, W1-T7807, W1-T8008, W1-T4662]
   files: [src/run-task.ts, src/lib/quiet-worker-watchdog.ts, test/a-latched-restart-ends-a-worker-round-with-no-boundary.test.ts]
   status: queued
-  priority: 1
+  priority: 1  # operator 2026-10-11: restart churn — 261 lane-min held by a running lane (240 a long first worker or pre-open gate), est. ~220 lane-min/day recovered
   attempts: 0
   rationale: |
     READ on origin/main 5d117761b, which includes hand PR #10925 (merged 18:00:13Z, during this filing).
