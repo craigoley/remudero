@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { resolve } from "node:path";
+import { systemClock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { createOrReadPublished, isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 
@@ -36,7 +37,7 @@ function assertDirectory(path: string): void {
 function claim(path: string): { owner: ReviewerLease; raw: string; count: number } {
   const lock = `${path}.lock`;
   const owner: ReviewerLease = { version: "reviewer-worktree-lease-v1", pid: process.pid,
-    host: hostname(), startedAt: new Date().toISOString(), run_id: `reviewer-${randomUUID()}` };
+    host: hostname(), startedAt: systemClock.iso(), run_id: `reviewer-${randomUUID()}` };
   const raw = JSON.stringify(owner);
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
@@ -72,17 +73,15 @@ export async function withReviewerWorktreeLease<T>(worktree: string, action: () 
     throw new Error("reviewer worktree lease changed during an active borrow");
   }
   held.count++;
-  let result: T | undefined;
-  let failed = false;
-  let failure: unknown;
-  try { result = await action(); }
-  catch (error) { failed = true; failure = error; }
-  let releaseFailure: unknown;
+  let outcome: { kind: "passed"; value: T } | { kind: "failed"; error: unknown };
+  try { outcome = { kind: "passed", value: await action() }; }
+  catch (error) { outcome = { kind: "failed", error }; }
+  let releaseFailure: { error: unknown } | undefined;
   try {
     assertDirectory(path);
     if (readFileSync(`${path}.lock`, "utf8") !== held.raw)
       throw new Error("reviewer worktree lease changed before release");
-  } catch (error) { releaseFailure = error; }
+  } catch (error) { releaseFailure = { error }; }
   held.count--;
   if (held.count === 0) {
     borrowers.delete(path);
@@ -91,10 +90,11 @@ export async function withReviewerWorktreeLease<T>(worktree: string, action: () 
         isStale: (owner) => owner.run_id === held.owner.run_id && owner.pid === held.owner.pid,
         onReclaim: () => {}, onLostReclaim: () => {} });
       if (released.outcome !== "reclaimed") throw new Error("reviewer lease release did not remove its own claim");
-    } catch (error) { releaseFailure ??= error; }
+    } catch (error) { releaseFailure ??= { error }; }
   }
-  if (failed && releaseFailure !== undefined) throw new AggregateError([failure, releaseFailure], "review and lease release failed");
-  if (failed) throw failure;
-  if (releaseFailure !== undefined) throw releaseFailure;
-  return result as T;
+  if (outcome.kind === "failed" && releaseFailure !== undefined)
+    throw new AggregateError([outcome.error, releaseFailure.error], "review and lease release failed");
+  if (outcome.kind === "failed") throw outcome.error;
+  if (releaseFailure !== undefined) throw releaseFailure.error;
+  return outcome.value;
 }
