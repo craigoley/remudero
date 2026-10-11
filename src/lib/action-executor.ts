@@ -597,5 +597,13 @@ export async function observeAdmissionDisposition(settings: AdmissionSettings | 
   root: string, record: AdmissionRecord, ownerInstructionId?: number,
   read: AdmissionRead = readAdmissionRestAsync, clock: Pick<Clock, "now"> = systemClock): Promise<AdmissionDispositionResult | undefined> {
   if (!settings || settings.disposition !== "shadow") return undefined;
-  return executeAdmissionDisposition({ settings, target, ownerInstructionId }, admissionDispositionStore(root), read, record, clock);
+  try { return await executeAdmissionDisposition({ settings, target, ownerInstructionId }, admissionDispositionStore(root), read, record, clock); }
+  catch {
+    // Invalid runtime configuration or a failed observer cannot hold the existing review/fix effects.
+    try { record("contributor_disposition.shadow", { mode: "shadow", status: "owner-action",
+      reason: "disposition-observer-unavailable", permission: "not-granted", evidence: "unknown", admission_lane_released: true }); }
+    catch { /* Lost diagnostic is still no authority grant or ordinary-flow hold. */ }
+    return { status: "owner-action", reason: "disposition-observer-unavailable", permission: "not-granted", laneReleased: true,
+      requiredChecks: "ordinary-current-head-checks-required", evidence: "unknown" };
+  }
 }
