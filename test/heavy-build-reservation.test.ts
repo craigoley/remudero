@@ -404,7 +404,7 @@ test("heavy READY v2 Linux unknown filesystem types never inherit ext4 or XFS ad
     fs.statfsSync = (...args) => ({...raw(...args), type:0x6969});syncBuiltinESMExports();
     try {
       const reading = api.readHeavyNewBuildHold({dir});assert.equal(reading.state, 'unavailable');
-      assert.match(reading.reason, /ext4\/XFS/);
+      assert.ok(reading.reason.includes('ext4/XFS'));
       assert.throws(api.heavyNewBuildGate(()=>{}, {dir}), /unavailable/);
     } finally {fs.statfsSync = raw;syncBuiltinESMExports();}
     assert.equal(api.readHeavyNewBuildHold({dir}).state, 'held');
