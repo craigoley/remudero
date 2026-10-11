@@ -13280,6 +13280,31 @@ export async function runFixRung(opts: {
         }
       }
     }
+    // W1-T7748: a worker that reported FIXED yet left the tree untouched (230.55 PR-hours of "the worker
+    // changed nothing" stand-downs) is resumed ONCE and told so, rather than the round standing down.
+    if (harnessCommitCount === 0 && harnessCommitRefusalReason === "the worker changed nothing" &&
+      fixOutcome?.kind === "FIXED" && !fixLeftEdits()) {
+      deps.log("fix.changed_nothing_requested", { strike: attempt, round });
+      deps.say("fix rung: the worker reported FIXED but changed nothing — resuming its session once");
+      const nudgeReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}-nothing`, systemClock.now()), fixLaneBenchmarkWork(opts.task, deps.ledgerPath),
+        { prUrl: opts.prUrl, roundId });
+      const nudged = await spawnFixWorkerBounded(
+        { ...deps, spawn: nudgeReceipt.spawn },
+        { ...fixArgs, prompt: CHANGED_NOTHING_RESUME_PROMPT, resumeSessionId: fixResult.sessionId },
+        { runId: opts.runId, taskId: opts.taskId, snapshot: { headSha: priorHeadSha, failingChecks: (priorCiFailures ?? []).map((f) => f.name) } },
+      );
+      const reply = nudged.kind === "spawned" ? deps.account(nudged.result) : undefined;
+      if (reply) {
+        harnessCommitRefusalReason = undefined;
+        harnessCommitUndeclared = [];
+        const repliedReport = `${workerTranscript(fixResult)}\n${workerTranscript(reply)}`;
+        fixOutcome = anchoredFixOutcome(repliedReport);
+        fixAction = decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests });
+        if (["legacy", "commit"].includes(fixAction.kind) || (fixAction.kind === "scope-needed" && fixAction.testPaths.length > 0)) {
+          harnessCommitCount = harnessCommit(repliedReport, { subjectSource: "re-asked", ...outcomeCommitOptions() });
+        }
+      }
+    }
     // W1-T5544: THE PROOF-REPAIR GATE, between the commit and the push. A round that committed nothing, staged a path
     // outside the stageable set, or left a named proof that does not pass at head AND fail at the merge base is
     // REFUSED here — recorded as `fix.commit_refused` (a refusal, never a strike, W1-T5542) and never pushed.
@@ -45690,6 +45715,13 @@ export async function resumeForMissingCommitLine(
   );
   return { commitCount, refusalReason: refusalState.reason, report: combinedReport, resumed: true };
 }
+
+/** W1-T7748: what the resume says to a worker that reported FIXED while its tree held no change. */
+const CHANGED_NOTHING_RESUME_PROMPT =
+  "You reported FIX_OUTCOME: FIXED, but the working tree holds NO change against the branch head, so " +
+  "there is nothing to commit. Make the edit now, then end your report with FIX_OUTCOME: FIXED and a " +
+  "COMMIT_MESSAGE line; if the branch already holds the fix, end with FIX_OUTCOME: BASE_RED, FLAKE or " +
+  "NEEDS_DESIGN <reason> instead.";
 
 /** W1-T4052: the ONLY thing the missing-line resume asks the worker's own session for. */
 export const COMMIT_LINE_RESUME_PROMPT =
