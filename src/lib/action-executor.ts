@@ -32,7 +32,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { open, mkdir, lstat, link, unlink } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { isPrActionSwitchedOff, isSafeTaskId, isStopped, type PrActionName } from "./fleet-control.js";
 import { armKick, armPause, armPrAction, armResume, prActionSwitchedOffDetail, type PanelActionDeps, type PanelLedgerRow } from "./panel-actions.js";
 import { writeTierSatisfies, type WriteTier } from "./service.js";
@@ -263,6 +263,7 @@ export interface AdmissionDispositionReceipt {
   sequence: number;
   previous: string;
   firstReason: string;
+  originalReason?: string;
   reason: string;
   stage: "identity" | "close" | "escalation" | "terminal";
   status: AdmissionDispositionStatus;
@@ -270,6 +271,7 @@ export interface AdmissionDispositionReceipt {
   prNumber: number;
   itemId?: number;
   headSha?: string;
+  expectedHeadSha?: string;
   policy: string;
   atMs: number;
   identityAttempts: number;
@@ -314,7 +316,7 @@ export async function executeAdmissionDisposition(
     try { record("contributor_disposition.shadow", { status, reason, permission: value.permission,
       mode: "shadow", evidence_domain: store.domain, admission_lane_released: value.laneReleased,
       repository_id: settings?.repositoryId, pr_number: target.prNumber, head_sha: receipt?.headSha,
-      cause: receipt?.cause, sequence: receipt?.sequence, first_reason: receipt?.firstReason }); }
+      cause: receipt?.cause, sequence: receipt?.sequence, first_reason: receipt?.firstReason, original_reason: receipt?.originalReason }); }
     catch { /* A lost diagnostic neither grants permission nor changes the ordinary PR flow. */ }
     return value;
   };
@@ -344,12 +346,15 @@ export async function executeAdmissionDisposition(
   };
   const commit = async (status: AdmissionDispositionStatus, reason: string, stage: AdmissionDispositionReceipt["stage"],
     counts: Partial<Pick<AdmissionDispositionReceipt, "identityAttempts" | "reconciliationAttempts" | "closeAttempts" | "escalationAttempts">> = {},
-    itemId?: number): Promise<AdmissionDispositionReceipt> => {
+    itemId?: number, observedHead?: string): Promise<AdmissionDispositionReceipt> => {
     const row: AdmissionDispositionReceipt = { version: "admission-disposition-v1", domain: store.domain, cause,
       sequence: history.length, previous: last ? dispositionHash(last) : "root", firstReason: last?.firstReason ?? "selected-origin-reconciliation",
+      ...(last?.originalReason !== undefined ? { originalReason: last.originalReason }
+        : reason === "identity-assessment-intent" ? {} : { originalReason: reason }),
       status, reason, stage, repositoryId: settings.repositoryId, prNumber: target.prNumber,
       ...(itemId === undefined ? last?.itemId === undefined ? {} : { itemId: last.itemId } : { itemId }),
-      ...(target.headSha === undefined ? {} : { headSha: target.headSha }), policy, atMs: clock.now(),
+      ...(observedHead === undefined ? last?.headSha === undefined ? {} : { headSha: last.headSha } : { headSha: observedHead }),
+      ...(target.headSha === undefined ? {} : { expectedHeadSha: target.headSha }), policy, atMs: clock.now(),
       identityAttempts: last?.identityAttempts ?? 0, reconciliationAttempts: last?.reconciliationAttempts ?? 0,
       closeAttempts: last?.closeAttempts ?? 0, escalationAttempts: last?.escalationAttempts ?? 0, ...counts };
     validateDispositionHistory([...history, row], store.domain, cause);
@@ -379,7 +384,7 @@ export async function executeAdmissionDisposition(
       if (!final.assessment || final.binding !== preflight.binding || dispositionHash(settings) !== policy) {
         return result("owner-action", "owner-target-changed", last);
       }
-      return result("adopted", "owner-current-head-adoption", await commit("adopted", "owner-current-head-adoption", "terminal", {}, final.itemId));
+      return result("adopted", "owner-current-head-adoption", await commit("adopted", "owner-current-head-adoption", "terminal", {}, final.itemId, final.assessment.subject.headSha));
     }
     if (last?.status === "owner-action") return result("owner-action", last.reason, last);
     const escalateSimulation = async (): Promise<AdmissionDispositionResult> => {
@@ -414,10 +419,10 @@ export async function executeAdmissionDisposition(
         : result("pending", preflight.reason, await commit("pending", preflight.reason, "identity"));
     }
     if (preflight.status === "trusted" || preflight.status === "noop") {
-      return result(preflight.status, preflight.reason, await commit(preflight.status, preflight.reason, "terminal", {}, preflight.itemId));
+      return result(preflight.status, preflight.reason, await commit(preflight.status, preflight.reason, "terminal", {}, preflight.itemId, preflight.assessment?.subject.headSha));
     }
-    if (!simulation) return result("would-close", preflight.reason, await commit("would-close", preflight.reason, "terminal", {}, preflight.itemId));
-    const intent = await commit("pending", "simulated-close-intent", "close", { closeAttempts: 1 }, preflight.itemId);
+    if (!simulation) return result("would-close", preflight.reason, await commit("would-close", preflight.reason, "terminal", {}, preflight.itemId, preflight.assessment?.subject.headSha));
+    const intent = await commit("pending", "simulated-close-intent", "close", { closeAttempts: 1 }, preflight.itemId, preflight.assessment?.subject.headSha);
     const current = await dispositionPreflight(settings, target, read, clock);
     if (current.status !== "would-close" || current.binding !== preflight.binding || dispositionHash(settings) !== policy) {
       return terminal("close-preflight-changed");
@@ -491,11 +496,13 @@ function validateDispositionHistory(history: readonly AdmissionDispositionReceip
       || !/^[a-f0-9]{64}$/.test(row.policy) || !/^[a-z-]{1,80}$/.test(row.firstReason) || !/^[a-z-]{1,80}$/.test(row.reason)
       || !["pending", "trusted", "would-close", "owner-action", "noop", "adopted", "simulated-closed"].includes(row.status)
       || !["identity", "close", "escalation", "terminal"].includes(row.stage)
-      || (row.status === "simulated-closed" && domain !== "rehearsal")) throw new Error("disposition-history-invalid");
+      || row.originalReason !== undefined && !/^[a-z-]{1,80}$/.test(row.originalReason)
+      || row.headSha !== undefined && !/^[a-f0-9]{40}$/i.test(row.headSha)
+      || (row.status === "simulated-closed" && (domain !== "rehearsal" || row.closeAttempts !== 1 || row.escalationAttempts !== 1 || row.stage !== "terminal"))) throw new Error("disposition-history-invalid");
     for (const [field, ceiling] of [["identityAttempts", 3], ["reconciliationAttempts", 2], ["closeAttempts", 1], ["escalationAttempts", 1]] as const) {
       if (!Number.isInteger(row[field]) || row[field] < (prior?.[field] ?? 0) || row[field] > ceiling) throw new Error("disposition-budget-invalid");
     }
-    if (prior && (row.firstReason !== prior.firstReason || row.repositoryId !== prior.repositoryId
+    if (prior && (row.firstReason !== prior.firstReason || prior.originalReason !== undefined && row.originalReason !== prior.originalReason || row.repositoryId !== prior.repositoryId
       || row.prNumber !== prior.prNumber || prior.itemId !== undefined && row.itemId !== prior.itemId)) throw new Error("disposition-cause-changed");
     prior = row;
   }
@@ -503,6 +510,10 @@ function validateDispositionHistory(history: readonly AdmissionDispositionReceip
 
 export function admissionDispositionStore(root: string, domain: DispositionDomain = "shadow"): AdmissionDispositionStore {
   const directory = join(root, "state", "contributor-disposition", domain);
+  const syncDirectory = async (path: string): Promise<void> => {
+    const handle = await open(path, "r");
+    try { await handle.sync(); } finally { await handle.close(); }
+  };
   const ensureDirectory = async (path: string, create: boolean): Promise<boolean> => {
     let created = false;
     if (create) {
@@ -511,6 +522,7 @@ export function admissionDispositionStore(root: string, domain: DispositionDomai
     }
     const stat = await lstat(path);
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("disposition-path-untrusted");
+    if (created) await syncDirectory(dirname(path));
     return created;
   };
   const paths = async (cause: string, initialize: boolean): Promise<{ path: string; created: boolean }> => {
@@ -528,7 +540,8 @@ export function admissionDispositionStore(root: string, domain: DispositionDomai
       if (handle) {
         try { await handle.writeFile(JSON.stringify({ version: 1, domain, cause })); await handle.sync(); }
         finally { await handle.close(); }
-        await ensureDirectory(join(directory, cause), true);
+        if (!await ensureDirectory(join(directory, cause), true)) throw new Error("disposition-registration-missing");
+        await syncDirectory(directory);
         created = true;
       }
     }
@@ -570,8 +583,7 @@ export function admissionDispositionStore(root: string, domain: DispositionDomai
       finally { await handle.close(); }
       try {
         await link(temporary, join(path, `${receipt.sequence}.json`));
-        const dir = await open(path, "r");
-        try { await dir.sync(); } finally { await dir.close(); }
+        await syncDirectory(path);
       } finally { await unlink(temporary); }
     } };
 }
