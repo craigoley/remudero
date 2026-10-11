@@ -127,13 +127,12 @@ test("a coverage shard whose file process exits 0 part-way is reported failed, a
   const root = tierFixture();
   const raw = join(root, "coverage-raw");
   mkdirSync(raw, { recursive: true });
+  // The wrapper's own retry knobs come from the environment; a caller's must not reach this fixture.
+  const env: NodeJS.ProcessEnv = { ...childEnv(), RMD_TEST_FLAKE_LEDGER: join(root, "flake-ledger.ndjson"), GITHUB_STEP_SUMMARY: "" };
+  delete env.TEST_RETRY;
+  delete env.TEST_RETRY_BUDGET_SECONDS;
   const wrapper = (args: string[]) =>
-    spawnSync(process.execPath, [join(REPO_ROOT, "scripts", "test-with-retry.mjs"), ...args], {
-      cwd: root,
-      encoding: "utf8",
-      maxBuffer: 1 << 26,
-      env: { ...childEnv(), RMD_TEST_FLAKE_LEDGER: join(root, "flake-ledger.ndjson"), GITHUB_STEP_SUMMARY: "" },
-    });
+    spawnSync(process.execPath, [join(REPO_ROOT, "scripts", "test-with-retry.mjs"), ...args], { cwd: root, encoding: "utf8", maxBuffer: 1 << 26, env });
 
   // The coverage lane's shape: an instrumented first pass, then an uninstrumented failed-file retry.
   const coverage = wrapper([
@@ -222,6 +221,31 @@ test("unit test: a judged child that starts node again with its own preloads doe
   });
   assert.equal(status, 0, log.join("\n"));
   assert.match(log.join("\n"), /rest run complete — 2\/2 file\(s\) reported/);
+});
+
+test("the judge's preload stays out of worker threads: a thread that throws still exits 1, pooled or isolated", () => {
+  const root = tierFixture();
+  // A node:test hook registered inside a worker rewrites that thread's exit code to 0 (a local
+  // #10894 shard-2 run with an unguarded marker failed the read model's integrity-thread test this way).
+  writeFileSync(
+    join(root, "test/e-thread.test.ts"),
+    `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { Worker } from "node:worker_threads";\n` +
+      `test("a worker that throws exits 1", async () => {\n` +
+      `  const worker = new Worker(new URL("data:text/javascript,throw new Error('boom')"));\n` +
+      `  let message = "";\n  worker.on("error", (error) => { message = error.message; });\n` +
+      `  const code = await new Promise((done) => worker.on("exit", done));\n` +
+      `  assert.equal(\`\${code}:\${message}\`, "1:boom");\n});\n`,
+  );
+  for (const pooled of [true, false]) {
+    const log: string[] = [];
+    const status = pool.spawnJudgedRun(["test/e-thread.test.ts", "test/a-first.test.ts"], {
+      spawn: realSpawn as never, cwd: root,
+      args: ["--test", "--test-reporter=tap", "--test-reporter-destination=stdout", ...(pooled ? ["--experimental-test-isolation=none"] : [])],
+      pool: pooled, role: pooled ? "pool" : "rest", log: (l) => log.push(l), env: childEnv(),
+    });
+    assert.equal(status, 0, log.join("\n"));
+    assert.match(log.join("\n"), /run complete — 2\/2 file\(s\) reported, # tests 2, # fail 0/);
+  }
 });
 
 test("unit test: an isolated run names the unreported file's own last test and exit", () => {
