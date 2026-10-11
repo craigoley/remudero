@@ -3,9 +3,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { fixedClock, systemClock } from "./clock.js";
+import { instanceForStateRoot } from "./deployer.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { captureFeedback, listFeedback, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
 import type { FleetLaneDeps } from "./fleet-lane.js";
+import { parseInstanceRegistry, type RegistryInstance } from "./instance-registry.js";
 import {
   type IncidentEvidence,
   type RunbookPassResult,
@@ -384,4 +386,95 @@ export function daemonSreLaneInput(
     log: input.log,
     runbookPass: input.runbookPass,
   };
+}
+
+// ── which instance runs the lane (W1-T8232) ───────────────────────────────────────────────────
+
+/**
+ * W1-T8232 — the daemon's own registry row, as the lane's start decision reads it, or why it could
+ * not be resolved. MEASURED 2026-10-11: the lane started only on `RMD_SRE_LANE=1`, no container was
+ * given that variable, and 284 `incident.event` rows that day reached no reader. The registry's
+ * `primary: true` row (W1-T4527) is the selector the old opt-in was waiting for.
+ */
+export type SreLaneInstance =
+  | ({ resolved: true } & Pick<RegistryInstance, "name" | "live" | "primary">)
+  | { resolved: false; why: string };
+
+/** The env names the start decision reads — passed in, never read here, so the predicate is pure. */
+export interface SreLaneEnv {
+  RMD_SRE_LANE?: string;
+}
+
+export interface SreLaneStartInput {
+  instance: SreLaneInstance;
+  env: SreLaneEnv;
+}
+
+export type SreLaneDecision =
+  | { enabled: true; instance: string | null; enabledBy: "primary" | "env" }
+  | { enabled: false; instance: string | null; reason: string };
+
+/**
+ * W1-T8232 — whether this daemon runs the SRE lane, and why. `RMD_SRE_LANE=0` is an explicit off
+ * that wins everywhere; otherwise the registry's live `primary: true` row runs it with no opt-in;
+ * `RMD_SRE_LANE=1` still turns it on anywhere, for existing hand setups. An instance that cannot be
+ * resolved is OFF, and the reason says why — never "behave as if primary".
+ */
+export function sreLaneDecision({ instance, env }: SreLaneStartInput): SreLaneDecision {
+  const name = instance.resolved ? instance.name : null;
+  const flag = env.RMD_SRE_LANE?.trim();
+  if (flag === "0") return { enabled: false, instance: name, reason: "RMD_SRE_LANE=0 turns the lane off explicitly" };
+  if (instance.resolved && instance.live && instance.primary === true) return { enabled: true, instance: name, enabledBy: "primary" };
+  if (flag === "1") return { enabled: true, instance: name, enabledBy: "env" };
+  if (!instance.resolved) return { enabled: false, instance: null, reason: instance.why };
+  if (!instance.live) return { enabled: false, instance: name, reason: `instance '${instance.name}' is retired in the registry` };
+  return { enabled: false, instance: name, reason: `instance '${instance.name}' is not the registry's primary instance` };
+}
+
+/** W1-T8232 — the ONE predicate the daemon decides the lane with (src/run-task.ts). */
+export function sreLaneEnabled(input: SreLaneStartInput): boolean {
+  return sreLaneDecision(input).enabled;
+}
+
+/**
+ * W1-T8232 — the one ledger row a daemon start writes about the lane, so "is the SRE lane running"
+ * is a ledger read and not a container inspect: `sre_lane.started` {instance, enabled_by} or
+ * `sre_lane.disabled` {instance, reason}.
+ */
+export function sreLaneStartRow(input: SreLaneStartInput): { step: "sre_lane.started" | "sre_lane.disabled"; fields: Record<string, unknown> } {
+  const decision = sreLaneDecision(input);
+  return decision.enabled
+    ? { step: "sre_lane.started", fields: { instance: decision.instance, enabled_by: decision.enabledBy } }
+    : { step: "sre_lane.disabled", fields: { instance: decision.instance, reason: decision.reason } };
+}
+
+/**
+ * W1-T8232 — this daemon's registry row, matched on its state root through
+ * {@link instanceForStateRoot} (the match W1-T7727's pause target uses: `state_dir` is bind-mounted
+ * as the container's `config.root`). An unreadable registry, a registry the parser refuses, and no
+ * or an ambiguous match each resolve to `{resolved: false}` naming the reason.
+ */
+export function resolveSreLaneInstance(input: {
+  stateRoot: string;
+  registryPath: string;
+  readText?: (path: string) => string;
+}): SreLaneInstance {
+  let text: string;
+  try {
+    text = (input.readText ?? ((path) => readFileSync(path, "utf8")))(input.registryPath);
+  } catch (error) {
+    return { resolved: false, why: `the instance registry ${input.registryPath} is unreadable: ${(error as Error).message}` };
+  }
+  const name = instanceForStateRoot(text, input.stateRoot);
+  if (name === undefined) {
+    return { resolved: false, why: `state root ${input.stateRoot} is not exactly one instance's state_dir in ${input.registryPath}` };
+  }
+  let row: RegistryInstance | undefined;
+  try {
+    row = parseInstanceRegistry(text).instances.find((instance) => instance.name === name);
+  } catch (error) {
+    return { resolved: false, why: `the instance registry ${input.registryPath} is refused: ${(error as Error).message}` };
+  }
+  if (row === undefined) return { resolved: false, why: `instance '${name}' is not a parsed row of ${input.registryPath}` };
+  return { resolved: true, name: row.name, live: row.live, ...(row.primary === undefined ? {} : { primary: row.primary }) };
 }
