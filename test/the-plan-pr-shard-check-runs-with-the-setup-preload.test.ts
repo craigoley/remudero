@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { getPriority } from "node:os";
 import { join } from "node:path";
@@ -77,7 +78,15 @@ for (const asyncRun of [false, true]) {
         assert.equal(census.selfSync, null, "the census removes even an inherited self-sync variable");
         assert.ok(census.argv.includes("--test-concurrency=1"));
         if (existsSync("/usr/bin/nice") || existsSync("/bin/nice")) {
-          assert.equal(census.priority, Math.min(19, parentPriority + 10), "the real census child runs under nice");
+          // nice increments an inherited priority; Darwin can report20 where Linux caps at19.
+          // Measure a real sibling under the same +10 contract rather than importing another OS's cap.
+          const nice = existsSync("/usr/bin/nice") ? "/usr/bin/nice" : "/bin/nice";
+          const measured = execFileSync(nice, ["-n", "10", process.execPath, "--input-type=module", "-e",
+            'import { getPriority } from "node:os"; process.stdout.write(String(getPriority()));'], { encoding: "utf8" });
+          assert.match(measured, /^-?\d+$/, "the native nice control emits a real integer observation");
+          const nativePriority = Number(measured);
+          assert.ok(nativePriority >= parentPriority, "the control never raises the inherited scheduling priority");
+          assert.equal(census.priority, nativePriority, "the real census matches its native nice control");
         }
         for (const name of ["lint-plan", "task-id", "check-proof"]) {
           assert.deepEqual(JSON.parse(readFileSync(join(repo.dir, `${name}.json`), "utf8")), {
