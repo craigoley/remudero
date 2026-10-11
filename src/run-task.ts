@@ -13178,6 +13178,15 @@ export async function runFixRung(opts: {
         }
       }
     }
+    if (harnessCommitCount === 0 && harnessCommitRefusalReason === MISSING_COMMIT_MESSAGE_REASON && fixLeftEdits()) {
+      const lastResort = derivedFixCommit(
+        priorCiFailures?.[0]?.name ?? unmet[0]?.claim ?? gateFailuresNow?.[0]?.reason ?? opts.task.title, opts.prUrl);
+      if (lastResort !== undefined) {
+        harnessCommitRefusalReason = undefined;
+        harnessCommitUndeclared = [];
+        harnessCommitCount = harnessCommit(fixReport, { ...outcomeCommitOptions(), derivedCommit: lastResort });
+      }
+    }
     // W1-T5544: THE PROOF-REPAIR GATE, between the commit and the push. A round that committed nothing, staged a path
     // outside the stageable set, or left a named proof that does not pass at head AND fail at the merge base is
     // REFUSED here — recorded as `fix.commit_refused` (a refusal, never a strike, W1-T5542) and never pushed.
@@ -45623,7 +45632,7 @@ function derivedImplementCommit(task: Pick<Task, "id" | "title" | "type">, paths
   return { subject, reason: `no COMMIT_MESSAGE after one re-ask; ${task.id} title and ${paths[0]}` };
 }
 
-function derivedFixCommit(check: string | undefined, prUrl: string): { subject: string; reason: string } | undefined {
+export function derivedFixCommit(check: string | undefined, prUrl: string): { subject: string; reason: string } | undefined {
   const pr = prUrl.match(/\/pull\/(\d+)(?:\/|$)/)?.[1];
   if (check === undefined || check.trim().length === 0 || pr === undefined) return undefined;
   const prefix = "fix: repair ";
