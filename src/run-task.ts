@@ -210,7 +210,7 @@ import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputs, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, evidenceCoveragePassDue, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
-import { daemonSreLaneInput, openIncidentFeedbackOrigins } from "./lib/sre-lane.js";
+import { daemonSreLaneInput, openIncidentFeedbackOrigins, resolveSreLaneInstance, sreLaneEnabled, sreLaneStartRow } from "./lib/sre-lane.js";
 import { fileConsumerVia, gitHeartbeatSource, HOST_RESOURCE, runHostResourcePassAsync } from "./lib/host-resource-gardener.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreOperatorEscalation, sreRunbookCatalog } from "./lib/sre-runbooks.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
@@ -39790,12 +39790,12 @@ export async function daemonCommand(
                 // W1-T5361: the machine-filing judge is one of them, so its git work runs in a child too.
                 ...REGISTERED_GARDEN_NAMES.map(offLoopGarden),
                 // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
-                // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). "Only on the SRE
-                // registry instance" has no selector yet -- `RegistryInstance` carries no role or
-                // state_dir a daemon can identify itself by -- so `RMD_SRE_LANE=1` is a safe-default-
-                // OFF opt-in an operator sets on the ONE instance meant to run it until one exists.
-                // The starter is inert until called, so it is built on every start and dropped
-                // unless opted in.
+                // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). W1-T8232: it runs on
+                // the registry's live `primary: true` instance, resolved from this daemon's own
+                // state root (`sreLaneEnabled`); `RMD_SRE_LANE=0` turns it off and `=1` still turns
+                // it on anywhere. The starter is inert until called, so it is built on every start
+                // and dropped when off; either way one `sre_lane.started`/`sre_lane.disabled` row
+                // says so. `state/SRE_LANE_OFF` stays the pause switch.
                 ...[
                   startDaemonSreLane(
                     (mergedLastDay) => daemonSreLaneInput({
@@ -39821,7 +39821,18 @@ export async function daemonCommand(
                     () => mergedInLastDayAsync(repoRoot),
                     log,
                   ),
-                ].filter(() => process.env.RMD_SRE_LANE === "1"),
+                ].filter(() => {
+                  const sreLane = {
+                    instance: resolveSreLaneInstance({
+                      stateRoot: config.root,
+                      registryPath: process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(repoRoot),
+                    }),
+                    env: { RMD_SRE_LANE: process.env.RMD_SRE_LANE },
+                  };
+                  const row = sreLaneStartRow(sreLane);
+                  log(row.step, row.fields);
+                  return sreLaneEnabled(sreLane);
+                }),
               ],
             }
           : {}),
