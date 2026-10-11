@@ -131,6 +131,103 @@ test("the attention census refuses a stale persisted classification and recovers
   assert.equal(passes(), 0, "freshness checks never classify on serve's main thread");
 });
 
+test("the attention census reads retained evidence from the same persisted classification without scanning archives", async (t) => {
+  const { stateDir, laneDeps } = world(t, ["verify-human:W1-T216"]);
+  const archive = join(stateDir, "ledger.2026-10-01T00-00-00-000Z.ndjson");
+  writeFileSync(archive, `${JSON.stringify({ step: "verify_human.judged", task_id: "W1-T216",
+    judge_decision: "needs_operator", judge_reason: "Choose the bounded security drill target." })}\n`);
+  const at = Date.now() - 1_000;
+  await refreshInboxClassification(laneDeps, {}, fixedClock(at));
+  const persisted = readPersistedInbox(stateDir)!;
+  // A main-thread read must not revisit this now-unreadable retained input. The next slow-lane
+  // pass, not a request, will discover the failure and qualify the replacement snapshot.
+  rmSync(archive);
+  mkdirSync(archive);
+  const { deps, passes } = freshGeneration(laneDeps);
+  const route = buildInboxAttentionCensusRoute(deps);
+  const first = await get(t, route, "/v1/inbox/attention-census?qualified=1");
+  assert.equal(first.status, 200);
+  assert.equal((first.body.sources as { archiveLedger: string }).archiveLedger, "partial");
+  const source = first.body.source as { state: string; classifiedAt: string; builtAt: string; verifiedAt: string; ageMs: number };
+  assert.equal(source.state, "fresh");
+  assert.equal(source.classifiedAt, persisted.generatedAt);
+  assert.equal(source.verifiedAt, source.builtAt);
+  assert.ok(source.ageMs >= 1_000 && source.ageMs < INBOX_STALE_AFTER_MS);
+  const items = first.body.items as Array<{ proposalId: string; sourceFacts: Array<{ source: string; detail: string }> }>;
+  assert.ok(items.find((item) => item.proposalId === "verify-human:W1-T216")?.sourceFacts
+    .some((fact) => fact.source === "judge" && fact.detail.includes("bounded security drill target")));
+  const second = await get(t, route, "/v1/inbox/attention-census?qualified=1");
+  assert.equal(second.body.snapshotKey, first.body.snapshotKey, "read time must not change the action snapshot identity");
+  assert.equal(passes(), 0);
+});
+
+test("legacy Inbox pagination retains its response shape while the census uses cached classification age", async (t) => {
+  const { laneDeps } = world(t, ["ruling:a", "adoption:fixture"]);
+  const inbox = await get(t, buildInboxRoute(laneDeps), "/v1/inbox?section=needsYou");
+  assert.equal(inbox.status, 200);
+  assert.deepEqual(Object.keys(inbox.body).sort(), ["counts", "needsYou"]);
+  const route = buildInboxAttentionCensusRoute(laneDeps);
+  const first = await get(t, route, "/v1/inbox/attention-census?qualified=1");
+  assert.equal(first.status, 200);
+  const firstSource = first.body.source as { classifiedAt: string };
+  assert.ok(Number.isFinite(Date.parse(firstSource.classifiedAt)));
+  const second = await get(t, route, "/v1/inbox/attention-census?qualified=1");
+  assert.equal(second.status, 200);
+  assert.equal((second.body.source as { classifiedAt: string }).classifiedAt, firstSource.classifiedAt);
+  assert.equal(second.body.snapshotKey, first.body.snapshotKey);
+});
+
+test("a legacy attention snapshot waits for the slow lane instead of doing request-time archive recovery", async (t) => {
+  const { stateDir, laneDeps } = world(t, ["ruling:a"]);
+  await refreshInboxClassification(laneDeps, {}, fixedClock(Date.now()));
+  const persisted = readPersistedInbox(stateDir)!;
+  const legacy = { ...persisted } as Record<string, unknown>;
+  delete legacy.attentionEvidence;
+  writeFileSync(persistedInboxPath(stateDir), JSON.stringify(legacy));
+  const { deps, passes } = freshGeneration(laneDeps);
+  const read = await get(t, buildInboxAttentionCensusRoute(deps), "/v1/inbox/attention-census?qualified=1");
+  assert.equal(read.status, 503);
+  assert.equal(read.body.error, "attention_evidence_pending");
+  assert.equal(read.body.counts, undefined);
+  assert.equal(passes(), 0);
+});
+
+test("a future-dated attention classification never certifies current counts", async (t) => {
+  const { laneDeps } = world(t, ["ruling:a"]);
+  await refreshInboxClassification(laneDeps, {}, fixedClock(Date.now() + INBOX_STALE_AFTER_MS));
+  const { deps, passes } = freshGeneration(laneDeps);
+  const read = await get(t, buildInboxAttentionCensusRoute(deps), "/v1/inbox/attention-census?qualified=1");
+  assert.equal(read.status, 503);
+  assert.equal(read.body.error, "attention_snapshot_invalid");
+  assert.equal(read.body.counts, undefined);
+  assert.equal(passes(), 0);
+});
+
+test("malformed persisted attention evidence never becomes an empty or successful census", async (t) => {
+  const { stateDir, laneDeps } = world(t, ["ruling:a"]);
+  await refreshInboxClassification(laneDeps, {}, fixedClock(Date.now()));
+  const persisted = readPersistedInbox(stateDir)!;
+  const cases = [
+    { archiveLedger: "observed", releases: [], judges: [] },
+    { archiveLedger: "partial", releases: null, judges: [] },
+    { archiveLedger: "partial", releases: [["wrong", "receipt"]], judges: [] },
+    { archiveLedger: "partial", releases: [["W1-T216", "x".repeat(513)]], judges: [] },
+    { archiveLedger: "partial", releases: [], judges: [["W1-T216", { decision: "needs_operator", reason: 2 }]] },
+    { archiveLedger: "partial", releases: [], judges: [["W1-T216", { decision: "x".repeat(65), reason: "reason" }]] },
+    { archiveLedger: "partial", releases: [], judges: [["W1-T216", { decision: "needs_operator", reason: "x".repeat(301) }]] },
+    { archiveLedger: "partial", releases: [["W1-T216", "one"], ["W1-T217", "two"]], judges: [] },
+  ];
+  for (const attentionEvidence of cases) {
+    writeFileSync(persistedInboxPath(stateDir), JSON.stringify({ ...persisted, attentionEvidence }));
+    const { deps, passes } = freshGeneration(laneDeps);
+    const read = await get(t, buildInboxAttentionCensusRoute(deps), "/v1/inbox/attention-census?qualified=1");
+    assert.equal(read.status, 503);
+    assert.equal(read.body.error, "attention_evidence_pending");
+    assert.equal(read.body.counts, undefined);
+    assert.equal(passes(), 0);
+  }
+});
+
 test("an inbox request on serve's main thread runs no classification pass", async (t) => {
   const { stateDir, laneDeps } = world(t, ["ruling:a"]);
   const { deps, passes } = freshGeneration(laneDeps);
