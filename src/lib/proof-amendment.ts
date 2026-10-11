@@ -20,13 +20,16 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, relative, sep } from "node:path";
-import { isMap, isScalar, isSeq, parseDocument } from "yaml";
+import { isMap, isScalar, isSeq, parseDocument, type Scalar } from "yaml";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { execWhitelistedProof, INSTRUMENT_SURFACE, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
 import type { ProofDiscriminationEvidence } from "./sweep.js";
 import { renderAcceptanceBlock } from "./plan-pr-emitter.js";
 import { taskIdFromRunBranch } from "./status.js";
 import { isTaskShardName } from "./task-shard-name.js";
+import { parseTasksFromYaml } from "./plan.js";
+import { lintTask } from "./task-linter.js";
+import { shapeCommitMessage } from "./commit-message.js";
 
 /** One worker-proposed replacement, parsed from the fix-rung report (see {@link
  *  parseProofAmendmentProposal}) or constructed directly by a test. `claim`/`oldProof` must be
@@ -570,8 +573,57 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
     const indent = shard.text.slice(lineStart, start).match(/^ */)![0];
     extra = `${shard.text[insert - 1] === "\n" ? "" : "\n"}${additions.map((path) => `${indent}- ${JSON.stringify(path)}\n`).join("")}`;
   }
-  const text = shard.text.slice(0, insert) + extra + shard.text.slice(insert);
+  let text = shard.text.slice(0, insert) + extra + shard.text.slice(insert);
   if (parseDocument(text).errors.length > 0) return refuse("shard-drifted", "appending paths would invalidate the files sequence");
+  let riskRaise = "";
+  try {
+    const baseTask = parseTasksFromYaml(shard.text, shard.path).find((entry) => entry.id === request.taskId)!;
+    const opts = { riskTransition: { baseTask } };
+    const baseViolations = lintTask(baseTask, opts).violations;
+    const newBlocking = (next: string) => {
+      const amendedTask = parseTasksFromYaml(next, shard.path).find((entry) => entry.id === request.taskId)!;
+      return lintTask(amendedTask, opts).violations.filter((v) => v.severity === "block" &&
+        !baseViolations.some((old) => old.check === v.check && old.message === v.message));
+    };
+    let violations = newBlocking(text);
+    if (violations.length > 0 && baseTask.risk !== "high" &&
+        violations.every((v) => v.check === "sizing" && v.message.includes("raise to risk:high"))) {
+      riskRaise = `Risk raised to high for scope amendment #${request.prNumber}: ` +
+        violations.map((v) => v.message).join("; ");
+      const amendedDoc = parseDocument(text);
+      const amendedMap = (isSeq(amendedDoc.contents) ? amendedDoc.contents.items : [])
+        .find((entry) => {
+          const id = isMap(entry) ? entry.get("id", true) : undefined;
+          return isScalar(id) && String(id.value) === request.taskId;
+        })!;
+      if (!isMap(amendedMap)) return refuse("shard-drifted", "the amended task mapping is unreadable");
+      const risk = amendedMap.get("risk", true);
+      const filesKey = amendedMap.items.find((pair) => isScalar(pair.key) && pair.key.value === "files")!.key as Scalar;
+      const filesLine = text.lastIndexOf("\n", filesKey.range![0]) + 1;
+      const indent = text.slice(filesLine, filesKey.range![0]);
+      const band = baseTask.band_meaning === undefined ? `${indent}band_meaning: span\n` : "";
+      const edits: Array<{ start: number; end: number; replacement: string }> = [];
+      if (isScalar(risk)) {
+        const end = text.indexOf("\n", risk.range![1]);
+        const lineEnd = end < 0 ? text.length : end;
+        const tail = text.slice(risk.range![1], lineEnd);
+        edits.push({ start: risk.range![0], end: lineEnd,
+          replacement: "high" + (/one concern/i.test(tail) ? `  # ${riskRaise}` : tail) });
+        if (band) edits.push({ start: filesLine, end: filesLine, replacement: band });
+      } else {
+        edits.push({ start: filesLine, end: filesLine, replacement: `${indent}risk: high\n${band}` });
+      }
+      for (const edit of edits.sort((a, b) => b.start - a.start)) {
+        text = text.slice(0, edit.start) + edit.replacement + text.slice(edit.end);
+      }
+      violations = newBlocking(text);
+    }
+    if (violations.length > 0) return refuse("amended-shard-lint",
+      violations.map((v) => `[${v.check}] ${v.message}`).join("\n"));
+  } catch (error) {
+    return { kind: "refused", reason: "amended-shard-lint",
+      detail: `cannot lint the amended task shard: ${String(error)}` };
+  }
   const wp = deps.worktreePathFor(request.taskId, request.prNumber);
   deps.worktreeAdd(deps.repoDir, wp, branch);
   try {
@@ -582,12 +634,17 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
     deps.writeFile(join(wp, shard.path), text);
     deps.gitAdd(wp, shard.path);
     const title = `fix(plan): extend ${request.taskId.toLowerCase()}'s files for #${request.prNumber}`;
-    const sha = deps.gitCommit(wp, `${title}\n\nAppend validated worker paths to files only.`);
+    const commitBody = riskRaise ? `Append validated worker paths to files.\n${riskRaise}` :
+      "Append validated worker paths to files only.";
+    const sha = deps.gitCommit(wp, shapeCommitMessage("fix(plan)", title.slice("fix(plan): ".length), commitBody).message);
     deps.gitPush(wp, branch, sha);
+    const criteria = additions.map((path) => ({ claim: `files includes ${path}`,
+      proof: `grep: ${addedFilesEntryPattern(path, files.flow === true, !shard.text.slice(start, end).includes("\n"))} in ${shard.path}` }));
+    if (riskRaise) criteria.push({ claim: riskRaise, proof: `grep: ^ *risk: high in ${shard.path}` });
     const created = deps.createPr({ title, head: branch, base: "main",
-      body: `Scope amendment for #${request.prNumber}. Only ${shard.path}'s files list changes.\n\n` +
-        renderAcceptanceBlock(additions.map((path) => ({ claim: `files includes ${path}`,
-          proof: `grep: ${addedFilesEntryPattern(path, files.flow === true, !shard.text.slice(start, end).includes("\n"))} in ${shard.path}` }))) });
+      body: `Scope amendment for #${request.prNumber}. ` +
+        (riskRaise ? `${shard.path}'s files list and risk declaration change. ${riskRaise}` :
+          `Only ${shard.path}'s files list changes.`) + "\n\n" + renderAcceptanceBlock(criteria) });
     deps.recordIdentity(key, { amendmentUrl: created.prUrl, amendmentNumber: created.prNumber, merged: false });
     return { kind: "created", amendmentUrl: created.prUrl, amendmentNumber: created.prNumber };
   } finally {
