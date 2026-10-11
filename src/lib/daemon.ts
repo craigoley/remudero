@@ -161,7 +161,7 @@ export function previousProcessIdleSample(
     const raw = rawLines[i]!;
     if (!raw.includes('"daemon.') && !raw.includes('"lane.idle_')) continue;
     let row: Record<string, unknown>;
-    try { row = JSON.parse(raw) as Record<string, unknown>; } catch { continue; }
+    try { row = JSON.parse(raw) as Record<string, unknown>; } catch (error) { /* a torn ledger row is no sign of life */ continue; }
     const step = row.step;
     if (typeof step !== "string") continue;
     const at = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
@@ -2988,7 +2988,7 @@ export async function runDaemon(
   const idleLaneHoldFor = (cause: IdleLaneCause | undefined): IdleLaneHold | undefined => {
     if (cause !== "pause" && cause !== "operator_pause" && cause !== "recycle_drain" && cause !== "restart") return undefined;
     let flag: Partial<IdleLaneHold> | undefined;
-    try { flag = deps.readPauseHold?.(); } catch { flag = undefined; }
+    try { flag = deps.readPauseHold?.(); } catch (error) { flag = { reason: `PAUSE flag unreadable: ${error instanceof Error ? error.message : String(error)}` }; }
     return {
       reason: flag?.reason ?? idleLaneTickReason ?? cause,
       pid: flag?.pid ?? null,
