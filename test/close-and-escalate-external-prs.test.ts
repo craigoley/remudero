@@ -8,6 +8,10 @@ import { executeAdmissionDisposition, admissionDispositionStore, observeAdmissio
   type AdmissionDispositionSimulation } from "../src/lib/action-executor.js";
 import type { AdmissionRead, AdmissionSettings } from "../src/lib/contributor-admission.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { depReviewCommand, fixCommand, reviewCommand } from "./helpers/run-task-test.js";
+import { buildSweepEffects, DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
+import type { Config } from "../src/lib/config.js";
+import type { Plan } from "../src/lib/plan.js";
 
 const sha = "a".repeat(40);
 const target = { owner: "acme", repo: "core", prNumber: 42, headSha: sha };
@@ -225,4 +229,48 @@ test("W1-T7755: absent shadow disposition does no disk work and a symlink cannot
     const result = await observeAdmissionDisposition(settings, target, root, () => {}, undefined, source(), clock);
     assert.equal(result?.reason, "journal-unreadable"); assert.deepEqual(readdirSync(join(root, "elsewhere")), []);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("W1-T7755: selected sweep and CLI callers record shadow disposition without withholding ordinary effects", async () => {
+  for (const caller of ["sweep", "dep-review", "review", "fix"] as const) {
+    const root = mkdtempSync(join(tmpdir(), "rmd-disposition-caller-"));
+    const shim = ghShim([{ when: "api repos/acme/core/pulls/42 -i", stdout: `HTTP/2 200 OK\n\n${JSON.stringify(pull())}` },
+      { when: "api repos/acme/core -i", stdout: 'HTTP/2 200 OK\n\n{"id":3,"full_name":"acme/core","private":false}' }]);
+    const previousPath = process.env.PATH; const config = { root, contributorAdmission: settings, claudeBin: "/bin/true" } as Config;
+    const events: string[] = [];
+    try {
+      process.env.PATH = `${shim.dir}:${previousPath}`;
+      if (caller === "sweep") {
+        const pr: OpenPrView = { prNumber: 42, prUrl: "https://github.com/acme/core/pull/42", taskId: "W1-T7755", headSha: sha,
+          reviewState: "none", checksState: "green", unmetCriteria: [], priorStrikes: 0,
+          lastActivityAt: new Date(NOW).toISOString(), autoMergeArmed: false };
+        const effects = buildSweepEffects({ owner: "acme", repo: "core", config, ledgerPath: join(root, "ledger.ndjson"),
+          runId: "test", plan: { tasks: [], byId: new Map() } as Plan, policy: DEFAULT_SWEEP_POLICY,
+          log: step => events.push(step), contributorAdmissionImpl: async () => {}, reviewRunner: async () => { events.push("ordinary-review"); return 0; } });
+        await effects.postReview!(pr);
+        assert.ok(events.includes("contributor_disposition.shadow")); assert.ok(events.includes("ordinary-review"));
+      } else if (caller === "dep-review") {
+        await assert.rejects(depReviewCommand("42", ["--repo", "acme/core"], { config, contributorAdmission: async () => {},
+          gh: () => ({ number: 42, url: "https://github.com/acme/core/pull/42", headRefOid: sha }),
+          prDiff: () => { events.push("ordinary-diff"); throw Error("effect trap"); } }));
+        assert.ok(events.includes("ordinary-diff"));
+      } else if (caller === "fix") {
+        assert.equal(await fixCommand(["42"], { config, self: { owner: "acme", repo: "core" }, contributorAdmission: async () => {},
+          fetch: () => { events.push("ordinary-fix-read"); throw Error("effect trap"); } }), 1);
+        assert.ok(events.includes("ordinary-fix-read"));
+      } else {
+        await assert.rejects(reviewCommand("42", ["--repo", "acme/core"], { loadConfig: () => config,
+          resolveOwnerRepo: () => ({ owner: "acme", repo: "core" }), contributorAdmission: async () => {},
+          fetchView: () => ({ ...pull(), body: "Remudero-Task: W1-T7755", html_url: "https://github.com/acme/core/pull/42" }),
+          reviewerCodeFreshness: () => ({ status: "fresh", codeSha: sha, originMainSha: sha, advance: "none" }),
+          postReviewPending: async () => ({ posted: true }) as never, fetchHead: () => {},
+          materialize: () => { events.push("ordinary-materialize"); throw Error("effect trap"); } }));
+        assert.ok(events.includes("ordinary-materialize"));
+      }
+      assert.ok(shim.calls().length >= 5, `${caller} drives the actual default disposition source reader`);
+      assert.ok(shim.calls().every(call => !/--method|-X|pr close|issue comment/.test(call)));
+      const directories = readdirSync(join(root, "state", "contributor-disposition", "shadow"));
+      assert.ok(directories.some(name => name.endsWith(".registered")));
+    } finally { process.env.PATH = previousPath; rmSync(root, { recursive: true, force: true }); rmSync(shim.dir, { recursive: true, force: true }); }
+  }
 });
