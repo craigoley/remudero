@@ -1991,7 +1991,7 @@ export interface CodexOutputTruncation {
 export const CODEX_WORKER_STDOUT_MAX_BYTES = 1 * 1024 * 1024;
 /** BACKSTOP (W1-T4595): the total stdout one Codex worker may STREAM, against a runaway process. */
 export const CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES = 64 * 1024 * 1024;
-/** W1-T8203: a MEMORY bound on what is RETAINED of stderr, a share of the stdout retention bound. stderr is
+/** PRIMARY CONTROL (W1-T8203): a MEMORY bound on what is RETAINED of stderr, a share of the stdout retention bound. stderr is
  * diagnostic evidence (failure tail, retro evidence), never protocol input: passing this keeps the head and the
  * tail and records the drop. It never tears the worker down and never decides a verdict. */
 export const CODEX_WORKER_STDERR_MAX_BYTES = CODEX_WORKER_STDOUT_MAX_BYTES / 4;
