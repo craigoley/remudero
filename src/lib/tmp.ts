@@ -84,6 +84,9 @@ export interface TempSweepSummary {
   removed: string[];
   kept: string[];
   oldestKeptAgeMs: number | null;
+  /** W1-T7808: set only when the sweep declined to run. Names why, so a caller logging
+   *  `removed`/`kept` does not mistake a refusal for "nothing stale". Absent on every real sweep. */
+  refused?: string;
 }
 
 export interface TempSweepOpts {
@@ -126,6 +129,24 @@ export function isRmdOwnedTempName(name: string): boolean {
   return name.startsWith(RMD_TMP_PREFIX) || LEGACY_TMP_PREFIXES.some((p) => name.startsWith(p));
 }
 
+/**
+ * W1-T7808 — A TEST PROCESS NEVER SWEEPS THE MACHINE'S REAL TEMP ROOT.
+ *
+ * Every test that boots `daemonCommand` or `main()` reaches `sweepStaleTempDirs()` with no `root`, i.e.
+ * on `tmpdir()`: the operator Mac's or the host's real temp root, holding other sessions' rmd-* dirs.
+ * Under a clock that moves `Date.now` but not the file clock it also ages the test's OWN fixture past
+ * the ceiling and deletes it (#10719). Under `NODE_TEST_CONTEXT` (set by `node --test` itself and by
+ * test/setup/tmp-hygiene.ts) a sweep that names no root therefore declines; a sweep handed an explicit
+ * `root` is a dir the caller chose and owns, so it runs exactly as in production.
+ *
+ * Returns the refusal text, or `undefined` when the sweep may proceed.
+ */
+function testContextRefusal(opts: TempSweepOpts): string | undefined {
+  if (opts.root !== undefined) return undefined;
+  if (process.env.NODE_TEST_CONTEXT === undefined || process.env.NODE_TEST_CONTEXT === "") return undefined;
+  return "refused: running under NODE_TEST_CONTEXT with no explicit root, so the sweep would scan the real temp root";
+}
+
 /** Default age ceiling for {@link sweepStaleTempDirs}: 24 hours. */
 export const DEFAULT_TEMP_SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
@@ -145,6 +166,8 @@ export const DEFAULT_TEMP_SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
  * entry never throws or blocks the rest of the sweep.
  */
 export function sweepStaleTempDirs(opts: TempSweepOpts = {}): TempSweepSummary {
+  const refused = testContextRefusal(opts);
+  if (refused !== undefined) return { removed: [], kept: [], oldestKeptAgeMs: null, refused };
   const root = opts.root ?? tmpdir();
   const maxAgeMs = opts.maxAgeMs ?? DEFAULT_TEMP_SWEEP_MAX_AGE_MS;
   const now = opts.now ?? (() => Date.now());
@@ -200,6 +223,8 @@ export function sweepStaleTempDirs(opts: TempSweepOpts = {}): TempSweepSummary {
  * root never holds the daemon loop. Never rejects, exactly as the sync sweep never throws.
  */
 export async function sweepStaleTempDirsAsync(opts: TempSweepOpts = {}): Promise<TempSweepSummary> {
+  const refused = testContextRefusal(opts);
+  if (refused !== undefined) return { removed: [], kept: [], oldestKeptAgeMs: null, refused };
   const fsa = opts.fsAsync ?? fs.promises;
   const root = opts.root ?? tmpdir();
   const maxAgeMs = opts.maxAgeMs ?? DEFAULT_TEMP_SWEEP_MAX_AGE_MS;
