@@ -383,7 +383,12 @@ test("W1-T7755: invalid private or unreadable ordinary contexts remain distinct 
   let elapsed = 0;
   const expired = await executeAdmissionDisposition({ settings, target }, memoryStore().store,
     async path => { elapsed = 15_001; return source()(path); }, () => {}, { now: () => NOW + elapsed });
-  assert.equal(expired.status, "pending");
+  assert.equal(expired.status, "owner-action");
+  assert.equal(expired.reason, "attempt-bound-reached");
+  assert.equal(expired.evidence, "unknown");
+  assert.equal(expired.permission, "not-granted");
+  assert.equal(expired.laneReleased, true);
+  assert.equal(expired.requiredChecks, "ordinary-current-head-checks-required");
   for (const failure of [1, 2]) {
     let reads = 0;
     const assessment = await assessContribution(settings, target, "disposition", async path => {

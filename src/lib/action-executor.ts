@@ -450,9 +450,11 @@ export async function executeAdmissionDisposition(
     catch { /* A lost close response is NOT proof that the simulated effect never ran. */
       return result("pending", "simulated-close-ambiguous", intent); }
     return escalateSimulation();
-  } catch {
+  } catch (error) {
     // Persistence or preflight failure releases only this observer lane, without granting permission or claiming a durable terminal.
-    return result("owner-action", "disposition-unavailable", last);
+    const reason = error instanceof Error && (error.message === "disposition-attempt-bound" || error.message === "disposition-attempt-timeout")
+      ? "attempt-bound-reached" : "disposition-unavailable";
+    return result("owner-action", reason, last);
   }
 }
 
