@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { feedbackLineageAuthority } from "../src/lib/authority.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, type AutoTriageInputs } from "../src/lib/auto-triage.js";
 import { classifyContribution, feedbackContentDigest, type AdmissionPolicy, type FeedbackAdmissionSubject } from "../src/lib/contributor-admission.js";
@@ -13,6 +13,10 @@ import {
 } from "../src/lib/feedback.js";
 import { ghIssueListGateway, normalizeIssue, pollIssues, type IssueListGateway } from "../src/lib/issues-intake.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { mergeFeedbackRecord } from "../src/lib/feedback-record-merge.js";
+import { LANDING_BRANCH, landFeedback, landFeedbackStatusContent, sweepFeedbackLanding } from "../src/lib/feedback-landing.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 // W1-T7754 — an issue or comment is an outside contribution until the shared classifier admits
 // its ORIGINAL actor. These fixtures drive real captures through pollIssues/captureFeedback and
@@ -409,3 +413,60 @@ test("W1-T7754 checkpoint: cyclic public lineage is unknown rather than a global
     mode: "shadow", policy: POLICY, nowMs: NOW, currentSubject: subject,
   }), { autonomous: false, basis: "unresolved-origin", reason: "lineage-unreadable" });
 });
+
+test("W1-T7754 consumers: every advancing merge preserves original lineage instead of trusting a later summary", () => {
+  const original = admitFeedbackContribution(boundIssue(), { mode: "shadow", policy: POLICY, nowMs: NOW });
+  for (const status of ["new", "grilling", "proposed", "accepted", "rejected", "answered"]) {
+    const upstream = { status: "new", contribution: original };
+    for (const contribution of [undefined, { ...original, actor: { id: SUMMARIZER_BOT_ID, type: "Bot" } }]) {
+      const local = { status, contribution, summary: { headline: "trusted summary" } };
+      const decision = mergeFeedbackRecord(stringifyYaml(upstream), stringifyYaml(local));
+      assert.equal(decision.kind, "take-local", "lineage repair must not strand a valid status advance");
+      const staged = parseYaml((decision as { content?: string }).content ?? stringifyYaml(local));
+      assert.deepEqual(staged.contribution, original, `immutable source survives ${status}`);
+      assert.deepEqual(staged.summary, local.summary);
+    }
+  }
+  assert.deepEqual(mergeFeedbackRecord(undefined, "status: new\n"), { kind: "take-local" });
+  assert.deepEqual(mergeFeedbackRecord("status: new\n", "status: accepted\n"), { kind: "take-local" });
+});
+
+for (const path of ["disk", "status-content", "queued"] as const) {
+  test(`W1-T7754 consumers: ${path} writer really stages original lineage and a forward status without a global hold`, () => {
+    const origin = gitRepo({ bare: true, kind: "admission-origin" });
+    const seed = gitRepo({ kind: "admission-seed" });
+    const rel = "plan/feedback/fb-lineage.yaml";
+    const original = admitFeedbackContribution(boundIssue(), { mode: "shadow", policy: POLICY, nowMs: NOW });
+    mkdirSync(join(seed.dir, "plan", "feedback"), { recursive: true });
+    writeFileSync(join(seed.dir, rel), stringifyYaml({ id: "fb-lineage", status: "new", contribution: original }));
+    seed.git("add", "-A");
+    seed.git("commit", "--quiet", "-m", "chore: seed lineage");
+    seed.addRemote("origin", origin.dir);
+    seed.git("push", "--quiet", "origin", "main");
+    const root = gitRepo({ cloneFrom: origin.dir, kind: "admission-consumer" });
+    const content = stringifyYaml({ id: "fb-lineage", status: "accepted", summary: { headline: "trusted relay" } });
+    const gh = (args: string[]) => {
+      if (args[0] === "pr" && args[1] === "list") return "[]";
+      if (args[0] === "pr" && args[1] === "create") return "https://github.com/acme/widgets/pull/1\n";
+      assert.fail(`unexpected GitHub effect ${JSON.stringify(args)}`);
+    };
+    const opts = { gh, targetRepository: { owner: "acme", repo: "widgets" },
+      sourceRepository: { owner: "acme", repo: "widgets" } };
+    const result = withLiveWritesAllowed(() => {
+      if (path === "status-content") return landFeedbackStatusContent(root.dir, rel, content, opts);
+      if (path === "queued") {
+        const stateRoot = tmpRoot();
+        const queued = landFeedbackStatusContent(root.dir, rel, content, { ...opts, stateRoot });
+        assert.deepEqual(queued.queued, [rel]);
+        return sweepFeedbackLanding(root.dir, { ...opts, stateRoot });
+      }
+      writeFileSync(join(root.dir, rel), content);
+      return landFeedback(root.dir, opts);
+    });
+    assert.equal(result.landed, true, JSON.stringify(result));
+    assert.equal(result.refused, undefined);
+    const staged = parseYaml(origin.git("show", `${LANDING_BRANCH}:${rel}`));
+    assert.equal(staged.status, "accepted");
+    assert.deepEqual(staged.contribution, original);
+  });
+}
