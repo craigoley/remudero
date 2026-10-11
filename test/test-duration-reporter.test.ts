@@ -51,7 +51,9 @@ test("duration reporter keeps only the selected physical wrapper when a real chi
     writeFileSync(join(root, "test/selected.test.ts"), 'import "./imported.test.ts"; import { test } from "node:test"; test("selected real test", () => {});\n');
     const evidence = join(root, "durations.json");
     // A separately launched runner must not inherit the parent's test-child marker.
-    const env = { ...process.env, NODE_V8_COVERAGE: undefined }; delete env.NODE_TEST_CONTEXT;
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    env.NODE_V8_COVERAGE = undefined;
     const tap = execFileSync(process.execPath, ["--test", "--test-reporter=tap", "--test-reporter-destination=stdout",
       `--test-reporter=${REPORTER}`, `--test-reporter-destination=${evidence}`, "test/selected.test.ts"],
     { cwd: root, env, encoding: "utf8", timeout: 30_000 });
