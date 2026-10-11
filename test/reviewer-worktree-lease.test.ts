@@ -32,7 +32,7 @@ test("reviewer lease retains the real source through native publication while th
   repo.git("worktree", "add", "--detach", idle, "HEAD");
   await withReviewerWorktreeLease(active, async () => {
     const swept = reapStaleWorktrees(root, { maxAgeMs: 0 });
-    assert.ok(swept.keptReasons.some((row) => row.name === "reviewer-active" && row.reason === "live-pid"));
+    assert.ok(swept.keptReasons?.some((row) => row.name === "reviewer-active" && row.reason === "live-pid"));
     assert.ok(swept.reaped.includes("reviewer-idle"), "the real reaper must positively remove its eligible corpus");
     const child = spawnSync(process.execPath, ["-e", "const fs=require('node:fs');fs.readFileSync(process.argv[1]+'/.git');fs.readFileSync(process.argv[1]+'.lock');console.log('terminal-source-readable')", active], { encoding: "utf8" });
     assert.equal(child.status, 0, child.stderr); assert.match(child.stdout, /terminal-source-readable/);
@@ -133,7 +133,7 @@ test("the shipped fresh reviewer runner keeps its default lease through the nati
     worktreeRoot: root,
     spawnReview: async (path) => {
       calls++; assert.ok(existsSync(`${path}.lock`));
-      assert.ok(reapStaleWorktrees(root, { maxAgeMs: 0 }).keptReasons.some((row) => row.reason === "live-pid"));
+      assert.ok(reapStaleWorktrees(root, { maxAgeMs: 0 }).keptReasons?.some((row) => row.reason === "live-pid"));
       const child = spawnSync(process.execPath, ["-e", "require('node:fs').readFileSync(process.argv[1]+'/.git')", path]);
       assert.equal(child.status, 0); return 0;
     },
