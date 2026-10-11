@@ -27,7 +27,6 @@ import { test } from "node:test";
  *  when the handed-over form began to count). A new name, or a count above its row, fails the census;
  *  so does a count BELOW its row: converting a site lowers its row here (or deletes it at 0) in the same PR. */
 const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
-  applyDefuseActions: 1,
   applyGhReadCadence: 1,
   assertOpenWeightToolBoundary: 1,
   assertWorkerEgressEnforcerVersion: 1,
@@ -192,6 +191,7 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   planSafetyGitSync: 1,
   planTreeIsBehindMain: 1,
   postReviewPending: 1,
+  prepareDefuseTaskIds: 1,
   preserveFixHead: 3,
   probeProofSandbox: 1,
   productionCiJudgePorts: 1,

@@ -14,7 +14,7 @@ import { join } from "node:path";
 
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
-import type { GardenerDeps } from "./gardener.js";
+import { prepareGardenTaskIds, recordGardenMintTimeout, type GardenTaskIdMinter, type GardenerDeps } from "./gardener.js";
 import { ghJsonAsync } from "./github-transport.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
@@ -129,7 +129,7 @@ export interface FlowGardenSources {
   readLedger?: (sinceIso: string) => FlowLedgerRead;
   readCi?: (headSha: string) => Promise<FlowCiReading | undefined>;
   planTasks?: () => FlowPlanTask[];
-  mintTaskId: (filingBranch: string) => string;
+  mintTaskId: GardenTaskIdMinter;
 }
 
 interface FlowPr {
@@ -469,6 +469,7 @@ async function fileRegressions(
       keys.push(stat.key);
       deps.log(FLOW_REGRESSION_FILED_STEP, { key: stat.key, task_id: landed.taskId, filing_pr: landed.prUrl, slowest: stat.slowest.map((s) => s.pr) });
     } catch (e) {
+      recordGardenMintTimeout(e, "flow", deps.log);
       deps.log(FLOW_FILING_FAILED_STEP, { key: stat.key, error: String((e as Error)?.message ?? e) });
     }
   }
@@ -478,12 +479,12 @@ async function fileRegressions(
 }
 
 async function landFollowUp(
-  deps: GardenerDeps, mintTaskId: (branch: string) => string, stat: FlowStageStat, population: readonly number[],
+  deps: GardenerDeps, mintTaskId: GardenTaskIdMinter, stat: FlowStageStat, population: readonly number[],
 ): Promise<{ taskId: string; prUrl: string }> {
   const workspace = await deps.openWorkspace();
   try {
     if (!workspace.branch) throw new Error("flow: filing workspace has no branch for task-id reservation");
-    const taskId = mintTaskId(workspace.branch);
+    const taskId = (await prepareGardenTaskIds(workspace, 1, mintTaskId, true))[0]!;
     const rendered = renderFlowFollowUp(stat, taskId, population);
     if (rendered.refused) throw new Error(`flow: follow-up record refused by lint (${rendered.refused})`);
     const relativePath = join("plan", "tasks.d", `${taskId}-${flowFollowUpStem(stat)}.yaml`);
