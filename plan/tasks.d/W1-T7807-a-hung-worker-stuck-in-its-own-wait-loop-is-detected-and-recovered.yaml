@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-10: W1-T7734 run W1-T7734-1791660796008 on the core fleet host (read-only)"
   plan_refs: [W1-T943, W1-T942, W1-T1045, W1-T1066, W1-T7697, W1-T7806, W1-T7096]
   files: [src/lib/quiet-worker-watchdog.ts, src/lib/worker.ts, src/run-task.ts, test/a-hung-worker-in-its-own-wait-loop-is-recovered.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
