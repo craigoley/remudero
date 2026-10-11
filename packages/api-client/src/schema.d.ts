@@ -2501,7 +2501,14 @@ export interface components {
       counterWindow: "daemon-run";
       outcomeAssessment: "not_collected";
       spend: null;
+      opportunityEvidence?: GardenerOpportunityEvidence;
     };
+    /** Independent saved opportunity registry, not the registered off-loop gardener inventory. All counts are stored classifications, not newly verified PR/deployment/benefit evidence. No cost or causal improvement claim is made. Missing, mixed, invalid or oversized registries are unavailable, not zero. Empty arrays have no reconciliation timestamp. */
+    GardenerOpportunityEvidence: ({
+      state?: "reported";
+    }) | ({
+      state?: "unavailable";
+    });
     GardenersUnavailable: {
       error: "gardeners_unavailable";
       reason: "not_collected" | "unreadable" | "repository_mismatch" | "clock_skew";
