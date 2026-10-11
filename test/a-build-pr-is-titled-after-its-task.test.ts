@@ -51,10 +51,11 @@ test("W1-T7952: the #10785 and #10834 branches get their tasks titles", () => {
 
 test("W1-T7952: a fix round commit does not replace the task title", () => {
   const task = { id: "W1-T6085", title: "PURE TEST FILES SHARE ONE PROCESS — pool detail" };
-  const subjects = ["wip: another checkpoint", "fix(test): blank coverage env and carry pure-test-pool in tier fixtures (W1-T6085)", "wip: yield at worker"];
+  const subjects = ["fix(test): blank coverage env and carry pure-test-pool in tier fixtures (W1-T6085)", "wip: yield at worker"];
   const expected = "fix(test): pure test files share one process (W1-T6085)";
   assert.equal(titleFor(subjects, task), expected);
   assert.equal(branchTitle(subjects, task), expected);
+  assert.equal(titleFor(["wip: another checkpoint", ...subjects], task), expected);
   assert.equal(titleFor(["docs: explain the pool", ...subjects], task), "docs: pure test files share one process (W1-T6085)");
 });
 
@@ -64,6 +65,7 @@ test("W1-T7952: a task-derived title passes the conventional header checks", () 
       const header = titleFor(subjects, { id: "W1-T7952", title });
       assert.deepEqual(checkCommitMessage(header), []);
       assert.ok(header.length <= 100, header);
+      assert.ok(header.endsWith(" (W1-T7952)"), header);
     }
   }
   assert.equal(titleFor([], { id: "W1-T7952", title: "A TASK WITHOUT A DASH" }), "feat: a task without a dash (W1-T7952)");

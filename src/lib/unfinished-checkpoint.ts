@@ -8,7 +8,7 @@
  * resumes; whether a later stop resumes again is the W1-T7096 progress judge's call.
  */
 import type { FixProgressInput, FixProgressJudge } from "./fix-progress-judge.js";
-import { fitConventionalTitle } from "./commit-message.js";
+import { CONVENTIONAL_LIMITS, fitConventionalTitle } from "./commit-message.js";
 import type { Task } from "./plan.js";
 
 /** One stop on a checkpoint tip: its 1-based ordinal, the checkpoint subject and its `remaining` line. */
@@ -140,5 +140,6 @@ export function prTitleForTask(subjects: readonly string[], task: Pick<Task, "id
   const prefix = /^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([^)]*\))?!?:\s/.exec(newest ?? "");
   const typeAndScope = prefix ? `${prefix[1]}${prefix[2] ?? ""}` : "feat";
   const lead = task.title.split(" — ", 1)[0]!.trim().toLowerCase();
-  return fitConventionalTitle(`${typeAndScope}: ${lead} (${task.id})`).header;
+  const suffix = ` (${task.id})`;
+  return fitConventionalTitle(`${typeAndScope}: ${lead}`, CONVENTIONAL_LIMITS.headerMaxLength - suffix.length).header + suffix;
 }
