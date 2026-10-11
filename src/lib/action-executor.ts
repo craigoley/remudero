@@ -340,7 +340,7 @@ export async function executeAdmissionDisposition(
   const started = clock.now();
   const policy = dispositionHash(settings);
   let reads = 0;
-  const bounded = async <T>(effect: () => Promise<T>): Promise<T> => {
+  const bounded = async <T>(effect: () => T | Promise<T>): Promise<T> => {
     if (!withinDispositionTime(started, clock.now(), settings.policy.maxEvidenceAgeMs)) throw new Error("disposition-attempt-bound");
     const remaining = Math.min(settings.policy.maxEvidenceAgeMs, 15_000) - (clock.now() - started);
     let timer: ReturnType<typeof setTimeout> | undefined;

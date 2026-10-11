@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { setTimeout, clearTimeout } from "node:timers";
 import { validateConfigShape } from "../src/lib/config-schema.js";
 import { executeAdmissionDisposition, admissionDispositionStore, observeAdmissionDisposition,
   type AdmissionDispositionReceipt, type AdmissionDispositionStore,
