@@ -4,7 +4,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { feedbackLineageAuthority, observeFeedbackAdmission } from "./authority.js";
 import { fixedClock, systemClock } from "./clock.js";
 import {
-  classifyContribution, type AdmissionDecision, type ContributionActor,
+  classifyContribution, feedbackPublicationSteps, type FeedbackPublicationContext, type AdmissionDecision, type ContributionActor,
   type FeedbackAdmissionSubject, type FeedbackAdmissionContext,
 } from "./contributor-admission.js";
 export type { FeedbackAdmissionContext } from "./contributor-admission.js";
@@ -634,8 +634,16 @@ function openUpstreamFeedbackPr(
   entryId: string,
   content: string,
   gh: UpstreamGhExec,
+  publication?: { context: FeedbackPublicationContext; contribution: unknown },
 ): { prUrl?: string; error?: string } {
   const slug = `${home.owner}/${home.repo}`;
+  const observation = feedbackPublicationSteps(publication?.context,
+    publication === undefined ? [] : [publication.contribution], slug, "upstream-publication");
+  let next = observation.next();
+  while (!next.done) {
+    try { next = observation.next({ status: 200, body: JSON.parse(gh(["api", next.value])) }); }
+    catch (error) { next = observation.throw(error); }
+  }
   try {
     const repoInfo = JSON.parse(gh(["api", `repos/${slug}`])) as { default_branch: string };
     const base = repoInfo.default_branch;
@@ -870,8 +878,10 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
   };
   writeFileSync(feedbackEntryPath(root, id), stringifyYaml(entry));
   observeFeedbackAdmission(entry, opts.admission, "capture");
+  const publication = opts.admission?.mode === "shadow" ? { mode: "shadow" as const,
+    record: opts.admission.record ?? (() => {}) } : undefined;
   try {
-    landFeedback(root, opts.land ?? {});
+    landFeedback(root, { ...opts.land, ...(publication === undefined ? {} : { publication }) });
   } catch {
     // landFeedback already swallows its own failures — a defensive second layer only.
   }
@@ -883,7 +893,8 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
       if (!isUpstreamSelfTarget(current, home)) {
         observeFeedbackAdmission(entry, opts.admission, "upstream-capture");
         const gh = opts.upstream?.gh ?? defaultUpstreamGh();
-        const { prUrl, error } = openUpstreamFeedbackPr(home, id, stringifyYaml(entry), gh);
+        const { prUrl, error } = openUpstreamFeedbackPr(home, id, stringifyYaml(entry), gh,
+          publication === undefined ? undefined : { context: publication, contribution: entry.contribution });
         entry = {
           ...entry,
           upstream: prUrl

@@ -74,6 +74,72 @@ export function feedbackLineageSnapshot(contributions: readonly unknown[]): unkn
   try { return structuredClone([...contributions]); }
   catch { return [{ kind: "unresolved", reason: "lineage-unreadable" }]; }
 }
+
+export interface FeedbackPublicationContext { mode: "shadow"; record: AdmissionRecord }
+
+export function* feedbackPublicationSteps(
+  context: FeedbackPublicationContext | undefined, contributions: readonly unknown[], target: string | undefined,
+  boundary: string, clock: Pick<Clock, "now"> = systemClock,
+): Generator<string, void, AdmissionResponse> {
+  if (context === undefined) return;
+  const started = clock.now();
+  const emit = (outcome: "unknown" | "private-to-public" | "no-private-boundary-observed", reason: string,
+    subject?: FeedbackAdmissionSubject, destination?: Record<string, unknown>): void => {
+    try { context.record("feedback_publication.shadow", { mode: "shadow", boundary, outcome, reason,
+      would_deny: outcome !== "no-private-boundary-observed", permission: "not-granted",
+      source_ref: subject?.sourceRef, source_repository_id: subject?.repository?.id,
+      target_repository_id: destination?.id, target, receipt_key: feedbackContentDigest([boundary, subject, destination, outcome, reason]) }); }
+    catch { /* Observation loss cannot change the publication effect. */ }
+  };
+  const repository = function* (slug: string): Generator<string, Record<string, unknown>, AdmissionResponse> {
+    if (!fresh(started, clock.now(), 5_000)) throw new Error("publication-read-bound");
+    const response = yield `repos/${slug}`;
+    const body = record(response.body);
+    if (response.status !== 200 || !validId(body.id as number) || body.full_name !== slug || typeof body.private !== "boolean") {
+      throw new Error("repository-visibility-unreadable");
+    }
+    return body;
+  };
+  if (context.mode !== "shadow" || target === undefined || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(target)) {
+    emit("unknown", "publication-target-unresolved"); return;
+  }
+  let destination: Record<string, unknown>;
+  try { destination = yield* repository(target); }
+  catch { emit("unknown", "publication-target-unreadable"); return; }
+  if (contributions.length === 0) emit("unknown", "publication-lineage-missing", undefined, destination);
+  for (const contribution of feedbackLineageSnapshot(contributions.slice(0, 8))) {
+    let subject: FeedbackAdmissionSubject | undefined;
+    try {
+      subject = record(contribution).subject as FeedbackAdmissionSubject | undefined;
+      const source = subject?.repository;
+      const slug = source?.fullName;
+      if (!subject || !slug || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(slug)
+        || !validId(source?.id) || typeof source?.private !== "boolean" || !subject.sourceRef.startsWith(`${slug}#`)) {
+        throw new Error("publication-lineage-unreadable");
+      }
+      const current = yield* repository(slug);
+      if (current.id !== source.id) throw new Error("publication-source-identity-changed");
+      const finalTarget = yield* repository(target);
+      if (feedbackContentDigest(finalTarget) !== feedbackContentDigest(destination)) throw new Error("publication-target-changed");
+      if (destination.private === false && (source.private || current.private)) {
+        emit("private-to-public", "actor-admission-is-not-publication-permission", subject, destination);
+      } else emit("no-private-boundary-observed", "visibility-observation-only", subject, destination);
+    } catch { emit("unknown", "publication-evidence-unreadable", subject, destination); }
+  }
+  if (contributions.length > 8) emit("unknown", "publication-lineage-read-bound", undefined, destination);
+}
+
+export async function observeFeedbackPublication(
+  context: FeedbackPublicationContext | undefined, contributions: readonly unknown[], target: string | undefined, boundary: string,
+  deps: { read?: AdmissionRead; clock?: Pick<Clock, "now"> } = {},
+): Promise<void> {
+  const steps = feedbackPublicationSteps(context, contributions, target, boundary, deps.clock);
+  let next = steps.next();
+  while (!next.done) {
+    try { next = steps.next(await (deps.read ?? readAdmissionRestAsync)(next.value)); }
+    catch (error) { next = steps.throw(error); }
+  }
+}
 /** A credential-capable resolver must verify this state: a 403/404 alone does not prove
  * non-membership in a private organization. Unreadable or permission-ambiguous reads are unknown. */
 export interface MembershipEvidence {

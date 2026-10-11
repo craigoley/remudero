@@ -39,6 +39,7 @@ import { loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { mergeFeedbackRecord } from "./feedback-record-merge.js";
+import { feedbackPublicationSteps, type FeedbackPublicationContext } from "./contributor-admission.js";
 import {
   PlanPrPreflightRefusedError,
   planPrPreflightAtCommit,
@@ -142,6 +143,7 @@ export interface LandingIdentity {
 }
 
 export interface LandFeedbackOpts {
+  publication?: FeedbackPublicationContext;
   /** Injectable `git` exec — real callers omit it; tests can force specific failure paths. */
   git?: GitExec;
   /** Injectable `gh` exec (the `ghGateway` pattern, lib/status.ts) — tests fake it; never real GitHub. */
@@ -979,6 +981,27 @@ function* finishLanding(
   // force-pushed every call and once deadlocked a PR's CI (racing cancellations, no settled sha).
   // Why: docs/forensics/feedback-landing.md#finishlanding_shortcircuit.
   const bodyOf = (b: LandingTreeBuild): string => kind.prBody(b.unlanded, landingTreeContent(git, b));
+  const observePublication = function* (b: LandingTreeBuild): Generator<LandingAsk, void, AskReply> {
+    if (kind.family !== "feedback" || opts.publication === undefined) return;
+    const contributions: unknown[] = [];
+    try {
+      const paths = git(["diff", "--name-only", b.mainSha, b.treeSha, "--", kind.ownedDir]).trim().split("\n")
+        .filter(path => path.endsWith(".yaml"));
+      const content = landingTreeContent(git, b);
+      for (const path of paths.slice(0, 9)) {
+        try { contributions.push((parseYaml(content.head(path) ?? "") as { contribution?: unknown } | null)?.contribution); }
+        catch { contributions.push(undefined); }
+      }
+    } catch { contributions.push(undefined); }
+    const steps = feedbackPublicationSteps(opts.publication, contributions,
+      kind.targetRepository === undefined ? undefined : repoKey(kind.targetRepository), "landing-publication");
+    let next = steps.next();
+    while (!next.done) {
+      try { next = steps.next({ status: 200, body: JSON.parse(yield* net.gh(["api", next.value])) }); }
+      catch (error) { next = steps.throw(error); }
+    }
+  };
+  yield* observePublication(build);
   if (remoteBranchTree(git, kind.branch) === build.treeSha) {
     const { prUrl, error } = yield* ensurePrOpen(kind, net, bodyOf(build), requestReview);
     return withRefused({ landed: true, files: build.unlanded, prUrl, error, pushed: false }, build.refused);
@@ -1032,6 +1055,7 @@ function* finishLanding(
     } catch (e) {
       return { landed: false, files: [], error: String((e as Error)?.message ?? e) };
     }
+    yield* observePublication(retried);
     if (remoteBranchTree(git, kind.branch) === retried.treeSha) {
       const { prUrl, error } = yield* ensurePrOpen(kind, net, bodyOf(retried), requestReview);
       return withRefused({ landed: true, files: retried.unlanded, prUrl, error, pushed: false }, retried.refused);

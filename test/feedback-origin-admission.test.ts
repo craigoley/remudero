@@ -381,14 +381,15 @@ test("W1-T7754 publication: owner admission is not private-source publication pe
   const run = async (privateSource: boolean | undefined, privateTarget: boolean | undefined, throws = false) => {
     const rows: Record<string, unknown>[] = []; const f = sourceFixture();
     f.subject.repository!.private = privateSource;
-    const fn = (admissionModule as unknown as { feedbackPublicationSteps: (...args: unknown[]) => Generator<() => unknown, void, unknown> }).feedbackPublicationSteps;
+    const fn = admissionModule.feedbackPublicationSteps;
     const steps = fn({ mode: "shadow", record: (_step: string, fields: Record<string, unknown>) => rows.push(fields) },
       [{ subject: f.subject, admission: { outcome: "trusted", reason: "owner" } }], "acme/public", "fixture-publication",
-      (path: string) => { if (throws) throw new Error("offline"); return { status: 200, body: path === "repos/acme/public"
+      { now: () => NOW });
+    const read = (path: string) => { if (throws) throw new Error("offline"); return { status: 200, body: path === "repos/acme/public"
         ? { id: 200, full_name: "acme/public", private: privateTarget }
-        : { id: 100, full_name: "acme/widgets", private: privateSource } }; }, { now: () => NOW });
+        : { id: 100, full_name: "acme/widgets", private: privateSource } }; };
     let next = steps.next();
-    while (!next.done) { try { next = steps.next(await next.value()); } catch (error) { next = steps.throw(error); } }
+    while (!next.done) { try { next = steps.next(read(next.value)); } catch (error) { next = steps.throw(error); } }
     return rows;
   };
   assert.equal((await run(true, false))[0].outcome, "private-to-public");
