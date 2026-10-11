@@ -34,8 +34,18 @@ test("an age or duration leaf is timing only when its difference is within the g
 });
 
 test("a time leaf whose values are not both instants is not explained by the gap", () => {
-  assert.equal(classifyShadowDiff({ path: "tasks[0].updatedAt", legacy: null, view: iso(T0), ids: [] }, TWO_SECONDS_APART).classification, "real");
+  assert.equal(classifyShadowDiff({ path: "tasks[0].updatedAt", legacy: null, view: iso(T0 - 3 * DAY), ids: [] }, TWO_SECONDS_APART).classification, "real");
   assert.equal(classifyShadowDiff({ path: "tasks[0].updatedAt", legacy: "soon", view: iso(T0), ids: [] }, TWO_SECONDS_APART).classification, "real");
+});
+
+test("a value stamped inside the gap by the side read later is timing, however far it is from the other side's", () => {
+  // The later read (the view, as-of T0) holds a reading stamped one second before it; the earlier read (legacy, T0 - 2 s) has the older one.
+  const rewritten = classifyShadowDiff({ path: "tasks[0].updatedAt", legacy: iso(T0 - 3 * DAY), view: iso(T0 - 1_000), ids: [] }, TWO_SECONDS_APART);
+  assert.equal(rewritten.classification, "timing");
+  const appeared = classifyShadowDiff({ path: "tasks[0].updatedAt", legacy: null, view: iso(T0 - 1_000), ids: [] }, TWO_SECONDS_APART);
+  assert.equal(appeared.classification, "timing", "a value the earlier read lacked, stamped inside the gap");
+  const stale = classifyShadowDiff({ path: "tasks[0].updatedAt", legacy: iso(T0 - 1_000), view: iso(T0 - 3 * DAY), ids: [] }, TWO_SECONDS_APART);
+  assert.equal(stale.classification, "real", "the later read holding the OLDER value is not a reading landing in the gap");
 });
 
 test("a time leaf days apart is still timing when a row in the gap names its id", () => {

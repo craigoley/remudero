@@ -416,13 +416,19 @@ function instantMs(value: unknown): number | null {
 }
 
 /**
- * Whether a time leaf's two values differ by no more than the sources' as-of gap: both are instants (or
- * both are ages/durations in ms) and sit within `gapMs` of each other. A time value days wrong, or one that
- * is not a time at all, is not explained by the gap.
+ * Whether the sources' as-of gap explains a time leaf's two values: both are instants (or both are
+ * ages/durations in ms) and either sit within the gap of each other, or the side read LATER holds the newer
+ * value and it was stamped inside the gap (after the earlier read, by the later one): a reading rewritten
+ * between the two reads (a value the earlier read lacked, as `explainOrder` treats a missing row, is older
+ * than any). A time value days wrong, or one that is not a time at all, is not explained.
  */
-function timeDiffWithin(legacy: unknown, view: unknown, gapMs: number): boolean {
-  const [a, b] = [instantMs(legacy), instantMs(view)];
-  return a !== null && b !== null && Math.abs(a - b) <= gapMs;
+function timeDiffWithin(legacy: unknown, view: unknown, legacyAsOfMs: number, viewAsOfMs: number): boolean {
+  const lacks = (value: unknown): boolean => value === null || value === undefined;
+  const [a, b] = [lacks(legacy) ? Number.NEGATIVE_INFINITY : instantMs(legacy), lacks(view) ? Number.NEGATIVE_INFINITY : instantMs(view)];
+  if (a === null || b === null || (a === b)) return false;
+  if (Math.abs(a - b) <= Math.abs(legacyAsOfMs - viewAsOfMs)) return true;
+  const [lateSeen, earlySeen, early, late] = legacyAsOfMs > viewAsOfMs ? [a, b, viewAsOfMs, legacyAsOfMs] : [b, a, legacyAsOfMs, viewAsOfMs];
+  return lateSeen > earlySeen && lateSeen > early && lateSeen <= late;
 }
 
 /**
@@ -454,7 +460,7 @@ export function classifyShadowDiff(diff: ShadowFieldDiff, ev: ShadowEvidence): {
   const leaf = diff.path.split(/[.[]/).at(-1) ?? "";
   if (agesDiffer) {
     const gapMs = Math.abs(ev.legacyAsOfMs! - ev.viewAsOfMs!);
-    const explained = any(ev.namedInGap) || (TIME_LEAF.test(leaf) && timeDiffWithin(legacy, view, gapMs));
+    const explained = any(ev.namedInGap) || (TIME_LEAF.test(leaf) && timeDiffWithin(legacy, view, ev.legacyAsOfMs!, ev.viewAsOfMs!));
     if (explained) return { classification: "timing", reason: `sources ${gapMs} ms apart; ${ev.rowsInGap} row(s) landed between` };
   }
   if (ev.legacyHorizonMs !== undefined && any(ev.namedBeforeHorizon)) {
