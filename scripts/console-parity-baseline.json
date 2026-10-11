@@ -48,6 +48,7 @@
     "ledger-compact",
     "ledger-grep",
     "lint-plan",
+    "live-edits",
     "mcp",
     "memory-lint",
     "next-task-id",

@@ -231,14 +231,49 @@ export function namedPlanOrDocsPaths(content) {
   return paths;
 }
 
+/** The plan paths that name the whole population rather than one record. */
+const PLAN_POPULATION_PATHS = ["plan", "plan/tasks.d", "plan/tasks.yaml"];
+
+/** Whether `content` loads the whole plan (`loadPlan(` on plan/tasks.yaml) or walks its population. */
+function readsWholePlan(content, paths = namedPlanOrDocsPaths(content)) {
+  const loadsPlan = /\bloadPlan\s*\(/.test(content) && paths.has("plan/tasks.yaml");
+  const walksPlan = enumeratesPopulation(content) && PLAN_POPULATION_PATHS.some((p) => paths.has(p));
+  return loadsPlan || walksPlan;
+}
+
+/** The modules that lint or validate the plan itself — the subject of a plan-integrity suite. */
+const PLAN_INTEGRITY_MODULE = /\bfrom\s+["'][^"']*\/(?:task-linter|plan-coherence|plan-index)(?:\.[a-z]+)?["']/;
+
+/**
+ * W1-T7809 — whether `content` is a plan-integrity suite: it imports the module that lints or validates
+ * the plan AND reads the real plan (loads it or walks its shards), so a changed shard is its subject.
+ * Derived from the suite's own source, never from a hand list. A suite that merely calls `loadPlan(`
+ * (fixtures, a status board) is not one.
+ */
+export function isPlanIntegritySuite(content) {
+  return PLAN_INTEGRITY_MODULE.test(content) && readsWholePlan(content);
+}
+
+/** W1-T7809 — whether `content` reads a changed plan path itself: the file, a path under a named
+ *  record directory, or a shard id. A reader of the whole plan population is NOT one (see
+ *  {@link isPlanIntegritySuite}); that is what made a one-shard filing select hundreds of suites. */
+export function readsChangedShard(content, changedFiles) {
+  const paths = namedPlanOrDocsPaths(content);
+  return changedFiles.some((file) => {
+    for (const path of paths) {
+      if (file === path) return true;
+      if (!PLAN_POPULATION_PATHS.includes(path) && file.startsWith(path + "/")) return true;
+    }
+    const id = /^plan\/tasks\.d\/(W\d+-T\d+)(?:[-.]|$)/.exec(file)?.[1];
+    return Boolean(id && new RegExp(`\\b${id}\\b`).test(content));
+  });
+}
+
 /** Match the changed file, a directory ancestor, a shard id, or a reader of the whole plan. */
 export function readsChangedPlanOrDocs(content, changedFiles) {
   const paths = namedPlanOrDocsPaths(content);
   const planChanged = changedFiles.some(isInPlanScope);
-  const loadsPlan = /\bloadPlan\s*\(/.test(content) && paths.has("plan/tasks.yaml");
-  const walksPlan = enumeratesPopulation(content) &&
-    ["plan", "plan/tasks.d", "plan/tasks.yaml"].some((p) => paths.has(p));
-  if (planChanged && (loadsPlan || walksPlan)) return true;
+  if (planChanged && readsWholePlan(content, paths)) return true;
   return changedFiles.some((file) => {
     for (const path of paths) if (file === path || file.startsWith(path + "/")) return true;
     const id = /^plan\/tasks\.d\/(W\d+-T\d+)(?:[-.]|$)/.exec(file)?.[1];
@@ -264,6 +299,25 @@ export function planReadingSuiteFiles(root = REPO_ROOT, changedFiles = []) {
     }
   }
   return [...out].sort();
+}
+
+/**
+ * W1-T7809 — the suites a PLAN-ONLY author diff reaches: those that read a changed shard by path or id,
+ * and the plan-integrity suites. Not every suite that calls `loadPlan(`: at origin/main that listing was
+ * ~469 suites for one filed shard. CI keeps {@link planReadingSuiteFiles}; only the author lane narrows.
+ */
+export function planOnlySuiteFiles(root = REPO_ROOT, changedFiles = []) {
+  const testDir = join(root, "test");
+  const out = [];
+  for (const entry of readdirSync(testDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".test.ts")) continue;
+    const abs = join(testDir, entry.name);
+    const content = readFileSync(abs, "utf8");
+    if (readsChangedShard(content, changedFiles) || isPlanIntegritySuite(content)) {
+      out.push(relative(root, abs).split(sep).join("/"));
+    }
+  }
+  return out.sort();
 }
 
 // ── W1-T2680: THE SUITES A `git grep <symbol>` SWEEP CANNOT REACH ─────────────────────────────
@@ -460,6 +514,9 @@ export function main(argv) {
       // spend ~39 minutes installing browsers and collecting an unchanged source-coverage graph.
       "coverage-class": { type: "boolean", default: false },
       "list-plan-reading-suites": { type: "boolean", default: false },
+      // W1-T7809: given a plan-only changed-file list, print the suites that read a changed shard plus the
+      // plan-integrity suites — the author lane's narrower reach than --list-plan-reading-suites.
+      "list-plan-only-suites": { type: "boolean", default: false },
       // W1-T4395: prints "files" then the changed test files plus the census suites that walk them, or "full",
       // or nothing (not a test-only diff).
       "test-only-run": { type: "boolean", default: false },
@@ -499,6 +556,19 @@ export function main(argv) {
     } catch (err) {
       console.error(`diff-class: FAILED to enumerate the census suite set — ${err && err.message ? err.message : String(err)}`);
       console.error("diff-class: printing NOTHING — a caller reading zero lines here must fail closed and run the full suite.");
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  if (values["list-plan-only-suites"]) {
+    try {
+      const root = values["plan-reading-root"] ?? REPO_ROOT;
+      for (const path of planOnlySuiteFiles(root, readChangedFilesArg(values["changed-files"]))) console.log(path);
+      process.exitCode = 0;
+    } catch (err) {
+      console.error(`diff-class: FAILED to enumerate the plan-only suite set — ${err && err.message ? err.message : String(err)}`);
+      console.error("diff-class: printing NOTHING — a caller reading zero lines here must fail closed.");
       process.exitCode = 1;
     }
     return;
