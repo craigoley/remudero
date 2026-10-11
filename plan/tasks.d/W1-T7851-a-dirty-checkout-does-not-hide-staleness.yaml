@@ -1,0 +1,80 @@
+- id: W1-T7851
+  title: "A DIRTY CHECKOUT DOES NOT HIDE STALENESS FROM FRESHNESS AGE PRESSURE — `daemonFreshnessFromService` answers `not stale` for a dirty tree that is behind main, `staleSinceMs` starts only on a stale reading, so the core daemon booted at 00:03Z on a sha main had passed at 22:05Z read age pressure 0 at 03:13Z, and nothing said why the tree was dirty"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — staleness is measured by loaded sha against origin/main whatever the dirty arm says
+  band_meaning: span
+  origin: "operator approval 2026-10-11: file the recommended follow-ups (a dirty checkout reset the daemon's freshness age pressure)"
+  plan_refs: [W1-T4945, W1-T6093, W1-T3756, W1-T5308, W1-T5476, W1-T2964]
+  files: [src/lib/self-sync.ts, src/lib/daemon.ts, test/a-dirty-checkout-does-not-hide-staleness.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED, read-only from the core daemon's live ledger on the Azure host (2026-10-11T03:45Z), host 0e3708:
+      - 00:03:28Z `daemon.boot`. The loaded sha was 81bb8c305. main had already moved past it: d2e779abf landed at
+        2026-10-10T22:05:44Z, and by d7f527f62 the daemon was 27 first-parent commits behind.
+      - 02:48:24Z and 02:51:20Z `daemon.freshness_not_stale` arm dirty, old_sha 81bb8c305, new_sha d7f527f62.
+      - 03:13:02Z, the first stale reading: `daemon.freshness_decision` defer with age_pressure 0. The pressure then
+        rose 1, 2, 3, 4, 5, 6, and the daemon restarted at 03:33:46Z (window_quiet).
+      - No freshness row exists between the boot and 02:48Z. The fleet was paused 01:17:50Z-01:48:20Z and
+        02:14:40Z-02:44:48Z (W1-T7839's evidence), and the per-tick check runs only after the operator holds
+        (src/lib/daemon.ts:4226-4232). So the ledger shows the daemon was behind for its whole lifetime, but it does
+        not show how long the tree was dirty. Nothing records that.
+    CURRENT BEHAVIOUR, read on origin/main e3256acda:
+      - `daemonFreshnessFromService` (src/lib/self-sync.ts:688) returns `{ stale: false, notStale: { arm: "dirty" } }`
+        for any dirty tree (:693-701). That is before it asks whether the advance is material (:704-709), so a dirty
+        tree behind main is never stale. The doc gives the reason (:683-685): entrypoint.sh refuses to sync a dirty
+        tree, so a restart would come back on the same sha and loop. That reason is about the restart, not about
+        whether the code is stale.
+      - The daemon starts its staleness clock only on a stale reading. `staleSinceMs` (daemon.ts:2847) is set by
+        `observeFreshnessAdvance` (daemon.ts:3238-3239), which runs only from `decideFreshness` (:3248) and the
+        first-cycle guard. Both take a stale reading. A not-stale reading only logs (`logNotStaleFreshness`,
+        daemon.ts:3224-3235).
+      - Age pressure is computed from that clock (`agePressure`, src/lib/deploy-judge.ts:417). So hours spent dirty
+        and behind count for nothing once the tree comes clean.
+      - Dirtiness is a bare boolean. The service check sees only whether `git status --porcelain -uno` printed
+        anything (self-sync.ts:589, :638). The boot row is `daemon.tree_dirty` with no fields (src/run-task.ts:55697),
+        and the dirty arm logs only the two shas. Neither says which tracked file was modified.
+  design: |
+    1. STALENESS IS LOADED SHA AGAINST ORIGIN/MAIN. `daemonFreshnessFromService` keeps the dirty arm, so a dirty tree is
+       still never `stale: true` and the in-place sync and restart stay blocked as today. When the dirty tree is also
+       materially behind (the same `advanceIsMaterial` test as the stale arm), the arm says so: `behind: true`, with
+       old_sha, new_sha and the `changes` the stale arm would carry.
+    2. THE CLOCK STARTS ON THE FIRST BEHIND READING, WHATEVER THE ARM. When `logNotStaleFreshness` sees the dirty arm
+       with `behind: true`, it calls `observeFreshnessAdvance(newSha, now)`. So `staleSinceMs` starts then, and the
+       advance coalescing sees it. The row also carries `stale_since_ms` and the age pressure the restart decision
+       would weigh, computed by the same `decideFreshnessRestart` arithmetic and never a new number. When the tree
+       comes clean, the first stale reading's decision uses that earlier `staleSinceMs`, so the hours spent dirty
+       count.
+    3. SAY WHY THE TREE IS DIRTY. The service read keeps the `git status --porcelain -uno` lines it already runs. Those
+       are tracked files of the service's own repository, so the paths are repo paths and never file content. The
+       dirty arm carries `dirty_paths` (bounded by the same row-size control other freshness rows use) and the boot
+       row `daemon.tree_dirty` carries them too. The caution at self-sync.ts:94-95 is about operator checkouts in the
+       CLI self-sync. This task does not widen that CLI's row.
+    4. A RESTART THE DIRTY TREE WITHHOLDS IS NAMED. When the pressure computed in (2) reaches the threshold the
+       decision would restart on, while the dirty arm blocks it, log `daemon.freshness_blocked_dirty` once per new_sha.
+       It carries old_sha, new_sha, stale_since_ms, the pressure and dirty_paths, so the stall reads as "behind and
+       blocked by these files", never as a current daemon.
+    Tests go in the new file test/a-dirty-checkout-does-not-hide-staleness.test.ts, with `test(` titles exactly as in
+    the proofs below. The existing freshness, coalescing and W1-T3756 suites must stay green.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-dirty-checkout-does-not-hide-staleness.test.ts"
+    - claim: "a dirty tree behind main reads the dirty arm with behind true and is still never stale"
+      proof: 'grep: test("W1-T7851: a dirty tree behind main is behind but never stale" in test/a-dirty-checkout-does-not-hide-staleness.test.ts'
+    - claim: "the staleness clock starts on the first dirty-and-behind reading, so the first clean stale reading carries the accrued age pressure"
+      proof: 'grep: test("W1-T7851: age pressure accrues while the checkout is dirty and behind" in test/a-dirty-checkout-does-not-hide-staleness.test.ts'
+    - claim: "the dirty arm and the boot dirty row name the dirty tracked paths"
+      proof: 'grep: test("W1-T7851: a dirty reading names the tracked paths that make it dirty" in test/a-dirty-checkout-does-not-hide-staleness.test.ts'
+    - claim: "a restart the dirty tree withholds is logged once per new sha"
+      proof: 'grep: test("W1-T7851: a restart withheld by a dirty tree is named once per new sha" in test/a-dirty-checkout-does-not-hide-staleness.test.ts'
+  falsifier: |
+    Leave `daemonFreshnessFromService` returning the bare dirty arm. The behind flag is then absent, `staleSinceMs`
+    never starts while dirty, and a fixture that reads dirty-and-behind for two hours before its first clean stale
+    reading gets age pressure 0, as the 03:13:02Z decision did. The second and third tests fail. Let a dirty tree read
+    `stale: true`, and the first test fails, because the restart would loop on a refused sync.
