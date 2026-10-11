@@ -477,3 +477,32 @@ for (const path of ["disk", "status-content", "queued", "pending-disk", "pending
     assert.deepEqual(staged.contribution, original);
   });
 }
+
+test("W1-T7754 consumers: carried pending content cannot replace main lineage while another record lands", () => {
+  const origin = gitRepo({ bare: true, kind: "admission-carry-origin" });
+  const seed = gitRepo({ kind: "admission-carry-seed" });
+  const rel = "plan/feedback/fb-original.yaml";
+  const original = admitFeedbackContribution(boundIssue(), { mode: "shadow", policy: POLICY, nowMs: NOW });
+  mkdirSync(join(seed.dir, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(seed.dir, rel), stringifyYaml({ id: "fb-original", status: "new", contribution: original }));
+  seed.git("add", "-A");
+  seed.git("commit", "--quiet", "-m", "chore: original");
+  seed.addRemote("origin", origin.dir);
+  seed.git("push", "--quiet", "origin", "main");
+  seed.git("checkout", "-b", LANDING_BRANCH);
+  writeFileSync(join(seed.dir, rel), stringifyYaml({ id: "fb-original", status: "accepted", contribution: { actor: { id: SUMMARIZER_BOT_ID } } }));
+  seed.git("add", "-A");
+  seed.git("commit", "--quiet", "-m", "chore: stale relay");
+  seed.git("push", "--quiet", "origin", LANDING_BRANCH);
+  const root = gitRepo({ cloneFrom: origin.dir, kind: "admission-carry-consumer" });
+  const result = withLiveWritesAllowed(() => landFeedbackStatusContent(root.dir, "plan/feedback/fb-other.yaml",
+    "id: fb-other\nstatus: new\n", { gh: args => {
+      if (args[1] === "list") return "[]";
+      if (args[1] === "create") return "https://github.com/acme/widgets/pull/2\n";
+      assert.fail(`unexpected GitHub effect ${JSON.stringify(args)}`);
+    }, targetRepository: { owner: "acme", repo: "widgets" }, sourceRepository: { owner: "acme", repo: "widgets" } }));
+  assert.equal(result.landed, true, JSON.stringify(result));
+  const staged = parseYaml(origin.git("show", `${LANDING_BRANCH}:${rel}`));
+  assert.equal(staged.status, "accepted");
+  assert.deepEqual(staged.contribution, original);
+});
