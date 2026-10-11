@@ -35424,6 +35424,7 @@ export function memoryReadTrackerFor(
   owner: string,
   repo: string,
   clock: Clock = systemClock,
+  issues: IssueGateway = ghIssueGateway(owner, repo),
 ): MemoryReadTracker {
   return createMemoryReadTracker(clock, {
     recoveredDurationsMs: (source: MemoryReadSource) =>
@@ -35451,7 +35452,7 @@ export function memoryReadTrackerFor(
           ],
           recommendation: "wait for recovery",
         },
-        { issues: ghIssueGateway(owner, repo), ledgerPath, runId },
+        { issues, ledgerPath, runId },
       );
     },
     onSinkError: (label, error) => console.error(`memory_read tracker: ${label} sink failed: ${error instanceof Error ? error.message : String(error)}`),
