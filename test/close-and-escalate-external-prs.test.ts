@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { executeAdmissionDisposition, admissionDispositionStore, observeAdmissionDisposition,
   type AdmissionDispositionReceipt, type AdmissionDispositionStore,
   type AdmissionDispositionSimulation } from "../src/lib/action-executor.js";
@@ -234,7 +235,8 @@ test("W1-T7755: absent shadow disposition does no disk work and a symlink cannot
 test("W1-T7755: selected sweep and CLI callers record shadow disposition without withholding ordinary effects", async () => {
   for (const caller of ["sweep", "dep-review", "review", "fix"] as const) {
     const root = mkdtempSync(join(tmpdir(), "rmd-disposition-caller-"));
-    const shim = ghShim([{ when: "api repos/acme/core/pulls/42 -i", stdout: `HTTP/2 200 OK\n\n${JSON.stringify(pull())}` },
+    const sourceHead = caller === "review" ? execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim() : sha;
+    const shim = ghShim([{ when: "api repos/acme/core/pulls/42 -i", stdout: `HTTP/2 200 OK\n\n${JSON.stringify(pull(8, sourceHead))}` },
       { when: "api repos/acme/core -i", stdout: 'HTTP/2 200 OK\n\n{"id":3,"full_name":"acme/core","private":false}' }]);
     const previousPath = process.env.PATH; const config = { root, contributorAdmission: settings, claudeBin: "/bin/true" } as Config;
     const events: string[] = [];
@@ -261,7 +263,7 @@ test("W1-T7755: selected sweep and CLI callers record shadow disposition without
       } else {
         await assert.rejects(reviewCommand("42", ["--repo", "acme/core"], { loadConfig: () => config,
           resolveOwnerRepo: () => ({ owner: "acme", repo: "core" }), contributorAdmission: async () => {},
-          fetchView: () => ({ ...pull(), body: "Remudero-Task: W1-T7755", html_url: "https://github.com/acme/core/pull/42" }),
+          fetchView: () => ({ ...pull(8, sourceHead), body: "Remudero-Task: W1-T7755", html_url: "https://github.com/acme/core/pull/42" }),
           reviewerCodeFreshness: () => ({ status: "fresh", codeSha: sha, originMainSha: sha, advance: "none" }),
           postReviewPending: async () => ({ posted: true }) as never, fetchHead: () => {},
           materialize: () => { events.push("ordinary-materialize"); throw Error("effect trap"); } }));
@@ -272,5 +274,22 @@ test("W1-T7755: selected sweep and CLI callers record shadow disposition without
       const directories = readdirSync(join(root, "state", "contributor-disposition", "shadow"));
       assert.ok(directories.some(name => name.endsWith(".registered")));
     } finally { process.env.PATH = previousPath; rmSync(root, { recursive: true, force: true }); rmSync(shim.dir, { recursive: true, force: true }); }
+  }
+});
+
+test("W1-T7755: healthy replay does not exhaust unknown recovery or claim a new current assessment", async () => {
+  for (const actor of [1, 8]) {
+    const { store, rows } = memoryStore();
+    const first = await executeAdmissionDisposition({ settings, target }, store, source(pull(actor)), () => {}, clock);
+    assert.equal(first.status, actor === 1 ? "trusted" : "would-close");
+    for (let i = 0; i < 6; i++) {
+      const replay = await executeAdmissionDisposition({ settings, target: { ...target, headSha: "b".repeat(40) } }, store,
+        () => assert.fail("retained terminal is not another recovery attempt or authority grant"), () => {}, clock);
+      assert.equal(replay.status, first.status);
+      assert.equal(replay.permission, "not-granted");
+      assert.equal(replay.evidence, "retained");
+    }
+    assert.equal(rows.at(-1)?.identityAttempts, 1);
+    assert.equal(rows.filter(r => r.status === "owner-action").length, 0);
   }
 });

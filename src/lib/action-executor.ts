@@ -301,6 +301,7 @@ export interface AdmissionDispositionResult {
   permission: "not-granted";
   laneReleased: boolean;
   requiredChecks: "ordinary-current-head-checks-required";
+  evidence: "fresh" | "retained" | "unknown";
   receipt?: AdmissionDispositionReceipt;
 }
 
@@ -310,11 +311,11 @@ export async function executeAdmissionDisposition(
 ): Promise<AdmissionDispositionResult> {
   const { settings, target } = request;
   const result = (status: AdmissionDispositionStatus, reason: string,
-    receipt?: AdmissionDispositionReceipt): AdmissionDispositionResult => {
+    receipt?: AdmissionDispositionReceipt, evidence: AdmissionDispositionResult["evidence"] = "unknown"): AdmissionDispositionResult => {
     const value: AdmissionDispositionResult = { status, reason, permission: "not-granted", laneReleased: status !== "pending",
-      requiredChecks: "ordinary-current-head-checks-required", ...(receipt ? { receipt } : {}) };
+      requiredChecks: "ordinary-current-head-checks-required", evidence, ...(receipt ? { receipt } : {}) };
     try { record("contributor_disposition.shadow", { status, reason, permission: value.permission,
-      mode: "shadow", evidence_domain: store.domain, admission_lane_released: value.laneReleased,
+      mode: "shadow", evidence_domain: store.domain, evidence, admission_lane_released: value.laneReleased,
       repository_id: settings?.repositoryId, pr_number: target.prNumber, head_sha: receipt?.headSha,
       cause: receipt?.cause, sequence: receipt?.sequence, first_reason: receipt?.firstReason, original_reason: receipt?.originalReason }); }
     catch { /* A lost diagnostic neither grants permission nor changes the ordinary PR flow. */ }
@@ -322,7 +323,7 @@ export async function executeAdmissionDisposition(
   };
   if (!settings || settings.mode !== "shadow" || settings.disposition !== "shadow") {
     return { status: "not-enabled", reason: "not-enabled", permission: "not-granted", laneReleased: true,
-      requiredChecks: "ordinary-current-head-checks-required" };
+      requiredChecks: "ordinary-current-head-checks-required", evidence: "unknown" };
   }
   if (!positiveId(settings.repositoryId) || !positiveId(target.prNumber)
     || !/^[A-Za-z0-9_.-]+$/.test(target.owner) || !/^[A-Za-z0-9_.-]+$/.test(target.repo)
