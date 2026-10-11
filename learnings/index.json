@@ -75,6 +75,7 @@
       "entries": [
         "a-board-wide-plan-red-is-main",
         "acceptance-author-gate-task-authoring-lane",
+        "analyze-actions-gate-refusals-repaired-by-hand",
         "analyze-javascript-typescript-gate-pre-push-steps",
         "body-fetch-guards-on-http-not-size",
         "ci-gate-refusals-repaired-by-hand",
@@ -105,6 +106,7 @@
       ],
       "globs": [
         ".github/**",
+        ".github/workflows/**",
         ".github/workflows/ci-gate.yml",
         ".github/workflows/ci.yml",
         ".github/workflows/codeql.yml",
@@ -135,6 +137,7 @@
         "src/lib/git-push.ts",
         "src/lib/ledger-projector.ts",
         "src/lib/ledger.ts",
+        "src/lib/main-health-rung.ts",
         "src/lib/open-prs-rest.ts",
         "src/lib/plan-pr-emitter.ts",
         "src/lib/policy.ts",

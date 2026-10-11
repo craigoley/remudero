@@ -499,3 +499,22 @@
     shared refusal reason, so this entry names the shared pre-push steps, not a verified per-PR cause.
   src: "ci-learning:6058:ci-gate"
   cited: "2026-10-09"
+
+- id: analyze-actions-gate-refusals-repaired-by-hand
+  subsystem: ci
+  lifecycle: active
+  files:
+    - "plan/tasks.d/**"
+    - "scripts/test-tier-manifest.json"
+    - "src/run-task.ts"
+    - "src/lib/main-health-rung.ts"
+    - "src/lib/sweep.ts"
+    - ".github/workflows/**"
+    - "test/**"
+    - "learnings/ci.yaml"
+  fact: >-
+    The Analyze (actions) gate refused three distinct pull requests in one window (#10578, #10628, #10671), and each was repaired after the refusal. Before the first push, a worker runs the two cheap ratchets over its own change, `npm run --silent comment-load-signal` and `npm run --silent source-size-ratchet`. A worker on a change that touches plan/ also runs `npm run --silent rule15-precheck`, and a change that touches src/run-task.ts or a new test/ file runs `rmd census-membership` and the suites it names. Do not wait for the hosted gate to find these steps.
+  evidence: >-
+    The Analyze (actions) refusals are recorded as ci-learning:10578:Analyze (actions) (PRs 10578, 10628, 10671; 10671 appears twice in the source list). The repairs touched the plan/tasks.d shard tree, scripts/test-tier-manifest.json, the run-task and sweep lane, and census-covered test files. Recon did not read the failure logs or the repair diffs, and did not establish the per-PR refusal reason, so this entry names the shared surface and the pre-push steps, not a verified cause of the Analyze (actions) gate.
+  src: "ci-learning:10578:Analyze (actions)"
+  cited: "2026-10-11"
