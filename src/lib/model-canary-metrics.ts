@@ -1,5 +1,6 @@
 /** Private measurements: unavailable is never zero; task runs own retry cost. */
 import { createHash } from "node:crypto";
+import { fixedClock } from "./clock.js";
 
 export type CanaryBilling = "api" | "subscription";
 /** One scheduled case across arms. Retention turns and retries stay inside one run. */
@@ -103,7 +104,7 @@ export function projectCanaryRuns(input: readonly CanaryRun[]) {
       const t = run.trial, hash = /^[a-f0-9]{64}$/;
       if (!t || t.version !== "canary-trial-block-v1" || !/^\d{4}-\d{2}-\d{2}$/.test(t.day)
         || !Number.isFinite(Date.parse(t.day + "T00:00:00Z"))
-        || new Date(t.day + "T00:00:00Z").toISOString().slice(0, 10) !== t.day
+        || fixedClock(Date.parse(t.day + "T00:00:00Z")).iso().slice(0, 10) !== t.day
         || !hash.test(t.scheduleDigest) || !hash.test(t.slotId)
         || !Array.isArray(t.plannedSlotIds) || !t.plannedSlotIds.length || t.plannedSlotIds.length > 128
         || t.plannedSlotIds.some(id => typeof id !== "string" || !hash.test(id))
