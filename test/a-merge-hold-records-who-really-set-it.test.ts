@@ -199,3 +199,31 @@ test("W1-T7721: a human at a real terminal is unchanged", async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("W1-T7721: a recorded actor that is not well-formed is dropped, so the hold reads as unrecorded", () => {
+  const rows = (hold_actor: unknown) => [
+    { step: "automerge.hold_engaged", pr_number: 10339, by: "craig", reason: "manual read", authority: "interactive-cli", hold_actor },
+  ];
+  const malformed = [
+    { kind: "robot", os_user: "craig", host: "workstation" },
+    { kind: "human", os_user: 7, host: "workstation" },
+    { kind: "agent", os_user: "node" },
+  ];
+  for (const bad of malformed) {
+    const hold = automergeHoldFromLedger(rows(bad), 10339)!;
+    assert.equal(hold.by, "craig", "the hold itself is still read");
+    assert.equal(hold.actor, undefined, `${JSON.stringify(bad)} is not a recorded actor`);
+    assert.match(describeHoldSetter(hold), /craig \(actor unrecorded\)/);
+  }
+});
+
+test("W1-T7721: the real probe reports no parents when a parent's process entry cannot be read", () => {
+  // A getter, because process.ppid ignores a redefinition by value. The pid below is past any real process table.
+  const realPpid = process.ppid;
+  Object.defineProperty(process, "ppid", { get: () => 2 ** 31 - 2, configurable: true });
+  try {
+    assert.deepEqual(realMergeHoldActorProbe().parents(), []);
+  } finally {
+    Object.defineProperty(process, "ppid", { get: () => realPpid, configurable: true });
+  }
+});
