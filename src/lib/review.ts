@@ -10391,6 +10391,8 @@ export interface PostReviewPendingOpts {
   lockOpts?: AcquireReviewStatusLockOpts;
   /** Injectable only so the durable owner record is deterministic in tests. */
   ownerIdentity?: { pid: number; startedAt: string };
+  /** Only proof of death overrides a readable young claim's TTL (W1-T8088). */
+  assessPendingOwner?: (record: PendingReviewStatusRecord) => PendingReviewOwnerAssessment;
   /** The wall clock the TTL is measured against. Defaults to {@link systemClock}, so production
    *  reads real time and nothing is handed a frozen instant it did not ask for — this is a CLOCK,
    *  not the fixed `now` field the comment below rules out. Present so the TTL boundary is
@@ -10414,8 +10416,8 @@ export interface PostReviewPendingResult {
  * `no_evidence`, so a prior `no_evidence` TERMINAL verdict for this head would sail through; a changed body is a fresh
  * input and may post again. (2) IDEMPOTENT PER INPUT, BUT ONLY INSIDE {@link REVIEW_LOCK_TTL_MS} (W1-T3647): a
  * `review.pending_posted` line for this exact head+body digest is a no-op while its own `ts` reads younger than the
- * TTL, OR while its age cannot be read at all — an unreadable clock FAILS TOWARD HOLDING, never toward reclaim, since
- * the alternative is two reviewers judging the same head. Only a READABLE age at or past the TTL reclaims: this call
+ * TTL unless its owner is proven dead (W1-T8088). An unreadable clock FAILS TOWARD HOLDING, never toward reclaim, since
+ * the alternative is two reviewers judging the same head. A READABLE age at or past the TTL also reclaims: this call
  * posts itself as the new holder and names the run it took over from, rather than deferring forever to a claim its
  * own owning run may already be dead. The posted status carries the posting `run_id`, which is what sweep.ts's
  * `OpenPrView.reviewPendingSince` producer derives its staleness clock from. */
@@ -10460,17 +10462,20 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       break;
     }
   }
-  // W1-T3647: a same-sha claim is a no-op ONLY while it is inside the TTL. Age is read off the
-  // claim's OWN ledger `ts` (`priorPending.postedAt`) against the wall clock right now — never a
-  // fixed field on the OPTS, so nothing here can be handed a stale "now" by a caller.
+  // W1-T3647/W1-T8088: read the claim's own ledger `ts` against the current clock. A young
+  // claim holds unless its owner is proven dead; an unreadable age always holds.
   let takenOverFrom: PendingReviewStatusRecord | undefined;
+  let ownerProvenDead = false;
+  const assessOwner = opts.assessPendingOwner ??
+    ((record: PendingReviewStatusRecord) => assessPendingReviewOwner(record, { isPidAlive: defaultIsPidAlive }));
   if (priorPending && priorPending.headSha === opts.sha) {
     const claimedAtMs = Date.parse(priorPending.postedAt);
     const ageMs = Number.isNaN(claimedAtMs) ? undefined : (opts.clock ?? systemClock).now() - claimedAtMs;
     // FAIL TOWARD HOLDING (design (c)): an age this process cannot read (missing/garbled `ts`) is
     // treated exactly like a FRESH, live claim — never like a stale one — because the alternative
     // is two reviewers judging the same head and posting conflicting verdicts.
-    if (ageMs === undefined || ageMs < REVIEW_LOCK_TTL_MS) {
+    ownerProvenDead = ageMs !== undefined && ageMs < REVIEW_LOCK_TTL_MS && assessOwner(priorPending) === "dead";
+    if (ageMs === undefined || (ageMs < REVIEW_LOCK_TTL_MS && !ownerProvenDead)) {
       return {
         posted: false,
         reason:
@@ -10500,7 +10505,12 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       if (foreignRun !== opts.runId) {
         const claimedAtMs = Date.parse(status.created_at ?? "");
         const ageMs = (opts.clock ?? systemClock).now() - claimedAtMs;
-        if (!Number.isFinite(ageMs) || ageMs < REVIEW_LOCK_TTL_MS) {
+        const foreignLine = lines.findLast(line => line.step === "review.pending_posted" &&
+          line.run_id === foreignRun && line.head_sha === opts.sha);
+        const foreignPending = foreignLine && pendingReviewStatusRecord(foreignLine);
+        ownerProvenDead = Number.isFinite(ageMs) && ageMs < REVIEW_LOCK_TTL_MS &&
+          foreignPending !== undefined && assessOwner(foreignPending) === "dead";
+        if (!Number.isFinite(ageMs) || (ageMs < REVIEW_LOCK_TTL_MS && !ownerProvenDead)) {
           return {
             posted: false,
             reason: `remudero-review is already pending (owned by run ${foreignRun}) — host-independent claim; no-op`,
@@ -10513,7 +10523,9 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     return { posted: false, reason: `holding review: shared remudero-review status unreadable — ${String(error)}` };
   }
   const description = (
-    takenOverFrom
+    takenOverFrom && ownerProvenDead
+      ? `pending (owned by run ${opts.runId}) — took over run ${takenOverFrom.runId}: owner proven dead`
+      : takenOverFrom
       ? `remudero-review: review in progress (owned by run ${opts.runId}) — took over a stale claim ` +
         `(>= ${Math.round(REVIEW_LOCK_TTL_MS / 60_000)}m old) from run ${takenOverFrom.runId} (W1-T3647)`
       : `remudero-review: review in progress (owned by run ${opts.runId})`
