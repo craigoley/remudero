@@ -50,9 +50,11 @@ test("duration reporter keeps only the selected physical wrapper when a real chi
     writeFileSync(join(root, "test/imported.test.ts"), 'import { test } from "node:test"; test("imported real test", () => {});\n');
     writeFileSync(join(root, "test/selected.test.ts"), 'import "./imported.test.ts"; import { test } from "node:test"; test("selected real test", () => {});\n');
     const evidence = join(root, "durations.json");
+    // A separately launched runner must not inherit the parent's test-child marker.
+    const env = { ...process.env }; delete env.NODE_TEST_CONTEXT;
     const tap = execFileSync(process.execPath, ["--test", "--test-reporter=tap", "--test-reporter-destination=stdout",
       `--test-reporter=${REPORTER}`, `--test-reporter-destination=${evidence}`, "test/selected.test.ts"],
-    { cwd: root, encoding: "utf8", timeout: 30_000 });
+    { cwd: root, env, encoding: "utf8", timeout: 30_000 });
     assert.match(tap, /^# tests 2$/m); assert.match(tap, /^# pass 2$/m); assert.match(tap, /^# fail 0$/m);
     const observed = JSON.parse(readFileSync(evidence, "utf8")) as { version: number; files: Record<string, number> };
     assert.equal(observed.version, 1);
