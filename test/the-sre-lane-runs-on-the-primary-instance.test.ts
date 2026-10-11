@@ -126,3 +126,39 @@ test("W1-T8232: the lane ledgers whether it started", async (t) => {
   assert.equal(row.step, "sre_lane.disabled");
   assert.match(String(row.fields.reason), /state root \/nowhere is not exactly one instance's state_dir/);
 });
+
+test("W1-T8232: an unreadable registry disables the lane with the read error", () => {
+  const registryPath = "/fixture/daemon-instances.yaml";
+  const instance = resolveSreLaneInstance({
+    stateRoot: "/fixture/core",
+    registryPath,
+    readText: (path) => {
+      assert.equal(path, registryPath);
+      throw new Error("registry read denied");
+    },
+  });
+  const reason = `the instance registry ${registryPath} is unreadable: registry read denied`;
+  assert.deepEqual(instance, { resolved: false, why: reason });
+  assert.equal(sreLaneEnabled({ instance, env: {} }), false);
+  assert.deepEqual(sreLaneStartRow({ instance, env: {} }), {
+    step: "sre_lane.disabled",
+    fields: { instance: null, reason },
+  });
+});
+
+test("W1-T8232: a refused registry disables the lane with the parser error", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rmd-w1t8232-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const root = join(home, "core");
+  const registryPath = join(home, "daemon-instances.yaml");
+  writeFileSync(registryPath, registryText(root, true).replace("primary: true", "primary: invalid"));
+  const instance = resolveSreLaneInstance({ stateRoot: root, registryPath });
+  const reason = `the instance registry ${registryPath} is refused: ` +
+    "instance registry invalid_primary: instance 'core' primary must be true or false";
+  assert.deepEqual(instance, { resolved: false, why: reason });
+  assert.equal(sreLaneEnabled({ instance, env: {} }), false);
+  assert.deepEqual(sreLaneStartRow({ instance, env: {} }), {
+    step: "sre_lane.disabled",
+    fields: { instance: null, reason },
+  });
+});
