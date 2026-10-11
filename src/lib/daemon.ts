@@ -133,12 +133,53 @@ import { createDaemonMemoryGovernor, type DaemonMemoryGovernor } from "./daemon-
 import {
   IDLE_LANE_SUMMARY_WINDOW_MS,
   accountIdleLaneMinutes,
+  chargeRestartGap,
+  idleLaneCauseForRefillReason,
   idleLaneCauseForStep,
+  idleLaneChange,
   newIdleLaneAccount,
   rollIdleLaneWindow,
   summarizeIdleLaneAccount,
   type IdleLaneCause,
+  type IdleLaneHold,
 } from "./idle-lane-accounting.js";
+
+/**
+ * W1-T8235: the previous process's last idle sample, read from the ledger union so a restart is charged.
+ * `atMs` is that process's last sign of life (its last `daemon.*` / `lane.idle_*` row before this boot's own
+ * `daemon.boot`), never the possibly hours-old transition row: a steady state would otherwise be charged to
+ * `restart` for the whole time it held. The state itself comes from its last `lane.idle_changed` row.
+ */
+export function previousProcessIdleSample(
+  rawLines: readonly string[],
+): { atMs: number; inFlight: number; capacity: number; dispatchable: number; bootMs: number | undefined } | undefined {
+  let bootMs: number | undefined;
+  let atMs: number | undefined;
+  let state: { inFlight: number; capacity: number; dispatchable: number } | undefined;
+  let pastOwnBoot = !rawLines.some((l) => l.includes('"daemon.boot"'));
+  for (let i = rawLines.length - 1; i >= 0; i--) {
+    const raw = rawLines[i]!;
+    if (!raw.includes('"daemon.') && !raw.includes('"lane.idle_')) continue;
+    let row: Record<string, unknown>;
+    try { row = JSON.parse(raw) as Record<string, unknown>; } catch { continue; }
+    const step = row.step;
+    if (typeof step !== "string") continue;
+    const at = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+    if (!pastOwnBoot) {
+      if (step === "daemon.boot") { pastOwnBoot = true; if (Number.isFinite(at)) bootMs = at; }
+      continue;
+    }
+    if (!Number.isFinite(at)) continue;
+    if (atMs === undefined && (step.startsWith("daemon.") || step.startsWith("lane.idle_"))) atMs = at;
+    if (state === undefined && step === "lane.idle_changed") {
+      const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+      state = { inFlight: num(row.in_flight), capacity: num(row.capacity), dispatchable: num(row.dispatchable) };
+    }
+    if (atMs !== undefined && state !== undefined) break;
+  }
+  if (atMs === undefined || state === undefined) return undefined;
+  return { atMs, ...state, bootMs };
+}
 
 /** W1-T3978: the implement producer's exact refusal, carried as runtime metadata without widening
  * the shared RunResult union used by every other dispatch lane. */
@@ -1025,6 +1066,9 @@ export interface DaemonDeps {
    *  the drain and is refused from the console. Same seam and same contract as `DrainDeps`'s.
    *  ABSENT = today's behaviour exactly, an empty released set. */
   readLedgerLines?: () => readonly string[];
+  /** W1-T8235: the PAUSE flag's own record of the hold (reason, setter pid, session id, actor), so the idle account can
+   *  name who emptied the lanes. Absent, a hold carries only the reason the daemon already saw. */
+  readPauseHold?: () => Partial<IdleLaneHold> | undefined;
   /** Re-read the plan from the same source the boot used, returning the fresh plan or `null` when
    *  nothing changed; omitted means the plan stays frozen at boot. The dep owns change detection
    *  because the cheap signal is caller-specific: a plan tree sha costs ~8ms, the parse ~60ms (impl-FZ). */
@@ -2921,26 +2965,54 @@ export async function runDaemon(
   const idleLaneClock = clockFromDateFn(deps.now);
   let idleLaneAccount = newIdleLaneAccount(idleLaneClock.now());
   let idleLaneTickCause: IdleLaneCause | undefined;
+  let idleLaneTickReason: string | undefined;
   let idleLaneDispatchable = 0;
   let livenessPulse: ReturnType<typeof startLivenessPulse> | undefined;
   const log: typeof emitLog = (step, fields) => {
-    idleLaneTickCause = idleLaneCauseForStep(step) ?? idleLaneTickCause;
+    const stepCause = idleLaneCauseForStep(step, fields);
+    // A refill decision names the hold of THAT lane; it replaces the tick's cause even with none, never inherits it.
+    if (step === "dispatch.lane_refill_held") idleLaneTickCause = stepCause;
+    else idleLaneTickCause = stepCause ?? idleLaneTickCause;
+    if (stepCause !== undefined) {
+      const text = fields?.detail ?? fields?.reason;
+      idleLaneTickReason = typeof text === "string" ? text : undefined;
+    }
     livenessPulse?.note(step);
     emitLog(step, fields);
   };
   // One sample per tick outcome: what the lanes are doing and why they are not doing more. `dispatchable`
   // is refreshed only on ticks that ran selection; a tick that never reached selection (a pause) reuses the
   // last known count rather than guessing. One `lane.idle_summary` row per window.
+  const idleLaneCapacity = (): number => Math.max(1, opts.laneCount ?? 1);
+  // W1-T8235: the hold behind a pause-type cause, as the PAUSE flag recorded it; the reason alone when no reader is wired.
+  const idleLaneHoldFor = (cause: IdleLaneCause | undefined): IdleLaneHold | undefined => {
+    if (cause !== "pause" && cause !== "operator_pause" && cause !== "recycle_drain" && cause !== "restart") return undefined;
+    let flag: Partial<IdleLaneHold> | undefined;
+    try { flag = deps.readPauseHold?.(); } catch { flag = undefined; }
+    return {
+      reason: flag?.reason ?? idleLaneTickReason ?? cause,
+      pid: flag?.pid ?? null,
+      session_id: flag?.session_id ?? null,
+      actor: flag?.actor ?? null,
+    };
+  };
   const sampleIdleLane = (busyLanes: number, selectionRan: boolean, dispatchable?: number): void => {
     if (dispatchable !== undefined) idleLaneDispatchable = dispatchable;
     const atMs = idleLaneClock.now();
+    const cause = idleLaneTickCause ?? (bootGateTrigger === undefined && busyLanes === 0 ? "boot_gate" : undefined);
+    const before = idleLaneAccount;
+    const hold = idleLaneHoldFor(cause);
     idleLaneAccount = accountIdleLaneMinutes(idleLaneAccount, {
       atMs,
       busyLanes,
       dispatchable: idleLaneDispatchable,
-      cause: idleLaneTickCause,
+      capacity: idleLaneCapacity(),
+      ...(hold ? { hold } : {}),
+      cause,
       selectionRan,
     });
+    const changed = idleLaneChange(before, idleLaneAccount);
+    if (changed) emitLog("lane.idle_changed", { ...changed });
     if (atMs - idleLaneAccount.windowStartMs >= IDLE_LANE_SUMMARY_WINDOW_MS) {
       emitLog("lane.idle_summary", { ...summarizeIdleLaneAccount(idleLaneAccount, atMs) });
       idleLaneAccount = rollIdleLaneWindow(idleLaneAccount, atMs);
@@ -2952,6 +3024,14 @@ export async function runDaemon(
   // must not add a row of zeros to the ledger. The account is rolled, so a second call cannot double-count.
   const flushIdleLaneWindow = (): void => {
     const atMs = idleLaneClock.now();
+    // W1-T8235: the interval still open at exit belongs to the state the last sample left, so close it first.
+    const open = idleLaneAccount.state;
+    if (open !== null && open.cause !== null) {
+      idleLaneAccount = accountIdleLaneMinutes(idleLaneAccount, {
+        atMs, busyLanes: open.in_flight, dispatchable: open.dispatchable, capacity: open.capacity, cause: open.cause,
+        ...(open.hold ? { hold: open.hold } : {}),
+      });
+    }
     const row = summarizeIdleLaneAccount(idleLaneAccount, atMs);
     idleLaneAccount = rollIdleLaneWindow(idleLaneAccount, atMs);
     if (row.idle_minutes > 0) emitLog("lane.idle_summary", { ...row, partial: true });
@@ -3243,6 +3323,12 @@ export async function runDaemon(
   let bootGateTrigger: string | undefined = bootGateHolds ? undefined : "nothing_to_defer";
   let releaseBootGate = (): void => {};
   const bootGateOpened = new Promise<void>((resolve) => (releaseBootGate = resolve));
+  // W1-T8235: RESTART IS CHARGED. No process sampled between the previous one's last sign of life and this boot.
+  const previousIdleSample = previousProcessIdleSample(bootLedgerLines);
+  if (previousIdleSample) {
+    idleLaneAccount = chargeRestartGap(idleLaneAccount, previousIdleSample, previousIdleSample.bootMs ?? idleLaneClock.now(),
+      bootGateTrigger === undefined);
+  }
   const deferredGardens = bootGateHolds ? (deps.gardens ?? []) : [];
   const deferBootCadence = (cadence: string): void =>
     log("daemon.boot_gate.deferred", { cadence, reason: "first full pass has not settled", bound_ms: bootGateBoundMs });
@@ -5245,6 +5331,15 @@ export async function runDaemon(
       }
     }
 
+    const queuedDispatchable = (): number => {
+      const filteredTally = idleReasons.snapshot();
+      const filtered = (Object.keys(filteredTally) as Array<keyof typeof filteredTally>).reduce(
+        (n, r) => (r === "already-merged" ? n : n + filteredTally[r].count),
+        0,
+      );
+      const queuedUnmerged = planForBatch.tasks.filter((t) => t.status === "queued" && !isMerged(t.id)).length;
+      return Math.max(0, queuedUnmerged - filtered);
+    };
     if (dispatchSet.length === 0) {
       scheduleRepositoryMaintenance(false);
       // Unlike drain.ts, where nothing runnable is a terminal stop, the daemon is persistent: new work can
@@ -5255,13 +5350,7 @@ export async function runDaemon(
       {
         // Dispatchable = queued and unmerged, less what eligibility filtered for a reason other than "already
         // merged" (which `isMerged` already removed). An estimate: it can only over-count, never hide work.
-        const filteredTally = idleReasons.snapshot();
-        const filtered = (Object.keys(filteredTally) as Array<keyof typeof filteredTally>).reduce(
-          (n, r) => (r === "already-merged" ? n : n + filteredTally[r].count),
-          0,
-        );
-        const queuedUnmerged = planForBatch.tasks.filter((t) => t.status === "queued" && !isMerged(t.id)).length;
-        sampleIdleLane(0, true, Math.max(0, queuedUnmerged - filtered));
+        sampleIdleLane(0, true, queuedDispatchable());
       }
       // Cadence: on change, not every tick. The idle row still fires every poll and is byte-compatible with
       // before. The reasons ride a separate step, emitted only when the picture actually changes — logging
@@ -5533,7 +5622,9 @@ export async function runDaemon(
         // NEXT tick boundary. Every worker is cut a fresh worktree from origin/main HEAD anyway.
         const interphaseWakeSeen = await stopInterphaseReviewClock();
         if (interphaseWakeSeen) log("daemon.dispatch.wake_deferred", { tasks: admitted.map((t) => t.id) });
-    sampleIdleLane(admitted.length, true, dispatchSet.length);
+    // W1-T8235: the lanes in flight; dispatchable is what is LEFT to fill the empty slots, so a busy lane never hides an
+    // empty one. Lane changes inside the wait sample themselves (free, parked, held, refilled).
+    sampleIdleLane(admitted.length, true, Math.max(0, queuedDispatchable() - admitted.length));
 
     // Concurrent dispatch: settle-all, never fail-fast, so a sibling lane's rejection can never abort another lane
     // in flight, and every lane's outcome is recorded before this tick decides anything (W1-T343). W1-T4416: a lane
@@ -5579,6 +5670,9 @@ export async function runDaemon(
     const refillLane = (lane: number, finished: Task, outcome: PromiseSettledResult<RunResult>): Task | undefined | Promise<Task | undefined> => {
       inFlightTasks.delete(finished);
       restartSlowLanes.delete(finished.id);
+      // W1-T8235: a lane that frees inside the tick's wait is a lane change; the decision below names what holds it.
+      idleLaneTickCause = undefined;
+      sampleIdleLane(inFlightTasks.size, false);
       if (outcome.status === "rejected") {
         // W1-T5083: a lane-local rejection (the settle loop logs it and the pass continues) never closes refill.
         if (!(outcome.reason instanceof TaskAdmissionError) && !refillLaneLocalRejection(outcome.reason)) refillClosed ??= "a lane rejected";
@@ -5596,6 +5690,9 @@ export async function runDaemon(
       const phaseBound = !refillClosed && phaseBoundHolds() ? "phase bound" : undefined;
       // With no history no sibling can ever read slow, so parking could only end as a hold: hold now (W1-T5761).
       if (phaseBound && measuredRefillBound && inFlightTasks.size > 0) {
+        idleLaneTickCause = "phase_bound";
+        idleLaneTickReason = phaseBound;
+        sampleIdleLane(inFlightTasks.size, false);
         log("dispatch.lane_parked", { lane, finished_task: finished.id, reason: phaseBound, phase_age_ms: phaseAgeMs,
           refill_bound_ms: refillBoundMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
         return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, wake }));
@@ -5654,10 +5751,15 @@ export async function runDaemon(
             }
           }
           if (!next) {
+            const heldReason = reason ?? "no disjoint runnable task within the lane budget";
+            // Sampled BEFORE the held row so the transition row it earns never trails the decision it names.
+            idleLaneTickCause = idleLaneCauseForRefillReason(heldReason);
+            idleLaneTickReason = heldReason;
+            sampleIdleLane(inFlightTasks.size, idleLaneTickCause === "selection_empty");
             log("dispatch.lane_refill_held", {
               lane,
               finished_task: finished.id,
-              reason: reason ?? "no disjoint runnable task within the lane budget",
+              reason: heldReason,
               ...(reason === "phase bound" ? { phase_age_ms: phaseAgeMs, ...(measuredRefillBound ? { refill_bound_ms: refillBoundMs } : {}) } : {}),
               ...(freshnessAction ? { freshness_action: freshnessAction } : {}),
             });
@@ -5671,6 +5773,8 @@ export async function runDaemon(
             ...(inFlightFreshness ? { restart_pending: true, waiting_on: [...restartSlowLanes] } : {}) });
           log("daemon.iteration", { task: next.id, attempted: attempted.length + 1, max: opts.max ?? null });
           attempted.push(next.id);
+          idleLaneTickCause = undefined;
+          sampleIdleLane(inFlightTasks.size, false);
           return next;
         };
         if (reason === undefined) {
