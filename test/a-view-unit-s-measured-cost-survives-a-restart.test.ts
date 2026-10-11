@@ -96,6 +96,18 @@ test(`${proof}: known affordable units share their first restarted pass instead 
   assert.deepEqual(second.fast.builds, ["core", "site"], "both known costs fit the restarted pass");
 });
 
+test(`${proof}: costs written by the current generation cannot grant a peer lane ownership before its handoff`, (t) => {
+  const f = fixture(t), first = f.start({ core: 80 });
+  first.fast.tick();
+  first.heavy.tick();
+  assert.deepEqual(first.heavy.builds, [], "only a previous generation's store can seed initial ownership");
+  const move = first.fast.posts.find((m) => m.type === "view_lane" && m.instance === "core");
+  assert.ok(move && move.type === "view_lane");
+  first.heavy.ticker.lane(move);
+  first.heavy.tick();
+  assert.deepEqual(first.heavy.builds, ["core"]);
+});
+
 test(`${proof}: saved costs are per view and instance, and absent costs retain the unmeasured first build`, (t) => {
   const f = fixture(t), first = f.start({ core: 80, site: 5 });
   first.fast.tick();
@@ -112,7 +124,11 @@ test(`${proof}: saved costs are per view and instance, and absent costs retain t
 });
 
 test(`${proof}: malformed, nonfinite and negative stored costs fall back without changing body output`, (t) => {
-  for (const value of ["not json", '{"version":1,"costMs":-1,"heavy":true}', '{"version":1,"costMs":"80","heavy":true}', '{"version":2,"costMs":80,"heavy":true}']) {
+  for (const value of ["not json", "null", '{"version":1,"holder":"old","costMs":-1,"heavy":true}',
+    '{"version":1,"holder":"old","costMs":"80","heavy":true}', '{"version":2,"holder":"old","costMs":80,"heavy":true}',
+    '{"version":1,"holder":"old","costMs":1e999}', '{"version":1,"holder":"old","costMs":5,"coldCostMs":-1}',
+    '{"version":1,"holder":"old","costMs":5,"coldCostMs":"80"}', '{"version":1,"holder":"old","costMs":5,"coldCostMs":1e999}',
+    '{"version":1,"costMs":80,"heavy":true}']) {
     const f = fixture(t), empty = f.start({ core: 5 });
     empty.stop();
     f.db().prepare("INSERT INTO meta(k,v) VALUES(?,?)").run(key("core"), value);

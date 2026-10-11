@@ -1114,8 +1114,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       try {
         const raw = home.meta(costKey(unit));
         if (raw === undefined) continue;
-        const saved = JSON.parse(raw) as { version?: number; costMs?: number; coldCostMs?: number; heavy?: boolean } | null;
-        if (!saved || saved.version !== 1 || typeof saved.costMs !== "number" || !Number.isFinite(saved.costMs) || saved.costMs < 0 ||
+        const saved = JSON.parse(raw) as { version?: number; holder?: string; costMs?: number; coldCostMs?: number; heavy?: boolean } | null;
+        if (!saved || saved.version !== 1 || typeof saved.holder !== "string" || saved.holder === holder || typeof saved.costMs !== "number" || !Number.isFinite(saved.costMs) || saved.costMs < 0 ||
           (saved.coldCostMs !== undefined && (typeof saved.coldCostMs !== "number" || !Number.isFinite(saved.coldCostMs) || saved.coldCostMs < 0))) continue;
         unit.costMs = saved.costMs;
         unit.coldCostMs = saved.coldCostMs;
@@ -1134,7 +1134,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   function persistUnitCost(unit: ViewUnit, laneCostMs: number): void {
     const home = slots[0];
     if (switches.projector !== "on" || home?.db === undefined || home.lease === undefined) return;
-    const value = JSON.stringify({ version: 1, costMs: unit.costMs, heavy: laneCostMs > soloMs,
+    const value = JSON.stringify({ version: 1, holder, costMs: unit.costMs, heavy: laneCostMs > soloMs,
       ...(unit.coldCostMs === undefined ? {} : { coldCostMs: unit.coldCostMs }) });
     if (value === unit.storedCost && home.ino === unit.storedCostIno) return;
     try {
