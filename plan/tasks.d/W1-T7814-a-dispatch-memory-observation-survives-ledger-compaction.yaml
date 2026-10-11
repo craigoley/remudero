@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-10: memory-governor follow-up to W1-T5347 and #10730; approved 2026-10-10"
   plan_refs: [W1-T5347, W1-T244, W1-T7094]
   files: [src/lib/ledger.ts, src/lib/sweep.ts, test/a-dispatch-memory-observation-survives-ledger-compaction.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

@@ -106,7 +106,7 @@ import {
 } from "./sweep.js";
 // VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
-import { checkDispatchGovernors, type DispatchGovernorVerdict, type QuietHoursHoldResult } from "./dispatch-governor.js";
+import { checkDispatchGovernors, governorDeferPayload, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
 import { assertRunnable, releasedTaskIds, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { resolveReleasedIds } from "./drain.js";
 import type { StatusProjection } from "./status.js";
@@ -238,21 +238,42 @@ export function dispatchRunHistory(rawLines: readonly string[]): { totalMs: numb
   return { totalMs, samples };
 }
 
-/** A pre-PR handoff's exact pushed head is resumable; any later verdict replaces that receipt. */
+/** The step a pre-PR handoff writes beside its verdict, and the daemon re-writes for a receipt the live ledger
+ *  holds only as a verdict row: verdicts keep the newest 200, so a parked checkpoint aged out of resumption. */
+export const HANDOFF_RECEIPT_STEP = "run.freshness_handoff";
+
+/** A pre-PR handoff's exact pushed head is resumable; any later verdict replaces that receipt, except a failed
+ *  restore, which consumed nothing (W1-T7806). A `run.freshness_handoff` row is a receipt too (W1-T7747). */
 export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<string, { branch: string; headSha: string }> {
   const pending = new Map<string, { branch: string; headSha: string }>();
   for (const raw of rawLines) {
     let row: Record<string, unknown>;
     try { row = JSON.parse(raw); } catch (error) { /* malformed rows establish no ownership */ continue; }
-    if (!row || row.step !== "verdict" || typeof row.task_id !== "string") continue;
+    if (!row || typeof row.task_id !== "string") continue;
+    const receipt = row.step === HANDOFF_RECEIPT_STEP ? row.waiting_on !== "pr" && row.waiting_on !== "ci"
+      : row.step === "verdict" && row.verdict === "handed_off" && row.reason === "freshness_yield" && !row.pr_url;
+    if (row.step !== "verdict" && !receipt) continue;
+    if (row.verdict === "no_pr" && row.reason === "restart_checkpoint_restore_failed") continue;
     pending.delete(row.task_id);
-    if (row.verdict === "handed_off" && row.reason === "freshness_yield" && !row.pr_url &&
-        typeof row.branch === "string" && row.branch.startsWith(`run-${row.task_id}-`) &&
+    if (receipt && typeof row.branch === "string" && row.branch.startsWith(`run-${row.task_id}-`) &&
         /^run-.+-[0-9]+$/.test(row.branch) && typeof row.head_sha === "string" && /^[a-f0-9]{40}$/.test(row.head_sha)) {
       pending.set(row.task_id, { branch: row.branch, headSha: row.head_sha });
     }
   }
   return pending;
+}
+
+/** The pending receipts whose only live record is a verdict row — what the daemon re-writes at boot. */
+export function handoffReceiptsToCarry(rawLines: readonly string[]): Array<[string, { branch: string; headSha: string }]> {
+  const recorded = new Set<string>();
+  for (const raw of rawLines) {
+    if (!raw.includes(HANDOFF_RECEIPT_STEP)) continue;
+    try {
+      const row = JSON.parse(raw) as Record<string, unknown>;
+      if (row?.step === HANDOFF_RECEIPT_STEP) recorded.add(`${String(row.task_id)}|${String(row.branch)}|${String(row.head_sha)}`);
+    } catch (error) { /* a torn row records nothing */ continue; }
+  }
+  return [...pendingWorkerBoundaryHandoffs(rawLines)].filter(([taskId, r]) => !recorded.has(`${taskId}|${r.branch}|${r.headSha}`));
 }
 
 /** A decided restart waits for every in-flight lane, silently: 2026-10-10 it waited 60+ min with no row. Name the
@@ -1091,6 +1112,10 @@ export interface DaemonDeps {
    *  `/proc/meminfo` reading per call. Consulted only through `checkDispatchGovernors`, so it holds
    *  NEW dispatch per lane and a throw fails OPEN there. Never consulted from the sweep. Optional. */
   checkMemoryGovernor?: () => MemoryGovernorResult | undefined;
+  /** W1-T7720: the streak tracker the unreadable memory probe / reservation store report to, and the
+   *  store read itself. Both are consulted only through `checkDispatchGovernors`. Optional. */
+  memoryReadTracker?: MemoryReadTracker;
+  readMemoryStoreFailure?: () => string | undefined;
   /** Quiet-hours preference: a defined return defers NEW dispatch only. Routed through the dispatch
    *  governor, never through `checkPause`, so sweep/drainage paths keep running and an unreadable
    *  read fails open in `checkDispatchGovernors` (W1-T2655). */
@@ -1486,12 +1511,22 @@ interface RunBranchState {
   orphanEvidence: OrphanRunBranchEvidence | undefined;
 }
 
+/** The epoch-ms suffix of a `run-<id>-<epochMs>` branch; NaN (never older) when it has none. */
+function runBranchEpoch(branch: string): number {
+  const match = /-([0-9]+)$/.exec(branch);
+  return match ? Number(match[1]) : Number.NaN;
+}
+
 function runBranchStateFrom(raw: string | undefined, orphanEvidence: OrphanRunBranchEvidence | undefined,
   resumable: ReadonlyMap<string, { branch: string; headSha: string }> = new Map()): RunBranchState {
   if (raw === undefined) return { ids: undefined, refs: [], orphanEvidence };
   const refs = parsePushedRunRefs(raw).filter((ref) => {
     const checkpoint = resumable.get(ref.taskId);
-    return checkpoint?.branch !== ref.ref || checkpoint.headSha !== ref.sha;
+    if (checkpoint === undefined) return true;
+    if (checkpoint.branch === ref.ref) return checkpoint.headSha !== ref.sha;
+    // W1-T7837: a run started after this branch was pushed, so the branch was restored or released then; the
+    // newer checkpoint carries the work. Left blocking, it held a resumable task as run-branch-already-pushed.
+    return !(runBranchEpoch(ref.ref) < runBranchEpoch(checkpoint.branch));
   });
   return { ids: new Set(refs.map((ref) => ref.taskId)), refs, orphanEvidence };
 }
@@ -2958,6 +2993,8 @@ export async function runDaemon(
         memory_floor_mib: verdict.result.floorMib,
         poll_interval_ms: pollIntervalMs,
       });
+    } else if (verdict.kind === "memory_unreadable") {
+      log("daemon.memory_unreadable", { tick, ...governorDeferPayload(verdict), poll_interval_ms: pollIntervalMs });
     } else if (verdict.kind === "quiet_hours") {
       log("daemon.quiet_hours", {
         tick,
@@ -3090,6 +3127,9 @@ export async function runDaemon(
   const bootLedgerLines = deps.readLedgerLines?.() ?? [];
   const runLengths = dispatchRunHistory(bootLedgerLines);
   const resumableHandoffs = pendingWorkerBoundaryHandoffs(bootLedgerLines);
+  for (const [taskId, receipt] of handoffReceiptsToCarry(bootLedgerLines)) {
+    log(HANDOFF_RECEIPT_STEP, { task_id: taskId, branch: receipt.branch, head_sha: receipt.headSha, carried: true });
+  }
   let staleReviewerRecurrence: StaleReviewerRecurrenceState | undefined = priorStaleReviewerRecurrenceState(bootLedgerLines);
   // W1-T5344: per-task delivery-failure parks, rebuilt from the ledger so a restart does not reset
   // them; consulted by the dispatch filter's independent-failure hold below.

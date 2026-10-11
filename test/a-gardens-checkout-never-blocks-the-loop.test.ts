@@ -80,11 +80,18 @@ function slowOrigin(kind: string) {
   git(clone, "config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);
   git(clone, "config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email);
   const transportLog = join(root, "transport.log");
-  for (const [service, key] of [["upload-pack", "uploadpack"], ["receive-pack", "receivepack"]] as const) {
-    const script = join(root, `slow-${service}.sh`);
+  // The transport programs are slowed through GIT_EXEC_PATH, never through `remote.origin.uploadpack` /
+  // `receivepack` in the clone's config: the hardened leaf refuses those keys (W1-T6148). git prepends its
+  // exec path to PATH before it runs `git-upload-pack` / `git-receive-pack` for a local remote, so a
+  // directory holding only these two wrappers is found first.
+  const execDir = join(root, "exec-path");
+  mkdirSync(execDir);
+  for (const service of ["upload-pack", "receive-pack"] as const) {
+    const script = join(execDir, `git-${service}`);
     writeFileSync(script, `#!/bin/sh\necho "start ${service}" >> '${transportLog}'\nsleep 0.3\ngit ${service} "$@"\nrc=$?\necho "end ${service}" >> '${transportLog}'\nexit $rc\n`, { mode: 0o755 });
-    git(clone, "config", `remote.origin.${key}`, script);
   }
+  const priorExecPath = process.env.GIT_EXEC_PATH;
+  process.env.GIT_EXEC_PATH = execDir;
   const lines = (): string[] => (existsSync(transportLog) ? readFileSync(transportLog, "utf8").split("\n").filter(Boolean) : []);
   return {
     root,
@@ -98,6 +105,8 @@ function slowOrigin(kind: string) {
     },
     reset: () => rmSync(transportLog, { force: true }),
     cleanup: () => {
+      if (priorExecPath === undefined) delete process.env.GIT_EXEC_PATH;
+      else process.env.GIT_EXEC_PATH = priorExecPath;
       for (const dir of [root, origin.dir, seed.dir]) rmSync(dir, { recursive: true, force: true });
     },
   };
