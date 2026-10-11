@@ -4,6 +4,8 @@ import { mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, unlinkSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { validateConfigShape } from "../src/lib/config-schema.js";
 import { executeAdmissionDisposition, admissionDispositionStore, observeAdmissionDisposition,
   type AdmissionDispositionReceipt, type AdmissionDispositionStore,
   type AdmissionDispositionSimulation } from "../src/lib/action-executor.js";
@@ -98,8 +100,29 @@ test("W1-T7755: owner adoption resumes flow with honest required checks", async 
   assert.equal(adopted.status, "adopted"); assert.equal(adopted.laneReleased, true);
   assert.equal(adopted.requiredChecks, "ordinary-current-head-checks-required");
   assert.equal(adopted.permission, "not-granted");
+  assert.deepEqual(adopted.receipt?.ownerInstruction, { commentId: 9, actorId: 1,
+    updatedAt: instruction.updated_at, contentDigest: createHash("sha256").update(instruction.body).digest("hex") });
   const bad = await executeAdmissionDisposition({ settings, target: { ...target, headSha: "b".repeat(40) }, ownerInstructionId: 9 }, store, read, () => {}, clock);
   assert.notEqual(bad.status, "adopted");
+});
+
+test("W1-T7755: stalled source reads terminate with unknown evidence within the bounded attempt", async () => {
+  const started = performance.now(), { store } = memoryStore("rehearsal"), sim = rehearsal();
+  const short = { ...settings, policy: { ...settings.policy, maxEvidenceAgeMs: 30 } };
+  const result = await executeAdmissionDisposition({ settings: short, target }, store,
+    () => new Promise(() => {}), () => {}, clock, sim.simulation);
+  assert.equal(result.status, "pending"); assert.equal(result.permission, "not-granted");
+  assert.ok(performance.now() - started < 1_000);
+  assert.deepEqual(sim.counts(), [0, 0]);
+});
+
+test("W1-T7755: configuration permits only opt-in shadow disposition and scoped service actions", () => {
+  const base = { claudeBin: "/bin/true", root: "/tmp/fixture", contributorAdmission: settings };
+  validateConfigShape(base, "fixture");
+  validateConfigShape({ ...base, contributorAdmission: { ...settings, disposition: undefined } }, "legacy");
+  for (const disposition of ["live", "enforce", true]) {
+    assert.throws(() => validateConfigShape({ ...base, contributorAdmission: { ...settings, disposition } }, "unsafe"), /disposition/);
+  }
 });
 
 test("W1-T7755: shadow and absent config never invoke disposable effects", async () => {
