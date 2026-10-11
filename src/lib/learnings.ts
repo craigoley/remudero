@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { MERGED_RULES_FILE, resolveCanonicalRuleId, slugifyRuleId, type MergedRuleGroup } from "./doctrine-lifecycle.js";
 import { deriveFactSymbols } from "./knowledge-symbols.js";
 import { learningValue, sampleBeta, seededRandom, type LearningUsage } from "./knowledge-value.js";
 import { bm25Rank } from "./learning-lexical.js";
@@ -2195,6 +2196,31 @@ export function retrieveRuleBody(index: Map<string, string>, headline: string): 
   return index.get(headline);
 }
 
+/** The merge registry as the worker's store reader sees it. ABSENT means no merge has happened yet,
+ *  so every id resolves to itself; an UNREADABLE or malformed registry throws, because collapsing
+ *  it to "no merges" would report a retired id as a missing rule when the real fault is the file. */
+function readMergedRuleGroupsFrom(readStoreFile: (target: string) => string): MergedRuleGroup[] {
+  let text: string;
+  try {
+    text = readStoreFile(MERGED_RULES_FILE);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return [];
+    throw new LearningsError(`lookupWorkerRule: ${MERGED_RULES_FILE} is unreadable: ${String(error)}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new LearningsError(`lookupWorkerRule: ${MERGED_RULES_FILE} is not JSON: ${String(error)}`);
+  }
+  if (!Array.isArray(parsed)) throw new LearningsError(`lookupWorkerRule: ${MERGED_RULES_FILE} is not an array`);
+  return parsed as MergedRuleGroup[];
+}
+
+/** One rule for the worker's read-only rule tool, by stable id, body path or headline phrase. An id
+ *  a fold retired from the index (its frozen bullet now sits in a live rule's body) resolves through
+ *  `doctrine/merged-rules.json` to that live rule — consulted only when nothing in the index matches,
+ *  so a phrase lookup never depends on the registry. */
 export function lookupWorkerRule(
   query: string,
   source: string,
@@ -2213,21 +2239,22 @@ export function lookupWorkerRule(
 
   const rules = parseRuleHeadlines(source);
   const folded = requested.replace(/\s+/g, " ").toLowerCase();
-  const idFor = (headline: string) => headline.normalize("NFKD")
-    .replace(/[̀-ͯ]/g, "").replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "")
-    .toLowerCase().slice(0, 64).replace(/-+$/g, "");
   const matches = rules.filter((rule) => {
     const pointer = parseRuleBodyPointer(rule.body);
-    return idFor(rule.headline) === requested
+    return slugifyRuleId(rule.headline) === requested
       || pointer?.target === requested
       || rule.headline.replace(/\s+/g, " ").toLowerCase().includes(folded);
   });
   if (matches.length > 1) throw new LearningsError(`lookupWorkerRule: ambiguous phrase "${requested}"`);
+  if (matches.length === 0) {
+    const canonicalId = resolveCanonicalRuleId(readMergedRuleGroupsFrom(readStoreFile), requested);
+    if (canonicalId !== requested) matches.push(...rules.filter((rule) => slugifyRuleId(rule.headline) === canonicalId));
+  }
   const rule = matches[0];
   if (rule === undefined) return undefined;
   const pointer = parseRuleBodyPointer(rule.body);
   const body = pointer === undefined ? rule.body : resolveRuleBodyPointer(rule.headline, pointer, readStoreFile);
-  return { id: idFor(rule.headline), text: `- **${rule.headline}**${body}`.trimEnd() };
+  return { id: slugifyRuleId(rule.headline), text: `- **${rule.headline}**${body}`.trimEnd() };
 }
 
 /**

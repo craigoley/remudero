@@ -106,6 +106,10 @@ export function verifyDoctrineReword(row: DoctrineFreezeRow, liveBodySha256: str
 
 // ── (iv): a merged rule keeps every old id resolving ───────────────────────────────────────────
 
+/** The alias registry RULE-MERGE writes: every id a merge ever folded, resolved to the canonical
+ *  id doctrine now stores it under. Nothing is ever deleted — the registry only grows. */
+export const MERGED_RULES_FILE = "doctrine/merged-rules.json";
+
 export interface MergedRuleGroup {
   canonicalId: string;
   aliasIds: string[];
