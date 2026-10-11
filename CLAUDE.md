@@ -1,26 +1,22 @@
 # remudero — Claude rules
 
-Always-on **workflow** rules, by the question you're asking. Knowledge lives in `learnings/*.yaml`
-(capped by `scripts/learnings-budget-ratchet.mjs`), `plan/`, `MASTER-PLAN.md`, `DECISIONS.md` and
-`LEARNINGS.md`, never here.
-
-**Nothing here is a gate**: enforcement is `coverage-ratchet`, `diff-coverage`, `proof-dialect`,
-`lint-plan`, `judgeReview` and `SymlinkInstallRefusal`; a rule needing one gets a filed task.
+Always-on **workflow** rules, by the question you're asking; knowledge lives in `learnings/*.yaml`,
+`plan/`, `MASTER-PLAN.md`, `DECISIONS.md` and `LEARNINGS.md`. Nothing here is a gate; a rule that
+needs one gets a filed task.
 
 **THIS FILE IS AN INDEX, AND THE ARROW IS AN INSTRUCTION TO YOU.** **The headline is the whole rule:
-obey it unopened.** Its `→ doctrine/<section>/<rule>.md` body is the evidence; a dangling pointer is
-a BUG (`test/the-doctrine-index-points-at-every-body.test.ts`).
+obey it unopened.** Its `→ doctrine/<section>/<rule>.md` body is the evidence.
 
-**Upkeep:** interactive sessions pay per byte; workers never load it (`spawnWorker` passes
-`settingSources: []`). A NEW RULE IS THREE EDITS: the headline bullet with its pointer here, the body
-file it names, and `npm run agents-md`. Compression is a deliverable (§8A), but the 56 pre-migration
-headlines and bodies are FROZEN (`test/fixtures/doctrine-pre-migration-W1-T3323.json`), so fold this
-preamble or a post-migration headline. Cite **symbol names, not line numbers**, and the earning PR.
+**Upkeep (§8A):** interactive sessions pay per byte; workers never load it (`settingSources: []`).
+A new rule is three edits: headline + pointer here, its body file, `npm run agents-md`. A fold keeps
+the instruction in the headline. A frozen W1-T3323 row leaves the index only by moving VERBATIM into
+the body of the rule now carrying its instruction, its id aliased in `doctrine/merged-rules.json`.
+Cite symbol names, not line numbers, and the earning PR.
 
 ## Before you push
 
-- **Run the shipped local gate before your FIRST push, not every commit.** → doctrine/before-you-push/run-the-shipped-local-gate-before-your-first-push-not.md
-- **SUPERSEDES full-parity first push: run `node --import tsx scripts/preflight-author.mjs` on the committed tree; required hosted checks still gate merge.** → doctrine/before-you-push/author-feedback-is-not-hosted-assurance.md
+- **Before your FIRST push (not every commit), run `node --import tsx scripts/preflight-author.mjs` on the
+  committed tree; required hosted checks still gate merge.** → doctrine/before-you-push/run-the-shipped-local-gate-before-your-first-push-not.md
 - **A test run with no `# tests` summary is NOT A RESULT, and a summary over an UNVERIFIED FILE LIST
   is not one either — `node --test` given a ghost path returns a green count, silently. `ls` first.** → doctrine/before-you-push/a-test-run-with-no-summary-is-not-a-result-and-a-summary.md
 
@@ -94,10 +90,8 @@ preamble or a post-migration headline. Cite **symbol names, not line numbers**, 
   SHARED closing `});`** → doctrine/ci-and-merging/when-two-prs-append-tests-to-the-same-file-s-tail-the.md
 - **A corrected PR title is observed by a RE-RUN, not only by a new sha — but `edited` still fires
   nothing.** → doctrine/ci-and-merging/a-corrected-pr-title-is-observed-by-a-re-run-not-only-by-a.md
-- **A merge to a BAKED path ships nothing until an operator triggers an image rebuild — know which
-  half of your diff you are in before you call a merge "shipped."** → doctrine/ci-and-merging/a-merge-to-a-baked-path-ships-nothing-until-an-operator.md
-- **SUPERSEDES THE RULE ABOVE: a baked-path merge ships itself (auto ACR build + recycle); check
-  `docker inspect`.** → doctrine/ci-and-merging/a-baked-path-merge-ships-itself.md
+- **A BAKED-path merge (`deploy/Dockerfile`, `deploy/entrypoint.sh`) ships itself by auto ACR build +
+  recycle, not at merge — confirm with `docker inspect` before calling it shipped.** → doctrine/ci-and-merging/a-baked-path-merge-ships-itself.md
 - **PRs green on their own bases can cross a ceiling together: a `# fail 0` main red is a ratchet
   collision, and main records it (#10724).** → doctrine/ci-and-merging/ratchet-collision.md
 - **Main push runs are cancelled while PENDING, so most main commits never get a CI verdict — never
@@ -107,10 +101,9 @@ preamble or a post-migration headline. Cite **symbol names, not line numbers**, 
 
 ## Ledger and evidence discipline
 
-- **The rotations come in TWO FORMS and every glob that names only one answers SILENTLY WRONG. The
-  union is three patterns, never two:** → doctrine/ledger-and-evidence-discipline/the-rotations-come-in-two-forms-and-every-glob-that-names.md
-- **THE CONTROL MUST PROVE EACH FORM WAS READ, and a raw cross-archive count CANNOT** → doctrine/ledger-and-evidence-discipline/the-control-must-prove-each-form-was-read-and-a-raw-cross.md
-- **And the archives are NOT cumulative snapshots.** → doctrine/ledger-and-evidence-discipline/and-the-archives-are-not-cumulative-snapshots.md
+- **Grep the ledger with `rmd ledger-grep <pat>`; by hand, `zgrep` THREE globs —
+  `state/ledger.*.ndjson.gz state/ledger.*.ndjson state/ledger.ndjson` — with a file count PER
+  FORM as the control, and never delete an archive: each holds history no other file has.** → doctrine/ledger-and-evidence-discipline/read-the-ledger-union.md
 - **A ledger line must carry the reason from the DECISION THAT PRODUCED ITS OUTCOME.** → doctrine/ledger-and-evidence-discipline/a-ledger-line-must-carry-the-reason-from-the-decision-that.md
 - **On a zero match, `node --test --test-name-pattern` still emits `ok 1 - <RELATIVE test path>` —
   exclude the wrapper by the RELATIVE path, never the absolute one.** → doctrine/ledger-and-evidence-discipline/on-a-zero-match-still-emits-exclude-the-wrapper-by-the.md
@@ -124,26 +117,21 @@ preamble or a post-migration headline. Cite **symbol names, not line numbers**, 
 - **`rmd drain --dry-run` is neither side-effect-free nor able to see your branch.** → doctrine/investigation-discipline/is-neither-side-effect-free-nor-able-to-see-your-branch.md
 - **A bound that fires on a HEALTHY condition is this repo's recurring defect — before tuning the
   number, check the population it is meant to separate has ever been observed.** → doctrine/investigation-discipline/a-bound-that-fires-on-a-healthy-condition-is-this-repo-s.md
-- **A ZERO IS NOT A MEASUREMENT UNTIL A POSITIVE CONTROL PROVES THE QUERY COULD SEE ITS CORPUS.
-  RUN ONE ON EVERY SWEEP WHOSE ANSWER YOU INTEND TO ACT ON.** → doctrine/investigation-discipline/a-zero-is-not-a-measurement-until-a-positive-control.md
+- **A ZERO IS NOT A MEASUREMENT until a positive control proves the query saw its corpus — run one on
+  every sweep you will act on. A control proves only that: name the question the query really
+  answers, check the corpus's newest ts covers the window, and re-run a surprise in another ENVIRONMENT.** → doctrine/investigation-discipline/a-zero-needs-a-positive-control.md
 - **(a) A POSIX REGEX ENGINE HERE SILENTLY DROPS `\s`/`\b` INSTEAD OF ERRORING, AND TWO DIFFERENT
   TOOLS DO IT.** → doctrine/investigation-discipline/a-a-posix-regex-engine-here-silently-drops-instead-of.md
 - **(b) THE `grep` IN THIS HARNESS IS A ugrep WRAPPER WITH `-I` (ignore-binary) INJECTED, so a file
   holding ONE NUL byte is skipped entirely — no output, exit 1, indistinguishable from real
   absence.** → doctrine/investigation-discipline/b-the-in-this-harness-is-a-ugrep-wrapper-with-ignore.md
 - **(c) A GLOB THAT NAMES ONE FILE FORM ANSWERS FROM THE OTHER WITHOUT SAYING SO.** → doctrine/investigation-discipline/c-a-glob-that-names-one-file-form-answers-from-the-other.md
-- **(d) A QUERY CAN ANSWER THE WRONG QUESTION WITH A PERFECTLY GOOD ZERO, AND NO POSITIVE CONTROL
-  SAVES YOU.** → doctrine/investigation-discipline/d-a-query-can-answer-the-wrong-question-with-a-perfectly.md
-- **(e) A CONTROL PROVES THE QUERY CAN SEE ITS CORPUS; IT DOES NOT PROVE THE CORPUS IS THE RIGHT ONE
-  — AND RE-RUNNING THE SAME WAY IS NOT A SECOND OPINION.** → doctrine/investigation-discipline/e-a-control-proves-the-query-can-see-its-corpus-it-does.md
 - **(f) THE TWO SIDES OF A COMPARISON MUST COUNT THE SAME UNITS — `ls` COUNTS A DIRECTORY AS ONE
   ENTRY.** → doctrine/investigation-discipline/f-the-two-sides-of-a-comparison-must-count-the-same-units.md
 - **(g) A CHANGE THAT REMOVES AN ACCESS PATH MUST PROVE THE REPLACEMENT FIRST, FROM A NEW SESSION
   — AN EXISTING CONNECTION IS NOT EVIDENCE.** → doctrine/investigation-discipline/g-a-change-that-removes-an-access-path-must-prove-the.md
 - **(h) A GATE RUN FROM A CHECKOUT that is BEHIND answers about a file and a threshold that both
   moved — run it against `origin/main`'s blobs and report the behind-count.** → doctrine/investigation-discipline/h-a-gate-run-from-a-checkout-that-is-behind-answers-about.md
-- **(i) A POSITIVE CONTROL PROVES THE QUERY CAN SEE ITS CORPUS; IT DOES NOT PROVE THE CORPUS COVERS THE
-  WINDOW.** → doctrine/investigation-discipline/i-a-positive-control-proves-the-query-can-see-its-corpus.md
 - **(j) A CENSUS TEST NAMES NONE OF YOUR SYMBOLS, SO THE CALLER SWEEP ABOVE CANNOT FIND IT** → doctrine/investigation-discipline/j-a-census-test-names-none-of-your-symbols-so-the-caller.md
 - **(k) A RULE 21 protocol run passing `{ baseTask }` ALONE reports THREE INDISTINGUISHABLE ZEROS.** → doctrine/investigation-discipline/k-a-rule-21-protocol-run-passing-alone-reports-three.md
 - **A `catch` returning a success-shaped literal is a CLAIM: name what it collapses, and where remedies
