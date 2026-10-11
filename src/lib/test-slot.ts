@@ -181,6 +181,15 @@ export interface TestSlotDir {
 }
 
 let testProcessSlotDir: string | undefined;
+let testFileSlotScope: string | undefined;
+const testFileSlotDirs = new Map<string, string>();
+
+/** Select the owning file before a pooled test runs; repeated and nested tests retain its state. */
+export function setTestFileSlotScope(file: string): void {
+  testFileSlotScope = file;
+  testProcessSlotDir = testFileSlotDirs.get(file);
+}
+
 /** The process's TMPDIR at load, so a test that later points TMPDIR at a fixture never receives the slot dir. */
 const TEST_PROCESS_TMP_ROOT = tmpdir();
 
@@ -206,6 +215,7 @@ export function resolveTestSlotDir(
   if (configured) return { dir: configured, scope: "configured" };
   if (env.NODE_TEST_CONTEXT) {
     testProcessSlotDir ??= mkdtempSync(join(TEST_PROCESS_TMP_ROOT, `${RMD_TMP_PREFIX}test-slots-`));
+    if (testFileSlotScope !== undefined) testFileSlotDirs.set(testFileSlotScope, testProcessSlotDir);
     return { dir: testProcessSlotDir, scope: "test-process" };
   }
   if (isDir(HOST_SCRATCH_RMD_DIR)) return { dir: join(HOST_SCRATCH_RMD_DIR, "test-slots"), scope: "host-scratch" };
