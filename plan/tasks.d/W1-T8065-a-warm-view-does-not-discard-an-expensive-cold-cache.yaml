@@ -39,11 +39,11 @@
     prepare and reclaim controls. No fact pruning or history trimming; payload/source semantics stay intact.
   acceptance:
     - claim: "cheap warm builds preserve the expensive factory's heavy ownership without retaining a duplicate on fast"
-      proof: "unit test: test/a-view-lane-constructs-only-the-views-it-owns.test.ts: a cache-cold factory stays heavy after its warm build instead of discarding and rebuilding its cache"
+      proof: "unit test: a cache-cold factory stays heavy after its warm build instead of discarding and rebuilding its cache"
     - claim: "a warm-only overrun can return a cheap factory to fast independently of another instance"
-      proof: "unit test: test/a-view-lane-constructs-only-the-views-it-owns.test.ts: a cheap factory can return to fast after a warm-only overrun and each instance is classified independently"
+      proof: "unit test: a cheap factory can return to fast after a warm-only overrun and each instance is classified independently"
     - claim: "bounded preparation is part of the first successful cold build's classification"
-      proof: "unit test: test/a-view-lane-constructs-only-the-views-it-owns.test.ts: the cold classification includes bounded preparation before the first published body"
+      proof: "unit test: the cold classification includes bounded preparation before the first published body"
   falsifier: |
     Remove the cold/recreation cost from routing, or omit it from the lane message. The receiver's cheap
     warm build then returns to fast and stops its continued owned builds. The first control must fail.
