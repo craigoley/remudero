@@ -215,6 +215,7 @@ import {
   escalate,
   ghIssueGateway,
   isEscalationJudgeExempt,
+  taskContractRevision,
   tryEscalate,
   type AskType,
   type Escalation,
@@ -1802,6 +1803,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "readArmTimeline",
   "readActionsStatusSummary", // W1-T5939
   "rerunFailedChecks",
+  // remudero-console #2035: the task contract an escalated fix-progress latch stands on.
+  "readTaskContractRevision",
 ] as const;
 
 export function productionFixProgressJudge(opts: {
@@ -1894,6 +1897,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "escalateRearmExhausted"
   | "readArmTimeline"
   | "readActionsStatusSummary"
+  | "readTaskContractRevision"
 > & {
   /** W1-T3618 — see `reviewerCodeStaleThisPassImpl`. Not a `SweepDeps` member: it is a read-back on
    *  this builder's own return, not an effect the sweep invokes. */
@@ -2289,9 +2293,19 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     }
   };
 
+  // The daemon hands each pass its tick's fresh plan; a task missing from it gets ONE re-read per cycle.
+  let reloadedForContract: { plan: Plan | undefined } | undefined;
   return {
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
     fixProgressJudge: effectsProgressJudge,
+    readTaskContractRevision: (taskId) => {
+      let task = plan.byId.get(taskId);
+      if (task === undefined) {
+        reloadedForContract ??= { plan: reloadPlanForFix() };
+        task = reloadedForContract.plan?.byId.get(taskId);
+      }
+      return task === undefined ? undefined : taskContractRevision(task);
+    },
     // W1-T3618: the entrypoint's freshness gate, surfaced so the lib-built and entrypoint-built
     // effect surfaces stay key-identical (W1-T2890).
     reviewerCodeStaleThisPass: reviewerCodeStaleThisPassImpl,
@@ -7959,6 +7973,8 @@ export const BASE_RED_REFRESH_STEP = "sweep.base_red.refresh";
 /** W1-T6405 — a red head behind main whose failing test files all pass on current main took that
  *  main: one update-branch per `pr@head`, shared with {@link BASE_RED_REFRESH_STEP}'s once-per-head key. */
 export const BASE_FIXED_REFRESH_STEP = "sweep.base_fixed.refresh";
+/** remudero-console #2035 — an escalated head whose task contract was amended on main took main once. */
+export const CONTRACT_AMENDED_REFRESH_STEP = "sweep.contract_amended.refresh";
 
 /** W1-T6405 — the failing test files of a red head that is BEHIND main and whose every failing test file
  *  a recorded probe found passing at main's CURRENT tip (`clear`, never partial or unrunnable); else
@@ -11369,6 +11385,11 @@ export interface StrikeLadderEffects {
 
 export interface SweepDeps {
   fixProgressJudge?: FixProgressJudge;
+  /** The CURRENT task contract revision ({@link taskContractRevision}) of a plan task on main, or `undefined`
+   *  when the plan does not hold it. An escalated fix-progress latch records the revision it stands on;
+   *  a different one means the plan was amended under it (remudero-console #2035). Omitted: the latch
+   *  holds on its input key alone, as before. */
+  readTaskContractRevision?: (taskId: string) => string | undefined;
   headRehome?: HeadRehomePorts;
   /** The already-listed peers retained when the light pass reconciles one PR at a time. */
   stuckStagePeers?: readonly OpenPrView[];
@@ -16062,6 +16083,45 @@ export async function runSweep(
               }
               let progressDecision: FixProgressVerdict | undefined;
               let progressParkedReason: string | undefined;
+              // remudero-console #2035: an escalated latch keys on the head and its round history, and a plan
+              // amendment on main moves neither, so it held a PR for 30+ hours after its contract was fixed.
+              // Each latched pass records the contract revision it stands on; when main's differs, take main
+              // into the branch once. The fix rung reads the contract AT THE HEAD (W1-T4073), so only a new
+              // head carries the amendment, and a new head releases every head-keyed hold with it.
+              const refreshAmendedContract = async (
+                latched: readonly Record<string, unknown>[], inputKey: string,
+              ): Promise<string | undefined> => {
+                const current = pr.taskId !== undefined ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
+                const standingOn = latched.findLast(row => typeof row.progress_contract_revision === "string")
+                  ?.progress_contract_revision as string | undefined;
+                const record = (revision: string | undefined) => {
+                  extraDisposedFields = { ...extraDisposedFields, progress_escalated_key: inputKey,
+                    ...(revision !== undefined ? { progress_contract_revision: revision } : {}) };
+                };
+                // First observation (or a latch predating the record): adopt the current contract, change nothing.
+                if (current === undefined || standingOn === undefined || standingOn === current) {
+                  record(standingOn ?? current);
+                  return undefined;
+                }
+                record(standingOn);
+                if (!deps.updateBranch) {
+                  return "task contract amended since this head was escalated — deferred to full sweep (update-branch not available on this pass)";
+                }
+                let outcome: string;
+                try { outcome = await deps.updateBranch(pr); }
+                catch (error) { outcome = `error: ${String(error)}`; }
+                appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+                  step: CONTRACT_AMENDED_REFRESH_STEP, pr_number: pr.prNumber, head_sha: pr.headSha,
+                  escalated_under: standingOn, contract_revision: current, outcome });
+                record(current);
+                if (outcome === "updated" || outcome === "head-moved") {
+                  acted = true;
+                  return `task contract amended since this head was escalated — took main into the branch (${outcome}) ` +
+                    "so the next round works on the amended contract";
+                }
+                return `task contract amended since this head was escalated — branch refresh ${outcome}; ` +
+                  "awaiting new evidence or an operator answer";
+              };
               const askProgress = async (): Promise<boolean> => {
                 progressDecision ??= progressParkedReason ? undefined : judgedContinue.get(pr.prNumber);
                 if (progressDecision) return true;
@@ -16082,11 +16142,14 @@ export async function runSweep(
                     : progressParkedReason?.startsWith("rerun-still-red") || progressParkedReason?.startsWith("amendment-closed") ? 1
                     : fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason: progressParkedReason });
                 const inputKey = createHash("sha256").update(JSON.stringify(input)).digest("hex");
-                if (ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
-                    row.head_sha === pr.headSha && row.progress_escalated_key === inputKey)) {
+                const latched = ledgerLines.filter(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
+                  row.head_sha === pr.headSha && row.progress_escalated_key === inputKey);
+                if (latched.length > 0) {
                   acted = false;
                   spent = false;
                   standDownReason = "this fix progress loop is already escalated; awaiting new evidence or an operator answer";
+                  const amended = await refreshAmendedContract(latched, inputKey);
+                  if (amended !== undefined) standDownReason = amended;
                   return false;
                 }
                 const result = await judgeFixProgress(input, progressJudge);
@@ -16103,7 +16166,9 @@ export async function runSweep(
                 if (result.verdict === "escalate") {
                   const reason = `fix progress loop: ${result.loop} — ${result.reason}`;
                   await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
-                  extraDisposedFields = { ...extraDisposedFields, progress_escalated_key: inputKey };
+                  const contract = pr.taskId !== undefined ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
+                  extraDisposedFields = { ...extraDisposedFields, progress_escalated_key: inputKey,
+                    ...(contract !== undefined ? { progress_contract_revision: contract } : {}) };
                   spent = false;
                   standDownReason = reason;
                   return false;
