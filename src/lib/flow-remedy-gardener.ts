@@ -7,7 +7,7 @@ import { ciFrictionRecordVerdict, ciFrictionRecencyWeight, gitCiFrictionOwnerSea
 import { CI_FRICTION_EFFECT_MAX_WINDOW_MS, CI_FRICTION_ESCALATE_RUNG, type CiFrictionRemedyTask, type OwnerSearch, type RemedyEffect } from "./ci-friction-remedy.js";
 import type { Escalation } from "./escalate.js";
 import { slug } from "./feedback-docket.js";
-import { gardenLedgerBucket, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
+import { prepareGardenTaskIds, gardenLedgerBucket, type GardenTaskIdMinter, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
 import { ghExec } from "./github-transport.js";
 import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
@@ -35,7 +35,7 @@ export interface Inventory {
 }
 export interface FlowGardenSources {
   owner: string; repo: string;
-  mintTaskId: (branch?: string) => string;
+  mintTaskId: GardenTaskIdMinter;
   ledgerRecords?: () => readonly LedgerRecord[];
   planState?: () => CiFrictionPlanState;
   prOutcomes?: (prs: readonly number[]) => ReadonlyMap<number, PrOutcome>;
@@ -367,7 +367,8 @@ export function ladderGardenSpec(deps: GardenerDeps, input: LadderSpecInput): Ga
       input.onScorecard?.(inv, scorecard);
       return scorecard;
     },
-    apply: (ws, plan) => {
+    prepare: (ws, plan, async) => prepareGardenTaskIds(ws, plan.actions[0] && !plan.actions[0].escalation ? 1 : 0, sources.mintTaskId, async),
+    apply: (ws, plan, _scorecard, heldIds) => {
       const action = plan.actions[0];
       if (!action) return undefined;
       if (action.escalation) {
@@ -380,7 +381,7 @@ export function ladderGardenSpec(deps: GardenerDeps, input: LadderSpecInput): Ga
         return undefined;
       }
       if (!ws.branch) throw new Error(`${kind.stem} gardener: filing workspace has no reservation branch`);
-      const id = sources.mintTaskId(ws.branch);
+      const id = (heldIds ?? prepareGardenTaskIds(ws, 1, sources.mintTaskId) as string[])[0]!;
       const search = sources.ownerSearch ?? gitCiFrictionOwnerSearch(args => execFileSync("git", ["-C", deps.repoRoot, ...args], { encoding: "utf8", timeout: 60_000 }));
       const contents = sources.draftShard ? sources.draftShard(action, id) : draftShard(action, id, search, kind);
       const verdict = ciFrictionRecordVerdict(contents, `${kind.stem}:${id}`);
