@@ -44,7 +44,7 @@
 import { readFileSync, writeFileSync, readdirSync, mkdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { POOL_ISOLATION_FLAG, runShardWithPool } from "./pure-test-pool.mjs";
+import { JUDGED_ROLES, POOL_ISOLATION_FLAG, runShardWithPool, spawnJudgedRun } from "./pure-test-pool.mjs";
 import { dirname, isAbsolute, join, posix, relative, resolve, sep, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -820,6 +820,9 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
         `--test-reporter-destination=${durationOutput}`,
       );
     }
+    // A pool-ladder run passes only with a complete summary from every file it was given: exit 0
+    // alone let a test's real process.exit(0) end shard 1's pool 92 files in and read green.
+    if (JUDGED_ROLES.includes(role)) return spawnJudgedRun(files, { spawn, cwd: root, args: testArgs, pool, quiet, role });
     const result = spawn(process.execPath, [...testArgs, ...files], { cwd: root, stdio: quiet ? "ignore" : "inherit" });
     return result.status ?? (result.signal ? 1 : 0);
   };

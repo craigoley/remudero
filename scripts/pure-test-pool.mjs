@@ -12,8 +12,10 @@
 //
 // Plain .mjs on purpose: ci runs scripts/test-tier-manifest.mjs under plain node, with no tsx.
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** The node flag that makes `node --test` run every file in the runner's own process. */
 export const POOL_ISOLATION_FLAG = "--experimental-test-isolation=none";
@@ -206,4 +208,155 @@ export function locateLeak(pooled, runPool) {
     else low = mid + 1;
   }
   return { leaker: before[high - 1], victim };
+}
+
+/**
+ * A RUN THAT ENDS WITHOUT A SUMMARY IS NOT A PASS (2026-10-11, ci-shard 1/8 of #10765).
+ *
+ * The pool runs ~240 files in ONE process, so a test that reaches the real `process.exit(0)` — serve's
+ * stale-code recycle, armed by a test that gave serve a fake boot sha — ends every file after it, and
+ * the run exits 0 with no `# tests` line. Exit status alone read that as green: shard 1 ran 92 of its
+ * 244 pooled files and passed. So a pool-ladder run (the pool, its isolated re-run and every
+ * leak-locating probe) passes only when:
+ *   - the child exits 0;
+ *   - it reached its end-of-run summary (`# tests`, `# pass`, `# fail 0`), read from
+ *     scripts/pool-run-tally.mjs, which writes only once the event stream has ended;
+ *   - EVERY file it was given reported: pooled, a test from the file ran or reported; isolated, the
+ *     file's own child reached its per-file summary (a child that exits 0 part-way reports the file as
+ *     `ok` with the rest of its tests never run, so a per-file `ok` is not enough);
+ *   - `# tests` is at least the number of files given.
+ * Anything else fails by name: the last test that started and, when the real `process.exit` was
+ * called, its call site (scripts/pool-run-marker.mjs records both synchronously).
+ */
+export const POOL_RUN_MARKER_ENV = "RMD_POOL_RUN_MARKER";
+
+/** The pool-ladder roles a run is judged in; "rest" is the shard's ordinary isolated run. */
+export const JUDGED_ROLES = Object.freeze(["pool", "rerun", "locate"]);
+
+const MARKER_MODULE = fileURLToPath(new URL("./pool-run-marker.mjs", import.meta.url));
+const TALLY_REPORTER = fileURLToPath(new URL("./pool-run-tally.mjs", import.meta.url));
+
+/** The extra `node --test` arguments and env one judged run needs, and how to read what it left. */
+export function prepareJudgedRun({ makeDir = () => mkdtempSync(join(tmpdir(), "rmd-pool-run-")) } = {}) {
+  const dir = makeDir();
+  const markerPath = join(dir, "marker.tsv");
+  const tallyPath = join(dir, "tally.json");
+  writeFileSync(markerPath, "");
+  const readOrEmpty = (path) => {
+    try {
+      return readFileSync(path, "utf8");
+    } catch {
+      return "";
+    }
+  };
+  return {
+    args: ["--import", pathToFileURL(MARKER_MODULE).href, `--test-reporter=${TALLY_REPORTER}`, `--test-reporter-destination=${tallyPath}`],
+    env: { [POOL_RUN_MARKER_ENV]: markerPath },
+    read: () => ({ tallyText: readOrEmpty(tallyPath), markerText: readOrEmpty(markerPath) }),
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  };
+}
+
+const realOrResolved = (path) => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+};
+
+/**
+ * Judge one finished run. `status` is the child's exit status; `pool` says whether the files shared
+ * one process. `tallyText`/`markerText` are what {@link prepareJudgedRun}'s files hold afterwards.
+ * @returns {{ status: number, childStatus: number, complete: boolean, given: number, reported: number, missing: string[],
+ *   tests: number | null, failed: number | null, lastStarted: string | null, exitSite: string | null,
+ *   problems: string[] }}
+ */
+export function judgeRun(files, { status, pool, root = ".", tallyText = "", markerText = "" }) {
+  let tally = null;
+  try {
+    const line = tallyText.trim().split("\n").at(-1);
+    if (line) tally = JSON.parse(line);
+  } catch {
+    tally = null;
+  }
+  let lastStart = null;
+  let exitSite = null;
+  const started = [];
+  for (const line of markerText.split("\n")) {
+    const [kind, first, second] = line.split("\t");
+    if (kind === "start") {
+      lastStart = { file: first, name: second };
+      started.push(first);
+    } else if (kind === "exit") exitSite = `process.exit(${first}) from ${second}`;
+  }
+  const summary = tally && typeof tally.summary === "object" ? tally.summary : null;
+  const seen = new Set(
+    (pool ? [...(tally?.testFiles ?? []), ...started] : tally?.fileSummaries ?? []).map(realOrResolved),
+  );
+  const missing = files.filter((file) => !seen.has(realOrResolved(resolve(root, file))));
+  const tests = Number.isFinite(summary?.tests) ? summary.tests : null;
+  const failed = Number.isFinite(summary?.failed) ? summary.failed : null;
+  const problems = [];
+  if (!summary) problems.push("no end-of-run test summary (the process ended before its tests did)");
+  else {
+    if (failed !== 0) problems.push(`# fail ${failed}`);
+    if (tests === null || tests < files.length) problems.push(`# tests ${tests} is fewer than the ${files.length} file(s) given`);
+  }
+  if (missing.length > 0) problems.push(`${missing.length} of ${files.length} file(s) never reported (first: ${missing[0]})`);
+  const complete = problems.length === 0;
+  const rel = (path) => {
+    const base = realOrResolved(resolve(root));
+    const real = realOrResolved(path);
+    return real.startsWith(`${base}/`) ? real.slice(base.length + 1) : path;
+  };
+  return {
+    status: status !== 0 ? status : complete ? 0 : 1,
+    childStatus: status,
+    complete,
+    given: files.length,
+    reported: files.length - missing.length,
+    missing,
+    tests,
+    failed,
+    lastStarted: lastStart ? `${rel(lastStart.file)} > ${lastStart.name}` : null,
+    exitSite,
+    problems,
+  };
+}
+
+/** The positive control, one line per judged run: files given, files that reported, `# tests`. */
+export function describeJudgedRun(role, verdict) {
+  const counts = `${verdict.reported}/${verdict.given} file(s) reported, # tests ${verdict.tests ?? "none"}, # fail ${verdict.failed ?? "none"}`;
+  if (verdict.complete) return `pure-test-pool: ${role} run complete — ${counts}.`;
+  // The child's own non-zero exit is an ordinary red; an exit 0 the judge overrules is the silent kind.
+  const headline = verdict.childStatus === 0 ? "INCOMPLETE — its exit 0 is counted as FAILED" : `FAILED (status ${verdict.childStatus})`;
+  return (
+    `pure-test-pool: ${role.toUpperCase()} RUN ${headline}: ${verdict.problems.join("; ")}. ` +
+    `${counts}. Last test started: ${verdict.lastStarted ?? "none"}` +
+    (verdict.exitSite ? `. The real ${verdict.exitSite}` : "") +
+    "."
+  );
+}
+
+/**
+ * Spawn ONE judged `node --test` child: `args` are the runner arguments up to the file list (reporters
+ * included); the judge's marker and tally are appended. Returns the judged status, which is non-zero
+ * for a child that exited 0 without completing every file.
+ */
+export function spawnJudgedRun(files, { spawn, cwd, args, pool, quiet = false, role, log = (line) => console.error(line), env = process.env }) {
+  const judged = prepareJudgedRun();
+  try {
+    const result = spawn(process.execPath, [...args, ...judged.args, ...files], {
+      cwd,
+      stdio: quiet ? "ignore" : "inherit",
+      env: { ...env, ...judged.env },
+    });
+    const status = result.status ?? (result.signal ? 1 : 0);
+    const verdict = judgeRun(files, { status, pool, root: cwd, ...judged.read() });
+    log(describeJudgedRun(role, verdict));
+    return verdict.status;
+  } finally {
+    judged.cleanup();
+  }
 }
