@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MERGED_RULES_FILE, resolveCanonicalRuleId, slugifyRuleId, type MergedRuleGroup } from "./doctrine-lifecycle.js";
 import { deriveFactSymbols } from "./knowledge-symbols.js";
 import { learningValue, sampleBeta, seededRandom, type LearningUsage } from "./knowledge-value.js";
 import { bm25Rank } from "./learning-lexical.js";
@@ -2196,7 +2195,9 @@ export function retrieveRuleBody(index: Map<string, string>, headline: string): 
   return index.get(headline);
 }
 
-function readMergedRuleGroupsFrom(readStoreFile: (target: string) => string): MergedRuleGroup[] {
+export const MERGED_RULES_FILE = "doctrine/merged-rules.json";
+
+function readMergedRuleGroupsFrom(readStoreFile: (target: string) => string): Array<{ canonicalId: string; aliasIds: string[] }> {
   let text: string;
   try {
     text = readStoreFile(MERGED_RULES_FILE);
@@ -2211,7 +2212,7 @@ function readMergedRuleGroupsFrom(readStoreFile: (target: string) => string): Me
     throw new LearningsError(`lookupWorkerRule: ${MERGED_RULES_FILE} is not JSON: ${String(error)}`);
   }
   if (!Array.isArray(parsed)) throw new LearningsError(`lookupWorkerRule: ${MERGED_RULES_FILE} is not an array`);
-  return parsed as MergedRuleGroup[];
+  return parsed as Array<{ canonicalId: string; aliasIds: string[] }>;
 }
 
 export function lookupWorkerRule(
@@ -2232,22 +2233,25 @@ export function lookupWorkerRule(
 
   const rules = parseRuleHeadlines(source);
   const folded = requested.replace(/\s+/g, " ").toLowerCase();
+  const idFor = (headline: string) => headline.normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "").replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "")
+    .toLowerCase().slice(0, 64).replace(/-+$/g, "");
   const matches = rules.filter((rule) => {
     const pointer = parseRuleBodyPointer(rule.body);
-    return slugifyRuleId(rule.headline) === requested
+    return idFor(rule.headline) === requested
       || pointer?.target === requested
       || rule.headline.replace(/\s+/g, " ").toLowerCase().includes(folded);
   });
   if (matches.length > 1) throw new LearningsError(`lookupWorkerRule: ambiguous phrase "${requested}"`);
   if (matches.length === 0) {
-    const canonicalId = resolveCanonicalRuleId(readMergedRuleGroupsFrom(readStoreFile), requested);
-    if (canonicalId !== requested) matches.push(...rules.filter((rule) => slugifyRuleId(rule.headline) === canonicalId));
+    const group = readMergedRuleGroupsFrom(readStoreFile).find((g) => g.aliasIds.includes(requested));
+    if (group !== undefined) matches.push(...rules.filter((rule) => idFor(rule.headline) === group.canonicalId));
   }
   const rule = matches[0];
   if (rule === undefined) return undefined;
   const pointer = parseRuleBodyPointer(rule.body);
   const body = pointer === undefined ? rule.body : resolveRuleBodyPointer(rule.headline, pointer, readStoreFile);
-  return { id: slugifyRuleId(rule.headline), text: `- **${rule.headline}**${body}`.trimEnd() };
+  return { id: idFor(rule.headline), text: `- **${rule.headline}**${body}`.trimEnd() };
 }
 
 /**

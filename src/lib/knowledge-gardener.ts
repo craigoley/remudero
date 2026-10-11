@@ -6,7 +6,8 @@ import { systemClock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { buildKnowledgeInventory, danglingWhyPointers, inventoryTotals, type KnowledgeItem } from "./knowledge-inventory.js";
-import { MERGED_RULES_FILE, resolveCanonicalRuleId, slugifyRuleId, type MergedRuleGroup } from "./doctrine-lifecycle.js";
+import { resolveCanonicalRuleId, slugifyRuleId, type MergedRuleGroup } from "./doctrine-lifecycle.js";
+import { MERGED_RULES_FILE } from "./learnings.js";
 import { GUARD_RETIREMENT_ZERO_STREAK } from "./retro-closure.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { hostWorktreeGit } from "./worktree-git.js";
@@ -341,7 +342,8 @@ export function doctrineDuplicatePairs(items: KnowledgeItem[]): Array<[Knowledge
   return pairs;
 }
 
-/** Re-exported from doctrine-lifecycle.ts, where the worker's rule lookup also reads it. */
+/** The alias registry RULE-MERGE writes: every id a merge ever folded, resolved to the canonical
+ *  id doctrine now stores it under. Nothing is ever deleted — the registry only grows. */
 export { MERGED_RULES_FILE };
 
 function readMergedRuleGroups(root: string): MergedRuleGroup[] {
