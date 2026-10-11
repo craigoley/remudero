@@ -591,6 +591,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // both read it as forward progress, resetting a halted task's breaker. Rotated away, a released
   // task's next restart would seed straight back from the still-live `dispatch.circuit_broken` row above.
   "dispatch.breaker_released",
+  "dispatch.breaker_judged", // W1-T7742: a judge's continue resets the streak like a release; its rulings dedup.
   // W1-T2910: `status.ts`'s projection reads this row to derive an independent-failure block and
   // clears it on a later dispatch (src/lib/status.ts, the `line.step === "dispatch.blocked_independent"`
   // arm). Rotated away, a block that was recorded stops being visible and the subtree is re-dispatched
