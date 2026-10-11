@@ -49,7 +49,8 @@ test("canary private browser drills from matched metrics to attempts and leaves 
 test("canary private preparation refuses a new directory behind a Git symlink ancestor", () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}canary-output-`));
   try {
-    mkdirSync(join(dir, "repo/.git"), { recursive: true }); symlinkSync(join(dir, "repo"), join(dir, "link"));
+    mkdirSync(join(dir, "repo/.git"), { recursive: true }); mkdirSync(join(dir, "repo/subdir"));
+    symlinkSync(join(dir, "repo/subdir"), join(dir, "link"));
     assert.throws(() => canaryCommand(["prepare", join(dir, "link/new")]), /inside-git/);
     assert.throws(() => canaryCommand(["prepare", dir, "extra"]), /usage/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
