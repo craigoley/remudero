@@ -10,7 +10,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test, type TestContext } from "node:test";
+import { describe, test, type TestContext } from "node:test";
 import {
   evaluateRetroTrigger,
   resolveMarkerForGather,
@@ -28,6 +28,8 @@ import type { Plan } from "../src/lib/plan.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { offlineGithub } from "./setup/offline-github.js";
 import type { RunRetroPrepublishPreflightOptions, RetroPrepublishResult } from "../src/lib/retro-preflight.js";
+
+describe("test/retro-marker-atomic-real-run.test.ts", () => {
 
 /** ONE offline gateway for every `retroCommand` call in this file; nothing here asserts merge state. */
 const offlineGh = offlineGithub();
@@ -64,8 +66,9 @@ test("unit test: test/retro-marker-atomic-real-run.test.ts", () => {
   const manifest = JSON.parse(readFileSync(join(REPO_ROOT_FOR_FIXTURES, "scripts", "test-tier-manifest.json"), "utf8")) as { files: Record<string, number> };
   const planReadingHalfMs = manifest.files["test/retro-marker-atomic.test.ts"];
   assert.equal(typeof planReadingHalfMs, "number", "the plan-reading half has a manifest row");
-  assert.ok(planReadingHalfMs < 30000, `the plan-reading half is recorded at ${planReadingHalfMs} ms, under 30000`);
-  assert.equal(typeof manifest.files["test/retro-marker-atomic-real-run.test.ts"], "number", "the real-run half has its own manifest row");
+  assert.ok(planReadingHalfMs > 0 && planReadingHalfMs < 30000, `the plan-reading half is recorded at ${planReadingHalfMs} ms, under 30000`);
+  const realRunHalfMs = manifest.files["test/retro-marker-atomic-real-run.test.ts"];
+  assert.ok(typeof realRunHalfMs === "number" && realRunHalfMs > 0, "the real-run half has a measured manifest row");
 });
 
 /** A trivial empty plan for `runDaemon` — nothing is ever runnable, so the retro-trigger
@@ -75,7 +78,7 @@ const EMPTY_DAEMON_PLAN: Plan = { tasks: [], byId: new Map() };
 
 // ── W1-T242 round 2: retroCommand's SUCCESS path reaches the atomic marker-advance ──
 //
-// The corrupt-marker test above proves the fail-closed branch. The tests below prove the
+// The corrupt-marker test in the plan-reading half proves the fail-closed branch. These tests prove the
 // OTHER half stays correct: a clean retro run still reaches `saveMarker` at the tail of the
 // real success path -- the exact call site round 1 made atomic -- and actually lands a real,
 // valid marker on disk. Every git/gh boundary is a REAL local git repo or a PATH-shimmed `gh`
@@ -1014,4 +1017,6 @@ test("retroCommand: a real retro spawns no learnings promotion judge (retired 20
     const judgeSpawns = fx.spawnArgs.filter((args) => Array.isArray(args.tools) && args.tools.length === 0);
     assert.equal(judgeSpawns.length, 0, "no tool-less promotion judge is spawned");
   });
+});
+
 });

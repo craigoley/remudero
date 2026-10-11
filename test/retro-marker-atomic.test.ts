@@ -485,7 +485,7 @@ test("the injected offline gateway is consulted by retroCommand, so no real one 
   const savedHome = process.env.HOME;
   process.env.HOME = fakeHome;
   mkdirSync(join(fakeHome, ".config", "remudero"), { recursive: true });
-    writeFileSync(configPath(), JSON.stringify({ claudeBin: "/bin/true", root, installRoot: REPO_ROOT_FOR_FIXTURES }, null, 2) + "\n");
+  writeFileSync(configPath(), JSON.stringify({ claudeBin: "/bin/true", root, installRoot: REPO_ROOT_FOR_FIXTURES }, null, 2) + "\n");
   t.mock.method(console, "log", () => {});
   const github = offlineGithub();
   try {
