@@ -2840,7 +2840,9 @@ import {
   SubscriptionOnlyRefusedError,
   deliverOperatorAnswerToRunningWorker,
 } from "./lib/worker.js";
-import { QuietRoundEndedError, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, runQuietWorkerWatchdog } from "./lib/quiet-worker-watchdog.js";
+import {
+  QuietRoundEndedError, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, runQuietWorkerWatchdog, type QuietWorkerJudge,
+} from "./lib/quiet-worker-watchdog.js";
 import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
 import { enrichWorkerStreamEvent } from "./lib/worker-telemetry.js";
 
@@ -3304,6 +3306,91 @@ export function attributeWorkerStreamEvent(
     routedProvider: event.routedProvider ?? assignment.selected.provider,
     routedModel: event.routedModel ?? assignment.selected.model,
   };
+}
+
+/** The stream observer one dispatch spawn hands its worker: enrich, attribute to the spawn's assignment, then forward. */
+export function dispatchStreamObserver(
+  base: WorkerStreamObserver,
+  spawn: Pick<SpawnWorkerArgs, "model" | "mountProvider">,
+  assignment: () => Pick<WorkerSelectionAssignment, "id" | "requested" | "selected"> | undefined,
+): WorkerStreamObserver {
+  return (event) => {
+    const current = assignment();
+    base(attributeWorkerStreamEvent(enrichWorkerStreamEvent(event, spawn, current), current));
+  };
+}
+
+/** W1-T7807: run `rawSpawn` under the quiet-worker watchdog when `watch.enabled` (a real dispatch spawn has a process tree to
+ * read; an injected one has none). `seams` default to the real ledger read, judge, nudge and checkpoint-and-push path. */
+export function watchDispatchSpawn(
+  rawSpawn: typeof spawnWorker,
+  watch: {
+    enabled: boolean;
+    taskId: string;
+    runId: string;
+    ledgerPath: string;
+    fallbackBoundMs: number;
+    spawnArgs: Pick<SpawnWorkerArgs, "cwd" | "settingsFile" | "workerClass">;
+    task: Pick<ReturnType<typeof selectTask>, "files" | "acceptance">;
+    provider: () => string | undefined;
+    log: (step: string, fields: Record<string, unknown>) => void;
+  },
+  seams: {
+    runWatchdog?: typeof runQuietWorkerWatchdog;
+    readRows?: typeof readLedgerUnionRecordsSync;
+    judge?: QuietWorkerJudge;
+    deliver?: typeof deliverOperatorAnswerToRunningWorker;
+    hasUncommittedChanges?: typeof worktreeHasUncommittedChanges;
+    commit?: typeof commitWorkerEdits;
+    push?: typeof gitPushRunBranchAsync;
+    headSha?: (cwd: string) => string;
+  } = {},
+): typeof spawnWorker {
+  if (!watch.enabled) return rawSpawn;
+  const { taskId, spawnArgs, task, log } = watch;
+  const state: { rootPid?: number; ended?: QuietRoundEndedError } = {};
+  const abort = new AbortController();
+  const watchdog = (seams.runWatchdog ?? runQuietWorkerWatchdog)({
+    taskId,
+    runId: watch.runId,
+    rootPid: () => state.rootPid,
+    provider: watch.provider,
+    history: () => {
+      const read = (seams.readRows ?? readLedgerUnionRecordsSync)(dirname(watch.ledgerPath), { step: ["worker.state", "worker.assignment"] });
+      return read.ok ? read.rows : [];
+    },
+    fallbackBoundMs: watch.fallbackBoundMs,
+    quietFloorMs: DEFAULT_WORKER_QUIET_FLOOR_MS,
+    ledger: (step, fields) => log(step, fields),
+    judge: seams.judge ?? productionQuietWorkerJudge({ cwd: spawnArgs.cwd, settingsFile: spawnArgs.settingsFile }),
+    nudge: (message) => (seams.deliver ?? deliverOperatorAnswerToRunningWorker)(taskId, message, { ledger: (event, fields) => log(event, fields ?? {}) })
+      === "delivered" ? "delivered" : "unsupported",
+    endRound: async (reason) => {
+      if ((spawnArgs.workerClass ?? "implement") !== "implement") return { ended: false, reason: "not an implement worker" };
+      const cwd = spawnArgs.cwd;
+      try {
+        // The W1-T7697 checkpoint path (yieldAtWorkerBoundary): retain the disk work, push it, then release the lane.
+        if ((seams.hasUncommittedChanges ?? worktreeHasUncommittedChanges)(cwd)) {
+          const checkpoint = (seams.commit ?? commitWorkerEdits)(cwd, task.files ?? [],
+            `wip: yield at quiet worker\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume\nfailed: none\n\nRemudero-Task: ${taskId}`,
+            {}, task.acceptance);
+          if (!checkpoint.committed || checkpoint.undeclared.length > 0) {
+            return { ended: false, reason: `checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}` };
+          }
+        }
+        await (seams.push ?? gitPushRunBranchAsync)(cwd);
+      } catch (error) {
+        return { ended: false, reason: `checkpoint failed: ${String((error as Error)?.message ?? error)}` };
+      }
+      const checkpointSha = (seams.headSha ?? ((dir: string) => hostWorktreeGit(dir, ["rev-parse", "HEAD"]).trim()))(cwd);
+      state.ended = new QuietRoundEndedError({ checkpointSha, reason });
+      abort.abort();
+      return { ended: true, checkpointSha };
+    },
+  });
+  return guardSpawnWithQuietWatchdog(rawSpawn, {
+    watchdog, abort, onRootPid: (pid) => { state.rootPid = pid; }, ended: () => state.ended,
+  });
 }
 
 const WORKER_TELEMETRY_TEXT_MAX_CHARS = 240;
@@ -17335,52 +17422,10 @@ async function runTask(
     const baseStreamObserver = effectiveSpawnArgs.streamObserver ?? workerStateSensor.observer;
     const receiptLog: typeof log = callerOwnsBenchmarkReceipt(effectiveSpawnArgs) ? () => {} : log; // W1-T4613: fixWorkerReceipt owns it
     // W1-T7807: the quiet-worker watchdog rides every REAL dispatch spawn (an injected spawn has no process tree to read).
-    let workerRootPid: number | undefined;
-    let quietEnded: QuietRoundEndedError | undefined;
-    const quietAbort = new AbortController();
-    const quietWatchdog = opts.spawn ? undefined : runQuietWorkerWatchdog({
-      taskId,
-      runId,
-      rootPid: () => workerRootPid,
+    const watchedSpawn = watchDispatchSpawn(rawSpawn, {
+      enabled: !opts.spawn, taskId, runId, ledgerPath, fallbackBoundMs: workerStallFallbackMs, spawnArgs: effectiveSpawnArgs, task, log,
       provider: () => selectionAssignment?.selected.provider,
-      history: () => {
-        const read = readLedgerUnionRecordsSync(dirname(ledgerPath), { step: ["worker.state", "worker.assignment"] });
-        return read.ok ? read.rows : [];
-      },
-      fallbackBoundMs: workerStallFallbackMs,
-      quietFloorMs: DEFAULT_WORKER_QUIET_FLOOR_MS,
-      ledger: (step, fields) => log(step, fields),
-      judge: productionQuietWorkerJudge({ cwd: effectiveSpawnArgs.cwd, settingsFile: effectiveSpawnArgs.settingsFile }),
-      nudge: (message) => deliverOperatorAnswerToRunningWorker(taskId, message, { ledger: (event, fields) => log(event, fields ?? {}) }) === "delivered"
-        ? "delivered" : "unsupported",
-      endRound: async (reason) => {
-        if ((effectiveSpawnArgs.workerClass ?? "implement") !== "implement") return { ended: false, reason: "not an implement worker" };
-        const cwd = effectiveSpawnArgs.cwd;
-        try {
-          // The W1-T7697 checkpoint path (yieldAtWorkerBoundary): retain the disk work, push it, then release the lane.
-          if (worktreeHasUncommittedChanges(cwd)) {
-            const checkpoint = commitWorkerEdits(cwd, task.files ?? [],
-              `wip: yield at quiet worker\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume\nfailed: none\n\nRemudero-Task: ${taskId}`,
-              {}, task.acceptance);
-            if (!checkpoint.committed || checkpoint.undeclared.length > 0) {
-              return { ended: false, reason: `checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}` };
-            }
-          }
-          await gitPushRunBranchAsync(cwd);
-        } catch (error) {
-          return { ended: false, reason: `checkpoint failed: ${String((error as Error)?.message ?? error)}` };
-        }
-        const checkpointSha = hostWorktreeGit(cwd, ["rev-parse", "HEAD"]).trim();
-        quietEnded = new QuietRoundEndedError({ checkpointSha, reason });
-        quietAbort.abort();
-        return { ended: true, checkpointSha };
-      },
     });
-    const watchedSpawn: typeof spawnWorker = quietWatchdog
-      ? guardSpawnWithQuietWatchdog(rawSpawn, {
-          watchdog: quietWatchdog, abort: quietAbort, onRootPid: (pid) => { workerRootPid = pid; }, ended: () => quietEnded,
-        })
-      : rawSpawn;
     return recordBenchmarkWorkerAttempt(() => watchedSpawn({
       ...effectiveSpawnArgs,
       // A dispatch run builds in its task worktree: its workers reserve (and learn) host memory as "implement".
@@ -17409,10 +17454,7 @@ async function runTask(
       // Keep provider/model attribution specific to THIS spawn, not the run's initial mount.
       // The selected assignment is authoritative for provider + requested model; the selected
       // model is deliberately not promoted to a served-model receipt.
-      streamObserver: (event) => {
-        baseStreamObserver(attributeWorkerStreamEvent(
-          enrichWorkerStreamEvent(event, effectiveSpawnArgs, selectionAssignment), selectionAssignment));
-      },
+      streamObserver: dispatchStreamObserver(baseStreamObserver, effectiveSpawnArgs, () => selectionAssignment),
       // W1-T1045: every real dispatch spawn gets the clock bound BY CONSTRUCTION — the SAME
       // wrap-once rationale as `onSpawnError`/`streamObserver` above. A caller that already set
       // its own `clockBound` (none exist today) is respected; every future dispatch call site

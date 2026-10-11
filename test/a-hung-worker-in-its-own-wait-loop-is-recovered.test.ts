@@ -8,10 +8,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { IMPLEMENT_WAIT_TARGET_CONTRACT } from "../src/run-task.js";
+import { dispatchStreamObserver, IMPLEMENT_WAIT_TARGET_CONTRACT, watchDispatchSpawn } from "../src/run-task.js";
 import { clockFromMillisFn } from "../src/lib/clock.js";
 import { exitCodeFor, RmdError } from "../src/lib/errors.js";
-import { withWorkerPidReport, type WorkerStreamObserver } from "../src/lib/worker.js";
+import { DEFAULT_WORKER_QUIET_FLOOR_MS, withWorkerPidReport, type WorkerStreamEvent, type WorkerStreamObserver } from "../src/lib/worker.js";
 import {
   classifyProcessTree,
   defaultListProcesses,
@@ -26,6 +26,7 @@ import {
   type EndRoundResult,
   type ProcRow,
   type QuietWatchdogHandle,
+  type QuietWatchdogOptions,
   type QuietEvidence,
   type QuietJudgement,
 } from "../src/lib/quiet-worker-watchdog.js";
@@ -591,6 +592,183 @@ test("W1-T7807: a round the watchdog ended surfaces as the quiet error, not as t
   const own = new Error("worker crashed");
   await assert.rejects(guardSpawnWithQuietWatchdog(async () => { throw own; }, failing.guard)({}), (error) => error === own);
   assert.deepEqual(failing.counts, { started: 1, stopped: 1 });
+});
+
+test("W1-T7807: a quiet worker with no bound pid is left alone and the row says why", async () => {
+  const rows: Array<Record<string, unknown>> = [];
+  const dog = runQuietWorkerWatchdog({
+    taskId: "W1-T7807", runId: "no-pid", rootPid: () => undefined, provider: () => "claude",
+    history: () => [], fallbackBoundMs: 60_000, quietFloorMs: 0,
+    clock: clockFromMillisFn(() => 100_000),
+    ledger: (step, extra) => { if (step === QUIET_JUDGED_LEDGER_STEP) rows.push(extra); },
+    judge: async () => { throw new Error("a worker with no pid must never reach the judge"); },
+  });
+  dog.observer({ kind: "working", tsMs: 0 });
+  await dog.tick();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].decision, "left_alone");
+  assert.equal(rows[0].reason, "no_root_pid");
+  assert.equal(rows[0].quiet_ms, 100_000);
+  assert.equal(rows[0].bound_ms, 60_000);
+  assert.equal(rows[0].provider, "claude");
+});
+
+test("W1-T7807: a dispatch stream observer enriches, attributes and forwards each event", () => {
+  const seen: WorkerStreamEvent[] = [];
+  const assignment = { id: "assign-1", requested: { model: "opus" }, selected: { provider: "claude", model: "sonnet" } };
+  let current: typeof assignment | undefined;
+  const observer = dispatchStreamObserver(
+    (event) => { seen.push(event); },
+    { model: "spawn-model", mountProvider: "mount-provider" } as never,
+    () => current as never,
+  );
+
+  observer({ kind: "working", tsMs: 1 });
+  assert.equal(seen[0].provider, "mount-provider", "before an assignment the spawn's own mount names the provider");
+  assert.equal(seen[0].requestedModel, "spawn-model");
+  assert.equal(seen[0].selectionAssignmentId, undefined);
+
+  current = assignment;
+  observer({ kind: "working", tsMs: 2 });
+  assert.equal(seen[1].provider, "claude", "the routed assignment outranks the mount default");
+  assert.equal(seen[1].requestedModel, "opus");
+  assert.equal(seen[1].selectionAssignmentId, "assign-1");
+  assert.equal(seen[1].routedProvider, "claude");
+  assert.equal(seen[1].routedModel, "sonnet");
+  assert.equal(seen[1].tsMs, 2);
+});
+
+test("W1-T7807: a dispatch spawn is watched only when enabled, and wires every watchdog callback", async () => {
+  const captured: QuietWatchdogOptions[] = [];
+  const logs: Array<[string, Record<string, unknown>]> = [];
+  const calls: string[] = [];
+  const handle: QuietWatchdogHandle = { observer: () => {}, tick: async () => {}, start: () => () => {} };
+  const mode = {
+    read: { ok: true, rows: [{ step: "worker.state" }] } as { ok: boolean; rows: unknown[] },
+    delivered: "delivered" as string,
+    uncommitted: true,
+    commit: { committed: true, undeclared: [] as string[], reason: undefined as string | undefined },
+    pushError: undefined as Error | undefined,
+  };
+  const judge = async () => undefined;
+  const seams: NonNullable<Parameters<typeof watchDispatchSpawn>[2]> = {
+    runWatchdog: ((options: QuietWatchdogOptions) => { captured.push(options); return handle; }) as never,
+    readRows: ((dir: string, options: unknown) => { calls.push(`read:${dir}:${JSON.stringify(options)}`); return mode.read; }) as never,
+    judge,
+    deliver: ((taskId: string, message: string, options?: { ledger?: (event: string, fields?: Record<string, unknown>) => void }) => {
+      calls.push(`deliver:${taskId}:${message}`);
+      options?.ledger?.("worker.nudge_seen");
+      return mode.delivered;
+    }) as never,
+    hasUncommittedChanges: ((cwd: string) => { calls.push(`status:${cwd}`); return mode.uncommitted; }) as never,
+    commit: ((cwd: string, files: readonly string[], message: string) => {
+      calls.push(`commit:${cwd}:${files.join(",")}:${message}`);
+      return mode.commit;
+    }) as never,
+    push: (async (cwd: string) => { calls.push(`push:${cwd}`); if (mode.pushError) throw mode.pushError; }) as never,
+    headSha: (cwd: string) => { calls.push(`head:${cwd}`); return "abc123"; },
+  };
+  const watchFor = (enabled: boolean, workerClass?: string) => ({
+    enabled, taskId: "W1-T7807", runId: "W1-T7807-1", ledgerPath: "/state/ledger.jsonl", fallbackBoundMs: 60_000,
+    spawnArgs: { cwd: "/wt", settingsFile: "/wt/settings.json", ...(workerClass ? { workerClass } : {}) } as never,
+    task: { files: ["src/a.ts"], acceptance: [] } as never,
+    provider: () => "claude",
+    log: (step: string, fields: Record<string, unknown>) => { logs.push([step, fields]); },
+  });
+  const raw = (async () => "raw") as never;
+
+  // Disabled: the very same spawn comes back, no watchdog is built.
+  assert.equal(watchDispatchSpawn(raw, watchFor(false), seams), raw);
+  assert.equal(captured.length, 0);
+
+  // Enabled: the root pid the worker reports reaches the watchdog.
+  const reportPid = (async (args: { onWorkerPid?: (pid: number) => void }) => { args.onWorkerPid?.(4321); return "spawned"; }) as never;
+  const watched = watchDispatchSpawn(reportPid, watchFor(true), seams);
+  assert.notEqual(watched, reportPid);
+  assert.equal(await watched({} as never), "spawned");
+  const options = captured[0];
+  assert.equal(options.taskId, "W1-T7807");
+  assert.equal(options.runId, "W1-T7807-1");
+  assert.equal(options.rootPid(), 4321);
+  assert.equal(options.provider(), "claude");
+  assert.equal(options.fallbackBoundMs, 60_000);
+  assert.equal(options.quietFloorMs, DEFAULT_WORKER_QUIET_FLOOR_MS);
+  assert.equal(options.judge, judge);
+
+  // History: the union read of the ledger's directory when it succeeded, nothing when it did not.
+  assert.deepEqual(options.history(), [{ step: "worker.state" }]);
+  assert.deepEqual(calls.filter((c) => c.startsWith("read:")), [`read:/state:${JSON.stringify({ step: ["worker.state", "worker.assignment"] })}`]);
+  mode.read = { ok: false, rows: [{ step: "ignored" }] };
+  assert.deepEqual(options.history(), []);
+
+  // Ledger rows land on the run's own logger.
+  options.ledger("worker.quiet_judged", { decision: "left_alone" });
+  assert.deepEqual(logs[logs.length - 1], ["worker.quiet_judged", { decision: "left_alone" }]);
+
+  // Nudge: delivered when a worker is running, unsupported otherwise; the delivery's own ledger rows are forwarded.
+  assert.equal(options.nudge?.("the run finished"), "delivered");
+  assert.ok(calls.includes("deliver:W1-T7807:the run finished"));
+  assert.deepEqual(logs[logs.length - 1], ["worker.nudge_seen", {}]);
+  mode.delivered = "no-running-worker";
+  assert.equal(options.nudge?.("again"), "unsupported");
+
+  // end_round checkpoint: a commit that refuses, or leaves undeclared paths, is not a checkpoint.
+  mode.commit = { committed: false, undeclared: [], reason: "nothing declared" };
+  assert.deepEqual(await options.endRound?.("stalled"), { ended: false, reason: "checkpoint refused: nothing declared" });
+  assert.ok(calls.some((c) => c.startsWith("commit:/wt:src/a.ts:wip: yield at quiet worker") && c.includes("Remudero-Task: W1-T7807")));
+  mode.commit = { committed: true, undeclared: ["x.ts", "y.ts"], reason: undefined };
+  assert.deepEqual(await options.endRound?.("stalled"), { ended: false, reason: "checkpoint refused: x.ts, y.ts" });
+  assert.equal(calls.filter((c) => c.startsWith("push:")).length, 0, "nothing is pushed after a refused commit");
+
+  // A push that fails is reported, not thrown.
+  mode.commit = { committed: true, undeclared: [], reason: undefined };
+  mode.pushError = new Error("push refused");
+  assert.deepEqual(await options.endRound?.("stalled"), { ended: false, reason: "checkpoint failed: push refused" });
+  mode.pushError = undefined;
+
+  // With nothing uncommitted the work is already on disk: no commit, just the push and the head sha.
+  mode.uncommitted = false;
+  calls.length = 0;
+  assert.deepEqual(await options.endRound?.("stalled"), { ended: true, checkpointSha: "abc123" });
+  assert.deepEqual(calls, ["status:/wt", "push:/wt", "head:/wt"]);
+
+  // Only an implement worker is ever checkpointed.
+  const reviewCaptured = captured.length;
+  watchDispatchSpawn(raw, watchFor(true, "review"), seams);
+  const reviewOptions = captured[reviewCaptured];
+  assert.deepEqual(await reviewOptions.endRound?.("stalled"), { ended: false, reason: "not an implement worker" });
+});
+
+test("W1-T7807: a round the dispatch watchdog ended surfaces as the quiet error with its checkpoint", async () => {
+  const captured: QuietWatchdogOptions[] = [];
+  const handle: QuietWatchdogHandle = { observer: () => {}, tick: async () => {}, start: () => () => {} };
+  let signal: AbortSignal | undefined;
+  const raw = (async (args: { signal?: AbortSignal }) => {
+    signal = args.signal;
+    assert.equal(signal?.aborted, false);
+    const ended = await captured[0].endRound?.("worker cannot resume");
+    assert.deepEqual(ended, { ended: true, checkpointSha: "def456" });
+    assert.equal(signal?.aborted, true, "ending the round aborts the worker's own stream");
+    throw new Error("The operation was aborted");
+  }) as never;
+  const watched = watchDispatchSpawn(raw, {
+    enabled: true, taskId: "W1-T7807", runId: "W1-T7807-2", ledgerPath: "/state/ledger.jsonl", fallbackBoundMs: 60_000,
+    spawnArgs: { cwd: "/wt", settingsFile: "/wt/settings.json" } as never,
+    task: { files: [], acceptance: [] } as never,
+    provider: () => undefined,
+    log: () => {},
+  }, {
+    runWatchdog: ((options: QuietWatchdogOptions) => { captured.push(options); return handle; }) as never,
+    hasUncommittedChanges: (() => false) as never,
+    push: (async () => {}) as never,
+    headSha: () => "def456",
+  });
+  await assert.rejects(watched({} as never), (error) => {
+    assert.ok(error instanceof QuietRoundEndedError);
+    assert.equal(error.detail.checkpointSha, "def456");
+    assert.equal(error.detail.reason, "worker cannot resume");
+    return true;
+  });
 });
 
 test("W1-T7807: the contained spawn reports the worker root pid", () => {

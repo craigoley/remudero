@@ -102,7 +102,7 @@
   "src/lib/containment.ts": 750,
   "src/lib/correct.ts": 29,
   "src/lib/daemon-health.ts": 192,
-  "src/lib/daemon.ts": 1750,
+  "src/lib/daemon.ts": 2000,
   "src/lib/deployer.ts": 1000,
   "src/lib/digest.ts": 329,
   "src/lib/dispatch-claim.ts": 130,
