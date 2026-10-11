@@ -14,7 +14,7 @@ import { join } from "node:path";
 
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
-import type { GardenerDeps } from "./gardener.js";
+import { GardenMintTimedOutError, prepareGardenTaskIds, recordGardenMintTimeout, type GardenTaskIdMinter, type GardenerDeps } from "./gardener.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { classifyContribution, feedbackContentDigest, type AdmissionSettings, type AdmissionDecision } from "./contributor-admission.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -309,7 +309,7 @@ export interface FlowGardenSources {
   readLedger?: (sinceIso: string) => FlowLedgerRead;
   readCi?: (headSha: string) => Promise<FlowCiReading | undefined>;
   planTasks?: () => FlowPlanTask[];
-  mintTaskId: (filingBranch: string) => string;
+  mintTaskId: GardenTaskIdMinter;
   admission?: AdmissionFlowInput;
 }
 
@@ -634,6 +634,7 @@ async function fileRegressions(
   const filed = { ...(state.filed ?? {}) };
   const filings = [...(state.filings ?? [])].slice(-30);
   const keys: string[] = [];
+  let decided = true;
   const population = regressed.map((s) => s.current!.p50 - s.baseline!.p50);
   for (const stat of regressed) {
     const planned = tasks.find((t) => t.origin === origin(stat.key) && !closed(t));
@@ -655,21 +656,23 @@ async function fileRegressions(
       keys.push(stat.key);
       deps.log(FLOW_REGRESSION_FILED_STEP, { key: stat.key, task_id: landed.taskId, filing_pr: landed.prUrl, slowest: stat.slowest.map((s) => s.pr) });
     } catch (e) {
+      recordGardenMintTimeout(e, "flow", deps.log);
+      if (e instanceof GardenMintTimedOutError) decided = false;
       deps.log(FLOW_FILING_FAILED_STEP, { key: stat.key, error: String((e as Error)?.message ?? e) });
     }
   }
   state.filed = filed;
   state.filings = filings;
-  return { decided: true, keys };
+  return { decided, keys };
 }
 
 async function landFollowUp(
-  deps: GardenerDeps, mintTaskId: (branch: string) => string, stat: FlowStageStat, population: readonly number[],
+  deps: GardenerDeps, mintTaskId: GardenTaskIdMinter, stat: FlowStageStat, population: readonly number[],
 ): Promise<{ taskId: string; prUrl: string }> {
   const workspace = await deps.openWorkspace();
   try {
     if (!workspace.branch) throw new Error("flow: filing workspace has no branch for task-id reservation");
-    const taskId = mintTaskId(workspace.branch);
+    const taskId = (await prepareGardenTaskIds(workspace, 1, mintTaskId, true))[0]!;
     const rendered = renderFlowFollowUp(stat, taskId, population);
     if (rendered.refused) throw new Error(`flow: follow-up record refused by lint (${rendered.refused})`);
     const relativePath = join("plan", "tasks.d", `${taskId}-${flowFollowUpStem(stat)}.yaml`);

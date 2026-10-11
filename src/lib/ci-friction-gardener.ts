@@ -8,7 +8,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { checkoutHeadStamp } from "./checkout-head.js";
 import type { Escalation } from "./escalate.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
-import { gardenLedgerBucket } from "./gardener.js";
+import { prepareGardenTaskIds, gardenLedgerBucket, type GardenTaskIdMinter } from "./gardener.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { ghExec } from "./github-transport.js";
 import { gateFireRatesPath, type GateFireRateReport } from "./gate-fire-rate.js";
@@ -1108,7 +1108,7 @@ export interface CiFrictionGardenSources {
   ownerSearch: OwnerSearch;
   /** THE RESERVATION PATH (task-id-reservation.ts via `ciLearningTaskIdMinter`, run-task.ts),
    *  never `max(id)+1` — see that minter's own doc for why. */
-  mintTaskId: (filingBranch?: string) => string;
+  mintTaskId: GardenTaskIdMinter;
 }
 
 /** How many of the costliest causes the ladder reports and the pass considers. */
@@ -1319,7 +1319,8 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
         ...(inv.degraded ? { degraded: inv.degraded } : {}),
       };
     },
-    apply: (ws, plan) => {
+    prepare: (ws, plan, async) => prepareGardenTaskIds(ws, plan.actions[0] && plan.actions[0].decision.kind !== "escalate" ? 1 : 0, sources.mintTaskId, async),
+    apply: (ws, plan, _scorecard, heldIds) => {
       const action = plan.actions[0];
       if (!action) return undefined;
       if (action.decision.kind === "escalate") {
@@ -1330,7 +1331,7 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
         return undefined;
       }
       if (!ws.branch) throw new Error("ci-friction gardener: filing workspace has no branch for task-id reservation");
-      const taskId = sources.mintTaskId(ws.branch);
+      const taskId = (heldIds ?? prepareGardenTaskIds(ws, 1, sources.mintTaskId) as string[])[0]!;
       const records = sources.ledgerRecords();
       const contents = ciFrictionShardYaml(
         { price: action.price, rung: action.rung, owner: action.decision.owner, rounds: remedyRoundsOf([
