@@ -20,7 +20,7 @@
         repos/craigoley/remudero/actions/jobs/79bcd36e-1735-5d23-aa94-a1a9e0d4fef4/logs / gh: Not Found (HTTP 404)".
       - Core ledger union 2026-10-10T20:00Z..2026-10-11T19:38Z (23 rotated archives + the live file): 29
         `fix-lane.gardener_failed` rows, every one with that same reason, and ZERO `fixlane.report` rows.
-        state/fix-lane-report.md was last written 2026-10-10 17:36.
+        The gardener's daily markdown report in the core state dir was last written 2026-10-10 17:36.
       - The overseer (W1-T4802) wrote one `gardener_overseer.escalated` row for fix-lane at 2026-10-10T20:16:47Z and,
         by design, nothing after it.
     So on the day an operator session hand-handled about twelve fleet failure classes, the gardener that W1-T7421
