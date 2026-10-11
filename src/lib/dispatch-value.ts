@@ -4,7 +4,7 @@
  */
 import { createHash } from "node:crypto";
 import { deriveTaskClass } from "./task-class.js";
-import { streakRefusal } from "./status.js";
+import { streakRefusal } from "./non-worker-verdict.js";
 
 /** Keeps the pooled prior strictly inside (0, 1) so a zero-merge fleet still yields a proper Beta. */
 const PRIOR_RATE_EPSILON = 1e-3;
