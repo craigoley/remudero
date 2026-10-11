@@ -26,9 +26,18 @@ const REPO_ROOT = process.cwd();
 // repoRoot, so distinct lock discriminators on the real checkout still erase each other's raw files.
 function runPreflightCoverage(repoRoot: string, deps: PreflightCoverageDeps = {}) {
   const privateRoot = repoRoot === REPO_ROOT ? mkdtempSync("/tmp/rmd-coverage-mode-fixture-") : undefined;
+  // A private slot dir with room for the overlapping run: the host-wide default has cores/4 slots
+  // (one on a small runner) and waits up to 45 minutes, so a nested gate would block on the outer
+  // gate's slot until the shard's own timeout instead of reaching the artifact assertion.
+  const slotDir = mkdtempSync("/tmp/rmd-coverage-mode-slots-");
   try {
-    return runPreflightCoverageEngine(privateRoot ?? repoRoot, { ...deps, coverageLockDiscriminator: randomUUID() });
+    return runPreflightCoverageEngine(privateRoot ?? repoRoot, {
+      ...deps,
+      coverageLockDiscriminator: randomUUID(),
+      testSlot: { dir: slotDir, slots: 4, waitBoundMs: 1_000, ...deps.testSlot },
+    });
   } finally {
+    rmSync(slotDir, { recursive: true, force: true });
     if (privateRoot !== undefined) rmSync(privateRoot, { recursive: true, force: true });
   }
 }
