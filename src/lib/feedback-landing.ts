@@ -814,7 +814,8 @@ function* readBranchPending(
  *  identical on `origin/main` (already merged for real) and any whose blob won't resolve (the
  *  ref moved between the `ls-tree` and this per-file read — dropped, never fatal; this is the
  *  W1-T191 regression lock, unchanged by this task). */
-function stageBranchPending(git: GitExec, kind: LandingKind, files: string[], env: NodeJS.ProcessEnv): void {
+function stageBranchPending(git: GitExec, kind: LandingKind, files: string[], env: NodeJS.ProcessEnv, scratchDir: string): FeedbackRefusal[] {
+  const refused: FeedbackRefusal[] = [];
   for (const f of files) {
     let pendingBlob: string;
     try {
@@ -829,8 +830,19 @@ function stageBranchPending(git: GitExec, kind: LandingKind, files: string[], en
       mainBlob = null;
     }
     if (pendingBlob === mainBlob) continue; // already merged into main for real
+    if (mainBlob !== null && isFeedbackRecordPath(kind, f)) {
+      const decision = decideFeedbackStage(git, mainBlob, git(["cat-file", "-p", pendingBlob]));
+      if (decision.kind === "refuse") { refused.push({ path: f, reason: decision.reason }); continue; }
+      if (decision.kind === "keep-upstream") continue;
+      if (decision.content !== undefined) {
+        const source = join(scratchDir, `carried-${files.indexOf(f)}`);
+        writeFileSync(source, decision.content);
+        pendingBlob = git(["hash-object", "-w", source], { env }).trim();
+      }
+    }
     git(["update-index", "--add", "--cacheinfo", `100644,${pendingBlob},${f}`], { env });
   }
+  return refused;
 }
 
 function landingTreeContent(git: GitExec, b: Pick<LandingTreeBuild, "mainSha" | "treeSha">): LandingContent {
@@ -1105,7 +1117,7 @@ function* landPendingSteps(root: string, kind: LandingKind, opts: LandPendingOpt
     // local copy that sits at an earlier §7B lifecycle position — reported below, never dropped
     // in the caller's tree. Every other path (attachments, a stray non-yaml file, and every
     // `decisions`/`ci-learning` family) keeps the exact pre-fix inequality behaviour.
-    const scanLocalUnlanded = (): { files: string[]; sources: Map<string, string>; contents: Map<string, string>; refused: FeedbackRefusal[] } => {
+    const scanLocalUnlanded = (env?: NodeJS.ProcessEnv): { files: string[]; sources: Map<string, string>; contents: Map<string, string>; refused: FeedbackRefusal[] } => {
       const files: string[] = [];
       const sources = new Map<string, string>();
       const contents = new Map<string, string>();
@@ -1118,7 +1130,7 @@ function* landPendingSteps(root: string, kind: LandingKind, opts: LandPendingOpt
         const localSha = git(["hash-object", abs]).trim();
         let remoteSha: string | null;
         try {
-          remoteSha = git(["rev-parse", `origin/main:${rel}`]).trim();
+          remoteSha = git(["rev-parse", env ? `:${rel}` : `origin/main:${rel}`], env ? { env } : undefined).trim();
         } catch {
           remoteSha = null; // not on origin/main at all yet
         }
@@ -1131,6 +1143,7 @@ function* landPendingSteps(root: string, kind: LandingKind, opts: LandPendingOpt
           }
           if (decision.kind === "keep-upstream") continue;
           if (decision.content !== undefined) contents.set(rel, decision.content);
+          else contents.delete(rel);
         }
         if (!sources.has(rel)) files.push(rel);
         sources.set(rel, abs); // a queued decision, listed last, wins over a disk copy of its path
@@ -1160,8 +1173,9 @@ function* landPendingSteps(root: string, kind: LandingKind, opts: LandPendingOpt
       const pending = yield* readBranchPending(git, net, kind);
       if (!pending.ok) throw new Error(pending.reason);
       git(["read-tree", "origin/main"], { env });
-      if (pending.tipSha) stageBranchPending(git, kind, pending.files, env);
-      const { files: unlanded, sources, contents, refused } = scanLocalUnlanded();
+      const carriedRefused = pending.tipSha ? stageBranchPending(git, kind, pending.files, env, scratchDir as string) : [];
+      const { files: unlanded, sources, contents, refused } = scanLocalUnlanded(env);
+      refused.push(...carriedRefused);
       for (const rel of unlanded) {
         let source = sources.get(rel) as string;
         const content = contents.get(rel);
@@ -1351,7 +1365,7 @@ function* landContentSteps(
       // criterion 2, extended by W1-T3560 to the disk-scanning sibling too): this content-only
       // path has no disk to re-scan the way {@link landPending} does, so without this a second
       // call would drop the first call's content entirely.
-      if (pending.tipSha) stageBranchPending(git, kind, pending.files, env);
+      const carriedRefused = pending.tipSha ? stageBranchPending(git, kind, pending.files, env, scratchDir as string) : [];
 
       const unlanded: string[] = [];
       // W1-T3561: `landFeedbackStatusContent` (the console's `POST /v1/feedback/decision` write
@@ -1360,7 +1374,7 @@ function* landContentSteps(
       // `isFeedbackRecordPath`) — it must obey the same monotonic predicate {@link landPending}'s
       // disk scan does, per the task's design point (v), rather than the bare
       // `remoteSha === blobSha` identity check this loop used before.
-      const refused: FeedbackRefusal[] = [];
+      const refused: FeedbackRefusal[] = [...carriedRefused];
       let i = 0;
       for (const { relPath, content: inputContent } of inputs) {
         let content = inputContent;
@@ -1370,7 +1384,7 @@ function* landContentSteps(
         let blobSha = git(["hash-object", "-w", tmpFile], { env }).trim();
         let remoteSha: string | null;
         try {
-          remoteSha = git(["rev-parse", `origin/main:${relPath}`]).trim();
+          remoteSha = git(["rev-parse", `:${relPath}`], { env }).trim();
         } catch {
           remoteSha = null; // not on origin/main at all yet
         }
