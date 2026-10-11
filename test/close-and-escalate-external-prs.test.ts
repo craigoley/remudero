@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { setTimeout, clearTimeout } from "node:timers";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { validateConfigShape } from "../src/lib/config-schema.js";
 import { executeAdmissionDisposition, admissionDispositionStore, observeAdmissionDisposition,
   type AdmissionDispositionReceipt, type AdmissionDispositionStore,
@@ -119,9 +120,29 @@ test("W1-T7755: stalled source reads terminate with unknown evidence within the 
   assert.notEqual(result, undefined, "a source that never settles cannot retain the observer lane");
   assert.ok(result);
   assert.equal(result.status, "pending"); assert.equal(result.permission, "not-granted");
-  assert.ok(performance.now() - started < 1_000);
+  assertWallClockBound(performance.now() - started, 1_000, "a stalled source releases within its declared wall-clock bound");
   assert.deepEqual(sim.counts(), [0, 0]);
 });
+
+for (const port of ["load", "append"] as const) {
+  test(`W1-T7755: stalled journal ${port} releases only its observer lane without effects`, { timeout: 1_000 }, async () => {
+    const { store } = memoryStore("rehearsal"), sim = rehearsal();
+    if (port === "load") store.load = async () => new Promise<readonly AdmissionDispositionReceipt[]>(() => {});
+    else store.append = async () => new Promise<void>(() => {});
+    const short = { ...settings, policy: { ...settings.policy, maxEvidenceAgeMs: 30 } };
+    const pending = executeAdmissionDisposition({ settings: short, target }, store, source(), () => {}, clock, sim.simulation);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([pending, new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), 200); })]);
+    if (timer !== undefined) clearTimeout(timer);
+    assert.notEqual(result, undefined, `a stalled journal ${port} cannot strand selected ordinary work`);
+    assert.ok(result);
+    assert.equal(result.status, "owner-action");
+    assert.equal(result.evidence, "unknown");
+    assert.equal(result.permission, "not-granted");
+    assert.equal(result.laneReleased, true);
+    assert.deepEqual(sim.counts(), [0, 0]);
+  });
+}
 
 test("W1-T7755: configuration permits only opt-in shadow disposition and scoped service actions", () => {
   const base = { claudeBin: "/bin/true", root: "/tmp/fixture", contributorAdmission: settings };
