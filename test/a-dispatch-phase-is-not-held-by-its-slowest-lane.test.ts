@@ -472,7 +472,7 @@ test("a parked checkpoint's receipt outlives its verdict row's rotation", async 
   const postPr = JSON.stringify({ step: "run.freshness_handoff", waiting_on: "ci", ...handoff });
   assert.equal(daemon.pendingWorkerBoundaryHandoffs([postPr]).size, 0, "a post-PR handoff is no checkpoint receipt");
   const verdict = JSON.stringify({ step: "verdict", verdict: "handed_off", reason: "freshness_yield", ...handoff });
-  const h = phase(5 * minute, { readLedgerLines: () => [verdict] });
+  const h = phase(5 * minute, { readLedgerLines: () => ['{"step":"run.freshness_handoff", torn', verdict] });
   try {
     await flush();
     const carried = h.rows.filter(({ step }) => step === "run.freshness_handoff");
