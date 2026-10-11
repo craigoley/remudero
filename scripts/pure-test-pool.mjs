@@ -125,6 +125,12 @@ export function partitionPool(files, { fast, root = ".", readFile } = {}) {
  * (a cross-file leak), not a test failure: the leaking file is located and named, the shard is green
  * and the defect is reported. If it fails isolated too, the failure is the tests' own and is returned.
  *
+ * ORDER (2026-10-11 hang): the isolated rest runs BEFORE the leak is located. Location is a diagnostic
+ * of quiet pool re-runs; it ran first and, with a linear search over a 224-file pool at ~30 s a probe,
+ * held three ci-shards silent until the job's 35-minute cancel, after every test had passed and with
+ * the rest never run. The shard's verdict is now complete before any probe starts, and every probe
+ * logs a line, so a slow location reads as progress, never as a hang.
+ *
  * @returns {{ status: number, poolDefect: null | { leaker: string | null, victim: string | null } }}
  */
 export function runShardWithPool(files, { fast, root = ".", readFile, run, log = (line) => console.error(line) }) {
@@ -132,7 +138,7 @@ export function runShardWithPool(files, { fast, root = ".", readFile, run, log =
   if (pooled.length < 2) return { status: run(files, { pool: false, role: "rest" }), poolDefect: null };
 
   let status = 0;
-  let poolDefect = null;
+  let leaked = false;
   const poolStatus = run(pooled, { pool: true, role: "pool" });
   if (poolStatus !== 0) {
     log(`pure-test-pool: the pool of ${pooled.length} file(s) failed (status ${poolStatus}); re-running them isolated once.`);
@@ -141,26 +147,41 @@ export function runShardWithPool(files, { fast, root = ".", readFile, run, log =
       status = again;
       log("pure-test-pool: the pooled files also fail isolated — a test failure, not a pool defect.");
     } else {
-      poolDefect = locateLeak(pooled, (subset) => run(subset, { pool: true, quiet: true, role: "locate" }));
-      log(
-        `pure-test-pool: POOL DEFECT — every pooled file passes isolated but the pool failed; ` +
-          `leaking file: ${poolDefect.leaker ?? "not isolated to one file"}` +
-          (poolDefect.victim ? ` (first failing alongside it: ${poolDefect.victim})` : "") +
-          `. Add the leak to the census in scripts/pure-test-pool.mjs.`,
-      );
+      leaked = true;
     }
   }
   if (isolated.length > 0) {
     const rest = run(isolated, { pool: false, role: "rest" });
     if (status === 0) status = rest;
   }
+  let poolDefect = null;
+  if (leaked) {
+    log(`pure-test-pool: every pooled file passes isolated; locating the leak among ${pooled.length} file(s) (shard status ${status} is already final).`);
+    let probes = 0;
+    poolDefect = locateLeak(pooled, (subset) => {
+      probes += 1;
+      const probeStatus = run(subset, { pool: true, quiet: true, role: "locate" });
+      log(`pure-test-pool: locate probe ${probes}: ${subset.length} file(s) ending ${subset.at(-1)} -> status ${probeStatus}`);
+      return probeStatus;
+    });
+    log(
+      `pure-test-pool: POOL DEFECT — every pooled file passes isolated but the pool failed; ` +
+        `leaking file: ${poolDefect.leaker ?? "not isolated to one file"}` +
+        (poolDefect.victim ? ` (first failing alongside it: ${poolDefect.victim})` : "") +
+        ` after ${probes} probe(s). Add the leak to the census in scripts/pure-test-pool.mjs.`,
+    );
+  }
   return { status, poolDefect };
 }
 
 /**
- * Name the file that leaks. `runPool(subset)` returns a status. The smallest failing PREFIX ends at
- * the victim (the file that trips over the leak, or the leaker itself); the leaker is the file whose
- * removal from that prefix makes it pass.
+ * Name the file that leaks, in O(log n) pool runs. `runPool(subset)` returns a status.
+ *
+ * The smallest failing PREFIX ends at the victim (the file that trips over the leak, or the leaker
+ * itself). The leaker is then the last file of the shortest run of the victim's predecessors that
+ * still fails with the victim appended; a victim that fails pooled ALONE is its own leaker. Both are
+ * binary searches: the linear "drop one file at a time" search this replaced cost up to one full pool
+ * run per predecessor (2026-10-11: past 33 minutes on one shard).
  * @returns {{ leaker: string | null, victim: string | null }}
  */
 export function locateLeak(pooled, runPool) {
@@ -174,9 +195,15 @@ export function locateLeak(pooled, runPool) {
   const prefix = pooled.slice(0, hi);
   if (runPool(prefix) === 0) return { leaker: null, victim: null }; // the failure did not reproduce
   const victim = prefix[prefix.length - 1];
-  for (let i = 0; i < prefix.length; i++) {
-    const without = prefix.filter((_, j) => j !== i);
-    if (without.length > 0 && runPool(without) === 0) return { leaker: prefix[i], victim };
+  const before = prefix.slice(0, -1);
+  if (runPool([victim]) !== 0) return { leaker: victim, victim };
+  // With every predecessor it is the failing prefix itself; find the fewest that still fail.
+  let low = 1;
+  let high = before.length;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (runPool([...before.slice(0, mid), victim]) !== 0) high = mid;
+    else low = mid + 1;
   }
-  return { leaker: null, victim };
+  return { leaker: before[high - 1], victim };
 }

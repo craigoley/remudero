@@ -2721,30 +2721,6 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     "listTrackedTestFiles shells `git ls-files -- test` — test/ only; src/ is the PROTECTED target this suite guards, not the " +
       "population it walks and asserts over",
   ),
-  // W1-T2643's OWN proof file. Its prose and its own recognizer-exercising tests inevitably
-  // mention "ls-files" and "src/" (the same self-reference test/nothing-tells-you-which-census-
-  // suites-your-change-joins.test.ts already has above), which trips the text-substring
-  // recognizer — proven by the drift-guard test below catching itself before this entry existed.
-  // It never shells `git ls-files` itself (only `git grep`, via censusPopulationDrift), so it
-  // fails clause (a) exactly like its W1-T2523 sibling.
-  refusedForPredicate(
-    "test/the-census-admission-set-is-derived-not-enumerated.test.ts",
-    "a",
-    "this file — meta-tests CENSUS_POPULATION/censusPopulationDrift/FAST_GATE_STEPS themselves; its one real git call is " +
-      "`git grep`, never `git ls-files`, so it is not itself a src-population walk",
-  ),
-  // W1-T2644's OWN proof file, the same self-reference shape its sibling directly above already
-  // has: it discusses (and, for the UNCLASSIFIED test, fabricates fixture text containing) both
-  // "ls-files" and "src/", which trips the recognizer's text-substring match. It never shells
-  // `git ls-files` itself — only `censusPopulationDrift`'s own `git grep` seam, under a mock —
-  // so it fails clause (a) exactly like the entry above it.
-  refusedForPredicate(
-    "test/the-census-roster-is-named-not-numbered.test.ts",
-    "a",
-    "this file — asserts CENSUS_SUITE_ROSTER/CENSUS_POPULATION/censusPopulationDrift/FAST_GATE_STEPS stay one consistent " +
-      "source; every git call it makes is through a mocked PreflightSpawn, never a real `git ls-files`, so it is not itself " +
-      "a src-population walk",
-  ),
   // W1-T2647's OWN proof file — self-reference shape as its siblings above; only real git call
   // is `git grep`, never `git ls-files`, so it fails clause (a).
   refusedForPredicate("test/census-population-is-derived-not-counted.test.ts", "a", "this file — W1-T2647's falsifier; its one real git call is `git grep`, never `git ls-files`"),

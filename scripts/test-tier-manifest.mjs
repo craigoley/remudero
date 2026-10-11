@@ -64,6 +64,25 @@ export const DEFAULT_CI_SHARD_COUNT = 8;
  *  ordinary file stays fast and only genuinely long-running files move tiers. */
 export const DEFAULT_SLOW_THRESHOLD_MS = 5000;
 
+/**
+ * A HUNG FAST-TIER TEST FAILS BY NAME instead of holding its ci-shard to the job's 35-minute cancel.
+ *
+ * A fast-tier FILE is one whose whole recorded run is under the tier threshold, so one test inside it
+ * running this many times that threshold is stuck, not slow (the longest top-level test across six
+ * 2026-10-11 ci-shard logs, ~17,600 results, was 5.4 s). It is a backstop, not a tuning knob: it scales
+ * with `thresholdMs`, a test that sets its own `timeout` keeps it, and `--test-force-exit` beside it
+ * lets the process end once every test has a result, so a handle a timed-out test leaked cannot keep a
+ * finished run alive. Neither can fire while the event loop is blocked synchronously.
+ */
+export const FAST_TIER_TEST_TIMEOUT_FACTOR = 24;
+
+/** The node flags that bound a fast-tier run: a per-test timeout derived from the tier threshold,
+ *  and an exit once every test has finished. */
+export function fastTierHangBoundArgs(manifest) {
+  const thresholdMs = Number.isFinite(manifest?.thresholdMs) && manifest.thresholdMs > 0 ? manifest.thresholdMs : DEFAULT_SLOW_THRESHOLD_MS;
+  return [`--test-timeout=${thresholdMs * FAST_TIER_TEST_TIMEOUT_FACTOR}`, "--test-force-exit"];
+}
+
 /** A materially different observation is worth naming before it is applied to the next proposal.
  * Two is intentionally a factor, not an absolute-ms tolerance: the ledger ranges from sub-ms
  * fixtures to multi-minute browser suites, and the same absolute delta would be noise in one
@@ -785,11 +804,12 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
   // `quiet` is a leak-locating re-run whose output and durations nobody wants. A role other than
   // "rest" writes its durations beside the main file (shard-1.pool.json), because the reporter
   // rewrites its destination and two children would otherwise erase each other's evidence.
-  const spawnTestFiles = (files, { pool = false, quiet = false, role = "rest" } = {}) => {
+  const spawnTestFiles = (files, { pool = false, quiet = false, role = "rest", bounded = false } = {}) => {
     // TAP on stdout always: test-with-retry parses this output, and Node 24 no longer defaults a
     // piped run to TAP. Reporters pair with destinations in order, so the duration reporter follows.
     const testArgs = ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--test-reporter=tap", "--test-reporter-destination=stdout"];
     if (pool) testArgs.push(POOL_ISOLATION_FLAG);
+    if (bounded) testArgs.push(...fastTierHangBoundArgs(manifest));
     const durationOutputRaw = env.RMD_TEST_DURATION_OUTPUT;
     if (durationOutputRaw && !quiet) {
       const resolved = resolve(root, durationOutputRaw);
@@ -1070,9 +1090,9 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
     }
     // W1-T6085: only the fast tier shares processes; a slow file keeps its own child.
     if (runTier === "fast" && env.RMD_TEST_POOL !== "0") {
-      return runShardWithPool(files, { fast, root, run: spawnTestFiles }).status;
+      return runShardWithPool(files, { fast, root, run: (subset, opts) => spawnTestFiles(subset, { ...opts, bounded: true }) }).status;
     }
-    return spawnTestFiles(files);
+    return spawnTestFiles(files, { bounded: runTier === "fast" });
   }
 
   const { fast, slow } = tierFiles(testFiles, manifest);

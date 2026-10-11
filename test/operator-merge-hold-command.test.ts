@@ -165,10 +165,10 @@ test("mergeHoldCommand routes parsed CLI input to the durable writer and reports
       { ledgerPath, now: () => 44, isInteractive: () => true },
     );
     assert.equal(exit, 0);
-    assert.deepEqual(automergeHoldFromLedger(readLedgerLines(ledgerPath), 3511), {
-      by: "craig",
-      reason: "manual squash override",
-    });
+    const hold = automergeHoldFromLedger(readLedgerLines(ledgerPath), 3511);
+    assert.equal(hold?.by, "craig");
+    assert.equal(hold?.reason, "manual squash override");
+    assert.equal(hold?.actor?.kind, "human", "W1-T7721: the command records the writer's actor beside the claimed name");
     assert.match(output.join("\n"), /ENGAGED for PR #3511/);
     assert.match(output.join("\n"), /read back through the production hold reader/);
   } finally {

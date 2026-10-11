@@ -73,6 +73,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "sweep.disposed": A_LANE_RUN_ID,
   "pr.terminal": A_LANE_RUN_ID, // W1-T5318: the sweep's terminal-row rung, under SWEEP-/DAEMON- run ids
   "sweep.escalation_closed": A_LANE_RUN_ID,
+  "pr.closing_reference_defused": A_LANE_RUN_ID, // the arm path's body rewrite, under run_id closing-reference-guard
   "sweep.head_moved": A_LANE_RUN_ID, // W1-T5749: the act-time head guard, under SWEEP-/DAEMON- run ids
   "sweep.missing_task_trailer_repaired": A_LANE_RUN_ID,
   "sweep.post_fix_redriven": A_LANE_RUN_ID,

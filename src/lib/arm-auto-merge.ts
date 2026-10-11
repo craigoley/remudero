@@ -45,6 +45,11 @@ import {
   type PlanMergeSafetyReadings,
 } from "./plan-pr-merge-safety.js";
 import { readLedgerLines } from "./status.js";
+import {
+  closingReferenceGuardSteps,
+  recordClosingReferenceToLedger,
+  type ClosingReferenceGuardResult,
+} from "./closing-reference-guard.js";
 import { ghExec, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { classifyContribution, contributorAdmissionSteps, readAdmissionRest, readAdmissionRestAsync,
   type AdmissionRead, type AdmissionSettings, type AdmissionTarget, type AdmissionAction, type AdmissionRecord } from "./contributor-admission.js";
@@ -579,6 +584,10 @@ export interface ArmDeps<A extends boolean = false> {
   enqueue?: (prUrl: string) => MaybeAsync<void, A>;
   /** W1-T4581 — explicit stack parents must all be merged before either arm or direct-merge path. */
   stackPrerequisite?: (prUrl: string) => MaybeAsync<StackPrerequisiteCheck, A>;
+  /** OPTIONAL. Rewrites each closing keyword in the PR's body that names another OPEN pull request,
+   *  before any arm, enqueue or merge: GitHub closes that PR when this one merges (core #10856,
+   *  closed by console #2035's merge on 2026-10-11). See lib/closing-reference-guard.ts. */
+  closingReferences?: (prUrl: string) => MaybeAsync<ClosingReferenceGuardResult, A>;
   say: (msg: string) => void;
 }
 
@@ -646,6 +655,10 @@ export function realArmDeps(
       runGh(["pr", "merge", prUrl], { encoding: "utf8", stdio: "pipe" });
     },
     stackPrerequisite: (prUrl) => stackPrerequisiteFromRest(prUrl),
+    closingReferences: (prUrl) => runStepsSync(closingReferenceGuardSteps(prUrl, ghJson, (args) => {
+      assertLiveWriteAllowed("gh-pr-merge", `rewriting a closing keyword in the body of ${prUrl} before merging it`);
+      return runGh(args, { encoding: "utf8", stdio: "pipe" });
+    }, recordClosingReferenceToLedger(loadConfigImpl))),
     say: (msg) => console.log(msg),
   };
 }
@@ -673,6 +686,10 @@ export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig)
     },
     readPlanTouch: (prUrl, headSha) => runStepsAsync(cachedPlanTouchSteps(prUrl, headSha, ghJsonAsync)),
     stackPrerequisite: (prUrl) => runStepsAsync(stackPrerequisiteSteps(prUrl, ghJsonAsync)),
+    closingReferences: (prUrl) => runStepsAsync(closingReferenceGuardSteps(prUrl, ghJsonAsync, async (args) => {
+      assertLiveWriteAllowed("gh-pr-merge", `rewriting a closing keyword in the body of ${prUrl} before merging it`);
+      return ghTextAsync(args);
+    }, recordClosingReferenceToLedger(loadConfigImpl))),
     sleep: async (ms) => { if (ms > 0) await delay(ms); },
     armAuto: async (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
@@ -1254,7 +1271,7 @@ export const REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS = 2_000;
 export function attemptArm(
   prUrl: string,
   deps: Pick<ArmDeps<false>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<false>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "contributorAdmission">>,
+    Partial<Pick<ArmDeps<false>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
   priorHeadSha?: string,
   // W1-T3551: read off `OpenPrView.isDraft` (POSITIVE match only — `undefined`/`false` both fall
   // through unchanged). This is the ONE shared call site {@link armAutoMergeDetailed} (ledger-gated
@@ -1271,7 +1288,7 @@ export function attemptArm(
 export function attemptArmAsync(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "contributorAdmission">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Promise<ArmAttemptResult> {
@@ -1281,7 +1298,7 @@ export function attemptArmAsync(
 function* attemptArmSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "checksGreenReviewed" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "contributorAdmission">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "checksGreenReviewed" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Steps<ArmAttemptResult> {
@@ -1324,6 +1341,32 @@ function* attemptArmSteps(
       const detail = stack.detail ?? `stack prerequisite state was ${stack.state}`;
       deps.say(`automerge.stack_parent_refused (W1-T4581): ${detail} — arm withheld: ${prUrl}`);
       return { outcome: "stack-parent-refused", error: detail };
+    }
+  }
+  // Before every arm, enqueue and merge below: a closing keyword naming another open PR would
+  // close it when this one merges. A body that cannot be read or rewritten withholds the arm, and
+  // the next pass retries it.
+  if (deps.closingReferences) {
+    let guard: ClosingReferenceGuardResult;
+    try {
+      guard = yield* step(() => deps.closingReferences!(prUrl));
+    } catch (e) {
+      // A guard that threw proves nothing about the body, so it withholds the arm like a failed one.
+      guard = { state: "failed", defused: [], detail: `closing-reference guard threw: ${String((e as Error)?.message ?? e)}` };
+    }
+    if (guard.state === "failed") {
+      const detail = guard.detail ?? "the closing-reference guard failed";
+      deps.say(
+        `automerge.closing_reference_refused: ${detail} — merging could close an open pull request this body names; ` +
+          `arm withheld: ${prUrl}`,
+      );
+      return { outcome: "arm-error-ignored", error: detail };
+    }
+    if (guard.state === "defused") {
+      deps.say(
+        `automerge.closing_reference_defused: rewrote ${guard.defused.map((d) => `"${d.reference}"`).join(", ")} so ` +
+          `merging never closes ${guard.defused.map((d) => d.url).join(", ")}: ${prUrl}`,
+      );
     }
   }
   if (yield* step(() => deps.mergeQueue?.(prUrl))) return yield* attemptQueueArmSteps(prUrl, deps);
@@ -1622,7 +1665,7 @@ function* attemptQueueArmSteps(
 export function armAutoMergeAtOpen(
   prUrl: string,
   deps: (Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "sleepSync" | "stackPrerequisite" | "contributorAdmission">>) = realArmDeps(),
+    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "sleepSync" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>) = realArmDeps(),
   irreversible = false,
   // W1-T3551: threaded straight through to {@link attemptArm}'s shared gate — see that function's
   // own doc. Defaults false, so every existing call site (which predates this parameter and never
@@ -1638,7 +1681,7 @@ export function armAutoMergeAtOpen(
 export async function armAutoMergeAtOpenAsync(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "contributorAdmission">> = realArmDepsAsync(),
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">> = realArmDepsAsync(),
   irreversible = false,
   isDraft = false,
 ): Promise<ArmOutcome> {
@@ -1649,7 +1692,7 @@ export async function armAutoMergeAtOpenAsync(
 function* armAtOpenSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "contributorAdmission">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
   irreversible: boolean,
   isDraft: boolean,
 ): Steps<ArmOutcome> {
