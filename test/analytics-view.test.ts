@@ -14,13 +14,20 @@ import {
   writeAnalyticsCheckpoint,
   type AnalyticsSnapshot,
   type AnalyticsTimer,
+  type CashSpendSnapshot,
 } from "../src/lib/analytics-route.js";
 import {
   ANALYTICS_SOURCE_CONSOLE_V1,
+  ANALYTICS_SOURCE_SIGNALS,
+  ANALYTICS_SOURCE_USAGE,
+  ANALYTICS_DETAILS_MAX_BYTES,
+  ANALYTICS_DETAILS_TOTAL_BYTES,
   ANALYTICS_SOURCE_NAMES,
   ANALYTICS_STALE_AFTER_MS,
   ANALYTICS_VIEW_NAME,
   analyticsLegacyView,
+  analyticsConsoleSource,
+  analyticsDetails,
   analyticsSourceBodies,
   createAnalyticsView,
   mergeAnalytics,
@@ -33,9 +40,11 @@ import { attachReadModel, currentReadModelPath, sourceSnapshotStates, type Sourc
 import { runSlowLaneWorker, type AnalyticsRefresh, type SlowLaneMessage } from "../src/lib/read-model-slow-lane.js";
 import { createReadModelTicker, readModelSwitchesPath, runReadModelWorker, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { buildUsageProjection, accumulateUsageLine, usageTelemetryState } from "../src/lib/usage-telemetry.js";
 import { createViewShadow, legacyViewSampler, type ShadowEvidence, type ShadowRequest } from "../src/lib/view-shadow.js";
 import type { ViewSource } from "../src/lib/views.js";
 import { switchViewsOn } from "./helpers/read-model-switches.js";
+import { SPEC, violations } from "./helpers/openapi-strict.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 
@@ -74,8 +83,8 @@ function snapshotOf(lines: ReadonlyArray<Record<string, unknown>>, atMs: number)
   return deriveAnalyticsSnapshot(lines, iso(atMs));
 }
 
-function written(instance: string, snapshot: AnalyticsSnapshot): SourceSnapshotWrite {
-  return { instance, ok: true, asOf: snapshot.asOf!, bodies: analyticsSourceBodies(snapshot) };
+function written(instance: string, snapshot: AnalyticsSnapshot, repository?: string): SourceSnapshotWrite {
+  return { instance, ok: true, asOf: snapshot.asOf!, bodies: analyticsSourceBodies(snapshot, repository) };
 }
 
 function metric(data: AnalyticsViewData, key: string): { value: number | null; instances: number; notCollectedReason?: string } {
@@ -85,11 +94,10 @@ function metric(data: AnalyticsViewData, key: string): { value: number | null; i
 }
 
 /** Two instances' stores, a ticker building only the analytics view over them, and its latest analytics body. */
-function world(t: TestCtx, clock: Clock, opts: { stateDir?: string; holder?: string } = {}) {
+function world(t: TestCtx, clock: Clock, opts: { stateDir?: string; holder?: string; names?: string[] } = {}) {
   const stateDir = opts.stateDir ?? scratch(t, "analytics-view-state");
-  const coreDir = join(stateDir, "ledgers", "core");
-  const siteDir = join(stateDir, "ledgers", "site");
-  for (const dir of [coreDir, siteDir]) {
+  const instances = (opts.names ?? ["core", "site"]).map((name) => ({ name, ledgerDir: join(stateDir, "ledgers", name) }));
+  for (const { ledgerDir: dir } of instances) {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "ledger.ndjson"), `${JSON.stringify({ ts: iso(T0 - MINUTE), step: "daemon.tick" })}\n`);
   }
@@ -97,7 +105,7 @@ function world(t: TestCtx, clock: Clock, opts: { stateDir?: string; holder?: str
   if (!existsSync(readModelSwitchesPath(stateDir))) switchViewsOn(stateDir, [ANALYTICS_VIEW_NAME]);
   const posted: ReadModelWorkerMessage[] = [];
   const ticker = createReadModelTicker({
-    stateDir, instances: [{ name: "core", ledgerDir: coreDir }, { name: "site", ledgerDir: siteDir }], views: [createAnalyticsView()],
+    stateDir, instances, views: [createAnalyticsView()],
     clock, holder: opts.holder ?? "holder-1", oracle: "off", post: (m) => void posted.push(m),
   });
   ticker.start();
@@ -155,6 +163,151 @@ test("W1-T5055: the analytics view merges every instance snapshot", (t) => {
   assert.deepEqual(data.instances.map((i) => [i.instanceId, i.metrics?.find((m) => m.key === "runs.completed")?.value]), [["core", 2], ["site", 1]]);
   assert.deepEqual(sources.map((s) => [s.name, s.state, s.asOf]), [["analytics:core", "fresh", core.asOf], ["analytics:site", "fresh", site.asOf]]);
   assert.equal(stale, false);
+});
+
+test("cached analytics details retain three repositories and their measured cash through a warm restart", (t) => {
+  const { clock } = handClock(T0);
+  const names = ["core", "site", "console"];
+  const repos = ["craigoley/remudero", "craigoley/remudero-site", "craigoley/remudero-console"];
+  const first = world(t, clock, { names });
+  const amounts = [1.25, 2.5, 5];
+  names.forEach((name, i) => {
+    const snapshot = snapshotOf([
+      ...CORE_LINES,
+      { ts: iso(T0 - MINUTE), step: "implement.done", provider: "cash", model: "cash-test", cost_usd: amounts[i], repo: "untrusted/ledger-label" },
+      { ts: iso(T0 - MINUTE), step: "fix.done", provider: "cash", model: "cash-test" },
+    ], T0);
+    assert.equal(snapshot.spend.cash.windows.find((window) => window.name === "7d")?.usd, amounts[i], "positive control: each real producer corpus has different measured cash");
+    first.ticker.acceptSnapshot(written(name, snapshot, repos[i]));
+  });
+  first.ticker.tick();
+  const before = first.body();
+  assert.deepEqual(before.data.instances.map((entry) => entry.repository), repos);
+  assert.deepEqual(before.data.instances.map((entry) => {
+    assert.ok(entry.details?.state === "reported");
+    assert.equal(entry.details.version, "analytics-details-v1");
+    assert.equal(entry.details.asOf, iso(T0));
+    assert.equal(entry.details.usage?.version, "usage-v2");
+    assert.ok(entry.details.signals.timeSeries.length > 0);
+    const cash = entry.details.signals.spend.cash as CashSpendSnapshot;
+    return cash.windows.find((window) => window.name === "7d")?.usd;
+  }), amounts);
+  const firstDetails = before.data.instances[0]!.details;
+  assert.ok(firstDetails?.state === "reported");
+  assert.equal((firstDetails.signals.spend.cash as CashSpendSnapshot).windows[0]!.unpricedRows, 1);
+  first.ticker.release();
+  const after = world(t, clock, { names, stateDir: first.stateDir, holder: "details-restart" });
+  t.after(() => after.ticker.release());
+  assert.deepEqual(after.body().data, before.data, "no refresh/provider/ledger scan is needed to recover stored detail projections");
+});
+
+test("cached analytics details refuse mixed snapshot times and corrupt stored JSON without erasing metrics", (t) => {
+  const { clock } = handClock(T0);
+  const w = world(t, clock);
+  t.after(() => w.ticker.release());
+  const snapshot = snapshotOf(CORE_LINES, T0);
+  w.ticker.acceptSnapshot(written("core", snapshot, "craigoley/remudero"));
+  const db = attachReadModel(currentReadModelPath(w.stateDir, "core", LEDGER_PROJECTOR_SCHEMA_VERSION), LEDGER_PROJECTOR_SCHEMA_VERSION);
+  t.after(() => db.close());
+  // This is fixture-only corruption in a real persisted row, not an injected read fake.
+  db.prepare("UPDATE source_snapshot SET body = '{' WHERE instance = ? AND name = ?").run("core", ANALYTICS_SOURCE_SIGNALS);
+  w.ticker.tick();
+  assert.deepEqual(w.body().data.instances[0]!.details, { version: "analytics-details-v1", state: "unavailable", asOf: snapshot.asOf, reason: "stored analytics details could not be read" });
+  assert.equal(metric(w.body().data, "runs.completed").value, 2);
+  const next = snapshotOf(CORE_LINES, T0 + MINUTE);
+  w.ticker.acceptSnapshot(written("core", next, "craigoley/remudero"));
+  w.ticker.tick();
+  assert.equal(w.body().data.instances[0]!.details?.state, "reported");
+  // Only usage moves: do not join new usage onto the old cash/metrics snapshot.
+  w.ticker.acceptSnapshot({ instance: "core", ok: true, asOf: iso(T0 + 2 * MINUTE), bodies: [analyticsSourceBodies(snapshotOf(CORE_LINES, T0 + 2 * MINUTE))[2]!] });
+  w.ticker.tick();
+  const mixed = w.body().data.instances[0]!.details;
+  assert.ok(mixed?.state === "unavailable");
+  assert.match(mixed.reason, /another snapshot/);
+  assert.equal(metric(w.body().data, "runs.completed").value, 2);
+});
+
+test("cached analytics details preserve the last values and mark a usage-only refresh failure stale", (t) => {
+  const { clock } = handClock(T0);
+  const w = world(t, clock);
+  t.after(() => w.ticker.release());
+  w.ticker.acceptSnapshot(written("core", snapshotOf(CORE_LINES, T0), "craigoley/remudero"));
+  w.ticker.tick();
+  const kept = w.body().data.instances[0];
+  w.ticker.acceptSnapshot({ instance: "core", ok: false, names: [ANALYTICS_SOURCE_USAGE], error: "usage refresh failed", atMs: T0 + MINUTE });
+  w.ticker.tick();
+  assert.deepEqual(w.body().data.instances[0], kept);
+  assert.deepEqual([w.reading("analytics:core")?.state, w.reading("analytics:core")?.phase], ["stale", "failed"]);
+});
+
+test("cached analytics details keep unknown repository identity and absent usage explicit and strip private snapshot fields", () => {
+  const snapshot = snapshotOf(CORE_LINES, T0);
+  const bodies = analyticsSourceBodies(snapshot, "not/a/slug");
+  assert.equal((bodies[0]!.body as AnalyticsConsoleSource).repository, undefined);
+  const details = analyticsDetails(snapshot.asOf!, { ...(bodies[1]!.body as object), operatorAgentMemory: { secret: "PRIVATE-SENTINEL" } }, { ...snapshot.usage!, privateLedger: "PRIVATE-SENTINEL" });
+  assert.equal(details.state, "reported");
+  assert.equal(JSON.stringify(details).includes("PRIVATE-SENTINEL"), false);
+  assert.equal(analyticsDetails(snapshot.asOf!, bodies[1]!.body, null).state, "reported", "null usage means not collected, not a fabricated empty projection");
+  assert.equal(analyticsDetails(snapshot.asOf!, null, snapshot.usage).state, "unavailable");
+  assert.equal(analyticsDetails(snapshot.asOf!, bodies[1]!.body, { ...snapshot.usage, version: "usage-v999" }).state, "unavailable");
+});
+
+test("cached analytics details bound a twelve-repository response without silently dropping metrics or claiming complete details", () => {
+  const snapshot = snapshotOf(CORE_LINES, T0);
+  const bodies = analyticsSourceBodies(snapshot);
+  const oversized = { ...(bodies[1]!.body as object), timeSeries: [{ ...snapshot.timeSeries[0]!, comment: "x".repeat(ANALYTICS_DETAILS_MAX_BYTES) }] };
+  const refused = analyticsDetails(snapshot.asOf!, oversized, snapshot.usage);
+  assert.equal(refused.state, "unavailable");
+  const large = analyticsDetails(snapshot.asOf!, { ...(bodies[1]!.body as object), timeSeries: [{ ...snapshot.timeSeries[0]!, comment: "x".repeat(160 * 1024) }] }, snapshot.usage);
+  assert.ok(large.state === "reported");
+  const inputs = Array.from({ length: 12 }, (_, i) => ({ instanceId: `repo-${i}`, snapshot: { asOf: snapshot.asOf!, console: analyticsConsoleSource(snapshot, `org/repo-${i}`), details: large } }));
+  const merged = mergeAnalytics(inputs, T0);
+  assert.equal(merged.data.coverage.counted, 12);
+  assert.equal(merged.data.instances.length, 12);
+  assert.ok(merged.data.instances.some((entry) => entry.details?.state === "unavailable"));
+  const bytes = merged.data.instances.reduce((total, entry) => total + (entry.details?.state === "reported" ? entry.details.payloadBytes : 0), 0);
+  assert.ok(bytes > 0 && bytes <= ANALYTICS_DETAILS_TOTAL_BYTES);
+  assert.ok(Buffer.byteLength(JSON.stringify(merged)) < 2 * 1024 * 1024);
+});
+
+test("cached analytics details declare populated spend, subscription and routing projections without permitting private fields", () => {
+  const ts = iso(T0 - MINUTE);
+  const assignment = { ts, step: "worker.assignment", run_id: "R-core-a", task_id: "W1-T1", lane: "run-task", worker_assignment: {
+    version: 1, id: "cached-assignment", phase: "pre-execution",
+    requested: { model: "sonnet", effort: "high", maxTurns: 400 },
+    selected: { provider: "cash", model: "cached-test", effort: "high" },
+    routing: { mode: "cash", selectionPath: "auction", policy: { preference: "automatic", reservePercent: 5, provenance: "default" }, decision: {
+      rule: "headroom-auction", capability: "balanced", headroomPercent: { claude: 80 },
+      trial: "cached-test", trialArm: "cash", trialReason: "bounded schema fixture",
+      considered: [{ provider: "claude", model: "sonnet", eligible: true, selected: false, reason: "not selected" }],
+    } },
+    candidates: [{ provider: "claude", readable: true, windows: [{ name: "session (5h)", usedPercent: 20, resetsAt: iso(T0 + 3_600_000) }] }],
+  } };
+  const rows = [...CORE_LINES, assignment,
+    { ts, step: "implement.done", provider: "cash", run_id: "R-core-a", model: "cached-test", total_cost_usd: 1.5 },
+    { ts, step: "verdict", run_id: "R-core-a", success: true, selection_assignment_id: "cached-assignment", verdict: "merged", total_cost_usd: 1.5 },
+    { ts, step: "implement.step_up", model: "cached-test" },
+  ];
+  const snapshot = snapshotOf(rows, T0);
+  const bodies = analyticsSourceBodies(snapshot, "craigoley/remudero");
+  // Positive controls: nonempty nested arrays validate real elements, not just their empty wrappers.
+  assert.ok(snapshot.usage!.subscriptions.some((entry) => entry.windows.length > 0));
+  assert.ok(snapshot.usage!.routing.recent.length > 0 && snapshot.usage!.routing.experiments.length > 0);
+  assert.ok(snapshot.usage!.cash.byModel24h.length > 0 && snapshot.routingTelemetry.buckets.length > 0);
+  const schema = SPEC.components.schemas.AnalyticsStoredDetails!;
+  for (const usage of [snapshot.usage, null]) {
+    const details = analyticsDetails(snapshot.asOf!, bodies[1]!.body, usage);
+    assert.deepEqual(violations(details, schema), []);
+    assert.ok(details.state === "reported");
+    assert.ok(violations({ ...details, signals: { ...details.signals, privateLedger: "PRIVATE" } }, schema).length > 0);
+    assert.ok(violations({ ...details, signals: { ...details.signals, spend: { cash: { ...snapshot.spend.cash, privateLedger: "PRIVATE" } } } }, schema).length > 0);
+  }
+  const state = usageTelemetryState();
+  for (const row of rows) accumulateUsageLine(state, row);
+  assert.deepEqual(violations(analyticsDetails(snapshot.asOf!, bodies[1]!.body, buildUsageProjection(state, snapshot.asOf!, undefined, "usage-v1")), schema), []);
+  const refused = analyticsDetails(snapshot.asOf!, null, null);
+  assert.deepEqual(violations(refused, schema), []);
+  assert.ok(violations({ ...refused, state: "reported" }, schema).length > 0, "reported without projections cannot validate");
 });
 
 test("W1-T5055: after a restart the analytics view answers from the persisted source snapshot", (t) => {
@@ -340,7 +493,7 @@ function lane(config: Parameters<typeof runSlowLaneWorker>[1], refresh?: Analyti
 test("the slow lane refreshes each instance's analytics off serve's loop and posts its source snapshots", async (t) => {
   const stateDir = scratch(t, "analytics-lane");
   writeFileSync(join(stateDir, "ledger.ndjson"), CORE_LINES.map((l) => `${JSON.stringify(l)}\n`).join(""));
-  const l = lane({ analytics: { instances: [{ name: "core", stateDir }] }, intervalMs: 60_000 });
+  const l = lane({ analytics: { instances: [{ name: "core", stateDir, repository: "craigoley/remudero" }] }, intervalMs: 60_000 });
   t.after(() => l.handle.stop());
   l.lease();
   await l.settle({ passes: 1, snapshots: 0 });
@@ -352,6 +505,7 @@ test("the slow lane refreshes each instance's analytics off serve's loop and pos
   assert.ok(write.ok);
   assert.deepEqual(write.bodies.map((b) => b.name), [...ANALYTICS_SOURCE_NAMES]);
   const console = write.bodies[0]!.body as AnalyticsConsoleSource;
+  assert.equal(console.repository, "craigoley/remudero", "the configured repository travels with the slow-lane snapshot, not the ledger's o/r label");
   assert.deepEqual([console.projection.metrics.find((m) => m.key === "runs.completed")?.value, console.cacheReuseTokens, console.taskDurationsMs], [2, { input: 10, cacheRead: 90, cacheCreation: 0 }, [10_000, 20_000]]);
   assert.equal((write.bodies[1]!.body as { version: string }).version, "console-signals-v1");
   assert.equal("queue" in (write.bodies[1]!.body as object), false, "the live readings are serve's and are not written as zeros");
@@ -403,7 +557,7 @@ test("the read-model worker commits a real slow lane's analytics refresh and ser
   let onMessage: ((msg: { type?: string }) => void) | undefined;
   runReadModelWorker(
     { on: (_event, run) => (onMessage = run), postMessage: (m) => void posted.push(m as ReadModelWorkerMessage), close: () => {} },
-    { kind: "remudero-read-model", stateDir, instances: [{ name: "core", ledgerDir }], tickMs: 20, signal: new SharedArrayBuffer(8), slowLane: { intervalMs: 60_000 } },
+    { kind: "remudero-read-model", stateDir, instances: [{ name: "core", ledgerDir, repo: "craigoley/remudero" }], tickMs: 20, signal: new SharedArrayBuffer(8), slowLane: { intervalMs: 60_000 } },
   );
   t.after(() => onMessage?.({ type: "stop" }));
   const merged = (): AnalyticsViewData | undefined => {
@@ -414,6 +568,7 @@ test("the read-model worker commits a real slow lane's analytics refresh and ser
   while (merged()?.coverage.counted !== 1 && Date.now() < deadline) await sleep(20);
   assert.deepEqual(merged()?.coverage, { counted: 1, of: 1, missing: [] }, JSON.stringify(posted.filter((m) => m.type === "log")));
   assert.equal(metric(merged()!, "runs.completed").value, 2);
+  assert.equal(merged()!.instances[0]!.repository, "craigoley/remudero", "the real worker supplies the identity to its default analytics unit");
   onMessage?.({ type: "stop" });
 });
 
@@ -430,7 +585,10 @@ function compareAnalytics(legacy: Array<[string, AnalyticsSnapshot]>, view: Arra
   const definition = analyticsLegacyView({ clock, scopes: () => legacy.map(([instanceId, snapshot]) => ({ instanceId, analytics: () => snapshot })) });
   legacyViewSampler({ legacy: [definition], clock, defer: (run) => run(), post: (request) => void posted.push(request) })(ANALYTICS_VIEW_NAME, "", new URLSearchParams());
   assert.ok(posted[0]?.legacy, "legacy rendered the sample");
-  const body = mergeAnalytics(view.map(([instanceId, snapshot]) => ({ instanceId, snapshot: { asOf: snapshot.asOf!, console: analyticsSourceBodies(snapshot)[0]!.body as AnalyticsConsoleSource } })), T0);
+  const body = mergeAnalytics(view.map(([instanceId, snapshot]) => {
+    const bodies = analyticsSourceBodies(snapshot);
+    return { instanceId, snapshot: { asOf: snapshot.asOf!, console: bodies[0]!.body as AnalyticsConsoleSource, details: analyticsDetails(snapshot.asOf!, bodies[1]!.body, bodies[2]!.body) } };
+  }), T0);
   tamper?.(body.data);
   const asOf = body.sources.map((s) => s.asOf!).sort()[0]!;
   const shadow = createViewShadow({ clock, log: () => {}, evidence: () => NO_EVIDENCE });
