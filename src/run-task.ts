@@ -39537,7 +39537,7 @@ export async function daemonCommand(
         ),
         // W1-T7734: the idle sleep runs the light pass while review demand waits, at a cadence the sweep
         // derives from observed review duration and head churn. Reads the sweep's in-process memo only.
-        readIdleReviewDemand: () => readIdleLightCadence(systemClock.now()),
+        readIdleReviewDemand: () => readIdleLightCadence(Date.now()),
         // W1-T117/W1-T356: the per-poll half of the orphan sweep — the SAME `sweepOrphans`
         // closure daemonBoot already runs once, above, wired here so a stray from a run that
         // ended BETWEEN polls (not only at the last boot) is still found within one cycle.
@@ -43288,7 +43288,7 @@ export function servedTickRead<T extends object>(
 ): () => Promise<(T & { servedPublishedAtMs?: number }) | undefined> {
   return async () => {
     const before = published();
-    const requestedAtMs = systemClock.now();
+    const requestedAtMs = Date.now();
     const facts = await serve();
     if (facts === undefined) return undefined;
     return { ...facts, servedPublishedAtMs: before !== undefined && facts === before.facts ? before.publishedAtMs : requestedAtMs };
@@ -43299,16 +43299,16 @@ export function buildRereadPrAtAct(
   owner: string,
   repo: string,
   ledgerPath: string,
-  opts: {
+  deps: {
     pacer?: GhCallPacer;
     fetchAsync?: GhApiFetcher;
     views?: Omit<NonNullable<Parameters<typeof buildOpenPrViewsAsync>[3]>, "openPrRows" | "fetchAsync" | "pacer">;
   } = {},
 ): (pr: OpenPrView) => Promise<OpenPrView | undefined> {
-  const read: GhApiFetcher = opts.fetchAsync ??((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit));
+  const read: GhApiFetcher = deps.fetchAsync ?? ((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit));
   return async (pr) => {
     const checkRuns = new Map<string, unknown>();
-    const row = await paceGhEntryAsync(opts.pacer, isGhRateLimitError, () =>
+    const row = await paceGhEntryAsync(deps.pacer, isGhRateLimitError, () =>
       fetchSinglePrRestAsync(owner, repo, pr.prNumber, async (args, onRateLimit) => {
         const response = await read(args, onRateLimit);
         if (args[1]?.includes("/check-runs?")) checkRuns.set(args[1], response);
@@ -43319,7 +43319,7 @@ export function buildRereadPrAtAct(
       attachPostedGateIds(row.statusCheckRollup, checkRuns.get(checkRunsRestArgs(owner, repo, row.headRefOid)[1]));
     }
     const views = await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
-      ...opts.views, fetchAsync: read, pacer: opts.pacer, openPrRows: [row],
+      ...deps.views, fetchAsync: read, pacer: deps.pacer, openPrRows: [row],
     });
     const view = views.find((candidate) => candidate.prNumber === pr.prNumber);
     if (!view) throw new Error(`the rebuilt view list did not contain PR #${pr.prNumber}`);
