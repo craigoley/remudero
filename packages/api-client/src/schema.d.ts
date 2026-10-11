@@ -2504,11 +2504,28 @@ export interface components {
       opportunityEvidence?: GardenerOpportunityEvidence;
     };
     /** Independent saved opportunity registry, not the registered off-loop gardener inventory. All counts are stored classifications, not newly verified PR/deployment/benefit evidence. No cost or causal improvement claim is made. Missing, mixed, invalid or oversized registries are unavailable, not zero. Empty arrays have no reconciliation timestamp. */
-    GardenerOpportunityEvidence: ({
-      state?: "reported";
-    }) | ({
-      state?: "unavailable";
-    });
+    GardenerOpportunityEvidence: (GardenerOpportunityReport) | (GardenerOpportunityUnavailable);
+    GardenerOpportunityReport: {
+      version: 1;
+      repository: string;
+      readAt: string;
+      coverage: "saved-opportunity-registry";
+      countSemantics: "reported_states_not_verified_outcomes";
+      state: "reported";
+      total: number;
+      counts: Record<string, number>;
+      oldestReconciledAt: string | null;
+      latestReconciledAt: string | null;
+    };
+    GardenerOpportunityUnavailable: {
+      version: 1;
+      repository: string | null;
+      readAt: string;
+      coverage: "saved-opportunity-registry";
+      countSemantics: "reported_states_not_verified_outcomes";
+      state: "unavailable";
+      reason: "scope_unavailable" | "not_collected" | "unreadable" | "malformed" | "oversized" | "repository_mismatch" | "clock_skew" | "corpus_changed";
+    };
     GardenersUnavailable: {
       error: "gardeners_unavailable";
       reason: "not_collected" | "unreadable" | "repository_mismatch" | "clock_skew";
