@@ -55,6 +55,22 @@ test("W1-T7812: a near crossing that stays green proposes the exemption marker w
   assert.match(result.report, /CLEAR/);
   assert.match(result.report, /expiring-fixture: exempt -- .+; 15\/15 pass with Date.now shifted \+2d/);
   assert.deepEqual(calls, [gardener.DEFUSE_CONTROL_SHIFT_DAYS, 2]);
+
+  const root = fixture();
+  const file = "test/green.test.ts";
+  writeFileSync(join(root, file), 'import { test } from "node:test";\ntest("green", () => {});\n');
+  const output: string[] = [];
+  try {
+    const code = census.main({
+      execFile: (command: string, args: string[]) => command === "node"
+        ? JSON.stringify({ staleDays: 14 }) : args[0] === "ls-files" ? file : "",
+      readFile: () => `updated_at: "${stamp(0.5)}",`, now: () => NOW,
+      log: (line: string) => output.push(line), assertAged: () => undefined,
+      assertComplete: () => undefined, recordedPopulationByFile: {}, repoRoot: root,
+    });
+    assert.equal(code, 0);
+    assert.match(output.join("\n"), /expiring-fixture: exempt -- .+; 1\/1 pass with Date.now shifted \+2d/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("W1-T7812: a re-run with no verdict blocks as run_error", () => {
@@ -103,8 +119,7 @@ function fixture() {
 }
 
 const measured = (root: string, file: string, days: number, options?: object): Measurement =>
-  (gardener as unknown as { runSuiteShiftedMeasured: (r: string, f: string, d: number, o?: object) => Measurement })
-    .runSuiteShiftedMeasured(root, file, days, options);
+  gardener.runSuiteShiftedMeasured(root, file, days, options);
 
 test("W1-T7812: each shifted re-run runs under its own private TMPDIR", () => {
   const root = fixture();
@@ -170,5 +185,40 @@ test("W1-T7812: incomplete, killed, and summary-less runner output never passes"
     assert.throws(() => measured(root, file, 2, { execFile: () => { throw killed; } }), /timed out/);
     const failed = Object.assign(new Error("exit 1"), { status: 1, stdout: "" });
     assert.throws(() => measured(root, file, 2, { execFile: () => { throw failed; } }), /TAP/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("W1-T7812: incomplete TAP counts block as run_error and clean the private root", () => {
+  const root = fixture();
+  const file = join(root, "test", "counts.test.ts");
+  writeFileSync(file, 'import { test } from "node:test";\ntest("green", () => {});\n');
+  const parent = process.env.TMPDIR;
+  const summary = "# tests 2\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n";
+  const roots: string[] = [];
+  const run = (output: string, error?: Error) => measured(root, file, 2, {
+    execFile: (_command: string, _args: string[], options: { env: NodeJS.ProcessEnv }) => {
+      roots.push(options.env.TMPDIR!);
+      assert.ok(existsSync(options.env.TMPDIR!));
+      if (error) throw error;
+      return output;
+    },
+  });
+  try {
+    const result = check(() => run(summary));
+    assert.equal(result.code, 1);
+    assert.match(result.report, /run_error.*incomplete TAP verdict/);
+    assert.doesNotMatch(result.report, /expiring-fixture: exempt/);
+    assert.throws(() => run(summary.replace("# tests 2", "# tests 1").replace("# skipped 0\n", "")), /no # skipped/);
+    assert.throws(() => run(summary, Object.assign(new Error("spawn timed out"), { signal: "SIGTERM" })), /spawn timed out/);
+    const skipped = summary.replace("# skipped 0", "# skipped 1");
+    assert.deepEqual(run(skipped), { passed: true, pass: 1, tests: 2 });
+    assert.throws(() => run(skipped, Object.assign(new Error("output buffer exceeded"), { status: 0 })), /output buffer exceeded/);
+    assert.throws(() => run(skipped.replace("# tests 2", "# tests 999999999999999999")), /invalid # tests TAP count/);
+    assert.throws(() => run(skipped.replace("# fail 0", "# fail 1")), /incomplete TAP verdict/);
+    const failed = summary.replace("# pass 1", "# pass 0").replace("# fail 0", "# fail 2");
+    assert.deepEqual(run(failed, Object.assign(new Error("exit 1"), { status: 1, stdout: failed })), { passed: false, pass: 0, tests: 2 });
+    assert.throws(() => run(skipped, Object.assign(new Error("exit 1"), { status: 1, stdout: skipped })), /incomplete TAP verdict/);
+    assert.equal(process.env.TMPDIR, parent);
+    for (const temp of roots) assert.equal(existsSync(temp), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

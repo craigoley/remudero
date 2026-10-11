@@ -76,31 +76,34 @@ export function runSuiteShifted(repoRoot: string, file: string, shiftDays: numbe
 }: ShiftedSuiteOptions & { measure?: boolean } = {}): ShiftedSuiteMeasurement | boolean {
   readFileSync(resolve(repoRoot, file)); // Node can report a green wrapper for a missing test path.
   const privateRoot = mkdtempSync(join(tmpdir(), "rmd-shifted-suite-"));
-  const env: NodeJS.ProcessEnv = { ...process.env, FK_SHIFT_DAYS: String(shiftDays), TMPDIR: privateRoot };
-  delete env.RMD_SELF_SYNC_DONE; // the test setup refuses to load under it (W1-T3069)
-  delete env.NODE_TEST_CONTEXT; // inherited from a parent `node --test`, it makes this run report nothing and exit 0
-  const args = ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--import", "./scripts/clock-shift.mjs", file];
-  // Niced and bounded (test-slot.ts), but no host-wide slot: one file, and a gardener pass must not queue behind coverage.
-  const load = readHostLoad();
-  const child = lowPriorityCommand(process.execPath, testRunArgv(args, testRunConcurrency(load, defaultTestSlots(load.cores))));
   try {
+    const env: NodeJS.ProcessEnv = { ...process.env, FK_SHIFT_DAYS: String(shiftDays), TMPDIR: privateRoot };
+    delete env.RMD_SELF_SYNC_DONE; // the test setup refuses to load under it (W1-T3069)
+    delete env.NODE_TEST_CONTEXT; // inherited from a parent `node --test`, it makes this run report nothing and exit 0
+    const args = ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--import", "./scripts/clock-shift.mjs", file];
+    // Niced and bounded (test-slot.ts), but no host-wide slot: one file, and a gardener pass must not queue behind coverage.
+    const load = readHostLoad();
+    const child = lowPriorityCommand(process.execPath, testRunArgv(args, testRunConcurrency(load, defaultTestSlots(load.cores))));
     let output: string;
     let status = 0;
     try {
       output = execFile(child.file, child.args, { cwd: repoRoot, env, encoding: "utf8", stdio: "pipe", timeout: DEFUSE_RUN_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 });
     } catch (error) {
       const failure = error as { status?: unknown; signal?: unknown; stdout?: string | Buffer };
-      if (typeof failure.status !== "number" || failure.signal) throw error;
+      if (typeof failure.status !== "number" || failure.status === 0 || failure.signal) throw error;
       status = failure.status;
       output = String(failure.stdout ?? "");
     }
     const count = (name: string): number => {
       const match = new RegExp(`^# ${name} (\\d+)\\s*$`, "m").exec(output);
       if (!match) throw new Error(`shifted suite ${file}: no # ${name} TAP summary`);
-      return Number(match[1]);
+      const value = Number(match[1]);
+      if (!Number.isSafeInteger(value)) throw new Error(`shifted suite ${file}: invalid # ${name} TAP count`);
+      return value;
     };
     const tests = count("tests"), pass = count("pass"), fail = count("fail"), cancelled = count("cancelled");
-    if (tests === 0 || cancelled > 0 || pass + fail === 0 || tests < pass + fail || (status !== 0 && fail === 0) || (status === 0 && fail > 0)) {
+    const skipped = count("skipped"), todo = count("todo");
+    if (tests === 0 || cancelled > 0 || pass + fail === 0 || tests !== pass + fail + cancelled + skipped + todo || (status !== 0 && fail === 0) || (status === 0 && fail > 0)) {
       throw new Error(`shifted suite ${file}: incomplete TAP verdict (exit ${status}, tests ${tests}, pass ${pass}, fail ${fail}, cancelled ${cancelled})`);
     }
     const measurement = { passed: status === 0, pass, tests };
