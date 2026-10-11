@@ -266,7 +266,7 @@ test("heavy READY v2 a native reader refuses symlink and FIFO requests without b
   const dir = fixture(t), handle = reserveHeavyNewBuilds("nonregular", "gate", { dir });
   nativeChild(dir, `
     const fs = await import('node:fs'), cp = await import('node:child_process');
-    const path = process.argv[2], backup = path + '.fixture-backup';
+    const path = process.argv[2], backup = dir + '/fixture-request-backup';
     assert.equal(api.readHeavyNewBuildHold({dir}).state, 'held');
     fs.renameSync(path, backup);
     fs.symlinkSync(backup, path);
