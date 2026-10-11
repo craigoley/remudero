@@ -649,6 +649,7 @@ import {
   ciLearningMergedOriginsAsync,
   ciLearningPendingOrigins,
   findPendingLandingPr,
+  landFeedbackStatusContent,
   landCiLearningShards,
   landCiLearningShardsAsync,
   landPlanReconcileShards,
@@ -658,6 +659,7 @@ import {
   sweepFeedbackLandingAsync,
   type LandCiLearningShardsOptions,
   type LandFeedbackResult,
+  type LandFeedbackOpts,
   type LandingReviewRequest,
   type SweepFeedbackLandingOpts,
 } from "./lib/feedback-landing.js";
@@ -1044,7 +1046,8 @@ import {
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
 import { clockFromDateFn, clockFromMillisFn, fixedClock, systemClock, type Clock } from "./lib/clock.js";
-import type { AdmissionObserver } from "./lib/contributor-admission.js";
+import { feedbackLineagePayload, feedbackLineageSnapshot, observeFeedbackInputs, observeFeedbackPublication, type AdmissionObserver, type FeedbackAdmissionContext } from "./lib/contributor-admission.js";
+import { envelope as feedbackLineageEnvelope } from "./lib/untrusted-envelope.js";
 import { observeContributorAdmission } from "./lib/arm-auto-merge.js";
 import {
   VERIFY_HUMAN_JUDGED_STEP,
@@ -6361,9 +6364,11 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
     }
     roundId = `${input.runId ?? input.task.id}:${pr.priorStrikes + 1}:${systemClock.now()}`;
     deps.log("fix.dispatch", { ...roundFields(), verdict_regime: "executed" });
+    await observeFeedbackInputs(input.admission, pr.pendingAnswer?.contributions ?? [], "plan-fix-adoption", deps.log,
+      deps.feedbackRead);
     const report = await deps.spawn(renderFixPrompt({ task: { ...input.task, files }, round: 1, branch: pr.headRefName!,
       harnessCommits: true, evidence: { planGateFindings: [...initial.failures, ...initial.unreadable], ciFailures: pr.ciFailures,
-        constraint: [input.lastRefusal, pr.pendingAnswer?.constraint].filter(Boolean).join("\n\n") || undefined } }));
+        constraint: [input.lastRefusal, feedbackFixConstraint(pr.pendingAnswer)].filter(Boolean).join("\n\n") || undefined } }));
     if (git(["rev-parse", "HEAD"]).trim() !== pr.headSha) return refuse("the worker moved the plan round head");
     const changed = workerChangedPaths(git(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]));
     const outside = changed.filter((path) => !files.includes(path));
@@ -11198,6 +11203,7 @@ export async function runFixRung(opts: {
    * dispatch (W1-T76, unchanged).
    */
   constraint?: string;
+  feedbackContributions?: readonly unknown[];
   /**
    * W1-T100 (the #170 fix): failing required-check name+log-tail evidence for
    * a blocked_ci dispatch — this PR is checks-red with NO review verdict
@@ -12942,6 +12948,7 @@ export async function runFixRung(opts: {
         ? { ...evidenceBase, priorPartialWork: opts.priorPartialWork }
         : evidenceBase;
     const fixMode = deriveFixMode(evidence, PROOF_REPAIR_FIX_MODE_RULES);
+    await observeFeedbackInputs(opts.config.contributorAdmission, opts.feedbackContributions ?? [], "fix-adoption", deps.log);
     // W1-T3727: WHO HOLDS THIS ROUND'S GIT, read once by BOTH the prompt and the tool bound so
     // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.
     const { harnessCommits: fixHarnessOwnsGit, cashTools: fixCashTools } = fixRoundGitOwnership(opts.config);
@@ -32570,6 +32577,7 @@ export function buildIntakeRungsDaemonHooks(deps: {
           ledgerPath,
           runId,
           dryRun: false,
+          admission: feedbackIntakeAdmission(config, ledgerPath, runId),
         });
         return {
           rung,
@@ -39076,6 +39084,7 @@ export async function daemonCommand(
   const feedbackLandingRungs = target.isSelf
     ? feedbackLandingSweepRungs(repoRoot, {
         log,
+        ...(config.contributorAdmission === undefined ? {} : { publication: { mode: "shadow" as const, record: log } }),
         ledgerLines: () => readLedgerLines(ledgerPath),
         requestReview: requestLandingReview,
         // W1-T5460: drain the console decisions `rmd serve` queued under the same state root.
@@ -39706,7 +39715,8 @@ export async function daemonCommand(
           targetCheckoutRoot,
           () => activePlanRef.current,
           // W1-T4471: the one real wiring of the owner-reply reader.
-          ghEscalationAnswerGateway(target.owner, target.repo, undefined, config.operatorGithubLogins),
+          ghEscalationAnswerGateway(target.owner, target.repo, undefined, config.operatorGithubLogins,
+            config.contributorAdmission === undefined ? undefined : { settings: config.contributorAdmission }),
           gitCredentialSocket?.socketPath,
           servedTickRead(onePassPerGeneration(() => tickReadGeneration, readPlane?.read,
             () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined }), { log }),
@@ -44104,6 +44114,12 @@ export function buildEscalationReconcileCandidates(
  * "the arg-builder carries the testable read-only contract; the spawn wrapper is
  * untested by design" split — see spawnSpecialistWorker/spawnReconSpecialist).
  */
+export function feedbackFixConstraint(answer: { constraint: string; contributions?: readonly unknown[] } | undefined): string | undefined {
+  return answer?.contributions?.length
+    ? feedbackLineageEnvelope(feedbackLineagePayload(answer.constraint, answer.contributions), "feedback-entry")
+    : answer?.constraint;
+}
+
 export function buildFixRungDispatchArgs(args: {
   task: { id: string; title: string; acceptance?: AcceptanceCriterion[] };
   runId: string;
@@ -44119,7 +44135,7 @@ export function buildFixRungDispatchArgs(args: {
   pr: {
     headSha: string;
     reviewSummary?: string;
-    pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean };
+    pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean; contributions?: unknown[] };
     checksState?: OpenPrView["checksState"];
     redRequiredChecks?: readonly string[];
   };
@@ -44223,7 +44239,8 @@ export function buildFixRungDispatchArgs(args: {
     strikeCap: args.strikeCap,
     initialReview,
     initialCriterionIndices,
-    constraint: pr.pendingAnswer?.constraint,
+    constraint: feedbackFixConstraint(pr.pendingAnswer),
+    feedbackContributions: pr.pendingAnswer?.contributions === undefined ? undefined : feedbackLineageSnapshot(pr.pendingAnswer.contributions),
     progressDecision: evidence.progressDecision,
     progressApproach: evidence.progressApproach,
     ciFailures: evidence.ciFailures,
@@ -48861,7 +48878,7 @@ export function renderFeedbackReconcile(result: ReconcileFeedbackLandingResult, 
  * ({@link reconcileFeedbackLanding}, lib/feedback-reconcile.ts) — this hub does no scanning or
  * classification of its own; it only parses argv and calls the library's one entry point.
  */
-export async function feedbackReconcileCommand(rest: string[]): Promise<number> {
+export async function feedbackReconcileCommand(rest: string[], configOverride?: Config, gh?: LandFeedbackOpts["gh"]): Promise<number> {
   const badArg = unknownArgError("feedback-reconcile", rest, ["--root", "--checkout"], ["--apply"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -48888,12 +48905,17 @@ export async function feedbackReconcileCommand(rest: string[]): Promise<number> 
   const checkoutRoot = checkoutArg !== undefined ? resolve(checkoutArg) : repoRoot;
   const apply = rest.includes("--apply");
 
-  const ledgerPath = ledgerPathFor(loadConfig());
+  const reconcileConfig = configOverride ?? loadConfig();
+  const ledgerPath = ledgerPathFor(reconcileConfig);
   const result = reconcileFeedbackLanding({
     roots,
     checkoutRoot,
     apply,
+    gh,
     ledgerLines: () => readLedgerLines(ledgerPath),
+    ...(reconcileConfig.contributorAdmission === undefined ? {} : { land: (root: string, relPath: string, content: string, opts: LandFeedbackOpts) =>
+      landFeedbackStatusContent(root, relPath, content, { ...opts, publication: { mode: "shadow", record: (step, fields) =>
+        appendLedger(ledgerPath, { step, task_id: "CLI", run_id: "feedback-reconcile", ...fields }) } }) }),
   });
   console.log(renderFeedbackReconcile(result, apply));
   if (result.error) {
@@ -49186,6 +49208,7 @@ async function triageCommandLocked(
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
+    await observeFeedbackInputs(config.contributorAdmission, entry.contribution ? [entry.contribution] : [], "triage-adoption", log);
 
     // ── THE CROSS-HOST CLAIM (W1-T1132), TAKEN BEFORE THE ARCHITECT CALL ────────────────────
     // HERE, not before the write: the loser's RESEARCH is the actual cost. Everything below this
@@ -49358,6 +49381,8 @@ async function triageCommandLocked(
         }),
     });
     const { decision, changedFiles } = loop.decision;
+    await observeFeedbackInputs(config.contributorAdmission, entry.contribution ? [entry.contribution] : [],
+      `triage-${decision.action}-adoption`, log);
 
     // W1-T985 — THE RARE-OVERLAP ADVISORY, AT THE POINT THE FILED SHARD IS ON DISK. The advisory
     // shipped 2026-08-16 (W1-T533) and gained its only reader the same day (W1-T917,
@@ -49506,6 +49531,8 @@ async function triageCommandLocked(
       }
     }
 
+    await observeFeedbackPublication(config.contributorAdmission === undefined ? undefined : { mode: "shadow", record: log },
+      entry.contribution ? [entry.contribution] : [], `${owner}/${repo}`, "triage-publication");
     await gitPushRunBranchAsync(worktreePath);
 
     // The title is the SAME header string that just went into the commit, split off
@@ -53717,6 +53744,11 @@ export async function alertFixCommand(rest: string[], deps: AlertFixCommandDeps 
   return 0;
 }
 
+export function feedbackIntakeAdmission(config: Pick<Config, "contributorAdmission">, ledgerPath: string, runId: string): FeedbackAdmissionContext | undefined {
+  return config.contributorAdmission === undefined ? undefined : { ...config.contributorAdmission,
+    record: (step, fields) => appendLedger(ledgerPath, { run_id: runId, task_id: "ISSUES", step, ...fields }) };
+}
+
 /**
  * `rmd issues [--dry-run]` — issues intake (W1-T57, MASTER-PLAN §5D lane 3): poll open issues
  * for every repo in `.remudero/managed-repos.json` via `gh api` (lib/issues-intake.ts), create a
@@ -53752,6 +53784,7 @@ async function issuesCommand(rest: string[]): Promise<number> {
     ledgerPath,
     runId,
     dryRun,
+    admission: feedbackIntakeAdmission(config, ledgerPath, runId),
   });
   console.log(`### rmd issues${dryRun ? " --dry-run" : ""}\nissues reviewed: ${renderIssuesSummary(result.summary)}`);
   if (dryRun) {
