@@ -10,7 +10,7 @@
   risk: high
   band_meaning: blast-radius
   origin: "Operator-approved admission and close-and-escalate briefs, filed under the 2026-10-10 authorization; original origin must survive trusted bot summaries."
-  files: [src/lib/issues-intake.ts, src/lib/feedback.ts, src/lib/auto-triage.ts, src/lib/authority.ts, src/lib/contributor-admission.ts, test/feedback-origin-admission.test.ts]
+  files: [src/lib/issues-intake.ts, src/lib/feedback.ts, src/lib/auto-triage.ts, src/lib/authority.ts, src/lib/contributor-admission.ts, src/run-task.ts, src/lib/triage.ts, src/lib/feedback-landing.ts, src/lib/feedback-record-merge.ts, src/lib/escalation-answers.ts, src/lib/worker.ts, src/lib/panel-graph.ts, src/lib/panel-actions.ts, src/lib/opportunity-intake.ts, src/lib/sweep.ts, test/feedback-origin-admission.test.ts]
   status: queued
   priority: 2
   attempts: 0
