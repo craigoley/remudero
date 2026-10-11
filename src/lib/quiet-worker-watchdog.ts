@@ -13,10 +13,11 @@
 // The W1-T943 escalation and the W1-T1045 clock bound stay the backstops, unchanged: a judge that cannot answer takes no
 // action and says so.
 
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { basename } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
+import { RmdError } from "./errors.js";
 import { buildRiskJudgeSpawnArgs, resolveRiskJudgeMount, scrubRiskJudgeText } from "./risk-judge.js";
 import { loadMounts, mountsPath, type Mount } from "./mounts.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
@@ -133,11 +134,16 @@ export function parsePsListing(text: string): ProcRow[] {
   return rows;
 }
 
-/** The real process listing. A failure THROWS — an unreadable table is not an empty one. */
-export function defaultListProcesses(): ProcRow[] {
-  return parsePsListing(execFileSync("ps", ["-eo", "pid=,ppid=,time=,args="], {
-    encoding: "utf8", maxBuffer: 8 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"],
-  }));
+/** The real asynchronous process listing. A failure rejects — an unreadable table is not an empty one. */
+export function defaultListProcesses(): Promise<ProcRow[]> {
+  return new Promise((resolve, reject) => {
+    execFile("ps", ["-eo", "pid=,ppid=,time=,args="], {
+      encoding: "utf8", maxBuffer: 8 * 1024 * 1024,
+    }, (error, stdout) => {
+      if (error) reject(error);
+      else resolve(parsePsListing(stdout));
+    });
+  });
 }
 
 export interface AwaitedRead {
@@ -415,10 +421,10 @@ export function productionQuietWorkerJudge(opts: {
 
 /** Thrown by a spawn whose round `end_round` stopped; carries what was checkpointed. run-task.ts turns it into a
  * `handed_off` verdict instead of a generic `run.error`. */
-export class QuietRoundEndedError extends Error {
+export class QuietRoundEndedError extends RmdError {
   readonly reasonClass = "quiet_round_ended" as const;
   constructor(readonly detail: { checkpointSha?: string; reason: string }) {
-    super(`worker round ended by the quiet-worker watchdog: ${detail.reason}`);
+    super("quiet_round_ended", 1, `worker round ended by the quiet-worker watchdog: ${detail.reason}`, detail);
     this.name = "QuietRoundEndedError";
   }
 }
@@ -446,7 +452,7 @@ export interface QuietWatchdogOptions {
   clock?: Clock;
   ledger: (step: string, extra: Record<string, unknown>) => void;
   judge: QuietWorkerJudge;
-  listProcesses?: () => ProcRow[];
+  listProcesses?: () => ProcRow[] | Promise<ProcRow[]>;
   readAwaited?: (path: string) => AwaitedRead | undefined;
   /** Signal ONE pid. Never called with the root pid or a pid outside the root's tree. */
   kill?: (pid: number, signal: NodeJS.Signals) => void;
@@ -525,7 +531,7 @@ export function runQuietWorkerWatchdog(opts: QuietWatchdogOptions): QuietWatchdo
       }
       let procs: ProcRow[];
       try {
-        procs = listProcesses();
+        procs = await listProcesses();
       } catch (error) {
         record({ ...common, decision: "left_alone", reason: "process_listing_unavailable", detail: String((error as Error)?.message ?? error) });
         return;

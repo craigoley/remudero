@@ -10,12 +10,15 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { IMPLEMENT_WAIT_TARGET_CONTRACT } from "../src/run-task.js";
 import { clockFromMillisFn } from "../src/lib/clock.js";
+import { exitCodeFor, RmdError } from "../src/lib/errors.js";
 import {
   classifyProcessTree,
+  defaultListProcesses,
   deriveQuietBound,
   parseQuietJudgement,
   QUIET_BASIS_LEDGER_STEP,
   QUIET_JUDGED_LEDGER_STEP,
+  QuietRoundEndedError,
   runQuietWorkerWatchdog,
   type AwaitedRead,
   type ProcRow,
@@ -297,4 +300,76 @@ test("W1-T7807: the judge answer is parsed strictly", () => {
   assert.equal(parseQuietJudgement('QUIET_JUDGE: {"verdict":"reboot","reason":"x"}'), undefined);
   assert.equal(parseQuietJudgement("not json"), undefined);
   assert.equal(parseQuietJudgement('{"verdict":"wait"}'), undefined);
+});
+
+test("W1-T7807: a quiet round ending carries the shared error envelope", () => {
+  const detail = { checkpointSha: "checkpoint", reason: "the worker cannot resume" };
+  const error = new QuietRoundEndedError(detail);
+  assert.ok(error instanceof RmdError);
+  assert.equal(error.kind, "quiet_round_ended");
+  assert.equal(exitCodeFor(error), 1);
+  assert.equal(error.name, "QuietRoundEndedError");
+  assert.equal(error.reasonClass, "quiet_round_ended");
+  assert.deepEqual(error.detail, detail);
+  assert.deepEqual(error.details, detail);
+  assert.match(error.message, /the worker cannot resume/);
+});
+
+test("W1-T7807: the default process listing resolves asynchronously and preserves spawn failures", async () => {
+  const pending = defaultListProcesses();
+  assert.ok(pending instanceof Promise);
+  const processes = await pending;
+  const self = processes.find((row) => row.pid === process.pid);
+  assert.ok(self, "the real ps listing must include this test process");
+  assert.equal(self.ppid, process.ppid);
+  assert.ok(Number.isFinite(self.cpuMs));
+  assert.match(self.args, /node/);
+
+  const emptyPath = mkdtempSync(join(tmpdir(), "rmd-quiet-ps-path-"));
+  const originalPath = process.env.PATH;
+  let unavailable: Promise<ProcRow[]>;
+  try {
+    process.env.PATH = emptyPath;
+    unavailable = defaultListProcesses();
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    rmSync(emptyPath, { recursive: true, force: true });
+  }
+  await assert.rejects(unavailable, { code: "ENOENT" });
+});
+
+test("W1-T7807: an async process listing is awaited and its rejection is ledgered", async () => {
+  await withOutputFile(FINISHED_OUTPUT, async (path) => {
+    const rows: Array<Record<string, unknown>> = [];
+    const kills: number[] = [];
+    let resolveListing!: (rows: ProcRow[]) => void;
+    let listing = new Promise<ProcRow[]>((resolve) => { resolveListing = resolve; });
+    const dog = runQuietWorkerWatchdog({
+      taskId: "W1-T7807", runId: "async-listing", rootPid: () => ROOT, provider: () => "claude",
+      history: () => [], fallbackBoundMs: 60_000, quietFloorMs: 0,
+      clock: clockFromMillisFn(() => 100_000),
+      ledger: (step, extra) => { if (step === QUIET_JUDGED_LEDGER_STEP) rows.push(extra); },
+      listProcesses: () => listing,
+      judge: async () => ({ verdict: "kill_poll_child", reason: "finished run" }),
+      kill: (pid) => { kills.push(pid); },
+    });
+    dog.observer({ kind: "working", tsMs: 0 });
+    const tick = dog.tick();
+    await dog.tick();
+    assert.deepEqual(kills, [], "pending process inspection takes no action");
+    assert.equal(rows.length, 0);
+    resolveListing(tree(path));
+    await tick;
+    assert.deepEqual(kills, [POLL]);
+    assert.equal(rows[0].action, "kill_poll_child");
+
+    listing = Promise.reject(new Error("ps unavailable"));
+    dog.observer({ kind: "working", tsMs: 0 });
+    await dog.tick();
+    assert.deepEqual(kills, [POLL], "a failed listing signals no child");
+    assert.equal(rows[1].decision, "left_alone");
+    assert.equal(rows[1].reason, "process_listing_unavailable");
+    assert.match(String(rows[1].detail), /ps unavailable/);
+  });
 });
