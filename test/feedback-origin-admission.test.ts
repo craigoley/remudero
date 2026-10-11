@@ -22,6 +22,9 @@ import { operatorVerdictEvidence } from "../src/lib/sweep.js";
 import { buildFixRungDispatchArgs, feedbackFixConstraint, runPlanScopedFixRound, buildIntakeRungsDaemonHooks } from "./helpers/run-task-test.js";
 import * as admissionModule from "../src/lib/contributor-admission.js";
 import type { AdmissionSettings, AdmissionRead, AdmissionDecision } from "../src/lib/contributor-admission.js";
+import { ghEscalationAnswerGateway, readEscalationAnswers } from "../src/lib/escalation-answers.js";
+import { renderIssueBody } from "../src/lib/escalate.js";
+import { fixedClock } from "../src/lib/clock.js";
 
 // W1-T7754 — an issue or comment is an outside contribution until the shared classifier admits
 // its ORIGINAL actor. These fixtures drive real captures through pollIssues/captureFeedback and
@@ -243,6 +246,48 @@ test("W1-T7754 source: a thrown membership read is unknown and never escapes the
   assert.equal(result?.decision.outcome, "unknown");
   assert.equal(result?.wouldDeny, true);
   assert.equal(rows.length, 1);
+});
+
+test("W1-T7754 answers: real comment and reaction bindings survive the durable store and rebuilt fix evidence", async () => {
+  for (const enabled of [false, true]) {
+    const root = mkdtempSync(join(tmpdir(), "rmd-answer-origin-"));
+    const f = sourceFixture("issue-reaction");
+    f.issue.body = renderIssueBody({ class: "BLOCKED", taskId: "W1-T9000", summary: "fixture", detail: "fixture",
+      options: [{ label: "retry", detail: "fixture" }], recommendation: "retry" });
+    f.comment.body = "retry";
+    const rows: Record<string, unknown>[] = [];
+    const gateway = (ghEscalationAnswerGateway as unknown as (...args: unknown[]) => ReturnType<typeof ghEscalationAnswerGateway>)(
+      "acme", "widgets", async (args: string[]) => JSON.stringify(args[1].includes("comments") ? [f.comment]
+        : args[1].includes("reactions") ? [f.reaction]
+        : [{ ...f.issue, html_url: "https://github.com/acme/widgets/issues/4" }]), ["actor-1"],
+      enabled ? { settings: f.settings, read: f.read } : undefined);
+    gateway.reactPlusOne = () => {};
+    gateway.reactPlusOneOnIssue = () => {};
+    try {
+      const result = await readEscalationAnswers(root, "fixture", gateway,
+        { ledgerPath: join(root, "ledger.ndjson"), writeLedger: (_path, row) => rows.push(row) }, fixedClock(NOW));
+      assert.equal(result.accepted, 2);
+      const answers = readFileSync(join(root, "plan/questions.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+      const evidence = operatorVerdictEvidence("W1-T9000", [], answers)!;
+      assert.equal(evidence.constraint, "retry", "text deduplication does not deduplicate the distinct original sources");
+      if (!enabled) {
+        assert.ok(answers.every(answer => !("contribution" in answer)));
+        assert.equal(f.calls.length, 0);
+        assert.equal(evidence.contributions, undefined);
+      } else {
+        assert.equal(evidence.contributions?.length, 2);
+        const [comment, reaction] = answers.map(answer => answer.contribution.subject);
+        assert.equal(comment.kind, "issue-comment"); assert.equal(comment.itemId, 9);
+        assert.equal(comment.origin.actor.id, OWNER_ID); assert.equal(comment.revision.updatedAt, f.comment.updated_at);
+        assert.equal(reaction.kind, "issue-reaction"); assert.equal(reaction.itemId, 81);
+        assert.equal(reaction.revision.createdAt, f.reaction.created_at);
+        assert.equal(reaction.revision.updatedAt, undefined);
+        assert.equal(reaction.parent.itemId, f.issue.id);
+        assert.equal(reaction.parent.revision.contentDigest, feedbackContentDigest([f.issue.title, f.issue.body, f.issue.labels]));
+        assert.ok(rows.filter(row => row.step === "panel.question_answered").every(row => row.contribution));
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
 });
 
 test("W1-T7754 adoption: selected lineage is re-read once and unreadable or over-bound inputs cannot hold effects", async () => {
