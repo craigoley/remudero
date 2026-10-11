@@ -55,6 +55,7 @@ export const DEFAULT_DISCOVERY_BUDGET: DiscoveryBudget = {
   maxListed: 20_000, maxFiles: 2_000, maxFileBytes: 8_192, maxTotalBytes: 1_048_576, maxElapsedMs: 2_000, yieldEvery: 32,
 };
 
+/** PRIMARY CONTROL: the response-size bound; a full page stops the scan and hands back a continuation. */
 export const MAX_DISCOVERY_PAGE = 100;
 export const DEFAULT_DISCOVERY_PAGE = 50;
 

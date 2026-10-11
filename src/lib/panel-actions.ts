@@ -398,9 +398,7 @@ export interface AssistantControlOptions extends Pick<PanelActionDeps, "root" | 
   bootSha?: string;
   afterClaim?: () => void;
   afterEffect?: () => void;
-  /** Server-observed submission time recorded in the claim; unset ⇒ Date.now. */
   now?: () => number;
-  /** Discovery read bounds (W1-T5399); unset ⇒ DEFAULT_DISCOVERY_BUDGET. */
   discoveryBudget?: Partial<DiscoveryBudget>;
 }
 
@@ -552,8 +550,6 @@ export function buildAssistantControlRoute(deps: AssistantControlOptions): Route
       const paths = assistantControlPaths(deps, input.actionId);
       const actorHash = assistantActorHash(operator);
       const fingerprint = assistantClaimFingerprint({ actorHash, instance: input.instance, repository: deps.repository ?? null, action: input.action, reason: input.reason ?? null });
-      // W1-T5399: the complete identity is committed with the claim, before any side effect, so a
-      // fresh device can discover an interrupted action without already knowing its ID.
       const claim: AssistantClaimV2 = { version: ASSISTANT_CLAIM_VERSION, actionId: input.actionId, action: input.action, actorHash,
         instance: deps.instance, repository: deps.repository ?? null, submittedAt: new Date((deps.now ?? Date.now)()).toISOString(), fingerprint };
       let admitted = false;
@@ -580,7 +576,6 @@ export function buildAssistantControlRoute(deps: AssistantControlOptions): Route
         }
         try {
           const receipt = JSON.parse(readFileSync(paths.receipt, "utf8")) as unknown;
-          // The fingerprint matched, so input.action IS the admitted verb, legacy claims included.
           if (isExactAssistantReceipt(receipt, { actionId: input.actionId, action: input.action, instance: deps.instance, repository: deps.repository ?? null })) {
             sendJson(res, 200, receipt);
             return;
@@ -608,7 +603,6 @@ export function buildAssistantControlRoute(deps: AssistantControlOptions): Route
   };
 }
 
-/** Discovery answers are per-principal: never stored by a shared cache. */
 function sendPrivateJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
@@ -618,12 +612,6 @@ function sendPrivateJson(res: ServerResponse, status: number, body: unknown): vo
   res.end(JSON.stringify(body));
 }
 
-/**
- * GET /v1/control/assistant-action/discovery (W1-T5399) — the verified actor's own admitted
- * actions on this exact target that lack a verified completion receipt. Strictly read-only: it
- * never prepares, retries or dispatches an action. The actor comes only from verified
- * authentication; no query parameter or header can name another one.
- */
 export function buildAssistantActionDiscoveryRoute(deps: AssistantControlOptions): Route {
   return {
     method: "GET", path: "/v1/control/assistant-action/discovery", scope: "read",
