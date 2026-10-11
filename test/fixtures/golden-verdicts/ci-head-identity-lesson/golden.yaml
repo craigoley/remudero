@@ -1,0 +1,13 @@
+violation: none
+rule: >
+  W1-T7900: head-identity-gate repair guidance reaches the push lane through a matched
+  learning, with an executable proof anchored to the recorded incident.
+verdict:
+  state: success
+  capped: false
+  testTheater: false
+  criteriaTampered: false
+arm: true
+criteria:
+  - met: true
+    proof_exec: executed_pass
