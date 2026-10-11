@@ -15822,6 +15822,7 @@ export async function runSweep(
                   fresh = reread;
                 }
               } catch (error) {
+                // Reason: the error text is recorded as `reread_error` and named in the stand-down sentence.
                 rereadError = String((error as Error)?.message ?? error);
                 standDown = `${movedFrom} — the single-PR re-read failed (${rereadError}); ${nextPass}, never the stale snapshot`;
               }
