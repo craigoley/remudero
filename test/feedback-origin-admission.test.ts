@@ -481,19 +481,20 @@ for (const path of ["disk", "status-content", "queued", "pending-disk", "pending
   });
 }
 
-test("W1-T7754 consumers: carried pending content cannot replace main lineage while another record lands", () => {
+for (const lineaged of [true, false]) {
+test(`W1-T7754 consumers: carried pending ${lineaged ? "content cannot replace main lineage" : "legacy content keeps its prior effect"} while another record lands`, () => {
   const origin = gitRepo({ bare: true, kind: "admission-carry-origin" });
   const seed = gitRepo({ kind: "admission-carry-seed" });
   const rel = "plan/feedback/fb-original.yaml";
   const original = admitFeedbackContribution(boundIssue(), { mode: "shadow", policy: POLICY, nowMs: NOW });
   mkdirSync(join(seed.dir, "plan", "feedback"), { recursive: true });
-  writeFileSync(join(seed.dir, rel), stringifyYaml({ id: "fb-original", status: "new", contribution: original }));
+  writeFileSync(join(seed.dir, rel), stringifyYaml({ id: "fb-original", status: lineaged ? "new" : "accepted", ...(lineaged ? { contribution: original } : {}) }));
   seed.git("add", "-A");
   seed.git("commit", "--quiet", "-m", "chore: original");
   seed.addRemote("origin", origin.dir);
   seed.git("push", "--quiet", "origin", "main");
   seed.git("checkout", "-b", LANDING_BRANCH);
-  writeFileSync(join(seed.dir, rel), stringifyYaml({ id: "fb-original", status: "accepted", contribution: { actor: { id: SUMMARIZER_BOT_ID } } }));
+  writeFileSync(join(seed.dir, rel), stringifyYaml({ id: "fb-original", status: lineaged ? "accepted" : "new", ...(lineaged ? { contribution: { actor: { id: SUMMARIZER_BOT_ID } } } : {}) }));
   seed.git("add", "-A");
   seed.git("commit", "--quiet", "-m", "chore: stale relay");
   seed.git("push", "--quiet", "origin", LANDING_BRANCH);
@@ -506,12 +507,14 @@ test("W1-T7754 consumers: carried pending content cannot replace main lineage wh
     }, targetRepository: { owner: "acme", repo: "widgets" }, sourceRepository: { owner: "acme", repo: "widgets" } }));
   assert.equal(result.landed, true, JSON.stringify(result));
   const staged = parseYaml(origin.git("show", `${LANDING_BRANCH}:${rel}`));
-  assert.equal(staged.status, "accepted");
-  assert.deepEqual(staged.contribution, original);
+  assert.equal(staged.status, lineaged ? "accepted" : "new");
+  assert.deepEqual(staged.contribution, lineaged ? original : undefined);
 });
+}
 
+for (const writer of ["disk", "status-content", "queued"]) {
 for (const malformed of [false, true]) {
-test(`W1-T7754 consumers: unchanged pending legacy ${malformed ? "unreadable" : "plain"} content stays in the receipt without restarting CI`, () => {
+test(`W1-T7754 consumers: ${writer} unchanged pending legacy ${malformed ? "unreadable" : "plain"} content stays in the receipt without restarting CI`, () => {
   const origin = gitRepo({ bare: true, kind: "admission-no-churn-origin" });
   const seed = gitRepo({ kind: "admission-no-churn-seed" });
   writeFileSync(join(seed.dir, "README.md"), "seed\n");
@@ -522,32 +525,41 @@ test(`W1-T7754 consumers: unchanged pending legacy ${malformed ? "unreadable" : 
   const root = gitRepo({ cloneFrom: origin.dir, kind: "admission-no-churn-consumer" });
   mkdirSync(join(root.dir, "plan", "feedback"), { recursive: true });
   const rel = "plan/feedback/fb-legacy.yaml";
-  writeFileSync(join(root.dir, rel), malformed ? "id: [\n" : "id: fb-legacy\nraw: unchanged\n");
   const opts = { gh: (args: string[]) => {
     if (args[1] === "list") return "[]";
     if (args[1] === "create") return "https://github.com/acme/widgets/pull/3\n";
     assert.fail(`unexpected GitHub effect ${JSON.stringify(args)}`);
   }, targetRepository: { owner: "acme", repo: "widgets" }, sourceRepository: { owner: "acme", repo: "widgets" } };
-  const first = withLiveWritesAllowed(() => landFeedback(root.dir, opts));
+  const stateRoot = tmpRoot();
+  const land = (path: string, content: string) => withLiveWritesAllowed(() => {
+    if (writer === "status-content") return landFeedbackStatusContent(root.dir, path, content, opts);
+    if (writer === "queued") {
+      landFeedbackStatusContent(root.dir, path, content, { ...opts, stateRoot });
+      return sweepFeedbackLanding(root.dir, { ...opts, stateRoot });
+    }
+    writeFileSync(join(root.dir, path), content);
+    return landFeedback(root.dir, opts);
+  });
+  const originalContent = malformed ? "id: [\n" : "id: fb-legacy\nraw: unchanged\n";
+  const first = land(rel, originalContent);
   assert.equal(first.landed, true, JSON.stringify(first));
   const head = origin.git("rev-parse", LANDING_BRANCH).trim();
-  const unchanged = withLiveWritesAllowed(() => landFeedback(root.dir, opts));
+  const unchanged = land(rel, originalContent);
   assert.deepEqual(unchanged.files, [rel]);
   assert.equal(unchanged.pushed, false);
   assert.equal(origin.git("rev-parse", LANDING_BRANCH).trim(), head);
   const another = "plan/feedback/fb-next.yaml";
-  writeFileSync(join(root.dir, another), "id: fb-next\nraw: new\n");
-  const changed = withLiveWritesAllowed(() => landFeedback(root.dir, opts));
-  assert.deepEqual(changed.files.sort(), [rel, another].sort());
+  const changed = land(another, "id: fb-next\nraw: new\n");
+  assert.deepEqual(changed.files.sort(), writer === "status-content" ? [another] : [rel, another].sort());
   assert.equal(changed.pushed, true);
   const changedHead = origin.git("rev-parse", LANDING_BRANCH).trim();
   const editedContent = "id: fb-legacy\nraw: edited\n";
-  writeFileSync(join(root.dir, rel), editedContent);
-  const edited = withLiveWritesAllowed(() => landFeedback(root.dir, opts));
+  const edited = land(rel, editedContent);
   assert.equal(edited.pushed, true, JSON.stringify(edited));
   assert.notEqual(origin.git("rev-parse", LANDING_BRANCH).trim(), changedHead);
   assert.equal(origin.git("show", `${LANDING_BRANCH}:${rel}`), editedContent.trim());
 });
+}
 }
 
 test("W1-T7754 consumers: actual triage prompt retains original lineage inside its untrusted boundary", () => {
