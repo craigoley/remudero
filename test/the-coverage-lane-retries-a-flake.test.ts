@@ -156,8 +156,10 @@ test("W1-T4398: a coverage-lane flake is retried once and reported", () => {
   assert.match(broken.out, /^FLAKE-RETRY: retry ALSO failed — always broken$/m);
   assert.doesNotMatch(broken.out, /FLAKE-RETRY-RECOVERED/);
   // A failure no file can be named for is not retried: repeating the whole instrumented run is
-  // exactly what the 2026-08-28 ruling removed, so pass one's own code stands.
-  const unnamed = runCoverageLane(dir, "no-such.test.mjs");
+  // exactly what the 2026-08-28 ruling removed, so pass one's own code stands. (A glob that matches
+  // nothing: node exits 0 over zero tests, the judge fails it, and there is no file to name. A
+  // missing explicit file is NAMED by the judge as never reporting, and so is retried.)
+  const unnamed = runCoverageLane(dir, "no-such-*.test.mjs");
   assert.notEqual(unnamed.status, 0);
   assert.match(unnamed.out, /^FLAKE-RETRY-FILES: no failed test file could be named — the instrumented run is not repeated/m);
   assert.doesNotMatch(unnamed.out, /uninstrumented —|retry ALSO failed/);

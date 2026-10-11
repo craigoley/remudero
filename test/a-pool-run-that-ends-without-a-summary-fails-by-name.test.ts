@@ -223,8 +223,8 @@ test("unit test: through the tier manifest, a pool child that exits 0 with no su
   assert.deepEqual(silent, [
     { judged: true, pooled: true },
     { judged: true, pooled: false },
-    { judged: false, pooled: false },
-  ], "the pool and its isolated re-run are judged; the shard's ordinary rest still runs");
+    { judged: true, pooled: false },
+  ], "the pool, its isolated re-run and the shard's ordinary rest are all judged");
 
   // Control: the same shard whose children really finish is green.
   const finished = manifest.main(["--root", root, "--run", "fast"], { spawn: (_cmd, args, o) => finishJudgedRun(args, o), env: {} });
