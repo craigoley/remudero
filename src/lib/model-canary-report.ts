@@ -1,0 +1,37 @@
+/** Private interactive report; never a public-release artifact or a private-daemon API. */
+import { projectCanaryRuns, type CanaryRun } from "./model-canary-metrics.js";
+
+export function renderCanaryReport(runs: readonly CanaryRun[]): string {
+  const projection = projectCanaryRuns(runs);
+  const data = JSON.stringify({ projection, runs }).replaceAll("<", "\\u003c");
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Private model canary report</title><style>
+body{font:16px system-ui,sans-serif;max-width:1050px;margin:auto;padding:24px;color:#18242c;background:#f5f7f8}h1{font-size:28px}label{display:inline-grid;gap:6px;margin:8px 12px 8px 0}select,button{font:inherit;padding:8px}table{width:100%;border-collapse:collapse;margin:16px 0}th,td{text-align:left;padding:10px;border-bottom:1px solid #bcc9ce}caption{text-align:left;font-weight:600;margin:8px 0}.scroll{overflow-x:auto}svg{width:100%;height:auto;min-height:240px}button{cursor:pointer}dl{display:grid;grid-template-columns:150px 1fr;gap:8px}dd{margin:0;overflow-wrap:anywhere}.muted{color:#526773}section{margin-top:24px}details{margin:12px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere}a{color:#006783}
+</style><h1>Model canaries</h1><p class="muted">Private controlled sandbox measurements · usage-rated estimates, not invoices · ${projection.uniqueRuns} task runs</p>
+<label>Task family<select id="family"></select></label><label>Cost basis<select id="basis"><option value="apiEstimate">API cash estimate</option><option value="subscriptionNotional">Subscription notional estimate</option></select></label>
+<p id="empty" role="status"></p><svg id="plot" viewBox="0 0 960 430" role="img" aria-labelledby="plot-title plot-desc"><title id="plot-title">Cost and time per correct task</title><desc id="plot-desc">Compare the same family, suite, route and effort. Unknown identity or cost is listed below, without a plotted zero. All numeric values have a table alternative.</desc></svg>
+<div class="scroll"><table><caption>Comparable configuration metrics and evidence coverage</caption><thead><tr><th>Configuration</th><th>Correct / observed</th><th>Tasks / cases / attempts</th><th>Cost / correct task</th><th>Completion p50 / p95</th><th>Served identity</th><th>Detail</th></tr></thead><tbody id="rows"></tbody></table></div>
+<section id="detail" aria-live="polite"><h2>Metric and test detail</h2><p>Select a configuration to inspect the measurements and tests.</p></section>
+<script type="application/json" id="data">${data}</script><script>
+(() => {
+const data=JSON.parse(document.getElementById('data').textContent), groups=data.projection.groups, rows=document.getElementById('rows'),plot=document.getElementById('plot'),family=document.getElementById('family'),basis=document.getElementById('basis'),detail=document.getElementById('detail');
+const text=(v)=>v===null?'Unavailable':String(v), usd=(v)=>v===null?'Unavailable':'$'+v.toFixed(6), ms=(v)=>v===null?'Unavailable':v.toFixed(0)+' ms';
+const element=(tag,value)=>{const e=document.createElement(tag);if(value!==undefined)e.textContent=value;return e;};
+for(const value of [...new Set(groups.map(g=>g.family))].sort()){const o=element('option',value);o.value=value;family.append(o);}
+function show(g){detail.replaceChildren(element('h2',g.model+' · '+g.family));
+ const dl=element('dl');for(const [k,v] of [['Route',g.route],['Effort',g.effort],['Suite',g.suiteHash],['Pass interval',g.passInterval?g.passInterval.map(x=>(x*100).toFixed(1)+'%').join('–'):'Unavailable'],['Interval basis',g.intervalBasis],['Unresolved',g.unresolved],['First text p50',ms(g.firstTextP50Ms)],['API estimate',usd(g.apiEstimate.totalUsd)],['Subscription notional',usd(g.subscriptionNotional.totalUsd)],['Invoice','Unavailable'],['Failed attempts',g.failedAttempts]]){dl.append(element('dt',k),element('dd',String(v)));}detail.append(dl);
+ const selected=data.runs.filter(r=>r.model===g.model&&r.family===g.family&&r.route===g.route&&r.effort===g.effort&&r.suiteHash===g.suiteHash);
+ for(const r of selected){const d=element('details'),s=element('summary',r.caseId+' · '+(r.verified===null?'Unresolved':r.verified?'Correct':'Incorrect')+' · '+ms(r.totalDurationMs));d.append(s);const t=element('table');t.append(element('caption','Attempt resources, including failures and retries'));const head=element('tr');for(const name of ['Attempt','Outcome','Duration','First text','Input / output','Cache read / write','Reasoning','Cost basis','Rated USD','Reported model'])head.append(element('th',name));t.append(head);
+ for(const [i,a] of r.attempts.entries()){const tr=element('tr');for(const v of [i+1,a.terminal,ms(a.durationMs),ms(a.firstTextMs),text(a.inputTokens)+' / '+text(a.outputTokens),text(a.cacheReadTokens)+' / '+text(a.cacheWriteTokens),text(a.reasoningTokens),a.billing==='api'?'API estimate':'Subscription notional',usd(a.usageRatedUsd),text(a.servedModel)])tr.append(element('td',String(v)));t.append(tr);}const wrapper=element('div');wrapper.className='scroll';wrapper.append(t);d.append(wrapper);detail.append(d);}}
+function render(){rows.replaceChildren();plot.querySelectorAll('g').forEach(g=>g.remove());const visible=groups.filter(g=>g.family===family.value),metric=basis.value;
+const qualified=visible.filter(g=>g.identityComparable&&g[metric].perCorrectTaskUsd!==null&&g.completionP50Ms!==null),maxX=Math.max(...qualified.map(g=>g[metric].perCorrectTaskUsd),.000001)*1.2,maxY=Math.max(...qualified.map(g=>g.completionP50Ms),1)*1.2;
+document.getElementById('empty').textContent=qualified.length?'Choose a point or Detail to inspect each test.':'No comparable, fully measured points for this selection. Missing values remain visible in the table.';
+const ns='http://www.w3.org/2000/svg',layer=document.createElementNS(ns,'g');plot.append(layer);const mark=(tag,attrs,txt)=>{const e=document.createElementNS(ns,tag);for(const [k,v] of Object.entries(attrs))e.setAttribute(k,String(v));if(txt)e.textContent=txt;layer.append(e);return e;};
+mark('line',{x1:90,y1:340,x2:900,y2:340,stroke:'#526773'});mark('line',{x1:90,y1:40,x2:90,y2:340,stroke:'#526773'});mark('text',{x:490,y:406,'text-anchor':'middle'},'Usage-rated cost per correct task · USD');mark('text',{x:12,y:24},'Time to verified completion · p50 ms');
+for(let i=0;i<5;i++){const x=90+i*202.5,y=340-i*75;mark('text',{x,y:370,'text-anchor':'middle'},'$'+(maxX*i/4).toFixed(5));mark('text',{x:80,y:y+4,'text-anchor':'end'},(maxY*i/4).toFixed(0));}
+for(const g of qualified){const x=90+810*g[metric].perCorrectTaskUsd/maxX,y=340-300*g.completionP50Ms/maxY,c=mark('circle',{cx:x,cy:y,r:9,fill:g.passRate>=.95?'#007c72':'#ac5f13',role:'button','aria-label':g.model+' details'});c.addEventListener('click',()=>show(g));mark('text',{x:x+12,y:y-8},g.model+' '+(100*g.passRate).toFixed(1)+'%');}
+for(const g of visible){const tr=element('tr');for(const v of [g.model+' · '+g.route+' · '+g.effort,g.correct+' / '+g.observed,g.tasks+' / '+g.distinctCases+' / '+g.attempts,usd(g[metric].perCorrectTaskUsd),ms(g.completionP50Ms)+' / '+ms(g.completionP95Ms),g.servedIdentityKnown+' / '+g.attempts+(g.servedMismatch?' · mismatch':'' )])tr.append(element('td',v));const td=element('td'),b=element('button','Detail');b.type='button';b.addEventListener('click',()=>show(g));td.append(b);tr.append(td);rows.append(tr);}}
+family.addEventListener('change',render);basis.addEventListener('change',render);render();
+})();</script></html>`;
+}
+
