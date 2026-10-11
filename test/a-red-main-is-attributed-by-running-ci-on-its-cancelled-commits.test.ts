@@ -17,16 +17,21 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import type { AsyncIssueGateway } from "../src/lib/escalate.js";
+import { appendLedger } from "../src/lib/ledger.js";
 import {
   buildMainHealthRung,
   chooseProbeConcurrency,
   locatedWriterRefusal,
+  mainBisectionFromLedger,
   medianCiRunMs,
   planMainBisection,
+  restMainProbes,
   type MainHealthRungDeps,
   type MainProbeVerdict,
   type MainRepairFixRequest,
   type MainRepairLane,
+  type MainRepairProbes,
+  type MainRepairRevertRequest,
 } from "../src/lib/main-health-rung.js";
 import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
 import { readLedgerLines } from "../src/lib/status.js";
@@ -63,6 +68,8 @@ interface World {
   queued: number;
   idle: number;
   refuseDispatch?: boolean;
+  /** Called with the sha each time main's first-parent chain is read at a commit. */
+  onCommitRead?: (commit: string) => void;
 }
 
 function world(cancelledCount: number): World {
@@ -163,6 +170,7 @@ function rig(w: World, lane: MainRepairLane, ledgerPath: string, overrides: Part
     }
     const commit = /^repos\/craigoley\/remudero\/commits\/([0-9a-f]{40})$/.exec(path)?.[1];
     if (commit) {
+      w.onCommitRead?.(commit);
       const index = w.chain.indexOf(commit);
       return {
         parents: index > 0 ? [{ sha: w.chain[index - 1] }] : [],
@@ -492,3 +500,217 @@ test("W1-T7760: the located writer refuses a sha with no completed red run", () 
   assert.equal(locatedWriterRefusal(cancelled, history, new Map<string, MainProbeVerdict>([[cancelled, "red"]])), undefined, "a concluded red probe may be named");
   assert.match(locatedWriterRefusal(cancelled, history, new Map<string, MainProbeVerdict>([[cancelled, "green"]])) ?? "", /no completed run/);
 });
+
+test("W1-T7760: the writer files the red unlocated when the run history stops showing a completed red for the named commit",
+  inScratchDir(async (ledgerPath) => {
+    const w = world(0); // G, R, head: nothing is unattributed, so R is named as the first red at once
+    const history = historyOf(w).map((run) => ({
+      headSha: run.head_sha,
+      workflowName: run.name,
+      runId: run.id,
+      conclusion: run.conclusion as string,
+      status: run.status,
+      url: run.html_url,
+      pullRequests: run.pull_requests,
+      startedAt: run.run_started_at,
+      completedAt: run.updated_at,
+    }));
+    // The run history is read once and shared; R's run is superseded while the lane reads main's
+    // first-parent chain, after the first red was named and before the located row is written.
+    w.onCommitRead = (commit) => {
+      if (commit === RED) history.find((run) => run.headSha === RED)!.conclusion = "cancelled";
+    };
+    const lane = fakeLane();
+    await rig(w, lane, ledgerPath, { readMainRunHistory: () => history }).observe();
+    assert.equal(lane.fixes.length, 0, "no fix is dispatched at a commit whose CI is not red");
+    assert.equal(rowsOf(ledgerPath, "main.repair.located").length, 0);
+    const [unlocated] = rowsOf(ledgerPath, "main.repair.unlocated");
+    assert.equal(unlocated?.refused_sha, RED);
+    assert.equal(unlocated?.first_red_sha, RED);
+    assert.match(String(unlocated?.reason), /no completed run whose required checks concluded red/);
+    assert.match(String(unlocated?.reason), /1 of them cancelled, skipped or stale/);
+  }),
+);
+
+test("W1-T7760: a probe that cannot be read, released or sized neither names a commit nor stops the bisection",
+  inScratchDir(async (ledgerPath) => {
+    const w = world(2);
+    const [c1, c2] = w.cancelled as [string, string];
+    const logs: Array<Record<string, unknown>> = [];
+    const dispatched: string[] = [];
+    let reading: "unreadable" | "cancelled" | "red" = "unreadable";
+    const probes: MainRepairProbes = {
+      dispatch: async (probeSha) => {
+        dispatched.push(probeSha);
+        return { sha: probeSha, ref: `rmd-attribution/${probeSha}` };
+      },
+      read: async () => {
+        if (reading === "unreadable") throw new Error("HTTP 502 listing the probe's runs");
+        return {
+          status: "completed",
+          runId: PROBE_BASE,
+          runUrl: `https://github.com/${OWNER}/${REPO}/actions/runs/${PROBE_BASE}`,
+          jobs: [{ name: "ci", status: "COMPLETED", conclusion: reading === "red" ? "FAILURE" : "CANCELLED" }],
+        };
+      },
+      release: async () => {
+        throw new Error("HTTP 404 the ref is already gone");
+      },
+      readRunnerLoad: async () => {
+        throw new Error("HTTP 403 runners need admin");
+      },
+    };
+    const lane = { ...fakeLane(), probes };
+    const daemon = rig(w, lane, ledgerPath, { log: (step, extra) => void logs.push({ step, ...extra }) });
+    const logged = (step: string) => logs.filter((entry) => entry.step === step);
+
+    // Runners that cannot be counted are read as one probe at a time, and the row says they were unread.
+    await daemon.observe();
+    assert.deepEqual(dispatched, [c2]);
+    assert.match(String(logged("main.repair.runner_load_unread")[0]?.error), /HTTP 403 runners need admin/);
+    assert.deepEqual(rowsOf(ledgerPath, "main.repair.bisecting")[0]?.concurrency_reading, { unread: "HTTP 403 runners need admin" });
+
+    // A probe whose run cannot be listed stays in flight: nothing concludes, nothing is re-dispatched.
+    await daemon.observe();
+    const [unreadable] = logged("main.repair.probe_unreadable");
+    assert.equal(unreadable?.probe_sha, c2);
+    assert.match(String(unreadable?.error), /HTTP 502/);
+    assert.deepEqual(dispatched, [c2]);
+    assert.equal(rowsOf(ledgerPath, "main.repair.probe_concluded").length, 0);
+
+    // A cancelled probe run concluded nothing: it is recorded inconclusive, its ref is still released
+    // (and a release that fails is logged, never fatal), and the commit is probed again.
+    reading = "cancelled";
+    await daemon.observe();
+    const [inconclusive] = rowsOf(ledgerPath, "main.repair.probe_concluded");
+    assert.equal(inconclusive?.verdict, "inconclusive");
+    assert.match(String(logged("main.repair.probe_ref_not_released")[0]?.error), /already gone/);
+    assert.deepEqual(dispatched, [c2, c2], "an inconclusive probe is not a verdict");
+
+    reading = "red";
+    await daemon.observe();
+    const concluded = rowsOf(ledgerPath, "main.repair.probe_concluded");
+    assert.deepEqual(concluded.map((row) => row.verdict), ["inconclusive", "red"]);
+    assert.deepEqual(concluded[1]?.failing_checks, ["ci"]);
+    assert.deepEqual(dispatched, [c2, c2, c1], "C2 reads red, so C1 -- the commit before it -- is probed next");
+    assert.equal(rowsOf(ledgerPath, "main.repair.located").length, 0, "nothing is named while the span is unproven");
+    assert.equal(lane.fixes.length, 0);
+  }),
+);
+
+test("W1-T7760: the bisection reads its state back from the ledger, a later inconclusive probe erasing an earlier verdict", () => {
+  const [c1, c2] = [sha("c1"), sha("c2")];
+  const ref = (probeSha: string) => `rmd-attribution/${probeSha}`;
+  const rows: Record<string, unknown>[] = [
+    { step: "main.repair.bisecting", first_red_sha: RED, probes: [{ sha: c1, ref: ref(c1) }, { sha: c2, ref: ref(c2), run_id: 7 }] },
+    { step: "main.repair.probe_concluded", first_red_sha: RED, probe_sha: c1, verdict: "green", failing_checks: [] },
+    { step: "main.repair.probe_concluded", first_red_sha: RED, probe_sha: c1, verdict: "inconclusive", failing_checks: [] },
+    { step: "main.repair.probe_concluded", first_red_sha: RED, probe_sha: c2, verdict: "red", run_id: 7, failing_checks: ["ci"] },
+    { step: "main.repair.probe_concluded", first_red_sha: sha("beef"), probe_sha: c2, verdict: "green", failing_checks: [] },
+  ];
+  const state = mainBisectionFromLedger(rows, RED);
+  assert.deepEqual([...state.verdicts], [[c2, "red"]], "C1's green was withdrawn by its later inconclusive run; another red's rows are not read");
+  assert.equal(state.inFlight.size, 0);
+  assert.equal(state.started, true);
+  assert.equal(state.located, false);
+
+  const located = { step: "main.repair.located", bisection_of: RED, offending_sha: c2 };
+  assert.equal(mainBisectionFromLedger([...rows, located], RED).located, true, "the located row that closed this bisection");
+  assert.equal(mainBisectionFromLedger([...rows, { ...located, bisection_of: sha("beef") }], RED).located, false, "a located row of another red closes nothing");
+});
+
+test("W1-T7760: a probe ref left by an earlier probe of the same commit is reused, any other refusal is not", async () => {
+  const probeSha = sha("c1");
+  const calls: string[][] = [];
+  const exists = ((args: string[]) => {
+    calls.push(args);
+    if (args.includes(`${REPO_PATH}/git/refs`)) throw new Error("HTTP 422 Reference already exists");
+    return {};
+  }) as GhApiFetcher;
+  const handle = await restMainProbes(OWNER, REPO, exists).dispatch(probeSha);
+  assert.deepEqual(handle, { sha: probeSha, ref: `rmd-attribution/${probeSha}` });
+  assert.ok(
+    calls.some((args) => args.includes(`${REPO_PATH}/actions/workflows/ci.yml/dispatches`) && args.includes(`ref=rmd-attribution/${probeSha}`)),
+    "the workflow is still dispatched on the existing ref",
+  );
+
+  const forbidden = ((args: string[]) => {
+    calls.push(args);
+    throw new Error("HTTP 403 Resource not accessible by integration");
+  }) as GhApiFetcher;
+  const before = calls.length;
+  await assert.rejects(restMainProbes(OWNER, REPO, forbidden).dispatch(probeSha), /HTTP 403/);
+  assert.equal(calls.length, before + 1, "no workflow is dispatched when the ref could not be created");
+});
+
+/** A bisected located row, its fix attempt ended without a PR: the next pass weighs a revert. */
+function seedBisectedRepair(ledgerPath: string, probeFailingChecks: string[]): { culprit: string; parent: string } {
+  const [parent, culprit] = [sha("c1"), sha("c2")];
+  const row = { run_id: "SEED", task_id: "main-health", surface: "main", offending_sha: culprit };
+  appendLedger(ledgerPath, {
+    ...row,
+    step: "main.repair.located",
+    head_sha: HEAD,
+    failing_checks: ["ci"],
+    method: "bisected-first-red",
+    bisection_of: RED,
+    parent_sha: parent,
+    probe_runs: [
+      { sha: culprit, verdict: "red", run_url: `https://github.com/${OWNER}/${REPO}/actions/runs/5001` },
+      { sha: parent, verdict: "green", run_url: `https://github.com/${OWNER}/${REPO}/actions/runs/5002` },
+    ],
+    probe_failing_checks: probeFailingChecks,
+    red_checks: ["ci"],
+    red_detail: null,
+  });
+  appendLedger(ledgerPath, { ...row, step: "main.repair.fix_dispatched", head_sha: HEAD, failing_checks: ["ci"] });
+  appendLedger(ledgerPath, { ...row, step: "main.repair.fix_refused", reason: "the fix run opened no pull request" });
+  return { culprit, parent };
+}
+
+test("W1-T7760: a bisected culprit is reverted on the strength of its probe runs, not main's push run history",
+  inScratchDir(async (ledgerPath) => {
+    const w = world(2);
+    const { culprit, parent } = seedBisectedRepair(ledgerPath, ["ci"]);
+    const reverts: MainRepairRevertRequest[] = [];
+    const lane: MainRepairLane = {
+      ...fakeLane(),
+      openRevertPr: async (request) => {
+        reverts.push(request);
+        return { prUrl: `https://github.com/${OWNER}/${REPO}/pull/10791` };
+      },
+    };
+    await rig(w, lane, ledgerPath).observe();
+    assert.equal(reverts.length, 1);
+    assert.equal(reverts[0]?.offendingSha, culprit);
+    assert.match(reverts[0]?.whyFixInsufficient ?? "", /culprit proven: /);
+    assert.ok(
+      (reverts[0]?.whyFixInsufficient ?? "").includes(`\`${culprit}\` was bisected: its probe run is red and its first parent \`${parent}\` is green`),
+      reverts[0]?.whyFixInsufficient,
+    );
+    assert.ok((reverts[0]?.whyFixInsufficient ?? "").includes(`${culprit} red https://github.com/${OWNER}/${REPO}/actions/runs/5001`), "the probe runs are the cited evidence");
+    const [opened] = rowsOf(ledgerPath, "main.repair.revert_opened");
+    assert.match(String(opened?.proof), /was bisected: its probe run is red and its first parent/);
+    assert.equal(rowsOf(ledgerPath, "main.repair.revert_withheld").length, 0);
+    assert.equal(w.requests.length, 0, "a proven culprit is not probed again");
+  }),
+);
+
+test("W1-T7760: a bisected culprit whose probe run is red on a different check than this repair's is not reverted",
+  inScratchDir(async (ledgerPath) => {
+    const w = world(2);
+    const { culprit } = seedBisectedRepair(ledgerPath, ["lint"]);
+    const lane = fakeLane();
+    let reverts = 0;
+    lane.openRevertPr = async () => {
+      reverts += 1;
+      return { prUrl: `https://github.com/${OWNER}/${REPO}/pull/10791` };
+    };
+    await rig(w, lane, ledgerPath).observe();
+    assert.equal(reverts, 0, "a revert is withheld when the probe run was red for another reason");
+    const [withheld] = rowsOf(ledgerPath, "main.repair.revert_withheld");
+    assert.equal(withheld?.offending_sha, culprit);
+    assert.match(String(withheld?.reason), /probe run is red on lint, not on this repair's ci/);
+    assert.equal(rowsOf(ledgerPath, "main.repair.revert_opened").length, 0);
+  }),
+);
