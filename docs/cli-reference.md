@@ -36,6 +36,7 @@ usage:
   rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...   # Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
   rmd progress-watchdog [--json] [--state-root <dir>]   # Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.
+  rmd live-edits --tree <daemon-checkout|install-checkout> --checkout <dir> --state-root <dir> [--json]   # Preserve, escalate, then restore tracked edits holding a live checkout behind origin/main.
   rmd claim <task-id> [--drop]   # Take (or with --drop, drop) the dispatch claim the fleet honours, for a hand-build.
   rmd routing-ab [--json]   # Compare the arms of each live routing experiment (Sol vs Sonnet) from the ledger union.
   rmd impossible-canary --model <id> [--model <id>]... --scaffold <revision> --grader <executable> [--state-dir <dir>] [--json]   # Run sealed impossible-task canaries per model and count cheating events with exact intervals.
@@ -340,6 +341,16 @@ rmd progress-watchdog [--json] [--state-root <dir>]
 ```
 
 W1-T5687: reads the deduplicated union of every ledger archive and the live ledger and prints one verdict: PROGRESSING, IDLE (no open PRs), STALLED (newest progress row over 15 min old: capture-diagnostics; over 30 min: recycle), CRASH_LOOP (3 or more daemon.paths boots in 15 min that never reached daemon.boot: hold-revive) or UNKNOWN (no rows or no open-PR count; never a silent none). Progress is ONLY a sweep.pass, review.posted or verdict.merged row: daemon.* and runtime.* rows are a pulse, not progress, which is why the 318-minute crash loop of 2026-10-03 read live to every daemon-prefix reader. The open-PR count is the newest sweep.pass row's enumerated field. On capture-diagnostics it writes one bundle (ledger tail, docker ps, the tenant's docker logs --tail, the verdict) under <state>/diagnostics/progress-<ts>/, at most one per 15 min. It recycles nothing; the host launcher acting on recycle / hold-revive is W1-T5688.
+
+### `rmd live-edits`
+
+Preserve, escalate, then restore tracked edits holding a live checkout behind origin/main.
+
+```
+rmd live-edits --tree <daemon-checkout|install-checkout> --checkout <dir> --state-root <dir> [--json]
+```
+
+2026-10-11: one rung of the live-edit ladder (src/lib/live-edit-ladder.ts) for one live checkout. With tracked edits it always writes them to <state-root>/recovery/live-edits/<tree>/ as a patch and to refs/rmd-recovery/live-edits/<host>/<ts>, read back and re-applied before it counts as a copy. Staleness pressure is the daemon's own freshness pressure (decideFreshnessRestart) from the first reading dirty and behind: at the restart threshold the daemon escalates once; at twice it, and only with a confirmed copy of these exact edits, the tracked paths are restored to HEAD so the checkout can fast-forward. Prints one JSON line with --json (restored:true only when the tree is now clean). This verb never escalates; the daemon posts what it leaves pending. Run by the host watchdog for the daemon checkout and the install checkout.
 
 ### `rmd claim`
 
