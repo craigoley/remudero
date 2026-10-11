@@ -82,6 +82,7 @@ const READ_STEPS = [
   "automerge.armed", "sweep.update_branch.updated", "fix.dispatch", "review.plan_only_reviewed",
 ];
 export const ADMISSION_FLOW_STEP = "admission_flow.shadow";
+/** PRIMARY CONTROL: selected terminal evidence is normally limited to eight reads per off-loop pass. */
 export const ADMISSION_FLOW_READ_MAX = 8;
 const ADMISSION_FLOW_TIMEOUT_MS = 5_000;
 const dispositionStatuses = new Set(["trusted", "would-close", "pending", "owner-action", "noop", "adopted", "simulated-closed"]);
