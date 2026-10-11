@@ -35,7 +35,7 @@
     1. THE SEAM. New src/lib/fleet-flow-detectors.ts exports `evaluateFleetFlowDetectors(...)` (called from runSreLanePass) and `FleetFlowDetector { id, inputs, evaluate(rows, nowMs,
        history) }` returning findings `{ name, subject, measured, bound, population, message }`. `message` carries
        `key=value` subjects (`task=`, `pr=`, `instance=`, `hold=`) so sre-runbooks' `incidentSubject` can read them.
-       It also exports `FLEET_FLOW_DETECTORS`, initially empty. Each detector is its own task and file.
+       The list of detectors the lane runs is `SRE_LANE_DETECTORS` in sre-lane.ts, initially empty. Each detector is its own task and module, registered there.
     2. JUDGED AGAINST ITS OWN HISTORY. One shared helper, `ownHistoryBound(samples, policy)`, gives a population's
        trailing p90. That is the statistic the flow and fix-lane gardeners already use for blocked-past-slo. Below
        the policy's `minSamples` it returns no bound, and the detector is silent, as cost-anomaly is for a thin
@@ -66,7 +66,7 @@
     - claim: "a still-firing finding is re-ledgered at most once per short window"
       proof: 'grep: test("W1-T8236: a still-firing finding re-ledgers once per short window" in test/the-sre-lane-evaluates-fleet-flow-detectors.test.ts'
     - claim: "detector inputs are in the writer census"
-      proof: 'grep: FLEET_FLOW_DETECTORS in test/every-incident-rule-reads-a-step-something-writes.test.ts'
+      proof: 'grep: SRE_LANE_DETECTORS in test/every-incident-rule-reads-a-step-something-writes.test.ts'
     - claim: "the SRE lane pass calls the detector registry"
       proof: 'grep: evaluateFleetFlowDetectors( in src/lib/sre-lane.ts'
   falsifier: |

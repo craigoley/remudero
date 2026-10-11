@@ -1,7 +1,7 @@
 - id: W1-T8245
   title: "A PAUSE SET FROM OUTSIDE THE FLEET IS AN INCIDENT BY ITS COST, NOT ITS CLOCK — on 2026-10-11 a Codex serve-restoration script paused core five times (01:17, 02:14, 02:52, 11:46, 12:44) for about 181 idle lane-minutes; the pause tiers escalate only at half of a 4-hour maintenance TTL, so none was ever flagged"
   repo: remudero
-  depends_on: [W1-T7839, W1-T8264, W1-T8235]  # actor evidence from W1-T7839; registers in src/lib/fleet-flow-detectors.ts after W1-T8264; idle cost from W1-T8235
+  depends_on: [W1-T7839, W1-T8264, W1-T8235]  # actor evidence from W1-T7839; registers in src/lib/sre-lane.ts's detector list after W1-T8264; idle cost from W1-T8235
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator ruling 2026-10-11 (\"Release the pause on core. Pause should only impact serve until it's back.\") + detection research: foreign-pause detector"
   plan_refs: [W1-T4429, W1-T7727, W1-T7839, W1-T2262, W1-T8235]
-  files: [src/lib/foreign-pause-detector.ts, src/lib/fleet-flow-detectors.ts, plan/policy.yaml, test/a-pause-set-from-outside-the-fleet-is-an-incident-by-its-cost.test.ts]
+  files: [src/lib/foreign-pause-detector.ts, src/lib/sre-lane.ts, plan/policy.yaml, test/a-pause-set-from-outside-the-fleet-is-an-incident-by-its-cost.test.ts]
   status: queued
   priority: 1.5
   attempts: 0
@@ -45,7 +45,7 @@
        `instance=`, `setter=`, `actor_class=`, `session=` (marked claimed), `reason=`, `expires=` and `since=`.
     3. A hold that ends before its bound leaves only its measured cost, as idle accounting already records it. It
        is not an incident.
-    4. REGISTER in FLEET_FLOW_DETECTORS. Its inputs join the census.
+    4. REGISTER in the SRE lane's detector list, SRE_LANE_DETECTORS in sre-lane.ts. Its inputs join the census.
     Tests go in the new file, with `test(` titles verbatim as in the proofs below. Replay the 11:46-12:29 pause
     with W1-T7839-shaped evidence for a remote non-interactive setter, and a 6-minute recycle-container pause.
   acceptance:
@@ -62,7 +62,7 @@
     - claim: "the pause policy names who may hold core"
       proof: 'grep: pausePolicy: in plan/policy.yaml'
     - claim: "the detector is registered"
-      proof: 'grep: foreignPauseDetector( in src/lib/fleet-flow-detectors.ts'
+      proof: 'grep: foreignPauseDetector( in src/lib/sre-lane.ts'
   falsifier: |
     Judge the hold by W1-T4429's TTL tier alone. The 43-minute replay never reaches the halfway point of a 4-hour
     maintenance TTL, so the first test reads no finding. Treat every PAUSE alike and the recycle test fires.
