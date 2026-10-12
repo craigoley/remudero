@@ -29,10 +29,10 @@ function put(repo: GitRepo, path: string, text: string) {
   writeFileSync(join(repo.dir, path), text);
 }
 
-function fixture(options: { planOnly?: boolean; rename?: boolean; unit?: boolean; blocking?: boolean } = {}) {
+function fixture(options: { planOnly?: boolean; rename?: boolean; unit?: boolean; blocking?: boolean; addedPath?: string } = {}) {
   const repo = gitRepo({ kind: "merged-proof-orphan" });
   const removed = options.planOnly ? "plan/old-evidence.yaml" : oldPath;
-  const added = options.planOnly ? "plan/new-evidence.yaml" : newPath;
+  const added = options.addedPath ?? (options.planOnly ? "plan/new-evidence.yaml" : newPath);
   const criteria = [{ claim, proof: options.unit ? `unit test: ${removed}` : `grep: ^needle[0-9][0-9]$ in ${removed}` }];
   const tasks = [task("W1-T1", "merged", criteria)];
   if (options.blocking) tasks.push(task("W1-T2", "queued", [{ claim: "a new test", proof: "unit test: test/missing.test.ts" }]));
@@ -136,6 +136,18 @@ test("a removed unit-test suite gets a candidate from literal test titles", () =
     assert.ok(line.includes(`candidates: ${added}`), result.output);
     assert.ok(!line.includes("decoy"), "comments and regex interpretations of a literal title are not candidate tests");
   } finally { repo.cleanup(); }
+});
+
+test("unit-test replacement hints accept every file shape the reviewer recognizes", () => {
+  for (const addedPath of ["test/replacement.spec.ts", "test/replacement.test.js", "test/replacement.spec.mjs"]) {
+    const { repo, added } = fixture({ unit: true, addedPath });
+    try {
+      const result = run(repo);
+      assert.equal(result.status, 0, result.output);
+      const line = result.output.split("\n").find((line) => line.includes("merged proof orphan"));
+      assert.ok(line?.includes(`candidates: ${added}`), result.output);
+    } finally { repo.cleanup(); }
+  }
 });
 
 test("an orphan without a replacement is still named and an existing title refusal still blocks", () => {

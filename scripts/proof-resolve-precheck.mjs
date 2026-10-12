@@ -89,7 +89,8 @@ function addedProofEvidence(orphans, addedPaths, repoRoot, baseSha) {
         }
         matches = result.status === 0;
       } else {
-        if (!path.endsWith(".test.ts")) continue;
+        const target = parseWhitelistedProof(`unit test: ${path}`);
+        if (target?.kind !== "test" || target.nameFiltered) continue;
         if (!titles.has(orphan.removedPath)) {
           titles.set(orphan.removedPath, literalTestTitlesIn(gitOrThrow(["show", `${baseSha}:${orphan.removedPath}`], { cwd: repoRoot })));
         }
