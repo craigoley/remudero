@@ -22,6 +22,41 @@
  */
 import { fixedClock, type Clock } from "./clock.js";
 import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
+import type { HeavyBuildHold } from "./heavy-build-reservation.js";
+import type { Task } from "./plan.js";
+
+export type NewBuildReservationVerdict =
+  | { kind: "held"; hold: HeavyBuildHold; reason: string }
+  | { kind: "unavailable"; reason: string };
+
+/** Pure decision over an injected, fresh reading. UNKNOWN holds only NEW implement admissions. */
+export function checkNewBuildReservation(
+  deps: Pick<DispatchGovernorDeps, "checkHeavyNewBuild">,
+  task: Pick<Task, "type">,
+): NewBuildReservationVerdict | undefined {
+  if (task.type !== "implement") return undefined;
+  try {
+    const hold = deps.checkHeavyNewBuild?.();
+    return hold ? { kind: "held", hold, reason: hold.detail } : undefined;
+  } catch (error) {
+    return { kind: "unavailable", reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** The actual start decision's evidence, shared by both consumers; never a cached tick verdict. */
+export function newBuildReservationPayload(verdict: NewBuildReservationVerdict): Record<string, unknown> {
+  return {
+    scope: "NEW-implement-only",
+    source: "heavy_ready",
+    state: verdict.kind,
+    reason: verdict.reason,
+    ...(verdict.kind === "held" ? {
+      request_id: verdict.hold.requestId,
+      ready_at_ms: verdict.hold.readyAtMs,
+      expires_at_ms: verdict.hold.expiresAtMs,
+    } : {}),
+  };
+}
 
 /** An epoch-ms instant as ISO-8601, via the Clock port (clock.ts, pure) rather than a bare Date site. */
 const isoAt = (ms: number): string => fixedClock(ms).iso();
@@ -137,6 +172,8 @@ export function checkDispatchGovernors(
  * one-optional-parameter type, so both satisfy this structurally and neither call site needs a shim.
  */
 export interface DispatchGovernorDeps {
+  /** NEW implement admission only; checkDispatchGovernors never consults this reservation. */
+  checkHeavyNewBuild?: () => HeavyBuildHold | undefined;
   checkCostGovernor?: (dailyCostCeilingUsd?: number) => CostGovernorResult | undefined;
   checkQueueGovernor?: () => QueueGovernorResult | undefined;
   /** W1-T1038 — see this module's own FAIL-OPEN note (above `checkDispatchGovernors`) for why a

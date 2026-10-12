@@ -135,8 +135,12 @@ export const IDLE_LANE_SUMMARY_WINDOW_MS = 60 * MS_PER_MINUTE;
  * why a lane is empty. The daemon observes its own log stream rather than threading a flag through every
  * decline, so a hold written by any layer (including one the daemon does not own) is still charged.
  */
-export function idleLaneCauseForStep(step: string): IdleLaneCause | undefined {
+export function idleLaneCauseForStep(step: string, fields?: { state?: unknown }): IdleLaneCause | undefined {
   switch (step) {
+    case "dispatch.new_build_held":
+      // A verified reservation is capacity set aside for a heavy run. An unreadable
+      // reservation is UNKNOWN, not evidence of either capacity or an empty selection.
+      return fields?.state === "held" ? "capacity_headroom" : "unknown";
     case "dispatch.wip_deferred":
     case "daemon.queue_governor":
       return "wip_limit";
