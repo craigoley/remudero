@@ -53897,6 +53897,12 @@ export interface AlertFixDispatchDeps {
    *  fakes that predate it keep driving only what they drove; omitted, the inert-proof count does not run (no real
    *  `gh` default fires under a fake). The real binding is {@link readAlertFixPrBody}. */
   readPrBody?: (prUrl: string) => string;
+  /** W1-T8572: the main-repair fix dispatch's no-test-file open (that lane reuses this seam rather than declaring
+   *  another): the REST PR create, the pushed branch's diff against origin/main and its head subject. Optional, so a
+   *  fake that omits them gets the real reads; the alert-fix lane never calls them. */
+  fetch?: GhApiFetcher;
+  readDiff?: (worktreePath: string) => string | undefined;
+  readHeadSubject?: (worktreePath: string) => string;
 }
 
 /** W1-T8625: the opened PR's body over `gh` — the ONE body read both {@link checkAlertFixAcceptance} and the
@@ -54196,15 +54202,7 @@ export function mainRepairWorkerOpenedDefect(prUrl: string, body: string | undef
   return { defect: "worker-opened", count: inert.length, inert_proofs: inert, resolution: "opened-unchecked", pr_url: prUrl, body_file_read: body !== undefined };
 }
 
-/** W1-T8572 — the fix dispatch's own seams beside the alert-fix ones: how it opens a no-test-file PR over REST, and
- *  how it reads the pushed branch's diff and head subject. Optional, so a fake that omits them gets the real reads. */
-export interface MainRepairFixDispatchDeps extends AlertFixDispatchDeps {
-  fetch?: GhApiFetcher;
-  readDiff?: (worktreePath: string) => string | undefined;
-  readHeadSubject?: (worktreePath: string) => string;
-}
-
-const REAL_MAIN_REPAIR_FIX_DEPS: MainRepairFixDispatchDeps = { ...REAL_ALERT_FIX_DISPATCH_DEPS, spawn: ledgeredNonDispatchSpawn("main-repair-fix") };
+const REAL_MAIN_REPAIR_FIX_DEPS: AlertFixDispatchDeps = { ...REAL_ALERT_FIX_DISPATCH_DEPS, spawn: ledgeredNonDispatchSpawn("main-repair-fix") };
 
 /**
  * W1-T6403 — the priority fix PR for a red main: {@link dispatchAlertFixRun}'s fresh-branch path, one
@@ -54221,7 +54219,7 @@ export async function dispatchMainRepairFixRun(
   request: MainRepairFixRequest,
   ledgerPath: string,
   runId: string,
-  deps: MainRepairFixDispatchDeps = REAL_MAIN_REPAIR_FIX_DEPS,
+  deps: AlertFixDispatchDeps = REAL_MAIN_REPAIR_FIX_DEPS,
 ): Promise<string | undefined> {
   const taskId = mainRepairTaskId(request.offendingSha);
   const log = (step: string, extra: Record<string, unknown> = {}) =>
@@ -54290,7 +54288,7 @@ async function openCheckedMainRepairPr(
   worktreePath: string,
   bodyFile: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  deps: MainRepairFixDispatchDeps,
+  deps: AlertFixDispatchDeps,
 ): Promise<string | undefined> {
   const diffText = (deps.readDiff ?? diffSinceMergeBase)(worktreePath);
   if (diffText === undefined || diffText.trim() === "") {

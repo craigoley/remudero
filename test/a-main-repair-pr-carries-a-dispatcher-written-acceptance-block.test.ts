@@ -24,6 +24,7 @@ import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 import {
+  type AlertFixDispatchDeps,
   dispatchMainRepairFixRun,
   MAIN_REPAIR_ACCEPTANCE_DEFECT_STEP,
   MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER,
@@ -33,7 +34,6 @@ import {
   mainRepairFixPrompt,
   mainRepairRevertBody,
   mainRepairTaskId,
-  type MainRepairFixDispatchDeps,
 } from "../src/run-task.js";
 
 const OWNER = "craigoley";
@@ -112,7 +112,7 @@ function harness(work: (bodyFile: string, args: SpawnWorkerArgs) => string) {
     opened.push(fields);
     return { html_url: FIX_PR };
   }) as GhApiFetcher;
-  const deps: MainRepairFixDispatchDeps = {
+  const deps: AlertFixDispatchDeps = {
     worktreeAdd: () => {},
     worktreeRemove: () => {},
     renderWorkerSettings: () => "/tmp/fake-settings.json",
@@ -191,7 +191,7 @@ test("W1-T8572: the fix worker opens its PR with the dispatcher-written body", a
 });
 
 test("W1-T8572: with no parsed test file the prompt carries the PR-body proof grammar", () => {
-  const prompt = mainRepairFixPrompt(request([]), "/state/tmp/body.md");
+  const prompt = mainRepairFixPrompt(request([]), "/root/tmp/main-repair-body.md");
   for (const line of PR_BODY_ACCEPTANCE_GRAMMAR) assert.ok(prompt.includes(line), `the PR-body grammar line: ${line}`);
   assert.ok(!prompt.includes("You are FILING work"), "never the filing grammar");
   for (const line of ACCEPTANCE_PROOF_GRAMMAR.filter((l) => !PR_BODY_ACCEPTANCE_GRAMMAR.includes(l))) {
