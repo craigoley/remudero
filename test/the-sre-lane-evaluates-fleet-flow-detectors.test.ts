@@ -15,6 +15,7 @@ import { fixedClock } from "../src/lib/clock.js";
 import { listFeedback } from "../src/lib/feedback.js";
 import { LEDGER_FILENAME } from "../src/lib/ledger-path.js";
 import { aggregateIncidents, runSreLanePass, SRE_LANE_DETECTORS } from "../src/lib/sre-lane.js";
+import { incidentSubject } from "../src/lib/sre-runbooks.js";
 
 const NOW = Date.parse("2026-10-11T19:00:00Z");
 const POLICY = { minSamples: 3, maxSamples: 6, longMs: 120_000 };
@@ -132,7 +133,7 @@ test("flow history stays bounded and same-class subjects share a fingerprint", a
   assert.equal(found.length, 4);
   const written = events(stateDir);
   assert.equal(aggregateIncidents(written.map((e) => ({ ...e, ts: Date.parse(e.ts), instance: "test" }))).length, 1);
-  assert.equal(written[0].message, "held task=a");
+  assert.equal(written[0].message, "task=a held");
   const store = JSON.parse(readFileSync(join(stateDir, "fleet-flow-detectors.json"), "utf8"));
   assert.equal(store.detectors.fake.history.length, POLICY.maxSamples);
   assert.deepEqual(store.detectors.fake.history.map((s: { measured: number }) => s.measured), [2, 3, 9, 9, 9, 9]);
@@ -227,4 +228,60 @@ test("flow rows already visible to the incident reader are aggregated once", asy
     },
   });
   assert.deepEqual(counts, [1]);
+});
+
+test("the lane evaluates a detector registered in its default registry", async () => {
+  const { stateDir, rows, detector } = fixture();
+  const registry = SRE_LANE_DETECTORS as FleetFlowDetector[];
+  registry.push(detector);
+  try {
+    await runSreLanePass({
+      stateDir, root: stateDir, mergedLastDay: () => 0, clock: fixedClock(NOW),
+      readFlowRows: () => rows, readEvents: () => [], hasOpenTask: () => false,
+      framesFor: () => [], mergedPrsSince: () => [], log: () => {},
+    });
+    assert.equal(events(stateDir)[0].kind, "flow");
+  } finally {
+    registry.splice(registry.indexOf(detector), 1);
+  }
+});
+
+test("flow messages preserve the exact runbook subject when another value shares its prefix", async () => {
+  const { stateDir, rows, detector } = fixture();
+  detector.evaluate = () => [{
+    name: "held-pause", subject: "task=a", population: "held", measured: 9, bound: 0,
+    message: "held task=ab hold=recycle",
+  }];
+  const found = await evaluateFleetFlowDetectors({ stateDir, detectors: [detector], nowMs: NOW, readRows: () => rows });
+  const [incident] = aggregateIncidents(found.map((row) => ({
+    fingerprint: String(row.fingerprint), name: String(row.name), kind: String(row.kind),
+    message: String(row.message), ts: NOW, instance: "test",
+  })));
+  assert.equal(incidentSubject(incident, "task"), "a");
+  assert.equal(incidentSubject(incident, "hold"), "recycle");
+});
+
+test("wildcard detector inputs read both rotation forms and ignore unrelated ledger steps", async () => {
+  const { stateDir, detector } = fixture();
+  detector.inputs = ["daemon.*", "*.held"];
+  const row = (step: string, measured: number) => JSON.stringify({
+    ts: new Date(NOW - 1_000).toISOString(), step, measured,
+  }) + "\n";
+  writeFileSync(join(stateDir, "ledger.2026-10-11T18-59-58-000Z.ndjson"),
+    row("daemon.pause", 7) + row("unrelated", 99));
+  writeFileSync(join(stateDir, "ledger.2026-10-11T18-59-59-000Z.ndjson.gz"),
+    gzipSync(row("dispatch.held", 8) + row("unrelated", 99)));
+  writeFileSync(join(stateDir, LEDGER_FILENAME), row("daemon.pause", 9) + row("unrelated", 99));
+  const seen: string[][] = [];
+  const evaluate = detector.evaluate;
+  detector.evaluate = (rows, now, history) => {
+    seen.push(rows.map((row) => String(row.step)));
+    return evaluate(rows, now, history);
+  };
+  const found = await evaluateFleetFlowDetectors({ stateDir, detectors: [detector], nowMs: NOW });
+  assert.equal(found.length, 1);
+  assert.deepEqual(seen, [
+    ["daemon.pause", "dispatch.held", "daemon.pause"],
+    ["daemon.pause", "dispatch.held", "daemon.pause"],
+  ]);
 });

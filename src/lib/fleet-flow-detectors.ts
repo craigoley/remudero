@@ -77,6 +77,17 @@ function matchesInput(step: unknown, inputs: readonly string[]): boolean {
       input.startsWith("*") ? step.endsWith(input.slice(1)) : step === input);
 }
 
+function inputPattern(inputs: readonly string[]): RegExp {
+  const alternatives = inputs.map((input) => {
+    const prefix = input.endsWith("*");
+    const suffix = !prefix && input.startsWith("*");
+    const literal = prefix ? input.slice(0, -1) : suffix ? input.slice(1) : input;
+    const escaped = JSON.stringify(literal).slice(1, -1).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return `${suffix ? '[^"]*' : ""}${escaped}${prefix ? '[^"]*' : ""}`;
+  });
+  return new RegExp(`"step"\\s*:\\s*"(?:${alternatives.join("|")})"`);
+}
+
 export interface FleetFlowInput {
   stateDir: string;
   detectors: readonly FleetFlowDetector[];
@@ -92,16 +103,18 @@ async function recentRows(input: FleetFlowInput, longMs: number): Promise<readon
   const since = input.nowMs - longMs;
   if (input.readRows) return input.readRows(since, input.nowMs);
   const inputs = [...new Set(input.detectors.flatMap((d) => [...d.inputs]))];
+  const pattern = inputPattern(inputs);
   const signature = JSON.stringify([inputs, longMs]);
   let reader = readers.get(input.stateDir);
   if (!reader || reader.signature !== signature) {
     const fresh = { signature, since, now: input.nowMs, read: async (): Promise<FleetFlowRow[]> => [] };
     const memo = createLedgerRotationMemo((rows) =>
-      inWindow(rows, fresh.since, fresh.now).filter((row) => matchesInput(row.step, inputs)));
+      inWindow(rows, fresh.since, fresh.now).filter((row) => matchesInput(row.step, inputs)), { pattern });
     fresh.read = async () => {
       const result = await readLedgerUnionRecordsMemoized(input.stateDir, memo, {
         since: new Date(fresh.since).toISOString(), rotationWindowMs: longMs,
         step: inputs.every((step) => !step.includes("*")) ? inputs : undefined,
+        pattern,
         refuseIncomplete: true,
       });
       if (!result.ok) throw new Error(`Fleet-flow ledger unreadable: ${result.unread.join(", ")}`);
@@ -151,7 +164,9 @@ export async function evaluateFleetFlowDetectors(input: FleetFlowInput): Promise
         source: "sre-lane", kind: "flow", name: finding.name,
         fingerprint: createHash("sha256").update(`flow\u0000${finding.name}`, "utf8").digest("hex"),
         subject: finding.subject, population: finding.population, measured: finding.measured, bound,
-        message: finding.message.includes(finding.subject) ? finding.message : `${finding.message} ${finding.subject}`,
+        // Runbooks read the first key=value token, so the finding's exact subject must lead.
+        message: finding.message.split(/\s+/, 1)[0] === finding.subject
+          ? finding.message : `${finding.subject} ${finding.message}`,
       };
       if (input.writeEvent) input.writeEvent(event);
       else appendLedger(join(input.stateDir, LEDGER_FILENAME), event, { clock: fixedClock(now) });
