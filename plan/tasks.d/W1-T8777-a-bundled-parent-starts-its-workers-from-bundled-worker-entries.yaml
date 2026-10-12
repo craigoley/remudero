@@ -1,0 +1,47 @@
+- id: W1-T8777
+  title: "A BUNDLED PARENT STARTS ITS WORKERS FROM BUNDLED WORKER ENTRIES — a module that starts a worker from its own URL resolves to its .ts source under a bundle, and a bundled process has no tsx loader, so no parent that starts a read-model, slow-lane, status or board worker can ever leave tsx"
+  repo: remudero
+  depends_on: [W1-T8776]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-12: docs/adr/0006-precompiled-daemon-child-entries.md's third unfiled follow-up (W1-T7729, #11136)"
+  plan_refs: [W1-T7729, W1-T8775, W1-T8776]
+  files: [scripts/build-child-entries.mjs, src/lib/child-entry-argv.ts, src/lib/read-model-worker.ts, src/lib/read-model-slow-lane.ts, src/lib/status.ts, src/lib/board-worker.ts, test/a-bundled-parent-starts-its-workers-from-bundled-worker-entries.test.ts, test/a-daemon-child-entry-is-precompiled.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    ADR 0006 decision 4: under a bundle, a worker started from a module's own URL (`new Worker(new URL(import.meta.url))`,
+    or a `workerUrl` defaulting to it) resolves to that module's .ts source, "and a bundled process has no tsx loader,
+    so it cannot start such a worker as-is". Phase one therefore bundles only children that start no self-URL worker;
+    the ADR's follow-up list orders "emit the worker-thread entries (read models, slow lane, status, board) as their own
+    bundles, located through the manifest, before any parent that starts them is bundled". Without it, the read plane's
+    parents stay on tsx for good. `grep -rln "new Worker(" src` is the live inventory; read-model-worker.ts,
+    read-model-slow-lane.ts, status.ts and board-worker.ts are the four the ADR names.
+  design: |
+    1. The build emits each named worker module as its own bundle and records it in the manifest under
+       `workers: [{ module, bundle }]`, with the same moduleUrlPlugin and banner, keyed by the same source hash.
+    2. A bundle marks itself (a banner-defined flag) so a module can tell it runs bundled. When bundled, each of the four
+       modules resolves the worker it starts through `bundledWorkerUrl(selfUrl)` (src/lib/child-entry-argv.ts), which
+       reads the manifest beside the running bundle; when not bundled, or when
+       the manifest lacks the worker, it keeps today's self-URL start unchanged. A bundled process that cannot locate
+       its worker bundle refuses loudly rather than starting a .ts worker that would crash.
+    3. Do not switch any parent's spawn site here: this task only makes the worker entries exist and resolvable, so
+       a later switch is safe. List any other `new Worker(new URL(import.meta.url))` module found by the grep in the
+       report as a follow-up.
+  acceptance:
+    - claim: "the child-entry build emits each named worker module as its own bundle and lists it in the manifest"
+      proof: 'grep: test("W1-T8777: the build emits and lists a bundle per named worker entry" in test/a-bundled-parent-starts-its-workers-from-bundled-worker-entries.test.ts'
+    - claim: "a bundled parent starts its worker from the bundled worker entry and the worker runs without tsx"
+      proof: 'grep: test("W1-T8777: a bundled parent starts its worker from the bundled worker entry" in test/a-bundled-parent-starts-its-workers-from-bundled-worker-entries.test.ts'
+    - claim: "an unbundled parent keeps today's self-URL worker start"
+      proof: 'grep: test("W1-T8777: an unbundled parent keeps its self-URL worker start" in test/a-bundled-parent-starts-its-workers-from-bundled-worker-entries.test.ts'
+    - claim: "the read-model worker resolves its worker through the bundled-worker lookup"
+      proof: "grep: bundledWorkerUrl( in src/lib/read-model-worker.ts"
+  falsifier: |
+    Leave the self-URL start in place under a bundle and the bundled parent tries to start a .ts worker with no loader:
+    the second test's worker fails to start.
