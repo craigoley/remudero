@@ -570,7 +570,7 @@ function judgedCensusReading(cwd: string, judged: JudgedRun, r: PlanPrPreflightR
   if (verdict.complete) return r;
   return { status: verdict.status, output: `${judge.describeJudgedRun("shard census", verdict, { prefix: "test-judge" })}\n${r.output}` };
 }
-function shardCensus(cwd: string, budgetMs: number): PlanPrPreflightReading {
+function runShardCensus(cwd: string, budgetMs: number): PlanPrPreflightReading {
   if (!existsSync(join(cwd, SHARD_CENSUS_TEST))) return absentFromTree(SHARD_CENSUS_TEST);
   const judged = loadCensusJudge().prepareJudgedRun();
   try {
@@ -579,7 +579,7 @@ function shardCensus(cwd: string, budgetMs: number): PlanPrPreflightReading {
     judged.cleanup();
   }
 }
-async function shardCensusAsync(cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> {
+async function runShardCensusAsync(cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> {
   if (!existsSync(join(cwd, SHARD_CENSUS_TEST))) return absentFromTree(SHARD_CENSUS_TEST);
   const judged = loadCensusJudge().prepareJudgedRun();
   try {
@@ -631,7 +631,7 @@ const defaultPreflightChecks = {
   lintPlan: (cwd: string, budgetMs: number): PlanPrPreflightReading => runInTree(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV, budgetMs),
   taskIdExistence: (cwd: string, headRef: string | undefined, budgetMs: number): PlanPrPreflightReading =>
     taskIdReading(runInTree(cwd, TASK_ID_SCRIPT, taskIdArgv(headRef), budgetMs)),
-  shardCensus: (cwd: string, budgetMs: number): PlanPrPreflightReading => shardCensus(cwd, budgetMs),
+  shardCensus: (cwd: string, budgetMs: number): PlanPrPreflightReading => runShardCensus(cwd, budgetMs),
   checkProof: (cwd: string, proof: string, budgetMs: number): ProofCheckStatus => proofCheckStatus(runInTree(cwd, RUN_TASK_ENTRY, checkProofArgv(proof), budgetMs)),
 };
 /** A test's stand-ins for any of {@link defaultPreflightChecks}, and for the budget each in-tree check gets. */
@@ -640,7 +640,7 @@ const defaultPreflightChecksAsync = {
   lintPlan: (cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> => runInTreeAsync(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV, budgetMs),
   taskIdExistence: async (cwd: string, headRef: string | undefined, budgetMs: number): Promise<PlanPrPreflightReading> =>
     taskIdReading(await runInTreeAsync(cwd, TASK_ID_SCRIPT, taskIdArgv(headRef), budgetMs)),
-  shardCensus: (cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> => shardCensusAsync(cwd, budgetMs),
+  shardCensus: (cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> => runShardCensusAsync(cwd, budgetMs),
   checkProof: async (cwd: string, proof: string, budgetMs: number): Promise<ProofCheckStatus> =>
     proofCheckStatus(await runInTreeAsync(cwd, RUN_TASK_ENTRY, checkProofArgv(proof), budgetMs)),
 };
