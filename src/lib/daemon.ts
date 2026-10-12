@@ -387,11 +387,11 @@ export function daemonExitCode(stopReason: DaemonStopReason): number {
 /**
  * W1-T3319 — ONE TASK'S FAILURE, RECOGNISED STRUCTURALLY RATHER THAN BY A TOOL'S PROSE.
  *
- * `drain.ts` has exactly TWO `summary("error", ...)` sites and BOTH build their detail as
- * `${taskId}: ${message}` — one wrapping `deps.runOne` in a try/catch, one reporting a lane's
- * recorded failure. So every drain-level error is ALREADY a per-task failure and exit 1 is
- * reachable by nothing else. The task-id prefix is a property of the EMITTER, not a guess about how
- * some tool words its failure.
+ * `drain.ts`'s two worker-failure sites build `${taskId}: ${message}` — one wrapping
+ * `deps.runOne` in a try/catch, one reporting a lane's recorded failure. The separate owned
+ * admission/reporting-fault site includes a phase and may name `dispatch`, not a task.
+ * That infrastructure failure must keep exit 1 rather than borrowing a worker's blocked code.
+ * The worker prefix is a property of the EMITTER, not a guess about a tool's prose.
  *
  * THIS REPLACES W1-T3310's BANNER MATCH, which keyed on the pre-push hook's refusal text. That was
  * right about the case it saw and blind to the next one: the very next crash was a failed GitHub
@@ -404,7 +404,7 @@ export function daemonExitCode(stopReason: DaemonStopReason): number {
  * a genuine crash would be reclassified as blocked and docker's budget would protect nothing.
  *
  * NARROW BY CONSTRUCTION, IN TWO WAYS, and the second was forced by an existing test rather than
- * chosen: the task-id prefix both sites emit, anchored at the start — not "anything with a colon" —
+ * chosen: the task-id prefix both worker sites emit, anchored at the start — not "anything with a colon" —
  * AND `Command failed: `, the shape a SPAWNED COMMAND's failure carries.
  *
  * WHY THE SECOND HALF EXISTS. W1-T2546's criterion 3 pins that an UNRECOGNISED failure still exits
@@ -5924,6 +5924,30 @@ export async function runDaemon(
           return false;
         }
       }
+      const rejoin = deps.categorizedRefusalRejoinFor?.(task.id);
+      if (rejoin && !rejoin.receiptRecorded) {
+        // A corrected refusal's durable RE-OFFER reason precedes run.start. It is not an
+        // accepted attempt: only a later real run.start spends this source's opportunity.
+        // Avoid writing for an already-held task, then re-read AFTER the fallible receipt.
+        const beforeReceipt = checkNewBuildReservation(deps, task);
+        if (beforeReceipt) {
+          newBuildHeld = true;
+          const fields = { task: task.id, lane, ...newBuildReservationPayload(beforeReceipt) };
+          log("dispatch.new_build_held", fields);
+          if (isRefill) log("dispatch.lane_refill_held", { ...fields, finished_task: refill!.finishedTaskId });
+          return false;
+        }
+        log("dispatch.harness_commit_retry", {
+          task_id: task.id,
+          original_run_id: rejoin.sourceRunId,
+          original_verdict: "no_pr",
+          original_refusal: "categorized_worker_refusal",
+          refused_contract_revision: rejoin.refusedContractRevision,
+          contract_revision: rejoin.contractRevision,
+          reason: "categorized refusal contract changed",
+          admission_stage: "contract_reoffer",
+        });
+      }
       const startedAtMs = daemonClock.now();
       // Last admission read: no await or fallible logging between this decision and runOne.
       const reservation = checkNewBuildReservation(deps, task);
@@ -5955,16 +5979,6 @@ export async function runDaemon(
       }
       if (isRefill) log("dispatch.lane_refilled", { lane, finished_task: refill!.finishedTaskId, next_task: task.id,
         ...(inFlightFreshness ? { restart_pending: true, waiting_on: [...restartHoldouts] } : {}) });
-      const rejoin = deps.categorizedRefusalRejoinFor?.(task.id);
-      if (rejoin && !rejoin.receiptRecorded) log("dispatch.harness_commit_retry", {
-        task_id: task.id,
-        original_run_id: rejoin.sourceRunId,
-        original_verdict: "no_pr",
-        original_refusal: "categorized_worker_refusal",
-        refused_contract_revision: rejoin.refusedContractRevision,
-        contract_revision: rejoin.contractRevision,
-        reason: "categorized refusal contract changed",
-      });
       log("daemon.iteration", { task: task.id, attempted: attempted.length, max: opts.max ?? null });
     };
     const poolControl: LanePoolControl = {};
