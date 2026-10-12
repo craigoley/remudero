@@ -45,7 +45,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   changeView: 1,
   changedShardProofs: 2,
   checkCliFreshness: 1,
-  checkFixCensusSnapshot: 1,
   checkProofAtAuthorTime: 1,
   ciLearningTaskIdMinter: 1,
   classifyHeadShaAvailability: 1,
@@ -207,7 +206,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   readCiFrictionHandFixes: 2,
   readCiFrictionPlanState: 1,
   readCodeScanningAlerts: 1,
-  readDispatchFilingSnapshot: 1,
   readHeadShaRest: 2,
   readLadderPlan: 1,
   readLocalOriginRefHead: 1,
@@ -513,9 +511,11 @@ test("unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts â€
   const fns = topLevelFunctions();
   const pop = population(fns);
   const reach = loopReachable(fns, "daemonCommand");
-  for (const seam of ["checkFixCensusSnapshot", "mergeDirectViaRest"]) {
-    assert.ok((pop.get(seam) ?? 0) > 0 && reach.has(seam), `${seam} hands a sync primitive to its own call and is reached`);
-  }
+  assert.ok((pop.get("mergeDirectViaRest") ?? 0) > 0 && reach.has("mergeDirectViaRest"), "mergeDirectViaRest hands a sync primitive to its own call and is reached");
+  // W1-T7744: checkFixCensusSnapshot keeps its spawnSync seam default, and the census still counts it, but the fix rung
+  // and the census-push repair now await checkFixCensusSnapshotAsync, so the loop no longer reaches the sync form.
+  assert.ok((pop.get("checkFixCensusSnapshot") ?? 0) > 0, "the sync census check's seam default is still counted");
+  assert.ok(!reach.has("checkFixCensusSnapshot"), "no daemon-loop path reaches the sync census check (W1-T7744)");
 
   // Falsifier on the real source: a reached function with no row gains a seam that defaults to the primitive.
   const seamed = fns.map((f) =>
