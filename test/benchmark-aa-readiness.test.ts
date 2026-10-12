@@ -3,6 +3,7 @@
 // replay and reports missingness instead of zeros. Every case runs in rmd- temp state roots with a fake attempt
 // dispatcher, a fake grader, injected runtime pins and a fixed clock: nothing spawns a worker, reads a real ledger or spends.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs, { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -483,5 +484,108 @@ test("rmd benchmark-aa readiness reaches the readiness driver", async () => {
     console.log = savedLog;
     if (savedHome === undefined) delete process.env.HOME;
     else process.env.HOME = savedHome;
+  }
+});
+
+type PopulationJson = Record<string, unknown> & { digest: string };
+const redigest = (body: Record<string, unknown>): PopulationJson => {
+  const { digest: _stale, ...rest } = body;
+  return { ...rest, digest: createHash("sha256").update(JSON.stringify(rest)).digest("hex") };
+};
+
+/** Makes the NEXT exclusive creation of population.json lose: `winner(intended)` is installed first, so the real create hits EEXIST. */
+function loseCreationTo(t: { mock: { method: (...args: never[]) => unknown } }, winner: (intended: PopulationJson) => string,
+  during: () => void = () => {}): { raced: () => boolean } {
+  const write = fs.writeFileSync;
+  let raced = false;
+  (t.mock.method as (object: unknown, name: string, impl: unknown) => unknown)(fs, "writeFileSync", (...args: Parameters<typeof write>) => {
+    const flag = (args[2] as { flag?: string } | undefined)?.flag;
+    if (!raced && flag === "wx" && String(args[0]).endsWith("population.json")) {
+      raced = true;
+      write(args[0], winner(JSON.parse(String(args[1])) as PopulationJson));
+      during();
+    }
+    return write(...args);
+  });
+  syncBuiltinESMExports();
+  return { raced: () => raced };
+}
+
+test("calibration reuses a valid concurrent population winner", async (t) => {
+  const stateDir = root();
+  await register(stateDir);
+  const winnerFrozenAt = "2026-10-02T08:30:00.000Z";
+  let winnerText = "";
+  const race = loseCreationTo(t, (intended) => { winnerText = `${JSON.stringify(redigest({ ...intended, frozenAt: winnerFrozenAt }), null, 2)}\n`; return winnerText; });
+  const calls: PairedAttemptRequest<string>[] = [];
+  try {
+    const result = await runBenchmarkAaReadiness(input(stateDir, calls));
+    assert.equal(race.raced(), true, "a competing driver installed the population between the read and the create");
+    assert.equal(result.state, "receipt-emitted", result.refusals.join(","));
+    assert.equal(result.population?.frozenAt, winnerFrozenAt, "the winner's freeze time is what this driver used");
+    assert.equal(readFileSync(join(prospectiveAaDir(stateDir, TRIAL), "population.json"), "utf8"), winnerText, "the winner is preserved byte for byte");
+    assert.equal(calls.length, TASKS.length * 2);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+});
+
+test("calibration refuses conflicting and partial population winners", async (t) => {
+  const cases: [string, (intended: PopulationJson) => string, RegExp][] = [
+    ["foreign allocation", (p) => JSON.stringify(redigest({ ...p, allocationReceiptHash: "f".repeat(64) })), /^population-changed-since-freeze$/],
+    ["tampered digest", (p) => JSON.stringify({ ...p, denominator: 99 }), /^population-changed-since-freeze$/],
+    ["widened denominator", (p) => JSON.stringify(redigest({ ...p, denominator: 99 })), /^population-changed-since-freeze$/],
+    ["dropped task", (p) => JSON.stringify(redigest({ ...p, eligible: (p.eligible as unknown[]).slice(1) })), /^population-changed-since-freeze$/],
+    ["foreign trial", (p) => JSON.stringify(redigest({ ...p, trialId: "other-trial" })), /^population-changed-since-freeze$/],
+    ["not an object", () => "null", /^population-changed-since-freeze$/],
+    ["truncated json", (p) => JSON.stringify(p).slice(0, 40), /^population-unreadable:/],
+    ["empty file", () => "", /^population-unreadable:/],
+  ];
+  for (const [label, winner, expected] of cases) {
+    const stateDir = root();
+    await register(stateDir);
+    let installed = "";
+    const race = loseCreationTo(t, (intended) => { installed = winner(intended); return installed; });
+    const calls: PairedAttemptRequest<string>[] = [];
+    try {
+      const result = await runBenchmarkAaReadiness(input(stateDir, calls));
+      assert.equal(race.raced(), true, label);
+      assert.equal(result.state, "refused", label);
+      assert.match(result.refusals[0] ?? "", expected, label);
+      assert.equal(result.receipt.state, "withheld", label);
+      assert.equal(calls.length, 0, `${label}: nothing dispatched before validation`);
+      assert.equal(readFileSync(join(prospectiveAaDir(stateDir, TRIAL), "population.json"), "utf8"), installed, `${label}: the winner is never replaced`);
+    } finally {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+    }
+  }
+});
+
+test("concurrent calibration drivers resume without pair replay", async (t) => {
+  const stateDir = root();
+  await register(stateDir);
+  const calls: PairedAttemptRequest<string>[] = [];
+  let other: Promise<Awaited<ReturnType<typeof runBenchmarkAaReadiness>>> | undefined;
+  // Driver A finds no population; a competing winner is installed at A's creation and driver B starts at that same instant.
+  const race = loseCreationTo(t, (intended) => `${JSON.stringify(intended, null, 2)}\n`,
+    () => { other = runBenchmarkAaReadiness(input(stateDir, calls)); });
+  try {
+    const first = await runBenchmarkAaReadiness(input(stateDir, calls));
+    const second = await other!;
+    assert.equal(race.raced(), true);
+    for (const result of [first, second]) assert.ok(result.population !== null, `both drivers read the one population: ${result.refusals.join(",")}`);
+    assert.equal(first.population?.frozenAt, second.population?.frozenAt, "both drivers share the winner's freeze");
+    for (const taskId of TASKS) assert.ok(calls.filter((call) => call.taskId === taskId).length <= 2, `${taskId} was not replayed while both drivers ran`);
+    const restarted = await runBenchmarkAaReadiness(input(stateDir, calls));
+    assert.equal(restarted.state, "receipt-emitted", restarted.refusals.join(","));
+    for (const taskId of TASKS) assert.equal(calls.filter((call) => call.taskId === taskId).length, 2, `${taskId} ran exactly one pair across both drivers and the restart`);
+    const admitted = prospectiveAaLedgerRows(stateDir, TRIAL).filter((row) => row.step === "aa_prospective.decision"
+      && (row.aa_prospective as { admitted?: boolean }).admitted === true);
+    assert.equal(admitted.length, TASKS.length, "one admission per task: a busy slot refuses, it never admits twice");
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
   }
 });

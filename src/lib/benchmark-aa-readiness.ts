@@ -191,21 +191,33 @@ function eligibilityReason(task: ReadinessTask | undefined): string | null {
   return criteria.some((criterion) => parseWhitelistedProof(criterion.proof) !== null) ? null : "no-executable-proof";
 }
 
-/** The population is frozen ONCE, before the first pair: a later run reads it back and never re-derives eligibility. */
-function freezePopulation(protocol: ProspectiveAaProtocol, trialDir: string, tasks: ReadonlyMap<string, ReadinessTask> | null,
-  nowIso: string): { ok: true; population: FrozenPopulation } | { ok: false; reason: string } {
-  const path = join(trialDir, "population.json");
-  let stored: FrozenPopulation | undefined;
+type PopulationOutcome = { ok: true; population: FrozenPopulation } | { ok: false; reason: string };
+
+/** Reads and validates a stored population: one immutable check serves a prior freeze and a competing winner alike. */
+function readStoredPopulation(path: string, protocol: ProspectiveAaProtocol): PopulationOutcome | null {
+  let stored: FrozenPopulation | null | undefined;
   try {
     const text = readOptional(path);
-    if (text !== undefined) stored = JSON.parse(text) as FrozenPopulation;
+    if (text !== undefined) stored = JSON.parse(text) as FrozenPopulation | null;
   } catch (error) { return { ok: false, reason: `population-unreadable:${(error as Error).message.slice(0, 80)}` }; }
-  if (stored !== undefined) {
-    const { digest, ...body } = stored;
-    if (stored.version !== READINESS_POPULATION_VERSION || digest !== sha256(JSON.stringify(body))
-      || stored.allocationReceiptHash !== protocol.allocationReceiptHash) return { ok: false, reason: "population-changed-since-freeze" };
-    return { ok: true, population: stored };
-  }
+  if (stored === undefined) return null;
+  const changed: PopulationOutcome = { ok: false, reason: "population-changed-since-freeze" };
+  if (stored === null || typeof stored !== "object" || !Array.isArray(stored.eligible) || !Array.isArray(stored.refused)) return changed;
+  const { digest, ...body } = stored;
+  const manifestIds = protocol.manifest.tasks.map((task) => task.taskId).sort();
+  const frozenIds = [...stored.eligible, ...stored.refused].map((entry) => entry.taskId).sort();
+  if (stored.version !== READINESS_POPULATION_VERSION || digest !== sha256(JSON.stringify(body))
+    || stored.trialId !== protocol.trialId || stored.allocationReceiptHash !== protocol.allocationReceiptHash
+    || stored.denominator !== manifestIds.length || JSON.stringify(frozenIds) !== JSON.stringify(manifestIds)) return changed;
+  return { ok: true, population: stored };
+}
+
+/** The population is frozen ONCE, before the first pair: a later run reads it back and never re-derives eligibility. */
+function freezePopulation(protocol: ProspectiveAaProtocol, trialDir: string, tasks: ReadonlyMap<string, ReadinessTask> | null,
+  nowIso: string): PopulationOutcome {
+  const path = join(trialDir, "population.json");
+  const existing = readStoredPopulation(path, protocol);
+  if (existing !== null) return existing;
   if (tasks === null) return { ok: false, reason: "plan-unreadable-before-freeze" };
   const order = (taskId: string) => sha256(`benchmark-aa-readiness-order-v1\0${protocol.allocationReceiptHash}\0${taskId}`);
   const eligible: FrozenPopulation["eligible"] = [];
@@ -220,7 +232,13 @@ function freezePopulation(protocol: ProspectiveAaProtocol, trialDir: string, tas
     allocationReceiptHash: protocol.allocationReceiptHash, consent: protocol.manifest.cohort.kind, orderMethod: READINESS_ORDER_METHOD,
     denominator: protocol.manifest.tasks.length, eligible, refused };
   const population: FrozenPopulation = { ...body, digest: sha256(JSON.stringify(body)) };
-  writeFileSync(path, `${JSON.stringify(population, null, 2)}\n`, { flag: "wx" });
+  try {
+    writeFileSync(path, `${JSON.stringify(population, null, 2)}\n`, { flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    // A competing driver froze first: its population is the one truth. Validate it; never replace, re-derive or widen it.
+    return readStoredPopulation(path, protocol) ?? { ok: false, reason: "population-unreadable:winner-vanished-after-EEXIST" };
+  }
   return { ok: true, population };
 }
 
