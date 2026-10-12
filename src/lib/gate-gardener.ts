@@ -106,6 +106,10 @@ export function runSuiteShifted(repoRoot: string, file: string, shiftDays: numbe
     if (tests === 0 || cancelled > 0 || pass + fail === 0 || tests !== pass + fail + cancelled + skipped + todo || (status !== 0 && fail === 0) || (status === 0 && fail > 0)) {
       throw new Error(`shifted suite ${file}: incomplete TAP verdict (exit ${status}, tests ${tests}, pass ${pass}, fail ${fail}, cancelled ${cancelled})`);
     }
+    const wrapper = `# Subtest: ${relative(repoRoot, resolve(repoRoot, file))}`;
+    if (!output.split("\n").some((line) => line.startsWith("# Subtest: ") && line !== wrapper)) {
+      throw new Error(`shifted suite ${file}: no named tests in TAP verdict`);
+    }
     const measurement = { passed: status === 0, pass, tests };
     return measure ? measurement : measurement.passed;
   } finally {

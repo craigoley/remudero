@@ -87,6 +87,23 @@ test("W1-T7812: a re-run with no verdict blocks as run_error", () => {
     assert.doesNotMatch(result.report, /expiring-fixture: exempt/);
     assert.equal(calls, atControl ? 1 : 2);
   }
+
+  const root = fixture();
+  const file = "test/empty.test.ts";
+  writeFileSync(join(root, file), "export {};\n");
+  const output: string[] = [];
+  try {
+    const code = census.main({
+      execFile: (command: string, args: string[]) => command === "node"
+        ? JSON.stringify({ staleDays: 14 }) : args[0] === "ls-files" ? file : "",
+      readFile: () => `updated_at: "${stamp(0.5)}",`, now: () => NOW,
+      log: (line: string) => output.push(line), assertAged: () => undefined,
+      assertComplete: () => undefined, recordedPopulationByFile: {}, repoRoot: root,
+    });
+    assert.equal(code, 1, "a green file wrapper is not a measured test verdict");
+    assert.match(output.join("\n"), /run_error.*no named tests/);
+    assert.doesNotMatch(output.join("\n"), /expiring-fixture: exempt/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("W1-T7812: control red blocks as control_failed without a shifted run", () => {
@@ -193,7 +210,7 @@ test("W1-T7812: incomplete TAP counts block as run_error and clean the private r
   const file = join(root, "test", "counts.test.ts");
   writeFileSync(file, 'import { test } from "node:test";\ntest("green", () => {});\n');
   const parent = process.env.TMPDIR;
-  const summary = "# tests 2\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n";
+  const summary = "# Subtest: measured\n# tests 2\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n";
   const roots: string[] = [];
   const run = (output: string, error?: Error) => measured(root, file, 2, {
     execFile: (_command: string, _args: string[], options: { env: NodeJS.ProcessEnv }) => {
