@@ -345,11 +345,16 @@ const inFlightAdmissions = new Set<string>();
 
 interface AdmissionClaim { version: 1; key: string; repo: string | null; gen: number; pid: number; host: string; startedAt: string; record: unknown }
 
+function parseJsonLine(line: string): { value: unknown } | { reason: string } {
+  try { return { value: JSON.parse(line) }; } catch (error) { return { reason: (error as Error).message }; }
+}
+
 /** True when `text` holds a canonical record for `key` under `repo`; a line that only mentions the key is not one. */
 function holdsCanonicalGap(text: string, key: string, repo: string | undefined): boolean {
   return text.split("\n").some((line) => {
-    let value: unknown;
-    try { value = JSON.parse(line); } catch { return false; }
+    const parsed = parseJsonLine(line);
+    if ("reason" in parsed) return false; // a torn or corrupt line is not a canonical record; it is kept, never rewritten
+    const value = parsed.value;
     if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
     const row = value as Record<string, unknown>;
     const gap = row.gap as Record<string, unknown> | null | undefined;
@@ -372,12 +377,12 @@ function readFd(fd: number): string {
   return buffer.subarray(0, read).toString("utf8");
 }
 
-function readClaim(path: string): AdmissionClaim | null {
+function readClaim(path: string): AdmissionClaim | { reason: string } {
   try {
     const value = JSON.parse(readFileSync(path, "utf8")) as Partial<AdmissionClaim>;
     return value.version === 1 && Number.isInteger(value.pid) && typeof value.host === "string" && typeof value.startedAt === "string"
-      ? value as AdmissionClaim : null;
-  } catch { return null; }
+      ? value as AdmissionClaim : { reason: "claim is not a version 1 admission claim" };
+  } catch (error) { return { reason: (error as Error).message }; }
 }
 
 /** Atomically publish a complete claim: the claim path either does not exist or already holds the whole claim. */
@@ -417,7 +422,7 @@ export function recordReadinessGap(stateDir: string, trialId: string, gap: Readi
       if (publishClaim(claimPath, claim)) { owned = claimPath; break; }
       if (recordedNow()) return { key, state: "already-recorded" };
       const holder = readClaim(claimPath);
-      if (holder === null) return { key, state: "pending", reason: `admission claim ${claimPath} is unreadable; its owner is unknown` };
+      if ("reason" in holder) return { key, state: "pending", reason: `admission claim ${claimPath} is unreadable (${holder.reason}); its owner is unknown` };
       const abandoned = holder.pid === process.pid && holder.host === hostname()
         ? !inFlightAdmissions.has(claimPath) : isHolderStale(holder, { isPidAlive: alive });
       if (!abandoned) return { key, state: "pending", reason: `admission of ${key} is owned by pid ${holder.pid} on ${holder.host}` };
