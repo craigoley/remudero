@@ -624,7 +624,6 @@ else
   echo "serve-container: resource policy NOT applied — ${SCRIPT_ROOT}/deploy/resource-policy.sh is absent"
 fi
 
-# ── 5b. W1-T8311: serve-policy-convergence.ts's replace needs fresh host admission, else HELD (75) ──
 SERVE_REPLACE_ADMISSION="${RMD_SERVE_REPLACE_ADMISSION:-}"
 SERVE_REPLACE_HELD_EXIT=75
 ADMIT_MEMINFO_PATH="${RMD_SERVE_ADMIT_MEMINFO_PATH:-/proc/meminfo}"
