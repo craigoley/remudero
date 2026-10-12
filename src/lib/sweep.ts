@@ -70,6 +70,7 @@ import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, work
 import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
+import { armedBodyNeedsGuard, rememberCleanArmedBody, type ClosingReferenceGuardResult } from "./closing-reference-guard.js";
 import { observeAdmissionDisposition } from "./action-executor.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
 import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
@@ -1899,6 +1900,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "reviewerCodeStaleThisPass",
   // W1-T4415: every open draft is marked ready for review (operator ruling 2026-09-24: no drafts).
   "readyDraft",
+  // An armed PR's body edited after the arm is re-checked for closing references every pass.
+  "guardArmedBody",
   // W1-T4838: a worker's categorized refusal is held and drafted as a plan amendment, not retried.
   "draftRefusalAmendments",
   // W1-T5349: the plan-repair rung's fact read and its renumber/retitle effect.
@@ -2002,6 +2005,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "mergeQueue"
   | "readPrFileSource"
   | "readyDraft"
+  | "guardArmedBody"
   | "draftRefusalAmendments"
   | "captureRepairFeedback"
   | "disarmAutoMerge"
@@ -4205,6 +4209,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     },
 
     readyDraft: (pr) => readyDraftImpl(pr),
+
+    guardArmedBody: (pr) => realArmDepsAsync(() => config).closingReferences!(pr.prUrl),
 
     // W1-T4838 — hold each refused task, then open ONE plan-only amendment PR for it. The hold is
     // written FIRST (cheap, local, idempotent) so a slow or failed PR never lets the task re-dispatch.
@@ -11730,6 +11736,9 @@ export interface SweepDeps {
     mode?: "armed-idle",
   ) => ArmOutcomeName | ArmAttemptOutcome | void | Promise<ArmOutcomeName | ArmAttemptOutcome | void>;
   readArmFacts?: (pr: OpenPrView) => ArmReprobeFacts | undefined | Promise<ArmReprobeFacts | undefined>;
+  /** Re-runs the closing-reference guard on a PR GitHub holds armed whose listed body names another
+   *  PR or issue: the arm-time guard cannot see a body edited after the arm. Omitted: not re-checked. */
+  guardArmedBody?: (pr: OpenPrView) => ClosingReferenceGuardResult | Promise<ClosingReferenceGuardResult>;
   /** W1-T5909 — read only for an unarmed `mergeable` PR on a pass that may arm. Omitted: the memory dedup. */
   readMergeQueueMembership?: (pr: OpenPrView) => MergeQueueMembership | Promise<MergeQueueMembership>;
   escalateRearmExhausted?: (pr: OpenPrView, rearms: number, bound: number, reason?: string) => string | null | Promise<string | null>;
@@ -14191,6 +14200,29 @@ export async function runSweep(
   }
   if (deps.readyDraft && (deps.actionable?.("held-draft") ?? true)) {
     for (const pr of openPrs) if (pr.isDraft === true) await deps.readyDraft(pr);
+  }
+  // GitHub merges an armed PR with the body it holds at that moment, and attemptArm guarded the body
+  // only when the fleet armed it. An edit since then can name another open PR with a closing keyword,
+  // which closes that PR on merge (core 10856, 2026-10-11). Each pass re-checks every armed PR whose
+  // listed body names another PR or issue; a body with no such reference costs no read.
+  if (deps.guardArmedBody && !deps.dryRun) {
+    for (const pr of openPrs) {
+      if (pr.autoMergeArmed !== true || !armedBodyNeedsGuard(pr.prUrl, pr.body)) continue;
+      let guard: ClosingReferenceGuardResult;
+      try {
+        guard = await deps.guardArmedBody(pr);
+      } catch (e) {
+        // A guard that threw proves nothing about the body: it is logged as failed below and retried next pass.
+        guard = { state: "failed", defused: [], detail: `closing-reference guard threw: ${String((e as Error)?.message ?? e)}` };
+      }
+      if (guard.state === "clean") {
+        if (pr.body !== undefined) rememberCleanArmedBody(pr.prUrl, pr.body);
+        continue;
+      }
+      // A failed guard leaves the arm standing and is retried next pass; the row says so.
+      log("sweep.armed_body_guarded", { pr_number: pr.prNumber, pr_url: pr.prUrl, state: guard.state,
+        defused: guard.defused.map((d) => d.url), ...(guard.detail ? { detail: guard.detail } : {}) });
+    }
   }
 
   // Dedup is keyed on the ledger, which persists across sweeps even when the input is
