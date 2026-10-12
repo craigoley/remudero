@@ -38,7 +38,7 @@ function fixture(options: { planOnly?: boolean; rename?: boolean; unit?: boolean
   if (options.blocking) tasks.push(task("W1-T2", "queued", [{ claim: "a new test", proof: "unit test: test/missing.test.ts" }]));
   put(repo, "plan/tasks.yaml", stringify(tasks));
   const source = options.unit ? 'test("owner [literal] records its cause", () => {});\n' : "needle42\n";
-  put(repo, removed, source);
+  put(repo, removed, options.unit ? `// test("comment-only ownership", () => {});\n${source}` : source);
   repo.git("add", ".");
   repo.git("commit", "-qm", "base");
   repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
@@ -48,7 +48,7 @@ function fixture(options: { planOnly?: boolean; rename?: boolean; unit?: boolean
     put(repo, added, options.unit ? source : "replacement census\nneedle42\n");
   }
   put(repo, options.planOnly ? "plan/decoy.yaml" : "test/decoy.test.ts", options.unit
-    ? '// owner [literal] records its cause\ntest("owner l records its cause", () => {});\n'
+    ? `// ${source}\n/* ${source} */\ntest("owner l records its cause", () => {});\ntest("comment-only ownership", () => {});\n`
     : "^needle[0-9][0-9]$\n");
   repo.git("add", "-A");
   repo.git("commit", "-qm", "head");

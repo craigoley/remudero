@@ -32,6 +32,7 @@ import { certainHeadRefusals, extractTaskTrailerId, parseWhitelistedProof, planO
 import { certainStaleProofs } from "../src/lib/proof-base-stale.js";
 import { taskIdFromRunBranch } from "../src/lib/status.js";
 import { literalTestTitlesIn } from "../src/lib/task-linter.js";
+import { stripComments } from "../src/lib/test-impact-map.js";
 import { isMainModule } from "./lib/argv.mjs";
 import { gitOrThrow } from "./lib/git.mjs";
 
@@ -92,9 +93,9 @@ function addedProofEvidence(orphans, addedPaths, repoRoot, baseSha) {
         const target = parseWhitelistedProof(`unit test: ${path}`);
         if (target?.kind !== "test" || target.nameFiltered) continue;
         if (!titles.has(orphan.removedPath)) {
-          titles.set(orphan.removedPath, literalTestTitlesIn(gitOrThrow(["show", `${baseSha}:${orphan.removedPath}`], { cwd: repoRoot })));
+          titles.set(orphan.removedPath, literalTestTitlesIn(stripComments(gitOrThrow(["show", `${baseSha}:${orphan.removedPath}`], { cwd: repoRoot }))));
         }
-        const addedTitles = literalTestTitlesIn(readFileSync(join(repoRoot, path), "utf8"));
+        const addedTitles = literalTestTitlesIn(stripComments(readFileSync(join(repoRoot, path), "utf8")));
         matches = titles.get(orphan.removedPath).some((title) => addedTitles.some((addedTitle) => addedTitle.includes(title)));
       }
       if (matches) matchingProofs.push(orphan.proof);
