@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-11 (\"go with all your recommendations\"): review-owner-dead loop, PRs #10783, #10848, #10862"
   plan_refs: [W1-T2844, W1-T3647, W1-T913, W1-T6047, W1-T6053, W1-T7955, W1-T2753]
   files: [src/lib/review.ts, test/a-re-run-review-takes-over-a-dead-owners-pending.test.ts]
-  status: queued
+  status: merged
   priority: 1.5
   attempts: 0
   rationale: |

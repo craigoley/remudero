@@ -11,7 +11,7 @@
   band_meaning: blast-radius
   origin: "Operator requested automation, flow and self-improvement with gardeners as necessary and no stuck PRs; 2026-10-10 authorized governed task filing and source implementation."
   files: [src/lib/flow-gardener.ts, src/lib/flow-remedy-gardener.ts, src/lib/garden-registry.ts, test/admission-pr-flow-gardening.test.ts, src/run-task.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
