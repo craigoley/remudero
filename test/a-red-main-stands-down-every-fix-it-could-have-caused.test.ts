@@ -10,6 +10,7 @@ import {
   BASE_RED_REFRESH_STEP,
   BASE_RED_STOOD_DOWN_STEP,
   baseRedHistoryFromLedger,
+  completeLiveRefreshHistory,
   decideBaseRed,
   mainLatestRunFromLedger,
   runSweep,
@@ -24,12 +25,13 @@ const pr = (names = ["lint-plan"]): OpenPrView => ({
   prNumber: 8920, prUrl: "https://github.com/o/r/pull/8920", taskId: "W1-T5490",
   headSha: HEAD, headRefName: "run-W1-T5490-1", checksState: "red", reviewState: "pending",
   unmetCriteria: [], priorStrikes: 0, autoMergeArmed: false, lastActivityAt: new Date(NOW - 60_000).toISOString(),
+  createdAt: new Date(NOW - 60 * 60_000).toISOString(),
   ciFailures: names.map((name) => ({ name, conclusion: "FAILURE", logTail: "AssertionError: inherited red" })),
 });
 const redMain = () => ({ step: "main.health.observed", sha: LAST, state: "red", failing_checks: ["ci"], observed_checks: ["ci", "build"] });
 
 test("W1-T5490: a pull-request-only red waits while main is red", async () => {
-  const rows: Record<string, unknown>[] = [redMain()];
+  const rows: Record<string, unknown>[] = [...completeLiveRefreshHistory(NOW), redMain()];
   const dispatched: number[] = [];
   const updated: number[] = [];
   const run = () => runSweep([pr(), { ...pr(), prNumber: 9000, checksState: "green", reviewState: "success", ciFailures: undefined }], {
@@ -48,6 +50,7 @@ test("W1-T5490: a pull-request-only red waits while main is red", async () => {
   rows.push({ ...redMain(), sha: HEAD, state: "green", failing_checks: [] });
   await run();
   assert.deepEqual(updated, [8920]);
+  assert.equal(rows.findLast(r => r.step === "refresh.clearance")?.history, "live");
   assert.equal(rows.filter((r) => r.step === BASE_RED_REFRESH_STEP).length, 1);
   await run();
   assert.deepEqual(dispatched, [8920], "the existing one-refresh rule remains bounded");

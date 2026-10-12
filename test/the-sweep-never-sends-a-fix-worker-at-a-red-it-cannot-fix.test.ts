@@ -5,6 +5,7 @@ import {
   BASE_RED_REFRESH_STEP,
   BASE_RED_STOOD_DOWN_STEP,
   DEFAULT_SWEEP_POLICY,
+  completeLiveRefreshHistory,
   mainLatestRunFromLedger,
   runSweep,
   type CiFailure,
@@ -34,6 +35,7 @@ function redPr(over: Partial<OpenPrView> = {}): OpenPrView {
     unmetCriteria: [],
     priorStrikes: 0,
     lastActivityAt: new Date(NOW - 60_000).toISOString(),
+    createdAt: new Date(NOW - 60 * 60_000).toISOString(),
     headSha: "a".repeat(40),
     headRefName: "run-W1-T4351-1",
     autoMergeArmed: false,
@@ -61,6 +63,7 @@ function mainObserved(sha: string, state: string, failing: unknown = []): Record
 }
 
 async function sweep(prs: OpenPrView[], ledger: Record<string, unknown>[], over: Partial<SweepDeps> = {}) {
+  if (!ledger.some(row => row.step === "refresh.clearance")) ledger.unshift(...completeLiveRefreshHistory(NOW));
   const dispatched: number[] = [];
   const escalated: Array<{ pr: number; reason: string }> = [];
   const updated: number[] = [];

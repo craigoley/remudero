@@ -4,7 +4,7 @@ import test from "node:test";
 import * as reproduction from "../src/lib/base-reproduction.js";
 import type { BaseProbeFile, BaseProbeResult } from "../src/lib/base-reproduction.js";
 import {
-  BASE_RED_REFRESH_STEP, BASE_RED_STOOD_DOWN_STEP, DEFAULT_SWEEP_POLICY, baseRedHistoryFromLedger, decideBaseRed,
+  BASE_RED_REFRESH_STEP, BASE_RED_STOOD_DOWN_STEP, completeLiveRefreshHistory, DEFAULT_SWEEP_POLICY, baseRedHistoryFromLedger, decideBaseRed,
   mainLatestRunFromLedger, runSweep, type OpenPrView, type SweepDeps,
 } from "./helpers/sweep-test.js";
 
@@ -30,7 +30,7 @@ function pr(over: Partial<OpenPrView> = {}): OpenPrView {
   return {
     prNumber: 9567, prUrl: "https://github.com/craigoley/remudero/pull/9567", taskId: "W1-T9567",
     reviewState: "pending", checksState: "red", unmetCriteria: [], priorStrikes: 0,
-    lastActivityAt: new Date(NOW - 60_000).toISOString(), headSha: "f".repeat(40),
+    lastActivityAt: new Date(NOW - 60_000).toISOString(), createdAt: new Date(NOW - 60 * 60_000).toISOString(), headSha: "f".repeat(40),
     headRefName: "run-W1-T9567-1", autoMergeArmed: false,
     ciFailures: [{ name: "coverage-ratchet", logTail: `not ok 1 - ${FILE_A}\nnot ok 2 - ${FILE_B}` }], ...over,
   };
@@ -57,6 +57,7 @@ const allFail: Probe = (files) => files.map((file): BaseProbeFile => ({ file, ou
 const worktreeAddFails: Probe = () => { throw new Error("git worktree add failed"); };
 
 function harness(rows: Row[]) {
+  rows.unshift(...completeLiveRefreshHistory(NOW));
   const fixed: number[] = [];
   const refreshed: number[] = [];
   const probed: string[] = [];
@@ -103,6 +104,7 @@ test("W1-T6024: #9567 stays base red after a later unrunnable probe and takes on
   h.at(M4, worktreeAddFails);
   await h.sweep([pr()]);
   assert.deepEqual(h.refreshed, [9567], "one branch refresh once main is green");
+  assert.equal(h.rows.findLast(r => r.step === "refresh.clearance")?.history, "live");
   assert.deepEqual(h.fixed, [], "and no fix strike");
   assert.equal(h.rows.filter((r) => r.step === BASE_RED_REFRESH_STEP).length, 1);
   await h.sweep([pr()]);

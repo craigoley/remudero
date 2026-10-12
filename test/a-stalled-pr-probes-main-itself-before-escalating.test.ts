@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
+import { completeLiveRefreshHistory, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { BASE_REPRODUCTION_MAX_FILES, type BaseProbeFile } from "../src/lib/base-reproduction.js";
 
 const NOW = Date.now();
@@ -15,7 +15,7 @@ function redPr(overrides: Partial<OpenPrView> = {}): OpenPrView {
   return {
     prNumber: PR, prUrl: `https://github.com/acme/remudero/pull/${PR}`, taskId: "W1-T6433",
     headSha: HEAD, headRefName: "run-W1-T6433-1", reviewState: "pending", checksState: "red",
-    unmetCriteria: [], priorStrikes: 0, lastActivityAt: ago(1), autoMergeArmed: false,
+    unmetCriteria: [], priorStrikes: 0, lastActivityAt: ago(1), createdAt: ago(60), autoMergeArmed: false,
     ciFailures: [{ name: "ci", logTail: `not ok 1 - ${FILE}` }], ...overrides,
   };
 }
@@ -31,7 +31,7 @@ function passing(file: string): BaseProbeFile {
 }
 
 function harness(history: Row[] = [stalled()], overrides: Partial<SweepDeps> = {}) {
-  const rows = [...history];
+  const rows = [...completeLiveRefreshHistory(NOW), ...history];
   const probes: { pr: number; files: readonly string[]; sha: string }[] = [];
   const refreshed: number[] = [];
   const fixes: number[] = [];
@@ -57,6 +57,7 @@ test("W1-T6433: a stalled PR with no cached probe probes main itself and refresh
   await runSweep([redPr()], h.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(h.probes, [{ pr: PR, files: [FILE], sha: MAIN }]);
   assert.deepEqual(h.refreshed, [PR]);
+  assert.equal(h.rows.findLast(row => row.step === "refresh.clearance")?.history, "live");
   assert.deepEqual(h.escalations, []);
   assert.deepEqual(h.fixes, []);
   const probe = h.rows.find(row => row.step === "sweep.base_reproduction");

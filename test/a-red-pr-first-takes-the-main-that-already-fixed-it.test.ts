@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
+import { completeLiveRefreshHistory, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { priorStrikesFor } from "../src/run-task.js";
 
 // W1-T6405 — OBSERVED 2026-10-08: #10058, #10084 and #10089 were red on failures main had already
@@ -21,7 +21,7 @@ function redPr(over: Partial<OpenPrView> = {}): OpenPrView {
   return {
     prNumber: PR, prUrl: `https://github.com/acme/remudero/pull/${PR}`, taskId: "W1-T6301",
     reviewState: "pending", checksState: "red", unmetCriteria: [], priorStrikes: 0,
-    lastActivityAt: ago(1), headSha: HEAD, headRefName: "run-W1-T6301-1", autoMergeArmed: false,
+    lastActivityAt: ago(1), createdAt: ago(60), headSha: HEAD, headRefName: "run-W1-T6301-1", autoMergeArmed: false,
     ciFailures: [{ name: "ci", logTail: `not ok 1 - ${FILE}` }], ...over,
   };
 }
@@ -32,6 +32,7 @@ function peer(): OpenPrView {
 }
 
 function harness(rows: Row[], behindBy: number) {
+  rows.unshift(...completeLiveRefreshHistory(NOW));
   const fixed: number[] = [];
   const refreshed: number[] = [];
   const probes: string[] = [];
@@ -63,6 +64,7 @@ test("W1-T6405: a red already fixed on main refreshes the branch before any fix 
   assert.deepEqual(h.probes, [`${MAIN}:${FILE}`]);
   assert.equal(h.rows.filter((r) => r.step === "sweep.base_reproduction" && r.verdict === "reproduced").length, 0);
   assert.deepEqual(h.refreshed, [PR], "the branch takes the main that already fixed its red");
+  assert.equal(h.rows.findLast(r => r.step === "refresh.clearance")?.history, "live");
   assert.deepEqual(h.fixed, [], "no fix round on the refreshing pass");
   assert.equal(priorStrikesFor(h.rows, "W1-T6301", "keyword_only", HEAD), 0, "no strike spent");
   const refresh = h.rows.filter((r) => r.step === "sweep.base_fixed.refresh");
@@ -106,6 +108,7 @@ test("W1-T6405: a stalled own-red fixed on main refreshes instead of escalating"
   assert.deepEqual(h.escalations, [], "a red main already fixed is not escalated");
   assert.deepEqual(h.refreshed, [PR]);
   assert.deepEqual(h.fixed, []);
+  assert.equal(h.rows.findLast(r => r.step === "refresh.clearance")?.history, "live");
   const stuck = h.rows.filter((r) => r.step === "pr.stuck");
   assert.equal(stuck.length, 1);
   assert.equal(stuck[0]?.blocker, "own-red");
