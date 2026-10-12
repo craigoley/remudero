@@ -85,6 +85,8 @@ export interface LedgerUnionResult {
   liveFileRead: boolean;
   unread: string[];
   unclassified?: string[];
+  /** Valid producer metadata the corpus excluded by name; never counted in `archiveCount`. */
+  auxiliary?: LedgerAuxiliaryFile[];
   ok: boolean;
   matches: string[];
 }
@@ -174,7 +176,53 @@ function isRotationOwnFile(name: string): boolean {
   return base === LEDGER_FILENAME || rotationStampIso(base) !== undefined;
 }
 
-function listedLedgerFiles(stateDir: string, fsDeps: Pick<LedgerGrepFsDeps, "readdirSync">): { rotations: LedgerCorpusEntry[]; unclassified: string[] } {
+/** A producer-owned metadata file beside the ledger, classified only because it was read and is valid. */
+export interface LedgerAuxiliaryFile {
+  path: string;
+  kind: "carried-prefix" | "retained-steps";
+}
+
+/** The shape `ledger.ts` writes to `ledger.ndjson.carried.json` (`bytes`, `sha256`, optional rate/ceiling). */
+export function isValidCarriedPrefixMetadata(raw: unknown): boolean {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
+  const r = raw as Record<string, unknown>;
+  const finiteWhenPresent = (v: unknown): boolean => v === undefined || (typeof v === "number" && Number.isFinite(v));
+  return typeof r.bytes === "number" && Number.isSafeInteger(r.bytes) && r.bytes >= 0 &&
+    typeof r.sha256 === "string" && /^[0-9a-f]{64}$/.test(r.sha256) &&
+    finiteWhenPresent(r.rateBytesPerHour) && finiteWhenPresent(r.effectiveCeilingBytes);
+}
+
+/** The shape `ledger.ts` writes to `ledger.ndjson.retained-steps.json`: a `steps` list of strings. */
+export function isValidRetainedStepsMetadata(raw: unknown): boolean {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
+  const steps = (raw as Record<string, unknown>).steps;
+  return Array.isArray(steps) && steps.every((x) => typeof x === "string");
+}
+
+const LEDGER_METADATA_FILES: ReadonlyArray<{ name: string; kind: LedgerAuxiliaryFile["kind"]; valid: (raw: unknown) => boolean }> = [
+  { name: `${LEDGER_FILENAME}${LEDGER_CARRIED_PREFIX_SUFFIX}`, kind: "carried-prefix", valid: isValidCarriedPrefixMetadata },
+  { name: `${LEDGER_FILENAME}${LEDGER_RETAINED_STEPS_SUFFIX}`, kind: "retained-steps", valid: isValidRetainedStepsMetadata },
+];
+
+function readsAsValidMetadata(path: string, valid: (raw: unknown) => boolean, readFileSync: LedgerGrepFsDeps["readFileSync"] | undefined): boolean {
+  if (readFileSync === undefined) return false;
+  try {
+    return valid(JSON.parse(Buffer.from(readFileSync(path)).toString("utf8")));
+  } catch {
+    // deliberate: unreadable or malformed metadata is not classified, so it stays named in `unclassified`.
+    return false;
+  }
+}
+
+/**
+ * The single corpus classifier. Rotations are archives; the two canonical producer metadata files are
+ * `auxiliary` only when they read as valid under their producer shape; anything else `ledger.*` stays
+ * `unclassified`. Callers that pass no `readFileSync` cannot validate, so metadata stays unclassified for them.
+ */
+function listedLedgerFiles(
+  stateDir: string,
+  fsDeps: Pick<LedgerGrepFsDeps, "readdirSync"> & Partial<Pick<LedgerGrepFsDeps, "readFileSync">>,
+): { rotations: LedgerCorpusEntry[]; unclassified: string[]; auxiliary: LedgerAuxiliaryFile[] } {
   let names: string[];
   try {
     names = fsDeps.readdirSync(stateDir);
@@ -184,13 +232,22 @@ function listedLedgerFiles(stateDir: string, fsDeps: Pick<LedgerGrepFsDeps, "rea
   }
   const rotations = ledgerRotationEntries(names, stateDir);
   const rotationPaths = new Set(rotations.map((e) => e.path));
+  const auxiliary: LedgerAuxiliaryFile[] = [];
+  const auxiliaryNames = new Set<string>();
+  for (const meta of LEDGER_METADATA_FILES) {
+    if (!names.includes(meta.name)) continue;
+    const path = join(stateDir, meta.name);
+    if (!readsAsValidMetadata(path, meta.valid, fsDeps.readFileSync)) continue;
+    auxiliary.push({ path, kind: meta.kind });
+    auxiliaryNames.add(meta.name);
+  }
   const unclassified = names
     .filter((n) => n.startsWith("ledger.") && n !== NEVER_ROTATE_FILENAME)
-    .filter((n) => n !== `${LEDGER_FILENAME}${LEDGER_CARRIED_PREFIX_SUFFIX}` && n !== `${LEDGER_FILENAME}${LEDGER_RETAINED_STEPS_SUFFIX}`)
+    .filter((n) => !auxiliaryNames.has(n))
     .filter((n) => !isRotationOwnFile(n))
     .map((n) => join(stateDir, n))
     .filter((p) => !rotationPaths.has(p));
-  return { rotations, unclassified };
+  return { rotations, unclassified, auxiliary };
 }
 
 function sinceMs(opts: LedgerUnionOptions): number | undefined {
@@ -397,12 +454,15 @@ export interface LedgerUnionStreamIO {
   readdirSync: (dir: string) => string[];
   existsSync: (path: string) => boolean;
   createReadStream: (path: string, options?: { start?: number }) => Readable;
+  /** Reads the two small producer metadata files; omitted, they stay unclassified (never silently excluded). */
+  readFileSync?: (path: string) => Buffer;
 }
 
 const realLedgerUnionStreamIO: LedgerUnionStreamIO = {
   readdirSync: (dir) => nodeReaddirSync(dir),
   existsSync: (path) => nodeExistsSync(path),
   createReadStream: (path, options) => nodeCreateReadStream(path, options),
+  readFileSync: (path) => nodeReadFileSync(path),
 };
 
 export async function* openLedgerUnion(
@@ -588,6 +648,7 @@ export interface AuditedLedgerUnionResult {
   unread: string[];
   malformed: LedgerMalformedSource[];
   unclassified: string[];
+  auxiliary?: LedgerAuxiliaryFile[];
   records: number;
   ok: boolean;
 }
@@ -611,12 +672,12 @@ export async function auditLedgerUnion(
   opts: AuditedLedgerUnionOptions,
   io: LedgerUnionStreamIO = realLedgerUnionStreamIO,
 ): Promise<AuditedLedgerUnionResult> {
-  const { rotations, unclassified } = listedLedgerFiles(stateDir, io);
+  const { rotations, unclassified, auxiliary } = listedLedgerFiles(stateDir, io);
   const unread: string[] = [];
   const malformedByPath = new Map<string, LedgerMalformedSource>();
   let records = 0;
   if (rotations.length === 0) {
-    return { stateDir, archiveFiles: [], archiveCount: 0, unread, malformed: [], unclassified, records, ok: false };
+    return { stateDir, archiveFiles: [], archiveCount: 0, unread, malformed: [], unclassified, auxiliary, records, ok: false };
   }
   for await (const row of openLedgerUnion(
     stateDir,
@@ -653,6 +714,7 @@ export async function auditLedgerUnion(
     unread,
     malformed: [...malformedByPath.values()],
     unclassified,
+    auxiliary,
     records,
     ok: unread.length === 0 && (!opts.strictMalformed || malformedByPath.size === 0),
   };
@@ -694,6 +756,7 @@ export interface LedgerUnionRawRead {
   liveFileRead: boolean;
   unread: string[];
   unclassified: string[];
+  auxiliary?: LedgerAuxiliaryFile[];
   ok: boolean;
   rawLines: string[];
   filesRead: number;
@@ -782,7 +845,7 @@ export function readLedgerUnionRawLinesSync(
   opts: LedgerUnionRawReadOptions = {},
   fsDeps: LedgerGrepFsDeps = realLedgerFs,
 ): LedgerUnionRawRead {
-  const { rotations, unclassified } = listedLedgerFiles(stateDir, fsDeps);
+  const { rotations, unclassified, auxiliary } = listedLedgerFiles(stateDir, fsDeps);
   const archiveFiles = rotations.map((e) => e.path);
   const livePath = ledgerLivePath(stateDir);
   const liveFileRead = fsDeps.existsSync(livePath);
@@ -815,7 +878,7 @@ export function readLedgerUnionRawLinesSync(
   };
 
   if (opts.requireArchives && archiveFiles.length === 0) {
-    return { stateDir, archiveFiles, archiveCount: 0, liveFileRead, unread, unclassified, ok: false, rawLines: [], filesRead };
+    return { stateDir, archiveFiles, archiveCount: 0, liveFileRead, unread, unclassified, auxiliary, ok: false, rawLines: [], filesRead };
   }
 
   const rotationsToRead = orderedEntries(rotations, opts);
@@ -831,6 +894,7 @@ export function readLedgerUnionRawLinesSync(
     liveFileRead,
     unread,
     unclassified,
+    auxiliary,
     ok,
     rawLines: ok ? rawLines : [],
     filesRead,
@@ -847,7 +911,7 @@ const yieldTurn = (): Promise<void> => new Promise<void>((resolve) => setImmedia
  * yielded between slices, so a corpus of hundreds of rotations never holds the loop for one whole file.
  */
 export async function readLedgerUnionRawLinesAsync(stateDir: string, opts: LedgerUnionRawReadOptions = {}): Promise<LedgerUnionRawRead> {
-  const { rotations, unclassified } = listedLedgerFiles(stateDir, realLedgerFs);
+  const { rotations, unclassified, auxiliary } = listedLedgerFiles(stateDir, realLedgerFs);
   const archiveFiles = rotations.map((e) => e.path);
   const livePath = ledgerLivePath(stateDir);
   const liveFileRead = nodeExistsSync(livePath);
@@ -892,7 +956,7 @@ export async function readLedgerUnionRawLinesAsync(stateDir: string, opts: Ledge
   };
 
   if (opts.requireArchives && archiveFiles.length === 0) {
-    return { stateDir, archiveFiles, archiveCount: 0, liveFileRead, unread, unclassified, ok: false, rawLines: [], filesRead };
+    return { stateDir, archiveFiles, archiveCount: 0, liveFileRead, unread, unclassified, auxiliary, ok: false, rawLines: [], filesRead };
   }
 
   const rotationsToRead = orderedEntries(rotations, opts);
@@ -908,6 +972,7 @@ export async function readLedgerUnionRawLinesAsync(stateDir: string, opts: Ledge
     liveFileRead,
     unread,
     unclassified,
+    auxiliary,
     ok,
     rawLines: ok ? rawLines : [],
     filesRead,
@@ -1395,7 +1460,7 @@ export function readLedgerUnionRecordsSync(
   opts: LedgerUnionRecordReadOptions = {},
   fsDeps: LedgerGrepFsDeps = realLedgerFs,
 ): LedgerUnionRecordRead {
-  const { rotations, unclassified } = listedLedgerFiles(stateDir, fsDeps);
+  const { rotations, unclassified, auxiliary } = listedLedgerFiles(stateDir, fsDeps);
   const archiveFiles = rotations.map((e) => e.path);
   const livePath = ledgerLivePath(stateDir);
   const liveFileRead = opts.readLiveRecords !== undefined ? true : fsDeps.existsSync(livePath);
@@ -1494,7 +1559,7 @@ export function readLedgerUnionRecordsSync(
   };
 
   if (opts.requireArchives && archiveFiles.length === 0) {
-    return { stateDir, archiveFiles, archiveCount: 0, liveFileRead, unread, unclassified, ok: false, rows: [], torn, filesRead };
+    return { stateDir, archiveFiles, archiveCount: 0, liveFileRead, unread, unclassified, auxiliary, ok: false, rows: [], torn, filesRead };
   }
 
   const rotationsToRead = orderedEntries(rotations, opts);
@@ -1513,6 +1578,7 @@ export function readLedgerUnionRecordsSync(
     liveFileRead,
     unread,
     unclassified,
+    auxiliary,
     ok,
     rows: ok ? rows : [],
     torn,
@@ -1687,7 +1753,7 @@ export function createIncrementalLedgerUnion(
     const state: IncrementalUnionState = states.get(stateKey) ?? { rotations: new Map() };
     states.set(stateKey, state);
 
-    const { rotations, unclassified } = listedLedgerFiles(stateDir, fsDeps);
+    const { rotations, unclassified, auxiliary } = listedLedgerFiles(stateDir, fsDeps);
     const keys = new Map<string, string>();
     for (const entry of rotations) {
       try {
@@ -1708,7 +1774,7 @@ export function createIncrementalLedgerUnion(
       // deliberate: an unstattable live file is never a cache hit; the union's own read decides what it costs.
       liveKey = undefined;
     }
-    const signature = JSON.stringify([unclassified, rotations.map((entry) => [entry.path, keys.get(entry.path) ?? null]), liveKey ?? null]);
+    const signature = JSON.stringify([unclassified, auxiliary, rotations.map((entry) => [entry.path, keys.get(entry.path) ?? null]), liveKey ?? null]);
     if (liveKey !== undefined && state.last?.signature === signature) return state.last.result;
 
     const reduce = (rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> => rows.filter((row) => stepMatches(row, steps));
@@ -1796,6 +1862,7 @@ function ledgerUnionResultOf(read: LedgerUnionRawRead): LedgerUnionResult {
     liveFileRead: read.liveFileRead,
     unread: read.unread,
     unclassified: read.unclassified,
+    auxiliary: read.auxiliary,
     ok: read.ok,
     matches: read.rawLines,
   };
