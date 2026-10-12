@@ -1,0 +1,87 @@
+- id: W1-T8677
+  title: "A CODEX ERROR EVENT IS LEDGERED WITH ITS MESSAGE — W1-T8502's run ended `failed` error_codex at 13:17:56Z on 2026-10-12 with worker exit 0 and a finished REPORT, and no ledger row says which `error` or `turn.failed` event failed the stream, because the parsed `errors` list never leaves the Codex adapter"
+  repo: remudero
+  depends_on: []  # W1-T8676 (filed beside this, P1) also edits src/run-task.ts, at the restore and the kept row, not workerErrorVerdict; overlap packing serializes them
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — a provider error's text reaches the worker row and the verdict; it spans the Codex adapter (worker-provider.ts), the row writer (worker.ts) and the verdict (run-task.ts). Telemetry only, no verdict changes
+  band_meaning: span
+  origin: "operator approval 2026-10-12 (\"Go with all\"): why W1-T8502's run ended error_codex, and whether it will recur"
+  plan_refs: [W1-T8502, W1-T8676, W1-T6027, W1-T6074, W1-T4595, W1-T238]
+  files: [src/lib/worker-provider.ts, src/lib/worker.ts, src/run-task.ts, test/a-codex-error-event-is-ledgered-with-its-message.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-12 in the core daemon's ledger on host remudero (~/rmd-state2/state), read niced. Run
+    W1-T8502-1791809077557's last implement continuation: `implement.continued` at 13:17:55.909Z, subtype error_codex,
+    worker_exit exit, worker_exit_code 0, token_usage_state partial, provider codex, routed gpt-6.1-sol. Its
+    stderr_excerpt is the worker's finished REPORT ("226 tests passed; typecheck passed ... COMMIT_MESSAGE: fix(dispatch):
+    pack lane refills around in-flight tasks"). The verdict reads "worker error at implement.continued: error_codex", the
+    worktree was removed, and the edits were never committed. No row, and no archived transcript (state/transcripts
+    holds only the first implement attempt), names the event that failed the stream.
+    WHY, READ on origin/main 7b649b481 (symbols, not lines):
+      - `CodexJsonlAccumulator.consumeLine` (src/lib/worker-provider.ts) sets `failed` on a `turn.failed` event, on an
+        `error` event, or on an unparseable line. It pushes the message into `errors`, and `finish()` returns subtype
+        `error_codex`.
+      - `spawnCodexWorkerInPrivateTemp` uses `parsed.errors` only for `apiError` and `permissionDenials`. The text itself
+        never reaches the `WorkerResult`. `workerLedgerFields` (src/lib/worker.ts) writes `stderr_excerpt` from
+        `workerFailureExcerpt`, which here held the report. `workerErrorVerdict` (src/run-task.ts) writes neither.
+      - The same envelope skips `commitCodexWriterEdits` whenever `isError`. A clean exit with a finished report is
+        therefore discarded like a crash.
+    THE INPUT SIZE IS NOT THE CAUSE. `tokens.input` (1,598,072, of which 1,502,208 cached) is the sum of every model
+    request in the Codex turn (`turn.completed` usage accumulates in `consumeLine`). It is not one request, so no context
+    window is near. The run is billed on the Codex subscription (billing_mode subscription), so no Azure TPM ceiling
+    applies either. MEASURED over 369 deduplicated Codex worker-result rows, 10-09T20:53Z to 10-12T17:02Z (40 rotations
+    plus the live file):
+      - Inputs of 2M or more: 109 success, 1 commit_refused, 1 scope_amendment_pending, no error_codex.
+      - Inputs of 1M to 2M: 56 success, 1 error_codex (this one).
+    There were 5 error_codex rows in the window, and 4 had inputs under 0.5M:
+      - W1-T7812 recon (169k input, exit 0, a full report): the same shape as this run.
+      - W1-T8001 and W1-T7729 recon: exit 1, no tokens.
+      - W1-T7957 implement: exit 1, "ERROR codex_core::session: failed to record rollout items".
+    Two of the five exited 0 with a finished report. Nothing records what those two streams said.
+    THE CHEAP CANDIDATE, AND WHAT THE COSTLY ONE WAITS FOR. This task only records the text. Keeping an exit-0 run's
+    finished edits (commit them as a checkpoint instead of discarding them) is the costly candidate. It waits for the
+    first exit-0 error_codex rows that carry provider_errors:
+      - If those events are notices the stream recovered from, the remedy is to stop reading them as a failure.
+      - If they are real turn failures, salvaging the edits would be wrong.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and on all 290 origin heads for error_codex and provider_errors.
+    W1-T6027 and W1-T6074 record how the worker PROCESS ended (exit kind). W1-T4595 is the output cap. None carries the
+    provider's error text.
+  design: |
+    No new bound and no verdict change.
+    1. THE TEXT REACHES THE RESULT. `spawnCodexWorkerInPrivateTemp` returns `providerErrors: parsed.errors`, already
+       bounded by the accumulator's own retention (`boundRetained`). Add it to `WorkerResult` as optional and absent when
+       empty. Any other provider's adapter is unchanged.
+    2. THE TEXT REACHES THE ROWS. `workerLedgerFields` writes `provider_errors` whenever `providerErrors` is non-empty,
+       so `recon.done`, `implement.done`, `implement.continued` and fix-round rows carry it. `workerErrorVerdict` copies
+       it into the `failed` verdict's ledger payload, so the run's own verdict names its cause. An unparseable line keeps
+       its existing `unparseable Codex event: ...` text, so a torn stream and a provider error stay distinguishable.
+    3. A CLEAN RUN IS UNCHANGED. A stream with no error events writes no `provider_errors` key. `stderr_excerpt` and
+       every other field are unchanged.
+    Tests go in a new file, test/a-codex-error-event-is-ledgered-with-its-message.test.ts, with `test(` titles verbatim
+    as in the proofs below. Drive `parseCodexJsonl` and `workerLedgerFields` with JSONL fixtures: one with an `error`
+    event before a final agent_message and turn.completed, as W1-T8502's stream ended with exit 0; one with
+    `turn.failed`; one clean. Drive `workerErrorVerdict` with the resulting `WorkerResult`.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-codex-error-event-is-ledgered-with-its-message.test.ts"
+    - claim: "an error event's message reaches the worker row as provider_errors"
+      proof: 'grep: test("W1-T8677: a Codex error event message reaches the worker row" in test/a-codex-error-event-is-ledgered-with-its-message.test.ts'
+    - claim: "a failed Codex run's verdict carries its provider errors"
+      proof: 'grep: test("W1-T8677: a failed Codex verdict carries its provider errors" in test/a-codex-error-event-is-ledgered-with-its-message.test.ts'
+    - claim: "a clean Codex run writes no provider_errors key"
+      proof: 'grep: test("W1-T8677: a clean Codex run writes no provider_errors" in test/a-codex-error-event-is-ledgered-with-its-message.test.ts'
+    - claim: "the worker row writer carries provider_errors"
+      proof: "grep: provider_errors in src/lib/worker.ts"
+  falsifier: |
+    Leave `parsed.errors` inside the adapter, and the first test reads no provider_errors on the worker row. Copy it to
+    the worker row but not the verdict, and the second test fails. Write an empty array on every row, and the third
+    test sees the key on a clean run.
+  note: |
+    EFFECT, measured after merge from the core ledger with no numeric pass mark. Group error_codex rows by
+    worker_exit_code and by the first provider_errors entry. That answers the costly candidate's question: are the
+    exit-0 ends recovered notices or real turn failures?
