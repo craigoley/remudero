@@ -1,0 +1,59 @@
+- id: W1-T8834
+  title: "THE BUILD PROMPT NAMES WHAT THE HARNESS ADMITS OUTSIDE files: — W1-T3741's worker refused to write its own proof tests and to regenerate docs/cli-reference.md as outside its declared files, four times, although the harness commits both; every push was then refused for a missing proof title"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high # the implement prompt every build worker reads, plus review's scope advisory; two concerns
+  band_meaning: span
+  origin: "operator session 2026-10-12: forensics on W1-T3741's four refused dispatches (operator: go through all follow-ups)"
+  plan_refs: [W1-T5386, W1-T2651, W1-T3741, W1-T401, W1-T2650]
+  files: [src/lib/prompt-render.ts, src/lib/review.ts, test/the-build-prompt-names-what-the-harness-admits-outside-files.test.ts, test/prompt-manifest.test.ts, test/the-worker-gets-the-headlines.test.ts, test/what-a-worker-loads.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED: W1-T3741 was dispatched four times on 2026-10-03/04, and every push was refused by the pre-push
+    proof-resolve-precheck ("no file under test/ contains the title"). The archived implement transcripts on the host
+    (W1-T3741-1791103184756.implement.md lines 23–29; W1-T3741-1791111754327) show the Codex worker choosing to
+    "keep the saved diff within src/run-task.ts": three [outside-declared-files] self-refusals and a request to
+    "authorize acceptance-test edits and regenerate docs/cli-reference.md". It never wrote the tests.
+    The harness WOULD have committed both (verified on origin/main 51ae52d1b):
+    - commitWorkerEdits admits a new, untracked test/ file that declares one of the task's proof titles
+      (`proofMatchedTests` / `declaresProofTitle`, src/run-task.ts ~45894–45907; W1-T5386, #8859, merged before
+      all four dispatches);
+    - docs/cli-reference.md is a registered regenerable artifact (REGENERABLE_ARTIFACT_GENERATORS,
+      src/lib/sweep.ts ~5415).
+    The worker was never told. `implementPromptParts` (src/lib/prompt-render.ts ~1132–1178) has no part naming either
+    admission, while the FIX prompt has the equivalent "REGISTRY EXCEPTION (W1-T2651)" clause (prompt-render.ts
+    ~587). Separately, review's scope advisory (`scopeViolationFiles`, src/lib/review.ts ~4730) exempts only
+    SCOPE_EXEMPT_GENERATED_ARTIFACTS (scripts/source-size-baseline.json), so an admitted proof test or a regenerated
+    artifact is reported as "outside the task's declared scope", contradicting the harness.
+  design: |
+    1. src/lib/prompt-render.ts: a new implement-prompt part `admitted_outside_files`, placed just before
+       `task_body` (after `capability_context`), rendered only when it has content. It lists:
+       a. each `unit test:` and `grep: test("…"` proof title of the task VERBATIM, saying a NEW test/ file that
+          declares that title will be committed even though it is not in files:;
+       b. each REGENERABLE_ARTIFACT_GENERATORS path with its generator command, saying the harness keeps a
+          regenerated copy.
+       It must not widen anything: it only names what commitWorkerEdits already admits.
+    2. src/lib/review.ts: the scope advisory exempts the same two admitted classes (a new test/ file declaring one
+       of the task's proof titles, and a REGENERABLE_ARTIFACT_GENERATORS path), so review no longer contradicts the
+       harness.
+    3. Update the three suites that pin the implement-prompt part list (test/prompt-manifest.test.ts,
+       test/the-worker-gets-the-headlines.test.ts, test/what-a-worker-loads.test.ts) for the new part name.
+  acceptance:
+    - claim: "for a task with proof titles and files: [src/x.ts], the build prompt names each proof title verbatim as admitted in a new test/ file"
+      proof: 'grep: test("W1-T8834: the build prompt names each proof title as admitted outside files" in test/the-build-prompt-names-what-the-harness-admits-outside-files.test.ts'
+    - claim: "the build prompt names every regenerable artifact path, docs/cli-reference.md included, with its generator command"
+      proof: 'grep: test("W1-T8834: the build prompt names each regenerable artifact and its generator" in test/the-build-prompt-names-what-the-harness-admits-outside-files.test.ts'
+    - claim: "review's scope advisory does not flag an admitted proof test or a regenerable artifact as outside the declared scope"
+      proof: 'grep: test("W1-T8834: review does not flag an admitted proof test or regenerable artifact as out of scope" in test/the-build-prompt-names-what-the-harness-admits-outside-files.test.ts'
+  falsifier: |
+    Render the implement prompt for a task with three unit-test proofs and files: [src/x.ts]. At origin/main it
+    contains none of the proof titles and no mention of docs/cli-reference.md; with the change it contains each title
+    verbatim and the artifact path with its generator. Run review's scope advisory on a diff adding such a test file
+    and docs/cli-reference.md: at origin/main both are flagged out of scope; with the change neither is. Remove the
+    new part and the first two tests red; drop the exemption and the third reds.
