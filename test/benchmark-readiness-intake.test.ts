@@ -14,7 +14,7 @@ import { READINESS_FOLLOW_UPS_FILE, recordReadinessGap, type ReadinessGap } from
 import { collectBenchmarkReadinessCandidates, readinessGapOutcome, readReadinessGapSidecar } from "../src/lib/benchmark-readiness-intake.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { listFeedback } from "../src/lib/feedback.js";
-import { openOpportunityIntakePorts, runOpportunityIntake, type OpportunityIntakePorts } from "../src/lib/opportunity-intake.js";
+import { githubRepoSlugOfCheckout, openOpportunityIntakePorts, runOpportunityIntake, type OpportunityIntakePorts } from "../src/lib/opportunity-intake.js";
 import type { GardenCheckoutAsync } from "../src/lib/gardener.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -136,6 +136,63 @@ test("calibration gap recording is not task filing", async () => {
     // The driver's own result names the sidecar write "recorded", the word that makes no claim about a task.
     assert.equal(recordReadinessGap(fx.stateDir, "trial-1", GAP, clock.iso(), REPO)?.state, "already-recorded");
   } finally { fx.cleanup(); }
+});
+
+test("calibration gap outcome reports staged proposals and the intake's own routing as held or pending", () => {
+  const candidate = { repo: REPO, key: KEY };
+  const empty = { proposals: [], tasks: [], mergedKeys: [], prs: [], feedback: [] };
+  const base = { unavailable: [], deduped: [], candidate: { key: KEY } };
+  // An operator proposal already staged under the key: held, and never claimed as a task.
+  const staged = readinessGapOutcome(candidate, { ...empty, proposals: [{ id: `${REPO}/${KEY}` } as never] });
+  assert.deepEqual({ state: staged.state, taskId: staged.taskId }, { state: "held", taskId: undefined });
+  assert.match(staged.reason, /staged as an operator proposal/);
+  // This pass opened a feedback PR: pending triage, carrying the PR url.
+  const opened = readinessGapOutcome(candidate, empty, { ...base, status: "promoted", destination: "plan-pr", prUrl: "https://github.com/acme/app/pull/71" });
+  assert.deepEqual({ state: opened.state, prUrl: opened.prUrl, taskId: opened.taskId }, { state: "pending-triage", prUrl: "https://github.com/acme/app/pull/71", taskId: undefined });
+  // Judgement held the candidate: evidence kept, held.
+  const heldByJudgement = readinessGapOutcome(candidate, empty, { ...base, status: "held" });
+  assert.equal(heldByJudgement.state, "held");
+  assert.match(heldByJudgement.reason, /judgement held the candidate/);
+  // The pass staged it in the operator inbox: held.
+  const inbox = readinessGapOutcome(candidate, empty, { ...base, status: "promoted", destination: "inbox" });
+  assert.equal(inbox.state, "held");
+  assert.match(inbox.reason, /staged as an operator proposal/);
+  // A promoted pass that neither opened a PR nor staged anything falls through to recorded.
+  assert.equal(readinessGapOutcome(candidate, empty, { ...base, status: "promoted", destination: "plan-pr" }).state, "recorded");
+});
+
+test("calibration gap pass reports unavailable when the work cannot be re-read after routing", async () => {
+  const fx = fixture();
+  try {
+    recordReadinessGap(fx.stateDir, "trial-1", GAP, clock.iso(), REPO);
+    const ports = await fx.ports();
+    let reads = 0;
+    // Reads 1 and 2 are routing's dedupe and post-judgement recheck; the third is the outcome's own.
+    const result = await runOpportunityIntake({ ...ports, readWork: () => { reads += 1; if (reads >= 3) throw new Error("plan unreadable"); return ports.readWork(); } });
+    assert.equal(reads, 3);
+    assert.equal(result.status, "promoted");
+    assert.equal(result.readiness?.key, KEY);
+    assert.equal(result.readiness?.state, "unavailable");
+    assert.match(result.readiness?.reason ?? "", /work unreadable: Error: plan unreadable/);
+    assert.equal(result.readiness?.taskId, undefined);
+  } finally { fx.cleanup(); }
+});
+
+test("a checkout's GitHub slug is read from origin and unknown otherwise", () => {
+  const withOrigin = gitRepo({ kind: "t5432-slug-origin" });
+  const noOrigin = gitRepo({ kind: "t5432-slug-bare" });
+  try {
+    withOrigin.addRemote("origin", `https://github.com/${REPO}.git`);
+    assert.equal(githubRepoSlugOfCheckout(withOrigin.dir), REPO);
+    // No origin remote: git fails, and the identity is unknown rather than guessed.
+    assert.equal(githubRepoSlugOfCheckout(noOrigin.dir), undefined);
+    // A non-GitHub origin is also unknown.
+    noOrigin.addRemote("origin", "https://example.com/acme/app.git");
+    assert.equal(githubRepoSlugOfCheckout(noOrigin.dir), undefined);
+  } finally {
+    rmSync(withOrigin.dir, { recursive: true, force: true });
+    rmSync(noOrigin.dir, { recursive: true, force: true });
+  }
 });
 
 test("calibration gap intake resumes without duplicate or foreign work", async () => {
