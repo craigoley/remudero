@@ -16,6 +16,7 @@ function draftFor(id: string): string {
     "  type: implement",
     "  verify: auto",
     "  risk: high",
+    "  band_meaning: span",
     "  files: [src/lib/x.ts, test/x.test.ts]",
     "  origin: feedback#P1",
     "  acceptance:",

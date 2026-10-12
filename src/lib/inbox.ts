@@ -1874,7 +1874,16 @@ function draftAbsenceProofViolations(task: import("./plan.js").Task): DraftLintV
   return out;
 }
 
-/** Lint a drafted fragment exactly as `rmd lint-plan` would. A fragment that does not parse is itself one block
+/** W1-T8714: the lint options BOTH floors pass to `lintTask` — the draft rung ({@link lintDraftedFragment}) and the
+ *  approve repair ({@link relintRatificationFragment}). A drafted task is new by definition, so it lints as a filing:
+ *  `riskTransition` with no base task makes an undeclared risk:high band a block. Held once so the two cannot drift
+ *  apart again: they did, and 40 READY drafts were refused at approve (53 approve.error rows, 2026-09-25..10-12). */
+export const DRAFT_FILING_LINT_OPTIONS = Object.freeze({
+  riskTransition: Object.freeze({ baseTask: undefined }),
+  proofSelfPath: "block",
+} as const);
+
+/** Lint a drafted fragment exactly as `rmd approve` will. A fragment that does not parse is itself one block
  *  violation, so it drives a redraft rather than being cached as NOT-READY. */
 export function lintDraftedFragment(
   fragmentYaml: string,
@@ -1891,7 +1900,7 @@ export function lintDraftedFragment(
   }
   const violations: DraftLintViolation[] = [];
   for (const task of tasks) {
-    violations.push(...filingBlockers(lintTask(task, { knownRepos }).violations, undefined, true));
+    violations.push(...filingBlockers(lintTask(task, { ...DRAFT_FILING_LINT_OPTIONS, knownRepos }).violations, undefined, true));
     violations.push(...draftPlaceholderViolations(task, directoryExists));
     violations.push(...draftAbsenceProofViolations(task));
   }
@@ -3316,9 +3325,15 @@ export function relintRatificationFragment(fragmentYaml: string, proposalId: str
       }
     }
 
-    if (filingBlockers(lintTask(task).violations, undefined, true).some((v) => v.check === "sizing" && task.risk !== "high")) {
-      const risk = fields.get("risk", true);
-      const band = fields.get("band_meaning", true);
+    const band = fields.get("band_meaning", true);
+    // W1-T8714: an already-high draft that declares no band gets the declaration that admits a span and exempts
+    // nothing, inserted after its risk line. Either declared band is the author's and is left alone.
+    const risk = fields.get("risk", true);
+    if (task.risk === "high" && task.band_meaning === undefined && isScalar(risk) && risk.range) {
+      const endOfLine = fragmentYaml.indexOf("\n", risk.range[1]);
+      const insertAt = endOfLine < 0 ? fragmentYaml.length : endOfLine + 1;
+      edits.push({ start: insertAt, end: insertAt, text: `${endOfLine < 0 ? "\n" : ""}  band_meaning: span\n` });
+    } else if (filingBlockers(lintTask(task).violations, undefined, true).some((v) => v.check === "sizing" && task.risk !== "high")) {
       if (isScalar(risk) && risk.range) {
         edits.push({ start: risk.range[0], end: risk.range[1], text: "high" });
         if (isScalar(band) && band.range) {
@@ -3343,10 +3358,7 @@ export function relintRatificationFragment(fragmentYaml: string, proposalId: str
   const violations: DraftLintViolation[] = [];
   try {
     for (const task of parseTasksFromYaml(repaired, `approve ${proposalId}`)) {
-      violations.push(...filingBlockers(lintTask(task, {
-        riskTransition: { baseTask: undefined },
-        proofSelfPath: "block",
-      }).violations, undefined, true));
+      violations.push(...filingBlockers(lintTask(task, DRAFT_FILING_LINT_OPTIONS).violations, undefined, true));
     }
   } catch (error) {
     return { ok: false, reason: `draft-parse: ${String((error as Error)?.message ?? error)}` };
