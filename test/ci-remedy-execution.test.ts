@@ -87,7 +87,8 @@ test("component work refuses foreign partial conflicting or earlier assignment a
     { remedyExecution: { ...e, identity: { ...identity, dependencies: { ...identity.dependencies, nodeVersion: "v24.0.1" } } } }])
     assert.equal(ciRemedyExecutionReport([a, { ...end, ...bad }], T(5)).records[0]!.laterWork.state, "unavailable");
   for (const other of [row("worker.assignment", e, { ts: T(4) }), row("worker.assignment", e, { runId: "foreign" }),
-    row("worker.attempt", e, { ts: T(4), success: false })])
+    row("worker.attempt", e, { ts: T(4), success: false }), row("worker.attempt", e, { ts: T(2), success: true }),
+    row("worker.attempt", e, { ts: T(4), success: true, runId: "foreign" })])
     assert.equal(ciRemedyExecutionReport([a, end, other], T(5)).records[0]!.laterWork.state, "unavailable");
   const standalone = row("fix.remedy_path_execution", e);
   assert.equal(ciRemedyExecutionReport([standalone, { ...a, ts: T(1) }, end], T(5)).records[0]!.laterWork.state, "unavailable");
@@ -101,4 +102,13 @@ test("component invocation conflicts remain unavailable and retained limits expo
   const rows = Array.from({ length: CI_REMEDY_EXECUTIONS_MAX + 2 }, () => row("fix.remedy_path_execution", execution()));
   const bounded = ciRemedyExecutionReport([...rows, rows.at(-1)!], T(5));
   assert.equal(bounded.records.length, CI_REMEDY_EXECUTIONS_MAX); assert.equal(bounded.omittedInvocations, 2);
+});
+
+
+test("component joins are independent of ledger rotation order and ignore unrelated worker populations", () => {
+  const e = execution(), assignment = row("worker.assignment", e), end = row("worker.attempt", e, { ts: T(4), success: true });
+  const unrelated = Array.from({ length: 1000 }, () => row("worker.assignment", { state: "unavailable", reason: "legacy" }));
+  const forward = ciRemedyExecutionReport([assignment, end], T(5));
+  assert.deepEqual(ciRemedyExecutionReport([end, ...unrelated, assignment], T(5)), forward);
+  assert.equal(forward.records[0]!.laterWork.state, "observed");
 });

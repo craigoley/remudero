@@ -89,6 +89,7 @@ export function ciRemedyExecutionReport(rows: readonly ExecutionRow[], asOf: str
     && row.repair.repo !== null && row.repair.number !== null && row.repair.assignmentObserved !== false;
   for (const row of rows) {
     if (!time(asOf) || !time(row.ts) || Date.parse(row.ts) > Date.parse(asOf) || row.host === null) continue;
+    if (!["fix.remedy_path_execution", "worker.assignment"].includes(row.step)) continue;
     const execution = ciRemedyExecutionOf(row.remedyExecution);
     if (["fix.remedy_path_execution", "worker.assignment"].includes(row.step) && execution.state === "observed"
       && row.runId === execution.callerRunId && Date.parse(execution.at) <= Date.parse(row.ts)) {
@@ -99,9 +100,19 @@ export function ciRemedyExecutionReport(rows: readonly ExecutionRow[], asOf: str
         laterWork: { state: "unavailable", reason: "no-later-joined-worker-attempt" } });
       else omitted.add(id);
     }
-    if (!validJoin(row)) continue;
-    const map = row.step === "worker.assignment" ? assignments : row.step === "worker.attempt" ? terminals : undefined;
-    if (map) { const group = map.get(key(row)) ?? []; group.push(row); map.set(key(row), group); }
+  }
+  // Index only assignments for the retained invocations, then only their terminals. Keeping
+  // all fleet worker rows would duplicate the existing collector's largest join population.
+  for (const row of rows) {
+    if (row.step !== "worker.assignment" || !validJoin(row) || !time(row.ts) || Date.parse(row.ts) > Date.parse(asOf)) continue;
+    const execution = ciRemedyExecutionOf(row.remedyExecution);
+    if (execution.state !== "observed" || !records.has(JSON.stringify([row.host, execution.processInstanceId, execution.invocationId]))) continue;
+    const group = assignments.get(key(row)) ?? []; group.push(row); assignments.set(key(row), group);
+  }
+  for (const row of rows) {
+    if (row.step !== "worker.attempt" || !validJoin(row) || !time(row.ts) || Date.parse(row.ts) > Date.parse(asOf)
+      || !assignments.has(key(row))) continue;
+    const group = terminals.get(key(row)) ?? []; group.push(row); terminals.set(key(row), group);
   }
   for (const group of assignments.values()) {
     const assignment = group[0]!, execution = ciRemedyExecutionOf(assignment.remedyExecution);
@@ -112,7 +123,7 @@ export function ciRemedyExecutionReport(rows: readonly ExecutionRow[], asOf: str
     if (group.some(row => row.ts !== assignment.ts || row.runId !== assignment.runId
       || JSON.stringify(ciRemedyExecutionOf(row.remedyExecution)) !== JSON.stringify(execution))) continue;
     const ends = terminals.get(key(assignment)) ?? [];
-    if (new Set(ends.map(row => JSON.stringify([row.success, ciRemedyExecutionOf(row.remedyExecution)]))).size !== 1) continue;
+    if (new Set(ends.map(row => JSON.stringify([row.success, row.runId, Date.parse(row.ts!) >= Date.parse(assignment.ts!), ciRemedyExecutionOf(row.remedyExecution)]))).size !== 1) continue;
     const end = ends.find(row => row.runId === execution.callerRunId && typeof row.success === "boolean" && Date.parse(row.ts!) >= Date.parse(assignment.ts!)
       && JSON.stringify(ciRemedyExecutionOf(row.remedyExecution)) === JSON.stringify(execution));
     if (!end) continue;

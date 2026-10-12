@@ -889,6 +889,7 @@ test("the sole private flow joins named preventive component execution without c
   assert.equal(actual.laterWork.state, "observed"); assert.equal(actual.eligible, true);
   assert.equal(actual.wholeFixAdoption, "not-certified"); assert.equal(actual.efficacyClaim, "none");
   assert.equal(snapshot.preventionAdoption![0]!.evidence.state, "unavailable");
+  assert.ok(snapshot.privateKeys.includes(e.invocationId)); assert.ok(snapshot.privateKeys.includes(e.processInstanceId));
   assert.doesNotMatch(JSON.stringify(snapshot), /private-unstructured-log|rawLog/);
   const release = buildFieldTrialsRelease(snapshot, CONSENT, "component-private-release-salt");
   assert.equal(release.state, "candidate");

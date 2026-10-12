@@ -773,6 +773,8 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
         assignmentTelemetry.set(key, counts);
       }
       for (const key of [row.taskId, row.runId, row.assignmentId, row.host, row.headSha]) if (key !== null) privateKeys.add(key);
+      if (row.remedyExecution?.state === "observed") for (const key of [row.remedyExecution.invocationId,
+        row.remedyExecution.processInstanceId, row.remedyExecution.callerRunId]) privateKeys.add(key);
       if (row.taskId !== null) {
         const taskRows = rowsByTask.get(row.taskId);
         if (taskRows) taskRows.push(row);
