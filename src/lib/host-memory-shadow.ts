@@ -1334,8 +1334,7 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
   };
 }
 
-/** The serve scenario: a shared host store is the authority, and one that establishes nothing is UNKNOWN, never this
- *  ledger's silence read as stopped. Only a host with no shared store ("local-only") keeps the local tail alone. */
+/** A shared host store is the authority; one that establishes nothing is UNKNOWN, never local silence as stopped. */
 function serveOf(ports: ShadowMemoryPorts, tail: ReturnType<typeof readTailRows>, now: number, root: string): ShadowInputs["serve"] {
   const local = (): ShadowInputs["serve"] => "unread" in tail
     ? { scenario: "unknown", basis: `ledger tail unreadable: ${tail.unread}` }
