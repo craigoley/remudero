@@ -13,6 +13,7 @@ import { buildReadModelViewRoutes } from "../src/lib/views.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { SPEC, violations } from "./helpers/openapi-strict.js";
 import type { AddressInfo } from "node:net";
+import { gzipSync } from "node:zlib";
 
 const repository = "fixture/repo";
 const at = new Date().toISOString();
@@ -23,7 +24,98 @@ function runtime(enabled = true, scope = "repository") {
       attempts: 0, completions: 0, failures: 0, lastCompletedAt: null, lastSuccessAt: null, lastFailureAt: null }] };
 }
 
+const passId = "12345678-1234-4123-8123-123456789abc";
+const archive = (offset = 0) => `ledger.${new Date(Date.parse(at) + offset).toISOString().replace(/[:.]/g, "-")}.ndjson`;
+const origin = { state: "linked", version: 1, name: "config", passId };
+const parent = { ts: at, step: "garden.lifecycle", name: "config", passId, repository,
+  daemon_run_id: "daemon-1", phase: "completed", exit: 0 };
+const child = { ts: at, step: "implement.done", run_id: "child", task_id: "task", total_cost_usd: 2,
+  gardener_origin: origin };
+async function captured(t: { after(fn: () => void): void }, rows: unknown[], scope = "repository") {
+  const dir = makeTempDir("gardener-spend-receipts");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const inventory = runtime(true, scope);
+  Object.assign(inventory.gardens[0]!, { attempts: 1, completions: 1 });
+  writeFileSync(join(dir, "gardener-runtime.json"), JSON.stringify(inventory));
+  writeFileSync(join(dir, "ledger.ndjson"), rows.map(row => JSON.stringify(row)).join("\n") + "\n");
+  return { dir, spend: foldGardenerSpend(await captureGardenerSpendSource(dir), repository, at) };
+}
+
+test("W1-T8484: gardener spend requires the exact scoped parent pass", async t => {
+  const { spend } = await captured(t, [child, parent]);
+  assert.equal(spend.pricedSubtotalUsd, 2);
+  assert.equal(spend.totalUsd, 2);
+  assert.equal(spend.state, "complete");
+  for (const mismatch of [{ passId: "22345678-1234-4123-8123-123456789abc" },
+    { name: "test" }, { repository: "other/repo" }, { daemon_run_id: "daemon-2" }]) {
+    const { spend: rejected } = await captured(t, [child, { ...parent, ...mismatch }]);
+    assert.equal(rejected.totalUsd, null);
+    assert.equal(rejected.pricedSubtotalUsd, null);
+    assert.equal(rejected.counts.unlinked, 1);
+  }
+  for (const mismatch of [{ repository: "other/repo" }, { daemon_run_id: "daemon-2" }]) {
+    const { spend: rejected } = await captured(t, [parent, { ...child, ...mismatch }]);
+    assert.equal(rejected.pricedSubtotalUsd, null);
+    assert.equal(rejected.counts.unlinked, 1);
+  }
+  const passReceipt = { ...parent, step: "garden.pass", phase: undefined };
+  assert.equal((await captured(t, [child, passReceipt])).spend.totalUsd, 2);
+});
+
+test("W1-T8484: gardener spend survives rotation without duplicate repository cost", async t => {
+  const { dir } = await captured(t, [parent, child, { ...child, step: "verdict", total_cost_usd: 99 }]);
+  const replay = [parent, child].map(row => JSON.stringify(row)).join("\n") + "\n";
+  writeFileSync(join(dir, archive() + ".gz"), gzipSync(replay));
+  writeFileSync(join(dir, archive(1000)), replay);
+  for (let restart = 0; restart < 2; restart++) {
+    const spend = foldGardenerSpend(await captureGardenerSpendSource(dir), repository, at);
+    assert.equal(spend.totalUsd, 2);
+    assert.equal(spend.counts.priced, 1);
+  }
+  writeFileSync(join(dir, "ledger.ndjson"), replay + JSON.stringify({ ...child, step: "recon.done" }) + "\n");
+  const distinct = foldGardenerSpend(await captureGardenerSpendSource(dir), repository, at);
+  assert.equal(distinct.totalUsd, 4, "two producer steps under one child run each carry real cost");
+  assert.equal(distinct.counts.priced, 2);
+  for (const scope of ["host", "fleet"]) {
+    const { spend } = await captured(t, [parent, child], scope);
+    assert.equal(spend.totalUsd, null);
+    assert.equal(spend.pricedSubtotalUsd, null);
+    assert.equal(spend.gardens[0]!.totalUsd, null);
+  }
+});
+
 test("W1-T8484: incomplete gardener spend remains unknown rather than zero", async t => {
+  for (const record of [{ ...child, total_cost_usd: undefined }, { ...child, total_cost_usd: -1 },
+    { ...child, gardener_origin: undefined }, { ...child, gardener_origin: { state: "invalid", reason: "malformed" } },
+    { ...child, gardener_origin: { ...origin, version: 0 } }, { ...child, gardener_origin: { ...origin, token: "secret" } }]) {
+    const { spend } = await captured(t, [parent, record]);
+    assert.equal(spend.totalUsd, null);
+    assert.equal(spend.pricedSubtotalUsd, null);
+    if (record.gardener_origin?.state === "linked" && "version" in record.gardener_origin &&
+      record.gardener_origin.version === 1 && !("token" in record.gardener_origin)) {
+      assert.equal(spend.counts.unpriced, 1);
+      assert.equal(spend.state, "partial");
+    }
+  }
+  for (const phase of ["running", "failed", "cancelled"]) {
+    const { spend } = await captured(t, [child, { ...parent, phase, exit: null }]);
+    assert.equal(spend.totalUsd, null);
+    assert.equal(spend.pricedSubtotalUsd, 2);
+    assert.equal(spend.state, "partial");
+  }
+  const interrupted = await captured(t, [child, { ...parent, phase: "cancelled", exit: null }, parent]);
+  assert.equal(interrupted.spend.totalUsd, null, "a conflicting completion cannot erase interruption");
+  const absent = await captured(t, [parent]);
+  assert.equal(absent.spend.totalUsd, null);
+  const zero = await captured(t, [parent, { ...child, total_cost_usd: 0 }]);
+  assert.equal(zero.spend.totalUsd, 0, "an observed priced zero is measured");
+  writeFileSync(join(zero.dir, archive(1000) + ".gz"), "corrupt archive");
+  const partial = foldGardenerSpend(await captureGardenerSpendSource(zero.dir), repository, at);
+  assert.equal(partial.totalUsd, null);
+  assert.equal(partial.pricedSubtotalUsd, 0);
+  assert.equal(partial.coverage.retainedCorpus, "partial");
+  rmSync(join(absent.dir, "ledger.ndjson"));
+  assert.equal(foldGardenerSpend(await captureGardenerSpendSource(absent.dir), repository, at).reason, "ledger_unavailable");
   for (const enabled of [true, false]) {
     const result = foldGardenerSpend({ runtime: runtime(enabled) }, repository, at);
     assert.equal(result.state, "not_collected");
@@ -59,12 +151,16 @@ test("W1-T8484: incomplete gardener spend remains unknown rather than zero", asy
   writeFileSync(path, "x".repeat(65537));
   assert.deepEqual(await captureGardenerSpendSource(dir), { reason: "over_budget" });
   writeFileSync(path, JSON.stringify({ ...runtime(), private: "private-sentinel" }));
+  writeFileSync(join(dir, "ledger.ndjson"), "");
   const source = await captureGardenerSpendSource(dir);
   assert.equal(JSON.stringify(source).includes("private-sentinel"), false);
   assert.equal(foldGardenerSpend(source, repository, at).reason, "correlation_not_available");
 });
 
-test("W1-T8484: missing or over-budget gardener spend preserves Analytics", () => {
+test("W1-T8484: missing or over-budget gardener spend preserves Analytics", async t => {
+  const overflow = await captured(t, [parent, ...Array.from({ length: 500 }, (_, i) => ({ ...child, run_id: `child-${i}` }))]);
+  const overflowSource = await captureGardenerSpendSource(overflow.dir);
+  assert.equal(overflowSource.reason, "over_budget");
   const stateDir = makeTempDir("gardener-spend-budget");
   try {
     mkdirSync(join(stateDir, "read-model"));
@@ -79,7 +175,8 @@ test("W1-T8484: missing or over-budget gardener spend preserves Analytics", () =
       ticker.start();
       ticker.tick();
       const oversized = { ...runtime(), gardens: Array.from({ length: 33 }, (_, i) => ({ ...runtime().gardens[0], name: `garden-${i}` })) };
-      for (const source of [undefined, { runtime: oversized }, { runtime: { ...runtime(), private: "x".repeat(65536) } }]) {
+      for (const source of [undefined, { runtime: runtime() }, overflowSource, { runtime: oversized },
+        { runtime: { ...runtime(), private: "x".repeat(65536) } }]) {
         const snapshot = deriveAnalyticsSnapshot([], new Date().toISOString());
         const bodies = analyticsSourceBodies(snapshot, repository);
         Object.assign(bodies[0]!.body as object, { gardenerSpendSource: source });
@@ -90,8 +187,13 @@ test("W1-T8484: missing or over-budget gardener spend preserves Analytics", () =
           assert.equal(data!.instances[0]!.gardenerSpend, undefined);
           continue;
         }
-        assert.equal(data!.instances[0]!.gardenerSpend!.reason, "over_budget");
-        assert.deepEqual(data!.instances[0]!.gardenerSpend!.gardens, []);
+        if (source.runtime && (source.runtime as { gardens: unknown[] }).gardens.length === 1 &&
+          !("private" in (source.runtime as object))) {
+          assert.equal(data!.instances[0]!.gardenerSpend!.reason, "correlation_not_available");
+        } else {
+          assert.equal(data!.instances[0]!.gardenerSpend!.reason, "over_budget");
+          assert.deepEqual(data!.instances[0]!.gardenerSpend!.gardens, []);
+        }
         assert.ok(Buffer.byteLength(JSON.stringify(data!.instances[0]!.gardenerSpend)) <= 65536);
       }
     } finally { ticker.release(); }
@@ -129,33 +231,49 @@ test("W1-T8484: real worker refresh serves gardener spend without request-time s
   const ledgerDir = join(stateDir, "core");
   mkdirSync(ledgerDir);
   mkdirSync(join(stateDir, "read-model"));
-  writeFileSync(join(ledgerDir, "ledger.ndjson"), JSON.stringify({ ts: at, step: "implement.done", run_id: "child", cost_usd: 2 }) + "\n");
-  writeFileSync(join(ledgerDir, "gardener-runtime.json"), JSON.stringify(runtime(false)));
+  const replay = [parent, child].map(row => JSON.stringify(row)).join("\n") + "\n";
+  writeFileSync(join(ledgerDir, "ledger.ndjson"), replay);
+  writeFileSync(join(ledgerDir, archive(1000) + ".gz"), gzipSync(replay));
+  const inventory = runtime(false);
+  Object.assign(inventory.gardens[0]!, { attempts: 1, completions: 1 });
+  writeFileSync(join(ledgerDir, "gardener-runtime.json"), JSON.stringify(inventory));
   writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { analytics: "serve" } }));
   const posted: ReadModelWorkerMessage[] = [];
   let onMessage: ((msg: { type?: string }) => void) | undefined;
-  runReadModelWorker({ on: (_event, run) => onMessage = run, postMessage: m => posted.push(m as ReadModelWorkerMessage), close() {} },
-    { kind: "remudero-read-model", stateDir, instances: [{ name: "core", ledgerDir, repo: repository }], tickMs: 20,
-      signal: new SharedArrayBuffer(8), slowLane: { intervalMs: 60000 } });
   t.after(() => onMessage?.({ type: "stop" }));
   const body = () => posted.findLast(m => m.type === "body" && m.entry.view === "analytics");
-  const ready = () => {
-    const message = body();
-    return message?.type === "body" && (message.entry.body.data as AnalyticsViewData).instances[0]?.gardenerSpend?.reason === "correlation_not_available";
+  const refresh = async (expected: number) => {
+    runReadModelWorker({ on: (_event, run) => onMessage = run, postMessage: m => posted.push(m as ReadModelWorkerMessage), close() {} },
+      { kind: "remudero-read-model", stateDir, instances: [{ name: "core", ledgerDir, repo: repository }], tickMs: 20,
+        signal: new SharedArrayBuffer(8), slowLane: { intervalMs: 60000 } });
+    const ready = () => {
+      const message = body();
+      return message?.type === "body" && (message.entry.body.data as AnalyticsViewData).instances[0]?.gardenerSpend?.totalUsd === expected;
+    };
+    const deadline = Date.now() + 20000;
+    while (!ready() && Date.now() < deadline) await sleep(20);
+    assert.ok(ready(), JSON.stringify(posted.filter(m => m.type === "log")));
+    onMessage?.({ type: "stop" });
   };
-  const deadline = Date.now() + 20000;
-  while (!ready() && Date.now() < deadline) await sleep(20);
-  assert.ok(ready(), JSON.stringify(posted.filter(m => m.type === "log")));
-  onMessage?.({ type: "stop" });
+  await refresh(2);
+  writeFileSync(join(ledgerDir, archive(2000)), replay);
+  writeFileSync(join(ledgerDir, "ledger.ndjson"), replay + JSON.stringify({ ...child, run_id: "child-2", total_cost_usd: 3 }) + "\n");
+  await refresh(5);
   const message = body();
   assert.ok(message?.type === "body");
   const entry = message.entry;
   const spend = (entry.body.data as AnalyticsViewData).instances[0]!.gardenerSpend!;
   assert.equal(spend.gardens[0]!.enabled, false);
-  assert.equal(spend.gardens[0]!.totalUsd, null);
-  assert.equal(spend.observedAt, at);
+  assert.equal(spend.gardens[0]!.totalUsd, 5);
+  assert.equal(spend.counts.priced, 2);
+  assert.ok(Date.parse(spend.observedAt!) >= Date.parse(at));
+  assert.equal(spend.window!.from, at);
+  assert.equal(spend.coverage.retainedCorpus, "complete");
+  assert.ok(Buffer.byteLength(JSON.stringify(spend)) <= 65536);
   assert.deepEqual(violations(entry.body, SPEC.components.schemas.AnalyticsView!), []);
   rmSync(join(ledgerDir, "ledger.ndjson"));
+  rmSync(join(ledgerDir, archive(1000) + ".gz"));
+  rmSync(join(ledgerDir, archive(2000)));
   rmSync(join(ledgerDir, "gardener-runtime.json"));
   const restarted = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir, repo: repository }] });
   assert.deepEqual((restarted.body("analytics")!.body.data as AnalyticsViewData).instances[0]!.gardenerSpend, spend);

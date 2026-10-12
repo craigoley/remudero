@@ -2908,31 +2908,34 @@ export interface components {
       value: number | null;
       notCollectedReason?: string;
     };
-    /** Optional cached gardener cost evidence (W1-T8484). Until a versioned child correlation producer is installed, spend and receipt counts are unknown, including disabled gardeners. Runtime observation time does not establish ledger coverage or historical zero cost. */
+    /** Optional cached gardener cost evidence (W1-T8484), scoped to the current daemon generation. Only exact parent passes admit canonical producer receipts. A priced subtotal is distinct from a complete total; absent correlation, prices or retained-corpus coverage stay unknown. Host and fleet gardeners contribute no repository cost. */
     GardenerSpend: {
       version: "gardener-spend-v1";
-      state: "not_collected";
-      reason: "missing_registry" | "invalid_registry" | "over_budget" | "missing_materialization" | "scope_mismatch" | "correlation_not_available";
+      state: "not_collected" | "partial" | "complete";
+      reason: "missing_registry" | "invalid_registry" | "over_budget" | "missing_materialization" | "scope_mismatch" | "correlation_not_available" | "ledger_unavailable" | "incomplete_evidence" | "priced_receipts";
       observedAt: string | null;
       materializedAt: string | null;
-      totalUsd: null;
-      pricedSubtotalUsd: null;
+      totalUsd: number | null;
+      pricedSubtotalUsd: number | null;
       counts: {
-        priced: null;
-        unpriced: null;
-        unlinked: null;
+        priced: number | null;
+        unpriced: number | null;
+        unlinked: number | null;
       };
-      window: null;
+      window: {
+        from: string;
+        through: string;
+      } | null;
       coverage: {
-        retainedCorpus: "not_collected";
-        truncated: null;
+        retainedCorpus: "not_collected" | "partial" | "complete";
+        truncated: boolean | null;
       };
       gardens: ({
         name: string;
         enabled: boolean;
         scope: "repository" | "host" | "fleet";
-        totalUsd: null;
-        pricedSubtotalUsd: null;
+        totalUsd: number | null;
+        pricedSubtotalUsd: number | null;
       })[];
     };
     /** GET /v1/views/analytics (docs/views.md, src/lib/analytics-view.ts; W1-T5055): every instance's console-v1 analytics merged in core. The read-model worker builds it from the `source_snapshot` rows the slow lane's analytics refresh commits per instance, so it answers from them after a restart. One `analytics:<instance>` source per instance: unavailable before its first refresh, stale with phase `failed` when its last refresh failed (the kept snapshot is still merged). */
