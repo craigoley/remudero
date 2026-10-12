@@ -229,6 +229,37 @@ test("W1-T8620: a real red re-runs nothing and an unknown refusal escalates once
   assert.match(unreadable.escalations[0], /rollup is unreadable/);
 });
 
+test("W1-T8620: a throwing job re-run is recorded as failed with its error", async t => {
+  const h = harness(t, GATE_REFUSAL, GATE_OLDER_THAN_INPUTS);
+  const throwing = () => { throw new Error("requeue exploded (HTTP 502)"); };
+  await h.pass(pr(), { requeueCheck: throwing });
+  await h.pass(pr(), { requeueCheck: throwing });
+  assert.equal(h.rows("automerge.stale_check_rerun").length, 1, "the attempt is recorded before the re-run is made");
+  assert.equal(h.escalations.length, 0);
+  const disposed = h.rows("sweep.disposed").at(-1);
+  assert.match(String(disposed?.stand_down_reason), /stale-check ci-gate .* — job re-run failed: requeue exploded \(HTTP 502\)/);
+});
+
+test("W1-T8620: an escalation that throws is recorded as not escalated, with its error", async t => {
+  const h = harness(t, "gh: Merge rejected by a repository rule (HTTP 405)", GATE_OLDER_THAN_INPUTS);
+  let attempts = 0;
+  const throwing = () => { attempts += 1; throw new Error("escalate exploded"); };
+  await h.pass(pr(), { escalate: throwing });
+  await h.pass(pr(), { escalate: throwing });
+  await h.pass(pr(), { escalate: throwing });
+  assert.equal(attempts, 1, "the failed escalation is attempted once per (head, refusal text)");
+  const escalated = h.rows("automerge.merge_refusal_escalated");
+  assert.equal(escalated.length, 1);
+  assert.equal(escalated[0].escalated, false);
+  assert.equal(escalated[0].kind, "other");
+  assert.equal(escalated[0].error, "escalate exploded");
+  assert.match(String(escalated[0].refusal), /Merge rejected by a repository rule \(HTTP 405\)/);
+  assert.equal(escalated[0].head_sha, HEAD);
+  assert.equal(escalated[0].pr_number, 8620);
+  const disposed = h.rows("sweep.disposed").filter(r => /escalation failed/.test(String(r.stand_down_reason)));
+  assert.ok(disposed.length >= 1, "the disposition names the failed escalation");
+});
+
 test("W1-T8620: classifyMergeRefusal names the transient and cancelled shapes", () => {
   assert.equal(classifyMergeRefusal("gh: API rate limit exceeded (HTTP 403)", undefined, REQUIRED).kind, "transient");
   assert.equal(classifyMergeRefusal(undefined, GATE_OLDER_THAN_INPUTS, REQUIRED).kind, "other");
