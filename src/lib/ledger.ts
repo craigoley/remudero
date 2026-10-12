@@ -29,7 +29,7 @@ import { defaultIsPidAlive, parseDrainLockInfo, type DrainLockInfo } from "./dra
 import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from "./fs-race-safe.js";
 import { LEDGER_CARRIED_PREFIX_SUFFIX, LEDGER_FILENAME, LEDGER_RETAINED_STEPS_SUFFIX } from "./ledger-path.js";
 import { assertLedgerPathNotLive } from "./live-write-guard.js";
-import { rotationStampIso } from "./ledger-union.js";
+import { isValidRetainedStepsMetadata, rotationStampIso } from "./ledger-union.js";
 import { PLAN_ONLY_REVIEW_MARKER_STEP, planOnlyReviewMarkers, PR_TERMINAL_STEP, pruneCarriedRows } from "./ledger-carry.js";
 import { resolveProducerIdentity, type ProducerIdentity } from "./producer-identity.js";
 import { WORKER_SCOPE_ENV, readGardenerOrigin } from "./worker-containment.js";
@@ -1257,10 +1257,10 @@ function readRetainedSteps(ledgerPath: string): RetainedStepsRead {
   if (!existsSync(path)) return { status: "absent" };
   try {
     const raw = JSON.parse(readFileSync(path, "utf8")) as Partial<RetainedStepsRecord>;
-    if (!Array.isArray(raw.steps) || !raw.steps.every((x) => typeof x === "string")) return { status: "unreadable" };
+    if (!isValidRetainedStepsMetadata(raw)) return { status: "unreadable" };
     const last = typeof raw.lastFullRotationMs === "number" && Number.isFinite(raw.lastFullRotationMs) ? raw.lastFullRotationMs : undefined;
     const deferral = raw.lastDeferral && typeof raw.lastDeferral.key === "string" && typeof raw.lastDeferral.atMs === "number" ? raw.lastDeferral : undefined;
-    return { status: "ok", record: { steps: raw.steps, lastFullRotationMs: last, lastDeferral: deferral } };
+    return { status: "ok", record: { steps: raw.steps as string[], lastFullRotationMs: last, lastDeferral: deferral } };
   } catch {
     return { status: "unreadable" };
   }

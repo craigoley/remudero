@@ -194,3 +194,24 @@ test("W1-T3547: rmd triage-outcomes is registered and reads the host ledger it i
   assert.equal(report.runs, 1);
   assert.equal(report.groups[0].provider, "cash");
 });
+
+test("triage outcomes accept producer metadata and refuse unknown artifacts", () => {
+  const sha = "c".repeat(64);
+  const dir = stateDirWith(run("a", "cash", "propose"));
+  writeFileSync(join(dir, "ledger.ndjson.carried.json"), JSON.stringify({ bytes: 93, sha256: sha }));
+  writeFileSync(join(dir, "ledger.ndjson.retained-steps.json"), JSON.stringify({ steps: ["triage.start"] }));
+  const accepted = captured([], dir);
+  assert.equal(accepted.code, 0, accepted.err.join("\n"));
+  assert.match(accepted.out.join("\n"), /1 triage runs/);
+
+  writeFileSync(join(dir, "ledger.ndjson.bak"), "old backup\n");
+  const unknown = captured([], dir);
+  assert.equal(unknown.code, 1);
+  assert.match(unknown.err.join("\n"), /unclassified: 1/);
+
+  rmSync(join(dir, "ledger.ndjson.bak"));
+  writeFileSync(join(dir, "ledger.ndjson.carried.json"), "{not json");
+  const corrupt = captured([], dir);
+  assert.equal(corrupt.code, 1, "corrupt metadata is not classified");
+  assert.match(corrupt.err.join("\n"), /unclassified: 1/);
+});
