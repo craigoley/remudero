@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-10: tiered unreadable-memory-ledger rule"
   plan_refs: [W1-T5347, W1-T5404, W1-T1038, W1-T7093, W1-T7094]
   files: [src/lib/dispatch-governor.ts, src/lib/drain.ts, src/lib/host-memory-ledger.ts, src/run-task.ts, test/an-unreadable-memory-reading-is-tiered-by-how-long-it-lasts.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
