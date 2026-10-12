@@ -7152,6 +7152,7 @@ export async function resolvePlanCriteriaAtHeadAsync(
     const identity = criteria.length ? await formatPlanReadIdentityAtHeadAsync(gitRunner, headSha, planRelPath) : undefined;
     return planCriteriaAtHeadResult(t, taskId, headSha, criteria, identity);
   } catch (e) {
+    // Named, never swallowed into an empty plan: the divergence carries git's message and the awaited cause probe.
     return planCriteriaAtHeadDivergence(taskId, e, await classifyHeadShaAvailabilityAsync(headSha, gitRunner));
   }
 }
@@ -7181,7 +7182,8 @@ async function formatPlanReadIdentityAtHeadAsync(
   try {
     blobOid = (await runGit(["rev-parse", `${headSha}:${planRelPath}`])).trim();
   } catch {
-    return undefined; // identity is optional legibility: the criteria bytes already resolved
+    // Identity is optional legibility: the criteria bytes already resolved, so a failed OID probe keeps the bare source.
+    return undefined;
   }
   const shardRelDir = join(dirname(planRelPath), "tasks.d");
   let shardSuffix = "";
