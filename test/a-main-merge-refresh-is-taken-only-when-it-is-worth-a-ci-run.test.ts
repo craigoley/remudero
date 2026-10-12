@@ -24,7 +24,7 @@ import {
   refreshRequestRow,
 } from "../src/lib/refresh-value.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { runLightPassReadyRefresh, type ArmedStalledPr } from "../src/lib/sweep.js";
+import { refreshStaleRollupAfterRefusal, runLightPassReadyRefresh, type ArmedStalledPr } from "../src/lib/sweep.js";
 import {
   DEFAULT_SWEEP_POLICY,
   runSweep,
@@ -280,4 +280,30 @@ test("W1-T7735: the overlap judge rules once per head, its failure is judge-unav
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }
+});
+
+test("W1-T7735: a repair-driven refresh keeps its own trigger and still writes a forced decision row", async () => {
+  // A green armed head GitHub still refuses (W1-T6404): the repair is never weighed, even under
+  // non-strict protection with zero overlap, but its CI cost is on the row beside the weighed ones.
+  const refused = pr(7030, { mergeable: true, mergeableState: "blocked", autoMergeArmed: true });
+  const rows: Record<string, unknown>[] = [];
+  const updated: number[] = [];
+  const result = await refreshStaleRollupAfterRefusal({
+    ledgerPath: "/nonexistent-rmd-w1-t7735/ledger.ndjson",
+    runId: "SWEEP-W1-T7735",
+    appendLine: (_path, row) => { rows.push(row); },
+    updateBranch: (target) => { updated.push(target.prNumber); return "updated"; },
+    escalate: () => {},
+  }, refused, []);
+  assert.match(result, /stale-rollup refresh: updated/);
+  assert.deepEqual(updated, [7030], "the repair keeps its own trigger");
+  const row = decided(rows)[0];
+  assert.equal(row?.decision, "refresh");
+  assert.equal(row?.path, "repair");
+  assert.equal(row?.forced_by, "stale-rollup");
+  assert.equal(row?.overlap, "unweighed");
+  assert.equal(row?.head_sha, refused.headSha);
+  assert.equal(typeof row?.predicted_cost_ci_min, "number");
+  assert.ok(rows.indexOf(row!) < rows.findIndex((r) => r.step === "automerge.stale_rollup_refreshed"),
+    "the decision row is written before the press");
 });

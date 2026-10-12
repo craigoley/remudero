@@ -274,6 +274,7 @@ import {
 import { mutationVerdictRunIdsFromLedger, pullMutationVerdicts, readMutationVerdictZip } from "./mutation-verdict-pull.js";
 import {
   decideRefresh,
+  forcedRefreshDecisionRow,
   nextRefreshRequest,
   pendingRefreshRequests,
   readRefreshJudgeVerdict,
@@ -4781,6 +4782,8 @@ export async function refreshStaleRollupAfterRefusal(
     if (!deps.updateBranch) {
       outcome = "unwired";
     } else {
+      appendLine(deps.ledgerPath, forcedRefreshDecisionRow({ runId: deps.runId, prNumber: pr.prNumber, headSha: pr.headSha, // W1-T7735
+        forcedBy: "stale-rollup", reason: "a green head GitHub still refuses", ...(pr.taskId === undefined ? {} : { taskId: pr.taskId }) }));
       outcome = await deps.updateBranch({ prNumber: pr.prNumber, prUrl: pr.prUrl,
         ...(pr.taskId === undefined ? {} : { taskId: pr.taskId }), headSha: pr.headSha, updateReason: "stale-blocked" });
       if (outcome === "up-to-date" && deps.repushAbsent) {
@@ -5196,6 +5199,8 @@ async function applyCiTimeoutRefresh(
   if (terminal) return `${head}; refresh refused: ${terminal}`;
   if (live.headSha !== pr.headSha) return `${head}; refresh refused: head moved to ${live.headSha ?? "an unreadable sha"}`;
   appendLine(deps.ledgerPath, { ...row, step: "sweep.ci_timeout_refresh.attempted" });
+  appendLine(deps.ledgerPath, forcedRefreshDecisionRow({ runId: deps.runId, prNumber: pr.prNumber, headSha: pr.headSha, // W1-T7735
+    forcedBy: "ci-timeout", reason: head, ...(pr.taskId === undefined ? {} : { taskId: pr.taskId }) }));
   let result: { outcome: string; error?: string };
   try {
     result = { outcome: await deps.updateBranch(pr) };
@@ -15116,6 +15121,8 @@ export async function runSweep(
       if (decision.rung === "refresh") {
         if (!deps.updateBranch) return hold("update branch is not wired");
         ladderUpdatedPrs.add(pr.prNumber);
+        appendLine(deps.ledgerPath, forcedRefreshDecisionRow({ runId: deps.runId, prNumber: pr.prNumber, headSha: pr.headSha, // W1-T7735
+          forcedBy: "strike-ladder", reason: decision.reason, ...(pr.taskId === undefined ? {} : { taskId: pr.taskId }) }));
         const outcome = await deps.updateBranch(pr);
         if (outcome === "conflict") {
           // A conflict cannot clear by refreshing again; only a rebuild from main (or a human) can.
@@ -16756,6 +16763,9 @@ export async function runSweep(
                   return "task contract amended since this head was escalated — deferred to full sweep (update-branch not available on this pass)";
                 }
                 let outcome: string;
+                appendLine(deps.ledgerPath, forcedRefreshDecisionRow({ runId: deps.runId, prNumber: pr.prNumber, headSha: pr.headSha, // W1-T7735
+                  forcedBy: "contract-amended", reason: `contract ${standingOn} -> ${current}`,
+                  ...(pr.taskId === undefined ? {} : { taskId: pr.taskId }) }));
                 try { outcome = await deps.updateBranch(pr); }
                 catch (error) { outcome = `error: ${String(error)}`; }
                 appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",

@@ -43,8 +43,9 @@ export const DEFAULT_REFRESH_CI_MINUTES = 16.4;
 /** BACKSTOP: a decision row lists at most this many overlap files; `overlap_count` keeps the total. */
 export const REFRESH_ROW_FILE_CAP = 20;
 
-/** Which refresh path is asking. `request` is the paced board-wide lane. */
-export type RefreshPath = "general" | "ready-light" | "base-red" | "base-fixed" | "plan-repair" | "request";
+/** Which refresh path is asking. `request` is the paced board-wide lane; `repair` is a repair-driven
+ *  refresh (ci-timeout, stale-rollup, strike ladder, contract-amended) that keeps its own trigger. */
+export type RefreshPath = "general" | "ready-light" | "base-red" | "base-fixed" | "plan-repair" | "request" | "repair";
 
 /** What the PR's own files share with main's delta since its merge base.
  *  - `direct`: a file both changed, or a fault only main can repair (a stale gate, a stale merge ref);
@@ -173,6 +174,29 @@ export function refreshDecisionRow(fields: {
     ...(fields.forcedBy === undefined ? {} : { forced_by: fields.forcedBy }),
     ...(fields.requestId === undefined ? {} : { request_id: fields.requestId }),
   };
+}
+
+/** THE REPAIR-DRIVEN ROW. A refresh that repairs a fault (a ci-timeout, a stale rollup, a strike-ladder
+ *  rung, an amended contract) keeps its own trigger and is never weighed: it buys a repair, not
+ *  freshness. It still writes one `sweep.refresh.decided` row with `forced_by: <path>`, so the tuning
+ *  sees its CI cost beside the weighed ones. `overlap` reads `unweighed`: no overlap was read. */
+export function forcedRefreshDecisionRow(fields: {
+  runId: string;
+  taskId?: string;
+  prNumber: number;
+  headSha: string;
+  forcedBy: string;
+  reason: string;
+  ciMinutes?: number;
+}): LedgerLine {
+  const row = refreshDecisionRow({
+    runId: fields.runId, prNumber: fields.prNumber, headSha: fields.headSha, forcedBy: fields.forcedBy,
+    ...(fields.taskId === undefined ? {} : { taskId: fields.taskId }),
+    input: { path: "repair", reason: fields.reason, overlap: "none", overlapFiles: [], strict: undefined, ciInFlight: false, judge: undefined },
+    value: { decision: "refresh", why: `forced by ${fields.forcedBy}: a repair keeps its own trigger`,
+      predictedCostCiMin: round1(fields.ciMinutes ?? DEFAULT_REFRESH_CI_MINUTES), predictedBenefit: 1 },
+  });
+  return { ...row, decision_id: `${String(row.decision_id)}:${fields.forcedBy}`, overlap: "unweighed" };
 }
 
 /** True when this exact decision (id and verdict) is already on the ledger: a pass that reaches the
