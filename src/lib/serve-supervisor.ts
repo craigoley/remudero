@@ -449,6 +449,10 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   let deferrals = 0;
   let retryPending = false;
   let largestRss = 0;
+  let largestRssGeneration: number | undefined;
+  // W1-T8378: the largest positive high-water mark read from an active generation. Monotone: it only grows.
+  let observedPeak = 0;
+  let observedPeakGeneration: number | undefined;
   let crashes = 0;
   const failed = new Set<string>();
   let pressure: HandoffPressure | undefined;
@@ -559,7 +563,10 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     // The standby's boot peak, not its RSS at this instant: both generations are resident until the drain ends.
     const pid = generation.process.pid;
     const sample = pid === undefined ? undefined : (peakRss(pid) ?? rss(pid));
-    if (sample !== undefined) largestRss = Math.max(largestRss, sample);
+    if (sample !== undefined && Number.isFinite(sample) && sample > largestRss) {
+      largestRss = sample;
+      largestRssGeneration = generation.id;
+    }
     return true;
   };
 
@@ -642,10 +649,17 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
    * Neither readable is UNKNOWN, never a zero-sized candidate.
    */
   const candidatePeak = (generation: Generation): { bytes?: number; basis: string } => {
-    if (largestRss > 0) return { bytes: largestRss, basis: "largest promoted boot peak" };
     const pid = generation.process.pid;
     const hwm = pid === undefined ? undefined : peakRss(pid);
-    if (hwm !== undefined && hwm > 0) return { bytes: hwm, basis: "active generation high-water mark" };
+    // A missing or invalid reading contributes nothing: never a zero, and never a shrink of a known peak.
+    if (hwm !== undefined && Number.isFinite(hwm) && hwm > observedPeak) {
+      observedPeak = hwm;
+      observedPeakGeneration = generation.id;
+    }
+    if (observedPeak > 0 && observedPeak >= largestRss) {
+      return { bytes: observedPeak, basis: `generation ${observedPeakGeneration} high-water mark (refreshed before this handoff, later than promotion)` };
+    }
+    if (largestRss > 0) return { bytes: largestRss, basis: `generation ${largestRssGeneration} boot peak (sampled at promotion)` };
     return { basis: "no generation's boot peak or high-water mark was readable" };
   };
 
