@@ -82,7 +82,7 @@ export function sourceHash(root, esbuildVersion = loadEsbuild(root).version) {
 
 /**
  * An esbuild plugin that keeps every module's own `import.meta.url`. A bundle otherwise collapses
- * all of them to the bundle's URL, and 42 src modules derive repo-root, script and worker paths
+ * all of them to the bundle's URL, and 40-odd src modules derive repo-root, script and worker paths
  * from it. Each module gets a module-scoped constant pointing at ITS OWN source file, located
  * relative to the bundle, so the bundle resolves paths inside the tree it sits in. The `define`
  * below binds `import.meta.url` to that constant lexically, so string literals are untouched.

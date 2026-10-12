@@ -32,7 +32,7 @@ const loadBuild = async (): Promise<BuildModule> => (await import(pathToFileURL(
 const ENTRIES = [{ name: "fixture-child", source: "src/child.ts" }];
 
 /** A minimal tree: an entry with a main-module guard, and a lib module that derives a path from
- *  its own `import.meta.url`, the shape 42 real src modules use. */
+ *  its own `import.meta.url`, the shape 40-odd real src modules use. */
 function makeTree(): string {
   const root = mkdtempSync(join(tmpdir(), "rmd-child-entry-tree-"));
   mkdirSync(join(root, "src", "lib"), { recursive: true });

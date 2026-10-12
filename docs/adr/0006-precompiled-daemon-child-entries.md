@@ -53,8 +53,9 @@ The parts of the decision:
    entry is added to `CHILD_ENTRIES` in the same PR that creates it. The
    daemon and serve parents stay on tsx: they own the read plane, the read
    models and the slow lane.
-2. **The 42 `import.meta.url` modules** (`grep -rln "import\.meta\.url" src`).
-   No module is kept external. An esbuild `onLoad` plugin gives every
+2. **The `import.meta.url` modules** (`grep -rln "import\.meta\.url" src`:
+   42 when the task was filed, 45 at this record's base). No module is kept
+   external, so a module added later needs no list entry. An esbuild `onLoad` plugin gives every
    first-party module a module-scoped constant equal to the URL of **its own
    source file**, resolved relative to the bundle (`new URL("../../src/lib/x.ts",
    <bundle url>)`). `define` binds `import.meta.url` to that constant
@@ -69,10 +70,14 @@ The parts of the decision:
    `fileURLToPath(import.meta.url) === process.argv[1]` then holds as it
    does under tsx. Any `argv[1]` reader sees the child as if it had been
    started on its source.
-4. **Worker-thread entries.** Under the bundle, `new Worker(new
-   URL(import.meta.url))` in read-model-worker.ts, read-model-slow-lane.ts,
-   status.ts, board-worker.ts, ledger-union.ts and console-projection-worker.ts
-   resolves to the module's `.ts` source, as before. A bundled process has no
+4. **Worker-thread entries.** Under the bundle, a worker started from a
+   module's own URL (`new Worker(new URL(import.meta.url))`, or a `workerUrl`
+   parameter defaulting to it) resolves to the module's `.ts` source, as
+   before. At this record's base that covers read-model-worker.ts,
+   read-model-slow-lane.ts, status.ts, board-worker.ts, ledger-union.ts,
+   console-projection-worker.ts, config-gardener.ts and serve-plan-reload.ts;
+   repo-dashboard-route.ts and secret-boundary.ts start workers from a URL
+   their caller passes in (`grep -rln "new Worker(" src`). A bundled process has no
    tsx loader, so it cannot start such a worker as-is. The read plane already
    loads `src/run-task.ts` through a tsx-registering eval bootstrap
    (`src/lib/read-plane.ts`), so it is unaffected. Phase one therefore bundles
