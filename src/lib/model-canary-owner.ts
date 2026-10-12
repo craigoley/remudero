@@ -77,7 +77,7 @@ export class CanarySlotOwner {
     if (run.caseId !== slot.caseId || run.suiteHash !== slot.pin.suiteHash || run.model !== slot.pin.model
       || run.route !== slot.pin.route || run.effort !== slot.pin.effort
       || (outcome.state === "unavailable" ? run.verified !== null : typeof run.verified !== "boolean")
-      || run.attempts.length > Math.min(retentionSlotTurnBound(slot), contextSlotCallBound(slot))
+      || run.attempts.length > (slot.context === undefined ? retentionSlotTurnBound(slot) : contextSlotCallBound(slot))
       || run.attempts.some(a => a.billing !== slot.pin.billing)
       || !retentionTerminalMatches(slot, run, outcome.state) || !contextTerminalMatches(slot, run, outcome.state))
       throw new Error("canary-owner-terminal-identity-invalid");

@@ -2,23 +2,11 @@
 import { createHash } from "node:crypto";
 import { fixedClock } from "./clock.js";
 import { contextCanaryProtocol, executeContextCanary } from "./model-canary-context.js";
-import { canaryTrialBlockId, type CanaryRun, type CanaryTrialBlock } from "./model-canary-metrics.js";
+import { canaryTrialBlockId, type CanaryRun } from "./model-canary-metrics.js";
 import type { CanaryPin } from "./model-canary-runner.js";
 import type { CanarySlot, CanarySchedulePorts } from "./model-canary-schedule.js";
 
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-export interface CanaryContextContract {
-  version: "canary-context-slot-v1";
-  bytes: 2048 | 16384 | 65536;
-  treatment: "first-use" | "repeat";
-  namespace: string;
-  protocolDigest: string;
-  day: string;
-  seed: string;
-  pins: CanaryPin[];
-  aa: boolean;
-  trial: CanaryTrialBlock;
-}
 
 /** Pin every arm to one byte protocol, and deterministically interleave model/effort arms. */
 export function buildContextCanarySchedule(day: string, seed: string, bytes: 2048 | 16384 | 65536,
