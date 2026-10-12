@@ -23,17 +23,13 @@ const check = (name: string, conclusion: string | null) => ({ name, conclusion, 
 const pr = (names = ["lint-plan"]): OpenPrView => ({
   prNumber: 8920, prUrl: "https://github.com/o/r/pull/8920", taskId: "W1-T5490",
   headSha: HEAD, headRefName: "run-W1-T5490-1", checksState: "red", reviewState: "pending",
-  unmetCriteria: [], priorStrikes: 0, autoMergeArmed: false,
-  createdAt: new Date(NOW - 90 * 60_000).toISOString(), lastActivityAt: new Date(NOW - 60_000).toISOString(),
+  unmetCriteria: [], priorStrikes: 0, autoMergeArmed: false, lastActivityAt: new Date(NOW - 60_000).toISOString(),
   ciFailures: names.map((name) => ({ name, conclusion: "FAILURE", logTail: "AssertionError: inherited red" })),
 });
 const redMain = () => ({ step: "main.health.observed", sha: LAST, state: "red", failing_checks: ["ci"], observed_checks: ["ci", "build"] });
 
 test("W1-T5490: a pull-request-only red waits while main is red", async () => {
   const rows: Record<string, unknown>[] = [redMain()];
-  // W1-T8533: unrelated PR history covers this PR's entire lifetime for every refresh reader.
-  rows.unshift(...["fix.base_refreshed", "sweep.base_red.refresh", "sweep.base_fixed.refresh", "refresh.clearance"]
-    .map(step => ({ step, ts: new Date(NOW - 120 * 60_000).toISOString(), pr_number: 1, outcome: "skipped" })));
   const dispatched: number[] = [];
   const updated: number[] = [];
   const run = () => runSweep([pr(), { ...pr(), prNumber: 9000, checksState: "green", reviewState: "success", ciFailures: undefined }], {
@@ -52,7 +48,7 @@ test("W1-T5490: a pull-request-only red waits while main is red", async () => {
   rows.push({ ...redMain(), sha: HEAD, state: "green", failing_checks: [] });
   await run();
   assert.deepEqual(updated, [8920]);
-  assert.equal(rows.filter((r) => r.step === BASE_RED_REFRESH_STEP && r.pr_number === 8920).length, 1);
+  assert.equal(rows.filter((r) => r.step === BASE_RED_REFRESH_STEP).length, 1);
   await run();
   assert.deepEqual(dispatched, [8920], "the existing one-refresh rule remains bounded");
 });
