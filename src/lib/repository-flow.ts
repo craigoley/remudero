@@ -6,6 +6,7 @@ import { fingerprintLedgerLine, openLedgerUnion } from "./ledger-union.js";
 import { buildBatchedGithub, taskIdFromRunBranch } from "./status.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { BoardPrRest } from "./open-prs-rest.js";
+import { ANALYTICS_REFRESH_INTERVAL_MS, ANALYTICS_REFRESH_TIMEOUT_MS } from "./analytics-route.js";
 
 export const REPOSITORY_FLOW_VERSION = "repository-flow-v1";
 /** BACKSTOP: optional graph evidence leaves room for existing Analytics in the same response. */
@@ -17,6 +18,8 @@ const MAX_PRS = 100000;
 /** BACKSTOP: exact receipt replay accounting is bounded separately from the compact public DTO. */
 const MAX_REPAIR_IDENTITIES = 65536;
 const DAY_MS = 86400000;
+/** PRIMARY CONTROL: graph completeness uses the existing Analytics refresh freshness bound. */
+const PR_SOURCE_FRESH_MS = 2 * ANALYTICS_REFRESH_INTERVAL_MS + ANALYTICS_REFRESH_TIMEOUT_MS;
 const reasonNames = ["code", "flake", "infrastructure", "conflict", "unknown"] as const;
 const unknowns = {
   firstPass: "initial-head and required-check policy evidence not collected",
@@ -35,14 +38,14 @@ const summarySchema = z.strictObject({ opened: nullableCount, merged: nullableCo
     conflict: nullableCount, unknown: nullableCount }),
   mergeLatency: z.strictObject({ unit: z.literal("ms"), samples: z.number().int().nonnegative(),
     p50Ms: nullableMs, p90Ms: nullableMs, missingCreatedAt: z.number().int().nonnegative() }),
-  openAge: z.strictObject({ unit: z.literal("ms"), censored: z.literal(true), samples: z.number().int().nonnegative(),
+  openAge: z.strictObject({ unit: z.literal("ms"), censored: z.literal(true), asOf: stamp.nullable(), samples: z.number().int().nonnegative(),
     oldestMs: nullableMs, missingCreatedAt: z.number().int().nonnegative() }) });
 const schema = z.strictObject({ version: z.literal(REPOSITORY_FLOW_VERSION), scope: z.literal("repository"),
   repository: z.string().max(240).regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
   state: z.enum(["reported", "partial", "not_collected"]), reason: z.enum(["missing_source", "invalid_source", "over_budget"]).nullable(),
   materializedAt: stamp,
   sources: z.strictObject({ openObservedAt: stamp.nullable(), closedObservedAt: stamp.nullable(),
-    prCorpus: z.enum(["complete", "partial", "unavailable"]),
+    prCorpus: z.enum(["complete", "partial", "unavailable"]), prFreshness: z.enum(["fresh", "stale", "unknown"]),
     ledgerObservedAt: stamp.nullable(), ledgerCorpus: z.enum(["observed", "partial", "unavailable"]),
     earliestLedgerAt: stamp.nullable(), latestLedgerAt: stamp.nullable(), observedPrs: nullableCount,
     observedRepairIdentities: nullableCount }),
@@ -71,7 +74,7 @@ function empty(repository: string, now: number, reason: RepositoryFlow["reason"]
   const through = fixedClock(now).iso();
   const endDay = Math.floor(now / DAY_MS) * DAY_MS;
   return { version: REPOSITORY_FLOW_VERSION, scope: "repository", repository, state: "not_collected", reason,
-    materializedAt: through, sources: { openObservedAt: null, closedObservedAt: null, prCorpus: "unavailable",
+    materializedAt: through, sources: { openObservedAt: null, closedObservedAt: null, prCorpus: "unavailable", prFreshness: "unknown",
       ledgerObservedAt: null, ledgerCorpus: "unavailable", earliestLedgerAt: null, latestLedgerAt: null,
       observedPrs: null, observedRepairIdentities: null },
     limits: { prRows: MAX_PRS, repairIdentities: MAX_REPAIR_IDENTITIES, publicBytes: REPOSITORY_FLOW_MAX_BYTES, evidencePerWindow: 64 },
@@ -83,7 +86,7 @@ function empty(repository: string, now: number, reason: RepositoryFlow["reason"]
       summary: { opened: null, merged: null, deliveredTasks: null, repairedPrs: null, repairRounds: null,
         repairReasons: { code: null, flake: null, infrastructure: null, conflict: null, unknown: null },
         mergeLatency: { unit: "ms", samples: 0, p50Ms: null, p90Ms: null, missingCreatedAt: 0 },
-        openAge: { unit: "ms", censored: true, samples: 0, oldestMs: null, missingCreatedAt: 0 } },
+        openAge: { unit: "ms", censored: true, asOf: null, samples: 0, oldestMs: null, missingCreatedAt: 0 } },
       evidence: [], evidenceTruncated: false })) };
 }
 
@@ -96,6 +99,11 @@ export function publicRepositoryFlow(value: unknown, repository: string, materia
     if (!parsed.success || parsed.data.repository !== repository || parsed.data.windows[0]!.days !== 7 ||
       parsed.data.windows[1]!.days !== 30 || parsed.data.windows.some(w => w.buckets.length !== w.days ||
         w.evidence.some(e => e.url !== `https://github.com/${repository}/pull/${e.prNumber}`))) {
+      return empty(repository, now, "invalid_source");
+    }
+    const clocks = [parsed.data.materializedAt, parsed.data.sources.openObservedAt, parsed.data.sources.closedObservedAt,
+      parsed.data.sources.ledgerObservedAt, ...parsed.data.windows.map(w => w.through)].filter((v): v is string => v !== null);
+    if (clocks.some(v => Date.parse(v) > now) || parsed.data.windows.some(w => Date.parse(w.from) > Date.parse(w.through))) {
       return empty(repository, now, "invalid_source");
     }
     return parsed.data;
@@ -145,12 +153,14 @@ export async function captureRepositoryFlow(root: string, stateDir: string, repo
   result.sources.openObservedAt = openAt === undefined ? null : fixedClock(openAt).iso();
   result.sources.closedObservedAt = closedAt === undefined ? null : fixedClock(closedAt).iso();
   result.sources.prCorpus = prComplete ? "complete" : rows.length ? "partial" : "unavailable";
+  const prFresh = openAt !== undefined && closedAt !== undefined && now - openAt <= PR_SOURCE_FRESH_MS && now - closedAt <= PR_SOURCE_FRESH_MS;
+  result.sources.prFreshness = openAt === undefined || closedAt === undefined ? "unknown" : prFresh ? "fresh" : "stale";
   result.sources.observedPrs = closed.closed !== undefined || open.ok ? prs.size : null;
   const gaps = new Set<string>();
   if (!prComplete) gaps.add("open or closed PR snapshot is missing or incomplete");
   if (openAt === undefined || closedAt === undefined) gaps.add("legacy snapshot has no source observation clock");
   if ((openAt ?? now) > now || (closedAt ?? now) > now) return empty(repository, now, "invalid_source");
-  if (now - (openAt ?? 0) > 32 * 60000 || now - (closedAt ?? 0) > 32 * 60000) gaps.add("PR checkpoint is older than the Analytics freshness bound");
+  if (result.sources.prFreshness === "stale") gaps.add("PR checkpoint is older than the Analytics freshness bound");
   let complete = true, live = false, earliest: number | undefined, latest: number | undefined, overflow = false;
   const fingerprints = new Set<string>();
   const repairs = new Map<string, Repair>();
@@ -225,7 +235,7 @@ export async function captureRepositoryFlow(root: string, stateDir: string, repo
         add(p.number, "merged", mergedAt);
       }
       if (p.state === "OPEN") {
-        if (created === undefined || created > now) missingOpenCreation++; else ages.push(now - created);
+        if (created === undefined || openAt === undefined || created > openAt) missingOpenCreation++; else ages.push(openAt - created);
       }
     }
     const observed = [...repairs].filter(([, r]) => inWindow(r.at));
@@ -236,8 +246,8 @@ export async function captureRepositoryFlow(root: string, stateDir: string, repo
       const bucket = counts.get(fixedClock(r.at).iso().slice(0, 10))!;
       bucket.repairs.add(r.pr); bucket.rounds.add(key); reasons[r.reason]++; add(r.pr, "repair", r.at);
     }
-    const mergesKnown = prComplete && !missingMerge;
-    const openedKnown = prComplete && !missingOpened;
+    const mergesKnown = prComplete && prFresh && !missingMerge;
+    const openedKnown = prComplete && prFresh && !missingOpened;
     const observedCount = (count: number, isComplete: boolean) => isComplete || count > 0 ? count : null;
     window.coverage = { opened: openedKnown ? "complete" : opened.size ? "observed" : "unknown",
       merged: mergesKnown ? "complete" : merged.size ? "observed" : "unknown", repairs: repairKnown ? "observed" : "unknown",
@@ -253,7 +263,8 @@ export async function captureRepositoryFlow(root: string, stateDir: string, repo
       repairRounds: repairKnown ? observed.length : null,
       repairReasons: repairKnown ? reasons : { code: null, flake: null, infrastructure: null, conflict: null, unknown: null },
       mergeLatency: { unit: "ms", samples: latencies.length, p50Ms: percentile(latencies, .5), p90Ms: percentile(latencies, .9), missingCreatedAt: missingCreation },
-      openAge: { unit: "ms", censored: true, samples: ages.length, oldestMs: ages.length ? Math.max(...ages) : null, missingCreatedAt: missingOpenCreation } });
+      openAge: { unit: "ms", censored: true, asOf: result.sources.openObservedAt, samples: ages.length,
+        oldestMs: ages.length ? Math.max(...ages) : null, missingCreatedAt: missingOpenCreation } });
     if (missingOpened || missingMerge || missingCreation || missingOpenCreation) gaps.add("legacy or invalid PR event metadata leaves counts or latency samples incomplete");
     window.evidence = evidence;
   }

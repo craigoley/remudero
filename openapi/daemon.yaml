@@ -7497,11 +7497,12 @@ components:
         sources:
           type: object
           additionalProperties: false
-          required: [openObservedAt, closedObservedAt, prCorpus, ledgerObservedAt, ledgerCorpus, earliestLedgerAt, latestLedgerAt, observedPrs, observedRepairIdentities]
+          required: [openObservedAt, closedObservedAt, prCorpus, prFreshness, ledgerObservedAt, ledgerCorpus, earliestLedgerAt, latestLedgerAt, observedPrs, observedRepairIdentities]
           properties:
             openObservedAt: {type: [string, "null"], format: date-time}
             closedObservedAt: {type: [string, "null"], format: date-time}
             prCorpus: {type: string, enum: [complete, partial, unavailable]}
+            prFreshness: {type: string, enum: [fresh, stale, unknown]}
             ledgerObservedAt: {type: [string, "null"], format: date-time}
             ledgerCorpus: {type: string, enum: [observed, partial, unavailable]}
             earliestLedgerAt: {type: [string, "null"], format: date-time}
@@ -7582,10 +7583,11 @@ components:
                   openAge:
                     type: object
                     additionalProperties: false
-                    required: [unit, censored, samples, oldestMs, missingCreatedAt]
+                    required: [unit, censored, asOf, samples, oldestMs, missingCreatedAt]
                     properties:
                       unit: {type: string, enum: [ms]}
                       censored: {type: boolean, enum: [true]}
+                      asOf: {type: [string, "null"], format: date-time}
                       samples: {type: integer, minimum: 0}
                       oldestMs: {type: [number, "null"], minimum: 0}
                       missingCreatedAt: {type: integer, minimum: 0}

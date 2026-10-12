@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
@@ -103,6 +103,7 @@ test("W1-T8684: repository flow preserves latency samples censoring and coverage
   assert.equal(summary.mergeLatency.missingCreatedAt, 1);
   assert.equal(summary.openAge.samples, 1);
   assert.equal(summary.openAge.oldestMs, 2 * day);
+  assert.equal(summary.openAge.asOf, iso(now));
   assert.equal(result.state, "partial");
   assert.equal(result.notCollected.firstPass, "initial-head and required-check policy evidence not collected");
   rmSync(join(state, "ledger.ndjson"));
@@ -110,6 +111,24 @@ test("W1-T8684: repository flow preserves latency samples censoring and coverage
   assert.ok(unavailable);
   assert.equal(unavailable.windows[0]!.summary.repairRounds, null);
   assert.equal(unavailable.windows[0]!.summary.merged, 2, "missing repairs cannot erase independently measured PRs");
+  const stale = (await captureRepositoryFlow(root, state, repository, fixedClock(now + 7200000)))!;
+  assert.equal(stale.sources.prFreshness, "stale");
+  assert.equal(stale.windows[0]!.coverage.merged, "observed");
+  assert.equal(stale.windows[0]!.summary.merged, 2);
+  assert.equal(stale.windows[0]!.summary.openAge.oldestMs, 2 * day, "censor at the real open observation clock, not a later read");
+  const noEvents = world(t, []);
+  const staleEmpty = (await captureRepositoryFlow(noEvents.root, noEvents.state, repository, fixedClock(now + 7200000)))!;
+  assert.equal(staleEmpty.windows[0]!.summary.merged, null, "a stale complete-empty snapshot is not a complete current zero");
+  assert.equal(staleEmpty.windows[0]!.coverage.merged, "unknown");
+  const future = (await captureRepositoryFlow(noEvents.root, noEvents.state, repository, fixedClock(now - 1)))!;
+  assert.equal(future.reason, "invalid_source");
+  const disk = boardSnapshotPath(noEvents.root, "fixture", "repo");
+  const records = readFileSync(disk, "utf8").trim().split("\n").map(l => JSON.parse(l));
+  delete records[0].channels.closed.observedAt;
+  writeFileSync(disk, records.map(r => JSON.stringify(r)).join("\n") + "\n");
+  const legacyClock = (await captureRepositoryFlow(noEvents.root, noEvents.state, repository, fixedClock(now)))!;
+  assert.equal(legacyClock.sources.prFreshness, "unknown");
+  assert.equal(legacyClock.windows[0]!.summary.merged, null);
 });
 
 test("W1-T8684: bounded flow refuses incompatible sources without losing Analytics", async t => {
@@ -121,6 +140,7 @@ test("W1-T8684: bounded flow refuses incompatible sources without losing Analyti
   assert.equal(result.windows[0]!.summary.repairRounds, null, "empty retained ledger is not proof of historical absence");
   assert.equal(publicRepositoryFlow(result, "another/repo", iso(now)).state, "not_collected");
   assert.equal(publicRepositoryFlow({ ...result, version: "future" }, repository, iso(now)).state, "not_collected");
+  assert.equal(publicRepositoryFlow({ ...result, materializedAt: iso(now + 1000) }, repository, iso(now)).reason, "invalid_source");
   assert.equal(publicRepositoryFlow({ ...result, unexpected: "private" }, repository, iso(now)).state, "not_collected");
   assert.equal(publicRepositoryFlow({ ...result, gaps: ["x".repeat(65537)] }, repository, iso(now)).state, "not_collected");
   const missing = await captureRepositoryFlow(root, state, "another/repo", fixedClock(now));

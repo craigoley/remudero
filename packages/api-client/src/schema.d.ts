@@ -2958,6 +2958,7 @@ export interface components {
         openObservedAt: string | null;
         closedObservedAt: string | null;
         prCorpus: "complete" | "partial" | "unavailable";
+        prFreshness: "fresh" | "stale" | "unknown";
         ledgerObservedAt: string | null;
         ledgerCorpus: "observed" | "partial" | "unavailable";
         earliestLedgerAt: string | null;
@@ -3012,6 +3013,7 @@ export interface components {
           openAge: {
             unit: "ms";
             censored: true;
+            asOf: string | null;
             samples: number;
             oldestMs: number | null;
             missingCreatedAt: number;
