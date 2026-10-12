@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-10: core daemon loop-stall investigation (daemon.loop_lag 07:50-09:57Z), operator asked for flow improvements"
   plan_refs: [W1-T5689, W1-T5718, W1-T6120, W1-T6121, W1-T6135, W1-T7534, W1-T7729]
   files: [src/run-task.ts, src/lib/worktree-git.ts, src/lib/affected-suites.ts, src/lib/git-push.ts, test/a-dispatched-build-runs-its-git-off-the-daemon-loop.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

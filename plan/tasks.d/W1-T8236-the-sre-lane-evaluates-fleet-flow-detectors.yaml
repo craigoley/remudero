@@ -11,7 +11,7 @@
   origin: "operator request 2026-10-11 (lean into automation and self improvement: the fleet catches its own failure classes) + 2026-10-11 detection research"
   plan_refs: [W1-T4384, W1-T4385, W1-T4387, W1-T931, W1-T4417, W1-T5904, W1-T7421]
   files: [src/lib/fleet-flow-detectors.ts, src/lib/sre-lane.ts, test/the-sre-lane-evaluates-fleet-flow-detectors.test.ts, test/every-incident-rule-reads-a-step-something-writes.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
