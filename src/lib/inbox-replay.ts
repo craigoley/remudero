@@ -193,7 +193,7 @@ function deferred(deps: BandMeaningReplayInput, reason: string, seeded: boolean)
   if (lastDeferral.get(deps.stateDir) !== reason) {
     lastDeferral.set(deps.stateDir, reason);
     const clock = deps.clock ?? systemClock;
-    appendLedger(deps.ledgerPath, { ts: clock.iso(), run_id: `REPLAY-${clock.now()}`, task_id: "inbox-replay", step: "inbox.replay_deferred", reason });
+    appendLedger(deps.ledgerPath, { ts: clock.iso(), run_id: `REPLAY-${clock.now()}`, task_id: "DAEMON", step: "inbox.replay_deferred", reason });
   }
   return { seeded, invalidated: [], recorded: [], deferred: reason, complete: false };
 }
