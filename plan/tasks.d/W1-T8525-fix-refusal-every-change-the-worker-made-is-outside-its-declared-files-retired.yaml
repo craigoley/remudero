@@ -1,0 +1,26 @@
+- id: W1-T8525
+  title: "RETIRED CI FRICTION CAUSE — fix_refusal:every-change-the-worker-made-is-outside-its-declared-files is accepted as a cost: 131 PR minutes in total, and its share of fix rounds fell to 0.0% (0/286) after W1-T5801"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  status: blocked
+  retirement: retired
+  # operator-2026-10-12: accept-cost on escalation #10184; the ci-friction gardener reads this rung-3 record as the cause's decision
+  origin: "ci-friction:fix_refusal:every-change-the-worker-made-is-outside-its-declared-files#r3"
+  plan_refs: [W1-T5801, W1-T5385, W1-T5090]
+  files: [src/run-task.ts]
+  attempts: 0
+  rationale: |
+    ACCEPT-COST, operator decision 2026-10-12, answering escalation #10184 (its own "accept-cost" option: add a task
+    with origin ci-friction:<cause> and a retirement field).
+    MEASURED by the ci-friction gardener: fix_refusal:every-change-the-worker-made-is-outside-its-declared-files cost
+    131 PR minutes across 72 fix rounds on 28 pull requests (seven-day half-life). Rung 1 W1-T5385 and rung 2
+    W1-T5801 both merged; after W1-T5801 its share of fix rounds was 0.4% (1/283) before and 0.0% (0/286) after, over
+    3.1 days each side. The gardener escalated only because a 1-round drop is inside its noise band, not because the
+    cause is still costing rounds.
+    WHY THIS SHAPE: src/lib/ci-friction-remedy.ts `ciFrictionCauseState` decides by the HIGHEST rung record; a retired,
+    unmerged record at rung > 0 yields state "retired", which is never re-drafted or escalated. This record sits at
+    rung 3 (`#r3`, above W1-T5801's `#r2`) and declares the cause's code path, not only the remedies doc, so
+    `remedyRung` counts it (a docs-only record is rung 0 and would retire the doc, not the cause). It is never built.
