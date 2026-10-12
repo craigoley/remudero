@@ -6,8 +6,8 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 10
-  risk: medium
-  band_meaning: blast-radius
+  risk: high
+  band_meaning: span
   priority: 2
   origin: operator#2026-10-12-checkpoint-author-followups
   plan_refs: [W1-T1087, W1-T7809, W1-T7756]
@@ -24,6 +24,9 @@
     The Darwin priority fixture has already been corrected in PR10937: no duplicate
     platform repair. Complete main/all four OPEN-head subject corpus/title controls
     show no new file-only SDK fixture repair; every selected source blob was read.
+    The two named test concerns are a real Rule19 span, so risk is high with explicit
+    band_meaning span. This is not production blast radius; no filename or baseline
+    is changed to hide the span. The first failed filing/base receipts remain retained.
   design: |
     1. Establish file-only authentication only inside the subscription-credential
        fixtures, using a small local fileOnlyUsageAuthentication helper that records

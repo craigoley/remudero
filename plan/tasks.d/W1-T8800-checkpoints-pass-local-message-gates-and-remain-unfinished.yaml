@@ -23,14 +23,18 @@
     W502 merged as PR1856; W7096 merged as PR10350; W7952 merged as PR11011. Their
     existing durability, resume judgment and task-derived title features are not
     rebuilt. W6013 has remote run branches; this task does not change its title
-    policy or claim its work. Fresh complete four-open-head trees have no own new
+    policy or claim its work. Its actual pending config rejects chore(wip) in local
+    validation too: a real CLI diagnostic rejects wip and chore(wip) but accepts
+    chore(checkpoint) and a terminal fix header. Fresh four-open-head trees have no new
     checkpoint-message subject diff, with a real W502 title/corpus positive control.
   design: |
     1. Reuse unfinished-checkpoint.ts for a shared conventional checkpoint subject
-       builder: chore(wip): followed by the existing reason, shaped with the existing
-       conventional limits. Keep body, remudero-context, remaining and task trailer
-       intact; do not rewrite old commits or main history. Wire both actual harness
-       checkpoint emitters. The restored-main chore(wip) merge stays recognized.
+       builder: chore(checkpoint): followed by the existing reason, shaped with the
+       existing conventional limits. Mark this prefix unfinished in the existing
+       recognizer while keeping legacy wip and chore(wip) recognition. Keep body,
+       remudero-context, remaining and task trailer intact; never rewrite old commits
+       or main history. Wire restart, watchdog and restored-main checkpoint emitters.
+       Do not change or bypass W6013's actual pending title policy.
     2. Teach that same subject in the implement prompt and compaction anchor. State
        the hosted-title/local-range distinction accurately, including local hooks.
        A final commit/PR title is not a checkpoint. Keep recon read-only, explicit
@@ -55,7 +59,7 @@
       proof: 'unit test: checkpoint emitters pass local range gates without erasing unfinished work'
     - claim: Implement and continuation contracts distinguish checkpoint subjects from terminal publication
       proof: 'unit test: checkpoint prompt and continuation agree with local range and hosted title contracts'
-    - claim: Both real emitters use the shared conventional checkpoint subject builder
+    - claim: Real checkpoint emitters use the shared conventional subject builder
       proof: 'grep: function checkpointCommitSubject in src/lib/unfinished-checkpoint.ts'
   files: [src/lib/compaction.ts, src/lib/unfinished-checkpoint.ts, src/run-task.ts, test/worker-checkpoint-contract.test.ts, test/checkpoint-publication-contract.test.ts]
   status: queued
