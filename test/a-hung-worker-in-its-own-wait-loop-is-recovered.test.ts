@@ -713,13 +713,15 @@ test("W1-T7807: a dispatch spawn is watched only when enabled, and wires every w
   mode.delivered = "no-running-worker";
   assert.equal(options.nudge?.("again"), "unsupported");
 
-  // end_round checkpoint: a commit that refuses, or leaves undeclared paths, is not a checkpoint.
+  // end_round checkpoint: a commit that refuses is not a checkpoint (W1-T8008: undeclared paths no longer refuse it).
   mode.commit = { committed: false, undeclared: [], reason: "nothing declared" };
   assert.deepEqual(await options.endRound?.("stalled"), { ended: false, reason: "checkpoint refused: nothing declared" });
   assert.ok(calls.some((c) => c.startsWith("commit:/wt:src/a.ts:wip: yield at quiet worker") && c.includes("Remudero-Task: W1-T7807")));
-  mode.commit = { committed: true, undeclared: ["x.ts", "y.ts"], reason: undefined };
-  assert.deepEqual(await options.endRound?.("stalled"), { ended: false, reason: "checkpoint refused: x.ts, y.ts" });
   assert.equal(calls.filter((c) => c.startsWith("push:")).length, 0, "nothing is pushed after a refused commit");
+  mode.commit = { committed: true, undeclared: ["x.ts", "y.ts"], reason: undefined };
+  assert.deepEqual(await options.endRound?.("stalled"), { ended: true, checkpointSha: "abc123" });
+  assert.equal(calls.filter((c) => c.startsWith("push:")).length, 1, "undeclared work is pushed, not refused");
+  calls.length = 0;
 
   // A push that fails is reported, not thrown.
   mode.commit = { committed: true, undeclared: [], reason: undefined };
