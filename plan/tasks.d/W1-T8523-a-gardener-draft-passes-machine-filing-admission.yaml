@@ -1,0 +1,61 @@
+- id: W1-T8523
+  title: "A GATE OR SCOUT GARDENER DRAFT PASSES MACHINE-FILING ADMISSION — both render through renderMachineShard, which writes verify: human as UNJUDGED for the machine-filing judge, yet machineFilingAdmissionViolations admits an unjudged record only for the origins isParkedMachineProposal lists, so every gate-gardener defuse draft and every scout draft is refused before the judge ever sees it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: low # admission predicate only; the machine-filing judge still rules on every record it admits
+  band_meaning: span
+  origin: "operator session 2026-10-12: escalations #10838 and #10530 triage"
+  plan_refs: [W1-T5995, W1-T5454, W1-T5539]
+  files: [src/lib/plan.ts, test/a-gardener-draft-passes-machine-filing-admission.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    OBSERVED: escalation #10838 (gate-gardener-liveness, 4 failed passes in a row): "gate gardener: defuse shard refused
+    (machine-filing-admission: task NEW-1 is not selectable by runnableCandidates under the current releasedIds: task
+    NEW-1 is verify:human — not auto-runnable by the proto-runner)". Escalation #10530 (scout-gardener-liveness, 3
+    failed passes, recurred 2026-10-11): the scout's drafted W1-T7562 failed the same admission for verify:human AND
+    for "declares file path(s) that exist in neither the checkout nor the base tree: test/scout-...". The gate
+    gardener has landed no defuse filing since #10605 (2026-10-10).
+    REPRODUCED on origin/main ecd3f9790:
+    - src/lib/machine-filing.ts (module doc and renderMachineShard): a machine filer writes `verify: human`, which
+      "means UNJUDGED, not needs a person": machine-filing-judge.ts rules on it and releases it to verify: auto
+      (operator ruling 2026-09-29: no blanket verify:human on machine filings; an LLM judge decides what escalates).
+    - src/lib/plan.ts `machineFilingAdmissionViolations`: an unjudged verify:human record is admitted only when
+      `isParkedMachineProposal(task)` holds, and that predicate lists origins one by one (ci-friction, hot-file,
+      flow-blocker, selector-shadow, flake-incident, ci-learning, host-resource). Neither `expiring-fixture:<file>`
+      (src/lib/gate-gardener.ts `defuseCandidates` / `renderDefuseShard`) nor `scout:<step>`
+      (src/lib/scout-gardener.ts `scoutShard`) is on it, so `assertDefuseAdmission` throws and the scout's lint refuses.
+    - The same function's `newTestAllowed` admits a declared new test file only for ci-friction, flow-blocker,
+      selector-shadow and hot-file shapes; the scout always declares `scoutTestPath(step)`, a new test/scout-*.test.ts.
+    The two gardeners are healthy otherwise; their only failure is an admission allowlist that predates them.
+  design: |
+    1. In src/lib/plan.ts, recognise both drafts as parked machine proposals, by SHAPE as the existing entries do
+       (author_class machine, verify human, not blocked, no depends_on):
+       - a gate-gardener defuse draft: origin starts with `expiring-fixture:` and `files` is exactly one existing
+         `test/**.test.ts` path equal to the origin's suffix;
+       - a scout draft: origin starts with `scout:` and the LAST declared file is a `test/scout-*.test.ts` path.
+    2. Admit the scout's declared new test path in `newTestAllowed` for the scout shape only; every other declared
+       path of a scout draft must still exist (a scout draft naming a missing non-test path stays refused).
+    3. Change nothing else: the judge, renderMachineShard, verify/risk derivation, and every existing allowlisted
+       shape stay byte-identical. A released (verify: auto) record keeps its ordinary admission.
+    4. Do not edit src/lib/gate-gardener.ts or src/lib/scout-gardener.ts; the tests render real drafts through
+       their exported `renderDefuseShard` / `scoutShard` and run the real admission on them.
+  acceptance:
+    - claim: "a gate-gardener defuse draft rendered by renderDefuseShard passes machineFilingAdmissionViolations"
+      proof: 'grep: test("W1-T8523: a gate-gardener defuse draft passes machine-filing admission" in test/a-gardener-draft-passes-machine-filing-admission.test.ts'
+    - claim: "a scout draft rendered by scoutShard, declaring its new test/scout-*.test.ts, passes machineFilingAdmissionViolations"
+      proof: 'grep: test("W1-T8523: a scout draft with its new test path passes machine-filing admission" in test/a-gardener-draft-passes-machine-filing-admission.test.ts'
+    - claim: "a scout draft that names a missing non-test path is still refused"
+      proof: 'grep: test("W1-T8523: a scout draft naming a missing source path is still refused" in test/a-gardener-draft-passes-machine-filing-admission.test.ts'
+    - claim: "an unjudged machine record of an unlisted origin is still refused"
+      proof: 'grep: test("W1-T8523: an unjudged record of an unlisted origin is still refused" in test/a-gardener-draft-passes-machine-filing-admission.test.ts'
+  falsifier: |
+    Render a defuse draft with renderDefuseShard for an existing test file and a scout draft with scoutShard, load each
+    with loadPlanFromYaml, and call machineFilingAdmissionViolations with an empty releasedIds and a pathExists that
+    answers for the repo. At origin/main both return a "verify:human — not auto-runnable" reason (the scout also a
+    missing-path reason); with the change both return []. Revert the predicate and the first two tests red.

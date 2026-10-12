@@ -110,7 +110,7 @@ const share = (w: ShareWindow): number => (w.n > 0 ? w.k / w.n : 0);
 
 /**
  * Did the cause's share of fix rounds fall after the remedy merged? Windows are equal: `after` runs from
- * the merge to now, `before` spans the same length ending at the merge (each capped at
+ * the latest post-merge span ending now, `before` spans the same length ending at the merge (each capped at
  * {@link CI_FRICTION_EFFECT_MAX_WINDOW_MS}).
  */
 export function ciFrictionRemedyEffect(rounds: readonly RemedyRound[], causeKey: string, mergedAtMs: number, nowMs: number): RemedyEffect {
@@ -120,7 +120,7 @@ export function ciFrictionRemedyEffect(rounds: readonly RemedyRound[], causeKey:
   for (const r of rounds) {
     const t = r.at === undefined ? NaN : Date.parse(r.at);
     if (!Number.isFinite(t)) continue;
-    const side = t >= mergedAtMs && t <= mergedAtMs + span ? after : t < mergedAtMs && t >= mergedAtMs - span ? before : undefined;
+    const side = t >= nowMs - span && t <= nowMs ? after : t < mergedAtMs && t >= mergedAtMs - span ? before : undefined;
     if (!side) continue;
     side.n += 1;
     if (r.causeKey === causeKey) side.k += 1;
@@ -209,8 +209,6 @@ export function ciFrictionCauseState(
       ? { state: "escalate", key, rung: next, prior: { task: top, effect } }
       : { state: "draft", key, rung: next, prior: { task: top, effect } };
   }
-  // "unmeasurable" (the cause had stopped before the merge) is a resolved cause by another road.
-  if (effect.verdict === "unmeasurable") return { state: "resolved", key, task: top, effect };
   return { state: "measuring", key, task: top, effect };
 }
 

@@ -1,0 +1,77 @@
+- id: W1-T8502
+  title: "A LANE REFILL PACKS ITS POOL DISJOINT FROM THE LANES ALREADY IN FLIGHT — on 2026-10-12 at 08:28:15Z the refill packed W1-T7735 (P1, sweep.ts + run-task.ts) first, so the pack dropped every other run-task.ts task, then an in-flight lane serialized W1-T7735 away and P2 W1-T7812 took the lane while P1 W1-T7957 and P1.5 W1-T8198 were runnable, with no dispatch.serialized row"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — the refill's candidate pack sees the in-flight lanes; the tick path is unchanged
+  band_meaning: span
+  origin: "operator approval 2026-10-12 (follow-up pattern): diagnosis of the 2026-10-12T08:28:15Z dispatch.lane_refilled row"
+  plan_refs: [W1-T476, W1-T4416, W1-T5083, W1-T5805, W1-T2286]
+  files: [src/lib/drain.ts, src/lib/daemon.ts, test/a-lane-refill-packs-its-pool-disjoint-from-the-lanes-already-in-flight.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED in the core daemon's ledger, the 2026-10-12T08:28:15Z `dispatch.lane_refilled` row (diagnosis
+    reproduced against that row on 2026-10-12): the in-flight lanes held W1-T7850 (P2; src/lib/sweep.ts) and
+    W1-T7746 (src/lib/daemon.ts). The dispatch-order head was W1-T7735 (P1; files src/lib/sweep.ts and
+    src/run-task.ts). The refill's pool came out [W1-T7735, W1-T7812, W1-T8000]. W1-T7735 was then serialized
+    behind the in-flight sweep.ts lane, and P2 W1-T7812 took the lane. P1 W1-T7957 and P1.5 W1-T8198 were
+    runnable, but both name src/run-task.ts, so the pack had left them out because the head named it.
+    THE PATHS, read on origin/main dc1b9f9c0 (symbol names, not line numbers):
+      - `chooseRefill`'s `decide` (src/lib/daemon.ts) builds `pool` with `runnableCandidates(..., laneCount,
+        dispatchOpts...)`. Only after that does it run `partitionByFileOverlap([...inFlightTasks, ...pool])` and
+        take `fits.dispatch.find((t) => !inFlightTasks.has(t))`.
+      - `runnableCandidates` (src/lib/drain.ts) calls `packDisjointFirst(eligible, limit, observedByTask)`. Each
+        slot takes the earliest candidate for which `isDisjointFromEvery(collected, candidate)` holds, so the
+        pack is disjoint among POOL MEMBERS ONLY. A head that the in-flight lanes will block still fills slot 1
+        and pushes out every task that overlaps it.
+      - `fits.serialized` is dropped in the refill. Only the tick path logs `dispatch.serialized`
+        (`for (const d of partition.serialized) log("dispatch.serialized", serializedLedgerPayload(d))`). The
+        diagnosis found 0 such rows in the 12 h before 08:28, so P1 tasks lost to a refill leave no trace.
+    OPERATOR-DECISION QUESTION (recorded here, NOT in this task's scope): hub-file contention on src/run-task.ts
+    serializes every P1 behind one in-flight run-task.ts task for hours. The disjoint-first tick also let a P2
+    (W1-T7850) hold src/lib/sweep.ts from 05:35 to 08:49 while P1s needing it waited. Should priority be able to
+    outrank disjointness when a lane is free, or should the hub file be split? That is a separate decision on
+    its own evidence. This task only makes the refill see what is already in flight.
+  design: |
+    1. Add optional `inFlight?: readonly Task[]` to `NextRunnableOpts` (src/lib/drain.ts). Document that it holds
+       tasks that already occupy a lane, are never returned, and only constrain the pack.
+    2. `packDisjointFirst` takes the in-flight set. It picks with `isDisjointFromEvery([...inFlight, ...collected],
+       candidate, observedByTask)` and returns only `collected`. Keep the `pickIndex = 0` fallback. Keep the
+       invariant: with no candidate disjoint from in-flight plus collected, or with `inFlight` absent or empty,
+       the result is byte-identical to today's. Use the same `observedByTask` map the partition uses.
+    3. `chooseRefill` (src/lib/daemon.ts) passes `inFlight: [...inFlightTasks]` to `runnableCandidates`. For each
+       `fits.serialized` entry whose task is a pool member, it logs `dispatch.serialized` with
+       `serializedLedgerPayload(d)`, the same payload the tick path writes.
+    4. The tick path's `runnableCandidates(planForBatch, isMerged, budget, dispatchOpts)` call, the overlap
+       admission in dispatch-overlap.ts, and dispatch order are unchanged.
+    Tests go in the new file test/a-lane-refill-packs-its-pool-disjoint-from-the-lanes-already-in-flight.test.ts,
+    with `test(` titles exactly as in the proofs below. Use injected plans and the daemon refill harness the existing refill tests use (for example
+    test/a-freed-lane-refills-while-its-sibling-runs.test.ts).
+    No live ledger and no network.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-lane-refill-packs-its-pool-disjoint-from-the-lanes-already-in-flight.test.ts"
+    - claim: "a lane refill skips the P1 that an in-flight lane blocks and picks the next P1, not a later disjoint P2"
+      proof: 'grep: test("W1-T8502: a lane refill picks the P1 disjoint from the in-flight lanes over a later P2" in test/a-lane-refill-packs-its-pool-disjoint-from-the-lanes-already-in-flight.test.ts'
+    - claim: "a lane refill logs dispatch.serialized for each pool task an in-flight lane blocks"
+      proof: 'grep: test("W1-T8502: a lane refill logs dispatch\.serialized for a pool task an in-flight lane blocks" in test/a-lane-refill-packs-its-pool-disjoint-from-the-lanes-already-in-flight.test.ts'
+    - claim: "the refill pack never returns an in-flight task, and is byte-identical to today's pack when nothing is in flight or nothing is disjoint"
+      proof: 'grep: test("W1-T8502: a lane refill pack is unchanged when nothing in flight constrains it" in test/a-lane-refill-packs-its-pool-disjoint-from-the-lanes-already-in-flight.test.ts'
+    - claim: "chooseRefill hands the in-flight lanes to the pack"
+      proof: 'grep: inFlight: \[\.\.\.inFlightTasks in src/lib/daemon.ts'
+  falsifier: |
+    In-flight lane A holds src/lib/sweep.ts. The queue in dispatch order is [P1 X (sweep.ts + run-task.ts),
+    P1 Y (run-task.ts), P2 Z (disjoint)]. Today the pack is [X, Z, ...]: Y is dropped because it overlaps X, X is
+    serialized behind A, and the refill picks Z. With the fix the pack skips X because it overlaps A, so the
+    refill picks Y. Drop the `inFlight` argument in chooseRefill, or ignore it in packDisjointFirst, and the first
+    test reads Z. Drop the refill's serialized log and the second test sees no dispatch.serialized row.
+  note: |
+    EFFECT, measured after merge from the ledger (no numeric pass mark): `dispatch.serialized` rows now appear
+    from refills. A `dispatch.lane_refilled` row whose next_task outranks nothing that was runnable and disjoint
+    from the in-flight lanes is the healthy shape. Compare the priority of refilled tasks against the runnable
+    disjoint frontier before and after.

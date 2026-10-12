@@ -49,6 +49,10 @@ export interface CanaryRun {
   attempts: CanaryAttempt[];
   outcomeReason?: string;
   retention?: { turnsObserved: number; violations: number; firstViolationTurn: number | null };
+  contextProfile?: { version: "canary-context-v1"; bytes: 2048 | 16384 | 65536;
+    treatment: "first-use" | "repeat"; byteUnit: "utf8-bytes"; cacheGuarantee: "none";
+    phases: { phase: string; verified: boolean | null; attemptIds: string[] }[];
+    probeCache: "unavailable" | "observed-read" | "observed-zero" };
   trial?: CanaryTrialBlock;
 }
 export const nonnegativeMeasurement = (n: number | null): n is number =>
