@@ -39,7 +39,7 @@ interface Fixture {
   cleanup: () => void;
 }
 
-function fixture(riskJudge?: Parameters<typeof openOpportunityIntakePorts>[1] extends infer D ? NonNullable<D>["riskJudge"] : never): Fixture {
+function fixture(riskJudge?: OpportunityIntakePorts["riskJudge"]): Fixture {
   const repo = gitRepo({ kind: "t5432-readiness-intake" });
   const root = repo.dir;
   const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t5432-state-`));

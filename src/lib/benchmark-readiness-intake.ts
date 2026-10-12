@@ -31,7 +31,10 @@ export interface ReadinessGapRead {
 function parseRecord(line: string): { base: Omit<ReadinessGapRecord, "repo">; repo: string | null } | string {
   let value: unknown;
   try { value = JSON.parse(line); }
-  catch (error) { return `unparseable line (${(error as Error).message.slice(0, 60)})`; }
+  catch (error) {
+    const reason = `unparseable line (${(error as Error).message.slice(0, 60)})`;
+    return reason;
+  }
   if (typeof value !== "object" || value === null || Array.isArray(value)) return "line is not an object";
   const row = value as Record<string, unknown>;
   const gap = row.gap as Record<string, unknown> | null | undefined;
@@ -56,7 +59,8 @@ export function readReadinessGapSidecar(stateDir: string, repo: string): Readine
   try { text = readFileSync(path, "utf8"); }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return out;
-    out.unavailable.push(`benchmark-readiness unavailable: ${READINESS_FOLLOW_UPS_FILE} unreadable (${(error as Error).message.slice(0, 80)})`);
+    const reason = `benchmark-readiness unavailable: ${READINESS_FOLLOW_UPS_FILE} unreadable (${(error as Error).message.slice(0, 80)})`;
+    out.unavailable.push(reason);
     return out;
   }
   const seen = new Set<string>();
@@ -84,7 +88,10 @@ export function collectBenchmarkReadinessCandidates(ports: ReadinessCandidatePor
   if (!ports.readReadinessGaps) return { candidates: [], unavailable: [] };
   let read: ReadinessGapRead;
   try { read = ports.readReadinessGaps(); }
-  catch (error) { return { candidates: [], unavailable: [`benchmark-readiness unavailable: ${String(error)}`] }; }
+  catch (error) {
+    const reason = `benchmark-readiness unavailable: ${String(error)}`;
+    return { candidates: [], unavailable: [reason] };
+  }
   const observedAt = ports.clock.iso();
   const candidates = read.records.map((record): OpportunityCandidate => ({
     source: "benchmark-readiness", repo: ports.repo, key: `benchmark-readiness:${record.key}`, observedAt, recordedAt: record.ts,
