@@ -44,6 +44,7 @@ export const SPEND_STEP_ROLES: Readonly<Record<string, SpendRole>> = {
   "retro.preflight_repair": "produced",
   "risk_judge.decision": "produced",
   "ci_judge.spend": "produced",
+  "refresh_judge.spend": "produced", // W1-T7735
   "containment.probe": "produced",
   "isolation.probe": "produced",
 };

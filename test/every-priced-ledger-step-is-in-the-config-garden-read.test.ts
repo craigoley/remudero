@@ -49,6 +49,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "isolation.probe": DONE_STEPS_PRICE_THE_RUN,
   "risk_judge.decision": DONE_STEPS_PRICE_THE_RUN,
   "ci_judge.spend": DONE_STEPS_PRICE_THE_RUN,
+  "refresh_judge.spend": DONE_STEPS_PRICE_THE_RUN, // W1-T7735: the refresh-overlap judge, priced like ci_judge
   "budget.warning": DONE_STEPS_PRICE_THE_RUN,
   "pr.open_deferred_to_existing": DONE_STEPS_PRICE_THE_RUN, // W1-T5520: the run's restated total, its verdict row follows
   "fix.spawn_infra_blocked": DONE_STEPS_PRICE_THE_RUN,

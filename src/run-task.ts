@@ -9,6 +9,7 @@ import { readPlaneWorkerInput, runReadPlaneWorker, readPlaneWorkerLog } from "./
 import { globSync, renameSync } from "node:fs";
 import { remeasureSettledGoals, withGoalRemeasurement } from "./lib/goals.js";
 import { judgeCiEscalation, productionCiJudgePorts, singleFlightCiJudge, withCiJudgeAfterSweep, type CiJudgeIo } from "./lib/ci-escalation-judge.js";
+import { judgeRefreshOverlap, productionRefreshJudgePorts } from "./lib/refresh-value.js";
 // The doctorCommand-only reads (DOCTOR_USAGE_EXIT, buildDoctorReport, readGitLocks, readMemInfo,
 // readPauseAgeMs, refuseUnsupportedArgs, classifyReadFailure, readDiskTotalBytes,
 // classifyWorktreeBase, MemInfo, WorktreeBaseRow, readNvmrcVersion) moved with doctorCommand to src/lib/report-commands.ts
@@ -39051,7 +39052,8 @@ export async function daemonCommand(
     freshTreeReviewAvailable: true,
   };
   const buildSweepHook: DaemonSweepHookBuilder = (...args) => withGoalRemeasurement(
-    withCiJudgeAfterSweep((deps.buildSweepHook ?? daemonDefaultBuildSweepHook)(...args), () => target.isSelf ? kickCiJudge?.() : undefined),
+    withCiJudgeAfterSweep((deps.buildSweepHook ?? daemonDefaultBuildSweepHook)(...args),
+      () => target.isSelf ? (kickRefreshJudge?.(), kickCiJudge?.()) : undefined),
     () => remeasureSettledGoals({ repoRoot: target.isSelf ? effectiveRepoRoot : targetCheckoutRoot, stateDir: join(config.root, "state"),
       tasks: activePlanRef.current.tasks, settled: (id) => lastProj?.get(id)?.indeterminate ? undefined : lastProj?.get(id)?.merged,
       log }), log);
@@ -39080,6 +39082,11 @@ export async function daemonCommand(
   const ciJudgeIo = deps.ciJudgeIo ?? (deps.repoRoot === undefined ? {} : undefined);
   const kickCiJudge = ciJudgeIo && singleFlightCiJudge(() => judgeCiEscalation(productionCiJudgePorts({
     owner: self.owner, repo: self.repo, repoRoot: effectiveRepoRoot, stateDir: join(config.root, "state"), log, ...ciJudgeIo,
+  })), log);
+  const kickRefreshJudge = ciJudgeIo && singleFlightCiJudge(() => judgeRefreshOverlap(productionRefreshJudgePorts({
+    owner: self.owner, repo: self.repo, repoRoot: effectiveRepoRoot, stateDir: join(config.root, "state"), log, // W1-T7735
+    readLedger: () => readLedgerLines(ledgerPath),
+    ...(ciJudgeIo.ghText ? { ghText: ciJudgeIo.ghText } : {}), ...(ciJudgeIo.spawn ? { spawn: ciJudgeIo.spawn } : {}),
   })), log);
   log("daemon.memory_policy", {
     ...memoryPolicyApplied,
@@ -47998,6 +48005,7 @@ export function buildSweepHook(
           updatedForWorkflow,
           behindMainByPr,
           baseChangedFilesByPr,
+          ...(tickRead?.closedPrs ? { closedPrs: tickRead.closedPrs } : {}), // W1-T7735: refresh outcome rows
           reviewerCodeRecovery,
           judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
           ...codeScanningJudgeDeps(owner, repo, config, plan, runId, log),
