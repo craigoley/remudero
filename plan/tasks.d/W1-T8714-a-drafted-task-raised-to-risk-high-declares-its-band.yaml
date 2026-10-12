@@ -1,0 +1,174 @@
+- id: W1-T8714
+  title: "A DRAFTED TASK RAISED TO RISK HIGH DECLARES ITS BAND BEFORE IT IS CACHED READY — the inbox draft lint never asks for band_meaning, and the approve floor refuses a risk:high task without one, so 40 READY proposals (53 approve.error rows, 2026-09-25 to 2026-10-12) never filed; one was the lifetime judge's automate remedy for W1-T8502. Once fixed, a one-shot replay re-files the lost proposals through the inbox path"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00  # raised 2026-10-12 from 5.00 for the design-4 replay
+  risk: high  # Rule 19: one concern — the draft floor and the approve floor apply one lint contract, and the proposals the old split lost are re-filed; it spans the draft lint and approve repair (inbox.ts), the shared redraft guidance (relint.ts) and the one-shot replay (inbox-replay.ts, fleet-lane.ts)
+  band_meaning: span
+  origin: "operator request 2026-10-12 (parallel work); found while freeing W1-T8502. Amended 2026-10-12 on operator approval (\"continue with follow ups\"): priority 1 and the design-4 replay"
+  plan_refs: [W1-T8502, W1-T8676, W1-T2503, W1-T4352, W1-T4700, W1-T5541, W1-T5660, W1-T4442, W1-T3188, W1-T4089, W1-T4086, W1-T192, W1-T3385, W1-T3511]
+  files:
+    - src/lib/inbox.ts
+    - src/lib/relint.ts
+    - src/lib/inbox-replay.ts
+    - src/lib/fleet-lane.ts
+    - test/a-drafted-task-raised-to-risk-high-declares-its-band.test.ts
+  status: queued
+  priority: 1  # raised 2026-10-12 from 2: the split silently lost 40 READY proposals, 18 of them judge remedies (verify-human-automate), and every re-approve repeats the refusal
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-12 in the core daemon's ledger on host remudero (~/rmd-state2/state), read niced:
+      - 15:02:59Z `verify_human.judged` ruled automate for blocked W1-T8502. `routeAdaptiveLifetimePressure`
+        (src/run-task.ts) passes no `release` hook, so `applyAutomateVerdict` (src/lib/verify-human-judge.ts) staged
+        proposal verify-human-automate:W1-T8502 through `automationProposalFromJudgedShard`.
+      - 15:08:09Z `inbox.draft_relint` attempt 1: "spans 2 distinct subsystems/concerns (selfimprovement, verifyhuman)
+        at risk:low — Rule 19: raise to risk:high or decompose". The drafter raised the task to risk:high.
+      - 15:08:14Z attempt 3: `inbox.drafted lint_clean true`, unresolved_violations [].
+      - 15:10:20Z `approve.id_materialized` W1-T8595, then `approve.error`: "rmd approve: refusing to file
+        verify-human-automate:W1-T8502 — [sizing] risk:high with no band_meaning declared — W1-T2503".
+    THE PROPOSAL BUILDER IS NOT THE CAUSE. `automationProposalFromJudgedShard` builds a summary with no shard and no
+    risk field. The shard is written later by the inbox drafter, and its lint and the approve lint disagree.
+    WHY, READ on origin/main 40b391682 (symbols, not lines):
+      - `sizingViolation` (src/lib/task-linter.ts) is silent on risk:high with no band_meaning unless the caller passes
+        `riskTransition`. With `riskTransition: { baseTask: undefined }` it blocks.
+      - `lintDraftedFragment` (src/lib/inbox.ts) calls `lintTask(task, { knownRepos })` with no `riskTransition`. The
+        draft rung's self-lint (`runDraftRung`) therefore caches such a fragment READY.
+      - `relintRatificationFragment` (inbox.ts), reached from `writeRatificationShards` at approve, lints with
+        `riskTransition: { baseTask: undefined }` and `proofSelfPath: "block"`. Its mechanical sizing repair (W1-T4352)
+        runs only when `task.risk !== "high"`. A draft that is already risk:high with no band is not repaired. It is
+        refused, and the refusal is thrown as `approve.error`.
+      - `relintGuidanceLines` (src/lib/relint.ts) tells the redrafting model to "raise that task to risk:high" and
+        never mentions band_meaning. The drafter did what it was told.
+    MEASURED over the whole ledger union: 495 .ndjson.gz rotations plus the live file, no plain rotated .ndjson
+    present. The approve.* rows, deduplicated by ts, step, run and error, span 2026-08-28T20:24Z to
+    2026-10-12T15:29Z. Control: 860 approve.* rows, of which 466 approve.error, 232 approve.id_materialized and 153
+    approve.shards_written.
+      - 53 approve.error rows carry "risk:high with no band_meaning declared", across 40 distinct proposals, first
+        2026-09-25T16:11Z.
+      - By family: followup 24 rows over 15 proposals, verify-human-automate 20 over 18, adoption 6 over 4,
+        proof-debt 3 over 3.
+      - None of the 40 has an approve.shards_written row. Re-approving them repeats the refusal: followup
+        DAEMON-1789296090167 was refused 4 times.
+      - 4 further `[sizing]` approve errors came from lint-plan-precheck at push. They are a different refusal and are
+        not counted here.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and on all 308 origin heads for band_meaning beside
+    draft/approve/relint, "no band_meaning declared", lintDraftedFragment, relintRatificationFragment,
+    relintGuidanceLines, automationProposalFromJudgedShard and verify-human-automate. Control: main reads 31 hits, and
+    no head reads more than main. W1-T4352 built the approve repair for risk below high. W1-T4700, W1-T5660 and
+    W1-T5827 tightened `lintDraftedFragment` for other checks. W1-T8676 reports this refusal and leaves it to this task.
+    AMENDMENT 2026-10-12 (operator approval, "continue with follow ups"), READ on origin/main e4fe69049:
+      - PRIORITY 1. The split silently lost 40 READY proposals, 18 of them the verify-human judge's own automate
+        remedies, and each re-approve repeats the refusal. Design 3 makes a cached READY draft file on its next approve.
+        It does not say which proposals get that approve, or record what happened to each.
+      - THE PATH THE REPLAY USES ALREADY EXISTS. All four families (followup, verify-human-automate, adoption,
+        proof-debt) are in `FLEET_KINDS` (src/lib/inbox-owner.ts), so `inboxOwner` returns "fleet" for every one of the
+        40. The fleet lane (`triageFleetLaneSteps`, src/lib/fleet-lane.ts, W1-T4089) files a fleet finding by handing it
+        to the ordinary `rmd approve`, one a pass and at the fleet's merge pace. It retries a `file` decision after a
+        day while the finding is still open. Its doc says its memory is its own store, never the live ledger, which
+        rotates every few minutes.
+      - THE SUPERSEDE CHECKS ALREADY EXIST. `classifyProposal` (src/lib/inbox.ts) returns `ratified`, `declined` or
+        `retired`: a resolved referent (`resolveBoardReferent`), an adoption finding gone, a successor
+        (`supersedingProposalId`, W1-T3511), a merged task referent (`taskReferentMerged`, W1-T3385), or a retired or
+        released task. Serve's slow lane writes those states to the snapshot the fleet lane reads
+        (`readClassificationSnapshot`). At approve, `draftedDuplicate` refuses a fragment whose shard near-duplicates a
+        filed task, with `draftedDuplicateRefusal`'s text. The fleet lane's MERGE step declines a finding into an older
+        open one on the same subject (`findingSubject`).
+  design: |
+    No new bound. One lint contract for both floors.
+    1. THE DRAFT FLOOR LINTS AS A FILING. Hold the approve floor's lint options in one exported constant in
+       src/lib/inbox.ts: `riskTransition: { baseTask: undefined }` and `proofSelfPath: "block"`. A drafted task is new
+       by definition. `lintDraftedFragment` and `relintRatificationFragment` both pass that constant to `lintTask`, so
+       they cannot drift apart again. The draft rung's bounded self-lint then sees the band block and redrafts with it
+       in hand. A fragment still dirty after the existing bound is cached NOT-READY with its violations named in
+       `inbox.drafted unresolved_violations`. That is the named refusal, and no approve run spends an id on it.
+    2. THE GUIDANCE NAMES THE BAND. The `[sizing]` paragraph of `relintGuidanceLines` says to raise the task to
+       risk:high AND declare `band_meaning: span`, with the one-line rationale. It names `band_meaning: blast-radius` as
+       the alternative for a change dangerous regardless of span.
+    3. THE APPROVE REPAIR COVERS AN ALREADY-HIGH DRAFT. `relintRatificationFragment`'s mechanical repair also fires for
+       a task at risk:high with no band_meaning. It inserts `band_meaning: span` after the risk line, the declaration
+       that admits a span and exempts nothing. A task that declares either band is untouched. The 40 proposals cached
+       READY before this change then file on their next approve instead of being refused again.
+    4. A ONE-SHOT REPLAY OF THE LOST PROPOSALS (amended 2026-10-12). Add `src/lib/inbox-replay.ts`. It re-drafts and
+       re-approves each lost proposal through the ordinary inbox path (drafter, relint, approve). It never writes a
+       shard, a plan file or a ratification row itself.
+       a. THE POPULATION, MEASURED, NOT LISTED. Read from the ledger union with the incremental reader
+          (`createIncrementalLedgerUnion`, src/lib/ledger-union.ts), filtered to the approve.* steps, never from the live
+          file alone. A proposal is in the population when its LATEST approve outcome (`approve.error` or
+          `approve.shards_written`, by ts) is an `approve.error` carrying "risk:high with no band_meaning declared", and
+          no `approve.shards_written` row ever names it. Attribute a row by `task_id`. A `task_id: "BATCH"` row is
+          attributed by its `proposal_ids`, or for an error by the proposal id its text names. Family is
+          `inboxKind(id)`. NO COUNT CAP: the population is the bound, 40 when measured. An incomplete union read
+          (`ok: false`) or a read with zero approve.* rows (the positive control) seeds nothing. It writes one
+          `inbox.replay_deferred` row with the reason, and the next pass tries again.
+       b. ONE-SHOT AND IDEMPOTENT. The seeded population and each proposal's outcome live in the replay's own store,
+          `state/inbox-replay-band-meaning.json`, never in the live ledger, for the reason fleet-lane.ts gives. A store
+          that exists is never re-seeded. A proposal with a stored outcome is never handled again. The outcome is stored
+          BEFORE its row is written, so a restart cannot write a second row for it. Once every seeded proposal has an
+          outcome, a pass reads only the store and returns.
+       c. SUPERSEDED IS CHECKED FIRST. A seeded proposal is `skipped_superseded`, and is not re-drafted, when any of
+          these holds: its `readClassificationSnapshot` state is `ratified`, `declined` or `retired` (the
+          `classifyProposal` checks above); it is no longer in the registry (`parseProposalRegistry`); or a replay
+          approve is refused with `draftedDuplicateRefusal`'s text. Each records the reason it matched: the state, or
+          the duplicate's filed id. It stays in the registry as a record and is never deleted.
+       d. RE-DRAFT, THEN THE FLEET LANE FILES IT. For each live proposal, the replay drops its cached draft
+          (`invalidateDraft`) and its draft-attempt key, merged onto the on-disk caches as `mergeDraftCaches` does, so the
+          draft rung re-drafts it under design 1's lint. The fleet lane's FILE step then hands it to `rmd approve`
+          unchanged, one a pass, at its own pace, when the snapshot reads it `ready`. The replay calls no approve itself.
+       e. ONE NAMED ROW PER PROPOSAL. `inbox.replayed` with `proposal_id`, `family` and `outcome`, written once when
+          the outcome is known: `refiled` (an `approve.shards_written` row names it after the seed),
+          `skipped_superseded` (with `reason`), `refused` (a later `approve.error` other than a duplicate, with its
+          text), or `redraft_not_ready` (the new draft was cached NOT-READY, with `inbox.drafted unresolved_violations`).
+       f. WHERE IT RUNS. The module exports `replayBandMeaningRefusals(deps)`, called as one step at the head of each
+          `triageFleetLaneSteps` pass, which already has `stateDir` and `ledgerPath`. No new timer and no run-task.ts
+          wiring.
+    Tests go in a new file, test/a-drafted-task-raised-to-risk-high-declares-its-band.test.ts, with `test(` titles
+    verbatim as in the proofs below. Drive `lintDraftedFragment` and `relintRatificationFragment` with a fragment shaped
+    like verify-human-automate:W1-T8502's attempt-3 draft: two subsystems, risk:high, no band_meaning. Drive the replay
+    over a fixture state dir: a ledger whose approve rows give one proposal per outcome, a registry, a classification
+    snapshot and draft caches.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-drafted-task-raised-to-risk-high-declares-its-band.test.ts"
+    - claim: "lintDraftedFragment blocks a drafted risk:high task that declares no band_meaning"
+      proof: 'grep: test("W1-T8714: the draft lint blocks a risk high task with no band" in test/a-drafted-task-raised-to-risk-high-declares-its-band.test.ts'
+    - claim: "relintRatificationFragment repairs an already-high draft with no band to band_meaning span and files it"
+      proof: 'grep: test("W1-T8714: the approve repair declares the band on an already high draft" in test/a-drafted-task-raised-to-risk-high-declares-its-band.test.ts'
+    - claim: "a draft that declares blast-radius is left unchanged by the repair"
+      proof: 'grep: test("W1-T8714: a declared band is left unchanged" in test/a-drafted-task-raised-to-risk-high-declares-its-band.test.ts'
+    - claim: "the redraft guidance for a sizing violation names band_meaning"
+      proof: 'grep: test("W1-T8714: the sizing guidance names band_meaning" in test/a-drafted-task-raised-to-risk-high-declares-its-band.test.ts'
+    - claim: "the shared redraft guidance carries the band declaration"
+      proof: "grep: band_meaning: span in src/lib/relint.ts"
+    - claim: "the replay population is exactly the proposals whose latest approve outcome is the band refusal and that never reached approve.shards_written"
+      proof: 'grep: test("W1-T8714: the replay population is the proposals whose latest approve outcome is the band refusal" in test/a-drafted-task-raised-to-risk-high-declares-its-band.test.ts'
+    - claim: "a replayed proposal is re-drafted and handed to the fleet lane's approve, and is recorded refiled only after an approve.shards_written row names it"
+      proof: 'grep: test("W1-T8714: a replayed proposal is re-drafted and filed through the inbox path" in test/a-drafted-task-raised-to-risk-high-declares-its-band.test.ts'
+    - claim: "a proposal the classification retired, declined or ratified is recorded skipped_superseded and is not re-drafted"
+      proof: 'grep: test("W1-T8714: a superseded proposal is recorded skipped_superseded and not re-drafted" in test/a-drafted-task-raised-to-risk-high-declares-its-band.test.ts'
+    - claim: "a second replay pass writes no second inbox.replayed row and never re-seeds"
+      proof: 'grep: test("W1-T8714: a second replay pass writes no second row" in test/a-drafted-task-raised-to-risk-high-declares-its-band.test.ts'
+    - claim: "an incomplete ledger union or a read with no approve rows seeds no replay"
+      proof: 'grep: test("W1-T8714: an incomplete ledger read seeds no replay" in test/a-drafted-task-raised-to-risk-high-declares-its-band.test.ts'
+    - claim: "the replay module names the skipped_superseded outcome"
+      proof: "grep: skipped_superseded in src/lib/inbox-replay.ts"
+    - claim: "the fleet lane's pass calls the replay"
+      proof: "grep: replayBandMeaningRefusals( in src/lib/fleet-lane.ts"
+  falsifier: |
+    Leave `lintDraftedFragment` without `riskTransition`, and the first test reads no violation for the W1-T8502-shaped
+    draft, as `inbox.drafted lint_clean true` did at 15:08:14Z. Keep the repair's `task.risk !== "high"` guard, and the
+    second test is refused with "[sizing] risk:high with no band_meaning declared", as `approve.error` was at
+    15:10:20Z. Overwrite a declared band, and the third test fails.
+    For the replay, select by ANY band refusal rather than the LATEST outcome, and a fixture proposal that later reached
+    approve.shards_written is replayed and filed twice. Skip the supersede check, and a proposal whose task referent
+    merged is re-drafted. Key idempotence on the live ledger instead of the store, and a pass after a fixture rotation
+    writes a second `inbox.replayed` row. Seed on an `ok: false` union, and the fixture with an unreadable rotation
+    seeds a partial population.
+  note: |
+    EFFECT, measured after merge from the core ledger with no numeric pass mark. Count approve.error rows carrying "no
+    band_meaning declared" after the merge sha deploys. Healthy shape: none. Count the 40 proposals above that reach
+    approve.shards_written.
+    REPLAY EFFECT: the `inbox.replayed` rows grouped by `outcome` and `family`. Healthy shape: one row per seeded
+    proposal, and none still without an outcome once its re-draft has run. The replay's store must hold the same set.
