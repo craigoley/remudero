@@ -220,6 +220,7 @@ import { loadConfig, type WorkerProviderId } from "./config.js";
 import type { Config, ModelApproval } from "./config-schema.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { createServeDrain, exitWithin } from "./serve-drain.js";
+import { publishHostServeEvidence, HOST_SERVE_ERROR_STEP, type HostServePublishOptions } from "./host-serve-evidence.js";
 import { createServeMemoryRegistry, droppableRouteCache, LEGACY_CACHE_VIEWS, readWorkerHeaps, sampleServeMemory, snapshotHolder, startServeMemoryMonitor, viewBodiesHolder,
   withoutRestore, workerThreads, type CgroupHeadroom, type ServeMemoryMonitorOptions, type ServeMemoryRegistry, type TrackedWorker } from "./serve-memory.js";
 import { githubAuthProbe, gatewayPrimedProbe, planLoadedProbe, readModelWarmProbe, type ReadinessProbe } from "./serve-generation.js";
@@ -608,6 +609,8 @@ export interface ServeDeps {
     /** W1-T5355: the threads whose heaps the sample reads; absent, every thread this one spawns after serve is built. */
     workers?: () => readonly TrackedWorker[];
   };
+  /** W1-T8711: the seams of serve's shared producer observation (host-serve-evidence.ts); absent, this host's real store. */
+  hostServeEvidence?: HostServePublishOptions;
 }
 
 /**
@@ -3363,12 +3366,26 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     const stopInvariants = startIncidentInvariantsMonitor(deps.ledgerPath, { ...deps.incidentInvariants, log: deps.log });
     // W1-T5175: serve samples its memory from its own loop, beside the invariants it ledgers. ONE close
     // listener stops both: the server already sits at its listener ceiling.
+    // W1-T8711: the shared producer observation rides the sample cadence above (no timer of its own), once at start and
+    // once at close. It never throws and never waits on anything but one small atomic write.
+    const publishServe = (scenario: "serve-steady" | "serve-stopped"): void => {
+      publishHostServeEvidence({ scenario }, {
+        revision: consoleSha,
+        log: (event) => deps.log?.(HOST_SERVE_ERROR_STEP, event),
+        ...deps.hostServeEvidence,
+      });
+    };
+    publishServe("serve-steady");
     const stopMemory = startServeMemoryMonitor({
       ...deps.serveMemory,
       holders: memory.holders,
-      sample: async (holders) => sampleServeMemory(holders, {
-        usage: deps.serveMemory?.usage, headroom: deps.serveMemory?.headroom, workerHeaps: await readWorkerHeaps(liveThreads()),
-      }),
+      sample: async (holders) => {
+        const sample = sampleServeMemory(holders, {
+          usage: deps.serveMemory?.usage, headroom: deps.serveMemory?.headroom, workerHeaps: await readWorkerHeaps(liveThreads()),
+        });
+        publishServe("serve-steady");
+        return sample;
+      },
       modeOf: (view) => viewMode(readModel, view),
       log: deps.log,
       incident: (line) => appendLedger(deps.ledgerPath, line),
@@ -3376,6 +3393,9 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     server.on("close", () => {
       stopInvariants();
       stopMemory();
+      // A supervised generation closing at a handoff is not serve stopping: its successor publishes its own, and a
+      // supervisor that really stopped is read as stale (unknown), never as an explicit stop it did not make.
+      if (!deps.generation) publishServe("serve-stopped");
     });
   };
   if (deps.generation) server.setMaxListeners(server.getMaxListeners() + 1).once("listening", startLedgerWriters);

@@ -52,7 +52,7 @@ import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, rea
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { sampleCgroupMemory } from "./daemon-memory-telemetry.js";
 import {
   DEFAULT_ESTIMATE_MIB,
@@ -78,6 +78,7 @@ import {
   type YieldDecision,
 } from "./host-memory-priority.js";
 import { classEstimate, classTypical } from "./host-memory-learning.js";
+import { readHostServeEvidence, type HostServeReading } from "./host-serve-evidence.js";
 import { readDaemonFootprint, type FootprintSample } from "./daemon-footprint.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { DAEMON_PID_ENV, type LedgerLine } from "./ledger.js";
@@ -754,6 +755,11 @@ export interface ShadowMemoryPorts {
   write: ((ledgerPath: string, row: LedgerLine) => void) | undefined;
   /** W1-T7095: every instance's published review demand, from the shared ledger directory. */
   readReviewDemand: () => ReviewDemandReading;
+  /**
+   * W1-T8711: what serve's shared producer evidence says at `now`. Absent (a caller that installed no reader): the local
+   * ledger tail alone decides, as it always did. Present: it is the authority for a host-wide store.
+   */
+  readHostServe?: (now: number) => HostServeReading;
   priorityPolicy: () => HostMemoryPriorityPolicy;
   stderr: (line: string) => void;
   /** This state root's instance name, AS THE LEDGER NAMES IT (the host-side mount), so its own entries read as its own. */
@@ -836,6 +842,7 @@ export function defaultShadowMemoryPorts(): ShadowMemoryPorts {
     write: installedSink,
     stderr: (line) => console.error(line),
     readReviewDemand: () => readReviewDemand(),
+    readHostServe: (now) => readHostServeEvidence({ clock: fixedClock(now) }),
     priorityPolicy: () => HOST_MEMORY_PRIORITY_PROPOSAL,
     instance: (root) => defaultInstance(root).name,
     daemonPid: () => {
@@ -1325,11 +1332,37 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
       estimateMib: start.estimateMib ?? estimateOf(ports, start.workerClass),
     },
     daemonGrowth: [own, ...others],
-    serve: "unread" in tail
-      ? { scenario: "unknown", basis: `ledger tail unreadable: ${tail.unread}` }
-      : serveScenarioOf(tail.rows, now, tailCoverageMs(tail.earliestMs, rotationOf(ports, start.root), now)),
+    serve: serveOf(ports, tail, now, start.root),
     reviewEstimateMib: estimateOf(ports, "review"),
   };
+}
+
+/**
+ * The serve scenario for one start. A shared host store is the authority: a current reading is used as it stands, and one
+ * that establishes nothing is UNKNOWN. This state root's own serve-row silence (a peer instance's ledger holds none) never
+ * becomes serve-stopped there. Only a host with no shared store at all ("local-only"), or a caller with no reader
+ * installed, keeps the local ledger tail as the single piece of evidence.
+ */
+function serveOf(ports: ShadowMemoryPorts, tail: ReturnType<typeof readTailRows>, now: number, root: string): ShadowInputs["serve"] {
+  const local = (): ShadowInputs["serve"] => "unread" in tail
+    ? { scenario: "unknown", basis: `ledger tail unreadable: ${tail.unread}` }
+    : serveScenarioOf(tail.rows, now, tailCoverageMs(tail.earliestMs, rotationOf(ports, root), now));
+  if (!ports.readHostServe) return local();
+  let reading: HostServeReading;
+  try {
+    reading = ports.readHostServe(now);
+  } catch (error) {
+    reading = { state: "unknown", cause: "unreadable", basis: `host serve evidence reader failed: ${reasonOf(error)}` };
+  }
+  if (reading.state === "present") return { scenario: reading.scenario, basis: reading.basis };
+  if (reading.cause === "local-only") return local();
+  const fromLedger = local();
+  if (fromLedger.scenario === "serve-stopped") {
+    return { scenario: "unknown", basis: `host serve evidence ${reading.cause}: ${reading.basis}; local ledger said: ${fromLedger.basis}` };
+  }
+  return fromLedger.scenario === "unknown"
+    ? { scenario: "unknown", basis: `host serve evidence ${reading.cause}: ${reading.basis}; ${fromLedger.basis}` }
+    : fromLedger;
 }
 
 function instanceOf(ports: ShadowMemoryPorts, root: string): string {
