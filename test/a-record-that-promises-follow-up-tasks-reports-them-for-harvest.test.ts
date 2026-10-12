@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { promisedFollowUps, unreportedFollowUps, parseHarvestableFollowUps } from "../src/lib/promised-follow-ups.js";
-import { judgeReview, observePromisedFollowUps, recoverPromisedFollowUpReports, reviewDecisionDigest, reviewInputDigest, REVIEW_ENGINE_REVISION } from "../src/lib/review.js";
+import { judgeReview, observePromisedFollowUps, recoverPromisedFollowUpReports, reviewDecisionDigest, reviewInputDigest, REVIEW_ENGINE_REVISION, type PromisedFollowUpObservation } from "../src/lib/review.js";
 import { parseFollowups } from "../src/lib/worker.js";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -17,7 +17,7 @@ const criteria = [{ claim: "a real change", proof: "grep: example in src/example
 const observation = (promised = promises, records: Array<{ id: string; title: string; plan_refs: string[] }> = []) => ({
   state: "complete" as const, headSha: "a".repeat(40), baseSha: "b".repeat(40), promised, planRecords: records,
 });
-function review(report = "", supplied = observation()) {
+function review(report = "", supplied: PromisedFollowUpObservation = observation()) {
   return judgeReview(criteria, {
     diff, report: "a real change", implementationReport: report,
     headCheckoutDir: "/unused", execProof: () => "pass",
