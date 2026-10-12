@@ -35,6 +35,7 @@ import { recordShadowMemoryVerdict } from "./host-memory-shadow.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { randomUUID } from "node:crypto";
 import type { GardenerRuntimeEvent } from "./gardener-runtime.js";
+import { GARDENER_ORIGIN_ENV, gardenerOriginEnv } from "./worker-containment.js";
 
 /** The gardens the daemon runs off its loop, in the order its `gardens` list has always wired them. */
 export const REGISTERED_GARDEN_NAMES = [
@@ -77,7 +78,7 @@ export const GARDEN_DUE_FAILED_STEP = "garden.due_failed";
 export const GARDEN_HOURLY_FLAG = "--hourly";
 
 /** Runs ONE pass of the named garden and resolves with its exit code (null when it died on a signal). */
-export type GardenPassSpawn = (name: RegisteredGardenName, args: readonly string[], signal: { readonly stopped: boolean; admitted?: () => void }) => Promise<number | null>;
+export type GardenPassSpawn = (name: RegisteredGardenName, args: readonly string[], signal: { readonly stopped: boolean; readonly passId?: string; admitted?: () => void }) => Promise<number | null>;
 
 /** Share a small host budget across all garden starters. A busy garden keeps its own pending
  * pass rather than spawning a second child, while queued passes from other gardens wait here. */
@@ -86,7 +87,7 @@ export function boundedGardenPassSpawn(spawnPass: GardenPassSpawn, width: number
   type Pending = {
     name: RegisteredGardenName;
     args: readonly string[];
-    signal: { readonly stopped: boolean; admitted?: () => void };
+    signal: Parameters<GardenPassSpawn>[2];
     resolve: (exit: number | null) => void;
     reject: (error: unknown) => void;
   };
@@ -257,6 +258,7 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
     let admittedMs: number | undefined;
     observe(event("queued", { passId, nextDueAt: null }));
     const passSignal = {
+      passId,
       get stopped() { return signal.stopped; },
       admitted: () => {
         admittedMs = clock.now();
@@ -365,7 +367,7 @@ export function childGardenPassSpawn(
   const root = opts.root ?? join(homedir(), "Remudero");
   const reserve = opts.reserve ??
     (() => (daemonOwnedProcess() ? openLearnedReservation({ workerClass: "garden", root }) : undefined));
-  return async (name, args) => {
+  return async (name, args, signal) => {
     const admission = await awaitMemoryAdmission({ workerClass: "garden", root, taskId: "GARDEN", runId: `garden-${name}`, reserve }, opts.admission);
     const reservation = "reservation" in admission ? admission.reservation :
       admission.kind === "error" && admission.reservationAttempted ? undefined : reserve();
@@ -384,7 +386,8 @@ export function childGardenPassSpawn(
       // The cap follows the inherited flags: V8 takes the last `--max-old-space-size` it is given.
       const child = spawn(execPath, [...execArgv, `--max-old-space-size=${heapLimitMb}`, entry, "garden", "run", name, ...args], {
         cwd: opts.cwd,
-        env: { ...(opts.env ?? process.env), [SELF_SYNC_GUARD_ENV]: "1" },
+        env: { ...(opts.env ?? process.env), [SELF_SYNC_GUARD_ENV]: "1",
+          [GARDENER_ORIGIN_ENV]: gardenerOriginEnv(name, signal.passId) },
         stdio: ["ignore", "ignore", "pipe"],
       });
       let stderr = "";

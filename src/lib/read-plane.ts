@@ -3,6 +3,8 @@ import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
+import { startLoopStallProfiler, type LoopLagReading, type LoopStallProfiler, type LoopStallProfilerOptions,
+  type StallLog } from "./loop-stall-profiler.js";
 
 export const READ_PLANE_KIND = "remudero-tick-reads";
 
@@ -35,8 +37,13 @@ export interface ReadPlaneSample {
 
 /** The sampler is handed to the daemon unbound. Calling it closes the `daemon.alive` window. `takeLagInterval`
  *  reads and closes a SEPARATE window, one per `consumer` key, so each `daemon.loop_lag` row names only the
- *  spawns made since that consumer's previous reading and `daemon.alive` keeps its own reset (W1-T7745). */
-export type ReadPlaneSampler = (() => ReadPlaneSample) & { takeLagInterval(consumer?: string): LagIntervalReading };
+ *  spawns made since that consumer's previous reading and `daemon.alive` keeps its own reset (W1-T7745).
+ *  `observeLoopLag` hands each tick's lag to the loop-stall profiler, whose bound it moves (W1-T7746). */
+export type ReadPlaneSampler = (() => ReadPlaneSample) & { takeLagInterval(consumer?: string): LagIntervalReading;
+  observeLoopLag(reading: LoopLagReading, log: StallLog): void };
+
+/** The lag-window consumer the loop-stall profiler's heartbeat reads, one heartbeat at a time (W1-T7746). */
+const STALL_PROFILE_CONSUMER = "loop_stall_profile";
 
 /** The shared spawn leaves: frames that only forward a spawn for someone else, so none is the caller. Declared
  *  once here: a module path, or plan.ts's named default runner (`loadPlanAtRef`'s `runGit` arrow). */
@@ -72,8 +79,9 @@ export function callerFrame(): { caller?: string; leaf?: string; callerIsLeaf?: 
     : { caller: leafLine.trim().slice(0, 200), leaf: frameName(leafLine), callerIsLeaf: true };
 }
 
-export function startReadPlaneTelemetry(options: { clock?: Clock } = {}): {
+export function startReadPlaneTelemetry(options: { clock?: Clock; stallProfiler?: LoopStallProfilerOptions } = {}): {
   sample: ReadPlaneSampler;
+  stallProfiler: LoopStallProfiler;
   stop(): void;
 } {
   const now = (options.clock ?? clockFromMillisFn(() => performance.now())).now;
@@ -142,12 +150,18 @@ export function startReadPlaneTelemetry(options: { clock?: Clock } = {}): {
       lagWindows.set(consumer, { ms: 0, top: [] });
       return { top: window.top[0], sync_spawn_ms: Math.round(window.ms) };
     },
+    observeLoopLag: (reading: LoopLagReading, log: StallLog): void => stallProfiler.observe(reading, log),
   });
+  // W1-T7746: idle until the daemon reports its first tick, which gives it the interval its bound is made of.
+  const stallProfiler = startLoopStallProfiler({
+    takeSyncSpawnMs: () => sample.takeLagInterval(STALL_PROFILE_CONSUMER).sync_spawn_ms, ...options.stallProfiler });
   return {
     sample,
+    stallProfiler,
     stop() {
       if (stopped) return;
       stopped = true;
+      stallProfiler.stop();
       histogram.disable();
       names.forEach((name, index) => Object.assign(childProcess, { [name]: originals[index] }));
       syncBuiltinESMExports();

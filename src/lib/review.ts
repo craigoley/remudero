@@ -10252,7 +10252,7 @@ export interface PostReviewStatusGuardedOpts {
 type ReviewerCodeFreshness =
   | { status: "fresh"; codeSha: string; originMainSha: string; advance: "none" | "immaterial" }
   | { status: "stale"; codeSha: string; originMainSha: string; changedPaths?: string[]; diffUnreadable?: string }
-  | { status: "unreadable"; reason: string };
+  | { status: "unreadable"; reason: string; hostGap?: "cwd-missing" };
 
 export interface PostReviewStatusGuardedResult {
   posted: boolean;
@@ -10308,7 +10308,8 @@ export async function postReviewStatusGuarded(
       reason: freshnessRefusal,
       reviewer_code_freshness: freshness.status,
       ...(freshness.status === "unreadable"
-        ? { reviewer_code_reason: freshness.reason }
+        ? { reviewer_code_reason: freshness.reason,
+            ...(freshness.hostGap !== undefined ? { reviewer_code_host_gap: freshness.hostGap } : {}) }
         : {
             reviewer_code_sha: freshness.codeSha,
             origin_main_sha: freshness.originMainSha,

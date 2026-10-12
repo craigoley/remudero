@@ -61,6 +61,7 @@ import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB } from "./host-memory-ledger.js";
 import { ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./host-memory-shadow.js";
+import { installedDaemonSlackReclaimer, reclaimLedgerFields, type SlackReclaimRecord } from "./daemon-memory-policy.js";
 import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
 } from "./pr-blocker.js";
@@ -11354,6 +11355,10 @@ function criteriaFromLedgerValue(value: unknown): CriterionVerdict[] | undefined
  *  reads it to release the delivered-review key, and {@link hostGapRereviewFacts} to pace the next. */
 export const HOST_GAP_REREVIEW_STEP = "sweep.capped_host_gap_rereview";
 
+/** W1-T7850: the ledger step that records one re-review of a verdict whose POST was refused because its reviewer
+ *  checkout vanished (`review.post_refused` carrying `reviewer_code_host_gap`). Folded like {@link HOST_GAP_REREVIEW_STEP}. */
+export const REFUSED_POST_HOST_GAP_REREVIEW_STEP = "sweep.review_host_gap_rereview";
+
 const rowMs = (row: Record<string, unknown>): number | undefined => {
   const at = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
   return Number.isNaN(at) ? undefined : at;
@@ -11374,9 +11379,10 @@ export function hostGapRereviewFacts(
   for (const line of lines) {
     if (line.head_sha !== pr.headSha) continue;
     const at = rowMs(line);
-    if (line.step === HOST_GAP_REREVIEW_STEP && line.pr_url === pr.prUrl) {
+    if ((line.step === HOST_GAP_REREVIEW_STEP || line.step === REFUSED_POST_HOST_GAP_REREVIEW_STEP) && line.pr_url === pr.prUrl) {
       if (at !== undefined) {
-        history.push({ atMs: at, skips: Array.isArray(line.skips) ? line.skips.filter((s): s is string => typeof s === "string") : [] });
+        history.push({ atMs: at, skips: Array.isArray(line.skips) ? line.skips.filter((s): s is string => typeof s === "string")
+          : typeof line.host_gap === "string" ? [line.host_gap] : [] });
         startedAtMs = at;
       }
     } else if (line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
@@ -12163,6 +12169,11 @@ interface PriorActions {
    *  semantic or lifecycle decision about the PR (W1-T2753). */
   reviewRetryableThrows: Map<string, number | undefined>;
   reviewFreshnessRefusals: Map<string, ReviewerCodeFreshnessRefusal>;
+  /** W1-T7850 — exact-input keys whose terminal verdict was computed and REFUSED because its reviewer checkout
+   *  vanished (`reviewer_code_host_gap`). Neither a freshness refusal (no probe, no backoff) nor a durable one: the
+   *  host gap earns a fresh review of the same input. `requestedForRefusal` is true once a
+   *  {@link REFUSED_POST_HOST_GAP_REREVIEW_STEP} row answers THIS refusal. */
+  reviewHostGapRefusals: Map<string, { attemptedAt: number | undefined; hostGap: string; requestedForRefusal: boolean }>;
   /** Exact-input keys where the thrown post-review attempt hit GitHub's permanent PR diff ceiling.
    *  The remedy is a new head with a smaller diff, so this is a terminal marker for the current
    *  key, not another entry in the timed retry bucket. */
@@ -12845,6 +12856,7 @@ function priorActionsFromLedger(
   const reviewRefused = new Set<string>();
   const reviewRetryableThrows = new Map<string, number | undefined>();
   const reviewFreshnessRefusals = new Map<string, ReviewerCodeFreshnessRefusal>();
+  const reviewHostGapRefusals = new Map<string, { attemptedAt: number | undefined; hostGap: string; requestedForRefusal: boolean }>();
   const reviewDiffCeilingRefused = new Set<string>();
   const reviewRetryableThrowCounts = new Map<string, number>();
   const riskRefused = new Map<string, string | undefined>();
@@ -12879,7 +12891,7 @@ function priorActionsFromLedger(
     // W1-T7837 — a host-gap re-review request RELEASES the delivered key of the verdict it supersedes, the way
     // W1-T5840 releases an overtaken failure: the review claim then admits one fresh review of the same head and
     // body. A review.posted row after it re-adds the key, so the release lasts one review.
-    if (line.step === HOST_GAP_REREVIEW_STEP) {
+    if (line.step === HOST_GAP_REREVIEW_STEP || line.step === REFUSED_POST_HOST_GAP_REREVIEW_STEP) {
       if (typeof line.task_id === "string" && typeof line.head_sha === "string") {
         const key = reviewOutcomeKey(
           line.task_id,
@@ -12889,6 +12901,11 @@ function priorActionsFromLedger(
         );
         reviewDelivered.delete(key);
         reviewDeliveredFailureAt.delete(key);
+        // W1-T7850: the request answers the refusal it names (`refusal_at`), not a later one.
+        const refused = reviewHostGapRefusals.get(key);
+        if (line.step === REFUSED_POST_HOST_GAP_REREVIEW_STEP && refused && refused.attemptedAt === line.refusal_at) {
+          refused.requestedForRefusal = true;
+        }
       }
       continue;
     }
@@ -12919,6 +12936,15 @@ function priorActionsFromLedger(
           if (!reviewRetryableThrows.has(key)) reviewRetryableThrows.set(key, undefined);
           if (!Number.isNaN(parsed) && (existing === undefined || parsed > existing)) {
             reviewRetryableThrows.set(key, parsed);
+          }
+        } else if (line.reviewer_code_freshness === "unreadable" && typeof line.reviewer_code_host_gap === "string") {
+          // W1-T7850: a vanished reviewer checkout is a host gap, not an unprovable source — it enters neither
+          // `reviewFreshnessRefusals` (no probe of the daemon's own code, no backoff) nor `reviewRefused`.
+          const parsed = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
+          const existing = reviewHostGapRefusals.get(key);
+          if (!existing || (!Number.isNaN(parsed) && (existing.attemptedAt === undefined || parsed > existing.attemptedAt))) {
+            reviewHostGapRefusals.set(key, { attemptedAt: Number.isNaN(parsed) ? undefined : parsed,
+              hostGap: line.reviewer_code_host_gap, requestedForRefusal: false });
           }
         } else if (isRetryableReviewerCodeFreshnessRefusal(line)) {
           const parsed = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
@@ -13047,6 +13073,7 @@ function priorActionsFromLedger(
     reviewRefused,
     reviewRetryableThrows,
     reviewFreshnessRefusals,
+    reviewHostGapRefusals,
     reviewDiffCeilingRefused,
     reviewRetryableThrowCounts,
     riskRefused,
@@ -13688,6 +13715,40 @@ export interface FixHostPressure {
   containerFloorMib?: number;
   binding?: "host" | "container";
   tier?: "fits" | "host-short" | "container-short" | "nothing-to-wait-for";
+  /** W1-T8401: the daemon's reclaim before this reading would have held container-short; the reading is then the
+   *  fresh one taken after it. */
+  reclaim?: SlackReclaimRecord;
+}
+
+/** The daemon's own reclaim, as a reading's caller hands it in: given the container working set, reclaim once and call
+ *  `reread` after a collection. Undefined when this process has no reclaimer. */
+export type SlackReclaim = (containerWorkingSetMib: number | undefined, reread: () => number | undefined) => SlackReclaimRecord | undefined;
+
+/** The production reclaim: this process's installed reclaimer (only the daemon installs one). */
+export const installedSlackReclaim: SlackReclaim = (workingSetMib, reread) =>
+  installedDaemonSlackReclaimer()?.reclaim(workingSetMib, reread);
+
+/**
+ * W1-T8401 — RECLAIM BEFORE HOLDING. A reading that would hold dispatch container-short first asks the daemon to give
+ * back its own slack (`reclaim`: a full collection under the tightest growth factor, paced by evidence), then decides
+ * on the fresh reading `reread` takes, carrying the reclaim on it for the hold row. Any other tier, or no reclaimer,
+ * returns `first` unchanged. A paced or unavailable reclaim keeps `first`, named.
+ */
+export function reclaimBeforeHold<T extends { tier?: string; container?: ContainerMemoryHeadroom; reclaim?: SlackReclaimRecord }>(
+  first: T,
+  reread: () => T,
+  reclaim: SlackReclaim | undefined,
+): T {
+  if (first.tier !== "container-short" || reclaim === undefined) return first;
+  const workingSet = (reading: T) => reading.container !== undefined && "workingSetMib" in reading.container
+    ? reading.container.workingSetMib : undefined;
+  let fresh: T | undefined;
+  const record = reclaim(workingSet(first), () => {
+    fresh = reread();
+    return workingSet(fresh);
+  });
+  if (record === undefined) return first;
+  return { ...(record.outcome === "reclaimed" && fresh !== undefined ? fresh : first), reclaim: record };
 }
 
 /** The workers a pressure reading admits at `perWorkerMib` each: none when unreadable, at least one when the container
@@ -13701,6 +13762,15 @@ export function pressureWorkers(pressure: FixHostPressure, perWorkerMib: number)
 export function readFixHostPressure(
   floorMib: number,
   read: (path: string) => string = path => readFileSync(path, "utf8"),
+  container?: { read: () => ContainerMemoryHeadroom; ownWorkLive: () => boolean; reclaim?: SlackReclaim },
+): FixHostPressure {
+  const once = () => readFixHostPressureOnce(floorMib, read, container);
+  return reclaimBeforeHold(once(), once, container?.reclaim);
+}
+
+function readFixHostPressureOnce(
+  floorMib: number,
+  read: (path: string) => string,
   container?: { read: () => ContainerMemoryHeadroom; ownWorkLive: () => boolean },
 ): FixHostPressure {
   let meminfo: string;
@@ -13738,6 +13808,7 @@ export function productionFixPressure(floorMib: number, ledgerPath: string): Fix
   return readFixHostPressure(floorMib, undefined, {
     read: () => readContainerMemoryHeadroom(),
     ownWorkLive: () => ownContainerWorkLive(dirname(dirname(ledgerPath))),
+    reclaim: installedSlackReclaim,
   });
 }
 
@@ -13810,6 +13881,7 @@ export function createSweepFixAdmissionController(input: {
       pressure_binding: state.pressure?.binding,
       pressure_tier: state.pressure?.tier,
       pressure_host_available_mib: state.pressure?.hostAvailableMib,
+      ...reclaimLedgerFields(state.pressure?.reclaim),
       pending_reservations: reservations,
     });
   };
@@ -15568,9 +15640,11 @@ export async function runSweep(
     const pendingSince = pr.reviewPendingSince ? Date.parse(pr.reviewPendingSince) : Number.NaN;
     // A refusal on this exact input after the current pending post proves its owner
     // finished. An older refusal cannot preempt a newer review in flight.
+    const hostGapRefusal = prior.reviewHostGapRefusals.get(reviewOutcomeKeyForPr(pr));
+    const refusalAttemptedAt = freshnessRefusal?.attemptedAt ?? hostGapRefusal?.attemptedAt;
     const refusedCurrentPending = pr.reviewState === "pending" &&
-      freshnessRefusal?.attemptedAt !== undefined && Number.isFinite(pendingSince) &&
-      freshnessRefusal.attemptedAt >= pendingSince;
+      refusalAttemptedAt !== undefined && Number.isFinite(pendingSince) &&
+      refusalAttemptedAt >= pendingSince;
     const dispositionView = refusedCurrentPending ? { ...pr, reviewPendingOwnerDead: true } : pr;
     // W1-T5813: the SAME delivered set the post-review claim dedups on, so the two cannot disagree.
     const unknownWaits = mergeabilityUnknownWaits.get(pr.prNumber);
@@ -15586,6 +15660,42 @@ export async function runSweep(
       deriveDisposition(dispositionView, policy, now, dispositionFacts);
     ruleBlockerByIndex.set(prIndex, derived.blocker);
     let { disposition, reason } = derived;
+    // W1-T7850 — A VERDICT REFUSED BECAUSE ITS REVIEWER CHECKOUT VANISHED is a host gap: re-review the same head
+    // and body (the ordinary freshness gate sends a stale daemon to a fresh-tree worktree), paced and escalated
+    // through the W1-T7837 planner. Never the freshness backoff, which probes the daemon's own loaded code.
+    if (hostGapRefusal !== undefined && disposition === "post-review" && !hostGapRefusal.requestedForRefusal) {
+      const skips = [hostGapRefusal.hostGap];
+      const facts = hostGapRereviewFacts(pr, ledgerLines);
+      const paced = facts.history.length > 0;
+      const hostGapState = { history: facts.history, skips,
+        ...(paced ? { lastReviewAtMs: Math.max(facts.lastReviewAtMs ?? Number.NEGATIVE_INFINITY, hostGapRefusal.attemptedAt ?? Number.NEGATIVE_INFINITY) } : {}),
+        nowMs: now, observedReviewMs: facts.observedReviewMs ?? policy.pendingCeilingMinutes * 60_000 };
+      const hostGapPlan = await planHostGapRereview(hostGapState, {
+        judge: deps.fixProgressJudge,
+        input: hostGapProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha }, hostGapState),
+        log: (step, fields) => appendLine(deps.ledgerPath, { run_id: deps.runId,
+          task_id: pr.taskId ?? `PR-${pr.prNumber}`, step, ...fields }),
+      });
+      const checkout = hostGapProblem(hostGapRefusal.hostGap);
+      if (hostGapPlan.kind === "rereview") {
+        const reviewKey = reviewOutcomeKeyForPr(pr);
+        if (!deps.dryRun) {
+          appendLine(deps.ledgerPath, { ts: clockFromMillisFn(() => now).iso(), run_id: deps.runId,
+            task_id: reviewOutcomeTaskIdFor(pr), step: REFUSED_POST_HOST_GAP_REREVIEW_STEP, pr_number: pr.prNumber,
+            pr_url: pr.prUrl, head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest, review_key: reviewKey,
+            refusal_at: hostGapRefusal.attemptedAt, host_gap: hostGapRefusal.hostGap,
+            rereview_ordinal: facts.history.length + 1, reason: hostGapPlan.reason });
+        }
+        prior.reviewDelivered.delete(reviewKey);
+        hostGapRefusal.requestedForRefusal = true;
+        disposition = "post-review";
+        reason = `the verdict was computed but its post was refused (${checkout}) — a host gap, not an unproven source; ${hostGapPlan.reason}`;
+      } else {
+        disposition = hostGapPlan.kind === "escalate" ? "blocked-ambiguous" : "wait";
+        reason = hostGapPlan.reason;
+        if (hostGapPlan.progress?.verdict === "unavailable") judgedUnavailable.set(pr.prNumber, hostGapPlan.progress.reason);
+      }
+    }
     if (headIdentityRed(pr) && !isDispatchedRunBranch(pr.headRefName)) {
       const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", from_pr: pr.prNumber,
         from_head: pr.headRefName, head_sha: pr.headSha };
@@ -19306,6 +19416,7 @@ export function logQueueGovernorDeferral(
     pressure_binding: result.pressure?.binding,
     pressure_tier: result.pressure?.tier,
     pressure_host_available_mib: result.pressure?.hostAvailableMib,
+    ...reclaimLedgerFields(result.pressure?.reclaim),
   });
 }
 
@@ -19474,6 +19585,8 @@ export interface MemoryGovernorResult {
   /** fits; host-short or container-short (deferred); nothing-to-wait-for: the container is short but no live
    *  work in it can free memory, so waiting cannot help and the dispatch is admitted, named. */
   tier?: "fits" | "host-short" | "container-short" | "nothing-to-wait-for";
+  /** W1-T8401: the daemon's reclaim before a container-short hold (see {@link reclaimBeforeHold}). */
+  reclaim?: SlackReclaimRecord;
 }
 
 /** The memory governor's pure predicate: STRICTLY BELOW `policy.memoryFloorMib` available, NEW
@@ -19532,6 +19645,7 @@ export function logMemoryObservation(
       binding: result.binding,
       tier: result.tier,
     }),
+    ...reclaimLedgerFields(result.reclaim),
   });
 }
 

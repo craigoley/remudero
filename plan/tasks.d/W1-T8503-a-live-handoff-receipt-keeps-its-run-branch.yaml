@@ -1,0 +1,114 @@
+- id: W1-T8503
+  title: "A LIVE HANDOFF RECEIPT KEEPS ITS RUN BRANCH, AND A RECEIPT WHOSE BRANCH IS GONE IS RESOLVED — the daemon's automatic branch reap deleted run-W1-T7703-1791665606208 (10-11 20:51:38Z) and run-W1-T6153-1791670097134 (22:16:07Z) as tip_in_main while their freshness_yield receipts were live, so every resume since ends no_pr restart_checkpoint_restore_failed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the receipt is the authority for its branch; the reaper deletes remote refs and the restore rewrites a run's base
+  band_meaning: span
+  origin: "operator approval 2026-10-12 (coordinator follow-up pattern): the fleet deleted a run branch a live handoff receipt named"
+  plan_refs: [W1-T7697, W1-T7747, W1-T7806, W1-T4633, W1-T3020, W1-T4476, W1-T147]
+  files:
+    - src/run-task.ts
+    - src/lib/daemon.ts
+    - test/a-live-handoff-receipt-keeps-its-run-branch.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-12 in the core daemon's live ledger and its rotations (host remudero, ~/rmd-state2/state).
+    Three resumes ended `verdict no_pr reason restart_checkpoint_restore_failed` with detail "the checkpoint's
+    remote head moved; refusing to replay a different worker's work":
+      - W1-T7703 at 2026-10-12T06:00:24Z and 11:44:23Z, source_branch run-W1-T7703-1791665606208.
+      - W1-T6153 at 2026-10-12T11:42:50Z, source_branch run-W1-T6153-1791670097134.
+    Neither source branch exists on origin any more. The fleet itself deleted both, while live receipts named them:
+      - Receipts: `run.freshness_handoff` rows on 10-10 22:10:35Z (verdict handed_off, reason freshness_yield),
+        carried at boot on 10-11 14:01:47Z (`carried: true`). The head_sha values are dc5d0d2c5 (W1-T7703) and
+        9dba39b36 (W1-T6153).
+      - Deleter: the daemon's automatic branch reap, run DAEMON-1791749825942. Its `branch_reap.dry_run` row at
+        10-11T20:51:29Z classified all three receipt-named heads `tip_in_main`: run-W1-T7703-1791665606208,
+        run-W1-T6153-1791670097134 and run-W1-T7650-1791670097134. `branch_reap.pruned` at 20:51:38.717Z then
+        logged `deleted_branches: ["run-W1-T7703-1791665606208"]`. GitHub's events API shows remudero-fleet[bot]
+        deleting that ref at 20:51:39Z.
+      - The same row withheld run-W1-T6153-1791670097134 only on tip age. Its tip, 9dba39b36, was committed
+        10-10 22:06:38Z, under the 24 h bound. Run DAEMON-1791756003074 then deleted it, with
+        run-W1-T7650-1791670097134, at 10-11T22:16:07Z. That is the first pass after the bound expired.
+    Both receipts point at a plain main commit, because each worker yielded before committing anything. W1-T6153
+    yielded 45 s after its anchor was built. The branch tip is therefore an ancestor of main, `tip_in_main` holds,
+    and the reaper has no reason to keep the branch.
+    READ on origin/main 62e0d5efe:
+      - src/run-task.ts:25424 `reapBranchesSteps` removes only W1-T4633's reversibly closed heads from
+        `plan.deletable`. Nothing there consults a handoff receipt.
+      - src/lib/branch-reaper.ts:745 `withholdActiveBranches` judges `tip_in_main` by tip AGE alone (`minAge`, 24 h,
+        :753). A receipt can outlive any age bound: these two waited 33 h and more. Age is the wrong evidence.
+        The ledger already holds the right evidence: src/lib/daemon.ts:247 `pendingWorkerBoundaryHandoffs`, the
+        exact set the restore reads at src/run-task.ts:19428.
+      - src/run-task.ts:5141 `restoreBoundaryCheckpoint` compares `ls-remote` output to the receipt's head
+        (:5147). An ABSENT ref yields "", so a deleted branch reports as "remote head moved", which is untrue.
+      - src/lib/daemon.ts:256: a `restart_checkpoint_restore_failed` verdict consumes nothing (W1-T7806). So a
+        receipt whose branch is gone stays pending forever, and every dispatch of the task ends at the same
+        refusal with no worker run. W1-T7703 has burned two dispatches so far, and W1-T6153 one.
+    NOTHING IS LOST THIS TIME. Both head shas are ancestors of origin/main (`git merge-base --is-ancestor`), so the
+    restore would have been a no-op (`base === checkpoint.headSha` returns main). The next receipt can carry
+    real commits, though, and the same deletion would then destroy paid work.
+    W1-T147 (the overnight chaos drill) shares src/run-task.ts and src/lib/daemon.ts with this task only because
+    both are large shared files. It injects faults and touches neither the reap keep nor the restore.
+  design: |
+    1. THE RECEIPT IS THE AUTHORITY FOR ITS BRANCH. In `reapBranchesSteps`, next to `keepReversiblyClosedHeads`,
+       remove from `plan.deletable` every branch that `pendingWorkerBoundaryHandoffs` names over the ledger this
+       pass already reads (`opts.creditLedgerPath ?? opts.ledgerPath`). Apply this whatever the classification
+       reason (tip_in_main, patch_id_equivalent, closed_unmerged, merged). The set must be computed by the same
+       function the restore uses at src/run-task.ts:19428, so the two can never disagree about which branches
+       are live. List the kept names in the `branch_reap.dry_run` row as `kept_handoff_receipt_branches`. When no
+       ledger is configured, keep nothing (today's behaviour). When the ledger exists but cannot be read, keep
+       every `run-<id>-<epoch>` head in deletable, because a live receipt cannot be ruled out. This keep needs no
+       age bound and no count bound: it lasts exactly as long as the receipt is pending. Once a receipt is
+       consumed (a later verdict, or step 3's drop row), its branch becomes reapable again on the ordinary rules.
+    2. AN ABSENT BRANCH IS NOT A MOVED BRANCH. `restoreBoundaryCheckpoint` tells three cases apart: an `ls-remote`
+       that failed (it throws, which is transient, and keeps today's restore_failed), a ref that is absent (empty
+       output), and a ref at a different sha (the real moved-head refusal, unchanged). For an absent ref:
+       a. If the receipt's head is already an ancestor of the fresh worktree's HEAD, the run resumes on main.
+          `implement.checkpoint_restored` records it with `source_branch_absent: true`. This is the W1-T7703 and
+          W1-T6153 case.
+       b. Otherwise, try `git fetch origin <head_sha>`. If the fetched object resolves to head_sha, recreate
+          `refs/heads/<source branch>` at that sha. Use a create-only push (an empty-expect
+          `--force-with-lease`, never a bare force), so a concurrent recreate cannot be overwritten. Then restore
+          by the existing merge path, and log `implement.checkpoint_branch_recreated` with the branch and sha.
+       c. Otherwise (the object is no longer on origin), log ONE `implement.checkpoint_dropped` row (task,
+          source_branch, head_sha, reason) and continue the SAME run fresh from main. Write no no_pr verdict, so
+          no dispatch is burned.
+    3. A DROPPED RECEIPT IS CONSUMED. `pendingWorkerBoundaryHandoffs` treats an `implement.checkpoint_dropped`
+       row whose branch and head match the pending receipt as replacing it. The receipt stops being pending,
+       `handoffReceiptsToCarry` stops re-carrying it, and the next dispatch never sees it. The W1-T7806 rule (a
+       failed restore consumes nothing) still holds for transient failures and for a genuinely moved head.
+    Tests go in a new file, test/a-live-handoff-receipt-keeps-its-run-branch.test.ts, with `test(` titles
+    verbatim as in the proofs below. Use a real gitRepo() fixture with a bare origin for the restore cases: delete
+    the source ref and keep or drop its object. Use the reap's injected exec for the keep cases. Give every
+    fixture a local git identity (the CI runner has none) and use neutral helper names.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-live-handoff-receipt-keeps-its-run-branch.test.ts"
+    - claim: "the branch reap keeps a tip_in_main run branch that a pending handoff receipt names, and lists it"
+      proof: 'grep: test("W1-T8503: the branch reap keeps a run branch a live handoff receipt names" in test/a-live-handoff-receipt-keeps-its-run-branch.test.ts'
+    - claim: "an unreadable ledger keeps every run-shaped deletable head"
+      proof: 'grep: test("W1-T8503: an unreadable ledger keeps every run-shaped head" in test/a-live-handoff-receipt-keeps-its-run-branch.test.ts'
+    - claim: "a consumed receipt no longer protects its branch"
+      proof: 'grep: test("W1-T8503: a consumed receipt no longer protects its branch" in test/a-live-handoff-receipt-keeps-its-run-branch.test.ts'
+    - claim: "a gone checkpoint branch whose head is already in main resumes on main, not restore_failed"
+      proof: 'grep: test("W1-T8503: a gone checkpoint branch whose head is in main resumes on main" in test/a-live-handoff-receipt-keeps-its-run-branch.test.ts'
+    - claim: "a gone checkpoint branch whose head is still fetchable is recreated and restored"
+      proof: 'grep: test("W1-T8503: a gone checkpoint branch with a fetchable head is recreated" in test/a-live-handoff-receipt-keeps-its-run-branch.test.ts'
+    - claim: "an unfetchable checkpoint is dropped once, consumed, and the run starts fresh"
+      proof: 'grep: test("W1-T8503: an unfetchable checkpoint is dropped once and the run starts fresh" in test/a-live-handoff-receipt-keeps-its-run-branch.test.ts'
+    - claim: "a failed ls-remote and a moved head still refuse as before"
+      proof: 'grep: test("W1-T8503: a failed ls-remote or a moved head still refuses" in test/a-live-handoff-receipt-keeps-its-run-branch.test.ts'
+  falsifier: |
+    Remove the receipt keep from `reapBranchesSteps`. The fixture's receipt-named tip_in_main head then reaches
+    `pruneDeletableBranchesSteps`, as run-W1-T7703-1791665606208 did on 10-11, and the first test fails. Treat an
+    unreadable ledger as "no receipts", and the second test sees the head deleted. Keep a branch forever, and the
+    third test fails. Leave the `remoteHead !== checkpoint.headSha` throw as the only check, and the absent-ref
+    tests end no_pr restart_checkpoint_restore_failed as W1-T7703 and W1-T6153 did. Drop without consuming, and
+    a second pendingWorkerBoundaryHandoffs read still returns the receipt. Collapse a failed ls-remote into
+    "absent", and the last test sees a transient error drop a live receipt.

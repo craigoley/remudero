@@ -68,6 +68,24 @@ test("canary private preparation refuses a new directory behind a Git symlink an
     assert.throws(() => canaryCommand(["prepare", dir, "extra"]), /usage/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+test("private canary preparation emits six bounded context profiles with separate scorer answers", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}canary-context-`));
+  try {
+    canaryCommand(["prepare", dir]);
+    const manifest = JSON.parse(readFileSync(join(dir, "model-canary-manifest.json"), "utf8"));
+    assert.equal(manifest.contextProfiles.length, 6);
+    assert.equal(manifest.cash.experimentDailyCapUsd, 0);
+    for (const profile of manifest.contextProfiles) {
+      assert.equal(profile.byteUnit, "utf8-bytes");
+      assert.equal(profile.cacheGuarantee, "none");
+      assert.equal(profile.sampleUnit, "whole-profile");
+      assert.match(profile.namespace, /^[a-f0-9]{64}$/);
+      assert.equal(profile.tasks.length, profile.treatment === "repeat" ? 2 : 1);
+      assert.ok(profile.tasks.every((task: object) => !Object.hasOwn(task, "expected")));
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("canary report has metric and run drilldowns and scripts cannot be injected through model names", () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}canary-report-`));
   try {

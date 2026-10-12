@@ -104,6 +104,36 @@ test("an old remedy is judged on its most recent fortnight, not its whole histor
   assert.equal(effect.verdict, "unmeasurable", "rounds older than the capped window are not the before side");
 });
 
+test("an aged remedy reopens when its recent window regresses despite a successful first fortnight", () => {
+  const before = rounds(MERGE - 14 * DAY, MERGE, 200, 4);
+  const initial = rounds(MERGE, MERGE + 14 * DAY, 200, 20);
+  const recent = rounds(MERGE + 46 * DAY, MERGE + 60 * DAY, 200, 4);
+  const effect = ciFrictionRemedyEffect([...before, ...initial, ...recent], KEY, MERGE, MERGE + 60 * DAY);
+  assert.deepEqual(effect.before, { k: 50, n: 200 });
+  assert.deepEqual(effect.after, { k: 50, n: 200 });
+  assert.equal(effect.verdict, "debit");
+  assert.equal(ciFrictionCauseState(KEY, [remedy()], [...before, ...initial, ...recent], MERGE + 60 * DAY).state, "draft");
+});
+
+test("an aged remedy credits a recent improvement instead of debiting its unsuccessful first fortnight", () => {
+  const before = rounds(MERGE - 14 * DAY, MERGE, 200, 4);
+  const initial = rounds(MERGE, MERGE + 14 * DAY, 200, 4);
+  const recent = rounds(MERGE + 46 * DAY, MERGE + 60 * DAY, 200, 20);
+  const effect = ciFrictionRemedyEffect([...before, ...initial, ...recent], KEY, MERGE, MERGE + 60 * DAY);
+  assert.equal(effect.verdict, "credit");
+  assert.deepEqual(effect.after, { k: 10, n: 200 });
+});
+
+test("an aged remedy cannot retain credit without a current post-merge observation", () => {
+  const before = rounds(MERGE - 14 * DAY, MERGE, 200, 4);
+  const initial = rounds(MERGE, MERGE + 14 * DAY, 200, 20);
+  const effect = ciFrictionRemedyEffect([...before, ...initial,
+    { pr: 9000, causeKey: KEY, at: new Date(MERGE + 61 * DAY).toISOString() }], KEY, MERGE, MERGE + 60 * DAY);
+  assert.equal(effect.after.n, 0);
+  assert.equal(effect.verdict, "pending");
+  assert.equal(ciFrictionCauseState(KEY, [remedy()], [...before, ...initial], MERGE + 60 * DAY).state, "measuring");
+});
+
 test("a cause with no task is drafted at rung 1, and a landed filing receipt holds it", () => {
   assert.deepEqual(ciFrictionCauseState(KEY, [], [], MERGE), { state: "draft", key: KEY, rung: 1 });
   const held = ciFrictionCauseState(KEY, [], [], MERGE, new Set([`ci-friction:${KEY}`]));
@@ -138,10 +168,26 @@ test("a merged remedy is measuring, then resolved on a fall, or reopened one run
   assert.equal(reopened.state, "draft");
   assert.equal(reopened.state === "draft" && reopened.rung, 2);
   assert.equal(reopened.state === "draft" && reopened.prior?.effect?.verdict, "debit");
-  // A cause that had already stopped before the merge is resolved by another road.
-  assert.equal(ciFrictionCauseState(KEY, [remedy()], [], MERGE + DAY).state, "resolved");
+  assert.equal(ciFrictionCauseState(KEY, [remedy()], [], MERGE + DAY).state, "measuring");
   // Merged by status but no build merge time yet: wait, measure nothing.
   assert.equal(ciFrictionCauseState(KEY, [remedy({ mergedAt: undefined })], before, MERGE + DAY).state, "in_progress");
+});
+
+test("a remedy without a measured baseline cannot resolve a later recurring cause", () => {
+  const unrelated = rounds(MERGE - DAY, MERGE, 50, 1, "check:ci-log:claims");
+  const later = rounds(MERGE, MERGE + DAY, 50, 1);
+  const state = ciFrictionCauseState(KEY, [remedy()], [...unrelated, ...later], MERGE + DAY);
+  assert.equal(state.state, "measuring");
+  assert.equal(state.state === "measuring" && state.effect.verdict, "unmeasurable");
+  assert.deepEqual(state.state === "measuring" && state.effect.after, { k: 50, n: 50 });
+});
+
+test("absent observation windows keep a merged remedy measuring without refiling or escalating", () => {
+  for (const rows of [[], rounds(MERGE - DAY, MERGE, 50, 1, "check:ci-log:claims")]) {
+    const state = ciFrictionCauseState(KEY, [remedy({ origin: `ci-friction:${KEY}#r2` })], rows, MERGE + DAY);
+    assert.equal(state.state, "measuring");
+    assert.equal(state.state === "measuring" && state.effect.verdict, "unmeasurable");
+  }
 });
 
 test("the second failed rung goes to a person instead of a third task", () => {
