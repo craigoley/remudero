@@ -120,7 +120,7 @@ test("W1-T8684: bounded flow refuses incompatible sources without losing Analyti
   assert.equal(missing.state, "not_collected");
   assert.equal(missing.windows[0]!.summary.merged, null);
   const snapshot = deriveAnalyticsSnapshot([], iso(now));
-  const console = { ...analyticsConsoleSource(snapshot, repository), repositoryFlow: { ...result, version: "future" } as typeof result };
+  const console = { ...analyticsConsoleSource(snapshot, repository), repositoryFlow: { ...result, version: "future" } as unknown as typeof result };
   const independent = mergeAnalytics([{ instanceId: "core", snapshot: { asOf: iso(now), console } }], now).data;
   assert.deepEqual(independent.coverage, { counted: 1, of: 1, missing: [] });
   assert.equal(independent.instances[0]!.repositoryFlow!.reason, "invalid_source");
