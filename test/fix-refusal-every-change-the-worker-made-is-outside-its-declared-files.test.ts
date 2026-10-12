@@ -250,6 +250,7 @@ test("the real named CI guard carries one invocation into its actual fix assignm
   assert.equal(result.outcome.outcome, "fixed"); assert.equal(result.spawns, 1);
   const source = result.rows.find(row => row.step === "fix.remedy_path_execution")!.prevention_execution;
   assert.ok(source, "the actual decision boundary records its invocation");
+  assert.equal((source as { identity: { recorder: { state: string } } }).identity.recorder.state, "observed");
   assert.deepEqual((source as { inputs?: unknown }).inputs, { failingChecks: 1, matchedPaths: 1, reachablePaths: 1, ownership: "compared" });
   const a = result.rows.find(row => row.step === "worker.assignment")!, end = result.rows.find(row => row.step === "worker.attempt")!;
   assert.deepEqual(a.prevention_execution, source); assert.deepEqual(end.prevention_execution, source);

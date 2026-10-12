@@ -876,7 +876,8 @@ test("the sole private flow joins named preventive component execution without c
     invocationId: "11111111-1111-1111-1111-111111111111", processInstanceId: "22222222-2222-2222-2222-222222222222",
     pid: 123, callerRunId: "private-component-run", at: T(3),
     identity: { caller: { state: "observed", source: "module-import-git", path: "src/run-task.ts", blob: "b".repeat(40), revision: "a".repeat(40), capturedAt: T(2) },
-      functionSha256: "c".repeat(64), dependencies: { existsSyncSha256: "d".repeat(64), joinSha256: "e".repeat(64), nodeVersion: "v24.21.0" } },
+      recorder: { state: "observed", source: "module-import-git", path: "src/lib/ci-remedy-execution.ts", blob: "f".repeat(40), revision: "a".repeat(40), capturedAt: T(2) },
+      functionSha256: "c".repeat(64), dependencies: { existsSyncSha256: "d".repeat(64), joinSha256: "e".repeat(64), importedModuleSha256: "1".repeat(64), clockSha256: "2".repeat(64), nodeVersion: "v24.21.0" } },
     inputs: { failingChecks: 1, matchedPaths: 1, reachablePaths: 1, ownership: "compared" }, rawLog: "private-unstructured-log" };
   const repair = { worker_run_id: "private-component-worker", worker_rung: "fix", repair_round_id: "private-component-round",
     repair_pr_url: "https://github.com/acme/core/pull/9", prevention_execution: e };

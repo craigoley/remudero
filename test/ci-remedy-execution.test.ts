@@ -9,7 +9,8 @@ import type { ImportedModuleEvidence } from "../src/lib/prevention-source-eviden
 const T = (n: number) => `2026-10-12T00:00:${String(n).padStart(2, "0")}.000Z`;
 const caller: ImportedModuleEvidence = { state: "observed", source: "module-import-git", path: "src/run-task.ts",
   blob: "b".repeat(40), revision: "a".repeat(40), capturedAt: "1970-01-01T00:00:00.000Z" };
-const identity = captureCiRemedyComponent(caller, (n: number) => n + 1, existsSync, join);
+const recorder: ImportedModuleEvidence = { ...caller, path: "src/lib/ci-remedy-execution.ts" };
+const identity = captureCiRemedyComponent(caller, (n: number) => n + 1, existsSync, join, recorder);
 function execution(): Extract<CiRemedyExecution, { state: "observed" }> {
   const actual = recordCiRemedyExecution(identity, "caller-1", { failingChecks: 1, matchedPaths: 1, reachablePaths: 1, ownership: "compared" });
   assert.equal(actual.state, "observed");
@@ -21,9 +22,9 @@ const row = (step: string, e: CiRemedyExecution, over: Record<string, unknown> =
 
 test("component identity changes with the loaded guard dependency and caller build", () => {
   assert.equal(identity.caller.state, "observed");
-  assert.notEqual(captureCiRemedyComponent(caller, (n: number) => n + 2, existsSync, join).functionSha256, identity.functionSha256);
-  assert.notEqual(captureCiRemedyComponent(caller, (n: number) => n + 1, () => false, join).dependencies.existsSyncSha256, identity.dependencies.existsSyncSha256);
-  assert.notEqual(captureCiRemedyComponent(caller, (n: number) => n + 1, existsSync, () => "elsewhere").dependencies.joinSha256, identity.dependencies.joinSha256);
+  assert.notEqual(captureCiRemedyComponent(caller, (n: number) => n + 2, existsSync, join, recorder).functionSha256, identity.functionSha256);
+  assert.notEqual(captureCiRemedyComponent(caller, (n: number) => n + 1, () => false, join, recorder).dependencies.existsSyncSha256, identity.dependencies.existsSyncSha256);
+  assert.notEqual(captureCiRemedyComponent(caller, (n: number) => n + 1, existsSync, () => "elsewhere", recorder).dependencies.joinSha256, identity.dependencies.joinSha256);
   assert.deepEqual(captureCiRemedyComponent(undefined, existsSync, existsSync, join).caller,
     { state: "unavailable", reason: "qualifying-imported-module-not-recorded" });
   assert.equal(identity.dependencies.nodeVersion, process.version);
@@ -34,10 +35,12 @@ test("component projection refuses missing source dependencies invocation input 
   const bad = [null, [], {}, { ...e, state: "loaded" }, { ...e, version: "v0" }, { ...e, component: "other" },
     { ...e, lineageTask: "W1-T1" }, { ...e, invocationId: "bad" }, { ...e, processInstanceId: "bad" },
     { ...e, pid: 0 }, { ...e, pid: 1.5 }, { ...e, callerRunId: "raw secret content" }, { ...e, at: "bad" },
-    { ...e, identity: null }, { ...e, identity: { ...identity, caller: { ...caller, path: "src/else.ts" } } },
+    { ...e, identity: null }, { ...e, identity: { ...identity, recorder: undefined } },
+    { ...e, identity: { ...identity, recorder: { ...recorder, revision: "f".repeat(40) } } },
+    { ...e, identity: { ...identity, recorder: { ...recorder, capturedAt: T(4) } } }, { ...e, identity: { ...identity, caller: { ...caller, path: "src/else.ts" } } },
     { ...e, identity: { ...identity, caller: { ...caller, capturedAt: T(4) } } },
     { ...e, identity: { ...identity, functionSha256: "bad" } },
-    ...["existsSyncSha256", "joinSha256", "nodeVersion"].map(key => ({ ...e, identity: { ...identity, dependencies: { ...identity.dependencies, [key]: "bad" } } })),
+    ...["existsSyncSha256", "joinSha256", "importedModuleSha256", "clockSha256", "nodeVersion"].map(key => ({ ...e, identity: { ...identity, dependencies: { ...identity.dependencies, [key]: "bad" } } })),
     { ...e, inputs: null }, ...["failingChecks", "matchedPaths", "reachablePaths"].map(key => ({ ...e, inputs: { ...e.inputs, [key]: -1 } })),
     { ...e, inputs: { ...e.inputs, matchedPaths: 6 } }, { ...e, inputs: { ...e.inputs, reachablePaths: 2 } },
     { ...e, inputs: { ...e.inputs, failingChecks: 0 } }, { ...e, inputs: { ...e.inputs, ownership: "invented" } },

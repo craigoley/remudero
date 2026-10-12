@@ -1,7 +1,8 @@
 /** Private component execution, separate from whole-fix adoption and causal efficacy. */
 import { createHash, randomUUID } from "node:crypto";
 import { systemClock } from "./clock.js";
-import { importedModuleOf, type ImportedModuleEvidence } from "./prevention-source-evidence.js";
+import { captureImportedModule, importedModuleOf, type ImportedModuleEvidence } from "./prevention-source-evidence.js";
+import { fileURLToPath } from "node:url";
 import type { RepairCostContext } from "./repair-cost-evidence.js";
 
 const COMPONENT = "ci-log-named-source-paths";
@@ -16,15 +17,20 @@ const processInstanceId = randomUUID();
 
 export interface CiRemedyComponent {
   caller: ImportedModuleEvidence;
+  recorder: ImportedModuleEvidence;
   functionSha256: string;
-  dependencies: { existsSyncSha256: string; joinSha256: string; nodeVersion: string };
+  dependencies: { existsSyncSha256: string; joinSha256: string; importedModuleSha256: string; clockSha256: string; nodeVersion: string };
 }
 /** Capture the exact lexical function and imported dependencies once with the caller's source pin.
  * These hashes identify JS function representations; nodeVersion is not a binary attestation. */
 export function captureCiRemedyComponent(caller: ImportedModuleEvidence | undefined,
-  guard: Function, exists: Function, join: Function): CiRemedyComponent {
-  return { caller: importedModuleOf(caller), functionSha256: hashFunction(guard),
-    dependencies: { existsSyncSha256: hashFunction(exists), joinSha256: hashFunction(join), nodeVersion: process.version } };
+  guard: Function, exists: Function, join: Function,
+  recorder: ImportedModuleEvidence = captureImportedModule(fileURLToPath(import.meta.url),
+    caller?.state === "observed" ? { source: "executing-module-git", revision: caller.revision } : undefined),
+): CiRemedyComponent {
+  return { caller: importedModuleOf(caller), recorder: importedModuleOf(recorder), functionSha256: hashFunction(guard),
+    dependencies: { existsSyncSha256: hashFunction(exists), joinSha256: hashFunction(join),
+      importedModuleSha256: hashFunction(importedModuleOf), clockSha256: hashFunction(systemClock.iso), nodeVersion: process.version } };
 }
 
 type Unavailable = { state: "unavailable"; reason: string };
@@ -47,13 +53,16 @@ export function recordCiRemedyExecution(identity: CiRemedyComponent, callerRunId
 export function ciRemedyExecutionOf(value: unknown): CiRemedyExecution {
   const r = object(value), identity = object(r?.identity), dependencies = object(identity?.dependencies), inputs = object(r?.inputs);
   if (!r || !identity || !dependencies || !inputs) return { state: "unavailable", reason: "qualifying-component-execution-not-recorded" };
-  const caller = importedModuleOf(identity.caller);
+  const caller = importedModuleOf(identity.caller), recorder = importedModuleOf(identity.recorder);
   if (r?.state !== "observed" || r.version !== "ci-remedy-execution-v1" || r.component !== COMPONENT
     || r.lineageTask !== "W1-T5801" || !UUID.test(String(r.invocationId)) || !UUID.test(String(r.processInstanceId))
     || !count(r.pid) || r.pid === 0 || !token(r.callerRunId) || !time(r.at)
     || caller.state !== "observed" || caller.path !== "src/run-task.ts" || Date.parse(caller.capturedAt) > Date.parse(r.at)
+    || recorder.state !== "observed" || recorder.path !== "src/lib/ci-remedy-execution.ts"
+    || recorder.revision !== caller.revision || Date.parse(recorder.capturedAt) > Date.parse(r.at)
     || !SHA256.test(String(identity.functionSha256)) || !SHA256.test(String(dependencies.existsSyncSha256))
-    || !SHA256.test(String(dependencies.joinSha256)) || typeof dependencies.nodeVersion !== "string"
+    || !SHA256.test(String(dependencies.joinSha256)) || !SHA256.test(String(dependencies.importedModuleSha256))
+    || !SHA256.test(String(dependencies.clockSha256)) || typeof dependencies.nodeVersion !== "string"
     || !/^v\d+\.\d+\.\d+$/.test(dependencies.nodeVersion)
     || !count(inputs.failingChecks) || !count(inputs.matchedPaths) || !count(inputs.reachablePaths)
     || inputs.matchedPaths > 5 || inputs.reachablePaths > inputs.matchedPaths
@@ -63,8 +72,8 @@ export function ciRemedyExecutionOf(value: unknown): CiRemedyExecution {
     return { state: "unavailable", reason: "qualifying-component-execution-not-recorded" };
   return { state: "observed", version: "ci-remedy-execution-v1", component: COMPONENT, lineageTask: "W1-T5801",
     invocationId: String(r.invocationId), at: r.at, processInstanceId: String(r.processInstanceId), pid: r.pid,
-    callerRunId: r.callerRunId, identity: { caller, functionSha256: String(identity!.functionSha256),
-      dependencies: { existsSyncSha256: String(dependencies.existsSyncSha256), joinSha256: String(dependencies.joinSha256), nodeVersion: dependencies.nodeVersion } },
+    callerRunId: r.callerRunId, identity: { caller, recorder, functionSha256: String(identity!.functionSha256),
+      dependencies: { existsSyncSha256: String(dependencies.existsSyncSha256), joinSha256: String(dependencies.joinSha256), importedModuleSha256: String(dependencies.importedModuleSha256), clockSha256: String(dependencies.clockSha256), nodeVersion: dependencies.nodeVersion } },
     inputs: { failingChecks: inputs.failingChecks, matchedPaths: inputs.matchedPaths, reachablePaths: inputs.reachablePaths,
       ownership: inputs.ownership as "compared" | "no-base" | "unreadable" } };
 }
