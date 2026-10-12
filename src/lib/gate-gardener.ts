@@ -102,10 +102,18 @@ export function runSuiteShifted(repoRoot: string, file: string, shiftDays: numbe
     // Niced and bounded (test-slot.ts), but no host-wide slot: one file, and a gardener pass must not queue behind coverage.
     const load = readHostLoad();
     const child = lowPriorityCommand(process.execPath, testRunArgv(args, testRunConcurrency(load, defaultTestSlots(load.cores))));
+    const childEnv: NodeJS.ProcessEnv = { ...env, ...judged.env };
+    // Shifted proof children are not part of the enclosing CI coverage measurement. Inheriting
+    // NODE_V8_COVERAGE makes an intentional early-exit fixture corrupt the parent coverage report.
+    delete childEnv.NODE_V8_COVERAGE;
+    childEnv.NODE_OPTIONS = (childEnv.NODE_OPTIONS ?? "")
+      .replace(/(^|\\s)(?:"--experimental-test-coverage"|'--experimental-test-coverage'|--experimental-test-coverage)(?=\\s|$)/g, "$1")
+      .trim();
+    if (!childEnv.NODE_OPTIONS) delete childEnv.NODE_OPTIONS;
     let output: string;
     let status = 0;
     try {
-      output = execFile(child.file, child.args, { cwd: repoRoot, env: { ...env, ...judged.env }, encoding: "utf8", stdio: "pipe", timeout: DEFUSE_RUN_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 });
+      output = execFile(child.file, child.args, { cwd: repoRoot, env: childEnv, encoding: "utf8", stdio: "pipe", timeout: DEFUSE_RUN_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 });
     } catch (error) {
       const failure = error as { status?: unknown; signal?: unknown; stdout?: string | Buffer };
       if (typeof failure.status !== "number" || failure.status === 0 || failure.signal) throw error;
