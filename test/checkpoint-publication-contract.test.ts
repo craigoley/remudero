@@ -98,8 +98,9 @@ test("checkpoint prompt and continuation agree with local range and hosted title
   assert.match(contract, /`chore\(checkpoint\): <what>`/);
   const messages = commitMessageContractLines().join("\n");
   assert.match(messages, /HOSTED.*PR TITLE/);
-  assert.match(messages, /LOCAL.*commitlint.*emitter-checks/);
-  assert.match(messages, /every commit.*range/);
+  assert.match(messages, /LOCAL.*branch commit range/);
+  assert.match(messages, /commitlint applies its configured ignore rules/);
+  assert.match(messages, /emitter-checks validates non-merge commits/);
   assert.doesNotMatch(messages, /never block a merge/);
   const anchor = renderAnchorBlock(task as never, "fixture");
   assert.ok(anchor.includes(messages), "compaction repeats the actual contract, not a stale second copy");
@@ -172,4 +173,31 @@ test("checkpoint no-diff, conflict refusal and failed default pushes retain thei
     assert.notEqual(failed.work.git("rev-parse", "HEAD"), failed.base, "failed push retains the committed local work");
     assert.equal(failed.origin.git("rev-parse", failed.branch), failed.base, "failed local-fixture push moved no remote branch");
   }
+});
+
+test("the local checkpoint contract preserves actual merge filtering and configured ignore rules", () => {
+  const { work, base } = rig();
+  work.git("commit", "--quiet", "--allow-empty", "-m", "test(checkpoint): left branch");
+  const left = work.git("rev-parse", "HEAD");
+  work.git("checkout", "--quiet", "--detach", base);
+  work.git("commit", "--quiet", "--allow-empty", "-m", "test(checkpoint): right branch");
+  const right = work.git("rev-parse", "HEAD");
+  const tree = work.git("rev-parse", `${left}^{tree}`);
+  for (const [subject, expectedCli] of [
+    ["wip: invalid custom merge", false],
+    ["Merge branch 'fixture-side'", true],
+    ["chore(checkpoint): merge main into the restored checkpoint", true],
+  ] as const) {
+    const merge = work.git("commit-tree", tree, "-p", left, "-p", right, "-m", subject);
+    const range = { from: base, to: merge };
+    assert.equal(work.git("rev-list", "--count", "--no-merges", `${base}..${merge}`), "2");
+    const cli = commitlintStep(work.dir, range);
+    const emitter = emitterChecksStep(work.dir, range);
+    assert.equal(cli.ok, expectedCli, cli.detail);
+    assert.equal(emitter.ok, true, emitter.detail);
+  }
+  const guidance = commitMessageContractLines().join("\n");
+  assert.match(guidance, /commitlint applies its configured ignore rules/);
+  assert.match(guidance, /emitter-checks validates non-merge commits/);
+  assert.doesNotMatch(guidance, /on every commit in the range/);
 });
