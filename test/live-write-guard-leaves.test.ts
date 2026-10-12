@@ -11,6 +11,9 @@ import { ghIssueGateway } from "../src/lib/escalate.js";
 import { defaultGitCapture, defaultPushExec, gitPushRunBranch } from "../src/lib/git-push.js";
 import { LiveWriteBlockedError, withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
+/** ghPrMergeSquash requires the closing-reference guard; these tests are about the merge call itself. */
+const CLEAN_GUARD = () => ({ state: "clean" as const, defused: [] });
+
 // W1-T327: drives the emitted title through the REAL commitlint CLI, the same subprocess
 // shape test/commit-message.test.ts already uses — never a hand-rolled regex approximating
 // commitlint.config.mjs's rules.
@@ -77,7 +80,7 @@ test("LEAF GUARD gh-pr-merge: ghPrMergeSquash REFUSES under the test runner and 
   withShimmedPath("gh", (log) => {
     let caught: unknown;
     try {
-      ghPrMergeSquash("https://github.com/acme/remudero/pull/7");
+      ghPrMergeSquash("https://github.com/acme/remudero/pull/7", CLEAN_GUARD);
     } catch (e) {
       caught = e;
     }
@@ -86,7 +89,7 @@ test("LEAF GUARD gh-pr-merge: ghPrMergeSquash REFUSES under the test runner and 
     assert.deepEqual(callsIn(log), [], "gh was never invoked — the merge did not happen");
 
     // WOULD-HAVE-FIRED control: exempted, the identical call DOES reach gh.
-    withLiveWritesAllowed(() => ghPrMergeSquash("https://github.com/acme/remudero/pull/7"));
+    withLiveWritesAllowed(() => ghPrMergeSquash("https://github.com/acme/remudero/pull/7", CLEAN_GUARD));
     const calls = callsIn(log);
     assert.equal(calls.length, 1, "exempted, the same call reaches gh exactly once");
     assert.match(calls[0], /pr merge .*--squash/, "and it is the squash-merge that was refused");
