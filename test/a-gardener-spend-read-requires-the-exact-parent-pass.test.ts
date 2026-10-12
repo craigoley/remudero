@@ -169,9 +169,11 @@ test("W1-T8484: incomplete gardener spend remains unknown rather than zero", asy
   assert.equal(foldGardenerSpend(source, repository, at).reason, "correlation_not_available");
 });
 
-test("W1-T8484: missing or over-budget gardener spend preserves Analytics", async t => {
+test("W1-T8667: genuine compact overflow preserves independent Analytics", async t => {
   const { captureGardenerSpendSource } = await loadSpend();
-  const overflow = await captured(t, [parent, ...Array.from({ length: 500 }, (_, i) => ({ ...child, run_id: `child-${i}` }))]);
+  const capacity = await captured(t, [parent, ...Array.from({ length: 500 }, (_, i) => ({ ...child, run_id: `child-${i}` }))]);
+  assert.equal(capacity.spend.totalUsd, 1000);
+  const overflow = await captured(t, Array.from({ length: 1000 }, (_, i) => ({ ...parent, passId: `pass-${i}` })));
   const overflowSource = await captureGardenerSpendSource(overflow.dir);
   assert.equal(overflowSource.reason, "over_budget");
   const stateDir = makeTempDir("gardener-spend-budget");
@@ -265,14 +267,15 @@ test("W1-T8484: missing or over-budget gardener spend preserves Analytics", asyn
   } finally { rmSync(stateDir, { recursive: true, force: true }); }
 });
 
-test("W1-T8484: real worker refresh serves gardener spend without request-time scans", async t => {
+test("W1-T8667: real worker materializes many gardener receipts before cached reads", async t => {
   await loadSpend();
   const stateDir = makeTempDir("gardener-spend-worker");
   t.after(() => rmSync(stateDir, { recursive: true, force: true }));
   const ledgerDir = join(stateDir, "core");
   mkdirSync(ledgerDir);
   mkdirSync(join(stateDir, "read-model"));
-  const replay = [parent, child].map(row => JSON.stringify(row)).join("\n") + "\n";
+  const replay = [parent, ...Array.from({ length: 500 }, (_, i) => ({ ...child, run_id: `child-${i}` }))]
+    .map(row => JSON.stringify(row)).join("\n") + "\n";
   writeFileSync(join(ledgerDir, "ledger.ndjson"), replay);
   writeFileSync(join(ledgerDir, archive(1000) + ".gz"), gzipSync(replay));
   const inventory = runtime(false);
@@ -289,24 +292,34 @@ test("W1-T8484: real worker refresh serves gardener spend without request-time s
         signal: new SharedArrayBuffer(8), slowLane: { intervalMs: 60000 } });
     const ready = () => {
       const message = body();
-      return message?.type === "body" && (message.entry.body.data as AnalyticsViewData).instances[0]?.gardenerSpend?.totalUsd === expected;
+      return message?.type === "body" && (message.entry.body.data as AnalyticsViewData).instances[0]?.gardenerSpend?.pricedSubtotalUsd === expected;
     };
     const deadline = Date.now() + 20000;
     while (!ready() && Date.now() < deadline) await sleep(20);
     assert.ok(ready(), JSON.stringify(posted.filter(m => m.type === "log")));
     onMessage?.({ type: "stop" });
   };
-  await refresh(2);
+  await refresh(1000);
+  const initial = body();
+  assert.ok(initial?.type === "body");
+  assert.equal((initial.entry.body.data as AnalyticsViewData).instances[0]!.gardenerSpend!.totalUsd, 1000);
   writeFileSync(join(ledgerDir, archive(2000)), replay);
-  writeFileSync(join(ledgerDir, "ledger.ndjson"), replay + JSON.stringify({ ...child, run_id: "child-2", total_cost_usd: 3 }) + "\n");
-  await refresh(5);
+  writeFileSync(join(ledgerDir, "ledger.ndjson"), replay + [
+    { ...child, run_id: "child-extra", total_cost_usd: 3 },
+    { ...child, run_id: "unpriced", total_cost_usd: undefined },
+    { ...parent, phase: "cancelled", exit: null },
+    { ...parent, repository: "other/repo" },
+  ].map(row => JSON.stringify(row)).join("\n") + "\n");
+  await refresh(1003);
   const message = body();
   assert.ok(message?.type === "body");
   const entry = message.entry;
   const spend = (entry.body.data as AnalyticsViewData).instances[0]!.gardenerSpend!;
   assert.equal(spend.gardens[0]!.enabled, false);
-  assert.equal(spend.gardens[0]!.totalUsd, 5);
-  assert.equal(spend.counts.priced, 2);
+  assert.equal(spend.gardens[0]!.totalUsd, null);
+  assert.equal(spend.pricedSubtotalUsd, 1003);
+  assert.equal(spend.state, "partial");
+  assert.deepEqual(spend.counts, { priced: 501, unpriced: 1, unlinked: 0 });
   assert.ok(Date.parse(spend.observedAt!) >= Date.parse(at));
   assert.equal(spend.window!.from, at);
   assert.equal(spend.coverage.retainedCorpus, "complete");
