@@ -3393,6 +3393,8 @@ export function watchDispatchSpawn(
     log: (step: string, fields: Record<string, unknown>) => void;
     /** The daemon's recycle-PAUSE reader: a pending recycle ends the round on the checkpoint path. */
     recyclePending?: () => string | undefined;
+    /** W1-T8139: the daemon's restart latch, read in-process (never the fetching freshness read): a latched restart ends the round too. */
+    restartPending?: () => string | undefined;
   },
   seams: {
     runWatchdog?: typeof runQuietWorkerWatchdog;
@@ -3425,6 +3427,7 @@ export function watchDispatchSpawn(
     nudge: (message) => (seams.deliver ?? deliverOperatorAnswerToRunningWorker)(taskId, message, { ledger: (event, fields) => log(event, fields ?? {}) })
       === "delivered" ? "delivered" : "unsupported",
     ...(watch.recyclePending ? { recyclePending: watch.recyclePending } : {}),
+    ...(watch.restartPending ? { restartPending: watch.restartPending } : {}),
     endRound: async (reason, trigger) => {
       if ((spawnArgs.workerClass ?? "implement") !== "implement") return { ended: false, reason: "not an implement worker" };
       const cwd = spawnArgs.cwd;
@@ -3433,7 +3436,7 @@ export function watchDispatchSpawn(
         // The W1-T7697 checkpoint path (yieldAtWorkerBoundary): retain the disk work, push it, then release the lane.
         if ((seams.hasUncommittedChanges ?? worktreeHasUncommittedChanges)(cwd)) {
           const checkpoint = (seams.commit ?? commitWorkerEdits)(cwd, task.files ?? [],
-            `wip: yield at ${trigger === "recycle" ? "container recycle" : "quiet worker"}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume\nfailed: none\n\nRemudero-Task: ${taskId}`,
+            `wip: yield at ${trigger === "recycle" ? "container recycle" : trigger === "restart" ? "daemon restart" : "quiet worker"}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume\nfailed: none\n\nRemudero-Task: ${taskId}`,
             {}, task.acceptance, { checkpoint: true });
           // W1-T8008: a checkpoint keeps undeclared work too; only what git forces (markers, unresolved paths) refuses.
           if (!checkpoint.committed) {
@@ -3501,17 +3504,29 @@ export function freshnessYieldRows(a: {
   ];
 }
 
+/** W1-T8139: the daemon's restart latch as the watchdog's pending-yield read: the in-process `restartAtWorkerBoundary`
+ * only (never the fetching `externalWaitFreshness`), named by the sha pair it waits on. Undefined without a daemon. */
+export function restartLatchDetail(
+  latch: (() => Extract<DaemonFreshness, { stale: true }> | undefined) | undefined,
+): (() => string | undefined) | undefined {
+  if (!latch) return undefined;
+  return () => {
+    const freshness = latch();
+    return freshness ? `daemon restart latched: ${freshness.oldSha.slice(0, 9)}..${freshness.newSha.slice(0, 9)}` : undefined;
+  };
+}
+
 export function roundEndedHandoffRows(
   detail: QuietRoundEndedError["detail"],
   branch: string,
 ): Array<{ step: string; fields: Record<string, unknown> }> {
   const headSha = detail.checkpointSha ?? null;
   const undeclared = checkpointUndeclaredFields(detail.undeclaredPaths ?? []);
-  if (detail.trigger !== "recycle") {
+  if (detail.trigger !== "recycle" && detail.trigger !== "restart") {
     return [{ step: "verdict", fields: { verdict: "handed_off", reason: "quiet_worker_round_ended", branch, head_sha: headSha, detail: detail.reason, ...undeclared } }];
   }
   return [
-    { step: "run.freshness_handoff", fields: { waiting_on: "worker_round", branch, head_sha: headSha, trigger: "recycle", detail: detail.reason, ...undeclared } },
+    { step: "run.freshness_handoff", fields: { waiting_on: "worker_round", branch, head_sha: headSha, trigger: detail.trigger, detail: detail.reason, ...undeclared } },
     { step: "verdict", fields: { verdict: "handed_off", reason: "freshness_yield", waiting_on: "worker_round", branch, head_sha: headSha, detail: detail.reason, ...undeclared } },
   ];
 }
@@ -17622,6 +17637,7 @@ async function runTask(
     const watchedSpawn = watchDispatchSpawn(rawSpawn, {
       enabled: !opts.spawn, taskId, runId, ledgerPath, fallbackBoundMs: workerStallFallbackMs, spawnArgs: effectiveSpawnArgs, task, log,
       provider: () => selectionAssignment?.selected.provider, recyclePending: opts.externalWaitRecycle,
+      restartPending: restartLatchDetail(opts.restartAtWorkerBoundary),
     });
     return recordBenchmarkWorkerAttempt(() => watchedSpawn({
       ...effectiveSpawnArgs,
@@ -21468,7 +21484,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       for (const row of roundEndedHandoffRows(err.detail, branch)) {
         log(row.step, row.step === "verdict" ? { ...row.fields, cost_usd: costUsd, ...terminalVerdictFields(null) } : row.fields);
       }
-      say(`verdict: handed_off — ${err.detail.trigger === "recycle" ? "a pending recycle" : "the quiet-worker watchdog"} ended the round (${err.detail.reason})`);
+      say(`verdict: handed_off — ${err.detail.trigger === "recycle" ? "a pending recycle" : err.detail.trigger === "restart" ? "a latched daemon restart" : "the quiet-worker watchdog"} ended the round (${err.detail.reason})`);
       return { taskId, runId, merged: false, costUsd, verdict: "handed_off" };
     }
     // W1-T1045: the clock-bound watchdog (worker.ts) aborted a silent dispatch spawn — NAME it
