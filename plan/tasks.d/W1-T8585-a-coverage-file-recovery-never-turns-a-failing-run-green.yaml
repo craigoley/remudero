@@ -1,0 +1,87 @@
+- id: W1-T8585
+  title: "A COVERAGE-FILE RECOVERY NEVER TURNS A FAILING RUN GREEN — on 2026-10-12 coverage-shard (8/8) of #11085 ran the W1-T5935 rotation census, which failed (# fail 1), but one child's raw V8 report was truncated, and test-with-retry.mjs judged the run all-pass from a nested fixture's `# fail 0` line, took the empty-coverage recovery, and exited 0; #11085 merged green and main went red on that census"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the coverage lane's retry wrapper keeps a failing test run's verdict; it spans emptyCoverageFailure's summary read and recoverEmptyCoverage's exit code, both in scripts/test-with-retry.mjs
+  band_meaning: blast-radius
+  origin: "operator standing direction 2026-10-12: fix reds at the root; red main from #11085, deadlocked repair #11096"
+  plan_refs: [W1-T6592, W1-T3207, W1-T4398, W1-T2597, W1-T4404, W1-T8565, W1-T8572, W1-T8575]
+  files:
+    - scripts/test-with-retry.mjs
+    - test/a-coverage-recovery-never-greens-a-failing-run.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ on origin/main 83831fad7. Symbols, not lines.
+    THE QUESTION. #11085 (W1-T8396, head 359c50bf2) merged green at 13:12Z as 97e3f9136, and main went red on
+    test/a-spent-check-requeue-survives-ledger-rotation.test.ts. That census fails on 359c50bf2 alone, and on CI's merge ref
+    (359c50bf2 merged into ecd3f9790, rebuilt locally), with and without CI's coverage flags: `# tests 3`, `# fail 1`.
+    WHAT CI DID. Read from #11085's check runs and job logs for 359c50bf2 (run 38251625984):
+      - The selector did not decide. `RMD_AFFECTED_SUITE_LIVE` is "0" in .github/workflows/ci.yml, so ci-shard skips PR
+        source diffs (W1-T3207: "coverage-ratchet owns the single instrumented full-suite run") and every coverage shard
+        takes `SELECTION="all"` (`--select-all`). The coverage-ratchet job logged "8 coverage shard(s) partition all 3272
+        test file(s) from one ledger", so the census was assigned exactly once.
+      - It ran in coverage-shard (8/8) (job 114819137145) and FAILED: `not ok 1330 - W1-T5935: the rotation census ...`,
+        then `# tests 3412`, `# pass 3411`, `# fail 1`, and `test-judge: NODE --TEST RUN FAILED (status 1): # fail 1.
+        403/403 file(s) reported`.
+      - The same run also logged `COVERAGE-REPORT-FAILED: coverage-18785-1791809630923-0.json bytes=81920` and Node's
+        `ERR_OPERATION_FAILED ... failed to parse coverage file`: one child's raw report was truncated.
+      - Then `FLAKE-RETRY: first attempt failed — W1-T5935: the rotation census ...`, and two minutes later
+        `FLAKE-RETRY-RECOVERED: dropped unreportable coverage file(s) — coverage/raw/coverage-18785-...json (truncated,
+        kept in .../raw-unparseable)`. The shard concluded success. No census rerun happened.
+      - The W1-T4404 shadow selector in the same step printed "1 real failure(s):
+        test/a-spent-check-requeue-survives-ledger-rotation.test.ts floor=selected narrow=missed". The failure was on the
+        record and nothing read it as a verdict.
+    WHY. In scripts/test-with-retry.mjs, `main` takes `recoverEmptyCoverage` when `emptyCoverageFailure(cmd, args,
+    first.output)` is true. That predicate is meant to fire only on an all-pass run: `count("tests") === count("pass") &&
+    count("fail") === 0 && count("cancelled") === 0`. `count` is `output.match(new RegExp("^# <label> (\\d+)$", "m"))`,
+    which returns the FIRST matching line in the whole output. The coverage step streams every test's stdout, and tests
+    that spawn their own `node --test` children print bare TAP summaries. In shard 8 the first such block came 6 minutes
+    before the real one, from a nested run: `# tests 2`, `# pass 2`, `# fail 0`, `# cancelled 0`. So the predicate read a
+    passing run. `recoverEmptyCoverage` then set the truncated report aside and rebuilt lcov. The rebuild exited 0, and the
+    function returns `code === 0 ? 0 : first.code`. That is the REBUILD's verdict, not the test run's.
+    `firstNames` (`parseFailingTestNames(first.output)`) already named the failing census one line earlier; nothing
+    consults it on this path.
+    WHY THE EXISTING GUARD TEST MISSED IT. test/a-truncated-child-coverage-report-does-not-fail-an-all-pass-shard.test.ts
+    "a truncated child coverage report never hides a real test failure" runs a fixture with one failing test and no nested
+    summary, so the first `# fail` line is the real one. It never prints a passing summary before the failing one.
+    RELATED, NOT THIS TASK. #11099 (W1-T8565, a selector-shadow gardener filing) names a "missed floor edge" for the same
+    census from PR #11091's run. #11091's shard concluded failure: the census red it saw was main's, inherited after
+    #11085 merged. That filing does not explain #11085's green, and its "edge" is not a selector gap. The affected-suite
+    selector never chose what #11085 ran, because it is not live.
+    MEASURED: one laundered run, this one. The recovery path shipped 2026-10-08 (#10188, W1-T6592). How often it has fired
+    on a failing run has not been counted. The FLAKE-RETRY-RECOVERED lines sit only in job logs and step summaries.
+  design: |
+    1. READ THE RUN'S OWN SUMMARY. `emptyCoverageFailure` reads the LAST `# tests` / `# pass` / `# fail` / `# cancelled`
+       block in the output, the run's own end-of-run summary, never the first. When the four counts do not come from
+       one contiguous final block, it returns false.
+    2. A NAMED FAILURE IS NEVER RECOVERED. `main` does not take `recoverEmptyCoverage` when `firstNames` is non-empty, or
+       when `failedFilesOf(first)` names a file. Those runs go to `coverageRetry` like any failing run, which reruns the
+       failed files uninstrumented, so a real failure stays red.
+    3. THE TEST VERDICT IS KEPT. `recoverEmptyCoverage` repairs coverage only. Its exit code is 0 only when the first run's
+       own final summary shows no failed or cancelled test. A successful lcov rebuild never upgrades a failing run.
+    4. Unchanged: the truncated-report set-aside and lcov rebuild for a genuinely all-pass run, W1-T4398's file-scoped
+       retry, `TEST_RETRY=0`, and the retry budget.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-coverage-recovery-never-greens-a-failing-run.test.ts"
+    - claim: "a failing run whose output prints a nested passing TAP summary first, plus a truncated coverage report, exits non-zero with no FLAKE-RETRY-RECOVERED line"
+      proof: 'grep: test("W1-T8585: a nested passing summary before a real failure never takes the coverage recovery" in test/a-coverage-recovery-never-greens-a-failing-run.test.ts'
+    - claim: "a run whose failing test is named is never recovered by dropping a coverage file, whatever its summary lines say"
+      proof: 'grep: test("W1-T8585: a named failing test keeps the run red after a coverage rebuild" in test/a-coverage-recovery-never-greens-a-failing-run.test.ts'
+    - claim: "a genuinely all-pass run with a truncated report still sets it aside and exits 0"
+      proof: 'grep: test("W1-T8585: an all-pass run with a truncated report still recovers" in test/a-coverage-recovery-never-greens-a-failing-run.test.ts'
+  falsifier: |
+    Reproduce #11085's shard 8 in a fixture: a test that prints a passing nested TAP summary, a failing test after it, and a
+    truncated `coverage-<pid>-<epochMs>-<n>.json` in the raw dir. On main the wrapper prints FLAKE-RETRY-RECOVERED and exits
+    0. Restore `count`'s first-match read, and the nested-summary test goes green-exit again. Drop the `firstNames` guard
+    and use a fixture whose final summary is mangled, and the named-failure test exits 0.
+  note: |
+    EFFECT, measured after merge with no fixed pass mark: per PR coverage shard, count FLAKE-RETRY-RECOVERED "dropped
+    unreportable coverage" lines whose same run carries a `not ok` or a `test-judge: NODE --TEST RUN FAILED` line. Healthy
+    shape: none. Also, after this lands, a PR that breaks a census can no longer merge with a green coverage-ratchet.

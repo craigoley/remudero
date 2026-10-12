@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-12 (\"go with your recommended follow ups\"): PR #11017 refreshed twice on its own red, hand-fixed by the session in 83aa463a0"
   plan_refs: [W1-T2671, W1-T2789, W1-T5528, W1-T6024, W1-T6405, W1-T6433, W1-T7445, W1-T8038, W1-T8042, W1-T8086, W1-T100]
   files: [src/lib/sweep.ts, src/run-task.ts, src/lib/base-reproduction.ts, test/a-red-the-pr-caused-is-fixed-not-refreshed.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
