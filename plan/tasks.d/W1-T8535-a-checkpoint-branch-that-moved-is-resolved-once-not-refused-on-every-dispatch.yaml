@@ -1,0 +1,122 @@
+- id: W1-T8535
+  title: "A CHECKPOINT BRANCH THAT MOVED IS RESOLVED ONCE, NOT REFUSED ON EVERY DISPATCH — when a handoff receipt's run branch still exists but its head is no longer the receipt's head, restoreBoundaryCheckpoint refuses with \"remote head moved\", pendingWorkerBoundaryHandoffs keeps the receipt after that failure, and every later dispatch of the task fails the same way with no worker run"
+  repo: remudero
+  depends_on: [W1-T8503]  # same functions (restoreBoundaryCheckpoint, pendingWorkerBoundaryHandoffs); W1-T8503 splits off the ABSENT ref and adds the consume-on-drop rule this extends
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a moved receipt branch is classified once and the receipt is resolved; it spans the restore (run-task.ts), the receipt fold (daemon.ts) and the retained set (ledger.ts)
+  band_meaning: span
+  origin: "operator approval 2026-10-12 (\"Go\")"
+  plan_refs: [W1-T8503, W1-T7806, W1-T7747, W1-T7697, W1-T147, W1-T298]
+  files:
+    - src/run-task.ts
+    - src/lib/daemon.ts
+    - src/lib/ledger.ts
+    - test/a-checkpoint-branch-that-moved-is-resolved-once.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    THE GAP, read on origin/main ab8287511 (symbols, not lines):
+      - `restoreBoundaryCheckpoint` (src/run-task.ts) reads `ls-remote origin refs/heads/<branch>` and throws "the
+        checkpoint's remote head moved; refusing to replay a different worker's work" whenever the result is not the
+        receipt's `headSha`. After its fetch it throws again, "moved during fetch", if FETCH_HEAD differs. A failed
+        `ls-remote` also throws. All three reach the same catch in the restore call site, which logs `verdict no_pr
+        restart_checkpoint_restore_failed` and returns.
+      - `pendingWorkerBoundaryHandoffs` (src/lib/daemon.ts) skips that verdict on purpose: "a failed restore ... consumed
+        nothing" (W1-T7806). For a transient failure that is right. For a branch that has moved, nothing will ever change,
+        so the receipt stays pending, `handoffReceiptsToCarry` carries it at every boot, and every dispatch ends at the same
+        refusal with no worker run.
+      - W1-T8503 (filed #11076, not yet built: no `refs/rmd-dispatch/W1-T8503` and no `run-W1-T8503-*` head at 13:00Z)
+        splits off the ABSENT ref and adds `implement.checkpoint_dropped` as a consuming row. It leaves "a ref at a
+        different sha (the real moved-head refusal, unchanged)". That moved-ref arm is this task.
+    MEASURED on host remudero, ~/rmd-state2/state, 2026-10-12 ~13:00Z. The read was niced, covered the 77 rotations of
+    10-09..10-12 plus the live file, and was deduplicated by run and ts, because carried rows repeat: 13 raw lines gave 5
+    rows.
+      - Positive control: all 5 `restart_checkpoint_restore_failed` rows in the window were found. Two are the old
+        cherry-pick failures (W1-T7766 10-10 22:16Z, W1-T7806 10-11 08:36Z). Three say "remote head moved": W1-T7703 at
+        10-12 06:00:24Z and 11:44:23Z, and W1-T6153 at 11:42:50Z.
+      - All three "moved" rows are the ABSENT case. `git ls-remote` at 13:00Z shows neither run-W1-T7703-1791665606208
+        nor run-W1-T6153-1791670097134 on origin, as W1-T8503 found. So 0 rows in the window are a branch that exists at
+        another sha.
+      - Looping now, but in W1-T8503's arm: the live ledger still holds both carried receipts (run.freshness_handoff,
+        10-11 14:01:47Z), and every dispatch since has ended restore_failed. W1-T7703 has failed twice and W1-T6153 once.
+        W1-T8503 (priority 1) is the fix for those.
+    Nothing is looping in this task's arm, so it is priority 2. It is still a loop with no exit. Nothing in the fleet
+    rewrites a parked source branch: a new dispatch pushes its own run-<id>-<epoch> branch, and a fix lane needs a PR. So
+    the trigger is a hand push or a rewrite, and when one happens the task is stranded until an operator edits the
+    ledger.
+    A CONSUMING ROW MUST OUTLIVE THE RECEIPT IT CONSUMES. `run.freshness_handoff` and `verdict` are in
+    `DECISION_RELEVANT_LEDGER_STEPS`. `implement.checkpoint_restored`, and W1-T8503's `implement.checkpoint_dropped` as
+    filed, are not (checked by importing the exported set). If a consuming row rotates out of the live file while the
+    carried receipt stays, the receipt is pending again and the loop comes back about an hour later (the rotation gap is
+    p50 64 min on that host). That is why src/lib/ledger.ts is in files.
+    W1-T147 (the overnight chaos drill) and W1-T298 (queue starvation escalates) share src/run-task.ts, src/lib/daemon.ts and
+    src/lib/ledger.ts with this task only because those files are large and shared. W1-T147 injects faults, and W1-T298
+    escalates an empty queue. Neither touches the checkpoint restore, the receipt fold or these retained steps.
+  design: |
+    1. CLASSIFY A PRESENT REF AT ANOTHER SHA, ONCE. In `restoreBoundaryCheckpoint`, after W1-T8503's absent-ref split, a
+       ref present at R ≠ the receipt head H is fetched (`git fetch origin <branch>`). FETCH_HEAD is the R that every later
+       step uses, so the "moved during fetch" race is classified the same way, not thrown. Then:
+       - `git merge-base --is-ancestor H R` exits 0: DESCENDS. Someone appended to the parked branch.
+       - It exits 1, or H's object is missing locally after that fetch (`git cat-file -e H^{commit}` fails): REWRITTEN.
+         A remote head that contained H would have brought H's object with it. A branch moved back to an ancestor of H
+         counts as rewritten too.
+       - Any other git failure, or a failed `ls-remote`, is a FAILED READ. It stays today's throw, so the run ends
+         restore_failed and the receipt is not consumed (the W1-T7806 rule, unchanged).
+    2. DESCENDS: RESUME FROM THE REMOTE HEAD. Restore R through the existing merge path, exactly as it restores H today
+       (merge-base with main, reset, `probeMerge`, `commit-tree`). Log `implement.checkpoint_restored` with
+       `source_head_sha: R`, `receipt_head_sha: H` and `relation: "descends"`. Nothing is lost: R contains H.
+    3. REWRITTEN: CONSUME THE RECEIPT IN ONE NAMED ROW, THEN RESUME FROM THE REMOTE HEAD. Write one
+       `implement.checkpoint_superseded` row with task, source_branch, `receipt_head_sha` H, `remote_head_sha` R and
+       relation (`"rewritten"`, or `"behind"` when R is an ancestor of H). Then restore R as in step 2. Why resume from R
+       and not start fresh:
+       - The branch is task-scoped. `pendingWorkerBoundaryHandoffs` accepts only `run-<taskId>-<digits>`.
+       - Nothing in the fleet writes a parked source branch, so a rewrite there is a deliberate act on this task's own
+         work. The remote ref is the shared truth.
+       - Starting fresh would throw away R's work and H's together. H is still recoverable by its sha, which the row
+         names.
+       - NEVER PUSH TO THE SOURCE BRANCH, by force or otherwise. The resumed run pushes its own run branch, as today.
+    4. A SUPERSEDED RECEIPT IS CONSUMED. `pendingWorkerBoundaryHandoffs` treats an `implement.checkpoint_superseded` row
+       whose branch and `receipt_head_sha` match the pending receipt as replacing it, the same rule W1-T8503 adds for
+       `implement.checkpoint_dropped`. `handoffReceiptsToCarry` then stops carrying it. A descends restore needs no
+       consuming row: it succeeds on every dispatch, and the run's own verdict consumes the receipt as today.
+    5. RETAIN THE CONSUMING ROWS. Add `"implement.checkpoint_superseded"` to `DECISION_RELEVANT_LEDGER_STEPS` with a
+       comment naming `pendingWorkerBoundaryHandoffs` as its reader. Add `"implement.checkpoint_dropped"` too if W1-T8503
+       did not, and say so in the PR body.
+    Tests go in a new file, test/a-checkpoint-branch-that-moved-is-resolved-once.test.ts, with `test(` titles verbatim
+    as in the proofs below. Use a real gitRepo() fixture with a bare origin: park a receipt at H, then move the source
+    ref, either by appending a commit or by pointing it at an unrelated commit. Give every fixture a local git identity
+    (the CI runner has none) and use neutral helper names. The rotation case uses the real `rotateLedger` on a temp state
+    dir. No live ledger and no network.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-checkpoint-branch-that-moved-is-resolved-once.test.ts"
+    - claim: "a receipt whose branch moved never ends restore_failed on a second dispatch"
+      proof: 'grep: test("W1-T8535: a receipt whose branch moved does not fail its restore twice" in test/a-checkpoint-branch-that-moved-is-resolved-once.test.ts'
+    - claim: "a remote head that descends from the receipt head resumes from the remote head"
+      proof: 'grep: test("W1-T8535: a remote head that descends from the receipt resumes from the remote head" in test/a-checkpoint-branch-that-moved-is-resolved-once.test.ts'
+    - claim: "a rewritten remote head writes one superseded row naming both shas, resumes from the remote head, and leaves the source branch untouched"
+      proof: 'grep: test("W1-T8535: a rewritten remote head is superseded once and resumes without a push" in test/a-checkpoint-branch-that-moved-is-resolved-once.test.ts'
+    - claim: "a superseded receipt stays consumed after a real rotation"
+      proof: 'grep: test("W1-T8535: a superseded receipt stays consumed after rotation" in test/a-checkpoint-branch-that-moved-is-resolved-once.test.ts'
+    - claim: "a failed ls-remote or fetch stays a failed read that consumes nothing, never a moved ref"
+      proof: 'grep: test("W1-T8535: a failed read stays a failed read and consumes nothing" in test/a-checkpoint-branch-that-moved-is-resolved-once.test.ts'
+    - claim: "the restore writes the named superseded row"
+      proof: 'grep: implement\.checkpoint_superseded in src/run-task.ts'
+    - claim: "the superseded row is retained"
+      proof: 'grep: "implement\.checkpoint_superseded" in src/lib/ledger.ts'
+  falsifier: |
+    Keep the `remoteHead !== checkpoint.headSha` throw for a present ref. Both dispatches in the first test then end no_pr
+    restart_checkpoint_restore_failed, the loop this task closes. Write the superseded row but leave
+    `pendingWorkerBoundaryHandoffs` blind to it, and the second dispatch still sees the receipt. Leave the row out of the
+    retained set, and the rotation test sees the receipt pending again. Push H back over the moved ref, and the rewritten
+    test sees the origin ref change. Collapse a failed `ls-remote` into "moved", and the failed-read test sees a transient
+    error consume a live receipt.
+  note: |
+    EFFECT, measured after merge from the core ledger with no numeric pass mark: count `restart_checkpoint_restore_failed`
+    verdicts per (task, source_branch). Healthy shape: none repeats for one receipt unless its detail is a failed read.
+    Count `implement.checkpoint_superseded` rows and `implement.checkpoint_restored` rows with `relation: "descends"`. Each
+    superseded row is a moved branch someone should know about, and its two shas say what was replaced.
