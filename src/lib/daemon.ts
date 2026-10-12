@@ -1136,7 +1136,9 @@ export interface DaemonDeps {
   /** Called once per task excluded because its own read is indeterminate. */
   onIndeterminate?: (task: Task) => void;
   /** Run ONE task through the existing run-task path (default = runTask). */
-  runOne: (taskId: string) => Promise<RunResult>;
+  runOne: (taskId: string, options?: {
+    restartAtWorkerBoundary: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+  }) => Promise<RunResult>;
   /** `laneDispatchBudget`'s other input: the same open-PR-count closure the real wiring already
    *  builds for `checkQueueGovernor`, never a second read path. Consulted only at two or more lanes.
    *  Optional — omitted, a wide batch is bounded by `laneCount` alone (W1-T343). */
@@ -5551,17 +5553,18 @@ export async function runDaemon(
     let inFlightFreshness: Extract<DaemonFreshness, { stale: true }> | undefined;
     const restartWait = { decidedAtMs: 0, reported: 0 };
     const laneStartedAtMs = new Map(admitted.map((t) => [t.id, dispatchPhaseStartedAtMs]));
-    const restartSlowLanes = new Set<string>();
+    const restartHoldouts = new Set<string>();
+    const admittedUnderLatch = new Set<string>();
     const slowLane = (t: Task): boolean => measuredRefillBound && daemonClock.now() - laneStartedAtMs.get(t.id)! > refillBoundMs;
-    const restartStillWaitingOnSlowLane = (): boolean => [...inFlightTasks].some((t) => restartSlowLanes.has(t.id));
+    const restartStillWaitingOnHoldout = (): boolean => restartHoldouts.size > 0;
     // Re-read at every decision, never latched: a refilled sibling can outlive the measured length AFTER a lane freed.
     const phaseBoundHolds = (): boolean => !inFlightFreshness && daemonClock.now() - dispatchPhaseStartedAtMs > refillBoundMs &&
       ![...inFlightTasks].some(slowLane);
     const latchRestart = (freshness: Extract<DaemonFreshness, { stale: true }>): void => {
       if (!inFlightFreshness) {
         restartWait.decidedAtMs = daemonClock.now();
-        // Only the cohort that already delayed the restart grants refill; new runs cannot renew it.
-        for (const t of inFlightTasks) if (slowLane(t)) restartSlowLanes.add(t.id);
+        // Every in-flight run holds refill until a boundary or settlement; refills cannot renew it (W1-T7806).
+        for (const t of inFlightTasks) restartHoldouts.add(t.id);
       }
       inFlightFreshness ??= freshness;
     };
@@ -5578,7 +5581,7 @@ export async function runDaemon(
     };
     const refillLane = (lane: number, finished: Task, outcome: PromiseSettledResult<RunResult>): Task | undefined | Promise<Task | undefined> => {
       inFlightTasks.delete(finished);
-      restartSlowLanes.delete(finished.id);
+      restartHoldouts.delete(finished.id);
       if (outcome.status === "rejected") {
         // W1-T5083: a lane-local rejection (the settle loop logs it and the pass continues) never closes refill.
         if (!(outcome.reason instanceof TaskAdmissionError) && !refillLaneLocalRejection(outcome.reason)) refillClosed ??= "a lane rejected";
@@ -5592,7 +5595,7 @@ export async function runDaemon(
     };
     const decideRefill = (lane: number, finished: Task): Task | undefined | Promise<Task | undefined> => {
       const phaseAgeMs = daemonClock.now() - dispatchPhaseStartedAtMs;
-      if (inFlightFreshness && !restartStillWaitingOnSlowLane()) refillClosed ??= "stale code";
+      if (inFlightFreshness && !restartStillWaitingOnHoldout()) refillClosed ??= "stale code";
       const phaseBound = !refillClosed && phaseBoundHolds() ? "phase bound" : undefined;
       // With no history no sibling can ever read slow, so parking could only end as a hold: hold now (W1-T5761).
       if (phaseBound && measuredRefillBound && inFlightTasks.size > 0) {
@@ -5607,10 +5610,10 @@ export async function runDaemon(
       const freshness = refillClosed || phaseBound ? undefined : freshnessReadsAsync ? settledFreshness : (deps.checkFreshness?.() as DaemonFreshness | undefined);
       if (!freshnessReadsAsync) logNotStaleFreshness(freshness);
       const freshnessAction = freshness?.stale ? decideFreshness(freshness, true) : undefined;
-      // W1-T6274: a restart decided here holds every later refill this phase and ends it in the freshness stop.
+      // W1-T6274/W1-T7806: once the latched holdouts drain, every later refill is held for the restart.
       if (freshnessAction === "restart" && freshness?.stale) {
         latchRestart(freshness);
-        if (!restartStillWaitingOnSlowLane()) refillClosed ??= "stale code";
+        if (!restartStillWaitingOnHoldout()) refillClosed ??= "stale code";
       }
       let reason =
         refillClosed ??
@@ -5646,7 +5649,7 @@ export async function runDaemon(
         const conclude = (): Task | undefined => {
           // W1-T6274: the reads above are awaited; a restart, stop or pause decided meanwhile still holds the lane.
           if (next) {
-            const latched = refillClosed ?? (inFlightFreshness && !restartStillWaitingOnSlowLane() ? "stale code" : undefined) ??
+            const latched = refillClosed ?? (inFlightFreshness && !restartStillWaitingOnHoldout() ? "stale code" : undefined) ??
               (deps.checkStop?.() ? "stop" : undefined) ?? (deps.checkPause?.() ? "pause" : undefined);
             if (latched !== undefined) {
               reason = `${latched} (decided while the refill read was in flight)`;
@@ -5666,9 +5669,10 @@ export async function runDaemon(
           snapshots.push(nextSnapshot!);
           passIds.add(next.id);
           inFlightTasks.add(next);
+          if (inFlightFreshness) admittedUnderLatch.add(next.id);
           laneStartedAtMs.set(next.id, daemonClock.now());
           log("dispatch.lane_refilled", { lane, finished_task: finished.id, next_task: next.id,
-            ...(inFlightFreshness ? { restart_pending: true, waiting_on: [...restartSlowLanes] } : {}) });
+            ...(inFlightFreshness ? { restart_pending: true, waiting_on: [...restartHoldouts] } : {}) });
           log("daemon.iteration", { task: next.id, attempted: attempted.length + 1, max: opts.max ?? null });
           attempted.push(next.id);
           return next;
@@ -5705,7 +5709,7 @@ export async function runDaemon(
       logNotStaleFreshness(freshness);
       if (freshness.stale && decideFreshness(freshness, true) === "restart") {
         latchRestart(freshness);
-        if (!restartStillWaitingOnSlowLane()) refillClosed ??= "stale code";
+        if (!restartStillWaitingOnHoldout()) refillClosed ??= "stale code";
       }
       wakeParkedLanes();
     };
@@ -5718,7 +5722,8 @@ export async function runDaemon(
       log("daemon.freshness_restart_waiting", {
         waiting_on: "in_flight_lanes",
         waited_ms: waitedMs,
-        lanes: [...inFlightTasks].map((t) => ({ task: t.id, age_ms: Math.max(0, nowMs - (laneStartedAtMs.get(t.id) ?? nowMs)) })),
+        lanes: [...inFlightTasks].map((t) => ({ task: t.id, age_ms: Math.max(0, nowMs - (laneStartedAtMs.get(t.id) ?? nowMs)),
+          holdout: restartHoldouts.has(t.id), admitted_under_latch: admittedUnderLatch.has(t.id) })),
         refill_held: refillClosed ?? null,
         report: restartWait.reported,
         old_sha: decided.oldSha,
@@ -5752,7 +5757,13 @@ export async function runDaemon(
         reason: "categorized refusal contract changed",
       });
       const startedAtMs = daemonClock.now();
-      return deps.runOne(id).then((outcome) => {
+      return deps.runOne(id, { restartAtWorkerBoundary: () => {
+        if (!inFlightFreshness) return undefined;
+        restartHoldouts.delete(id);
+        if (!restartStillWaitingOnHoldout()) refillClosed ??= "stale code";
+        wakeParkedLanes();
+        return inFlightFreshness;
+      } }).then((outcome) => {
         const length = daemonClock.now() - startedAtMs;
         if (length > 0) { runLengths.totalMs += length; runLengths.samples++; }
         return outcome;
