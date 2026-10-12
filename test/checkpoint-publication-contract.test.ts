@@ -151,6 +151,7 @@ test("checkpoint no-diff, conflict refusal and failed default pushes retain thei
   assert.equal(cleanEnd.checkpointSha, clean.base);
   const conflict = rig();
   change(conflict.work.dir, "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> main\n");
+  conflict.work.git("add", "-N", "src/work.txt");
   await assert.rejects(withLiveWritesAllowed(() => runTask.commitAndPushRestartCheckpoint(conflict.work.dir, { files: ["src/work.txt"] }, TASK, "worker")), /checkpoint refused/);
   const refused = await withLiveWritesAllowed(() => watchdog(conflict.work.dir)());
   assert.equal(refused.ended, false);
