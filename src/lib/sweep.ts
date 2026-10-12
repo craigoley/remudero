@@ -1,6 +1,6 @@
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, judgeFixProgress, parseFixProgressVerdict,
-  type FixProgressJudge, type FixProgressVerdict } from "./fix-progress-judge.js";
+  type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
 import { createHeadRehomePorts, headIdentityRed, headRehomePlan, rehomeBody, type HeadRehomePorts } from "./head-rehome.js";
@@ -60,7 +60,7 @@ import {
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB } from "./host-memory-ledger.js";
-import type { ContainerMemoryHeadroom } from "./host-memory-shadow.js";
+import { ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./host-memory-shadow.js";
 import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
 } from "./pr-blocker.js";
@@ -70,6 +70,8 @@ import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, work
 import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
+import { armedBodyNeedsGuard, rememberCleanArmedBody, type ClosingReferenceGuardResult } from "./closing-reference-guard.js";
+import { observeAdmissionDisposition } from "./action-executor.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
 import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, type InflightLockHandle } from "./inflight-lock.js";
 import { reclaimStaleLock } from "./fs-race-safe.js";
@@ -171,6 +173,7 @@ import type {
   CriterionVerdict,
   PlanCriteriaAtHeadResult,
   ProofExecutor,
+  ProofSkipReason,
   ReviewEvidence,
   ReviewVerdict,
 } from "./review.js";
@@ -366,6 +369,116 @@ function reviewReuseEvidence(input: ReviewReuseDiscriminationInput): ReviewEvide
   };
 }
 
+/** W1-T7837 — THE ONE DEFINITION OF "THIS PROOF NEVER RAN BECAUSE OF THE HOST". A criterion whose
+ *  proof was skipped for a missing runner, a vanished checkout, an incomplete or broken runtime, or no
+ *  execution context — or whose execution threw or could not read the base — says nothing about the PR
+ *  body, so no body edit can change it. {@link assessReviewReuse} (unreadable evidence) and the capped
+ *  block's re-review route both read this predicate, so the two cannot drift. */
+export function isHostGapCriterion(
+  criterion: { readonly proof_exec?: string; readonly proof_skip?: string },
+): boolean {
+  return (
+    criterion.proof_exec === "exec_error" ||
+    criterion.proof_exec === "base_unreadable" ||
+    criterion.proof_skip === "runner-absent" ||
+    criterion.proof_skip === "cwd-missing" ||
+    criterion.proof_skip === "incomplete-run" ||
+    criterion.proof_skip === "runtime-broken" ||
+    criterion.proof_skip === "no-exec-context"
+  );
+}
+
+/** One host-gap re-review already given this head: when requested, and the grades the superseded review carried. */
+export interface HostGapRereview { atMs: number; skips: readonly string[] }
+
+/** The host problem behind a grade — the sentence an escalation carries. */
+export function hostGapProblem(skip: string): string {
+  switch (skip) {
+    case "runner-absent": return "sandbox runner missing";
+    case "cwd-missing": return "review worktree reclaimed";
+    case "runtime-broken": return "runtime broken";
+    case "incomplete-run": return "runtime broken (run ended without its summary)";
+    case "no-exec-context": return "no PR-head checkout to execute in";
+    case "exec_error":
+    case "exec-error": return "proof execution threw";
+    case "base_unreadable": return "merge-base checkout unreadable";
+    default: return skip;
+  }
+}
+
+/** Wait before the next host-gap re-review: one observed review duration, grown by each prior re-review. */
+export function hostGapRereviewWaitMs(observedReviewMs: number, priorRereviews: number): number {
+  return Math.max(0, observedReviewMs) * (priorRereviews + 1);
+}
+
+export interface HostGapRereviewState {
+  history: readonly HostGapRereview[];
+  skips: readonly string[];
+  lastReviewAtMs?: number;
+  observedReviewMs: number;
+  nowMs: number;
+}
+
+export type HostGapRereviewAction =
+  | { kind: "rereview"; reason: string; progress?: FixProgressResult }
+  | { kind: "hold"; reason: string; progress?: FixProgressResult }
+  | { kind: "escalate"; reason: string; progress?: FixProgressResult };
+
+const sortedUnique = (values: readonly string[]) => [...new Set(values)].sort();
+
+/** Fix-progress judge input for a persisting host gap: each re-review is a no-op round on the branch. */
+export function hostGapProgressInput(
+  base: { taskId?: string; prNumber?: number; headSha: string },
+  state: Pick<HostGapRereviewState, "history" | "skips">,
+): FixProgressInput {
+  const currentRed = sortedUnique(state.skips.map((skip) => `host-gap:${skip}`));
+  const rounds = state.history.map((entry, index) => ({
+    id: `host-gap:${index}`, dispatchedHead: base.headSha, pushedHead: base.headSha,
+    redBefore: sortedUnique(entry.skips.map((skip) => `host-gap:${skip}`)), completed: true,
+  }));
+  rounds.forEach((round, index) => Object.assign(round, { redAfter: rounds[index + 1]?.redBefore ?? currentRed }));
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  return { taskId: base.taskId, prNumber: base.prNumber, headSha: base.headSha, strikesSpent: rounds.length, currentRed,
+    rounds: rounds as FixProgressInput["rounds"], formerCeiling: 1,
+    parkedReason: `host-gap-rereview: ${rounds.length} prior re-reviews, none ran a proof`,
+    signals: { noOpRounds: rounds.length,
+      identicalRedSets: rounds.filter((round) => same(round.redBefore, (round as { redAfter?: string[] }).redAfter)).length,
+      identicalDiffs: 0, oscillating: false, refusedRounds: 0, incompleteRounds: 0, reviewerOnlyFailurePersists: 0 } };
+}
+
+/** W1-T7837 — next step for a capped verdict whose every proof hit a host gap: never a body or shard
+ *  repair, but a paced re-review of the same head, or an escalation once the fix-progress judge says so. */
+export async function planHostGapRereview(
+  state: HostGapRereviewState,
+  opts: { judge?: FixProgressJudge; input: FixProgressInput;
+    log?: (step: string, fields: Record<string, unknown>) => void },
+): Promise<HostGapRereviewAction> {
+  const prior = state.history.length;
+  const problems = sortedUnique(state.skips.map(hostGapProblem)).join(", ");
+  const anchor = Math.max(state.lastReviewAtMs ?? Number.NEGATIVE_INFINITY,
+    ...state.history.map((entry) => entry.atMs));
+  const waitMs = hostGapRereviewWaitMs(state.observedReviewMs, prior);
+  if (Number.isFinite(anchor) && state.nowMs < anchor + waitMs) {
+    return { kind: "hold", reason: `capped review could not run its proofs (${problems}) — a host gap, not a body defect; ` +
+      `re-review ${prior + 1} is paced ${Math.ceil((anchor + waitMs - state.nowMs) / 60_000)}m out ` +
+      `(${Math.ceil(waitMs / 60_000)}m derived from ${prior} prior host-gap re-review(s) and the observed review duration)` };
+  }
+  if (prior >= 1) {
+    const progress = await judgeFixProgress(opts.input, opts.judge);
+    opts.log?.("fix.progress_judged", { site: "host-gap-rereview", pr_number: opts.input.prNumber,
+      head_sha: opts.input.headSha, parked_reason: opts.input.parkedReason, round_count: opts.input.rounds.length,
+      signals: opts.input.signals, ...progress });
+    if (progress.verdict === "unavailable") return { kind: "hold", reason: progress.reason, progress };
+    if (progress.verdict === "escalate") {
+      return { kind: "escalate", progress, reason: `host gap persists across ${prior} re-review(s) — ` +
+        `${state.skips.join(", ")} (${problems}); fix progress loop: ${progress.loop} — ${progress.reason}` };
+    }
+    return { kind: "rereview", progress, reason: `host-gap re-review ${prior + 1}: ${progress.reason}` };
+  }
+  return { kind: "rereview", reason: `capped review could not run its proofs (${problems}) — a host gap a PR-body edit cannot fix; ` +
+    `re-reviewing the same head and body` };
+}
+
 function assessReviewReuse(
   input: ReviewReuseDiscriminationInput,
   criteria: AcceptanceCriterion[],
@@ -374,16 +487,7 @@ function assessReviewReuse(
   // W1-T4423: a plan-only verdict rests on a lint-plan run this reuse path does not repeat.
   if (computed.planOnly) return { ok: false, reason: "a plan-only verdict needs a full review to re-run lint-plan" };
 
-  const unreadable = computed.criteria.find(
-    (criterion) =>
-      criterion.proof_exec === "exec_error" ||
-      criterion.proof_exec === "base_unreadable" ||
-      criterion.proof_skip === "runner-absent" ||
-      criterion.proof_skip === "cwd-missing" ||
-      criterion.proof_skip === "incomplete-run" ||
-      criterion.proof_skip === "runtime-broken" ||
-      criterion.proof_skip === "no-exec-context",
-  );
+  const unreadable = computed.criteria.find(isHostGapCriterion);
   if (unreadable) {
     return {
       ok: false,
@@ -1796,6 +1900,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "reviewerCodeStaleThisPass",
   // W1-T4415: every open draft is marked ready for review (operator ruling 2026-09-24: no drafts).
   "readyDraft",
+  // An armed PR's body edited after the arm is re-checked for closing references every pass.
+  "guardArmedBody",
   // W1-T4838: a worker's categorized refusal is held and drafted as a plan amendment, not retried.
   "draftRefusalAmendments",
   // W1-T5349: the plan-repair rung's fact read and its renumber/retitle effect.
@@ -1899,6 +2005,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "mergeQueue"
   | "readPrFileSource"
   | "readyDraft"
+  | "guardArmedBody"
   | "draftRefusalAmendments"
   | "captureRepairFeedback"
   | "disarmAutoMerge"
@@ -2038,8 +2145,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
   const admission: AdmissionObserver = deps.contributorAdmissionImpl ?? ((target, action) =>
     observeContributorAdmission(config.contributorAdmission, target, action, log));
-  const observePr = (pr: OpenPrView, action: Parameters<AdmissionObserver>[1]): Promise<void> =>
-    admission({ owner, repo, prNumber: pr.prNumber, headSha: pr.headSha }, action);
+  const observePr = async (pr: OpenPrView, action: Parameters<AdmissionObserver>[1]): Promise<void> => {
+    const target = { owner, repo, prNumber: pr.prNumber, headSha: pr.headSha };
+    await observeAdmissionDisposition(config.contributorAdmission, target, config.root, log);
+    await admission(target, action);
+  };
 
   const repoDir = repo === localRepoName ? entrypointRepoRoot : join(config.root, "repos", repo);
   // W1-T4460 (design ii): the real default reads this repo's OWN plan fresh off disk, swallowing a
@@ -4100,6 +4210,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
     readyDraft: (pr) => readyDraftImpl(pr),
 
+    guardArmedBody: (pr) => realArmDepsAsync(() => config).closingReferences!(pr.prUrl),
+
     // W1-T4838 — hold each refused task, then open ONE plan-only amendment PR for it. The hold is
     // written FIRST (cheap, local, idempotent) so a slow or failed PR never lets the task re-dispatch.
     draftRefusalAmendments: async (candidates) => {
@@ -5128,6 +5240,27 @@ function observedPathMatchesRepositoryPath(observedPath: string, repositoryPath:
   return observedPath === repositoryPath || observedPath.endsWith(`/${repositoryPath}`);
 }
 
+/** W1-T8038: the runner's own words for a job killed at its ceiling or cancelled. PRIMARY CONTROL: a
+ *  classifier, not a cap — it decides whether the job log is read beside the annotations. */
+export const RUNNER_TIMEOUT_LINE =
+  /exceeded the maximum execution time|The (?:operation|job|run) was canceled|received a shutdown signal|SHARD HANG\W+the matrix was cancelled/i;
+
+/** W1-T8038: the paths a CI job runs rather than tests: workflows, scripts entry points, test/setup/. */
+export function isCiHarnessPath(path: string): boolean {
+  return /^(?:\.github\/workflows\/[^/]+|scripts\/[^/]+|test\/setup\/.+)$/.test(path.replaceAll("\\", "/"));
+}
+
+function redIsTimedOutOrFileless(
+  failures: readonly CiFailure[],
+  failingTestFiles: readonly string[],
+  failingSourceFiles: readonly string[],
+): boolean {
+  if (failures.some((f) => (f.conclusion ?? "").toUpperCase() === "CANCELLED" || RUNNER_TIMEOUT_LINE.test(f.logTail ?? ""))) {
+    return true;
+  }
+  return failingTestFiles.length === 0 && failingSourceFiles.length === 0;
+}
+
 /** W1-T2671/W1-T2789 — the ONE pure exact-path decision shared by the fix rung and the sweep-level
  *  pre-exhaustion release, so neither caller can reinterpret a weak behind/path signal alone. */
 export function decideRedBaseRefresh(
@@ -5154,14 +5287,22 @@ export function decideRedBaseRefresh(
     else refreshableSourceFiles.add(observedPath);
   }
   const baseChangedFiles = facts.baseChangedFiles;
-  const matchingBaseFiles =
-    facts.behindBy !== undefined && facts.behindBy > 0 && baseChangedFiles !== undefined
-      ? baseChangedFiles.filter((baseFile) =>
-          [...failingTestFiles, ...refreshableSourceFiles].some((failureFile) =>
-            observedPathMatchesRepositoryPath(failureFile, baseFile),
-          ),
-        )
+  const behind = facts.behindBy !== undefined && facts.behindBy > 0 && baseChangedFiles !== undefined;
+  const exactMatches = behind
+    ? baseChangedFiles.filter((baseFile) =>
+        [...failingTestFiles, ...refreshableSourceFiles].some((failureFile) =>
+          observedPathMatchesRepositoryPath(failureFile, baseFile),
+        ),
+      )
+    : [];
+  // W1-T8038: a red that timed out or was cancelled, or names no file, can never match a failing
+  // file — so main changing the HARNESS the job runs (its workflow, a scripts/ entry point, the
+  // test/setup/ helpers) is the only base evidence there is. Any other base change falls through.
+  const harnessMatches =
+    behind && exactMatches.length === 0 && redIsTimedOutOrFileless(failures, failingTestFiles, failingSourceFiles)
+      ? baseChangedFiles.filter(isCiHarnessPath)
       : [];
+  const matchingBaseFiles = exactMatches.length > 0 ? exactMatches : harnessMatches;
   return {
     refresh: matchingBaseFiles.length > 0,
     behindBy: facts.behindBy,
@@ -5214,6 +5355,9 @@ export type CiAnnotationFallback =
   | { outcome: "recovered" }
   | { outcome: "empty" }
   | { outcome: "bare-exit-code" }
+  /** W1-T8038: the annotations held only the runner's own timeout or cancellation lines, which name no
+   *  test, so the job log was read beside them. */
+  | { outcome: "runner-timeout-only" }
   | { outcome: "skipped-limit" }
   | { outcome: "failed"; detail: string };
 
@@ -6774,13 +6918,28 @@ export interface MainHealthRunHistoryEntry {
 }
 
 export interface MainHealthFirstRedCommit {
+  /** The oldest commit after the last green whose CI COMPLETED red: a cancelled run is never named. */
   readonly headSha: string;
+  /** The newest commit whose CI completed green before it. */
   readonly afterGreenSha: string;
   readonly runUrl?: string;
   readonly pullRequest?: MainHealthPullRequestRef;
+  /** W1-T7760 — the UNATTRIBUTED span: first-parent commits strictly between `afterGreenSha` and
+   *  `headSha` that have no completed verdict, newest first. Present only when main's first-parent
+   *  chain was supplied; empty means `headSha` is the first red, non-empty means any of them may be. */
+  readonly span?: readonly string[];
+}
+
+/** W1-T7760 — what bounds the first-red walk: the workflows that carry required checks, and main's
+ *  first-parent commits (newest first) from `headSha` back to at least `afterGreenSha`. */
+export interface MainHealthFirstRedOptions {
+  readonly requiredWorkflows?: ReadonlySet<string>;
+  readonly firstParentOrder?: readonly string[];
 }
 
 export interface MainHealthEnrichment {
+  /** W1-T7760: workflows learned to carry required checks; the first-red walk reads only their runs. */
+  readonly requiredWorkflows?: ReadonlySet<string>;
   readonly ciFailures?: readonly CiFailure[];
   readonly ciFailuresUnavailable?: string;
   readonly runHistory?: readonly MainHealthRunHistoryEntry[];
@@ -6834,13 +6993,36 @@ export function mainHealthFailingTestTitles(
 /** A run that concluded red about the tree. A CANCELLED (or skipped, or stale) run concluded nothing,
  *  so it is never the first red: 63 of main's newest 100 CI runs on 2026-10-10 were cancelled while
  *  pending, and counting them named a new innocent "offending merge" on every pass. */
-function mainRunConcludedRed(run: MainHealthRunHistoryEntry): boolean {
+export function mainRunConcludedRed(run: MainHealthRunHistoryEntry): boolean {
   return mainRunIsVerdict(run) && mainHealthFailureConclusion(run.conclusion);
 }
 
-export function mainHealthFirstRedCommitFromRunHistory(
+/** W1-T7760 — the first-parent commits strictly between `afterGreenSha` and `headSha` (newest first)
+ *  that have NO completed verdict in `history`: every one of them may be where main turned red.
+ *  Undefined when `order` does not hold both ends, because a span that was not read is not an empty one. */
+export function mainHealthUnattributedSpan(
+  order: readonly string[],
+  boundary: Pick<MainHealthFirstRedCommit, "headSha" | "afterGreenSha">,
   history: readonly MainHealthRunHistoryEntry[],
+): string[] | undefined {
+  const redAt = order.indexOf(boundary.headSha);
+  const greenAt = order.indexOf(boundary.afterGreenSha);
+  if (redAt < 0 || greenAt <= redAt) return undefined;
+  const concluded = new Set(history.filter(mainRunIsVerdict).map((run) => run.headSha));
+  return order.slice(redAt + 1, greenAt).filter((sha) => !concluded.has(sha));
+}
+
+export function mainHealthFirstRedCommitFromRunHistory(
+  allHistory: readonly MainHealthRunHistoryEntry[],
+  options: MainHealthFirstRedOptions = {},
 ): MainHealthFirstRedCommit | "window-exhausted" | undefined {
+  // Only a workflow that carries required checks can say a commit is green or red: CodeQL going
+  // green on a commit whose CI was cancelled is not a green main.
+  const workflows = options.requiredWorkflows;
+  const history =
+    workflows && workflows.size > 0
+      ? allHistory.filter((run) => run.workflowName === undefined || workflows.has(run.workflowName))
+      : allHistory;
   if (!history.some(mainRunConcludedRed)) return undefined;
   if (!history.some((run) => mainHealthSuccessConclusion(run.conclusion))) return "window-exhausted";
   let greenSha: string | undefined;
@@ -6851,11 +7033,13 @@ export function mainHealthFirstRedCommitFromRunHistory(
     }
     if (greenSha && mainRunConcludedRed(run)) {
       const [pullRequest] = run.pullRequests ?? [];
+      const boundary = { headSha: run.headSha, afterGreenSha: greenSha };
+      const span = options.firstParentOrder ? mainHealthUnattributedSpan(options.firstParentOrder, boundary, history) : undefined;
       return {
-        headSha: run.headSha,
-        afterGreenSha: greenSha,
+        ...boundary,
         ...(run.url ? { runUrl: run.url } : {}),
         ...(pullRequest ? { pullRequest } : {}),
+        ...(span ? { span } : {}),
       };
     }
   }
@@ -6886,7 +7070,9 @@ export function enrichMainHealthObservation(
   let firstRedCommit: MainHealthFirstRedCommit | undefined;
   let runHistoryWindowExhausted: boolean | undefined;
   if (enrichment.runHistory) {
-    const boundary = mainHealthFirstRedCommitFromRunHistory(enrichment.runHistory);
+    const boundary = mainHealthFirstRedCommitFromRunHistory(enrichment.runHistory, {
+      ...(enrichment.requiredWorkflows ? { requiredWorkflows: enrichment.requiredWorkflows } : {}),
+    });
     if (boundary === "window-exhausted") {
       runHistoryWindowExhausted = true;
     } else {
@@ -6937,7 +7123,7 @@ export const MAIN_GUARD_WORKFLOWS: ReadonlySet<string> = new Set(["main-plan-gua
 /** A superseded, skipped or stale run concluded nothing about the tree. */
 const MAIN_RUN_NON_VERDICT: ReadonlySet<string> = new Set(["CANCELLED", "SKIPPED", "STALE"]);
 
-function mainRunIsVerdict(run: MainHealthRunHistoryEntry): boolean {
+export function mainRunIsVerdict(run: MainHealthRunHistoryEntry): boolean {
   const conclusion = (run.conclusion ?? "").toUpperCase();
   return conclusion !== "" && !MAIN_RUN_NON_VERDICT.has(conclusion);
 }
@@ -10958,6 +11144,8 @@ export interface ProofDiscriminationEvidence {
     readonly claim: string;
     readonly proof: string;
     readonly proofExec: NonExecutedProofExecOutcome;
+    /** W1-T7837: WHY the proof did not run, when the review recorded it (absent otherwise). */
+    readonly proofSkip?: ProofSkipReason;
   }>;
 }
 
@@ -10986,7 +11174,8 @@ export function proofDiscriminationEvidenceFromCriteria(
     criterion.proof_exec !== "executed_pass" &&
     criterion.proof_exec !== "executed_fail" &&
     criterion.proof_exec !== "stale_self_path"
-      ? [{ claim: criterion.claim, proof: criterion.proof, proofExec: criterion.proof_exec }]
+      ? [{ claim: criterion.claim, proof: criterion.proof, proofExec: criterion.proof_exec,
+          ...(criterion.proof_skip !== undefined ? { proofSkip: criterion.proof_skip } : {}) }]
       : [],
   );
   return proofs.length > 0 ? { proofs } : undefined;
@@ -11154,9 +11343,54 @@ function criteriaFromLedgerValue(value: unknown): CriterionVerdict[] | undefined
       met: criterion.met,
       reason: criterion.reason,
       proof_exec: criterion.proof_exec,
+      // W1-T7837: the skip reason is what tells a host gap from a stale or prose proof.
+      ...(typeof criterion.proof_skip === "string" ? { proof_skip: criterion.proof_skip as ProofSkipReason } : {}),
     });
   }
   return criteria;
+}
+
+/** W1-T7837: the ledger step that records one host-gap re-review request. {@link priorActionsFromLedger}
+ *  reads it to release the delivered-review key, and {@link hostGapRereviewFacts} to pace the next. */
+export const HOST_GAP_REREVIEW_STEP = "sweep.capped_host_gap_rereview";
+
+const rowMs = (row: Record<string, unknown>): number | undefined => {
+  const at = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
+  return Number.isNaN(at) ? undefined : at;
+};
+
+/** W1-T7837: what this PR head's own ledger history says about pacing its host-gap re-reviews — the
+ *  re-reviews already requested, when the newest review posted, and the longest review duration
+ *  observed for this input (a `review.posted` row less the nearest earlier row that started it: an
+ *  acted post-review disposition or an earlier re-review request). `undefined` where nothing was dated. */
+export function hostGapRereviewFacts(
+  pr: Pick<OpenPrView, "prNumber" | "prUrl" | "headSha">,
+  lines: ReadonlyArray<Record<string, unknown>>,
+): { history: HostGapRereview[]; lastReviewAtMs?: number; observedReviewMs?: number } {
+  const history: HostGapRereview[] = [];
+  let lastReviewAtMs: number | undefined;
+  let observedReviewMs: number | undefined;
+  let startedAtMs: number | undefined;
+  for (const line of lines) {
+    if (line.head_sha !== pr.headSha) continue;
+    const at = rowMs(line);
+    if (line.step === HOST_GAP_REREVIEW_STEP && line.pr_url === pr.prUrl) {
+      if (at !== undefined) {
+        history.push({ atMs: at, skips: Array.isArray(line.skips) ? line.skips.filter((s): s is string => typeof s === "string") : [] });
+        startedAtMs = at;
+      }
+    } else if (line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
+        line.disposition === "post-review" && line.acted === true) {
+      if (at !== undefined) startedAtMs = at;
+    } else if (line.step === "review.posted" && line.pr_url === pr.prUrl && at !== undefined) {
+      lastReviewAtMs = at;
+      if (startedAtMs !== undefined && at >= startedAtMs) {
+        observedReviewMs = Math.max(observedReviewMs ?? 0, at - startedAtMs);
+      }
+      startedAtMs = undefined;
+    }
+  }
+  return { history, lastReviewAtMs, observedReviewMs };
 }
 
 /**
@@ -11502,6 +11736,9 @@ export interface SweepDeps {
     mode?: "armed-idle",
   ) => ArmOutcomeName | ArmAttemptOutcome | void | Promise<ArmOutcomeName | ArmAttemptOutcome | void>;
   readArmFacts?: (pr: OpenPrView) => ArmReprobeFacts | undefined | Promise<ArmReprobeFacts | undefined>;
+  /** Re-runs the closing-reference guard on a PR GitHub holds armed whose listed body names another
+   *  PR or issue: the arm-time guard cannot see a body edited after the arm. Omitted: not re-checked. */
+  guardArmedBody?: (pr: OpenPrView) => ClosingReferenceGuardResult | Promise<ClosingReferenceGuardResult>;
   /** W1-T5909 — read only for an unarmed `mergeable` PR on a pass that may arm. Omitted: the memory dedup. */
   readMergeQueueMembership?: (pr: OpenPrView) => MergeQueueMembership | Promise<MergeQueueMembership>;
   escalateRearmExhausted?: (pr: OpenPrView, rearms: number, bound: number, reason?: string) => string | null | Promise<string | null>;
@@ -12639,6 +12876,22 @@ function priorActionsFromLedger(
       armed.delete(`${line.pr_number}@${line.head_sha}`);
       continue;
     }
+    // W1-T7837 — a host-gap re-review request RELEASES the delivered key of the verdict it supersedes, the way
+    // W1-T5840 releases an overtaken failure: the review claim then admits one fresh review of the same head and
+    // body. A review.posted row after it re-adds the key, so the release lasts one review.
+    if (line.step === HOST_GAP_REREVIEW_STEP) {
+      if (typeof line.task_id === "string" && typeof line.head_sha === "string") {
+        const key = reviewOutcomeKey(
+          line.task_id,
+          typeof line.pr_url === "string" ? line.pr_url : undefined,
+          line.head_sha,
+          typeof line.review_input_digest === "string" ? line.review_input_digest : undefined,
+        );
+        reviewDelivered.delete(key);
+        reviewDeliveredFailureAt.delete(key);
+      }
+      continue;
+    }
     // W1-T254/W1-T1213: OUTCOME-KEYED, off the review lane's OWN ledger lines — never
     // `sweep.disposed`. See PriorActions.reviewDelivered/reviewRefused's docs.
     if (line.step === "review.posted" || line.step === "review.post_refused") {
@@ -13415,16 +13668,77 @@ export function detachedActionInFlight(kind: DetachedActionKind): boolean {
 
 export type SweepRepairSurface = "full" | "light";
 
-export interface FixHostPressure { availableMib: number; floorMib: number; reason?: string }
+/**
+ * The memory the measured WIP bound and the fix admission divide into workers: `availableMib - floorMib` of the BINDING
+ * pool. With a container reading, that is the smaller of the host's (MemAvailable less the floor) and this container's
+ * own (its headroom less a CONTAINER-SIZED floor: the host floor scaled by the container's ceiling over MemTotal, so the
+ * container keeps the same share of its memory the host keeps of its own). The host floor against a container headroom
+ * (median 3.4-4.6 GiB on core, 2026-10-10/11) would hold implement dispatch most of the time.
+ * `tier` is set with a container reading: fits; host-short; container-short (under one worker, with live work in this
+ * container that can free memory); nothing-to-wait-for (short, but nothing in it can free memory, so waiting cannot
+ * help: {@link pressureWorkers} admits one, named, never wedged).
+ */
+export interface FixHostPressure {
+  availableMib: number;
+  floorMib: number;
+  reason?: string;
+  hostAvailableMib?: number;
+  hostFloorMib?: number;
+  container?: ContainerMemoryHeadroom;
+  containerFloorMib?: number;
+  binding?: "host" | "container";
+  tier?: "fits" | "host-short" | "container-short" | "nothing-to-wait-for";
+}
 
-export function readFixHostPressure(floorMib: number, read: (path: string) => string = path => readFileSync(path, "utf8")): FixHostPressure {
+/** The workers a pressure reading admits at `perWorkerMib` each: none when unreadable, at least one when the container
+ *  is short with nothing in it to wait for. */
+export function pressureWorkers(pressure: FixHostPressure, perWorkerMib: number): number {
+  if (pressure.reason !== undefined) return 0;
+  const workers = Math.floor(Math.max(0, pressure.availableMib - pressure.floorMib) / perWorkerMib);
+  return pressure.tier === "nothing-to-wait-for" ? Math.max(1, workers) : workers;
+}
+
+export function readFixHostPressure(
+  floorMib: number,
+  read: (path: string) => string = path => readFileSync(path, "utf8"),
+  container?: { read: () => ContainerMemoryHeadroom; ownWorkLive: () => boolean },
+): FixHostPressure {
+  let meminfo: string;
+  let host: FixHostPressure;
   try {
-    const match = /^MemAvailable:\s*(\d+)\s*kB\s*$/m.exec(read("/proc/meminfo"));
+    meminfo = read("/proc/meminfo");
+    const match = /^MemAvailable:\s*(\d+)\s*kB\s*$/m.exec(meminfo);
     if (!match) throw new Error("MemAvailable absent from /proc/meminfo");
-    return { availableMib: Math.floor(Number(match[1]) / 1024), floorMib };
+    host = { availableMib: Math.floor(Number(match[1]) / 1024), floorMib };
   } catch (error) {
     return { availableMib: 0, floorMib, reason: `host pressure unreadable: ${String(error)}` };
   }
+  if (!container) return host;
+  const named = { hostAvailableMib: host.availableMib, hostFloorMib: floorMib };
+  const totalKb = /^MemTotal:\s*(\d+)\s*kB\s*$/m.exec(meminfo)?.[1];
+  const reading = container.read();
+  const unit = DEFAULT_ESTIMATE_MIB.implement;
+  const hostTier = host.availableMib - floorMib < unit ? "host-short" as const : "fits" as const;
+  // Unbounded, unread, or no MemTotal to size its floor by: the host reading alone, as before, with the reading named.
+  if (!("headroomMib" in reading) || totalKb === undefined || Number(totalKb) <= 0) {
+    return { ...host, ...named, container: reading, binding: "host", tier: hostTier };
+  }
+  const containerFloorMib = Math.round(floorMib * Math.min(1, reading.ceilingMib / (Number(totalKb) / 1024)));
+  const pool = reading.headroomMib - containerFloorMib < host.availableMib - floorMib
+    ? { availableMib: reading.headroomMib, floorMib: containerFloorMib, binding: "container" as const }
+    : { ...host, binding: "host" as const };
+  const out = { ...pool, ...named, container: reading, containerFloorMib };
+  if (pool.availableMib - pool.floorMib >= unit) return { ...out, tier: "fits" };
+  if (pool.binding === "host") return { ...out, tier: "host-short" };
+  return { ...out, tier: container.ownWorkLive() ? "container-short" : "nothing-to-wait-for" };
+}
+
+/** The production fix pressure: the host and this container, its live work read from the instance's reservations. */
+export function productionFixPressure(floorMib: number, ledgerPath: string): FixHostPressure {
+  return readFixHostPressure(floorMib, undefined, {
+    read: () => readContainerMemoryHeadroom(),
+    ownWorkLive: () => ownContainerWorkLive(dirname(dirname(ledgerPath))),
+  });
 }
 
 export interface SweepFixCapacitySnapshot {
@@ -13461,7 +13775,7 @@ export function createSweepFixAdmissionController(input: {
   const refresh = () => {
     activeWorkers = Math.max(0, Math.trunc(input.readActiveWorkers?.() ?? input.activeWorkers));
     pressure = input.readPressure?.();
-    const free = pressure ? Math.floor(Math.max(0, pressure.availableMib - pressure.floorMib) / DEFAULT_ESTIMATE_MIB.fix)
+    const free = pressure ? pressureWorkers(pressure, DEFAULT_ESTIMATE_MIB.fix)
       : Math.max(0, input.hostWorkerBudget - activeWorkers);
     available = pressure?.reason ? 0 : Math.max(0, free - input.reviewReservations - reservations);
   };
@@ -13493,6 +13807,9 @@ export function createSweepFixAdmissionController(input: {
       pressure_available_mib: state.pressure?.availableMib,
       pressure_floor_mib: state.pressure?.floorMib,
       pressure_reason: state.pressure?.reason,
+      pressure_binding: state.pressure?.binding,
+      pressure_tier: state.pressure?.tier,
+      pressure_host_available_mib: state.pressure?.hostAvailableMib,
       pending_reservations: reservations,
     });
   };
@@ -13884,6 +14201,29 @@ export async function runSweep(
   if (deps.readyDraft && (deps.actionable?.("held-draft") ?? true)) {
     for (const pr of openPrs) if (pr.isDraft === true) await deps.readyDraft(pr);
   }
+  // GitHub merges an armed PR with the body it holds at that moment, and attemptArm guarded the body
+  // only when the fleet armed it. An edit since then can name another open PR with a closing keyword,
+  // which closes that PR on merge (core 10856, 2026-10-11). Each pass re-checks every armed PR whose
+  // listed body names another PR or issue; a body with no such reference costs no read.
+  if (deps.guardArmedBody && !deps.dryRun) {
+    for (const pr of openPrs) {
+      if (pr.autoMergeArmed !== true || !armedBodyNeedsGuard(pr.prUrl, pr.body)) continue;
+      let guard: ClosingReferenceGuardResult;
+      try {
+        guard = await deps.guardArmedBody(pr);
+      } catch (e) {
+        // A guard that threw proves nothing about the body: it is logged as failed below and retried next pass.
+        guard = { state: "failed", defused: [], detail: `closing-reference guard threw: ${String((e as Error)?.message ?? e)}` };
+      }
+      if (guard.state === "clean") {
+        if (pr.body !== undefined) rememberCleanArmedBody(pr.prUrl, pr.body);
+        continue;
+      }
+      // A failed guard leaves the arm standing and is retried next pass; the row says so.
+      log("sweep.armed_body_guarded", { pr_number: pr.prNumber, pr_url: pr.prUrl, state: guard.state,
+        defused: guard.defused.map((d) => d.url), ...(guard.detail ? { detail: guard.detail } : {}) });
+    }
+  }
 
   // Dedup is keyed on the ledger, which persists across sweeps even when the input is
   // byte-identical — the level-triggered idempotence mechanism. The SAME read feeds
@@ -14189,7 +14529,7 @@ export async function runSweep(
           hostWorkerBudget: policy.reviewCapacity.hostWorkerBudget,
           activeWorkers: fullRepairActiveWorkers,
           readActiveWorkers: deps.fixProgressJudge || deps.readFixPressure ? deps.readActiveWorkerCount ?? activeWorkerCount : undefined,
-          readPressure: deps.readFixPressure ?? (deps.fixProgressJudge ? () => readFixHostPressure(policy.memoryFloorMib) : undefined),
+          readPressure: deps.readFixPressure ?? (deps.fixProgressJudge ? () => productionFixPressure(policy.memoryFloorMib, deps.ledgerPath) : undefined),
           reviewReservations: Math.min(fullReviewQueueDepth, fullReviewLanes),
           log,
         });
@@ -15467,46 +15807,81 @@ export async function runSweep(
     let planShardRepairDue = false;
     if (proofDiscrimination !== undefined && !decideSweepArm(pr, ledgerLines, undefined, readArmLedgerUnion).arm) {
       planProofBlockedPrs.add(pr.prNumber);
-      const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
-      const planRepairCapable = typeof deps.dispatchPlanOnlyRepair === "function";
-      const planRepairStrikes = priorPlanRepairStrikesFromLedger(pr, ledgerLines);
-      const action = deps.fixProgressJudge
-        ? await judgeCappedRepair({ bodyStrikes: pr.priorStrikes, planRepairStrikes }, ceiling, {
-            planRepairCapable, judge: deps.fixProgressJudge,
-            input: { ...buildFixProgressInput({ redClassNames: prRedClassNames(pr), taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
-              currentRed: proofDiscrimination.proofs.map(proof => `proof:${proof.proof}`), ledger: ledgerLines,
-              operatorAnswer: pr.pendingAnswer?.constraint }),
-              remedyHistory: ledgerLines.filter(row => row.step === PLAN_REPAIR_DISPATCH_STEP && row.task_id === pr.taskId) },
-            log: (step, fields) => appendLine(deps.ledgerPath, { run_id: deps.runId,
-              task_id: pr.taskId ?? `PR-${pr.prNumber}`, step, ...fields }),
-          })
-        : planCappedRepair({ bodyStrikes: pr.priorStrikes, planRepairStrikes }, ceiling, { planRepairCapable });
-      if ("progress" in action && action.progress) {
-        if (action.progress.verdict === "continue" || action.progress.verdict === "change-approach") {
-          judgedContinue.set(pr.prNumber, action.progress);
-          pr.progressContinue = { reason: action.progress.reason };
-          if (action.progress.verdict === "change-approach") proofDiscrimination.progressApproach = action.progress.approach;
+      // W1-T7837: a verdict whose EVERY proof hit a host gap (runner absent, worktree reclaimed, runtime broken,
+      // no exec context) says nothing about the body, so a body or shard repair cannot help it. It is re-reviewed.
+      // A grade with NO recorded skip reason (a row predating W1-T305, or a base_unreadable proof) cannot be shown to be
+      // a host gap, so it keeps today's body-repair route.
+      const hostGapOnly = proofDiscrimination.proofs.every((proof) =>
+        proof.proofSkip !== undefined && isHostGapCriterion({ proof_exec: proof.proofExec, proof_skip: proof.proofSkip }));
+      if (hostGapOnly) {
+        const skips = [...new Set(proofDiscrimination.proofs.map((proof) => proof.proofSkip!))].sort();
+        const facts = hostGapRereviewFacts(pr, ledgerLines);
+        const hostGapState = { history: facts.history, skips, lastReviewAtMs: facts.lastReviewAtMs, nowMs: now,
+          observedReviewMs: facts.observedReviewMs ?? policy.pendingCeilingMinutes * 60_000 };
+        const hostGap = await planHostGapRereview(hostGapState, {
+          judge: deps.fixProgressJudge,
+          input: hostGapProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha }, hostGapState),
+          log: (step, fields) => appendLine(deps.ledgerPath, { run_id: deps.runId,
+            task_id: pr.taskId ?? `PR-${pr.prNumber}`, step, ...fields }),
+        });
+        if (hostGap.kind === "rereview") {
+          const reviewKey = reviewOutcomeKeyForPr(pr);
+          if (!deps.dryRun) {
+            appendLine(deps.ledgerPath, { ts: clockFromMillisFn(() => now).iso(), run_id: deps.runId,
+              task_id: reviewOutcomeTaskIdFor(pr), step: HOST_GAP_REREVIEW_STEP, pr_number: pr.prNumber,
+              pr_url: pr.prUrl, head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest, review_key: reviewKey,
+              skips, rereview_ordinal: facts.history.length + 1, reason: hostGap.reason });
+          }
+          prior.reviewDelivered.delete(reviewKey);
+          disposition = "post-review";
+          reason = hostGap.reason;
+        } else {
+          disposition = hostGap.kind === "escalate" ? "blocked-ambiguous" : "wait";
+          reason = hostGap.reason;
+          if (hostGap.progress?.verdict === "unavailable") judgedUnavailable.set(pr.prNumber, hostGap.progress.reason);
         }
-        if (action.progress.verdict === "unavailable") judgedUnavailable.set(pr.prNumber, action.progress.reason);
-      }
-      if (action.kind === "hold") {
-        disposition = "wait";
-        reason = action.reason!;
-      } else
-      if (action.kind === "give_up") {
-        disposition = "blocked-ambiguous";
-        reason = "progress" in action ? action.reason! : planRepairCapable
-          ? `capped review still has non-discriminating proofs, but every repair path is exhausted ` +
-            `(body ${pr.priorStrikes}/${ceiling}, plan-shard repair ${planRepairStrikes}/${MAX_PLAN_REPAIR_STRIKES})`
-          : `capped review still has non-discriminating proofs, but its shared fix budget is exhausted (${pr.priorStrikes}/${ceiling})`;
       } else {
-        disposition = "blocked-fixable";
-        planShardRepairDue = action.kind === "repair_plan_shard";
-        reason = planShardRepairDue
-          ? `capped review still has non-discriminating proofs and the shared fix budget is exhausted ` +
-            `(${pr.priorStrikes}/${ceiling}) — dispatching a plan-only repair of the offending shard ` +
-            `(${planRepairStrikes}/${MAX_PLAN_REPAIR_STRIKES})`
-          : "capped review has only non-discriminating proofs — dispatching the existing bounded fix rung to repair the PR body";
+        const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
+        const planRepairCapable = typeof deps.dispatchPlanOnlyRepair === "function";
+        const planRepairStrikes = priorPlanRepairStrikesFromLedger(pr, ledgerLines);
+        const action = deps.fixProgressJudge
+          ? await judgeCappedRepair({ bodyStrikes: pr.priorStrikes, planRepairStrikes }, ceiling, {
+              planRepairCapable, judge: deps.fixProgressJudge,
+              input: { ...buildFixProgressInput({ redClassNames: prRedClassNames(pr), taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
+                currentRed: proofDiscrimination.proofs.map(proof => `proof:${proof.proof}`), ledger: ledgerLines,
+                operatorAnswer: pr.pendingAnswer?.constraint }),
+                remedyHistory: ledgerLines.filter(row => row.step === PLAN_REPAIR_DISPATCH_STEP && row.task_id === pr.taskId) },
+              log: (step, fields) => appendLine(deps.ledgerPath, { run_id: deps.runId,
+                task_id: pr.taskId ?? `PR-${pr.prNumber}`, step, ...fields }),
+            })
+          : planCappedRepair({ bodyStrikes: pr.priorStrikes, planRepairStrikes }, ceiling, { planRepairCapable });
+        if ("progress" in action && action.progress) {
+          if (action.progress.verdict === "continue" || action.progress.verdict === "change-approach") {
+            judgedContinue.set(pr.prNumber, action.progress);
+            pr.progressContinue = { reason: action.progress.reason };
+            if (action.progress.verdict === "change-approach") proofDiscrimination.progressApproach = action.progress.approach;
+          }
+          if (action.progress.verdict === "unavailable") judgedUnavailable.set(pr.prNumber, action.progress.reason);
+        }
+        if (action.kind === "hold") {
+          disposition = "wait";
+          reason = action.reason!;
+        } else
+        if (action.kind === "give_up") {
+          disposition = "blocked-ambiguous";
+          reason = "progress" in action ? action.reason! : planRepairCapable
+            ? `capped review still has non-discriminating proofs, but every repair path is exhausted ` +
+              `(body ${pr.priorStrikes}/${ceiling}, plan-shard repair ${planRepairStrikes}/${MAX_PLAN_REPAIR_STRIKES})`
+            : `capped review still has non-discriminating proofs, but its shared fix budget is exhausted (${pr.priorStrikes}/${ceiling})`;
+        } else {
+          disposition = "blocked-fixable";
+          planShardRepairDue = action.kind === "repair_plan_shard";
+          reason = planShardRepairDue
+            ? `capped review still has non-discriminating proofs and the shared fix budget is exhausted ` +
+              `(${pr.priorStrikes}/${ceiling}) — dispatching a plan-only repair of the offending shard ` +
+              `(${planRepairStrikes}/${MAX_PLAN_REPAIR_STRIKES})`
+            : "capped review has only non-discriminating proofs — dispatching the existing bounded fix rung to repair the PR body";
+        }
       }
     }
     // W1-T5544 — LADDER RUNG TWO IS NOT STRIKE EXHAUSTION. Two identical refused proof-repair rounds at one head read
@@ -18159,6 +18534,11 @@ export async function runSweepLightPass(
   const queueDepth = reviewAdmissionQueueDepth(openPrs, policy, now, outcomes);
   // W1-T7095: candidates for the host-memory demand row, read BEFORE this pass reserves its own spawning heads.
   const demandCandidates = openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr)));
+  // W1-T7955: the heads an OVERLAPPING pass already holds, keyed by head (`<pr>@<head>`), never by PR number
+  // alone — a review for an older head is not this head's review. Captured before this pass reserves its own.
+  const heldElsewhere = new Set(
+    openPrs.filter((pr) => lightPassReservedHeads.has(lightPassHeadKey(pr))).map(lightPassHeadKey),
+  );
   const activeWorkers = (deps.readActiveWorkerCount ?? activeWorkerCount)();
   const policySemanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines, activeWorkers);
   const { bound: semanticBound, inFlight: reviewsInFlight } = reviewAdmissionBound(policySemanticBound);
@@ -18236,7 +18616,7 @@ export async function runSweepLightPass(
     hostWorkerBudget,
     activeWorkers,
     readActiveWorkers: deps.fixProgressJudge || deps.readFixPressure ? deps.readActiveWorkerCount ?? activeWorkerCount : undefined,
-    readPressure: deps.readFixPressure ?? (deps.fixProgressJudge ? () => readFixHostPressure(policy.memoryFloorMib) : undefined),
+    readPressure: deps.readFixPressure ?? (deps.fixProgressJudge ? () => productionFixPressure(policy.memoryFloorMib, deps.ledgerPath) : undefined),
     reviewReservations,
     log: deps.log,
   });
@@ -18288,7 +18668,10 @@ export async function runSweepLightPass(
               // light pass never runs, and both used to write the same sentence.
               standDownReasonFor: (d) =>
                 d === "post-review"
-                  ? (pr.isPlanFiling === true
+                  ? (heldElsewhere.has(lightPassHeadKey(pr))
+                      // W1-T7955: the review is running, admitted by an overlapping pass — not a lost admission.
+                      ? "review already in flight for this head (admitted by an overlapping light pass)"
+                      : pr.isPlanFiling === true
                       ? `not admitted this pass: at most ${availablePlanFilings} plan-filing ` +
                         (availablePlanFilings === policy.planFilingAdmissionBound
                           ? "post-review admissions per light pass"
@@ -18843,8 +19226,8 @@ export function checkQueueGovernor(
   const trailingMergedCount = flow.trailingMergedCount ?? 0;
   const trailingOpenedCount = flow.trailingOpenedCount ?? 0;
   const pressure = flow.pressure;
-  const pressureHeld = pressure !== undefined && (pressure.reason !== undefined || pressure.availableMib - pressure.floorMib < DEFAULT_ESTIMATE_MIB.implement);
-  const hostBound = pressure ? Math.max(0, Math.floor((pressure.availableMib - pressure.floorMib) / DEFAULT_ESTIMATE_MIB.implement)) : undefined;
+  const hostBound = pressure ? pressureWorkers(pressure, DEFAULT_ESTIMATE_MIB.implement) : undefined;
+  const pressureHeld = hostBound !== undefined && hostBound < 1;
   const measuredBound = hostBound === undefined ? undefined : pressureHeld ? 0
     : Math.min(trailingMergedCount || Math.max(1, hostBound), hostBound);
   // #10510's adaptive bound wins when wired; W1-T7243's measured bound otherwise; the old bound is the stand-in.
@@ -18920,6 +19303,9 @@ export function logQueueGovernorDeferral(
     pressure_available_mib: result.pressure?.availableMib,
     pressure_floor_mib: result.pressure?.floorMib,
     pressure_reason: result.pressure?.reason,
+    pressure_binding: result.pressure?.binding,
+    pressure_tier: result.pressure?.tier,
+    pressure_host_available_mib: result.pressure?.hostAvailableMib,
   });
 }
 
@@ -20287,7 +20673,7 @@ export function diffCoverageReport(failures: readonly CiFailure[]): DiffCoverage
     // The fix prompt uses repository-relative targets. CI can also print an absolute checkout
     // path; retain it here so the red-base refresh can compare its complete source suffix.
     for (const raw of f.logTail.split("\n")) {
-      const absolute = /^\s*-\s+((?:[A-Za-z]:[\\/]|\/)(?:[^\s:]+[\\/])*[^\s:]+\.[cm]?[jt]sx?):(\d+)(?:\s|$)/.exec(raw);
+      const absolute = /^\s*-\s+((?:[A-Za-z]:[\\/]|\/)[^\s:]+\.[cm]?[jt]sx?):(\d+)(?:\s|$)/.exec(raw);
       if (absolute) uncovered.push(`${absolute[1]}:${absolute[2]}`);
     }
     return { check: f.name, uncovered };

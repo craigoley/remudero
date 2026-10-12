@@ -1,0 +1,65 @@
+- id: W1-T8139
+  title: "A LATCHED FRESHNESS RESTART ENDS A WORKER ROUND THAT HAS NO BOUNDARY — #10925 (merged 2026-10-11) lets a pending container recycle end an implement round on the end_round checkpoint path, but the daemon's own freshness restart still waits for the first implement worker to return, for as long as that worker runs"
+  repo: remudero
+  depends_on: [W1-T7806, W1-T8008]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a latched daemon restart is not held by a lane inside a worker that cannot yield
+  band_meaning: span
+  origin: "operator approval 2026-10-11: follow-ups from the recycle-stall fix (hand PR #10925)"
+  plan_refs: [W1-T7697, W1-T7806, W1-T7807, W1-T8008, W1-T4662]
+  files: [src/run-task.ts, src/lib/quiet-worker-watchdog.ts, test/a-latched-restart-ends-a-worker-round-with-no-boundary.test.ts]
+  status: queued
+  priority: 1  # operator 2026-10-11: restart churn — 261 lane-min held by a running lane (240 a long first worker or pre-open gate), est. ~220 lane-min/day recovered
+  attempts: 0
+  rationale: |
+    READ on origin/main 5d117761b, which includes hand PR #10925 (merged 18:00:13Z, during this filing).
+      - src/run-task.ts yieldAtWorkerBoundary (:19708) yields to a pending daemon restart
+        (`opts.externalWaitFreshness`) or a recycle PAUSE (`opts.externalWaitRecycle`), but only at boundaries
+        reached AFTER a worker returns (W1-T7697). W1-T7806's rationale records the gap: "Nothing yields while the
+        FIRST implement worker runs ... A lane inside its first worker is therefore unyieldable for as long as that
+        worker lasts."
+      - #10925 added `recyclePending` to runQuietWorkerWatchdog (src/lib/quiet-worker-watchdog.ts:467, used by
+        yieldToRecycle :515) and wired it at the watchDispatchSpawn call (src/run-task.ts:17548-17550) to
+        `opts.externalWaitRecycle` ONLY. A pending recycle now ends the round through the W1-T7807 `endRound`
+        checkpoint path (:3405), and roundEndedHandoffRows (:3438) writes the `run.freshness_handoff` receipt only
+        for trigger "recycle". The daemon's own freshness restart is not wired, so the restart half is still open.
+      - W1-T7806 (queued, in flight) fixes the REFILL half: freed lanes keep refilling while such a lane holds the
+        restart. Its design 2 also threads the daemon's restart latch into the run as one predicate. It does not
+        end the long worker's round, so the restart itself still waits for it.
+    DEPENDENCIES: W1-T7806 provides the latch predicate this task reads. W1-T8008 (queued) edits the same
+    `endRound` checkpoint in watchDispatchSpawn. All three edit src/run-task.ts. Serialized after both.
+  design: |
+    Operator rulings: no hard thresholds; lean into automation.
+    1. ONE PENDING-YIELD PREDICATE. The value the watchdog reads to end a round mid-worker is "a recycle PAUSE is
+       pending OR the daemon's restart latch is set". Read the latch through the predicate W1-T7806 threads from
+       the daemon's runOne (cheap, in-process). Never call `externalWaitFreshness` on every watchdog poll; it can
+       fetch.
+    2. Same path as the recycle: the `endRound` checkpoint (commit, push, QuietRoundEndedError), a trigger naming
+       which one fired (`recycle` or `restart`), and roundEndedHandoffRows writes the same `run.freshness_handoff`
+       receipt with waiting_on worker_round for `restart` as for `recycle`, so the next run restores the
+       checkpoint (pendingWorkerBoundaryHandoffs).
+    3. A round end that fails (a refused checkpoint) is ledgered as `worker.recycle_yield` with decision
+       action_failed, as #10925 does, and the run continues to its next boundary. The restart waits for it as
+       today.
+    4. Only implement workers (the existing `endRound` guard). Fix-rung workers are a separate task filed with
+       this one.
+    Tests (new file, `test(` titles verbatim as in the proofs below) drive watchDispatchSpawn with injected seams,
+    as test/a-recycle-ends-a-round-that-has-no-boundary-yet.test.ts (#10925) does: a latched restart and no
+    recycle PAUSE, an implement worker mid-stream.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-latched-restart-ends-a-worker-round-with-no-boundary.test.ts"
+    - claim: "a latched daemon restart ends an implement round mid-worker on the checkpoint path"
+      proof: 'grep: test("W1-T8139: a latched restart ends an implement round mid-worker" in test/a-latched-restart-ends-a-worker-round-with-no-boundary.test.ts'
+    - claim: "the round end writes a worker_round receipt with trigger restart"
+      proof: 'grep: test("W1-T8139: a restart round end writes a worker_round receipt" in test/a-latched-restart-ends-a-worker-round-with-no-boundary.test.ts'
+    - claim: "with neither a latch nor a recycle PAUSE the round is not ended"
+      proof: 'grep: test("W1-T8139: no latch and no recycle leaves the round running" in test/a-latched-restart-ends-a-worker-round-with-no-boundary.test.ts'
+    - claim: "the watchdog never calls the fetching freshness read on a poll"
+      proof: 'grep: test("W1-T8139: the pending-yield read never calls the freshness fetch" in test/a-latched-restart-ends-a-worker-round-with-no-boundary.test.ts'
+  falsifier: |
+    Wire only the recycle PAUSE, as #10925 does: under a latched restart the first test sees the worker keep
+    running and no checkpoint commit. Read `externalWaitFreshness` on each poll: the last test's spy counts calls.

@@ -1,11 +1,49 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { canaryPassInterval, canaryStreamClock, projectCanaryRuns, type CanaryAttempt, type CanaryRun } from "../src/lib/model-canary-metrics.js";
+import { canaryPassInterval, canaryStreamClock, projectCanaryRuns, canaryTrialBlockId, type CanaryAttempt, type CanaryRun } from "../src/lib/model-canary-metrics.js";
 const attempt = (id: string, usd: number | null = .02): CanaryAttempt => ({ id, durationMs: 20, firstTextMs: null,
   generationMs: null, inputTokens: 50, outputTokens: 10, cacheReadTokens: null, cacheWriteTokens: null,
   reasoningTokens: null, usageRatedUsd: usd, billing: "api", servedModel: "model", terminal: "complete" });
 const run = (id: string, verified: boolean | null = true): CanaryRun => ({ id, caseId: "case", suiteHash: "a".repeat(64),
   model: "model", route: "azure", effort: "low", family: "schema", verified, totalDurationMs: 100, attempts: [attempt(id)] });
+
+function trialRun(id: string, position = 0): CanaryRun {
+  const row = run(id), day = "2026-10-11", scheduleDigest = "b".repeat(64), plannedSlotIds = ["c".repeat(64), "d".repeat(64)];
+  row.trial = { version: "canary-trial-block-v1", day, scheduleDigest, plannedSlotIds, position,
+    slotId: plannedSlotIds[position]!, aaLabel: position ? "B" : "A",
+    blockId: canaryTrialBlockId(day, row.suiteHash, row.caseId, scheduleDigest, plannedSlotIds) };
+  return row;
+}
+
+test("canary projection keeps historical runs unpaired and repeated cases as one trial block", () => {
+  const a = trialRun("one"), b = trialRun("two", 1), historical = run("historical");
+  const projection = projectCanaryRuns([a, b, historical, structuredClone(a)]), g = projection.groups[0]!;
+  assert.equal(projection.uniqueRuns, 3); assert.equal(g.tasks, 3); assert.equal(g.distinctCases, 1);
+  assert.equal(g.trialBlocks, 1); assert.equal(g.unpairedRuns, 1);
+  assert.equal(g.intervalBasis, "descriptive-run-not-independent-case");
+  assert.equal(g.invoiceUsd, null);
+});
+
+test("canary projection refuses case block corruption and reused durable slot identities", () => {
+  const a = trialRun("one");
+  const corruptions = [
+    { version: "other" }, { day: "bad" }, { day: "2026-02-30" }, { scheduleDigest: "missing" },
+    { slotId: "missing" }, { plannedSlotIds: null }, { plannedSlotIds: [] },
+    { plannedSlotIds: Array(129).fill("c".repeat(64)) }, { plannedSlotIds: [null] },
+    { plannedSlotIds: ["c".repeat(64), "c".repeat(64)] }, { position: -1 }, { position: .5 },
+    { position: 128 }, { aaLabel: "wrong" }, { blockId: "missing" },
+  ];
+  for (const change of corruptions) {
+    const changed = structuredClone(a);
+    Object.assign(changed.trial!, change);
+    assert.throws(() => projectCanaryRuns([changed]), /trial-block-invalid/, JSON.stringify(change));
+  }
+  assert.throws(() => projectCanaryRuns([{ ...a, trial: null } as unknown as CanaryRun]), /trial-block-invalid/);
+  assert.throws(() => projectCanaryRuns([{ ...a, caseId: "other-case" }]), /trial-block-invalid/);
+  assert.throws(() => projectCanaryRuns([a, { ...trialRun("other-id"), verified: false }]), /trial-slot-reused/);
+  assert.notEqual(a.trial!.blockId, canaryTrialBlockId("2026-10-12", a.suiteHash, a.caseId,
+    a.trial!.scheduleDigest, a.trial!.plannedSlotIds));
+});
 
 test("canary cost includes failed attempts and retries without fabricating missing prices", () => {
   const first = run("one"); first.attempts.push({ ...attempt("retry", .03), terminal: "error" });

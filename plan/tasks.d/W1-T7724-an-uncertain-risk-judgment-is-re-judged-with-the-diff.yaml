@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-10: tiered risk judgment (PR #10339 / W1-T7092, issue #10670, hand-merged by the operator)"
   plan_refs: [W1-T454, W1-T970, W1-T5403, W1-T5523, W1-T5911, W1-T1031, W1-T2284, W1-T4050, W1-T100]
   files: [src/lib/risk-judge.ts, src/lib/sweep.ts, src/run-task.ts, test/an-uncertain-risk-judgment-is-re-judged-with-the-diff.test.ts, test/spend-observability-fields.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

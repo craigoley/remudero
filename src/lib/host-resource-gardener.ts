@@ -8,7 +8,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { Escalation } from "./escalate.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { runStepsEager, runStepsSyncOnly, type GardenCheckout, type GardenCheckoutAsync, type GardenWorkspacePort } from "./gardener.js";
+import { prepareGardenTaskIds, recordGardenMintTimeout, type GardenTaskIdMinter, runStepsEager, runStepsSyncOnly, type GardenCheckout, type GardenCheckoutAsync, type GardenWorkspacePort } from "./gardener.js";
 import { runStepsAsync, step, type Steps } from "./git-push.js";
 import { machineShardLandingRefusal, renderMachineShard } from "./machine-filing.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -877,9 +877,9 @@ export function consumerShardYaml(f: ConsumerFiling, taskId: string): string {
 }
 
 /** File one persistent grower through a checkout: the shard alone, so the filing PR is plan-only. */
-export function landConsumerShard(ws: GardenCheckout | GardenCheckoutAsync, mintTaskId: (branch?: string) => string, f: ConsumerFiling): string | undefined | Promise<string | undefined> {
+export function landConsumerShard(ws: GardenCheckout | GardenCheckoutAsync, mintTaskId: GardenTaskIdMinter, f: ConsumerFiling, heldId?: string): string | undefined | Promise<string | undefined> {
   if (!ws.branch) throw new Error("host-resource gardener: filing workspace has no branch for task-id reservation");
-  const taskId = mintTaskId(ws.branch);
+  const taskId = heldId ?? (prepareGardenTaskIds(ws, 1, mintTaskId) as string[])[0]!;
   const contents = consumerShardYaml(f, taskId);
   const shardDir = join(resolveRepoLayout(ws.root).planDir, "tasks.d");
   const shardPath = join(shardDir, `${taskId}-${kebabSlug(`host-resource-${f.host}-${f.consumer}`, 72).replace(/-+$/, "")}.yaml`);
@@ -902,14 +902,18 @@ export function landConsumerShard(ws: GardenCheckout | GardenCheckoutAsync, mint
 
 /** The production filer: a fresh checkout per filing, always disposed, the shard landed through it —
  *  synchronously over the CLI's port, awaited over the daemon's (W1-T5740). */
-export function fileConsumerVia(openWorkspace: GardenWorkspacePort, mintTaskId: (branch?: string) => string): (f: ConsumerFiling) => string | undefined | Promise<string | undefined> {
-  return (f) => runStepsEager(consumerFilingSteps(openWorkspace, mintTaskId, f));
+export function fileConsumerVia(openWorkspace: GardenWorkspacePort, mintTaskId: GardenTaskIdMinter, log: (step: string, fields?: Record<string, unknown>) => void = () => {}): (f: ConsumerFiling) => string | undefined | Promise<string | undefined> {
+  return (f) => runStepsEager(consumerFilingSteps(openWorkspace, mintTaskId, f, log));
 }
 
-function* consumerFilingSteps(openWorkspace: GardenWorkspacePort, mintTaskId: (branch?: string) => string, f: ConsumerFiling): Steps<string | undefined> {
+function* consumerFilingSteps(openWorkspace: GardenWorkspacePort, mintTaskId: GardenTaskIdMinter, f: ConsumerFiling, log: (step: string, fields?: Record<string, unknown>) => void): Steps<string | undefined> {
   const ws = yield* step<GardenCheckout | GardenCheckoutAsync>(openWorkspace);
   try {
-    return yield* step(() => landConsumerShard(ws, mintTaskId, f));
+    const ids = yield* step(() => prepareGardenTaskIds(ws, 1, mintTaskId, Boolean(mintTaskId.async)));
+    return yield* step(() => landConsumerShard(ws, mintTaskId, f, ids[0]!));
+  } catch (error) {
+    recordGardenMintTimeout(error, "host-resource", log);
+    throw error;
   } finally {
     yield* step(() => ws.dispose());
   }

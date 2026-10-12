@@ -1,0 +1,99 @@
+- id: W1-T8086
+  title: "AN OWN-RED PR'S FIX WAITS FOR THE NEXT FULL SWEEP — the light pass defers every blocked-fixable head as \"deferred to full sweep (light pass)\" unless every in-flight run is awaiting CI, so on 2026-10-11 1,336 of 2,023 own-red PR-minutes (66%) had no fix worker, and 11.3 of the 17.0 median minutes from red to first remedy were spent waiting for a full sweep"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the ordinary light pass may run the own-red fix lane, gated by the existing fix-capacity admission
+  band_meaning: span
+  origin: "operator approval 2026-10-11 (\"go with all your recommendations\"): flow re-measure 02:00-14:09Z names own-red fix latency as the next bottleneck"
+  plan_refs: [W1-T1211, W1-T2430, W1-T5922, W1-T7243, W1-T2379, W1-T2726, W1-T7955, W1-T100]
+  files: [src/run-task.ts, src/lib/sweep.ts, test/an-own-red-head-is-fixed-on-the-light-pass.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-11, 02:00-14:09Z, from the core daemon's ledger union and GitHub's check runs
+    (files in ~/Remudero-notes/flow-remeasure-2026-10-11/ on the operator Mac):
+      - 2,023 own-red PR-minutes. On 1,336 of them (66%) no fix worker was running for the PR.
+      - On 1,410 own-red minutes the PR's latest sweep row read
+        "NOT DISPATCHED this pass: deferred to full sweep (light pass)".
+      - First own-red row to first remedy: median 17.0 min, p90 50.3, n=59. Of that, the wait for the
+        next FULL sweep is median 11.3 min, p90 26.5. Full sweeps ran a median 14 min apart.
+    LIVE CASE, PR #10866. `fix.progress_judged` returned "continue" at 14:24, 14:34 and 14:36Z. Each
+    following `sweep.disposed` read "fix round 2 — judge: continue — NOT DISPATCHED this pass: deferred
+    to full sweep (light pass)", repeat_streak 1 to 3. It was never dispatched. A bot update-branch at
+    14:58Z then discarded the round.
+
+    THE PATH, read on origin/main 363991c2a (symbol names, not line numbers):
+      - `buildSweepLightHook` (src/run-task.ts) runs the light pass while `runOne` is in flight. Its
+        ordinary batch passes `actionable: (d) => lightPassActionable(d, fixRungAllowed, false, !reviewOnly)`.
+      - `lightPassActionable` admits `blocked-fixable` only when `fixRungAllowed || requeueLaneOnly`.
+      - `fixRungAllowed` is `fixRungAllowedBesideInFlight`: TRUE only when EVERY in-flight task's latest
+        retained row is `run.awaiting_external` (W1-T1211). A fleet that is building almost always has
+        one run working, so the fix lane reads closed on nearly every light pass.
+      - `runSweep` (src/lib/sweep.ts) then sets `acted = false` and writes the stand-down
+        "deferred to full sweep (light pass)". The head waits for the next full sweep.
+    W1-T1211 gave the restriction one reason: spend and capacity — three dispatch lanes plus three
+    review lanes against a host measured to fit about four workers. That reason is now enforced per
+    claim. W1-T7243's `createSweepFixAdmissionController` reads live occupancy and memory pressure
+    (container-sized since #10899) and writes `sweep.fix_capacity`. The light pass already wires it:
+    its scoped deps carry `claimFixAdmission` on `repairAdmissionSurface: "light"`, and a refused claim
+    already writes "live host capacity exhausted for this light pass". The blanket "every run is
+    waiting" precondition now duplicates that gate, and is far coarser than it.
+    PRECEDENT: #10690 and #10791 moved review admission onto the light pass under its own bounded
+    admission. This task does the same for the own-red fix lane under the fix-capacity admission.
+    OVERLAP WITH W1-T100 (same files): W1-T100 routes blocked_ci to the ci-log fix path. This task does not
+    change that path or its ladder. It changes only WHICH PASS may run it: the light pass, not just the full sweep.
+  design: |
+    1. ADMIT THE OWN-RED LANE ON THE ORDINARY LIGHT PASS. Give `lightPassActionable` an additive fifth
+       parameter (for example `ownRedFixAllowed`, default false). `blocked-fixable` is actionable when
+       `fixRungAllowed || requeueLaneOnly || ownRedFixAllowed`. Every existing 2-, 3- and 4-argument
+       caller keeps its exact answer, so the assertions in test/light-pass-ci-idle.test.ts and
+       test/a-ready-pr-is-armed-and-its-review-admitted-on-the-next-light-pass.test.ts stay green.
+    2. WIRE IT. `buildSweepLightHook`'s ordinary batch passes `!reviewOnly` for the new parameter. The
+       requeue-only batch (W1-T2430) is unchanged. A review-only pass (W1-T4053 freshness drain) still
+       stands the fix lane down as "deferred to full sweep (light pass)".
+    3. THE GATE IS THE EXISTING FIX-CAPACITY ADMISSION, NOT A NEW BOUND. `runSweep`'s `blocked-fixable`
+       case already claims `claimFixAdmission` before `dispatchFix`. A refused claim stands down with the
+       capacity reason, never "deferred to full sweep". Add no count, ceiling or timer.
+    4. THE WHOLE FIX CHAIN RUNS, UNCHANGED. Base reproduction, the progress judge, the strike schedule,
+       fix dedup and the fix-branch claim (W1-T2726) all live in `runSweep`'s `blocked-fixable` case.
+       They run on the light pass exactly as on the full pass. `detachFixWait: true` is already set on
+       the light pass, so a dispatched fix never holds the light tick (W1-T2379).
+    5. ONE FIX PER HEAD ACROSS OVERLAPPING PASSES. Two overlapping light passes, or a light pass beside
+       a full pass, must never dispatch two fix rounds for one head. If the existing fix-branch claim
+       does not already guarantee this, add a head-keyed reservation beside `lightPassReservedHeads` in
+       src/lib/sweep.ts.
+    6. `conflicted` keeps W1-T1211's gate. This task changes the own-red lane only.
+    Tests go in the new file test/an-own-red-head-is-fixed-on-the-light-pass.test.ts, with `test(` titles
+    exactly as in the proofs below. Drive `runSweepLightPass` with `lightPassActionable` built as the
+    ordinary hook builds it, an in-flight run that is WORKING (not awaiting external), and an injected
+    `claimFixAdmission` and `dispatchFix`. THE LATENCY ASSERTION IS THE DISPATCH DECISION, NOT A CLOCK:
+    a first-seen own-red head reaches `dispatchFix` on the FIRST light pass that sees it, with zero full
+    sweeps in between. The operator rejects numeric wall-clock thresholds.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/an-own-red-head-is-fixed-on-the-light-pass.test.ts"
+    - claim: "a first-seen own-red head reaches dispatchFix on the first light pass that sees it while another run is working, with no full sweep in between"
+      proof: 'grep: test("W1-T8086: a first-seen own-red head is dispatched on the light pass while another run is working" in test/an-own-red-head-is-fixed-on-the-light-pass.test.ts'
+    - claim: "a fix round the progress judge returned continue for is dispatched on the light pass rather than written NOT DISPATCHED deferred to full sweep (the PR #10866 shape)"
+      proof: 'grep: test("W1-T8086: a judged continue round is dispatched on the light pass, not deferred to the full sweep" in test/an-own-red-head-is-fixed-on-the-light-pass.test.ts'
+    - claim: "when the fix-capacity admission refuses, the own-red head is not dispatched and its stand-down names the capacity, never deferred to full sweep"
+      proof: 'grep: test("W1-T8086: an own-red head the fix capacity refuses names the capacity, not the full sweep" in test/an-own-red-head-is-fixed-on-the-light-pass.test.ts'
+    - claim: "a review-only light pass still stands the fix lane down, and conflicted keeps the W1-T1211 gate"
+      proof: 'grep: test("W1-T8086: a review-only pass and the conflicted lane keep their gates" in test/an-own-red-head-is-fixed-on-the-light-pass.test.ts'
+    - claim: "two overlapping passes dispatch at most one fix round for one head"
+      proof: 'grep: test("W1-T8086: overlapping passes dispatch one fix round for one head" in test/an-own-red-head-is-fixed-on-the-light-pass.test.ts'
+  falsifier: |
+    Leave `lightPassActionable`'s `blocked-fixable` arm on `fixRungAllowed || requeueLaneOnly`. With a
+    working in-flight run the light pass writes "deferred to full sweep (light pass)" and never calls
+    `dispatchFix`, so the first-seen and judged-continue tests fail. Admit the lane but skip
+    `claimFixAdmission`, and the capacity test fails. Admit it on a review-only pass too, and the gate
+    test fails. Drop the per-head guard where the claim does not cover it, and the overlap test fails.
+  note: |
+    EFFECT, measured after merge with the same flow re-measure (no numeric pass mark): the share of
+    own-red PR-minutes with no fix worker, and the "waiting for the next full sweep" part of red to
+    first remedy. Both should fall; a rise in `sweep.fix_capacity` refusals is the expected trade.

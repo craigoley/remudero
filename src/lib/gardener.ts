@@ -497,6 +497,45 @@ export async function freshMergedPlanLintAsync(root: string, paths: readonly str
   return lintMergedPlanChange({ base, changes });
 }
 
+export type GardenTaskIdMinter = ((branch: string) => string) & { async?: (branch: string) => Promise<string> };
+
+/** CLI preparation stays synchronous; the daemon awaits every reservation before any tree write. */
+export function prepareGardenTaskIds(ws: Pick<GardenCheckout, "branch">, count: number, mint: GardenTaskIdMinter, async = false): string[] | Promise<string[]> {
+  if (count === 0) return [];
+  if (!ws.branch) throw new Error("gardener: filing workspace has no branch for task-id reservation (no reservation branch)");
+  const branch = ws.branch;
+  if (!async) return Array.from({ length: count }, () => mint(branch));
+  return (async () => {
+    const ids: string[] = [];
+    for (let i = 0; i < count; i++) ids.push(await (mint.async ?? mint)(branch));
+    return ids;
+  })();
+}
+
+/** Rolling p95 with three times the observed duration; first use inherits the poll cadence. */
+export class GardenMintBudget {
+  private durations: number[] = [];
+  constructor(private readonly pollIntervalMs: () => number) {}
+  boundMs(): number {
+    const sorted = [...this.durations].sort((a, b) => a - b);
+    return sorted.length ? 3 * sorted[Math.ceil(sorted.length * 0.95) - 1]! : this.pollIntervalMs();
+  }
+  observe(elapsedMs: number): void {
+    if (elapsedMs > 0) this.durations = [...this.durations.slice(-31), elapsedMs];
+  }
+}
+
+export class GardenMintTimedOutError extends RmdError {
+  constructor(readonly elapsedMs: number, readonly boundMs: number) {
+    super("gardener", GENERIC_EXIT_CODE, `task-id reservation exceeded its ${boundMs} ms bound`, { elapsedMs, boundMs });
+    this.name = "GardenMintTimedOutError";
+  }
+}
+
+export function recordGardenMintTimeout(error: unknown, name: string, log: GardenerDeps["log"]): void {
+  if (error instanceof GardenMintTimedOutError) log("garden.mint_timed_out", { spec: name, elapsed_ms: error.elapsedMs, bound_ms: error.boundMs });
+}
+
 export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout> {
   /** Ledger prefix, state-file stem and off-switch prefix (upper-cased). */
   name: string;
@@ -519,8 +558,9 @@ export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W ex
   /** Every action any class could take now. Called after the class draws, with the same rng. */
   candidates: (inventory: I, rng: () => number) => A[];
   scorecard: (inventory: I, plan: GardenPlan<C, A>) => Record<string, unknown>;
-  /** Make the plan's changes in the workspace; return what to land, or undefined if nothing changed. */
-  apply: (workspace: W, plan: GardenPlan<C, A>, scorecard: Record<string, unknown>) => { paths: string[]; title: string; body: string } | undefined;
+  /** Reserve the plan's IDs before apply; actions that file nothing reserve nothing. */
+  prepare?(workspace: W, plan: GardenPlan<C, A>, async: boolean): readonly string[] | Promise<readonly string[]>;
+  apply: (workspace: W, plan: GardenPlan<C, A>, scorecard: Record<string, unknown>, heldIds?: readonly string[]) => { paths: string[]; title: string; body: string } | undefined;
   /** A garden that files plan shards names lint-plan's verdict on its landing here, normally
    *  machine-filing.ts's `machineShardLandingRefusal`. A refusal is a recorded filing failure, so a
    *  draft lint-plan would refuse never opens as a red PR (#10446, #10457). */
@@ -975,15 +1015,16 @@ export function runGardenAsync<C extends string, I, A extends GardenAction<C>, W
   spec: GardenSpec<C, I, A, W>,
   deps: GardenerDeps<W, PrState | Promise<PrState>>,
 ): Promise<GardenPassResult<C, A>> {
-  return runStepsAsync(gardenPassSteps(spec, { ...deps, mergedPlanLint: deps.mergedPlanLint ?? freshMergedPlanLintAsync }));
+  return runStepsAsync(gardenPassSteps(spec, { ...deps, mergedPlanLint: deps.mergedPlanLint ?? freshMergedPlanLintAsync }, true));
 }
 
 function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
   spec: GardenSpec<C, I, A, W>,
   deps: GardenerDeps<W, PrState | Promise<PrState>>,
+  async = false,
 ): Steps<GardenPassResult<C, A>> {
   try {
-    return yield* gardenPassBody(spec, deps);
+    return yield* gardenPassBody(spec, deps, async);
   } finally {
     notePendingWatch(spec.name, spec.classes, deps);
   }
@@ -992,6 +1033,7 @@ function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W exte
 function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
   spec: GardenSpec<C, I, A, W>,
   deps: GardenerDeps<W, PrState | Promise<PrState>>,
+  async: boolean,
 ): Steps<GardenPassResult<C, A>> {
   const statePath = gardenStatePath(deps.stateDir, spec.name);
   let state = readGardenState(statePath, spec.classes);
@@ -1095,7 +1137,8 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
       const ws = yield* step<W | GardenCheckoutAsync<W>>(() => deps.openWorkspace());
       try {
         // A spec's apply only writes the tree; landing and disposal stay with the pass, awaited or not.
-        const landing = spec.apply(ws as unknown as W, plan, scorecard);
+        const heldIds = yield* step(() => spec.prepare?.(ws as unknown as W, plan, async));
+        const landing = spec.apply(ws as unknown as W, plan, scorecard, heldIds);
         const digest = landing && landingDigest(ws.root, landing.paths);
         // 2026-10-10: the backlog lane re-drafted one refused change every ~20 min (17:17-18:09Z), each a new
         // worktree and a full plan-PR preflight. Bytes once refused are never landed again; a new draft is.
@@ -1124,6 +1167,11 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
         yield* step(() => ws.dispose());
       }
     } catch (e) {
+      recordGardenMintTimeout(e, spec.name, deps.log);
+      if (e instanceof GardenMintTimedOutError) {
+        deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: plan.acting, actions: plan.actions.length, pr_url: null, mint_timed_out: true });
+        return { ran: true, plan, scorecard };
+      }
       // A failed filing is not a pass: no fingerprint is recorded, so the same work is retried once
       // the doubling wait elapses, and a streak is raised to a person instead of going silent.
       const reason = String((e as Error)?.message ?? e);

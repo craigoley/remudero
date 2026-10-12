@@ -19,6 +19,9 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { approveRunBranch } from "../src/lib/inbox.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
+/** ghPrMergeSquash requires the closing-reference guard; these tests are about the merge call itself. */
+const CLEAN_GUARD = () => ({ state: "clean" as const, defused: [] });
+
 // ── WHY THIS FILE EXISTS ─────────────────────────────────────────────────────────────
 // PR #954's guard call sites inside `triageCommand` and `planCommand` sat after a
 // `spawnWorker` call in functions that took no deps, so no offline test could reach them
@@ -1174,7 +1177,7 @@ test("arm merge: the head ref is absent after a merge with no local delete", () 
     );
     process.env.PATH = `${shimDir}:${savedPath}`;
 
-    withLiveWritesAllowed(() => ghPrMergeSquash("https://github.com/acme/sandboxrepo/pull/1052"));
+    withLiveWritesAllowed(() => ghPrMergeSquash("https://github.com/acme/sandboxrepo/pull/1052", CLEAN_GUARD));
 
     const refs = execFileSync("git", ["-C", bare, "for-each-ref", "--format=%(refname:short)"], { encoding: "utf8" });
     assert.equal(
@@ -1331,7 +1334,7 @@ test("arm merge: both immediate call sites drop the local branch delete", () => 
     process.env.PATH = `${shimDir}:${savedPath}`;
 
     withLiveWritesAllowed(() => realArmDeps().mergeDirect("https://github.com/acme/sandboxrepo/pull/1055"));
-    withLiveWritesAllowed(() => ghPrMergeSquash("https://github.com/acme/sandboxrepo/pull/1056"));
+    withLiveWritesAllowed(() => ghPrMergeSquash("https://github.com/acme/sandboxrepo/pull/1056", CLEAN_GUARD));
 
     const lines = readFileSync(logPath, "utf8").trim().split("\n");
     assert.equal(lines.length, 2, `expected exactly two gh invocations, got ${JSON.stringify(lines)}`);

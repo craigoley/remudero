@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-11: file the fix-lane follow-ups from the PR #10829 / #10852 ci-shard (7/8)|(8/8) timeouts after the W1-T6085 pure-test pool (#10834); slot-dir class named by the coordinating session after hand PR #10883"
   plan_refs: [W1-T6085, W1-T4805, W1-T5624]
   files: [src/lib/test-slot.ts, test/setup/tmp-hygiene.ts, test/a-pooled-test-file-gets-its-own-slot-dir-and-proves-containment.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

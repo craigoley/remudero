@@ -10,6 +10,7 @@
 //   2. {@link classifyProcessTree} — find the worker's poll loop and what it awaits; progressing work is left alone.
 //   3. a JUDGE (an LLM, {@link productionQuietWorkerJudge}) picks nudge | kill_poll_child | end_round | wait.
 //   4. {@link runQuietWorkerWatchdog} — the rung: ledgers every decision as `worker.quiet_judged`.
+// It also ends a round for a pending container recycle (`worker.recycle_yield`), quiet or not.
 // The W1-T943 escalation and the W1-T1045 clock bound stay the backstops, unchanged: a judge that cannot answer takes no
 // action and says so.
 
@@ -27,6 +28,8 @@ import type { SpawnWorkerArgs, WorkerResult, WorkerStreamEvent, WorkerStreamObse
 export const QUIET_BASIS_LEDGER_STEP = "worker.quiet_bound";
 /** One row per quiet-worker DECISION, including "left alone" and "judge unavailable". */
 export const QUIET_JUDGED_LEDGER_STEP = "worker.quiet_judged";
+/** One row when a pending container recycle ends the round (or fails to). */
+export const RECYCLE_YIELD_LEDGER_STEP = "worker.recycle_yield";
 
 /** The quantile of a provider's observed quiet-gap episodes the bound is read at. A statistic over DATA, not a time
  * threshold: nearest-rank, so the bound is always a gap that really happened. */
@@ -423,8 +426,8 @@ export function productionQuietWorkerJudge(opts: {
  * `handed_off` verdict instead of a generic `run.error`. */
 export class QuietRoundEndedError extends RmdError {
   readonly reasonClass = "quiet_round_ended" as const;
-  constructor(readonly detail: { checkpointSha?: string; reason: string }) {
-    super("quiet_round_ended", 1, `worker round ended by the quiet-worker watchdog: ${detail.reason}`, detail);
+  constructor(readonly detail: { checkpointSha?: string; reason: string; trigger?: "recycle"; undeclaredPaths?: string[] }) {
+    super("quiet_round_ended", 1, `worker round ended ${detail.trigger === "recycle" ? "for a pending container recycle" : "by the quiet-worker watchdog"}: ${detail.reason}`, detail);
     this.name = "QuietRoundEndedError";
   }
 }
@@ -459,7 +462,9 @@ export interface QuietWatchdogOptions {
   /** Deliver `message` to the live session; `"unsupported"` when the session cannot take streamed input. */
   nudge?: (message: string) => "delivered" | "unsupported";
   /** Checkpoint the work and stop the worker. Omitted means `end_round` degrades to `wait`. */
-  endRound?: (reason: string) => Promise<EndRoundResult>;
+  endRound?: (reason: string, trigger?: "recycle") => Promise<EndRoundResult>;
+  /** The container-recycle PAUSE detail while one is pending, else `undefined`. */
+  recyclePending?: () => string | undefined;
   /** Polling cadence for {@link QuietWatchdogHandle.start}; ticks are cheap until a bound is crossed. */
   pollMs?: number;
 }
@@ -488,6 +493,7 @@ export function runQuietWorkerWatchdog(opts: QuietWatchdogOptions): QuietWatchdo
   let prevSample: TreeSample | undefined;
   let busy = false;
   let finished = false;
+  let recycleTried = false;
 
   const observer: WorkerStreamObserver = (event: WorkerStreamEvent) => {
     lastActivityMs = event.tsMs;
@@ -503,10 +509,33 @@ export function runQuietWorkerWatchdog(opts: QuietWatchdogOptions): QuietWatchdo
 
   const record = (extra: Record<string, unknown>): void => opts.ledger(QUIET_JUDGED_LEDGER_STEP, extra);
 
+  // 2026-10-11: a recycle PAUSE held every lane idle 52 min on one lane inside its first worker, which has no boundary
+  // to yield at, then refused. A pending recycle ends the round on the end_round checkpoint path: work is pushed and
+  // resumes after the swap. One attempt per spawn; a refused checkpoint leaves the boundary yields to catch the run.
+  const yieldToRecycle = async (): Promise<boolean> => {
+    if (recycleTried || !opts.endRound || !opts.recyclePending) return false;
+    const recycle = opts.recyclePending();
+    if (!recycle) return false;
+    recycleTried = true;
+    let result: EndRoundResult;
+    try {
+      result = await opts.endRound(`recycle pending: ${recycle}`, "recycle");
+    } catch (error) {
+      result = { ended: false, reason: String((error as Error)?.message ?? error) };
+    }
+    finished = result.ended;
+    opts.ledger(RECYCLE_YIELD_LEDGER_STEP, {
+      decision: result.ended ? "acted" : "action_failed", action: "end_round", recycle,
+      checkpoint_sha: result.checkpointSha ?? null, ...(result.reason ? { detail: result.reason } : {}),
+    });
+    return result.ended;
+  };
+
   const tick = async (): Promise<void> => {
     if (busy || finished) return;
     busy = true;
     try {
+      if (await yieldToRecycle()) return;
       const nowMs = now();
       const quietForMs = nowMs - lastActivityMs - opts.quietFloorMs;
       if (quietForMs <= 0) return;

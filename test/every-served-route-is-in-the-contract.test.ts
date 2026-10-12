@@ -68,9 +68,10 @@ function servedPaths(): string[] {
     const instanceControl = routes.filter((path) => path === "/v1/i/site/control/assistant-action")
       .map((path) => path.replace("/site/", "/{instance}/"));
     assert.equal(instanceControl.length, 1, "the dynamic assistant control must be mounted for a registered instance");
-    const instanceControlReads = routes.filter((path) => path === "/v1/i/site/control/assistant-action/status" || path === "/v1/i/site/control/assistant-action/receipt")
+    const instanceControlReads = routes.filter((path) => path === "/v1/i/site/control/assistant-action/status" || path === "/v1/i/site/control/assistant-action/receipt"
+      || path === "/v1/i/site/control/assistant-action/discovery")
       .map((path) => path.replace("/site/", "/{instance}/"));
-    assert.equal(instanceControlReads.length, 2, "both dynamic assistant control reads must be mounted for a registered instance");
+    assert.equal(instanceControlReads.length, 3, "every dynamic assistant control read, discovery included, must be mounted for a registered instance");
     const instanceAnswers = routes.filter((path) => path === "/v1/i/site/manual/approve" || path === "/v1/i/site/escalation/mark-handled")
       .map((path) => path.replace("/site/", "/{instance}/"));
     assert.equal(instanceAnswers.length, 2, "both answer routes now names for an instance's escalations must be mounted for a registered instance");

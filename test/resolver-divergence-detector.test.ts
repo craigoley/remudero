@@ -126,8 +126,8 @@ test("a trailer that resolves nothing (unloadable plan) is DISTINGUISHABLE from 
   // fixtures (its divergence shape is unchanged), while `reviewCommand`'s live wiring reads the
   // plan at the PR's own head sha instead of the container's checked-out tree.
   const runTaskSrc = readSrc("run-task.ts");
-  const ifTaskIdBlock = /if\s*\(taskId\)\s*{\s*const resolved = resolvePlanCriteriaAtHead\(body, [A-Za-z][A-Za-z0-9]*, /;
-  assert.match(runTaskSrc, ifTaskIdBlock, "resolvePlanCriteriaAtHead must be gated on a resolved taskId, never called for an untrailered body");
+  const ifTaskIdBlock = /if\s*\(taskId\)\s*{\s*const resolved = await resolvePlanCriteriaAtHeadAsync\(body, [A-Za-z][A-Za-z0-9]*, /;
+  assert.match(runTaskSrc, ifTaskIdBlock, "resolvePlanCriteriaAtHeadAsync must be gated on a resolved taskId, never called for an untrailered body");
 });
 
 // ── ACCEPTANCE 4: AN UNTRAILERED BODY IS UNCHANGED ──────────────────────────────────────────────
@@ -218,11 +218,13 @@ test("resolvePlanCriteriaForReview is wired at exactly ZERO call sites now — t
   // judged on. A tier with its own parser would be worse than no tier. So the count rises by one
   // and each site is still named below: a FOURTH is still refused, and so is moving any of the
   // three somewhere new.
-  const atHeadCallSites = runTaskSrc.split("resolvePlanCriteriaAtHead(").length - 1;
+  // W1-T7743: the daemon-side paths resolve through the AWAITED form, so the fix-rung helper has a sync and an async
+  // call and the count is four: review command (async), fix-rung helper (sync + async), preflight proofs (sync).
+  const atHeadCallSites = runTaskSrc.split(/resolvePlanCriteriaAtHead(?:Async)?\(/).length - 1;
   assert.equal(
     atHeadCallSites,
-    3,
-    "exactly the review-command, fix-rung-head-contract and preflight-proofs resolver call sites are permitted",
+    4,
+    "exactly the review-command, fix-rung-head-contract (sync and awaited) and preflight-proofs resolver call sites are permitted",
   );
   assert.match(
     runTaskSrc,

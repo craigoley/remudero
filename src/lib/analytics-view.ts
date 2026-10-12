@@ -28,7 +28,7 @@ import {
   type ConsoleV1MetricKey,
   type ConsoleV1Projection,
 } from "./analytics-route.js";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { cacheHitRatio, type CacheHitTokens } from "./digest.js";
 import { readSourceSnapshotBody, sourceSnapshotStates, type ReadModelDb } from "./read-model-db.js";
 import type { ViewDefinition, ViewSource } from "./views.js";
@@ -40,6 +40,74 @@ export const ANALYTICS_DETAILS_VERSION = "analytics-details-v1";
 export const ANALYTICS_DETAILS_MAX_BYTES = 256 * 1024;
 /** BACKSTOP: leave 512 KiB for metric, source and coverage metadata in a multi-repository response. */
 export const ANALYTICS_DETAILS_TOTAL_BYTES = 1536 * 1024;
+
+export const HOST_MODEL_APPROVALS_VERSION = "host-model-approvals-v1";
+/** BACKSTOP: a malformed loaded configuration cannot expand the cached response without limit. */
+export const HOST_MODEL_APPROVALS_MAX_ROWS = 100;
+/** BACKSTOP: reserve the rest of the existing Analytics transport budget for repository measurements. */
+export const HOST_MODEL_APPROVALS_MAX_BYTES = 64 * 1024;
+type ApprovalRecord = { model: string; approvedBy: string; approvedAt: string; expiresAt?: string };
+export type HostModelApprovalConfig = { capturedAt: string | null; approvals: unknown; reason?: "invalid_source" | "over_budget" };
+export type HostModelApprovalEvidence = {
+  version: typeof HOST_MODEL_APPROVALS_VERSION;
+  scope: "serving-host";
+  sourceKind: "loaded-config";
+  capturedAt: string | null;
+} & ({ state: "reported"; approvals: ApprovalRecord[] }
+  | { state: "unavailable"; reason: "invalid_source" | "over_budget" | "clock_skew" });
+
+function approvalTimestamp(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > 40) return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.exec(value);
+  if (!match || Number(match[2]) < 1 || Number(match[2]) > 12 || Number(match[3]) < 1 ||
+    Number(match[3]) > fixedClock(Date.UTC(Number(match[1]), Number(match[2]), 0)).date().getUTCDate() ||
+    Number(match[4]) > 23 || Number(match[5]) > 59 || Number(match[6]) > 59 || !Number.isFinite(Date.parse(value))) return null;
+  return fixedClock(Date.parse(value)).iso();
+}
+
+/** Only these loaded configuration fields may cross into the worker. No file read or permission change. */
+export function captureHostModelApprovals(input: HostModelApprovalConfig): HostModelApprovalConfig {
+  const capturedAt = approvalTimestamp(input.capturedAt);
+  const refused = (reason: "invalid_source" | "over_budget"): HostModelApprovalConfig => ({ capturedAt, approvals: null, reason });
+  if (input.reason === "over_budget" || input.reason === "invalid_source") return refused(input.reason);
+  if (!capturedAt || !Array.isArray(input.approvals)) return refused("invalid_source");
+  if (input.approvals.length > HOST_MODEL_APPROVALS_MAX_ROWS) return refused("over_budget");
+  const approvals: ApprovalRecord[] = [];
+  const identities = new Set<string>();
+  const text = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0 && value.length <= 160 && !/[\u0000-\u001f\u007f]/.test(value);
+  try {
+    for (const value of input.approvals) {
+      if (!object(value) || !text(value.model) || !text(value.approvedBy)) return refused("invalid_source");
+      const approvedAt = approvalTimestamp(value.approvedAt);
+      const expiresAt = value.expiresAt === undefined ? undefined : approvalTimestamp(value.expiresAt);
+      if (!approvedAt || Date.parse(approvedAt) > Date.parse(capturedAt) || expiresAt === null) return refused("invalid_source");
+      const record = { model: value.model.trim(), approvedBy: value.approvedBy.trim(), approvedAt, ...(expiresAt ? { expiresAt } : {}) };
+      const identity = JSON.stringify([record.model.toLowerCase(), record.approvedBy, approvedAt]);
+      if (identities.has(identity)) return refused("invalid_source");
+      identities.add(identity);
+      approvals.push(record);
+    }
+    return Buffer.byteLength(JSON.stringify({ version: HOST_MODEL_APPROVALS_VERSION, scope: "serving-host",
+      sourceKind: "loaded-config", capturedAt, state: "reported", approvals })) > HOST_MODEL_APPROVALS_MAX_BYTES
+      ? refused("over_budget") : { capturedAt, approvals };
+  } catch {
+    const reason = "invalid_source" as const;
+    return refused(reason);
+  }
+}
+
+function hostModelApprovalEvidence(input: HostModelApprovalConfig, now: number): HostModelApprovalEvidence {
+  const captured = captureHostModelApprovals(input);
+  const base = { version: HOST_MODEL_APPROVALS_VERSION, scope: "serving-host" as const, sourceKind: "loaded-config" as const,
+    capturedAt: captured.capturedAt } as const;
+  if (captured.reason) return { ...base, state: "unavailable", reason: captured.reason };
+  if (!Number.isFinite(now) || Date.parse(captured.capturedAt!) > now) return { ...base, state: "unavailable", reason: "clock_skew" };
+  return { ...base, state: "reported", approvals: captured.approvals as ApprovalRecord[] };
+}
+
+function withHostModelApprovals(result: { data: AnalyticsViewData; sources: ViewSource[] }, input: HostModelApprovalConfig | undefined, now: number) {
+  return input === undefined ? result : { ...result, data: { ...result.data, modelApprovals: hostModelApprovalEvidence(input, now) } };
+}
 
 /** Transported projections are opaque: consumers still validate their complete metric schemas. */
 type AnalyticsStoredSignals = { version: typeof CONSOLE_SIGNALS_PROJECTION_VERSION; timeSeries: unknown[]; spend: Record<string, unknown>; routingTelemetry: Record<string, unknown> };
@@ -130,6 +198,8 @@ export interface AnalyticsMergedMetric extends ConsoleV1Metric {
 }
 
 export interface AnalyticsViewData {
+  /** Loaded serving-host configuration, not per-repository authority or proof of worker adoption. */
+  modelApprovals?: HostModelApprovalEvidence;
   /** Every counted instance's console-v1 metrics merged, in catalog order. */
   overview: AnalyticsMergedMetric[];
   /** How many instances the overview counts, of how many serve projects, and which have no snapshot yet. */
@@ -254,20 +324,23 @@ export interface AnalyticsScope {
 }
 
 /** The merge over serve's own analytics caches: the shadow's legacy side, and the answer while the view is off. */
-export function analyticsLegacyView(opts: { scopes: () => readonly AnalyticsScope[]; clock?: Clock }): ViewDefinition<AnalyticsViewData> {
+export function analyticsLegacyView(opts: { scopes: () => readonly AnalyticsScope[]; clock?: Clock; modelApprovalConfig?: HostModelApprovalConfig }): ViewDefinition<AnalyticsViewData> {
   return {
     name: ANALYTICS_VIEW_NAME,
     version: ANALYTICS_VIEW_VERSION,
     get shadowSources() {
       return pairedSources(opts.scopes().map((scope) => scope.instanceId));
     },
-    compute: () => mergeAnalytics(opts.scopes().map((scope) => {
+    compute: () => {
+      const now = (opts.clock ?? systemClock).now();
+      return withHostModelApprovals(mergeAnalytics(opts.scopes().map((scope) => {
       const snapshot = scope.analytics();
       const bodies = analyticsSourceBodies(snapshot, scope.repository);
       return snapshot.asOf === null
         ? { instanceId: scope.instanceId }
         : { instanceId: scope.instanceId, snapshot: { asOf: snapshot.asOf, console: bodies[0]!.body as AnalyticsConsoleSource, details: analyticsDetails(snapshot.asOf, bodies[1]!.body, bodies[2]!.body) } };
-    }), (opts.clock ?? systemClock).now()),
+      }), now), opts.modelApprovalConfig, now);
+    },
   };
 }
 
@@ -275,7 +348,7 @@ export function analyticsLegacyView(opts: { scopes: () => readonly AnalyticsScop
  * `analytics` materialized by the read-model worker from the home store's `source_snapshot` rows, one body for
  * every instance the worker projects. A row's body is parsed again only when its as-of moved.
  */
-export function createAnalyticsView(): {
+export function createAnalyticsView(opts: { modelApprovalConfig?: HostModelApprovalConfig } = {}): {
   name: string;
   version: number;
   snapshotSourced: true;
@@ -323,7 +396,7 @@ export function createAnalyticsView(): {
           ...(failed?.error ? { failure: { error: failed.error, atMs: Number(failed.errorMs) } } : {}),
         };
       });
-      return [{ key: "", ...mergeAnalytics(inputs, now) }];
+      return [{ key: "", ...withHostModelApprovals(mergeAnalytics(inputs, now), opts.modelApprovalConfig, now) }];
     },
   };
 }

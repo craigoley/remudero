@@ -61,7 +61,10 @@ test("a handoff waits out a spacing that grows with recent handoffs and heals on
     sleep: (ms) => new Promise<void>((resolve) => void waits.push({ ms, wake: () => ((now += ms), resolve()) })),
     freeMemory: () => undefined,
     rss: () => undefined,
-    peakRss: () => undefined,
+    // W1-T8311: an unknown peak or an unread host now holds a handoff; this test is about spacing alone.
+    peakRss: () => 1_000,
+    hostPressure: async () => ({ atMs: now, memAvailableBytes: 2 ** 40, swapInPagesPerSec: 0, psiSomeAvg10: 0, psiFullAvg10: 0, unread: [] }),
+    upgradeThresholds: () => ({ hostReserveBytes: 0, swapInPagesPerSecMax: 256, psiSomeAvg10Max: 10, psiFullAvg10Max: 2, staleMs: 600_000 }),
     socketPathFor: (n) => `/sock/${n}`,
     spacingBaseMs: 15 * MIN,
     spacingHalfLifeMs: 60 * MIN,

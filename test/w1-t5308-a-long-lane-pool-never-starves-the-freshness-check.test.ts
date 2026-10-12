@@ -47,6 +47,7 @@ function harness(externalWait = false, lightPass = false, max?: number, backgrou
   let pause = false;
   let complete = false;
   let nowMs = Date.now();
+  const boundaries = new Map<string, () => unknown>();
   const run = runDaemon(loadPlan(path), {
     refreshMerged: () => () => false,
     checkStop: () => stop ? "fixture cleanup" : undefined,
@@ -63,8 +64,9 @@ function harness(externalWait = false, lightPass = false, max?: number, backgrou
     ...(backgroundSweep ? { sweep: () => sweep.promise } : {}),
     runInstall: () => logs.push({ step: "install" }),
     log: (step, extra) => logs.push({ step, extra }),
-    runOne: async (id) => {
+    runOne: async (id, options) => {
       started.push(id);
+      if (options) boundaries.set(id, options.restartAtWorkerBoundary);
       if (started.length === 2) ready.resolve();
       await gates.get(id)?.promise;
       if (externalWait) {
@@ -93,6 +95,8 @@ function harness(externalWait = false, lightPass = false, max?: number, backgrou
     advance: (value: DaemonFreshness = ADVANCE) => { advance = value; },
     pause: () => { pause = true; },
     release: (id: string) => gates.get(id)?.resolve(),
+    /** W1-T7806: the run reaches a worker boundary and reads the daemon's restart latch. */
+    boundary: (id: string) => boundaries.get(id)?.(),
     releaseSweep: () => sweep.resolve(),
     tick: async (elapsedMs = 0) => {
       nowMs += elapsedMs;
@@ -159,6 +163,8 @@ test("W1-T5308: in-flight runs are asked to yield at their external-wait boundar
     await releaseQuietWindow(h);
     assert.ok(h.logs.some((row) => row.step === "daemon.freshness_decision" && row.extra?.action === "restart"));
     assert.deepEqual(h.finished, [], "live workers remain live until they enter their external wait");
+    // W1-T7806: A was in flight at the latch, so it holds refill open until it reaches a boundary (or settles).
+    assert.ok(h.boundary("A"), "A reaches a worker boundary and reads the latched restart");
     h.release("B");
     await flush();
     assert.deepEqual(h.finished, ["B"], "B yields on its own while A keeps working");

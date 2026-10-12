@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync, sign } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -498,6 +498,32 @@ test("POST /v1/control/assistant-action binds a verified operator to the fleet r
     assert.ok(existsSync(pauseFilePath(h.fleetRoot)));
     assert.ok(!existsSync(pauseFilePath(h.questionsRoot)));
     assert.equal(ledgerSteps(h.ledgerPath).filter((row) => row.step === "panel.pause_requested" && row.assistant_action_id === body.actionId).length, 1);
+  }, true);
+});
+
+test("GET /v1/control/assistant-action/discovery is served over the fleet root's claim store, privately and read-only", async () => {
+  await withProductionServer(async (h) => {
+    const discover = (session: boolean) => fetch(`${h.base}/v1/control/assistant-action/discovery`, {
+      headers: { authorization: `Bearer ${READ_TOKEN}`, ...(session ? { [OPERATOR_SESSION_HEADER]: h.operatorSession! } : {}) },
+    });
+    assert.equal((await discover(false)).status, 403, "a read grant without a verified operator discovers nothing");
+    const body = { actionId: "route-wiring-discovery-01", instance: "core", action: "pause" };
+    const issued = await fetch(`${h.base}/v1/control/assistant-action`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json", [OPERATOR_SESSION_HEADER]: h.operatorSession! },
+      body: JSON.stringify(body),
+    });
+    assert.equal(issued.status, 200);
+    // Lose the receipt, as an interruption between effect and receipt would.
+    rmSync(join(h.fleetRoot, "state", "assistant-control-actions", `${createHash("sha256").update(body.actionId).digest("hex")}.receipt.json`));
+    const found = await discover(true);
+    assert.equal(found.status, 200);
+    assert.equal(found.headers.get("cache-control"), "private, no-store");
+    const view = await found.json() as { completeness: string; pending: Array<{ actionId: string; status: string }> };
+    assert.equal(view.completeness, "complete");
+    assert.deepEqual(view.pending.map((entry) => [entry.actionId, entry.status]), [[body.actionId, "claimed_unknown"]]);
+    assert.ok(!existsSync(join(h.questionsRoot, "state", "assistant-control-actions")), "the served route reads the fleet root's store only");
+    assert.equal(ledgerSteps(h.ledgerPath).filter((row) => row.step === "panel.pause_requested").length, 1, "discovery dispatched nothing");
   }, true);
 });
 
