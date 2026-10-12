@@ -18,8 +18,25 @@ attachments: []
 origin: cli
 status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/10996
+summary:
+  headline: Daemon lane is missing servedModel on most worker calls; fix or document why.
+  what_happened: Only 17 of 38 daemon worker calls (44.7%) in the last 7 days
+    recorded the servedModel field, well below the 90% floor. The gap has
+    persisted since 2026-09-28 and does not block any PR or work.
+  decision: Choose whether to restore servedModel recording in the daemon lane's
+    ledger write path, or record a documented reason the daemon lane
+    legitimately lacks it.
+  options:
+    - label: Restore the field
+      consequence: The daemon ledger write site will record servedModel, and coverage
+        should climb toward the 90% floor.
+    - label: Record a documented exemption
+      consequence: The daemon lane is exempted from servedModel coverage with a stated
+        reason, and this alert stops firing.
+    - label: Defer for now
+      consequence: The gap stays open and the gardener keeps updating this entry in
+        place; no work is blocked.
 expansion: null
 submission_key: null
 thread_id: null
