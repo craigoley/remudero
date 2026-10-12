@@ -1,7 +1,7 @@
 - id: W1-T8722
   title: "A LANE-OPENED PR BODY WITH NO ACCEPTANCE BLOCK IS A NAMED DEFECT — acceptanceAuthorTimeCheck returns ok at its Remudero-Task trailer arm before it reads the body, every alert-fix and main-repair body carries a synthetic trailer, and W1-T8625's inert-proof count reads 0 for a body with no block, so the lane ledgers nothing while the required CI gate refuses it"
   repo: remudero
-  depends_on: [W1-T8625, W1-T8572]  # W1-T8625 adds inertAcceptanceProofs (src/lib/proof-grammar.ts) and the alert-fix body read this reuses; W1-T8572 adds the main-repair no-test-file body check this extends. All three edit dispatchAlertFixRun or dispatchMainRepairFixRun in src/run-task.ts
+  depends_on: [W1-T8625, W1-T8572]  # W1-T8625 (merged in #11140, dc0b55325) adds inertAcceptanceProofs (src/lib/proof-grammar.ts) and the alert-fix body read this reuses; W1-T8572 adds the main-repair no-test-file body check this extends. All three edit dispatchAlertFixRun or dispatchMainRepairFixRun in src/run-task.ts
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -18,8 +18,9 @@
   priority: 2
   attempts: 0
   rationale: |
-    READ on origin/main e4fe69049 and on #11140's head aa1a0d944 (run-W1-T8625-1791827884000, W1-T8625, open).
-    Symbols, not lines.
+    READ on origin/main e4fe69049 and on #11140's head aa1a0d944 (run-W1-T8625-1791827884000, W1-T8625). #11140 then
+    merged as dc0b55325. Its src/lib/proof-grammar.ts and src/lib/review.ts are byte-identical to aa1a0d944, and its
+    `checkAlertFixAcceptance` still calls `acceptanceAuthorTimeCheck` with no options. Symbols, not lines.
     THE TRAILER ARM. `acceptanceAuthorTimeCheck` (src/lib/review.ts, W1-T952) returns `ok: true` ("criteria resolve
     from plan/tasks.yaml") as soon as `extractTaskTrailerId` finds a trailer, unless the caller passes a
     `trailerResolves` that answers false (W1-T2297). `checkAlertFixAcceptance` (src/run-task.ts) passes no options.
