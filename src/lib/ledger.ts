@@ -659,6 +659,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "main.health.observed",
   "sweep.base_red.stood_down",
   "sweep.base_red.refresh",
+  "refresh.clearance", // refusedRefreshClearancesFromLedger memoizes refusal evidence across passes.
   "sweep.ci_timeout_refresh.attempted",
   "sweep.ci_timeout_refresh.outcome",
   "sweep.ci_timeout_refresh.escalated",
