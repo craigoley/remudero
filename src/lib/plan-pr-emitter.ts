@@ -541,13 +541,6 @@ const taskIdReading = (r: PlanPrPreflightReading): PlanPrPreflightReading =>
 const shardCensusReading = (r: PlanPrPreflightReading): PlanPrPreflightReading =>
   r.status === 1 && !/^# fail [1-9]/m.test(r.output) ? { ...r, status: null } : r; // no `# fail N`: a load error, not a result
 
-// ── THE SHARD CENSUS IS JUDGED BY ITS PER-FILE SUMMARY (W1-T8380, after #10894/#10918/#11000) ───────────────────────
-// A census child that exits 0 part-way (a real `process.exit(0)`, a dead worker) loses the rest of its tests and still
-// exits 0, which passed the filing. The run now carries scripts/pure-test-pool.mjs's marker and tally reporter, and an
-// exit 0 whose file never reached its own summary (no tally at all included) is a red reading led by the judge's line,
-// `UNREPORTED FILE` included. A nonzero or killed run keeps {@link shardCensusReading}'s reading.
-
-/** The slice of scripts/pure-test-pool.mjs (the test judge) the census uses. A plain .mjs, so no types. */
 interface JudgedRun {
   args: string[];
   env: Record<string, string>;
@@ -560,7 +553,6 @@ interface CensusJudge {
   judgeRun(files: readonly string[], opts: { status: number; pool: boolean; root: string; tallyText: string; markerText: string }): { complete: boolean; status: number };
   describeJudgedRun(role: string, verdict: { complete: boolean }, opts: { prefix: string }): string;
 }
-// Loaded from the orchestrator's own checkout when a census runs, never at import (sandboxes copy only src/).
 const loadCensusJudge = (): CensusJudge => createRequire(import.meta.url)("../../scripts/pure-test-pool.mjs") as CensusJudge;
 
 function judgedCensusReading(cwd: string, judged: JudgedRun, r: PlanPrPreflightReading): PlanPrPreflightReading {

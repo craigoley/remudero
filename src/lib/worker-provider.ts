@@ -3707,7 +3707,6 @@ export function openWeightCheckSandboxArgv(
 /** The only production route for `RunCheck`: no fallback can execute an unchecked process. */
 const execFileAsync = promisify(execFileChild);
 
-/** The slice of scripts/pure-test-pool.mjs (the test judge) a `node --test` check uses. A plain .mjs, so no types. */
 interface CheckJudge {
   inlineJudgedArgs(): string[];
   judgedNodeTestArgs(args: readonly string[], judgedArgs: readonly string[]): string[];
@@ -3716,18 +3715,12 @@ interface CheckJudge {
   judgeRun(files: readonly string[], opts: { status: number; pool: boolean; root: string; tallyText: string }): { complete: boolean; status: number };
   describeJudgedRun(role: string, verdict: { complete: boolean }, opts: { prefix: string }): string;
 }
-// From the ORCHESTRATOR's own checkout (this module's), never the worktree the check runs in; loaded when a check runs.
+// The judge comes from the ORCHESTRATOR's checkout (this module's), never the worktree the check runs in.
 const loadCheckJudge = (): CheckJudge => createRequire(import.meta.url)("../../scripts/pure-test-pool.mjs") as CheckJudge;
 
-/**
- * W1-T8380: A `unit_test` RUN IS JUDGED BY ITS PER-FILE SUMMARIES, as #10894/#10918/#11000 judge CI's, pre-push's and the
- * review's. A suite whose own child exits 0 part-way (a real `process.exit(0)`) loses the rest of its tests and node
- * still exits 0 — which told the lane its tests were green. The sandboxed child sees only the worktree, so the judge's
- * tally reporter rides the argv as a `data:` URL and writes one line to stdout, taken back off here. An exit 0 whose
- * files did not all reach their own summary (no tally line included) is thrown as a failed check — a nonzero `status`
- * and the judge's `UNREPORTED FILE` line in its output — exactly the shape a red run rejects with. A nonzero exit keeps
- * its own reading; every other check is unjudged.
- */
+/** W1-T8380: a `node --test` check whose exit 0 left a file short of its own summary (a real `process.exit(0)`) is thrown
+ *  as a red run: nonzero `status`, the judge's line in its output. The sandboxed child sees only the worktree, so the
+ *  judge's tally reporter rides the argv as a `data:` URL and its stdout line is taken back off. */
 export async function runOpenWeightCheck(input: OpenWeightCheckInput): Promise<string> {
   const judge = input.argv.includes("--test") ? loadCheckJudge() : undefined;
   const argv = judge ? judge.judgedNodeTestArgs(input.argv, judge.inlineJudgedArgs()) : input.argv;
