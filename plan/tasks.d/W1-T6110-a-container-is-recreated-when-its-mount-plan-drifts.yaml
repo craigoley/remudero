@@ -1,0 +1,47 @@
+- id: W1-T6110
+  title: "A CONTAINER IS RECREATED WHEN ITS MOUNT PLAN DRIFTS — the deploy tick recycles on image drift and on resource-policy drift (W1-T4267) but never compares the scratch-mount binds a container should have with the ones it has, so a new bind (PR #9761's test-slot directory, or any later one) lands only at the next unrelated recreate; and the launcher sources an installed rmd-scratch-mounts copy that only `install-host-units.sh --install` refreshes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — a running container whose binds differ from the live mount plan is recycled the way policy drift is
+  band_meaning: span
+  origin: "operator session 2026-10-06: follow-up found while building W1-T6090 (PR #9761)"
+  plan_refs: [W1-T4267, W1-T6090, W1-T4102, W1-T3245]
+  files: [src/lib/deployer.ts, deploy/install-host-units.sh, test/a-container-is-recreated-when-its-mount-plan-drifts.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 on origin/main 23c0e7dfe. src/lib/deployer.ts `readResourcePolicyDrift` sources
+    deploy/resource-policy.sh from the install path, compares it with `docker inspect <c> --format
+    {{json .HostConfig}}` through `resourcePolicyDriftFrom`, and the `imageDriftOnly` decision recycles on
+    a non-empty drift (with the STOP and one-hour backoff guards); nothing compares binds. The bind plan
+    is deploy/scratch-mounts.sh `scratch_plan <state_dir> <container>` (SCRATCH_ARGS/SCRATCH_BINDS).
+    recycle-container.sh and serve-container.sh source it from the checkout, but the rendered launcher in
+    deploy/install-host-units.sh sources `${BIN_DIR}/rmd-scratch-mounts`, a copy written by
+    `render_scratch_lib` only at install. PR #9761 (W1-T6090, open) adds a test-slot bind in
+    scratch-mounts.sh; its own note says it takes effect at the next recycle, and no tick causes one.
+  design: |
+    (1) deployer.ts gains a mount-plan reading beside the policy one: source the install path's
+    deploy/scratch-mounts.sh, run `scratch_plan` for the container, and compare each planned bind
+    (source:destination) with `docker inspect <c> --format {{json .Mounts}}`. A planned bind missing from
+    the container, or present at a different source, is drift; mounts the plan does not name are ignored
+    (other launch paths add their own). Any failure (no file, scratch off, unreadable inspect) is UNKNOWN,
+    never drift: the same no-storm rule as `readResourcePolicyDrift`. (2) The `imageDriftOnly` decision
+    recycles on mount drift exactly as it does on policy drift, under the same STOP and backoff guards,
+    and names the drifted binds in its reason. (3) The rendered launcher prefers the live checkout's
+    deploy/scratch-mounts.sh when present and falls back to the installed copy, so a merged bind reaches
+    both the drift reading and the relaunch.
+  acceptance:
+    - claim: "a running container missing a bind the scratch-mount plan names reads as mount drift and the deploy tick recycles it under the same STOP and backoff guards as policy drift; an extra unplanned mount is not drift; an unreadable plan or inspect is unknown and never recycles; the launcher sources the checkout's scratch-mounts.sh before the installed copy"
+      proof: "unit test: test/a-container-is-recreated-when-its-mount-plan-drifts.test.ts"
+  falsifier: |
+    Drop the mount reading from the decision: the fixture container without the planned bind reads no
+    drift and the recycle test fails.
+  note: |
+    deploy/ is a baked path; verify on the host with `docker inspect <c> --format '{{json .Mounts}}'`
+    after the merge, not from the merge. Independent of #9761: the reading compares against whatever the
+    plan names, so it also delivers that bind once #9761 merges.

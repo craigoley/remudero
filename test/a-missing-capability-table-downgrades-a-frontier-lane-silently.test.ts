@@ -75,7 +75,7 @@ test("selectCodexModel marks modelDecision.capabilityFallbackReason ONLY when th
   assert.equal(fallback.modelDecision?.capabilityFallbackReason, "capability-table-unavailable");
   assert.equal(fallback.modelDecision?.requestedModel, "claude-opus-5");
   assert.equal(fallback.modelDecision?.requestedCapability, "balanced", "the exact silent downgrade: frontier resolves to balanced");
-  assert.deepEqual(fallback.modelDecision?.mappedCandidates, ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.5"]);
+  assert.deepEqual(fallback.modelDecision?.mappedCandidates, ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"]);
 
   // A loaded table that simply has no row for this model takes the SAME "balanced" default, but
   // carries no fallback reason — the documented, intended case this must stay distinct from.
@@ -110,11 +110,11 @@ function fakeCodexProcess(): { proc: EventEmitter & { stdin: PassThrough; stdout
 }
 
 const VISIBLE_CODEX_MODELS: CodexModelInfo[] = [
-  { id: "gpt-6-luna", defaultReasoningEffort: "medium", supportedReasoningEfforts: [{ reasoningEffort: "medium" }] },
+  { id: "gpt-6.1-sol", defaultReasoningEffort: "medium", supportedReasoningEfforts: [{ reasoningEffort: "medium" }] },
 ];
 const CODEX_HEADROOM = {
   rateLimitsByLimitId: {
-    "gpt-6-luna": { limitId: "gpt-6-luna", limitName: "gpt-6-luna", primary: { usedPercent: 10 } },
+    "gpt-6.1-sol": { limitId: "gpt-6.1-sol", limitName: "gpt-6.1-sol", primary: { usedPercent: 10 } },
   },
 };
 
@@ -171,7 +171,7 @@ test("a Codex worker whose capability table is unreadable still spawns (fail-sof
     "balanced",
     "a frontier lane silently served under 'balanced' is exactly the defect W1-T3097 reports",
   );
-  assert.deepEqual(result.codexCapabilityFallback?.candidates, ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.5"]);
+  assert.deepEqual(result.codexCapabilityFallback?.candidates, ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"]);
   assert.ok(result.codexCapabilityFallback?.searchedPaths.length > 0, "names where the table was looked for");
 
   // Criterion 2: a ledger ROW, not merely a field nobody reads — a console-carried JSON line naming
@@ -188,7 +188,7 @@ test("a Codex worker whose capability table is unreadable still spawns (fail-sof
   assert.ok(ledgerEvent, "the fallback must be reported as a ledger row, never silent");
   assert.equal(ledgerEvent?.requested_model, "claude-opus-5");
   assert.equal(ledgerEvent?.capability_used, "balanced");
-  assert.deepEqual(ledgerEvent?.candidates, ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.5"]);
+  assert.deepEqual(ledgerEvent?.candidates, ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"]);
 
   // Criterion 4: the SAME evidence rides the shared per-call ledger telemetry every worker/brain-
   // plane call spreads — so an arm built from `served_model` is attributable, not poisoned.

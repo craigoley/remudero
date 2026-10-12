@@ -1,0 +1,37 @@
+- id: W1-T7799
+  title: "FLAKE INCIDENT — 'W1-T4064: the daemon reads filing dates from the plan path it was given' failed CI on 4 pull requests whose diffs do not touch it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flake-incident:test/new-work-is-ordered-by-cost-of-delay.test.ts#W1-T4064: the daemon reads filing dates from the plan path it was given"
+  files:
+    - test/new-work-is-ordered-by-cost-of-delay.test.ts
+  acceptance:
+    - claim: "the cause of the intermittent failure W1-T7799 records in test/new-work-is-ordered-by-cost-of-delay.test.ts is fixed, pinned by a test that forces the failing order"
+      proof: "unit test: W1-T7799 pins the cause of the intermittent failure"
+    - claim: "the test that pins the cause is added to test/new-work-is-ordered-by-cost-of-delay.test.ts, beside the test that failed"
+      proof: "grep: test(\"W1-T7799 pins the cause of the intermittent failure\" in test/new-work-is-ordered-by-cost-of-delay.test.ts"
+  note: "Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The SRE ruling of 2026-09-23 is that a CI flake is an incident."
+  rationale: |
+    Test: 'W1-T4064: the daemon reads filing dates from the plan path it was given' (test/new-work-is-ordered-by-cost-of-delay.test.ts)
+    Failed CI on 4 distinct pull requests whose changed files include neither the test file nor a module it imports: #10627, #10644, #10646, #10650.
+    CI runs: 38051864963, 38052693240, 38053177582, 38053594710.
+    Retry outcomes: 0 recovered on retry, 4 also failed on retry (the case that reds a PR).
+    Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.88
+    reasons:
+      - "The declared files list names only one test file, test/new-work-is-ordered-by-cost-of-delay.test.ts. That points to a test-only fix for a flaky test, with no source, config, CI, or policy files."
+      - "The task description and acceptance criteria describe fixing an intermittent test failure and adding a pinning test. They don't mention secrets, auth, deletion, merge or deploy policy, or any irreversible action. They also don't ask for an operator decision."
+      - "The gates state is clean. The author class is machine, and the flake-incident family has 7 merged and 0 declined tasks (Beta mean 0.89). The task's own PR still has to pass CI and review."
+      - "No actual change view was supplied, so I can't confirm the real touched files match the declared one. The acceptance criteria are concrete and checkable (a unit test and a grep), so the result can be verified."
+    judged_at: "2026-10-10T20:34:10.046Z"
+    pin: "ab4277732203346534ba36315cb322beef10d2017a8402c086b06ccd55b741a3"

@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { readReadModelSwitches } from "../src/lib/read-model-worker.js";
 import { createRouteReadRollup } from "../src/lib/route-read-rollup.js";
 import { makeTempDir } from "../src/lib/tmp.js";
-import { createViewEvents, VIEW_EVENTS_PATH, VIEW_VERSIONS_PATH, type ViewEventsOptions } from "../src/lib/view-events.js";
+import { createViewEvents, VIEW_EMITTED_SAMPLE_MS, VIEW_EVENTS_PATH, VIEW_VERSIONS_PATH, type ViewEventsOptions } from "../src/lib/view-events.js";
 import { viewEtag, type ViewBodyEntry, type ViewSource } from "../src/lib/views.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
@@ -352,7 +352,54 @@ test("an emitted view event is ledgered at most once per minute per key", async 
     ["instance=core", new Date(T0 + 60_000).toISOString()],
     ["instance=site", new Date(T0 + 60_001).toISOString()],
   ]);
-  assert.deepEqual({ ...sampled[0], etag: undefined }, { view: "now", key: "instance=core", etag: undefined, cause: "body", emittedAt: new Date(T0).toISOString(), rowTs: new Date(T0).toISOString(), bytes: sampled[0]!.bytes, inline: true, subscribers: 1 });
+  assert.deepEqual({ ...sampled[0], etag: undefined }, { view: "now", key: "instance=core", etag: undefined, cause: "body", emittedAt: new Date(T0).toISOString(), rowTs: new Date(T0).toISOString(), judgedRowTs: new Date(T0).toISOString(), bytes: sampled[0]!.bytes, inline: true, subscribers: 1, sampleEveryMs: VIEW_EMITTED_SAMPLE_MS, unsampled: 0 });
+});
+
+test("a sampled view.emitted row names its sampling interval and counts the events it skipped", async (t) => {
+  const rm = fakeReadModel({ now: "serve" });
+  let at = T0;
+  const stepped: Clock = { now: () => at, date: () => new Date(at), iso: () => new Date(at).toISOString() };
+  const rows: Array<Record<string, unknown>> = [];
+  const { url } = await serve(t, { names: ["now"], readModel: rm, clock: stepped, every: timers().every, log: (step, extra) => void (step === "view.emitted" && rows.push(extra!)) });
+  const stream = await open(t, `${url}${VIEW_EVENTS_PATH}`);
+  await stream.next((f) => f.event === "hello");
+  // Two keys sampled apart: site's skipped events never count against core's.
+  for (const [offset, key, n] of [[0, "core", 1], [1_000, "site", 2], [2_000, "core", 3], [3_000, "site", 4], [4_000, "site", 5], [60_000, "core", 6], [61_000, "site", 7]] as const) {
+    at = T0 + offset;
+    rm.post(entry("now", `instance=${key}`, { n }));
+    await stream.next((f) => f.event === "view" && f.id?.endsWith(`:${n}`) === true);
+  }
+  assert.deepEqual(rows.map((r) => [r.key, r.sampleEveryMs, r.unsampled]), [
+    ["instance=core", VIEW_EMITTED_SAMPLE_MS, 0],
+    ["instance=site", VIEW_EMITTED_SAMPLE_MS, 0],
+    ["instance=core", VIEW_EMITTED_SAMPLE_MS, 1],
+    ["instance=site", VIEW_EMITTED_SAMPLE_MS, 2],
+  ], "each key counts only its own unledgered events");
+});
+
+test("a view.emitted row names its sampling and the key's events since its last row that no row records", async (t) => {
+  const rm = fakeReadModel({ now: "serve" });
+  let at = T0;
+  const stepped: Clock = { now: () => at, date: () => new Date(at), iso: () => new Date(at).toISOString() };
+  const rows: Array<Record<string, unknown>> = [];
+  const { url } = await serve(t, { names: ["now"], readModel: rm, clock: stepped, every: timers().every, log: (step, extra) => void (step === "view.emitted" && rows.push(extra!)) });
+  const stream = await open(t, `${url}${VIEW_EVENTS_PATH}`);
+  await stream.next((f) => f.event === "hello");
+  // Six events in the loop: those at 0 s and 60 s are ledgered; the three between them and the one at 61 s are not.
+  for (const [offset, n] of [[0, 1], [5_000, 2], [20_000, 3], [40_000, 4], [60_000, 5], [61_000, 6]] as const) {
+    at = T0 + offset;
+    rm.post(entry("now", "instance=core", { n }));
+    await stream.next((f) => f.event === "view" && f.id?.endsWith(`:${n}`) === true);
+  }
+  at = T0 + 120_000;
+  rm.post(entry("now", "instance=core", { n: 7 }));
+  await stream.next((f) => f.event === "view" && f.id?.endsWith(":7") === true);
+  assert.equal(stream.frames.filter((f) => f.event === "view").length, 7, "control: every change was emitted");
+  assert.deepEqual(rows.map((r) => [r.emittedAt, r.sampleEveryMs, r.unsampled]), [
+    [new Date(T0).toISOString(), VIEW_EMITTED_SAMPLE_MS, 0],
+    [new Date(T0 + 60_000).toISOString(), VIEW_EMITTED_SAMPLE_MS, 3],
+    [new Date(T0 + 120_000).toISOString(), VIEW_EMITTED_SAMPLE_MS, 1],
+  ], "seven events, three rows: the unsampled counts sum to the four no row records");
 });
 
 test("the events route answers 404 push_disabled while the push switch is off", async (t) => {
@@ -416,4 +463,33 @@ test("the push stream tells the rollup each open close and handover with the sub
   events.handover("recycle");
   a.req.emit("close");
   assert.deepEqual(rollup.summary().streams.views, { opened: 3, closed: 1, peak: 3, handovers: { slow_consumer: 1, recycle: 1 }, subscribers: 0 }, "a close after a handover is not a second close");
+});
+
+test("a sampled view.emitted row bounds its row's wait with prevRowTs and buildStartedAt", async (t) => {
+  const rm = fakeReadModel({ now: "serve" });
+  let at = T0;
+  const stepped: Clock = { now: () => at, date: () => new Date(at), iso: () => new Date(at).toISOString() };
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const { url } = await serve(t, { names: ["now"], readModel: rm, clock: stepped, every: timers().every, log: (step, extra) => void rows.push({ step, ...(extra ? { extra } : {}) }) });
+  const iso = (ms: number): string => new Date(ms).toISOString();
+  /** A body reflecting rows up to `rowMs`, from a build that began at `startedMs`. */
+  const built = (n: number, rowMs: number, startedMs: number): ViewBodyEntry => {
+    const e = entry("now", "instance=core", { n });
+    return { ...e, buildStartedMs: startedMs, body: { ...e.body, sources: [{ name: "ledger:core", asOf: iso(rowMs), state: "fresh" }] } };
+  };
+  rm.post(built(0, T0 - 9_000, T0 - 8_000));
+  const stream = await open(t, `${url}${VIEW_EVENTS_PATH}`);
+  await stream.next((f) => f.event === "hello");
+  // [emitted at, newest row reflected, build started]: the middle event falls inside the minute and is not ledgered.
+  for (const [n, emitAt, rowMs, startedMs] of [[1, T0, T0 - 1_000, T0 - 500], [2, T0 + 10_000, T0 + 8_000, T0 + 8_500], [3, T0 + 60_000, T0 + 50_000, T0 + 56_000]] as const) {
+    at = emitAt;
+    rm.post(built(n, rowMs, startedMs));
+    await stream.next((f) => f.event === "view" && f.id?.endsWith(`:${n}`) === true);
+  }
+  const sampled = rows.filter((r) => r.step === "view.emitted").map((r) => r.extra!);
+  assert.equal(sampled.length, 2, "control: one row per key per minute");
+  assert.deepEqual(sampled.map((r) => ({ emittedAt: r.emittedAt, rowTs: r.rowTs, prevRowTs: r.prevRowTs, buildStartedAt: r.buildStartedAt })), [
+    { emittedAt: iso(T0), rowTs: iso(T0 - 1_000), prevRowTs: iso(T0 - 9_000), buildStartedAt: iso(T0 - 500) },
+    { emittedAt: iso(T0 + 60_000), rowTs: iso(T0 + 50_000), prevRowTs: iso(T0 + 8_000), buildStartedAt: iso(T0 + 56_000) },
+  ]);
 });

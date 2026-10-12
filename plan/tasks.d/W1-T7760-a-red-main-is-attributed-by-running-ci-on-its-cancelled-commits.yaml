@@ -1,0 +1,108 @@
+- id: W1-T7760
+  title: "A RED MAIN IS ATTRIBUTED BY RUNNING CI ON ITS CANCELLED COMMITS, NEVER BY NAMING ONE — on 2026-10-10 `main.repair.located` named cc903730b, 58eb31094 and cd5741b83 as culprits, three commits whose CI was cancelled and never concluded, because `mainHealthFirstRedCommitFromRunHistory` counts a cancelled run as red"
+  repo: remudero
+  depends_on: [W1-T7762]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high  # Rule 19: one concern — which main commit the red-main repair lane names as the offender; a wrong name sends the fix and the revert at an innocent merge
+  band_meaning: span
+  origin: "operator session 2026-10-10: main-red investigation, operator asked for flow improvements"
+  plan_refs: [W1-T6403, W1-T5843, W1-T4817, W1-T6023, W1-T7757]
+  files: [src/lib/main-health-rung.ts, src/lib/sweep.ts, src/lib/ledger.ts, test/a-red-main-is-attributed-by-running-ci-on-its-cancelled-commits.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-10. Of main's newest 100 CI runs, 63 were cancelled while still pending. Push runs share one
+    concurrency group, `ci-${{ github.event.pull_request.number || github.ref }}` (.github/workflows/ci.yml:72).
+    `cancel-in-progress` is true only for pull requests (ci.yml:73). GitHub keeps one running and one pending run
+    per group, and each newer push replaces the pending one, which GitHub cancels. Most main commits therefore
+    never get a CI verdict. On 2026-10-10 `main.repair.located` named cc903730b, 58eb31094 and cd5741b83 as the
+    offending merges. Each of those commits' runs was cancelled, and none has a completed run.
+
+    READ on origin/main 688f222c6.
+    - The writer: `repairRedMain` (src/lib/main-health-rung.ts:812) appends `main.repair.located` at
+      main-health-rung.ts:837 with `method: "first-red-run"` (:843). Its `offending_sha` is
+      `observation.firstRedCommit.headSha`, and the fix dispatch and any later revert target that sha.
+      `mainRepairRecordsFromLedger` reads the row back at main-health-rung.ts:303.
+    - `firstRedCommit` is set by `enrichMainHealthObservation` (src/lib/sweep.ts:6771) at sweep.ts:6795 from
+      `mainHealthFirstRedCommitFromRunHistory` (sweep.ts:6747). That function walks the history oldest first and
+      returns the first run after a green whose conclusion passes `mainHealthFailureConclusion` (sweep.ts:6710).
+      That predicate is `REQUIRED_CHECK_FAIL` (sweep.ts:6128), and the set includes `CANCELLED` (sweep.ts:6132).
+      The first cancelled run after a green is therefore named as the first red. The walk also reads every
+      workflow's runs, not only the runs that carry required checks.
+    - REPRODUCED on 688f222c6 through tsx. History, newest first: R failure, C2 cancelled, C1 cancelled, G success.
+      `mainHealthFirstRedCommitFromRunHistory` returns `{"headSha":"C1","afterGreenSha":"G"}`. C1 never concluded.
+    - The fallback path already treats a cancelled run as no verdict: `MAIN_RUN_NON_VERDICT` (sweep.ts:6850) holds
+      CANCELLED, SKIPPED and STALE. The first-red walk does not use it.
+    - DISPATCH SHAPE. ci.yml has a `workflow_dispatch` trigger (ci.yml:49), and `main.run_gap.dispatched`
+      (src/lib/main-run-gaps.ts) already dispatches it, but only at `ref=main`. The dispatches endpoint takes a
+      branch or tag, never a sha. Re-running the cancelled push run in place (`actions/runs/<id>/rerun`) would join
+      the group `ci-refs/heads/main`. It would wait behind main's running run, and it would replace main's own
+      pending run, cancelling it. That is the exact loss this task fights.
+
+    SERIALIZED: this task edits src/lib/main-health-rung.ts after W1-T7757 and src/lib/sweep.ts after
+    W1-T7762. Parallel agents editing one file broke main (#10349 and #10353 were each green and together
+    reddened main, 2026-10-09).
+  design: |
+    1. NO VERDICT, NO NAME. `mainHealthFirstRedCommitFromRunHistory` treats CANCELLED, SKIPPED and STALE as no
+       verdict (`MAIN_RUN_NON_VERDICT`). It reads only runs of workflows that carry required checks; the walk-back
+       already learns that set. It returns the boundary: the newest completed green G, the oldest completed red R
+       after G, and the first-parent commits strictly between them that have no completed verdict (the
+       UNATTRIBUTED span, from main's first-parent window).
+    2. EMPTY SPAN: R's first parent is G, or every commit between them has a completed verdict. `main.repair.located`
+       names R at once, with method `first-red-run`, as today.
+    3. NON-EMPTY SPAN: PROBE IT. The rung runs CI on the span's commits, newest first, until the first red is
+       proven: a completed red whose first parent has a completed green. That red is the bisected first red.
+       - Each probe creates a ref for that one sha through the REST `git/refs` endpoint (for example
+         `refs/heads/rmd-attribution/<sha>`), then dispatches ci.yml on it. Its concurrency group is that ref's
+         own, never `ci-refs/heads/main`. Do not re-run the cancelled push run in place (see rationale).
+       - The builder confirms that creating the ref fires no other workflow's `push` trigger, and deletes the ref
+         once its run concludes.
+       - A probe's verdict is its required jobs, judged by `mainHealthFromRollup` against the same required set
+         main is judged by.
+    4. ADAPTIVE BOUND, NO CONSTANT.
+       - Probes in flight follow runner availability: one at a time while any CI job in the repo is queued; up to
+         the observed idle capacity when none is.
+       - Each probe is priced at the median duration of main's completed CI runs in the history already read.
+       - When the span's linear cost, newest first, exceeds a bisection's, probe split points instead.
+       - The `main.repair.bisecting` row carries the concurrency chosen, the reading it came from and the
+         estimated runner-minutes.
+       - No fixed cap on probes or span length, per the operator's no-hard-thresholds ruling.
+    5. LEDGER.
+       - `main.repair.bisecting` (span, probe shas, run ids and urls) and `main.repair.probe_concluded` (sha,
+         verdict, run url) are new rows. Both join the rotation-retained steps in src/lib/ledger.ts, so a rotated
+         row does not re-dispatch a probe.
+       - The located row is written once the boundary is proven, with method `bisected-first-red` and the probe
+         run urls as evidence.
+       - Until then no fix is dispatched for this red. The existing fix-then-revert ladder of W1-T6403 is
+         unchanged once a located row exists.
+    6. THE WRITER REFUSES A SHA WITH NO COMPLETED RUN. Before it appends `main.repair.located`, `repairRedMain`
+       checks that `offending_sha` has a completed run, or a concluded probe, whose required checks concluded red.
+       If none, it writes `main.repair.unlocated` with that reason and dispatches nothing. That is the backstop
+       for any future path that hands it a cancelled commit.
+
+    NOT IN SCOPE: changing ci.yml's push concurrency (the one-pending-run group is deliberate, ci.yml:65), and how
+    main health is judged (W1-T7757).
+  acceptance:
+    - claim: "the first red never names a commit whose only run was cancelled; it returns the completed red and the unattributed span between the last green and it"
+      proof: 'grep: test("W1-T7760: the first red never names a commit whose only run was cancelled" in test/a-red-main-is-attributed-by-running-ci-on-its-cancelled-commits.test.ts'
+    - claim: "a red main with cancelled commits since the last green dispatches CI for those commits, newest first, each on its own ref"
+      proof: 'grep: test("W1-T7760: a red main dispatches CI for the cancelled commits since the last green, newest first, each on its own ref" in test/a-red-main-is-attributed-by-running-ci-on-its-cancelled-commits.test.ts'
+    - claim: "no probe runs in main's concurrency group: a probe never re-runs the cancelled push run and never dispatches at ref main"
+      proof: 'grep: test("W1-T7760: a probe never re-runs a cancelled push run and never dispatches at main" in test/a-red-main-is-attributed-by-running-ci-on-its-cancelled-commits.test.ts'
+    - claim: "main.repair.located names the bisected first red, a completed red whose first parent has a completed green, with the probe runs as evidence"
+      proof: 'grep: test("W1-T7760: main\.repair\.located names the bisected first red, proven by completed runs" in test/a-red-main-is-attributed-by-running-ci-on-its-cancelled-commits.test.ts'
+    - claim: "probes in flight follow observed runner availability and run cost, not a constant"
+      proof: 'grep: test("W1-T7760: probes in flight follow observed runner availability and run cost, not a constant" in test/a-red-main-is-attributed-by-running-ci-on-its-cancelled-commits.test.ts'
+    - claim: "the located writer refuses a sha with no completed red run and writes main.repair.unlocated instead"
+      proof: 'grep: test("W1-T7760: the located writer refuses a sha with no completed red run" in test/a-red-main-is-attributed-by-running-ci-on-its-cancelled-commits.test.ts'
+  falsifier: |
+    Leave CANCELLED in the first-red walk's failure set: the first test returns C1, a commit with no completed run.
+    Re-run the cancelled push run, or dispatch at `ref=main`: the third test sees a request into main's concurrency
+    group. Write the located row from the run history alone: the fourth test names a cancelled commit or the later
+    red R instead of the bisected first red. Fix the probe count as a constant: the fifth test sees the same count
+    under an idle and a saturated runner reading. Drop the writer's check: the sixth test appends a located row for
+    a cancelled commit.

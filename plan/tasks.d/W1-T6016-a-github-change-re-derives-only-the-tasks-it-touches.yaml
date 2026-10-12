@@ -1,0 +1,36 @@
+- id: W1-T6016
+  title: "A GITHUB CHANGE RE-DERIVES ONLY THE TASKS IT TOUCHES — BoardProjection folds githubGeneration() into the GLOBAL stamp every task's stamp carries (board-projection.ts), so any change in the open-PR snapshot's content (one PR's checks moving) restamps and re-derives every plan task (~3,000) instead of the few whose PR changed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — which GitHub facts dirty which task's projection
+  band_meaning: blast-radius
+  origin: "2026-10-06 core-console architecture plan backlog E14 (SLOWVIEW follow-up (c), after #8325 keyed the projection on snapshot content)"
+  plan_refs: [W1-T5066, W1-T6015]
+  files: [src/lib/board-projection.ts, src/lib/now-view.ts, test/a-github-change-re-derives-only-the-tasks-it-touches.test.ts]
+  status: queued
+  priority: 4
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 at origin/main a6a285150: board-projection.ts builds
+    `const global = sha1(JSON.stringify([BOARD_PROJECTION_VERSION, opts.codeVersion ?? "", crossCount, crossSeq,
+    githubGeneration(), sha1(overrides)]))`, and now-view.ts passes `githubGeneration: () => g.gateway.content ??
+    g.githubKey`. #8325 made that a content hash so an unchanged re-save no longer restamps, but any real change to
+    the open-PR snapshot (which moves every few minutes on an active fleet) still makes every task stale and
+    re-derived. The ledger side already has per-task dirt (boardDirtForRow); GitHub has none. Scope-time checks:
+    no plan record, run- branch or open PR head adds per-task GitHub dirt.
+  design: |
+    Remove the snapshot-wide GitHub generation from the global stamp; give each task a GitHub component built
+    from the facts its projection reads (its candidate head branches and their PR, merge and check state), so a
+    change to one PR dirties only the tasks that read that PR. Facts with no per-task owner (a change to how the
+    gateway answers at all, e.g. reachability) stay global. The oracle (board_oracle) must still find no
+    mismatch against a full re-derive.
+  acceptance:
+    - claim: "a GitHub snapshot change to one task's pull request re-derives that task only, a change to a PR no task reads re-derives none, and the projections equal a full re-derive"
+      proof: "unit test: test/a-github-change-re-derives-only-the-tasks-it-touches.test.ts"
+  falsifier: |
+    Keep githubGeneration() in the global stamp: one PR's change reports every task rederived and the test
+    fails.

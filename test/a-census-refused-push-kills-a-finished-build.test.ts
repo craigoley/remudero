@@ -128,6 +128,8 @@ function buildFixture(): Fixture {
   mkdirSync(join(seed.dir, "hooks"), { recursive: true });
   writeFileSync(join(seed.dir, "hooks", "pre-push"), hookScript(logPath));
   chmodSync(join(seed.dir, "hooks", "pre-push"), 0o755);
+  // W1-T6106: the host push runs the HARNESS's pre-push, never the lane's tracked copy; this seed's hooks/ plays the harness.
+  process.env.RMD_HARNESS_HOOKS_DIR = join(seed.dir, "hooks");
   seed.git("add", "-A");
   seed.git("commit", "-q", "-m", "seed");
   seed.git("push", "-q", "origin", "main");

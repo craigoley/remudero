@@ -1,0 +1,38 @@
+- id: W1-T6013
+  title: "A WIP-TITLED PR IS REFUSED AT MERGE — the PR title gate (commitlint.config.mjs, run by pr-title-lint.yml and ci.yml's commitlint job under ci-gate) extends config-conventional only, so `chore(wip): …` and `chore(serve): wip serve plan reload in place` pass and squash onto main; 25 wip-marked subjects merged since 2026-09-01, the latest #9510"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  risk: medium  # Rule 19: one concern — what the PR-title gate refuses
+  band_meaning: blast-radius
+  origin: "2026-10-06 core-console architecture plan backlog E9 (P0-LOOP: #7982 merged with a wip title and 'remaining: census suites')"
+  plan_refs: [W1-T31, W1-T351]
+  files: [commitlint.config.mjs, test/a-wip-titled-pr-is-refused-at-merge.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 at origin/main a6a285150: `git log --since=2026-09-01 --format=%s | grep -ciE
+    '(^|[^a-z])wip([^a-z]|$)'` reads 25, including 1cfc3a4fe "chore(serve): wip serve plan reload in place
+    (#7982)" (merged with "remaining: census suites" in its context block), 8f2c102f3 "chore(wip): main run-gap
+    finder… (#7945)", 74869b9db "chore(handoff): wip move prose… (#8576)" and e5264afa4 "chore(wip): catch
+    carries its reason (#9510)". commitlint.config.mjs is `extends: ['@commitlint/config-conventional']` with
+    no rule naming wip, and nothing under src/, scripts/ or .github/ refuses one (git grep for wip finds only
+    compaction.ts's guidance that `wip:` checkpoint commits are squashed away). The squash subject IS the PR
+    title, so a checkpoint label becomes main's permanent history and nothing asks whether the work finished.
+    Scope-time checks: no plan record, run- branch or open PR head adds a wip refusal.
+  design: |
+    Add a local commitlint rule (a config plugin in commitlint.config.mjs) that refuses a header whose type or
+    scope is `wip`, or whose subject contains `wip` as a whole word (case-insensitive), naming the rule and
+    saying to retitle the PR for what it completes. Words that merely contain the letters (`wipe`,
+    `wip_limit`, `wipetest`) pass. The existing commitlint tests keep passing. Do NOT change compaction.ts's
+    `wip:` checkpoint guidance: branch commits are not linted; only the PR title is.
+  acceptance:
+    - claim: "commitlint refuses `chore(wip): x`, `wip: x` and `chore(serve): wip serve plan reload in place` naming the wip rule, and still accepts `fix(janitor): wipe stale caches` and `feat(drain): honour wip_limit`"
+      proof: "unit test: test/a-wip-titled-pr-is-refused-at-merge.test.ts"
+  falsifier: |
+    Leave the config as config-conventional alone: `chore(serve): wip serve plan reload in place` lints clean
+    and the test fails.

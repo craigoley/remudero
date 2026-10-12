@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { MAX_STALE_PROOF_CLOSES_PER_PASS, runSweep, type CiFailure, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { MAX_STALE_PROOF_CLOSES_PER_PASS, runSweep, type CiFailure, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-09-30T19:00:00Z");
 const WORKER_PROOF = "unit test: test/read-model-worker.test.ts";

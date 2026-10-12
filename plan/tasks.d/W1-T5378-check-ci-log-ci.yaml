@@ -37,3 +37,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.84
+    reasons:
+      - "high-risk verdict at confidence 0.84 — on the change's description/files alone, no diff was read — The acceptance requires preventing check:ci-log:ci fix rounds, but its supplied proof only greps for a test declaration; it does not require executing that test or verifying prevention.; on the change's description/files alone, no diff was read — The filing-time record names src/run-task.ts and a test file but supplies no prevention mechanism or supporting measurement. The claimed remedy cannot be verified from what is shown, an explicit escalation condition in GATES STATE."
+    judged_at: "2026-10-03T04:01:38.221Z"
+    pin: "d56eb49ff9746381503b23d497b5961e0c9dfe1e5fd912c5de8d2d3a0bef1a2e"

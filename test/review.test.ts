@@ -56,6 +56,7 @@ import {
   type ProofSpawner,
   type WhitelistedProof,
 } from "../src/lib/review.js";
+import { inlineJudgedTally } from "./helpers/judged-pool-run.js";
 
 // W1-T229: source text of run-task.ts, read once, so the plan-only carve-out
 // falsifier below can verify by STRUCTURE (call-site count) rather than by
@@ -1385,7 +1386,7 @@ test("parseWhitelistedProof: a named test-file proof is the 'test' shape", () =>
   const wp = parseWhitelistedProof("run `test/foo.test.ts` and see it pass");
   assert.ok(wp);
   assert.equal(wp!.kind, "test");
-  assert.deepEqual(wp!.args, ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "test/foo.test.ts"]);
+  assert.deepEqual(wp!.args, ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "test/foo.test.ts"]);
 });
 
 test("parseWhitelistedProof: a fenced literal grep command is the 'grep' shape", () => {
@@ -1657,6 +1658,7 @@ test("parseWhitelistedProof: a dialect body containing a semicolon and a test-pa
   assert.ok(wp!.nameFiltered);
   assert.deepEqual(wp!.args, [
     "--test",
+    "--test-reporter=tap",
     "--import",
     "tsx",
     "--import",
@@ -1673,6 +1675,7 @@ test("parseWhitelistedProof: house-dialect 'unit test: <name>' (not a path) comp
   assert.equal(wp!.kind, "test");
   assert.deepEqual(wp!.args, [
     "--test",
+    "--test-reporter=tap",
     "--import",
     "tsx",
     "--import",
@@ -1705,7 +1708,7 @@ test("parseWhitelistedProof (W1-T112 round-3): a dialect NAME containing regex-s
 test("parseWhitelistedProof: house-dialect 'unit test: <path>' reuses the exact-file shape verbatim", () => {
   const wp = parseWhitelistedProof("unit test: test/foo.test.ts");
   assert.ok(wp);
-  assert.deepEqual(wp!.args, ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "test/foo.test.ts"]);
+  assert.deepEqual(wp!.args, ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "test/foo.test.ts"]);
 });
 
 // ── nameFilteredOutcome (W1-T178, round 2): a name-filtered proof globs the
@@ -2618,6 +2621,7 @@ test('W1-T227 (acceptance 1): a proof matching tests in exactly one file execute
 
   const baseArgs = [
     "--test",
+    "--test-reporter=tap",
     "--import",
     "tsx",
     "--test-name-pattern",
@@ -2627,6 +2631,7 @@ test('W1-T227 (acceptance 1): a proof matching tests in exactly one file execute
   const narrowed = narrowNameFilteredArgs(baseArgs, candidates);
   assert.deepEqual(narrowed, [
     "--test",
+    "--test-reporter=tap",
     "--import",
     "tsx",
     "--test-name-pattern",
@@ -2636,11 +2641,12 @@ test('W1-T227 (acceptance 1): a proof matching tests in exactly one file execute
 });
 
 test("W1-T227 (acceptance 2): no name-pattern invocation carries the full glob once at least one candidate file is found — even with several matches", () => {
-  const baseArgs = ["--test", "--import", "tsx", "--test-name-pattern", "shared fragment", "test/**/*.test.ts"];
+  const baseArgs = ["--test", "--test-reporter=tap", "--import", "tsx", "--test-name-pattern", "shared fragment", "test/**/*.test.ts"];
   const narrowed = narrowNameFilteredArgs(baseArgs, ["test/foo.test.ts", "test/bar.test.ts"]);
   assert.ok(!narrowed.includes("test/**/*.test.ts"), "the narrowed argv must never carry the full suite glob");
   assert.deepEqual(narrowed, [
     "--test",
+    "--test-reporter=tap",
     "--import",
     "tsx",
     "--test-name-pattern",
@@ -2653,6 +2659,7 @@ test("W1-T227 (acceptance 2): no name-pattern invocation carries the full glob o
 test("W1-T227 (acceptance 3): zero-candidate patterns are NO-MATCH, not a pass — narrowing changes nothing, and a completed zero-match run is the absent-test signal (never turned into a pass)", () => {
   const baseArgs = [
     "--test",
+    "--test-reporter=tap",
     "--import",
     "tsx",
     "--test-name-pattern",
@@ -2695,9 +2702,9 @@ test("resolveNameFilteredCandidates: grep LOOKED and no file contains the raw na
  * than infer it from a stopwatch. */
 function countingSpawner(stdout: string): { spawner: ProofSpawner; calls: { args: readonly string[] }[] } {
   const calls: { args: readonly string[] }[] = [];
-  const spawner: ProofSpawner = (_command, args) => {
+  const spawner: ProofSpawner = (_command, args, cwd) => {
     calls.push({ args });
-    return stdout;
+    return stdout + inlineJudgedTally(args, cwd);
   };
   return { spawner, calls };
 }

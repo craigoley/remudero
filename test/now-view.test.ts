@@ -262,7 +262,7 @@ test("an action's strike count is a structured field", () => {
 function openPr(number: number, taskId: string): BoardPrRest {
   return {
     number, url: `https://github.com/o/r/pull/${number}`, state: "OPEN", headRefName: `run-${taskId}-1790000000000`, headRefOid: `sha-${number}`,
-    body: "work in progress", autoMergeRequest: null, title: `open ${number}`, updatedAt: "2026-09-30T11:00:00Z",
+    body: "work in progress", autoMergeRequest: null, title: `open ${number}`, updatedAt: "2026-09-30T11:00:00Z", // expiring-fixture: exempt -- the now view runs on this suite's injected manual Clock; 43/43 pass with Date.now shifted +8d and +30d
   };
 }
 
@@ -804,7 +804,10 @@ test("a task whose newest row is a step the fact store skips sorts by that row o
   assert.equal(body.data.board.groups.queued[0], "W1-T5", "a task with only machine_judge rows sorts by them");
   const diffs = compareNow(view, core, body, T0 + 50_000);
   assert.deepEqual(diffs.filter((d) => d.path.startsWith("board.groups")), [], JSON.stringify(diffs));
-  assert.deepEqual(diffs.filter((d) => d.classification === "real"), [], JSON.stringify(diffs));
+  // The view omits lastActivityAt for this skipped event although its sort key uses it. That is a real
+  // data mismatch: the event predates both reads, so a timestamp leaf alone cannot call it timing.
+  assert.deepEqual(diffs.filter((d) => d.classification === "real").map((d) => d.path),
+    ["board.tasks[taskId=W1-T5].lastActivityAt"], JSON.stringify(diffs));
 });
 
 test("a running order no sort-key row explains is still a real now diff", (t) => {
@@ -1094,6 +1097,30 @@ test("legacy reads a task's newer row past an older one compaction kept live and
   assert.ok(wrong.some((d) => d.classification === "real"), JSON.stringify(wrong));
 });
 
+test("now legacy retention is named without dropping old rows from a recent archive or repeating unchanged samples", (t) => {
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const logged: Array<{ step: string; [key: string]: unknown }> = [];
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { listGrilling: () => [], log: (step, extra) => logged.push({ step, ...extra }) });
+  clock.set(T0 - 3 * 3_600_000);
+  core.append({ step: "implement.done", task_id: "W1-T1", run_id: "old", cost_usd: 0.5 });
+  archive(core, T0 - 1_000, "gzip", liveLines(core));
+  writeFileSync(join(core.ledgerDir, "ledger.ndjson"), "");
+  clock.set(T0);
+  core.append({ step: "daemon.tick" });
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  const first = view.legacy("instance=core", T0 + 30_000, body.data);
+  assert.ok(first?.rows["W1-T1"]?.length, "old timestamp was live until the recent archive cut");
+  view.legacy("instance=core", T0 + 30_000, body.data);
+  const reports = logged.filter((row) => row.step === "read_model.now_legacy_retention");
+  assert.equal(reports.length, 1);
+  assert.deepEqual(reports[0]?.rows, { archives: 1, rows: 1, tornRows: 0, failedArchives: 0 });
+  assert.deepEqual(reports[0]?.costs, { archives: 1, rows: 1, tornRows: 0, failedArchives: 0 });
+  assert.deepEqual(Object.keys(reports[0]!).sort(), ["costs", "instance", "rows", "step"]);
+});
+
 test("legacy counts a row held in both rotation forms once and reads the day's spend from either", (t) => {
   // (c) The same costed row sits in a gzip and a plain rotation, both cut today but before legacy's board window, and a
   // second costed row sits in the plain one only: the day's spend reads both forms and each row once.
@@ -1224,4 +1251,61 @@ test("a run escalated to another model mid-run shows the model its worker now as
   shown!.worker = { requestedModel: "sonnet" };
   const wrong = compareNow(view, core, body, T0 + 210_000).find((d) => d.path === "board.tasks[taskId=W1-T1].worker.requestedModel");
   assert.equal(wrong?.classification, "real", JSON.stringify(wrong));
+});
+
+test("a queued order set by a costed row only the day's spend read is legacy_horizon", (t) => {
+  // Captured 2026-10-03T17:09Z on core: board.groups.queued read real for 8 merged tasks whose newest row was a
+  // cost.anomaly (it carries cost_usd) in a rotation cut today before legacy's board window. Compaction then
+  // dropped it from the live file, so legacy sorted by an older row; the day's spend read it, and that read was
+  // taken as the board's.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { readPlan: () => planOf([task("W1-T1"), task("W1-T2"), task("W1-T3")]), listGrilling: () => [] });
+  clock.set(T0 - 6 * 3_600_000);
+  core.append({ step: "verdict.merged", task_id: "W1-T3", run_id: "r3", pr_number: 3 });
+  clock.set(T0 - 5 * 3_600_000);
+  core.append({ step: "verdict.merged", task_id: "W1-T1", run_id: "r1", pr_number: 1 });
+  clock.set(T0 - 4 * 3_600_000);
+  core.append({ step: "verdict.merged", task_id: "W1-T2", run_id: "r2", pr_number: 2 });
+  clock.set(T0 - 3 * 3_600_000);
+  core.append({ step: "cost.anomaly", task_id: "W1-T1", run_id: "r1", cost_usd: 4.12 });
+  const lines = liveLines(core);
+  archive(core, T0 - 2 * 3_600_000, "gzip", [lines[3]!]);
+  writeFileSync(join(core.ledgerDir, "ledger.ndjson"), `${lines.slice(0, 3).join("\n")}\n`);
+  clock.set(T0);
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  assert.deepEqual(body.data.board.groups.queued, ["W1-T1", "W1-T2", "W1-T3"], "the view sorts by the task's newest row");
+  const legacy = view.legacy("instance=core", T0 + 30_000, body.data);
+  assert.deepEqual(legacy?.data.board.groups.queued, ["W1-T2", "W1-T1", "W1-T3"], "legacy's board window cannot see the archived row");
+  const queued = compareNow(view, core, body, T0 + 30_000).find((d) => d.path === "board.groups.queued");
+  assert.equal(queued?.classification, "legacy_horizon", JSON.stringify(queued));
+  // Negative controls: an order and a membership no row explains stay real.
+  body.data.board.groups.queued = ["W1-T3", "W1-T1", "W1-T2"];
+  const order = compareNow(view, core, body, T0 + 30_000).find((d) => d.path === "board.groups.queued");
+  assert.equal(order?.classification, "real", JSON.stringify(order));
+  body.data.board.groups.queued = ["W1-T1", "W1-T9", "W1-T2", "W1-T3"];
+  const member = compareNow(view, core, body, T0 + 30_000).find((d) => d.path === "board.groups.queued");
+  assert.equal(member?.classification, "real", JSON.stringify(member));
+});
+
+test("each pull-request queue row carries its review state, so the console never has to print unknown", (t) => {
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const failed = { number: 9301, url: "https://github.com/o/r/pull/9301", state: "OPEN", title: "classify operator items", headRefName: "run-unfiled-1", headRefOid: "aaa1" };
+  const unreviewed = { number: 9313, url: "https://github.com/o/r/pull/9313", state: "OPEN", title: "block placeholder drafts", headRefName: "run-unfiled-2", headRefOid: "bbb2" };
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], {
+    listGrilling: () => [],
+    github: () => ({
+      github: stubGateway({ listOpenHeadBranches: () => [failed, unreviewed], reviewState: (url: string) => (url === failed.url ? "failure" : undefined) }),
+      generation: "g",
+      source: { asOf: null, state: "fresh" },
+    }),
+  });
+  clock.set(T0);
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  assert.deepEqual(body.data.prQueue.rows.map((r) => [r.prNumber, r.reviewState]), [[9301, "failure"], [9313, "none"]]);
 });

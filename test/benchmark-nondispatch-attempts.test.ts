@@ -217,7 +217,7 @@ test("real cash worker boundary emits a distinct assignment for each walked mode
   clearOpenWeightAbsence();
   try {
     const settingsFile = join(root, "settings.json");
-    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
+    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }), "utf8");
     const models: string[] = [];
     const final = await benchmarkNonDispatchSpawn("inbox-draft", spawnWorker)({
       cwd: REPO_ROOT,
@@ -258,7 +258,7 @@ test("real cash ladder continues when a fallback telemetry callback throws", asy
   clearOpenWeightAbsence();
   try {
     const settingsFile = join(root, "settings.json");
-    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
+    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }), "utf8");
     const models: string[] = [];
     const final = await spawnWorker({
       cwd: REPO_ROOT, permissionMode: "bypassPermissions", settingsFile, prompt: "bounded cash request",
@@ -301,4 +301,23 @@ test("non-dispatch benchmark receipt failure preserves normal flow", async () =>
   }) as typeof spawnWorker;
   await assert.rejects(benchmarkNonDispatchSpawn("triage", failing)(args("/dev/null")),
     (error: unknown) => error === thrown, "telemetry cannot replace the worker's error");
+});
+
+test("Codex attempts preserve explicit notional pricing without turning it into cash or a served model", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-benchmark-notional-receipt-"));
+  try {
+    const raw = (async (input: SpawnWorkerArgs) => {
+      input.onSelectionAssignment?.(assignment("notional", "codex", "gpt-6.1-sol"));
+      return { ...result("codex", "gpt-6.1-sol", "notional"), costUsd: 0, notionalCostUsd: 0.75,
+        servedModel: null, servedModelReason: "CLI reports no served identity" };
+    }) as typeof spawnWorker;
+    await benchmarkNonDispatchSpawn("review", raw)(args(root));
+    const receipt = rows(root).find(row => row.step === "worker.attempt")!;
+    assert.equal(receipt.notional_cost_usd, 0.75);
+    assert.equal(receipt.total_cost_usd, undefined);
+    assert.equal(receipt.served_model, null);
+    const accounting = (receipt.benchmark_run as Record<string, any>).accounting;
+    assert.deepEqual(accounting.subscriptionNotionalUsd, { state: "observed", value: 0.75 });
+    assert.equal(accounting.apiCostUsd.state, "unavailable");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

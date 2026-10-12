@@ -166,6 +166,8 @@ test("the ratify PR body lists exactly the files the approve path wrote — MAST
     try {
       const before = withBullet ? `# plan\n- ${PROPOSAL} (open)\n` : "# plan\n";
       writeFileSync(join(wt, "MASTER-PLAN.md"), before, "utf8");
+      // W1-T5660: the draft floor refuses a files: entry whose directory the worktree lacks.
+      mkdirSync(join(wt, "src", "lib"), { recursive: true });
       const written = fileRatificationDraft(wt, { fragmentYaml: fragment, proposalId: PROPOSAL, stampLine: stamp }, deps, join, KNOWN);
       assert.equal(written.filter((p) => p.startsWith("plan/tasks.d/")).length, 2);
       assert.equal(written.includes("MASTER-PLAN.md"), withBullet);

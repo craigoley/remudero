@@ -352,11 +352,11 @@ test("drainCommand keeps its batched gateway while daemonCommand adds target-roo
   const factories = src.split("\n").filter((l) => l.includes("const githubFactory = deps.githubFactory ??"));
   assert.equal(factories.length, 2, "exactly two commands assign the status gateway factory");
   assert.equal(
-    factories[0].includes("buildBatchedGithub"),
+    factories[0].includes("createDaemonGatewayFactory"),
     true,
-    "drainCommand retains the direct batched gateway construction",
+    "drainCommand builds its batched gateway through the shared daemon factory (W1-T6259: with changed-files cache)",
   );
   assert.match(factories[1], /gatewayFor/, "daemonCommand routes through its target-aware gateway factory");
   assert.match(src, /targetCommitTrailerIndex/);
-  assert.match(src, /commitTrailerIndex: targetCommitTrailerIndex/);
+  assert.match(src, /trailerIndexFor: \(o, r\) => \(o === target\.owner && r === target\.repo \? targetCommitTrailerIndex : undefined\)/);
 });

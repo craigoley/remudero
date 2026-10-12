@@ -8,7 +8,7 @@ import { ContainmentError, probeContainment, type ProbeExecResult } from "../src
 function settingsFile(): string {
   const path = join(mkdtempSync(join(tmpdir(), "rmd-containment-retry-")), "worker.json");
   writeFileSync(path, JSON.stringify({
-    sandbox: { enabled: true, failIfUnavailable: true },
+    sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false },
     permissions: { deny: [], allow: [], ask: [] },
   }));
   return path;

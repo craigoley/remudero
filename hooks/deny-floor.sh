@@ -57,15 +57,135 @@ invokes_gh() {
     | grep -Eq '(^|[^A-Za-z0-9_/.-])gh[[:space:]]'
 }
 
-# 1) force-push to the default branch (main/master), judged per command SEGMENT (W1-T4588): the
-#    force flag and the default-branch refspec must sit in the SAME `git push` segment. Read across
-#    the whole line, gh's `-f base=main` field beside a plain push satisfied both greps.
-while IFS= read -r seg; do
-  if printf '%s' "$seg" | grep -Eq 'git[[:space:]]+push[[:space:]].*(--force|-f)([[:space:]]|=|$)' &&
-    printf '%s' "$seg" | grep -Eq '(origin[[:space:]]+)?(main|master|HEAD:main|HEAD:master)'; then
-    deny "git push --force to a default branch"
-  fi
-done < <(printf '%s\n' "$cmd" | sed -E 's/(&&|[|][|]|;|[|])/\n/g')
+# 1) a push whose DESTINATION is a default branch (main/master), judged per command SEGMENT (W1-T4588)
+#    by its PARSED refspecs (W1-T5352), never by substrings. Two loose greps -- a force flag anywhere
+#    in the segment AND `main` anywhere in it -- refused a forced push of `run-fix-main-gate-1` and let
+#    `+HEAD:main`, `--force-with-lease origin main`, `-fu`, `:main` and `--delete main` through.
+#    `push_refusal` finds `git [-C x|-c k=v|--git-dir x|--work-tree x]* push`, then walks its words:
+#    force = --force | --force-with-lease[=..] | --force-if-includes | a short cluster holding `f` | a
+#    `+refspec`; delete = --delete | a cluster holding `d` | a `:dst` refspec; --mirror/--all/--branches
+#    = every branch, forced. The first positional word is the remote, every later one a refspec, and its
+#    destination is the text after the last `:` minus `+` and `refs/heads/`. Only a destination of
+#    EXACTLY main or master is refused -- a run branch merely NAMED like main passes. A bare `HEAD` and a
+#    push with no refspec stay allowed: the hook cannot know the upstream. Quoted text holding a space
+#    or separator is blanked first (a commit message that says "git push origin main" is not a push);
+#    a quoted single word is unquoted. Still a tripwire: a refspec assembled indirectly (`"$ref"`)
+#    escapes it, as the file header says. It FAILS CLOSED: if the split or the parse errors, the push
+#    is refused as unparseable rather than waved through.
+push_refusal() {
+  local words n i w k c sub rest dst force=0 del=0 every=0 hit=0 hit_del=0 remote_seen=0 endopts=0
+  IFS=$' \t' read -r -a words <<< "$1"
+  n=${#words[@]}
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    w="${words[$i]}"
+    i=$((i + 1))
+    case "$w" in git|*/git|*'('git|*'`'git) ;; *) continue ;; esac
+    sub=""
+    while [ "$i" -lt "$n" ]; do
+      w="${words[$i]}"
+      i=$((i + 1))
+      case "$w" in
+        -C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix) i=$((i + 1)) ;;
+        -*) ;;
+        *) sub="$w"; break ;;
+      esac
+    done
+    [ "$sub" = push ] || continue
+    force=0 del=0 every=0 hit=0 hit_del=0 remote_seen=0 endopts=0
+    while [ "$i" -lt "$n" ]; do
+      w="${words[$i]}"
+      i=$((i + 1))
+      case "$w" in '#'*|'&') break ;; esac
+      if [ "$endopts" -eq 0 ]; then
+        case "$w" in
+          --) endopts=1; continue ;;
+          --force|--force-with-lease|--force-with-lease=*|--force-if-includes) force=1; continue ;;
+          --delete) del=1; continue ;;
+          --mirror|--all|--branches) every=1; continue ;;
+          --repo|--push-option|--receive-pack|--exec|--recurse-submodules) i=$((i + 1)); continue ;;
+          --*) continue ;;
+          -?*)
+            k=1
+            while [ "$k" -lt "${#w}" ]; do
+              c="${w:$k:1}"
+              k=$((k + 1))
+              case "$c" in
+                f) force=1 ;;
+                d) del=1 ;;
+                o) [ "$k" -ge "${#w}" ] && i=$((i + 1)); break ;;
+              esac
+            done
+            continue ;;
+        esac
+      fi
+      case "$w" in
+        '>'|'>>'|'<'|[0-9]'>'|[0-9]'>>'|[0-9]'<'|'&>'|'&>>') i=$((i + 1)); continue ;;
+        '>'*|'<'*|[0-9]'>'*|[0-9]'<'*|'&>'*) continue ;;
+      esac
+      while :; do
+        case "$w" in *')'|*'`'|*'&') w="${w%?}" ;; *) break ;; esac
+      done
+      if [ "$remote_seen" -eq 0 ]; then
+        remote_seen=1
+        continue
+      fi
+      case "$w" in '+'*) force=1; w="${w#+}" ;; esac
+      if [ "$w" = ":" ]; then
+        every=1
+        continue
+      fi
+      dst="${w##*:}"
+      dst="${dst#refs/heads/}"
+      case "$dst" in
+        main|master)
+          hit=1
+          case "$w" in :*) hit_del=1 ;; esac ;;
+      esac
+    done
+    if [ "$every" -eq 1 ]; then
+      printf '%s\n' "git push --force to a default branch"
+      return 0
+    fi
+    if [ "$hit" -eq 1 ]; then
+      if [ "$del" -eq 1 ] || [ "$hit_del" -eq 1 ]; then
+        printf '%s\n' "deleting a default branch"
+      elif [ "$force" -eq 1 ]; then
+        printf '%s\n' "git push --force to a default branch"
+      else
+        printf '%s\n' "a push to a default branch — open a PR"
+      fi
+      return 0
+    fi
+  done
+  return 0
+}
+case "$cmd" in
+  *push*)
+    r1_text="$(printf '%s\n' "$cmd" | awk '
+      BEGIN { RS = "\001"; qre = "[\"\047]" }
+      {
+        rest = $0; out = ""
+        while ((p = match(rest, qre)) > 0) {
+          out = out substr(rest, 1, p - 1); qc = substr(rest, p, 1); rest = substr(rest, p + 1)
+          e = index(rest, qc)
+          if (e == 0) { out = out "QSTR"; rest = ""; break }
+          inner = substr(rest, 1, e - 1); rest = substr(rest, e + 1)
+          if (inner ~ /[ \t\n;&|]/) out = out "QSTR"; else out = out inner
+        }
+        out = out rest
+        gsub(/&&|\|\||;|\|/, "\n", out)
+        printf "%s\n", out
+      }')" || deny "an unparseable git push — rule 1 fails closed"
+    while IFS= read -r seg; do
+      case "$seg" in *git*push*) ;; *) continue ;; esac
+      r1_reason="$(push_refusal "$seg")" || deny "an unparseable git push — rule 1 fails closed"
+      if [ -n "$r1_reason" ]; then
+        deny "$r1_reason"
+      fi
+    done <<< "$r1_text"
+    ;;
+esac
 
 # 2) gh auth mutation (login/logout/refresh/token/setup-git).
 if printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+auth[[:space:]]+(login|logout|refresh|token|setup-git)'; then
@@ -418,6 +538,77 @@ if [ "$cov_scan" -eq 1 ]; then
   done < <(printf '%s\n' "$cmd" | cov_segments)
 fi
 
+# 15) A HAND-RUN `node --test` WITHOUT THE SETUP PRELOAD (W1-T6030). MEASURED 2026-10-06: without
+#    `--import ./test/setup/tmp-hygiene.ts` a suite has no gh refusal stub, live push URLs, the shell's real
+#    GH_TOKEN and no gc-disable; run-task failed 8/324 and git-fixture-gc-hygiene 3/6 as ordinary reds.
+#    Every scripted run passes the preload; a hand-typed one had no check. Parsed like rule 13 (segments,
+#    program position). Refused: a `node ... --test` naming a test/ path or glob with no `--import X` or
+#    `--import=X` (nor NODE_OPTIONS) ending in test/setup/tmp-hygiene.ts — only where that file exists in
+#    the payload cwd or a leading `cd <dir>` target, so other repos are never refused. One -f per run.
+pl_has_preload() { case "$1" in *test/setup/tmp-hygiene.ts) return 0 ;; esac; return 1; }
+case "$cmd" in *node*--test*) pl_scan=1 ;; *) pl_scan=0 ;; esac
+if [ "$pl_scan" -eq 1 ]; then
+  pl_dir="${hook_cwd%/}" pl_env=0
+  while IFS= read -r pl_seg; do
+    case "$pl_seg" in *NODE_OPTIONS=*test/setup/tmp-hygiene.ts*) pl_env=1 ;; esac
+    pl_state=pre pl_skip=0 pl_dur=0 pl_test=0 pl_names=0 pl_pre=0 pl_val=0 pl_cd=0
+    set -f
+    for pl_tok in $pl_seg; do
+      pl_t="${pl_tok//[\"\']/}"
+      if [ "$pl_state" = pre ]; then
+        if [ "$pl_skip" -gt 0 ]; then pl_skip=$((pl_skip - 1)); continue; fi
+        if [ "$pl_dur" -eq 1 ]; then
+          case "$pl_t" in -k|-s|--signal|--kill-after) pl_skip=1; continue ;; -*) continue ;; esac
+          pl_dur=0; continue
+        fi
+        case "$pl_t" in
+          [A-Za-z_]*=*|do|then|else|elif|if|while|until|"!"|"{"|time|nohup|exec|command|env|nice) continue ;;
+          timeout) pl_dur=1 ;;
+          -n|-u|-C|-S) pl_skip=1 ;;
+          -*) ;;
+          cd) pl_state=cd ;;
+          node|*/node|nodejs) pl_state=node ;;
+          *) break ;;
+        esac
+      elif [ "$pl_state" = cd ]; then
+        case "$pl_t" in -L|-P|-e|-@) continue ;; esac
+        pl_cd=1
+        case "$pl_t" in
+          /*) pl_dir="$pl_t" ;;
+          "~") pl_dir="$HOME" ;;
+          "~/"*) pl_dir="$HOME/${pl_t#\~/}" ;;
+          -) pl_dir="" ;;
+          *) [ -n "$pl_dir" ] && pl_dir="$pl_dir/$pl_t" ;;
+        esac
+        break
+      elif [ "$pl_val" -eq 1 ]; then
+        pl_val=0; pl_has_preload "$pl_t" && pl_pre=1
+      elif [ "$pl_skip" -gt 0 ]; then
+        pl_skip=0
+      else
+        case "$pl_t" in
+          -e|--eval|-p|--print|--eval=*|--print=*) pl_state=none; break ;;
+          --test) pl_test=1 ;;
+          --import) pl_val=1 ;;
+          --import=*) pl_has_preload "${pl_t#--import=}" && pl_pre=1 ;;
+          --require|-r|--loader|--experimental-loader|--test-reporter|--test-reporter-destination|\
+          --test-name-pattern|--test-skip-pattern|--test-concurrency|--test-shard|--test-timeout|\
+          --test-coverage-include|--test-coverage-exclude|--env-file|--conditions|-C) pl_skip=1 ;;
+          -*) ;;
+          *\>*|*\<*) ;;
+          test/*|./test/*|*/test/*) pl_names=1 ;;
+        esac
+      fi
+    done
+    set +f
+    [ "$pl_state" = cd ] && [ "$pl_cd" -eq 0 ] && pl_dir="$HOME"
+    [ "$pl_state" = node ] && [ "$pl_test" -eq 1 ] && [ "$pl_names" -eq 1 ] || continue
+    [ "$pl_pre" -eq 1 ] || [ "$pl_env" -eq 1 ] && continue
+    [ -n "$pl_dir" ] && [ -f "$pl_dir/test/setup/tmp-hygiene.ts" ] || continue
+    deny "a hand-run \`node --test\` without the setup preload (W1-T6030) — it runs uncontained (no gh refusal stub, live push URLs, the shell's real GH_TOKEN, no gc-disable) and its reds are not regressions. Add \`--import ./test/setup/tmp-hygiene.ts\` after \`--import tsx\`: node --test --import tsx --import ./test/setup/tmp-hygiene.ts <files>"
+  done < <(printf '%s\n' "$cmd" | cov_segments)
+fi
+
 # 14) WORKER FILE TOOLS STAY IN THE ASSIGNED WORKTREE (W1-T5016). OBSERVED at c94c2bf49: workers run
 #    under bypassPermissions, this hook read `file_path` and `cwd` and never compared them, and the worker
 #    matcher omitted Read — a scratch-hook test allowed an Edit in a sibling checkout. Worker-lane only
@@ -429,6 +620,12 @@ fi
 #    HOME; and this session's own ~/.claude/projects/<sanitized project dir>, where the CLI persists large
 #    tool output. FAIL CLOSED on no path, no worktree, a `..` component, an unresolvable path, or no jq.
 #    Bash is NOT confined here: the OS sandbox is that boundary.
+#    W1-T5354: Grep (content mode returns file bodies) and Glob are judged the same way, with the node_modules
+#    read allowance. Their `path` is the target; ABSENT means the session cwd, never a refusal. An absolute Glob
+#    `pattern` is judged by its literal prefix up to the last `/` before its first metacharacter, and a `..`
+#    anywhere in a pattern is refused. Codex's own edit tool reaches this hook as `apply_patch` (captured from
+#    codex-cli 0.159.0, routed by the `Edit`/`Write` aliases too), with the patch in `command`: every
+#    Add/Update/Delete File and Move to header is a write target, and a patch naming none fails closed.
 ft_canon() {  # absolute path -> physical path, resolving every symlink component (dangling included)
   local rest="${1#/}" out="" comp link hops=0
   while [ -n "$rest" ]; do
@@ -451,50 +648,607 @@ ft_under() {  # is physical path $1 at or below physical root $2?
   case "$1/" in "$2"/*) return 0 ;; esac
   return 1
 }
+ft_check() {  # deny unless tool $1's target $2 is inside the worktree or an allowed root
+  local tool="$1" target="$2" real ok=0 nm tmp home proj slug
+  case "$target" in '~'*) deny "$tool of a \`~\` path ($target) — name it by its absolute path inside the assigned worktree (W1-T5016, W1-T5354)" ;; esac
+  case "$target" in
+    /*) : ;;
+    *) case "$hook_cwd" in /*) target="$hook_cwd/$target" ;; *) deny "$tool of a relative path with no cwd (W1-T5016)" ;; esac ;;
+  esac
+  case "/$target/" in */../*) deny "$tool of a path with a \`..\` component ($target) — name the file by its absolute path inside the assigned worktree (W1-T5016)" ;; esac
+  real="$(ft_canon "$target")" || deny "$tool target does not resolve ($target, W1-T5016)"
+  ft_under "$real" "$ft_root" && ok=1
+  if [ "$ok" -eq 0 ] && [ -L "$ft_root/node_modules" ]; then
+    case "$tool" in Read|Grep|Glob) nm="$(ft_canon "$ft_root/node_modules")" && ft_under "$real" "$nm" && ok=1 ;; esac
+  fi
+  if [ "$ok" -eq 0 ]; then
+    tmp="$(ft_canon "${TMPDIR:-/tmp}")" && ft_under "$real" "$tmp" && ok=1
+  fi
+  if [ "$ok" -eq 0 ] && [ -n "${HOME:-}" ]; then
+    case "${HOME%/}" in
+      */worker-home*) home="$(ft_canon "$HOME")" && ft_under "$real" "$home" && ok=1 ;;
+    esac
+    for slug in "${ft_anchor//[^A-Za-z0-9]/-}" "${ft_root//[^A-Za-z0-9]/-}"; do
+      [ "$ok" -eq 1 ] && break
+      proj="$(ft_canon "$HOME/.claude/projects/$slug")" && ft_under "$real" "$proj" && ok=1
+    done
+  fi
+  [ "$ok" -eq 1 ] || deny "$tool outside the assigned worktree ($target resolves to $real; worktree $ft_root, W1-T5016, W1-T5354) — file tools stay inside the worktree, and scratch goes under ${TMPDIR:-/tmp}"
+}
 if [ "$confine_file_tools" -eq 1 ]; then
   if [ "$have_jq" -eq 0 ]; then
-    if printf '%s' "$input" | grep -Eq '"tool_name"[[:space:]]*:[[:space:]]*"(Read|Write|Edit|MultiEdit|NotebookEdit)"'; then
+    if printf '%s' "$input" | grep -Eq '"tool_name"[[:space:]]*:[[:space:]]*"(Read|Write|Edit|MultiEdit|NotebookEdit|Grep|Glob|apply_patch)"'; then
       deny "a file tool with no jq to read its target — confinement fails closed (W1-T5016)"
     fi
   else
     ft_tool="$(printf '%s' "$input" | jq -r '.tool_name // ""')"
     case "$ft_tool" in
-      Read|Write|Edit|MultiEdit|NotebookEdit)
+      Read|Write|Edit|MultiEdit|NotebookEdit|Grep|Glob|apply_patch)
         ft_target="$path"
         [ "$ft_tool" = NotebookEdit ] && ft_target="$(printf '%s' "$input" | jq -r '.tool_input.notebook_path // ""')"
-        [ -n "$ft_target" ] || deny "$ft_tool names no path, so it cannot be checked against the assigned worktree (W1-T5016)"
+        case "$ft_tool" in
+          Grep|Glob|apply_patch) : ;;
+          *) [ -n "$ft_target" ] || deny "$ft_tool names no path, so it cannot be checked against the assigned worktree (W1-T5016)" ;;
+        esac
         ft_anchor="${CLAUDE_PROJECT_DIR:-$hook_cwd}"
         case "$ft_anchor" in /*) : ;; *) deny "$ft_tool with no absolute assigned worktree to compare against (W1-T5016)" ;; esac
-        case "$ft_target" in
-          /*) : ;;
-          *) case "$hook_cwd" in /*) ft_target="$hook_cwd/$ft_target" ;; *) deny "$ft_tool of a relative path with no cwd (W1-T5016)" ;; esac ;;
-        esac
-        case "/$ft_target/" in */../*) deny "$ft_tool of a path with a \`..\` component ($ft_target) — name the file by its absolute path inside the assigned worktree (W1-T5016)" ;; esac
         ft_root="$(ft_canon "$ft_anchor")" || deny "the assigned worktree does not resolve (W1-T5016)"
         [ -d "$ft_root" ] || deny "the assigned worktree ($ft_anchor) is not a directory (W1-T5016)"
-        ft_real="$(ft_canon "$ft_target")" || deny "$ft_tool target does not resolve ($ft_target, W1-T5016)"
-        ft_ok=0
-        ft_under "$ft_real" "$ft_root" && ft_ok=1
-        if [ "$ft_ok" -eq 0 ] && [ "$ft_tool" = Read ] && [ -L "$ft_root/node_modules" ]; then
-          ft_nm="$(ft_canon "$ft_root/node_modules")" && ft_under "$ft_real" "$ft_nm" && ft_ok=1
-        fi
-        if [ "$ft_ok" -eq 0 ]; then
-          ft_tmp="$(ft_canon "${TMPDIR:-/tmp}")" && ft_under "$ft_real" "$ft_tmp" && ft_ok=1
-        fi
-        if [ "$ft_ok" -eq 0 ] && [ -n "${HOME:-}" ]; then
-          case "${HOME%/}" in
-            */worker-home*) ft_home="$(ft_canon "$HOME")" && ft_under "$ft_real" "$ft_home" && ft_ok=1 ;;
-          esac
-          for ft_slug in "${ft_anchor//[^A-Za-z0-9]/-}" "${ft_root//[^A-Za-z0-9]/-}"; do
-            [ "$ft_ok" -eq 1 ] && break
-            ft_proj="$(ft_canon "$HOME/.claude/projects/$ft_slug")" && ft_under "$ft_real" "$ft_proj" && ft_ok=1
-          done
-        fi
-        [ "$ft_ok" -eq 1 ] || deny "$ft_tool outside the assigned worktree ($ft_target resolves to $ft_real; worktree $ft_root, W1-T5016) — file tools stay inside the worktree, and scratch goes under ${TMPDIR:-/tmp}"
+        case "$ft_tool" in
+          Grep|Glob)
+            ft_target="$(printf '%s' "$input" | jq -r '.tool_input.path // ""')"
+            [ -n "$ft_target" ] || ft_target="${hook_cwd:-$ft_anchor}"
+            ft_check "$ft_tool" "$ft_target"
+            if [ "$ft_tool" = Glob ]; then
+              ft_pat="$(printf '%s' "$input" | jq -r '.tool_input.pattern // ""')"
+              case "/$ft_pat/" in */../*) deny "Glob pattern with a \`..\` component ($ft_pat) climbs out of its path (W1-T5354)" ;; esac
+              case "$ft_pat" in
+                /*) ft_pre="${ft_pat%%[*?[{]*}"; ft_pre="${ft_pre%/*}"; ft_check Glob "${ft_pre:-/}" ;;
+              esac
+            fi
+            ;;
+          apply_patch)
+            ft_n=0
+            while IFS= read -r ft_line; do
+              ft_line="${ft_line#"${ft_line%%[![:space:]]*}"}"
+              ft_line="${ft_line%"${ft_line##*[![:space:]]}"}"
+              case "$ft_line" in
+                '*** Add File: '* | '*** Update File: '* | '*** Delete File: '*) ft_target="${ft_line#*File: }" ;;
+                '*** Move to: '*) ft_target="${ft_line#*Move to: }" ;;
+                *) continue ;;
+              esac
+              ft_target="${ft_target#"${ft_target%%[![:space:]]*}"}"
+              [ -n "$ft_target" ] || deny "apply_patch with an empty file header (W1-T5354)"
+              ft_check apply_patch "$ft_target"
+              ft_n=$((ft_n + 1))
+            done < <(printf '%s\n' "$cmd")
+            [ "$ft_n" -gt 0 ] || deny "apply_patch names no file, so it cannot be checked against the assigned worktree (W1-T5354)"
+            ;;
+          *) ft_check "$ft_tool" "$ft_target" ;;
+        esac
         ;;
     esac
   fi
 fi
+
+# 16) HOUSE RULES THE PROMPTS DID NOT HOLD (operator ruling 2026-10-10: in one day sessions ran `git stash`
+#    twice, `--no-verify` once and `pkill -f` over `ssh remudero` once). Refused, naming rule and alternative:
+#    stash: `git stash` in any form but the read-only `list`/`show`. no-verify: `--no-verify` on commit, push
+#    or merge, `git commit -n`, and any core.hooksPath override (`-c`, `--config-env`, `GIT_CONFIG_*`, or
+#    `git config` setting it to anything but `hooks`, unsetting it, or removing `core`); `git push -n` is
+#    --dry-run and passes. host: kill/pkill/killall (not `kill -0`/`-l`), docker restart/stop/kill/rm/rmi/
+#    down/prune/pause, systemctl restart/stop/kill, rm -r/-f and `git worktree prune` sent to `ssh remudero`,
+#    also via `sh -c`, `docker exec`, a heredoc, a here-string or a pipe into it. Read-only queries pass.
+#    Judged at the PROGRAM position of each quote-aware simple command, so text that only NAMES a shape (a
+#    grep, an echo, a commit message) runs. Bash tool only; inert without jq; a tripwire (file header).
+#    OPERATOR OVERRIDE, A CHOICE ON THE RECORD: RMD_HOUSE_RULE_OVERRIDE=<stash|no-verify|host>[,...] in the
+#    session's LAUNCH environment; agents never set it. Unlike RMD_GH_COOLDOWN_S it is NOT read from the
+#    command text, so an inline assignment is refused: the agent typing it is who must not hold it.
+#    FALSIFIER: test/the-house-rules-are-refused-at-the-floor.test.ts.
+hr_tokens() {  # shell text -> per simple command: <`|` after a pipe, else `-`>\037<word>\037...; heredoc body = \036<body>
+  awk '
+    function endtok() { if (have) { seg = seg US tok; segn++ } tok = ""; have = 0 }
+    function flush(nsep) { endtok(); if (segn) out[++no] = sep seg; seg = ""; segn = 0; sep = nsep }
+    function emit(   k) { for (k = 1; k <= no; k++) print out[k]; no = 0 }
+    function attach(b) { if (segn || have) { seg = seg US HB b; segn++ } else if (no) out[no] = out[no] US HB b }
+    BEGIN { US = "\037"; HB = "\036"; NL = "\035"; q = ""; tok = ""; have = 0; seg = ""; segn = 0; sep = "-"; no = 0; nh = 0; hi = 0; body = "" }
+    {
+      L = $0
+      if (hi) {
+        line = L; if (htab[hi]) sub(/^\t+/, "", line)
+        if (line == hword[hi]) {
+          attach(body); body = ""
+          if (++hi > nh) { hi = 0; nh = 0; if (q == "") emit() }
+        } else body = body (body == "" ? "" : NL) L
+        next
+      }
+      r = L
+      while ((p = match(r, /<<-?[ \t]*[\047"\\]*[A-Za-z_][A-Za-z0-9_]*/)) > 0) {
+        if (p > 1 && substr(r, p - 1, 1) == "<") { r = substr(r, p + RLENGTH); continue }
+        w = substr(r, p, RLENGTH); t = (w ~ /^<<-/); sub(/^<<-?[ \t]*[\047"\\]*/, "", w)
+        hword[++nh] = w; htab[nh] = t
+        r = substr(r, p + RLENGTH)
+      }
+      n = length(L); cont = 0
+      for (i = 1; i <= n; i++) {
+        c = substr(L, i, 1)
+        if (q == "\047") { if (c == "\047") q = ""; else tok = tok c; continue }
+        if (q == "\"") {
+          if (c == "\\" && i < n && substr(L, i + 1, 1) ~ /[\\"$`]/) { tok = tok substr(L, i + 1, 1); i++; continue }
+          if (c == "\"") q = ""; else tok = tok c
+          continue
+        }
+        if (c == "\\") { if (i == n) { cont = 1; break } tok = tok substr(L, i + 1, 1); have = 1; i++; continue }
+        if (c == "\047" || c == "\"") { q = c; have = 1; continue }
+        if (c == " " || c == "\t") { endtok(); continue }
+        if (c == "#" && !have) break
+        if (substr(L, i, 3) == "<<<") { endtok(); tok = "<<<"; have = 1; endtok(); i += 2; continue }
+        if (substr(L, i, 2) == "<<") {
+          endtok(); tok = "<<"; have = 1; endtok()
+          j = i + 2; if (substr(L, j, 1) == "-") j++
+          while (substr(L, j, 1) ~ /[ \t]/) j++
+          while (j <= n && substr(L, j, 1) !~ /[ \t;&|()<>]/) j++
+          i = j - 1; continue
+        }
+        if (c == ">" && substr(L, i + 1, 1) == "&") { tok = tok ">&"; have = 1; i++; continue }
+        if (c == "&" && substr(L, i + 1, 1) == ">") { tok = tok "&>"; have = 1; i++; continue }
+        if (c == "$" && substr(L, i + 1, 1) == "(") { flush("-"); i++; continue }
+        if (c == "|") { if (substr(L, i + 1, 1) == "|") { flush("-"); i++ } else flush("|"); continue }
+        if (c == ";" || c == "&" || c == "(" || c == ")" || c == "`") { if (c == "&" && substr(L, i + 1, 1) == "&") i++; flush("-"); continue }
+        tok = tok c; have = 1
+      }
+      if (q != "") tok = tok NL
+      else if (cont) endtok()
+      else flush("-")
+      if (nh) hi = 1
+      else if (q == "" && !cont) emit()
+    }
+    END { flush("-"); emit() }'
+}
+HR_STASH="git stash (house rule: never stash: a stash lives outside every branch, is invisible to every other session sharing this clone, and is lost when its worktree is reaped). Commit by explicit path instead (git add <path> && git commit), or copy the file aside (cp <file> <scratch>/) to prove a falsifier, then copy it back. The read-only \`git stash list\` and \`git stash show\` still run."
+HR_NOVERIFY="git commit/push/merge with --no-verify, or \`git commit -n\` (house rule: never --no-verify: the hooks are this repo's gates). Fix what the hook reports, then commit or push again."
+HR_HOOKSPATH="a core.hooksPath override (house rule: never bypass the hooks: pointing core.hooksPath anywhere but \`hooks\` disarms pre-commit, commit-msg and pre-push). Fix what the hook reports; the only value this repo sets is \`git config core.hooksPath hooks\`."
+HR_HOST="the fleet host is READ-ONLY for sessions (house rule)"
+hr_override="${RMD_HOUSE_RULE_OVERRIDE-}"
+hr_refuse() {  # $1 = rule (stash|no-verify|host), $2 = message. deny exits; an override records and returns.
+  case ",$hr_override," in
+    *",$1,"*)
+      printf 'deny-floor: house rule "%s" OVERRIDDEN by RMD_HOUSE_RULE_OVERRIDE (an operator choice on the record): %s\n' "$1" "$2" >&2
+      return 0 ;;
+  esac
+  deny "$2"
+}
+hr_host_refuse() {  # $1 = the destructive command as parsed
+  hr_refuse host "destructive process control sent to the fleet host over ssh (\`$1\`): $HR_HOST. Read-only queries (ps, docker ps/inspect/logs, systemctl status, journalctl, cat, ls) still run. Report to the operator with the exact command you would have run, and stop."
+}
+hr_is_hookspath() {  # config keys are case-insensitive
+  case "$1" in [cC][oO][rR][eE].[hH][oO][oO][kK][sS][pP][aA][tT][hH]) return 0 ;; esac
+  return 1
+}
+hr_decode() { printf '%s' "${1//$'\035'/$'\n'}"; }
+hr_rest() {  # the words t[i..] of the caller's segment, space-joined (heredoc bodies left out)
+  local k="$i" s=""
+  while [ "$k" -lt "$n" ]; do
+    case "${t[$k]}" in $'\036'*) ;; *) s="$s ${t[$k]}" ;; esac
+    k=$((k + 1))
+  done
+  printf '%s' "${s# }"
+}
+hr_skipopts() {  # step the caller's i past the wrapper word at t[i] and its options; $1 = options taking a value
+  i=$((i + 1))
+  while [ "$i" -lt "$n" ]; do
+    case "${t[$i]}" in
+      --) i=$((i + 1)); break ;;
+      -*) case " $1 " in *" ${t[$i]} "*) i=$((i + 2)) ;; *) i=$((i + 1)) ;; esac ;;
+      *) break ;;
+    esac
+  done
+  return 0
+}
+hr_env_split_words() {  # split env -S text into literal argv words without interpreting shell separators or expansions
+  local input="$1" len pos=0 ch next quote="" word="" have=0 out="" us=$'\037'
+  len=${#input}
+  while [ "$pos" -lt "$len" ]; do
+    ch="${input:$pos:1}"
+    if [ "$quote" = "'" ]; then
+      if [ "$ch" = "'" ]; then quote=""; else word="$word$ch"; have=1; fi
+      pos=$((pos + 1))
+      continue
+    fi
+    if [ "$quote" = '"' ]; then
+      case "$ch" in
+        '"') quote="" ;;
+        \\)
+          if [ $((pos + 1)) -lt "$len" ]; then
+            next="${input:$((pos + 1)):1}"
+            case "$next" in '"'|\\) word="$word$next"; pos=$((pos + 1)) ;; *) word="$word$ch" ;; esac
+          else word="$word$ch"; fi ;;
+        *) word="$word$ch" ;;
+      esac
+      have=1
+      pos=$((pos + 1))
+      continue
+    fi
+    case "$ch" in
+      ' '|$'\t'|$'\n')
+        if [ "$have" -eq 1 ]; then out="${out}${word}${us}"; word=""; have=0; fi ;;
+      "'"|'"') quote="$ch"; have=1 ;;
+      \\)
+        if [ $((pos + 1)) -ge "$len" ]; then return 1; fi
+        next="${input:$((pos + 1)):1}"
+        case "$next" in
+          c) pos=$len; continue ;;
+          _) word="$word " ;;
+          *) word="$word$next" ;;
+        esac
+        have=1
+        pos=$((pos + 1)) ;;
+      *) word="$word$ch"; have=1 ;;
+    esac
+    pos=$((pos + 1))
+  done
+  [ -z "$quote" ] || return 1
+  if [ "$have" -eq 1 ]; then out="${out}${word}${us}"; fi
+  printf '%s' "$out"
+}
+hr_env_check() {  # inspect env argv, expanding split-string options as literal argv
+  local previous="$1" mode="$2" depth="$3" j w encoded split_arg rounds=0 command_line us=$'\037'
+  local -a argv=() split=()
+  for ((j = i + 1; j < n; j++)); do argv+=("${t[$j]}"); done
+
+  # Expand env's split-string option in place; semicolons in its words stay argv data.
+  j=0
+  while [ "$j" -lt "${#argv[@]}" ]; do
+    w="${argv[$j]}"
+    case "$w" in
+      --) break ;;
+      -u|--unset|-C|--chdir|-P|--path|-a|--argv0) j=$((j + 2)); continue ;;
+      -S|--split-string)
+        [ $((j + 1)) -lt "${#argv[@]}" ] || deny "env -S has no split-string argument; run the command without env -S so the house-rule floor can inspect it"
+        split_arg="${argv[$((j + 1))]}"
+        encoded="$(hr_env_split_words "$split_arg")" || deny "env -S has malformed split-string quoting; run the command without env -S so the house-rule floor can inspect it"
+        split=()
+        if [ -n "$encoded" ]; then IFS=$'\037' read -r -a split <<< "$encoded"; fi
+        argv=("${argv[@]:0:j}" "${split[@]}" "${argv[@]:j+2}")
+        rounds=$((rounds + 1))
+        [ "$rounds" -le 8 ] || deny "env -S nesting exceeds the house-rule parser limit; run the command without nested env -S"
+        continue ;;
+      --split-string=*)
+        split_arg="${w#--split-string=}"
+        encoded="$(hr_env_split_words "$split_arg")" || deny "env --split-string has malformed quoting; run the command without env -S so the house-rule floor can inspect it"
+        split=()
+        if [ -n "$encoded" ]; then IFS=$'\037' read -r -a split <<< "$encoded"; fi
+        argv=("${argv[@]:0:j}" "${split[@]}" "${argv[@]:j+1}")
+        rounds=$((rounds + 1))
+        [ "$rounds" -le 8 ] || deny "env -S nesting exceeds the house-rule parser limit; run the command without nested env -S"
+        continue ;;
+      -S?*)
+        split_arg="${w#-S}"
+        encoded="$(hr_env_split_words "$split_arg")" || deny "env -S has malformed split-string quoting; run the command without env -S so the house-rule floor can inspect it"
+        split=()
+        if [ -n "$encoded" ]; then IFS=$'\037' read -r -a split <<< "$encoded"; fi
+        argv=("${argv[@]:0:j}" "${split[@]}" "${argv[@]:j+1}")
+        rounds=$((rounds + 1))
+        [ "$rounds" -le 8 ] || deny "env -S nesting exceeds the house-rule parser limit; run the command without nested env -S"
+        continue ;;
+      --unset=*|--chdir=*|--path=*|--argv0=*|-u?*|-C?*|-P?*|-a?*|-i|-v|-0|--ignore-environment|--null|--debug|--help|--version|-[iv0]*)
+        j=$((j + 1)); continue ;;
+      [A-Za-z_][A-Za-z0-9_]*=*)
+        j=$((j + 1)); continue ;;
+      *) break ;;
+    esac
+    j=$((j + 1))
+  done
+
+  j=0
+  while [ "$j" -lt "${#argv[@]}" ]; do
+    w="${argv[$j]}"
+    case "$w" in
+      --) j=$((j + 1)); break ;;
+      -u|--unset|-C|--chdir|-P|--path|-a|--argv0) j=$((j + 2)) ;;
+      --unset=*|--chdir=*|--path=*|--argv0=*|-i|--ignore-environment|-0|--null|-v|--debug|--help|--version|-[iv0]*) j=$((j + 1)) ;;
+      -u?*|-C?*|-P?*|-a?*) j=$((j + 1)) ;;
+      [A-Za-z_][A-Za-z0-9_]*=*) j=$((j + 1)) ;;
+      -*) deny "env option '$w' is not recognized by the house-rule parser; run the command without that env option so its executable can be inspected" ;;
+      *) break ;;
+    esac
+  done
+  [ "$j" -lt "${#argv[@]}" ] || return 0
+
+  command_line="-"
+  w="${argv[$j]}"
+  if [ "${w##*/}" = env ] && [ "$depth" -ge 4 ]; then
+    deny "nested env wrappers exceed the house-rule parser limit; run the command without nested env wrappers"
+  fi
+  while [ "$j" -lt "${#argv[@]}" ]; do
+    command_line="${command_line}${us}${argv[$j]}"
+    j=$((j + 1))
+  done
+  hr_segment "$command_line" "$previous" "$mode" $((depth + 1))
+  return 0
+}
+hr_check() {  # $1 = shell text, $2 = local|host, $3 = depth
+  local hr_line hr_prev=""
+  [ "$3" -le 4 ] || return 0
+  while IFS= read -r hr_line; do
+    hr_segment "$hr_line" "$hr_prev" "$2" "$3"
+    hr_prev="$hr_line"
+  done < <(printf '%s\n' "$1" | hr_tokens)
+  return 0
+}
+hr_git_c() {  # one `git -c key[=value]`
+  local key="${1%%=*}" val=""
+  case "$1" in *=*) val="${1#*=}" ;; esac
+  if hr_is_hookspath "$key" && [ "$val" != hooks ]; then hr_refuse no-verify "$HR_HOOKSPATH"; fi
+  return 0
+}
+hr_git_noverify() {  # $1 = commit|merge|push; the caller's t[i..] are the subcommand's words
+  local w k c vals
+  case "$1" in
+    commit) vals=" -m -F -C -c -t --message --file --reuse-message --reedit-message --template --author --date --cleanup --fixup --squash --trailer --pathspec-from-file " ;;
+    merge) vals=" -m -F -s -X --message --file --strategy --strategy-option --cleanup --into-name " ;;
+    *) vals=" -o --repo --push-option --receive-pack --exec " ;;
+  esac
+  while [ "$i" -lt "$n" ]; do
+    w="${t[$i]}"
+    i=$((i + 1))
+    case "$vals" in *" $w "*) i=$((i + 1)); continue ;; esac
+    case "$w" in
+      --) break ;;
+      '<<<') i=$((i + 1)) ;;
+      --no-veri|--no-verif|--no-verify) hr_refuse no-verify "$HR_NOVERIFY" ;;
+      --*) ;;
+      -?*)
+        [ "$1" = commit ] || continue
+        k=1
+        while [ "$k" -lt "${#w}" ]; do
+          c="${w:$k:1}"
+          k=$((k + 1))
+          case "$c" in
+            n) hr_refuse no-verify "$HR_NOVERIFY" ;;
+            m|F|C|c|t) if [ "$k" -ge "${#w}" ]; then i=$((i + 1)); fi; break ;;
+            S|u) break ;;
+          esac
+        done ;;
+    esac
+  done
+  return 0
+}
+hr_git_config() {  # the caller's t[i..] are `git config`'s words
+  local w verb="" key=0 read=0 unset=0 val="" have_val=0
+  while [ "$i" -lt "$n" ]; do
+    w="${t[$i]}"
+    i=$((i + 1))
+    case "$w" in
+      $'\036'*) ;;
+      --get|--get-all|--get-regexp|--get-urlmatch|-l|--list) read=1 ;;
+      --unset|--unset-all) unset=1 ;;
+      --remove-section|--rename-section)
+        case "${t[$i]-}" in [cC][oO][rR][eE]) hr_refuse no-verify "$HR_HOOKSPATH" ;; esac
+        i=$((i + 1)) ;;
+      -f|--file|--blob|--type|--default|--comment|--value|-t) i=$((i + 1)) ;;
+      -*) ;;
+      *)
+        if [ -z "$verb" ] && [ "$key" -eq 0 ]; then
+          case "$w" in
+            get|list) verb="$w"; read=1; continue ;;
+            set|unset|edit|rename-section|remove-section) verb="$w"; continue ;;
+          esac
+        fi
+        case "$verb" in
+          rename-section|remove-section)
+            case "$w" in [cC][oO][rR][eE]) hr_refuse no-verify "$HR_HOOKSPATH" ;; esac
+            return 0 ;;
+        esac
+        if [ "$key" -eq 0 ]; then
+          hr_is_hookspath "$w" || return 0
+          key=1
+        elif [ "$have_val" -eq 0 ]; then
+          val="$w"; have_val=1
+        fi ;;
+    esac
+  done
+  [ "$key" -eq 1 ] || return 0
+  [ "$read" -eq 0 ] || return 0
+  if [ "$unset" -eq 1 ] || [ "$verb" = unset ]; then hr_refuse no-verify "$HR_HOOKSPATH"; return 0; fi
+  [ "$have_val" -eq 1 ] || return 0
+  if [ "$val" != hooks ]; then hr_refuse no-verify "$HR_HOOKSPATH"; fi
+  return 0
+}
+hr_git() {  # $1 = mode, $2 = depth; the caller's t[i..] are git's words after the program
+  local w sub="" pos=""
+  while [ "$i" -lt "$n" ]; do
+    w="${t[$i]}"
+    i=$((i + 1))
+    case "$w" in
+      -c) hr_git_c "${t[$i]-}"; i=$((i + 1)) ;;
+      --config-env) w="${t[$i]-}"; if hr_is_hookspath "${w%%=*}"; then hr_refuse no-verify "$HR_HOOKSPATH"; fi; i=$((i + 1)) ;;
+      --config-env=*) w="${w#--config-env=}"; if hr_is_hookspath "${w%%=*}"; then hr_refuse no-verify "$HR_HOOKSPATH"; fi ;;
+      -C|--git-dir|--work-tree|--namespace|--super-prefix) i=$((i + 1)) ;;
+      -*) ;;
+      *) sub="$w"; break ;;
+    esac
+  done
+  case "$sub" in
+    stash) case "${t[$i]-}" in list|show) ;; *) hr_refuse stash "$HR_STASH" ;; esac ;;
+    commit|merge|push) hr_git_noverify "$sub" ;;
+    config) hr_git_config ;;
+    worktree)
+      if [ "$1" = host ]; then
+        while [ "$i" -lt "$n" ]; do
+          case "${t[$i]}" in -*) i=$((i + 1)) ;; *) pos="${t[$i]}"; break ;; esac
+        done
+        if [ "$pos" = prune ]; then hr_host_refuse "git worktree prune"; fi
+      fi ;;
+  esac
+  return 0
+}
+hr_ssh() {  # $1 = depth, $2 = the previous segment; the caller's t[i..] are ssh's words
+  local w k c dest="" host remote="" j
+  local -a p
+  while [ "$i" -lt "$n" ]; do
+    w="${t[$i]}"
+    i=$((i + 1))
+    case "$w" in
+      --) ;;
+      -?*)
+        k=1
+        while [ "$k" -lt "${#w}" ]; do
+          c="${w:$k:1}"
+          k=$((k + 1))
+          case "$c" in [BbcDEeFIiJLlmOoPpQRSWw]) if [ "$k" -ge "${#w}" ]; then i=$((i + 1)); fi; break ;; esac
+        done ;;
+      *) dest="$w"; break ;;
+    esac
+  done
+  host="${dest#ssh://}"; host="${host##*@}"; host="${host%%:*}"
+  [ "$host" = remudero ] || return 0
+  while [ "$i" -lt "$n" ]; do
+    w="${t[$i]}"
+    i=$((i + 1))
+    case "$w" in
+      $'\036'*) hr_check "$(hr_decode "${w#?}")" host $(( $1 + 1 )) ;;
+      '<<') ;;
+      '<<<') hr_check "$(hr_decode "${t[$i]-}")" host $(( $1 + 1 )); i=$((i + 1)) ;;
+      '<'|'>'|'>>'|[0-9]'>'|[0-9]'>>'|'&>') i=$((i + 1)) ;;
+      '<'*|'>'*|[0-9]'>'*|'&>'*) ;;
+      *) remote="$remote $w" ;;
+    esac
+  done
+  if [ -n "$remote" ]; then hr_check "$(hr_decode "$remote")" host $(( $1 + 1 )); fi
+  case "${t[0]}" in
+    '|')
+      [ -n "$2" ] || return 0
+      IFS=$'\037' read -r -a p <<< "$2"
+      j=1
+      while [ "$j" -lt "${#p[@]}" ]; do
+        w="${p[$j]}"
+        hr_check "$(hr_decode "${w#$'\036'}")" host $(( $1 + 1 ))
+        j=$((j + 1))
+      done ;;
+  esac
+  return 0
+}
+hr_docker() {  # $1 = depth; host mode only; the caller's t[i..] are docker's words
+  local w sub="" sub2=""
+  while [ "$i" -lt "$n" ]; do
+    w="${t[$i]}"
+    i=$((i + 1))
+    case "$w" in
+      -H|--host|--context|-c|--config|-l|--log-level) i=$((i + 1)) ;;
+      -*) ;;
+      *) sub="$w"; break ;;
+    esac
+  done
+  case "$sub" in
+    container|compose|image|volume|network|system|builder|buildx)
+      while [ "$i" -lt "$n" ]; do
+        w="${t[$i]}"
+        i=$((i + 1))
+        case "$w" in
+          -f|--file|-p|--project-name|--profile|--env-file|--project-directory) i=$((i + 1)) ;;
+          -*) ;;
+          *) sub2="$w"; break ;;
+        esac
+      done ;;
+    *) sub2="$sub"; sub="" ;;
+  esac
+  case "$sub2" in
+    restart|stop|kill|rm|rmi|down|prune|pause|remove) hr_host_refuse "docker ${sub:+$sub }$sub2" ;;
+    exec)
+      while [ "$i" -lt "$n" ]; do
+        w="${t[$i]}"
+        i=$((i + 1))
+        case "$w" in
+          -e|--env|--env-file|-u|--user|-w|--workdir|--detach-keys|--index) i=$((i + 1)) ;;
+          -*) ;;
+          *) break ;;
+        esac
+      done
+      hr_check "$(hr_decode "$(hr_rest)")" host $(( $1 + 1 )) ;;
+  esac
+  return 0
+}
+hr_segment() {  # $1 = one hr_tokens line, $2 = the previous line, $3 = local|host, $4 = depth
+  local -a t
+  local n i=1 w prog k c
+  IFS=$'\037' read -r -a t <<< "$1"
+  n=${#t[@]}
+  for w in "${t[@]}"; do
+    case "$w" in
+      GIT_CONFIG*=*[cC][oO][rR][eE].[hH][oO][oO][kK][sS][pP][aA][tT][hH]*) hr_refuse no-verify "$HR_HOOKSPATH" ;;
+    esac
+  done
+  while [ "$i" -lt "$n" ]; do
+    case "${t[$i]}" in
+      [A-Za-z_]*=*|do|then|else|elif|if|while|until|'!'|'{'|time|nohup|exec|command|builtin) i=$((i + 1)) ;;
+      sudo|*/sudo) hr_skipopts "-u -g -h -p -C -D -r -t -U -T" ;;
+      env|*/env) hr_env_check "$2" "$3" "$4"; return 0 ;;
+      nice|*/nice) hr_skipopts "-n" ;;
+      timeout|*/timeout) hr_skipopts "-s -k --signal --kill-after"; i=$((i + 1)) ;;
+      xargs|*/xargs) hr_skipopts "-I -n -P -L -d -a -E -s --max-args --max-procs --max-lines --delimiter --arg-file" ;;
+      *) break ;;
+    esac
+  done
+  [ "$i" -lt "$n" ] || return 0
+  prog="${t[$i]##*/}"
+  i=$((i + 1))
+  case "$prog" in
+    git) hr_git "$3" "$4" ;;
+    ssh) hr_ssh "$4" "$2" ;;
+    bash|sh|zsh|dash|ksh)
+      while [ "$i" -lt "$n" ]; do
+        w="${t[$i]}"
+        i=$((i + 1))
+        case "$w" in
+          $'\036'*) hr_check "$(hr_decode "${w#?}")" "$3" $(( $4 + 1 )) ;;
+          '<<<') hr_check "$(hr_decode "${t[$i]-}")" "$3" $(( $4 + 1 )); i=$((i + 1)) ;;
+          --*) ;;
+          -*c*) hr_check "$(hr_decode "${t[$i]-}")" "$3" $(( $4 + 1 )); i=$((i + 1)) ;;
+        esac
+      done ;;
+    eval) hr_check "$(hr_decode "$(hr_rest)")" "$3" $(( $4 + 1 )) ;;
+  esac
+  [ "$3" = host ] || return 0
+  case "$prog" in
+    kill) case "${t[$i]-}" in -0|-l|-L) ;; *) hr_host_refuse "kill $(hr_rest)" ;; esac ;;
+    pkill|killall) hr_host_refuse "$prog $(hr_rest)" ;;
+    docker) hr_docker "$4" ;;
+    systemctl)
+      while [ "$i" -lt "$n" ]; do
+        w="${t[$i]}"
+        i=$((i + 1))
+        case "$w" in
+          -H|--host|-M|--machine|-p|--property|-t|--type|-s|--signal|-n|--lines|-o|--output|--state) i=$((i + 1)) ;;
+          -*) ;;
+          restart|stop|kill|try-restart|reload-or-restart|try-reload-or-restart|condrestart) hr_host_refuse "systemctl $w"; break ;;
+          *) break ;;
+        esac
+      done ;;
+    rm)
+      k="$i"
+      while [ "$k" -lt "$n" ]; do
+        w="${t[$k]}"
+        k=$((k + 1))
+        case "$w" in
+          --) break ;;
+          --recursive|--force) hr_host_refuse "rm $w"; break ;;
+          --*) ;;
+          -*[rRf]*) hr_host_refuse "rm $w"; break ;;
+        esac
+      done ;;
+  esac
+  return 0
+}
+hr_tool=""
+[ "$have_jq" -eq 1 ] && hr_tool="$(printf '%s' "$input" | jq -r '.tool_name // ""')"
+case "$hr_tool" in
+  apply_patch|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob) ;;
+  *)
+    if [ "$have_jq" -eq 1 ]; then
+      case "$cmd" in *git*|*ssh*|*GIT_CONFIG*) hr_check "$cmd" local 0 ;; esac
+    fi ;;
+esac
 
 # 10) READ-SHAPED `gh` CALLS, TOO CLOSE TOGETHER (W1-T3275 — THE SECONDARY LIMIT COUNTS CADENCE).
 #    Rule 6 refuses the SHAPE of a poll — loop keyword + wait + `gh`. That is not how the budget

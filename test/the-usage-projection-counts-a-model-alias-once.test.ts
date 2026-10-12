@@ -85,7 +85,7 @@ test("claude model aliases resolve each bare alias to its capability's first can
   const aliases = claudeModelAliases(loadMounts(mountsPath(process.cwd())));
   assert.equal(aliases.get("sonnet"), "claude-sonnet-5-5");
   assert.equal(aliases.get("opus"), "claude-opus-5-5");
-  assert.equal(aliases.get("haiku"), "claude-haiku-4-5-20251001");
+  assert.equal(aliases.get("haiku"), "claude-haiku-5-5");
   assert.equal(aliases.has("claude-sonnet-5-5"), false, "a concrete id is not an alias");
   assert.equal(aliases.has("gpt-5.6-terra"), false, "another vendor's deployment is not a claude alias");
   assert.equal(claudeModelAliases({ capabilities: { ladder: {}, claude: { sonnet: "balanced" }, codex: {} } } as never).size, 0, "no candidate list means no alias target");

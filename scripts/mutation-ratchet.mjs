@@ -775,6 +775,7 @@ function main(argv) {
       const started = Date.now();
       const result = spawnSync(
         process.execPath,
+        // node-test-reporter: exempt — stdio is ignored; only the exit code is read.
         ['--test', '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...files],
         { cwd: repoRoot, timeout: commandBudgetMs, stdio: 'ignore' },
       );

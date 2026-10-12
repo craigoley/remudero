@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { DEFAULT_FIX_RETRIGGER_CAP, isRetriggerShapedCommit, runFixRung } from "../src/run-task.js";
-import type { FixRoundCommit } from "../src/run-task.js";
+import { DEFAULT_FIX_RETRIGGER_CAP, isRetriggerShapedCommit, runFixRung } from "./helpers/run-task-test.js";
+import type { FixRoundCommit } from "./helpers/run-task-test.js";
 import { fixStrikeCap } from "../src/lib/config.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { Config } from "../src/lib/config.js";
@@ -217,10 +217,11 @@ test("W1-T2403: a retrigger-shaped round is logged fix.retrigger (never fix.disp
 
 // ── claim 3 — a retrigger on an unchanged head is bounded by its own counter, never a timer ──
 
-test("W1-T2403: an all-retrigger rung is bounded by retriggerCap (never strikeCap, never a timer) and escalates once the count is reached", async () => {
+test("W1-T2403/W1-T7096: the judge may escalate after repeated retriggers; the old counter does not decide", async () => {
   const { lines, log } = captureLog();
   const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
   let spawnCalls = 0;
+  let judgeCalls = 0;
   const RETRIGGER_CAP = 3;
 
   const startedAt = Date.now();
@@ -230,6 +231,9 @@ test("W1-T2403: an all-retrigger rung is bounded by retriggerCap (never strikeCa
     retriggerCap: RETRIGGER_CAP,
     initialReview: fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })], "sha-0"),
     deps: {
+      fixProgressJudge: async () => ++judgeCalls > RETRIGGER_CAP
+        ? { verdict: "escalate", loop: "three retrigger rounds at the same red set", reason: "no new evidence" }
+        : { verdict: "continue", reason: "one more round is justified" },
       spawn: async () => {
         spawnCalls++;
         return result({ sessionId: `fix-session-${spawnCalls}` });
@@ -255,7 +259,7 @@ test("W1-T2403: an all-retrigger rung is bounded by retriggerCap (never strikeCa
   assert.equal(rung.strikes, 0, "not a single strike was spent — every round was retrigger-shaped");
   assert.equal(rung.retriggers, RETRIGGER_CAP, "the retrigger counter, not strikeCap (50), is what bound this loop");
   assert.equal(rung.outcome, "escalated");
-  assert.equal(rung.reason, "retrigger_cap_exhausted", "the exhaustion is attributed to the RETRIGGER cap, not the strike cap");
+  assert.match(rung.reason ?? "", /three retrigger rounds at the same red set/, "the judge names the loop instead of reporting a counter exhaustion");
   assert.equal(issueCalls.length, 1, "the rung escalated exactly once");
   assert.ok(!lines.some((l) => l.step === "fix.dispatch"), "no fix.dispatch line exists — priorStrikesFor would read zero strikes from this ledger");
   assert.ok(
@@ -306,8 +310,46 @@ test("W1-T2403: a real defect (never retrigger-shaped) still spends real strikes
   assert.ok(!lines.some((l) => l.step === "fix.retrigger"), "no fix.retrigger line exists — nothing was misclassified");
 });
 
-test("W1-T2403: DEFAULT_FIX_RETRIGGER_CAP is a small, separate bound — never equal to a raised/lowered fixStrikeCap in disguise", () => {
+test("W1-T2403/W1-T7096: the former retrigger cap is diagnostic only; it does not bind the fix loop", async () => {
   assert.ok(DEFAULT_FIX_RETRIGGER_CAP >= 1 && DEFAULT_FIX_RETRIGGER_CAP <= 5, "small, per W1-T2345's own 'bound the repetition' shape");
+  const { lines, log } = captureLog();
+  const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+  const judgedRoundCounts: number[] = [];
+  let spawnCalls = 0;
+
+  const rung = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 1,
+    retriggerCap: 1,
+    initialReview: fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false })], "sha-0"),
+    ciFailures: [{ name: "coverage-ratchet", logTail: "transient infra failure" }],
+    deps: {
+      fixProgressJudge: async input => {
+        judgedRoundCounts.push(input.rounds.length);
+        return { verdict: "continue", reason: "the transient check warrants another retrigger" };
+      },
+      spawn: async () => result({ sessionId: `fix-session-${++spawnCalls}` }),
+      readRoundCommits: async () => [RETRIGGER_COMMIT],
+      waitForCiGreen: async () => spawnCalls < 3 ? "red" : "green",
+      fetchCiFailures: async () => [{ name: "coverage-ratchet", logTail: "still transiently red" }],
+      fetchPrBody: async () => FAKE_PR_BODY,
+      runReview: async () => fakeReview("success", [criterion({ claim: "criterion A merges cleanly", met: true })], "sha-3"),
+      push: () => {},
+      issues: fakeIssues(issueCalls),
+      ledgerPath: tmpLedgerPath(),
+      log,
+      say: () => {},
+      account: r => r,
+    },
+  });
+
+  assert.equal(spawnCalls, 3, "the judge permits retriggers past the former cap of one until CI is green");
+  assert.deepEqual(judgedRoundCounts, [0, 1, 2], "each next-round decision sees the completed round history");
+  assert.equal(rung.outcome, "fixed", "green CI and a successful review resolve the rung");
+  assert.equal(rung.retriggers, 3, "all retrigger rounds are still counted for diagnostics");
+  assert.equal(rung.strikes, 0, "retrigger rounds still spend no repair strikes");
+  assert.equal(lines.filter(l => l.step === "fix.retrigger").length, 3);
+  assert.equal(issueCalls.length, 0, "crossing the former cap never escalates against the judge's verdict");
 });
 
 test("W1-T2403: fixStrikeCap's own default is unchanged by this task, in either direction", () => {
@@ -316,10 +358,11 @@ test("W1-T2403: fixStrikeCap's own default is unchanged by this task, in either 
 
 // ── claim 6 — a permanently failing check stops retriggering and escalates NAMING the check ──
 
-test("W1-T2403: a permanently red check (never green, every round retrigger-shaped) stops after retriggerCap and its escalation NAMES the check", async () => {
+test("W1-T2403/W1-T7096: a permanently red check is escalated by an explicit judge verdict that names it", async () => {
   const { lines, log } = captureLog();
   const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
   let spawnCalls = 0;
+  let judgeCalls = 0;
   const RETRIGGER_CAP = 2;
 
   const rung = await runFixRung({
@@ -330,6 +373,9 @@ test("W1-T2403: a permanently red check (never green, every round retrigger-shap
     // ci-log mode from round 1: no review has ever posted, the check itself is the evidence.
     ciFailures: [{ name: "coverage-ratchet", logTail: "flaky infra hiccup" }],
     deps: {
+      fixProgressJudge: async () => ++judgeCalls > RETRIGGER_CAP
+        ? { verdict: "escalate", loop: "coverage-ratchet stayed red through retrigger rounds", reason: "the check remains red" }
+        : { verdict: "continue", reason: "retry is still justified" },
       spawn: async () => {
         spawnCalls++;
         return result({ sessionId: `fix-session-${spawnCalls}` });
@@ -354,7 +400,7 @@ test("W1-T2403: a permanently red check (never green, every round retrigger-shap
   assert.equal(rung.strikes, 0, "zero strikes spent chasing a check that was never going to turn green");
   assert.equal(rung.retriggers, RETRIGGER_CAP);
   assert.equal(rung.outcome, "escalated");
-  assert.equal(rung.reason, "retrigger_cap_exhausted");
+  assert.match(rung.reason ?? "", /coverage-ratchet stayed red through retrigger rounds/);
   assert.equal(issueCalls.length, 1);
   const issueText = `${issueCalls[0]?.title ?? ""} ${issueCalls[0]?.body ?? ""}`;
   assert.match(issueText, /coverage-ratchet/, "the escalation NAMES the check that stayed red, not a generic 'exhausted' message");

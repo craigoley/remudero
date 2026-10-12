@@ -39,11 +39,28 @@ export function parseFlakeRetryLine(line) {
   if (!m) return null;
   const [, headline, label] = m;
   if (label === NO_NAME_PLACEHOLDER) return { headline, names: [] };
-  const names = label
+  return { headline, names: parseFlakeNames(label) };
+}
+
+/** W1-T7125: the names in a FLAKE-RETRY label. A label that starts with "[" and parses as a JSON
+ *  array of strings is the unambiguous form (a title may contain ", "); anything else is the older
+ *  ", "-joined form. */
+export function parseFlakeNames(label) {
+  const trimmed = label.trim();
+  if (trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed) && parsed.every((n) => typeof n === "string")) {
+        return parsed.map((s) => s.trim()).filter(Boolean);
+      }
+    } catch {
+      // not the array form: fall through to the ", "-joined form
+    }
+  }
+  return label
     .split(", ")
     .map((s) => s.trim())
     .filter(Boolean);
-  return { headline, names };
 }
 
 /** Every `FLAKE-RETRY:` line in `text` (any other line ignored), counted per test name across

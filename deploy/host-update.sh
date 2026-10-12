@@ -34,9 +34,11 @@
 # reaper (see the recommendation at the foot of this file), not "just the old ones". A disk-space
 # script that can delete evidence is one bad predicate away from destroying the only copy, and the
 # blast radius is the whole fleet's history. This script MEASURES the state directory, read-only,
-# and on the nightly `--reclaim-only` rung COPIES `state/` (mounted read-only) into its sibling
-# `state-backups/` (section 3a, W1-T3677). The only thing that copy ever removes is one of its OWN
-# dated snapshots beyond the keep count — never anything under `state/`.
+# and on the nightly `--reclaim-only` rung COPIES every live root's `state/` (mounted read-only)
+# into its sibling `state-backups/` (section 3a, W1-T3677, W1-T5545). The only thing that copy ever
+# removes is one of its OWN dated snapshots beyond the keep count — never anything under `state/`.
+# With RMD_STATE_OFFHOST set it then copies them OFF the VM (section 3b, W1-T5546), expiring only
+# its OWN tagged Azure snapshots the same way.
 #
 # ── PLAIN BASH AND DOCKER, deliberately — the same discipline as deploy/verify-image.sh, which is
 # this script's sibling. It runs on a host that may have no node, no rmd and no checkout, and it
@@ -54,7 +56,9 @@
 #   RMD_STATE_DIR=/path ./deploy/host-update.sh            # if the bind mount is not ~/rmd-state
 #   ./deploy/host-update.sh --check-state-roots            # is EVERY instance's state on /mnt/rmd?
 #   ./deploy/host-update.sh --relocate-state-root <instance> <dest>  # copy one there, verified
-#   ./deploy/host-update.sh --reclaim-only     # the NIGHTLY rung: snapshot state/, then reclaim
+#   ./deploy/host-update.sh --reclaim-only     # the NIGHTLY rung: snapshot every live state/, then reclaim
+#   RMD_STATE_OFFHOST=azure-disk-snapshot:<rg>/<disk> ./deploy/host-update.sh --reclaim-only
+#                                              # ...and an off-host copy (or azure-blob:<acct>/<ctr>)
 
 set -euo pipefail
 
@@ -741,11 +745,14 @@ echo "host-update: target ${REF}"
 HOST_UPDATE_TMPDIR="${TMPDIR:-/tmp}"
 DOCKER_ERR=""
 PULL_LOG=""
+OFFHOST_TAR=""
 # Installed BEFORE the first mktemp on purpose: if the SECOND allocation fails, the first is
 # already registered and still gets removed.
 host_update_cleanup_tmp() {
   [ -n "${DOCKER_ERR}" ] && rm -f "${DOCKER_ERR}"
   [ -n "${PULL_LOG}" ] && rm -f "${PULL_LOG}"
+  [ -n "${OFFHOST_TAR}" ] && rm -f "${OFFHOST_TAR}"
+  [ -n "${HOST_RECYCLE_LOCK_TAKEN:-}" ] && rmd_release_host_recycle_lock "${HOST_RECYCLE_LOCK_TAKEN}"
   return 0
 }
 trap host_update_cleanup_tmp EXIT
@@ -861,7 +868,8 @@ echo "host-update: no fleet container running"
 if [ "${DRY_RUN}" -eq 0 ] && [ "${RECLAIM_ONLY}" -eq 0 ]; then
   if command -v az >/dev/null 2>&1; then
     echo "host-update: az acr login -n ${REGISTRY}"
-    if ! az acr login -n "${REGISTRY}" >/dev/null; then
+    source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/acr-login.sh"
+    if ! rmd_acr_login "${REGISTRY}"; then
       echo "host-update: FAILED to authenticate to ${REGISTRY}." >&2
       echo "  ACR access tokens expire; this is the expected failure after a while away." >&2
       echo "    az login && az acr login -n ${REGISTRY}" >&2
@@ -937,7 +945,7 @@ else
   echo "  state volume:   ${STATE_DIR} does not exist on this host"
 fi
 
-# ── 3a. NIGHTLY STATE SNAPSHOT (W1-T3677) — before the reclaim, which can remove the image ─────
+# ── 3a. NIGHTLY STATE SNAPSHOT (W1-T3677, W1-T5545) — before the reclaim, which can remove the image ──
 # `snapshotState` (src/lib/ledger.ts, W1-T234) was built and tested and had never run: nothing
 # scheduled it and no snapshot existed on the host. This rung already runs nightly, so the snapshot
 # rides it — one maintenance story, not two.
@@ -947,119 +955,304 @@ fi
 # `--pull never` makes a missing image a loud failure rather than a download. It runs BEFORE section
 # 4 because, with no fleet container up, `docker image prune -a` removes that very image.
 #
-# INVARIANT: refuse while any fleet container is LIVE (section 1's `LIVE`) — a live daemon may be
-# mid-append, and a copy of a half-written ledger is not a backup. A refusal that leaves no snapshot
-# newer than RMD_STATE_BACKUP_MAX_AGE_HOURS fails the rung: a backup that is always skipped is the
-# exact silence this section exists to end.
+# W1-T5545 — EVERY LIVE ROOT, WITH THE FLEET UP. Until then this section had never succeeded: it
+# refused whenever a fleet container ran (always), and the cron sets no RMD_STATE_DIR, so it read
+# ~/rmd-state, an empty decoy, while the daemons mounted ~/rmd-state2, ~/rmd-site-state and
+# /mnt/rmd/remudero-console-state. So the roots are now DERIVED: the host side of every running
+# container's ${STATE_MOUNT_DEST} mount, plus RMD_STATE_DIR when set, and ${STATE_DIR} only when
+# neither names one. Each lands in its own <root>/state-backups. snapshotState is live-safe (whole
+# ledger lines, a mid-copy rotation re-copied, unchanged rotations hard-linked to the previous
+# archive), so there is no LIVE refusal: a race it cannot settle is a failure it reports itself.
+#
+# A ROOT WHOSE state/ HOLDS NO LEDGER beside a sibling directory whose state/ does fails the rung,
+# naming both — the rmd-state -> rmd-state2 drift. An EXISTING empty state/ no longer passes.
 #
 # VERIFY, DON'T TRUST: success is an archive the HOST can see holding files, never a zero exit. Any
 # failure sets `state_snapshot_failed`, which section 4c turns into a non-zero exit; the reclaim
 # still runs, because disk pressure does not wait on a backup.
 #
-# FALSIFIER: test/the-state-snapshot-actually-runs-on-this-host.test.ts — drop the invocation and no
-# archive appears; swallow a failure and the rung exits 0; drop the LIVE refusal and a snapshot is
-# taken beside a live container.
+# FALSIFIERS: test/the-state-snapshot-actually-runs-on-this-host.test.ts (the invocation, a failure
+# exits non-zero, a live container no longer refuses), test/the-nightly-rung-snapshots-the-state-
+# root-each-running-daemon-mounts.test.ts and test/a-derived-state-dir-with-no-ledger-beside-a-
+# sibling-that-has-one-fails-the-rung.test.ts.
 state_snapshot_failed=0
+state_snapshot_reason=""
+state_snapshot_offhost=not-configured
+state_snapshot_fail() {
+  echo "$1" >&2
+  state_snapshot_failed=1
+  if [ -z "${state_snapshot_reason}" ]; then state_snapshot_reason="$1"; fi
+}
+STATE_SNAPSHOT_ARCHIVES=()
 if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   echo
-  STATE_SNAPSHOT_SRC="${STATE_DIR}/state"
   STATE_SNAPSHOT_IMAGE="${RMD_STATE_SNAPSHOT_IMAGE:-${REF}}"
-  STATE_BACKUP_KEEP="${RMD_STATE_BACKUP_KEEP:-7}"
-  STATE_BACKUP_MAX_AGE_HOURS="${RMD_STATE_BACKUP_MAX_AGE_HOURS:-48}"
-  for knob in "RMD_STATE_BACKUP_KEEP=${STATE_BACKUP_KEEP}" "RMD_STATE_BACKUP_MAX_AGE_HOURS=${STATE_BACKUP_MAX_AGE_HOURS}"; do
-    case "${knob#*=}" in
-      ''|*[!0-9]*|0) echo "host-update: REFUSING — ${knob%%=*} must be a positive integer, got '${knob#*=}'." >&2; exit 2 ;;
-    esac
-  done
+  # Operator ruling 2026-10-06: keep the newest 2 nightly snapshots (was 7). They stay on the
+  # durable state disk (<root>/state-backups), never /mnt/scratch, which deallocation wipes.
+  STATE_BACKUP_KEEP="${RMD_STATE_BACKUP_KEEP:-2}"
+  case "${STATE_BACKUP_KEEP}" in
+    ''|*[!0-9]*|0) echo "host-update: REFUSING — RMD_STATE_BACKUP_KEEP must be a positive integer, got '${STATE_BACKUP_KEEP}'." >&2; exit 2 ;;
+  esac
   # The container-side paths. The image's source tree is /app (deploy/Dockerfile's WORKDIR).
   SNAP_IN_STATE="/rmd-snapshot/state"
   SNAP_IN_BACKUPS="/rmd-snapshot/backups"
   SNAP_JS="import { snapshotState } from '/app/src/lib/ledger.ts';
 const s = snapshotState('${SNAP_IN_STATE}', '${SNAP_IN_BACKUPS}');
-console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.length);"
+console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.length, s.linked.length, s.vanished.length, s.ledgerTrimmedBytes);"
   # Only names snapshotState itself writes (`state-backup.<ISO stamp, : and . as ->`) are ever
-  # listed, counted as fresh, or expired — nothing else under the backup dir is this rung's to judge.
+  # listed or expired — nothing else under a backup dir is this rung's to judge.
   is_snapshot_name() {
     case "$1" in
       state-backup.[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9]Z) return 0 ;;
     esac
     return 1
   }
-  # Every snapshot, oldest first (the ISO stamp sorts chronologically), optionally only those whose
-  # directory mtime is newer than <minutes>.
+  # Every snapshot under <backup dir>, oldest first (the ISO stamp sorts chronologically).
   list_snapshots() {
-    [ -d "${STATE_BACKUP_DIR}" ] || return 0
+    [ -d "$1" ] || return 0
     local n
-    if [ -n "${1:-}" ]; then
-      find "${STATE_BACKUP_DIR}" -mindepth 1 -maxdepth 1 -type d -name 'state-backup.*' -mmin "-$1" 2>/dev/null || true
-    else
-      find "${STATE_BACKUP_DIR}" -mindepth 1 -maxdepth 1 -type d -name 'state-backup.*' 2>/dev/null || true
-    fi | while IFS= read -r n; do
+    find "$1" -mindepth 1 -maxdepth 1 -type d -name 'state-backup.*' 2>/dev/null | while IFS= read -r n; do
       n="${n##*/}"
       if is_snapshot_name "${n}"; then printf '%s\n' "${n}"; fi
     done | sort
   }
-  if [ ! -d "${STATE_SNAPSHOT_SRC}" ]; then
-    # The rmd-state -> rmd-state2 drift the sibling scan exists for: a derived path with no state/
-    # beside one that has a ledger is a missed backup, not a fresh host.
-    sib_ledger="$(find_sibling_with_marker "${STATE_DIR}" "state/ledger.ndjson")"
-    if [ -n "${sib_ledger}" ]; then
-      echo "host-update: STATE SNAPSHOT FAILED — ${STATE_SNAPSHOT_SRC} does not exist, but" >&2
-      echo "  ${sib_ledger} does. Set RMD_STATE_DIR if that is the volume you mean." >&2
-      state_snapshot_failed=1
-    else
-      echo "host-update: state snapshot — ${STATE_SNAPSHOT_SRC} does not exist on this host; nothing to snapshot"
-    fi
-  elif [ -n "${LIVE}" ]; then
-    echo "host-update: REFUSING state snapshot — a fleet container is RUNNING." >&2
-    printf '%s\n' "${LIVE}" | sed 's/^/  /' >&2
-    echo "  A live daemon may be mid-append; a copy of a half-written ledger is not a backup." >&2
-    fresh_snap="$(list_snapshots "$((STATE_BACKUP_MAX_AGE_HOURS * 60))" | tail -1)"
-    if [ -n "${fresh_snap}" ]; then
-      echo "  The newest snapshot is under ${STATE_BACKUP_MAX_AGE_HOURS}h old and still stands: ${STATE_BACKUP_DIR}/${fresh_snap}" >&2
-    else
-      echo "host-update: STATE SNAPSHOT MISSED — nothing under ${STATE_BACKUP_DIR} is newer than ${STATE_BACKUP_MAX_AGE_HOURS}h." >&2
-      echo "  The ledger stays unprotected until this rung runs with the fleet stopped." >&2
-      state_snapshot_failed=1
-    fi
-  elif [ "${DRY_RUN}" -eq 1 ]; then
-    echo "host-update: state snapshot (DRY RUN) — would copy ${STATE_SNAPSHOT_SRC} (read-only) into ${STATE_BACKUP_DIR}"
-    echo "  via ${STATE_SNAPSHOT_IMAGE}, keeping the newest ${STATE_BACKUP_KEEP}; nothing written"
-  elif ! mkdir -p "${STATE_BACKUP_DIR}"; then
-    echo "host-update: STATE SNAPSHOT FAILED — cannot create ${STATE_BACKUP_DIR}." >&2
-    state_snapshot_failed=1
+  # The roots, one per line, deduplicated. A docker that does not answer is a FAILURE, not "no
+  # containers": falling back to the default would snapshot the decoy and report success.
+  snap_roots=""
+  if ! snap_ids="$(docker ps -q 2>&1)"; then
+    state_snapshot_fail "host-update: STATE SNAPSHOT FAILED — docker ps did not answer, so the mounted state roots"
+    echo "  cannot be derived: ${snap_ids}" >&2
   else
-    echo "host-update: state snapshot — ${STATE_SNAPSHOT_SRC} -> ${STATE_BACKUP_DIR} via ${STATE_SNAPSHOT_IMAGE}"
-    snap_out="$(docker run --rm --pull never --network none --entrypoint node -w /app \
-      -v "${STATE_SNAPSHOT_SRC}:${SNAP_IN_STATE}:ro" -v "${STATE_BACKUP_DIR}:${SNAP_IN_BACKUPS}" \
-      "${STATE_SNAPSHOT_IMAGE}" --import tsx --input-type=module -e "${SNAP_JS}" 2>&1)" && snap_rc=0 || snap_rc=$?
-    snap_name="$(printf '%s\n' "${snap_out}" | awk '$1 == "RMD_STATE_SNAPSHOT" { n = $2 } END { print n }')"
-    is_snapshot_name "${snap_name}" || snap_name=""
-    if [ "${snap_rc}" -ne 0 ]; then
-      echo "host-update: STATE SNAPSHOT FAILED — the snapshot exited ${snap_rc}:" >&2
-      printf '%s\n' "${snap_out}" | sed 's/^/  /' >&2
-      state_snapshot_failed=1
-    elif [ -z "${snap_name}" ] || [ ! -d "${STATE_BACKUP_DIR}/${snap_name}" ] \
-         || [ -z "$(find "${STATE_BACKUP_DIR}/${snap_name}" -type f 2>/dev/null | head -1)" ]; then
-      echo "host-update: STATE SNAPSHOT FAILED — it exited 0 but published no archive this host can see" >&2
-      echo "  under ${STATE_BACKUP_DIR} (reported: '${snap_name:-nothing}'). Output was:" >&2
-      printf '%s\n' "${snap_out}" | sed 's/^/  /' >&2
-      state_snapshot_failed=1
-    else
-      echo "host-update: state snapshot — ${STATE_BACKUP_DIR}/${snap_name} verified"
-      # Retention, only after a verified NEW snapshot: keep the newest STATE_BACKUP_KEEP, never the
-      # one just written. A failed or refused night expires nothing.
-      snap_all="$(list_snapshots)"
-      snap_count="$(printf '%s\n' "${snap_all}" | grep -c . || true)"
-      snap_excess=$((snap_count - STATE_BACKUP_KEEP))
-      if [ "${snap_excess}" -gt 0 ]; then
-        printf '%s\n' "${snap_all}" | head -n "${snap_excess}" | while IFS= read -r old_snap; do
-          [ -n "${old_snap}" ] && [ "${old_snap}" != "${snap_name}" ] || continue
-          rm -rf -- "${STATE_BACKUP_DIR:?}/${old_snap}"
-          echo "  expired ${old_snap} (keeping the newest ${STATE_BACKUP_KEEP})"
-        done
+    for snap_id in ${snap_ids}; do
+      snap_src="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"${STATE_MOUNT_DEST}\"}}{{.Source}}{{end}}{{end}}" "${snap_id}" 2>/dev/null)" || snap_src=""
+      [ -n "${snap_src}" ] && snap_roots="${snap_roots}${snap_src%/}"$'\n'
+    done
+    [ -n "${RMD_STATE_DIR:-}" ] && snap_roots="${RMD_STATE_DIR%/}"$'\n'"${snap_roots}"
+    if [ -z "${snap_roots}" ]; then
+      echo "host-update: state snapshot — no running container mounts ${STATE_MOUNT_DEST} and RMD_STATE_DIR is unset; using ${STATE_DIR}"
+      snap_roots="${STATE_DIR}"$'\n'
+    fi
+    snap_roots="$(printf '%s' "${snap_roots}" | awk 'NF && !seen[$0]++')"
+  fi
+  while IFS= read -r snap_root; do
+    [ -n "${snap_root}" ] || continue
+    snap_state="${snap_root}/state"
+    snap_backups="${snap_root}/state-backups"
+    [ "${snap_root}" = "${STATE_DIR%/}" ] && snap_backups="${STATE_BACKUP_DIR}"
+    if [ ! -s "${snap_state}/ledger.ndjson" ]; then
+      sib_ledger="$(find_sibling_with_marker "${snap_root}" "state/ledger.ndjson")"
+      if [ -n "${sib_ledger}" ]; then
+        state_snapshot_fail "host-update: STATE SNAPSHOT FAILED — ${snap_state}/ledger.ndjson does not exist or is empty, but"
+        echo "  ${sib_ledger} does. Set RMD_STATE_DIR if that is the volume you mean." >&2
+        continue
+      fi
+      if [ ! -d "${snap_state}" ]; then
+        echo "host-update: state snapshot — ${snap_state} does not exist on this host; nothing to snapshot"
+        continue
       fi
     fi
+    if [ "${DRY_RUN}" -eq 1 ]; then
+      echo "host-update: state snapshot (DRY RUN) — would copy ${snap_state} (read-only) into ${snap_backups}"
+      echo "  via ${STATE_SNAPSHOT_IMAGE}, keeping the newest ${STATE_BACKUP_KEEP}; nothing written"
+      continue
+    fi
+    if ! mkdir -p "${snap_backups}"; then
+      state_snapshot_fail "host-update: STATE SNAPSHOT FAILED — cannot create ${snap_backups}."
+      continue
+    fi
+    echo "host-update: state snapshot — ${snap_state} -> ${snap_backups} via ${STATE_SNAPSHOT_IMAGE}"
+    snap_out="$(docker run --rm --pull never --network none --entrypoint node -w /app \
+      -v "${snap_state}:${SNAP_IN_STATE}:ro" -v "${snap_backups}:${SNAP_IN_BACKUPS}" \
+      "${STATE_SNAPSHOT_IMAGE}" --import tsx --input-type=module -e "${SNAP_JS}" 2>&1 </dev/null)" && snap_rc=0 || snap_rc=$?
+    snap_line="$(printf '%s\n' "${snap_out}" | awk '$1 == "RMD_STATE_SNAPSHOT" { l = $0 } END { print l }')"
+    read -r _snap_tag snap_name snap_files snap_linked snap_vanished snap_trimmed <<<"${snap_line}" || true
+    is_snapshot_name "${snap_name:-}" || snap_name=""
+    if [ "${snap_rc}" -ne 0 ]; then
+      state_snapshot_fail "host-update: STATE SNAPSHOT FAILED — the snapshot of ${snap_state} exited ${snap_rc}:"
+      printf '%s\n' "${snap_out}" | sed 's/^/  /' >&2
+      continue
+    fi
+    if [ -z "${snap_name}" ] || [ ! -d "${snap_backups}/${snap_name}" ] \
+       || [ -z "$(find "${snap_backups}/${snap_name}" -type f 2>/dev/null | head -1)" ]; then
+      state_snapshot_fail "host-update: STATE SNAPSHOT FAILED — it exited 0 but published no archive this host can see"
+      echo "  under ${snap_backups} (reported: '${snap_name:-nothing}'). Output was:" >&2
+      printf '%s\n' "${snap_out}" | sed 's/^/  /' >&2
+      continue
+    fi
+    echo "host-update: state snapshot — ${snap_backups}/${snap_name} verified"
+    echo "  ${snap_files} file(s): ${snap_linked} rotation(s) hard-linked to the previous archive," \
+      "${snap_vanished} removed by a live writer mid-copy, ${snap_trimmed} torn ledger byte(s) left out"
+    STATE_SNAPSHOT_ARCHIVES+=("${snap_backups}/${snap_name}")
+    # Retention, only after a verified NEW snapshot: keep the newest STATE_BACKUP_KEEP, never the
+    # one just written. A failed night expires nothing. Removing an archive only unlinks: a rotation
+    # hard-linked into a newer archive keeps its bytes there.
+    snap_all="$(list_snapshots "${snap_backups}")"
+    snap_count="$(printf '%s\n' "${snap_all}" | grep -c . || true)"
+    snap_excess=$((snap_count - STATE_BACKUP_KEEP))
+    if [ "${snap_excess}" -gt 0 ]; then
+      printf '%s\n' "${snap_all}" | head -n "${snap_excess}" | while IFS= read -r old_snap; do
+        [ -n "${old_snap}" ] && [ "${old_snap}" != "${snap_name}" ] || continue
+        rm -rf -- "${snap_backups:?}/${old_snap}"
+        echo "  expired ${old_snap} (keeping the newest ${STATE_BACKUP_KEEP})"
+      done
+    fi
+  done <<<"${snap_roots}"
+  # ── 3b. THE OFF-HOST COPY (W1-T5546) ──────────────────────────────────────────────────────
+  # Every archive above lands on the SAME Azure managed disk as the state it copies (remudero-data,
+  # /mnt/rmd), so a lost disk loses the ledger and every backup of it together. RMD_STATE_OFFHOST
+  # names where a copy goes OFF the VM. An UNSET target is one line, not a failure: an off-host copy
+  # has a recurring storage cost, and that is an operator decision, not this script's.
+  #   azure-disk-snapshot:<resource-group>/<disk>  an INCREMENTAL snapshot of the whole disk — every
+  #       root and every archive at once — after a `sync`, in the disk's own region, named
+  #       <disk>-<UTC stamp> and tagged purpose=fleet-state-backup created-by=host-update. Only after
+  #       it verifies are the newest RMD_STATE_OFFHOST_KEEP (default 7) of THOSE kept. A snapshot
+  #       missing either tag, or not named <disk>-<UTC stamp>, is never deleted — an operator's
+  #       hand-taken one (created-by=operator-session) included.
+  #   azure-blob:<account>/<container>  each archive verified above, as a .tar.gz named
+  #       <backup dir>/<archive>.tar.gz, uploaded with the host's `az login` (--auth-mode login).
+  #       No expiry here: a lifecycle rule on the container is the place for one.
+  # VERIFY, DON'T TRUST, again: success is `az snapshot show` reporting Succeeded with both tags, or
+  # the blob's contentLength equal to the local tarball's — never an exit code. Any failure sets
+  # state_snapshot_failed, so section 4c exits non-zero. RMD_STATE_OFFHOST_AZ replaces `az`.
+  # FALSIFIER: test/the-nightly-state-snapshot-has-an-off-host-copy.test.ts.
+  OFFHOST_TARGET="${RMD_STATE_OFFHOST:-}"
+  if [ -n "${OFFHOST_TARGET}" ]; then state_snapshot_offhost=failed; fi
+  OFFHOST_AZ="${RMD_STATE_OFFHOST_AZ:-az}"
+  OFFHOST_KEEP="${RMD_STATE_OFFHOST_KEEP:-7}"
+  offhost_fail() { # <what failed> [command output, indented beneath]
+    state_snapshot_fail "host-update: STATE SNAPSHOT OFF-HOST COPY FAILED — $1"
+    [ -n "${2:-}" ] && printf '%s\n' "$2" | sed 's/^/  /' >&2
+    state_snapshot_offhost=failed
+  }
+  # The names on stdin that are this rung's own: <disk>-<UTC stamp>, nothing else. The `case` lives
+  # here, not inside the $(...) that calls it: Bash 3.2 (the Mac's /bin/bash) re-parses a command
+  # substitution when it runs it, and a case pattern's bare `)` there is a syntax error (W1-T6594).
+  offhost_own_names() { # <disk>
+    local old
+    while IFS= read -r old; do
+      case "${old}" in
+        "$1"-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) printf '%s\n' "${old}" ;;
+      esac
+    done
+  }
+  offhost_disk_snapshot() { # <resource group> <disk>
+    local rg="$1" disk="$2" out rc disk_id disk_loc name got want all count excess old
+    if ! out="$(sync 2>&1)"; then
+      offhost_fail "sync failed, so a disk snapshot could miss tonight's archives:" "${out}"
+      return
+    fi
+    out="$("${OFFHOST_AZ}" disk show -g "${rg}" -n "${disk}" --query "join('|', [id, location])" -o tsv 2>&1)" && rc=0 || rc=$?
+    disk_id="${out%%|*}"; disk_loc="${out#*|}"
+    if [ "${rc}" -ne 0 ] || [ -z "${disk_id}" ] || [ -z "${disk_loc}" ] || [ "${disk_loc}" = "${out}" ]; then
+      offhost_fail "az disk show -g ${rg} -n ${disk} exited ${rc} without an id|location:" "${out}"
+      return
+    fi
+    name="${disk}-$(date -u +%Y%m%dT%H%M%SZ)"
+    out="$("${OFFHOST_AZ}" snapshot create -g "${rg}" -n "${name}" --source "${disk_id}" -l "${disk_loc}" \
+      --incremental true --tags purpose=fleet-state-backup created-by=host-update -o none 2>&1)" && rc=0 || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+      offhost_fail "az snapshot create -g ${rg} -n ${name} exited ${rc}:" "${out}"
+      return
+    fi
+    got="$("${OFFHOST_AZ}" snapshot show -g "${rg}" -n "${name}" \
+      --query "join('|', [provisioningState, tags.purpose, tags.\"created-by\", creationData.sourceResourceId])" -o tsv 2>&1)" && rc=0 || rc=$?
+    want="Succeeded|fleet-state-backup|host-update|${disk_id}"
+    # ARM ids are case-insensitive and come back in whatever case the resource was created with.
+    if [ "${rc}" -ne 0 ] || [ "$(printf '%s' "${got}" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "${want}" | tr '[:upper:]' '[:lower:]')" ]; then
+      offhost_fail "az snapshot create exited 0 but az snapshot show -g ${rg} -n ${name} (exit ${rc}) does not report '${want}':" "${got}"
+      return
+    fi
+    echo "host-update: state snapshot off-host copy — azure disk snapshot ${rg}/${name} verified (incremental, of ${disk})"
+    # Retention, only after a verified NEW snapshot, and only of this rung's own (both tags, and the
+    # <disk>-<stamp> name it writes), oldest first by creation time.
+    all="$("${OFFHOST_AZ}" snapshot list -g "${rg}" \
+      --query "sort_by([?tags.purpose=='fleet-state-backup' && tags.\"created-by\"=='host-update'], &timeCreated)[].name" -o tsv 2>&1)" && rc=0 || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+      offhost_fail "az snapshot list -g ${rg} exited ${rc}, so no snapshot beyond the newest ${OFFHOST_KEEP} was expired:" "${all}"
+      return
+    fi
+    all="$(printf '%s\n' "${all}" | offhost_own_names "${disk}")"
+    count="$(printf '%s\n' "${all}" | grep -c . || true)"
+    excess=$((count - OFFHOST_KEEP))
+    [ "${excess}" -gt 0 ] || return 0
+    while IFS= read -r old; do
+      [ -n "${old}" ] && [ "${old}" != "${name}" ] || continue
+      if out="$("${OFFHOST_AZ}" snapshot delete -g "${rg}" -n "${old}" 2>&1)"; then
+        echo "  expired azure disk snapshot ${rg}/${old} (keeping the newest ${OFFHOST_KEEP})"
+      else
+        offhost_fail "az snapshot delete -g ${rg} -n ${old} failed; it is still billed:" "${out}"
+      fi
+    done <<<"$(printf '%s\n' "${all}" | head -n "${excess}")"
+  }
+  offhost_blob() { # <account> <container>
+    local account="$1" container="$2" archive backups name blob size remote out rc
+    for archive in "${STATE_SNAPSHOT_ARCHIVES[@]}"; do
+      backups="${archive%/*}"; name="${archive##*/}"
+      blob="${backups#/}/${name}.tar.gz"
+      if ! OFFHOST_TAR="$(mktemp "${backups}/.rmd-offhost-upload.XXXXXX" 2>&1)"; then
+        offhost_fail "cannot create a temporary tarball in ${backups} for ${name}:" "${OFFHOST_TAR}"
+        OFFHOST_TAR=""
+        continue
+      fi
+      if ! out="$(tar -czf "${OFFHOST_TAR}" -C "${backups}" "${name}" 2>&1)"; then
+        offhost_fail "tar of ${archive} failed:" "${out}"
+      else
+        size="$(wc -c <"${OFFHOST_TAR}" | tr -d ' ')"
+        out="$("${OFFHOST_AZ}" storage blob upload --auth-mode login --account-name "${account}" \
+          --container-name "${container}" --name "${blob}" --file "${OFFHOST_TAR}" --only-show-errors -o none 2>&1)" && rc=0 || rc=$?
+        if [ "${rc}" -ne 0 ]; then
+          offhost_fail "az storage blob upload of ${archive} to ${account}/${container} exited ${rc}:" "${out}"
+        else
+          remote="$("${OFFHOST_AZ}" storage blob show --auth-mode login --account-name "${account}" \
+            --container-name "${container}" --name "${blob}" --query properties.contentLength -o tsv 2>&1)" && rc=0 || rc=$?
+          if [ "${rc}" -ne 0 ] || [ "${remote}" != "${size}" ]; then
+            offhost_fail "az storage blob show reports '${remote}' (exit ${rc}) for ${account}/${container}/${blob}, not the ${size} bytes uploaded"
+          else
+            echo "host-update: state snapshot off-host copy — ${archive} -> azure-blob ${account}/${container}/${blob} verified (${size} bytes)"
+          fi
+        fi
+      fi
+      rm -f -- "${OFFHOST_TAR}"
+      OFFHOST_TAR=""
+    done
+  }
+  offhost_kind="" offhost_a="" offhost_b=""
+  if [ -n "${OFFHOST_TARGET}" ]; then
+    offhost_kind="${OFFHOST_TARGET%%:*}"
+    offhost_spec="${OFFHOST_TARGET#*:}"
+    offhost_a="${offhost_spec%%/*}"; offhost_b="${offhost_spec#*/}"
+    case "${offhost_kind}" in azure-disk-snapshot|azure-blob) ;; *) offhost_kind="" ;; esac
+    if [ -z "${offhost_kind}" ] || [ -z "${offhost_a}" ] || [ -z "${offhost_b}" ] \
+       || [ "${offhost_b}" = "${offhost_spec}" ] || [[ "${offhost_b}" == */* ]]; then
+      offhost_fail "RMD_STATE_OFFHOST='${OFFHOST_TARGET}' is neither azure-disk-snapshot:<resource-group>/<disk> nor azure-blob:<account>/<container>."
+      offhost_kind=""
+    fi
+    case "${OFFHOST_KEEP}" in
+      ''|*[!0-9]*|0) offhost_fail "RMD_STATE_OFFHOST_KEEP must be a positive integer, got '${OFFHOST_KEEP}'."; offhost_kind="" ;;
+    esac
+  fi
+  if [ -z "${OFFHOST_TARGET}" ]; then
+    echo "host-update: state snapshot off-host copy — NOT CONFIGURED: every archive above is on the same disk as"
+    echo "  the state it copies. Set RMD_STATE_OFFHOST=azure-disk-snapshot:<resource-group>/<disk> or"
+    echo "  azure-blob:<account>/<container>; enabling it is an operator COST decision (recurring storage)."
+  elif [ -z "${offhost_kind}" ]; then
+    : # refused above, already failing the rung
+  elif [ "${DRY_RUN}" -eq 1 ]; then
+    echo "host-update: state snapshot off-host copy (DRY RUN) — would copy to ${OFFHOST_TARGET}; nothing sent"
+  elif [ "${#STATE_SNAPSHOT_ARCHIVES[@]}" -eq 0 ]; then
+    if [ "${state_snapshot_failed}" -eq 1 ]; then
+      echo "host-update: state snapshot off-host copy — skipped: no archive was verified tonight (see above)" >&2
+    else
+      echo "host-update: state snapshot off-host copy — skipped: there was no state to snapshot tonight"
+    fi
+  elif ! command -v "${OFFHOST_AZ}" >/dev/null 2>&1; then
+    offhost_fail "RMD_STATE_OFFHOST is set but '${OFFHOST_AZ}' is not a command on PATH: install the Azure CLI and 'az login', or unset RMD_STATE_OFFHOST."
+  elif [ "${offhost_kind}" = "azure-disk-snapshot" ]; then
+    state_snapshot_offhost=ok
+    offhost_disk_snapshot "${offhost_a}" "${offhost_b}"
+  else
+    state_snapshot_offhost=ok
+    offhost_blob "${offhost_a}" "${offhost_b}"
   fi
 fi
 
@@ -1105,8 +1298,21 @@ else
   else
     echo "  (skipping 'docker container prune' — --reclaim-only never removes a container)"
   fi
-  docker image     prune -af 2>&1 | tail -1 | sed 's/^/  /' || true
-  docker builder   prune -af 2>&1 | tail -1 | sed 's/^/  /' || true
+  # The image prune takes deploy/recycle-container.sh's host lock (deploy/host-recycle-lock.sh): an
+  # instance mid-recycle holds a pulled image no container references yet, and `image prune -a`
+  # would delete it. A held lock past the wait SKIPS this prune and says why — never prunes under it.
+  source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/host-recycle-lock.sh"
+  HOST_RECYCLE_LOCK="$(rmd_host_recycle_lock_path)"
+  if rmd_take_host_recycle_lock "${HOST_RECYCLE_LOCK}" "host-update" \
+      "${RMD_RECLAIM_LOCK_WAIT_S:-600}" "${RMD_RECYCLE_LOCK_POLL_S:-5}"; then
+    HOST_RECYCLE_LOCK_TAKEN="${HOST_RECYCLE_LOCK}"
+    docker image     prune -af 2>&1 | tail -1 | sed 's/^/  /' || true
+    docker builder   prune -af 2>&1 | tail -1 | sed 's/^/  /' || true
+    rmd_release_host_recycle_lock "${HOST_RECYCLE_LOCK}"
+    HOST_RECYCLE_LOCK_TAKEN=""
+  else
+    echo "  SKIPPING image and build-cache prune — ${RMD_HOST_RECYCLE_LOCK_HOLDER} holds the host recycle lock (${HOST_RECYCLE_LOCK}); a later run reclaims."
+  fi
 fi
 
 # ── 4a. GIT OBJECT RECLAIM (W1-T3612) — the OTHER filesystem the disk actually fills on ─────────
@@ -1207,38 +1413,196 @@ fi
 # and ${CRED_DIR}/projects (or RMD_AGENT_HISTORY_DIRS's override), never ${STATE_DIR}, so the
 # ledger, run locks and service tokens the file header protects are untouched by this rung too.
 #
+# W1-T3676 — THE BYTES ARE INSIDE TWO ALWAYS-CURRENT FILES. MEASURED 2026-09-16: 3.72 GiB of the
+# 6.5 GiB sat in thread_history_1.sqlite and state_5.sqlite, live databases whose mtime is today on
+# every run, so the age tier above can never match them and freed 29.6 MiB. Lowering the tier would
+# delete more history and still miss every byte that matters, and deleting a live database risks an
+# in-flight session. So after the age sweep, each tree's IN-TIER real SQLite files (checked by the
+# file header, never the name) are COMPACTED IN PLACE — `wal_checkpoint(TRUNCATE)` + `VACUUM`, which
+# releases the free pages the owning tool's own deletes left inside the file and keeps every row.
+# This runs only in the window the LIVE refusal already names as safe (no fleet container up), with
+# busy_timeout=0 so a writer the refusal cannot see makes it fail rather than wait, and only when
+# the file's filesystem has twice its size free (VACUUM writes a full copy). The engine is `sqlite3`
+# on PATH, else `node` with node:sqlite; RMD_AGENT_HISTORY_SQLITE_ENGINE=sqlite3|node|none pins it.
+#
+# AND EVERY TREE SAYS WHAT IT COULD NOT REACH, AND WHY: `could not reach <bytes> — reason: <r>`, one
+# line per reason — within-age-tier, live-rows (still held by rows the owning tool keeps),
+# no-sqlite-engine, insufficient-free-space, compaction-failed, and live-fleet-container when the
+# refusal holds. A refusal is a refusal, not a run with nothing to do: section 4c prints the closing
+# verdict `agent history reclaim: REFUSED` or `COMPLETED`. The exit code stays 0 on a refusal, on
+# purpose — this fleet is always up, so a non-zero refusal would fail every nightly and bury the
+# snapshot alarm (W1-T5545) under a permanent false one.
+#
 # FALSIFIER: remove the live-worker refusal and a fixture's old file is reclaimed beside a live
-# container; collapse the per-tree report into one total and the split assertion fails.
+# container; collapse the per-tree report into one total and the split assertion fails. Sweep by
+# mtime alone, or report only bytes freed, and test/agent-history-reclaim-reaches-the-bulk.test.ts
+# fails against a real SQLite fixture whose mtime is always current.
+agent_history_verdict=""
 if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   echo
+  AGENT_HISTORY_MAX_AGE_DAYS="${RMD_AGENT_HISTORY_MAX_AGE_DAYS:-14}"
+  IFS=':' read -r -a AGENT_HISTORY_DIRS <<<"${RMD_AGENT_HISTORY_DIRS:-${CODEX_DIR}:${CRED_DIR}/projects}"
+  # `find -printf` is GNU-only. BSD find has the same `-print0` primitive, so keep the traversal
+  # portable and ask the host's `stat` for the two metadata fields separately. The format is probed
+  # once per tree: GNU stat accepts `-c`; BSD stat accepts `-f`.
+  agent_history_probe_stat() {
+    AGENT_HISTORY_STAT_FORMAT="bsd"
+    if stat -c '%Y %s' "$1" >/dev/null 2>&1; then AGENT_HISTORY_STAT_FORMAT="gnu"; fi
+  }
+  agent_history_file_metadata() {
+    if [ "${AGENT_HISTORY_STAT_FORMAT}" = "gnu" ]; then
+      stat -c '%Y %s' "$1"
+    else
+      stat -f '%m %z' "$1"
+    fi
+  }
+  # Bytes of a file plus its SQLite companions (a database's WAL and shared-memory files belong to it).
+  agent_history_held_bytes() {
+    local total=0 f m
+    for f in "$1" "$1-wal" "$1-shm"; do
+      [ -f "${f}" ] || continue
+      m="$(agent_history_file_metadata "${f}")" || continue
+      total=$((total + ${m#* }))
+    done
+    printf '%s' "${total}"
+  }
+  agent_history_is_sqlite() { [ -f "$1" ] && [ "$(head -c 15 "$1" 2>/dev/null)" = "SQLite format 3" ]; }
+  # <tree> <label> <bytes> <reason> <files> <why>
+  agent_history_unreached() {
+    echo "host-update: agent history reclaim${2} — ${1}: could not reach $(human_kb $(($3 / 1024))) — reason: ${4} (${5} file(s)); ${6}"
+  }
   if [ -n "${LIVE}" ]; then
     echo "host-update: REFUSING agent history reclaim — a fleet container is RUNNING." >&2
     printf '%s\n' "${LIVE}" | sed 's/^/  /' >&2
     echo "  a running lane may still be writing the very session/thread file this would remove." >&2
     echo "  No file under any configured tree was touched." >&2
+    agent_history_verdict=refused
+    for rdir in "${AGENT_HISTORY_DIRS[@]}"; do
+      [ -n "${rdir}" ] && [ -d "${rdir}" ] || continue
+      agent_history_probe_stat "${rdir}"
+      refused_bytes=0
+      refused_files=0
+      while IFS= read -r -d '' path; do
+        metadata="$(agent_history_file_metadata "${path}")" || continue
+        refused_bytes=$((refused_bytes + ${metadata#* }))
+        refused_files=$((refused_files + 1))
+      done < <(find "${rdir}" -type f -print0 2>/dev/null)
+      agent_history_unreached "${rdir}" " REFUSED" "${refused_bytes}" live-fleet-container "${refused_files}" \
+        "a fleet container is RUNNING, so nothing under this tree was removed or compacted"
+    done
   else
-    AGENT_HISTORY_MAX_AGE_DAYS="${RMD_AGENT_HISTORY_MAX_AGE_DAYS:-14}"
-    IFS=':' read -r -a AGENT_HISTORY_DIRS <<<"${RMD_AGENT_HISTORY_DIRS:-${CODEX_DIR}:${CRED_DIR}/projects}"
+    agent_history_verdict=completed
+    [ "${DRY_RUN}" -eq 1 ] && agent_history_verdict=dry-run
+    AGENT_HISTORY_SQLITE_ENGINE="${RMD_AGENT_HISTORY_SQLITE_ENGINE:-auto}"
+    if [ "${AGENT_HISTORY_SQLITE_ENGINE}" = "auto" ]; then
+      AGENT_HISTORY_SQLITE_ENGINE=none
+      if command -v sqlite3 >/dev/null 2>&1; then
+        AGENT_HISTORY_SQLITE_ENGINE=sqlite3
+      elif command -v node >/dev/null 2>&1 && node --no-warnings -e "require('node:sqlite')" >/dev/null 2>&1; then
+        AGENT_HISTORY_SQLITE_ENGINE=node
+      fi
+    fi
+    case "${AGENT_HISTORY_SQLITE_ENGINE}" in
+      sqlite3|node|none) ;;
+      *) echo "host-update: WARNING — RMD_AGENT_HISTORY_SQLITE_ENGINE='${AGENT_HISTORY_SQLITE_ENGINE}' is not sqlite3|node|none; compacting nothing." >&2
+         AGENT_HISTORY_SQLITE_ENGINE=none ;;
+    esac
+    AGENT_HISTORY_NODE_SQLITE="const { DatabaseSync } = require('node:sqlite');
+const [mode, file] = process.argv.slice(1);
+try {
+  if (mode === 'measure') {
+    const db = new DatabaseSync(file, { readOnly: true });
+    const pageSize = db.prepare('PRAGMA page_size').get().page_size;
+    const free = db.prepare('PRAGMA freelist_count').get().freelist_count;
+    db.close();
+    console.log(pageSize * free);
+  } else {
+    const db = new DatabaseSync(file);
+    db.exec('PRAGMA busy_timeout=0');
+    if (db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get().busy) throw new Error('database is busy (WAL checkpoint)');
+    db.exec('VACUUM');
+    db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+    db.close();
+  }
+} catch (e) { console.error(String(e && e.message || e).split('\n')[0]); process.exit(1); }"
+    # <measure|compact> <db>: measure prints the free-page bytes; compact prints nothing on success.
+    # Either prints one reason line on failure.
+    agent_history_sqlite() {
+      local out
+      if [ "${AGENT_HISTORY_SQLITE_ENGINE}" = "node" ]; then
+        SQLITE_TMPDIR="$(dirname "$2")" node --no-warnings -e "${AGENT_HISTORY_NODE_SQLITE}" "$1" "$2" 2>&1 </dev/null
+        return
+      fi
+      if [ "$1" = "measure" ]; then
+        out="$(sqlite3 -readonly -batch "$2" 'PRAGMA page_size;' 'PRAGMA freelist_count;' 2>&1 </dev/null)" || { printf '%s\n' "${out}" | head -1; return 1; }
+        printf '%s\n' "${out}" | awk 'NR == 1 { p = $1 } NR == 2 { f = $1 } END { if (p !~ /^[0-9]+$/ || f !~ /^[0-9]+$/) exit 1; print p * f }'
+        return
+      fi
+      out="$(SQLITE_TMPDIR="$(dirname "$2")" sqlite3 -batch -bail "$2" 'PRAGMA busy_timeout=0;' \
+        'PRAGMA wal_checkpoint(TRUNCATE);' 'VACUUM;' 'PRAGMA wal_checkpoint(TRUNCATE);' 2>&1 </dev/null)" || { printf '%s\n' "${out}" | head -1; return 1; }
+      if printf '%s\n' "${out}" | grep -q '^1|'; then echo "database is busy (WAL checkpoint)"; return 1; fi
+    }
+    # Section 4b's second pass over one tree: compact its in-tier SQLite files and say, per reason,
+    # what it could not reach. Runs after the age sweep, so what is left is in the tier by definition.
+    agent_history_compact_tree() {
+      local tree="$1" path held after freed avail_kb out label=""
+      local done_n=0 done_b=0 tier_b=0 tier_n=0 rows_b=0 rows_n=0 eng_b=0 eng_n=0 space_b=0 space_n=0 fail_b=0 fail_n=0 fail_why=""
+      [ "${DRY_RUN}" -eq 1 ] && label=" (DRY RUN)"
+      while IFS= read -r -d '' path; do
+        case "${path}" in
+          *-wal|*-shm|*-journal) if agent_history_is_sqlite "${path%-*}"; then continue; fi ;;
+        esac
+        held="$(agent_history_held_bytes "${path}")"
+        if ! agent_history_is_sqlite "${path}"; then
+          tier_b=$((tier_b + held)); tier_n=$((tier_n + 1)); continue
+        fi
+        if [ "${AGENT_HISTORY_SQLITE_ENGINE}" = "none" ]; then
+          eng_b=$((eng_b + held)); eng_n=$((eng_n + 1)); continue
+        fi
+        if [ "${DRY_RUN}" -eq 1 ]; then
+          if ! out="$(agent_history_sqlite measure "${path}")"; then
+            fail_b=$((fail_b + held)); fail_n=$((fail_n + 1)); [ -n "${fail_why}" ] || fail_why="${path}: ${out}"; continue
+          fi
+          [ "${out}" -le "${held}" ] || out="${held}"
+          echo "  would compact ${path}: $(human_kb $((out / 1024))) of $(human_kb $((held / 1024))) is free pages"
+          done_n=$((done_n + 1)); done_b=$((done_b + out)); rows_b=$((rows_b + held - out)); rows_n=$((rows_n + 1))
+          continue
+        fi
+        avail_kb="$(df -Pk "$(dirname "${path}")" 2>/dev/null | awk 'NR == 2 { print $4 }')"
+        if ! [ "${avail_kb:-0}" -ge $((2 * held / 1024 + 1)) ] 2>/dev/null; then
+          space_b=$((space_b + held)); space_n=$((space_n + 1)); continue
+        fi
+        if ! out="$(agent_history_sqlite compact "${path}")"; then
+          fail_b=$((fail_b + held)); fail_n=$((fail_n + 1)); [ -n "${fail_why}" ] || fail_why="${path}: ${out}"; continue
+        fi
+        after="$(agent_history_held_bytes "${path}")"
+        freed=$((held - after)); [ "${freed}" -ge 0 ] || freed=0
+        echo "  compacted ${path}: $(human_kb $((held / 1024))) -> $(human_kb $((after / 1024))), freed $(human_kb $((freed / 1024)))"
+        done_n=$((done_n + 1)); done_b=$((done_b + freed)); rows_b=$((rows_b + after)); rows_n=$((rows_n + 1))
+      done < <(find "${tree}" -type f ! -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" -print0 2>/dev/null)
+      if [ "${done_n}" -gt 0 ]; then
+        if [ "${DRY_RUN}" -eq 1 ]; then
+          echo "host-update: agent history reclaim (DRY RUN) — ${tree}: would compact ${done_n} live database(s) in place, freeing up to $(human_kb $((done_b / 1024))); nothing changed"
+        else
+          echo "host-update: agent history reclaim — ${tree}: compacted ${done_n} live database(s) in place, freed $(human_kb $((done_b / 1024)))"
+        fi
+      fi
+      [ "${tier_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${tier_b}" within-age-tier "${tier_n}" "younger than ${AGENT_HISTORY_MAX_AGE_DAYS}d and not a database; kept by the age tier"
+      [ "${rows_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${rows_b}" live-rows "${rows_n}" "held by rows the owning tool still keeps; only its own retention can release them"
+      [ "${eng_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${eng_b}" no-sqlite-engine "${eng_n}" "live SQLite database(s), and no sqlite3 (or node with node:sqlite) on this host to compact them"
+      [ "${space_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${space_b}" insufficient-free-space "${space_n}" "VACUUM needs twice the file's size free on its filesystem"
+      [ "${fail_n}" -eq 0 ] || agent_history_unreached "${tree}" "${label}" "${fail_b}" compaction-failed "${fail_n}" "${fail_why}"
+      if [ $((tier_n + rows_n + eng_n + space_n + fail_n)) -eq 0 ]; then
+        echo "host-update: agent history reclaim${label} — ${tree}: could not reach 0.0KB — every byte was in scope"
+      fi
+    }
     for hdir in "${AGENT_HISTORY_DIRS[@]}"; do
       [ -n "${hdir}" ] || continue
       if [ ! -d "${hdir}" ]; then
         echo "host-update: agent history reclaim — ${hdir}: no such directory, skipping"
         continue
       fi
-      # `find -printf` is GNU-only. BSD find has the same `-print0` primitive, so keep the
-      # traversal portable and ask the host's `stat` for the two metadata fields separately.
-      # Probe the format once per tree: GNU stat accepts `-c`; BSD stat accepts `-f`.
-      AGENT_HISTORY_STAT_FORMAT="bsd"
-      if stat -c '%Y %s' "${hdir}" >/dev/null 2>&1; then
-        AGENT_HISTORY_STAT_FORMAT="gnu"
-      fi
-      agent_history_file_metadata() {
-        if [ "${AGENT_HISTORY_STAT_FORMAT}" = "gnu" ]; then
-          stat -c '%Y %s' "$1"
-        else
-          stat -f '%m %z' "$1"
-        fi
-      }
+      agent_history_probe_stat "${hdir}"
       if [ "${DRY_RUN}" -eq 1 ]; then
         would_bytes=0
         while IFS= read -r -d '' path; do
@@ -1248,6 +1612,7 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
         done < <(find "${hdir}" -type f -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" -print0 2>/dev/null)
         would_kb=$((would_bytes / 1024))
         echo "host-update: agent history reclaim (DRY RUN) — ${hdir}: would free $(human_kb "${would_kb:-0}") across files older than ${AGENT_HISTORY_MAX_AGE_DAYS}d; nothing removed"
+        agent_history_compact_tree "${hdir}"
         continue
       fi
       freed_bytes=0
@@ -1269,6 +1634,7 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
       )
       freed_kb=$((freed_bytes / 1024))
       echo "host-update: agent history reclaim — ${hdir}: freed $(human_kb "${freed_kb}") across ${removed} file(s) older than ${AGENT_HISTORY_MAX_AGE_DAYS}d, oldest first"
+      agent_history_compact_tree "${hdir}"
     done
   fi
 fi
@@ -1287,8 +1653,40 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   AFTER_AVAIL="$(df -Pk / | awk 'NR==2 {print $4}')"
   echo
   echo "host-update: reclaim-only — no pull, no restart. Free on / : ${AFTER_AVAIL} KiB"
-  # W1-T3677: section 3a's snapshot failed, was refused past its age bound, or missed a drifted
-  # state volume. The reclaim above still ran; the rung must not report success regardless.
+  # W1-T3676: section 4b's verdict, so a refusal never reads as a clean run with nothing to do.
+  case "${agent_history_verdict}" in
+    refused)
+      echo "host-update: agent history reclaim: REFUSED — a fleet container was RUNNING, so nothing under any tree"
+      echo "  was removed or compacted. This is NOT a clean nothing-to-do run: the per-tree 'could not reach'"
+      echo "  lines above name what each tree still holds." ;;
+    completed) echo "host-update: agent history reclaim: COMPLETED — see the per-tree 'freed' and 'could not reach' lines above." ;;
+    dry-run) echo "host-update: agent history reclaim: DRY RUN — nothing was removed or compacted." ;;
+  esac
+  if [ "${DRY_RUN}" -eq 0 ]; then
+    snapshot_receipt="${RMD_STATE_SNAPSHOT_RECEIPT:-${XDG_STATE_HOME:-$HOME/.local/state}/remudero/state-snapshot.receipt}"
+    snapshot_result=ok
+    if [ "${state_snapshot_failed}" -eq 1 ] || [ "${state_snapshot_offhost}" = failed ]; then
+      snapshot_result=failed
+    fi
+    snapshot_reason="${state_snapshot_reason//$'\n'/ }"
+    snapshot_reason="${snapshot_reason//$'\r'/ }"
+    if ! mkdir -p "$(dirname "${snapshot_receipt}")" \
+       || [ -d "${snapshot_receipt}" ] \
+       || ! snapshot_receipt_tmp="$(mktemp "${snapshot_receipt}.XXXXXX")"; then
+      echo "host-update: cannot prepare state snapshot receipt ${snapshot_receipt}" >&2
+      exit 1
+    fi
+    if ! printf 'result=%s\nts=%s\narchives=%s\noffhost=%s\nreason=%s\n' \
+      "${snapshot_result}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${#STATE_SNAPSHOT_ARCHIVES[@]}" \
+      "${state_snapshot_offhost}" "${snapshot_reason}" >"${snapshot_receipt_tmp}" \
+      || ! mv -f -- "${snapshot_receipt_tmp}" "${snapshot_receipt}"; then
+      rm -f -- "${snapshot_receipt_tmp}"
+      echo "host-update: cannot publish state snapshot receipt ${snapshot_receipt}" >&2
+      exit 1
+    fi
+  fi
+  # W1-T3677/W1-T5545: section 3a's snapshot of some live root failed, or a root held no ledger
+  # beside a sibling that does. The reclaim above still ran; the rung must not report success.
   if [ "${state_snapshot_failed}" -eq 1 ]; then
     echo "host-update: the nightly STATE SNAPSHOT did not leave a verified, recent archive — see above." >&2
     exit 1

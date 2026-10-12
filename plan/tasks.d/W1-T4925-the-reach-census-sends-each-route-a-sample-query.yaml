@@ -14,7 +14,7 @@
   files:
     - test/every-get-read-route-is-bounded-by-reach.test.ts
     - src/lib/serve.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-09-30 (serve read-side review). W1-T4576's census

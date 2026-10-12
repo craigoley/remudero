@@ -1,0 +1,70 @@
+- id: W1-T8172
+  title: "THE RESTART DRAIN STARTS WHEN THE RESTART LATCHES — today drainBeforeRestart begins only after the last lane settles, so detached actions and reviews are waited on AFTER the lane wait, not during it, and the drain's review clock admits reviews it then abandons at the bound (2026-10-11 12:56: a 10-min drain, 9 review passes, all 3 in-flight reviews abandoned; 62 lane-min of review drain that day)"
+  repo: remudero
+  depends_on: [W1-T7806, W1-T8170]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the restart's drain runs beside the lane wait and admits no review it will abandon
+  band_meaning: span
+  origin: "operator approval 2026-10-11 (Craig: go with your recommendations): restart-churn measurement, ~/Remudero-notes/restart-churn-2026-10-11"
+  plan_refs: [W1-T4053, W1-T5721, W1-T2744, W1-T7806, W1-T8170, W1-T7697]
+  files: [src/lib/daemon.ts, test/the-restart-drain-starts-when-the-restart-latches.test.ts]
+  status: queued
+  priority: 2.5
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-11 (core daemon ledger, copied read-only to ~/Remudero-notes/restart-churn-2026-10-11/ledger-copy;
+    episodes.txt). The day's 880 idle lane-min include 62 of review drain. The `daemon.freshness_drain.completed` rows:
+      - 04:08:02: 1 in-flight review, 2 review passes, 343,984 ms.
+      - 05:11:50: 2 in-flight reviews, 115,118 ms.
+      - 13:06:40: 1 detached action, 3 in-flight reviews, 9 review passes, 597,801 ms, and abandoned_in_flight_reviews 3.
+        The drain started at 12:56:42, 9 min after the last lane settled (12:47:28), ran to its bound, and then
+        abandoned every review it had waited on.
+      - 17:22:13: 1 detached action, 2 review passes, 170,913 ms.
+    In each case every lane was already idle: the restart had latched long before (12:36:32 for the 12:56 drain).
+    READ on origin/main 233304449 (src/lib/daemon.ts):
+      - drainBeforeRestart (:3378) counts detached sweep actions and in-flight reviews only when it is called, from
+        stopForFreshness (:3456), after the last lane settles and after the pre-exit pass (W1-T8170 removes the
+        repeated pass, not this ordering).
+      - It waits on `drainDetachedSweepActions` and `drainInFlightReviews({ boundMs: sweepWallClockBoundMs })` (:3398-3408)
+        with the bound measured from the drain's own start. With a detached action present it also runs W1-T4053's
+        review-only clock beside the drain (:3392-3393), which keeps admitting reviews. A review admitted near the end
+        of the bound cannot finish and is abandoned (:3412-3414 re-drains with the remainder of the bound).
+      - The restart latch is set in runDaemon's dispatch phase (`latchRestart`, :5560) long before that. Nothing
+        drains between the latch and the last lane's settle.
+    DEPENDENCIES: W1-T7806 (in flight) rewrites `latchRestart` and the holdout reading in the dispatch block. W1-T8170
+    edits stopForFreshness just above drainBeforeRestart. Serialized after both.
+  design: |
+    Operator rulings: no hard thresholds (no fixed wait or count below), lean into automation.
+    1. DRAIN FROM THE LATCH. When the restart latches, start waiting on the detached sweep actions and in-flight reviews
+       that exist at that moment, beside the lane wait. W1-T5721 is unchanged: live fix workers are protected, and no new
+       detached sweep action starts after the latch. The drain's bound runs from the latch. When the last lane settles,
+       the exit waits only for what that early drain has not yet seen finish.
+    2. REVIEWS KEEP FLOWING (W1-T4053), BUT NONE IS ADMITTED TO BE ABANDONED. Under a latched restart (lane wait or
+       drain), the review clock admits a review only while the time left in the drain's bound exceeds the measured
+       review run length (the recent median from `sweep.review_started` to `review.posted` for the same PR, read from the ledger). With no history it admits as
+       today. A review already admitted is waited on, as today.
+    3. Observability: `daemon.freshness_drain.started` carries `started_at: "latch"` and the latch time.
+       `.completed` carries `admitted_after_latch` and `abandoned_admitted_after_latch`, so an admit-then-abandon is
+       visible as a number.
+    4. The memory drain (`daemon.memory_drain`, the same function) keeps today's behaviour. It has no latch.
+    Tests (new file, `test(` titles verbatim as in the proofs below) drive runDaemon with an injected runOne,
+    detached-action and in-flight-review registries, and a fake clock, as
+    test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts does.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-restart-drain-starts-when-the-restart-latches.test.ts"
+    - claim: "a review in flight at the latch that finishes during the lane wait leaves nothing for the exit's drain to wait on"
+      proof: 'grep: test("W1-T8172: a review in flight at the latch drains during the lane wait" in test/the-restart-drain-starts-when-the-restart-latches.test.ts'
+    - claim: "the drain bound runs from the latch, not from the last lane's settle"
+      proof: 'grep: test("W1-T8172: the drain bound runs from the latch" in test/the-restart-drain-starts-when-the-restart-latches.test.ts'
+    - claim: "under a latch, a review whose measured length exceeds the drain time left is not admitted"
+      proof: 'grep: test("W1-T8172: no review is admitted that the drain would abandon" in test/the-restart-drain-starts-when-the-restart-latches.test.ts'
+    - claim: "with no review history the clock admits as today"
+      proof: 'grep: test("W1-T8172: with no review history the clock admits as today" in test/the-restart-drain-starts-when-the-restart-latches.test.ts'
+  falsifier: |
+    Keep drainBeforeRestart's start at the exit, as on main: in the first test the exit's drain still waits on the
+    review that finished during the lane wait, or counts it in in_flight_reviews. Keep the review clock admitting
+    freely: the third test sees a review admitted with less bound left than its measured length, then abandoned.

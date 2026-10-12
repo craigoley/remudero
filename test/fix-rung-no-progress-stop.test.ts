@@ -1,30 +1,6 @@
 /**
- * test/fix-rung-no-progress-stop.test.ts — W1-T1269.
- *
- * THE DEFECT. Across separate fix-rung dispatches for one PR, the ONLY quantity the sweep's
- * strike-cap escalation row reads is `pr.priorStrikes` (a count that only ascends) against
- * `policy.strikeCap` — `pr.priorStrikes >= policy.strikeCap` (DISPOSITION_RULES row 4). The
- * evidence a strike leaves behind, `pr.unmetCriteria` (a `CriterionVerdict[]` carrying each
- * criterion's `claim`), is rendered into the strike reason ("N unmet criteria — strike X/Y") but
- * nothing ever COMPARES it to what the prior strike was given, so a strike that reproduces the
- * identical failure — same claims, same reasons — is indistinguishable from one that halved the
- * count or swapped which criteria are unmet. The cap is spent regardless.
- *
- * THE FIX. `fixRungRepeatsIdenticalFailure` (lib/sweep.ts, pure) compares the CURRENT
- * `pr.unmetCriteria` claim set against `pr.strikeHistory`'s most recently recorded strike's own
- * `unmetClaims` (a new, additive field on `StrikeAttempt`) — keyed on each claim's IDENTITY,
- * never on `.length`. DISPOSITION_RULES gains one new row (5.5), ordered after the cap-exhausted
- * row (unaffected) and the ci-log row ("ci-log wins" unaffected), but strictly before the
- * ordinary criteria-dispatch row: an EXACT repeat escalates immediately, BEFORE the cap; a
- * DIFFERENT set — even one of the same size — falls through and keeps its remaining strikes. The
- * escalation route is the SAME `blocked-ambiguous` disposition every other ambiguous block
- * already uses (`deps.escalate`, carrying a rendered `ClarificationQuestion`) — never a silent
- * stand-down.
- *
- * SCOPE: `StrikeAttempt.unmetClaims` ships unwired (no producer in `run-task.ts` populates it
- * yet, mirroring `pendingAnswer`/`reviewOrphanedByPush`'s own shipped-ahead-of-producer
- * precedent) — every fixture here supplies it directly, exactly as the real gateway will once its
- * own follow-up producer lands.
+ * Repeated red criteria are diagnostic evidence for W1-T7096's progress judge. They no longer
+ * select an automatic stop or escalation in the disposition table.
  */
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
@@ -121,7 +97,7 @@ function fakeDeps(overrides: Partial<SweepDeps> = {}): SweepDeps & {
 
 // ── acceptance 1 — an identical-by-claim repeat stops the rung BEFORE the cap ──
 
-test("W1-T1269 acceptance 1: a strike whose unmet criteria are unchanged stops the rung before the cap", () => {
+test("W1-T1269 signal: unchanged unmet criteria do not override the progress-judge disposition", () => {
   const stalledPr = pr({
     priorStrikes: 1,
     unmetCriteria: [criterion({ claim: "criterion A" }), criterion({ claim: "criterion B" })],
@@ -130,9 +106,8 @@ test("W1-T1269 acceptance 1: a strike whose unmet criteria are unchanged stops t
 
   assert.ok(1 < DEFAULT_SWEEP_POLICY.strikeCap, "sanity: this PR has NOT reached the cap yet");
   const result = deriveDisposition(stalledPr, DEFAULT_SWEEP_POLICY, NOW);
-  assert.equal(result.disposition, "blocked-ambiguous", "escalates instead of dispatching another strike");
-  assert.match(result.reason, /identical unmet criteria/);
-  assert.match(result.reason, /escalating before the cap/);
+  assert.equal(result.disposition, "blocked-fixable", "the progress judge, not a repeated-set shortcut, owns the next-round decision");
+  assert.doesNotMatch(result.reason, /identical unmet criteria/);
 });
 
 // ── acceptance 2 — a DIFFERENT unmet set, even at the same size, keeps its remaining strikes ──
@@ -204,10 +179,12 @@ test("W1-T1269 acceptance 3: fixRungRepeatsIdenticalFailure keys on each criteri
   );
 });
 
-// ── acceptance 4 — the earlier stop still escalates to a human, never goes quiet ──
+// ── acceptance 4 — a repeated red set can escalate only through an explicit judge verdict ──
 
-test("W1-T1269 acceptance 4: an early stop still escalates to a human rather than going quiet", async () => {
-  const deps = fakeDeps();
+test("W1-T1269: the progress judge may escalate an unchanged red set, with a named loop", async () => {
+  const deps = fakeDeps({
+    fixProgressJudge: async () => ({ verdict: "escalate", loop: "same unmet criteria", reason: "the latest round added no evidence" }),
+  });
   const stalledPr = pr({
     priorStrikes: 1,
     unmetCriteria: [criterion({ claim: "criterion A" }), criterion({ claim: "criterion B" })],
@@ -215,10 +192,10 @@ test("W1-T1269 acceptance 4: an early stop still escalates to a human rather tha
   });
 
   const summary = await runSweep([stalledPr], deps);
-  assert.equal(summary.byDisposition["blocked-ambiguous"], 1);
-  assert.equal(deps.fixed.length, 0, "never spends another strike on a proven-identical failure");
-  assert.equal(deps.escalated.length, 1, "escalates to a human instead of standing down silently");
-  assert.match(deps.escalated[0].reason, /identical unmet criteria/);
+  assert.equal(summary.byDisposition["blocked-fixable"], 1);
+  assert.equal(deps.fixed.length, 0, "the explicit judge verdict declines another round");
+  assert.equal(deps.escalated.length, 1, "the judge's explicit decision reaches a human");
+  assert.match(deps.escalated[0].reason, /same unmet criteria/);
   assert.ok(deps.escalated[0].question, "a real clarification question is generated, never silence");
   assert.equal(deps.escalated[0].question.taskId, "W1-D");
 });

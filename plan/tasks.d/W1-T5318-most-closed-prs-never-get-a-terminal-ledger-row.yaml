@@ -11,7 +11,7 @@
   band_meaning: span
   origin: "operator session 5da5b764, 2026-10-02: arch-plan E35 (ledger rotation every ~5 min on the fleet host)"
   files: [src/lib/sweep.ts, src/lib/ledger-carry.ts, src/lib/ledger.ts, src/run-task.ts, test/w1-t5318-every-closed-pr-has-one-terminal-ledger-row.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-02 on the fleet host (header of src/lib/ledger-carry.ts): the carried core of each

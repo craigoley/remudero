@@ -13,7 +13,7 @@ import { readLedgerLines } from "../src/lib/status.js";
 import type { GitHub } from "../src/lib/status.js";
 import { postReviewStatusGuarded, type PrLifecycleState } from "../src/lib/review.js";
 import { checkReviewerCodeFreshness, SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
-import { reviewCommand, runFixRung, runReview, runTask, type ReviewRunResult } from "../src/run-task.js";
+import { reviewCommand, runFixRung, runReview, runTask, type ReviewRunResult } from "./helpers/run-task-test.js";
 import type { WorkerResult, spawnWorker } from "../src/lib/worker.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { ghShim } from "./helpers/gh-shim.js";
@@ -112,7 +112,7 @@ test("W1-T3337: the CLI self-reexec guard never suppresses the reviewer code pro
     },
   });
   assert.equal(result.status, "stale");
-  assert.deepEqual(calls, ["fetch --quiet origin", "rev-parse HEAD", "rev-parse origin/main", `merge-base ${OLD} ${MAIN}`, `diff --name-only ${OLD}..${MAIN}`]);
+  assert.deepEqual(calls, ["fetch --quiet --no-tags origin +refs/heads/main:refs/remotes/origin/main", "rev-parse HEAD", "rev-parse origin/main", `merge-base ${OLD} ${MAIN}`, `diff --name-only ${OLD}..${MAIN}`]);
 });
 
 test("W1-T3337: an unreadable guarded diff withholds the terminal verdict", () => {

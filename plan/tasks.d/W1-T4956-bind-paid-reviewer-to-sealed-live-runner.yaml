@@ -12,7 +12,7 @@
   origin: "operator-approved paid reviewer build follow-up, 2026-09-30"
   plan_refs: [W1-T4619, W1-T4848, W1-T4905, W1-T4928, W1-T4929]
   files: [src/lib/replay-harness.ts, src/lib/paired-review-eval.ts, src/lib/review-finding-evidence.ts, src/lib/benchmark-paid-pilot.ts, src/run-task.ts, test/paired-review-live-runner.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: W1-T4929's guarded library adapter is opened as PR 8131, not a

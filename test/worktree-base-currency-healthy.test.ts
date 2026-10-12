@@ -25,7 +25,7 @@ function seedClone(): GitRepo {
 
 test("worktreeAdd proceeds untouched on a genuinely current base -- the REAL ls-remote, nothing injected", () => {
   const repo = seedClone();
-  const wt = `${repo.dir}-wt`;
+  const wt = join(repo.dir, "wt"); // inside the fixture, so its removal takes the worktree too (W1-T5625)
   // No `deps` argument at all: exercises the real default `git ls-remote` against the
   // real local "origin" remote.
   assert.doesNotThrow(() => worktreeAdd(repo.dir, wt, "run-healthy-probe", "origin/main"));
@@ -37,8 +37,8 @@ test("worktreeAdd proceeds untouched on a genuinely current base -- the REAL ls-
 
 test("a second worktreeAdd off the same, unchanged remote also proceeds untouched -- repeated healthy dispatch never fires the check", () => {
   const repo = seedClone();
-  const wt1 = `${repo.dir}-wt1`;
-  const wt2 = `${repo.dir}-wt2`;
+  const wt1 = join(repo.dir, "wt1");
+  const wt2 = join(repo.dir, "wt2");
   assert.doesNotThrow(() => worktreeAdd(repo.dir, wt1, "run-healthy-probe-a", "origin/main"));
   assert.doesNotThrow(() => worktreeAdd(repo.dir, wt2, "run-healthy-probe-b", "origin/main"));
 });

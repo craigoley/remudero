@@ -1,0 +1,34 @@
+- id: W1-T5675
+  title: "A REFUSAL-AMENDMENT ROW SURVIVES LEDGER ROTATION — `noPrVerdictRowsFromLedger` decides on `refusal_amendment.drafted` (`REFUSAL_AMENDMENT_STEP`) but the step is absent from `DECISION_RELEVANT_LEDGER_STEPS`, so a rotation keeps the `no_pr` verdict and drops the amendment row that settled it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: low
+  origin: "operator session 2026-10-04: watch log, REFUSAL_AMENDMENT_STEP is read to decide but not retained"
+  plan_refs: [W1-T4838, W1-T5531, W1-T209]
+  files: [src/lib/ledger.ts, test/a-refusal-amendment-row-survives-ledger-rotation.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9. `noPrVerdictRowsFromLedger` (src/lib/refusal-amendment.ts)
+    decides with `line.step === REFUSAL_AMENDMENT_STEP` (`"refusal_amendment.drafted"`), and
+    `runSweep` calls it every pass; the step is absent from `DECISION_RELEVANT_LEDGER_STEPS`
+    (src/lib/ledger.ts) while `"verdict"` is in it. After a rotation the `no_pr` verdict survives and
+    the amendment row is archived, so within the 3-day `REFUSAL_AMENDMENT_MAX_AGE_MS` the task is
+    re-offered: an extra shard read and GitHub probe, a re-appended row, a fresh amendment PR if the
+    first was closed unmerged, and W1-T5531's `origin_main_sha` retry memory is lost.
+    test/ledger-rotation.test.ts's consumer scan matches only `.step === "<literal>"`, so it misses
+    a constant. W1-T5531 (#9110, merged) is the only shard naming the step.
+  design: |
+    Add `"refusal_amendment.drafted"` to `DECISION_RELEVANT_LEDGER_STEPS` with an end-of-line
+    comment (ledger.ts is at its comment-load ceiling); a string literal, not an import, since
+    refusal-amendment.ts imports review.js.
+  acceptance:
+    - claim: "after rotateLedger, a no_pr verdict whose amendment was drafted is not re-offered by noPrVerdictRowsFromLedger"
+      proof: "unit test: test/a-refusal-amendment-row-survives-ledger-rotation.test.ts"
+  falsifier: |
+    Remove the entry; the rotated ledger re-offers the task and the test fails.

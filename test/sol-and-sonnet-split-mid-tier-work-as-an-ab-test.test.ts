@@ -142,6 +142,24 @@ test("the evaluator compares merge rate fix strikes time and cost per arm", () =
     meanNotionalCostUsd: 5,
     costMissingAssignments: 0,
     nonStarterAssignments: 1,
+    receiptCoverage: { assignments: 2, terminalAssignments: 2, costKnownAssignments: 2,
+      servedModelKnownAssignments: 0, outcomeKnownAssignments: 0 },
+    requestEffortEvidence: {
+      state: "unavailable",
+      assignments: 2,
+      reportedAssignments: 0,
+      missingAssignments: 2,
+      invalidAssignments: 0,
+      conflictingAssignments: 0,
+      noRequestAssignments: 0,
+      attemptedRequests: null,
+      parameterPresentRequests: null,
+      parameterOmittedRequests: null,
+      parameterUnreadableRequests: null,
+      parameters: null,
+      countsOverflow: false,
+      providerEffectiveEffort: null,
+    },
   });
   assert.equal(sol?.tasks, 2, "the mixed task counts under the arm of its first tagged assignment");
   assert.equal(sol?.merged, 1);

@@ -111,6 +111,8 @@ function fakeGh(prUrl: string) {
     if (args[0] === "pr" && args[1] === "merge") {
       return "";
     }
+    // W1-T5348: a push onto an already-open landing PR refreshes its body over REST.
+    if (args[0] === "api" && args[2] === "PATCH") return "{}";
     throw new Error(`unexpected gh call in test fixture: ${JSON.stringify(args)}`);
   };
   return { gh, calls, createCount: () => createCount };
@@ -701,6 +703,7 @@ test("an existing landing PR missing review is repaired before merge", () => {
       merges++;
       return "";
     }
+    if (args[0] === "api" && args[2] === "PATCH" && args[3] === "repos/o/r/pulls/16") return "{}";
     throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
   };
   const result = withLiveWritesAllowed(() =>
@@ -756,6 +759,7 @@ test("feedback landing swallows a rejected pending review promise when repairing
     if (args[0] === "pr" && args[1] === "list") return JSON.stringify([{ url: "https://github.com/o/r/pull/18" }]);
     if (args[0] === "pr" && args[1] === "create") throw new Error("must reuse the open landing PR");
     if (args[0] === "pr" && args[1] === "merge") throw new Error("unexpected pre-review auto-merge arm");
+    if (args[0] === "api" && args[2] === "PATCH" && args[3] === "repos/o/r/pulls/18") return "{}";
     throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
   };
 

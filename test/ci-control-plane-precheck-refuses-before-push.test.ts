@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
@@ -19,7 +20,7 @@ let counter = 0;
 function fixture(t: TestContext) {
   const remote = gitRepo({ kind: "t3423-remote", bare: true });
   const parent = gitRepo({ kind: "t3423-parent" });
-  const work = parent.addWorktree(join(dirname(parent.dir), `rmd-t3423-wt-${process.pid}-${counter++}`), "pushbranch");
+  const work = parent.addWorktree(join(parent.dir, `rmd-t3423-wt-${counter++}`), "pushbranch");
   t.after(() => work.cleanup());
 
   mkdirSync(join(work.dir, "hooks"), { recursive: true });
@@ -79,7 +80,7 @@ test("W1-T3423: unreadable diff and static inputs refuse before a hook can repor
   assert.equal(unreadableDiff, 2);
   assert.match(errors[0] ?? "", /could not read the diff against origin\/main \(merge base unavailable\)/);
 
-  const emptyRoot = mkdtempSync(join(dirname(REPO_ROOT), "rmd-t3423-unreadable-static-"));
+  const emptyRoot = mkdtempSync(join(tmpdir(), "rmd-t3423-unreadable-static-"));
   try {
     const unreadableStatic = runCiControlPlanePrecheck({
       repoRoot: emptyRoot,

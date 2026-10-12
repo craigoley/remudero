@@ -1,0 +1,13 @@
+violation: none
+rule: >
+  W1-T6334: the remudero-review refusal lesson must reach its matched worker lane,
+  and the cited incident must execute as a proof against the active CI learning.
+verdict:
+  state: success
+  capped: false
+  testTheater: false
+  criteriaTampered: false
+arm: true
+criteria:
+  - met: true
+    proof_exec: executed_pass

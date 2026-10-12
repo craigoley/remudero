@@ -200,6 +200,10 @@ export interface CapabilityGrantStore {
   resolveSecret(id: string): string | undefined;
 }
 
+export type CapabilityGrantReadStore = Pick<CapabilityGrantStore,
+  "get" | "isRevoked" | "useCount" | "hasSeenNonce">;
+export type CapabilityCheckedPredicate = "canonical-grant" | Exclude<CapabilityRefusalCode, "unknown-grant">;
+
 /** Reads the real secret behind a grant id fresh, per call — never a captured string — so a
  *  rotated credential is honoured without re-issuing the grant. Mirrors
  *  `BoundaryDestination.realValue` in secret-boundary.ts. */
@@ -268,11 +272,16 @@ export class InMemoryCapabilityGrantStore implements CapabilityGrantStore {
  * consumes a verified grant, and the module header for why secret resolution is separate again.
  */
 export function verifyCapabilityGrant(
-  store: CapabilityGrantStore,
+  store: CapabilityGrantReadStore,
   request: CapabilityUseRequest,
-  opts: { now?: string | number } = {},
+  opts: { now?: string | number; onCheck?: (predicate: CapabilityCheckedPredicate, passed: boolean) => void } = {},
 ): CapabilityVerification {
+  const refuses = (predicate: CapabilityCheckedPredicate, failed: boolean): boolean => {
+    opts.onCheck?.(predicate, !failed);
+    return failed;
+  };
   const grant = store.get(request.grantId);
+  refuses("canonical-grant", !grant);
   if (!grant) {
     return {
       ok: false,
@@ -280,21 +289,21 @@ export function verifyCapabilityGrant(
       reason: `no capability grant is on file for reference ${JSON.stringify(request.grantId)}`,
     };
   }
-  if (store.isRevoked(grant.id)) {
+  if (refuses("revoked", store.isRevoked(grant.id))) {
     return { ok: false, code: "revoked", reason: `capability grant ${grant.id} has been revoked` };
   }
   const nowMs = typeof opts.now === "number" ? opts.now : Date.parse(typeof opts.now === "string" ? opts.now : new Date().toISOString());
-  if (Number.isNaN(nowMs) || nowMs >= Date.parse(grant.expiresAt)) {
+  if (refuses("expired", Number.isNaN(nowMs) || nowMs >= Date.parse(grant.expiresAt))) {
     return { ok: false, code: "expired", reason: `capability grant ${grant.id} expired at ${grant.expiresAt}` };
   }
-  if (request.audience !== grant.audience) {
+  if (refuses("wrong-audience", request.audience !== grant.audience)) {
     return {
       ok: false,
       code: "wrong-audience",
       reason: `capability grant ${grant.id} is scoped to audience ${JSON.stringify(grant.audience)}, not ${JSON.stringify(request.audience)}`,
     };
   }
-  if (request.target !== grant.targetIdentity) {
+  if (refuses("wrong-target", request.target !== grant.targetIdentity)) {
     return {
       ok: false,
       code: "wrong-target",
@@ -304,14 +313,14 @@ export function verifyCapabilityGrant(
   // EXACT MEMBERSHIP ONLY. Never `startsWith`/`includes` against a single joined string: either
   // would let an operation that merely CONTAINS an allowed name (e.g. "email.read.and.forward"
   // against an allowlist of ["email.read"]) ride the allowed entry through. See module header.
-  if (!grant.operations.includes(request.operation)) {
+  if (refuses("operation-not-granted", !grant.operations.includes(request.operation))) {
     return {
       ok: false,
       code: "operation-not-granted",
       reason: `operation ${JSON.stringify(request.operation)} is not in grant ${grant.id}'s allowlist (${grant.operations.join(", ")})`,
     };
   }
-  if (store.hasSeenNonce(grant.id, request.nonce)) {
+  if (refuses("replayed-nonce", store.hasSeenNonce(grant.id, request.nonce))) {
     return {
       ok: false,
       code: "replayed-nonce",
@@ -319,7 +328,7 @@ export function verifyCapabilityGrant(
     };
   }
   const used = store.useCount(grant.id);
-  if (used >= grant.useLimit) {
+  if (refuses("use-limit-exceeded", used >= grant.useLimit)) {
     return {
       ok: false,
       code: "use-limit-exceeded",

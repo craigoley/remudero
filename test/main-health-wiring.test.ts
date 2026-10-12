@@ -14,7 +14,7 @@ import {
 import { requeueActionsJob } from "../src/run-task.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
-import { buildSweepHook } from "../src/run-task.js";
+import { buildSweepHook, buildSweepLightHook } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { CiFailure } from "../src/lib/sweep.js";
 import { readLedgerLines } from "../src/lib/status.js";
@@ -49,7 +49,7 @@ function fixture(overrides: Partial<MainHealthRungDeps> = {}) {
       };
     }
     if (path === `repos/${OWNER}/${REPO}/commits/${sha}/status`) return { statuses: [] };
-    if (path === `repos/${OWNER}/${REPO}/actions/runs?branch=trunk&event=push&status=completed&per_page=100`) {
+    if (path === `repos/${OWNER}/${REPO}/actions/runs?branch=trunk&event=push&per_page=100`) {
       return {
         workflow_runs: [
           { head_sha: sha, conclusion, html_url: `https://github.com/${OWNER}/${REPO}/actions/runs/1` },
@@ -127,7 +127,7 @@ test("main push history retains associated pull-request numbers and both GitHub 
   const fetch = ((args: string[]) => {
     assert.deepEqual(args, [
       "api",
-      `repos/${OWNER}/${REPO}/actions/runs?branch=trunk&event=push&status=completed&per_page=100`,
+      `repos/${OWNER}/${REPO}/actions/runs?branch=trunk&event=push&per_page=100`,
     ]);
     return {
       workflow_runs: [
@@ -394,13 +394,14 @@ test("daemonCommand supplies the real REST and issue gateways to the one event-a
   assert.match(call, /buildMainHealthRung\(target\.owner, target\.repo/);
   // E36: the awaited transport — a sync ghJson here held the daemon loop 144 s.
   assert.match(call, /fetch: \(args\) => ghJsonAsync\(args\)/);
-  assert.match(call, /issues: ghIssueGateway\(target\.owner, target\.repo\)/);
-  assert.match(call, /readCiFailures:\s*\(rollup\)\s*=>\s*fetchCiFailures/);
+  // W1-T5283: the issue gateway, the CI evidence read and the requeue are awaited too.
+  assert.match(call, /issues: ghIssueGatewayAsync\(target\.owner, target\.repo\)/);
+  assert.match(call, /readCiFailures:\s*\(rollup\)\s*=>\s*fetchCiFailuresAsync\(/);
   // W1-T3194: the endpoint literal moved into `requeueActionsJob` when it was extracted so its
   // three arms could be unit-tested. The INVARIANT is unchanged and still asserted, one hop over:
   // the wiring delegates to that function, and that function targets ONE job by id, never the
   // whole-run `rerun-failed-jobs` endpoint.
-  assert.match(call, /requeueCheck:\s*\(failure\)\s*=>\s*requeueActionsJob\(target\.owner, target\.repo, failure, log\)/);
+  assert.match(call, /requeueCheck:\s*\(failure\)\s*=>\s*requeueActionsJobAsync\(target\.owner, target\.repo, failure, log\)/);
   // W1-T4056: main-health judges the target checkout's ci-gate contract, not every check on main.
   assert.match(call, /readRequiredChecks:\s*\(\)\s*=>\s*readCiGateRequiredChecks\(targetCheckoutRoot\)/);
   const requeueFn = source.slice(source.indexOf("export function requeueActionsJob("));
@@ -468,4 +469,37 @@ test("requeueActionsJob: a refused API call is ledgered and returns false, never
   assert.equal(logged[0][1]?.check_name, "ci-shard (4/4)");
   assert.equal(logged[0][1]?.job_id, "999");
   assert.match(String(logged[0][1]?.error), /403 rate limited/);
+});
+
+test("the light pass also observes main, so a run in flight cannot starve the main-health rung", async () => {
+  const bin = mkdtempSync(join(tmpdir(), "rmd-main-health-gh-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-main-health-light-"));
+  writeFileSync(join(bin, "gh"), '#!/bin/sh\necho "[]"\n', { mode: 0o755 });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath}`;
+  let observations = 0;
+  try {
+    const light = buildSweepLightHook(
+      "o",
+      "r",
+      { root, claudeBin: "/bin/true" } as Config,
+      join(root, "ledger.ndjson"),
+      "DAEMON-TEST",
+      { tasks: [], byId: new Map() },
+      () => {},
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async () => {
+        observations += 1;
+      },
+    );
+    await light();
+    assert.equal(observations, 1);
+  } finally {
+    process.env.PATH = previousPath;
+    rmSync(bin, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
 });

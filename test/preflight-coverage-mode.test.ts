@@ -22,9 +22,24 @@ import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
 
 const REPO_ROOT = process.cwd();
 
-// These fixtures fake the coverage subprocess while the outer full gate owns the real lock.
+// Fake gates need private scratch as well as private locks: the scratch name derives from
+// repoRoot, so distinct lock discriminators on the real checkout still erase each other's raw files.
 function runPreflightCoverage(repoRoot: string, deps: PreflightCoverageDeps = {}) {
-  return runPreflightCoverageEngine(repoRoot, { ...deps, coverageLockDiscriminator: randomUUID() });
+  const privateRoot = repoRoot === REPO_ROOT ? mkdtempSync("/tmp/rmd-coverage-mode-fixture-") : undefined;
+  // A private slot dir with room for the overlapping run: the host-wide default has cores/4 slots
+  // (one on a small runner) and waits up to 45 minutes, so a nested gate would block on the outer
+  // gate's slot until the shard's own timeout instead of reaching the artifact assertion.
+  const slotDir = mkdtempSync("/tmp/rmd-coverage-mode-slots-");
+  try {
+    return runPreflightCoverageEngine(privateRoot ?? repoRoot, {
+      ...deps,
+      coverageLockDiscriminator: randomUUID(),
+      testSlot: { dir: slotDir, slots: 4, waitBoundMs: 1_000, ...deps.testSlot },
+    });
+  } finally {
+    rmSync(slotDir, { recursive: true, force: true });
+    if (privateRoot !== undefined) rmSync(privateRoot, { recursive: true, force: true });
+  }
 }
 
 /** Records every spawn call and answers from a lookup table keyed by a substring of
@@ -51,7 +66,7 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
     // resolve can still override it.
     if (file === "git" && args[0] === "rev-parse") return { status: 0, stdout: `${PINNED_BASE_SHA}\n`, stderr: "" };
     if (file === process.execPath && args.some((arg) => arg.endsWith("scripts/test-tier-manifest.mjs")) && args.includes("--select-all")) {
-      const shard = args[args.indexOf("--shard") + 1]?.match(/^(\d+)\/4$/)?.[1];
+      const shard = args[args.indexOf("--shard") + 1]?.match(/^([1-8])\/8$/)?.[1];
       return shard ? { status: 0, stdout: `test/coverage-shard-${shard}.test.ts\n`, stderr: "" } : { status: 1, stdout: "", stderr: "invalid selector shard" };
     }
     const coverage = coverageParitySpawnResult(file, args, opts);
@@ -62,6 +77,32 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
 }
 
 const SOME_LCOV = "TN:\nSF:src/lib/example.ts\nDA:1,1\nend_of_record\n";
+
+test("overlapping fake coverage gates preserve the first run's raw artifacts in private scratch", () => {
+  const answers = {
+    [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
+    [`diff ${PINNED_RANGE}`]: { status: 0, stdout: "diff --git a/src/lib/example.ts b/src/lib/example.ts\n+x\n" },
+  };
+  const first = recordingSpawn(answers);
+  let overlapped = false;
+  const spawn: PreflightSpawn = (file, args, opts) => {
+    const result = first.spawn(file, args, opts);
+    if (args.includes("--experimental-test-coverage") && !overlapped) {
+      overlapped = true;
+      const peer = recordingSpawn(answers);
+      const second = runPreflightCoverage(REPO_ROOT, {
+        coverageFreeBytes: () => Number.MAX_SAFE_INTEGER, spawn: peer.spawn, lcovText: SOME_LCOV,
+      });
+      assert.equal(second.ok, true, JSON.stringify(second.steps));
+    }
+    return result;
+  };
+  const result = runPreflightCoverage(REPO_ROOT, {
+    coverageFreeBytes: () => Number.MAX_SAFE_INTEGER, spawn, lcovText: SOME_LCOV,
+  });
+  assert.equal(overlapped, true, "positive control: a second gate ran after the first produced real raw files");
+  assert.equal(result.ok, true, JSON.stringify(result.steps));
+});
 
 // ── acceptance 1: the mode derives its OWN three-dot base, never a caller-supplied one ──────
 
@@ -263,7 +304,7 @@ test("runPreflightCoverage: the coverage runs retain source-map and test exclusi
   runPreflightCoverage(REPO_ROOT, { coverageFreeBytes: () => Number.MAX_SAFE_INTEGER,  spawn, lcovText: SOME_LCOV });
 
   const coverageCalls = calls.filter((c) => c.args.includes("--experimental-test-coverage"));
-  assert.equal(coverageCalls.length, 4, "expected one coverage invocation for each CI shard");
+  assert.equal(coverageCalls.length, 8, "expected one coverage invocation for each CI shard");
   for (const coverageCall of coverageCalls) {
     assert.ok(coverageCall.args.includes("--enable-source-maps"), "source maps must be enabled");
     assert.ok(coverageCall.args.includes("--test-coverage-exclude=test/**"), "test/** must stay excluded from the ratio");
@@ -273,7 +314,7 @@ test("runPreflightCoverage: the coverage runs retain source-map and test exclusi
     .filter((c) => c.args.some((arg) => arg.endsWith("scripts/test-tier-manifest.mjs")) && c.args.includes("--select-all"))
     .map((c) => c.args[c.args.indexOf("--shard") + 1])
     .sort();
-  assert.deepEqual(selectorShards, ["1/4", "2/4", "3/4", "4/4"], "all selectors must partition the complete manifest");
+  assert.deepEqual(selectorShards, ["1/8", "2/8", "3/8", "4/8", "5/8", "6/8", "7/8", "8/8"], "all selectors must partition the complete manifest");
 });
 
 test(
@@ -325,10 +366,11 @@ test(
 
 // ── acceptance 4: --fast still shells no test suite now that --coverage exists beside it ────
 
-test("FAST_GATE_STEPS: unaffected by --coverage's existence — still exactly the twelve deterministic npm-script gates, including W1-T2734's source-size signal, the comment-load ratchet, W1-T3702's diff-scoped lint-plan and the plan-shaped self-path-proof ratchet, plus the seven census entries (four from W1-T2478, W1-T2695's authority-census, W1-T2898's ledger-literal-census, and W1-T4422's no-draft-pr-census)", () => {
+test("FAST_GATE_STEPS: unaffected by --coverage's existence — still exactly the twelve deterministic npm-script gates plus W1-T6435's census-precheck runner, including W1-T2734's source-size signal, the comment-load ratchet, W1-T3702's diff-scoped lint-plan and the plan-shaped self-path-proof ratchet, plus the seven census entries (four from W1-T2478, W1-T2695's authority-census, W1-T2898's ledger-literal-census, and W1-T4422's no-draft-pr-census)", () => {
   const scripts = FAST_GATE_STEPS.map((s) => s.script).sort();
   assert.deepEqual(scripts, [
     "api-client:check",
+    "census-precheck",
     "census:authority",
     "census:bound-kind",
     "census:catch-erasure",

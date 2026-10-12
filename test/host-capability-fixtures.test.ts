@@ -136,6 +136,23 @@ const CHMOD_REMEDY =
  */
 const DECLARED: readonly Declared[] = [
   {
+    kind: "chmod", file: "heavy-build-reservation.test.ts", key: "0o644", count: 1,
+    reason: "The READY reader refuses group/world-readable record modes by descriptor stat before parsing. This explicit policy is independent of uid, not an EACCES assertion.",
+  },
+  {
+    kind: "chmod", file: "heavy-build-reservation.test.ts", key: "0o600", count: 1,
+    reason: "Restores the same READY record to its supported private mode after the uid-independent policy refusal; the default reader then positively observes its held request.",
+  },
+  {
+    kind: "chmod",
+    file: "routing-quarantine-resolution.test.ts",
+    key: "0o644",
+    count: 1,
+    reason:
+      "The daily collector refuses a resolution file unless its stat mode is exactly 0600. " +
+      "This fixture tests that explicit mode policy before reading, so the refusal holds at every uid.",
+  },
+  {
     kind: "chmod",
     file: "worktree-reap-liveness.test.ts",
     key: "0o000",
@@ -152,6 +169,16 @@ const DECLARED: readonly Declared[] = [
     reason:
       "read-but-not-traverse on a DIRECTORY, so every stat of a child fails EACCES — the per-entry catch arm. Root " +
       `traverses regardless, and the test's own comment says "without this the arm never runs". ${CHMOD_REMEDY}`,
+  },
+  {
+    kind: "chmod",
+    file: "host-root-disk-janitor.test.ts",
+    key: "0o444",
+    count: 1,
+    reason:
+      "the cross-identity janitor lock: a non-root runner meets a lock it cannot write exactly as the user cron " +
+      "meets root's 0644 lock, proving the script opens it read-only. VACUOUS UNDER uid 0 — root opens any mode, " +
+      `so a root runner cannot tell read-only from read-write here. ${CHMOD_REMEDY}`,
   },
   {
     kind: "chmod",
@@ -342,6 +369,17 @@ const DECLARED: readonly Declared[] = [
       "setpriv against a root-chowned path, and skips with a stated reason when setpriv is absent — never vacuous.",
   },
   // ── platform-varying real binaries ──────────────────────────────────────────────────────────
+  {
+    kind: "platform-tool",
+    file: "the-watchdog-tick-skips-git-and-node-work-when-nothing-changed.test.ts",
+    key: "/usr/bin/stat",
+    count: 1,
+    reason:
+      "The Linux launcher requests GNU stat -c %Y, which BSD stat cannot execute. This fixture owns that " +
+      "observation with a Node shim reading real file mtimes, and tests that changing the file changes the " +
+      "reported timestamp. The single system-stat fallback is only for other flags; no watchdog timestamp " +
+      "or healthy verdict is invented, and the production predicate remains unchanged on both platforms.",
+  },
   {
     kind: "platform-tool",
     file: "fleet-heartbeat.test.ts",

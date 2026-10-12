@@ -33,6 +33,57 @@ import { writeLedger } from "./helpers/ledger-fixture.js";
 
 const NOW = "2026-09-24T12:00:00.000Z";
 
+test("cash spend includes drafting and other cash producers without restating terminal costs", () => {
+  const ts = "2026-09-24T11:30:00.000Z";
+  const lines = [
+    {ts, step: "inbox.draft_synthesized", provider: "cash", model: "gpt-oss-120b", total_cost_usd: 0.12},
+    {ts, step: "recon.done", provider: "cash", model: "gpt-5-nano", cost_usd: 0.03},
+    {ts, step: "implement.resumed", provider: "cash", model: "gpt-6-luna", total_cost_usd: 0.04},
+    {ts, step: "review.reviewer", provider: "cash", model: "gpt-6-luna", total_cost_usd: 0.05},
+    {ts, step: "inbox.draft_synthesized", provider: "cash", model: "gpt-5-nano"},
+    {ts, step: "verdict", provider: "cash", model: "gpt-oss-120b", total_cost_usd: 0.12},
+    {ts, step: "cost.anomaly", provider: "cash", model: "gpt-oss-120b", cost_usd: 0.12},
+    {ts, step: "inbox.draft_synthesized", provider: "claude", model: "sonnet", total_cost_usd: 9},
+    {ts, step: "fix.done", cost_usd: 7},
+  ];
+  const snapshot = deriveAnalyticsSnapshot(lines, NOW);
+  const week = snapshot.spend.cash.windows.find(w => w.name === "7d")!;
+  const hour = snapshot.usage!.cash.windows.find(w => w.name === "1h")!;
+  assert.equal(week.usd, 0.24);
+  assert.equal(week.rows, 5);
+  assert.equal(week.unpricedRows, 1);
+  assert.equal(hour.usd, week.usd);
+  assert.equal(hour.rows, week.rows);
+  assert.equal(hour.unpricedRows, 1);
+  assert.match(snapshot.usage!.cash.coverage, /not an invoice/);
+});
+
+test("old cash checkpoints rescan retained drafting receipts before serving or resuming", async () => {
+  const fixture = writeLedger([
+    {ts: "2026-09-24T11:00:00.000Z", step: "inbox.draft_synthesized", provider: "cash", model: "gpt-oss-120b", total_cost_usd: 0.12},
+  ]);
+  try {
+    const clock = fixedClock(Date.parse(NOW));
+    const first = await deriveAnalyticsSnapshotFromCheckpointedLedger(fixture.dir, clock);
+    const old = structuredClone(first.checkpoint);
+    delete old.state.usage!.cashAccountingVersion;
+    old.state.usage!.cash = [];
+    old.state.usage!.cashEvents = [];
+    for (const [, bucket] of old.state.history.days) { bucket.cashUsd = 0; bucket.cashRows = 0; }
+    old.snapshot.spend.cash.windows.forEach(w => { w.usd = 0; w.rows = 0; });
+    writeAnalyticsCheckpoint(fixture.dir, old);
+    const cache = createAnalyticsSnapshotCache({stateDir: fixture.dir, clock});
+    assert.equal(cache.current().usage, undefined, "legacy zero is not a current receipt");
+    const restored = await deriveAnalyticsSnapshotFromCheckpointedLedger(fixture.dir, clock, undefined, old);
+    assert.equal(restored.snapshot.spend.cash.windows[0]!.usd, 0.12);
+    assert.equal(restored.snapshot.usage!.cash.windows[0]!.usd, 0.12);
+    const resumed = await deriveAnalyticsSnapshotFromCheckpointedLedger(fixture.dir, clock, undefined, restored.checkpoint);
+    assert.equal(resumed.snapshot.spend.cash.windows[0]!.usd, 0.12, "resumed union must not double count");
+    writeAnalyticsCheckpoint(fixture.dir, resumed.checkpoint);
+    assert.equal(createAnalyticsSnapshotCache({stateDir: fixture.dir, clock}).current().usage!.cash.windows[0]!.usd, 0.12);
+  } finally {rmSync(fixture.dir, {recursive: true, force: true});}
+});
+
 function headroom(ts: string, used: number, extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     ts,

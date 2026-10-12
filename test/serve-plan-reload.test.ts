@@ -188,7 +188,7 @@ test("a plan-only advance of the gateway checkout reloads at origin's sha instea
   assert.equal(planOnly.reloadPlanAt, NEW);
   const mixed = await assess("plan/tasks.d/W1-T2-x.yaml\nsrc/lib/serve.ts\n");
   assert.equal(mixed.restartDue, true);
-  assert.equal(mixed.reloadPlanAt, undefined);
+  assert.equal(mixed.reloadPlanAt, NEW, "the plan half of a mixed merge reloads now; the code half waits for its handoff");
   assert.equal((await assess("docs/a.md\n")).reloadPlanAt, undefined);
 
   const reloads: string[] = [];

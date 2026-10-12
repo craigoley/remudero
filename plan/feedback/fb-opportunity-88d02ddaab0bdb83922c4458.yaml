@@ -1,0 +1,11 @@
+id: fb-opportunity-88d02ddaab0bdb83922c4458
+ts: 2026-10-07T21:22:34.738Z
+raw: |-
+  Opportunity-Key: craigoley/remudero/standing-debt:1
+  {"source":"standing-debt","key":"standing-debt:1","repo":"craigoley/remudero","observedAt":"2026-10-07T21:21:49.287Z","anchor":"MASTER-PLAN.md#standing-debt-1","availability":"available","freshness":"fresh","population":{"affected":1,"denominator":18,"unit":"open debt entries"},"impact":{"value":78,"unit":"cycles of dwell"},"remedy":"`plan/mast-mapping.yaml` (untouched since #1270) needs `incomplete`, `blocked_transient` and\n`failed` rows, its merge-state join must exclude ledger-credit rescues, and `blocked_inflight` must map to no failure category — **AGE: 78 cycles; R114 prints `inter-agent`×0, six `handed_off` and five `incomplete` unmapped; the GitHub-only join still does not reconcile ledger-credit rescues**.","authority":"machine","related":{}}
+  Draft one bounded task through the normal triage and machine-filing judge, with author_class: machine. Preserve origin: standing-debt:1 and the exact Opportunity-Key line on the task. Establish executable acceptance before filing.
+origin: cli
+status: new
+attachments: []
+proposal_pr: null
+submission_key: craigoley/remudero/standing-debt:1

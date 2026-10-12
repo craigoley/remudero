@@ -1,0 +1,118 @@
+- id: W1-T7806
+  title: "A RESTART LATCHED WHILE A LANE HAS NO SAFE BOUNDARY IDLES EVERY FREED LANE"
+  repo: remudero
+  depends_on: []
+  dispatch_hold: true  # operator 2026-10-12: held for a session build — restart churn keeps interrupting it; release after the session PR merges or if the session hands it back
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — a latched restart must not idle freed lanes behind a lane that cannot yield yet
+  band_meaning: span
+  origin: "operator session 2026-10-10: core daemon ledger 19:35-20:33Z, lane running W1-T7734 (W1-T7697 design 3)"
+  plan_refs: [W1-T7697, W1-T6274, W1-T5761, W1-T4416, W1-T4662, W1-T3793, W1-T147]
+  files:
+    - src/lib/daemon.ts
+    - src/run-task.ts
+    - test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts
+    - test/a-daemon-draining-for-a-restart-dispatches-no-new-run.test.ts
+    # session build 2026-10-12: existing latch/refill tests that encode the old held-refill behaviour; each red without the change
+    - test/a-freed-lane-refills-unless-the-daemon-would-restart.test.ts
+    - test/the-daemon-freshness-reads-never-block-the-loop.test.ts
+    - test/w1-t5308-a-long-lane-pool-never-starves-the-freshness-check.test.ts
+    - test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts
+    - test/owner-dispatch-threading.test.ts
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    DEPENDENCY. Open PR #10741 (run-unfiled, "park a phase-bound lane until a sibling outlives the measured run
+    length", head 3fb4aab41, NOT merged into origin/main d57884498 at filing) rewrites the same block of
+    runDaemon: it splits refillLane into refillLane + decideRefill, adds phaseBoundHolds and parkedLanes, and wakes
+    parked lanes after a restart latches. Build this task on a main that carries #10741; if #10741 is closed
+    unmerged, build on main as it stands, since the defect below is the same in both trees.
+    READ on origin/main d57884498 (src/lib/daemon.ts, inside runDaemon's dispatch phase):
+      - `latchRestart` (:5441) records the restart and, ONLY on the first latch, copies every in-flight lane for
+        which `slowLane(t)` holds (age past `refillBoundMs`, the measured mean run length, :5427) into
+        `restartSlowLanes`. Its own comment: "Only the cohort that already delayed the restart grants refill; new
+        runs cannot renew it."
+      - `restartStillWaitingOnSlowLane` (:5440) is the only thing that keeps refill open under a latched
+        restart. refillLane closes refill with "stale code" when it is false (:5463, :5474), the in-flight read
+        re-checks it in `conclude` (:5509), and `actOnDispatchFreshness` closes it at latch time (:5568).
+      - `slowLane` returns false whenever `measuredRefillBound` is false, so with no run history the cohort is
+        always empty and a latched restart always closes refill.
+    So the cohort is a snapshot of lane AGE at latch time. A lane younger than the mean when the restart latches
+    is not in it, refill closes as "stale code" at once, and every lane that frees afterwards idles until that
+    young lane settles, however long it then runs.
+    WHY A YOUNG LANE CAN RUN FAR PAST THE MEAN WITHOUT YIELDING. A run yields to a pending restart only through
+    `yieldAtWorkerBoundary` (src/run-task.ts:19427, W1-T7697), and every call site comes after a worker returns:
+    "decision" :19701, "checkpoint" :19757 and :19776, "worker" before the pre-open gate :19805,
+    "preopen_gate" :19811 and "worker" before PR open :19839. Nothing yields while the FIRST implement worker
+    runs (the spawn in attemptImplement, :19453/:19466, driven by runDiagnoseThenRetry :19583). A lane inside its
+    first worker is therefore unyieldable for as long as that worker lasts.
+    OBSERVED 2026-10-10 (core daemon ledger, read from the fleet host read-only by the operator session): no
+    run.start from 19:35Z to 20:33Z while W1-T7734 (run W1-T7734-1791660796008, worker.assignment 19:35:18Z) sat
+    in its first implement worker, which hung in its own wait loop from ~19:47Z (W1-T7807, filed in the
+    same PR). On that day the first idle stretch was the one-way "phase bound"
+    closure that #10741 fixes. By the 20:01Z restart W1-T7734 was already past the measured mean (16.3 min from
+    163 observed runs, per #10741), so it sat in the cohort. The residual this task closes is the same shape one
+    step earlier: had the restart latched before W1-T7734 crossed the mean, the cohort would have been empty,
+    refill would have closed as "stale code", and the freed lanes would have idled until W1-T7734 ended (the
+    restart waited about 55 min on it).
+    RELATED, already merged: W1-T7697 (yield at worker boundaries, adaptive refill bound, and this
+    design 3 left half-built as the age cohort), W1-T6274 (a draining daemon dispatches no new run; this task
+    must keep that guarantee once every lane can yield), W1-T4662 (a yield is handed_off, never a transient
+    failure).
+    AMENDED 2026-10-11 (operator approval): files: adds test/a-daemon-draining-for-a-restart-dispatches-no-new-run.test.ts.
+    Its two W1-T6274 tests latch the restart while lane A is in flight and has reached no yield boundary, then assert
+    that B's freed lane is held with "stale code". Design 1 below makes A a holdout, so that lane now refills, and the
+    build must move those fixtures onto design 3's common case (A has reached a boundary or settled) to keep W1-T6274's
+    guarantee. With the file undeclared, the run's restart checkpoint was refused at 19:40:14Z (verdict no_pr,
+    reason restart_checkpoint_failed), detail:
+      "restart checkpoint refused: test/a-daemon-draining-for-a-restart-dispatches-no-new-run.test.ts"
+    and the work was lost (W1-T8008 owns keeping undeclared work).
+    OVERLAP. lint-plan reports W1-T147 (the overnight chaos drill) as sharing src/lib/daemon.ts and src/run-task.ts.
+    That is the whole-file surface only: W1-T147 injects faults and checks recovery rows, and does not touch the
+    restart latch or lane refill, so neither shard supersedes the other (the same ruling W1-T7697 recorded).
+  design: |
+    Operator rulings: no hard thresholds (nothing below adds a fixed cap or constant), lean into automation.
+    W1-T7697 design 3: a freed lane keeps refilling on the old code until the restart is actually ready.
+    1. Replace the at-latch AGE cohort with a LIVE reading. When the restart latches, every lane then in flight is
+       a holdout. A holdout stops holding the restart when it settles OR when it reaches a yield boundary since
+       the latch (with a restart pending it yields there and settles as handed_off). While any holdout remains,
+       a freed lane is not closed with "stale code"; it refills through the same gates as today. Delete
+       `restartSlowLanes` / the `slowLane` test inside `latchRestart`, so the decision no longer depends on lane
+       age or on whether run history exists.
+    2. A refill admitted while the restart is latched is NOT a holdout and cannot renew the hold (the existing
+       "new runs cannot renew it" property stays). It yields at its first safe boundary: the daemon makes the
+       latched restart visible to that run's boundary check, so a refilled run reads the pending restart at
+       `yieldAtWorkerBoundary` even if its own freshness read would not (one predicate, the latch, not two
+       readings that can disagree). If boundary arrival needs a report from the run to the daemon to make the
+       reading live, add it as a run option threaded from the daemon's runOne (src/run-task.ts), not a ledger
+       scrape.
+    3. Keep W1-T6274 for the common case: once no holdout remains (every lane in flight at the latch has settled
+       or reached a boundary), refill closes as "stale code" and no new run starts. Keep the in-flight-read
+       re-check in `conclude` reading the same predicate.
+    4. Observability: `dispatch.lane_refilled` under a latch names the holdouts it waits on (today `waiting_on:
+       [...restartSlowLanes]`), and `daemon.freshness_restart_waiting` marks which in-flight lanes are holdouts
+       and which were admitted under the latch, so the restart's wait is attributable.
+    Tests (new file, `test(` titles verbatim as in the proofs below), driving runDaemon with an injected runOne,
+    checkFreshness and fake clock as test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts does:
+    three lanes, measured mean 16 min; the restart latches at minute 5 while lane A (2 min old, inside its
+    first worker) is in flight; lanes B and C free at minutes 6 and 8.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts"
+    - claim: "a freed lane refills while a lane younger than the mean has not reached a yield boundary since the restart latched"
+      proof: 'grep: test("W1-T7806: a freed lane refills while a young lane has no yield boundary since the latch" in test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts'
+    - claim: "with no run history a latched restart still keeps refill open while a lane has not reached a yield boundary"
+      proof: 'grep: test("W1-T7806: refill stays open under a latch with no run history" in test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts'
+    - claim: "a run refilled under a latched restart yields at its first safe boundary and does not hold refill open"
+      proof: 'grep: test("W1-T7806: a refill admitted under the latch yields at its first boundary" in test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts'
+    - claim: "once every lane in flight at the latch has settled or reached a boundary no new run starts"
+      proof: 'grep: test("W1-T7806: refill closes as stale code once every holdout can yield" in test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts'
+  falsifier: |
+    Keep the age cohort in latchRestart: in the first test lane A is 2 min old against a 16 min mean, so the
+    cohort is empty and lane B is held with reason "stale code" at minute 6; in the no-history test `slowLane`
+    is always false and the same hold fires. Drop the holdout drain instead (refill open for any in-flight lane):
+    the last test sees a run.start after lane A settled.

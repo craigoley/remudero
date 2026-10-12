@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-02: implement dispatch admission research (lane-time attribution)"
   plan_refs: [W1-T4662, W1-T5037, W1-T5127, W1-T4945]
   files: [src/run-task.ts, test/a-lane-is-free-once-its-pull-request-is-open.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

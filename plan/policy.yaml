@@ -614,11 +614,23 @@ sweep:
   # supposed to earn lane three has fired 718 times since 2026-09-05 and granted it ZERO times —
   # 59% of refusals are missing telemetry, not pressure, on a host reporting 0% PSI and 29 GiB
   # free. Until that is fixed this committed value is the ONLY way a third lane exists.
+  #
+  # OPERATOR RULING 2026-10-06 (option A, "width 4, max 5"): value 3 -> 4, max 3 -> 5, min stays 1.
+  # MEASURED 2026-10-05 23:05 -> 2026-10-06 16:00Z: in the 13-16Z backlog (queue 4-19) the width-3
+  # ceiling bound for 2.05 of 3 h (191 "semantic post-review admission bound 0, in-flight 3" rows).
+  # Reviews ran p50 4.5 min / p90 13 min. The widener could not help: max equalled value, and its
+  # commonest reason was `provider-telemetry-unavailable` (142 of 316 `review.capacity` rows,
+  # provider_status_age_ms ~500-800 s against the router's 60 s cache bound); `healthy-window`
+  # fired twice. MEMORY: mem_available min 4.3 GB / median 6.7 GB on the 16 GB host; one more
+  # ~1.33 GiB worker at that minimum leaves ~3 GB, above the 1.5 GiB reserve, and the
+  # memory-pressure and memory-reserve arms still shed admissions below it. Lane five is never
+  # committed: it stays capacity the widener must earn (option B, a separate code PR). Not a
+  # ratified rung: plan/ratifications.yaml pins no `sweep.*` row, so nothing needs re-ratifying.
   reviewLanes:
-    value: 3
+    value: 4 # operator ruling 2026-10-06: 3 -> 4
     origin: "net-new"
     min: 1
-    max: 3
+    max: 5 # operator ruling 2026-10-06: 3 -> 5
   # W1-T2853: lane three is temporary capacity earned by a sustained healthy window, not a new
   # default. These rows govern review admission only; they never cancel a live worker and never
   # widen dispatchLanes. The 1.5 GiB reserve follows W1-T1049's measured ~1.33 GiB Claude-worker
@@ -807,8 +819,9 @@ sweep:
   # THE REGISTRY IS THE FENCE: `src/lib/sweep.ts` derives the admitted check names from
   # REGENERABLE_ARTIFACT_GENERATORS. A floor-shaped ratchet such as coverage/mutation is not in
   # that registry, so no lowered score floor can be written by this switch.
+  # Operator ruling 2026-10-10 ("lean into automation"): switched ON; the acting path is further fenced by RATIFIED_BASELINE_RATCHET_REPAIRS.
   recordableRatchetRepairEnabled:
-    value: false
+    value: true  # operator ruling 2026-10-10
     origin: "lifted:src/lib/sweep.ts (recordableRatchetRepairEnabled === true guards; absent shipped false)"
 
   # W1-T1038 (the 2026-08-19 host stall). Dispatch has priced every draw in dollars
@@ -857,6 +870,71 @@ sweep:
     origin: "net-new"
     min: 0
     max: 8192
+  # W1-T7094 — the host-wide memory budget (src/lib/host-memory-shadow.ts). Every row is a PROPOSAL
+  # to calibrate from `memory_budget.shadow` rows, not a ruling. mode accepts off, shadow or enforce.
+  # "shadow" (shipped) records a verdict per start and delays nothing. "enforce"
+  # (src/lib/host-memory-admission.ts, #10730) makes a start that would not fit wait, tiered: one
+  # re-read when only uncertainty tipped it; back-off while reserved work that can free memory still
+  # runs; admitted and named when nothing is left to wait for. Switching to enforce is an operator ruling made by editing this row;
+  # nothing switches it on a timer. Read by host-memory-shadow.ts
+  # itself, never by validatePolicy.
+  hostMemoryBudget:
+    mode:
+      value: "shadow"
+      origin: "proposal"
+    # The 1.5 GiB dispatch reserve (memoryFloorMib above) rounded up: MemAvailable kept after every claim.
+    hostReserveMib:
+      value: 2048
+      origin: "proposal"
+      min: 0
+      max: 16384
+    containerReserveMib:
+      value: 1024
+      origin: "proposal"
+      min: 0
+      max: 16384
+    # Pages per second (pswpin delta); 256 pages is 1 MiB/s at 4 KiB pages.
+    swapInPagesPerSecMax:
+      value: 256
+      origin: "proposal"
+      min: 0
+      max: 1000000
+    psiSomeAvg10Max:
+      value: 10
+      origin: "proposal"
+      min: 0
+      max: 100
+    psiFullAvg10Max:
+      value: 2
+      origin: "proposal"
+      min: 0
+      max: 100
+    # OBSERVED 2026-10-09: serve's cold start peaks at 7.5 GB; a cold start begins from nothing resident.
+    serveColdStartReserveMib:
+      value: 7680
+      origin: "proposal"
+      min: 0
+      max: 16384
+    uncertaintyMarginMib:
+      value: 256
+      origin: "proposal"
+      min: 0
+      max: 8192
+    daemonGrowthUnmeasuredMib:
+      value: 1024
+      origin: "proposal"
+      min: 0
+      max: 8192
+    daemonGrowthMinSamples:
+      value: 6
+      origin: "proposal"
+      min: 1
+      max: 3600
+    staleReadingMs:
+      value: 600000
+      origin: "proposal"
+      min: 1000
+      max: 86400000
 
 drain:
   max:
@@ -1392,32 +1470,46 @@ worktreeReapBoot:
 # BOTH rows below are net-new: no source literal of either shape (a cost multiplier over a class
 # median, a minimum-sample floor before a median is trusted) ever existed in src/ to lift from.
 
-# W1-T3092 — the OBJECT reaper inside logDiskReclaimRung: git prune of UNREACHABLE objects in the
-# worker clone. Nothing has ever reclaimed a git object; the clone reached 16,747 loose objects and
-# a .git/gc.log whose presence SUPPRESSES git own automatic cleanup, so the condition that would
-# self-heal is the condition that disables the healer.
+# Autonomous repository maintenance after admission; Git owns locking and gc.log recovery.
 objectReap:
-  # ARMED 2026-09-08, ON THE OPERATOR'S EXPLICIT INSTRUCTION ("arm 4532"). That instruction is
-  # the condition W1-T3092's falsifier names: this flag may not ship true unless the operator has
-  # said so in writing on the task.
-  #
-  # A DEPARTURE FROM THE CONVENTION, RECORDED RATHER THAN GLOSSED. worktreeReapBoot and
-  # scratchReap ship OFF because they DELETE, so an operator can read several passes of
-  # dispositions before arming. This rung was written that way and is being armed in the same PR,
-  # so NO pass of survey dispositions was read first. The operator asked for it armed; the cost of
-  # that shortcut is that the quiet predicate's real firing rate is still unmeasured.
-  #
-  # WHAT ARMED MEANS HERE. The reap acts only when the fleet is QUIET — no registered worktree, no
-  # inflight lock, no open handle under .git — and ALWAYS with --expire=24.hours.ago, so an object
-  # a live worker created today is ineligible even if that quiet verdict were wrong. Prune only,
-  # never gc. While false it SURVEYS instead: every one of those probes still runs and what a
-  # prune WOULD remove is ledgered, spawning nothing.
-  #
-  # Set back to false to return to survey-only; nothing else changes. Ratifying afterwards
-  # (rmd ratify objectReap) pins the armed operation against silent drift.
   enabled:
     value: true
     origin: "net-new"
+  intervalMs:
+    value: 86400000
+    origin: "net-new"
+    min: 86400000
+    max: 604800000
+  probeIntervalMs:
+    value: 60000
+    origin: "net-new"
+    min: 60000
+    max: 3600000
+  timeoutMs:
+    value: 300000
+    origin: "net-new"
+    min: 1000
+    max: 600000
+  backoffMs:
+    value: 60000
+    origin: "net-new"
+    min: 60000
+    max: 3600000
+  maxBackoffMs:
+    value: 3600000
+    origin: "net-new"
+    min: 60000
+    max: 86400000
+  maxFailures:
+    value: 3
+    origin: "net-new"
+    min: 1
+    max: 10
+  maxActiveLanes:
+    value: 1
+    origin: "net-new"
+    min: 0
+    max: 2
 
 costAnomaly:
   # (iii) MEDIAN, NOT MEAN, AND THAT IS LOAD-BEARING — the mean is dragged by the very outlier
@@ -1558,6 +1650,44 @@ risk:
     origin: "lifted:src/lib/risk-judge.ts:593 (DEFAULT_CONFIDENCE_THRESHOLD, as measured at 855dcb0b6)"
     min: 0
     max: 1
+  # W1-T7724: how far ABOVE confidenceThreshold a `low` verdict is still uncertain. A `low` verdict below the
+  # threshold, or inside [threshold, threshold + borderlineBand), is judged a second time with the diff before
+  # it may escalate. 0 = no band: only a verdict below the threshold is re-judged.
+  borderlineBand:
+    value: 0
+    origin: "net-new"
+    min: 0
+    max: 1
   verifyHumanReleaseEnabled:
     value: true
     origin: "net-new"
+
+# THE DAEMON'S HEAP GROWTH AND MEMORY-PRESSURE SHARES, read at daemon entry by
+# src/lib/daemon-memory-policy.ts's `readDaemonMemoryPolicy` (OPTIONAL: absent rows read as the
+# defaults below; NOT threaded through src/lib/policy.ts's `validatePolicy`, exactly like `risk:`).
+#
+# MEASURED 2026-10-10 on the core host: the daemon's live set was 0.6-0.9 GB while V8, under the
+# container's 8 GB heap ceiling, let garbage reach ~4x that before a major GC; RSS sat at 4.1-4.5 GB
+# with 1-3 GB more in swap. `heapGrowingPercent` fixes the next collection at (1 + value/100) times
+# what survived the last one: 50 measured a 45% lower peak heap for ~14% less synthetic throughput.
+#
+# The two shares are of the daemon's RSS+swap against the container's own memory.high (else
+# memory.max), read from the cgroup every tick. Between them the growth percent falls linearly
+# toward 10; at `restartShare` with 10 already in force the daemon drains and restarts at a tick
+# boundary. Both scale with whatever budget the container is given; neither is a byte count.
+daemonMemory:
+  heapGrowingPercent:
+    value: 50
+    origin: "net-new"
+    min: 10
+    max: 300
+  tightenShare:
+    value: 0.3
+    origin: "net-new"
+    min: 0.05
+    max: 0.95
+  restartShare:
+    value: 0.5
+    origin: "net-new"
+    min: 0.1
+    max: 1

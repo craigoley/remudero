@@ -31,6 +31,7 @@ import {
   type RepoShadowFacts,
   type RepoSummaryFileReads,
 } from "./repo-dashboard-route.js";
+import type { RepoLedgerWatermark } from "./repo-ledger-index.js";
 import type { ShadowLegacy } from "./view-shadow.js";
 import type { ViewSource } from "./views.js";
 
@@ -137,8 +138,9 @@ function readSources(path: string): RepositoriesSources | undefined {
 const parsedRepoRows = new WeakMap<ReadModelDb, Map<string, Record<string, unknown>>>();
 
 /** One instance's `repo_row` rows inside twice the window, plus its newest heartbeat as a `daemon.*` row:
- *  the shape `computeRepoTelemetrySync`'s `readLedger` seam takes. Only rows not parsed by the last read are parsed (E37). */
-export function readRepoRows(db: ReadModelDb, nowMs: number, parse: (body: string) => Record<string, unknown> = JSON.parse): Array<Record<string, unknown>> {
+ *  the shape `computeRepoTelemetrySync`'s `readLedger` seam takes. Only rows not parsed by the last read are parsed (E37).
+ *  `read.through` is set to the greatest row identity returned: how far the projector had read. */
+export function readRepoRows(db: ReadModelDb, nowMs: number, parse: (body: string) => Record<string, unknown> = JSON.parse, read: { through?: RepoLedgerWatermark } = {}): Array<Record<string, unknown>> {
   const since = nowMs - 2 * REPO_TELEMETRY_WINDOW_MS;
   const keyOf = (row: { ts_ms?: unknown; h?: unknown }): string => `${String(row.ts_ms)}:${String(row.h)}`;
   const keys = db.prepare("SELECT ts_ms, h FROM repo_row WHERE ts_ms >= ? ORDER BY ts_ms, h", { bigInts: true }).all(since).map(keyOf);
@@ -149,6 +151,8 @@ export function readRepoRows(db: ReadModelDb, nowMs: number, parse: (body: strin
     : db.prepare("SELECT ts_ms, h, body FROM repo_row WHERE ts_ms >= ? ORDER BY ts_ms, h", { bigInts: true }).all(since)
       .map((row) => [keyOf(row), held.get(keyOf(row)) ?? parse(String(row.body))] as const);
   const rows = listed.map(([key, row]) => (kept.set(key, row), row));
+  const [tsMs, h] = listed.at(-1)?.[0].split(":") ?? [];
+  if (h !== undefined) read.through = { tsMs: Number(tsMs), h };
   parsedRepoRows.set(db, kept);
   const beat = db.prepare("SELECT last_ms FROM instance_heartbeat WHERE k = 'daemon'").get();
   if (beat) rows.push({ ts: fixedClock(Number(beat.last_ms)).iso(), step: "daemon.heartbeat" });
@@ -168,6 +172,8 @@ interface InstanceSummary {
   plan?: PlanRead;
   /** The registry, managed set, PAUSE/STOP markers and alerts the summary read: legacy replays them. */
   fileReads?: RepoSummaryFileReads;
+  /** The greatest `repo_row` identity the summary read: legacy reads the ledger only through it. */
+  through?: RepoLedgerWatermark;
   /** The summary was computed while the instance's projector was still catching up, so from a partial ledger. */
   partial?: true;
   /** No summary yet because the instance's projector has not ticked: the read model is still warming. */
@@ -237,7 +243,11 @@ export function legacyRepositories(
   at: (instanceId: string) => number = () => nowMs,
   planOf: (instanceId: string) => Plan | undefined = () => undefined,
   /** The sources file, each instance's file reads and the portfolio's registry read the view's body was built from. */
-  paired: { sources?: RepositoriesSources; readsOf?: (instanceId: string) => RepoSummaryFileReads | undefined; registry?: { read: ReturnType<typeof readRegistry> | undefined } } = {},
+  paired: {
+    sources?: RepositoriesSources; readsOf?: (instanceId: string) => RepoSummaryFileReads | undefined; registry?: { read: ReturnType<typeof readRegistry> | undefined };
+    /** How far each instance's projector had read when its summary read the rows: a row it had not read is in neither side. */
+    throughOf?: (instanceId: string) => RepoLedgerWatermark | undefined;
+  } = {},
 ): ShadowLegacy & { facts: ShadowFactsByInstance } | undefined {
   let published: RepositoriesSources;
   try {
@@ -252,7 +262,8 @@ export function legacyRepositories(
     instants.push(at(instanceId));
     const plan = planOf(instanceId);
     const fileReads = paired.readsOf?.(instanceId);
-    const outcome = repoSummarySync({ ...options, shadowMembers: true, ...(plan ? { readPlan: () => plan } : {}), ...(fileReads ? { fileReads } : {}) }, instants.at(-1)!);
+    const through = paired.throughOf?.(instanceId);
+    const outcome = repoSummarySync({ ...options, shadowMembers: true, ...(plan ? { readPlan: () => plan } : {}), ...(fileReads ? { fileReads } : {}), ...(through ? { ledgerThrough: through } : {}) }, instants.at(-1)!);
     if (!outcome.ok) return { instanceId, reason: outcome.reason };
     facts[instanceId] = outcome.shadow ?? {};
     return { instanceId, summary: unstampedSummary(outcome.summary) };
@@ -306,6 +317,7 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
   type Pair = {
     at: Record<string, number>; facts: ShadowFactsByInstance; plans: Record<string, PlanRead>;
     sources: RepositoriesSources; reads: Record<string, RepoSummaryFileReads>; registry?: { read: ReturnType<typeof readRegistry> | undefined };
+    through: Record<string, RepoLedgerWatermark>;
   };
   const shown = new WeakMap<RepositoriesData, Pair>();
   let sourcesPath: string | undefined;
@@ -332,9 +344,10 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
     // an instance with no slot at all is structurally unprojected and compared (2026-10-02 23:14Z, after a serve handoff).
     const warming = slot !== undefined && (slot.db === undefined || slot.state.tickedAt === undefined) ? { warming: true as const } : {};
     computed.set(instanceId, next.summary
-      ? { atMs: now, generation, sourcesMtimeMs, summary: next.summary, ...(next.shadow ? { shadow: next.shadow } : {}), ...(read ? { plan: read } : {}), ...(next.fileReads ? { fileReads: next.fileReads } : {}), ...partial }
+      ? { atMs: now, generation, sourcesMtimeMs, summary: next.summary, ...(next.shadow ? { shadow: next.shadow } : {}), ...(read ? { plan: read } : {}), ...(next.fileReads ? { fileReads: next.fileReads } : {}),
+        ...(next.through ? { through: next.through } : {}), ...partial }
       : { atMs: now, generation, sourcesMtimeMs, reason: next.reason, ...warming, ...(prior?.summary ? { summary: prior.summary, ...(prior.shadow ? { shadow: prior.shadow } : {}), ...(prior.plan ? { plan: prior.plan } : {}),
-        ...(prior.fileReads ? { fileReads: prior.fileReads } : {}), ...(prior.partial ? { partial: true as const } : {}) } : {}) });
+        ...(prior.fileReads ? { fileReads: prior.fileReads } : {}), ...(prior.through ? { through: prior.through } : {}), ...(prior.partial ? { partial: true as const } : {}) } : {}) });
   };
   const published = (instances: ReadonlyArray<{ db?: ReadModelDb }>): { path: string; sources?: RepositoriesSources } | undefined => {
     const dbPath = instances.find((slot) => slot.db)?.db?.path;
@@ -351,10 +364,11 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
       const legacy = sourcesPath === undefined || pair === undefined
         ? undefined
         : legacyRepositories(sourcesPath, now, (instanceId) => pair.at[instanceId] ?? now, (instanceId) => pair.plans[instanceId]?.plan,
-          { sources: pair.sources, readsOf: (instanceId) => pair.reads[instanceId], ...(pair.registry ? { registry: pair.registry } : {}) });
+          { sources: pair.sources, readsOf: (instanceId) => pair.reads[instanceId], throughOf: (instanceId) => pair.through[instanceId], ...(pair.registry ? { registry: pair.registry } : {}) });
       if (!legacy) return undefined;
       const control = Object.entries(pair!.reads).flatMap(([instanceId, read]) => (read.control ? [[instanceId, read.control.stopped ? "stopped" : read.control.paused ? "paused" : "running"]] : []));
-      const inputs = { plan: Object.fromEntries(Object.entries(pair!.plans).map(([instanceId, read]) => [instanceId, read.key])), control: Object.fromEntries(control) };
+      const through = Object.fromEntries(Object.entries(pair!.through).map(([instanceId, w]) => [instanceId, `${fixedClock(w.tsMs).iso()}#${w.h}`]));
+      const inputs = { plan: Object.fromEntries(Object.entries(pair!.plans).map(([instanceId, read]) => [instanceId, read.key])), control: Object.fromEntries(control), through };
       return { data: legacy.data, asOfMs: legacy.asOfMs, inputs, ...repositoriesShadowPairing(legacy.facts, pair!.facts, data as RepositoriesData) };
     },
     /** Each due instance's plan read and summary, one step each, so a cold build is never one unit. */
@@ -386,7 +400,7 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
       const sourcesMtimeMs = statSync(at.path).mtimeMs;
       const sources: ViewSource[] = [];
       const data: RepositoriesData = { instances: [], projects: [] };
-      const pair: Pair = { at: {}, facts: {}, plans: {}, sources: at.sources, reads: {} };
+      const pair: Pair = { at: {}, facts: {}, plans: {}, sources: at.sources, reads: {}, through: {} };
       for (const { instanceId, options } of at.sources.instances) {
         const slot = instances.find((candidate) => candidate.state.instance === instanceId);
         if (slot) sources.push(ledgerSource(slot.state, now));
@@ -396,6 +410,7 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
         pair.facts[instanceId] = current.shadow ?? {};
         if (current.plan) pair.plans[instanceId] = current.plan;
         if (current.fileReads) pair.reads[instanceId] = current.fileReads;
+        if (current.through) pair.through[instanceId] = current.through;
         sources.push(summarySource(instanceId, current));
         data.instances.push({ instanceId, ...(current.summary ? { summary: unstampedSummary(current.summary) } : {}), ...(current.reason ? { reason: current.reason } : {}) });
       }
@@ -434,19 +449,20 @@ function summarize(
   options: RepositoriesInstanceOptions,
   now: number,
   readPlan: (path: string) => Plan,
-): { summary?: RepoDashboardResult; reason?: string; shadow?: Record<string, RepoShadowFacts>; fileReads?: RepoSummaryFileReads } {
+): { summary?: RepoDashboardResult; reason?: string; shadow?: Record<string, RepoShadowFacts>; fileReads?: RepoSummaryFileReads; through?: RepoLedgerWatermark } {
   if (slot === undefined) return { reason: "the read model does not project this instance" };
   if (slot.db === undefined) return { reason: "the read model has not opened this instance's store yet" };
   if (slot.state.tickedAt === undefined) return { reason: "the read model has not projected this instance's ledger yet" };
   const db = slot.db;
   let rows: Array<Record<string, unknown>>;
+  const read: { through?: RepoLedgerWatermark } = {};
   try {
-    rows = readRepoRows(db, now);
+    rows = readRepoRows(db, now, undefined, read);
   } catch (error) {
     return { reason: `repository rows unreadable: ${(error as Error).message}` };
   }
   const outcome = repoSummarySync({ ...options, readLedger: () => rows, readPlan, shadowMembers: true }, now);
-  return outcome.ok ? { summary: outcome.summary, ...(outcome.shadow ? { shadow: outcome.shadow } : {}), fileReads: outcome.fileReads } : { reason: outcome.reason };
+  return outcome.ok ? { summary: outcome.summary, ...(outcome.shadow ? { shadow: outcome.shadow } : {}), fileReads: outcome.fileReads, ...(read.through ? { through: read.through } : {}) } : { reason: outcome.reason };
 }
 
 /** Absent until the first summary, catching up while it was computed from a partial ledger, stale while the last recompute failed (#7928), else fresh; warming while a configured instance's store is unopened or unticked. */

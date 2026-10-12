@@ -1,0 +1,59 @@
+- id: W1-T8524
+  title: "A FIX ROUND NEVER REFUSES ITS EDITS FOR A MISSING COMMIT_MESSAGE LINE — the harness derives a fix subject only from a failing check, unmet claim or gate reason, and only for an identified provider or a FIXED outcome, so a legacy writer still missing the line after its one re-ask, and a round with no failing-check name, are refused and their edits discarded"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high # changes a pinned fix-lane contract (a missing line no longer refuses) across run-task.ts and its existing suite
+  band_meaning: span
+  origin: "operator session 2026-10-12: escalation #10031 triage"
+  plan_refs: [W1-T5565, W1-T5325, W1-T4467, W1-T4052]
+  files: [src/run-task.ts, test/fix-refusal-no-anchored-commit-message-line-in-the-report.test.ts, test/a-fix-round-never-refuses-a-missing-commit-line.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED: escalation #10031 (ci-friction, BLOCKED): fix_refusal:no-anchored-commit-message-line-in-the-report cost
+    641.1 PR minutes across 249 fix rounds on 165 pull requests (seven-day half-life). Two remedy rungs did not retire
+    it; the last, W1-T5565, halved it (5.0% of fix rounds, 14/281, before; 2.5%, 7/282, after) but the class persists.
+    REPRODUCED on origin/main ecd3f9790, src/run-task.ts fix rung:
+    - `derivedFirst` calls `derivedFixCommit(priorCiFailures?.[0]?.name ?? unmet[0]?.claim ?? gateFailuresNow?.[0]?.reason,
+      opts.prUrl)` with NO task-title fallback, and only when the writer's provider is identified. A round with none of
+      those (a merge-conflict round, a review round with no unmet claim) derives nothing.
+    - `outcomeCommitOptions` has the title fallback but applies only when the worker wrote `FIX_OUTCOME: FIXED`.
+    - So a report with no COMMIT_MESSAGE line falls to `harnessCommitForShellLessWorker`'s
+      `MISSING_COMMIT_MESSAGE_REASON` refusal, the session is re-asked once, and if the answer still lacks the line (or
+      the re-ask cannot spawn) the round is refused with its edits uncommitted.
+    - test/fix-refusal-no-anchored-commit-message-line-in-the-report.test.ts "a legacy writer still missing its commit
+      line is refused after one re-ask" pins exactly that refusal (outcome stood_down, no commit).
+    The remedy removes the refusal class rather than asking harder: a missing line is a formatting gap the harness can
+    fill from facts it already holds, and the scope guard, not the subject, is what protects the branch.
+  design: |
+    1. Give the fix rung ONE derived subject for every round that left edits: `derivedFixCommit` over the failing check
+       name, else the unmet claim, else the gate reason, else `opts.task.title` (never undefined while the PR URL
+       parses). Use it for `derivedFirst` regardless of provider identity.
+    2. A worker-authored COMMIT_MESSAGE line still wins (subject_source worker-authored), and a resumable writer may
+       still be re-asked once; but when the re-ask's answer still lacks the line, or the re-ask cannot spawn, commit
+       under the derived subject instead of refusing. The ledger row stays `implement.harness_commit` with
+       `subject_source: "harness-derived"` and the derivation's reason.
+    3. FIX_OUTCOME semantics are unchanged: BASE_RED, FLAKE, NEEDS_SCOPE and NEEDS_DESIGN still commit nothing;
+       `commitWorkerEdits`' declared-surface and conflict-marker guards still refuse what they refuse today.
+    4. Rewrite the pinning test "a legacy writer still missing its commit line is refused after one re-ask" to the new
+       contract (it commits under a derived subject); keep every other test in that file as is.
+  acceptance:
+    - claim: "a legacy writer still missing its commit line after the one re-ask commits under a harness-derived subject"
+      proof: 'grep: test("W1-T8524: a legacy writer still missing its commit line commits under a derived subject" in test/a-fix-round-never-refuses-a-missing-commit-line.test.ts'
+    - claim: "a fix round with no failing check, unmet claim or gate reason derives its subject from the task title"
+      proof: 'grep: test("W1-T8524: a round with no failing check derives its subject from the task title" in test/a-fix-round-never-refuses-a-missing-commit-line.test.ts'
+    - claim: "a commit-line re-ask that cannot spawn still commits under the derived subject"
+      proof: 'grep: test("W1-T8524: a re-ask that cannot spawn still commits under the derived subject" in test/a-fix-round-never-refuses-a-missing-commit-line.test.ts'
+    - claim: "a NEEDS_SCOPE or BASE_RED outcome without a commit line still commits nothing"
+      proof: 'grep: test("W1-T8524: a non-commit outcome without a commit line still commits nothing" in test/a-fix-round-never-refuses-a-missing-commit-line.test.ts'
+  falsifier: |
+    Drive runFixRung (test/helpers/run-task-test.js, as the existing missing-line suite does) with a legacy writer
+    whose report and re-ask answer carry no COMMIT_MESSAGE line, and separately with a round whose prior failures,
+    unmet claims and gate failures are all empty. At origin/main both end with fix.commit_refused
+    "no anchored COMMIT_MESSAGE line in the report" and no commit; with the change both commit with
+    subject_source "harness-derived". Revert the fallback and the first two tests red.

@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-02: implement dispatch admission research (memory risk of a third lane)"
   plan_refs: [W1-T1038, W1-T1049, W1-T317, W1-T321]
   files: [src/run-task.ts, plan/policy.yaml, test/implement-dispatch-holds-on-low-host-memory.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

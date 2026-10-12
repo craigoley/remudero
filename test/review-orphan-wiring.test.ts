@@ -110,7 +110,11 @@ test("W1-T1015: a sweep-updated prior head does not increment the orphan count",
     "W1-A",
     CURRENT,
   );
-  assert.deepEqual(facts, { orphanedByPush: false, priorOrphans: 0 }, "the sweep owns this supersession");
+  assert.deepEqual(
+    facts,
+    { orphanedByPush: true, priorOrphans: 0 },
+    "the sweep owns this supersession: the reuse rows see an orphan, but no strike is spent (W1-T5713)",
+  );
 });
 
 test("W1-T1015: a foreign push still increments the orphan count", () => {
@@ -158,10 +162,13 @@ test("W1-T1015: absent evidence counts the head as foreign", () => {
 test("W1-T1015: inverting the attribution fails the foreign-push control", async () => {
   const runTaskUrl = new URL("../src/run-task.ts", import.meta.url);
   const src = readFileSync(runTaskUrl, "utf8");
-  const target = "    if (sweepUpdatedHeads.has(sha)) continue; // the sweep itself superseded this reviewed head\n";
+  const target = "    if (sweepUpdatedHeads.has(sha)) { sweepSuperseded = true; continue; } // the sweep itself superseded this reviewed head\n";
   assert.equal(src.split(target).length - 1, 1, "the substitution target must be unique");
   const originalSha = createHash("sha256").update(src).digest("hex");
-  const mutatedSrc = src.replace(target, "    if (!sweepUpdatedHeads.has(sha)) continue; // the sweep itself superseded this reviewed head\n");
+  const mutatedSrc = src.replace(
+    target,
+    "    if (!sweepUpdatedHeads.has(sha)) { sweepSuperseded = true; continue; } // the sweep itself superseded this reviewed head\n",
+  );
   const mutatedSha = createHash("sha256").update(mutatedSrc).digest("hex");
   assert.notEqual(mutatedSha, originalSha, "the mutation must change the source");
 
@@ -272,7 +279,8 @@ test("legacy rows without an input identity and infrastructure refusals never co
   const ledger = [
     { step: "review.posted", task_id: taskId, head_sha: CURRENT },
     { step: "review.post_refused", task_id: taskId, head_sha: CURRENT, pr_url: prUrl, review_input_digest: digest },
-    { step: "review.posted", task_id: "OTHER", head_sha: CURRENT, pr_url: prUrl, review_input_digest: digest },
+    // W1-T5839: a row is attributed by its pr_url, so the foreign row must name another PR.
+    { step: "review.posted", task_id: "OTHER", head_sha: CURRENT, pr_url: `${prUrl}8`, review_input_digest: digest },
   ];
   assert.deepEqual(reviewAttemptsForInput(ledger, taskId, prUrl, CURRENT, digest), { attempts: 0 });
 });

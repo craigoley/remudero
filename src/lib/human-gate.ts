@@ -1,3 +1,10 @@
+import type { FeedbackEntry } from "./feedback.js";
+import { readLedgerUnionRecordsSync, realLedgerFs } from "./ledger-union.js";
+import type { PolicyValues } from "./policy.js";
+import { ratificationPinCheck, type Ratifications } from "./ratification.js";
+import type { NeedsMeSection } from "./status-board.js";
+import type { VerifyHumanRuling } from "./verify-human-judge.js";
+
 /** Source-owned decisions, projected without granting authority or performing actions. */
 export type HumanGateKind =
   | "escalation" | "manual_approval" | "task_question" | "feedback_grill"
@@ -31,6 +38,558 @@ export interface HumanGateSource {
   gates: readonly HumanGateObservation[];
 }
 
+export interface FeedbackAgeRoot {
+  instance: string;
+  ledgerDir: string;
+  enrolled: boolean;
+  consent: boolean;
+  entries: readonly FeedbackEntry[];
+  /** Attested continuous observation intervals, supplied by the consenting evidence collector. */
+  coverage: readonly { from: string; through: string }[];
+}
+
+export interface FeedbackAgeEvidence {
+  state: "measured" | "uncalibrated";
+  window: { from: string; through: string };
+  observedMaxMs: number | null;
+  samples: Array<{ instance: string; id: string; ageMs: number }>;
+  censored: Array<{ instance: string; id: string; ageMs: number | null }>;
+  controls: Array<{ instance: string; forms: { plain: number; gzip: number; live: number }; covered: boolean }>;
+  reason: string;
+}
+
+function covers(intervals: FeedbackAgeRoot["coverage"], from: number, through: number): boolean {
+  let end = from;
+  for (const interval of [...intervals].sort((a, b) => Date.parse(a.from) - Date.parse(b.from))) {
+    const start = Date.parse(interval.from), stop = Date.parse(interval.through);
+    if (!Number.isFinite(start) || !Number.isFinite(stop) || stop < start || start > end) return false;
+    end = Math.max(end, stop);
+    if (end >= through) return true;
+  }
+  return end >= through;
+}
+
+/** Read only explicitly consenting enrolled roots; a visible corpus alone does not attest its window. */
+export function measureFeedbackAge(roots: readonly FeedbackAgeRoot[], window: FeedbackAgeEvidence["window"]): FeedbackAgeEvidence {
+  const result: FeedbackAgeEvidence = { state: "uncalibrated", window, observedMaxMs: null, samples: [], censored: [], controls: [], reason: "no usable consenting enrolled feedback age evidence" };
+  const from = Date.parse(window.from), through = Date.parse(window.through);
+  if (!Number.isFinite(from) || !Number.isFinite(through) || through <= from) {
+    result.reason = "uncalibrated: invalid observation window";
+    return result;
+  }
+  let complete = roots.length > 0;
+  for (const root of new Map(roots.map((r) => [JSON.stringify([r.instance, r.ledgerDir]), r])).values()) {
+    if (!root.enrolled || !root.consent) { complete = false; continue; }
+    const forms = { plain: 0, gzip: 0, live: 0 };
+    const live = readLedgerUnionRecordsSync(root.ledgerDir, { refuseIncomplete: true }, { ...realLedgerFs, readdirSync: () => [] });
+    forms.live = live.rows.length;
+    let positive = live.ok && live.liveFileRead && live.torn === 0 && forms.live > 0;
+    const union = readLedgerUnionRecordsSync(root.ledgerDir, {
+      refuseIncomplete: true, readLiveRecords: () => live.rows,
+      rotationRecords: (entry, parse) => {
+        const read = parse();
+        forms[entry.form] += read.rows.length;
+        if (read.rows.length === 0) positive = false;
+        return read;
+      },
+    });
+    const times = union.rows.flatMap((r) => typeof r.ts === "string" && Number.isFinite(Date.parse(r.ts)) ? [Date.parse(r.ts)] : []);
+    const covered = covers(root.coverage, from, through) && times.some((ts) => ts <= from) && times.some((ts) => ts >= through);
+    result.controls.push({ instance: root.instance, forms, covered });
+    if (!positive || !covered || !union.ok || union.torn > 0 || (union.unclassified?.length ?? 0) > 0) complete = false;
+    const starts = new Map<string, number>();
+    for (const row of union.rows) {
+      if (row.step !== "triage.start" || typeof row.feedback_id !== "string" || typeof row.ts !== "string") continue;
+      const ts = Date.parse(row.ts);
+      if (!Number.isFinite(ts) || ts < from || ts > through) continue;
+      starts.set(row.feedback_id, Math.min(starts.get(row.feedback_id) ?? ts, ts));
+    }
+    const samplesBefore = result.samples.length;
+    for (const entry of new Map(root.entries.map((e) => [e.id, e])).values()) {
+      const created = Date.parse(entry.ts);
+      if (created > through) continue;
+      const start = starts.get(entry.id);
+      if (!Number.isFinite(created) || created < from || (start !== undefined && start < created)) {
+        result.censored.push({ instance: root.instance, id: entry.id, ageMs: null });
+        complete = false;
+      } else if (start === undefined) result.censored.push({ instance: root.instance, id: entry.id, ageMs: through - created });
+      else result.samples.push({ instance: root.instance, id: entry.id, ageMs: start - created });
+    }
+    if (result.samples.length === samplesBefore) complete = false;
+  }
+  const max = result.samples.reduce((n, s) => Math.max(n, s.ageMs), 0);
+  if (complete && max > 0 && result.censored.every((s) => s.ageMs !== null && s.ageMs <= max)) {
+    result.state = "measured";
+    result.observedMaxMs = max;
+    result.reason = `measured new-to-triage maximum ${max} ms; ${result.samples.length} observed, ${result.censored.length} censored; window ${window.from} through ${window.through}`;
+  } else result.reason = `uncalibrated: coverage, positive controls or completed age sample insufficient; ${result.samples.length} observed, ${result.censored.length} censored; window ${window.from} through ${window.through}`;
+  return result;
+}
+
+export function feedbackHasAnswer(entry: FeedbackEntry, entries: readonly FeedbackEntry[]): boolean {
+  return !!entry.answered_by || entries.some((reply) => reply.reply_to === entry.id && typeof reply.raw === "string" && reply.raw.trim().length > 0);
+}
+
+export function feedbackQuestionContext(entry: FeedbackEntry): string {
+  const summary = entry.summary;
+  return [typeof entry.raw === "string" ? entry.raw : "", ...(summary ? [summary.headline, summary.what_happened, summary.decision, ...summary.options.map((o) => `${o.label}: ${o.consequence}`)] : [])].filter(Boolean).join("\n\n");
+}
+
+export interface FeedbackGateSource extends HumanGateSource {
+  records: FeedbackEntry[];
+  backlog: Array<{ entry: FeedbackEntry; state: "machine" | "claimed" | "uncalibrated" }>;
+  repairs: Array<{ entry: FeedbackEntry; reason: string }>;
+  age: FeedbackAgeEvidence;
+  followUps: Array<{ key: string; reason: string }>;
+}
+
+/** Feedback is a choice only while unresolved; age requests triage, never approval. */
+/**
+ * The two row lookups projectFeedbackGates makes per entry, answered from one pass. `triageStartedWithin` is
+ * `rows.some(triage.start for this feedback id, ts within [from, through])`; `lastGrillUrl` is the issue_url of
+ * `rows.findLast(triage.grill_opened for this task id with a string issue_url)`. A non-string id has no key, so
+ * it is asked of the rows directly, exactly as before.
+ */
+function feedbackRowIndex(rows: readonly Record<string, unknown>[] | undefined): {
+  triageStartedWithin(id: unknown, from: number, through: number): boolean;
+  lastGrillUrl(taskId: string): unknown;
+} {
+  let starts: Map<string, number[]> | undefined;
+  let grills: Map<string, unknown> | undefined;
+  const build = (): void => {
+    starts = new Map();
+    grills = new Map();
+    for (const r of rows ?? []) {
+      if (r.step === "triage.start" && typeof r.feedback_id === "string" && typeof r.ts === "string") {
+        const ms = Date.parse(r.ts);
+        if (!Number.isNaN(ms)) (starts.get(r.feedback_id) ?? starts.set(r.feedback_id, []).get(r.feedback_id)!).push(ms);
+      } else if (r.step === "triage.grill_opened" && typeof r.task_id === "string" && typeof r.issue_url === "string") {
+        grills.set(r.task_id, r.issue_url); // later rows overwrite: findLast's answer
+      }
+    }
+  };
+  return {
+    triageStartedWithin(id, from, through) {
+      if (rows === undefined) return false;
+      if (typeof id !== "string") {
+        return rows.some((r) => r.step === "triage.start" && r.feedback_id === id && typeof r.ts === "string" && Date.parse(r.ts) >= from && Date.parse(r.ts) <= through);
+      }
+      if (!starts) build();
+      return starts!.get(id)?.some((ms) => ms >= from && ms <= through) === true;
+    },
+    lastGrillUrl(taskId) {
+      if (rows === undefined) return undefined;
+      if (!grills) build();
+      return grills!.get(taskId);
+    },
+  };
+}
+
+export function projectFeedbackGates(input: {
+  instance: string; entries: readonly (FeedbackEntry & { unverified?: true })[]; now: number;
+  rows?: readonly Record<string, unknown>[]; age?: FeedbackAgeEvidence; unavailableReason?: string;
+}): FeedbackGateSource {
+  const entries = [...new Map(input.entries.map((e) => [e.id, e])).values()];
+  const supplied = input.age;
+  const age = supplied?.state === "measured" && input.now >= Date.parse(supplied.window.from) && input.now <= Date.parse(supplied.window.through)
+    && supplied.controls.some((c) => c.instance === input.instance && c.covered)
+    ? supplied : { ...(supplied ?? measureFeedbackAge([], { from: "", through: "" })), state: "uncalibrated" as const, observedMaxMs: null,
+      reason: supplied?.state === "uncalibrated" ? supplied.reason : "uncalibrated: no usable consenting enrolled feedback age evidence covering this source and observation window" };
+  const result: FeedbackGateSource = { name: "feedback", instance: input.instance, state: input.unavailableReason ? "unavailable" : "complete", gates: [], records: [], backlog: [], repairs: [], age, followUps: [] };
+  const gates: HumanGateObservation[] = [];
+  const reasons: string[] = input.unavailableReason ? [input.unavailableReason] : [];
+  if (entries.some((e) => e.unverified)) {
+    result.state = input.unavailableReason ? "unavailable" : "partial";
+    reasons.push("feedback proposal resolution could not be verified");
+  }
+  // Each pending entry asked two questions of EVERY row (836,723 fact rows on core, 2026-10-07): about 1.7 s of a now
+  // build, booked to its `decisions.dependencies` lap. One pass answers both for every entry: the same rows, matched the same way.
+  const rowIndex = feedbackRowIndex(input.rows);
+  for (const entry of entries) {
+    if (["accepted", "rejected", "answered"].includes(entry.status)) { result.records.push(entry); continue; }
+    if ((entry.status === "grilling" || entry.status === "proposed") && feedbackHasAnswer(entry, entries)) {
+      const reason = `lifecycle repair: feedback ${entry.id} remains ${entry.status} with a durable recorded answer; ${feedbackQuestionContext(entry)}`;
+      result.repairs.push({ entry, reason }); reasons.push(reason); continue;
+    }
+    let kind: HumanGateKind = entry.status === "grilling" ? "feedback_grill" : "feedback_proposal";
+    let resolutionVerb: ResolutionVerb = entry.status === "grilling" ? "answer" : "ratify";
+    if (entry.status === "new") {
+      const created = Date.parse(entry.ts);
+      const claimed = age.samples.some((s) => s.instance === input.instance && s.id === entry.id && created + s.ageMs <= input.now)
+        || rowIndex.triageStartedWithin(entry.id, created, input.now);
+      const calibrated = age.state === "measured" && age.observedMaxMs !== null && created >= Date.parse(age.window.from) && input.now <= Date.parse(age.window.through) && created <= input.now;
+      if (claimed || !calibrated || input.now - created <= age.observedMaxMs!) {
+        result.backlog.push({ entry, state: claimed ? "claimed" : calibrated ? "machine" : "uncalibrated" }); continue;
+      }
+      kind = "feedback_new"; resolutionVerb = "triage";
+    }
+    const grillUrl = rowIndex.lastGrillUrl(`TRIAGE-${entry.id}`);
+    gates.push({ kind, subject: entry.id, ownerSurface: "inbox", openedAt: entry.ts ?? null,
+      url: typeof grillUrl === "string" ? grillUrl : entry.proposal_pr ?? null,
+      reason: (feedbackQuestionContext(entry) || entry.id) + (kind === "feedback_new" ? `\n\nUnclaimed feedback age ${input.now - Date.parse(entry.ts)} ms; ${age.reason}. Run triage for ${entry.id}.` : ""), resolutionVerb });
+  }
+  if (result.backlog.some((b) => b.state === "uncalibrated")) {
+    result.followUps.push({ key: `feedback-age:${input.instance}`, reason: "collect consenting enrolled new-to-triage age evidence across all ledger forms with positive controls, window coverage and censored entries" });
+  }
+  for (const followUp of result.followUps) reasons.push(`evidence-collection follow-up ${followUp.key}: ${followUp.reason}`);
+  reasons.push(age.reason);
+  if (result.backlog.length > 0) reasons.push(`feedback backlog: ${result.backlog.map((b) => `${b.entry.id} (${b.state}, ${b.entry.ts}): ${feedbackQuestionContext(b.entry)}`).join("; ")}`);
+  if (result.repairs.length > 0 || age.state === "uncalibrated" || result.backlog.some((b) => b.state === "uncalibrated")) result.state = input.unavailableReason ? "unavailable" : "partial";
+  result.gates = gates;
+  if (reasons.length > 0) result.reason = reasons.join("; ");
+  return result;
+}
+
+interface ChangeManagementAction {
+  kind: "blocked_pr" | "merge_held";
+  prNumber?: number;
+  prUrl?: string;
+  disposition: string;
+  reason: string;
+  tone: "exhausted" | "held" | "blocked" | "unknown" | "repairing";
+  strike?: { n: number; of: number };
+  sortAt?: string;
+}
+
+export function projectChangeManagementGates(
+  input: Pick<HumanGateSource, "instance" | "state" | "reason"> & { actions: readonly ChangeManagementAction[] },
+): HumanGateSource {
+  const evidence = (action: ChangeManagementAction): string =>
+    `${action.disposition}: ${action.reason}${action.strike ? ` (failed repair attempts ${action.strike.n}/${action.strike.of})` : ""}`;
+  const unknown = input.actions.filter((action) => action.kind === "blocked_pr" && action.tone === "unknown");
+  const reasons = [...new Set([...(input.reason ? [input.reason] : []), ...unknown.map(evidence)])].sort();
+  const gates: HumanGateObservation[] = input.actions.flatMap((action) => {
+    if (action.kind === "blocked_pr" && action.tone === "repairing") return [];
+    const held = action.kind === "merge_held";
+    return [{
+      kind: action.kind, subject: String(action.prNumber ?? "fleet"),
+      ownerSurface: held || action.tone === "blocked" ? "change-management" : "inbox",
+      openedAt: action.sortAt ?? null, url: action.prUrl ?? null,
+      reason: evidence(action), resolutionVerb: held ? "release_hold" : "rework",
+    }];
+  });
+  return {
+    name: "change-management", instance: input.instance,
+    state: input.state === "complete" && unknown.length > 0 ? "partial" : input.state,
+    ...(reasons.length > 0 ? { reason: reasons.join("; ") } : {}), gates,
+  };
+}
+
+/** One escalation still open on a Dependabot PR, named by the dep-review.ts producer that opened it: `manual`
+ *  (`dep-review-PR<n>`, a major or unparseable bump), `arm` (`dep-review-arm-PR<n>`, auto-merge never armed) or
+ *  `hold` (`dep-review-hold-PR<n>`, the bounded-age backstop escalating a hold past DEP_REVIEW_HOLD_AGE_MS). */
+export interface DependencyEscalation { producer: "manual" | "arm" | "hold"; class?: string; issueUrl?: string; openedAt?: string; unverified?: true }
+
+export interface DependencyReviewFact {
+  repo: string | null;
+  prNumber: number;
+  prUrl: string | null;
+  /** The newest `dep-review.decided` verdict for the PR; null when none was read. */
+  decision: string | null;
+  escalations: readonly DependencyEscalation[];
+  /** Whether the PR is still open; null when the open-PR index was incomplete. */
+  prOpen: boolean | null;
+}
+
+/** A `heldDependencyRoots` entry; `stalled` lists only dependents still live behind it. */
+export interface HeldRootFact { rootId: string; hold: "verify-not-auto" | "blocked"; stalled: readonly string[]; url: string | null }
+
+export interface VerifyHumanFact { taskId: string; url: string | null; judgment: VerifyHumanRuling }
+
+type FactPart<T> = Pick<HumanGateSource, "state" | "reason"> & { items: readonly T[] };
+
+const listed = (ids: readonly string[], cap = 10): string =>
+  ids.slice(0, cap).join(", ") + (ids.length > cap ? ` (+${ids.length - cap} more)` : "");
+
+function partOf(name: string, instance: string, part: FactPart<unknown>, gaps: readonly string[], notes: readonly string[], gates: HumanGateObservation[]): HumanGateSource {
+  const reasons = [...(part.reason ? [part.reason] : []), ...gaps, ...notes];
+  return { name, instance, state: part.state === "complete" && gaps.length > 0 ? "partial" : part.state,
+    ...(reasons.length > 0 ? { reason: reasons.join("; ") } : {}), gates };
+}
+
+/**
+ * W1-T5370 (W1-T5021 slice 4): dependency review, held roots and verify-human. Read-only: it grants no approval,
+ * release or retirement and adds no PR or dispatch gate. MIGRATE closes its own PR and a HOLD is the sweep's to
+ * retry, so neither asks until the bounded-age hold producer itself escalates; no second timer lives here. A
+ * judge's automate or backlog ruling stays fleet-owned, and a task with no readable current ruling is a named gap
+ * that turns the count into a floor: never an approval, never a zero.
+ */
+export function projectDependencyVerificationGates(input: {
+  instance: string;
+  dependencyReview: FactPart<DependencyReviewFact>;
+  heldRoots: FactPart<HeldRootFact>;
+  verifyHuman: FactPart<VerifyHumanFact>;
+}): HumanGateSource[] {
+  const depGaps = new Set<string>();
+  const depGates = input.dependencyReview.items.flatMap((fact): HumanGateObservation[] => {
+    if (fact.prOpen === false || fact.decision === "migrate") return [];
+    const ask = fact.decision === "hold" ? fact.escalations.find((e) => e.producer === "hold")
+      : fact.escalations.find((e) => e.producer !== "hold" && (e.class ?? "MANUAL") === "MANUAL");
+    if (!ask) return [];
+    const unsure = [...(ask.unverified ? ["the escalation issue's open state could not be confirmed"] : []),
+      ...(fact.prOpen === null ? ["the PR's open state could not be confirmed"] : [])];
+    unsure.forEach((gap) => depGaps.add(gap));
+    const hold = ask.producer === "hold";
+    return [{
+      kind: "dependency_review", subject: `${fact.repo ?? ""}#${fact.prNumber}`, ownerSurface: "inbox",
+      openedAt: ask.openedAt ?? null, url: ask.issueUrl ?? fact.prUrl,
+      reason: (hold ? `dependency hold on PR #${fact.prNumber} outlived the dep-review backstop and its aged-hold escalation asks for a check repair`
+        : `MANUAL dependency escalation (${ask.producer}) for PR #${fact.prNumber}; latest dep-review verdict: ${fact.decision ?? "unread"}`) +
+        (unsure.length > 0 ? `; ${unsure.join("; ")}` : ""),
+      resolutionVerb: hold ? "rework" : "approve",
+    }];
+  });
+  const rulings = new Map(input.verifyHuman.items.map((fact) => [fact.taskId, fact.judgment]));
+  const rootIds = new Set<string>();
+  const fleetRoots: string[] = [];
+  const rootGates = input.heldRoots.items.flatMap((root): HumanGateObservation[] => {
+    const stalled = [...new Set(root.stalled)].sort();
+    if (stalled.length === 0) return [];
+    const ruling = rulings.get(root.rootId);
+    if (root.hold === "verify-not-auto" && ruling?.state === "judged" && ruling.decision === "automate") {
+      fleetRoots.push(`${root.rootId} (${stalled.length} stalled)`);
+      return [];
+    }
+    rootIds.add(root.rootId);
+    return [{
+      kind: "held_root", subject: root.rootId, ownerSurface: "inbox", openedAt: null, url: root.url,
+      reason: `${root.rootId} is held (${root.hold === "blocked" ? "blocked with no retirement ruling" : "its verify gate is not released"}); ` +
+        `${stalled.length} task(s) stalled behind it: ${listed(stalled)}` +
+        (ruling?.state === "judged" && ruling.decision === "needs_operator" ? `; the judge ruled a person is needed: ${ruling.reason}` : ""),
+      resolutionVerb: root.hold === "blocked" ? "retire" : "release",
+    }];
+  });
+  const unclassified: string[] = [];
+  const verifyGates = input.verifyHuman.items.flatMap((fact): HumanGateObservation[] => {
+    if (fact.judgment.state === "unclassified") unclassified.push(`${fact.taskId} (${fact.judgment.reason})`);
+    // A held root already asks once, through its held_root gate, carrying the ruling and its impact.
+    if (fact.judgment.state !== "judged" || fact.judgment.decision !== "needs_operator" || rootIds.has(fact.taskId)) return [];
+    return [{
+      kind: "verify_human", subject: fact.taskId, ownerSurface: "inbox", openedAt: fact.judgment.at, url: fact.url,
+      reason: `the verify-human judge ruled a person is needed: ${fact.judgment.reason}`, resolutionVerb: "verify",
+    }];
+  });
+  unclassified.sort();
+  return [
+    partOf("dependency-review", input.instance, input.dependencyReview, [...depGaps].sort(), [], depGates),
+    partOf("held-roots", input.instance, input.heldRoots, [],
+      fleetRoots.length > 0 ? [`fleet-owned by a judge automate ruling: ${listed(fleetRoots.sort())}`] : [], rootGates),
+    partOf("verify-human", input.instance, input.verifyHuman,
+      unclassified.length > 0 ? [`${unclassified.length} verify: human task(s) unclassified, with no readable current judge ruling: ${listed(unclassified)}`] : [], [], verifyGates),
+  ];
+}
+
+export interface PinReviewerGateInput {
+  instance: string;
+  state: HumanGateSource["state"];
+  reason?: string;
+  rows: ReadonlyArray<Record<string, unknown>>;
+  pins?: Ratifications;
+  policy?: PolicyValues;
+  pinReason?: string;
+  nowMs: number;
+  freshnessBudgetMs: number;
+}
+
+/** W1-T5371: consume the producers' decisions; a checkout HEAD cannot identify loaded daemon code. */
+export function projectPinReviewerGates(input: PinReviewerGateInput): HumanGateSource[] {
+  const time = (row: Record<string, unknown>): number => typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+  const rows = input.rows.filter((row) => Number.isFinite(time(row)) && time(row) <= input.nowMs)
+    .sort((a, b) => time(a) - time(b));
+  const source = (name: string, reasons: string[], gates: HumanGateObservation[]): HumanGateSource => ({
+    name, instance: input.instance,
+    state: input.state === "unavailable" ? "unavailable" : reasons.length > 0 || input.state === "partial" ? "partial" : "complete",
+    ...(reasons.length > 0 ? { reason: [...new Set(reasons)].join("; ") } : {}), gates,
+  });
+  const common = input.state !== "complete" ? [input.reason ?? "source ledger completeness was not established"] : [];
+  const pinReasons = [...common, ...(input.pinReason ? [input.pinReason] : [])];
+  const pinGates: HumanGateObservation[] = [];
+  const refusals = new Map<string, Record<string, unknown>>();
+  for (const row of rows) if (row.step === "rung.unratified" && typeof row.rung === "string") refusals.set(row.rung, row);
+  for (const [rung, row] of refusals) {
+    let reason = typeof row.diff === "string" ? row.diff : `rung '${rung}' refused with unreadable operation evidence`;
+    // The emitting checker supplies the contract version; do not duplicate the CLI's private registry.
+    const version = /live policy\+contract "([^"]+)" now computes [a-f0-9]{64}/.exec(reason)?.[1];
+    let block: unknown = input.policy;
+    for (const segment of rung.split(".")) block = block && typeof block === "object" ? (block as Record<string, unknown>)[segment] : undefined;
+    if (version && block !== undefined && input.pins?.has(rung)) {
+      const current = ratificationPinCheck(rung, block, version, input.pins);
+      if (current.fire) continue;
+      reason = current.diff;
+    } else {
+      pinReasons.push(`rung '${rung}' current pin, policy or producer contract could not be verified`);
+    }
+    pinGates.push({ kind: "pin_drift", subject: rung, ownerSurface: "inbox", openedAt: String(row.ts),
+      url: typeof row.pr_url === "string" ? row.pr_url : null, reason, resolutionVerb: "reratify" });
+  }
+  const pinSource = source("ratification-pins", pinReasons, pinGates);
+  if (input.pinReason && input.pins === undefined) pinSource.state = "unavailable";
+
+  const reviewerReasons = [...common];
+  const boot = rows.findLast((row) => row.step === "daemon.boot");
+  const loaded = typeof boot?.head_sha === "string" && boot.head_sha.length > 0 ? boot.head_sha : undefined;
+  if (!loaded) reviewerReasons.push("loaded reviewer code identity is unknown: no readable daemon.boot head_sha");
+  const evidence = rows.findLast((row) => row.step === "daemon.freshness_not_stale" ||
+    row.step === "review.post_refused" && row.reviewer_code_freshness !== undefined ||
+    typeof row.step === "string" && row.step.startsWith("review.stale_reviewer_"));
+  const current = evidence !== undefined && boot !== undefined && time(evidence) >= time(boot) &&
+    input.nowMs - time(evidence) <= input.freshnessBudgetMs;
+  const fresh = current && loaded !== undefined && evidence!.step === "daemon.freshness_not_stale" &&
+    (evidence!.arm === "up_to_date" || evidence!.arm === "immaterial" && evidence!.old_sha === loaded);
+  const upstream = evidence?.origin_main_sha ?? evidence?.new_sha;
+  const evidenceCode = evidence?.code_sha ?? evidence?.reviewer_code_sha ?? evidence?.old_sha;
+  if (!current) reviewerReasons.push("current reviewer upstream evidence is missing or stale");
+  else if (!fresh && (typeof upstream !== "string" || upstream.length === 0 || evidenceCode !== loaded)) {
+    reviewerReasons.push(typeof evidence!.detail === "string" ? evidence!.detail :
+      typeof evidence!.reviewer_code_reason === "string" ? evidence!.reviewer_code_reason : "reviewer upstream or loaded-code evidence is unreadable");
+  }
+  const decision = rows.findLast((row) => (row.step === "review.stale_reviewer_needs_human" ||
+    row.step === "review.stale_reviewer_held" || row.step === "review.stale_reviewer_restart_requested") &&
+    typeof row.code_sha === "string" && row.code_sha.length > 0 && (!loaded || row.code_sha === loaded));
+  const ask = decision?.step === "review.stale_reviewer_needs_human" ? decision : undefined;
+  const resolved = loaded !== undefined && rows.findLast((row) => row.step === "daemon.freshness_not_stale" &&
+    time(row) >= time(boot!) && (row.arm === "up_to_date" || row.arm === "immaterial" && row.old_sha === loaded));
+  const reviewerGates: HumanGateObservation[] = [];
+  if (ask && !(resolved && time(resolved) >= time(ask))) {
+    reviewerGates.push({ kind: "stale_reviewer", subject: String(ask.code_sha), ownerSurface: "inbox",
+      openedAt: String(ask.ts), url: typeof ask.pr_url === "string" ? ask.pr_url : null,
+      reason: typeof ask.reason === "string" ? ask.reason : "the reviewer recurrence producer needs a person",
+      resolutionVerb: "restart" });
+  }
+  return [pinSource, source("reviewer-freshness", reviewerReasons, reviewerGates)];
+}
+
+export type OperatorItemKind = "costAnomaly" | "imageDrift" | "tokenFallback" | "uncreditedBuilds";
+
+/**
+ * W1-T5374: each NEEDS ME operator item, classified by its producer's real action route, never by its presence.
+ * A diagnostic or a still-running automated recovery is a record; only a source-owned unresolved choice that a
+ * person's existing verb resolves becomes an `operator_item` gate.
+ */
+export const OPERATOR_ITEM_CLASSIFICATION: Readonly<Record<OperatorItemKind, {
+  route: "record" | "gate-when-source-holds"; producer: string; evidence: string;
+}>> = {
+  costAnomaly: { route: "record", producer: "src/lib/cost-anomaly.ts",
+    evidence: "the sentinel reports a settled run's spend and never defers, stops or blocks anything; its incident event is the SRE gardener's to triage" },
+  tokenFallback: { route: "record", producer: "src/lib/github-app.ts",
+    evidence: "startInstallationTokenRefresh reschedules every failed mint after REFRESH_FAILURE_RETRY_MS, so recovery stays automated and no person's verb mints the token" },
+  uncreditedBuilds: { route: "record", producer: "src/lib/status.ts",
+    evidence: "uncreditedBuildWarning warns and never credits; the row changes no disposition and crediting is not an authority this surface holds" },
+  imageDrift: { route: "gate-when-source-holds", producer: "src/lib/deployer.ts",
+    evidence: "decideDeployTrigger recycles a drifted image itself once published; only state/DEPLOY_IMAGE_MANUAL without DEPLOY_AUTO or a pending DEPLOY_REQUESTED leaves the recycle waiting for rmd deploy" },
+};
+
+/** One classified operator item. It carries no resolution verb: acknowledging one is a read, never a grant. */
+export interface OperatorItemRecord {
+  kind: OperatorItemKind;
+  instance: string;
+  subject: string;
+  observedAt: string | null;
+  url: string | null;
+  evidence: string;
+  freshness: "current" | "stale" | "unknown";
+  disposition: "record" | "gate";
+  why: string;
+}
+
+/** The deployer's own markers under the instance's state root: true present, false absent, undefined unreadable. */
+export interface DeployMarkerReading {
+  imageRecycleManual: boolean | undefined;
+  autoMode: boolean | undefined;
+  requested: boolean | undefined;
+  reason?: string;
+}
+
+export interface OperatorItemGateInput {
+  instance: string;
+  state: HumanGateSource["state"];
+  reason?: string;
+  /** status-board's deriveOperatorItems rows; an absent `uncreditedBuilds` was not observed, never an empty list. */
+  items: Pick<NeedsMeSection, "costAnomaly" | "imageDrift" | "tokenFallback"> & { uncreditedBuilds?: NeedsMeSection["uncreditedBuilds"] };
+  uncreditedReason?: string;
+  /** Every `daemon.boot` time. A recycle is a boot, and each boot re-runs the image check. */
+  bootTimes: readonly string[];
+  deploy: DeployMarkerReading;
+  nowMs: number;
+  freshnessBudgetMs: number;
+}
+
+export interface OperatorItemProjection {
+  source: HumanGateSource;
+  /** Every observed item, gate or record, with its instance, time and evidence: none is hidden by classification. */
+  records: OperatorItemRecord[];
+  unobserved: Array<{ kind: OperatorItemKind; reason: string }>;
+}
+
+/** W1-T5374: classify NEEDS ME's operator items; only a held image recycle is a person's decision. */
+export function projectOperatorItemGates(input: OperatorItemGateInput): OperatorItemProjection {
+  const age = (ts: string | undefined): OperatorItemRecord["freshness"] => {
+    const ms = ts === undefined ? Number.NaN : Date.parse(ts);
+    if (!Number.isFinite(ms) || ms > input.nowMs) return "unknown";
+    return input.nowMs - ms <= input.freshnessBudgetMs ? "current" : "stale";
+  };
+  const records: OperatorItemRecord[] = [];
+  const record = (kind: OperatorItemKind, item: Omit<OperatorItemRecord, "kind" | "instance" | "disposition" | "why">): void =>
+    void records.push({ kind, instance: input.instance, ...item, disposition: "record", why: OPERATOR_ITEM_CLASSIFICATION[kind].evidence });
+  for (const row of input.items.costAnomaly) {
+    const usd = (field: "cost_usd" | "median_cost_usd", n: number): string => row.unknown?.includes(field) ? "unknown" : `$${n.toFixed(2)}`;
+    record("costAnomaly", { subject: row.runId, observedAt: row.ts ?? null, url: null, freshness: age(row.ts),
+      evidence: `${row.taskId} (${row.runId}) [${row.taskClass}] cost ${usd("cost_usd", row.costUsd)} vs class median ` +
+        `${usd("median_cost_usd", row.medianCostUsd)} (>${row.multiplier}x, n=${row.sampleSize})` });
+  }
+  const token = input.items.tokenFallback;
+  if (token) {
+    const freshness = age(token.ts);
+    record("tokenFallback", { subject: "github-app-installation-token", observedAt: token.ts ?? null, url: null, freshness,
+      evidence: `the App installation token refresh last failed (${token.reason}); ` +
+        (token.lastOkTs ? `last good refresh ${token.lastOkTs}` : "no successful refresh on record") +
+        (freshness === "current" ? "" : "; no retry of the refresh loop has been observed since") });
+  }
+  const unobserved: OperatorItemProjection["unobserved"] = [];
+  if (input.items.uncreditedBuilds === undefined) {
+    unobserved.push({ kind: "uncreditedBuilds", reason: input.uncreditedReason ?? "uncredited builds were not read" });
+  }
+  for (const row of input.items.uncreditedBuilds ?? []) {
+    record("uncreditedBuilds", { subject: row.taskId, observedAt: null, url: row.prUrl, freshness: "current",
+      evidence: `merged #${row.prNumber} names ${row.taskId} in its ${row.namedIn}, but no credit surface claimed it` });
+  }
+  const reasons = input.state !== "complete" ? [input.reason ?? "operator-item ledger completeness was not established"] : [];
+  const gates: HumanGateObservation[] = [];
+  const drift = input.items.imageDrift;
+  if (drift) {
+    const driftMs = drift.ts === undefined ? Number.NaN : Date.parse(drift.ts);
+    // The observing process logs its own boot after the check; a second later boot re-ran it without seeing drift.
+    const later = input.bootTimes.filter((ts) => Date.parse(ts) > driftMs).length;
+    const freshness: OperatorItemRecord["freshness"] = !Number.isFinite(driftMs) || driftMs > input.nowMs ? "unknown" : later >= 2 ? "stale" : "current";
+    const subject = `image-drift:${drift.buildSha}`;
+    const evidence = `running image built at ${drift.buildSha} is missing a baked change at ${drift.bakedSha}` +
+      (freshness === "stale" ? "; a later boot re-ran the image check without re-observing drift" : "");
+    const { imageRecycleManual: manual, autoMode: auto, requested } = input.deploy;
+    const held = freshness === "current" && manual === true && auto === false && requested === false;
+    const why = held ? "state/DEPLOY_IMAGE_MANUAL holds image recycles behind rmd deploy and no DEPLOY_AUTO or DEPLOY_REQUESTED stands, so nothing recycles it but a person"
+      : requested === true ? "an operator deploy request already stands; the deployer recycles at the next idle gap"
+      : OPERATOR_ITEM_CLASSIFICATION.imageDrift.evidence;
+    records.push({ kind: "imageDrift", instance: input.instance, subject, observedAt: drift.ts ?? null, url: null,
+      evidence, freshness, disposition: held ? "gate" : "record", why });
+    if (held) {
+      gates.push({ kind: "operator_item", subject, ownerSurface: "inbox", openedAt: drift.ts!, url: null,
+        reason: `${evidence}; ${why}`, resolutionVerb: "restart" });
+    } else if (freshness === "current" && manual !== false && auto !== true && requested !== true) {
+      // Not held, yet nothing read says automation owns it: one of the markers was unreadable.
+      reasons.push(`deploy markers are unreadable (${input.deploy.reason ?? "no reason recorded"}), so whether the deployer or a person recycles the drift is unknown`);
+    } else if (freshness === "unknown" && manual !== false) {
+      reasons.push("an image drift observation has no readable time, so it cannot be placed against the current boot");
+    }
+  }
+  records.sort((a, b) => compareText(a.kind, b.kind) || compareText(a.subject, b.subject));
+  return {
+    source: { name: "operator-items", instance: input.instance,
+      state: input.state === "unavailable" ? "unavailable" : reasons.length > 0 ? "partial" : "complete",
+      ...(reasons.length > 0 ? { reason: reasons.join("; ") } : {}), gates },
+    records, unobserved,
+  };
+}
+
 export type HumanGateCount = { count: number; atLeast?: never } | { atLeast: number; count?: never };
 
 export interface HumanGateProjection {
@@ -62,7 +621,7 @@ export function projectHumanGates(input: readonly HumanGateSource[]): HumanGateP
   const unique = new Map<string, HumanGate>();
   const sources: HumanGateProjection["sources"] = input.map((source) => ({
     name: source.name, instance: source.instance, state: source.state,
-    ...(source.state !== "complete" ? { reason: source.reason ?? "source completeness was not established" } : {}),
+    ...(source.reason || source.state !== "complete" ? { reason: source.reason ?? "source completeness was not established" } : {}),
   }));
   if (sources.length === 0) sources.push({ name: "projection", instance: null, state: "unavailable", reason: "no human-gate sources were provided" });
   for (const source of input) {
@@ -91,4 +650,91 @@ export function projectHumanGates(input: readonly HumanGateSource[]): HumanGateP
     count: { inbox: count(inbox.length), changeManagement: count(gates.length - inbox.length), byKind },
     sources,
   };
+}
+
+/** Every gate kind in wire order; a surface names the ones no supplied source covers. */
+const HUMAN_GATE_KINDS: readonly HumanGateKind[] = [
+  "escalation", "manual_approval", "task_question", "feedback_grill", "feedback_proposal", "feedback_new",
+  "proposal", "dependency_review", "held_root", "verify_human", "pin_drift", "stale_reviewer",
+  "blocked_pr", "merge_held", "operator_item",
+];
+
+/** The kinds each production adapter's source reads, so an empty complete source still covers them. */
+const SOURCE_KINDS: Readonly<Record<string, readonly HumanGateKind[]>> = {
+  escalations: ["escalation", "manual_approval"],
+  "feedback-grills": ["feedback_grill"],
+  "task-questions": ["task_question"],
+  "now-decisions": ["escalation", "manual_approval", "task_question", "feedback_grill"],
+  "change-management": ["blocked_pr", "merge_held"],
+  "ratification-pins": ["pin_drift"],
+  "reviewer-freshness": ["stale_reviewer"],
+  proposals: ["proposal"],
+  "operator-items": ["operator_item"],
+  "dependency-review": ["dependency_review"],
+  "held-roots": ["held_root"],
+  "verify-human": ["verify_human"],
+};
+
+/** One surface's needs-you number, read from the shared projection and never recounted. */
+export interface HumanGateCountSummary {
+  /** Distinct Inbox-owned decisions over every supplied gate, before any display cap. */
+  inbox: HumanGateCount;
+  byKind: HumanGateProjection["count"]["byKind"];
+  /** Change-management gates: labelled separately and never added to `inbox`. */
+  changeManagement: HumanGateCount;
+  /** Present when the surface displays a page: how many Inbox decisions it shows and leaves out. */
+  display?: { shown: number; more: HumanGateCount };
+  /** Kinds some readable source covers, and the kinds no supplied source reads yet. */
+  kinds: { covered: HumanGateKind[]; missing: HumanGateKind[] };
+  /** Each instance's own Inbox count; exact only when all of that instance's sources are complete. */
+  instances: Array<{ instance: string; inbox: HumanGateCount }>;
+  /** Every source that did not attest complete coverage, with its reason. */
+  uncertain: Array<{ name: string; instance: string | null; state: "partial" | "unavailable"; reason: string }>;
+}
+
+/** W1-T5373: the one adapter every needs-you surface reports through; `shown` is its displayed page. */
+export function consumeHumanGateCounts(projection: HumanGateProjection, display?: { shown: number }): HumanGateCountSummary {
+  const inboxGates = projection.gates.filter((gate) => gate.ownerSurface === "inbox");
+  const exact = (count: HumanGateCount, n: number): HumanGateCount => count.count !== undefined ? { count: n } : { atLeast: n };
+  const covered = new Set<HumanGateKind>(projection.gates.map((gate) => gate.kind));
+  const instanceOf = (gate: HumanGate): string => decodeURIComponent(gate.key.split(":")[1] ?? "");
+  const names = new Set<string>(projection.gates.map(instanceOf));
+  for (const source of projection.sources) {
+    if (source.instance !== null) names.add(source.instance);
+    if (source.state !== "unavailable") for (const kind of SOURCE_KINDS[source.name] ?? []) covered.add(kind);
+  }
+  const uncertain = projection.sources.flatMap((source) => source.state === "complete" ? [] : [{
+    name: source.name, instance: source.instance, state: source.state,
+    reason: source.reason ?? "source completeness was not established",
+  }]);
+  const inbox = projection.count.inbox;
+  const total = inbox.count ?? inbox.atLeast;
+  return {
+    inbox, byKind: projection.count.byKind, changeManagement: projection.count.changeManagement,
+    ...(display ? { display: { shown: display.shown, more: exact(inbox, Math.max(0, total - display.shown)) } } : {}),
+    kinds: { covered: HUMAN_GATE_KINDS.filter((kind) => covered.has(kind)), missing: HUMAN_GATE_KINDS.filter((kind) => !covered.has(kind)) },
+    instances: [...names].sort(compareText).map((instance) => {
+      const n = inboxGates.filter((gate) => instanceOf(gate) === instance).length;
+      const known = projection.sources.every((source) => source.instance !== instance || source.state === "complete") &&
+        projection.sources.every((source) => source.instance !== null || source.state === "complete");
+      return { instance, inbox: known ? { count: n } : { atLeast: n } };
+    }),
+    uncertain,
+  };
+}
+
+/** The summary a surface reports when it cannot read the shared projection at all: a lower bound, never zero. */
+export function unavailableHumanGateCounts(name: string, reason: string): HumanGateCountSummary {
+  return consumeHumanGateCounts(projectHumanGates([{ name, instance: "core", state: "unavailable", reason, gates: [] }]));
+}
+
+/** How many distinct Inbox gates a displayed page covers, matched on instance and source condition. */
+export function shownHumanGates(projection: HumanGateProjection, shown: ReadonlyArray<{ instance: string; kind: HumanGateKind; subject: string }>): number {
+  const condition = (kind: HumanGateKind, instance: string, subject: string): string =>
+    JSON.stringify([kind === "manual_approval" ? "escalation" : kind, instance, subject]);
+  const displayed = new Set(shown.map((row) => condition(row.kind, row.instance, row.subject)));
+  return projection.gates.filter((gate) => {
+    const [, instance = "", subject = ""] = gate.key.split(":");
+    return gate.ownerSurface === "inbox" && displayed.has(condition(gate.kind, decodeURIComponent(instance), decodeURIComponent(subject)));
+  }).length;
 }

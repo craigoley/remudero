@@ -1,0 +1,2 @@
+- claim: the lane that hits the ci-gate refusals receives the pre-push remedy through a matched learning
+  proof: "grep: ci-learning:6058:ci-gate in learnings/ci.yaml"

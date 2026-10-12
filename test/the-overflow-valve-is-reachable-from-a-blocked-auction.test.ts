@@ -60,7 +60,7 @@ test("a blocked auction reaches the overflow valve, and only after cash has refu
   const root = mkdtempSync(join(tmpdir(), "rmd-overflow-"));
   try {
     const settingsFile = join(root, "settings.json");
-    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
+    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }), "utf8");
     const unreadable = { readable: false, windows: [], detail: "exhausted" };
 
     let cashSpawns = 0;

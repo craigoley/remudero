@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { armAutoMerge, armFailureAction, sweepArmAttemptOutcome, type ArmDeps } from "../src/run-task.js";
-import { runSweep, DEFAULT_SWEEP_POLICY, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { runSweep, DEFAULT_SWEEP_POLICY, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { readLedgerLines } from "../src/lib/status.js";
 
 // W1-T1117 — `armFailureAction`'s `transient` arm was an allowlist of TRANSPORT/SERVER faults

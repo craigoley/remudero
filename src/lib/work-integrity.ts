@@ -130,58 +130,100 @@ function latestAtOrBefore<T extends { at: number }>(entries: readonly T[] | unde
   return best;
 }
 
-interface Review { at: number; row: Row }
+/** The joins {@link finishWorkIntegrity} reads, kept per run, assignment and head rather than per row. */
+export interface WorkIntegrityFold {
+  taskClassByRun: Map<string, string>;
+  assignments: Map<string, { model: string; runId?: string }>;
+  assignmentsByRun: Map<string, Array<{ at: number; id: string }>>;
+  implementsByRun: Map<string, Array<{ at: number; author?: string }>>;
+  headAuthors: Map<string, string>;
+  completed: Set<string>;
+  commitEligible: Set<string>;
+  implementAuthors: Set<string>;
+  reviewsByHead: Map<string, Row>;
+  headlessReviews: number;
+  pending: Row[];
+}
+
+export function emptyWorkIntegrityFold(): WorkIntegrityFold {
+  return {
+    taskClassByRun: new Map(), assignments: new Map(), assignmentsByRun: new Map(), implementsByRun: new Map(), headAuthors: new Map(),
+    completed: new Set(), commitEligible: new Set(), implementAuthors: new Set(), reviewsByHead: new Map(), headlessReviews: 0, pending: [],
+  };
+}
+
+const REVIEW_FIELDS = ["ts", "decision_verdict", "test_theater", "reward_hacking_gap"];
+
+export function foldWorkIntegrityRow(fold: WorkIntegrityFold, row: Row): void {
+  const runId = str(row.run_id);
+  const at = timeOf(row);
+  const selected = str(row.selection_assignment_id);
+  if (row.step === "run.start" && runId && str(row.task_class)) fold.taskClassByRun.set(runId, str(row.task_class)!);
+  if (row.step === "worker.assignment") {
+    const raw = record(row.worker_assignment);
+    const id = str(raw?.id);
+    const model = str(record(raw?.selected)?.model);
+    if (id && model && !fold.assignments.has(id)) {
+      fold.assignments.set(id, { model, ...(runId ? { runId } : {}) });
+      if (runId && at !== undefined) fold.assignmentsByRun.set(runId, [...(fold.assignmentsByRun.get(runId) ?? []), { at, id }]);
+    }
+  }
+  if (COMPLETION_STEPS.has(String(row.step)) && selected) fold.completed.add(selected);
+  if ((row.step === "implement.done" || row.step === "fix.done") && selected) fold.commitEligible.add(selected);
+  if (row.step === "implement.done") {
+    const author = assignmentIdOf(row.head_assignment) ?? selected;
+    if (author) fold.implementAuthors.add(author);
+    if (runId && at !== undefined) fold.implementsByRun.set(runId, [...(fold.implementsByRun.get(runId) ?? []), { at, ...(author ? { author } : {}) }]);
+  }
+  const head = str(row.head_sha);
+  if ((row.step === "implement.done" || row.step === "pr.opened") && head) {
+    const value = str(row.head_assignment) ?? "unrecorded";
+    if (!fold.headAuthors.has(head) || (assignmentIdOf(value) && !assignmentIdOf(fold.headAuthors.get(head)))) fold.headAuthors.set(head, value);
+  }
+  if (row.step === "review.posted") {
+    if (!head) fold.headlessReviews += 1;
+    else {
+      const prior = fold.reviewsByHead.get(head);
+      if (!prior || (at ?? -Infinity) >= (timeOf(prior) ?? -Infinity)) {
+        fold.reviewsByHead.set(head, Object.fromEntries(REVIEW_FIELDS.filter((field) => row[field] !== undefined).map((field) => [field, row[field]])));
+      }
+    }
+  }
+  if (row.step === "scope_guard.overrun" || Object.hasOwn(IN_FLIGHT_EVENTS, String(row.step))) {
+    fold.pending.push({ step: row.step, ...(row.run_id !== undefined ? { run_id: row.run_id } : {}), ...(row.ts !== undefined ? { ts: row.ts } : {}) });
+  }
+}
+
+/** A fold as JSON: every map and set as its entries, in insertion order. */
+export function workIntegrityFoldToJson(fold: WorkIntegrityFold): Row {
+  return {
+    taskClassByRun: [...fold.taskClassByRun], assignments: [...fold.assignments], assignmentsByRun: [...fold.assignmentsByRun],
+    implementsByRun: [...fold.implementsByRun], headAuthors: [...fold.headAuthors], completed: [...fold.completed],
+    commitEligible: [...fold.commitEligible], implementAuthors: [...fold.implementAuthors], reviewsByHead: [...fold.reviewsByHead],
+    headlessReviews: fold.headlessReviews, pending: [...fold.pending],
+  };
+}
+
+export function workIntegrityFoldFromJson(json: Row): WorkIntegrityFold {
+  const entries = <K, V>(value: unknown): Array<[K, V]> => (Array.isArray(value) ? value as Array<[K, V]> : []);
+  const values = (value: unknown): string[] => (Array.isArray(value) ? value as string[] : []);
+  return {
+    taskClassByRun: new Map(entries(json.taskClassByRun)), assignments: new Map(entries(json.assignments)),
+    assignmentsByRun: new Map(entries(json.assignmentsByRun)), implementsByRun: new Map(entries(json.implementsByRun)),
+    headAuthors: new Map(entries(json.headAuthors)), completed: new Set(values(json.completed)), commitEligible: new Set(values(json.commitEligible)),
+    implementAuthors: new Set(values(json.implementAuthors)), reviewsByHead: new Map(entries(json.reviewsByHead)),
+    headlessReviews: typeof json.headlessReviews === "number" ? json.headlessReviews : 0, pending: Array.isArray(json.pending) ? json.pending as Row[] : [],
+  };
+}
 
 export function deriveWorkIntegrity(rows: ReadonlyArray<Row>, options: { asOf: string | null }): WorkIntegrity {
-  const taskClassByRun = new Map<string, string>();
-  const assignments = new Map<string, { model: string; runId?: string }>();
-  const assignmentsByRun = new Map<string, Array<{ at: number; id: string }>>();
-  const implementsByRun = new Map<string, Array<{ at: number; author?: string }>>();
-  const headAuthors = new Map<string, string>();
-  const completed = new Set<string>();
-  const commitEligible = new Set<string>();
-  const implementAuthors = new Set<string>();
-  const reviewsByHead = new Map<string, Review>();
-  const headlessReviews: Row[] = [];
-  const pending: Row[] = [];
+  const fold = emptyWorkIntegrityFold();
+  for (const row of rows) foldWorkIntegrityRow(fold, row);
+  return finishWorkIntegrity(fold, options);
+}
 
-  rows.forEach((row) => {
-    const runId = str(row.run_id);
-    const at = timeOf(row);
-    const selected = str(row.selection_assignment_id);
-    if (row.step === "run.start" && runId && str(row.task_class)) taskClassByRun.set(runId, str(row.task_class)!);
-    if (row.step === "worker.assignment") {
-      const raw = record(row.worker_assignment);
-      const id = str(raw?.id);
-      const model = str(record(raw?.selected)?.model);
-      if (id && model && !assignments.has(id)) {
-        assignments.set(id, { model, ...(runId ? { runId } : {}) });
-        if (runId && at !== undefined) assignmentsByRun.set(runId, [...(assignmentsByRun.get(runId) ?? []), { at, id }]);
-      }
-    }
-    if (COMPLETION_STEPS.has(String(row.step)) && selected) completed.add(selected);
-    if ((row.step === "implement.done" || row.step === "fix.done") && selected) commitEligible.add(selected);
-    if (row.step === "implement.done") {
-      const author = assignmentIdOf(row.head_assignment) ?? selected;
-      if (author) implementAuthors.add(author);
-      if (runId && at !== undefined) implementsByRun.set(runId, [...(implementsByRun.get(runId) ?? []), { at, ...(author ? { author } : {}) }]);
-    }
-    const head = str(row.head_sha);
-    if ((row.step === "implement.done" || row.step === "pr.opened") && head) {
-      const value = str(row.head_assignment) ?? "unrecorded";
-      if (!headAuthors.has(head) || (assignmentIdOf(value) && !assignmentIdOf(headAuthors.get(head)))) headAuthors.set(head, value);
-    }
-    if (row.step === "review.posted") {
-      if (!head) headlessReviews.push(row);
-      else {
-        const prior = reviewsByHead.get(head);
-        const review = { at: at ?? -Infinity, row };
-        if (!prior || review.at >= prior.at) reviewsByHead.set(head, review);
-      }
-    }
-    if (row.step === "scope_guard.overrun" || Object.hasOwn(IN_FLIGHT_EVENTS, String(row.step))) pending.push(row);
-  });
-
+export function finishWorkIntegrity(fold: WorkIntegrityFold, options: { asOf: string | null }): WorkIntegrity {
+  const { taskClassByRun, assignments, assignmentsByRun, implementsByRun, headAuthors, completed, commitEligible, implementAuthors, pending } = fold;
   const unattributed = emptyUnattributed();
   const miss = (signal: WorkIntegritySignal, reason: string): void => {
     unattributed[signal].count += 1;
@@ -212,15 +254,15 @@ export function deriveWorkIntegrity(rows: ReadonlyArray<Row>, options: { asOf: s
 
   const reviewsByAssignment = new Map<string, Row[]>();
   const missReview = (reason: string): void => { for (const signal of REVIEW_SIGNALS) miss(signal, reason); };
-  headlessReviews.forEach(() => missReview("review-without-head"));
-  for (const [head, review] of reviewsByHead) {
+  for (let review = 0; review < fold.headlessReviews; review += 1) missReview("review-without-head");
+  for (const [head, row] of fold.reviewsByHead) {
     const value = headAuthors.get(head);
     const author = assignmentIdOf(value);
     if (value === undefined) missReview("head-not-observed");
     else if (value === "unrecorded") missReview("head-assignment-unrecorded");
     else if (!author) missReview(value === "unreadable" ? "head-unreadable" : "head-unattributed");
     else if (!assignments.has(author)) missReview("assignment-not-observed");
-    else reviewsByAssignment.set(author, [...(reviewsByAssignment.get(author) ?? []), review.row]);
+    else reviewsByAssignment.set(author, [...(reviewsByAssignment.get(author) ?? []), row]);
   }
 
   const cells = new Map<string, { model: string; taskClass: string; ids: string[] }>();

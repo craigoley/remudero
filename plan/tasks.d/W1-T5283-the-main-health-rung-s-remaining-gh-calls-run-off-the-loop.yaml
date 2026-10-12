@@ -12,7 +12,7 @@
   origin: "operator session 2026-10-02: core daemon CPU profile (E36) and #8674's follow-up audit"
   plan_refs: [W1-T4970, W1-T3991, W1-T4446, W1-T1223]
   files: [src/lib/main-health-rung.ts, src/lib/escalate.ts, src/run-task.ts, test/the-main-health-rung-never-blocks-on-gh.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-02. A live CPU profile of the core daemon caught a 144 s loop stall. 50.2 s of it was in

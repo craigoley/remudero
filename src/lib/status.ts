@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { ghExec, ghExecFile } from "./github-transport.js";
+import { ghExec, ghExecFile, ghTextAsync } from "./github-transport.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS, createNonBlockingGhCallPacer, parseGhRateLimitHeaders, splitGhHeaderBlock, type GhRateLimitReading } from "./github-transport.js";
 import type { WarmRefreshOutcome, WarmRefreshTelemetry } from "./github-refresh-pacer.js";
 // W1-T2440: the pre-warm walk runs on its own OS thread (`runPrewarmWorker`), so the `execFileSync` below stays
@@ -13,13 +13,14 @@ import { readFileSync as nodeReadFileSync } from "node:fs";
 import { gunzipSync as nodeGunzipSync } from "node:zlib";
 import { dirname } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
+import { PLAN_ONLY_REVIEW_MARKER_STEP } from "./ledger-carry.js";
 import type { Plan, Task, TaskStatus } from "./plan.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
 import { isHolderStale } from "./fs-race-safe.js";
 import { isTestRunner } from "./live-write-guard.js";
-import type { BoardSnapshotCache } from "./board-snapshot-cache.js";
+import { boardRefreshRollup, type BoardSnapshotCache } from "./board-snapshot-cache.js";
 import type { ChangedFilesCache } from "./changed-files-cache.js";
 import type { WorkerState } from "./worker.js";
 import {
@@ -40,6 +41,9 @@ import {
 } from "./open-prs-rest.js";
 import { isInPlanScope } from "./plan-architect.js";
 import { isDeclaredBranchGuard } from "./branch-reaper.js";
+import { activeCategorizedRefusal, categorizedRefusalRejoin, type CategorizedRefusalRejoin } from "./refusal-amendment.js";
+import { preDispatchContractRevision } from "./dispatch-repair.js";
+import { infrastructureRefusal, lifetimeInfrastructureRefusal, streakRefusal } from "./non-worker-verdict.js";
 
 /**
  * Derived task status (MASTER-PLAN v2.1). Merge-state is DERIVED FROM GITHUB, never written back to
@@ -117,6 +121,7 @@ export interface PrRef {
   url: string;
   /** GitHub PR state: "MERGED" | "OPEN" | "CLOSED". */
   state: string;
+  mergedAt?: string;
   /** The PR's title (W1-T184) — a DECORATION, never a precedence input; omitted ⇒ the bare number and url. */
   title?: string;
   /** The head branch ref (W1-T256), riding the one list fetch so rung (c2) re-asserts ownership with no second
@@ -204,6 +209,9 @@ export interface StatusProjection {
   needsHuman?: true;
   /** An independent-failure block, derived from `dispatch.blocked_independent` and cleared by a later dispatch. */
   independentFailureBlocked?: true;
+  categorizedRefusalRejoin?: CategorizedRefusalRejoin;
+  /** W1-T7533: a `failed`/`no_pr` latch released because its evidence changed and its back-off elapsed. */
+  independentBlockRelease?: IndependentBlockRelease;
   /** The escalation issue's own URL (W1-T182), so NEEDS ME renders a direct link rather than soliciting one. */
   escalationIssueUrl?: string;
   /** The escalation's one-line ask (W1-T182) — the live issue's title, off the same batched gateway. */
@@ -316,6 +324,7 @@ export interface GitHub {
    *  accessor: collapsing a FAILED fetch into a PARTIAL one recreates the conflation W1-T119 prevents.
    *  Truncation only OMITS rows, so the deferral sits in `readFailed()`'s arm, never upstream of a credit. */
   readTruncated?(): boolean;
+  readBoardCoverage?(): { openTruncated: boolean; closedFloor?: string };
   /** R-24 (docs/audits/recon-2026-09-05.md): DROP THE FAILURE VERDICTS LEFT BY EARLIER ATTEMPTS, AND NOTHING
    *  ELSE. THE TRAP: a FAILED fetch replaces its half with an EMPTY one and stamps it (the W1-T181 pairing), so
    *  a half is dropped exactly when its verdict is. The delta caches are NOT touched.
@@ -457,6 +466,9 @@ export interface DeriveDeps {
   creditOverridePath?: string;
   /** W1-T2970 — test seam: read the override record's text. Production reads the real file. */
   readCreditOverrideFile?: () => string;
+  /** The override record's rows, loaded at most once per {@link projectPlan} pass and shared by every task.
+   *  Absent, each derivation loads the record itself, as a standalone `deriveStatus` does. */
+  creditOverrideRows?: () => readonly CreditOverrideRow[];
   /** Reader for the durable credit store; defaults to {@link loadCreditStore}. Injectable so a test
    *  can hand a canned store directly and prove the resolution never touches `deps.github`. */
   readCreditStore?: () => CreditStore;
@@ -546,11 +558,8 @@ export interface CreditBackfillReceipt {
   prNumber: number;
 }
 
-/** W1-T3996: a SUBTRACT-ONLY quarantine mark against one durable {@link CreditStoreEntry} source,
- *  tied to the EXACT recorded PR that proved it plan-only — never inferred from a branch name, a
- *  task status field, or an operator override (design's own bar). Once written it is never
- *  cleared by this module; only a fresh, non-plan-only credit for the SAME source could displace
- *  it, and nothing here manufactures one. */
+/** A subtract-only quarantine tied to the exact PR proved plan-only. Marks survive replacement
+ *  credits: a source may recover, but the quarantined PR must never recover through any source. */
 export interface DurableCreditInvalidation {
   prUrl: string;
   prNumber: number;
@@ -561,11 +570,11 @@ export interface DurableCreditInvalidation {
 /** One task's durable merge-evidence paths plus independent backfill-writer bookkeeping. */
 export type CreditStoreTaskRecord = Partial<Record<CreditStoreEntry["source"], CreditStoreEntry>> & {
   backfillReceipt?: CreditBackfillReceipt;
-  /** W1-T3996: sources whose durable entry above has been REVALIDATED and found plan-only. A
-   *  reader consults this BEFORE trusting the sibling entry, so a later projection with no
-   *  merged-path map in hand (the ordinary case) refuses the same credit it refused last time it
-   *  had one, rather than resurrecting it. */
-  invalidated?: Partial<Record<CreditStoreEntry["source"], DurableCreditInvalidation>>;
+  /** Legacy source-keyed marks plus later PR-url-keyed marks. Every value quarantines its PR
+   *  across both credit sources, including when no merged-path evidence is available. */
+  invalidated?: Record<string, DurableCreditInvalidation>;
+  /** W1-T5551: the operator correction a projection last read live, kept past the ledger row's rotation. */
+  correction?: { prUrl: string; prNumber?: number };
 };
 
 /** DELIVERABLE A — the durable, GitHub-independent record of merge credit, keyed by task id then by the path
@@ -715,21 +724,28 @@ export function saveCreditStore(path: string, store: CreditStore, fsDeps: Credit
  *  read-time projection only. The daemon runs projectPlan with the default writer and owns the store. */
 export const SERVE_KEEPS_CREDITS_IN_MEMORY = (_store: CreditStore): void => {};
 
-/** Merges one newly-discovered credit into the store, immutably. Idempotent: a source already recorded is left
- *  untouched, which keeps the function correct standing alone even though the durable rung returns first. */
+function quarantinedCreditUrls(record: CreditStoreTaskRecord | undefined): Set<string> {
+  return new Set(Object.values(record?.invalidated ?? {}).map((mark) => mark.prUrl));
+}
+
+/** Immutably records eligible credit, replacing only a quarantined entry in an occupied slot. */
 export function recordCredit(store: CreditStore, taskId: string, entry: CreditStoreEntry): CreditStore {
   const existing = store[taskId] ?? {};
-  if (existing[entry.source]) return store;
+  const quarantined = quarantinedCreditUrls(existing);
+  const current = existing[entry.source];
+  if (quarantined.has(entry.prUrl) || (current && !quarantined.has(current.prUrl))) return store;
   return { ...store, [taskId]: { ...existing, [entry.source]: entry } };
 }
 
-/** W1-T3996: SUBTRACT-ONLY — records that `source`'s durable entry for `taskId` is refused, tied
- *  to the exact PR the caller just proved plan-only. Idempotent, matching {@link recordCredit}'s
- *  own shape: a source already quarantined is left untouched rather than overwritten, so the
- *  FIRST reason recorded stands as the audit trail. This never removes the sibling
- *  {@link CreditStoreEntry} itself — a live rung (e.g. `corroborateByBranch`) that re-derives the
- *  SAME source must still see it occupied and refuse to persist a duplicate, which is why the
- *  quarantine sits ALONGSIDE the entry rather than in place of it. */
+/** Records `prUrl` as `taskId`'s durable correction credit, handing back the SAME store when it already holds it. */
+export function recordCorrectionCredit(store: CreditStore, taskId: string, prUrl: string): CreditStore {
+  const existing = store[taskId] ?? {};
+  if (existing.correction?.prUrl === prUrl) return store;
+  return { ...store, [taskId]: { ...existing, correction: { prUrl, prNumber: prNumberFromRef(prUrl) } } };
+}
+
+/** Adds a PR quarantine without removing entries or earlier marks. The first mark keeps its
+ *  legacy source key; subsequent PRs use their URL, preserving every audit reason durably. */
 export function invalidateDurableCredit(
   store: CreditStore,
   taskId: string,
@@ -737,8 +753,9 @@ export function invalidateDurableCredit(
   invalidation: DurableCreditInvalidation,
 ): CreditStore {
   const existing = store[taskId] ?? {};
-  if (existing.invalidated?.[source]) return store;
-  return { ...store, [taskId]: { ...existing, invalidated: { ...existing.invalidated, [source]: invalidation } } };
+  if (quarantinedCreditUrls(existing).has(invalidation.prUrl)) return store;
+  const key = existing.invalidated?.[source] ? invalidation.prUrl : source;
+  return { ...store, [taskId]: { ...existing, invalidated: { ...existing.invalidated, [key]: invalidation } } };
 }
 
 /** Whether the backfill writer has durably recorded a successful append for this task. Kept
@@ -863,6 +880,12 @@ export function readMergeCreditedTaskIds(
   const ledgerFs = opts.ledgerFs ?? realLedgerFs;
   // ledger-read-intent: live — this function's own seed, extended with rotations below.
   const live = opts.readLive ? opts.readLive(path) : readLedgerLines(path, ledgerFs);
+  const fsDeps = statusLedgerUnionFsDeps(ledgerFs, opts);
+  // A rotation is written once, so its credit rows are parsed once and answered from a memo; an unmemoized
+  // or changed rotation is parsed inline, exactly as before. Each open PR's resequence check
+  // (buildOpenPrViews) used to re-parse the whole corpus per PR. Its own memo, not the async scan's: a
+  // memo this warmed would let that scan skip the load that gives the event loop its turn.
+  const pass = syncCreditScanMemo.pass({ parseMissing: true });
   const read = readLedgerUnionRecordsSync(
     dirname(path),
     {
@@ -875,15 +898,46 @@ export function readMergeCreditedTaskIds(
       readLiveRecords: () => live,
       onRecord: take,
       satisfied: done,
+      rotationRecords: pass.rotationRecords,
     },
-    statusLedgerUnionFsDeps(ledgerFs, opts),
+    fsDeps,
   );
+  // Pruning keeps only the rotations this pass touched, so prune only after a walk that touched every
+  // listed rotation: never after an early stop or a cap, and never over an injected directory listing.
+  if (fsDeps === undefined && !done() && (cap === undefined || read.archiveCount <= cap)) pass.complete();
   // `complete: false` means candidates are unresolved: new merges nothing has credited yet, or ids a cap hid.
   const complete = wanted.size === 0 ? true : outstanding <= 0;
   // W1-T3019: `budgetExhausted` separates "a CAP hid files we never opened" (absence UNPROVEN) from "the
   // CORPUS ran out" (every file opened, absence PROVEN). With no cap nothing is hidden, so it is false.
   const hidden = cap !== undefined && read.archiveCount > cap;
   return { credited, filesRead: read.filesRead, complete, budgetExhausted: !complete && hidden };
+}
+
+const creditScanMemo = createLedgerRotationMemo((rows) => rows.filter(isMergeCreditLine), { pattern: /verdict/ });
+const syncCreditScanMemo = createLedgerRotationMemo((rows) => rows.filter(isMergeCreditLine), { pattern: /verdict/ });
+
+export async function readMergeCreditedTaskIdsAsync(
+  path: string,
+  opts: { candidates?: Iterable<string>; readLive?: (path: string) => Iterable<Record<string, unknown>> } = {},
+): Promise<{ credited: Set<string>; filesRead: number; complete: boolean; budgetExhausted: boolean }> {
+  const credited = new Set<string>();
+  const wanted = new Set(opts.candidates ?? []);
+  let outstanding = wanted.size;
+  const take = (line: Record<string, unknown>): void => {
+    if (!isMergeCreditLine(line)) return;
+    const id = line.task_id;
+    if (typeof id !== "string" || credited.has(id)) return;
+    credited.add(id);
+    if (wanted.has(id)) outstanding -= 1;
+  };
+  // ledger-read-intent: live — this function's own seed, extended with rotations below.
+  const live = opts.readLive ? opts.readLive(path) : readLedgerLines(path);
+  const read = await readLedgerUnionRecordsMemoized(dirname(path), creditScanMemo, {
+    liveFirst: true, order: "newest-first", dedupe: false, pattern: /verdict/,
+    readLiveRecords: () => live, onRecord: take, satisfied: () => wanted.size > 0 && outstanding <= 0,
+  });
+  const complete = wanted.size === 0 ? true : outstanding <= 0;
+  return { credited, filesRead: read.filesRead, complete, budgetExhausted: false };
 }
 
 /** The ledger union a RENDERING surface needs: the live file plus dated rotations, NEWEST FIRST, stopping at
@@ -960,8 +1014,13 @@ export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedge
   // `present: false` is the whole point of this early return carrying metadata at all. The empty array itself
   // is unchanged, so no existing consumer moves.
   if (!ledgerFs.existsSync(path)) return withReadMeta(out, 0, false);
+  return parseLedgerContent(path, ledgerFs.readFileSync(path, "utf8"), onTorn);
+}
+
+function parseLedgerContent(path: string, content: string, onTorn?: (raw: string) => void): LedgerLines {
+  const out: Array<Record<string, unknown>> = [];
   let torn = 0;
-  for (const raw of ledgerFs.readFileSync(path, "utf8").split("\n")) {
+  for (const raw of content.split("\n")) {
     const l = raw.trim();
     if (!l) continue;
     try {
@@ -973,6 +1032,33 @@ export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedge
     }
   }
   return withReadMeta(out, torn, true);
+}
+
+/** W1-T6358: one fd read a selection pass shares; absent is `identity: undefined`, other errors propagate. */
+export interface LedgerSnapshot {
+  identity: string | undefined;
+  content: string;
+  lines: LedgerLines;
+  index: LedgerIndex;
+}
+
+export function readLedgerSnapshot(path: string): LedgerSnapshot {
+  let fd: number;
+  try {
+    fd = fs.openSync(path, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    const lines = withReadMeta([], 0, false);
+    return { identity: undefined, content: "", lines, index: buildLedgerIndex(lines) };
+  }
+  try {
+    const stat = fs.fstatSync(fd);
+    const content = fs.readFileSync(fd, "utf8");
+    const lines = parseLedgerContent(path, content);
+    return { identity: `${stat.dev}:${stat.ino}`, content, lines, index: buildLedgerIndex(lines) };
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 /** The two ways a {@link readLedgerLines} call can be answered, and the only two a caller may declare. Neither
@@ -1167,8 +1253,38 @@ function pushIndexed(
   else buckets.set(key, [row]);
 }
 
-/** Build the {@link LedgerIndex} for `rows` in a single pass. */
+/** W1-T6253: the row generation an owner of a mutable rows array last registered for it, and the index held for it. */
+const ledgerGenerations = new WeakMap<ReadonlyArray<Record<string, unknown>>, number>();
+const generationIndexes = new WeakMap<ReadonlyArray<Record<string, unknown>>, { generation: number; index: LedgerIndex }>();
+let ledgerIndexBuilds = 0;
+
+/** W1-T6253: an owner mutating `rows` in place registers each generation; an unregistered array is indexed every call. */
+export function noteLedgerGeneration(rows: ReadonlyArray<Record<string, unknown>>, generation: number): void {
+  ledgerGenerations.set(rows, generation);
+}
+
+/** The generation registered for `rows`, or undefined when its owner registers none. */
+export function ledgerGenerationOf(rows: ReadonlyArray<Record<string, unknown>>): number | undefined {
+  return ledgerGenerations.get(rows);
+}
+
+/** How many indexes this process has computed: the W1-T6253 tests' counting seam. */
+export function ledgerIndexBuildCount(): number {
+  return ledgerIndexBuilds;
+}
+
+/** Build the {@link LedgerIndex} for `rows` in a single pass, or return the one held for its unchanged generation. */
 export function buildLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): LedgerIndex {
+  const generation = ledgerGenerations.get(rows);
+  const held = generation === undefined ? undefined : generationIndexes.get(rows);
+  if (held && held.generation === generation) return held.index;
+  ledgerIndexBuilds++;
+  const index = computeLedgerIndex(rows);
+  if (generation !== undefined) generationIndexes.set(rows, { generation, index });
+  return index;
+}
+
+function computeLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): LedgerIndex {
   const byTask = new Map<string, Array<Record<string, unknown>>>();
   const byStep = new Map<string, Array<Record<string, unknown>>>();
   const planOnlyFilingPrUrls = new Set<string>();
@@ -1181,7 +1297,7 @@ export function buildLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): 
       if (step === "pr.opened" && row.plan_only === true && typeof row.pr_url === "string") {
         planOnlyFilingPrUrls.add(row.pr_url);
       }
-      if (step === "review.posted" && row.plan_only === true &&
+      if ((step === "review.posted" || step === PLAN_ONLY_REVIEW_MARKER_STEP) && row.plan_only === true &&
           typeof row.pr_url === "string" && typeof row.head_sha === "string") {
         const heads = planOnlyReviewedHeads.get(row.pr_url) ?? new Set<string>();
         heads.add(row.head_sha);
@@ -1317,10 +1433,7 @@ export function seedCountFromCircuitBreak(
   // The ONE helper reading `task` as well as `task_id` — see {@link LedgerIndex} for why the bucket is keyed on
   // both, which is what keeps this scan's row set unchanged.
   for (const line of indexedTaskRows(lines, taskId, index)) {
-    if (
-      line.task_id === taskId &&
-      (line.step === "pr.opened" || isMergeCreditLine(line) || line.step === "dispatch.breaker_released")
-    ) {
+    if (line.task_id === taskId && isDispatchStreakReset(line)) {
       seed = undefined; // forward progress — the same reset the counter itself applies
       continue;
     }
@@ -1332,41 +1445,16 @@ export function seedCountFromCircuitBreak(
   return seed;
 }
 
-/** Infrastructure refusals did not give this task a chance to open a PR. Match the run's terminal
- * verdict, which is already present in historical ledger rows, rather than a newer write-time flag. */
-const INFRASTRUCTURE_REFUSAL_VERDICTS: ReadonlySet<string> = new Set([
-  "blocked_containment",
-  "blocked_isolation",
-  "blocked_toolchain",
-  "blocked_transient",
-  "task_already_merged",
-]);
+export { infrastructureRefusal, lifetimeInfrastructureRefusal, streakRefusal };
 
-/** These also consume no task attempt for lifetime judgment, but the existing dispatch breaker
- * counts them. Keep the two decisions separate so a new terminal verdict cannot reset its streak. */
-const LIFETIME_ONLY_REFUSAL_VERDICTS: ReadonlySet<string> = new Set([
-  "blocked_git_fetch", "blocked_inflight", "handed_off",
-]);
+/** The ledger step of the dispatch-break judge's ruling ({@link judgeDispatchBreak}, stall-verifier.ts). */
+export const DISPATCH_BREAKER_JUDGED_STEP = "dispatch.breaker_judged";
 
-/** A THROWN run's `failed` verdict (run-task.ts `endThrownRun`) at one of these stages is a deferral the harness
- *  refused before any worker ran — 10 lock-contention refusals tripped W1-T4684's breaker on 2026-09-29. */
-const INFRASTRUCTURE_THROWN_STAGES: ReadonlySet<string> = new Set([
-  "managed_checkout.refresh",
-  "worktree.node_modules",
-  "preflight.containment",
-  "preflight.isolation",
-]);
-
-export function infrastructureRefusal(line: Record<string, unknown>): string | undefined {
-  if (typeof line.verdict !== "string") return undefined;
-  if (INFRASTRUCTURE_REFUSAL_VERDICTS.has(line.verdict)) return line.verdict;
-  if (line.verdict === "failed" && typeof line.stage === "string" && INFRASTRUCTURE_THROWN_STAGES.has(line.stage)) return line.stage;
-  return undefined;
-}
-
-export function lifetimeInfrastructureRefusal(line: Record<string, unknown>): string | undefined {
-  return infrastructureRefusal(line) ??
-    (typeof line.verdict === "string" && LIFETIME_ONLY_REFUSAL_VERDICTS.has(line.verdict) ? line.verdict : undefined);
+/** Rows that end a streak: a new owned PR, a merge credit, an operator's `rmd release` (W1-T4691), or the
+ *  dispatch-break judge ruling the attempts so far are worth continuing (W1-T7742). */
+export function isDispatchStreakReset(line: Record<string, unknown>): boolean {
+  return line.step === "pr.opened" || isMergeCreditLine(line) || line.step === "dispatch.breaker_released" ||
+    (line.step === "dispatch.breaker_judged" && line.decision === "continue");
 }
 
 /** Options shared by {@link orphanedRunIds} and every counter built on it — never widened for
@@ -1482,6 +1570,8 @@ interface DispatchStreakTally {
   count: number;
   excludedDispatches: number;
   excludedByReason: Record<string, number>;
+  /** The newest reset row's identity: a count that dropped when it changed is that reset, not a rotation. */
+  lastReset?: string;
 }
 
 /** `taskId`'s rows in timestamp order. A rotation union is live-first, then newest-first
@@ -1522,25 +1612,21 @@ function dispatchStreakTally(
   // A run's terminal verdict follows its start, so collect exclusions before counting starts.
   const refusalByRunId = new Map<string, string>();
   for (const line of rows) {
-    if (
-      line.task_id === taskId &&
-      line.step === "verdict" &&
-      infrastructureRefusal(line) !== undefined &&
-      typeof line.run_id === "string"
-    ) {
-      refusalByRunId.set(line.run_id, infrastructureRefusal(line)!);
-    }
+    const refusal = line.task_id === taskId && line.step === "verdict" ? streakRefusal(line) : undefined;
+    if (refusal !== undefined && typeof line.run_id === "string") refusalByRunId.set(line.run_id, refusal);
   }
   const orphanRunIds = orphanedRunIds(lines, taskId, index, opts);
   let count = 0;
   let excludedDispatches = 0;
   let excludedByReason: Record<string, number> = {};
+  let lastReset: string | undefined;
   for (const line of rows) {
     if (line.task_id !== taskId) continue;
-    if (line.step === "pr.opened" || isMergeCreditLine(line) || line.step === "dispatch.breaker_released") {
-      count = 0; // forward progress — a new PR, a credited merge, or an operator release resets the streak
+    if (isDispatchStreakReset(line)) {
+      count = 0; // forward progress — a new PR, a credited merge, an operator release, or a judge's continue
       excludedDispatches = 0;
       excludedByReason = {};
+      lastReset = `${String(line.step)}|${String(line.run_id)}|${String(line.ts)}`;
     } else if (line.step === "run.start") {
       const reason = typeof line.run_id === "string"
         ? refusalByRunId.get(line.run_id) ?? (orphanRunIds.has(line.run_id) ? "orphaned_run" : undefined)
@@ -1554,7 +1640,7 @@ function dispatchStreakTally(
       count++;
     }
   }
-  return { count, excludedDispatches, excludedByReason };
+  return { count, excludedDispatches, excludedByReason, lastReset };
 }
 
 export function dispatchesWithoutNewOwnedPr(
@@ -1770,10 +1856,12 @@ export function isOrphanFaultTripped(
 export interface DispatchBreakerCache {
   /** @internal highest per-task `dispatchesWithoutNewOwnedPr` count observed while the ledger was readable. */
   lastCounts: Map<string, number>;
+  /** @internal the newest streak-reset row each `lastCounts` entry was observed under (W1-T7742). */
+  lastResets?: Map<string, string | undefined>;
 }
 
 export function createDispatchBreakerCache(): DispatchBreakerCache {
-  return { lastCounts: new Map() };
+  return { lastCounts: new Map(), lastResets: new Map() };
 }
 
 /**
@@ -1823,15 +1911,17 @@ export function evaluateDispatchBreakerDetailed(
     maxDispatches?: number;
     ledgerFs?: LedgerFsDeps;
     openHeadBranches?: OpenHeadBranchesSource;
+    snapshot?: Pick<LedgerSnapshot, "lines" | "index">;
   } = {},
 ): DispatchBreakerDetail {
   const maxDispatches = opts.maxDispatches ?? DEFAULT_MAX_TASK_DISPATCHES;
   const ledgerFs = opts.ledgerFs ?? realLedgerFs;
   // ledger-read-intent: live — the dispatch breaker wants the newest rows only.
-  const lines = readLedgerLines(ledgerPath, ledgerFs);
+  const lines = opts.snapshot?.lines ?? readLedgerLines(ledgerPath, ledgerFs);
   // R-23: ONE pass to bucket, then per-task lookups — the helpers below otherwise walk the whole array each.
-  const index = buildLedgerIndex(lines);
-  const { count: freshCount, excludedDispatches, excludedByReason } = dispatchStreakTally(lines, taskId, index);
+  const index = opts.snapshot?.index ?? buildLedgerIndex(lines);
+  const { count: freshCount, excludedDispatches, excludedByReason, lastReset } = dispatchStreakTally(lines, taskId, index);
+  const resetKeys = (cache.lastResets ??= new Map());
   let priorCount = cache.lastCounts.get(taskId);
   // W1-T2425: FIRST OBSERVATION OF THIS TASK IN THIS PROCESS — seed the baseline from the breaker's own on-disk
   // record so the regression arm below is reachable across a restart. Only ever on a MISS (a live process's own
@@ -1846,12 +1936,15 @@ export function evaluateDispatchBreakerDetailed(
   const hasNewOwnedPr = lastPrOpened(lines, taskId, index) !== undefined;
   const base = { freshCount, excludedDispatches, excludedByReason, maxDispatches, priorCount, hasNewOwnedPr };
 
-  if (priorCount !== undefined && freshCount + excludedDispatches < priorCount && !hasNewOwnedPr) {
+  // W1-T7742: a reset written since the prior observation (a release, a judge's continue) explains the drop.
+  const resetSincePrior = resetKeys.has(taskId) && resetKeys.get(taskId) !== lastReset;
+  if (priorCount !== undefined && freshCount + excludedDispatches < priorCount && !hasNewOwnedPr && !resetSincePrior) {
     // count regressed with nothing in the ledger to explain it — runs now excluded as infrastructure DO explain it
     return { ...base, state: "indeterminate", ledgerState: "indeterminate" };
   }
 
   cache.lastCounts.set(taskId, freshCount);
+  resetKeys.set(taskId, lastReset);
   const ledgerState: DispatchBreakerState = freshCount >= maxDispatches ? "tripped" : "clear";
   if (ledgerState !== "tripped" || !("openHeadBranches" in opts)) {
     return { ...base, state: ledgerState, ledgerState };
@@ -1924,7 +2017,7 @@ export function evaluateDispatchBreakerCorroboratedDetailed(
   taskId: string,
   cache: DispatchBreakerCache,
   openHeadBranches: OpenHeadBranchesSource,
-  opts: { maxDispatches?: number; ledgerFs?: LedgerFsDeps } = {},
+  opts: { maxDispatches?: number; ledgerFs?: LedgerFsDeps; snapshot?: Pick<LedgerSnapshot, "lines" | "index"> } = {},
 ): DispatchBreakerDetail {
   return evaluateDispatchBreakerDetailed(ledgerPath, taskId, cache, { ...opts, openHeadBranches });
 }
@@ -2387,6 +2480,20 @@ export function isPlanOnlyChangeset(files: readonly string[]): boolean {
   return files.length > 0 && files.every((f) => isInPlanScope(f));
 }
 
+/** W1-T5553: `files` DELIVERS `task`, whose `files:` are all plan scope — every path declared or its own shard
+ *  (#6461), one declared and not its own shard. A filing adds only its own shard, so it stays refused. */
+export function isPlanTextDeliverable(task: Pick<Task, "id" | "files">, files: readonly string[]): boolean {
+  const declared = new Set(task.files ?? []);
+  if (declared.size === 0 || ![...declared].every((f) => isInPlanScope(f))) return false;
+  const ownShard = new RegExp(`^plan/tasks\\.d/${escapeRegExp(task.id)}(-|\\.ya?ml$)`);
+  return files.every((f) => declared.has(f) || ownShard.test(f)) && files.some((f) => declared.has(f) && !ownShard.test(f));
+}
+
+// The plan-only DIFF refusal every credit rung applies (W1-T413), minus isPlanTextDeliverable.
+export function refusesAsPlanOnly(task: Pick<Task, "id" | "files">, files: readonly string[]): boolean {
+  return isPlanOnlyChangeset(files) && !isPlanTextDeliverable(task, files);
+}
+
 /**
  * Persist a VERIFIED already_satisfied credit where deriveStatus reads first (the durable store's
  * `trailer` entry), applying rung (c)'s plan-only refusal first. Without it the worker's verified
@@ -2396,14 +2503,15 @@ export function isPlanOnlyChangeset(files: readonly string[]): boolean {
  */
 export function persistVerifiedCredit(
   ledgerPath: string,
-  taskId: string,
+  task: Pick<Task, "id" | "files"> | string,
   pr: { number: number; url: string },
   files: readonly string[] | undefined,
 ): "recorded" | "plan-only" | "unreadable" {
   if (!files || files.length === 0) return "unreadable";
-  if (isPlanOnlyChangeset(files)) return "plan-only";
+  const creditTask = typeof task === "string" ? { id: task } : task;
+  if (refusesAsPlanOnly(creditTask, files)) return "plan-only";
   const path = defaultCreditStorePath(ledgerPath);
-  saveCreditStore(path, recordCredit(loadCreditStore(path), taskId, { source: "trailer", prUrl: pr.url, prNumber: pr.number, prState: "MERGED" }));
+  saveCreditStore(path, recordCredit(loadCreditStore(path), creditTask.id, { source: "trailer", prUrl: pr.url, prNumber: pr.number, prState: "MERGED" }));
   return "recorded";
 }
 
@@ -2462,8 +2570,8 @@ export function runBranchClaimGap(pr: PrRef, taskId: string): RunBranchClaimGap 
 
 /** PLAN-ONLY-FILING REFUSAL (W1-T1004) — was `prUrl` opened by a plan-only FILING run, per THAT run's own
  *  positive ledger record, never inferred from the diff? A SEPARATE COPY, NOT A SHARED IMPORT (design note v):
- *  the run-task.ts twin stays private there, and W1-T471 serialises every task naming that file. A task whose
- *  own deliverable is genuinely plan text still reads false, an ordinary implement run writing no marker. */
+ *  the run-task.ts twin stays private there, and W1-T471 serialises every task naming that file. A plan-only
+ *  REVIEW row is diff evidence, so callers pass no `headSha` for a proven plan-text delivery (W1-T5553). */
 function isPlanOnlyFilingPr(
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
   prUrl: string,
@@ -2476,7 +2584,7 @@ function isPlanOnlyFilingPr(
   }
   return ledgerLines.some((l) =>
     l.pr_url === prUrl && l.plan_only === true &&
-    (l.step === "pr.opened" || (headSha !== undefined && l.step === "review.posted" && l.head_sha === headSha)));
+    (l.step === "pr.opened" || (headSha !== undefined && isPlanOnlyReviewEvidence(l) && l.head_sha === headSha)));
 }
 
 /** The review row only offers a safe durable-credit refusal after its head is checked against the merged PR. */
@@ -2486,7 +2594,12 @@ function hasPlanOnlyReviewForPr(
   index?: LedgerIndex,
 ): boolean {
   if (index !== undefined && index.rows === ledgerLines) return index.planOnlyReviewedHeads.has(prUrl);
-  return ledgerLines.some((l) => l.step === "review.posted" && l.plan_only === true && l.pr_url === prUrl && typeof l.head_sha === "string");
+  return ledgerLines.some((l) => isPlanOnlyReviewEvidence(l) && l.plan_only === true && l.pr_url === prUrl && typeof l.head_sha === "string");
+}
+
+/** A review row, or the compact marker rotation carries in its place once the PR's merge is recorded (ledger-carry.ts). */
+function isPlanOnlyReviewEvidence(l: Record<string, unknown>): boolean {
+  return l.step === "review.posted" || l.step === "review.plan_only_reviewed";
 }
 
 /** W1-T5353 — the override record as ONE derivation's per-PAIRING exclusion. The walk asks
@@ -2509,7 +2622,7 @@ function creditOverrideExclusion(taskId: string, deps: DeriveDeps): CreditOverri
   let first: CreditOverrideRow | undefined;
   const rowFor = (prNumber: number | undefined): CreditOverrideRow | undefined => {
     if (prNumber === undefined) return undefined;
-    rows ??= loadCreditOverrides(
+    rows ??= deps.creditOverrideRows?.() ?? loadCreditOverrides(
       deps.readCreditOverrideFile ??
         (() => nodeReadFileSync(deps.creditOverridePath ?? defaultCreditOverridePath(deps.ledgerPath), "utf8")),
     ).rows;
@@ -2564,7 +2677,16 @@ function derivePrPrecedence(
   // ref through a real gateway call at WRITE time, so this returns BEFORE any `deps.github` call and no read
   // result may demote it. Why: under quota exhaustion this rung re-dispatched a satisfied task
   const ledgerIndex = deps.ledgerIndex;
-  const correctedUrl = latestActualPrUrl(ledgerLines, task.id, ledgerIndex);
+  const readCreditStore = deps.readCreditStore ?? (() => loadCreditStore(deps.creditStorePath ?? defaultCreditStorePath(deps.ledgerPath)));
+  const writeCreditStore =
+    deps.writeCreditStore ?? ((store: CreditStore) => saveCreditStore(deps.creditStorePath ?? defaultCreditStorePath(deps.ledgerPath), store));
+  let creditStore = readCreditStore();
+  // W1-T5551: persisted on a live read, so the rung still answers once rotation has dropped the row.
+  const liveCorrection = latestActualPrUrl(ledgerLines, task.id, ledgerIndex);
+  if (liveCorrection && recordCorrectionCredit(creditStore, task.id, liveCorrection) !== creditStore) {
+    writeCreditStore((creditStore = recordCorrectionCredit(creditStore, task.id, liveCorrection)));
+  }
+  const correctedUrl = liveCorrection ?? creditStore[task.id]?.correction?.prUrl;
   // W1-T5353: every crediting rung below skips an OVERRIDDEN (task, PR) pairing and lets the next rung answer.
   if (correctedUrl && !overrides.excludes(prNumberFromRef(correctedUrl))) {
     return {
@@ -2580,80 +2702,70 @@ function derivePrPrecedence(
   // W1-T951 DURABLE CREDIT RUNG — directly UNDER `correction`, which must still override a stale entry, and
   // ABOVE every rung that reads a live PR record. That ordering is DELIVERABLE A's point: once credit is
   // durable, resolving it again costs NO PR-record read.
-  const readCreditStore = deps.readCreditStore ?? (() => loadCreditStore(deps.creditStorePath ?? defaultCreditStorePath(deps.ledgerPath)));
-  const writeCreditStore =
-    deps.writeCreditStore ?? ((store: CreditStore) => saveCreditStore(deps.creditStorePath ?? defaultCreditStorePath(deps.ledgerPath), store));
-  let creditStore = readCreditStore();
   const durableCredit = creditStore[task.id];
+  // W1-T5552: PRs quarantined under EITHER source — no rung below may credit or re-persist one.
+  const quarantinedUrls = quarantinedCreditUrls(durableCredit);
   if (durableCredit) {
     // Trailer is the STURDIER of the two evidentially — an anchored body hit, not a ref GitHub deletes on merge
     // — but either alone suffices: this is a tie-break for which url to report. W1-T5353: an OVERRIDDEN
-    // entry is skipped for its sibling; both overridden, the rung falls through to the live rungs below.
-    const entry = [durableCredit.trailer, durableCredit["head-branch"]].find(
-      (e) => e !== undefined && !overrides.excludes(e.prNumber),
-    );
-    if (entry) {
-      // W1-T3996 DURABLE-CREDIT REVALIDATION — a HEAD-BRANCH entry gets ONE more look before this rung trusts
-      // it, because the rung that WRITES one (`corroborateByBranch` below) only ever ran the LEDGER-based
-      // `isPlanOnlyFilingPr` guard, never the DIFF-based `isPlanOnlyChangeset` one rung (c) runs before ITS OWN
-      // persist — so a plan-only filing PR whose ledger row carries no `plan_only` marker slips straight past
-      // it and sits in `merge-credit.json` forever (the W1-T3990/#6468 incident this task recovers). A TRAILER
-      // entry needs no second look: line ~2449 below only ever persists one AFTER `planOnlyRefusal` already
-      // cleared, so re-checking it here would just repeat a check it already passed.
-      const alreadyInvalidated = entry.source === "head-branch" ? durableCredit.invalidated?.["head-branch"] : undefined;
-      const planOnlyPaths =
-        !alreadyInvalidated && entry.source === "head-branch" ? deps.mergedPathsByPr?.get(entry.prNumber) : undefined;
-      const reviewedPr = !alreadyInvalidated && entry.source === "head-branch" &&
+    // entry (W1-T5552: or a QUARANTINED one) is skipped for its sibling; none left, the live rungs answer.
+    for (const entry of [durableCredit.trailer, durableCredit["head-branch"]]) {
+      if (entry === undefined || overrides.excludes(entry.prNumber)) continue;
+      if (quarantinedUrls.has(entry.prUrl)) continue;
+      // W1-T3996 DURABLE-CREDIT REVALIDATION — ONE more look from FREE local `mergedPathsByPr` evidence; no
+      // row is no opinion. HEAD-BRANCH: its writer once skipped the diff check (W1-T3990/#6468). TRAILER
+      // (W1-T5552): an entry saved before the diff refusal (W1-T413/W1-T3067) was never checked — W1-T380
+      // stayed credited by plan-only #1437 until #8962. The `prByRef` review arm stays head-branch only.
+      const planOnlyPaths = deps.mergedPathsByPr?.get(entry.prNumber) ?? [];
+      const reviewedPr = entry.source === "head-branch" && !isPlanTextDeliverable(task, planOnlyPaths) &&
         hasPlanOnlyReviewForPr(ledgerLines, entry.prUrl, ledgerIndex)
         ? deps.github.prByRef(entry.prUrl) : null;
-      const isRevalidatedPlanOnly = isPlanOnlyChangeset(planOnlyPaths ?? []) ||
+      const isRevalidatedPlanOnly =
+        refusesAsPlanOnly(task, planOnlyPaths) ||
         (reviewedPr?.headRefOid !== undefined &&
           isPlanOnlyFilingPr(ledgerLines, entry.prUrl, ledgerIndex, reviewedPr.headRefOid));
-      if (!alreadyInvalidated && !isRevalidatedPlanOnly) {
-        const base: StatusProjection = {
-          taskId: task.id,
-          source: entry.source,
-          status: "merged",
-          merged: true,
-          prUrl: entry.prUrl,
-          prNumber: entry.prNumber,
-          prState: entry.prState,
-          // DELIVERABLE B: the discoverable signal (design (iii)) — a task credited by exactly one
-          // of the two durable paths says so right here, in the SAME projection every existing
-          // caller of `merged`/`source` already reads, no second query required.
-          ...(isSinglePathCredited(creditStore, task.id) ? { singlePathCredit: true as const } : {}),
-        };
-        // W1-T119/W1-T179 PARITY: the durable record proves the MERGE beyond doubt, but `indeterminate` asks
-        // whether THIS cycle's read succeeded, so a dark cycle is still surfaced — from cheap flags the gateway
-        // already computed, never a NEW PR-record read.
-        if (deps.github.readFailed?.() || deps.github.readTruncated?.()) {
-          const previous = deps.previousProjection?.(task.id);
-          const now = deps.now ?? Date.now;
-          return {
-            ...base,
-            indeterminate: true,
-            unavailableReason: deps.github.readFailureReason?.() ?? "unknown",
-            githubUnobservableSince: previous?.githubUnobservableSince ?? new Date(now()).toISOString(),
-          };
-        }
-        return base;
-      }
       if (isRevalidatedPlanOnly) {
         // durable-credit-plan-only: SUBTRACT ONLY, tied to the EXACT recorded PR — never inferred from the
         // branch name, a task status field, or an operator override. Persisted so a LATER call with no path
         // map in hand (the ordinary case: the map is one bounded `git log` per PASS, not every derivation)
-        // reads this mark instead of re-deriving it, and so `corroborateByBranch` below — reached in THIS
-        // very call once the durable rung declines — cannot silently re-persist the same known-bad PR.
-        creditStore = invalidateDurableCredit(creditStore, task.id, "head-branch", {
+        // reads this mark instead of re-deriving it, and so `corroborateByBranch` and rung (c) below — reached
+        // in THIS very call once the durable rung declines — cannot silently re-persist the same known-bad PR.
+        creditStore = invalidateDurableCredit(creditStore, task.id, entry.source, {
           prUrl: entry.prUrl,
           prNumber: entry.prNumber,
           reason: "durable-credit-plan-only",
         });
         writeCreditStore(creditStore);
+        quarantinedUrls.add(entry.prUrl);
+        continue; // the sibling gets its own look; none left, the live rungs answer, reopening dispatch
       }
-      // FALL THROUGH, refused or already-quarantined alike: every rung below gets to answer as if this
-      // durable entry had never existed, which is what actually stops suppressing dispatch — merely
-      // flagging the surviving projection would still leave the task read as merged.
+      const base: StatusProjection = {
+        taskId: task.id,
+        source: entry.source,
+        status: "merged",
+        merged: true,
+        prUrl: entry.prUrl,
+        prNumber: entry.prNumber,
+        prState: entry.prState,
+        // DELIVERABLE B: the discoverable signal (design (iii)) — a task credited by exactly one
+        // of the two durable paths says so right here, in the SAME projection every existing
+        // caller of `merged`/`source` already reads, no second query required.
+        ...(isSinglePathCredited(creditStore, task.id) ? { singlePathCredit: true as const } : {}),
+      };
+      // W1-T119/W1-T179 PARITY: the durable record proves the MERGE beyond doubt, but `indeterminate` asks
+      // whether THIS cycle's read succeeded, so a dark cycle is still surfaced — from cheap flags the gateway
+      // already computed, never a NEW PR-record read.
+      if (deps.github.readFailed?.() || deps.github.readTruncated?.()) {
+        const previous = deps.previousProjection?.(task.id);
+        const now = deps.now ?? Date.now;
+        return {
+          ...base,
+          indeterminate: true,
+          unavailableReason: deps.github.readFailureReason?.() ?? "unknown",
+          githubUnobservableSince: previous?.githubUnobservableSince ?? new Date(now()).toISOString(),
+        };
+      }
+      return base;
     }
   }
 
@@ -2714,6 +2826,20 @@ function derivePrPrecedence(
   // exit-0 EMPTY result is INDETERMINATE rather than "not merged", so corroborate deterministically by head
   // branch and RE-ASSERT ownership. null on FAILURE and [] on a genuine miss keep the two apart.
   // Why: one body-index miss caused four spurious 07-24 re-dispatches
+  const changedFilesByPr = new Map<string, string[] | undefined>();
+  const changedFiles = (pr: PrRef): string[] | undefined => {
+    if (!changedFilesByPr.has(pr.url)) changedFilesByPr.set(pr.url, deps.github.changedFiles?.(pr.url));
+    return changedFilesByPr.get(pr.url);
+  };
+  const reviewHead = (pr: PrRef): string | undefined => {
+    let files = deps.mergedPathsByPr?.get(pr.number);
+    if ((!files || files.length === 0) &&
+        !isPlanOnlyFilingPr(ledgerLines, pr.url, ledgerIndex) &&
+        isPlanOnlyFilingPr(ledgerLines, pr.url, ledgerIndex, pr.headRefOid)) {
+      files = changedFiles(pr);
+    }
+    return isPlanTextDeliverable(task, files ?? []) ? undefined : pr.headRefOid;
+  };
   const corroborateByBranch = (): StatusProjection | undefined => {
     // BATCHED first (W1-T257): the one-fetch-per-projection index, returning null ONLY when the batch FAILED —
     // then, and only then, the per-task fetch runs; on both failing, W1-T119 defers rather than a false none.
@@ -2723,24 +2849,23 @@ function derivePrPrecedence(
     // W1-T3996: the durable rung above may have JUST quarantined this exact PR this very call (or on a
     // previous one) — without this, a plan-only filing whose ledger row carries no `plan_only` marker
     // would sail past `isPlanOnlyFilingPr` below and get re-persisted in the SAME projection that just
-    // refused it, undoing the revalidation before this function even returns.
-    const invalidatedUrl = creditStore[task.id]?.invalidated?.["head-branch"]?.prUrl;
+    // refused it, undoing the revalidation before this function even returns. W1-T5552: under EITHER source.
     const planOnlyByDiff = (pr: PrRef): boolean => {
-      const files = deps.mergedPathsByPr?.get(pr.number) ?? deps.github.changedFiles?.(pr.url);
-      return files !== undefined && isPlanOnlyChangeset(files);
+      const files = deps.mergedPathsByPr?.get(pr.number) ?? changedFiles(pr);
+      return files !== undefined && refusesAsPlanOnly(task, files);
     };
     const hit = cands.find(
       (pr) =>
         pr.state.toUpperCase() === "MERGED" &&
         ownsBranch(pr.headRefName, task.id) &&
         !debunked.has(pr.url) &&
-        pr.url !== invalidatedUrl &&
+        !quarantinedUrls.has(pr.url) &&
         // W1-T5353: an overridden pairing neither credits nor persists.
         !overrides.excludes(pr.number) &&
         // W1-T1004: this rung had NO plan-only guard at all before — a filing PR dispatched from this task's
         // OWN worktree, which the retro, triage and plan flows reuse, would otherwise credit the task it just
         // filed unconditionally.
-        !isPlanOnlyFilingPr(ledgerLines, pr.url, ledgerIndex, pr.headRefOid) &&
+        !isPlanOnlyFilingPr(ledgerLines, pr.url, ledgerIndex, reviewHead(pr)) &&
         !planOnlyByDiff(pr),
     );
     if (!hit) return undefined;
@@ -2780,9 +2905,12 @@ function derivePrPrecedence(
   // W1-T5353: an OVERRIDDEN trailer hit is not this task's answer, but a later merge carrying the same trailer may
   // be — so widen to every trailered candidate (newest first) and take the first pairing the override leaves
   // standing. Paid ONLY when an override actually names the first hit. None standing reads as no hit at all.
+  // W1-T5552: a QUARANTINED hit is skipped the same way, so an older build behind it still answers
+  // (W1-T2318: build #2972, then plan-only amendment #3059).
+  const skipsTrailerPr = (pr: PrRef): boolean => overrides.excludes(pr.number) || quarantinedUrls.has(pr.url);
   const trailerPr =
-    firstTrailerPr && overrides.excludes(firstTrailerPr.number)
-      ? (deps.github.findMergedByTrailerAll?.(task.id) ?? []).find((pr) => !overrides.excludes(pr.number)) ?? null
+    firstTrailerPr && skipsTrailerPr(firstTrailerPr)
+      ? (deps.github.findMergedByTrailerAll?.(task.id) ?? []).find((pr) => !skipsTrailerPr(pr)) ?? null
       : firstTrailerPr;
   if (trailerPr && !debunkedTrailerUrls(ledgerLines, task.id, ledgerIndex).has(trailerPr.url)) {
     const head = deps.github.headRefName(trailerPr.url);
@@ -2794,7 +2922,7 @@ function derivePrPrecedence(
     // W1-T1004: the ledger-backed plan-only-FILING refusal, checked BEFORE and INDEPENDENTLY of
     // `ownsOwnRunBranch`, unlike the diff-based refusal below — a filing PR dispatched from this task's OWN run
     // branch sits on that branch too, so that test would wave it through by construction.
-    const planOnlyFilingRefusal = wouldCredit && isPlanOnlyFilingPr(ledgerLines, trailerPr.url, ledgerIndex, trailerPr.headRefOid);
+    const planOnlyFilingRefusal = wouldCredit && isPlanOnlyFilingPr(ledgerLines, trailerPr.url, ledgerIndex, reviewHead(trailerPr));
     // W1-T413: the DIFF-BASED plan-only refusal, for any hit that would otherwise credit and that the ledger
     // check did not refuse.
     //
@@ -2819,7 +2947,7 @@ function derivePrPrecedence(
             // LOCAL EVIDENCE FIRST, AND IT IS FREE. A merged PR's merge commit is on origin/main by
             // definition, so the one-git-log map answers for exactly the population that matters.
             const local = deps.mergedPathsByPr?.get(trailerPr.number);
-            if (local && local.length > 0) return isPlanOnlyChangeset(local);
+            if (local && local.length > 0) return refusesAsPlanOnly(task, local);
             // ⚠ NO LOCAL ANSWER: FALL BACK TO EXACTLY THE PRE-W1-T3067 BEHAVIOUR, INCLUDING THE
             // SHORTCUT. That shortcut is a TESTED COST GUARANTEE, not an oversight — "a worker's own
             // run- branch credits without ever reading the changed-file list" is an existing test,
@@ -2827,8 +2955,9 @@ function derivePrPrecedence(
             // would trade a rare wrong credit for 1,400 requests. So the fix is NARROW: the shortcut
             // no longer decides when free local evidence exists, and is untouched when it does not.
             if (ownsOwnRunBranch(head, task.id)) return false;
+            if (changedFilesByPr.has(trailerPr.url)) return refusesAsPlanOnly(task, changedFilesByPr.get(trailerPr.url) ?? []);
             const files = deps.github.changedFiles?.(trailerPr.url);
-            return files !== undefined && isPlanOnlyChangeset(files);
+            return files !== undefined && refusesAsPlanOnly(task, files);
           })()
         : false;
     const planOnlyRefusal = planOnlyFilingRefusal || planOnlyDiffRefusal;
@@ -3009,7 +3138,7 @@ const LANE_TERMINAL_STEPS: ReadonlySet<string> = new Set([
 /** The cold fix rung runs under its caller's run_id, not the task run's. Its task_id is deliberately
  *  preserved, so allow only that fix invocation's own rows to extend liveness after fix.dispatch;
  *  a later sweep/automerge/review row naming the same task is not evidence that the worker lived. */
-const FIX_LANE_TERMINAL_STEPS: ReadonlySet<string> = new Set([
+export const FIX_LANE_TERMINAL_STEPS: ReadonlySet<string> = new Set([
   "fix.done",
   "fix.resolved",
   "fix.exhausted",
@@ -3280,6 +3409,48 @@ function environmentChangedSince(
   return before !== undefined && afterShas.some((sha) => sha !== before.sha);
 }
 
+/** W1-T7533: the first back-off a released `failed`/`no_pr` latch serves; each consecutive latch doubles it. */
+export const INDEPENDENT_BLOCK_BASE_BACKOFF_MS = 60 * 60 * 1000;
+/** W1-T7533: the ledger step a writer records once per released latch, keyed by `blocking_run_id`. */
+export const INDEPENDENT_BLOCK_RELEASED_STEP = "dispatch.independent_block_released";
+
+/** W1-T7533: why a `failed`/`no_pr` latch stopped excluding its task. A re-offer, never a credit: the
+ *  next dispatch's `run.start` clears the latch through the ordinary path. */
+export interface IndependentBlockRelease {
+  blockingRunId: string;
+  blockedAt: string;
+  evidence: "main_moved" | "contract_revised";
+  /** For `main_moved`: the first merge credit (any task) dated after the block. */
+  mergedTaskId?: string;
+  mergedAt?: string;
+  /** Consecutive `failed`/`no_pr` latches on this task, this one included. */
+  latchCount: number;
+  /** The back-off served: the base doubled for each earlier consecutive latch. */
+  backoffMs: number;
+  /** A {@link INDEPENDENT_BLOCK_RELEASED_STEP} row already names this blocking run, so it is not re-ledgered. */
+  receiptRecorded: boolean;
+}
+
+/** W1-T7533: the first merge credit (any task) dated strictly after `blockMs`, if main has moved since. */
+function firstMergeAfter(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  blockMs: number,
+  index: LedgerIndex | undefined,
+): { taskId: string; ts: string; ms: number } | undefined {
+  let first: { taskId: string; ts: string; ms: number } | undefined;
+  const rows = index?.rows === lines
+    ? [...indexedStepRows(lines, "verdict.merged", index), ...indexedStepRows(lines, "verdict", index)]
+    : lines;
+  for (const line of rows) {
+    if (!isMergeCreditLine(line) || typeof line.ts !== "string") continue;
+    const ms = Date.parse(line.ts);
+    if (!Number.isFinite(ms) || ms <= blockMs || (first && ms >= first.ms)) continue;
+    const taskId = typeof line.task_id === "string" ? line.task_id : typeof line.task === "string" ? line.task : "";
+    first = { taskId, ts: line.ts, ms };
+  }
+  return first;
+}
+
 /** The latest durable independent-failure block if no later dispatch superseded it.
  *
  * `blocked_illformed` is a zero-cost admission refusal: run-task returns it before an inflight
@@ -3299,13 +3470,29 @@ function environmentChangedSince(
  * W1-T3978: a shell-less implement can leave a producer-owned refusal after substantive edits.
  * That exact terminal class gets one pending retry marker. The marker makes the task eligible
  * until the retry's `run.start`; after that start the marker is spent, so a second refusal stays
- * blocked. Ordinary `no_pr` rows never enter this state machine. */
+ * blocked. Ordinary `no_pr` rows never enter this state machine. W1-T7533: see {@link independentFailureLatch}. */
 export function latestIndependentFailureBlock(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
   index?: LedgerIndex,
   nowMs?: number,
+  categorizedRefusalRunId?: string,
+  currentContractRevision?: string | (() => string),
 ): boolean {
+  return independentFailureLatch(lines, taskId, index, nowMs, categorizedRefusalRunId, currentContractRevision).blocked;
+}
+
+/** W1-T7533: a `failed`/`no_pr` latch blocked the run.start that alone could clear it. It now releases
+ * once main moved (a merge credit after the block) or the task's contract revision changed, AND the block
+ * is older than a back-off doubling per consecutive latch. Other verdict classes keep their own rules. */
+export function independentFailureLatch(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  index?: LedgerIndex,
+  nowMs?: number,
+  categorizedRefusalRunId?: string,
+  currentContractRevision?: string | (() => string),
+): { blocked: boolean; release?: IndependentBlockRelease } {
   let last: "run" | "blocked" | "admission_refused" | "inflight_deferral" | "credit_refused" | undefined;
   // W1-T4597: the stage each run's verdict named, the current streak of consecutive environmental
   // blocks, and when the latest one landed.
@@ -3317,10 +3504,27 @@ export function latestIndependentFailureBlock(
   let retryPending = false;
   let retrySpent = false;
   const harnessRefusalRuns = new Set<string>();
+  // W1-T7533: the latest `failed`/`no_pr` latch, how many consecutive runs latched that way, and the
+  // contract revision each run's verdict saw. A run that ends without any block resets the streak.
+  const revisionByRun = new Map<string, unknown>();
+  const releasedRuns = new Set<string>();
+  let failureLatch: { runId: string; ts: string; ms: number } | undefined;
+  let failureStreak = 0;
+  let runOpen = false;
+  let runLatched = false;
   for (const line of indexedTaskRows(lines, taskId, index)) {
     if (line.task_id !== taskId && line.task !== taskId) continue;
+    if (line.step === INDEPENDENT_BLOCK_RELEASED_STEP && typeof line.blocking_run_id === "string") {
+      releasedRuns.add(line.blocking_run_id);
+    }
+    if (line.step === "run.start") {
+      if (runOpen && !runLatched) failureStreak = 0;
+      runOpen = true;
+      runLatched = false;
+    }
     if (line.step === "verdict" && typeof line.run_id === "string") {
       stageByRun.set(line.run_id, line.stage);
+      revisionByRun.set(line.run_id, line.pre_dispatch_contract_revision);
       // W1-T4655/W1-T4701: a thrown run's verdict keeps the streak, as its verdict-less row did.
       const thrownRunEnding = typeof line.stage === "string" && THROWN_RUN_VERDICT_STAGES.has(line.stage);
       if (!thrownRunEnding && !isEnvironmentalBlock(line.verdict, line.stage)) environmentalStreak = 0;
@@ -3352,9 +3556,10 @@ export function latestIndependentFailureBlock(
             : line.verdict === "task_already_merged"
               ? "credit_refused" // W1-T4413: a refusal about credit, not a task failure
               : "blocked";
-      if (last === "blocked" && isEnvironmentalBlock(line.verdict, line.stage ?? stageByRun.get(runId))) {
+      const environmental = last === "blocked" && isEnvironmentalBlock(line.verdict, line.stage ?? stageByRun.get(runId));
+      const ms = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
+      if (environmental) {
         environmentalStreak += 1;
-        const ms = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
         environmentalBlockMs = Number.isFinite(ms) ? ms : undefined;
         environmentalBlockHost = typeof line.host === "string" ? line.host : undefined;
       } else if (last === "blocked") {
@@ -3362,6 +3567,14 @@ export function latestIndependentFailureBlock(
         environmentalBlockMs = undefined;
         environmentalBlockHost = undefined;
       }
+      if (last === "blocked" && !environmental && (line.verdict === "failed" || line.verdict === "no_pr") &&
+        runId && typeof line.ts === "string" && Number.isFinite(ms)) {
+        if (!runLatched) failureStreak += 1;
+        failureLatch = { runId, ts: line.ts, ms };
+      } else {
+        failureLatch = undefined;
+      }
+      runLatched = true;
     } else if (
       line.step === "dispatch.harness_commit_retry" &&
       line.original_refusal === "harness_commit_refused" &&
@@ -3369,19 +3582,38 @@ export function latestIndependentFailureBlock(
       line.harness_commit_refused === true
     ) {
       const originalRunId = typeof line.original_run_id === "string" ? line.original_run_id : "";
-      if (harnessRefusalRuns.has(originalRunId) && !retrySpent) {
+      if (harnessRefusalRuns.has(originalRunId) && !retrySpent && originalRunId !== categorizedRefusalRunId) {
         retryPending = true;
       }
     }
   }
-  if (retryPending) return false;
-  if (harnessRefusal && retrySpent) return true;
-  if (harnessRefusal) return true;
+  if (retryPending) return { blocked: false };
+  // W1-T7533: the latest block is a task-caused `failed`/`no_pr` latch (any W1-T3978 retry already
+  // spent, since a pending one returned above) and not a W1-T6593 categorized refusal.
+  if (last === "blocked" && failureLatch !== undefined && failureLatch.runId !== categorizedRefusalRunId) {
+    const now = nowMs ?? (index?.rows === lines ? index.latestTsMs : latestLedgerTsMs(lines)) ?? failureLatch.ms;
+    const latchCount = Math.max(1, failureStreak);
+    const backoffMs = INDEPENDENT_BLOCK_BASE_BACKOFF_MS * 2 ** (latchCount - 1);
+    if (now - failureLatch.ms >= backoffMs) {
+      const seenRevision = revisionByRun.get(failureLatch.runId);
+      const served = { blockingRunId: failureLatch.runId, blockedAt: failureLatch.ts, latchCount, backoffMs,
+        receiptRecorded: releasedRuns.has(failureLatch.runId) };
+      const current = typeof currentContractRevision === "function" ? currentContractRevision() : currentContractRevision;
+      if (typeof seenRevision === "string" && current !== undefined && seenRevision !== current) {
+        return { blocked: false, release: { ...served, evidence: "contract_revised" } };
+      }
+      const merge = firstMergeAfter(lines, failureLatch.ms, index);
+      if (merge) {
+        return { blocked: false, release: { ...served, evidence: "main_moved", mergedTaskId: merge.taskId, mergedAt: merge.ts } };
+      }
+    }
+  }
+  if (harnessRefusal) return { blocked: true };
   if (last === "blocked" && environmentalBlockMs !== undefined && environmentalStreak <= MAX_ENVIRONMENTAL_REOFFERS) {
     const now = nowMs ?? (index?.rows === lines ? index.latestTsMs : latestLedgerTsMs(lines)) ?? environmentalBlockMs;
-    if (environmentChangedSince(lines, environmentalBlockMs, environmentalBlockHost, now, index)) return false;
+    if (environmentChangedSince(lines, environmentalBlockMs, environmentalBlockHost, now, index)) return { blocked: false };
   }
-  return last === "blocked";
+  return { blocked: last === "blocked" };
 }
 
 /** JOIN LIVE STATE, DO NOT PATCH THE HISTORY SCAN (W1-T182). Returns `undefined` ONLY when the issue is
@@ -3443,9 +3675,19 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
   const now = deps.now ?? (() => Date.now());
   const projection: StatusProjection = { ...base };
 
-  if (latestIndependentFailureBlock(ledgerLines, task.id, deps.ledgerIndex, now())) {
-    projection.status = "blocked";
-    projection.independentFailureBlocked = true;
+  const taskRows = indexedTaskRows(ledgerLines, task.id, deps.ledgerIndex);
+  const refusalSource = activeCategorizedRefusal(task.id, taskRows);
+  const latch = independentFailureLatch(
+    ledgerLines, task.id, deps.ledgerIndex, now(), refusalSource?.runId, () => preDispatchContractRevision(task),
+  );
+  if (latch.release) projection.independentBlockRelease = latch.release;
+  if (latch.blocked) {
+    const rejoin = categorizedRefusalRejoin(dirname(deps.ledgerPath), task, taskRows, refusalSource);
+    if (rejoin) projection.categorizedRefusalRejoin = rejoin;
+    else {
+      projection.status = "blocked";
+      projection.independentFailureBlocked = true;
+    }
   }
 
   // IN-FLIGHT + PHASE: never overrides an already-definitive `blocked` — a closed PR is stronger GitHub
@@ -3800,7 +4042,8 @@ export function projectPlan(
   const ledgerLinesOnce = readLedgerOnce(effectiveDeps.ledgerPath);
   // R-23: AND INDEX IT ONCE. Reading once was half the fix — the ten per-task helpers each still walked the
   // whole array, so an N-task plan scanned it ~10N times.
-  const ledgerIndex = effectiveDeps.unindexedForEquivalenceTest ? undefined : buildLedgerIndex(ledgerLinesOnce);
+  const supplied = effectiveDeps.ledgerIndex?.rows === ledgerLinesOnce ? effectiveDeps.ledgerIndex : undefined;
+  const ledgerIndex = effectiveDeps.unindexedForEquivalenceTest ? undefined : supplied ?? buildLedgerIndex(ledgerLinesOnce);
   effectiveDeps = { ...effectiveDeps, readLedger: () => ledgerLinesOnce, ledgerIndex };
   // W1-T951 DELIVERABLE A, READ AND WRITE THE DURABLE STORE ONCE PER PLAN. Without it an N-task plan would
   // parse the store once per task and fsync N times per projection.
@@ -3808,8 +4051,17 @@ export function projectPlan(
   const creditStoreAtStart = effectiveDeps.readCreditStore ? effectiveDeps.readCreditStore() : loadCreditStore(creditStorePathOnce);
   const flushCreditStore = effectiveDeps.writeCreditStore ?? ((store: CreditStore) => saveCreditStore(creditStorePathOnce, store));
   let creditStoreLive = creditStoreAtStart;
+  // AND THE OVERRIDE RECORD, ONCE PER PLAN, LAZILY: each task asking loaded it afresh, a file read (a thrown
+  // ENOENT where there is none) and a YAML parse per task, ~3,000 a pass, on every read-model build.
+  let overrideRows: readonly CreditOverrideRow[] | undefined;
+  const passDeps = effectiveDeps;
+  const creditOverrideRows = passDeps.creditOverrideRows ?? ((): readonly CreditOverrideRow[] => (overrideRows ??= loadCreditOverrides(
+    passDeps.readCreditOverrideFile ??
+      (() => nodeReadFileSync(passDeps.creditOverridePath ?? defaultCreditOverridePath(passDeps.ledgerPath), "utf8")),
+  ).rows));
   effectiveDeps = {
     ...effectiveDeps,
+    creditOverrideRows,
     readCreditStore: () => creditStoreLive,
     writeCreditStore: (store: CreditStore) => {
       creditStoreLive = store;
@@ -3835,7 +4087,8 @@ export function projectPlan(
     const captured = byTask;
     // W1-T2392: the SAME rows, walked once more in memory for the prose index — no second fetch, and skipped
     // entirely when the batched read failed.
-    const prose = allMerged !== null ? indexProseNamedTaskIds(allMerged) : undefined;
+    // Only the uncredited-build warning reads the index, so a pass that skips the warning skips the walk too.
+    const prose = allMerged !== null && !effectiveDeps.skipUncreditedBuildWarning ? indexProseNamedTaskIds(allMerged) : undefined;
     // W1-T3763: capture the exact trailer lookup from this projection's SAME merged snapshot. A failed merged
     // read must stay a failure for every task, never fall back into N direct probes that can restart the board
     // walk. A gateway without this optional batched surface keeps its existing direct lookup.
@@ -3990,15 +4243,37 @@ export type RequiredContextsRead =
 export function readRequiredStatusCheckContexts(owner: string, repo: string, branch = "main"): RequiredContextsRead {
   let raw: string;
   try {
-    raw = ghExec(["api", `repos/${owner}/${repo}/branches/${branch}/protection/required_status_checks`],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    );
+    const requiredArgs = requiredStatusChecksArgs(owner, repo, branch);
+    raw = ghExec(requiredArgs, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   } catch (e) {
     // THE FACT THIS TASK EXISTS TO PRESERVE. Classified at the point of failure, because nothing downstream can
     // recover it: an absent binary, an unprivileged token, a network error and a 404 on an unprotected branch
     // all land here and all used to become a bare `undefined`.
     return { kind: "unreadable", branch, reason: firstLine((e as Error)?.message) || "gh read failed" };
   }
+  return requiredContextsFromProtection(raw, branch);
+}
+
+export async function readRequiredStatusCheckContextsAsync(
+  owner: string,
+  repo: string,
+  branch = "main",
+  readText: (args: string[]) => Promise<string> = ghTextAsync,
+): Promise<RequiredContextsRead> {
+  let raw: string;
+  try {
+    raw = await readText(requiredStatusChecksArgs(owner, repo, branch));
+  } catch (e) {
+    return { kind: "unreadable", branch, reason: firstLine((e as Error)?.message) || "gh read failed" };
+  }
+  return requiredContextsFromProtection(raw, branch);
+}
+
+function requiredStatusChecksArgs(owner: string, repo: string, branch: string): string[] {
+  return ["api", `repos/${owner}/${repo}/branches/${branch}/protection/required_status_checks`];
+}
+
+function requiredContextsFromProtection(raw: string, branch: string): RequiredContextsRead {
   try {
     const parsed = JSON.parse(raw) as { contexts?: unknown; checks?: Array<{ context?: unknown }> };
     const fromChecks = (parsed.checks ?? [])
@@ -4260,6 +4535,7 @@ export interface BatchedPr {
   number: number;
   url: string;
   state: string;
+  mergedAt?: string;
   headRefName?: string;
   /** The exact current head commit; see {@link PrRef.headRefOid}. */
   headRefOid?: string;
@@ -4474,9 +4750,8 @@ export function buildBatchedGithub(
     exec?: (args: string[]) => string;
     /** W1-T2387: injectable stand-in for the real `git log` read; mirrors {@link ghGateway}'s own seam. */
     commitTrailerIndex?: () => Map<string, PrRef[]> | null;
-    /** Observability hook (W1-T181), called on every fetch attempt: the payload size after a successful read,
-     *  then the outcome for EVERY `fetchAll`. Real callers wire it to the ledger, so the next approach to a
-     *  ceiling is observable in advance and a failure is ledgered with its classified reason. */
+    /** Observability hook: changes and failures keep full rows; every successful read is counted
+     *  in a five-minute rollup (W1-T4480). */
     log?: (event: string, extra?: Record<string, unknown>) => void;
     /** INJECTABLE stand-in for the batched escalation-issue fetch (W1-T182), mirroring `fetchAll`'s role for
      *  PRs — a fixture array or a throwing fake proves the join is O(1) and fails closed, without shelling. */
@@ -4523,6 +4798,26 @@ export function buildBatchedGithub(
   const pacer = opts.pacer ?? (defaultGhCallPacer ??= createGhCallPacer(isTestRunner() ? { sleepSync: () => {} } : {}));
   const now = opts.now ?? (() => Date.now());
   const log = opts.log ?? (() => {});
+  const rollup = boardRefreshRollup(opts.log);
+  const writtenCounts = new Map<string, number>();
+  const failedChannels = new Set<string>();
+  const writtenFetches = new Map<string, { mode: string; truncated: boolean }>();
+  const recordFetchOk = (prCount: number, channel: string): void => {
+    rollup?.fetchOk(channel);
+    if (writtenCounts.get(channel) !== prCount || failedChannels.has(channel)) {
+      log("board_gateway.fetch_ok", { prCount, channel });
+      writtenCounts.set(channel, prCount);
+      failedChannels.delete(channel);
+    }
+  };
+  const recordFetchBytes = (bytes: number, restCalls: number, mode: string, truncated: boolean, half: string): void => {
+    rollup?.fetch(half, mode, restCalls, bytes, truncated);
+    const previous = writtenFetches.get(half);
+    if (!previous || previous.mode !== mode || previous.truncated !== truncated || truncated) {
+      log("board_gateway.fetch_bytes", { bytes, restCalls, mode, truncated, half });
+      writtenFetches.set(half, { mode, truncated });
+    }
+  };
   // W1-T4771: off-loop mode (serve). The pacer it runs under refuses rather than sleeping the thread, and a due
   // read is only ever REQUESTED of the background walk, at most once per `warmRetryGapMs`, so a walk that keeps
   // failing is not respawned by every board read.
@@ -4570,6 +4865,7 @@ export function buildBatchedGithub(
   // the other still carries. The accessor reports their OR.
   let lastOpenTruncated = false;
   let lastClosedTruncated = false;
+  let lastClosedFloor: string | undefined;
   const lastFetchTruncated = (): boolean => lastOpenTruncated || lastClosedTruncated;
   const run =
     opts.exec ??
@@ -4630,21 +4926,12 @@ export function buildBatchedGithub(
       // sets only on a THROW. W1-T2323: recorded against the half that produced it. Only the two real halves
       // reach here, so a third arm would be dead code no fixture could exercise.
       if (half === "open") lastOpenTruncated = fetched.truncated;
-      else lastClosedTruncated = fetched.truncated;
+      else {
+        lastClosedTruncated = fetched.truncated;
+        lastClosedFloor = fetched.truncated ? fetched.closedFloor : undefined;
+      }
       if (half === "open" && !fetched.truncated) snapshotCache?.commitOpen?.(fetched.rows, now());
-      // W1-T181: log the payload size on every SUCCESSFUL fetch, so the next approach to whatever ceiling is
-      // set above is observable in advance instead of arriving as a silent outage. Call count and mode are
-      // W1-T265 additions — that change's whole claim is the count, so it is measured here.
-      log("board_gateway.fetch_bytes", {
-        bytes,
-        restCalls: fetched.calls,
-        mode: fetched.mode,
-        truncated: fetched.truncated,
-        // W1-T2323: WHICH HALF, in the ledger, so "did the split actually stop the daemon paying for the closed
-        // walk" is a measurement over these rows rather than a claim. Before this task every row was implicitly
-        // both.
-        half: fetched.half,
-      });
+      recordFetchBytes(bytes, fetched.calls, fetched.mode, fetched.truncated, fetched.half);
       return fetched.rows;
   };
   /** W1-T2323: TRUE ONLY WHEN THIS GATEWAY OWNS ITS OWN FETCHES. An injected `opts.fetchAll` returns the WHOLE
@@ -4784,7 +5071,7 @@ export function buildBatchedGithub(
         // gateway's reads, and run-task.ts's sweep enumeration, keeps three polite callers off second zero.
         all = paceGhEntry(activePacer(opts.fetchAll !== undefined), isGhRateLimitError, fetch);
         record({ failed: false, reason: undefined });
-        log("board_gateway.fetch_ok", { prCount: all.length, channel });
+        recordFetchOk(all.length, channel);
       } catch (err) {
         const e = err as NodeJS.ErrnoException & { status?: number | null; stderr?: string | Buffer };
         record({ failed: true, reason: classifyGhFailure(e?.status, e?.stderr != null ? String(e.stderr) : undefined, e?.code) });
@@ -4792,6 +5079,7 @@ export function buildBatchedGithub(
         // classifying "unknown" and nothing surfacing it. `console.error` guarantees this reaches whatever log
         // the process is redirected into even if a caller never wires `opts.log`; the injectable log ALSO fires.
         console.error(`board gateway: batched PR fetch failed (${lastFetchFailureReason()}): ${e?.message ?? String(err)}`);
+        failedChannels.add(channel);
         log("board_gateway.fetch_failed", { reason: lastFetchFailureReason(), message: e?.message ?? String(err), channel });
         // W1-T181 design (v): a bare [] here is what converted "I could not read GitHub" into "GitHub says there
         // are zero PRs". The [] below is now always PAIRED with the failure flags, which
@@ -4946,6 +5234,7 @@ export function buildBatchedGithub(
     number: p.number,
     url: p.url,
     state: p.state,
+    ...(p.mergedAt === undefined ? {} : { mergedAt: p.mergedAt }),
     title: p.title,
     headRefName: p.headRefName,
     ...(p.headRefOid ? { headRefOid: p.headRefOid } : {}),
@@ -4968,17 +5257,22 @@ export function buildBatchedGithub(
    *  `findMergedByTrailer` path only needs one task at a time and is deliberately left as-is for callers that
    *  do not already hold a board snapshot. `projectPlan`, however, derives every task: rescanning thousands of
    *  bodies for every absent id lets its gateway TTL expire mid-pass and restarts the same GitHub walk. */
+  /** The trailer map of the index it was built from: a pass over an unrefreshed index reuses it, not rescans every body. */
+  let trailersOf: { idx: Index; byTask: Map<string, PrRef> } | undefined;
   const mergedTrailerLookup = (): ((taskId: string) => PrRef | null) | null => {
     const idx = index();
     if (unreadable()) return null;
-    const byTask = new Map<string, PrRef>();
-    for (const pr of idx.mergedNewestFirst) {
-      for (const rawLine of (pr.body ?? "").split(/\r?\n/)) {
-        // `[ \t]*` keeps the established anchored-trailer dialect while the captured value remains exact.
-        const match = /^Remudero-Task:[ \t]*(.*?)[ \t]*$/.exec(rawLine);
-        const taskId = match?.[1];
-        if (taskId !== undefined && !byTask.has(taskId)) byTask.set(taskId, asRef(pr));
+    const byTask = trailersOf?.idx === idx ? trailersOf.byTask : new Map<string, PrRef>();
+    if (trailersOf?.idx !== idx) {
+      for (const pr of idx.mergedNewestFirst) {
+        for (const rawLine of (pr.body ?? "").split(/\r?\n/)) {
+          // `[ \t]*` keeps the established anchored-trailer dialect while the captured value remains exact.
+          const match = /^Remudero-Task:[ \t]*(.*?)[ \t]*$/.exec(rawLine);
+          const taskId = match?.[1];
+          if (taskId !== undefined && !byTask.has(taskId)) byTask.set(taskId, asRef(pr));
+        }
       }
+      trailersOf = { idx, byTask };
     }
     // The old lookup falls back to the memoized commit index only after a body miss. Keep that laziness and
     // precedence; the difference is that the body miss is now O(1), not a fresh O(merged PRs) scan per task.
@@ -4999,6 +5293,7 @@ export function buildBatchedGithub(
     if (!outcome.ok) {
       openOutcome = { failed: true, reason: outcome.reason };
       console.error(`board gateway: batched PR fetch failed (${outcome.reason}): ${outcome.message}`);
+      failedChannels.add("open");
       log("board_gateway.fetch_failed", { reason: outcome.reason, message: outcome.message, channel: "open" });
       return;
     }
@@ -5007,8 +5302,8 @@ export function buildBatchedGithub(
     openEpoch += 1;
     lastOpenTruncated = outcome.truncated;
     if (!outcome.truncated) snapshotCache?.commitOpen?.(outcome.rows, now());
-    log("board_gateway.fetch_ok", { prCount: outcome.rows.length, channel: "open" });
-    log("board_gateway.fetch_bytes", { bytes: outcome.bytes, restCalls: outcome.calls, mode: outcome.mode, truncated: outcome.truncated, half: "open" });
+    recordFetchOk(outcome.rows.length, "open");
+    recordFetchBytes(outcome.bytes, outcome.calls, outcome.mode, outcome.truncated, "open");
     // W1-T2323's own cross-half invalidation, replayed here verbatim for the async path — see `openRows`'s doc
     // for why a PR leaving the open set is the merge or close itself, observed.
     if (previouslyOpen) {
@@ -5024,9 +5319,11 @@ export function buildBatchedGithub(
   };
   const applyMergedOutcome = (outcome: PrewarmChannelOutcome<BoardPrRest>, elapsedMs: number): void => {
     mergedFetchDurationMs = elapsedMs;
+    lastClosedFloor = undefined;
     if (!outcome.ok) {
       mergedOutcome = { failed: true, reason: outcome.reason };
       console.error(`board gateway: batched PR fetch failed (${outcome.reason}): ${outcome.message}`);
+      failedChannels.add("merged");
       log("board_gateway.fetch_failed", { reason: outcome.reason, message: outcome.message, channel: "merged" });
       return;
     }
@@ -5036,8 +5333,8 @@ export function buildBatchedGithub(
     lastClosedTruncated = outcome.truncated;
     knownBoardPrs = new Map(outcome.rows.map((r) => [r.number, r]));
     if (!outcome.truncated) snapshotCache?.commitClosed(outcome.rows);
-    log("board_gateway.fetch_ok", { prCount: outcome.rows.length, channel: "merged" });
-    log("board_gateway.fetch_bytes", { bytes: outcome.bytes, restCalls: outcome.calls, mode: outcome.mode, truncated: outcome.truncated, half: "closed" });
+    recordFetchOk(outcome.rows.length, "merged");
+    recordFetchBytes(outcome.bytes, outcome.calls, outcome.mode, outcome.truncated, "closed");
   };
   const applyIssuesOutcome = (outcome: PrewarmChannelOutcome<BoardIssueRest>): void => {
     if (!outcome.ok) {
@@ -5119,7 +5416,7 @@ export function buildBatchedGithub(
     };
     let worker: Worker;
     try {
-      worker = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: req, execArgv: process.execArgv });
+      worker = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: req });
     } catch (err) {
       // Spawning itself failed (e.g. no worker_threads support) — fall back to the SAME channel walk
       // synchronously on THIS thread, applied through the SAME bookkeeping a landed message uses. The ONE place
@@ -5353,6 +5650,10 @@ export function buildBatchedGithub(
       // this FIRST, never preceded by another method call, still reports accurately.
       index();
       return lastFetchTruncated();
+    },
+    readBoardCoverage() {
+      index();
+      return { openTruncated: lastOpenTruncated, ...(lastClosedTruncated && lastClosedFloor !== undefined ? { closedFloor: lastClosedFloor } : {}) };
     },
     // R-24: NEVER forces a fetch and performs no I/O — the whole point is that a caller can call
     // it at the top of every tick for free. See `resetFailureFlags`'s own doc above.

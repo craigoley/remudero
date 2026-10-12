@@ -1,3 +1,7 @@
+import { ghTextAsync, type GhAsyncExecutor } from "./github-transport.js";
+import { boundGitCall, type AsyncGitRunner } from "./git-fetch-retry.js";
+import { asyncGit } from "./self-sync.js";
+
 /**
  * THE REVIEWER'S DIFF, WITH A FLOOR UNDER IT.
  *
@@ -18,9 +22,9 @@
  */
 export interface PrDiffSource {
   /** `gh pr diff <url>` — the API path, refused above 300 files. */
-  api: (prUrl: string) => string;
+  api: (prUrl: string) => string | Promise<string>;
   /** `git diff <base>...<headSha>` in the checkout — no file cap. */
-  local: (headSha: string) => string;
+  local: (headSha: string) => string | Promise<string>;
 }
 
 export type PrDiffOutcome =
@@ -39,16 +43,16 @@ export function isDiffTooLarge(message: string): boolean {
  * property: an auth failure, a rate limit or a deleted PR must not be answered with a diff computed
  * from whatever this checkout happens to hold. Only the file cap has a locally-equivalent answer.
  */
-export function fetchPrDiff(prUrl: string, headSha: string, source: PrDiffSource): PrDiffOutcome {
+export async function fetchPrDiff(prUrl: string, headSha: string, source: PrDiffSource): Promise<PrDiffOutcome> {
   try {
-    return { kind: "ok", diff: source.api(prUrl), source: "api" };
+    return { kind: "ok", diff: await source.api(prUrl), source: "api" };
   } catch (apiError) {
     const message = String((apiError as Error)?.message ?? apiError);
     if (!isDiffTooLarge(message)) {
       return { kind: "refused", reason: `could not read the diff for ${prUrl}: ${message}` };
     }
     try {
-      return { kind: "ok", diff: source.local(headSha), source: "local" };
+      return { kind: "ok", diff: await source.local(headSha), source: "local" };
     } catch (localError) {
       return {
         kind: "refused",
@@ -59,4 +63,38 @@ export function fetchPrDiff(prUrl: string, headSha: string, source: PrDiffSource
       };
     }
   }
+}
+
+/** BACKSTOP per awaited diff read: the sync `gh pr diff`'s own default bound. MEASURED 2026-10-06: that sync read
+ *  held the daemon loop 3.5 s from the sweep's review reuse; a read still running at a minute is hung. */
+export const PR_DIFF_READ_TIMEOUT_MS = 60_000;
+/** The sync reads' own 64 MiB: a plan reconciliation's diff is megabytes. */
+const PR_DIFF_MAX_BUFFER = 1 << 26;
+
+/** `gh pr diff <url>` off the event loop through {@link ghTextAsync} (paced; SIGTERM, then SIGKILL past its bound).
+ *  A read killed at the bound rejects NAMING it, so a caller refuses or falls back on a reason, never on a hang. */
+export async function ghPrDiffAsync(prUrl: string, opts: { timeoutMs?: number; execAsync?: GhAsyncExecutor } = {}): Promise<string> {
+  const timeoutMs = opts.timeoutMs ?? PR_DIFF_READ_TIMEOUT_MS;
+  try {
+    return await ghTextAsync(["pr", "diff", prUrl], { maxBuffer: PR_DIFF_MAX_BUFFER, timeout: timeoutMs }, opts.execAsync);
+  } catch (e) {
+    if ((e as { killed?: boolean }).killed) throw new Error(`gh pr diff timed out after ${timeoutMs}ms and was killed`);
+    throw e;
+  }
+}
+
+/** The local fallback, `git -C <repoRoot> diff origin/main...<headSha>`, awaited and killed past its bound
+ *  (`boundGitCall` rejects naming it). */
+export function localPrDiffAsync(
+  repoRoot: string,
+  headSha: string,
+  opts: { timeoutMs?: number; git?: AsyncGitRunner } = {},
+): Promise<string> {
+  const git = opts.git ?? asyncGit(repoRoot, { maxBuffer: PR_DIFF_MAX_BUFFER });
+  return boundGitCall(git, ["diff", `origin/main...${headSha}`], opts.timeoutMs ?? PR_DIFF_READ_TIMEOUT_MS);
+}
+
+/** The reviewer's production {@link PrDiffSource}: both reads awaited and bounded, never on the daemon loop. */
+export function prDiffSourceAsync(repoRoot: string): PrDiffSource {
+  return { api: (prUrl) => ghPrDiffAsync(prUrl), local: (headSha) => localPrDiffAsync(repoRoot, headSha) };
 }

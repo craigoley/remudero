@@ -16,7 +16,13 @@ import {
   createServeSupervisor,
   generationCommand,
   handoffSwitch,
+  judgeServeUpgradeAdmission,
   procRss,
+  readHostPressure,
+  readServeUpgradeThresholds,
+  serveUpgradeThresholdsFromPolicy,
+  type HostPressureReading,
+  type ServeUpgradeThresholds,
   socketGet,
   type GenerationProcess,
   type PreparedSlot,
@@ -24,9 +30,15 @@ import {
 } from "../src/lib/serve-supervisor.js";
 import type { GenerationMessage } from "../src/lib/serve-generation.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { systemClock } from "../src/lib/clock.js";
+import { loadHostMemoryBudgetPolicy } from "../src/lib/host-memory-shadow.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const tick = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+const MIB = 1024 * 1024;
+/** W1-T8311: the shipped host budget thresholds, and a host reading with room to spare. */
+const THRESHOLDS: ServeUpgradeThresholds = { hostReserveBytes: 2048 * MIB, swapInPagesPerSecMax: 256, psiSomeAvg10Max: 10, psiFullAvg10Max: 2, staleMs: 600_000 };
+const AMPLE: Omit<HostPressureReading, "atMs"> = { memAvailableBytes: 64 * 1024 * MIB, swapInPagesPerSec: 0, psiSomeAvg10: 0, psiFullAvg10: 0, unread: [] };
 
 // ── fakes for the decision tests ────────────────────────────────────────────────────────────────
 
@@ -107,8 +119,10 @@ function decisionSupervisor(fleet: ReturnType<typeof fakeFleet>, extra: Partial<
     sleep: async () => {},
     freeMemory: () => undefined,
     rss: () => undefined,
-    peakRss: () => undefined,
+    peakRss: () => 1_000,
     socketPathFor: (n) => `/sock/${n}`,
+    hostPressure: async () => ({ ...AMPLE, atMs: (extra.clock ?? systemClock).now() }),
+    upgradeThresholds: () => THRESHOLDS,
     ...extra,
   });
   return { supervisor, logs, exits, steps: () => logs.map((l) => l.step) };
@@ -165,17 +179,27 @@ test("handoff off turns a handoff request into exit 0", async () => {
 
 test("insufficient cgroup headroom defers the handoff and ledgers the reason", async () => {
   const fleet = fakeFleet();
-  const { supervisor, logs, exits } = decisionSupervisor(fleet, { freeMemory: () => 1_000, rss: () => 5_000, deferMs: 1 });
+  const retries: Array<() => void> = [];
+  const { supervisor, logs, exits } = decisionSupervisor(fleet, {
+    freeMemory: () => 1_000, rss: () => 5_000, peakRss: () => undefined, deferMs: 1, shedBackstopMs: 7,
+    sleep: (ms) => (ms === 7 ? Promise.resolve() : new Promise<void>((resolve) => void retries.push(resolve))),
+  });
   await supervisor.start();
   await supervisor.requestHandoff();
+  for (let i = 0; i < 4; i += 1) {
+    retries.shift()?.();
+    await tick(2);
+  }
   const deferred = logs.filter((l) => l.step === "serve.handoff_deferred");
-  assert.ok(deferred.length >= 1);
-  assert.deepEqual({ reason: deferred[0].extra?.reason, freeBytes: deferred[0].extra?.freeBytes, needBytes: deferred[0].extra?.needBytes }, { reason: "memory", freeBytes: 1_000, needBytes: 5_000 });
-  for (let i = 0; i < 20 && exits.length === 0; i += 1) await tick(5);
+  assert.equal(deferred.length, 5, "every refusal defers again: pressure never ends the supervisor");
+  assert.deepEqual(
+    { reason: deferred[0].extra?.reason, hold: deferred[0].extra?.hold, freeBytes: deferred[0].extra?.freeBytes, needBytes: deferred[0].extra?.needBytes },
+    { reason: "memory", hold: "container_headroom", freeBytes: 1_000, needBytes: 5_000 },
+  );
   assert.equal(fleet.generations.length, 1, "no standby is forked while headroom is short");
-  assert.deepEqual(exits, [0], "repeated deferrals fall back to today's restart rather than never recycling");
-  assert.equal(logs.filter((l) => l.step === "serve.handoff_deferred").length, 3);
+  assert.deepEqual(exits, [], "no legacy exit");
   assert.equal(logs.find((l) => l.step === "serve.handoff_shed")?.extra?.answered, false, "a generation that never answers the shed is waited out by its backstop");
+  await supervisor.shutdown("test");
 });
 
 test("a memory-short handoff asks the active generation to shed before it defers", async () => {
@@ -184,6 +208,7 @@ test("a memory-short handoff asks the active generation to shed before it defers
   const { supervisor, logs } = decisionSupervisor(fleet, {
     freeMemory: () => (shedAsked() ? 9_000 : 1_000),
     rss: () => 5_000,
+    peakRss: () => undefined,
     shedBackstopMs: 123,
     sleep: (ms) => (ms === 123 ? new Promise<void>(() => {}) : Promise.resolve()),
   });
@@ -213,7 +238,10 @@ test("a memory-short handoff asks the active generation to shed before it defers
 test("a standby needs its boot peak and not its resident bytes at promotion", async () => {
   const fleet = fakeFleet();
   // Every generation reads 1 000 resident now; the cold one peaked at 1 500 while it booted.
-  const { supervisor, logs } = decisionSupervisor(fleet, { freeMemory: () => 1_400, rss: () => 1_000, peakRss: (pid) => (pid === 1 ? 1_500 : undefined), deferMs: 1 });
+  const { supervisor, logs } = decisionSupervisor(fleet, {
+    freeMemory: () => 1_400, rss: () => 1_000, peakRss: (pid) => (pid === 1 ? 1_500 : undefined), deferMs: 1,
+    sleep: (ms) => (ms === 1 ? new Promise<void>(() => {}) : Promise.resolve()),
+  });
   await supervisor.start();
   await supervisor.requestHandoff();
   const deferred = logs.find((l) => l.step === "serve.handoff_deferred")?.extra;
@@ -241,6 +269,7 @@ test("a shed generation left serving by an abandoned handoff is asked to restore
   const { supervisor, logs } = decisionSupervisor(fleet, {
     freeMemory: () => (shedAsked() ? 9_000 : 1_000),
     rss: () => 5_000,
+    peakRss: () => undefined,
     clock: { now: () => (now += 1_000), iso: () => "" } as never,
     readyBoundMs: 5_000,
   });
@@ -261,8 +290,9 @@ test("a shed generation waiting on a memory retry stays cold until the handoff e
   const { supervisor, logs, exits } = decisionSupervisor(fleet, {
     freeMemory: () => 1_000,
     rss: () => 5_000,
+    peakRss: () => undefined,
     deferMs: 50,
-    sleep: (ms) => (ms === 50 ? new Promise<void>((resolve) => (releaseRetry = resolve)) : Promise.resolve()),
+    sleep: (ms) => (ms >= 50 ? new Promise<void>((resolve) => (releaseRetry = resolve)) : Promise.resolve()),
   });
   await supervisor.start();
   const cold = fleet.generations[0];
@@ -270,13 +300,15 @@ test("a shed generation waiting on a memory retry stays cold until the handoff e
   await supervisor.requestHandoff();
   assert.equal(logs.filter((l) => l.step === "serve.handoff_deferred").length, 1, "positive control: the shed did not free enough and a retry is pending");
   assert.equal(cold.sent.some((m) => m.type === "rmd.restore"), false, "re-warming now would only be shed again by the retry");
-  for (let i = 0; i < 20 && exits.length === 0; i += 1) {
+  for (let i = 0; i < 5; i += 1) {
     releaseRetry();
     await tick(1);
   }
-  assert.deepEqual(exits, [0], "the third deferral replaces the process");
-  assert.equal(cold.sent.some((m) => m.type === "rmd.restore"), false, "a replaced generation has nothing to restore");
+  assert.deepEqual(exits, [], "W1-T8311: a third and later deferral keeps the generation serving");
+  assert.ok(logs.filter((l) => l.step === "serve.handoff_deferred").length >= 4);
+  assert.equal(cold.sent.some((m) => m.type === "rmd.restore"), false, "a retry is always pending, so the shed generation stays cold");
   assert.equal(logs.some((l) => l.step === "serve.shed_restore"), false);
+  await supervisor.shutdown("test");
 });
 
 test("handoff requests coalesce, and only the active generation can ask", async () => {
@@ -396,13 +428,51 @@ test("a cold generation that asked for a handoff while standby gets it once prom
 
 test("a handoff whose standby smoke read answers 503 is still aborted and the old generation keeps serving", async () => {
   const fleet = fakeFleet((slot) => ({ smoke503: slot.sha === "sha-2" }));
-  const { supervisor, logs } = decisionSupervisor(fleet);
+  let now = 0;
+  const { supervisor, logs } = decisionSupervisor(fleet, { clock: { now: () => (now += 1_000), iso: () => "" } as never, readyBoundMs: 5_000 });
   await supervisor.start();
   await supervisor.requestHandoff();
   assert.equal(logs.find((l) => l.step === "serve.handoff_aborted")?.extra?.criterion, "smoke /v1/status");
   assert.deepEqual(fleet.generations[1].killed, ["SIGKILL"], "the standby never served");
   assert.equal(supervisor.activeSha(), "sha-1");
   assert.deepEqual(fleet.generations[0].sent.map((m) => m.type), ["rmd.promote"], "the serving generation was never drained");
+});
+
+test("a recovering smoke read rechecks readiness and every route before promotion", async () => {
+  const fleet = fakeFleet();
+  let statusReads = 0;
+  const checked: string[] = [];
+  const { supervisor } = decisionSupervisor(fleet, {
+    get: async (socket, path) => {
+      if (socket !== "/sock/2") return fleet.get!(socket, path);
+      checked.push(path.split("?")[0]);
+      if (path === "/v1/status" && statusReads++ === 0) {
+        assert.equal(supervisor.activeSha(), "sha-1", "the old generation still owns the port");
+        return { status: 503, body: "warming" };
+      }
+      if (path.startsWith("/v1/ready") && statusReads === 1 && checked.filter((p) => p === "/v1/ready").length === 2)
+        return { status: 503, body: "readiness regressed" };
+      return fleet.get!(socket, path);
+    },
+  });
+  await supervisor.start();
+  await supervisor.requestHandoff();
+  assert.equal(supervisor.activeSha(), "sha-2");
+  assert.deepEqual(checked, ["/v1/ready", "/v1/version", "/v1/status", "/v1/ready", "/v1/ready", "/v1/version", "/v1/status", "/v1/views/versions"]);
+});
+
+test("a non-503 smoke failure is refused immediately", async () => {
+  const fleet = fakeFleet();
+  let refused = 0;
+  const { supervisor, logs } = decisionSupervisor(fleet, {
+    get: async (socket, path) => socket === "/sock/2" && path === "/v1/status"
+      ? (refused++, { status: 401, body: "unauthorized" }) : fleet.get!(socket, path),
+  });
+  await supervisor.start();
+  await supervisor.requestHandoff();
+  assert.equal(refused, 1);
+  assert.equal(supervisor.activeSha(), "sha-1");
+  assert.deepEqual(logs.find((l) => l.step === "serve.handoff_aborted")?.extra?.detail, { status: 401 });
 });
 
 test("a rollback to the previous slot is promoted even while its smoke read answers 503", async () => {
@@ -452,6 +522,206 @@ test("a cold start that never listens exits 1, and a failed restart falls back t
   for (let i = 0; i < 50 && second.exits.length === 0; i += 1) await tick(1);
   assert.deepEqual(second.exits, [0]);
   assert.ok(second.steps().includes("serve.generation_restart_failed"));
+});
+
+// ── W1-T8311: a memory-unsafe upgrade is deferred, never turned into downtime ──────────────────
+
+/** A retry gate: each deferral's retry sleep waits here until the test releases it. */
+function retryGate(deferMs: number) {
+  const waiting: Array<{ ms: number; wake: () => void }> = [];
+  return {
+    sleep: (ms: number): Promise<void> => (ms >= deferMs ? new Promise<void>((resolve) => void waiting.push({ ms, wake: resolve })) : Promise.resolve()),
+    async release(): Promise<number | undefined> {
+      const next = waiting.shift();
+      next?.wake();
+      for (let i = 0; i < 5; i += 1) await tick(1);
+      return next?.ms;
+    },
+  };
+}
+
+test("a memory-deferred serve upgrade keeps the healthy console answering", async () => {
+  const fleet = fakeFleet((slot) => ({ readyAfter: slot.sha === "sha-1" ? 0 : 2 }));
+  const gate = retryGate(10);
+  let pressured = true;
+  let prepares = 0;
+  const { supervisor, logs, exits, steps } = decisionSupervisor(fleet, {
+    deferMs: 10,
+    pollMs: 1,
+    sleep: gate.sleep,
+    prepare: async () => ({ dir: `/slot-${++prepares}`, sha: `sha-${prepares + 1}` }),
+    hostPressure: async () => ({ ...AMPLE, ...(pressured ? { psiFullAvg10: 2.53, swapInPagesPerSec: 12 } : {}), atMs: Date.now() }),
+  });
+  await supervisor.start();
+  const cold = fleet.generations[0];
+  await supervisor.requestHandoff();
+  const retryMs: Array<number | undefined> = [];
+  for (let i = 0; i < 4; i += 1) retryMs.push(await gate.release());
+
+  const deferred = logs.filter((l) => l.step === "serve.handoff_deferred").map((l) => l.extra!);
+  assert.equal(deferred.length, 5, "five refusals, two past the old third-refusal exit");
+  assert.deepEqual(deferred.map((d) => d.hold), ["psi", "psi", "psi", "psi", "psi"], "each refusal names its hold");
+  assert.deepEqual(deferred.map((d) => d.preserved), [true, true, true, true, true], "the kept generation positively answered every time");
+  assert.deepEqual(retryMs, [10, 20, 40, 80], "the existing retry, doubling per refusal");
+  assert.deepEqual(exits, [], "pressure never exits the supervisor");
+  assert.equal(steps().includes("serve.handoff_legacy_exit"), false);
+  assert.equal(fleet.generations.length, 1, "zero standby forks while refused");
+  assert.deepEqual(cold.sent.map((m) => m.type), ["rmd.promote"], "the healthy generation was never drained");
+  assert.equal((await fleet.get!("/sock/1", "/v1/ready")).status, 200, "and still answers");
+  assert.equal(supervisor.activeSha(), "sha-1");
+
+  // A positively admitted retry supersedes every obsolete candidate and takes the normal path.
+  pressured = false;
+  await gate.release();
+  assert.equal(fleet.generations.length, 2, "exactly one standby, forked only once admitted");
+  assert.equal(fleet.generations[1].slot.sha, "sha-7", "the newest target, never an obsolete deferred one");
+  const admitted = logs.find((l) => l.step === "serve.handoff_admitted")?.extra;
+  assert.equal(admitted?.sha, "sha-7");
+  assert.equal(admitted?.deferrals, 5);
+  assert.deepEqual(fleet.generations[1].sent.map((m) => m.type), ["rmd.promote"], "promoted after its readiness polls");
+  assert.deepEqual(cold.sent.map((m) => m.type), ["rmd.promote", "rmd.drain"], "the old generation drained only after the promote");
+  assert.equal(logs.find((l) => l.step === "serve.handoff_done")?.extra?.toSha, "sha-7");
+  assert.equal(supervisor.activeSha(), "sha-7");
+
+  // A kept generation that does NOT positively answer is never reported preserved.
+  const sick = fakeFleet();
+  const sickGate = retryGate(10);
+  let coldReady = 200;
+  const unhealthy = decisionSupervisor(sick, {
+    deferMs: 10,
+    sleep: sickGate.sleep,
+    get: async (socket, path) => (socket === "/sock/1" && path === "/v1/ready" ? { status: coldReady, body: "{}" } : sick.get!(socket, path)),
+    hostPressure: async () => ({ ...AMPLE, memAvailableBytes: 1 * MIB, atMs: Date.now() }),
+  });
+  await unhealthy.supervisor.start();
+  coldReady = 503;
+  await unhealthy.supervisor.requestHandoff();
+  const row = unhealthy.logs.find((l) => l.step === "serve.handoff_deferred")?.extra;
+  assert.deepEqual({ hold: row?.hold, preserved: row?.preserved }, { hold: "host_headroom", preserved: false });
+  assert.deepEqual(unhealthy.exits, []);
+  await unhealthy.supervisor.shutdown("test");
+  await supervisor.shutdown("test");
+});
+
+test("serve upgrade admission preserves unknowns and genuine recovery paths", async () => {
+  const at = 1_000_000;
+  const fits = { thresholds: THRESHOLDS, candidatePeakBytes: 7_680 * MIB, peakBasis: "boot peak", nowMs: at };
+  const reading = (over: Partial<HostPressureReading> = {}): HostPressureReading => ({ ...AMPLE, atMs: at, ...over });
+  const hold = (i: Parameters<typeof judgeServeUpgradeAdmission>[0]): string | undefined => {
+    const v = judgeServeUpgradeAdmission(i);
+    return v.admit ? undefined : v.hold;
+  };
+  // Unknowns are named holds, never zero pressure or a fit.
+  assert.equal(hold({ ...fits, reading: undefined }), "pressure_unread");
+  assert.equal(hold({ ...fits, reading: reading({ psiFullAvg10: undefined, psiSomeAvg10: undefined, unread: ["/proc/pressure/memory: ENOENT"] }) }), "pressure_unread");
+  assert.equal(hold({ ...fits, reading: reading({ swapInPagesPerSec: undefined }) }), "pressure_unread", "a missing field without a reason is still unread");
+  assert.equal(hold({ ...fits, reading: reading({ atMs: at - 600_001 }) }), "pressure_stale");
+  assert.equal(hold({ ...fits, reading: reading({ atMs: at + 5 }) }), "pressure_stale", "a reading from the future is not fresh");
+  assert.equal(hold({ ...fits, reading: reading(), candidatePeakBytes: undefined }), "peak_unknown");
+  assert.equal(hold({ ...fits, reading: reading(), candidatePeakBytes: 0 }), "peak_unknown", "a zero peak is not a zero-sized candidate");
+  assert.equal(hold({ ...fits, reading: reading(), thresholds: { unread: "policy.yaml: ENOENT" } }), "policy_unread");
+  // Measured pressure refuses against the shipped thresholds.
+  assert.equal(hold({ ...fits, reading: reading({ swapInPagesPerSec: 257 }) }), "swap_in");
+  assert.equal(hold({ ...fits, reading: reading({ psiFullAvg10: 2.53 }) }), "psi");
+  assert.equal(hold({ ...fits, reading: reading({ psiSomeAvg10: 10.5 }) }), "psi");
+  // The 22:57Z minimum: 4 146 167 808 B available does not hold a 7.5 GiB peak over the 2 GiB reserve.
+  assert.equal(hold({ ...fits, reading: reading({ memAvailableBytes: 4_146_167_808 }) }), "host_headroom");
+  const freed = judgeServeUpgradeAdmission({ ...fits, reading: reading({ memAvailableBytes: 4_146_167_808 }), freedBytes: 6_144 * MIB });
+  assert.deepEqual(freed.admit && freed.needBytes, 2_048 * MIB + 1_536 * MIB, "only what the stop frees first is credited, once");
+  assert.equal(judgeServeUpgradeAdmission({ ...fits, reading: reading() }).admit, true, "positive control");
+
+  // The default reader names each unread measurement and measures swap-in over its window.
+  let vmstat = 100;
+  const files: Record<string, () => string> = {
+    "/proc/vmstat": () => `pgpgin 1\npswpin ${(vmstat += 50)}\n`,
+    "/proc/meminfo": () => "MemTotal: 16000000 kB\nMemAvailable:    4049000 kB\n",
+    "/proc/pressure/memory": () => "some avg10=1.50 avg60=0.10 avg300=0.00 total=1\nfull avg10=0.25 avg60=0.00 avg300=0.00 total=1\n",
+  };
+  let now = 0;
+  const read = (path: string): string => {
+    const f = files[path];
+    if (!f) throw new Error(`ENOENT: ${path}`);
+    return f();
+  };
+  const measured = await readHostPressure({ read, clock: { now: () => now, iso: () => "" } as never, sleep: async (ms) => void (now += ms), sampleMs: 500 });
+  assert.deepEqual(measured, { atMs: 500, memAvailableBytes: 4_049_000 * 1024, swapInPagesPerSec: 100, psiSomeAvg10: 1.5, psiFullAvg10: 0.25, unread: [] });
+  delete files["/proc/pressure/memory"];
+  const noPsi = await readHostPressure({ read, clock: { now: () => now, iso: () => "" } as never, sleep: async (ms) => void (now += ms) });
+  assert.match(noPsi.unread.join(";"), /\/proc\/pressure\/memory: ENOENT/);
+  assert.equal(hold({ ...fits, reading: noPsi, nowMs: now }), "pressure_unread");
+  const frozen = await readHostPressure({ read, clock: { now: () => 7, iso: () => "" } as never, sleep: async () => {} });
+  assert.match(frozen.unread.join(";"), /no time elapsed/, "no window, no rate: never a zero swap-in");
+
+  // The baked supervisor's threshold reader agrees with the validated loader on the shipped policy.
+  const shipped = loadHostMemoryBudgetPolicy(join(REPO_ROOT, "plan", "policy.yaml"));
+  assert.deepEqual(readServeUpgradeThresholds(REPO_ROOT), {
+    hostReserveBytes: shipped.hostReserveMib * MIB, swapInPagesPerSecMax: shipped.swapInPagesPerSecMax,
+    psiSomeAvg10Max: shipped.psiSomeAvg10Max, psiFullAvg10Max: shipped.psiFullAvg10Max, staleMs: shipped.staleReadingMs,
+  });
+  assert.match(String((serveUpgradeThresholdsFromPolicy("sweep:\n  hostMemoryBudget:\n    hostReserveMib:\n      value: 2048\n") as { unread: string }).unread), /swapInPagesPerSecMax/);
+  assert.match((readServeUpgradeThresholds("/definitely/not/a/slot") as { unread: string }).unread, /policy\.yaml/);
+
+  // The supervisor holds on each unknown and forks nothing.
+  const unknowns: Array<[string, Partial<ServeSupervisorOptions>]> = [
+    ["peak_unknown", { peakRss: () => undefined, rss: () => undefined }],
+    ["pressure_unread", { hostPressure: async () => { throw new Error("EIO"); } }],
+    ["pressure_stale", { hostPressure: async () => ({ ...AMPLE, atMs: Date.now() - 3_600_000 }) }],
+    ["policy_unread", { upgradeThresholds: () => ({ unread: "no policy" }) }],
+  ];
+  for (const [name, over] of unknowns) {
+    const fleet = fakeFleet();
+    const run = decisionSupervisor(fleet, { deferMs: 10, sleep: (ms) => (ms >= 10 ? new Promise<void>(() => {}) : Promise.resolve()), ...over });
+    await run.supervisor.start();
+    await run.supervisor.requestHandoff();
+    assert.equal(run.logs.find((l) => l.step === "serve.handoff_deferred")?.extra?.hold, name, name);
+    assert.equal(fleet.generations.length, 1, `${name}: no standby`);
+    assert.deepEqual(run.exits, [], name);
+    await run.supervisor.shutdown("test");
+  }
+
+  // Genuine recovery keeps its own outcomes, even on a pressured host.
+  const pressured = { hostPressure: async () => ({ ...AMPLE, psiFullAvg10: 50, atMs: Date.now() }) };
+  const crashFleet = fakeFleet();
+  const crash = decisionSupervisor(crashFleet, pressured);
+  await crash.supervisor.start();
+  crashFleet.generations[0].die(1);
+  for (let i = 0; i < 20 && crashFleet.generations.length < 2; i += 1) await tick(1);
+  assert.equal(crash.logs.find((l) => l.step === "serve.generation_crashed")?.extra?.sha, "sha-1", "a real crash is replaced, not admitted");
+  assert.equal(crash.supervisor.activeSha(), "sha-1");
+
+  const rollFleet = fakeFleet();
+  let admitAll = true;
+  const roll = decisionSupervisor(rollFleet, { hostPressure: async () => ({ ...AMPLE, ...(admitAll ? {} : { psiFullAvg10: 50 }), atMs: Date.now() }) });
+  await roll.supervisor.start();
+  await roll.supervisor.requestHandoff();
+  admitAll = false;
+  rollFleet.generations[1].die(1);
+  for (let i = 0; i < 20 && roll.supervisor.activeSha() !== "sha-1"; i += 1) await tick(1);
+  assert.equal(roll.logs.find((l) => l.step === "serve.handoff_rolled_back")?.extra?.sha, "sha-2", "rollback is its own outcome");
+  assert.equal(roll.supervisor.activeSha(), "sha-1");
+
+  const readyFleet = fakeFleet((slot) => (slot.sha === "sha-2" ? { never: true } : {}));
+  let clock = 0;
+  const notReady = decisionSupervisor(readyFleet, { clock: { now: () => (clock += 1_000), iso: () => "" } as never, readyBoundMs: 5_000 });
+  await notReady.supervisor.start();
+  await notReady.supervisor.requestHandoff();
+  assert.equal(notReady.logs.find((l) => l.step === "serve.handoff_aborted")?.extra?.criterion, "ready_bound", "an admitted standby can still fail readiness");
+  assert.equal(notReady.supervisor.activeSha(), "sha-1");
+  assert.equal(notReady.steps().includes("serve.handoff_deferred"), false);
+
+  const offFleet = fakeFleet();
+  const off = decisionSupervisor(offFleet, { ...pressured, handoffEnabled: () => false });
+  await off.supervisor.start();
+  await off.supervisor.requestHandoff();
+  assert.equal(off.logs.find((l) => l.step === "serve.handoff_legacy_exit")?.extra?.reason, "handoff_off", "the operator kill switch still exits");
+  assert.deepEqual(off.exits, [0]);
+
+  const stopFleet = fakeFleet();
+  const stop = decisionSupervisor(stopFleet, pressured);
+  await stop.supervisor.start();
+  await stop.supervisor.shutdown("sigterm");
+  assert.deepEqual(stop.exits, [0], "an explicit stop drains and exits");
+  assert.deepEqual(stopFleet.generations[0].sent.map((m) => m.type), ["rmd.promote", "rmd.drain"]);
 });
 
 // ── the real swap: cluster generations on one shared handle, under load ─────────────────────────
@@ -528,9 +798,33 @@ function realSupervisor(port: number, modes: Record<string, string>) {
     exit: (code) => exits.push(code),
     pollMs: 50,
     readyBoundMs: 4_000,
+    // The swap itself is under test here, not this test host's own memory pressure.
+    hostPressure: async () => ({ ...AMPLE, atMs: Date.now() }),
+    upgradeThresholds: () => THRESHOLDS,
   });
   return { supervisor, logs, exits };
 }
+
+test("a real standby that briefly answers 503 becomes ready before it replaces the active generation", { timeout: 120_000 }, async () => {
+  const port = await freePort();
+  const { supervisor, logs } = realSupervisor(port, { "sha-2": "status-warming" });
+  try {
+    await supervisor.start();
+    assert.equal((await hit(port, false, "GET")).sha, "sha-1");
+    const handoff = supervisor.requestHandoff();
+    while (supervisor.activeSha() === "sha-1" && !logs.some((l) => l.step === "serve.handoff_aborted")) {
+      const reply = await hit(port, false, "GET");
+      assert.equal(reply.status, 200, "the active generation serves throughout the standby wait");
+      await tick(10);
+    }
+    await handoff;
+    assert.equal(supervisor.activeSha(), "sha-2");
+    assert.equal(logs.some((l) => l.step === "serve.handoff_aborted"), false);
+    assert.equal((await hit(port, false, "GET")).sha, "sha-2");
+  } finally {
+    await supervisor.shutdown("test");
+  }
+});
 
 test("zero connection errors across three supervised swaps under load", { timeout: 120_000 }, async () => {
   const port = await freePort();
@@ -646,4 +940,90 @@ test("the supervisor's default seams read cgroup memory, procfs and the kill swi
   server.close();
   await assert.rejects(socketGet(join(gens, "missing.sock"), "/"));
   assert.equal(typeof clusterSpawn, "function");
+});
+
+// W1-T8378: the peak a handoff is priced on is refreshed from the still-active generation before any fork.
+const GIB = 1024 * MIB;
+
+test("unit test: a serve handoff refreshes its peak after promotion before forking", async () => {
+  // Early sample at promotion 1 GiB; the active generation's high-water mark later reaches 4 GiB.
+  let hwm = 1 * GIB;
+  const fleet = fakeFleet();
+  const { supervisor, logs } = decisionSupervisor(fleet, {
+    peakRss: () => hwm,
+    hostPressure: async () => ({ ...AMPLE, memAvailableBytes: 5 * GIB, atMs: Date.now() }),
+    deferMs: 10,
+    sleep: (ms) => (ms >= 10 ? new Promise<void>(() => {}) : Promise.resolve()),
+  });
+  await supervisor.start();
+  hwm = 4 * GIB; // grows after the supervisor's one promotion-time sample
+  await supervisor.requestHandoff();
+  const deferred = logs.find((l) => l.step === "serve.handoff_deferred")?.extra;
+  assert.equal(deferred?.hold, "host_headroom", "1 GiB would fit in 5 GiB over a 2 GiB reserve; the 4 GiB later peak needs 6 GiB");
+  assert.match(String(deferred?.detail), /need 6442450944 B/);
+  assert.equal(fleet.generations.length, 1, "no standby was forked");
+  assert.equal(supervisor.activeSha(), "sha-1", "the old generation is kept");
+  await supervisor.shutdown("test");
+
+  // Positive control: the same early sample with no later growth is admitted, and an ample host promotes normally.
+  const ctlFleet = fakeFleet();
+  const ctl = decisionSupervisor(ctlFleet, {
+    peakRss: () => 1 * GIB,
+    hostPressure: async () => ({ ...AMPLE, memAvailableBytes: 5 * GIB, atMs: Date.now() }),
+  });
+  await ctl.supervisor.start();
+  await ctl.supervisor.requestHandoff();
+  assert.equal(ctl.supervisor.activeSha(), "sha-2", "a peak that fits still hands off");
+  const ample = fakeFleet();
+  let ampleHwm = 1 * GIB;
+  const roomy = decisionSupervisor(ample, { peakRss: () => ampleHwm });
+  await roomy.supervisor.start();
+  ampleHwm = 4 * GIB;
+  await roomy.supervisor.requestHandoff();
+  assert.equal(roomy.supervisor.activeSha(), "sha-2", "a genuinely ample host promotes despite the larger peak");
+  assert.match(String(roomy.logs.find((l) => l.step === "serve.handoff_admitted")?.extra?.peakBasis), /generation 1 high-water mark/);
+});
+
+test("unit test: serve peak evidence keeps its generation and unknown state", async () => {
+  // A later missing, invalid or lower reading never shrinks a known peak, and never fabricates one.
+  let current: number | undefined = 4 * GIB;
+  const fleet = fakeFleet();
+  const { supervisor, logs } = decisionSupervisor(fleet, {
+    peakRss: () => current,
+    hostPressure: async () => ({ ...AMPLE, memAvailableBytes: 5 * GIB, atMs: Date.now() }),
+    deferMs: 10,
+    sleep: (ms) => (ms >= 10 ? new Promise<void>(() => {}) : Promise.resolve()),
+  });
+  await supervisor.start();
+  const deferredRows = (): Array<Record<string, unknown> | undefined> => logs.filter((l) => l.step === "serve.handoff_deferred").map((l) => l.extra);
+  for (const later of [undefined, Number.NaN, -1, 0, 1 * GIB]) {
+    current = later;
+    const before = deferredRows().length;
+    await supervisor.requestHandoff();
+    const row = deferredRows()[before];
+    assert.equal(row?.hold, "host_headroom", `reading ${String(later)} does not shrink the known 4 GiB peak`);
+    assert.match(String(row?.detail), /candidate 4294967296/);
+  }
+  assert.equal(fleet.generations.length, 1, "nothing was forked on a shrunken or fabricated peak");
+  await supervisor.shutdown("test");
+
+  // With no positive reading at all the named unknown hold remains, not a zero-sized candidate.
+  const unknownFleet = fakeFleet();
+  const unknown = decisionSupervisor(unknownFleet, {
+    peakRss: () => Number.NaN, rss: () => undefined, deferMs: 10,
+    sleep: (ms) => (ms >= 10 ? new Promise<void>(() => {}) : Promise.resolve()),
+  });
+  await unknown.supervisor.start();
+  await unknown.supervisor.requestHandoff();
+  const hold = unknown.logs.find((l) => l.step === "serve.handoff_deferred")?.extra;
+  assert.equal(hold?.hold, "peak_unknown");
+  assert.equal(unknownFleet.generations.length, 1);
+  await unknown.supervisor.shutdown("test");
+
+  // The evidence names the generation that produced it.
+  const named = fakeFleet();
+  const rows = decisionSupervisor(named, { peakRss: () => 1 * GIB });
+  await rows.supervisor.start();
+  await rows.supervisor.requestHandoff();
+  assert.match(String(rows.logs.find((l) => l.step === "serve.handoff_admitted")?.extra?.peakBasis), /generation 1 /);
 });

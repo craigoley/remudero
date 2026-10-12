@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -94,7 +94,7 @@ test("W1-T3792: writable Codex resume keeps fresh containment roots", async () =
     const cwdIndex = args.indexOf("-C");
     const writableRoots = args.flatMap((arg, index) => arg === "--add-dir" ? [args[index + 1]] : []);
     assert.equal(args[cwdIndex + 1], worktree, "the fresh invocation keeps the requested worktree cwd");
-    assert.deepEqual(writableRoots, [realpathSync(join(worktree, ".git"))], "only this worktree's Git administrative root is writable");
+    assert.deepEqual(writableRoots, [], "W1-T6148: no git administrative root is writable; the harness commits");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

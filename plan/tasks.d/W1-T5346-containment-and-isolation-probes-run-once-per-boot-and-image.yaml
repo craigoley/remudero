@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-02: implement dispatch admission research (lane-time attribution); operator ruling that the probes run once per boot and on image or harness change"
   plan_refs: [W1-T17, W1-T5345]
   files: [src/run-task.ts, MASTER-PLAN.md, test/containment-and-isolation-probes-run-once-per-boot-and-image.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

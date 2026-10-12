@@ -1,0 +1,14 @@
+violation: none
+rule: >
+  W1-T3594: the task authoring lane receives a matched lesson that explains the
+  squash trailer refusal and its two repairs; the cited incident executes as a
+  proof against the active learning entry.
+verdict:
+  state: success
+  capped: false
+  testTheater: false
+  criteriaTampered: false
+arm: true
+criteria:
+  - met: true
+    proof_exec: executed_pass

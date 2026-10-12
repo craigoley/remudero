@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-02: runnable-queue proof audit (workflow-push-rejected); operator declined to grant the App workflows permission"
   plan_refs: [W1-T4818, W1-T3720, W1-T5018, W1-T4690, W1-T5102, W1-T4057, W1-T4071]
   files: [src/lib/drain.ts, test/a-workflow-editing-task-is-routed-to-an-operator-build.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

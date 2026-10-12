@@ -1,0 +1,106 @@
+/** Offline CLI preparation and projection. Provider execution requires a separately admitted adapter. */
+import { mkdirSync, writeFileSync, existsSync, realpathSync, openSync, fstatSync, readSync, closeSync, constants } from "node:fs";
+import { dirname, resolve, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { canarySuiteDigest, commonCanarySuite, weeklyCanarySuite, MODEL_CANARY_VERSION } from "./model-canary-suite.js";
+import { projectCanaryRuns, type CanaryRun } from "./model-canary-metrics.js";
+import { renderCanaryReport } from "./model-canary-report.js";
+import { retentionCanaryProtocol } from "./model-canary-retention.js";
+import { contextCanaryProtocol } from "./model-canary-context.js";
+import { randomBytes } from "node:crypto";
+import { rotatingCanarySuite } from "./model-canary-rotation.js";
+
+function boundedInput(input: string, limit = 8 * 1024 * 1024): string {
+  if (!Number.isInteger(constants.O_NOFOLLOW) || constants.O_NOFOLLOW <= 0
+    || !Number.isInteger(constants.O_NONBLOCK) || constants.O_NONBLOCK <= 0)
+    throw new Error("canary-input-platform-unsupported");
+  const fd = openSync(input, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile()) throw new Error("canary-input-regular-file-required");
+    if (info.size > limit) throw new Error("canary-input-bound");
+    const buffer = Buffer.alloc(limit + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const count = readSync(fd, buffer, length, buffer.length - length, null);
+      if (count === 0) break;
+      length += count;
+    }
+    if (length > limit) throw new Error("canary-input-bound");
+    return buffer.subarray(0, length).toString("utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function privateOutput(dir: string, name: string, data: string) {
+  let parent = resolve(dir);
+  // Resolve the first existing ancestor too: a new directory below a symlink is not private.
+  while (!existsSync(parent)) parent = dirname(parent);
+  parent = realpathSync(parent);
+  while (true) {
+    if (existsSync(join(parent, ".git"))) throw new Error("canary-output-inside-git");
+    const next = dirname(parent); if (next === parent) break; parent = next;
+  }
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  writeFileSync(join(dir, name), data, { encoding: "utf8", flag: "wx", mode: 0o600 });
+}
+
+export function canaryCommand(argv: readonly string[]) {
+  if (argv[0] === "prepare-rotation") {
+    const [, outDir, day, keyFile] = argv;
+    if (argv.length !== 4 || !outDir || !day || !keyFile)
+      throw new Error("usage: model-canary-command prepare-rotation <private-out-dir> <day> <private-key-file>");
+    const key = boundedInput(keyFile, 66);
+    const pack = rotatingCanarySuite(day, key.replace(/\r?\n$/, ""));
+    const { cases, ...metadata } = pack;
+    // Private scorer records retain expectations; the separate request manifest never does.
+    privateOutput(outDir, "model-canary-rotation-scorer.json", JSON.stringify(pack, null, 2) + "\n");
+    privateOutput(outDir, "model-canary-rotation-manifest.json", JSON.stringify({ ...metadata,
+      state: "prepared-not-activated", tasks: cases.map(({ expected: _scorerOnly, ...task }) => task),
+      cash: { globalDailyCapUsd: 25, experimentDailyCapUsd: 0, premiumCashEligible: false },
+      requires: ["published-source", "qualified-adapter", "capacity-admission", "shared-owner", "agreed-experiment-budget"] }, null, 2) + "\n");
+    return { state: "prepared-not-activated", suiteHash: pack.suiteHash, cases: cases.length };
+  }
+  const [command, outDir, input] = argv;
+  if (!outDir || !["prepare", "project"].includes(command ?? "")
+    || argv.length !== (command === "prepare" ? 2 : 3))
+    throw new Error("usage: model-canary-command prepare <private-out-dir> | project <private-out-dir> <run-array.json>");
+  if (command === "prepare") {
+    const daily = commonCanarySuite(), weekly = weeklyCanarySuite();
+    const namespace = randomBytes(32).toString("hex");
+    const manifest = { version: MODEL_CANARY_VERSION, state: "prepared-not-activated", dailyCases: daily.length,
+      weeklyCases: weekly.length, suiteHash: canarySuiteDigest([...daily, ...weekly]),
+      tasks: [...daily, ...weekly].map(({ expected: _heldOut, ...task }) => task),
+      limits: { concurrency: 1, maxCallsDailyCase: 3, wallMs: 60_000, maxOutputBytes: 16_384 },
+      cash: { globalDailyCapUsd: 25, experimentDailyCapUsd: 0, premiumCashEligible: false },
+      requires: ["published-source", "qualified-adapter", "capacity-admission", "shared-owner", "agreed-experiment-budget"],
+      retentionProtocols: [25, 50].map(turns => {
+        const p = retentionCanaryProtocol(turns as 25 | 50);
+        return { turns, suiteHash: p.suiteHash, instruction: p.instruction,
+          prompts: p.cases.map(c => ({ id: c.id, prompt: c.prompt })), sampleUnit: "whole-conversation" };
+      }),
+      contextProfiles: ([2048, 16384, 65536] as const).flatMap(bytes => (["first-use", "repeat"] as const).map(treatment => {
+        const p = contextCanaryProtocol(bytes, treatment, namespace);
+        return { version: p.version, bytes, byteUnit: p.byteUnit, treatment, namespace, suiteHash: p.suiteHash,
+          cacheGuarantee: p.cacheGuarantee, sampleUnit: p.sampleUnit,
+          tasks: p.cases.map(({ expected: _scorerOnly, ...task }) => task) };
+      })),
+      deeperWeekly: { patchExecution: "pending-isolated-scorer", retention25And50Turns: "native-protocol-prepared-adapter-pending", cacheProfiles: "native-byte-protocol-prepared-adapter-pending" } };
+    privateOutput(outDir, "model-canary-manifest.json", JSON.stringify(manifest, null, 2) + "\n");
+    return { state: manifest.state, suiteHash: manifest.suiteHash };
+  }
+  if (!input) throw new Error("canary-input-bound");
+  const value: unknown = JSON.parse(boundedInput(input));
+  if (!Array.isArray(value)) throw new Error("canary-run-array-required");
+  const runs = value as CanaryRun[], projection = projectCanaryRuns(runs);
+  privateOutput(outDir, "model-canary-metrics.json", JSON.stringify(projection, null, 2) + "\n");
+  privateOutput(outDir, "model-canary-report.html", renderCanaryReport(runs));
+  return { state: "private-projection", runs: projection.uniqueRuns };
+}
+
+// diff-cov: process-boundary — standalone CLI stdout flush and exit; the native child control proves this entry.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const result = canaryCommand(process.argv.slice(2));
+  process.stdout.write(JSON.stringify(result) + "\n", () => process.exit(0));
+}

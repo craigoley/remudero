@@ -22,11 +22,10 @@
   risk_ruling:
     verdict: "low"
     action: proceed
-    confidence: 0.85
+    confidence: 0.9
     reasons:
-      - "The declared file is only learnings/ci.yaml. The description shows this is a documentation-style learnings entry and not a change to CI, merge, deploy, review policy, secrets or permissions."
-      - "The acceptance criterion is a grep check that the entry exists (ci-learning:8053:coverage-shard (7/8)). That makes the finding verifiable from what is shown."
-      - "Nothing in the description shows data deletion, an irreversible action or an operator-only decision. The PR still goes through CI and review."
-      - "The ci-learning family has 1 merged and 0 declined task, so its track record is clean though thin."
-    judged_at: "2026-10-02T03:34:34.188Z"
+      - "The filed plan scopes the remedy to a matched learnings entry in learnings/ci.yaml, and the declared file list matches that scope."
+      - "The supplied task describes carrying coverage-gate lessons to workers; it does not propose changing gate, merge, deploy, or review policy."
+      - "The supplied gates state reports no failing gate, and the ci-learning family has 2 merged and 0 declined tasks."
+    judged_at: "2026-10-03T07:01:04.393Z"
     pin: "d481059571d631290829385625f3a49fbcb1fc1a41cdc544ed38e9deb81f63ef"

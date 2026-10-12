@@ -16,10 +16,28 @@ raw: >-
   gardener updates this entry in place while the gap persists.
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/11041
+summary:
+  headline: Daemon lane's cost data is missing from most worker calls; choose a fix
+  what_happened: Only 17 of 38 daemon-lane worker calls (44.7%) in the last 7 days
+    recorded the cost field, well below the 90% minimum, and the gap has
+    persisted since 2026-09-28. This follow-up does not block any PR or work.
+  decision: Choose whether to restore the cost field at the daemon lane's ledger
+    write site, or document why this lane legitimately lacks it.
+  options:
+    - label: Restore the cost field
+      consequence: Edit the daemon lane's ledger write site in
+        src/lib/benchmark-evidence.ts so cost is recorded, which should bring
+        coverage back above 90%.
+    - label: Record an exemption
+      consequence: Document why the daemon lane legitimately lacks cost data, so the
+        gardener stops flagging this gap.
+    - label: Leave it open for now
+      consequence: Take no action; the evidence-coverage gardener will keep updating
+        this entry in place while the gap continues.
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

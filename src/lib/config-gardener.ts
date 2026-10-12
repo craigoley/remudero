@@ -1,5 +1,7 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
+import { pathToFileURL } from "node:url";
+import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
 
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { aggregateCacheHitTotals, deriveKnowledgeBudgetCap, measureKnowledgeBudgetPressure, TRIVIAL_DROPPED_WEIGHT_CHARS, type CacheHitTokens, type KnowledgeBudgetDerivation } from "./digest.js";
@@ -18,10 +20,11 @@ import {
   type PromotionRecord,
 } from "./experiment-promotion.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
-import { gardenStatePath, judgeGardenDecision, readGardenState, runGarden, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec, type PrState } from "./gardener.js";
+import { gardenNeedsInventory, gardenPassDue, gardenStatePath, judgeGardenDecision, readGardenState, runGardenAsync, type GardenAction, type GardenCheckout, type GardenPassResult, type GardenSpec, type GardenerDeps, type PrState } from "./gardener.js";
 import { buildEntryWeightIndex, DEFAULT_KNOWLEDGE_BUDGET_CHARS, loadLearningsCorpus } from "./learnings.js";
 import type { LedgerLine } from "./ledger.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
 import type { BillingMode } from "./env.js";
 import { recommendMounts, type MountHeadroomCell, type MountRecommendation } from "./mount-recommender.js";
 import { loadMounts, mountsPath } from "./mounts.js";
@@ -84,6 +87,8 @@ export interface ConfigGardenAction extends GardenAction<ConfigGardenClass> {
   shadowObservations: GuardObservation[];
   /** W1-T4711: `neverWorked` runs kept out of the class sample this action was derived from; absent when none. */
   excludedCount?: number;
+  /** W1-T6466: runs of unknown cost (`costSource: "none"`) kept out of the class costs; absent when none. */
+  unpriced?: number;
 }
 
 export interface ConfigCanary {
@@ -122,9 +127,9 @@ export interface ConfigInventory {
 
 /** Where the gardener reads. Every field has a production default; a test supplies its own. */
 export interface ConfigGardenSources {
-  ledgerRows?: () => Array<Record<string, unknown>>;
-  mountRecommendations?: () => MountRecommendation[];
-  entryWeights?: () => Record<string, number>;
+  ledgerRows?: () => Array<Record<string, unknown>> | Promise<Array<Record<string, unknown>>>;
+  mountRecommendations?: () => MountRecommendation[] | Promise<MountRecommendation[]>;
+  entryWeights?: () => Record<string, number> | Promise<Record<string, number>>;
 }
 
 export const CONFIG_GARDEN_NAME = "config";
@@ -195,30 +200,45 @@ const settledImplement = (r: RunSummary) => r.type === "implement" && r.verdict 
 
 /** Settled implement costs per class, `neverWorked` runs skipped and counted per class (W1-T4711):
  *  a $0 refusal is no sample of what the class costs. */
-export function settledClassCosts(runs: RunSummary[]): { byClass: Map<string, number[]>; excluded: Map<string, number> } {
+export function settledClassCosts(runs: RunSummary[]): { byClass: Map<string, number[]>; excluded: Map<string, number>; unpriced: Map<string, number> } {
   const byClass = new Map<string, number[]>();
   const excluded = new Map<string, number>();
+  const unpriced = new Map<string, number>();
   for (const r of runs.filter(settledImplement)) {
     const key = r.taskClass ?? "unknown";
     if (r.neverWorked) excluded.set(key, (excluded.get(key) ?? 0) + 1);
+    else if (r.costSource === "none") unpriced.set(key, (unpriced.get(key) ?? 0) + 1); // W1-T6466: unknown, not $0
     else byClass.set(key, [...(byClass.get(key) ?? []), r.costUsd]);
   }
-  return { byClass, excluded };
+  return { byClass, excluded, unpriced };
 }
 
 /** Distinct settled tasks among `runs`, how many merged, and their summed cost; a `neverWorked` run
  *  is no canary outcome, only `excludedCount` (W1-T4726). */
 export function cohortOutcome(runs: RunSummary[]): CohortOutcome & { excludedCount?: number } {
   const tasks = new Map<string, boolean>();
+  const pricedTasks = new Set<string>();
   let costUsd = 0;
   let excludedCount = 0;
+  let unpriced = 0;
   for (const r of runs) {
     if (r.verdict === "incomplete") continue;
     if (r.neverWorked) { excludedCount++; continue; }
     tasks.set(r.taskId, (tasks.get(r.taskId) ?? false) || r.verdict === "merged");
+    // W1-T6466: an unpriced run keeps its merge outcome but adds no cost; its $0 is unknown, not free.
+    if (r.costSource === "none") { unpriced++; continue; }
+    pricedTasks.add(r.taskId);
     costUsd += r.costUsd;
   }
-  return { tasks: tasks.size, merged: [...tasks.values()].filter(Boolean).length, costUsd, ...(excludedCount > 0 ? { excludedCount } : {}) };
+  const merged = [...tasks.values()].filter(Boolean).length;
+  const pricedMerged = [...tasks].filter(([id, m]) => m && pricedTasks.has(id)).length;
+  return {
+    tasks: tasks.size,
+    merged,
+    costUsd: unpriced > 0 && pricedTasks.size === 0 ? null : costUsd,
+    ...(unpriced > 0 ? { unpriced, pricedMerged } : {}),
+    ...(excludedCount > 0 ? { excludedCount } : {}),
+  };
 }
 
 /** The canary cohort's runs and the rest's, per {@link ConfigCohort}, since `exposedAt`; `neverWorked`
@@ -274,35 +294,181 @@ export function capDerivation(rows: Array<Record<string, unknown>>, weights: Rec
   return deriveKnowledgeBudgetCap(measureKnowledgeBudgetPressure(underCurrent, weights), mix, current);
 }
 
-export function configInventory(deps: GardenerDeps, sources: ConfigGardenSources = {}): ConfigInventory {
-  const rows = (sources.ledgerRows ?? (() => readLedgerUnionRecordsSync(deps.stateDir, { rotationWindowMs: 60 * 24 * 3600 * 1000, minRotations: 4 }).rows))();
-  const weights = (sources.entryWeights ?? (() => buildEntryWeightIndex(loadLearningsCorpus(resolveRepoLayout(deps.repoRoot).learningsDir))))();
-  const nowMs = (deps.clock ?? systemClock).now();
-  const canaries = readConfigCanaries(deps.stateDir);
+/** W1-T5474: every step the inventory's consumers read. MEASURED 2026-10-03 on the live corpus: unfiltered, the
+ *  60-day read held 2.85M rows at a 3,163 MB heap peak; filtered, 79,826 rows at 211 MB, and the runs and cap
+ *  derivation over the 60-day rotations were identical either way. With no verdict line (a ledger credit can
+ *  still settle the run) `gatherRuns` takes a run's FIRST `pr_url` row of any step, so each step carrying one
+ *  inside a run is listed, and (W1-T5526) prices it from its worker rows only; `aggregateCacheHitTotals`
+ *  folds every tokened call row. */
+export const CONFIG_GARDEN_LEDGER_STEPS: readonly string[] = [
+  // gatherRuns, by name.
+  "run.start", "verdict", "verdict.merged", "recon.done", "implement.done", "implement.resumed", "implement.continued", "implement.preopen_continued", "pr.opened", "correction.provenance",
+  // gatherRuns' pr_url fallback.
+  "report.followups", "pr.head_provider", "dispatch.blocked_independent", "automerge.armed", "automerge.arm_skipped",
+  "automerge.arm_failed", "automerge.clean_status_direct_merge", "review.posted", "review.pending_posted",
+  "review.unwired_advisory", "review.post_refused", "review.stood_down", "acceptance.repaired", "trailer_stamp.failed",
+  // capDerivation: the knowledge-budget pressure, and the cache-hit mix's call rows.
+  "learnings.injected", "review.reviewer", "inbox.draft_synthesized", "triage.synthesized", "retro.synthesized",
+  "retro.preflight_repair", "fix.done", "fix.commit_line_answered", "census_push.strike", "plan.synthesized", "diagnose.worker_done",
+  // W1-T5668: the rest that can be a worker run's first pr_url row (0 live rows on 2026-10-04, listed so a first one is read).
+  "acceptance.repair.unrepresentable", "changeset_claim.repaired", "retro.pr.recovered", "pr.body_normalize.error",
+];
+
+/** W1-T5474: the 60-day union read bounded to {@link CONFIG_GARDEN_LEDGER_STEPS}. An incomplete union fails
+ *  the pass rather than pricing budgets from a partial history. */
+export function readConfigGardenLedgerRows(stateDir: string, reader: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync): Array<Record<string, unknown>> {
+  const read = reader(stateDir, { rotationWindowMs: 60 * 24 * 3600 * 1000, minRotations: 4, step: CONFIG_GARDEN_LEDGER_STEPS, refuseIncomplete: true });
+  if (!read.ok) throw new Error(`config gardener: incomplete ledger union: ${read.unread.join(", ")}`);
+  return read.rows;
+}
+
+/** Ledger reads, plan loading and derivation run on a one-shot worker, including injected snapshots. */
+export async function configInventory(deps: GardenerDeps, sources: ConfigGardenSources = {}, reader?: typeof readLedgerUnionRecordsSync): Promise<ConfigInventory> {
+  const [rows, weights, recommendations] = await Promise.all([
+    sources.ledgerRows?.() ?? (reader ? readConfigGardenLedgerRows(deps.stateDir, reader) : undefined),
+    sources.entryWeights?.(),
+    sources.mountRecommendations?.() ?? [],
+  ]);
+  return configMeasurementOffLoop<ConfigInventory>({
+    kind: "inventory", stateDir: deps.stateDir, repoRoot: deps.repoRoot,
+    nowMs: (deps.clock ?? systemClock).now(), rows, weights, recommendations,
+  });
+}
+
+interface InventoryMeasurement {
+  kind: "inventory";
+  stateDir: string;
+  repoRoot: string;
+  nowMs: number;
+  rows?: Array<Record<string, unknown>>;
+  weights?: Record<string, number>;
+  recommendations: MountRecommendation[];
+}
+
+type ConfigMeasurement = InventoryMeasurement | { kind: "mount"; stateDir: string; sweepScript: string };
+type MeasurementReply = { ok: true; value: ConfigInventory | MountSweep } | { ok: false; reason: string };
+type MountSweep = { cells: MountHeadroomCell[]; corpus?: { unread: string[] } };
+const CONFIG_MEASUREMENT_WORKER_KIND = "remudero-config-measurement";
+
+const HEAP_FLAG = /^--max[-_]old[-_]space[-_]size(?:=(.*))?$/;
+
+/**
+ * The measurement worker's options for a process started with `execArgv`. The garden child runs
+ * with `--max-old-space-size=<mb>` (garden-registry), and a Worker refuses V8 heap flags in its own
+ * execArgv, so passing `process.execArgv` through made 46 of 66 config passes fail with "invalid
+ * execArgv flags". The worker inherits its execArgv instead (the loader comes with it, and Node
+ * 24's test runner adds per-process flags a Worker also refuses), and the old-generation budget
+ * the heap flag carried becomes `resourceLimits.maxOldGenerationSizeMb`. Last flag wins, as in V8.
+ */
+export function measurementWorkerOptions(execArgv: readonly string[]): { resourceLimits?: { maxOldGenerationSizeMb: number } } {
+  let budgetMb: number | undefined;
+  for (let index = 0; index < execArgv.length; index += 1) {
+    const match = HEAP_FLAG.exec(execArgv[index]!);
+    if (!match) continue;
+    const value = match[1] ?? execArgv[index + 1];
+    if (match[1] === undefined) index += 1;
+    const mb = Number(value);
+    if (Number.isFinite(mb) && mb > 0) budgetMb = mb;
+  }
+  return budgetMb === undefined ? {} : { resourceLimits: { maxOldGenerationSizeMb: budgetMb } };
+}
+
+/** A worker failure refuses this measurement; it never falls back to reading on the event loop. */
+export function configMeasurementOffLoop<T>(input: ConfigMeasurement, workerUrl: URL = new URL(import.meta.url)): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(workerUrl, { workerData: { kind: CONFIG_MEASUREMENT_WORKER_KIND, input }, ...measurementWorkerOptions(process.execArgv) });
+    worker.once("message", (reply: MeasurementReply) => {
+      void worker.terminate();
+      if (reply.ok) resolve(reply.value as T);
+      else reject(new Error(reply.reason));
+    });
+    worker.once("error", reject);
+    worker.once("exit", (code) => reject(new Error(`config gardener: measurement worker exited before answering (code ${code})`)));
+  });
+}
+
+/** Named worker body so tests can also exercise the read and error replies in the instrumented thread. */
+export async function serveConfigMeasurement(input: ConfigMeasurement, port: { postMessage(reply: MeasurementReply): void }): Promise<void> {
+  try {
+    let value: ConfigInventory | MountSweep;
+    if (input.kind === "inventory") value = buildConfigInventory(input);
+    else {
+      const m = await import(pathToFileURL(input.sweepScript).href) as { buildMountHeadroomSweep: (stateDir: string) => MountSweep };
+      value = await cachedMountHeadroomSweep(input.stateDir, input.sweepScript, m.buildMountHeadroomSweep);
+    }
+    port.postMessage({ ok: true, value });
+  } catch (e) {
+    port.postMessage({ ok: false, reason: String((e as Error)?.message ?? e) });
+  }
+}
+
+if (!isMainThread && workerData?.kind === CONFIG_MEASUREMENT_WORKER_KIND) void serveConfigMeasurement(workerData.input, parentPort!);
+
+function buildConfigInventory(input: InventoryMeasurement): ConfigInventory {
+  const rows = input.rows ?? readConfigGardenLedgerRows(input.stateDir);
+  const weights = input.weights ?? buildEntryWeightIndex(loadLearningsCorpus(resolveRepoLayout(input.repoRoot).learningsDir));
+  const canaries = readConfigCanaries(input.stateDir);
   return {
-    nowIso: fixedClock(nowMs).iso(),
+    nowIso: fixedClock(input.nowMs).iso(),
     runs: gatherRuns(rows as LedgerRecord[]),
-    queued: queuedBudgets(deps.repoRoot, deps.stateDir),
-    recommendations: sources.mountRecommendations?.() ?? [],
+    queued: queuedBudgets(input.repoRoot, input.stateDir),
+    recommendations: input.recommendations,
     cap: { current: DEFAULT_KNOWLEDGE_BUDGET_CHARS, derivation: capDerivation(rows, weights, DEFAULT_KNOWLEDGE_BUDGET_CHARS) },
     active: canaries.filter((c) => isPromotionActive(c.promotion.state)),
-    cooling: canaries.filter((c) => c.promotion.state === "rolled_back" && nowMs - Date.parse(c.promotion.createdAt) < CANARY_TTL_MS).map((c) => c.promotion.scope.policyScope),
+    cooling: canaries.filter((c) => c.promotion.state === "rolled_back" && input.nowMs - Date.parse(c.promotion.createdAt) < CANARY_TTL_MS).map((c) => c.promotion.scope.policyScope),
   };
+}
+
+/** Archive metadata, covering both rotation forms. Live appends wait for the next rotation; before
+ *  the first rotation, live metadata prevents a first-boot sweep from being cached forever. */
+function mountSweepKey(stateDir: string, sweepScript: string): string {
+  const rotations = ledgerRotationEntries(readdirSync(stateDir), stateDir).map((entry) => entry.path);
+  const paths = [sweepScript, ...(rotations.length ? rotations : [join(stateDir, LEDGER_FILENAME)])];
+  return JSON.stringify(paths.map((path) => {
+    const stat = existsSync(path) ? statSync(path) : undefined;
+    return [path, stat?.size, stat?.mtimeMs, stat?.ctimeMs];
+  }));
+}
+
+export const configMountSweepCachePath = (stateDir: string): string => join(stateDir, "config-mount-headroom-sweep.json");
+
+/** Persist cells, not recommendations: mounts and billing mode are re-evaluated on every pass. A
+ *  missing, malformed or obsolete disposable cache is rebuilt, and incomplete sweeps are never saved. */
+export async function cachedMountHeadroomSweep(stateDir: string, sweepScript: string, build: (stateDir: string) => MountSweep | Promise<MountSweep>): Promise<MountSweep> {
+  const key = mountSweepKey(stateDir, sweepScript);
+  const path = configMountSweepCachePath(stateDir);
+  const raw = readFileIfExists(path);
+  if (raw !== undefined) {
+    let cached: { version?: number; key?: string; cells?: MountHeadroomCell[] } | undefined;
+    try { cached = JSON.parse(raw); } catch { /* Disposable JSON corruption requires a new sweep. */ }
+    if (cached?.version === 1 && cached.key === key && Array.isArray(cached.cells) && cached.cells.every((c) =>
+      c && typeof c.cellKey === "string" && Array.isArray(c.arms) && Array.isArray(c.comparisons))) return { cells: cached.cells };
+  }
+  const sweep = await build(stateDir);
+  const corpusIsReadable = sweep.corpus === undefined || sweep.corpus.unread.length === 0;
+  if (corpusIsReadable && mountSweepKey(stateDir, sweepScript) === key) {
+    writeAtomic(path, JSON.stringify({ version: 1, key, cells: sweep.cells }) + "\n");
+  }
+  return { cells: sweep.cells };
 }
 
 /** Mount recommendations as the gardener reads them: the recommender's own gates over the headroom
  *  sweep, kept to the recommendations. A sweep that cannot be built (no runs yet) is logged and reads as
  *  none, so the other classes still act. */
 export function mountRecommendationSource(opts: {
-  build: (stateDir: string) => { cells: MountHeadroomCell[] };
+  build?: (stateDir: string) => { cells: MountHeadroomCell[] } | Promise<{ cells: MountHeadroomCell[] }>;
+  sweepScript: string;
   stateDir: string;
   mountsFile: string;
   billingMode: BillingMode;
   log: GardenerDeps["log"];
-}): () => MountRecommendation[] {
-  return () => {
+}): () => Promise<MountRecommendation[]> {
+  return async () => {
     try {
-      const outcomes = recommendMounts(opts.build(opts.stateDir).cells, loadMounts(opts.mountsFile), { billingMode: opts.billingMode });
+      const sweep = opts.build
+        ? await cachedMountHeadroomSweep(opts.stateDir, opts.sweepScript, opts.build)
+        : await configMeasurementOffLoop<{ cells: MountHeadroomCell[] }>({ kind: "mount", stateDir: opts.stateDir, sweepScript: opts.sweepScript });
+      const outcomes = recommendMounts(sweep.cells, loadMounts(opts.mountsFile), { billingMode: opts.billingMode });
       return outcomes.filter((o): o is MountRecommendation => o.kind === "recommendation");
     } catch (e) {
       opts.log(`${CONFIG_GARDEN_NAME}.mount_recommendations_unread`, { error: String((e as Error)?.message ?? e) });
@@ -327,7 +493,7 @@ function shuffled<T>(items: T[], rng: () => number): T[] {
 /** The class whose queued budgets are furthest from its observed costs, as one canary over a random
  *  cohort of them. The cohort is at most half the mismatched shards, so the rest can judge it. */
 export function budgetCandidate(inv: ConfigInventory, rng: () => number): ConfigGardenAction | undefined {
-  const { byClass, excluded } = settledClassCosts(inv.runs);
+  const { byClass, excluded, unpriced } = settledClassCosts(inv.runs);
   let best: { taskClass: string; costs: number[]; budget: number; off: QueuedBudget[] } | undefined;
   for (const [taskClass, costs] of [...byClass].sort(([a], [b]) => a.localeCompare(b))) {
     if (costs.length < BUDGET_MIN_SAMPLES) continue;
@@ -343,11 +509,12 @@ export function budgetCandidate(inv: ConfigInventory, rng: () => number): Config
   const overrun = best.costs.filter((c) => c > best!.budget).length / best.costs.length;
   const cohortPop = population({ kind: "tasks", taskClass: best.taskClass, taskIds: [] });
   const excludedCount = excluded.get(best.taskClass) ?? 0;
+  const unpricedCount = unpriced.get(best.taskClass) ?? 0;
   return {
     class: "recalibrate-budget",
     target: best.taskClass,
     scope: `budget:${best.taskClass}`,
-    reason: `class ${best.taskClass}: p90 of ${best.costs.length} settled implement runs is $${usd(nearestRank(best.costs, 90))}; ${best.off.length} queued shard(s) declare a budget ${Math.round(BUDGET_MIN_CHANGE * 100)}%+ away from $${usd(best.budget)}.${excludedCount > 0 ? ` ${excludedCount} never-worked run(s) excluded.` : ""}`,
+    reason: `class ${best.taskClass}: p90 of ${best.costs.length} settled implement runs is $${usd(nearestRank(best.costs, 90))}; ${best.off.length} queued shard(s) declare a budget ${Math.round(BUDGET_MIN_CHANGE * 100)}%+ away from $${usd(best.budget)}.${excludedCount > 0 ? ` ${excludedCount} never-worked run(s) excluded.` : ""}${unpricedCount > 0 ? ` unpriced: ${unpricedCount} run(s) of unknown cost excluded.` : ""}`,
     edits: cohort.map((q) => ({ path: q.shard, from: q.line, to: `  budget_usd: ${usd(best!.budget)}` })),
     cohort: { kind: "tasks", taskClass: best.taskClass, taskIds: cohort.map((q) => q.id) },
     candidate: `budget_usd ${usd(best.budget)} for ${cohort.length} queued ${best.taskClass} shard(s)`,
@@ -356,6 +523,7 @@ export function budgetCandidate(inv: ConfigInventory, rng: () => number): Config
     shadowMetrics: [{ metricName: "shadow_overrun_rate", unit: "fraction", direction: "max", abortThreshold: BUDGET_MAX_SHADOW_OVERRUN }],
     shadowObservations: [{ metricName: "shadow_overrun_rate", value: overrun, denominator: best.costs.length, freshness: "verified", comparisonPopulation: cohortPop, observedAt: inv.nowIso }],
     ...(excludedCount > 0 ? { excludedCount } : {}),
+    ...(unpricedCount > 0 ? { unpriced: unpricedCount } : {}),
   };
 }
 
@@ -623,7 +791,7 @@ export function configCanariesDue(stateDir: string, clock: Clock = systemClock):
   return file.lastTendMs === undefined || clock.now() - file.lastTendMs >= CONFIG_TEND_INTERVAL_MS;
 }
 
-export function tendConfigCanaries(deps: GardenerDeps, runs: () => RunSummary[]): TendResult[] {
+export async function tendConfigCanaries(deps: GardenerDeps, runs: () => Promise<RunSummary[]>): Promise<TendResult[]> {
   const nowMs = (deps.clock ?? systemClock).now();
   const file = readConfigCanaryFile(deps.stateDir);
   const canaries = file.canaries;
@@ -656,14 +824,14 @@ export function tendConfigCanaries(deps: GardenerDeps, runs: () => RunSummary[])
         }
       }
     } else {
-      measured ??= runs();
+      measured ??= await runs();
       const split = splitCohort(c.cohort, measured, c.exposedAt ?? c.promotion.observationWindow.start, nowIso);
       excludedCount = split.excludedCount;
       step = stepCanary(c.promotion, cohortGuardObservations(cohortOutcome(split.canary), cohortOutcome(split.rest), c.promotion.comparisonPopulation, nowIso), nowIso);
     }
     c.promotion = { ...c.promotion, state: step.state };
     c.reason = step.reason ?? c.reason;
-    if (step.verdict === "rolled_back" && exposed) c.rollbackPrUrl = rollBack(deps, c);
+    if (step.verdict === "rolled_back" && exposed) c.rollbackPrUrl = await rollBack(deps, c);
     if (step.verdict === "rolled_back") settlePending(deps.stateDir, c.prUrl, "debit");
     if (step.verdict === "promoted") settlePending(deps.stateDir, c.prUrl, "credit");
     if (step.verdict === "expired") settlePending(deps.stateDir, c.prUrl, "release");
@@ -676,8 +844,8 @@ export function tendConfigCanaries(deps: GardenerDeps, runs: () => RunSummary[])
 }
 
 /** Land a PR reverting exactly the canary's lines; the receipt is its url, or why there was none. */
-function rollBack(deps: GardenerDeps, c: ConfigCanary): string | undefined {
-  const ws = deps.openWorkspace();
+async function rollBack(deps: GardenerDeps, c: ConfigCanary): Promise<string | undefined> {
+  const ws = await deps.openWorkspace();
   try {
     const edits = reverseEdits(c.edits);
     const paths = applyExactConfigRollback(ws.root, edits);
@@ -686,21 +854,37 @@ function rollBack(deps: GardenerDeps, c: ConfigCanary): string | undefined {
       return undefined;
     }
     const body = [`The config gardener (W1-T4113) rolls back its \`${c.actionClass}\` canary from ${c.prUrl}: ${c.reason ?? "a cohort guardrail breach"}.`, "", ...acceptance(edits)].join("\n");
-    const prUrl = ws.land({ paths, title: `revert(config): the config gardener rolls back its ${c.actionClass} canary`, body });
+    const prUrl = await ws.land({ paths, title: `revert(config): the config gardener rolls back its ${c.actionClass} canary`, body });
     if (!prUrl) throw new Error(`config gardener: rollback PR was not opened for ${c.prUrl}`);
     return prUrl;
   } finally {
-    ws.dispose();
+    await ws.dispose();
   }
 }
 
-type ConfigGardenSpec = GardenSpec<ConfigGardenClass, ConfigInventory, ConfigGardenAction, GardenCheckout>;
+type ConfigGardenSpec = Omit<GardenSpec<ConfigGardenClass, ConfigInventory, ConfigGardenAction, GardenCheckout>, "inventory"> & {
+  inventory: () => Promise<ConfigInventory>;
+};
 
 /** One pass: judge the open canaries, then let the garden act, recording any change it lands as a new
  *  canary that waits in shadow for its merge. */
-export function runConfigGarden(spec: ConfigGardenSpec, deps: GardenerDeps, sources: ConfigGardenSources = {}): ReturnType<typeof runGarden<ConfigGardenClass, ConfigInventory, ConfigGardenAction, GardenCheckout>> {
-  tendConfigCanaries(deps, () => configInventory(deps, sources).runs);
-  const pass = runGarden(spec, deps);
+export async function runConfigGarden(spec: ConfigGardenSpec, deps: GardenerDeps, sources: ConfigGardenSources = {}): Promise<GardenPassResult<ConfigGardenClass, ConfigGardenAction>> {
+  await tendConfigCanaries(deps, async () => (await configInventory(deps, sources)).runs);
+  if (!gardenPassDue(spec, deps)) return { ran: false };
+  // W1-T5668: a pending PR keeps the pass due, yet the pass then returns on an unchanged cheap fingerprint
+  // without reading the inventory, so build the 60-day inventory only when the pass would use it. The
+  // pending PR's state is read once and handed to the pass, which would otherwise ask for it again.
+  const pending = readGardenState(gardenStatePath(deps.stateDir, spec.name), spec.classes).pending;
+  const prState = pending ? (deps.prState?.(pending.prUrl) ?? "unknown") : undefined;
+  const passDeps: GardenerDeps = pending ? { ...deps, prState: () => prState! } : deps;
+  const inventory = gardenNeedsInventory(spec, deps, prState) ? await spec.inventory() : undefined;
+  const pass = await runGardenAsync({
+    ...spec,
+    inventory: () => {
+      if (inventory === undefined) throw new Error("config gardener: the pass read an inventory gardenNeedsInventory ruled out");
+      return inventory;
+    },
+  }, passDeps);
   const action = pass.plan?.actions[0];
   if (pass.prUrl && action) {
     // The action's shadow evidence was measured by the inventory. Starting the window from a
@@ -727,18 +911,18 @@ export function runConfigGarden(spec: ConfigGardenSpec, deps: GardenerDeps, sour
 /** Run passes on their own timer beside the main loop, never two at once. */
 export function startConfigGarden(spec: ConfigGardenSpec, deps: GardenerDeps, sources: ConfigGardenSources, intervalMs: number): { stop: () => void } {
   let running = false;
-  const tick = () => {
+  const tick = async () => {
     if (running) return;
     running = true;
     try {
-      runConfigGarden(spec, deps, sources);
+      await runConfigGarden(spec, deps, sources);
     } catch (e) {
       deps.log(`${CONFIG_GARDEN_NAME}.gardener_failed`, { error: String((e as Error)?.message ?? e) });
     } finally {
       running = false;
     }
   };
-  tick();
+  void tick();
   const timer = setInterval(tick, intervalMs);
   timer.unref?.();
   return { stop: () => clearInterval(timer) };

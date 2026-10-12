@@ -4,7 +4,7 @@ import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rm
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "yaml";
-import { loadGoals, measureGoal, remeasureSettledGoals, withGoalRemeasurement, type GoalRecord } from "../src/lib/goals.js";
+import { GOAL_REMEASUREMENT_CADENCE_MS, loadGoals, measureGoal, remeasureSettledGoals, withGoalRemeasurement, type GoalRecord } from "../src/lib/goals.js";
 import { fixedClock, systemClock } from "../src/lib/clock.js";
 import { buildGather, renderGather } from "../src/lib/retro.js";
 import { parseTasksFromYaml, type Task } from "../src/lib/plan.js";
@@ -102,6 +102,24 @@ test("W1-T4684: an unmoved goal is handed to the retro", async () => {
   } finally { rmSync(fixture.dir, { recursive: true, force: true }); }
 });
 
+test("settled goals are revisited daily so a measured improvement cannot hide a later regression", async () => {
+  const fixture = writeLedger([]);
+  const events: string[] = [];
+  const input = { repoRoot: fixture.dir, stateDir: fixture.dir, tasks, goals: [goal], rows,
+    settled: () => true, log: (step: string) => events.push(step) };
+  try {
+    assert.equal((await remeasureSettledGoals({ ...input, clock }))[0]!.step, "goal.moved");
+    assert.deepEqual(await remeasureSettledGoals({ ...input, clock: fixedClock(clock.now() + GOAL_REMEASUREMENT_CADENCE_MS - 1) }), []);
+    const regressionRows = rows.map((row) => row.step === "verdict.merged" ? { ...row, ts: "2026-10-02T10:30:00Z" } : row);
+    const later = fixedClock(clock.now() + GOAL_REMEASUREMENT_CADENCE_MS);
+    assert.equal((await remeasureSettledGoals({ ...input, rows: regressionRows, clock: later }))[0]!.step, "goal.unmoved");
+    assert.deepEqual(await remeasureSettledGoals({ ...input, rows: regressionRows, clock: later }), []);
+    assert.equal((await remeasureSettledGoals({ ...input, rows: [], clock: fixedClock(later.now() + GOAL_REMEASUREMENT_CADENCE_MS) }))[0]!.step, "goal.unmeasured");
+    assert.deepEqual(events, ["goal.moved", "goal.unmoved", "goal.unmeasured"]);
+    assert.equal(JSON.parse(readFileSync(join(fixture.dir, "goal-remeasurements.json"), "utf8"))[goal.id].step, "goal.unmeasured");
+  } finally { rmSync(fixture.dir, { recursive: true, force: true }); }
+});
+
 test("goal measurement commands are typed ledger queries with positive controls", () => {
   assert.equal(measureGoal("pr-flow-minutes", []), null);
   assert.equal(measureGoal("pr-flow-minutes", [...rows, { step: "pr.opened", pr_url: "x", ts: "2026-10-02T10:00:00Z" }, { step: "verdict.merged", pr_url: "x", ts: "2026-10-02T10:15:00Z" }]), 10);
@@ -110,6 +128,26 @@ test("goal measurement commands are typed ledger queries with positive controls"
   assert.equal(measureGoal("ci-friction-minutes", [{ step: "ci-friction.scorecard", priced: [{ minutes: 20 }, { minutes: 5 }] }]), 25);
   assert.equal(measureGoal("terminal-missing-percent", []), null);
   assert.equal(measureGoal("terminal-missing-percent", [{ step: "worker.assignment", worker_assignment: { id: "a" } }, { step: "worker.assignment", worker_assignment: { id: "b" } }, { step: "implement.done", selection_assignment_id: "a" }]), 50);
+});
+
+test("a malformed or future goal checkpoint cannot indefinitely defer a settled goal measurement", async () => {
+  const fixture = writeLedger([]);
+  const input = { repoRoot: fixture.dir, stateDir: fixture.dir, tasks, goals: [goal], rows, clock,
+    settled: () => true, log: () => {} };
+  const path = join(fixture.dir, "goal-remeasurements.json");
+  try {
+    assert.equal((await remeasureSettledGoals(input))[0]!.step, "goal.moved");
+    for (const ts of ["malformed", fixedClock(clock.now() + GOAL_REMEASUREMENT_CADENCE_MS).iso()]) {
+      const checkpoint = JSON.parse(readFileSync(path, "utf8"));
+      checkpoint[goal.id].ts = ts;
+      writeFileSync(path, JSON.stringify(checkpoint));
+      assert.deepEqual(await remeasureSettledGoals({ ...input, settled: () => false }), [],
+        "bad metadata never makes unsettled work eligible");
+      const observations = await remeasureSettledGoals({ ...input, rows: [] });
+      assert.equal(observations[0]!.step, "goal.unmeasured", "missing evidence replaces the stale success claim");
+      assert.equal(JSON.parse(readFileSync(path, "utf8"))[goal.id].ts, clock.iso());
+    }
+  } finally { rmSync(fixture.dir, { recursive: true, force: true }); }
 });
 
 test("goals load from their own records and the task parser retains goal membership", () => {

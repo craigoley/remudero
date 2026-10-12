@@ -123,7 +123,7 @@ export function readLedgerCorpus(stateDir, fsDeps = realMountHeadroomFs) {
  * Parse lines as JSON, DEDUPED BY LINE TEXT (remembered by SHA-1, not kept) — rotations duplicate whole
  * windows. A torn line is skipped. `rawRowsWithRunId` counts pre-dedup run-tagged lines.
  */
-export function ledgerRecordCollector() {
+export function ledgerRecordCollector({ retainRecord = () => true, observeRecord = () => {} } = {}) {
   const seen = new Set();
   const records = [];
   let rawRowsWithRunId = 0;
@@ -136,12 +136,15 @@ export function ledgerRecordCollector() {
         return;
       }
       if (parsed && typeof parsed === "object" && typeof parsed.run_id === "string") rawRowsWithRunId++;
+      observeRecord(parsed);
+      if (!retainRecord(parsed)) return;
       const key = createHash("sha1").update(line).digest("base64");
       if (seen.has(key)) return;
       seen.add(key);
       records.push(parsed);
     },
     result: () => ({ records, rawRowsWithRunId }),
+    identityCount: () => seen.size,
   };
 }
 
@@ -223,12 +226,15 @@ export function computeClassSweep(runs) {
     const settled = rs.filter((r) => isSettled(r) && !r.neverWorked);
     const excludedCount = rs.filter((r) => isSettled(r) && r.neverWorked).length;
     const turns = settled.map((r) => r.numTurns);
-    const costs = settled.map((r) => r.costUsd);
+    const priced = settled.filter((r) => r.costSource !== "none");
+    const unpriced = settled.length - priced.length;
+    const costs = priced.map((r) => r.costUsd);
     const passing = settled.filter((r) => r.verdict === PASSING_VERDICT).length;
     const blockedCi = settled.filter((r) => r.verdict === BLOCKED_CI_VERDICT).length;
     const redispatchedCount = settled.filter((r) => redispatched.has(r.runId)).length;
     const totalSettledCostUsd = round2(costs.reduce((s, c) => s + c, 0));
     const distinctSettledTasks = new Set(settled.map((r) => r.taskId)).size;
+    const distinctPricedTasks = new Set(priced.map((r) => r.taskId)).size;
     out.push({
       taskClass,
       totalRuns: rs.length,
@@ -242,7 +248,8 @@ export function computeClassSweep(runs) {
       outcomes: { passing, blockedCi, redispatched: redispatchedCount },
       totalSettledCostUsd,
       distinctSettledTasks,
-      costPerCompletedTaskUsd: distinctSettledTasks === 0 ? null : round2(totalSettledCostUsd / distinctSettledTasks),
+      costPerCompletedTaskUsd: distinctPricedTasks === 0 ? null : round2(totalSettledCostUsd / distinctPricedTasks),
+      ...(unpriced > 0 ? { unpriced } : {}),
       ...(excludedCount > 0 ? { excludedCount } : {}),
     });
   }
@@ -626,12 +633,15 @@ export function computeArmSweep(runs, armFields, newestTs, windowEvidence = new 
     for (const arm of cell.armsByKey.values()) {
       const settled = arm.runs.filter(isSettled);
       const turns = settled.map((r) => r.numTurns);
-      const costs = settled.map((r) => r.costUsd);
+      const priced = settled.filter((r) => r.costSource !== "none");
+      const unpriced = settled.length - priced.length;
+      const costs = priced.map((r) => r.costUsd);
       const passing = settled.filter((r) => r.verdict === PASSING_VERDICT).length;
       const blockedCi = settled.filter((r) => r.verdict === BLOCKED_CI_VERDICT).length;
       const redispatchedCount = settled.filter((r) => redispatched.has(r.runId)).length;
       const totalSettledCostUsd = round2(costs.reduce((s, c) => s + c, 0));
       const distinctSettledTasks = new Set(settled.map((r) => r.taskId)).size;
+      const distinctPricedTasks = new Set(priced.map((r) => r.taskId)).size;
       let eligibleCalls = 0;
       let measuredCalls = 0;
       let unreadableCalls = 0;
@@ -674,7 +684,8 @@ export function computeArmSweep(runs, armFields, newestTs, windowEvidence = new 
         totalSettledCostUsd,
         distinctSettledTasks,
         costPerCompletedTaskUsd:
-          distinctSettledTasks === 0 ? null : round2(totalSettledCostUsd / distinctSettledTasks),
+          distinctPricedTasks === 0 ? null : round2(totalSettledCostUsd / distinctPricedTasks),
+        ...(unpriced > 0 ? { unpriced } : {}),
         windowShare: {
           provider: arm.provider,
           percentConsumedPerCompletedTask:
@@ -720,12 +731,27 @@ export function computeAssignmentSweep(runs, assignmentFields, newestTs) {
   }));
 }
 
+export const MOUNT_SWEEP_LEDGER_STEPS = new Set([
+  "run.start", "verdict", "verdict.merged", "pr.opened", "correction.provenance",
+  ASSIGNMENT_EVENT_STEP, ...ARM_DONE_STEPS, ...Object.values(ARCHITECT_LANE_STEPS),
+]);
+
+export function isMountSweepEvidence(row) {
+  return MOUNT_SWEEP_LEDGER_STEPS.has(row.step) || Boolean(row.run_id && row.pr_url);
+}
+
 /**
  * THE ONE ENTRY POINT: read the union corpus, dedup, reduce into per-run summaries, and build the
  * per-class sweep. Throws on ZERO distinct runs; spawns and writes nothing.
  */
 export function buildMountHeadroomSweep(stateDir, fsDeps = realMountHeadroomFs) {
-  const collector = ledgerRecordCollector();
+  let newestTs;
+  const collector = ledgerRecordCollector({
+    retainRecord: isMountSweepEvidence,
+    observeRecord: (row) => {
+      if (typeof row.ts === "string" && (newestTs === undefined || row.ts > newestTs)) newestTs = row.ts;
+    },
+  });
   const corpus = scanLedgerCorpus(stateDir, (line) => collector.add(line), fsDeps);
   const { records, rawRowsWithRunId } = collector.result();
   const runs = gatherRuns(records);
@@ -738,11 +764,6 @@ export function buildMountHeadroomSweep(stateDir, fsDeps = realMountHeadroomFs) 
         `unread rotations: ${corpus.unread.length}) — a zero here is not a measurement until a ` +
         `positive control proves this query could see its corpus at all (see this script's own header).`,
     );
-  }
-
-  let newestTs;
-  for (const r of records) {
-    if (typeof r.ts === "string" && (newestTs === undefined || r.ts > newestTs)) newestTs = r.ts;
   }
 
   const armFields = armFieldsByRunId(records);

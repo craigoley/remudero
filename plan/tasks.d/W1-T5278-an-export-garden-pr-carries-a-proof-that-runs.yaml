@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-02: #8540 failed acceptance-author-gate (proof-shape) and was hand-fixed"
   plan_refs: ["W1-T4117"]
   files: [src/lib/export-gardener.ts, test/an-export-garden-pr-carries-a-proof-that-runs.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

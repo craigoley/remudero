@@ -1,13 +1,16 @@
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { basename, join, relative } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, relative } from "node:path";
+import { stringify as stringifyYaml } from "yaml";
 
 import { systemClock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { buildKnowledgeInventory, danglingWhyPointers, inventoryTotals, type KnowledgeItem } from "./knowledge-inventory.js";
 import { resolveCanonicalRuleId, slugifyRuleId, type MergedRuleGroup } from "./doctrine-lifecycle.js";
+import { MERGED_RULES_FILE } from "./learnings.js";
 import { GUARD_RETIREMENT_ZERO_STREAK } from "./retro-closure.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 import { buildSkillEffectivenessReport, loadInjectableSkills, stageSkillLifecycleProposal, type InjectableSkill } from "./skill-workshop.js";
 import { updateProposalRegistry, type Proposal } from "./inbox.js";
 import {
@@ -16,8 +19,9 @@ import {
   judgeGardenPending,
   planGarden,
   readGardenState,
-  runGarden,
+  runGardenAsync,
   startGarden,
+  isPromiseLike,
   type GardenCheckout,
   type GardenerDeps,
   type GardenPlan as GenericPlan,
@@ -183,7 +187,39 @@ export function retireCandidates(usage: LearningUsage, activeIds: string[], rng:
  *  A test that requires a learning (`test/learnings-injection-w1t6.test.ts` requires
  *  `sdk-result-envelope` to be injected) goes red when it is superseded, so the gardener never
  *  retires or folds one away: passes #7101 and #7205 both tried. `test/fixtures` is data, skipped. */
-export function testPinnedLearnings(root: string, ids: string[]): Record<string, string> {
+export function testPinnedLearnings(
+  root: string,
+  ids: string[],
+  opts: { treeId?: (root: string) => string | undefined; readFile?: (path: string) => string } = {},
+): Record<string, string> {
+  // W1-T6276: the walk read every test file on every garden pass (a 39.9 s loop block); its answer moves only with the tree.
+  const tree = opts.treeId ? opts.treeId(root) : treeIdOrUndefined(testTreeId(root));
+  const key = tree === undefined ? undefined : `${root}\0${tree}\0${[...new Set(ids)].sort().join("\0")}`;
+  if (key !== undefined && testPinCache.has(key)) return { ...testPinCache.get(key)! };
+  const pins = scanTestPinnedLearnings(root, ids, opts.readFile ?? ((path) => readFileSync(path, "utf8")));
+  if (key !== undefined) {
+    testPinCache.clear();
+    testPinCache.set(key, pins);
+  }
+  return { ...pins };
+}
+
+const testPinCache = new Map<string, Record<string, string>>();
+
+/** The git tree id of `test/` at HEAD, or why it could not be read; an unreadable id forces a full scan. */
+export function testTreeId(root: string): { id: string } | { unreadable: string } {
+  try {
+    const id = hostWorktreeGit(root, ["rev-parse", "HEAD:test"]).trim();
+    return id ? { id } : { unreadable: "git printed no tree id for test/" };
+  } catch (error) {
+    const reason = String((error as Error)?.message ?? error);
+    return { unreadable: reason };
+  }
+}
+
+const treeIdOrUndefined = (read: { id: string } | { unreadable: string }): string | undefined => ("id" in read ? read.id : undefined);
+
+function scanTestPinnedLearnings(root: string, ids: string[], readFile: (path: string) => string): Record<string, string> {
   const wanted = new Set(ids);
   const pins: Record<string, string> = {};
   const walk = (dir: string): void => {
@@ -192,7 +228,7 @@ export function testPinnedLearnings(root: string, ids: string[]): Record<string,
       if (ent.isDirectory()) {
         if (ent.name !== "fixtures") walk(path);
       } else if (/\.[cm]?[jt]s$/.test(ent.name)) {
-        for (const m of readFileSync(path, "utf8").matchAll(/(["'`])([\w.-]+)\1/g)) {
+        for (const m of readFile(path).matchAll(/(["'`])([\w.-]+)\1/g)) {
           if (wanted.has(m[2]!) && !(m[2]! in pins)) pins[m[2]!] = relative(root, path).split("\\").join("/");
         }
       }
@@ -308,7 +344,7 @@ export function doctrineDuplicatePairs(items: KnowledgeItem[]): Array<[Knowledge
 
 /** The alias registry RULE-MERGE writes: every id a merge ever folded, resolved to the canonical
  *  id doctrine now stores it under. Nothing is ever deleted — the registry only grows. */
-export const MERGED_RULES_FILE = "doctrine/merged-rules.json";
+export { MERGED_RULES_FILE };
 
 function readMergedRuleGroups(root: string): MergedRuleGroup[] {
   const path = join(root, MERGED_RULES_FILE);
@@ -843,19 +879,207 @@ export function appendGardenLog(root: string, at: Date, actions: GardenAction[],
 export interface GardenWorkspace extends GardenCheckout {
   /** Re-run learnings assertions in the workspace (the REFRESH action); returns changed paths. */
   refreshAssertions: () => string[];
+  /** W1-T4927: this gardener's own open knowledge-garden PR, if one is open, with the targets it already acts on. */
+  openGardenPr?: () => OpenGardenPr | undefined;
+  /** W1-T4927: add this pass's changes to the open PR's branch instead of opening another. */
+  updateGardenPr?: (pr: OpenGardenPr, opts: { paths: string[]; title: string; body: string }) => string | undefined | Promise<string | undefined>;
+}
+
+/** An open knowledge-garden PR: its url and the entries it already retires, merges or repairs. */
+export interface OpenGardenPr {
+  url: string;
+  handled: string[];
+}
+
+type LandOpts = { paths: string[]; title: string; body: string };
+
+/** W1-T4927: land into the open gardener PR when there is one, so one retirement never gets two PRs. */
+function reusingOpenPr(deps: GardenerDeps<GardenWorkspace>): GardenerDeps<GardenWorkspace> {
+  const wrap = (ws: GardenWorkspace): GardenWorkspace => {
+    const open = ws.openGardenPr?.();
+    if (!open || !ws.updateGardenPr) return ws;
+    return Object.assign(Object.create(ws) as GardenWorkspace, { land: (o: LandOpts) => ws.updateGardenPr!(open, o) });
+  };
+  return {
+    ...deps,
+    openWorkspace: () => {
+      const ws = deps.openWorkspace() as unknown;
+      return (isPromiseLike(ws) ? ws.then((w) => wrap(w as GardenWorkspace)) : wrap(ws as GardenWorkspace)) as never;
+    },
+  };
+}
+
+/** One acceptance claim of a pass's PR: what it asserts and the proof that executes at its head. */
+interface PassClaim {
+  claim: string;
+  proof: string;
+}
+
+function passClaims(actions: GardenAction[], located: Record<string, string>, heading: string): PassClaim[] {
+  const proved = actions.filter((a) => located[a.target]);
+  return [
+    { claim: "this pass is recorded in the garden log", proof: `grep: ^${heading}$ in ${GARDEN_LOG}` },
+    ...proved.map((a) => ({ claim: `the gardener's ${a.class} of ${a.target} is marked in its entry`, proof: `grep: ${gardenMarker(a)}$ in ${located[a.target]}` })),
+  ];
+}
+
+/** W1-T5837: the golden case a retire/merge pass re-pins to itself. A learnings data change is a
+ *  prompt surface, and scripts/prompt-surface-gate.mjs (W1-T3077) admits it only on a golden
+ *  verdict under test/fixtures/golden-verdicts/ — so the pass carries its own. */
+export const KNOWLEDGE_RETIRE_GOLDEN = "test/fixtures/golden-verdicts/knowledge-retire";
+
+function fileLines(text: string): string[] {
+  const lines = text.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
+/** Zero-context hunks turning `a` into `b`: trim the common head and tail, then diff the middle by
+ *  longest common subsequence (a plain replace when the middle is too large to table). */
+function diffHunks(a: string[], b: string[]): string[] {
+  let head = 0;
+  while (head < a.length && head < b.length && a[head] === b[head]) head++;
+  let tail = 0;
+  while (tail < a.length - head && tail < b.length - head && a[a.length - 1 - tail] === b[b.length - 1 - tail]) tail++;
+  const x = a.slice(head, a.length - tail);
+  const y = b.slice(head, b.length - tail);
+  const ops: Array<[" " | "-" | "+", string]> = [];
+  if (x.length * y.length > 4_000_000) {
+    for (const l of x) ops.push(["-", l]);
+    for (const l of y) ops.push(["+", l]);
+  } else {
+    const t = Array.from({ length: x.length + 1 }, () => new Uint32Array(y.length + 1));
+    for (let i = x.length - 1; i >= 0; i--) for (let j = y.length - 1; j >= 0; j--) t[i]![j] = x[i] === y[j] ? t[i + 1]![j + 1]! + 1 : Math.max(t[i + 1]![j]!, t[i]![j + 1]!);
+    let i = 0;
+    let j = 0;
+    while (i < x.length && j < y.length) {
+      if (x[i] === y[j]) {
+        ops.push([" ", x[i]!]);
+        i++;
+        j++;
+      } else if (t[i + 1]![j]! >= t[i]![j + 1]!) ops.push(["-", x[i++]!]);
+      else ops.push(["+", y[j++]!]);
+    }
+    while (i < x.length) ops.push(["-", x[i++]!]);
+    while (j < y.length) ops.push(["+", y[j++]!]);
+  }
+  const out: string[] = [];
+  let oldAt = head;
+  let newAt = head;
+  for (let k = 0; k < ops.length; ) {
+    if (ops[k]![0] === " ") {
+      oldAt++;
+      newAt++;
+      k++;
+      continue;
+    }
+    const removed: string[] = [];
+    const added: string[] = [];
+    const oldStart = oldAt;
+    const newStart = newAt;
+    for (; k < ops.length && ops[k]![0] !== " "; k++) {
+      if (ops[k]![0] === "-") {
+        removed.push(ops[k]![1]);
+        oldAt++;
+      } else {
+        added.push(ops[k]![1]);
+        newAt++;
+      }
+    }
+    out.push(`@@ -${removed.length ? oldStart + 1 : oldStart},${removed.length} +${added.length ? newStart + 1 : newStart},${added.length} @@`);
+    out.push(...removed.map((l) => `-${l}`), ...added.map((l) => `+${l}`));
+  }
+  return out;
+}
+
+/** One file's change in the `diff --git` / `@@` shape judgeReview parses; "" when nothing changed. */
+export function fileDiff(path: string, before: string | undefined, after: string): string {
+  if (before === after) return "";
+  const hunks = diffHunks(before === undefined ? [] : fileLines(before), fileLines(after));
+  const head = before === undefined ? ["new file mode 100644", "--- /dev/null"] : [`--- a/${path}`];
+  return [`diff --git a/${path} b/${path}`, ...head, `+++ b/${path}`, ...hunks].join("\n") + "\n";
+}
+
+/** The lines of a shard the pass's proofs read: each acted entry's id, marker and lifecycle. */
+function entryExcerpt(shard: string, targets: string[]): string {
+  const lines = fileLines(shard);
+  const out: string[] = [];
+  for (const target of targets) {
+    const at = lines.findIndex((l) => l.trimEnd() === `- id: ${target}`);
+    if (at < 0) continue;
+    out.push(lines[at]!);
+    for (let i = at + 1; i < lines.length && !/^- id: /.test(lines[i]!); i++) {
+      if (/^\s+(# knowledge gardener:|lifecycle:|superseded_by:)/.test(lines[i]!)) out.push(lines[i]!);
+    }
+  }
+  return out.join("\n") + "\n";
+}
+
+/** What `apply` read before it changed anything: the shards and the garden log as origin/main has them. */
+interface PassBefore {
+  shards: Map<string, string>;
+  log: string | undefined;
+}
+
+function readPassBefore(root: string, learningsDir: string): PassBefore {
+  const shards = new Map<string, string>();
+  if (existsSync(learningsDir)) {
+    for (const name of readdirSync(learningsDir).filter((f) => f.endsWith(".yaml")).sort()) shards.set(`${basename(learningsDir)}/${name}`, readFileSync(join(learningsDir, name), "utf8"));
+  }
+  return { shards, log: readFileIfExists(join(root, GARDEN_LOG)) };
+}
+
+function filesUnder(dir: string, root = dir): string[] {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? filesUnder(join(dir, e.name), root) : [relative(root, join(dir, e.name))]));
+}
+
+/** Rewrite the knowledge-retire golden case from this pass itself and return every path it touched,
+ *  stale `checkout/` files included (their removal must be staged too). golden.yaml keeps its verdict
+ *  facts, which hold for any correct retirement, but its criteria list is re-pinned to this pass's
+ *  claims: #9542's two-retirement case left three rows that a one-retirement pass contradicts. */
+function writePassGolden(root: string, before: PassBefore, changedShards: string[], actions: GardenAction[], located: Record<string, string>, heading: string, body: string): string[] {
+  const dir = join(root, KNOWLEDGE_RETIRE_GOLDEN);
+  const stale = filesUnder(join(dir, "checkout")).map((f) => `${KNOWLEDGE_RETIRE_GOLDEN}/checkout/${f}`);
+  rmSync(join(dir, "checkout"), { recursive: true, force: true });
+  const after = new Map<string, string>();
+  const patch: string[] = [];
+  for (const rel of [...changedShards, GARDEN_LOG].sort()) {
+    const text = readFileSync(join(root, rel), "utf8");
+    after.set(rel, text);
+    patch.push(fileDiff(rel, rel === GARDEN_LOG ? before.log : before.shards.get(rel), text));
+  }
+  const files = new Map<string, string>();
+  for (const rel of changedShards) {
+    const targets = actions.filter((a) => (a.class === "merge" || a.class === "retire") && located[a.target] === rel).map((a) => a.target);
+    files.set(`checkout/${rel}`, entryExcerpt(after.get(rel)!, targets));
+  }
+  const log = after.get(GARDEN_LOG)!;
+  const section = log.slice(log.lastIndexOf(`\n${heading}\n`) + 1);
+  files.set(`checkout/${GARDEN_LOG}`, `${log.slice(0, log.indexOf("\n## ") + 1)}\n${section}`);
+  files.set("diff.patch", patch.join(""));
+  const claims = passClaims(actions, located, heading);
+  files.set("criteria.yaml", stringifyYaml(claims, { lineWidth: 0 }));
+  const golden = existsSync(join(dir, "golden.yaml")) ? readFileSync(join(dir, "golden.yaml"), "utf8") : "";
+  const criteriaAt = golden.search(/^criteria:[ \t]*$/m);
+  const repinned = criteriaAt < 0 ? golden : `${golden.slice(0, criteriaAt)}criteria:\n${claims.map(() => "  - met: true\n    proof_exec: executed_pass\n").join("")}`;
+  if (repinned !== golden) files.set("golden.yaml", repinned);
+  files.set("report.md", body.endsWith("\n") ? body : `${body}\n`);
+  for (const [rel, text] of files) {
+    mkdirSync(dirname(join(dir, rel)), { recursive: true });
+    writeFileSync(join(dir, rel), text);
+  }
+  return [...new Set([...stale, ...[...files.keys()].map((rel) => `${KNOWLEDGE_RETIRE_GOLDEN}/${rel}`)])];
 }
 
 function prBody(actions: GardenAction[], located: Record<string, string>, heading: string): string {
-  const proved = actions.filter((a) => located[a.target]);
   const lines = [
     "The knowledge gardener (W1-T4095) tended the knowledge base. Every change is reversible: nothing is deleted, and a superseded learning keeps its text and stops being injected.",
     "",
     ...actions.map((a) => `- **${a.class}**${a.target ? ` \`${a.target}\`` : ""}${a.into ? ` into \`${a.into}\`` : ""}: ${a.reason}`),
     "",
     "## Acceptance",
-    `- claim: this pass is recorded in the garden log`,
-    `  proof: grep: ^${heading}$ in ${GARDEN_LOG}`,
-    ...proved.flatMap((a) => [`- claim: the gardener's ${a.class} of ${a.target} is marked in its entry`, `  proof: grep: ${gardenMarker(a)}$ in ${located[a.target]}`]),
+    ...passClaims(actions, located, heading).flatMap((c) => [`- claim: ${c.claim}`, `  proof: ${c.proof}`]),
   ];
   return lines.join("\n");
 }
@@ -910,8 +1134,14 @@ export function knowledgeGardenSpec(deps: GardenerDeps<GardenWorkspace>): Garden
       return actions;
     },
     scorecard: (inv, plan) => ({ ...buildScorecard({ ...inv, dangling: danglingWhyPointers(deps.repoRoot).length, plan, memoryDirs: deps.memoryDirs }) }),
-    apply: (ws, plan, card) => {
-      const applied = applyLearningActions(resolveRepoLayout(ws.root).learningsDir, plan.actions);
+    apply: (ws, plan0, card) => {
+      let plan = plan0;
+      const learningsDir = resolveRepoLayout(ws.root).learningsDir;
+      const before = readPassBefore(ws.root, learningsDir);
+      // W1-T4927: an entry the open gardener PR already handles is not handled again.
+      const handled = new Set(ws.openGardenPr?.()?.handled ?? []);
+      if (handled.size > 0) plan = { ...plan, actions: plan.actions.filter((a) => a.class === "refresh" || !handled.has(a.target)) };
+      const applied = applyLearningActions(learningsDir, plan.actions);
       const ruleMerged = applyRuleMergeActions(ws.root, plan.actions);
       const repaired = applyRepairReferenceActions(ws.root, plan.actions);
       const refreshed = plan.acting.includes("refresh") ? ws.refreshAssertions() : [];
@@ -936,22 +1166,22 @@ export function knowledgeGardenSpec(deps: GardenerDeps<GardenWorkspace>): Garden
             ? `chore(knowledge): the gardener repairs ${nonRefresh.length} dangling reference(s)`
             : `chore(knowledge): the gardener folds and retires ${nonRefresh.length} learnings`;
       const ruleMergeLocated = Object.fromEntries(plan.actions.filter((a) => a.class === "rule-merge" && a.at).map((a) => [a.target, a.at!]));
-      return {
-        paths: [...changed, GARDEN_LOG].sort(),
-        title,
-        body: prBody(plan.actions, { ...applied.located, ...ruleMergeLocated }, heading),
-      };
+      const body = prBody(plan.actions, { ...applied.located, ...ruleMergeLocated }, heading);
+      // W1-T5837: a retire/merge that changed a shard is a learnings data change, which the prompt-surface
+      // gate admits only on a golden verdict — so the pass writes its own knowledge-retire case.
+      const golden = applied.paths.length > 0 ? writePassGolden(ws.root, before, applied.paths, plan.actions, applied.located, heading, body) : [];
+      return { paths: [...new Set([...changed, GARDEN_LOG, ...golden])].sort(), title, body };
     },
   };
 }
 
 /** One knowledge gardener pass. Returns what it did. */
-export function runGardenPass(deps: GardenerDeps<GardenWorkspace>): { ran: boolean; plan?: GardenPlan; prUrl?: string; scorecard?: KnowledgeScorecard } {
-  const result = runGarden(knowledgeGardenSpec(deps), deps);
+export async function runGardenPass(deps: GardenerDeps<GardenWorkspace>): Promise<{ ran: boolean; plan?: GardenPlan; prUrl?: string; scorecard?: KnowledgeScorecard }> {
+  const result = await runGardenAsync(knowledgeGardenSpec(deps), reusingOpenPr(deps));
   return { ...result, scorecard: result.scorecard as unknown as KnowledgeScorecard | undefined };
 }
 
 /** Run knowledge passes on their own timer beside the main loop, never two at once. */
 export function startKnowledgeGardener(deps: GardenerDeps<GardenWorkspace>, intervalMs: number): { stop: () => void } {
-  return startGarden(knowledgeGardenSpec(deps), deps, intervalMs);
+  return startGarden(knowledgeGardenSpec(deps), reusingOpenPr(deps), intervalMs);
 }

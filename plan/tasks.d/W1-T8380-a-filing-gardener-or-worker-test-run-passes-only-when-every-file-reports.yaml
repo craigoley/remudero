@@ -1,0 +1,66 @@
+- id: W1-T8380
+  title: "A FILING, GARDENER OR WORKER TEST RUN PASSES ONLY WHEN EVERY FILE REPORTS — a filing PR's shard census, the gate gardener's clock-shifted defuse run and the open-weight worker's unit_test check still read `node --test` exit 0 as a pass, so a suite that exits 0 before its own summary passes a filing, hides a time bomb, or tells a worker its tests are green; judge each run the way #10894/#10918/#11000 judge theirs"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high # Rule 19: one concern (what counts as a finished test run) across three subsystems: plan-pr-emitter, gate-gardener, worker-provider
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-12: the judged-runs sweep after #11000 (the review's unit-test proof runner)"
+  plan_refs: [W1-T5521, W1-T6036, W1-T6091, W1-T3617]
+  files: [src/lib/plan-pr-emitter.ts, src/lib/gate-gardener.ts, src/lib/worker-provider.ts, test/a-filing-gardener-or-worker-test-run-passes-only-when-every-file-reports.test.ts]
+  status: merged
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    A `node --test` child can exit 0 without finishing: a test file whose code calls `process.exit(0)`, or a worker
+    that dies, loses that file's remaining tests, and node still exits 0. #10894 and #10918 made every CI and pre-push
+    runner judge this: a run passes only when every file it names reaches its own per-file summary (`judgeRun` in
+    scripts/pure-test-pool.mjs). #11000 did the same for the review's `unit test:` proof runner. W1-T8379 covers the
+    preflight and census runners. READ at origin/main 0525727d0, three more runners read exit 0 as a pass:
+      - src/lib/plan-pr-emitter.ts `SHARD_CENSUS_ARGV` (~520): the filing PR's shard census runs through `runInTree` /
+        `runInTreeAsync`, and `shardCensusReading` only reinterprets status 1. Status 0 passes the filing.
+      - src/lib/gate-gardener.ts `runSuiteShifted` (~64): `execFileSync` returning means "passed", which the defuse
+        reads as `shifted_passed`. A clock-shifted file that exits 0 partway hides the time bomb it was run to find.
+      - src/lib/worker-provider.ts, the open-weight `run_check` handler for `unit_test` (OPENWEIGHT_CHECKS ~3544):
+        `runOpenWeightCheck` returning means `exitCode: 0`, which the lane reads as green.
+    Out of scope, by design:
+      - scripts/workflow-guard-mutation-ratchet.mjs `suiteFails` (~280): an unfinished mutant run reads as survived,
+        a false red, not a false pass.
+      - scripts/clock-sweep.mjs (~217) and scripts/host-parity.ts (~59): scheduled and operator sweeps that gate no
+        merge.
+      - scripts/check.mjs (~75): an operator convenience run.
+      - scripts/list-rule-suites.mjs (~21): lists suites and decides nothing.
+  design: |
+    1. Judge each run with scripts/pure-test-pool.mjs's existing exports, never a second implementation. src/ code
+       loads the .mjs lazily through `createRequire`, as src/lib/review.ts `loadProofJudge` does, never at import.
+       - The shard census and the shifted defuse run execute in a checkout that carries scripts/pure-test-pool.mjs,
+         so the file-based tally works: `prepareJudgedRun` → `judgedNodeTestArgs` → spawn → `judgeRun` → `cleanup`.
+       - The open-weight `unit_test` child runs sandboxed in its own network namespace and may run in a consumer
+         repo, so it uses the inline judge #11000 added: `inlineJudgedArgs`, then `splitInlineTally` on stdout, as
+         src/lib/review.ts `withProofJudge` / `splitProofOutput` / `unfinishedProofRun` do. Load the judge from the
+         orchestrator's own checkout, never from the worktree.
+    2. An exit-0 run whose verdict is not `complete`:
+       - shard census: a failed reading (nonzero status) whose output carries `describeJudgedRun`'s
+         `test-judge: … UNREPORTED FILE` line, so the filing is refused with a reason;
+       - shifted defuse run: throws ("the run reaches no verdict", the function's own contract), never `true`;
+       - open-weight unit_test: a nonzero `exitCode` whose output carries the judge's line, so the lane reads its red;
+         `ledgerRunCheck` records the same exit code.
+    3. A nonzero exit keeps today's reading at each site. A missing tally line on an exit-0 run is a failure, never a
+       pass. The open-weight `typecheck` check and the git checks are unchanged.
+    Do not edit scripts/pure-test-pool.mjs or src/lib/review.ts.
+  acceptance:
+    - claim: "a filing PR's shard census that exits 0 before its suite's summary is a failed reading naming the unreported file"
+      proof: 'grep: test("W1-T8380: a filing PR shard census fails when the suite exits 0 before its summary" in test/a-filing-gardener-or-worker-test-run-passes-only-when-every-file-reports.test.ts'
+    - claim: "a clock-shifted defuse run that exits 0 before its summary reaches no verdict instead of reading as passed"
+      proof: 'grep: test("W1-T8380: a shifted defuse run that exits 0 before its summary reaches no verdict" in test/a-filing-gardener-or-worker-test-run-passes-only-when-every-file-reports.test.ts'
+    - claim: "an open-weight unit_test check whose run stops before its summary returns a nonzero exit code and the judge's line"
+      proof: 'grep: test("W1-T8380: an open-weight unit_test check that stops before its summary reports a failure" in test/a-filing-gardener-or-worker-test-run-passes-only-when-every-file-reports.test.ts'
+  falsifier: |
+    Each test drives the real runner with a test file that registers one passing test and then calls
+    `process.exit(0)` before a second test runs, so node exits 0 with that file's summary missing. Remove the judgment
+    from any one site and that site's test reads a pass: status 0 from the shard census, `true` from
+    `runSuiteShifted`, `exitCode: 0` from the unit_test check. A control file that finishes must still pass at every
+    site.

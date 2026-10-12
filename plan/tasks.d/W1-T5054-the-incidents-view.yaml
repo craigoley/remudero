@@ -14,7 +14,7 @@
     - src/lib/incidents-view.ts
     - test/incidents-view.test.ts
     - src/lib/read-model-worker.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-10-01: /incidents reads /v1/incidents, the operator-agent emergency state and daemon health

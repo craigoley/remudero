@@ -456,6 +456,7 @@ exit 1
 `,
   );
   chmodSync(dockerPath, 0o755);
+  writeFileSync(join(binDir, "az"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,

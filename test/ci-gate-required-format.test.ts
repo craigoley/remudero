@@ -46,6 +46,7 @@ const PRE_REFORMAT_REQUIRED_FIXTURE = JSON.stringify([
   "claims",
   "learnings-budget-ratchet",
   "commitlint",
+  "rule-checks", // W1-T5695: posted under its own name, no longer ANDed into commitlint
   "api-client-drift",
   "no-hand-rolled-fetch",
   "prompt-surface-gate",

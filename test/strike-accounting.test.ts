@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { priorStrikesFor, runFixRung } from "../src/run-task.js";
+import { priorStrikesFor, runFixRung } from "./helpers/run-task-test.js";
 import { isRealStrike, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA } from "../src/lib/ledger.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { Config } from "../src/lib/config.js";

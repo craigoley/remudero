@@ -35,7 +35,7 @@ test("W1-T2946: runReview gives Codex a test-capable disposable review sandbox",
     const workerHome = join(root, "worker-home");
     mkdirSync(workerHome);
     writeFileSync(settingsFile, JSON.stringify({
-      sandbox: { enabled: true, failIfUnavailable: true },
+      sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false },
       hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "bash /bin/true", timeout: 5 }] }] },
     }), "utf8");
     writeFileSync(

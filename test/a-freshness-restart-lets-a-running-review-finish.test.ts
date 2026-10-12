@@ -21,7 +21,7 @@ import {
   runSweep,
   trackInFlightReview,
   type OpenPrView,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { RunResult } from "../src/run-task.js";
 

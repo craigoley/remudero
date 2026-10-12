@@ -6,7 +6,7 @@
   verify: auto
   priority: 2.2
   risk: low
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "ci-learning:6058:ci-gate"

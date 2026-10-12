@@ -18,8 +18,8 @@
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { statSync } from "node:fs";
-import { basename, dirname, join, relative } from "node:path";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { basename, dirname, join, relative, resolve as resolvePath } from "node:path";
 import {
   computeBoardSnapshot,
   computeRecentActivity,
@@ -28,18 +28,42 @@ import {
   isBlockedRow,
   isRunningRow,
   type BoardSnapshot,
+  type PrQueueRow,
   type RecentActivityCache,
 } from "./board.js";
 import { createBoardProjection, rowsNamingTasksBefore, type BoardProjection, type Row } from "./board-projection.js";
 import { boardOpenSnapshotPath, boardSnapshotPath, createBoardSnapshotReader, OPEN_SNAPSHOT_RESAVE_MS, readOpenBoardSnapshot, type SharedBoardSnapshotRows } from "./board-snapshot-cache.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { deriveLastPoll, readDiskFreeBytes, readGhRateLimitRemaining } from "./daemon-health.js";
+import { deployAutoPath, deployImageManualPath, deployMarkerPath } from "./deployer.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { feedbackDir, listFeedback, type FeedbackEntry } from "./feedback.js";
-import { projectHumanGates, type HumanGateObservation, type HumanGateProjection, type HumanGateSource } from "./human-gate.js";
+import { overlayQueuedFeedbackEntries, queuedFeedbackDir } from "./feedback-landing.js";
+import { heldDependencyRoots } from "./held-dependency-roots.js";
+import {
+  consumeHumanGateCounts,
+  measureFeedbackAge,
+  projectChangeManagementGates,
+  projectDependencyVerificationGates,
+  projectFeedbackGates,
+  projectHumanGates,
+  projectOperatorItemGates,
+  projectPinReviewerGates,
+  shownHumanGates,
+  type DependencyEscalation,
+  type DependencyReviewFact,
+  type FeedbackAgeEvidence,
+  type DeployMarkerReading,
+  type FeedbackAgeRoot,
+  type HumanGateCountSummary,
+  type HumanGateObservation,
+  type HumanGateProjection,
+  type HumanGateSource,
+  type OperatorItemProjection,
+} from "./human-gate.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { readTaskActivity } from "./ledger-projector.js";
-import { createLedgerRotationMemo, readLedgerUnionRecordsSync, rotationStampIso, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
+import { createLedgerRotationMemo, ledgerRotationDigests, readLedgerUnionRecordsSync, rotationStampIso, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
 import {
   capDecisions,
   escalationClasses,
@@ -52,14 +76,20 @@ import {
   type QuestionStoreLine,
 } from "./now-decisions.js";
 import type { BoardIssueRest, BoardPrRest } from "./open-prs-rest.js";
-import type { Plan } from "./plan.js";
+import { projectReconciledFeedback } from "./panel-graph.js";
+import { unmetDependencies, type Plan } from "./plan.js";
+import { loadPolicy, policyPath, type PolicyValues } from "./policy.js";
+import { ratificationsPath, type Ratifications } from "./ratification.js";
+import { parse as parseYaml } from "yaml";
 import type { ReadModelDb, ReadModelLease } from "./read-model-db.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { buildBatchedGithub, readLedgerLines, type BatchedPr, type GitHub } from "./status.js";
+import { buildBatchedGithub, buildLedgerIndex, ledgerGenerationOf, readLedgerLines, resolveEscalation, type BatchedPr, type GitHub } from "./status.js";
+import { deriveOperatorItems } from "./status-board.js";
 import { deriveDayCostUsd, windowCostRows } from "./sweep.js";
-import { threadPlan, threadPlanPin } from "./thread-plan.js";
+import { threadPlan, threadPlanPin, threadPlanPinnedRef } from "./thread-plan.js";
 import { utcDayWindowMs } from "./time-window.js";
-import { judgeSource, PLAN_BUDGET_MS } from "./view-freshness.js";
+import { currentVerifyHumanRulings, VERIFY_HUMAN_JUDGED_STEP } from "./verify-human-judge.js";
+import { judgeSource } from "./view-freshness.js";
 import { legacyRowIndex, type LegacyRows, type ShadowLatest, type ShadowSum } from "./view-shadow.js";
 import { effectiveViewMode, type ViewSource, type ViewSwitchMode } from "./views.js";
 
@@ -107,6 +137,14 @@ export interface NowTask {
   verifyHumanPending?: true;
   escalation?: { title?: string; issueUrl?: string; unverified?: true; openedAt?: string };
   worker?: { servedModel?: string; requestedModel?: string };
+  /** The run's worker liveness, carried from {@link BoardRow.workerState}: the console's fleet map evidences a
+   *  worker process only from it (a phase or a model is task context, not process evidence). It moves only on a
+   *  `worker.state` transition, so it does not churn the ETag the way per-event activity would. */
+  workerState?: BoardRow["workerState"];
+  /** When the run went quiet; present only while `workerState` is `quiet` ({@link BoardRow.workerStateSince}). */
+  workerStateSince?: string;
+  /** The row is running only on an open PR's strength: no live lock and no recent activity ({@link BoardRow.processUnevidenced}). */
+  processUnevidenced?: true;
 }
 
 export interface NowGroups {
@@ -158,7 +196,7 @@ export interface NowViewData {
     tasks: NowTask[];
     groups: NowGroups;
   };
-  prQueue: { complete: boolean; unavailableReason?: string; rows: Array<{ prNumber: number; prUrl: string; title: string; taskId?: string; disposition: string; queueClass: string; held: boolean }> };
+  prQueue: { complete: boolean; unavailableReason?: string; rows: Array<{ prNumber: number; prUrl: string; title: string; taskId?: string; disposition: string; queueClass: string; held: boolean; reviewState: PrQueueRow["reviewState"] }> };
   actions: NowAction[];
   recent: { entries: Array<{ ts: string; verb: string; taskId: string; title: string; detail?: string; costUsd?: number; prUrl?: string }>; mergedToday: { count: number; day: string } };
   health: NowHealth;
@@ -169,10 +207,12 @@ export interface NowViewData {
   decisionsReasons?: Partial<Record<"grill" | "task_question", string>>;
   /** Additive decision projection; its counts precede the legacy decisions display cap. */
   humanGates?: HumanGateProjection;
+  /** W1-T5373: this instance's needs-you count, read through the shared consumer before the display cap. */
+  needsYou?: HumanGateCountSummary;
 }
 
 /** The `decisions` half of one instance's body. */
-export type NowDecisionsData = Pick<NowViewData, "decisions" | "decisionsMore" | "decisionsReasons" | "humanGates">;
+export type NowDecisionsData = Pick<NowViewData, "decisions" | "decisionsMore" | "decisionsReasons" | "humanGates" | "needsYou">;
 
 function decisionGate(decision: NowDecision): HumanGateObservation {
   const kind = decision.kind === "grill" ? "feedback_grill" : decision.kind;
@@ -183,6 +223,69 @@ function decisionGate(decision: NowDecision): HumanGateObservation {
     reason: decision.prompt.split("\n").find((line) => line.trim() !== "")?.trim() ?? decision.title,
     resolutionVerb: decision.kind === "manual_approval" ? "approve" : decision.kind === "escalation" ? "mark_handled" : "answer",
   };
+}
+
+const DEP_REVIEW_TASK = /^dep-review(?:-(arm|hold))?-PR(\d+)$/;
+
+/** W1-T5370: each producer's own record, joined the board's way. Dependency escalations go through resolveEscalation's
+ *  issue join; held roots through heldDependencyRoots over the board's merge state; verify-human through the
+ *  judge's current ruling. An existing release (`ratify.approved`, `released: verify-human`) frees a root and
+ *  settles its verify ask. */
+export function nowDependencyVerificationGates(input: {
+  instance: string; repo?: string; plan: Plan | undefined; rows: ReadonlyArray<Row>; github: GitHub;
+  snapshot: Pick<BoardSnapshot, "tasks" | "prQueue" | "github_unreachable">;
+}): HumanGateSource[] {
+  const { snapshot, rows, plan } = input;
+  const ledger = rows as Array<Record<string, unknown>>;
+  // Every read below is of a few steps' rows or a few tasks' rows: the step and task buckets of the index the board's
+  // snapshot stage already built for this row generation, never a walk of the whole ledger. Four whole-ledger walks
+  // (this loop, the rulings and one per dependency escalation) were the `decisions.dependencies` lap: 0.33-0.6 s per
+  // core build over ~0.85 M fact rows on 2026-10-08, due on every new ledger row.
+  const index = buildLedgerIndex(ledger);
+  const stepRows = (step: string): ReadonlyArray<Row> => (index.byStep.get(step) ?? []) as ReadonlyArray<Row>;
+  const decided = new Map<number, Row>();
+  const escalated = new Map<number, Set<string>>();
+  const released = new Set<string>();
+  for (const row of stepRows("ratify.approved")) if (typeof row.task_id === "string" && row.released === "verify-human") released.add(row.task_id);
+  for (const row of stepRows("dep-review.decided")) {
+    const dep = typeof row.task_id === "string" ? DEP_REVIEW_TASK.exec(row.task_id) : null;
+    if (dep && !dep[1]) decided.set(Number(dep[2]), row);
+  }
+  for (const row of stepRows("escalation.issue_opened")) {
+    const dep = typeof row.task_id === "string" ? DEP_REVIEW_TASK.exec(row.task_id) : null;
+    if (dep) escalated.set(Number(dep[2]), (escalated.get(Number(dep[2])) ?? new Set()).add(row.task_id as string));
+  }
+  const openPrs = new Map(snapshot.prQueue.rows.map((pr) => [pr.prNumber, pr.prUrl]));
+  const dependencyReview = [...escalated].sort(([a], [b]) => a - b).map(([prNumber, taskIds]): DependencyReviewFact => {
+    const verdict = decided.get(prNumber);
+    // A reconciliation failure re-logs the review as `hold`; the review's own verdict rides `review_decision`.
+    const decision = verdict?.review_decision ?? verdict?.decision;
+    return {
+      repo: input.repo ?? null, prNumber, prUrl: openPrs.get(prNumber) ?? (typeof verdict?.pr_url === "string" ? verdict.pr_url : null),
+      decision: typeof decision === "string" ? decision : null, prOpen: snapshot.prQueue.complete ? openPrs.has(prNumber) : null,
+      escalations: [...taskIds].sort().flatMap((taskId): DependencyEscalation[] => {
+        const open = resolveEscalation(ledger, taskId, input.github, index);
+        return open ? [{ producer: (DEP_REVIEW_TASK.exec(taskId)![1] ?? "manual") as DependencyEscalation["producer"], ...(open.escalationClass ? { class: open.escalationClass } : {}),
+          ...(open.issueUrl ? { issueUrl: open.issueUrl } : {}), ...(open.openedAt ? { openedAt: open.openedAt } : {}), ...(open.unverified ? { unverified: true as const } : {}) }] : [];
+      }),
+    };
+  });
+  const byId = new Map(snapshot.tasks.map((t) => [t.taskId, t]));
+  const merged = (id: string): boolean => byId.get(id)?.merged === true;
+  const depsMerged = (id: string): boolean | undefined => {
+    const task = plan?.byId.get(id);
+    return task ? unmetDependencies(plan!, task, (t) => merged(t.id)).length === 0 : undefined;
+  };
+  const rulings = currentVerifyHumanRulings(stepRows(VERIFY_HUMAN_JUDGED_STEP) as ReadonlyArray<Record<string, unknown>>, depsMerged);
+  const githubGap = snapshot.github_unreachable || !snapshot.prQueue.complete;
+  return projectDependencyVerificationGates({
+    instance: input.instance,
+    dependencyReview: { state: githubGap ? "partial" : "complete", ...(githubGap ? { reason: snapshot.prQueue.unavailableReason ?? "GitHub PR state could not be completely verified" } : {}), items: dependencyReview },
+    heldRoots: { state: plan ? "complete" : "unavailable", ...(plan ? {} : { reason: "no plan was read, so held roots are unknown" }),
+      items: (plan ? heldDependencyRoots(plan, merged, released) : []).map((root) => ({ ...root, url: byId.get(root.rootId)?.prUrl ?? byId.get(root.rootId)?.escalationIssueUrl ?? null })) },
+    verifyHuman: { state: "complete", items: snapshot.tasks.filter((t) => t.verifyHumanPending && !released.has(t.taskId)).map((t) => ({
+      taskId: t.taskId, url: t.prUrl ?? null, judgment: rulings.get(t.taskId) ?? { state: "unclassified" as const, reason: "no judge verdict recorded" } })) },
+  });
 }
 
 const RUNNING_STATUSES = new Set(["running", "fixing", "review", "diagnosing"]);
@@ -322,6 +425,9 @@ function nowTask(row: BoardRow): NowTask {
     ...(row.needsHuman ? { needsHuman: row.needsHuman } : {}), ...(row.verifyHumanPending ? { verifyHumanPending: row.verifyHumanPending } : {}),
     ...(escalation ? { escalation } : {}),
     ...(t?.servedModel || t?.requestedModel ? { worker: { ...(t.servedModel ? { servedModel: t.servedModel } : {}), ...(t.requestedModel ? { requestedModel: t.requestedModel } : {}) } } : {}),
+    ...(row.workerState ? { workerState: row.workerState } : {}),
+    ...(row.workerState === "quiet" && row.workerStateSince ? { workerStateSince: row.workerStateSince } : {}),
+    ...(row.processUnevidenced ? { processUnevidenced: true as const } : {}),
   };
 }
 
@@ -359,7 +465,7 @@ export function assembleNowView(input: {
     prQueue: {
       complete: snapshot.prQueue.complete,
       ...(snapshot.prQueue.unavailableReason ? { unavailableReason: snapshot.prQueue.unavailableReason } : {}),
-      rows: snapshot.prQueue.rows.map((r) => ({ prNumber: r.prNumber, prUrl: r.prUrl, title: r.title, ...(r.taskId ? { taskId: r.taskId } : {}), disposition: r.disposition, queueClass: r.queueClass, held: r.held })),
+      rows: snapshot.prQueue.rows.map((r) => ({ prNumber: r.prNumber, prUrl: r.prUrl, title: r.title, ...(r.taskId ? { taskId: r.taskId } : {}), disposition: r.disposition, queueClass: r.queueClass, held: r.held, reviewState: r.reviewState })),
     },
     actions: nowActions(snapshot, input.rows),
     recent: {
@@ -457,7 +563,8 @@ function closedHalfOf(rows: SharedBoardSnapshotRows): ClosedHalf {
 
 /**
  * A gateway over the legacy gateway's persisted snapshot (ruling Q3): open PRs, closed PRs and issues, no GitHub read.
- * `generation` is the files' mtimes, which move on every re-save; `content` moves only when what they hold does.
+ * `generation` is the files' identities; atomic re-saves may share an mtime but replace the inode.
+ * `content` moves only when what they hold does.
  * The closed/issues file is parsed once per change and shared ({@link createBoardSnapshotReader}), and so is the
  * gateway while `content` holds: the open half's 60 s re-save rebuilt both on every build (E33).
  */
@@ -505,7 +612,15 @@ export function snapshotSource(savedAt: string | null, reason: string | undefine
 }
 
 export function snapshotGeneration(root: string, owner: string, repo: string): string {
-  return `${mtimeOf(boardSnapshotPath(root, owner, repo)) ?? "-"}:${mtimeOf(boardOpenSnapshotPath(root, owner, repo)) ?? "-"}`;
+  return [boardSnapshotPath(root, owner, repo), boardOpenSnapshotPath(root, owner, repo)].map((path) => {
+    try {
+      const st = statSync(path);
+      return `${st.ino}:${st.mtimeMs}:${st.size}`;
+    } catch {
+      // Missing/unreadable is an identity, not fresh evidence; snapshotGithub names the refusal.
+      return "-";
+    }
+  }).join(":");
 }
 
 export interface NowViewOptions {
@@ -526,27 +641,96 @@ export interface NowViewOptions {
     rateLimit?: () => number | undefined;
     diskFree?: (path: string) => number | undefined;
   };
-  /** Core's feedback entries parked `grilling`; `listFeedback` over its `feedbackRoot` by default. */
+  /** Legacy grill-only injection seam; production reads all statuses so durable answers remain visible. */
   listGrilling?: (instance: NowInstance) => FeedbackEntry[];
+  dependencyGates?: typeof nowDependencyVerificationGates;
+  feedbackAgeObservation?: { roots: readonly FeedbackAgeRoot[]; window: FeedbackAgeEvidence["window"] };
   /** How far each instance's checkout is behind origin/main's plan; production reads git ({@link gitPlanBehind}). */
   planBehind?: (instance: NowInstance) => PlanBehind;
+  readPinPolicy?: (instance: NowInstance) => PolicyValues;
+  /** Fact rows one `board` step ingests at most (W1-T6014); the projection's default when omitted. */
+  boardIngestChunkRows?: number;
+  /** False: the board keeps its rows' parsed strings (W1-T6467's equality arm). */
+  boardInternStrings?: boolean;
 }
 
 /** How many plan-touching commits on origin/main a checkout lacks, and the oldest one's time; or why that is unknowable. */
 export type PlanBehind = { commits: number; sinceMs?: number } | { reason: string };
 
+function feedbackFileIdentities(path: string): string {
+  try {
+    return JSON.stringify(readdirSync(path).filter((name) => name.endsWith(".yaml")).sort().map((name) => {
+      const s = statSync(join(path, name), { bigint: true });
+      return [name, s.dev, s.ino, s.size, s.mtimeNs, s.ctimeNs, s.mode].map(String);
+    }));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return `missing: ${(error as Error).message}`;
+    return `unreadable: ${(error as Error).message}`;
+  }
+}
+
+/** A full sha, never an abbreviation: what `git rev-parse` prints, so a file answer is compared byte for byte. */
+const isFullSha = (text: string): boolean => /^[0-9a-f]{40,64}$/.test(text);
+
+function readRefFile(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    // deliberate: absent or unreadable means this layout does not hold the ref here; the caller spawns git.
+    return undefined;
+  }
+}
+
+/** A full ref's sha from the common dir's loose ref, else its packed-refs line (a loose ref wins, as in git). */
+function refShaFromFiles(commonDir: string, ref: string): string | undefined {
+  const loose = readRefFile(join(commonDir, ref))?.trim();
+  if (loose !== undefined) return isFullSha(loose) ? loose : undefined;
+  const packed = readRefFile(join(commonDir, "packed-refs"));
+  return packed?.split("\n").find((line) => line.endsWith(` ${ref}`) && isFullSha(line.slice(0, line.indexOf(" "))))?.split(" ")[0];
+}
+
 /**
- * Compares a plan's checkout with its origin/main. The commit log is read only when the pair of
- * heads moved since `memo` last saw them, so a materialize costs one `git rev-parse` per instance.
+ * What `git -C <dir> rev-parse <base> origin/main` prints, read from the ref files with no spawn — `.git` (a
+ * directory, or a linked worktree's `gitdir:` file), its `commondir`, the loose ref, then `packed-refs`; the
+ * inbox's {@link "./inbox.js".readOriginMainSha} reads origin/main the same way. `base` is a full sha (a pinned
+ * plan) or `HEAD` (direct, or one symbolic hop to a branch). Undefined for any other shape — the caller spawns.
+ */
+export function planHeadsFromRefFiles(dir: string, base: string): string | undefined {
+  const dotGit = join(dir, ".git");
+  const pointer = readRefFile(dotGit);
+  const gitDir = pointer?.startsWith("gitdir:") ? resolvePath(dir, pointer.slice("gitdir:".length).trim()) : dotGit;
+  const common = readRefFile(join(gitDir, "commondir"));
+  const commonDir = common === undefined ? gitDir : resolvePath(gitDir, common.trim());
+  let left: string | undefined;
+  if (isFullSha(base)) left = base;
+  else if (base === "HEAD") {
+    const head = readRefFile(join(gitDir, "HEAD"))?.trim();
+    const symbolic = head?.startsWith("ref: ") ? head.slice("ref: ".length).trim() : undefined;
+    left = symbolic === undefined ? (head !== undefined && isFullSha(head) ? head : undefined) : refShaFromFiles(commonDir, symbolic);
+  }
+  const main = left === undefined ? undefined : refShaFromFiles(commonDir, "refs/remotes/origin/main");
+  return main === undefined ? undefined : `${left}\n${main}`;
+}
+
+/**
+ * Compares the plan this thread serves with its origin/main. The pair of heads is read from the ref files
+ * ({@link planHeadsFromRefFiles}); only a layout those cannot answer spawns `git rev-parse`. The commit log is
+ * read only when the heads moved since `memo` last saw them, so an idle materialize spawns no git at all.
+ * MEASURED 2026-10-06: the rev-parse ran on every read-model materialize, idle passes included (~7 ms each).
+ * `base` is the commit the plan is pinned to when serve reloaded it in place (thread-plan.ts), else the
+ * checkout's HEAD: a generation's working tree never moves, so HEAD read every plan merge after its boot
+ * as behind while the pinned plan already held it (2026-10-06: 74 of 74 now reads stale over 8 reloads).
  */
 export function gitPlanBehind(
   planPath: string,
   memo: { heads?: string; result?: PlanBehind } = {},
   git: (args: string[]) => string = (args) => execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+  base: string = threadPlanPinnedRef(planPath) ?? "HEAD",
+  readHeads: (dir: string, base: string) => string | undefined = planHeadsFromRefFiles,
 ): PlanBehind {
   const dir = dirname(dirname(planPath));
   try {
-    const heads = git(["-C", dir, "rev-parse", "HEAD", "origin/main"]).trim();
+    const heads = readHeads(dir, base) ?? git(["-C", dir, "rev-parse", base, "origin/main"]).trim();
     if (memo.heads === heads && memo.result) return memo.result;
     const [head, main] = heads.split("\n");
     const paths = [relative(dir, planPath), relative(dir, join(dirname(planPath), "tasks.d"))];
@@ -562,7 +746,7 @@ export function gitPlanBehind(
 /**
  * The `plan:<i>` source. A checkout as new as origin/main's plan is fresh as of now; one behind it is
  * as old as the oldest plan commit it lacks, which the budget table judges, so a checkout behind for
- * longer than {@link PLAN_BUDGET_MS} reads stale, phase `behind`.
+ * longer than {@link judgeSource}'s plan budget reads stale, phase `behind`.
  */
 export function planSource(name: string, behind: PlanBehind, now: number): ViewSource {
   if ("reason" in behind) return judgeSource({ name, asOf: null, state: "unavailable", reason: behind.reason }, now);
@@ -630,8 +814,26 @@ interface Shown {
   credit: ReturnType<BoardProjection["creditRead"]>;
 }
 
-/** The day's cost rows `computeGlanceSpend` adds into `spendTodayUsd`. */
-const dayCostRows = (rows: ReadonlyArray<Record<string, unknown>>, nowMs: number): Array<[string, number]> => windowCostRows(rows, ...utcDayWindowMs(nowMs));
+const dayCostMemo = new WeakMap<ReadonlyArray<Record<string, unknown>>, { generation: number; dayStartMs: number; rows: Array<[string, number]> }>();
+let dayCostScans = 0;
+
+/** How many day-cost scans this process has run: the W1-T6253 tests' counting seam. */
+export function dayCostScanCount(): number {
+  return dayCostScans;
+}
+
+/** The day's cost rows `computeGlanceSpend` adds into `spendTodayUsd`. W1-T6253: a rows array whose owner registers a
+ *  generation is scanned once per (generation, UTC day); any other array is scanned on every call. */
+const dayCostRows = (rows: ReadonlyArray<Record<string, unknown>>, nowMs: number): Array<[string, number]> => {
+  const window = utcDayWindowMs(nowMs);
+  const generation = ledgerGenerationOf(rows);
+  const held = generation === undefined ? undefined : dayCostMemo.get(rows);
+  if (held && held.generation === generation && held.dayStartMs === window[0]) return held.rows.slice();
+  dayCostScans++;
+  const scanned = windowCostRows(rows, ...window);
+  if (generation !== undefined) dayCostMemo.set(rows, { generation, dayStartMs: window[0], rows: scanned });
+  return scanned.slice();
+};
 
 /** The legacy side of one shadow sample (view-shadow.ts): what /now shows today, in the view's shape. */
 export interface NowShadowLegacy {
@@ -644,6 +846,7 @@ export interface NowShadowLegacy {
   /** The task window's paths, computed only from the board groups. */
   derived: Record<string, string[]>;
   rows: LegacyRows;
+  orderRows: LegacyRows;
   sortKeys: Record<string, Record<string, ShadowLatest>>;
   from: Record<string, ShadowLatest>;
   inputs: { plan: string; probeAt: string; builtAt: string; windows: Record<"board" | "probe" | "spend", LegacyWindowRead> };
@@ -693,8 +896,10 @@ export function createNowView(opts: NowViewOptions): {
   version: number;
   materialize(ctx: NowViewContext): Array<{ key: string; data: NowViewData; sources: ViewSource[] }>;
   prepare(ctx: NowViewContext, more: () => boolean): boolean;
+  stages(ctx: NowViewContext): Record<string, number> | undefined;
   legacy(key: string, now: number, view: unknown): NowShadowLegacy | undefined;
   perInstance: true;
+  readPaced: true;
 } {
   const clock = opts.clock ?? systemClock;
   const log = opts.log ?? (() => {});
@@ -705,6 +910,7 @@ export function createNowView(opts: NowViewOptions): {
   const shown = new WeakMap<NowViewData, Shown>();
   /** Per instance, the rotations legacy's windows read, each parsed once: a sample reads only the live file and any new cut. */
   const legacyMemos = new Map<string, { rows: LedgerRotationMemo; costs: LedgerRotationMemo }>();
+  const retentionReported = new Map<string, string>();
   const planCache = new Map<string, { key: string; plan: Plan }>();
   const readPlan = opts.readPlan ?? ((instance: NowInstance): Plan => {
     const path = nowPlanPath(instance);
@@ -725,25 +931,157 @@ export function createNowView(opts: NowViewOptions): {
     return snapshotGeneration(dirname(instance.ledgerDir), owner!, repo!);
   };
   const probeHost = (instance: NowInstance, isCore: boolean): NowHostProbe => defaultProbeHost(instance, isCore, clock, opts.hostProbe);
-  const listGrilling = opts.listGrilling ?? ((instance: NowInstance) => listFeedback(instance.feedbackRoot!, { status: "grilling" }));
-  /** Core's feedback dir and question store, so an answer landing in either re-materializes at once. */
-  const decisionsKey = (instance: NowInstance): string =>
-    instance.name === core && instance.feedbackRoot ? `${mtimeOf(feedbackDir(instance.feedbackRoot)) ?? "-"}:${mtimeOf(questionStorePath(instance.feedbackRoot)) ?? "-"}` : "none";
+  const listGrilling = opts.listGrilling ?? ((instance: NowInstance) => listFeedback(instance.feedbackRoot!));
+  const dependencyGates = opts.dependencyGates ?? nowDependencyVerificationGates;
+  const feedbackListings = new Map<string, { key: string; entries: FeedbackEntry[] }>();
+  const reconciledFeedback = new Map<string, { key: string; entries: FeedbackEntry[] }>();
+  const dependencySources = new Map<string, { db: ReadModelDb; key: string; sources: HumanGateSource[] }>();
+  const feedbackKey = (instance: NowInstance): string => instance.name === core && instance.feedbackRoot
+    ? JSON.stringify([feedbackFileIdentities(feedbackDir(instance.feedbackRoot)), feedbackFileIdentities(queuedFeedbackDir(dirname(instance.ledgerDir)))]) : "none";
+  const feedbackAge = opts.feedbackAgeObservation ? measureFeedbackAge(opts.feedbackAgeObservation.roots, opts.feedbackAgeObservation.window) : undefined;
+  /** Core's feedback dir and question store, so an answer landing in either re-materializes at once. NOT the
+   *  live ledger's mtime: every ledger row the pin and reviewer gates read already advances the projector
+   *  generation `step` keys on, so the mtime only added serve's own diagnostic rows as a rebuild cause. */
+  const decisionsKey = (instance: NowInstance, feedback: string): string => {
+    const path = nowPlanPath(instance);
+    const root = path ? dirname(dirname(path)) : undefined;
+    const stateRoot = dirname(instance.ledgerDir);
+    const stores = instance.name === core && instance.feedbackRoot ? `${feedback}:${mtimeOf(questionStorePath(instance.feedbackRoot)) ?? "-"}` : "none";
+    const markers = [deployImageManualPath, deployAutoPath, deployMarkerPath].map((path) => mtimeOf(path(stateRoot)) ?? "-").join(":");
+    return `${stores}:${root ? `${mtimeOf(ratificationsPath(root)) ?? "-"}:${mtimeOf(policyPath(root)) ?? "-"}` : "none"}:${markers}`;
+  };
+  /** Bump this version whenever the pin/reviewer or operator step set changes. */
+  const gateReducerVersion = "1";
+  const isPinReviewerRow = (row: Record<string, unknown>): boolean => row.step === "rung.unratified" || row.step === "daemon.boot" ||
+    row.step === "daemon.freshness_not_stale" || row.step === "review.post_refused" || typeof row.step === "string" && row.step.startsWith("review.stale_reviewer_");
+  const operatorSteps = /cost\.anomaly|daemon\.image_drift|daemon\.boot|github_app\.token_refresh/;
+  const isOperatorRow = (row: Record<string, unknown>): boolean => typeof row.step === "string" && operatorSteps.test(row.step);
+  const gateLinePattern = /rung\.unratified|daemon\.boot|daemon\.freshness_not_stale|review\.post_refused|review\.stale_reviewer_|cost\.anomaly|daemon\.image_drift|github_app\.token_refresh/;
+  const reduceGateRows = (rows: Array<Record<string, unknown>>) => rows.filter((row) => isPinReviewerRow(row) || isOperatorRow(row));
+  const gateMemos = new Map<string, ReturnType<typeof createLedgerRotationMemo>>();
+  const gateRows = new Map<string, Array<Record<string, unknown>>>();
+  /** The gate rows of one decisions build: complete, or the last complete read's rows with `complete: false`. */
+  const gateLedger = (instance: NowInstance): { complete: boolean; rows: Array<Record<string, unknown>> } => {
+    const memo = gateMemos.get(instance.name) ?? createLedgerRotationMemo(reduceGateRows, { holder: "now.gate" });
+    gateMemos.set(instance.name, memo);
+    const pass = memo.pass({ parseMissing: true });
+    const digests = ledgerRotationDigests(instance.ledgerDir, reduceGateRows, { holder: "now.gate", reducerVersion: gateReducerVersion });
+    const read = readLedgerUnionRecordsSync(instance.ledgerDir, { refuseIncomplete: true, pattern: gateLinePattern,
+      rotationRecords: (entry, parse) => pass.rotationRecords(entry, () => {
+        const archived = digests.rotationRecords(entry, parse);
+        const tornLines = archived.tornLines.filter((line) => gateLinePattern.test(line));
+        return { ...archived, torn: tornLines.length, tornLines };
+      }) });
+    pass.complete();
+    if (read.archiveCount > 0) log("read_model.now_gate_digests", { instance: instance.name, ...digests.counts() });
+    const complete = read.ok && read.liveFileRead && read.torn === 0 && read.unclassified.length === 0;
+    if (complete) gateRows.set(instance.name, read.rows);
+    return { complete, rows: complete ? read.rows : gateRows.get(instance.name) ?? read.rows };
+  };
+  const pinReviewerSources = (instance: NowInstance, nowMs: number, ledger: { complete: boolean; rows: Array<Record<string, unknown>> }): HumanGateSource[] => {
+    const complete = ledger.complete;
+    let pins: Ratifications | undefined;
+    let policy: PolicyValues | undefined;
+    let pinReason: string | undefined;
+    const path = nowPlanPath(instance);
+    try {
+      if (!path) throw new NowViewError("instance names no repository for ratification pins");
+      const root = dirname(dirname(path));
+      const pinPath = ratificationsPath(root);
+      try {
+        const raw: unknown = parseYaml(readFileSync(pinPath, "utf8"));
+        if (!Array.isArray(raw) || raw.some((entry) => !entry || typeof entry.rung !== "string" || typeof entry.operationHash !== "string")) {
+          throw new NowViewError("ratification pin table has unreadable rows");
+        }
+        pins = new Map(raw.map((entry) => [entry.rung, {
+          rung: entry.rung, operationHash: entry.operationHash,
+          ratifiedAt: typeof entry.ratifiedAt === "string" ? entry.ratifiedAt : "",
+          ratifiedBy: typeof entry.ratifiedBy === "string" ? entry.ratifiedBy : "",
+        }]));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        pins = new Map();
+      }
+      policy = opts.readPinPolicy ? opts.readPinPolicy(instance) : loadPolicy(policyPath(root)).values;
+    } catch (error) {
+      const reason = `cannot read current ratification source: ${String((error as Error).message)}`;
+      pinReason = reason;
+    }
+    return projectPinReviewerGates({ instance: instance.name, state: complete ? "complete" : "partial",
+      ...(!complete ? { reason: "pin/reviewer ledger source is missing, unreadable or incomplete" } : {}),
+      rows: ledger.rows.filter(isPinReviewerRow), pins, policy, pinReason,
+      nowMs, freshnessBudgetMs: NOW_DAEMON_SILENT_MS });
+  };
+  /** W1-T5374: NEEDS ME's operator items through status-board's own producers, classified by their real action route. */
+  const operatorItemsOf = (instance: NowInstance, nowMs: number, ledger: { complete: boolean; rows: Array<Record<string, unknown>> }): OperatorItemProjection => {
+    const complete = ledger.complete;
+    const rows = ledger.rows.filter(isOperatorRow);
+    const stateRoot = dirname(instance.ledgerDir);
+    const unreadable: string[] = [];
+    const present = (path: string): boolean | undefined => {
+      try {
+        statSync(path);
+        return true;
+      } catch (error) {
+        // ENOENT is the marker's real absence; any other failure is unknown, named, and never read as absent.
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+        const reason = `${basename(path)}: ${(error as Error).message}`;
+        unreadable.push(reason);
+        return undefined;
+      }
+    };
+    const deploy: DeployMarkerReading = { imageRecycleManual: present(deployImageManualPath(stateRoot)),
+      autoMode: present(deployAutoPath(stateRoot)), requested: present(deployMarkerPath(stateRoot)) };
+    if (unreadable.length > 0) deploy.reason = unreadable.join("; ");
+    return projectOperatorItemGates({ instance: instance.name, state: complete ? "complete" : "partial",
+      ...(!complete ? { reason: "operator-item ledger source is missing, unreadable or incomplete" } : {}),
+      items: { ...deriveOperatorItems(rows, undefined), uncreditedBuilds: undefined },
+      uncreditedReason: "the now view's board snapshot does not read uncredited builds; rmd status renders them",
+      bootTimes: rows.flatMap((row) => row.step === "daemon.boot" && typeof row.ts === "string" ? [row.ts] : []),
+      deploy, nowMs, freshnessBudgetMs: NOW_DAEMON_SILENT_MS });
+  };
   /** One instance's open decisions: grill and task questions from core's stores, escalations from its own board. */
-  const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>): NowDecisionsData => {
+  const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>, now: number, statusGithub: GitHub, plan: Plan | undefined, keys: NowBuild["keys"], generation: number): NowDecisionsData => {
     const reasons: NonNullable<NowViewData["decisionsReasons"]> = {};
+    const lap = decisionsLap(instance.name);
     const all = escalationDecisions(instance.name, snapshot.tasks, escalationClasses(rows), instance.name === core);
+    const feedbackLap = decisionsLap(instance.name, "feedback");
+    let feedbackEntries: FeedbackEntry[] = [];
     if (instance.name !== core) {
       reasons.grill = "feedback questions live in core only";
       reasons.task_question = "the question store core answers is core's own";
     } else if (!instance.feedbackRoot) {
       reasons.grill = reasons.task_question = "no feedback root is configured";
     } else {
-      all.push(...grillDecisions(instance.name, listGrilling(instance)));
+      try {
+        // W1-T5730: the landing queue overlays the checkout, so a queued answer leaves the list and a queue-only grill joins it.
+        const cached = feedbackListings.get(instance.name);
+        let listed = cached?.key === keys.feedback ? cached.entries : listGrilling(instance);
+        feedbackLap("list");
+        if (cached?.key !== keys.feedback) {
+          try {
+            listed = overlayQueuedFeedbackEntries(listed, dirname(instance.ledgerDir));
+            feedbackListings.set(instance.name, { key: keys.feedback, entries: listed });
+          } catch (error) {
+            const reason = `the landing queue is unreadable, so queued feedback is not shown: ${(error as Error).message}`;
+            reasons.grill = reason;
+          }
+        }
+        feedbackLap("overlay");
+        const key = JSON.stringify([keys.feedback, keys.github]);
+        const reconciled = reconciledFeedback.get(instance.name);
+        feedbackEntries = !reasons.grill && reconciled?.key === key ? reconciled.entries : projectReconciledFeedback(listed, statusGithub);
+        if (!reasons.grill) reconciledFeedback.set(instance.name, { key, entries: feedbackEntries });
+        feedbackLap("reconcile");
+        all.push(...grillDecisions(instance.name, feedbackEntries));
+      } catch (error) {
+        reasons.grill = `the feedback store is unreadable: ${(error as Error).message}`;
+      }
       const store = readQuestionStore(instance.feedbackRoot);
       if ("reason" in store) reasons.task_question = store.reason;
       else all.push(...taskQuestionDecisions(instance.name, store.lines as QuestionStoreLine[], answeredByFact(db), snapshot.tasks));
     }
+    lap("feedback");
     const escalationUnknown = snapshot.github_unreachable || !snapshot.prQueue.complete || snapshot.tasks.some((task) => task.escalationUnverified);
     const sources: HumanGateSource[] = [{
       name: "escalations", instance: instance.name, state: escalationUnknown ? "partial" : "complete",
@@ -751,16 +1089,38 @@ export function createNowView(opts: NowViewOptions): {
       gates: all.filter((decision) => decision.kind === "escalation" || decision.kind === "manual_approval").map(decisionGate),
     }];
     if (instance.name === core) {
-      sources.push({ name: "feedback-grills", instance: instance.name,
-        state: reasons.grill ? "unavailable" : "complete", ...(reasons.grill ? { reason: reasons.grill } : {}),
-        gates: all.filter((decision) => decision.kind === "grill").map(decisionGate) });
+      const feedback = projectFeedbackGates({ instance: instance.name, entries: feedbackEntries, now, rows, age: feedbackAge, unavailableReason: reasons.grill });
+      sources.push(feedback);
       // The legacy question reader skips malformed lines without attesting complete coverage.
       sources.push({ name: "task-questions", instance: instance.name, state: reasons.task_question ? "unavailable" : "partial",
         reason: reasons.task_question ?? "the question reader does not report malformed-line completeness",
         gates: all.filter((decision) => decision.kind === "task_question").map(decisionGate) });
     }
+    const changeManagementUnknown = snapshot.github_unreachable || !snapshot.prQueue.complete || !!snapshot.blockedPrsUnverifiedReason;
+    sources.push(projectChangeManagementGates({
+      instance: instance.name, state: changeManagementUnknown ? "partial" : "complete",
+      ...(changeManagementUnknown ? { reason: snapshot.blockedPrsUnverifiedReason ?? snapshot.prQueue.unavailableReason ?? "GitHub PR state could not be completely verified" } : {}),
+      actions: nowActions(snapshot, rows),
+    }));
+    const dependencyKey = JSON.stringify([keys.plan, generation, keys.github]);
+    let dependencies = dependencySources.get(instance.name);
+    if (!dependencies || dependencies.db !== db || dependencies.key !== dependencyKey) {
+      dependencies = { db, key: dependencyKey, sources: dependencyGates({ instance: instance.name, ...(instance.repo ? { repo: instance.repo } : {}), plan, rows, github: statusGithub, snapshot }) };
+      dependencySources.set(instance.name, dependencies);
+    }
+    sources.push(...dependencies.sources);
+    lap("dependencies");
+    const ledger = gateLedger(instance);
+    lap("ledger");
+    sources.push(...pinReviewerSources(instance, now, ledger));
+    // Only the gate source joins this body; every record stays on rmd status's NEEDS ME block, unchanged.
+    sources.push(operatorItemsOf(instance, now, ledger).source);
     const humanGates = projectHumanGates(sources);
-    return { ...capDecisions(all), humanGates, ...(Object.keys(reasons).length > 0 ? { decisionsReasons: reasons } : {}) };
+    const capped = capDecisions(all);
+    const shown = shownHumanGates(humanGates, capped.decisions.map((decision) => ({ instance: decision.instance, ...decisionGate(decision) })));
+    const needsYou = consumeHumanGateCounts(humanGates, { shown });
+    lap("gates");
+    return { ...capped, humanGates, needsYou, ...(Object.keys(reasons).length > 0 ? { decisionsReasons: reasons } : {}) };
   };
   const behindMemo = new Map<string, { heads?: string; result?: PlanBehind }>();
   const planBehind = opts.planBehind ?? ((instance: NowInstance): PlanBehind => {
@@ -778,7 +1138,7 @@ export function createNowView(opts: NowViewOptions): {
     state: NowSlotState;
     now: number;
     stage: number;
-    keys: { plan: string; github: string; decisions: string };
+    keys: { plan: string; github: string; feedback: string; decisions: string };
     plan?: Plan;
     gateway?: ReturnType<typeof snapshotGithub>;
     h?: Held;
@@ -788,12 +1148,25 @@ export function createNowView(opts: NowViewOptions): {
     body?: { key: string; data: NowViewData; sources: ViewSource[] };
   }
   const builds = new Map<string, NowBuild>();
+  /** Each instance's stage timings since its last `prepare`, for the worker's `read_model.slow_view` row. */
+  const ran = new Map<string, Record<string, number>>();
+  /** The `decisions` stage's parts as `decisions.<part>` stages, each the ms since the previous lap: a cold or slow
+   *  decisions build (p99 27 s on 2026-10-06) is then attributed to its part, not only to the stage. */
+  const decisionsLap = (name: string, prefix = "decisions"): ((part: string) => void) => {
+    let last = clock.now();
+    return (part) => {
+      const at = clock.now();
+      (ran.get(name) ?? ran.set(name, {}).get(name)!)[`${prefix}.${part}`] = at - last;
+      last = at;
+    };
+  };
   const ledgerPathOf = (instance: NowInstance): string => join(instance.ledgerDir, LEDGER_FILENAME);
   const depsOf = (instance: NowInstance, b: NowBuild) => ({
     plan: b.plan!, ledgerPath: ledgerPathOf(instance), github: b.gateway!.github, readLedger: () => b.rows as Array<Record<string, unknown>>, now: () => clock.now(),
   });
-  /** The stages of one build, in order; the plan parse (about 1 s on core) is a stage of its own. */
-  const STAGES: ReadonlyArray<[string, (instance: NowInstance, b: NowBuild) => void]> = [
+  /** The stages of one build, in order; the plan parse (about 1 s on core) is a stage of its own. A stage
+   *  returning false is not done: the next step resumes it (a cold `board` ingests one chunk per step). */
+  const STAGES: ReadonlyArray<[string, (instance: NowInstance, b: NowBuild) => void | false]> = [
     ["plan", (instance, b) => {
       const cachedPlan = planCache.get(instance.name);
       b.plan = cachedPlan?.key === b.keys.plan ? cachedPlan.plan : readPlan(instance);
@@ -815,12 +1188,14 @@ export function createNowView(opts: NowViewOptions): {
           get github() { return held.get(name)!.gateway.github; },
           githubGeneration: () => { const g = held.get(name)!; return g.gateway.content ?? g.githubKey; },
           log: (step, extra) => log(step, { instance: name, ...extra }),
+          ...(opts.boardIngestChunkRows ? { ingestChunkRows: opts.boardIngestChunkRows } : {}),
+          ...(opts.boardInternStrings === false ? { internStrings: false } : {}),
         });
         h = { db: b.db, board, recent: createRecentActivityCache(), generation: -1, planKey: b.keys.plan, githubKey: b.keys.github, gateway: b.gateway!, at: b.now, healthAt: Number.NEGATIVE_INFINITY, decisionsKey: b.keys.decisions };
         held.set(name, h);
       }
       Object.assign(h, { githubKey: b.keys.github, gateway: b.gateway });
-      h.board.update({ force: true });
+      if (!h.board.update({ force: true }).caughtUp) return false;
       b.h = h;
       b.rows = h.board.rows();
     }],
@@ -840,7 +1215,7 @@ export function createNowView(opts: NowViewOptions): {
       h.probe = probeHost(instance, instance.name === core);
       h.healthAt = b.now;
     }],
-    ["decisions", (instance, b) => void (b.decisions = decisionsOf(instance, b.db, b.snapshot!, b.rows!))],
+    ["decisions", (instance, b) => void (b.decisions = decisionsOf(instance, b.db, b.snapshot!, b.rows!, b.now, b.h!.gateway.github, b.plan, b.keys, b.state.generation))],
     ["assemble", (instance, b) => {
       const { h, snapshot, rows, now, state } = b as Required<NowBuild>;
       const data = assembleNowView({ instance: instance.name, snapshot, rows, plan: b.plan!, recent: computeRecentActivity(depsOf(instance, b), h.recent, 20), health: h.probe!.health, decisions: b.decisions!, nowMs: now });
@@ -865,7 +1240,8 @@ export function createNowView(opts: NowViewOptions): {
     let b = builds.get(instance.name);
     if (b && b.db !== entry.db) b = undefined;
     if (!b) {
-      const keys = { plan: planKey(instance), github: githubKey(instance), decisions: decisionsKey(instance) };
+      const feedback = feedbackKey(instance);
+      const keys = { plan: planKey(instance), github: githubKey(instance), feedback, decisions: decisionsKey(instance, feedback) };
       const h = held.get(instance.name);
       const due = !h || h.db !== entry.db || h.generation !== entry.state.generation || h.planKey !== keys.plan || h.githubKey !== keys.github
         || h.decisionsKey !== keys.decisions || now - h.at >= NOW_REFRESH_MS;
@@ -877,10 +1253,12 @@ export function createNowView(opts: NowViewOptions): {
       if (!more()) return false;
       const [stage, run] = STAGES[b.stage]!;
       const started = clock.now();
-      run(instance, b);
+      const done = run(instance, b) !== false;
       const ms = clock.now() - started;
+      const timed = ran.get(instance.name) ?? ran.set(instance.name, {}).get(instance.name)!;
+      timed[stage] = (timed[stage] ?? 0) + ms;
       if (ms > NOW_SLOW_STAGE_MS) log("read_model.now_slow_stage", { instance: instance.name, stage, ms });
-      b.stage++;
+      if (done) b.stage++;
     }
     return true;
   }
@@ -905,6 +1283,8 @@ export function createNowView(opts: NowViewOptions): {
     name: NOW_VIEW_NAME,
     version: NOW_VIEW_VERSION,
     perInstance: true,
+    // ~4.8 s a core build, due on every ledger generation: rebuilt at full cadence only while someone reads it.
+    readPaced: true,
     /**
      * The shadow comparator's legacy side for one key, over the plan, GitHub snapshot and probe the compared
      * body was built from: GET /v1/status's board and PR queue over the rows the instance's live file held in
@@ -922,7 +1302,10 @@ export function createNowView(opts: NowViewOptions): {
       if (!instance || !built || !key.startsWith("instance=")) return undefined;
       const ledgerPath = join(instance.ledgerDir, LEDGER_FILENAME);
       const probeMs = Date.parse(built.probe.sampledAt);
-      const memo = legacyMemos.get(name) ?? legacyMemos.set(name, { rows: createLedgerRotationMemo((r) => r), costs: createLedgerRotationMemo((r) => r.filter((row) => typeof row.cost_usd === "number")) }).get(name)!;
+      const memo = legacyMemos.get(name) ?? legacyMemos.set(name, {
+        rows: createLedgerRotationMemo((r) => r, { holder: "now.legacy.rows" }),
+        costs: createLedgerRotationMemo((r) => r.filter((row) => typeof row.cost_usd === "number"), { holder: "now.legacy.costs" }),
+      }).get(name)!;
       const [rowsPass, costsPass] = [memo.rows.pass({ parseMissing: true }), memo.costs.pass({ parseMissing: true })];
       const live = readLedgerLines(ledgerPath);
       // Each computation reads the rows the live file held over the window it evaluates, up to the body's build.
@@ -935,11 +1318,19 @@ export function createNowView(opts: NowViewOptions): {
       const spent = ledgerRowsOver(instance.ledgerDir, { fromMs: utcDayWindowMs(built.builtMs)[0], toMs: built.builtMs }, live, costsPass);
       rowsPass.complete();
       costsPass.complete();
+      memo.rows.reportRetention(instance.ledgerDir, name, log);
+      memo.costs.reportRetention(instance.ledgerDir, name, log);
+      const retention = { rows: memo.rows.retention(), costs: memo.costs.retention() };
+      const retentionKey = JSON.stringify(retention);
+      if (retentionReported.get(name) !== retentionKey) {
+        retentionReported.set(name, retentionKey);
+        log("read_model.now_legacy_retention", { instance: name, ...retention });
+      }
       const rows = board.rows;
       const deps = { plan: built.plan, ledgerPath, github: built.gateway.github, readLedger: () => rows, now: () => now,
         readCreditStore: () => built.credit.credit, readCreditOverrideFile: () => built.credit.overrides };
       const snapshot = computeBoardSnapshot(deps);
-      const decisions: NowDecisionsData = { decisions: mine.decisions, ...(mine.decisionsMore ? { decisionsMore: mine.decisionsMore } : {}), ...(mine.decisionsReasons ? { decisionsReasons: mine.decisionsReasons } : {}), ...(mine.humanGates ? { humanGates: mine.humanGates } : {}) };
+      const decisions: NowDecisionsData = { decisions: mine.decisions, ...(mine.decisionsMore ? { decisionsMore: mine.decisionsMore } : {}), ...(mine.decisionsReasons ? { decisionsReasons: mine.decisionsReasons } : {}), ...(mine.humanGates ? { humanGates: mine.humanGates } : {}), ...(mine.needsYou ? { needsYou: mine.needsYou } : {}) };
       const legacy = assembleNowView({ instance: name, snapshot, rows, plan: built.plan, recent: [], health: mine.health, decisions, nowMs: now });
       legacy.board.spendTodayUsd = deriveDayCostUsd(spent.rows, built.builtMs);
       const captured = built.probe.health;
@@ -969,6 +1360,7 @@ export function createNowView(opts: NowViewOptions): {
           ...Object.fromEntries(prs.map(([, path]) => [`${path}.queueClass`, [`${path}.disposition`]])),
         },
         rows: legacyRowIndex([...new Set([...rows, ...spent.rows])]),
+        orderRows: legacyRowIndex(rows),
         sortKeys: Object.fromEntries(groups.map((path) => [path, keys])),
         from,
         inputs: {
@@ -980,9 +1372,16 @@ export function createNowView(opts: NowViewOptions): {
     },
     /** W1-T5066: one bounded step per stage per instance; the worker builds no body until every stage is done. */
     prepare(ctx, more) {
+      for (const { state } of ctx.instances) ran.delete(state.instance);
       let done = true;
       eachInstance(ctx, (instance, entry) => void (done = step(instance, entry, ctx.now, more) && done));
       return done;
+    },
+    /** `ReadModelView.stages`: each stage's ms `step` ran for `ctx`'s instances since their last `prepare` (one worker call),
+     *  which the worker names in `read_model.slow_view`, so a slow build's dominant stage reads below NOW_SLOW_STAGE_MS. */
+    stages(ctx) {
+      const out = Object.assign({}, ...ctx.instances.map(({ state }) => ran.get(state.instance) ?? {})) as Record<string, number>;
+      return Object.keys(out).length > 0 ? out : undefined;
     },
     /** Takes each finished build's body; an instance with none in flight is built here in one go, as a caller with no `prepare` expects. */
     materialize(ctx) {

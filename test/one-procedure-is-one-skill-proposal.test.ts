@@ -24,11 +24,13 @@ import {
   skillDraftProposalId,
 } from "../src/lib/skill-workshop.js";
 
+// W1-T4270: the fixture's signal is `fully_executed_proof` — a `clean_single_strike`-only candidate
+// (the outcome label measured above) no longer drafts at all, so it cannot carry these id tests.
 function candidate(over: Record<string, unknown> = {}) {
   return {
-    shapeKey: "clean_single_strike",
+    shapeKey: "fully_executed_proof",
     taskType: "implement",
-    signals: ["clean_single_strike"],
+    signals: ["fully_executed_proof"],
     runIds: ["R1", "R2"],
     taskIds: ["W1-T1"],
     supportingRuns: 2,
@@ -48,8 +50,8 @@ test("W1-T3385c: the SAME procedure with MORE supporting runs is ONE proposal, n
 });
 
 test("W1-T3385c: a DIFFERENT procedure shape is still its own proposal", () => {
-  const a = renderSkillDraft(candidate({ shapeKey: "clean_single_strike" }))!;
-  const b = renderSkillDraft(candidate({ shapeKey: "fully_executed_proof" }))!;
+  const a = renderSkillDraft(candidate({ shapeKey: "fully_executed_proof" }))!;
+  const b = renderSkillDraft(candidate({ shapeKey: "clean_single_strike+fully_executed_proof", signals: ["clean_single_strike", "fully_executed_proof"] }))!;
   assert.notEqual(skillDraftProposalId(a.procedureKey), skillDraftProposalId(b.procedureKey));
 });
 
@@ -76,7 +78,7 @@ test("W1-T3385c: the run-set hash is UNCHANGED — this repoints the id, it does
 test("W1-T3385c: the draft carries its supporting-run count, so a stager can compare evidence", () => {
   const d = renderSkillDraft(candidate({ supportingRuns: 9, runIds: ["A", "B", "C"] }))!;
   assert.equal(d.supportingRuns, 9);
-  assert.equal(procedureKeyFor({ shapeKey: "clean_single_strike", taskType: "implement" }), d.procedureKey);
+  assert.equal(procedureKeyFor({ shapeKey: "fully_executed_proof", taskType: "implement" }), d.procedureKey);
 });
 
 test("W1-T3385c: a single-run candidate is still refused outright — the floor is untouched", () => {

@@ -121,7 +121,9 @@ test("W1-T4567: no read route scans the whole ledger union per request", async (
       const again = await call(r.route, r.url);
       assert.equal(again.body, before.get(r.name), `${r.name} re-read an archive on a warm request`);
     }
-    // A route built now has no memo: it must reach the locked archives, and cannot answer the same.
+    // A route built now has no memo of its own; W1-T6263 lets it reuse a rotation's digest while the file's stat
+    // is unchanged, so move the mtime: the digest no longer vouches for the bytes, and it must reach the archives.
+    for (const path of archives) utimesSync(path, ARCHIVE_MTIME_S + 60, ARCHIVE_MTIME_S + 60);
     for (const r of routes) {
       const cold = await call(r.build(), r.url);
       assert.notEqual(cold.body, before.get(r.name), `${r.name}: the archives were never needed, so the check above proves nothing`);

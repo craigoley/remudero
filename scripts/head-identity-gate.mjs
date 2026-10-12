@@ -238,10 +238,13 @@ export function evaluateHeadIdentityGate({ headCommitMessage, headRef, changedPa
       "(1) push to a session branch shaped " +
       `\`${RUN_BRANCH_FILED_FORM}\` when building a filed task, or \`${RUN_BRANCH_UNFILED_FORM}\` ` +
       "when the work has no filed task, or (2) carry an anchored `Remudero-Task: <id>` trailer " +
-      "on the head commit (either is enough — see W1-T3388). If a pull request is ALREADY open, " +
-      "renaming is no longer an option — a pull request's head ref cannot be renamed in GitHub " +
-      "once it exists — so the repair is to amend the head commit to add the trailer and " +
-      "force-push the same branch, not to open a new one.",
+      "on the head commit (either is enough — see W1-T3388). An agent session on a `codex/` or " +
+      "`claude/` branch pushes `git push origin HEAD:run-unfiled-$(date +%s)000` and opens its pull " +
+      "request from that. If a pull request is ALREADY open, its head ref cannot be renamed, and " +
+      "none of this needs a force-push: push a NEW head commit (`git commit --allow-empty` is " +
+      "enough) carrying `Remudero-Task: <id>` for a filed task that has not merged, or " +
+      "`Remudero-Task: PR-<n>` with the pull request's own number for ad-hoc work — never an " +
+      "amend, a force-push or a new pull request.",
   };
 }
 

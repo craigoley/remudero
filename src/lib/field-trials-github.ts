@@ -58,7 +58,10 @@ export function pageOf(body: string): GithubPage {
     const reason = "github-page-unparseable";
     return { ok: false, reason };
   }
-  const items = Array.isArray(parsed) ? parsed : record(parsed)?.check_runs;
+  const value = record(parsed);
+  const action = value !== undefined && Number.isSafeInteger(value.id) && text(value.head_sha) !== null
+    && (Number.isSafeInteger(value.workflow_id) || (Number.isSafeInteger(value.run_id) && text(value.check_run_url) !== null));
+  const items = Array.isArray(parsed) ? parsed : value?.check_runs ?? (action ? [parsed] : undefined);
   return Array.isArray(items) ? { ok: true, items } : { ok: false, reason: "github-page-not-a-list" };
 }
 
@@ -156,6 +159,167 @@ export interface GithubPull {
   revertsPr: number | null;
   authorClass: AuthorClass;
   detail: PullDetail | { state: "pending" } | { state: "unavailable"; reason: string };
+  headGreen?: HeadGreenObservation;
+}
+
+/** BACKSTOP: a head's traversal and pending producer identities stay bounded in the private store. */
+const HEAD_GREEN_MAX_PAGES = 10;
+const HEAD_GREEN_MAX_CANDIDATES = 100;
+interface HeadGreenCandidate {
+  checkId: number; suiteId: number; runId: number; jobId: number;
+  checkCompletedAt: string; firstReadAt: string;
+  producer?: { workflowId: number; path: string };
+  commitAssociationPending?: true;
+}
+export interface HeadGreenEvidence extends HeadGreenCandidate {
+  completedAt: string; validatedAt: string;
+  producer: { workflowId: number; path: string };
+}
+export interface HeadGreenObservation {
+  version: 1;
+  commitAssociationPolicy?: 1;
+  headSha: string;
+  state: "pending" | "observed" | "unavailable";
+  readAt: string | null;
+  history: { state: "pending" | "partial" | "complete"; nextPage: number; pagesRead: number; reason: string | null };
+  pending: HeadGreenCandidate[];
+  seenCheckIds: number[];
+  firstObserved: HeadGreenEvidence | null;
+  firstEver: "unavailable-retention-uncertified";
+}
+
+const positiveId = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) > 0;
+const shaIdentity = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{40}$/.test(value);
+const gateWorkflow = (value: unknown): value is string => value === ".github/workflows/ci.yml" || value === ".github/workflows/ci-gate.yml";
+function freshHeadGreen(headSha: string): HeadGreenObservation {
+  return { version: 1, commitAssociationPolicy: 1, headSha, state: "pending", readAt: null,
+    history: { state: "pending", nextPage: 1, pagesRead: 0, reason: null }, pending: [], seenCheckIds: [], firstObserved: null,
+    firstEver: "unavailable-retention-uncertified" };
+}
+function validCandidate(value: unknown): value is HeadGreenCandidate {
+  const row = record(value); const producer = record(row?.producer);
+  return row !== undefined && [row.checkId, row.suiteId, row.runId, row.jobId].every(positiveId)
+    && iso(row.checkCompletedAt) !== null && iso(row.firstReadAt) !== null
+    && (row.commitAssociationPending === undefined || (row.commitAssociationPending === true && producer !== undefined))
+    && (row.producer === undefined || (positiveId(producer?.workflowId) && gateWorkflow(producer?.path)));
+}
+function headObservation(pull: GithubPull): HeadGreenObservation | null {
+  if (!shaIdentity(pull.headSha)) return null;
+  const prior = pull.headGreen;
+  if (prior?.version === 1 && prior.headSha === pull.headSha && prior.firstEver === "unavailable-retention-uncertified"
+    && positiveId(prior.history?.nextPage) && prior.history.nextPage <= HEAD_GREEN_MAX_PAGES + 1
+    && Array.isArray(prior.pending) && prior.pending.length <= HEAD_GREEN_MAX_CANDIDATES && prior.pending.every(validCandidate)
+    && Array.isArray(prior.seenCheckIds) && prior.seenCheckIds.length <= HEAD_GREEN_MAX_PAGES * GITHUB_PAGE_SIZE
+    && prior.seenCheckIds.every(positiveId)) {
+    if (prior.commitAssociationPolicy !== 1 && prior.firstObserved === null
+      && prior.history.reason === "head-gate-producer-identity-mismatch") return pull.headGreen = freshHeadGreen(pull.headSha);
+    prior.commitAssociationPolicy = 1;
+    return prior;
+  }
+  return pull.headGreen = freshHeadGreen(pull.headSha);
+}
+
+/** One positive current-head receipt; a completed page traversal never certifies retained first-ever history. */
+export function observedCurrentHeadGreen(pull: GithubPull, asOf: string): HeadGreenEvidence | null {
+  const observation = pull.headGreen; const found = observation?.firstObserved;
+  if (iso(asOf) === null || observation?.version !== 1 || observation.headSha !== pull.headSha || observation.state !== "observed"
+    || observation.firstEver !== "unavailable-retention-uncertified" || !validCandidate(found)
+    || !found.producer || found.commitAssociationPending || iso(found.completedAt) === null || iso(found.validatedAt) === null
+    || pull.createdAt === null || Date.parse(found.completedAt) < Date.parse(pull.createdAt)
+    || [found.completedAt, found.checkCompletedAt, found.firstReadAt, found.validatedAt].some((at) => Date.parse(at) > Date.parse(asOf))) return null;
+  return found;
+}
+
+function gateCandidate(item: unknown, repo: string, pull: GithubPull, asOf: string): HeadGreenCandidate | null {
+  const row = record(item); const completed = iso(row?.completed_at);
+  const checkSuite = record(row?.check_suite);
+  if (checkSuite === undefined) return null;
+  if (!row || row.name !== "ci-gate" || row.status !== "completed" || row.conclusion !== "success"
+    || record(row.app)?.slug !== "github-actions" || row.head_sha !== pull.headSha || completed === null
+    || !positiveId(row.id) || !positiveId(checkSuite.id) || pull.createdAt === null
+    || Date.parse(completed) < Date.parse(pull.createdAt) || Date.parse(completed) > Date.parse(asOf)) return null;
+  if (typeof row.details_url !== "string" || !URL.canParse(row.details_url)) return null;
+  const url = new URL(row.details_url);
+  if (url.origin !== "https://github.com" || url.username || url.password || url.search || url.hash) return null;
+  const prefix = "/" + repo + "/";
+  if (!url.pathname.startsWith(prefix)) return null;
+  const match = /^(?:actions\/runs\/([0-9]+)\/job\/([0-9]+)|runs\/([0-9]+)\/jobs\/([0-9]+))$/.exec(url.pathname.slice(prefix.length));
+  const runId = Number(match?.[1] ?? match?.[3]); const jobId = Number(match?.[2] ?? match?.[4]);
+  if (!positiveId(runId) || !positiveId(jobId)) return null;
+  return { checkId: row.id, suiteId: checkSuite.id as number, runId, jobId,
+    checkCompletedAt: completed, firstReadAt: asOf };
+}
+
+async function readHeadGreen(fetch: GithubPageFetch, repo: string, pull: GithubPull, budget: Budget, asOf: string): Promise<boolean> {
+  const observation = headObservation(pull);
+  if (observation === null || budget.left <= 0) return false;
+  const candidate = observation.pending[0];
+  const read = async (path: string) => { budget.left -= 1; observation.readAt = asOf; return fetch(path); };
+  if (candidate) {
+    const path = candidate.commitAssociationPending ? `repos/${repo}/commits/${pull.headSha}/pulls?per_page=${GITHUB_PAGE_SIZE}&page=1`
+      : candidate.producer ? `repos/${repo}/actions/jobs/${candidate.jobId}` : `repos/${repo}/actions/runs/${candidate.runId}`;
+    const response = await read(path);
+    if (!response.ok) { observation.history.reason = response.reason; return false; }
+    if (candidate.commitAssociationPending) {
+      const associated = response.items.some((item) => {
+        const pr = record(item);
+        return pr?.number === pull.number && record(pr.head)?.sha === pull.headSha
+          && record(record(pr.base)?.repo)?.full_name === repo;
+      });
+      if (associated) delete candidate.commitAssociationPending;
+      else { observation.history.reason = "head-gate-commit-pr-association-missing"; observation.pending.shift(); }
+      return true;
+    }
+    const row = record(response.items[0]);
+    if (!candidate.producer) {
+      const related = Array.isArray(row?.pull_requests) && row.pull_requests.some((item) => {
+        const pr = record(item); return pr?.number === pull.number && record(pr.head)?.sha === pull.headSha;
+      });
+      const emptyAssociation = Array.isArray(row?.pull_requests) && row.pull_requests.length === 0;
+      if (row?.id === candidate.runId && row.head_sha === pull.headSha && row.check_suite_id === candidate.suiteId
+        && record(row.repository)?.full_name === repo && row.event === "pull_request" && (related || emptyAssociation)
+        && positiveId(row.workflow_id) && gateWorkflow(row.path)) {
+        candidate.producer = { workflowId: row.workflow_id, path: row.path };
+        if (emptyAssociation) candidate.commitAssociationPending = true;
+        return true;
+      }
+      observation.history.reason = "head-gate-producer-identity-mismatch";
+    } else {
+      const completed = iso(row?.completed_at);
+      if (row?.id === candidate.jobId && row.run_id === candidate.runId && row.head_sha === pull.headSha
+        && row.name === "ci-gate" && row.status === "completed" && row.conclusion === "success"
+        && row.check_run_url === `https://api.github.com/repos/${repo}/check-runs/${candidate.checkId}`
+        && completed !== null && pull.createdAt !== null && Date.parse(completed) >= Date.parse(pull.createdAt)
+        && Date.parse(completed) <= Date.parse(asOf)) {
+        const evidence: HeadGreenEvidence = { ...candidate, producer: candidate.producer, completedAt: completed, validatedAt: asOf };
+        if (observation.firstObserved === null || evidence.completedAt < observation.firstObserved.completedAt) observation.firstObserved = evidence;
+        observation.state = "observed";
+      } else observation.history.reason = "head-gate-job-identity-mismatch";
+    }
+    observation.pending.shift();
+    return true;
+  }
+  if (observation.history.state === "complete" || observation.history.nextPage > HEAD_GREEN_MAX_PAGES) return false;
+  const page = observation.history.nextPage;
+  const response = await read(`repos/${repo}/commits/${pull.headSha}/check-runs?check_name=ci-gate&filter=all&per_page=${GITHUB_PAGE_SIZE}&page=${page}`);
+  if (!response.ok) { observation.history.state = "partial"; observation.history.reason = response.reason; return false; }
+  observeHeadCheckPage(observation, response.items, repo, pull, asOf);
+  return true;
+}
+
+function observeHeadCheckPage(observation: HeadGreenObservation, items: unknown[], repo: string, pull: GithubPull, asOf: string): void {
+  const seen = new Set(observation.seenCheckIds); observation.readAt = asOf;
+  for (const item of items.slice(0, GITHUB_PAGE_SIZE)) {
+    const id = record(item)?.id;
+    if (!positiveId(id) || seen.has(id)) continue;
+    seen.add(id);
+    const found = gateCandidate(item, repo, pull, asOf);
+    if (found && observation.pending.length < HEAD_GREEN_MAX_CANDIDATES) observation.pending.push(found);
+  }
+  observation.seenCheckIds = [...seen]; observation.history.pagesRead += 1; observation.history.nextPage += 1;
+  observation.history.state = items.length < GITHUB_PAGE_SIZE ? "complete" : "partial";
+  observation.history.reason = items.length < GITHUB_PAGE_SIZE ? null : "head-check-history-page-bound-or-pending";
+  if (observation.firstObserved === null && observation.history.state === "complete" && observation.pending.length === 0) observation.state = "unavailable";
 }
 
 export function pullOf(item: unknown): GithubPull | null {
@@ -189,6 +353,8 @@ export interface GithubCursor {
   resumePage: number | null;
   pagesRead: number;
   asOf: string | null;
+  /** A recent head read is separate from completion of the historical sweep. */
+  head?: { state: "observed" | "unavailable"; asOf: string; reason: string | null };
 }
 
 function blankCursor(): GithubCursor {
@@ -200,6 +366,9 @@ export interface GithubRepoStore {
   commits: Record<string, string>;
   deployments: Record<string, GithubDeployment>;
   cursors: { pulls: GithubCursor; commits: GithubCursor; deployments: GithubCursor };
+  /** Rotate historical pages so a large resource cannot starve its siblings. */
+  backfillResourceIndex?: number;
+  evidenceLane?: "head-green" | "legacy-detail";
 }
 
 export function emptyRepoStore(): GithubRepoStore {
@@ -229,37 +398,37 @@ function laterIso(a: string | null, b: string | null): string | null {
   return a === null ? b : b === null || a >= b ? a : b;
 }
 
-/** Sweep one newest-first list. The watermark moves only when a sweep completes; a stop records its page. */
-async function sweepList(fetch: GithubPageFetch, path: string, cursor: GithubCursor, budget: Budget, asOf: string,
+/** Read one newest-first page. Only completion advances the historical watermark. */
+async function sweepListPage(fetch: GithubPageFetch, path: string, cursor: GithubCursor, budget: Budget, asOf: string,
   timeOf: (item: unknown) => string | null, upsert: (item: unknown) => void): Promise<void> {
-  let page = cursor.resumePage ?? 1;
-  for (;;) {
-    if (budget.left <= 0) {
-      Object.assign(cursor, { resumePage: page, state: "partial", reason: "page-budget-exhausted" });
-      return;
-    }
-    budget.left -= 1;
-    const result = await fetch(`${path}${path.includes("?") ? "&" : "?"}per_page=${GITHUB_PAGE_SIZE}&page=${page}`);
-    if (!result.ok) {
-      Object.assign(cursor, { resumePage: page, reason: result.reason,
-        state: cursor.watermark === null && page === 1 ? "unavailable" : "partial" });
-      return;
-    }
-    cursor.pagesRead += 1;
-    let reachedWatermark = false;
-    for (const item of result.items) {
-      const at = timeOf(item);
-      cursor.sweepHigh = laterIso(cursor.sweepHigh, at);
-      if (at !== null && cursor.watermark !== null && at <= cursor.watermark) reachedWatermark = true;
-      upsert(item);
-    }
-    if (result.items.length < GITHUB_PAGE_SIZE || reachedWatermark) {
-      Object.assign(cursor, { watermark: laterIso(cursor.watermark, cursor.sweepHigh), sweepHigh: null,
-        resumePage: null, state: "complete", reason: null, asOf });
-      return;
-    }
-    page += 1;
+  const page = cursor.resumePage ?? 1;
+  if (budget.left <= 0) {
+    Object.assign(cursor, { resumePage: page, state: "partial", reason: "page-budget-exhausted" });
+    return;
   }
+  budget.left -= 1;
+  const result = await fetch(`${path}${path.includes("?") ? "&" : "?"}per_page=${GITHUB_PAGE_SIZE}&page=${page}`);
+  if (!result.ok) {
+    if (page === 1) cursor.head = { state: "unavailable", asOf, reason: result.reason };
+    Object.assign(cursor, { resumePage: page, reason: result.reason,
+      state: cursor.watermark === null && page === 1 ? "unavailable" : "partial" });
+    return;
+  }
+  cursor.pagesRead += 1;
+  if (page === 1) cursor.head = { state: "observed", asOf, reason: null };
+  let reachedWatermark = false;
+  for (const item of result.items) {
+    const at = timeOf(item);
+    cursor.sweepHigh = laterIso(cursor.sweepHigh, at);
+    if (at !== null && cursor.watermark !== null && at <= cursor.watermark) reachedWatermark = true;
+    upsert(item);
+  }
+  if (result.items.length < GITHUB_PAGE_SIZE || reachedWatermark) {
+    Object.assign(cursor, { watermark: laterIso(cursor.watermark, cursor.sweepHigh), sweepHigh: null,
+      resumePage: null, state: "complete", reason: null, asOf });
+    return;
+  }
+  Object.assign(cursor, { resumePage: page + 1, state: "partial", reason: "page-budget-exhausted" });
 }
 
 async function readDetail(fetch: GithubPageFetch, repo: string, pull: GithubPull, budget: Budget,
@@ -273,7 +442,11 @@ async function readDetail(fetch: GithubPageFetch, repo: string, pull: GithubPull
   const firstSha = text(record(commits.items[0])?.sha);
   const last = record(record(record(commits.items.at(-1))?.commit)?.committer);
   const checks = firstSha === null ? { ok: false as const, reason: "no-commits-read" }
-    : await fetch(`repos/${repo}/commits/${firstSha}/check-runs?per_page=${GITHUB_PAGE_SIZE}`);
+    : await fetch(`repos/${repo}/commits/${firstSha}/check-runs?filter=all&per_page=${GITHUB_PAGE_SIZE}`);
+  const head = headObservation(pull);
+  if (checks.ok && firstSha === pull.headSha && checks.items.length < GITHUB_PAGE_SIZE && head?.history.pagesRead === 0) {
+    observeHeadCheckPage(head, checks.items, repo, pull, asOf);
+  }
   const states = reviews.items.map((item) => record(item)?.state);
   return {
     state: "observed", readAt: asOf, readWhileOpen: pull.state === "open",
@@ -297,54 +470,161 @@ export interface FieldTrialsGithubRepoPass {
   deployments: GithubCursor;
   detailsPending: number;
   detailsUnavailable: number;
+  /** Counts over stored deployments; an unreadable deployment list is still unknown. */
+  statusesPending?: number;
+  statusesUnavailable?: number;
+  headGreensPending?: number;
+  headGreensUnavailable?: number;
+  workAllocation?: {
+    mode: "all-available" | "head-green" | "legacy-detail";
+    reserved: { details: number; statuses: number; headGreens: number };
+    requests: { fresh: number; backfill: number; statuses: number; details: number; headGreens: number };
+  };
 }
 
 async function ingestRepo(fetch: GithubPageFetch, repo: string, store: GithubRepoStore, budget: Budget,
   asOf: string): Promise<FieldTrialsGithubRepoPass> {
-  await sweepList(fetch, `repos/${repo}/pulls?state=all&sort=updated&direction=desc`, store.cursors.pulls, budget, asOf,
-    (item) => iso(record(item)?.updated_at), (item) => {
-      const pull = pullOf(item);
-      if (pull === null) return;
-      const prior = store.pulls[pull.nodeId];
-      // An unchanged PR keeps its detail; an edit, rerun or late event bumps updated_at and re-reads it.
-      store.pulls[pull.nodeId] = prior && prior.updatedAt === pull.updatedAt ? { ...pull, detail: prior.detail } : pull;
-    });
-  await sweepList(fetch, `repos/${repo}/commits`, store.cursors.commits, budget, asOf,
-    (item) => iso(record(record(record(item)?.commit)?.committer)?.date), (item) => {
-      const sha = text(record(item)?.sha);
-      const at = iso(record(record(record(item)?.commit)?.committer)?.date);
-      if (sha !== null && at !== null) store.commits[sha] = at;
-    });
-  await sweepList(fetch, `repos/${repo}/deployments`, store.cursors.deployments, budget, asOf,
-    (item) => iso(record(item)?.created_at), (item) => {
-      const deployment = record(item);
-      if (deployment === undefined || !Number.isSafeInteger(deployment.id)) return;
-      const id = deployment.id as number;
-      store.deployments[String(id)] = store.deployments[String(id)]
-        ?? { id, sha: text(deployment.sha), createdAt: iso(deployment.created_at), status: { state: "pending-read" } };
-    });
-  for (const deployment of Object.values(store.deployments)) {
-    if (TERMINAL_DEPLOYMENT_STATES.has(deployment.status.state) || budget.left <= 0) continue;
+  const requests = { fresh: 0, backfill: 0, statuses: 0, details: 0, headGreens: 0 };
+  const initialBudget = budget.left;
+  const resources: Array<{ key: keyof GithubRepoStore["cursors"]; path: string;
+    timeOf: (item: unknown) => string | null; upsert: (item: unknown) => void }> = [
+    { key: "pulls", path: `repos/${repo}/pulls?state=all&sort=updated&direction=desc`,
+      timeOf: (item) => iso(record(item)?.updated_at), upsert: (item) => {
+        const pull = pullOf(item);
+        if (pull === null) return;
+        const prior = store.pulls[pull.nodeId];
+        // An unchanged PR keeps its detail; an edit, rerun or late event bumps updated_at and re-reads it.
+        const unchangedHead = prior?.headSha === pull.headSha;
+        store.pulls[pull.nodeId] = prior && prior.updatedAt === pull.updatedAt && unchangedHead ? { ...pull, detail: prior.detail } : pull;
+        if (unchangedHead && prior?.headGreen) store.pulls[pull.nodeId]!.headGreen = prior.headGreen;
+    } },
+    { key: "commits", path: `repos/${repo}/commits`,
+      timeOf: (item) => iso(record(record(record(item)?.commit)?.committer)?.date), upsert: (item) => {
+        const sha = text(record(item)?.sha);
+        const at = iso(record(record(record(item)?.commit)?.committer)?.date);
+        if (sha !== null && at !== null) store.commits[sha] = at;
+    } },
+    { key: "deployments", path: `repos/${repo}/deployments`,
+      timeOf: (item) => iso(record(item)?.created_at), upsert: (item) => {
+        const deployment = record(item);
+        if (deployment === undefined || !Number.isSafeInteger(deployment.id)) return;
+        const id = deployment.id as number;
+        store.deployments[String(id)] = store.deployments[String(id)]
+          ?? { id, sha: text(deployment.sha), createdAt: iso(deployment.created_at), status: { state: "pending-read" } };
+    } },
+  ];
+  const blocked = new Set<string>();
+  // Refresh page one without discarding a historical resume page or advancing its watermark.
+  for (const resource of resources) {
+    const cursor = store.cursors[resource.key];
+    const resuming = (cursor.resumePage ?? 1) > 1;
+    const head = resuming ? blankCursor() : cursor;
+    await sweepListPage(fetch, resource.path, head, budget, asOf, resource.timeOf, resource.upsert);
+    if (resuming) {
+      cursor.pagesRead += head.pagesRead;
+      cursor.sweepHigh = laterIso(cursor.sweepHigh, head.sweepHigh ?? head.watermark);
+      if (head.head !== undefined) cursor.head = head.head;
+      if (head.state === "unavailable") Object.assign(cursor, { state: "partial", reason: head.reason });
+    }
+    if (head.head?.state === "unavailable" && head.head.asOf === asOf) blocked.add(resource.key);
+  }
+  requests.fresh = initialBudget - budget.left;
+  const detailCandidates = () => Object.values(store.pulls).filter(needsDetail)
+    .sort((a, b) => Number(a.detail.state === "observed") - Number(b.detail.state === "observed")
+      || (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "") || b.number - a.number);
+  let detailReserve = detailCandidates().length > 0 && budget.left >= 3 ? 3 : 0;
+  const statusCandidates = () => Object.values(store.deployments).filter((deployment) => !TERMINAL_DEPLOYMENT_STATES.has(deployment.status.state))
+    .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? "") || b.id - a.id);
+  const pendingStatuses = statusCandidates();
+  const statusReserve = pendingStatuses.length > 0 && budget.left > detailReserve ? 1 : 0;
+  const blockedHeads = new Set<string>();
+  const headCandidates = () => Object.values(store.pulls).filter((pull) => {
+    const observation = headObservation(pull);
+    if (blockedHeads.has(pull.nodeId)) return false;
+    if (observation !== null && observation.pending.length === 0 && observation.history.nextPage > HEAD_GREEN_MAX_PAGES) {
+      if (observation.firstObserved === null) observation.state = "unavailable";
+      return false;
+    }
+    return observation !== null && (observation.pending.length > 0 || (observation.history.state !== "complete" && observation.history.nextPage <= HEAD_GREEN_MAX_PAGES)
+      || (pull.state === "open" && observation.firstObserved === null));
+  }).sort((a, b) => Number((a.headGreen?.pending.length ?? 0) === 0) - Number((b.headGreen?.pending.length ?? 0) === 0)
+    || (a.headGreen?.readAt ?? "").localeCompare(b.headGreen?.readAt ?? "") || b.number - a.number);
+  const hasHeadWork = headCandidates().length > 0;
+  // A fresh head needs check/run/job reads, plus a commit association when the run's PR list is empty.
+  const headUnit = hasHeadWork ? Math.min(4, budget.left - statusReserve) : 0;
+  const scarce = detailReserve > 0 && hasHeadWork && budget.left < detailReserve + statusReserve + headUnit;
+  const mode = scarce ? (store.evidenceLane === "legacy-detail" ? "legacy-detail" : "head-green") : "all-available";
+  if (mode === "head-green") detailReserve = 0;
+  const headReserve = !hasHeadWork || mode === "legacy-detail" ? 0 : Math.min(4, Math.max(0, budget.left - detailReserve - statusReserve));
+  if (scarce) store.evidenceLane = mode === "head-green" ? "legacy-detail" : "head-green";
+  const backfillStart = budget.left;
+  let next = Number.isInteger(store.backfillResourceIndex) ? (store.backfillResourceIndex ?? 0) % resources.length : 0;
+  if (next < 0) next = 0;
+  while (budget.left > detailReserve + statusReserve + headReserve) {
+    let chosen = -1;
+    for (let offset = 0; offset < resources.length; offset++) {
+      const index = (next + offset) % resources.length;
+      const resource = resources[index]!;
+      if (!blocked.has(resource.key) && (store.cursors[resource.key].resumePage ?? 1) > 1) { chosen = index; break; }
+    }
+    if (chosen < 0) break;
+    const resource = resources[chosen]!;
+    const cursor = store.cursors[resource.key];
+    await sweepListPage(fetch, resource.path, cursor, budget, asOf, resource.timeOf, resource.upsert);
+    if (cursor.reason !== null && cursor.reason !== "page-budget-exhausted") blocked.add(resource.key);
+    next = (chosen + 1) % resources.length;
+    store.backfillResourceIndex = next;
+  }
+  requests.backfill = backfillStart - budget.left;
+  const statusesStart = budget.left;
+  for (const deployment of statusCandidates()) {
+    if (budget.left <= detailReserve + headReserve) break;
     budget.left -= 1;
     const statuses = await fetch(`repos/${repo}/deployments/${deployment.id}/statuses?per_page=${GITHUB_PAGE_SIZE}`);
     const newest = statuses.ok ? record(statuses.items[0]) : undefined;
     deployment.status = !statuses.ok ? { state: "unavailable", reason: statuses.reason }
       : newest === undefined ? { state: "no-status", at: null } : { state: String(newest.state), at: iso(newest.created_at) };
   }
-  for (const pull of Object.values(store.pulls).filter(needsDetail).sort((a, b) => a.number - b.number)) {
-    const detail = await readDetail(fetch, repo, pull, budget, asOf);
+  requests.statuses = statusesStart - budget.left;
+  const detailsStart = budget.left;
+  const legacyBudget = { left: budget.left - headReserve };
+  for (const pull of detailCandidates()) {
+    const detail = await readDetail(fetch, repo, pull, legacyBudget, asOf);
     if (detail !== null) pull.detail = detail;
   }
+  budget.left = legacyBudget.left + headReserve;
+  requests.details = detailsStart - budget.left;
+  const headsStart = budget.left;
+  for (let reads = 0; reads < headReserve && budget.left > 0; reads++) {
+    const pull = headCandidates()[0];
+    if (!pull) break;
+    const observation = headObservation(pull)!;
+    if (observation.history.state === "complete" && observation.pending.length === 0 && observation.firstObserved === null) {
+      observation.history = { state: "pending", nextPage: 1, pagesRead: 0, reason: null }; observation.seenCheckIds = [];
+    }
+    const before = budget.left;
+    if (!await readHeadGreen(fetch, repo, pull, budget, asOf)) blockedHeads.add(pull.nodeId);
+    if (observation.pending.length === 0 && observation.firstObserved === null && observation.history.state === "complete") blockedHeads.add(pull.nodeId);
+    if (before === budget.left) break;
+  }
+  requests.headGreens = headsStart - budget.left;
   const pulls = Object.values(store.pulls);
   return { pulls: { ...store.cursors.pulls }, commits: { ...store.cursors.commits }, deployments: { ...store.cursors.deployments },
     detailsPending: pulls.filter((pull) => pull.detail.state === "pending").length,
-    detailsUnavailable: pulls.filter((pull) => pull.detail.state === "unavailable").length };
+    detailsUnavailable: pulls.filter((pull) => pull.detail.state === "unavailable").length,
+    statusesPending: Object.values(store.deployments).filter((item) => item.status.state === "pending-read").length,
+    statusesUnavailable: Object.values(store.deployments).filter((item) => item.status.state === "unavailable").length,
+    headGreensPending: pulls.filter((pull) => pull.headGreen?.state === "pending" || (pull.headGreen?.pending.length ?? 0) > 0).length,
+    headGreensUnavailable: pulls.filter((pull) => pull.headGreen?.state === "unavailable").length,
+    workAllocation: { mode, reserved: { details: detailReserve, statuses: statusReserve, headGreens: headReserve }, requests } };
 }
 
 export interface FieldTrialsGithubPass {
   state: "complete" | "partial" | "unavailable" | "skipped";
   asOf: string;
   pagesRead: number;
+  /** Actual transport attempts, including failures; pagesRead counts successful pages only. */
+  requestsMade?: number;
   repos: Record<string, FieldTrialsGithubRepoPass>;
 }
 
@@ -354,17 +634,26 @@ export interface FieldTrialsGithubPass {
  */
 export async function ingestFieldTrialsGithub(fetch: GithubPageFetch, repos: readonly string[],
   store: FieldTrialsGithubStore, asOf: string, maxPages: number = DEFAULT_MAX_PAGES): Promise<FieldTrialsGithubPass> {
-  const pass: FieldTrialsGithubPass = { state: "complete", asOf, pagesRead: 0, repos: {} };
-  const share = Math.max(1, Math.floor(maxPages / Math.max(1, repos.length)));
-  for (const repo of repos) {
+  if (!Number.isSafeInteger(maxPages) || maxPages < 0) throw new RangeError("field-trials page budget must be a nonnegative safe integer");
+  const pass: FieldTrialsGithubPass = { state: "complete", asOf, pagesRead: 0, requestsMade: 0, repos: {} };
+  const share = Math.floor(maxPages / Math.max(1, repos.length));
+  for (const [index, repo] of repos.entries()) {
     const repoStore = store.repos[repo] ??= emptyRepoStore();
-    const budget = { left: share };
-    const before = ["pulls", "commits", "deployments"].reduce((sum, key) =>
-      sum + repoStore.cursors[key as keyof GithubRepoStore["cursors"]].pagesRead, 0);
-    pass.repos[repo] = await ingestRepo(fetch, repo, repoStore, budget, asOf);
+    const budget = { left: share + (index < maxPages % Math.max(1, repos.length) ? 1 : 0) };
+    let requests = 0;
+    let pages = 0;
+    const countedFetch: GithubPageFetch = async (path) => {
+      requests += 1;
+      const result = await fetch(path);
+      if (result.ok) pages += 1;
+      return result;
+    };
+    pass.repos[repo] = await ingestRepo(countedFetch, repo, repoStore, budget, asOf);
     const cursors = Object.values(repoStore.cursors);
-    pass.pagesRead += cursors.reduce((sum, cursor) => sum + cursor.pagesRead, 0) - before;
-    if (cursors.some((cursor) => cursor.state !== "complete") || pass.repos[repo].detailsPending > 0) pass.state = "partial";
+    pass.pagesRead += pages;
+    pass.requestsMade = (pass.requestsMade ?? 0) + requests;
+    if (cursors.some((cursor) => cursor.state !== "complete") || pass.repos[repo].detailsPending > 0
+      || (pass.repos[repo].statusesPending ?? 0) > 0 || (pass.repos[repo].headGreensPending ?? 0) > 0) pass.state = "partial";
   }
   if (repos.length > 0 && Object.values(pass.repos).every((repo) => repo.pulls.state === "unavailable")) pass.state = "unavailable";
   return pass;

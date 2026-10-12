@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-02: daemon loop-stall diagnosis"
   plan_refs: ["W1-T4393"]
   files: [src/lib/view-shadow.ts, test/a-shadow-diff-row-is-written-only-for-a-real-difference.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

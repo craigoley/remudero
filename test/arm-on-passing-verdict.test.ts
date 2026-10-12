@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { armIfVerdictPermits } from "../src/run-task.js";
+import { armIfVerdictPermits } from "../src/lib/arm-auto-merge.js";
 
 // ── THE DEFECT ───────────────────────────────────────────────────────────────────────
 // `armAutoMerge` returns "no-task-id" on its FIRST branch when a PR has no

@@ -20,7 +20,7 @@ import { join } from "node:path";
 
 import type { execFileSync } from "node:child_process";
 
-import { defaultProofSpawner, ensureDeps } from "../src/lib/review.js";
+import { defaultProofSpawner, ensureDeps, PROOF_INSTALL_ARGS } from "../src/lib/review.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
@@ -129,7 +129,7 @@ test("W1-T3266: the dependency priming spawn carries the same untrappable kill s
 
   assert.equal(calls.length, 1, "a checkout with a package.json and no node_modules must be primed");
   assert.equal(calls[0]!.file, "npm");
-  assert.deepEqual([...calls[0]!.args], ["ci"]);
+  assert.deepEqual([...calls[0]!.args], [...PROOF_INSTALL_ARGS], "W1-T6124: npm ci, scripts off");
   assert.equal(
     calls[0]!.opts.killSignal,
     "SIGKILL",

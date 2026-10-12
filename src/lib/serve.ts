@@ -63,6 +63,7 @@ import {
   type ServiceTokens,
   type SseRoute,
   type WriteTier,
+  verifiedActor,
 } from "./service.js";
 import {
   buildIncidentEventsRoute,
@@ -71,6 +72,7 @@ import {
 } from "./incident-events.js";
 import { buildConsoleTelemetryRoute, CONSOLE_TELEMETRY_ROUTE_METHOD, CONSOLE_TELEMETRY_ROUTE_PATH } from "./console-telemetry.js";
 import { buildIncidentsRoute, type IncidentsRouteInput } from "./incident-lifecycle.js";
+import { buildGardenersRoute } from "./gardeners-route.js";
 import { BENCHMARK_AA_VERSION, TRIAL_ID_RE } from "./benchmark-aa.js";
 import { BENCHMARK_PAID_PILOT_VERSION, loadPaidPilotProtocol, paidPilotEvalCardTrial } from "./benchmark-paid-pilot.js";
 import { emptyEvalCardEvidence, parseEvalCardEvidence, parseEvalCardTrial, type EvalCardEvidence, type EvalCardTrial } from "./eval-card.js";
@@ -83,19 +85,27 @@ import {
   type CiIncidentState,
 } from "./ci-incidents.js";
 import { loadEscalationLinkSecret, readEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
-import { classifyAskRecordItem } from "./ask-classification.js";
-import { buildReadModelViewRoutes, viewMode, type ViewBodySource } from "./views.js";
+import { projectClassifiedHumanGates } from "./ask-classification.js";
+import { buildReadModelViewRoutes, oldestAsOf, viewMode, type ViewBodySource } from "./views.js";
 import { createViewEvents, VIEW_EVENTS_PATH, type ViewEvents } from "./view-events.js";
-import { navBadgeView, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
+import { analyticsLegacyView, captureHostModelApprovals, type HostModelApprovalConfig } from "./analytics-view.js";
+import { NAV_BADGE_NO_COMPOSITE, navBadgeView, navBadgeWithDecisions, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
 import { NOW_VIEW_NAME } from "./now-view.js";
+import { HOST_VIEW_NAME, hostLegacyView, providerPolicyConfigFromStatus, providerRoutingBody, type HostViewData } from "./host-view.js";
 import { FEEDBACK_VIEW_NAME, feedbackLegacyView } from "./feedback-view.js";
 import { INBOX_VIEW_NAME, inboxLegacyView } from "./inbox-view.js";
-import { NEEDS_YOU_VIEW_NAME, withNeedsYouView } from "./needs-you-view.js";
+import { NEEDS_YOU_VIEW_NAME, withNeedsYouView, type NeedsYouData } from "./needs-you-view.js";
+import { WORKSTREAMS_VIEW_NAME, WORKSTREAMS_VIEW_VERSION, type WorkstreamsData } from "./workstreams-view.js";
+import { ACTIONS_VIEW_NAME, ACTIONS_VIEW_VERSION, type ActionsData } from "./actions-view.js";
+import { AGENT_VIEW_NAME } from "./agent-view.js";
+import { INCIDENTS_VIEW_NAME } from "./incidents-view.js";
+import { TASK_VIEW_NAME } from "./view-demand.js";
+import { consumeHumanGateCounts, unavailableHumanGateCounts, type HumanGateProjection } from "./human-gate.js";
 import { startRepositoriesSourcePublisher, type RepositoriesSources } from "./repositories-view.js";
 import { withViewShadow } from "./view-shadow.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps, type BoardSnapshotSource } from "./board.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
-import { buildInstanceGatewayRoutes, CORE_INSTANCE, instanceStateRoot, livenessInstances, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
+import { buildInstanceGatewayRoutes, CORE_INSTANCE, DEFAULT_INSTANCE_STATE_BASE, instanceStateRoot, livenessInstances, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
 import { createReadModelWorker, READ_MODEL_VIEWS, readModelStatusView, type ReadModelInstance, type ReadModelWorkerHandle, type ReadModelWorkerOptions } from "./read-model-worker.js";
 import { CONSOLE_CACHED_READ_PATHS, ROUTE_READS_STEP, buildRouteReadsRoute, createRouteReadRollup, type RouteReadRollup } from "./route-read-rollup.js";
 import { buildOperatorAgentAnswer, buildOperatorAgentAnswerRoute, readInboxAnswerEvidence } from "./operator-agent-answer.js";
@@ -118,6 +128,7 @@ import {
   buildAssistantControlRoute,
   buildAssistantControlCapabilityRoute,
   buildAssistantControlReceiptRoute,
+  buildAssistantActionDiscoveryRoute,
   buildPrActionRoute,
   buildQuietHoursRoute,
   buildResumeRoute,
@@ -136,6 +147,7 @@ import { buildRepoDashboardRoutes } from "./repo-dashboard-route.js";
 import { buildTaskCardRoute } from "./task-card.js";
 import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operator-notes.js";
 import { buildRecordJudgeLabelRoute, fileJudgeLabelStore } from "./judge-calibration.js";
+import { createOperatorAgentRowsSource } from "./operator-agent-read-model.js";
 import { buildOperatorAgentRoutes, createOperatorAgentMemorySource, prewarmOperatorAgentReads, type OperatorAgentMemorySource } from "./operator-agent.js";
 import { buildContextControlsRoutes } from "./context-controls.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
@@ -153,7 +165,8 @@ import {
   type IncidentInvariantRow,
 } from "./incident-invariants.js";
 import { checkServiceFreshness } from "./self-sync.js";
-import { reloadServePlan, touchesReloadablePlan } from "./serve-plan-reload.js";
+import { GATEWAY_FETCH_TIMEOUT_MS } from "./git-fetch-retry.js";
+import { reloadServePlan, touchesReloadablePlan, type PlanSourceHolder } from "./serve-plan-reload.js";
 import { publishThreadPlan } from "./thread-plan.js";
 import { changedPathsSince, serveRestartRelevant, type ChangedPathsRead, type ChangedPathsReader } from "./serve-restart-relevance.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
@@ -207,8 +220,8 @@ import { loadConfig, type WorkerProviderId } from "./config.js";
 import type { Config, ModelApproval } from "./config-schema.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { createServeDrain, exitWithin } from "./serve-drain.js";
-import { createServeMemoryRegistry, droppableRouteCache, LEGACY_CACHE_VIEWS, sampleServeMemory, snapshotHolder, startServeMemoryMonitor, viewBodiesHolder, withoutRestore,
-  type CgroupHeadroom, type ServeMemoryMonitorOptions, type ServeMemoryRegistry } from "./serve-memory.js";
+import { createServeMemoryRegistry, droppableRouteCache, LEGACY_CACHE_VIEWS, readWorkerHeaps, sampleServeMemory, snapshotHolder, startServeMemoryMonitor, viewBodiesHolder,
+  withoutRestore, workerThreads, type CgroupHeadroom, type ServeMemoryMonitorOptions, type ServeMemoryRegistry, type TrackedWorker } from "./serve-memory.js";
 import { githubAuthProbe, gatewayPrimedProbe, planLoadedProbe, readModelWarmProbe, type ReadinessProbe } from "./serve-generation.js";
 import type { ConsoleProjectionWorker, FeedbackProjectionInput } from "./console-projection-worker.js";
 import { createConsoleSnapshotStore } from "./console-snapshot-store.js";
@@ -216,14 +229,16 @@ import {
   createConsoleSnapshotCache,
   createConsoleWriteGeneration,
   invalidateSnapshotsOnWrite,
-  prewarmReadRoutes,
   RouteResponseBuffer,
   sendStaleJson,
+  snapshotEtag,
+  writeBufferedResponse,
   type ConsoleResponseStaleness,
   type ConsoleSnapshotCacheOptions,
 } from "./console-snapshot-cache.js";
 import { operatorIdentityFromFile, type OperatorIdentityFileIo } from "./operator-identity-file.js";
-import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, InstanceRegistryError, parseInstanceRegistry } from "./instance-registry.js";
+import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, InstanceRegistryError, parseInstanceRegistry, requirePrimaryInstance } from "./instance-registry.js";
+import { GoLiveError, readShadowEvidence, requestGoLive, type GoLiveWiring } from "./onboarding-golive.js";
 import {
   INSTANCES_VIEW_NAME,
   legacyRegistryBody,
@@ -300,7 +315,7 @@ export interface ServeDeps {
   routeReadRollup?: RouteReadRollup;
   projectionWorker?: ConsoleProjectionWorker;
   readModel?: Pick<ReadModelWorkerOptions, "tickMs" | "stopWaitMs" | "workerUrl" | "every" | "slowLane">;
-  consoleSnapshots?: { dir: string; prewarmPaths?: readonly string[] };
+  consoleSnapshots?: { dir: string };
   /** Injectable ONLY so a unit test can pin the captured sha; real callers omit it and get
    *  {@link resolveConsoleSha}, resolved once at server start. */
   consoleSha?: string;
@@ -324,12 +339,15 @@ export interface ServeDeps {
   operatorIdentity?: OperatorIdentityConfig;
   /** The key-set fetch and clock the operator provider uses — injectable so a test is hermetic. */
   operatorIdentityIo?: { fetchImpl?: typeof fetch; clock?: Clock };
-  /** W1-T2562: re-resolve the CURRENT on-disk sha for the shell's staleness chip. Defaults to
-   *  {@link resolveConsoleSha} — the same primitive {@link gateStaleCodeExit} compares against. */
+  /** W1-T2562: re-resolve the CURRENT on-disk sha. Handed to {@link gateStaleCodeExit}, which
+   *  compares {@link consoleSha} against it; absent, the gate calls {@link resolveConsoleSha}. */
   resolveCurrentSha?: () => string;
-  board: BoardDeps;
+  /** `planSource` (W1-T5639) qualifies `plan`: absent, the plan is trusted as it always was. */
+  board: BoardDeps & Pick<PlanSourceHolder, "planSource">;
   /** Read-only projection of the host's model approvals; no other config field crosses the status wire. */
   modelApprovals?: readonly ModelApproval[];
+  /** Captured once at startup and shared with legacy and cached readers; not a new policy authority. */
+  modelApprovalConfig?: HostModelApprovalConfig;
   /**
    * `plan/feedback/` + `plan/tasks.yaml` root and GitHub trace gateway (panel-graph.ts).
    * Deliberately `Omit<..., "inboxRoot">` — {@link buildServeRoutes} supplies `inboxRoot`
@@ -522,6 +540,8 @@ export interface ServeDeps {
   };
   /** Read-only, paginated GitHub-token inventory for the console onboarding candidate list. */
   onboardingRepositoryInventory?: OnboardingInventoryRouteOptions;
+  /** Shadow history uses the gateway's instance state roots; writes target the fleet registry. */
+  onboardingGoLive?: GoLiveWiring;
   instances?: InstanceGatewayOptions;
   /**
    * W1-T2269: the console's OWN installation-token refresh loop — the SAME mechanism
@@ -585,6 +605,8 @@ export interface ServeDeps {
   serveMemory?: Pick<ServeMemoryMonitorOptions, "intervalMs" | "setInterval" | "clearInterval" | "clock"> & {
     usage?: () => NodeJS.MemoryUsage;
     headroom?: () => CgroupHeadroom | undefined;
+    /** W1-T5355: the threads whose heaps the sample reads; absent, every thread this one spawns after serve is built. */
+    workers?: () => readonly TrackedWorker[];
   };
 }
 
@@ -683,8 +705,15 @@ export const CONSOLE_BLOCKING_REQUEST_PATH_BASELINE = 0;
 /** PRIMARY CONTROL (W1-T4576): GET read routes that still re-open rotated ledger archives on a warm request, measured
  *  by REACH in test/every-get-read-route-is-bounded-by-reach.test.ts. A set that may only SHRINK:
  *  a new route that scans the union per request is refused, and a route bounded later leaves it. */
-export const CONSOLE_UNBOUNDED_LEDGER_READ_BASELINE: readonly string[] = [
-];
+const CONSOLE_UNBOUNDED_LEDGER_READ_REASONS = {
+  "GET /v1/replay": "since/until requests synchronously read the full archive union; the Phase 1 read model retires this reader",
+  "GET /v1/self-measurement": "detail requests synchronously scan the archive union until the newest matching verb; the Phase 1 read model retires this reader",
+};
+export const CONSOLE_UNBOUNDED_LEDGER_READ_BASELINE: readonly string[] & {
+  readonly reasons: Readonly<Record<string, string>>;
+} = Object.assign(Object.keys(CONSOLE_UNBOUNDED_LEDGER_READ_REASONS), {
+  reasons: CONSOLE_UNBOUNDED_LEDGER_READ_REASONS,
+});
 export const CONSOLE_STATUS_FULL_TASK_THRESHOLD = 500; // PRIMARY CONTROL
 export const CONSOLE_STATUS_RENDERED_TASK_LIMIT = 120; // BACKSTOP
 export const CONSOLE_STATUS_RESPONSE_SIZE_RATCHET_BYTES = 96_000;
@@ -729,16 +758,16 @@ function projectModelApprovals(
   }));
 }
 
-/** W1-T3394: `row.needsHuman` is one of the classifier's four source shapes — a needs-human
- *  escalation (escalate.ts, W1-T8/T77's BLOCKED-AMBIGUOUS disposition) — so routed through {@link
- *  classifyAskRecordItem} rather than read as a bare boolean here, even though today's only
- *  consumer (this initial-board cut) still just wants "does this need attention now". Byte-
- *  identical to the prior `row.needsHuman === true` check: `resolved` is the negation of the same
- *  flag, and the classifier's `escalation` arm is exactly `resolved ? RECORD : ASK`. This is the
- *  classifier's production call site (W1-T3395/W1-T3396 will consult it for the full NEEDS ME
- *  split; this task only needs it reachable from src, not from its own tests alone). */
+/** Keep observed escalation asks on the initial board through the shared projection (W1-T5340). */
 function taskRendersOnInitialBoard(row: BoardRow): boolean {
-  const escalationIsAsk = classifyAskRecordItem({ kind: "escalation", resolved: row.needsHuman !== true }) === "ASK";
+  const escalationIsAsk = projectClassifiedHumanGates([{
+    name: "escalations", instance: "core", state: row.escalationUnverified ? "partial" : "complete",
+    gates: [{
+      classification: { kind: "escalation", resolved: row.needsHuman !== true },
+      kind: "escalation", subject: row.taskId, ownerSurface: "inbox", openedAt: row.escalationOpenedAt ?? null,
+      url: row.escalationIssueUrl ?? null, reason: row.escalationTitle ?? row.title, resolutionVerb: "mark_handled",
+    }],
+  }]).gates.length > 0;
   return row.phase !== undefined || escalationIsAsk || row.verifyHumanPending === true;
 }
 
@@ -848,6 +877,22 @@ function fallbackBodyForCachedRead(path: string, deps: ServeDeps, staleness: Con
  * A non-JSON or non-object body passes through untouched.
  */
 export function withRepairLadder(route: Route, read: (nowMs: number) => RepairLadderState): Route {
+  return spliceJsonField(route, "repairLadder", read);
+}
+
+/**
+ * W1-T5373: `GET /v1/status` gains `needsYou`, the needs-you composite's decision count read through the
+ * shared consumer -- the same number the badge, the composite and each instance's now view report. No
+ * composite (no read model, or none composed yet) is a named lower bound, never a zero.
+ */
+export function withStatusNeedsYou(route: Route, read: () => HumanGateProjection | undefined): Route {
+  return spliceJsonField(route, "needsYou", () => {
+    const projection = read();
+    return projection ? consumeHumanGateCounts(projection) : unavailableHumanGateCounts("needs-you", NAV_BADGE_NO_COMPOSITE);
+  });
+}
+
+function spliceJsonField(route: Route, field: string, read: (nowMs: number) => unknown): Route {
   return {
     ...route,
     handler: async (req, res, ctx) => {
@@ -873,7 +918,7 @@ export function withRepairLadder(route: Route, read: (nowMs: number) => RepairLa
       }
       delete headers["content-length"];
       res.writeHead(buffered.status, headers);
-      res.end(JSON.stringify({ ...(body as Record<string, unknown>), repairLadder: read(nowMs) }));
+      res.end(JSON.stringify({ ...(body as Record<string, unknown>), [field]: read(nowMs) }));
     },
   };
 }
@@ -929,17 +974,45 @@ export function boundConsoleReadRoute(
   return { ...route, handler: droppable.handler };
 }
 
+/** W1-T7390: reuse an instance's fresh view before entering the legacy cache or ledger fold. */
+function legacyReadFromView(route: Route, readModel: { source: ViewBodySource; instance: string } | undefined, budgetMs: number): Route {
+  const view = route.path === "/v1/operator-activity" ? WORKSTREAMS_VIEW_NAME : route.path === "/v1/action-results" ? ACTIONS_VIEW_NAME : undefined;
+  if (route.method !== "GET" || !view || !readModel) return route;
+  const { source, instance } = readModel;
+  return { ...route, handler: (req, res, ctx) => {
+    const params = new URL(req.url ?? route.path, "http://localhost").searchParams;
+    // The views are unfiltered and bounded: even a valid filter may need rows outside their bodies.
+    if (params.size > 0) return route.handler(req, res, ctx);
+    const entry = source.body(view, "");
+    const version = view === WORKSTREAMS_VIEW_NAME ? WORKSTREAMS_VIEW_VERSION : ACTIONS_VIEW_VERSION;
+    if (!entry || entry.version !== version) return route.handler(req, res, ctx);
+    const data = entry.body.data as WorkstreamsData | ActionsData | undefined;
+    const selected = data?.instances?.find((item) => item.instance === instance);
+    const body = selected && ("activity" in selected ? selected.activity : selected.results);
+    if (!body || body.state === "unavailable" || body.state === "not-collected") return route.handler(req, res, ctx);
+    const now = systemClock.now();
+    const sources = source.judge(entry.body.sources.filter((s) => s.instance === instance || s.name.endsWith(`:${instance}`)), now, entry);
+    if (sources.length === 0 || sources.some((s) => s.state !== "fresh")) return route.handler(req, res, ctx);
+    const asOf = oldestAsOf(sources);
+    const text = JSON.stringify(body);
+    writeBufferedResponse(req, res, { status: 200, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-cache" },
+      body: text, generatedAtMs: Date.parse(entry.body.generatedAt), etag: snapshotEtag(text), jsonObject: true },
+    { status: "fresh", stale: false, ageMs: asOf === null ? null : Math.max(0, now - Date.parse(asOf)),
+      generatedAt: entry.body.generatedAt, refreshing: false, budgetMs });
+  } };
+}
+
 export function boundConsoleReadRoutes(
   routes: readonly Route[],
   deps: ServeDeps,
   budgetMs: number = CONSOLE_READ_ROUTE_BUDGET_MS,
   memory?: { registry: ServeMemoryRegistry; scope: string },
+  readModel?: { source: ViewBodySource; instance: string },
 ): Route[] {
   const generation = createConsoleWriteGeneration();
   const snapshots = deps.consoleSnapshots;
   const store = snapshots && createConsoleSnapshotStore({ dir: snapshots.dir, codeRev: deps.consoleSha ?? CONSOLE_SHA_UNKNOWN, log: deps.log });
-  if (snapshots?.prewarmPaths) void prewarmReadRoutes(routes, snapshots.prewarmPaths, deps.log);
-  return routes.map((route) => invalidateSnapshotsOnWrite(boundConsoleReadRoute(route, deps, budgetMs, { generation, store }, memory), generation));
+  return routes.map((route) => invalidateSnapshotsOnWrite(legacyReadFromView(boundConsoleReadRoute(route, deps, budgetMs, { generation, store }, memory), readModel, budgetMs), generation));
 }
 
 /**
@@ -1341,15 +1414,14 @@ export function consoleRecyclePatienceMs(
  *  up, against the 3h25m of stale service the edge-only trigger actually produced. */
 export const RECYCLE_RECHECK_MS = 60_000;
 
-/** W1-T4229 BACKSTOP: a hung fetch must not hold the checkout read open past the next re-check. */
-export const GATEWAY_FETCH_TIMEOUT_MS = 60_000;
-
 /** One read of the gateway's own checkout, and whether it warrants the freshness restart. */
 export interface GatewayCheckoutAssessment {
   state: GatewayCheckoutState;
   /** Behind AND clean: the entrypoint fast-forwards only a clean tree on boot. */
   restartDue: boolean;
   reloadPlanAt?: string;
+  /** origin/main's sha when the checkout is behind: what a handoff requested now would serve. */
+  targetSha?: string;
 }
 
 /** {@link assessGatewayCheckout}'s seams; every git call is injectable so a test stays hermetic. */
@@ -1449,9 +1521,21 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
   };
   // NEVER DIRTY: the entrypoint refuses to sync it, so the restart would loop on the same sha.
   const relevant = svc.behind !== null && behindBy !== 0 && serveRestartRelevant(svc.behind.changedPaths);
-  const reloadPlanAt = svc.behind !== null && behindBy !== 0 && !relevant && touchesReloadablePlan(svc.behind.changedPaths) ? svc.behind.newSha : undefined;
-  return { state, restartDue: !svc.dirty && relevant, ...(reloadPlanAt === undefined ? {} : { reloadPlanAt }) };
+  // RELOADED EVEN WHEN RELEVANT: a code handoff now waits out SERVE_HANDOFF_COALESCE_MS, and the plan
+  // half of a mixed merge must not wait with it. A plan the old code cannot parse keeps the old one.
+  const reloadPlanAt = svc.behind !== null && behindBy !== 0 && touchesReloadablePlan(svc.behind.changedPaths) ? svc.behind.newSha : undefined;
+  return {
+    state,
+    restartDue: !svc.dirty && relevant,
+    ...(reloadPlanAt === undefined ? {} : { reloadPlanAt }),
+    ...(svc.behind === null ? {} : { targetSha: svc.behind.newSha }),
+  };
 }
+
+/** OPERATOR RULING 2026-10-06: a generation asks for a code handoff at most once per this window,
+ *  measured from its boot or its last ask, so every merge landing meanwhile rides ONE handoff (each
+ *  cost ~55 s of cold prewarm, ~95 a day). Plan-only advances still reload in place at once. */
+export const SERVE_HANDOFF_COALESCE_MS = 15 * 60_000;
 
 /** W1-T4229 BACKSTOP: fires only on a connection that never ends by itself (SSE, a hung client). */
 export const SERVE_RESTART_DRAIN_BOUND_MS = 10_000;
@@ -1493,6 +1577,8 @@ export interface StaleCodeExitDeps {
   changedPathsSince?: ChangedPathsReader;
   reloadPlan?: (ref: string) => Promise<boolean>;
   requestHandoff?: (detail: Record<string, unknown>) => void;
+  /** When this generation booted, the first anchor of {@link SERVE_HANDOFF_COALESCE_MS}; defaults to construction. */
+  bootedAt?: number;
 }
 /** What {@link gateStaleCodeExit} hands back — a wrapper for the console's ONE SSE route and a
  *  wrapper for each HIGH-tier write route, both feeding the SAME internal decision. */
@@ -1543,12 +1629,12 @@ export interface StaleCodeExitGate {
  * 2026-09-15 — so counting it would report constant attention and the gate would never recycle.
  * What the gate needs to know is whether a HUMAN surface is being read.
  */
-export function stampReadWith(route: Route, stamp: () => void): Route {
+export function stampReadWith(route: Route, stamp: (req: import("node:http").IncomingMessage) => void): Route {
   if (route.scope !== "read" || route.path === VIEW_EVENTS_PATH) return route;
   return {
     ...route,
     handler: (req, res, ctx) => {
-      stamp();
+      stamp(req);
       return route.handler(req, res, ctx);
     },
   };
@@ -1577,6 +1663,8 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   let handoffAsked: string | undefined;
   let exited: Promise<void> | undefined;
   let dirtyReported: string | undefined;
+  let windowFrom = deps.bootedAt ?? clock.now();
+  let coalescing: { firstSeenSha: string; firstSeenAt: number } | undefined;
   const readChangedPaths = deps.changedPathsSince ?? ((boot, target) => changedPathsSince(boot, target, serveRepoDir()));
   const relevance = new Map<string, boolean | "pending">();
   let headPlanRef: string | undefined;
@@ -1626,6 +1714,7 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
     const checkoutBehind = checkout?.restartDue === true;
     if (!codeStale && !checkoutBehind) {
       staleSince = undefined;
+      coalescing = undefined;
       return;
     }
     staleSince ??= clock.now();
@@ -1649,12 +1738,23 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
       staleForMs,
       patienceMs,
       msSinceLastRead,
+      ...(checkout?.targetSha === undefined ? {} : { targetSha: checkout.targetSha }),
       ...(checkoutBehind ? { reason: "checkout_behind", checkout: checkout?.state } : {}),
     };
     if (deps.requestHandoff) {
       const key = `${currentSha} ${originBehind ?? ""}`;
       if (key === handoffAsked) return;
+      const targetSha = checkout?.targetSha ?? currentSha;
+      coalescing ??= { firstSeenSha: targetSha, firstSeenAt: clock.now() };
+      const dueAt = windowFrom + SERVE_HANDOFF_COALESCE_MS;
+      if (clock.now() < dueAt) return;
       handoffAsked = key;
+      windowFrom = clock.now();
+      // ONE ROW PER WINDOW, written when the deferred ask finally goes out, never per poll.
+      if (coalescing.firstSeenAt < dueAt) {
+        log("serve.handoff_coalesced", { firstSeenSha: coalescing.firstSeenSha, targetSha, waitedMs: clock.now() - coalescing.firstSeenAt, mergesAbsorbed: commitsBehind, windowMs: SERVE_HANDOFF_COALESCE_MS });
+      }
+      coalescing = undefined;
       log("serve.handoff_requested", decision);
       return deps.requestHandoff(decision);
     }
@@ -1833,7 +1933,7 @@ export type HostRegistryState = InstancesHostRegistryState;
  * repo registry answered and the host copy is only the thing being checked against it.
  * W1-T5056: while the `instances` view serves, the answer is that body's projection and reads no file.
  */
-export type RegistryRouteInput = NonNullable<ServeDeps["registry"]> & { repoRegistryPath: string; readModel?: Pick<ViewBodySource, "body" | "switches"> };
+export type RegistryRouteInput = NonNullable<ServeDeps["registry"]> & { repoRegistryPath: string; readModel?: Pick<ViewBodySource, "body" | "switches" | "autoMode"> };
 
 export function buildRegistryRoute(deps: RegistryRouteInput): Route {
   const readText = deps.readText ?? ((path: string) => fsPromises.readFile(path, "utf8"));
@@ -1971,8 +2071,58 @@ function accessConfig(): { accessTeamDomain?: string; accessAudience?: string } 
   }
 }
 
-/** W1-T4244 — `serve.operatorIdentity` off `loadConfig()`, tolerantly, {@link accessConfig}'s
- *  precedent: an unreadable config composes no operator provider rather than failing the boot. */
+/** W1-T4266: exact instance routes share the gateway's registry and state-root conventions. */
+export function buildOnboardingGoLiveRoutes(deps: ServeDeps): Route[] {
+  const registryPath = deps.registry?.repoRegistryPath ?? deps.instances?.registryPath ?? daemonInstanceRegistryPath(deps.questionsRoot);
+  let registry;
+  try {
+    registry = parseInstanceRegistry((deps.instances?.readText ?? ((path) => readFileSync(path, "utf8")))(registryPath));
+  } catch (error) {
+    deps.log?.("serve.onboarding_registry_unavailable", { reason: String(error) });
+    return [];
+  }
+  const goLiveErrorResponse = (error: unknown) => {
+    if (!(error instanceof GoLiveError)) throw error;
+    return { status: error.status, body: { error: error.code, ...(error.receipt ? { receipt: error.receipt } : {}) } };
+  };
+  return registry.instances.filter((instance) => instance.live).flatMap((instance): Route[] => {
+    const stateDir = instance.name === (deps.instances?.coreInstance ?? CORE_INSTANCE)
+      ? dirname(deps.ledgerPath)
+      : dirname(instanceStateRoot(instance, deps.instances?.stateBase ?? DEFAULT_INSTANCE_STATE_BASE).ledgerPath);
+    const prefix = `/v1/i/${instance.name}`;
+    return [
+      {
+        method: "GET", path: `${prefix}/shadow-evidence`, scope: "read",
+        handler: async (_req, res) => {
+          try { sendJson(res, 200, await readShadowEvidence(stateDir, instance.name, deps.onboardingGoLive?.readRows)); }
+          catch (cause) {
+            const error = goLiveErrorResponse(cause);
+            sendJson(res, error.status, error.body);
+          }
+        },
+      },
+      {
+        method: "POST", path: `${prefix}/go-live`, scope: "write", tier: "high",
+        handler: jsonAction(() => ({}), async (_body, req, res) => {
+          const actor = verifiedActor(req);
+          if (!actor) return sendJson(res, 403, { error: "verified_operator_required" });
+          try {
+            const registryRepository = deps.onboardingGoLive?.registryRepository ?? deps.assistantRepository ?? requirePrimaryInstance(registry).repo;
+            const receipt = await requestGoLive({ instance: instance.name, actor }, {
+              ...deps.onboardingGoLive, registryRepository, stateDir, ledgerPath: deps.ledgerPath,
+            });
+            sendJson(res, 202, receipt);
+          } catch (cause) {
+            const error = goLiveErrorResponse(cause);
+            sendJson(res, error.status, error.body);
+          }
+        }),
+      },
+    ];
+  });
+}
+
+/** W1-T4244 — unreadable config composes no operator provider rather than failing the boot. */
 export function operatorIdentityConfig(
   read: () => Pick<Config, "serve"> = loadConfig,
   file: OperatorIdentityFileIo = {},
@@ -2062,16 +2212,8 @@ export function buildProviderRoutingRoute(deps: {
     method: "GET",
     path: "/v1/provider-routing",
     scope: "read",
-    handler: (_req, res) => {
-      const read = deps.read ?? readProviderRoutingStatus;
-      const status = read(deps.root, { now: deps.now });
-      const config = providerPolicyConfigFromStatus(status);
-      const policy = config ? resolveProviderRoutingPolicy(deps.root, config, { now: deps.now }) : status.policy;
-      // The status remains the daemon's last material routing decision. Overlay only the live
-      // policy projection so a successful console write, expiry, or clear stays visible before
-      // the next dispatch refreshes capacities/selection; Serve still performs no provider probe.
-      sendJson(res, 200, policy ? { ...status, policy } : status);
-    },
+    // The body is the `host` view's providerRouting part too (host-view.ts).
+    handler: (_req, res) => sendJson(res, 200, providerRoutingBody(deps)),
   };
 }
 
@@ -2091,17 +2233,6 @@ function validateProviderRoutingPolicyBody(body: unknown): { error: string } | {
   // The store is the one schema authority. Keep the unknown object wrapped so a hostile `error`
   // key cannot be mistaken for jsonAction's own validation-error envelope.
   return { value: body as ProviderRoutingPolicyOverrideInput };
-}
-
-function providerPolicyConfigFromStatus(status: ProviderRoutingStatus): { workerProviders: { enabled: WorkerProviderId[]; reservePercent: number } } | undefined {
-  const committed = status.policy?.committed;
-  if (!committed) return undefined;
-  return {
-    workerProviders: {
-      enabled: [...committed.enabledProviders],
-      reservePercent: committed.reservePercent,
-    },
-  };
 }
 
 function providerPolicyAuditProjection(policy: ReturnType<typeof resolveProviderRoutingPolicy>): Record<string, unknown> {
@@ -2588,7 +2719,7 @@ function assembleServeRoutes(
     ...badgeScopes];
   const modelApprovals = deps.modelApprovals ?? [];
   const routeReads = deps.routeReadRollup ?? createRouteReadRollup();
-  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME], servedByDefault: [readModelStatusView.name],
+  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME, TASK_VIEW_NAME], servedByDefault: [readModelStatusView.name],
     ...(readModel ? { readModel } : {}), every: deps.readModel?.every, log: deps.log, onSubscribers: (change, n, reason) => routeReads.stream("views", change, n, reason) });
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
@@ -2633,8 +2764,14 @@ function assembleServeRoutes(
     ...deps.panelGraph,
     inboxRoot: deps.fleetControlRoot,
     ratify: deps.panelGraph.ratify ?? ratifyCliGateway(deps.panelGraph.root, join(deps.fleetControlRoot, "state", "logs")),
-    ...(projectionWorker ? { projectFeedback: (input: FeedbackProjectionInput) => projectionWorker.feedback(input), logProjection: deps.log } : {}),
+    logProjection: deps.log,
+    ...(projectionWorker ? { projectFeedback: (input: FeedbackProjectionInput) => projectionWorker.feedback(input) } : {}),
   };
+  // W1-T5886: the panel routes and the inbox view's legacy side share ONE deps object. The inbox classification memo is
+  // keyed by it, and the legacy side was handed `panelGraphDeps` while the routes classified under a copy, so it
+  // answered "serve has not classified the inbox yet" even while the thread list served a held classification.
+  // W1-T5897: under the slow lane that classifies the inbox, no inbox read classifies on this thread; a new generation reads what it persisted.
+  const panelReadDeps: PanelGraphDeps = { ...panelGraphDeps, readPlanSnapshot: () => deps.board.plan, readPlanSource: () => deps.board.planSource, ...(deps.readModel?.slowLane?.inbox ? { inboxFromSlowLane: true } : {}) };
   const lastSeen = deps.lastSeen ?? createLastSeenStore(lastSeenPath(deps.fleetControlRoot));
   // W1-T500: SAME instance `createService`'s dispatch consults (see ServeDeps.confirmNonces's own
   // doc for why that has to be true) -- {@link buildServeServer} resolves this once and threads it
@@ -2671,14 +2808,19 @@ function assembleServeRoutes(
   // inventory is metadata-only; raw private content is consumed through the ledger-backed
   // preflight reader, never serialized by the browser-facing console route.
   const goalBoardCache = createBoardSnapshotCache();
+  // W1-T5355: the cache exposes only `get`, which builds; the holder sizes the snapshot it last returned.
+  let goalBoard: BoardSnapshot | undefined;
+  memory?.add(snapshotHolder("goal-board", () => goalBoard));
   const operatorAgentRoutes = buildOperatorAgentRoutes({
     ledgerPath: deps.ledgerPath,
     root: deps.fleetControlRoot,
     ...(operatorAgentMemory ? { memory: operatorAgentMemory } : {}),
+    ...(readModel ? { panelRows: createOperatorAgentRowsSource(readModel, { instance: deps.instances?.coreInstance ?? CORE_INSTANCE }) } : {}),
     goalBoard: () => {
       const state = deps.boardSnapshotSource?.current();
-      if (state?.state === "unavailable") return undefined;
-      return { plan: deps.board.plan, snapshot: state?.snapshot ?? goalBoardCache.get(deps.board) };
+      // An unavailable plan source is a placeholder plan, never an empty goal board.
+      if (state?.state === "unavailable" || deps.board.planSource?.state === "unavailable") return undefined;
+      return { plan: deps.board.plan, snapshot: state?.snapshot ?? (goalBoard = goalBoardCache.get(deps.board)) };
     },
   });
   prewarmOperatorAgentReads(deps.ledgerPath).catch((e) => deps.log?.("serve.operator_agent_prewarm_failed", { reason: String((e as Error)?.message ?? e) }));
@@ -2711,8 +2853,21 @@ function assembleServeRoutes(
   const readLadder = (nowMs: number): RepairLadderState => (deps.repairLadder?.read ?? readRepairLadderState)(deps.fleetControlRoot, nowMs);
   const assistantControl = { ...fleetControlDeps, claimRoot: deps.fleetControlRoot,
     instance: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository, bootSha: consoleSha };
+  const needsYouGates = (): HumanGateProjection | undefined => (readModel?.body(NEEDS_YOU_VIEW_NAME)?.body.data as NeedsYouData | undefined)?.humanGates;
+  const navBadge = navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: navBadgeScopes });
+  // W1-T5053: the host view's legacy side reads through the same deps its four routes answer with.
+  const hostLegacy = hostLegacyView({ control: controlStatusDeps, account: accountUsageDeps, providerRouting: { root: deps.fleetControlRoot, ...deps.providerRouting }, skillsRoot: deps.questionsRoot },
+    () => readModel?.body(HOST_VIEW_NAME)?.body.data as HostViewData | undefined);
+  // W1-T5055: the analytics view's legacy side merges serve's own per-instance caches, as the worker merges their snapshots.
+  const analyticsLegacy = analyticsLegacyView({ scopes: () => navBadgeScopes().map((scope) => ({ instanceId: scope.instanceId, repository: scope.repository, analytics: scope.analytics })), modelApprovalConfig: deps.modelApprovalConfig });
+  // The shadow compares the worker's badge with the undecorated legacy one; only the served badge carries decisions.
+  const shadowed = withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name], onServed: routeReads.served,
+    readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME, TASK_VIEW_NAME],
+    requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"], [AGENT_VIEW_NAME]: ["instance", "part"] },
+    legacy: [navBadge, analyticsLegacy, inboxLegacyView(panelReadDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan), hostLegacy] });
+  const served = { ...shadowed, legacy: shadowed.legacy.map((view) => view === navBadge ? navBadgeWithDecisions(navBadge, needsYouGates) : view) };
   const rawRoutes = [
-    withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder),
+    withStatusNeedsYou(withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder), needsYouGates),
     ...buildRepoDashboardRoutes({
       root: deps.questionsRoot,
       repoRegistryPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
@@ -2723,9 +2878,7 @@ function assembleServeRoutes(
       planPath: deps.panelGraph.planPath,
     }),
     buildRecentRoute(deps.board),
-    ...buildReadModelViewRoutes(withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name], onServed: routeReads.served,
-      readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME], requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"] },
-      legacy: [navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: navBadgeScopes }), inboxLegacyView(panelGraphDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan)] })),
+    ...buildReadModelViewRoutes(served),
     ...viewEvents.routes,
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     withRepairLadder(buildDaemonHealthRoute(daemonHealthDeps), readLadder),
@@ -2749,6 +2902,7 @@ function assembleServeRoutes(
     buildAssistantControlRoute(assistantControl),
     buildAssistantControlCapabilityRoute(assistantControl),
     buildAssistantControlReceiptRoute(assistantControl),
+    buildAssistantActionDiscoveryRoute(assistantControl),
     buildQuietHoursRoute(fleetControlDeps),
     buildAnswerQuestionRoute(questionDeps),
     buildApproveManualRoute(fleetControlDeps),
@@ -2806,7 +2960,7 @@ function assembleServeRoutes(
     ...buildOperatorAgentActionHandoffRoutes({ root: deps.fleetControlRoot, ledgerPath: deps.ledgerPath, claimRoot: deps.fleetControlRoot,
       instance: assistantControl.instance, repository: assistantControl.repository }),
     ...contextControlsRoutes,
-    ...buildPanelGraphRoutes(panelGraphDeps, () => deps.board.plan),
+    ...buildPanelGraphRoutes(panelReadDeps, panelReadDeps.readPlanSnapshot),
     // W1-T284: the skills-panel button SET, read-scoped -- was built (lib/panel-skills.ts,
     // W3-T8) but never wired into the real route table, so GET /v1/skills 404'd on every
     // running console. `questionsRoot` IS repoRoot (see that field's own doc, above) and
@@ -2825,10 +2979,9 @@ function assembleServeRoutes(
     // feedback entry, ledger `panel.skill_invoked`. No worker, no spend.
     //
     // `panelGraphDeps` is passed WHOLE and deliberately: this module needs the same `root`,
-    // `planPath`, `ledgerPath` and `feedbackLand` that POST /v1/feedback/decision already uses, and
-    // production sets `panelGraph.root` and `questionsRoot` to the SAME `repoRoot` (run-task.ts) —
-    // so the skills registry and the feedback write resolve under one root, and the grill lands on
-    // the bot branch instead of dirtying the daemon's checkout.
+    // `planPath`, `ledgerPath` and `inboxRoot` that POST /v1/feedback/decision already uses, so the
+    // skills registry and the grill resolve under one root, and the grill is moved into the
+    // `inboxRoot` landing queue the daemon's sweep lands (W1-T5525, W1-T5628), leaving no copy.
     ...buildPanelSkillRunRoutes(panelGraphDeps),
     buildTaskCardRoute(deps.board),
     // W1-T3352: synchronous read of process-owned state. The server assembly owns refresh and
@@ -2911,8 +3064,11 @@ function assembleServeRoutes(
       clock: deps.incidents?.clock,
       readStore: deps.incidents?.readStore,
     }),
+    buildGardenersRoute({ stateDir: dirname(deps.ledgerPath), repository: deps.assistantRepository }),
   ];
-  const routes = boundConsoleReadRoutes(rawRoutes, deps, CONSOLE_READ_ROUTE_BUDGET_MS, memory && { registry: memory, scope: "core" });
+  const routes = boundConsoleReadRoutes(rawRoutes, deps, CONSOLE_READ_ROUTE_BUDGET_MS, memory && { registry: memory, scope: "core" },
+    readModel && { source: readModel, instance: deps.instances?.coreInstance ?? CORE_INSTANCE });
+  routes.push(...buildOnboardingGoLiveRoutes(deps));
   routes.push(
     ...buildInstanceGatewayRoutes(routes, {
       registryPath: daemonInstanceRegistryPath(deps.questionsRoot),
@@ -2922,12 +3078,14 @@ function assembleServeRoutes(
       log: deps.log,
       bound: (reads, board, instance) => boundConsoleReadRoutes(reads.map((r) => projectConsoleStatusRoute(r, modelApprovals)), {
         ...deps, board, consoleSnapshots: deps.consoleSnapshots && instance ? { dir: join(deps.consoleSnapshots.dir, "instances", instance) } : undefined,
-      }, CONSOLE_READ_ROUTE_BUDGET_MS, memory && { registry: memory, scope: instance ?? "instance" }),
+      }, CONSOLE_READ_ROUTE_BUDGET_MS, memory && { registry: memory, scope: instance ?? "instance" },
+      readModel && { source: readModel, instance: instance ?? CORE_INSTANCE }),
       ...deps.instances,
       assistantClaimRoot: deps.fleetControlRoot,
       assistantBootSha: consoleSha,
       onAnalyticsCache: (cache, instance) => {
         instanceAnalyticsCaches.push(cache);
+        memory?.add(snapshotHolder(`analytics:${instance.name}`, cache.current, () => cache.shed()));
         badgeScopes.push({ instanceId: instance.name, repository: instance.repo, analytics: cache.current, ledgerPath: instance.ledgerPath,
           memory: createOperatorAgentMemorySource(() => cache.current().operatorAgentMemory) });
       },
@@ -3016,6 +3174,14 @@ export function startIncidentInvariantsMonitor(
  * returned server `close`s, so no timer outlives it.
  */
 function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
+  // The CLI supplies this property only after loadConfig succeeds, including an absent optional list.
+  // Direct callers without a source stay unreported; no directory name is permission evidence.
+  const supplied = deps.modelApprovalConfig ?? (Object.hasOwn(deps, "modelApprovals")
+    ? { capturedAt: systemClock.iso(), approvals: deps.modelApprovals ?? [] } : undefined);
+  const modelApprovalConfig = supplied === undefined ? undefined : captureHostModelApprovals(supplied);
+  deps = { ...deps, modelApprovalConfig };
+  // W1-T5355: subscribed before anything below can spawn a thread, so each one's heap is sampled.
+  const liveThreads = deps.serveMemory?.workers ?? workerThreads().live;
   const github = deps.board.github;
   github.serveOffLoop?.();
   const statusStream = buildStatusStream(deps.board, deps.pollMs ?? DEFAULT_POLL_MS);
@@ -3061,9 +3227,11 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   });
   const readModel = deps.readModel && withNeedsYouView(createReadModelWorker({ stateDir: dirname(deps.ledgerPath), instances: readModelInstances(deps), log: deps.log, escalationRepository: deps.assistantRepository,
     registry: { repoPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot), hostPath: deps.registry?.hostRegistryPath ?? DEFAULT_HOST_INSTANCE_REGISTRY_PATH },
-    ...(keepWarm ? { github: { serve: keepWarm, ...walk } } : {}), ...deps.readModel }));
+    ...(keepWarm ? { github: { serve: keepWarm, ...walk } } : {}), ...deps.readModel, modelApprovalConfig }));
   const staleExit = gateStaleCodeExit({
     bootSha: consoleSha,
+    // The caller's "current sha" is what the gate compares against; absent, the gate re-reads git.
+    ...(deps.resolveCurrentSha ? { resolveCurrentSha: deps.resolveCurrentSha } : {}),
     log: deps.log,
     beforeExit: () => {
       readModel?.stop();
@@ -3093,10 +3261,12 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   // Both were blind to a polling console in exactly the same way, so both read the same signal
   // rather than growing a second notion of "someone is watching".
   const stampRead = (route: Route): Route =>
-    stampReadWith(route, () => {
+    stampReadWith(route, (req) => {
       lastReadAt = systemClock.now();
       prewarm.noteRead();
       readModel?.noteGithubRead?.();
+      // A per-instance view's read names its instance, so only that instance's unit keeps its cadence.
+      readModel?.noteViewRead?.(route.path, new URL(req.url ?? "/", "http://localhost").searchParams.get("instance") ?? undefined);
     });
   // W1-T5175: every holder serve can name, sized by its own memory loop (startLedgerWriters, below).
   const memory = createServeMemoryRegistry();
@@ -3196,7 +3366,9 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     const stopMemory = startServeMemoryMonitor({
       ...deps.serveMemory,
       holders: memory.holders,
-      sample: (holders) => sampleServeMemory(holders, { usage: deps.serveMemory?.usage, headroom: deps.serveMemory?.headroom }),
+      sample: async (holders) => sampleServeMemory(holders, {
+        usage: deps.serveMemory?.usage, headroom: deps.serveMemory?.headroom, workerHeaps: await readWorkerHeaps(liveThreads()),
+      }),
       modeOf: (view) => viewMode(readModel, view),
       log: deps.log,
       incident: (line) => appendLedger(deps.ledgerPath, line),

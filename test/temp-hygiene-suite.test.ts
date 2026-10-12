@@ -23,18 +23,24 @@ import { fileURLToPath } from "node:url";
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HYGIENE_IMPORT = join(REPO_ROOT, "test", "setup", "tmp-hygiene.ts");
 
-/** Count dirs directly under the OS tmp root whose name carries the given prefix —
- * an external, filesystem-level count, not anything the hygiene module reports about
- * itself. */
-function countTmpDirs(prefix: string): number {
-  return readdirSync(tmpdir()).filter((name) => name.startsWith(prefix)).length;
+/** Count dirs directly under `root` whose name carries the given prefix — an external,
+ * filesystem-level count, not anything the hygiene module reports about itself. */
+function countTmpDirs(root: string, prefix: string): number {
+  return readdirSync(root).filter((name) => name.startsWith(prefix)).length;
+}
+
+/** A tmp root only the spawned child writes to. The shared OS tmp root also holds every other
+ * in-flight suite's dirs — test/worker.test.ts makes rmd-worker-guard- dirs of its own while the
+ * full suite runs — so a prefix count there compares against other files' traffic (#10578). */
+function ownTmpRoot(): string {
+  return mkdtempSync(join(tmpdir(), "rmd-temp-hygiene-own-tmp-"));
 }
 
 /** Run one `.test.ts` file exactly the way the real `test` npm script does (same two
  * `--import` flags, same runner), optionally narrowed to one test by name. Never
  * throws on a nonzero exit — the caller decides whether that's expected (claim 3
  * deliberately runs a failing fixture). */
-function runNodeTestFile(fixturePath: string, testNamePattern?: string): { status: number } {
+function runNodeTestFile(fixturePath: string, tmpRoot: string, testNamePattern?: string): { status: number } {
   const args = ["--test", "--import", "tsx", "--import", HYGIENE_IMPORT];
   if (testNamePattern) args.push("--test-name-pattern", testNamePattern);
   args.push(fixturePath);
@@ -51,6 +57,8 @@ function runNodeTestFile(fixturePath: string, testNamePattern?: string): { statu
   // it into every spawned child), so an unblanked value here would silently enrol this fresh
   // child in whatever coverage session is running this very suite.
   env.NODE_V8_COVERAGE = undefined;
+  // The child's os.tmpdir() is the caller's private root, so the counts read only its own dirs.
+  env.TMPDIR = tmpRoot;
   try {
     execFileSync(process.execPath, args, { cwd: REPO_ROOT, stdio: "pipe", env });
     return { status: 0 };
@@ -59,6 +67,32 @@ function runNodeTestFile(fixturePath: string, testNamePattern?: string): { statu
     return { status: status ?? 1 };
   }
 }
+
+test("the spawned suite's tmpdir() is the caller's private tmp root, so each claim's count can see the child's dirs", () => {
+  const scratch = mkdtempSync(join(tmpdir(), "temp-hygiene-suite-"));
+  try {
+    const fixture = join(scratch, "fixture-tmp-root-probe.test.ts");
+    writeFileSync(
+      fixture,
+      [
+        'import { writeFileSync } from "node:fs";',
+        'import { tmpdir } from "node:os";',
+        'import { join } from "node:path";',
+        'import { test } from "node:test";',
+        "",
+        'test("marks the tmp root it resolves", () => {',
+        '  writeFileSync(join(tmpdir(), "tmp-root-probe"), "seen");',
+        "});",
+        "",
+      ].join("\n"),
+    );
+    const own = ownTmpRoot();
+    assert.equal(runNodeTestFile(fixture, own).status, 0, "the probe fixture passes");
+    assert.ok(readdirSync(own).includes("tmp-root-probe"), "the child wrote into the private root, so a zero there is a measurement");
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
 
 test("claim 1: a full test-suite run leaves ZERO net new rmd- prefixed dirs under the temp root, counted before and after", () => {
   const scratch = mkdtempSync(join(tmpdir(), "temp-hygiene-suite-"));
@@ -88,10 +122,11 @@ test("claim 1: a full test-suite run leaves ZERO net new rmd- prefixed dirs unde
     // flaky on suite noise it has no business asserting about. The dirs this
     // fixture creates ARE "rmd-" prefixed (see above), so this is the same claim,
     // just measured without cross-file interference.
-    const before = countTmpDirs("rmd-suite-claim1-");
-    const { status } = runNodeTestFile(fixture);
+    const own = ownTmpRoot();
+    const before = countTmpDirs(own, "rmd-suite-claim1-");
+    const { status } = runNodeTestFile(fixture, own);
     assert.equal(status, 0, "the fixture itself passes — this is the ordinary leak shape, not a thrown test");
-    const after = countTmpDirs("rmd-suite-claim1-");
+    const after = countTmpDirs(own, "rmd-suite-claim1-");
 
     assert.equal(after, before, "no net new rmd- prefixed dirs survive a run under the hygiene import");
   } finally {
@@ -99,14 +134,16 @@ test("claim 1: a full test-suite run leaves ZERO net new rmd- prefixed dirs unde
   }
 });
 
-test("claim 2: test/worker.test.ts:374's rmd-worker-guard- dir — the confirmed instance that anchored the census — no longer leaks", () => {
-  const before = countTmpDirs("rmd-worker-guard-");
+test("claim 2: worker.test.ts's rmd-worker-guard- dir no longer leaks, counted in a tmp root no other suite writes to", () => {
+  const own = ownTmpRoot();
+  const before = countTmpDirs(own, "rmd-worker-guard-");
   const { status } = runNodeTestFile(
     join(REPO_ROOT, "test", "worker.test.ts"),
+    own,
     "an invalid settings file is REJECTED at the spawn boundary",
   );
   assert.equal(status, 0, "the anchor test itself passes");
-  const after = countTmpDirs("rmd-worker-guard-");
+  const after = countTmpDirs(own, "rmd-worker-guard-");
 
   assert.equal(after, before, "the rmd-worker-guard- dir mkdtempSync'd at worker.test.ts:374 is gone after the run");
 });
@@ -131,10 +168,11 @@ test("claim 3: a test whose body THROWS still leaves no temp dir behind — the 
       ].join("\n"),
     );
 
-    const before = countTmpDirs("rmd-suite-claim3-");
-    const { status } = runNodeTestFile(fixture);
+    const own = ownTmpRoot();
+    const before = countTmpDirs(own, "rmd-suite-claim3-");
+    const { status } = runNodeTestFile(fixture, own);
     assert.notEqual(status, 0, "the fixture is EXPECTED to fail (it throws) — proves this is a real thrown-test proof, not a false pass");
-    const after = countTmpDirs("rmd-suite-claim3-");
+    const after = countTmpDirs(own, "rmd-suite-claim3-");
 
     assert.equal(after, before, "the dir created before the throw is still swept away when the process exits");
   } finally {
@@ -167,12 +205,13 @@ test("claim 4: a mutation-style repeated run of the same fixture N times creates
     // turned a one-dir-per-fixture leak into 202,830 dirs / 14G: N reruns, each
     // leaking its own dir, with nothing ever reclaiming them between runs.
     const N = 5;
-    const before = countTmpDirs("rmd-suite-claim4-");
+    const own = ownTmpRoot();
+    const before = countTmpDirs(own, "rmd-suite-claim4-");
     for (let i = 0; i < N; i++) {
-      const { status } = runNodeTestFile(fixture);
+      const { status } = runNodeTestFile(fixture, own);
       assert.equal(status, 0, `run ${i + 1}/${N} of the fixture itself passes`);
     }
-    const after = countTmpDirs("rmd-suite-claim4-");
+    const after = countTmpDirs(own, "rmd-suite-claim4-");
 
     // Bounded, not one-per-run: each of the N process launches sweeps its own dir at
     // exit, so the count left behind after all N runs must stay flat — not grow with N.

@@ -12,7 +12,7 @@
   origin: "2026-10-02 operator approved all Inbox and decision-queue follow-ups"
   plan_refs: [W1-T5021, W1-T3186]
   files: [src/lib/human-gate.ts, src/lib/now-view.ts, test/human-gate.test.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at ffb0108e54e35400ca3e93ec1b58c4339bbb1555: W1-T5021 shipped a design,

@@ -1,0 +1,42 @@
+- id: W1-T7756
+  title: Extend existing PR-flow gardeners with bounded contributor-admission recovery evidence
+  repo: remudero
+  depends_on: [W1-T7755]
+  type: implement
+  verify: auto
+  author_class: operator
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "Operator requested automation, flow and self-improvement with gardeners as necessary and no stuck PRs; 2026-10-10 authorized governed task filing and source implementation."
+  files: [src/lib/flow-gardener.ts, src/lib/flow-remedy-gardener.ts, src/lib/garden-registry.ts, test/admission-pr-flow-gardening.test.ts, src/run-task.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED: existing off-loop flow/scout/remedy gardening is available, but the flow receipt
+    reader lacks contributor-admission outcomes. INFERRED: extending that flow is smaller and safer
+    than adding a daemon-loop scanner or competing autonomous authority. This files the approved
+    gardener brief, not permission to change trust policy or activate a scheduler.
+  design: |
+    Consume W1-T7755's executor receipts off-loop under existing budgets. Measure trusted PR progress,
+    confirmed external disposition, unresolved identity and missing/unreadable evidence separately.
+    Prove population visibility with a synthetic affected case and legitimate trusted control; unknown
+    is not zero health. Bound retries and deduplicate head-independent persistent causes. File at most
+    one admitted remedy per cause, retain the original reason, and measure post-remedy recurrence.
+    Escalate owner judgment once, remain quiet on unchanged/non-actionable state, and expose honest
+    unresolved age rather than claiming all PRs have closed. Respect withdrawn review-enforcement
+    proposals. No automatic trust widening, fake green, force merge, required extra reviewer,
+    settings changes, new daemon critical-loop reads, infrastructure or scheduler activation.
+  acceptance:
+    - claim: Admission gardening measures its corpus with affected and trusted positive controls
+      proof: 'unit test: W1-T7756: admission gardening distinguishes missing evidence from healthy flow'
+    - claim: One persistent cause produces bounded recovery and one admitted remedy across head changes
+      proof: 'unit test: W1-T7756: admission recovery deduplicates persistent causes across PR heads'
+    - claim: Gardening preserves owner/trusted progress and never widens authority or manufactures green
+      proof: 'unit test: W1-T7756: admission gardening cannot widen trust or bypass required checks'
+  falsifier: |
+    Delete an admission receipt or deny its read and the population must become unknown, not healthy.
+    Change a head repeatedly under one failure and duplicate remedy filings fail the bound. Let a
+    gardener mutate policy/checks or consume the trusted lane and its forbidden-effect trap fails.

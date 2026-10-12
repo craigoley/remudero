@@ -583,6 +583,7 @@ test("doctor: the verb registration dispatches into the doctor module", async ()
     liveInflightRuns: () => [],
     readLockFiles: () => ({ locks: [] }),
     readMemInfo: () => ({ availableBytes: 8 * 1024 ** 3, totalBytes: 16 * 1024 ** 3, swapTotalBytes: 2 * 1024 ** 3 }),
+    readWorkerProcesses: () => ({ count: 0, processes: [] }),
     readDiskFreeBytes: () => 40 * 1024 ** 3,
     readPauseAgeMs: () => undefined,
     readGitLocks: () => [],
@@ -594,7 +595,7 @@ test("doctor: the verb registration dispatches into the doctor module", async ()
     // on whether THIS host's node happens to match the repo's .nvmrc pin.
     readNvmrcVersion: () => process.versions.node,
   });
-  assert.equal(code, 0, "a healthy local read exits 0");
+  assert.equal(code, 0, `a healthy local read exits 0; report:\n${lines.join("\n")}`);
   assert.match(lines.join("\n"), /^rmd doctor: OK/m, "the command printed the module's own report");
 
   // NO NETWORK: the command took no gateway, no token and no gh seam — there is nowhere for a
@@ -618,6 +619,8 @@ function doctorDoctorDeps(over: Record<string, unknown> = {}) {
     nowMs: Date.parse("2026-08-20T12:00:00Z"),
     readLedgerLines: () => [aliveRow("dispatch", "2026-08-20T11:59:00Z"), ...healthySweepRows()],
     readMemInfo: () => ({ availableBytes: 8 * 1024 ** 3, totalBytes: 16 * 1024 ** 3, swapTotalBytes: 2 * 1024 ** 3 }),
+    // These fixtures judge locks/worktree ancestry, not the host's current process table.
+    readWorkerProcesses: () => ({ count: 0, processes: [] }),
     readDiskFreeBytes: () => 40 * 1024 ** 3,
     readPauseAgeMs: () => undefined,
     readGitLocks: () => [],
@@ -647,7 +650,7 @@ test("W1-T1109: a live run's lock is not reported as stale", async () => {
       readLockFiles: () => ({ locks: ["W1-T1100"] }),
     }),
   );
-  assert.equal(code, 0, "a live run's lock must not fail the health check");
+  assert.equal(code, 0, `a live run's lock must not fail the health check; report:\n${lines.join("\n")}`);
   const text = lines.join("\n");
   assert.match(text, /1 lock\(s\), 0 with no live pid/);
   // Scoped to the lock-vs-process line itself: this test is about THAT arm, not about whether
@@ -1127,7 +1130,7 @@ test("W1-T2627: doctorCommand calls readWorktreeBase for each live run's worktre
       },
     }),
   );
-  assert.equal(code, 0, "at-base is not a finding");
+  assert.equal(code, 0, `at-base is not a finding; report:\n${lines.join("\n")}`);
   assert.deepEqual(readWorktreeBaseCalls, [worktreePath], "readWorktreeBase is called exactly once, on the live run's own worktree path");
   assert.deepEqual(readWorktreeHeadCalls, [worktreePath], "the HEAD read is scoped to the SAME worktree the base was read from");
   const text = lines.join("\n");
@@ -1180,7 +1183,7 @@ test("W1-T2627: doctorCommand end to end — unrelated is a WARN naming the run;
         isWorktreeBaseAncestor: () => undefined,
       }),
     );
-    assert.equal(code, 0, "a FAILED ancestry read must never fail the health check — cannot-observe is not contamination");
+    assert.equal(code, 0, `a FAILED ancestry read must never fail the health check — cannot-observe is not contamination; report:\n${lines.join("\n")}`);
     const text = lines.join("\n");
     assert.match(text, /base-unknown/);
     assert.equal(text.includes("unrelated"), false);

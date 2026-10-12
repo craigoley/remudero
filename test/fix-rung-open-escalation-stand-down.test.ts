@@ -34,7 +34,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runFixRung, openEscalationStandDownReason, taskContractRevision } from "../src/run-task.js";
+import { runFixRung, openEscalationStandDownReason, taskContractRevision } from "./helpers/run-task-test.js";
 import {
   escalationHeadSha,
   escalationContractRevision,

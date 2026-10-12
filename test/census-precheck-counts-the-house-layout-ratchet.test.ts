@@ -98,7 +98,7 @@ function installHook(dir: string): void {
   ]) {
     copyFileSync(join(REPO_ROOT, "scripts", script), join(dir, "scripts", script));
   }
-  for (const lib of ["argv.mjs", "git.mjs", "json-duplicate-keys.mjs"]) {
+  for (const lib of ["argv.mjs", "git.mjs", "json-duplicate-keys.mjs", "instrument-surface-census.mjs", "git-spawn-shapes.mjs"]) {
     copyFileSync(join(REPO_ROOT, "scripts", "lib", lib), join(dir, "scripts", "lib", lib));
   }
   writeFileSync(join(dir, "scripts", "rule15-precheck.mjs"), "process.exit(0)\n");
@@ -110,7 +110,7 @@ let counter = 0;
 function pushFixture(seed: Tree, change: Tree) {
   const remote = gitRepo({ kind: "house-layout-remote", bare: true });
   const parent = gitRepo({ kind: "house-layout-parent" });
-  const work = parent.addWorktree(join(dirname(parent.dir), `house-layout-wt-${process.pid}-${counter++}`), "pushbranch");
+  const work = parent.addWorktree(join(parent.dir, `house-layout-wt-${counter++}`), "pushbranch");
   const write = (tree: Tree) => {
     for (const [path, text] of Object.entries(tree)) {
       mkdirSync(dirname(join(work.dir, path)), { recursive: true });

@@ -16,7 +16,7 @@ import {
   buildFixRungDispatchArgs,
   buildOpenPrViews,
   runFixRung,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import {
   DEFAULT_SWEEP_POLICY,
   deriveDisposition,
@@ -24,7 +24,7 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { reviewInputDigest } from "../src/lib/review.js";
 import type { Config } from "../src/lib/config.js";
 import type { Mount } from "../src/lib/mounts.js";
@@ -228,6 +228,7 @@ test("cold reconstruction preserves the exact structured Rule-25 evidence", () =
 test("the full #4559 cold path opens and parks on a prerequisite without an ordinary strike", async () => {
   const { view, cleanup } = boardView([reviewRow()]);
   const events: string[] = [];
+  let prerequisiteBranch = "";
   const sweepDir = mkdtempSync(join(tmpdir(), "rmd-w1-t3172-sweep-"));
   try {
     const disposition = deriveDisposition(view, DEFAULT_SWEEP_POLICY, JUDGED_AT_MS);
@@ -251,7 +252,18 @@ test("the full #4559 cold path opens and parks on a prerequisite without an ordi
           events.push("prerequisite.spawn");
           assert.match(args.prompt, /scripts\/coverage-ratchet\.mjs/);
           assert.match(args.prompt, /src\/lib\/worker-provider\.ts/);
+          const mintedBranch = args.prompt.match(/run-unfiled-\d+/)?.[0];
+          assert.ok(mintedBranch, "the prerequisite worker receives its minted branch");
+          prerequisiteBranch = mintedBranch;
           return workerResult(`REPORT\nPR_URL: https://github.com/${OWNER}/${REPO}/pull/9001`);
+        },
+        readLiveHead: () => {
+          events.push("prerequisite.head");
+          return { ok: true, headSha: "prerequisite-head", headRefName: prerequisiteBranch };
+        },
+        fetchPrBody: async () => {
+          events.push("prerequisite.body");
+          return "## Acceptance\n- the instrument reads the new field | grep: newField in scripts/coverage-ratchet.mjs";
         },
         waitForCiGreen: async () => {
           events.push("prerequisite.ci-green");
@@ -272,6 +284,9 @@ test("the full #4559 cold path opens and parks on a prerequisite without an ordi
     assert.equal(outcome.outcome, "parked");
     assert.equal(outcome.strikes, 0);
     assert.equal(events.filter((event) => event === "prerequisite.spawn").length, 1);
+    assert.deepEqual(events.filter((event) => event.startsWith("prerequisite.")), [
+      "prerequisite.spawn", "prerequisite.head", "prerequisite.body", "prerequisite.ci-green",
+    ]);
     assert.equal(events.includes("fix.dispatch"), false, "no ordinary strike was recorded");
   } finally {
     rmSync(sweepDir, { recursive: true, force: true });
@@ -317,7 +332,7 @@ test("last exact-input review wins, so success or a different failure class clea
   }
 });
 
-// W1-T3172 unrelated review routes stay byte-identical.
+// W1-T3172 unrelated review routes stay behavior-identical; W1-T5537 adds the blocker field.
 test("ordinary unmet and Rule-15 review routes remain unchanged", () => {
   const base: OpenPrView = {
     prNumber: 1,
@@ -336,6 +351,7 @@ test("ordinary unmet and Rule-15 review routes remain unchanged", () => {
   };
   assert.deepEqual(deriveDisposition(base, DEFAULT_SWEEP_POLICY, JUDGED_AT_MS), {
     disposition: "blocked-fixable",
+    blocker: "review-failed",
     reason: "1 unmet criterion — strike 1/2",
   });
   const rule15 = deriveDisposition({ ...base, unmetCriteria: [], reviewSummary: "Standing rule 15" }, DEFAULT_SWEEP_POLICY, JUDGED_AT_MS);
@@ -344,10 +360,12 @@ test("ordinary unmet and Rule-15 review routes remain unchanged", () => {
 });
 
 // W1-T3172 exhaustion and prerequisite safety still win.
-test("strike exhaustion precedes the split route", () => {
+test("the former strike ceiling routes the split case to a progress judgment", () => {
   const { view, cleanup } = boardView([reviewRow()]);
   try {
-    const exhausted = deriveDisposition({ ...view, priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap }, DEFAULT_SWEEP_POLICY, JUDGED_AT_MS);
+    // W1-T7096 (ruling 2026-10-09: "an llm judge should determine if more fix attempts should be made"): the count makes
+    // a judgment DUE; the strikes-exhausted route is taken once the progress judge rules the rounds a loop.
+    const exhausted = deriveDisposition({ ...view, priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap, progressEscalation: { loop: "fix rounds repeat without progress", reason: "the progress judge ruled the rounds a loop", judged: true } }, DEFAULT_SWEEP_POLICY, JUDGED_AT_MS);
     assert.equal(exhausted.disposition, "blocked-ambiguous");
     assert.match(exhausted.reason, /strikes exhausted/);
     assert.doesNotMatch(exhausted.reason, /W1-T2436/);

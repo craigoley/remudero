@@ -151,10 +151,12 @@ test("W1-T3030 (falsifier): the RAISE path is unmoved by the new mode", () => {
 
 test("W1-T3030 criterion 4: every workflow that RAISES also RESOLVES", () => {
   // The wiring is the half that makes this reach production, and a test that only exercises the
-  // script would pass with all four call sites missing. Derived from the workflow files themselves,
+  // script would pass with every call site missing. Derived from the workflow files themselves,
   // so a fifth caller added later without a recovery path fails here.
   const dir = join(REPO_ROOT, ".github", "workflows");
-  const files = ["mutation-nightly", "fleet-heartbeat-watch", "clock-sweep", "recovery-drill"];
+  // W1-T5811 added coverage-nightly, the fifth: its resolver is gated on success() AND a proven
+  // green verdict, since its delivery job runs `if: always()` to judge a run whose merge was skipped.
+  const files = ["mutation-nightly", "fleet-heartbeat-watch", "clock-sweep", "recovery-drill", "coverage-nightly"];
   const raisers: string[] = [];
   for (const f of files) {
     const text = readFileSync(join(dir, `${f}.yml`), "utf8");
@@ -177,7 +179,7 @@ test("W1-T3030 criterion 4: every workflow that RAISES also RESOLVES", () => {
       assert.match(text, /if: success\(\)/, `${f}'s resolver must be gated on success`);
     }
   }
-  assert.equal(raisers.length, 4, "all four known raisers must be covered");
+  assert.equal(raisers.length, 5, "all five known raisers must be covered");
 });
 
 // ── the two refusal arms diff-coverage flagged ───────────────────────────────────────────────────

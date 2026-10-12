@@ -198,6 +198,151 @@ function prInfo(over: Partial<GardenerPrInfo> & { mergedAt: string }): GardenerP
   return { state: "merged", title: "chore(plan): fix", paths: ["plan/a.yaml"], ...over };
 }
 
+test("an interrupted producer commit cannot expose a verdict that is not in its durable outbox", () => {
+  const h = harness(T0 + 10 * HOUR);
+  try {
+    const outbox = join(h.dir, "gardener-overseer.json");
+    h.rows.push(row("demo.scorecard", T0, { pr_url: "https://github.com/o/r/pull/7", acting: ["draft"] }));
+    h.deps.prInfo = () => prInfo({ mergedAt: new Date(T0 + HOUR).toISOString() });
+    h.deps.effectReading = () => {
+      mkdirSync(outbox);
+      return { before: 100, after: 10, se: 20, reason: "cost fell" };
+    };
+    assert.throws(() => runGardenerOverseer(h.deps), /EISDIR|ENOTDIR/);
+    assert.equal(existsSync(gardenEffectsPath(h.dir, "demo")), false);
+    assert.equal(h.steps("gardener_overseer.effect_verdict").length, 0);
+    assert.equal(h.steps("gardener_overseer.churn").length, 0);
+    assert.equal(h.steps("gardener_overseer.scorecard").length, 0);
+    rmSync(outbox, { recursive: true });
+    h.deps.effectReading = () => ({ before: 100, after: 10, se: 20, reason: "cost fell" });
+    runGardenerOverseer(h.deps);
+    const committed = JSON.parse(readFileSync(outbox, "utf8"));
+    assert.deepEqual(readGardenEffects(gardenEffectsPath(h.dir, "demo")).map((v) => v.id), committed.verdicts.map((v: { id: string }) => v.id));
+    assert.equal(h.steps("gardener_overseer.effect_verdict")[0]?.reason, "cost fell");
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("committed gardener verdicts survive delivery and acknowledgement interruptions exactly once", () => {
+  const h = harness(T0 + 10 * HOUR);
+  try {
+    const outbox = join(h.dir, "gardener-overseer.json");
+    const handoff = gardenEffectsPath(h.dir, "demo");
+    h.rows.push(row("demo.scorecard", T0, { pr_url: "https://github.com/o/r/pull/7", acting: ["draft"] }));
+    h.deps.prInfo = () => prInfo({ mergedAt: new Date(T0 + HOUR).toISOString() });
+    h.deps.effectReading = () => {
+      mkdirSync(handoff);
+      return { before: 100, after: 10, se: 20, reason: "cost fell" };
+    };
+    assert.throws(() => runGardenerOverseer(h.deps), /EISDIR/);
+    const committed = JSON.parse(readFileSync(outbox, "utf8"));
+    assert.equal(committed.verdicts.length, 1);
+    assert.equal(h.steps("gardener_overseer.effect_verdict").length, 0);
+    rmSync(handoff, { recursive: true });
+    h.deps.effectReading = () => { throw new Error("a committed verdict must not be measured again"); };
+    runGardenerOverseer(h.deps);
+    const issued = readFileSync(handoff, "utf8");
+    assert.equal(readGardenEffects(handoff)[0]?.id, committed.verdicts[0].id);
+    assert.equal(h.steps("gardener_overseer.effect_verdict")[0]?.reason, "cost fell");
+    const receipt = gardenStatePath(h.dir, "demo");
+    writeFileSync(receipt, "{bad");
+    assert.throws(() => runGarden(demoSpec, { stateDir: h.dir, repoRoot: h.dir, openWorkspace: () => { throw new Error("no workspace"); }, log: () => {} }), /unparseable/);
+    assert.equal(readFileSync(handoff, "utf8"), issued);
+    rmSync(receipt);
+    const gardenDeps = { stateDir: h.dir, repoRoot: h.dir, openWorkspace: () => { throw new Error("no workspace"); }, log: () => {}, clock: h.clock };
+    const blockedClasses = [...demoSpec.classes];
+    Object.defineProperty(blockedClasses, 0, { get: () => {
+      mkdirSync(receipt, { recursive: true });
+      return "draft";
+    } });
+    assert.throws(() => runGarden({ ...demoSpec, classes: blockedClasses }, gardenDeps), /EISDIR|ENOTDIR/);
+    assert.equal(readFileSync(handoff, "utf8"), issued, "a failed receipt commit leaves the delivery intact");
+    rmSync(receipt, { recursive: true });
+    runGarden(demoSpec, gardenDeps);
+    writeFileSync(handoff, issued);
+    h.deps.readRows = () => {
+      rmSync(handoff);
+      mkdirSync(handoff);
+      return h.rows;
+    };
+    assert.throws(() => runGardenerOverseer(h.deps), /unparseable/);
+    assert.equal(JSON.parse(readFileSync(outbox, "utf8")).verdicts[0].id, committed.verdicts[0].id);
+    rmSync(handoff, { recursive: true });
+    writeFileSync(handoff, issued);
+    h.deps.readRows = () => h.rows;
+    runGardenerOverseer(h.deps);
+    assert.equal(existsSync(handoff), false);
+    writeFileSync(handoff, issued);
+    runGarden(demoSpec, gardenDeps);
+    assert.equal(JSON.parse(readFileSync(receipt, "utf8")).classes.draft.alpha, 4);
+    assert.equal(h.steps("gardener_overseer.effect_verdict").length, 1);
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("an unknown gardener class retains the unconsumed handoff suffix across restart", () => {
+  const h = harness(T0);
+  try {
+    const handoff = gardenEffectsPath(h.dir, "demo");
+    const effects = ["draft", "new-class", "other"].map((actionClass, i) => ({
+      id: `effect:${i}`, actionClass, verdict: "credit", kind: "effect", at: h.clock.iso(), sequence: i + 1,
+    }));
+    writeFileSync(handoff, JSON.stringify({ effects }));
+    const deps = { stateDir: h.dir, repoRoot: h.dir, openWorkspace: () => { throw new Error("no workspace"); }, log: () => {}, clock: h.clock };
+    runGarden(demoSpec, deps);
+    runGarden(demoSpec, deps);
+    const state = JSON.parse(readFileSync(gardenStatePath(h.dir, "demo"), "utf8"));
+    assert.equal(state.foldedEffectThrough, 1);
+    assert.equal(state.classes.draft.alpha, 4);
+    assert.equal(state.classes.other.alpha, 3);
+    assert.deepEqual(readGardenEffects(handoff), effects.slice(1));
+    const upgradedSpec: GardenSpec<"draft" | "other" | "new-class", Record<string, never>, never, never> = {
+      ...demoSpec, classes: [...demoSpec.classes, "new-class"], metric: undefined,
+      scorecard: () => ({}), apply: () => undefined,
+    };
+    runGarden(upgradedSpec, deps);
+    const upgraded = JSON.parse(readFileSync(gardenStatePath(h.dir, "demo"), "utf8"));
+    assert.equal(upgraded.foldedEffectThrough, 3);
+    assert.equal(upgraded.classes["new-class"].alpha, 4);
+    assert.equal(upgraded.classes.other.alpha, 4);
+    assert.equal(existsSync(handoff), false);
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("acknowledged aged verdicts are pruned without orphaning their handoff", () => {
+  const h = harness(T0 + 31 * 24 * HOUR);
+  try {
+    const verdict = { id: "old", gardener: "demo", actionClass: "draft", verdict: "credit", kind: "effect", at: new Date(T0).toISOString(), sequence: 1 };
+    const outbox = join(h.dir, "gardener-overseer.json");
+    writeFileSync(outbox, JSON.stringify({ episodes: {}, prs: {}, verdicts: [verdict], churnEscalated: {}, nextVerdictSequence: 1 }));
+    const handoff = gardenEffectsPath(h.dir, "demo");
+    writeFileSync(handoff, JSON.stringify({ effects: [verdict] }));
+    writeFileSync(gardenStatePath(h.dir, "demo"), JSON.stringify({ classes: { draft: { alpha: 4, beta: 1 } }, foldedEffectThrough: 1 }));
+    runGardenerOverseer(h.deps);
+    assert.equal(existsSync(handoff), false);
+    assert.deepEqual(JSON.parse(readFileSync(outbox, "utf8")).verdicts, []);
+    runGardenerOverseer(h.deps);
+    assert.equal(JSON.parse(readFileSync(gardenStatePath(h.dir, "demo"), "utf8")).classes.draft.alpha, 4);
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("uncommitted handoffs and corrupt newly targeted receipts refuse before changing evidence", () => {
+  const h = harness(T0);
+  try {
+    const handoff = gardenEffectsPath(h.dir, "demo");
+    const bytes = JSON.stringify({ effects: [{ id: "orphan", actionClass: "draft", verdict: "credit", kind: "effect", at: h.clock.iso(), sequence: 1 }] });
+    writeFileSync(handoff, bytes);
+    assert.throws(() => runGardenerOverseer(h.deps), /receipt .*unavailable/);
+    assert.equal(readFileSync(handoff, "utf8"), bytes);
+    assert.equal(existsSync(join(h.dir, "gardener-overseer.json")), false);
+    rmSync(handoff);
+    const receipt = gardenStatePath(h.dir, "demo");
+    writeFileSync(receipt, "{bad");
+    h.rows.push(row("demo.scorecard", T0, { pr_url: "https://github.com/o/r/pull/7", acting: ["draft"] }));
+    assert.throws(() => runGardenerOverseer(h.deps), /unparseable/);
+    assert.equal(readFileSync(receipt, "utf8"), "{bad");
+    assert.equal(h.logs.length, 0);
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
 test("W1-T4802: an effect verdict reaches the class Beta record on the next pass", () => {
   const T = T0 + 10 * HOUR;
   for (const [after, verdict, alpha, beta] of [[10, "credit", 4, 1], [300, "debit", 3, 2]] as const) {
@@ -396,7 +541,10 @@ test("W1-T5073: corrupt overseer state refuses and preserves issued verdicts", (
   const h = harness(T0 + 10 * HOUR);
   try {
     const path = join(h.dir, "gardener-overseer.json");
-    for (const bytes of ["{not json", JSON.stringify({ verdicts: "lost" })]) {
+    for (const bytes of ["{not json", JSON.stringify({ verdicts: "lost" }),
+      JSON.stringify({ episodes: {}, prs: {}, verdicts: [], churnEscalated: {}, pendingTelemetry: [{ step: "effect", extra: null }] }),
+      JSON.stringify({ episodes: {}, prs: {}, verdicts: [1, 2].map((sequence) => ({ id: "duplicate", gardener: "demo", actionClass: "draft", verdict: "credit", kind: "effect", at: h.clock.iso(), sequence })), churnEscalated: {}, nextVerdictSequence: 2 }),
+    ]) {
       writeFileSync(path, bytes);
       assert.throws(() => runGardenerOverseer(h.deps), /gardener-overseer\.json.*(unparseable|malformed)/);
       assert.equal(readFileSync(path, "utf8"), bytes);
@@ -472,6 +620,11 @@ test("W1-T5073: the 201st verdict never re-credits an older ID", () => {
     writeFileSync(join(h.dir, "gardener-overseer.json"), JSON.stringify({ episodes: {}, prs: {}, verdicts, churnEscalated: {}, nextVerdictSequence: 201 }));
     runGardenerOverseer(h.deps);
     const gardenDeps = { stateDir: h.dir, repoRoot: h.dir, openWorkspace: () => { throw new Error("no workspace"); }, log: () => {}, clock: h.clock };
+    assert.equal(readGardenEffects(gardenEffectsPath(h.dir, "demo")).length, 200, "delivery is a bounded prefix");
+    runGarden(demoSpec, gardenDeps);
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).classes.draft.alpha, 203);
+    runGardenerOverseer(h.deps);
+    assert.deepEqual(readGardenEffects(gardenEffectsPath(h.dir, "demo")).map((e) => e.sequence), [201]);
     runGarden(demoSpec, gardenDeps);
     assert.equal(JSON.parse(readFileSync(path, "utf8")).classes.draft.alpha, 204);
     runGardenerOverseer(h.deps);

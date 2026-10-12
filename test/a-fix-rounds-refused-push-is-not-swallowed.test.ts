@@ -10,8 +10,9 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildSweepEffects, FixRoundPushError, pushFixRound, runTask } from "../src/run-task.js";
+import { buildSweepEffects, FixRoundPushError, pushFixRound, runTask } from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
+import { ghJsonAsync } from "../src/lib/github-transport.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
 import { LanePushForeignHeadError } from "../src/lib/git-push.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
@@ -118,6 +119,8 @@ function buildFixture(): Fixture {
   mkdirSync(join(seed.dir, "hooks"), { recursive: true });
   writeFileSync(join(seed.dir, "hooks", "pre-push"), hookScript(logPath));
   chmodSync(join(seed.dir, "hooks", "pre-push"), 0o755);
+  // W1-T6106: the host push runs the HARNESS's pre-push, never the lane's tracked copy; this seed's hooks/ plays the harness.
+  process.env.RMD_HARNESS_HOOKS_DIR = join(seed.dir, "hooks");
   seed.git("add", "-A");
   seed.git("commit", "-q", "-m", "seed");
   seed.git("push", "-q", "origin", "main");
@@ -174,6 +177,8 @@ async function drive(fx: Fixture, t: { mock: { method: (o: object, k: string, f:
       { when: "--json headRefName", stdout: JSON.stringify({ headRefName: branch, headRefOid: PR_HEAD, body: "" }) },
       { when: "--json headRefOid", stdout: JSON.stringify({ headRefOid: PR_HEAD }) },
       { when: "--json body", stdout: JSON.stringify({ body: "" }) },
+      // W1-T4074: an unreadable PR diff stands the fix rung down before dispatch — answer the read.
+      { when: "--json files", stdout: JSON.stringify({ files: [{ path: "src/lib/daemon.ts" }] }) },
       { when: "pulls/501/", stdout: "[]" },
       { when: "check-runs", stdout: JSON.stringify({ check_runs: [{ name: "ci", status: "completed", conclusion: "success" }] }) },
       { when: "/status", stdout: JSON.stringify({ statuses: [] }) },
@@ -300,19 +305,12 @@ function censusLane(fx: Fixture): { dir: string; branch: string; head: string } 
   return { dir, branch, head };
 }
 
-test("W1-T4693: pushFixRound — a head the remote already holds is a silent no-op; a foreign head still raises; a refusal is named", () => {
+test("W1-T4693: pushFixRound — a head the remote already holds is a silent no-op; a foreign head still raises; a refusal is named", async () => {
   const fx = buildFixture();
   try {
     const lane = censusLane(fx);
-    withLiveWritesAllowed(() => {
-      const refusal = (() => {
-        try {
-          pushFixRound(lane.dir, lane.branch, lane.head);
-        } catch (e) {
-          return e;
-        }
-        return undefined;
-      })();
+    await withLiveWritesAllowed(async () => {
+      const refusal = await pushFixRound(lane.dir, lane.branch, lane.head).then(() => undefined, (e: unknown) => e);
       assert.ok(refusal instanceof FixRoundPushError, `a refused push throws FixRoundPushError; got ${String(refusal)}`);
       assert.equal(refusal.pushCause, "census-refused-push");
       assert.deepEqual(refusal.refusal?.censuses, ["clock-signature"]);
@@ -320,8 +318,8 @@ test("W1-T4693: pushFixRound — a head the remote already holds is a silent no-
       // The head reaches origin by a path this helper does not own (it landed before the hook was armed);
       // the hook still refuses the now up-to-date push, and that is the one failure that means nothing.
       execFileSync("git", ["-C", lane.dir, "-c", "core.hooksPath=/dev/null", "push", "-q", "origin", "HEAD"]);
-      assert.doesNotThrow(() => pushFixRound(lane.dir, lane.branch, lane.head));
-      assert.throws(() => pushFixRound(lane.dir, lane.branch, "0".repeat(40)), LanePushForeignHeadError);
+      await assert.doesNotReject(() => pushFixRound(lane.dir, lane.branch, lane.head));
+      await assert.rejects(() => pushFixRound(lane.dir, lane.branch, "0".repeat(40)), LanePushForeignHeadError);
     });
     assert.deepEqual(fx.hookLog().map((l) => l.split(" ")[0]), ["refused"], "the up-to-date push ran the hook with nothing to send");
   } finally {
@@ -334,7 +332,7 @@ test("W1-T4693: the sweep's fix dispatch hands runFixRung the same push, so its 
   const shim = ghShim(
     [
       {
-        when: "pr view https://github.com/craigoley/remudero/pull/2890 --json headRefName,headRefOid,body",
+        when: "pr view https://github.com/craigoley/remudero/pull/2890 --json headRefName,headRefOid,body,files",
         stdout: JSON.stringify({ headRefName: "run-W1-T2890-1789022939729", headRefOid: "remote123456789", body: "" }),
       },
     ],
@@ -370,7 +368,7 @@ test("W1-T4693: the sweep's fix dispatch hands runFixRung the same push, so its 
       spawnWallClockBoundMsOverride: 1,
       reclaimWorkerImpl: () => {},
       disarmImpl: () => undefined,
-      readJsonImpl: async () => ({}),
+      readJsonImpl: async (args: string[]) => args[0] === "pr" ? ghJsonAsync(args) : {},
       registeredWorktreeOwnerImpl: () => (++ownerReads === 1 ? join(fx.root, "worktrees", "owner") : undefined),
       registeredOwnerRecovery: {
         capture: () => ({
@@ -398,9 +396,9 @@ test("W1-T4693: the sweep's fix dispatch hands runFixRung the same push, so its 
       captureWorktreeSnapshotImpl: () => ({ headSha: "birth123" }),
       buildFixRungDispatchArgsImpl: () => ({}),
       openTaskIdsFromPlanImpl: () => new Set(["W1-T2890"]),
-      runFixRungImpl: async (args: { deps: { push: (wt: string, branch: string, sha: string) => void } }) => {
+      runFixRungImpl: async (args: { deps: { push: (wt: string, branch: string, sha: string) => Promise<void> } }) => {
         try {
-          args.deps.push(lane.dir, lane.branch, lane.head);
+          await args.deps.push(lane.dir, lane.branch, lane.head);
         } catch (e) {
           surfaced = e;
         }

@@ -282,6 +282,26 @@ test("resolve-scope: the REAL PR gate config (stryker.conf.json) resolves to exa
   assert.deepEqual(matched, ["src/lib/classify.ts"]);
 });
 
+// W1-T5948: the specifier matcher the census below filters importers with. It must name the
+// classify MODULE, not any module whose name ENDS in "classify": an unanchored
+// /classify(\.js)?$/ also matched "../src/lib/fix-rung-classify.js", so a test of the
+// update-branch classifier was refused as a classify.ts importer (W1-T5933 dodged it by importing
+// through run-task.ts's re-export, hiding the real dependency).
+const CLASSIFY_IMPORT_MATCHER = /(^|\/)classify(\.js)?$/;
+
+test("the classify importer census counts a classify.js import and not a fix-rung-classify.js one (W1-T5948)", () => {
+  assert.equal(
+    importsModule(`import { classify } from "../src/lib/classify.js";`, CLASSIFY_IMPORT_MATCHER),
+    true,
+    "positive control: an import of src/lib/classify.js must still be counted",
+  );
+  assert.equal(
+    importsModule(`import { classifyNoPrShape } from "../src/lib/fix-rung-classify.js";`, CLASSIFY_IMPORT_MATCHER),
+    false,
+    "an import of src/lib/fix-rung-classify.js is a different module and must not be counted as a classify.ts importer",
+  );
+});
+
 // W1-T133 LATENCY, ROUND 2: this task's own PR is a `matched: true` PR (it edits scripts/
 // mutation-ratchet.mjs + scripts/mutation-baseline.json, both in the trigger's relevant-paths
 // list) and was the FIRST PR since W1-T108 to actually drive a real `npx stryker run` through to
@@ -328,7 +348,7 @@ test("the REAL PR gate config's commandRunner is scoped to exactly the test file
   // `type X = import(...).X` query must be counted too, or the census silently undercounts and
   // this test's own "every importer is in the command" guarantee stops meaning anything.
   const classifyImporters = testFiles
-    .filter((f) => importsModule(readFileSync(join(REPO_ROOT, "test", f), "utf8"), /classify(\.js)?$/))
+    .filter((f) => importsModule(readFileSync(join(REPO_ROOT, "test", f), "utf8"), CLASSIFY_IMPORT_MATCHER))
     .sort();
   assert.ok(
     classifyImporters.includes("classify.test.ts") && classifyImporters.includes("block-reason.test.ts"),

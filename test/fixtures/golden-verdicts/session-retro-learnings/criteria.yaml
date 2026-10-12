@@ -1,0 +1,10 @@
+- claim: this retro adds the board-wide plan-red learning to the CI shard
+  proof: "grep: id: a-board-wide-plan-red-is-main in learnings/ci.yaml"
+- claim: this retro adds the cross-host review collision learning
+  proof: "grep: id: hand-review-collides-with-the-daemon in learnings/ci.yaml"
+- claim: this retro adds the strike-count learning
+  proof: "grep: id: strikes-exhausted-counts-rows in learnings/ci.yaml"
+- claim: this retro adds the proof-must-fail-at-base learning to the testing shard
+  proof: "grep: id: a-proof-must-fail-at-base in learnings/testing.yaml"
+- claim: this retro adds the plan-proof test-title learning
+  proof: "grep: id: title-tests-with-the-plan-proof in learnings/testing.yaml"

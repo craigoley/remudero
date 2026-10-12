@@ -91,16 +91,22 @@ test("W1-T1027: no install step carries a retry, a lock wait, or a per-attempt t
   }
 });
 
-test("W1-T1027: source-capable jobs retain the exact no-apt install command; coverage-ratchet alone may guard it by diff class", async () => {
+test("W1-T1027: admitted source work retains the exact no-apt install command", async () => {
   const jobs = await loadCiJobs();
   const runs = Object.fromEntries(playwrightInstallSteps(jobs));
   assert.equal(Object.keys(runs).length, 3, "expected exactly three install steps");
   assert.equal(
-    runs.ci,
     runs["test-slow-shard"],
-    "the unguarded install steps must stay byte-identical — PR #2150 took the board down on the copy " +
-      "that had not been fixed, five minutes after PR #2148 hung on the other",
+    "npx playwright install chromium",
+    "admitted work must retain the no-apt command — the historical failure came from different install commands, not admission",
   );
+  assert.equal(runs.ci.trim(), [
+    'if [ "${{ steps.admission.outputs.setup }}" != "false" ]; then',
+    '  npx playwright install chromium',
+    'else',
+    '  echo "CI admission: no browser download for an idle source shard."',
+    'fi',
+  ].join("\n"), "ci may guard only the unchanged command by explicit idle admission; missing or unknown admission still installs");
   assert.match(runs["coverage-ratchet"], /if \[ "\$CLASS" != "SOURCE" \]/, "coverage-ratchet may skip the browser only after the canonical source-class guard");
   assert.match(runs["coverage-ratchet"], /npx playwright install chromium\s*$/, "a SOURCE coverage diff must retain the exact Chromium command");
 });

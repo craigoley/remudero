@@ -1,0 +1,50 @@
+- id: W1-T8266
+  title: "THE BOARD LEADS WITH OPERATOR INTERVENTION SHARE — the operator calls interventions the headline signal, yet no surface says how many hand actions the fleet needed today, on what share of its PRs, or which cause class led; publish it daily and on the status board"
+  repo: remudero
+  depends_on: [W1-T8264, W1-T7839]  # reads W1-T8264's operator.intervention rows; shares src/lib/status-board.ts with W1-T7839
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — one measure of operator interventions, shown and kept as history
+  band_meaning: span
+  origin: "operator ruling 2026-10-09 (\"never leave stuck PRs; a gardener watches the fix bots — operator interventions are the headline signal\")"
+  plan_refs: [W1-T7421, W1-T4939, W1-T5904, W1-T8264]
+  files: [src/lib/operator-interventions.ts, src/lib/status-board.ts, test/the-board-leads-with-operator-intervention-share.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    Today the only intervention count is a line in the fix-lane gardener's daily markdown ("Operator interventions in
+    the window: N (target 0)", src/lib/fix-lane-gardener.ts:498). It covers fix-lane PRs only, and it has not
+    been written since 2026-10-10 17:36 (W1-T8229). On 2026-10-11 the measure the operator asked for was assembled by
+    hand from a session tracker. W1-T8264 gives every hand action one cause-classed row. This task turns those rows
+    into the headline number, with history so a trend is a read rather than a reconstruction.
+  design: |
+    No target or threshold is set here. The board shows the measure, and the SRE lane routes the classes (W1-T8264).
+    1. THE MEASURE (pure, in operator-interventions.ts): over a UTC day, the intervention count by surface and by
+       cause class; the hand-touched share (fleet PRs merged that day with at least one PR-surface intervention,
+       divided by fleet PRs merged that day); and control interventions per day. The comparison is with the
+       median of the prior 7 days.
+    2. HISTORY. Once per UTC day, the first SRE lane pass after midnight writes one `intervention.share` row for the
+       day before. A later pass for the same day writes nothing. Read through the ledger union.
+    3. THE BOARD. status-board.ts calls `interventionShareLine(...)` (operator-interventions.ts) and shows one line near the top: the last 24 h count, the hand-touched share, the
+       leading cause class with its count, and the 7-day median beside it. An unreadable ledger reads "unknown",
+       never 0.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-board-leads-with-operator-intervention-share.test.ts"
+    - claim: "the share counts fleet PRs merged with a hand action over fleet PRs merged"
+      proof: 'grep: test("W1-T8266: the hand-touched share is computed over merged fleet PRs" in test/the-board-leads-with-operator-intervention-share.test.ts'
+    - claim: "one intervention.share row is written per UTC day"
+      proof: 'grep: test("W1-T8266: one intervention\.share row per UTC day" in test/the-board-leads-with-operator-intervention-share.test.ts'
+    - claim: "the board line names the count, the share and the leading class"
+      proof: 'grep: test("W1-T8266: the board line names count, share and leading class" in test/the-board-leads-with-operator-intervention-share.test.ts'
+    - claim: "an unreadable ledger reads unknown, never zero"
+      proof: 'grep: test("W1-T8266: an unreadable ledger reads unknown" in test/the-board-leads-with-operator-intervention-share.test.ts'
+    - claim: "the status board renders the share through the shared measure"
+      proof: 'grep: interventionShareLine( in src/lib/status-board.ts'
+  falsifier: |
+    Without the board line, the third test finds no intervention text. Default a failed read to 0 and the last test
+    fails.

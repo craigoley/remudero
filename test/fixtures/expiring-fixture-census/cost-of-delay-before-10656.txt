@@ -1,0 +1,24 @@
+// VERBATIM EXCERPT of test/new-work-is-ordered-by-cost-of-delay.test.ts as it stood at dbca9031a, before
+// #10656 -- the fixture that went red on 2026-10-10T12:00Z. Read by test/expiring-fixture-census.test.ts;
+// kept as a copy so the census proof never depends on (or conflicts with) the live test file.
+import { daemonCommand, dispatchValueContextForSelection, readDispatchFilingSnapshot } from "../src/run-task.js";
+const DAY = 86_400_000;
+const NOW = Date.parse("2026-10-04T12:00:00Z");
+const task = (id: string, over: Partial<Task> = {}): Task => ({
+  id, title: id, repo: "remudero", depends_on: [], files: ["src/a.ts"],
+  type: "implement", verify: "auto", risk: "high", status: "queued", attempts: 0, ...over,
+});
+const fresh = task("W1-T4052");
+const old = task("W1-T1070");
+const filed = new Map([[fresh.id, NOW - DAY], [old.id, NOW - 30 * DAY]]);
+const history: Array<Record<string, unknown>> = [];
+for (let i = 0; i < 20; i++) {
+  const id = `W1-T${5000 + i}`;
+  const age = (i < 10 ? 1 : 30) * DAY;
+  filed.set(id, NOW - DAY - age);
+  history.push({ step: "run.start", task_id: id, run_id: id, task_class: "src", ts: new Date(NOW - DAY).toISOString() });
+  history.push({ step: "verdict", task_id: id, run_id: id, verdict: i < 10 ? "merged" : "already_satisfied", cost_usd: 2, ts: new Date(NOW - DAY).toISOString() });
+}
+        context = deps.buildDispatchValueContext?.(daemonPlan, () => false);
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },

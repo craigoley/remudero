@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: high
   budget_usd: 14.00
-  files: [src/lib/ci-parity.ts, test/the-census-roster-is-named-not-numbered.test.ts]
+  files: [src/lib/ci-parity.ts, test/the-gate-admission-population-is-checked-from-one-scan.test.ts]
   origin: "followup#W1-T2478-census-membership"
   plan_refs: ["W1-T2478", "W1-T2523", "W1-T1266"]
   status: merged
@@ -67,19 +67,26 @@
     already make.
   acceptance:
     - claim: "the census population is enumerated as data — every member named, with its measured runtime and its admission verdict — never as a bare count"
-      proof: "unit test: test/the-census-roster-is-named-not-numbered.test.ts"
+      proof: "unit test: CENSUS_POPULATION: every member carries exactly one verdict shape"
+      kind: guard
     - claim: "the roster and FAST_GATE_STEPS cannot disagree: every wired census entry is a roster member, and every roster member the bound admits is wired"
-      proof: "unit test: test/the-census-roster-is-named-not-numbered.test.ts"
+      proof: "unit test: has a CENSUS_SUITE_ROSTER member ADMITTED with that exact job, and vice versa"
+      kind: guard
     - claim: "the under-bound member counted by the shipped rationale but absent from the wired four is NAMED with its measurement and an explicit admitted-or-refused verdict"
-      proof: "unit test: test/the-census-roster-is-named-not-numbered.test.ts"
+      proof: "unit test: is a named population member, REFUSED for cost with a measured number"
+      kind: guard
     - claim: "a tracked test file that walks the src population and is absent from the roster resolves to UNCLASSIFIED with its path reported, never silent omission"
-      proof: "unit test: test/the-census-roster-is-named-not-numbered.test.ts"
+      proof: "unit test: censusPopulationDrift: a discovered src-filtering caller with no population entry is named in"
+      kind: guard
     - claim: "a census entry added to FAST_GATE_STEPS with no roster entry FAILS — the roster cannot be bypassed by extending the step list"
-      proof: "unit test: test/the-census-roster-is-named-not-numbered.test.ts"
+      proof: "unit test: a hand-added FAST_GATE_STEPS-shaped entry with no roster member fails"
+      kind: guard
     - claim: "the roster refuses nothing on its own and cannot fail a preflight run by itself — admission stays the measured bound's decision"
-      proof: "unit test: test/the-census-roster-is-named-not-numbered.test.ts"
+      proof: "unit test: REFUSED roster members never run and never appear in a preflight result"
+      kind: guard
     - claim: "replacing the roster with a bare count makes the named-members assertion fail"
-      proof: "unit test: test/the-census-roster-is-named-not-numbered.test.ts"
+      proof: "unit test: the named-members assertion passes against the real CENSUS_SUITE_ROSTER but fails"
+      kind: guard
     - claim: "the roster is stated once, as data, beside the step table it governs"
       proof: "grep: CENSUS_SUITE_ROSTER in src/lib/ci-parity.ts"
   note: |

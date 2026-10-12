@@ -1001,7 +1001,8 @@ test("idle_starved: plan/main movement and unreadable PR data both wake the prob
   const base = git(checkout, ["rev-parse", "HEAD"]);
   const gh = join(stubs, "gh");
   writeFileSync(gh, "#!/usr/bin/env bash\nprintf '[]'\n", { mode: 0o755 });
-  const probe = (app = false) => spawnSync("bash", [join(REPO_ROOT, "deploy", "idle-starved-probe.sh"), "fake/remudero-site", checkout, base, state, since, marker, REPO_ROOT], {
+  const engineBase = git(REPO_ROOT, ["rev-parse", "HEAD"]);
+  const probe = (app = false) => spawnSync("bash", [join(REPO_ROOT, "deploy", "idle-starved-probe.sh"), "fake/remudero-site", checkout, base, state, since, marker, REPO_ROOT, "full", engineBase], {
     encoding: "utf8",
     env: { ...ambientWithoutRmdControls(), PATH: `${stubs}:${process.env.PATH ?? ""}`, GH_TOKEN: app ? "" : "fixture-token", GH_APP_ID: app ? "fixture-app" : "", GH_APP_INSTALLATION_ID: app ? "1" : "", GH_APP_PRIVATE_KEY_PATH: app ? join(root, "key.pem") : "" },
   });
@@ -1022,6 +1023,244 @@ test("idle_starved: plan/main movement and unreadable PR data both wake the prob
   assert.equal(probe().status, 10, "a moved main wakes the full daemon");
   writeFileSync(gh, "#!/usr/bin/env bash\nprintf '{bad json'\n", { mode: 0o755 });
   assert.equal(probe().status, 2, "unreadable PR data is never interpreted as an empty board");
+});
+
+test("idle_starved: the entrypoint captures engine revision before its daemon can advance the checkout", () => {
+  const origin = makeOrigin();
+  mkdirSync(join(origin, "deploy"), { recursive: true });
+  writeFileSync(join(origin, "deploy", "idle-starved-probe.sh"), readFileSync(join(REPO_ROOT, "deploy", "idle-starved-probe.sh")));
+  writeFileSync(join(origin, "bin", "rmd"), [
+    "#!/usr/bin/env bash",
+    "set -eu",
+    'state="$HOME/Remudero/state"',
+    'mkdir -p "$state" "$HOME/Remudero/repos"',
+    'if [ ! -e "$state/first-run" ]; then',
+    '  touch "$state/first-run"',
+    '  git clone -q "$RMD_REPO_URL" "$HOME/Remudero/repos/remudero-site"',
+    '  git rev-parse HEAD > "$state/launched-engine-sha"',
+    '  printf "engine changed\\n" > engine-change.txt',
+    '  git add engine-change.txt',
+    '  git -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm engine-change',
+    '  git rev-parse HEAD > "$state/updated-engine-sha"',
+    `  exit ${DAEMON_EXIT_IDLE_STARVED}`,
+    "fi",
+    'touch "$state/woke-for-engine"',
+    "exit 0",
+    "",
+  ].join("\n"), { mode: 0o755 });
+  git(origin, ["add", "-A"]);
+  commit(origin, "engine changes during daemon fixture");
+  const home = freshHome();
+  const result = boot(home, origin, {
+    timeoutMs: 15_000,
+    cmd: ["./bin/rmd", "daemon", "--repo", "fake/remudero-site"],
+    env: { RMD_RESTART_THROTTLE_S: "1", GH_TOKEN: "fixture-token" },
+    stubs: {
+      sleep: "#!/usr/bin/env bash\nexit 0\n",
+      gh: '#!/usr/bin/env bash\ntouch "$HOME/Remudero/state/gh-consulted"\nprintf "[]"\n',
+    },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const state = join(home, "Remudero", "state");
+  assert.ok(existsSync(join(state, "woke-for-engine")));
+  assert.equal(existsSync(join(state, "gh-consulted")), false);
+  const ledger = readFileSync(join(state, "ledger.ndjson"), "utf8").trim().split("\n").map((s) => JSON.parse(s));
+  const wake = ledger.find((row) => row.step === "daemon.idle_starved.engine_wake");
+  assert.equal(wake?.reason, "engine_revision_changed");
+  assert.equal(wake?.engine_base_sha, readFileSync(join(state, "launched-engine-sha"), "utf8").trim());
+  assert.equal(wake?.engine_head_sha, readFileSync(join(state, "updated-engine-sha"), "utf8").trim());
+  assert.equal(ledger.filter((row) => row.step === IDLE_STARVED_PULSE_STEP).length, 1);
+});
+
+test("idle_starved: an engine-only advance wakes an unchanged empty target before any GitHub read", () => {
+  const engine = makeOrigin();
+  const engineBase = git(engine, ["rev-parse", "HEAD"]);
+  const target = makeOrigin();
+  const targetBase = git(target, ["rev-parse", "HEAD"]);
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}quiet-engine-`));
+  const state = join(root, "state");
+  const stubs = join(root, "stubs");
+  mkdirSync(state);
+  mkdirSync(stubs);
+  const marker = join(state, "idle-starved.marker");
+  writeFileSync(marker, "");
+  writeFileSync(join(state, "ledger.ndjson"), "");
+  const ghCalls = join(state, "gh-consulted");
+  writeFileSync(join(stubs, "gh"), `#!/usr/bin/env bash\nprintf x >> '${ghCalls}'\nprintf '[]'\n`, { mode: 0o755 });
+  const since = new Date().toISOString().replace(/\.[0-9]{3}Z$/, ".000Z");
+  const run = (baseline: string, mode = "pr-board", enginePath = engine) => spawnSync("bash", [
+    join(REPO_ROOT, "deploy", "idle-starved-probe.sh"), "fake/remudero-site", target, targetBase, state, since, marker, enginePath, mode, baseline,
+  ], {
+    encoding: "utf8", timeout: BOOT_SPAWN_TIMEOUT_MS,
+    env: { ...ambientWithoutRmdControls(), PATH: `${stubs}:${process.env.PATH ?? ""}`, GH_TOKEN: "fixture-token" },
+  });
+
+  assert.equal(run(engineBase).status, 0, "unchanged engine and empty target stay quiet");
+  assert.equal(readFileSync(ghCalls, "utf8"), "x", "the healthy control really reads its PR board");
+  unlinkSync(ghCalls);
+  const engineHead = advanceOrigin(engine, "engine-update.txt", "engine advanced\n");
+  for (const mode of ["pr-board", "full"]) {
+    const result = run(engineBase, mode);
+    assert.equal(result.status, 10, result.stderr);
+  }
+  assert.equal(existsSync(ghCalls), false, "engine freshness wakes before a remote board or target-main query");
+  const rows = readFileSync(join(state, "ledger.ndjson"), "utf8").trim().split("\n").map((s) => JSON.parse(s));
+  assert.equal(rows.length, 2);
+  for (const row of rows) {
+    assert.equal(row.step, "daemon.idle_starved.engine_wake");
+    assert.equal(row.reason, "engine_revision_changed");
+    assert.equal(row.engine_base_sha, engineBase);
+    assert.equal(row.engine_head_sha, engineHead);
+    assert.ok(Number.isFinite(Date.parse(row.ts)));
+  }
+});
+
+test("idle_starved: missing or unreadable engine revisions wake with distinct durable reasons", () => {
+  const engine = makeOrigin();
+  const base = git(engine, ["rev-parse", "HEAD"]);
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}quiet-engine-unknown-`));
+  const state = join(root, "state");
+  const unavailableEngine = join(root, "not-a-checkout");
+  mkdirSync(state);
+  mkdirSync(unavailableEngine);
+  const marker = join(state, "idle-starved.marker");
+  writeFileSync(marker, "");
+  writeFileSync(join(state, "ledger.ndjson"), "");
+  const since = new Date().toISOString().replace(/\.[0-9]{3}Z$/, ".000Z");
+  for (const [baseline, enginePath] of [["", engine], [base, unavailableEngine]]) {
+    const result = spawnSync("bash", [join(REPO_ROOT, "deploy", "idle-starved-probe.sh"), "fake/remudero-site", engine, base, state, since, marker, enginePath, "pr-board", baseline], {
+      encoding: "utf8", timeout: BOOT_SPAWN_TIMEOUT_MS,
+      env: ambientWithoutRmdControls(),
+    });
+    assert.equal(result.status, 2, result.stderr);
+  }
+  const rows = readFileSync(join(state, "ledger.ndjson"), "utf8").trim().split("\n").map((s) => JSON.parse(s));
+  assert.deepEqual(rows.map((r) => r.reason), ["engine_baseline_unavailable", "engine_head_unavailable"]);
+  assert.equal(rows[0].engine_base_sha, "unknown");
+  assert.equal(rows[1].engine_base_sha, base);
+  assert.ok(rows.every((r) => r.engine_head_sha === "unknown"));
+});
+
+test("idle_starved: installation-only movement wakes both probe modes before any GitHub read", () => {
+  const runtime = makeOrigin();
+  const baseline = git(runtime, ["rev-parse", "HEAD"]);
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}quiet-installation-`));
+  const installed = join(root, "daemon-install");
+  git(root, ["clone", "-q", runtime, installed]);
+  const target = makeOrigin();
+  const targetBase = git(target, ["rev-parse", "HEAD"]);
+  const state = join(root, "state");
+  const stubs = join(root, "stubs");
+  mkdirSync(state);
+  mkdirSync(stubs);
+  const marker = join(state, "idle-starved.marker");
+  writeFileSync(marker, "");
+  writeFileSync(join(state, "ledger.ndjson"), "");
+  const ghCalls = join(state, "gh-consulted");
+  writeFileSync(join(stubs, "gh"), `#!/usr/bin/env bash\nprintf x >> '${ghCalls}'\nprintf '[]'\n`, { mode: 0o755 });
+  const since = new Date().toISOString().replace(/\.[0-9]{3}Z$/, ".000Z");
+  const run = (mode: string) => spawnSync("bash", [
+    join(REPO_ROOT, "deploy", "idle-starved-probe.sh"), "fake/remudero-site", target, targetBase, state, since, marker, runtime, mode, baseline, installed,
+  ], {
+    encoding: "utf8", timeout: BOOT_SPAWN_TIMEOUT_MS,
+    env: { ...ambientWithoutRmdControls(), PATH: `${stubs}:${process.env.PATH ?? ""}`, GH_TOKEN: "fixture-token" },
+  });
+  assert.equal(run("pr-board").status, 0, "equal installation and runtime revisions stay asleep");
+  assert.equal(readFileSync(ghCalls, "utf8"), "x", "the unchanged positive control reads the board");
+  unlinkSync(ghCalls);
+  const installedHead = advanceOrigin(installed, "installed-update.txt", "installed source advanced\n");
+  assert.equal(git(runtime, ["rev-parse", "HEAD"]), baseline, "the runtime checkout remains frozen");
+  for (const mode of ["pr-board", "full"]) {
+    const result = run(mode);
+    assert.equal(result.status, 10, result.stderr);
+  }
+  assert.equal(existsSync(ghCalls), false, "local installation movement wakes before paid or remote work");
+  const rows = readFileSync(join(state, "ledger.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(rows.length, 2);
+  for (const row of rows) {
+    assert.equal(row.reason, "engine_revision_changed");
+    assert.equal(row.engine_base_sha, baseline);
+    assert.equal(row.engine_head_sha, installedHead);
+  }
+});
+
+test("idle_starved: a declared unreadable installation never falls back to a healthy runtime", () => {
+  const runtime = makeOrigin();
+  const baseline = git(runtime, ["rev-parse", "HEAD"]);
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}quiet-installation-unknown-`));
+  const state = join(root, "state");
+  mkdirSync(state);
+  const marker = join(state, "idle-starved.marker");
+  writeFileSync(marker, "");
+  writeFileSync(join(state, "ledger.ndjson"), "");
+  const since = new Date().toISOString().replace(/\.[0-9]{3}Z$/, ".000Z");
+  for (const installed of ["", join(root, "missing-daemon-install")]) {
+    const result = spawnSync("bash", [
+      join(REPO_ROOT, "deploy", "idle-starved-probe.sh"), "fake/remudero-site", runtime, baseline, state, since, marker, runtime, "pr-board", baseline, installed,
+    ], { encoding: "utf8", timeout: BOOT_SPAWN_TIMEOUT_MS, env: ambientWithoutRmdControls() });
+    assert.equal(result.status, 2, result.stderr);
+  }
+  const rows = readFileSync(join(state, "ledger.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(rows.length, 2);
+  assert.ok(rows.every((row) => row.reason === "engine_head_unavailable" && row.engine_base_sha === baseline && row.engine_head_sha === "unknown"));
+});
+
+test("idle_starved: the entrypoint observes daemon-install and refreshes its frozen runtime after wake", () => {
+  const origin = makeOrigin();
+  mkdirSync(join(origin, "deploy"));
+  writeFileSync(join(origin, "deploy", "idle-starved-probe.sh"), readFileSync(join(REPO_ROOT, "deploy", "idle-starved-probe.sh")));
+  writeFileSync(join(origin, "bin", "rmd"), [
+    "#!/usr/bin/env bash",
+    "set -eu",
+    'state="$HOME/Remudero/state"',
+    'installed="$HOME/Remudero/daemon-install"',
+    'mkdir -p "$state" "$HOME/Remudero/repos"',
+    'if [ ! -e "$state/first-run" ]; then',
+    '  touch "$state/first-run"',
+    '  git clone -q "$RMD_REPO_URL" "$HOME/Remudero/repos/remudero-site"',
+    '  git rev-parse HEAD > "$state/launched-engine-sha"',
+    '  printf "installed source changed\\n" > "$RMD_REPO_URL/install-update.txt"',
+    '  git -C "$RMD_REPO_URL" add install-update.txt',
+    '  git -C "$RMD_REPO_URL" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm installed-change',
+    '  git -C "$installed" fetch -q origin main',
+    '  git -C "$installed" merge -q --ff-only origin/main',
+    '  git -C "$installed" rev-parse HEAD > "$state/installed-engine-sha"',
+    '  git rev-parse HEAD > "$state/runtime-before-wake-sha"',
+    `  exit ${DAEMON_EXIT_IDLE_STARVED}`,
+    "fi",
+    'git rev-parse HEAD > "$state/runtime-after-wake-sha"',
+    "exit 0",
+    "",
+  ].join("\n"), { mode: 0o755 });
+  git(origin, ["add", "-A"]);
+  commit(origin, "installation observer fixture");
+  const home = freshHome();
+  mkdirSync(join(home, "Remudero"));
+  git(home, ["clone", "-q", origin, join(home, "Remudero", "daemon-install")]);
+  const result = boot(home, origin, {
+    timeoutMs: 15_000,
+    cmd: ["./bin/rmd", "daemon", "--repo", "fake/remudero-site"],
+    env: { RMD_RESTART_THROTTLE_S: "1", GH_TOKEN: "fixture-token" },
+    stubs: {
+      sleep: "#!/usr/bin/env bash\nexit 0\n",
+      // Without the observer, this bounded fallback wakes on the target's moved main.
+      gh: '#!/usr/bin/env bash\ntouch "$HOME/Remudero/state/gh-consulted"\nprintf "[]"\n',
+    },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const state = join(home, "Remudero", "state");
+  const launched = readFileSync(join(state, "launched-engine-sha"), "utf8").trim();
+  const installed = readFileSync(join(state, "installed-engine-sha"), "utf8").trim();
+  assert.notEqual(installed, launched);
+  assert.equal(readFileSync(join(state, "runtime-before-wake-sha"), "utf8").trim(), launched);
+  assert.equal(readFileSync(join(state, "runtime-after-wake-sha"), "utf8").trim(), installed, "the ordinary wake path actually refreshes runtime source");
+  assert.equal(existsSync(join(state, "gh-consulted")), false, "the installation wake must precede a board read");
+  const rows = readFileSync(join(state, "ledger.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const wake = rows.find((row) => row.step === "daemon.idle_starved.engine_wake");
+  assert.equal(wake?.reason, "engine_revision_changed");
+  assert.equal(wake?.engine_base_sha, launched, "baseline names code loaded by Node, not the installation observer");
+  assert.equal(wake?.engine_head_sha, installed);
+  assert.equal(rows.filter((row) => row.step === IDLE_STARVED_PULSE_STEP).length, 1);
 });
 
 test("W1-T2537: the entrypoint's blocked code is the SAME NUMBER as DAEMON_EXIT_BLOCKED, not a drifting literal", () => {

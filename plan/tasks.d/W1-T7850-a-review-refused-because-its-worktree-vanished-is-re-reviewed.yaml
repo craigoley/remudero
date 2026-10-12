@@ -1,0 +1,91 @@
+- id: W1-T7850
+  title: "A REVIEW VERDICT REFUSED BECAUSE ITS WORKTREE VANISHED IS RE-REVIEWED AT ONCE — a publication-time freshness read in a reclaimed `reviewer-<sha>` worktree grades `unreadable`, the sweep then probes the daemon's own loaded code and backs off 10/20/40/60 min on `stale`, and W1-T5530 adds no restart pressure, so PR #10783's withheld success waited on a restart nothing asked for"
+  repo: remudero
+  depends_on: [W1-T7837, W1-T7851]  # W1-T7851 shares src/lib/self-sync.ts
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — a post refusal whose reviewer cwd vanished is a host gap that earns a fresh review
+  band_meaning: span
+  origin: "operator approval 2026-10-11: file the recommended follow-ups (PR #10783's success verdict was refused when its reviewer worktree vanished, and never re-reviewed)"
+  plan_refs: [W1-T7837, W1-T7822, W1-T5530, W1-T5476, W1-T3723, W1-T5840, W1-T6033]
+  files: [src/lib/self-sync.ts, src/lib/review.ts, src/lib/sweep.ts, test/a-review-refused-because-its-worktree-vanished-is-re-reviewed.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED, read-only from the core daemon's live ledger on the Azure host (2026-10-11T03:45Z), PR #10783,
+    head 2fd447d7e:
+      - 01:48:16Z `review.pending_posted`.
+      - 01:56:30Z `review.post_refused`, attempted_state success, reviewer_code_freshness unreadable. The
+        reviewer_code_reason was "git fetch origin failed in /home/node/Remudero/worktrees/reviewer-e6cb1f765599:
+        ... git -C /home/node/Remudero/worktrees/reviewer-e6cb1f765599 fetch ...". That worktree had been reclaimed
+        mid-review. #10770 (187fcb90d) fixes the reclaim race, but the daemon was running older code.
+      - `sweep.reviewer_freshness_probe` rows followed at 02:01:39Z, 02:13:13Z, 02:33:36Z and 03:15:50Z. Each read
+        outcome stale ("loaded reviewer code freshness is not proven"), with backoff_minutes 10, 20, 40 and 60.
+        No re-review was dispatched in that time.
+    CURRENT BEHAVIOUR, read on origin/main e3256acda:
+      - The review ran from a fresh-tree worktree. `buildFreshTreeReviewRunner` (src/run-task.ts:1923, W1-T3723)
+        names it `reviewer-<sha12>` under the worktree root and spawns the review there. That review's
+        publication-time freshness read (`checkReviewerCodeFreshnessAsync`, src/lib/self-sync.ts:1065) ran its git
+        in that directory after the directory was gone. The `unreadable` variant of `ReviewerCodeFreshness`
+        (self-sync.ts:715-718) carries only a reason string, so the vanished cwd is not told apart from a
+        genuinely unprovable source.
+      - `postReviewStatusGuarded` (src/lib/review.ts:10096) withholds every non-fresh terminal verdict and ledgers
+        `review.post_refused` with reviewer_code_freshness unreadable (review.ts:10101-10122).
+      - The sweep files that refusal as a freshness refusal (`isRetryableReviewerCodeFreshnessRefusal`,
+        src/lib/sweep.ts:11981; recorded at :12545-12556). `freshnessBackoff` (sweep.ts:13878-13921) then probes
+        `recovery.loadedCodeSha`, which is the daemon's own loaded code and not the fresh tree the review ran on.
+        It doubles the wait on every reading that is not fresh (:13896). `reviewerCodeFreshnessBackoffReason`
+        (sweep.ts:11999-12014) holds the PR until a probe reads fresh. A daemon that is behind main always reads
+        stale, so the hold lasts until something restarts it.
+      - Nothing pushes for that restart. W1-T5530 (src/lib/daemon.ts:534-536, `withheldReviewsSince`) counts an
+        unreadable refusal apart and adds no restart pressure, because a restart cannot fix a ref-lock race. It
+        cannot fix a vanished worktree either. That holds up, but it leaves this refusal with no actor at all.
+    WHY A RE-REVIEW IS THE REMEDY. The verdict was computed and only its publication was refused. A fresh review of
+    the same head goes back through the ordinary freshness gate, which sends a stale daemon to a new fresh-tree
+    worktree (W1-T3723). The re-review needs nothing from the vanished directory.
+    RELATION TO W1-T7837. W1-T7837 (queued) gives a capped verdict whose proofs hit a host gap a re-review of the same
+    head. It releases the delivered-review key the way W1-T5840 does, paces repeats from observed history, and
+    escalates a persisting gap through the fix-progress judge. This task reuses that release, pacing and escalation
+    for a refused post, so it depends on W1-T7837 and adds no second mechanism.
+  design: |
+    1. NAME THE HOST GAP AT ITS SOURCE. `checkReviewerCodeFreshnessAsync` (and its sync sibling) checks that its
+       repoDir still exists before any git call. When it does not, the result is `{ status: "unreadable", reason:
+       "reviewer checkout no longer exists: <dir>", hostGap: "cwd-missing" }`. `hostGap` is a new optional field on
+       the unreadable variant, the same naming W1-T7822 gave a vanished proof cwd. Every other unreadable reading
+       is unchanged.
+    2. CARRY IT ON THE REFUSAL. `postReviewStatusGuarded` still refuses, because an unproven source is never
+       published. It copies `reviewer_code_host_gap: "cwd-missing"` onto the `review.post_refused` row.
+       reviewer_code_freshness stays "unreadable", so W1-T5530's count and every existing reader keep their
+       meaning.
+    3. ROUTE IT TO A RE-REVIEW, NOT THE FRESHNESS BACKOFF. In `priorActionsFromLedger`, a refusal with
+       reviewer_code_host_gap is not a freshness refusal. It does not enter `reviewFreshnessRefusals` (so no
+       freshness probe and no backoff) and does not enter `reviewRefused`. The sweep ledgers
+       `sweep.review_host_gap_rereview` (pr, head, review_input_digest, refusal_at, host_gap). It releases that
+       exact input's review key through W1-T7837's release, so the next review dispatch admits a fresh review of
+       the same head and body. The disposition names the vanished checkout, never "awaiting proven freshness".
+    4. PACE AND ESCALATE THROUGH W1-T7837. A repeat refusal with a host gap at the same head is paced from the
+       observed history and escalated by the fix-progress judge, exactly as W1-T7837's host-gap re-reviews are.
+       There is no fixed count or interval.
+    Tests go in the new file test/a-review-refused-because-its-worktree-vanished-is-re-reviewed.test.ts, with
+    `test(` titles exactly as in the proofs below. The existing reviewer-freshness and W1-T5530 suites must stay
+    green.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-review-refused-because-its-worktree-vanished-is-re-reviewed.test.ts"
+    - claim: "a freshness read whose repo dir is gone names the host gap cwd-missing"
+      proof: 'grep: test("W1-T7850: a freshness read in a vanished checkout names the host gap" in test/a-review-refused-because-its-worktree-vanished-is-re-reviewed.test.ts'
+    - claim: "the refusal row carries reviewer_code_host_gap and still reads unreadable freshness"
+      proof: 'grep: test("W1-T7850: the post refusal carries the host gap beside unreadable freshness" in test/a-review-refused-because-its-worktree-vanished-is-re-reviewed.test.ts'
+    - claim: "a host-gap refusal releases the review key for a fresh review of the same head with no freshness probe"
+      proof: 'grep: test("W1-T7850: a vanished-worktree refusal is re-reviewed at the same head with no freshness backoff" in test/a-review-refused-because-its-worktree-vanished-is-re-reviewed.test.ts'
+    - claim: "an unreadable refusal with no host gap keeps today's freshness backoff"
+      proof: 'grep: test("W1-T7850: an unreadable refusal with no host gap keeps the freshness backoff" in test/a-review-refused-because-its-worktree-vanished-is-re-reviewed.test.ts'
+  falsifier: |
+    Leave the freshness reader as it is. A removed repo dir then grades plain unreadable with no host gap, and the
+    first test fails. Leave `priorActionsFromLedger` routing every unreadable refusal to `reviewFreshnessRefusals`.
+    The #10783 ledger shape (one refusal, then stale probes) then holds the PR with "awaiting proven freshness" and
+    no re-review, and the third test fails. Route every unreadable refusal to a re-review, and the fourth test sees
+    a ref-lock refusal skip its backoff and fails.
