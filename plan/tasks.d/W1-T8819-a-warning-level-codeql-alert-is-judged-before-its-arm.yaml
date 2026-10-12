@@ -1,0 +1,50 @@
+- id: W1-T8819
+  title: "A WARNING-LEVEL CODEQL ALERT IS JUDGED BEFORE ITS ARM, LIKE A HIGH ONE — W1-T5633 judges a failing CodeQL check only for critical/high/error alerts, so #11136 merged on 2026-10-12 with its CodeQL check red on a warning-level js/file-system-race (alert #370) that nothing read; main now holds 35 warning-level alerts, growing about 3-6 a day"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low # widens which alerts reach an existing judge; the judge never holds a PR (W1-T5633)
+  band_meaning: span
+  origin: "operator session 2026-10-12: CodeQL new-alert ratchet (operator approved, \"go with 1-4\")"
+  plan_refs: [W1-T5633, W1-T3980, W1-T4070]
+  files: [src/lib/open-prs-rest.ts, test/a-warning-level-codeql-alert-is-judged-before-its-arm.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-12: #11136 (W1-T7729) merged at 18:39Z with GitHub's `CodeQL` results check FAILED on
+    js/file-system-race at scripts/build-child-entries.mjs:71 (rule severity warning; now open alert #370 on main).
+    ci-gate lists only the `Analyze (...)` jobs, as ADVISORY, and never the `CodeQL` results check; W1-T5633 added
+    the one reader of that check: a head whose CodeQL check failed on a readable alert is judged once before its arm
+    (fix ruling -> fix lane; false positive -> reason, comment, arm; unavailable -> fix lane; it never holds).
+    But `classifyCodeqlHeadAlerts` (src/lib/open-prs-rest.ts) keeps an alert only when its severity is in
+    `CODEQL_HIGH_SEVERITIES` = ["critical", "high", "error"], so a warning-level alert is invisible to the judge
+    and its PR arms as if the check were green. Main had 82 open code-scanning alerts on 2026-10-12: 47
+    js/unused-local-variable notes and 35 warnings (7 js/useless-assignment-to-local, 7 js/http-to-file-access,
+    5 js/file-access-to-http, 3 js/missing-await, 2 js/insecure-temporary-file, 2 js/indirect-command-line-injection,
+    2 js/file-system-race, ...), created at 2-6 a day since 10-04.
+    WHY NOT A ci-gate BLOCK: W1-T5633 decided a CodeQL alert is judged and never holds the PR (its suite is named
+    for it), and the operator rules out blocking rules; flipping CodeQL to a required check is a branch-protection
+    setting this task does not touch.
+  design: |
+    1. The severities the head-alert classifier keeps widen from critical/high/error to every non-note level:
+       rule severity `warning` or `error`, or security severity `medium`, `high` or `critical`. Notes (and security
+       severity `low` with rule severity `note`) stay out: the existing assertion that a note/low alert classifies to
+       nothing keeps passing.
+    2. Each kept alert carries its own severity string unchanged, so the judge's prompt and the ledger row name
+       "warning" or "medium" rather than reporting it as high.
+    3. Nothing else moves: the judge, its rulings, the hydration cap and the never-hold contract are W1-T5633's.
+  acceptance:
+    - claim: "a head whose CodeQL check failed on a warning-level alert yields that alert for judgment"
+      proof: 'grep: test("W1-T8819: a warning-level CodeQL alert is kept for judgment" in test/a-warning-level-codeql-alert-is-judged-before-its-arm.test.ts'
+    - claim: "a security-severity medium alert is kept, carrying its own severity"
+      proof: 'grep: test("W1-T8819: a medium security alert is kept with its own severity" in test/a-warning-level-codeql-alert-is-judged-before-its-arm.test.ts'
+    - claim: "a note-level alert still yields nothing to judge"
+      proof: 'grep: test("W1-T8819: a note-level alert is still not judged" in test/a-warning-level-codeql-alert-is-judged-before-its-arm.test.ts'
+  falsifier: |
+    Feed `classifyCodeqlHeadAlerts` the #370 shape (tool CodeQL, rule js/file-system-race, rule severity warning, on
+    the head sha). At origin/main it returns no alert, so the PR arms unjudged; with the change it returns one alert
+    whose severity reads "warning". Leave CODEQL_HIGH_SEVERITIES as it is and the first two tests red.

@@ -106,7 +106,7 @@ import {
 } from "./sweep.js";
 // VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
-import { checkDispatchGovernors, type DispatchGovernorVerdict, type QuietHoursHoldResult } from "./dispatch-governor.js";
+import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
 import { assertRunnable, releasedTaskIds, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { resolveReleasedIds } from "./drain.js";
 import type { StatusProjection } from "./status.js";
@@ -238,21 +238,48 @@ export function dispatchRunHistory(rawLines: readonly string[]): { totalMs: numb
   return { totalMs, samples };
 }
 
-/** A pre-PR handoff's exact pushed head is resumable; any later verdict replaces that receipt. */
+/** The step a pre-PR handoff writes beside its verdict, and the daemon re-writes for a receipt the live ledger
+ *  holds only as a verdict row: verdicts keep the newest 200, so a parked checkpoint aged out of resumption. */
+export const HANDOFF_RECEIPT_STEP = "run.freshness_handoff";
+
+/** A pre-PR handoff's exact pushed head is resumable; any later verdict replaces that receipt, except a failed
+ *  restore, which consumed nothing (W1-T7806). A matching checkpoint drop consumes the receipt;
+ *  a `run.freshness_handoff` row is a receipt too (W1-T7747). */
 export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<string, { branch: string; headSha: string }> {
   const pending = new Map<string, { branch: string; headSha: string }>();
   for (const raw of rawLines) {
     let row: Record<string, unknown>;
     try { row = JSON.parse(raw); } catch (error) { /* malformed rows establish no ownership */ continue; }
-    if (!row || row.step !== "verdict" || typeof row.task_id !== "string") continue;
+    if (!row || typeof row.task_id !== "string") continue;
+    if (row.step === "implement.checkpoint_dropped") {
+      const prior = pending.get(row.task_id);
+      if (prior && row.source_branch === prior.branch && row.head_sha === prior.headSha) pending.delete(row.task_id);
+      continue;
+    }
+    const receipt = row.step === HANDOFF_RECEIPT_STEP ? row.waiting_on !== "pr" && row.waiting_on !== "ci"
+      : row.step === "verdict" && row.verdict === "handed_off" && row.reason === "freshness_yield" && !row.pr_url;
+    if (row.step !== "verdict" && !receipt) continue;
+    if (row.verdict === "no_pr" && row.reason === "restart_checkpoint_restore_failed") continue;
     pending.delete(row.task_id);
-    if (row.verdict === "handed_off" && row.reason === "freshness_yield" && !row.pr_url &&
-        typeof row.branch === "string" && row.branch.startsWith(`run-${row.task_id}-`) &&
+    if (receipt && typeof row.branch === "string" && row.branch.startsWith(`run-${row.task_id}-`) &&
         /^run-.+-[0-9]+$/.test(row.branch) && typeof row.head_sha === "string" && /^[a-f0-9]{40}$/.test(row.head_sha)) {
       pending.set(row.task_id, { branch: row.branch, headSha: row.head_sha });
     }
   }
   return pending;
+}
+
+/** The pending receipts whose only live record is a verdict row — what the daemon re-writes at boot. */
+export function handoffReceiptsToCarry(rawLines: readonly string[]): Array<[string, { branch: string; headSha: string }]> {
+  const recorded = new Set<string>();
+  for (const raw of rawLines) {
+    if (!raw.includes(HANDOFF_RECEIPT_STEP)) continue;
+    try {
+      const row = JSON.parse(raw) as Record<string, unknown>;
+      if (row?.step === HANDOFF_RECEIPT_STEP) recorded.add(`${String(row.task_id)}|${String(row.branch)}|${String(row.head_sha)}`);
+    } catch (error) { /* a torn row records nothing */ continue; }
+  }
+  return [...pendingWorkerBoundaryHandoffs(rawLines)].filter(([taskId, r]) => !recorded.has(`${taskId}|${r.branch}|${r.headSha}`));
 }
 
 /** A decided restart waits for every in-flight lane, silently: 2026-10-10 it waited 60+ min with no row. Name the
@@ -366,11 +393,11 @@ export function daemonExitCode(stopReason: DaemonStopReason): number {
 /**
  * W1-T3319 — ONE TASK'S FAILURE, RECOGNISED STRUCTURALLY RATHER THAN BY A TOOL'S PROSE.
  *
- * `drain.ts` has exactly TWO `summary("error", ...)` sites and BOTH build their detail as
- * `${taskId}: ${message}` — one wrapping `deps.runOne` in a try/catch, one reporting a lane's
- * recorded failure. So every drain-level error is ALREADY a per-task failure and exit 1 is
- * reachable by nothing else. The task-id prefix is a property of the EMITTER, not a guess about how
- * some tool words its failure.
+ * `drain.ts`'s two worker-failure sites build `${taskId}: ${message}` — one wrapping
+ * `deps.runOne` in a try/catch, one reporting a lane's recorded failure. The separate owned
+ * admission/reporting-fault site includes a phase and may name `dispatch`, not a task.
+ * That infrastructure failure must keep exit 1 rather than borrowing a worker's blocked code.
+ * The worker prefix is a property of the EMITTER, not a guess about a tool's prose.
  *
  * THIS REPLACES W1-T3310's BANNER MATCH, which keyed on the pre-push hook's refusal text. That was
  * right about the case it saw and blind to the next one: the very next crash was a failed GitHub
@@ -383,7 +410,7 @@ export function daemonExitCode(stopReason: DaemonStopReason): number {
  * a genuine crash would be reclassified as blocked and docker's budget would protect nothing.
  *
  * NARROW BY CONSTRUCTION, IN TWO WAYS, and the second was forced by an existing test rather than
- * chosen: the task-id prefix both sites emit, anchored at the start — not "anything with a colon" —
+ * chosen: the task-id prefix both worker sites emit, anchored at the start — not "anything with a colon" —
  * AND `Command failed: `, the shape a SPAWNED COMMAND's failure carries.
  *
  * WHY THE SECOND HALF EXISTS. W1-T2546's criterion 3 pins that an UNRECOGNISED failure still exits
@@ -951,6 +978,8 @@ export interface DaemonSummary {
   costUsd: number;
   /** Count of idle polls (no runnable task, so the loop slept and re-checked). */
   ticks: number;
+  /** Reporting failures after settlement; not proof that a ledger receipt was delivered. */
+  reportingFaults?: Array<{ phase: string; detail: string }>;
 }
 
 /** Injectable dependencies — the real command wires GitHub/run-task/usage/locks. */
@@ -1007,12 +1036,14 @@ export interface DaemonDeps {
   /** Re-read the plan from the same source the boot used, returning the fresh plan or `null` when
    *  nothing changed; omitted means the plan stays frozen at boot. The dep owns change detection
    *  because the cheap signal is caller-specific: a plan tree sha costs ~8ms, the parse ~60ms (impl-FZ). */
-  reloadPlan?: () => Plan | null;
+  reloadPlan?: () => Plan | null | Promise<Plan | null>;
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
   refreshMerged: (plan?: Plan) => MergedSet;
   refreshMergedAsync?: (plan?: Plan) => Promise<MergedSet>;
   readLoopTelemetry?: (() => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number;
-    sync_spawn_top?: unknown[] }) & { peek?: () => unknown };
+    sync_spawn_top?: unknown[] }) & { takeLagInterval?: (consumer?: string) => { top: unknown; sync_spawn_ms: number };
+    /** W1-T7746: each tick's lag, the history the loop-stall profiler's bound is a quantile of. */
+    observeLoopLag?: (reading: { lagMs: number; intervalMs: number }, log: (step: string, extra?: Record<string, unknown>) => void) => void };
   /** W1-T6782: flat, payload-free memory fields (`sampleDaemonMemory`, daemon-memory-telemetry.ts)
    *  spread into the existing `daemon.alive` row. A throw is carried as `mem_telemetry`, never lost.
    *  W1-T7092: `afterRow` starts the worker-thread heap read once the row is written; the tick never
@@ -1091,10 +1122,16 @@ export interface DaemonDeps {
    *  `/proc/meminfo` reading per call. Consulted only through `checkDispatchGovernors`, so it holds
    *  NEW dispatch per lane and a throw fails OPEN there. Never consulted from the sweep. Optional. */
   checkMemoryGovernor?: () => MemoryGovernorResult | undefined;
+  /** W1-T7720: the streak tracker the unreadable memory probe / reservation store report to, and the
+   *  store read itself. Both are consulted only through `checkDispatchGovernors`. Optional. */
+  memoryReadTracker?: MemoryReadTracker;
+  readMemoryStoreFailure?: () => string | undefined;
   /** Quiet-hours preference: a defined return defers NEW dispatch only. Routed through the dispatch
    *  governor, never through `checkPause`, so sweep/drainage paths keep running and an unreadable
    *  read fails open in `checkDispatchGovernors` (W1-T2655). */
   checkQuietHours?: () => QuietHoursHoldResult | undefined;
+  /** Opt-in heavy READY reservation: checked only at an actual NEW implement start, UNKNOWN holds. */
+  checkHeavyNewBuild?: DispatchGovernorDeps["checkHeavyNewBuild"];
   /** True when a task's own read is indeterminate — a genuine read failure rather than a clean
    *  absence of evidence — re-derived from the same projection. Optional (W1-T119). */
   isIndeterminate?: (taskId: string) => boolean;
@@ -1110,8 +1147,11 @@ export interface DaemonDeps {
   readTerminalPreDispatchRefusalRevisions?: () => ReadonlyMap<string, string>;
   /** Called once per task excluded because its own read is indeterminate. */
   onIndeterminate?: (task: Task) => void;
-  /** Run ONE task through the existing run-task path (default = runTask). */
-  runOne: (taskId: string) => Promise<RunResult>;
+  /** Run ONE task through the existing run-task path (default = runTask). W1-T7806: `restartAtWorkerBoundary` is
+   *  the dispatch phase's restart latch, read by the run at each worker boundary. */
+  runOne: (taskId: string, options?: {
+    restartAtWorkerBoundary: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+  }) => Promise<RunResult>;
   /** `laneDispatchBudget`'s other input: the same open-PR-count closure the real wiring already
    *  builds for `checkQueueGovernor`, never a second read path. Consulted only at two or more lanes.
    *  Optional — omitted, a wide batch is bounded by `laneCount` alone (W1-T343). */
@@ -1486,12 +1526,22 @@ interface RunBranchState {
   orphanEvidence: OrphanRunBranchEvidence | undefined;
 }
 
+/** The epoch-ms suffix of a `run-<id>-<epochMs>` branch; NaN (never older) when it has none. */
+function runBranchEpoch(branch: string): number {
+  const match = /-([0-9]+)$/.exec(branch);
+  return match ? Number(match[1]) : Number.NaN;
+}
+
 function runBranchStateFrom(raw: string | undefined, orphanEvidence: OrphanRunBranchEvidence | undefined,
   resumable: ReadonlyMap<string, { branch: string; headSha: string }> = new Map()): RunBranchState {
   if (raw === undefined) return { ids: undefined, refs: [], orphanEvidence };
   const refs = parsePushedRunRefs(raw).filter((ref) => {
     const checkpoint = resumable.get(ref.taskId);
-    return checkpoint?.branch !== ref.ref || checkpoint.headSha !== ref.sha;
+    if (checkpoint === undefined) return true;
+    if (checkpoint.branch === ref.ref) return checkpoint.headSha !== ref.sha;
+    // W1-T7837: a run started after this branch was pushed, so the branch was restored or released then; the
+    // newer checkpoint carries the work. Left blocking, it held a resumable task as run-branch-already-pushed.
+    return !(runBranchEpoch(ref.ref) < runBranchEpoch(checkpoint.branch));
   });
   return { ids: new Set(refs.map((ref) => ref.taskId)), refs, orphanEvidence };
 }
@@ -1629,8 +1679,26 @@ function startMemoryReadAfterRow(deps: Pick<DaemonDeps, "readMemoryTelemetry">, 
   }
 }
 
-function peekSyncSpawnTop(deps: Pick<DaemonDeps, "readLoopTelemetry">): unknown {
-  try { return deps.readLoopTelemetry?.peek?.(); } catch { return undefined; /* Reason: observability only. */ }
+/** W1-T7745: what the spawns of THIS consumer's own interval were, read and closed so the next row starts clean.
+ *  Spread into a `reportLoopLag` sample; a daemon without the sampler contributes neither field. */
+function takeSyncSpawn(deps: Pick<DaemonDeps, "readLoopTelemetry">, consumer: string):
+  { syncSpawnTop?: unknown; syncSpawnMs?: number } {
+  try {
+    const taken = deps.readLoopTelemetry?.takeLagInterval?.(consumer);
+    return taken === undefined ? {} : { syncSpawnTop: taken.top, syncSpawnMs: taken.sync_spawn_ms };
+  } catch { return {}; /* Reason: observability only. */ }
+}
+
+/** W1-T7746: report a tick's lag, and first hand it to the loop-stall profiler, which sets its bound from
+ *  this interval and these lags. A daemon without the sampler reports exactly as before. */
+export function reportTickLag(deps: Pick<DaemonDeps, "readLoopTelemetry">, sample: Parameters<typeof reportLoopLag>[0],
+  log: (step: string, extra?: Record<string, unknown>) => void): void {
+  try {
+    deps.readLoopTelemetry?.observeLoopLag?.({ lagMs: sample.observedAtMs - sample.dueAtMs, intervalMs: sample.intervalMs }, log);
+  } catch (error) {
+    log("daemon.loop_stall_profile_failed", { reason: `observe: ${String((error as Error)?.message ?? error).slice(0, 160)}` });
+  }
+  reportLoopLag(sample, log);
 }
 
 /**
@@ -1655,8 +1723,10 @@ function peekSyncSpawnTop(deps: Pick<DaemonDeps, "readLoopTelemetry">): unknown 
  */
 export function reportLoopLag(
   sample: { phase: string; dueAtMs: number; observedAtMs: number; intervalMs: number; lastStepBeforeBlock?: string;
-    /** W1-T5718: the longest synchronous spawn of the window this lag closes, read without closing it. */
-    syncSpawnTop?: unknown },
+    /** W1-T5718: the longest synchronous spawn of the interval this lag closes (W1-T7745: its own interval's). */
+    syncSpawnTop?: unknown;
+    /** W1-T7745: the synchronous spawn time of that same interval, so a row says how much of its lag was spawn. */
+    syncSpawnMs?: number },
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): void {
   try {
@@ -1669,6 +1739,7 @@ export function reportLoopLag(
       missed_ticks: Math.floor(lagMs / sample.intervalMs),
       last_step_before_block: sample.lastStepBeforeBlock,
       ...(sample.syncSpawnTop === undefined ? {} : { sync_spawn_top: sample.syncSpawnTop }),
+      ...(sample.syncSpawnMs === undefined ? {} : { sync_spawn_ms: sample.syncSpawnMs }),
     });
   } catch {
     // Reason: a throwing logger must cost the reading, never the tick.
@@ -1716,9 +1787,9 @@ export function startInterphaseReviewClock(
         while (active) {
           const clockDueAtMs = interphaseClock.now() + quantumMs;
           const result = await wait(quantumMs);
-          reportLoopLag(
+          reportTickLag(deps,
             { phase, dueAtMs: clockDueAtMs, observedAtMs: interphaseClock.now(), intervalMs: quantumMs,
-              lastStepBeforeBlock: deps.lastStepBeforeBlock?.(), syncSpawnTop: peekSyncSpawnTop(deps) },
+              lastStepBeforeBlock: deps.lastStepBeforeBlock?.(), ...takeSyncSpawn(deps, "review_clock") },
             log,
           );
           if (result === "wake") {
@@ -2089,9 +2160,9 @@ function startInFlightTicker(
           const tickDueAtMs = daemonClock.now() + pollIntervalMs;
           const waitResult = await (owner.sweepRetrigger ? (deps.sleepUntilSweepWake ?? deps.sleep) : deps.sleep)(pollIntervalMs);
           const lastStepBeforeBlock = deps.lastStepBeforeBlock?.();
-          reportLoopLag(
+          reportTickLag(deps,
             { phase: owner.phase, dueAtMs: tickDueAtMs, observedAtMs: daemonClock.now(), intervalMs: pollIntervalMs, lastStepBeforeBlock,
-              syncSpawnTop: peekSyncSpawnTop(deps) },
+              ...takeSyncSpawn(deps, "ticker") },
             log,
           );
           if (waitResult === "wake") eventWakePending = true;
@@ -2322,6 +2393,8 @@ export interface SweepLiveness {
   /** True while a `deps.sweep()` promise is still executing, INCLUDING after its await was
    *  abandoned by the wall-clock bound. */
   inFlight: boolean;
+  /** W1-T8170: successful completion, including a pass that settled after its wait bound. */
+  lastCompletedAtMs?: number;
 }
 
 async function runGatedSweep(
@@ -2374,7 +2447,10 @@ async function runGatedSweep(
     // `finally` below, which runs when the await ends, is what keeps the flag true through the
     // abandon-to-settle window every observed re-entry landed in. `then(onOk, onErr)` rather than
     // `finally`, so this derived promise can never become an unhandled rejection of its own.
-    if (liveness) void sweepPromise.then(() => { liveness.inFlight = false; }, () => { liveness.inFlight = false; });
+    if (liveness) void sweepPromise.then(() => {
+      liveness.inFlight = false;
+      liveness.lastCompletedAtMs = clockFromDateFn(deps.now).now();
+    }, () => { liveness.inFlight = false; });
     const startedAtMs = Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const bound = new Promise<"abandoned">((resolve) => {
@@ -2785,16 +2861,133 @@ export function triagePrOpenedInLedger(lines: readonly string[] | undefined, fee
 /** W1-T4416: a lane pool. Each task runs on its own lane; a lane that settles while a sibling is still
  *  in flight may take `refill`'s next task, appended to `tasks`. Resolves, never rejects, once every lane
  *  settles, with outcomes indexed like `tasks`. The first wave is invoked synchronously, as the batch was.
- *  W1-T5805: a promised refill holds its lane busy until it answers; a rejected one ends that lane. */
+ *  W1-T5805: in the legacy four-argument path, a rejected promised refill ends only that lane.
+ *  Opt-in admission/onStarted callers receive a separate fault, after all actual workers drain. */
+export type LanePoolOutcome<T, R> = {
+  settled: PromiseSettledResult<R>[];
+  fault?: { task: T; lane: number; phase: "admit" | "onStarted" | "refill"; reason: unknown };
+  /** A caller phase failed, not a synthetic task/worker. Mutually exclusive with fault: first wins. */
+  externalFault?: { phase: string; reason: unknown };
+};
+
+export type LanePoolControl = { close?: (reason: unknown, phase?: string) => void };
+
 export function runLanePool<T extends { id: string }, R>(
   tasks: T[],
   run: (id: string) => Promise<R>,
   refill: (lane: number, finished: T, outcome: PromiseSettledResult<R>) => T | undefined | Promise<T | undefined>,
-  // W1-T5343: a live view of the count, read by the phase ticker. Optional and trailing.
+  lanes?: { inFlight: number },
+  admit?: undefined,
+): Promise<PromiseSettledResult<R>[]>;
+export function runLanePool<T extends { id: string }, R>(
+  tasks: T[],
+  run: (id: string) => Promise<R>,
+  refill: (lane: number, finished: T, outcome: PromiseSettledResult<R>) => T | undefined | Promise<T | undefined>,
+  lanes: { inFlight: number } | undefined,
+  admit: (task: T, lane: number, isRefill: boolean) => boolean,
+  onStarted?: (task: T, lane: number, isRefill: boolean) => void,
+): Promise<LanePoolOutcome<T, R>>;
+export function runLanePool<T extends { id: string }, R>(
+  tasks: T[],
+  run: (id: string) => Promise<R>,
+  refill: (lane: number, finished: T, outcome: PromiseSettledResult<R>) => T | undefined | Promise<T | undefined>,
+  lanes: { inFlight: number } | undefined,
+  admit: ((task: T, lane: number, isRefill: boolean) => boolean) | undefined,
+  onStarted: (task: T, lane: number, isRefill: boolean) => void,
+): Promise<LanePoolOutcome<T, R>>;
+export function runLanePool<T extends { id: string }, R>(
+  tasks: T[],
+  run: (id: string) => Promise<R>,
+  refill: (lane: number, finished: T, outcome: PromiseSettledResult<R>) => T | undefined | Promise<T | undefined>,
+  lanes: { inFlight: number } | undefined,
+  admit: ((task: T, lane: number, isRefill: boolean) => boolean) | undefined,
+  onStarted: ((task: T, lane: number, isRefill: boolean) => void) | undefined,
+  control: LanePoolControl,
+): Promise<LanePoolOutcome<T, R>>;
+export function runLanePool<T extends { id: string }, R>(
+  tasks: T[],
+  run: (id: string) => Promise<R>,
+  refill: (lane: number, finished: T, outcome: PromiseSettledResult<R>) => T | undefined | Promise<T | undefined>,
+  // W1-T5343: a live view of the count, read by the phase ticker. Optional.
   lanes: { inFlight: number } = { inFlight: 0 },
-): Promise<PromiseSettledResult<R>[]> {
+  // Opt-in path: false starts no work; a throw closes starts and is returned separately from workers.
+  admit?: (task: T, lane: number, isRefill: boolean) => boolean,
+  // Synchronous, but only AFTER the pool owns the worker promise and its settlement handlers.
+  onStarted?: (task: T, lane: number, isRefill: boolean) => void,
+  // Installed synchronously, before the first wave. Closes starts, never cancels real workers.
+  control?: LanePoolControl,
+): Promise<PromiseSettledResult<R>[] | LanePoolOutcome<T, R>> {
+  if (admit || onStarted || control) {
+    const initial = tasks.splice(0);
+    const settled: PromiseSettledResult<R>[] = [];
+    let fault: LanePoolOutcome<T, R>["fault"];
+    let externalFault: LanePoolOutcome<T, R>["externalFault"];
+    let active = 0, refilling = 0, initializing = true;
+    return new Promise<LanePoolOutcome<T, R>>((resolve) => {
+      const finishIfIdle = (): void => {
+        if (!initializing && active === 0 && refilling === 0) resolve({ settled,
+          ...(fault ? { fault } : {}), ...(externalFault ? { externalFault } : {}) });
+      };
+      const fail = (task: T, lane: number, phase: NonNullable<typeof fault>["phase"], reason: unknown): void => {
+        // Presence, never truthiness of reason: undefined/null/false are still genuine thrown values.
+        if (externalFault === undefined) fault ??= { task, lane, phase, reason };
+        // Proposals are not workers. Retire their wait, but leave both late handlers attached below.
+        refilling = 0;
+        finishIfIdle();
+      };
+      if (control) control.close = (reason, phase = "external") => {
+        if (fault === undefined) externalFault ??= { phase, reason };
+        refilling = 0;
+        finishIfIdle();
+      };
+      const finish = (i: number, lane: number, outcome: PromiseSettledResult<R>): void => {
+        settled[i] = outcome;
+        active--;
+        lanes.inFlight--;
+        if (fault || externalFault || active + refilling === 0) return finishIfIdle();
+        let next: T | undefined | Promise<T | undefined>;
+        try { next = refill(lane, tasks[i], outcome); }
+        catch (reason) { /* Retain the producer failure in the pool's first-fault envelope. */ return fail(tasks[i], lane, "refill", reason); }
+        if (!(next instanceof Promise)) return take(lane, next, true);
+        if (!fault && !externalFault) refilling++;
+        // Keep the promised handoff: admission observes changes AFTER the producer resolves.
+        void next.then(
+          (value): PromiseSettledResult<T | undefined> => ({ status: "fulfilled", value }),
+          (reason: unknown): PromiseSettledResult<T | undefined> => ({ status: "rejected", reason }),
+        ).then((proposal) => {
+          if (fault || externalFault) return; // no late start or decrement of the retired proposal count
+          refilling--;
+          if (proposal.status === "rejected") return fail(tasks[i], lane, "refill", proposal.reason);
+          take(lane, proposal.value, true);
+        });
+        if (fault || externalFault) finishIfIdle();
+      };
+      const take = (lane: number, task: T | undefined, isRefill: boolean): void => {
+        if (fault || externalFault || task === undefined) return finishIfIdle();
+        try { if (admit && !admit(task, lane, isRefill)) return finishIfIdle(); }
+        catch (reason) { /* Retain the admission failure in the pool's first-fault envelope. */ return fail(task, lane, "admit", reason); }
+        if (fault || externalFault) return finishIfIdle();
+        const i = tasks.push(task) - 1;
+        active++;
+        lanes.inFlight++;
+        // The executor invokes run synchronously and owns its promise (or synchronous rejection).
+        // Attach settlement BEFORE another admission or any fallible onStarted bookkeeping.
+        const worker = new Promise<R>((done) => done(run(task.id)));
+        void worker.then(
+          (value) => finish(i, lane, { status: "fulfilled", value }),
+          (reason: unknown) => finish(i, lane, { status: "rejected", reason }),
+        );
+        try { onStarted?.(task, lane, isRefill); }
+        catch (reason) { /* Retain telemetry failure after owning the actual worker. */ fail(task, lane, "onStarted", reason); }
+      };
+      for (let lane = 0; lane < initial.length && !fault && !externalFault; lane++) take(lane, initial[lane], false);
+      initializing = false;
+      finishIfIdle();
+    });
+  }
+  // The unwired four-argument API and its refill-failure behaviour stay unchanged.
   const settled: PromiseSettledResult<R>[] = [];
-  const firstWave = tasks.map((t) => run(t.id));
+  const firstWave = tasks.map((task, lane) => ({ lane, promise: run(task.id) }));
   let refilling = 0;
   return new Promise((resolve) => {
     if (tasks.length === 0) resolve(settled);
@@ -2822,7 +3015,7 @@ export function runLanePool<T extends { id: string }, R>(
         });
       });
     };
-    firstWave.forEach((p, i) => start(i, i, p));
+    firstWave.forEach(({ lane, promise }, i) => start(i, lane, promise));
   });
 }
 
@@ -2881,6 +3074,23 @@ export async function runDaemon(
     },
   };
   const emitLog = deps.log ?? (() => {});
+  type SettlementReporting = {
+    report: typeof emitLog;
+    faults: Array<{ phase: string; reason: unknown }>;
+  };
+  const reportingFaultDetail = (reason: unknown): string => {
+    if (reason === null) return "null";
+    if (typeof reason !== "object" && typeof reason !== "function") return String(reason);
+    try {
+      // Do not invoke a thrown object's message getter or custom string conversion.
+      const message = Object.getOwnPropertyDescriptor(reason, "message");
+      return message && "value" in message && typeof message.value === "string"
+        ? message.value : "[non-string reporting failure]";
+    } catch {
+      // The original reason stays in the named reporting-fault channel; detail is explicitly unknown.
+      return "[uninspectable reporting failure]";
+    }
+  };
   // W1-T4837: idle build-lane minute accounting. The daemon's own log stream is observed rather than a flag
   // threaded through every decline, so a hold written by any layer names the cause of the tick it lands in.
   const idleLaneClock = clockFromDateFn(deps.now);
@@ -2888,10 +3098,21 @@ export async function runDaemon(
   let idleLaneTickCause: IdleLaneCause | undefined;
   let idleLaneDispatchable = 0;
   let livenessPulse: ReturnType<typeof startLivenessPulse> | undefined;
-  const log: typeof emitLog = (step, fields) => {
-    idleLaneTickCause = idleLaneCauseForStep(step) ?? idleLaneTickCause;
+  const noteLog: typeof emitLog = (step, fields) => {
+    idleLaneTickCause = idleLaneCauseForStep(step, fields) ?? idleLaneTickCause;
     livenessPulse?.note(step);
+  };
+  const log: typeof emitLog = (step, fields) => {
+    noteLog(step, fields);
     emitLog(step, fields);
+  };
+  const createSettlementReporting = (): SettlementReporting => {
+    const faults: SettlementReporting["faults"] = [];
+    return { faults, report: (step, fields) => {
+      noteLog(step, fields);
+      try { emitLog(step, fields); }
+      catch (reason) { faults.push({ phase: `report.${step}`, reason: reason }); }
+    } };
   };
   // One sample per tick outcome: what the lanes are doing and why they are not doing more. `dispatchable`
   // is refreshed only on ticks that ran selection; a tick that never reached selection (a pause) reuses the
@@ -2915,11 +3136,11 @@ export async function runDaemon(
   // daemon restarts on merges long before most hourly windows close, so the open window is written out as a
   // partial row rather than lost with the process. A window with no idle minute writes nothing: a restart
   // must not add a row of zeros to the ledger. The account is rolled, so a second call cannot double-count.
-  const flushIdleLaneWindow = (): void => {
+  const flushIdleLaneWindow = (report: typeof emitLog = emitLog): void => {
     const atMs = idleLaneClock.now();
     const row = summarizeIdleLaneAccount(idleLaneAccount, atMs);
     idleLaneAccount = rollIdleLaneWindow(idleLaneAccount, atMs);
-    if (row.idle_minutes > 0) emitLog("lane.idle_summary", { ...row, partial: true });
+    if (row.idle_minutes > 0) report("lane.idle_summary", { ...row, partial: true });
   };
   // Shared by both governor call sites below, so the two cannot silently drift into different field
   // names for the same verdict (W1-T342).
@@ -2958,6 +3179,8 @@ export async function runDaemon(
         memory_floor_mib: verdict.result.floorMib,
         poll_interval_ms: pollIntervalMs,
       });
+    } else if (verdict.kind === "memory_unreadable") {
+      log("daemon.memory_unreadable", { tick, ...governorDeferPayload(verdict), poll_interval_ms: pollIntervalMs });
     } else if (verdict.kind === "quiet_hours") {
       log("daemon.quiet_hours", {
         tick,
@@ -3043,14 +3266,14 @@ export async function runDaemon(
   // no judge/proposal failure can change eligibility or hold a healthy sibling lane.
   const lifetimePressureTasks = new Map<string, Task>();
   const lifetimePressureObserved = new Set<string>();
-  const flushLifetimePressure = async (): Promise<void> => {
+  const flushLifetimePressure = async (report: typeof emitLog = log): Promise<void> => {
     if (lifetimePressureTasks.size === 0 || deps.onLifetimePressure === undefined) return;
     const tasks = [...lifetimePressureTasks.values()];
     lifetimePressureTasks.clear();
     try {
       await deps.onLifetimePressure(tasks);
     } catch (error) {
-      log("dispatch.lifetime_pressure.failed", {
+      report("dispatch.lifetime_pressure.failed", {
         tasks: tasks.map((task) => task.id),
         error: String((error as Error)?.message ?? error),
       });
@@ -3090,6 +3313,9 @@ export async function runDaemon(
   const bootLedgerLines = deps.readLedgerLines?.() ?? [];
   const runLengths = dispatchRunHistory(bootLedgerLines);
   const resumableHandoffs = pendingWorkerBoundaryHandoffs(bootLedgerLines);
+  for (const [taskId, receipt] of handoffReceiptsToCarry(bootLedgerLines)) {
+    log(HANDOFF_RECEIPT_STEP, { task_id: taskId, branch: receipt.branch, head_sha: receipt.headSha, carried: true });
+  }
   let staleReviewerRecurrence: StaleReviewerRecurrenceState | undefined = priorStaleReviewerRecurrenceState(bootLedgerLines);
   // W1-T5344: per-task delivery-failure parks, rebuilt from the ledger so a restart does not reset
   // them; consulted by the dispatch filter's independent-failure hold below.
@@ -3151,46 +3377,65 @@ export async function runDaemon(
   // them. A per-tick clock restarted its interval every tick and stop() won the race: live 2026-10-05,
   // 33 paused ticks ran one pass. Stopped by the first unpaused tick, and by `summary` on every exit.
   const pauseReview: { clock?: InterphaseReviewClock; reported: number } = { reported: 0 };
-  const reportPauseReviewPasses = (passes: number): void => {
-    if (passes > pauseReview.reported) log("daemon.pause.review_passes", { tick: ticks, passes: passes - pauseReview.reported });
+  const reportPauseReviewPasses = (passes: number, report: typeof emitLog = log): void => {
+    if (passes > pauseReview.reported) report("daemon.pause.review_passes", { tick: ticks, passes: passes - pauseReview.reported });
     pauseReview.reported = passes;
   };
-  const stopPauseReviewClock = async (): Promise<void> => {
+  const stopPauseReviewClock = async (report: typeof emitLog = log): Promise<void> => {
     const clock = pauseReview.clock;
     if (!clock) return;
     pauseReview.clock = undefined;
-    reportPauseReviewPasses((await clock.stop()).passes);
+    reportPauseReviewPasses((await clock.stop()).passes, report);
     pauseReview.reported = 0;
   };
-  const summary = async (stopReason: DaemonStopReason, stopDetail?: string): Promise<DaemonSummary> => {
+  let ownedServicesClosed = false;
+  const closeOwnedServices = async (report: typeof emitLog = log): Promise<void> => {
+    if (ownedServicesClosed) return;
+    ownedServicesClosed = true;
     repositoryMaintenanceStopped = true;
     dueRungsStopped = true;
     if (dueRungsTimer) clearInterval(dueRungsTimer);
     if (repositoryMaintenanceTimer) clearInterval(repositoryMaintenanceTimer);
-    if (pauseReview.clock) await stopPauseReviewClock();
-    prActionPumpRef.stop();
-    plainBackfill?.stop();
-    fleetLane?.stop();
-    inboxResponder?.stop();
     clearTimeout(bootGateTimer);
     bootGateTrigger ??= "exited";
-    gardenerRef.stop();
-    livenessPulse?.stop();
+    const failures: unknown[] = [];
+    try { if (pauseReview.clock) await stopPauseReviewClock(report); }
+    catch (reason) { /* Retained in the cleanup AggregateError, after every other stop is attempted. */ failures.push(reason); }
+    for (const stop of [
+      () => prActionPumpRef.stop(), () => plainBackfill?.stop(), () => fleetLane?.stop(),
+      () => inboxResponder?.stop(), () => gardenerRef.stop(), () => livenessPulse?.stop(),
+    ]) {
+      try { stop(); }
+      catch (reason) { /* Retained in the cleanup AggregateError, never converted into successful closure. */ failures.push(reason); }
+    }
+    // Attempt every owned cleanup once; semantic cleanup failures remain caller-visible.
+    if (failures.length) throw new AggregateError(failures, "owned daemon cleanup failed");
+  };
+  const summary = async (stopReason: DaemonStopReason, stopDetail?: string, reporting: SettlementReporting = createSettlementReporting()): Promise<DaemonSummary> => {
+    const report = reporting.report;
+    await closeOwnedServices(report);
     if (stopReason === "stopped") {
       if (backgroundSweep) await backgroundSweep;
       const abandonedReviews = await drainInFlightReviews({ boundMs: sweepWallClockBoundMs });
-      if (abandonedReviews > 0) log("daemon.stop_drain.completed", {
+      if (abandonedReviews > 0) report("daemon.stop_drain.completed", {
         abandoned_in_flight_reviews: abandonedReviews, bound_ms: sweepWallClockBoundMs,
       });
     }
-    flushIdleLaneWindow();
+    flushIdleLaneWindow(report);
     const s: DaemonSummary = { attempted, merged, stopReason, stopDetail, costUsd, ticks };
-    log("daemon.summary", { ...s });
+    report("daemon.summary", { ...s });
+    if (reporting.faults.length) {
+      s.reportingFaults = reporting.faults.map(({ phase, reason }) => ({ phase, detail: reportingFaultDetail(reason) }));
+      // A hard operator STOP must stay a clean stop, not invite a supervisor restart.
+      // Its separate reportingFaults still explicitly refuse delivered-report assurance.
+      if (stopReason !== "stopped") s.stopReason = "error";
+      s.stopDetail = [stopDetail, ...s.reportingFaults.map(({ phase, detail }) => `${phase}: ${detail}`)].filter(Boolean).join("; ");
+    }
     return s;
   };
   if (deps.livenessPulse) livenessPulse = startLivenessPulse(pollIntervalMs, idleLaneClock, log,
-    (sample) => reportLoopLag({ ...sample, lastStepBeforeBlock: deps.lastStepBeforeBlock?.(),
-      syncSpawnTop: peekSyncSpawnTop(deps) }, log));
+    (sample) => reportTickLag(deps, { ...sample, lastStepBeforeBlock: deps.lastStepBeforeBlock?.(),
+      ...takeSyncSpawn(deps, "pulse") }, log));
   const prActionPump = startPrActionPump(deps, pollIntervalMs, log);
   prActionPumpRef.stop = prActionPump.stop;
   prActionPumpRef.isBusy = prActionPump.isBusy;
@@ -3210,7 +3455,14 @@ export async function runDaemon(
     ...(deps.knowledgeGardener ? [startGarden(knowledgeGardenSpec({ ...deps.knowledgeGardener, prState: undefined }), deps.knowledgeGardener, pollIntervalMs)] : []),
     ...(bootGateHolds ? [] : (deps.gardens ?? [])).map((start) => start(pollIntervalMs)),
   ];
-  gardenerRef.stop = () => gardens.forEach((g) => g.stop());
+  gardenerRef.stop = () => {
+    const failures: unknown[] = [];
+    for (const garden of gardens) {
+      try { garden.stop(); }
+      catch (reason) { /* Every garden still gets its stop; all failures propagate in the AggregateError. */ failures.push(reason); }
+    }
+    if (failures.length) throw new AggregateError(failures, "owned garden cleanup failed");
+  };
   if (deferredGardens.length > 0) deferBootCadence("gardens");
   const openBootGate = (trigger: string): void => {
     if (bootGateTrigger !== undefined) return;
@@ -3396,17 +3648,22 @@ export async function runDaemon(
   // ledger and stale summary contract; duplicating that sequence would let them drift (W1-T2845).
   const stopForFreshness = async (
     freshness: Extract<DaemonFreshness, { stale: true }>,
+    dispatchLatchAtMs?: number,
   ): Promise<DaemonSummary> => {
     // Install BEFORE the loop stops for restart, never after, so the relaunched process inherits deps
     // matching the new sha rather than the stale tree this process is still running (W1-T151).
     if (freshness.installNeeded) {
       deps.runInstall?.();
     }
-    // Every stale exit reaches the same bounded full-pass gate before returning. The restart is never
-    // suppressed by the pass, and no second implementation is introduced (W1-T1272).
-    // W1-T4998: a background pass still running IS that pass; its call returns within the same bound.
+    // A pass completed during the dispatch latch already reached the full sweep (W1-T8170/W1-T1272).
+    // A running pass is still awaited within its bound; other freshness exits keep their pass.
+    let preExitPass: "skipped_ran_since_latch" | "awaited_in_flight" | "ran" = "ran";
     if (backgroundSweep) {
+      preExitPass = "awaited_in_flight";
       await backgroundSweep;
+    } else if (dispatchLatchAtMs !== undefined && sweepLiveness.lastCompletedAtMs !== undefined &&
+      sweepLiveness.lastCompletedAtMs > dispatchLatchAtMs) {
+      preExitPass = "skipped_ran_since_latch";
     } else if (deps.sweep) {
       sweepRetriggerState.lastRunAtMs = daemonClock.now();
       await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
@@ -3417,7 +3674,7 @@ export async function runDaemon(
     const detail =
       `origin/main advanced ${freshness.oldSha.slice(0, 7)}..${freshness.newSha.slice(0, 7)} ` +
       `past this process's boot sha`;
-    log("daemon_selfrestart_for_freshness", { old_sha: freshness.oldSha, new_sha: freshness.newSha });
+    log("daemon_selfrestart_for_freshness", { old_sha: freshness.oldSha, new_sha: freshness.newSha, pre_exit_pass: preExitPass });
     return summary("stale", detail);
   };
 
@@ -3431,6 +3688,7 @@ export async function runDaemon(
     task: Task,
     result: RunResult,
     isMerged: MergedSet,
+    report: typeof emitLog = log,
   ): Promise<
     | { kind: "merged" }
     | { kind: "continue" }
@@ -3446,7 +3704,7 @@ export async function runDaemon(
         creditVisible = (deps.refreshMergedAsync ? await deps.refreshMergedAsync(planForBatch) : deps.refreshMerged(planForBatch))(task.id);
       } catch (error) {
         refreshError = String((error as Error)?.message ?? error);
-        log("daemon.merge_credit_refresh_failed", { task: task.id, error: refreshError });
+        report("daemon.merge_credit_refresh_failed", { task: task.id, error: refreshError });
       }
       if (creditVisible) {
         pendingMergedCredit.delete(task.id);
@@ -3462,12 +3720,12 @@ export async function runDaemon(
         rawRows = deps.readLedgerLines?.() ?? [];
       } catch (error) {
         evidenceError = String((error as Error)?.message ?? error);
-        log("daemon.merge_credit_evidence_failed", { task: task.id, error: evidenceError });
+        report("daemon.merge_credit_evidence_failed", { task: task.id, error: evidenceError });
       }
       const rows = rawRows.flatMap((raw) => {
         try { return [JSON.parse(raw) as Record<string, unknown>]; }
         catch (error) {
-          log("daemon.merge_credit_evidence_invalid", { task: task.id, error: String((error as Error)?.message ?? error) });
+          report("daemon.merge_credit_evidence_invalid", { task: task.id, error: String((error as Error)?.message ?? error) });
           return [];
         }
       });
@@ -3479,7 +3737,7 @@ export async function runDaemon(
       const merge = owner && rows.findLast((row) => row.step === "pr.merged" && row.run_id === owner.run_id);
       const refusedAt = typeof refusal?.ts === "string" ? Date.parse(refusal.ts) : NaN;
       const mergedAt = typeof merge?.ts === "string" ? Date.parse(merge.ts) : NaN;
-      log("daemon.merge_credit_correction", {
+      report("daemon.merge_credit_correction", {
         task: task.id,
         run_id: result.runId,
         pr_url: prUrl ?? null,
@@ -3510,7 +3768,7 @@ export async function runDaemon(
 
       if (disposition.kind === "awaiting_merge") {
         blockRetryStates.delete(task.id);
-        log("daemon.block.awaiting_merge", {
+        report("daemon.block.awaiting_merge", {
           task: task.id,
           verdict: result.verdict,
           pr_url: result.prUrl,
@@ -3521,7 +3779,7 @@ export async function runDaemon(
         // Transient: no strike. Selection naturally retries the same task next tick, since it is still
         // unmerged and its deps are unchanged, so no separate re-dispatch mechanism is needed.
         blockRetryStates.set(task.id, disposition.state);
-        log("daemon.block.transient_retry", {
+        report("daemon.block.transient_retry", {
           task: task.id,
           verdict: result.verdict,
           transient_retries: disposition.state.transientRetries,
@@ -3534,7 +3792,7 @@ export async function runDaemon(
         // this module uses, never a separate unbounded loop — exhausting the bound falls through to a
         // genuine blocker on a later tick rather than fix-looping forever (W1-T174, W1-T168).
         blockRetryStates.set(task.id, disposition.state);
-        log("daemon.block.fixable_dispatch", {
+        report("daemon.block.fixable_dispatch", {
           task: task.id,
           verdict: result.verdict,
           dependents: disposition.dependents,
@@ -3556,7 +3814,7 @@ export async function runDaemon(
           // releases, even though nothing about the task itself failed. So: no ledger write, no
           // entry in `independentFailureBlocksThisRun`, and the tick simply continues — the live
           // lock, not a ledger row, remains the actual exclusion until its owner finishes.
-          log("daemon.block.inflight_contention", {
+          report("daemon.block.inflight_contention", {
             task: task.id,
             verdict: result.verdict,
             run_id: result.runId,
@@ -3565,7 +3823,7 @@ export async function runDaemon(
         }
         if (result.verdict === "blocked_illformed") {
           illformedAdmissionBlocksThisRun.set(task.id, JSON.stringify(task));
-          log("daemon.block.illformed_admission", {
+          report("daemon.block.illformed_admission", {
             task: task.id,
             verdict: result.verdict,
             run_id: result.runId,
@@ -3580,7 +3838,7 @@ export async function runDaemon(
         const environmental = !harnessCommitRefused && isEnvironmentalBlock(result.verdict, undefined);
         if (environmental) environmentalBlocksThisRun.set(task.id, daemonClock.now());
         else if (!harnessCommitRefused) independentFailureBlocksThisRun.add(task.id);
-        log("dispatch.blocked_independent", {
+        report("dispatch.blocked_independent", {
           task_id: task.id,
           task: task.id,
           verdict: result.verdict,
@@ -3596,7 +3854,7 @@ export async function runDaemon(
             : {}),
         });
         if (harnessCommitRefused) {
-          log("dispatch.harness_commit_retry", {
+          report("dispatch.harness_commit_retry", {
             task_id: task.id,
             task: task.id,
             original_run_id: result.runId,
@@ -3605,7 +3863,7 @@ export async function runDaemon(
             harness_commit_refused: true,
           });
         }
-        log("daemon.block.independent_failure", {
+        report("daemon.block.independent_failure", {
           task: task.id,
           verdict: result.verdict,
           pr_url: result.prUrl,
@@ -3617,7 +3875,7 @@ export async function runDaemon(
       // the gap" is absolute. Escalate once, then let the caller park this task while its unmerged state
       // continues to dependency-gate every descendant. Reached by a genuine blocker, by a fixable one whose
       // strike bound is exhausted, and by a fixable one with no fix rung wired (W1-T174, W1-T3122).
-      log("daemon.blocked", {
+      report("daemon.blocked", {
         task: task.id,
         verdict: result.verdict,
         pr_url: result.prUrl,
@@ -3662,10 +3920,11 @@ export async function runDaemon(
   };
 
   // Shared by the top of tick and a lane refill (W1-T4416).
-  const reloadPlanBinding = (): void => {
+  const reloadPlanBinding = async (): Promise<void> => {
     if (!deps.reloadPlan) return;
     try {
-      const fresh = deps.reloadPlan();
+      // W1-T7743: awaited, so the production reloader's git runs off the loop; a sync fake resolves at once.
+      const fresh = await deps.reloadPlan();
       if (fresh) {
         plan = fresh;
         deps.onPlanReload?.(fresh);
@@ -4185,7 +4444,7 @@ export async function runDaemon(
     // landing on origin/main and the daemon next booting is 106 minutes (impl-FZ). Position is the safety argument:
     // after the stop check, so a halted fleet does no I/O, and before any dispatch decision reads the plan. A throw
     // is caught and ledgered, never fatal. Forensics: docs/forensics/daemon.md.
-    reloadPlanBinding();
+    if (deps.reloadPlan) await reloadPlanBinding();
     // One snapshot per admission (W1-T340, W1-T4416; MASTER-PLAN §4B). The plan binding is mutable and reassigned by the
     // reload above, so code closing over the NAME reads whatever the most recent reload produced. That is invisible
     // at one lane and stops being invisible the moment a batch holds more than one: a lane's later reasoning would be
@@ -4904,6 +5163,7 @@ export async function runDaemon(
     // first runnable kick becomes this cycle's task; others wait (fb-1784988460437-9daa9b).
     const mergedTask: MergedResolver = (t) => isMerged(t.id);
     let forcedNext: Task | undefined;
+    let forcedKick: { taskId: string; origin: string } | undefined;
     if (deps.pendingKicks) {
       for (const kick of deps.pendingKicks()) {
         const refuse = (reason: string) => {
@@ -4921,8 +5181,8 @@ export async function runDaemon(
           refuse(e instanceof PlanError ? e.message : String((e as Error)?.message ?? e));
           continue;
         }
-        deps.clearKick?.(kick.taskId);
-        log("console.kick_dispatched", { task: kick.taskId, origin: kick.origin });
+        // A reservation/governor deferral is not a serviced kick. Clear only at accepted start.
+        forcedKick = kick;
         forcedNext = task;
         break;
       }
@@ -5464,16 +5724,6 @@ export async function runDaemon(
       continue;
     }
 
-    if (dispatchSet.length > 1) {
-      // Mirrors `runDrainLanes`' concurrent-set row — the evidence trail P19's banked rung 2 needs. Never
-      // fires at one lane.
-      log("dispatch.concurrent_set", { tasks: admitted.map((t) => t.id), lane_count: laneCount });
-    }
-    for (const t of admitted) {
-      log("daemon.iteration", { task: t.id, attempted: attempted.length + 1, max: opts.max ?? null });
-      attempted.push(t.id);
-    }
-
     // The light-sweep ticker: while admitted lanes are unbounded and in flight, tick the restricted light
     // pass on the same injected clock idle polling uses, so a PR that goes green-but-review-absent
     // mid-batch re-posts within one poll interval instead of sitting invisible until every lane returns
@@ -5493,8 +5743,6 @@ export async function runDaemon(
         // NEXT tick boundary. Every worker is cut a fresh worktree from origin/main HEAD anyway.
         const interphaseWakeSeen = await stopInterphaseReviewClock();
         if (interphaseWakeSeen) log("daemon.dispatch.wake_deferred", { tasks: admitted.map((t) => t.id) });
-    sampleIdleLane(admitted.length, true, dispatchSet.length);
-
     // Concurrent dispatch: settle-all, never fail-fast, so a sibling lane's rejection can never abort another lane
     // in flight, and every lane's outcome is recorded before this tick decides anything (W1-T343). W1-T4416: a lane
     // that frees while a sibling runs refills from a FRESH read through the same gates; one lane never refills.
@@ -5504,24 +5752,34 @@ export async function runDaemon(
     const measuredRefillBound = runLengths.samples > 0;
     log("dispatch.refill_bound", { bound_ms: refillBoundMs, samples: runLengths.samples,
       source: measuredRefillBound ? "observed_runs" : "no_history_fallback" });
-    const snapshots = admitted.map(() => ({ plan: planForBatch, isMerged }));
-    const passIds = new Set(admitted.map((t) => t.id));
-    const inFlightTasks = new Set<Task>(admitted);
+    const snapshots: Array<{ plan: Plan; isMerged: MergedSet }> = [];
+    // Prepared before admission; not an accepted attempt or an in-flight ownership slot.
+    const preparedStartTimes = new Map<string, number>();
+    const passIds = new Set<string>();
+    const inFlightTasks = new Set<Task>();
+    const refillAdmissions = new WeakMap<Task, {
+      snapshot: { plan: Plan; isMerged: MergedSet }; finishedTaskId: string;
+    }>();
+    // A promised handoff owns only its proposal, never an attempt or active-worker slot.
+    // Other freed lanes must not choose its ID/scope before the pool accepts it.
+    const refillProposals = new Set<Task>();
+    let newBuildHeld = false;
     let refillClosed: string | undefined;
     let inFlightFreshness: Extract<DaemonFreshness, { stale: true }> | undefined;
     const restartWait = { decidedAtMs: 0, reported: 0 };
-    const laneStartedAtMs = new Map(admitted.map((t) => [t.id, dispatchPhaseStartedAtMs]));
-    const restartSlowLanes = new Set<string>();
+    const laneStartedAtMs = new Map<string, number>();
+    const restartHoldouts = new Set<string>();
+    const admittedUnderLatch = new Set<string>();
     const slowLane = (t: Task): boolean => measuredRefillBound && daemonClock.now() - laneStartedAtMs.get(t.id)! > refillBoundMs;
-    const restartStillWaitingOnSlowLane = (): boolean => [...inFlightTasks].some((t) => restartSlowLanes.has(t.id));
+    const restartStillWaitingOnHoldout = (): boolean => restartHoldouts.size > 0;
     // Re-read at every decision, never latched: a refilled sibling can outlive the measured length AFTER a lane freed.
     const phaseBoundHolds = (): boolean => !inFlightFreshness && daemonClock.now() - dispatchPhaseStartedAtMs > refillBoundMs &&
       ![...inFlightTasks].some(slowLane);
     const latchRestart = (freshness: Extract<DaemonFreshness, { stale: true }>): void => {
       if (!inFlightFreshness) {
         restartWait.decidedAtMs = daemonClock.now();
-        // Only the cohort that already delayed the restart grants refill; new runs cannot renew it.
-        for (const t of inFlightTasks) if (slowLane(t)) restartSlowLanes.add(t.id);
+        // Every in-flight run holds refill until a boundary or settlement; refills cannot renew it (W1-T7806).
+        for (const t of inFlightTasks) restartHoldouts.add(t.id);
       }
       inFlightFreshness ??= freshness;
     };
@@ -5531,14 +5789,15 @@ export async function runDaemon(
     // 2026-10-10 19:38: both freed lanes were held for good while the lane that later held the phase was 5 min old.
     // A measured bound parks such a lane instead; a dispatch tick or a sibling's finish re-decides it.
     const parkedLanes: Array<{ lane: number; finished: Task; wake: (next: Promise<Task | undefined>) => void }> = [];
+    const governorParked = new Map<number, string>();
     const wakeParkedLanes = (): void => {
       if (inFlightTasks.size > 0 && !refillClosed && phaseBoundHolds()) return;
-      // Deferred, so a throwing decision ends only its own lane (runLanePool), never strands a later parked one.
+      // Deferred: a throwing decision reaches the pool's fault outcome, never strands an owned sibling.
       for (const { lane, finished, wake } of parkedLanes.splice(0)) wake(Promise.resolve().then(() => decideRefill(lane, finished)));
     };
     const refillLane = (lane: number, finished: Task, outcome: PromiseSettledResult<RunResult>): Task | undefined | Promise<Task | undefined> => {
       inFlightTasks.delete(finished);
-      restartSlowLanes.delete(finished.id);
+      restartHoldouts.delete(finished.id);
       if (outcome.status === "rejected") {
         // W1-T5083: a lane-local rejection (the settle loop logs it and the pass continues) never closes refill.
         if (!(outcome.reason instanceof TaskAdmissionError) && !refillLaneLocalRejection(outcome.reason)) refillClosed ??= "a lane rejected";
@@ -5552,12 +5811,13 @@ export async function runDaemon(
     };
     const decideRefill = (lane: number, finished: Task): Task | undefined | Promise<Task | undefined> => {
       const phaseAgeMs = daemonClock.now() - dispatchPhaseStartedAtMs;
-      if (inFlightFreshness && !restartStillWaitingOnSlowLane()) refillClosed ??= "stale code";
+      if (inFlightFreshness && !restartStillWaitingOnHoldout()) refillClosed ??= "stale code";
       const phaseBound = !refillClosed && phaseBoundHolds() ? "phase bound" : undefined;
       // With no history no sibling can ever read slow, so parking could only end as a hold: hold now (W1-T5761).
       if (phaseBound && measuredRefillBound && inFlightTasks.size > 0) {
         log("dispatch.lane_parked", { lane, finished_task: finished.id, reason: phaseBound, phase_age_ms: phaseAgeMs,
           refill_bound_ms: refillBoundMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
+        governorParked.delete(lane);
         return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, wake }));
       }
       const governed = refillClosed || phaseBound ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
@@ -5567,10 +5827,10 @@ export async function runDaemon(
       const freshness = refillClosed || phaseBound ? undefined : freshnessReadsAsync ? settledFreshness : (deps.checkFreshness?.() as DaemonFreshness | undefined);
       if (!freshnessReadsAsync) logNotStaleFreshness(freshness);
       const freshnessAction = freshness?.stale ? decideFreshness(freshness, true) : undefined;
-      // W1-T6274: a restart decided here holds every later refill this phase and ends it in the freshness stop.
+      // W1-T6274/W1-T7806: once the latched holdouts drain, every later refill is held for the restart.
       if (freshnessAction === "restart" && freshness?.stale) {
         latchRestart(freshness);
-        if (!restartStillWaitingOnSlowLane()) refillClosed ??= "stale code";
+        if (!restartStillWaitingOnHoldout()) refillClosed ??= "stale code";
       }
       let reason =
         refillClosed ??
@@ -5580,6 +5840,15 @@ export async function runDaemon(
         (stopped ? `stop: ${stopped}` : undefined) ??
         (paused ? `pause: ${paused}` : undefined) ??
         (governed ? `governor: ${governed.kind}` : undefined);
+      // 2026-10-12 09:00: one container-short WIP reading held lane 2 for good while two siblings ran on past the hour.
+      // A governor reading is re-taken each tick, so a lane it holds parks; one row per lane and reason, not per tick.
+      if (governed && reason === `governor: ${governed.kind}` && inFlightTasks.size > 0) {
+        if (governorParked.get(lane) !== reason) log("dispatch.lane_parked", { lane, finished_task: finished.id, reason,
+          phase_age_ms: phaseAgeMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
+        governorParked.set(lane, reason);
+        return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, wake }));
+      }
+      governorParked.delete(lane);
       // W1-T5805: the refill decides on its OWN branch read, never the tick's: a branch pushed since the
       // tick began must refuse its task here. A failed read decides on the tick-start reading instead.
       const chooseRefill = (runBranchListing: string | undefined): Task | undefined | Promise<Task | undefined> => {
@@ -5594,10 +5863,16 @@ export async function runDaemon(
             ...dispatchOpts,
             ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log),
             dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
-            excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...pendingMergedCredit, ...passIds]),
+            excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...pendingMergedCredit, ...passIds,
+              ...[...refillProposals].map((proposal) => proposal.id)]),
+            // W1-T8502: pack the pool disjoint from the occupied lanes too, so a head they block cannot crowd out the rest.
+            inFlight: [...inFlightTasks, ...refillProposals],
           });
-          const fits = partitionByFileOverlap([...inFlightTasks, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
-          next = fits.dispatch.find((t) => !inFlightTasks.has(t));
+          const fits = partitionByFileOverlap([...inFlightTasks, ...refillProposals, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
+          // The same row the tick path writes, for pool tasks only: an occupied lane's own deferral is not a refill's.
+          const poolIds = new Set(pool.map((t) => t.id));
+          for (const d of fits.serialized) if (poolIds.has(d.task)) log("dispatch.serialized", serializedLedgerPayload(d));
+          next = fits.dispatch.find((t) => !inFlightTasks.has(t) && !refillProposals.has(t));
           if (next) nextSnapshot = snapshot;
         };
         const readFailed = (e: unknown): void => {
@@ -5606,7 +5881,7 @@ export async function runDaemon(
         const conclude = (): Task | undefined => {
           // W1-T6274: the reads above are awaited; a restart, stop or pause decided meanwhile still holds the lane.
           if (next) {
-            const latched = refillClosed ?? (inFlightFreshness && !restartStillWaitingOnSlowLane() ? "stale code" : undefined) ??
+            const latched = refillClosed ?? (inFlightFreshness && !restartStillWaitingOnHoldout() ? "stale code" : undefined) ??
               (deps.checkStop?.() ? "stop" : undefined) ?? (deps.checkPause?.() ? "pause" : undefined);
             if (latched !== undefined) {
               reason = `${latched} (decided while the refill read was in flight)`;
@@ -5623,19 +5898,15 @@ export async function runDaemon(
             });
             return undefined;
           }
-          snapshots.push(nextSnapshot!);
-          passIds.add(next.id);
-          inFlightTasks.add(next);
-          laneStartedAtMs.set(next.id, daemonClock.now());
-          log("dispatch.lane_refilled", { lane, finished_task: finished.id, next_task: next.id,
-            ...(inFlightFreshness ? { restart_pending: true, waiting_on: [...restartSlowLanes] } : {}) });
-          log("daemon.iteration", { task: next.id, attempted: attempted.length + 1, max: opts.max ?? null });
-          attempted.push(next.id);
-          return next;
+          // A promised refill still crosses the pool's handoff before it actually starts. No
+          // attempt/snapshot/overlap slot is committed here. Give concurrent decisions distinct keys.
+          const candidate = { ...next };
+          refillAdmissions.set(candidate, { snapshot: nextSnapshot!, finishedTaskId: finished.id });
+          refillProposals.add(candidate);
+          return candidate;
         };
-        if (reason === undefined) {
+        const decideFromPlan = (): Task | undefined | Promise<Task | undefined> => {
           try {
-            reloadPlanBinding();
             const refillPlan = plan;
             // W1-T5846: with the async port wired the merged set is read through it, never `refreshMerged`, whose
             // stale-generation fallback (W1-T5762) is a synchronous live read on the event loop. Only a deps
@@ -5654,8 +5925,11 @@ export async function runDaemon(
             // the failure is carried as the held reason, logged by `dispatch.lane_refill_held`
             readFailed(e);
           }
-        }
-        return conclude();
+          return conclude();
+        };
+        if (reason !== undefined) return conclude();
+        // W1-T7743: the reload is awaited (its git runs off the loop); a deps object with no reloader stays synchronous.
+        return deps.reloadPlan ? reloadPlanBinding().then(decideFromPlan) : decideFromPlan();
       };
       const runBranchRead = reason === undefined ? readRunBranchesFor("lane-refill", tickRunBranchListing) : undefined;
       return runBranchRead instanceof Promise ? runBranchRead.then(chooseRefill) : chooseRefill(runBranchRead);
@@ -5665,7 +5939,7 @@ export async function runDaemon(
       logNotStaleFreshness(freshness);
       if (freshness.stale && decideFreshness(freshness, true) === "restart") {
         latchRestart(freshness);
-        if (!restartStillWaitingOnSlowLane()) refillClosed ??= "stale code";
+        if (!restartStillWaitingOnHoldout()) refillClosed ??= "stale code";
       }
       wakeParkedLanes();
     };
@@ -5678,7 +5952,8 @@ export async function runDaemon(
       log("daemon.freshness_restart_waiting", {
         waiting_on: "in_flight_lanes",
         waited_ms: waitedMs,
-        lanes: [...inFlightTasks].map((t) => ({ task: t.id, age_ms: Math.max(0, nowMs - (laneStartedAtMs.get(t.id) ?? nowMs)) })),
+        lanes: [...inFlightTasks].map((t) => ({ task: t.id, age_ms: Math.max(0, nowMs - (laneStartedAtMs.get(t.id) ?? nowMs)),
+          holdout: restartHoldouts.has(t.id), admitted_under_latch: admittedUnderLatch.has(t.id) })),
         refill_held: refillClosed ?? null,
         report: restartWait.reported,
         old_sha: decided.oldSha,
@@ -5700,38 +5975,149 @@ export async function runDaemon(
     const lanes = { inFlight: 0 };
     sweepRetrigger.lanesInFlight = () => lanes.inFlight;
     const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch, sweepRetrigger, headroomSampler).stop;
-    const admittedWork = runLanePool(admitted, (id) => {
-      const rejoin = deps.categorizedRefusalRejoinFor?.(id);
-      if (rejoin && !rejoin.receiptRecorded) log("dispatch.harness_commit_retry", {
-        task_id: id,
-        original_run_id: rejoin.sourceRunId,
-        original_verdict: "no_pr",
-        original_refusal: "categorized_worker_refusal",
-        refused_contract_revision: rejoin.refusedContractRevision,
-        contract_revision: rejoin.contractRevision,
-        reason: "categorized refusal contract changed",
-      });
+    const admitAtStart = (task: Task, lane: number, isRefill: boolean): boolean => {
+      const refill = isRefill ? refillAdmissions.get(task) : undefined;
+      if (isRefill) {
+        refillProposals.delete(task);
+        // Concurrent proposals cannot spend the same task, overlap, max or WIP slot at handoff.
+        // A throwing reader/logger is a pool fault, not a success-shaped refusal.
+        const budget = laneDispatchBudget({
+          laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: deps.readQueueAdmission?.(),
+        });
+        const reason = refillClosed ??
+          (inFlightFreshness && !restartStillWaitingOnHoldout() ? "stale code" : undefined) ??
+          (deps.checkStop?.() ? "stop" : undefined) ?? (deps.checkPause?.() ? "pause" : undefined) ??
+          (!refill ? "missing refill snapshot" : undefined) ??
+          (passIds.has(task.id) ? "already dispatched this phase" : undefined) ??
+          (opts.max !== undefined && attempted.length >= opts.max ? "max reached" : undefined) ??
+          (budget <= inFlightTasks.size ? "lane budget" : undefined) ??
+          (!partitionByFileOverlap([...inFlightTasks, task], deps.observedByTask ?? NO_OBSERVED_SCOPE).dispatch.includes(task)
+            ? "file overlap at start" : undefined);
+        if (reason !== undefined) {
+          log("dispatch.lane_refill_held", { lane, finished_task: refill?.finishedTaskId, reason });
+          return false;
+        }
+      }
+      const rejoin = deps.categorizedRefusalRejoinFor?.(task.id);
+      if (rejoin && !rejoin.receiptRecorded) {
+        // A corrected refusal's durable RE-OFFER reason precedes run.start. It is not an
+        // accepted attempt: only a later real run.start spends this source's opportunity.
+        // Avoid writing for an already-held task, then re-read AFTER the fallible receipt.
+        const beforeReceipt = checkNewBuildReservation(deps, task);
+        if (beforeReceipt) {
+          newBuildHeld = true;
+          const fields = { task: task.id, lane, ...newBuildReservationPayload(beforeReceipt) };
+          log("dispatch.new_build_held", fields);
+          if (isRefill) log("dispatch.lane_refill_held", { ...fields, finished_task: refill!.finishedTaskId });
+          return false;
+        }
+        log("dispatch.harness_commit_retry", {
+          task_id: task.id,
+          original_run_id: rejoin.sourceRunId,
+          original_verdict: "no_pr",
+          original_refusal: "categorized_worker_refusal",
+          refused_contract_revision: rejoin.refusedContractRevision,
+          contract_revision: rejoin.contractRevision,
+          reason: "categorized refusal contract changed",
+          admission_stage: "contract_reoffer",
+        });
+      }
       const startedAtMs = daemonClock.now();
-      return deps.runOne(id).then((outcome) => {
+      // Last admission read: no await or fallible logging between this decision and runOne.
+      const reservation = checkNewBuildReservation(deps, task);
+      if (reservation) {
+        newBuildHeld = true;
+        const fields = { task: task.id, lane, ...newBuildReservationPayload(reservation) };
+        log("dispatch.new_build_held", fields);
+        if (isRefill) log("dispatch.lane_refill_held", { ...fields, finished_task: refill!.finishedTaskId });
+        return false;
+      }
+      preparedStartTimes.set(task.id, startedAtMs);
+      return true;
+    };
+    const onStarted = (task: Task, lane: number, isRefill: boolean): void => {
+      const refill = isRefill ? refillAdmissions.get(task) : undefined;
+      // Commit ALL accepted-only accounting before any external callback can throw. The pool
+      // already owns this worker, so even a failed log/clearKick cannot erase an actual attempt.
+      snapshots.push(refill?.snapshot ?? { plan: planForBatch, isMerged });
+      passIds.add(task.id);
+      inFlightTasks.add(task);
+      if (inFlightFreshness) admittedUnderLatch.add(task.id);
+      laneStartedAtMs.set(task.id, preparedStartTimes.get(task.id)!);
+      attempted.push(task.id);
+      if (forcedKick?.taskId === task.id) {
+        const kick = forcedKick;
+        deps.clearKick?.(task.id);
+        forcedKick = undefined;
+        log("console.kick_dispatched", { task: task.id, origin: kick.origin });
+      }
+      if (isRefill) log("dispatch.lane_refilled", { lane, finished_task: refill!.finishedTaskId, next_task: task.id,
+        ...(inFlightFreshness ? { restart_pending: true, waiting_on: [...restartHoldouts] } : {}) });
+      log("daemon.iteration", { task: task.id, attempted: attempted.length, max: opts.max ?? null });
+    };
+    const poolControl: LanePoolControl = {};
+    // Only these named phase boundaries are contained. Other logging keeps its existing contract.
+    const phaseFaults: Array<{ phase: string; reason: unknown }> = [];
+    const admittedWork = runLanePool(admitted, (id) => {
+      const startedAtMs = preparedStartTimes.get(id)!;
+      // Preserve the current worker-boundary handoff; a reservation never preempts it.
+      return deps.runOne(id, { restartAtWorkerBoundary: () => {
+        if (!inFlightFreshness) return undefined;
+        restartHoldouts.delete(id);
+        if (!restartStillWaitingOnHoldout()) refillClosed ??= "stale code";
+        wakeParkedLanes();
+        return inFlightFreshness;
+      } }).then((outcome) => {
         const length = daemonClock.now() - startedAtMs;
         if (length > 0) { runLengths.totalMs += length; runLengths.samples++; }
         return outcome;
       });
-    }, refillLane, lanes);
-    scheduleRepositoryMaintenance(true, () => lanes.inFlight);
-    const settled = await admittedWork;
-    repositoryMaintenanceQueueBusy = false;
-    // The settled counterpart to the concurrent-set row. Emitted BEFORE the ticker stop and the
-    // classification loop, because that loop's fatal path returns and the stop is itself awaited work that
-    // could throw, so anything later would be lost in exactly the failure cases this row reports.
-    log("dispatch.settled_set", settledSetPayload(admitted, settled, laneCount));
-    await stopTicker();
-    await flushLifetimePressure();
+    }, refillLane, lanes, admitAtStart, onStarted, poolControl);
+    let poolOutcome: LanePoolOutcome<Task, RunResult>;
+    try {
+      let phase = "dispatch.concurrent_set";
+      try {
+        if (dispatchSet.length > 1 && admitted.length > 0) {
+          log("dispatch.concurrent_set", { tasks: admitted.map((t) => t.id), lane_count: laneCount });
+        }
+        phase = "dispatch.sample_idle_lane";
+        sampleIdleLane(admitted.length, true, dispatchSet.length);
+        phase = "dispatch.repository_maintenance";
+        scheduleRepositoryMaintenance(true, () => lanes.inFlight);
+      } catch (reason) {
+        phaseFaults.push({ phase, reason });
+        // Retire proposals immediately, while keeping every actual worker and its handlers.
+        poolControl.close!(reason, phase);
+      } finally {
+        // Even a phase-level logging failure cannot abandon promises the pool already owns.
+        poolOutcome = await admittedWork;
+      }
+      try { log("dispatch.settled_set", settledSetPayload(admitted, poolOutcome.settled, laneCount)); }
+      catch (reason) { phaseFaults.push({ phase: "dispatch.settled_set", reason: reason }); }
+    } finally {
+      repositoryMaintenanceQueueBusy = false;
+      await stopTicker();
+    }
+    const reporting = createSettlementReporting();
+    try {
+    const settled = poolOutcome.settled;
+    await flushLifetimePressure(reporting.report);
     restartInterphaseReviewClock();
+    if (admitted.length === 0 && newBuildHeld && poolOutcome.fault === undefined && phaseFaults.length === 0) {
+      // Persistent hold is an in-process, paced NEW-build deferral, never a failure/STOP.
+      // A new tick owns a new clock. Retire this one before continuing, preserving
+      // any event wake instead of leaving its runner live after the hold releases.
+      if (await stopInterphaseReviewClock()) continue;
+      ticks++;
+      sampleIdleLane(0, true, dispatchSet.length);
+      await sleepUntilSweepWake(pollIntervalMs);
+      continue;
+    }
     // Lanes are back to empty here; whatever holds them empty from now on is named by the next tick's sample,
     // and an interval nothing names is reported as unknown rather than absorbed.
     idleLaneTickCause = undefined;
-    sampleIdleLane(0, false);
+    try { sampleIdleLane(0, false); }
+    catch (reason) { phaseFaults.push({ phase: "dispatch.sample_idle_lane", reason: reason }); }
 
     // Classify every lane's settlement before this tick decides anything, mirroring `runDrainLanes`.
     // A positively transient gh transport failure and a spawn-infra failure degrade into their bounded
@@ -5740,17 +6126,14 @@ export async function runDaemon(
     let spawnInfraSeenThisTick = false;
     let dispatchTransportSeenThisTick = false;
     const toProcess: Array<{ task: Task; result: RunResult; snapshot: (typeof snapshots)[number] }> = [];
-    for (let i = 0; i < admitted.length; i++) {
-      const t = admitted[i];
-      const outcome = settled[i];
-      if (outcome.status === "rejected") {
-        const err = outcome.reason;
+    const classifyRejection = async (t: Task, err: unknown, phase?: NonNullable<typeof poolOutcome.fault>["phase"]): Promise<{ taskId: string; message: string } | undefined> => {
+        // Only reporting throws are contained; the original classification still governs.
         if (err instanceof TaskAdmissionError) {
           invalidatedAdmissionsThisRun.add(t.id);
           const rawReason = String(err.message).replace(/[\r\n\t]+/g, " ");
           const reason = rawReason.length <= 240 ? rawReason : `${rawReason.slice(0, 239)}…`;
-          log("daemon.admission_stood_down", { task: t.id, reason });
-          continue;
+          reporting.report("daemon.admission_stood_down", { task: t.id, reason });
+          return;
         }
         const transientTransport = transientGhDispatchFailure(err);
         const spawnInfra = isSpawnInfraBlocked(err);
@@ -5780,7 +6163,7 @@ export async function runDaemon(
           const backoffMs = laneDeliveryBackoffMs(consecutive);
           const parkedUntilMs = daemonClock.now() + backoffMs;
           laneDeliveryParks.set(t.id, { consecutive, parkedUntilMs, revision });
-          log("daemon.lane_failed", {
+          reporting.report("daemon.lane_failed", {
             task: t.id,
             class: delivery.failureClass,
             error: delivery.firstLine,
@@ -5789,42 +6172,49 @@ export async function runDaemon(
             parked_until_ms: parkedUntilMs,
             revision,
           });
-          continue;
+          return;
         }
         if (!spawnInfra && transientTransport === undefined && ghRead === undefined) {
           // First observed wins the summary detail, mirroring `runDrainLanes`' identical choice. Every other
           // already-settled lane is still classified and processed before this tick returns.
-          if (!fatalError) fatalError = { taskId: t.id, message: String((err as Error)?.message ?? err) };
-          continue;
+          const message = String((err as Error)?.message ?? err);
+          return { taskId: t.id, message: phase ? `${phase}: ${message}` : message };
         }
         if (ghRead !== undefined) {
-          log("daemon.gh_read_failed", { task: t.id, error: ghRead.detail });
-          continue;
+          reporting.report("daemon.gh_read_failed", { task: t.id, error: ghRead.detail });
+          return;
         }
         if (transientTransport !== undefined) {
           dispatchTransportSeenThisTick = true;
-          log("daemon.dispatch_transport_deferred", {
+          reporting.report("daemon.dispatch_transport_deferred", {
             task: t.id,
             consecutive: consecutiveDispatchTransportFailures + 1,
             error: transientTransport.detail,
           });
-          continue;
+          return;
         }
         // Degrade, do not die: a spawn-infrastructure failure is never a fatal crash. The pre-fix shape was
         // error, process exit, supervisor restart, the identical failure again — five consecutive polls, zero
         // escalations, zero backoff. Escalate once per distinct cause, and count once per TICK rather than per
         // lane, so a batch where two lanes hit the same outage backs off like one bad tick (W1-T113 part iii).
         spawnInfraSeenThisTick = true;
-        const reason = err.message;
-        log("daemon.spawn_infra_blocked", { task: t.id, reason, consecutive: consecutiveSpawnInfraFailures + 1 });
+        const reason = (err as Error).message;
+        reporting.report("daemon.spawn_infra_blocked", { task: t.id, reason, consecutive: consecutiveSpawnInfraFailures + 1 });
         if (!toolchainEscalated.has(reason)) {
           toolchainEscalated.add(reason);
           try {
             await deps.onSpawnInfraBlocked?.({ task: t, reason });
           } catch (escErr) {
-            log("daemon.escalation.failed", { task: t.id, error: String((escErr as Error)?.message ?? escErr) });
+            reporting.report("daemon.escalation.failed", { task: t.id, error: String((escErr as Error)?.message ?? escErr) });
           }
         }
+    };
+    for (let i = 0; i < admitted.length; i++) {
+      const t = admitted[i];
+      const outcome = settled[i];
+      if (outcome.status === "rejected") {
+        const failure = await classifyRejection(t, outcome.reason);
+        fatalError ??= failure;
         continue;
       }
       const result = outcome.value;
@@ -5832,10 +6222,18 @@ export async function runDaemon(
       laneDeliveryParks.delete(t.id); // W1-T5344: a settled run ends this task's delivery-failure streak
       toProcess.push({ task: t, result, snapshot: snapshots[i] });
     }
+    if (poolOutcome.fault !== undefined) {
+      const { task, lane, phase, reason } = poolOutcome.fault;
+      try { log("dispatch.pool_failed", { task: task.id, lane, phase, error: String((reason as Error)?.message ?? reason) }); }
+      catch (logReason) { phaseFaults.push({ phase: "dispatch.pool_failed", reason: logReason }); }
+      // No synthetic task/settlement/attempt: only the original fault enters caller classification.
+      const failure = await classifyRejection(task, reason, phase);
+      fatalError ??= failure;
+    }
 
-    if (fatalError) {
+    if (fatalError && poolOutcome.fault === undefined && phaseFaults.length === 0 && reporting.faults.length === 0) {
       await stopInterphaseReviewClock();
-      return summary("error", `${fatalError.taskId}: ${fatalError.message}`);
+      return summary("error", `${fatalError.taskId}: ${fatalError.message}`, reporting);
     }
 
     // A successful lane — including one returning a non-spawn-infra blocked verdict — clears the backoff
@@ -5858,13 +6256,13 @@ export async function runDaemon(
       const apiWindowDisposition = reasonAboutApiWindow(apiWindowHoldState, task.id, result.verdict, pollIntervalMs, maxApiWindowHoldMs);
       apiWindowHoldState = apiWindowDisposition.state;
       apiWindowHoldMs = apiWindowDisposition.holdMs;
-      const outcome = await processDispatchResult(snapshot.plan, task, result, snapshot.isMerged);
+      const outcome = await processDispatchResult(snapshot.plan, task, result, snapshot.isMerged, reporting.report);
       if (outcome.kind === "genuine_blocker") {
         if (deps.isOpenPr === undefined || deps.isCreditIndeterminate === undefined) {
           blockedDetail ??= outcome.detail;
         } else {
           parkedBlockers.set(task.id, { prUrl: result.prUrl, dependents: outcome.dependents });
-          log("daemon.block.parked", {
+          reporting.report("daemon.block.parked", {
             task: task.id,
             verdict: result.verdict,
             pr_url: result.prUrl,
@@ -5874,14 +6272,24 @@ export async function runDaemon(
         }
       }
     }
+    if (fatalError || phaseFaults.length > 0 || reporting.faults.length > 0) {
+      // A pool fault closes starts, but genuine workers still earn their result/cost/merge credit.
+      // Preserve original classification/detail; named logging faults remain separate secondary facts.
+      const detail = [
+        ...(fatalError ? [`${fatalError.taskId}: ${fatalError.message}`] : []),
+        ...phaseFaults.map(({ phase, reason }) => `${phase}: ${String((reason as Error)?.message ?? reason)}`),
+      ].join("; ");
+      await stopInterphaseReviewClock();
+      return summary("error", detail, reporting);
+    }
     if (blockedDetail !== undefined) {
       await stopInterphaseReviewClock();
-      return summary("blocked", blockedDetail);
+      return summary("blocked", blockedDetail, reporting);
     }
 
     if (inFlightFreshness && !deps.checkStop?.() && !deps.checkPause?.()) {
       await stopInterphaseReviewClock();
-      return stopForFreshness(inFlightFreshness);
+      return stopForFreshness(inFlightFreshness, restartWait.decidedAtMs);
     }
 
     if (apiWindowHoldMs > 0) {
@@ -5931,6 +6339,16 @@ export async function runDaemon(
     }
 
     await stopInterphaseReviewClock();
+    } catch (reason) {
+      // Semantic failures still propagate after independently attempting both owned finalizers.
+      const cleanupFaults: unknown[] = [];
+      try { await stopInterphaseReviewClock(); }
+      catch (cleanupReason) { /* Caller receives the original failure plus this named cleanup failure. */ cleanupFaults.push(cleanupReason); }
+      try { await closeOwnedServices(reporting.report); }
+      catch (cleanupReason) { /* Caller receives the original failure plus this named cleanup failure. */ cleanupFaults.push(cleanupReason); }
+      if (cleanupFaults.length) throw new AggregateError([reason, ...cleanupFaults], "post-settlement reconciliation and cleanup failed");
+      throw reason;
+    }
   }
 }
 

@@ -229,35 +229,63 @@ function unseamedCoverage(r: LedgerRecord, sources: FixLaneEvidence): string | u
   return `${r.head_sha}: ${evidence.join("; ")}`;
 }
 
-/** Reads only the exact-head coverage evidence the ledger rows can consume, off the daemon loop. */
+export interface CheckRunRef { id: number; name?: string; details_url?: string; app?: { slug?: string } | null }
+
+/**
+ * The Actions job id of a check run, from a numeric source only: a `details_url` `/job/<digits>` or `/jobs/<digits>`
+ * segment, or the check run's own id when GitHub Actions posted it. Never `external_id` (a UUID on some checks).
+ */
+export function actionsJobIdOf(check: CheckRunRef): string | undefined {
+  const fromUrl = /\/jobs?\/(\d+)(?:[/?#]|$)/.exec(check.details_url ?? "")?.[1];
+  if (fromUrl) return fromUrl;
+  if (check.app?.slug === "github-actions" && Number.isSafeInteger(check.id) && check.id > 0) return String(check.id);
+  return undefined;
+}
+
+/**
+ * Reads only the exact-head coverage evidence the ledger rows can consume, off the daemon loop. An unreadable log is
+ * missing evidence for that head (ledgered once as `fix-lane.evidence_unreadable`), never a failed pass.
+ */
 export async function readFixLaneEvidence(
   sources: Pick<FixLaneSources, "owner" | "repo" | "readHeadSource" | "readCoverageLog">,
   records: readonly LedgerRecord[],
+  log?: (step: string, extra?: Record<string, unknown>) => void,
 ): Promise<FixLaneEvidence> {
   const logCache = new Map<string, string | undefined>();
   const sourceCache = new Map<string, string | undefined>();
   const readCoverageLog = async (head: string): Promise<string | undefined> => {
     if (logCache.has(head)) return logCache.get(head);
     if (sources.readCoverageLog) {
-      const log = sources.readCoverageLog(head);
-      logCache.set(head, log);
-      return log;
+      const injected = sources.readCoverageLog(head);
+      logCache.set(head, injected);
+      return injected;
     }
     const pages = await ghJsonAsync([...checkRunsRestArgs(sources.owner, sources.repo, head), "--paginate", "--slurp"]) as Array<{
-      check_runs: Array<{ id: number; name: string; conclusion: string; details_url?: string; external_id?: string }>;
+      check_runs: Array<CheckRunRef & { name: string; conclusion: string }>;
     }>;
     const checks = pages.flatMap(page => page.check_runs);
     const latest = new Map<string, typeof checks[number]>();
     for (const check of checks) if (check.id > (latest.get(check.name)?.id ?? 0)) latest.set(check.name, check);
-    const logs: string[] = [];
+    const logs: string[] = [], unreadable: Array<{ check: string; reason: string }> = [];
     for (const check of latest.values()) {
       if (check.conclusion !== "failure" || !isCoverage({ check: check.name })) continue;
-      const job = /\/jobs\/(\d+)/.exec(check.details_url ?? "")?.[1] ?? check.external_id ?? String(check.id);
-      logs.push(await ghTextAsync(["api", `repos/${sources.owner}/${sources.repo}/actions/jobs/${job}/logs`]));
+      const job = actionsJobIdOf(check);
+      if (job === undefined) continue;
+      try {
+        logs.push(await ghTextAsync(["api", `repos/${sources.owner}/${sources.repo}/actions/jobs/${job}/logs`]));
+      } catch (error) {
+        unreadable.push({ check: check.name, reason: String((error as Error)?.message ?? error) });
+      }
     }
-    const log = logs.join("\n");
-    logCache.set(head, log);
-    return log;
+    if (unreadable.length) {
+      // Partial logs would price a partial uncovered set as if it were complete, so the head's evidence is unknown.
+      log?.("fix-lane.evidence_unreadable", { head_sha: head, check: unreadable.map(u => u.check).join(", "), reason: unreadable.map(u => u.reason).join("; ") });
+      logCache.set(head, undefined);
+      return undefined;
+    }
+    const joined = logs.join("\n");
+    logCache.set(head, joined);
+    return joined;
   };
   const readHeadSource = async (head: string, file: string): Promise<string | undefined> => {
     const key = `${head}:${file}`;
@@ -282,8 +310,8 @@ export async function readFixLaneEvidence(
     if (!failures.length) continue;
     const tails = failures.flatMap(f => typeof f.logTail === "string" ? [f.logTail] : []);
     if (tails.length !== failures.length) {
-      const log = await readCoverageLog(row.head_sha);
-      if (log !== undefined) tails.push(log);
+      const read = await readCoverageLog(row.head_sha);
+      if (read !== undefined) tails.push(read);
     }
     const parsed = diffCoverageTargets(tails.map(tail => tail.replace(/^\d{4}-\d\d-\d\dT\S+ ?/gm, "")));
     if (!parsed || parsed.unlisted > 0 || !parsed.targets.length) continue;
@@ -549,7 +577,7 @@ export function fixLaneGardenSpec(deps: GardenerDeps, sources: FixLaneSources) {
     },
     inventoryAsync: async () => {
       const { now, records, plan } = readInputs();
-      const evidence = await readFixLaneEvidence(sources, records);
+      const evidence = await readFixLaneEvidence(sources, records, deps.log);
       return inventoryOf(now, records, plan, evidence);
     },
     onScorecard: (inv, scorecard) => {

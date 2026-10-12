@@ -1,0 +1,58 @@
+- id: W1-T5432
+  title: "Turn calibration gaps into governed tasks and report recording separately from filing"
+  repo: remudero
+  depends_on: [W1-T5341, W1-T4949]
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "2026-10-03 approved benchmark follow-ups; successor to merged readiness driver"
+  plan_refs: [W1-T5341, W1-T4949, W1-T965]
+  files: [src/lib/benchmark-readiness-intake.ts, src/lib/benchmark-aa-readiness.ts, src/lib/opportunity-intake.ts, src/run-task.ts, docs/cli-reference.md, test/benchmark-readiness-intake.test.ts, test/benchmark-aa-readiness.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED at a92ce44653eb9201ba6a1003c03c6e09a18a61bd: readiness implementation #8852
+    merged at 08:00:31. src/lib/benchmark-aa-readiness.ts:325-334 appends a local sidecar
+    and returns followUp.state=filed. The exact constant/path consumer census finds this
+    writer and its tests, not a named task-producing consumer. This is a bounded census,
+    not universal absence of an unnamed generic consumer. Existing governed opportunity
+    intake already routes source-qualified candidates to feedback-to-plan; reuse it.
+    W1-T965 was retired and concerned harvested worker text, not this readiness sidecar.
+    Complete history read 7,142 closed PRs with merged #8852 and #8791 controls; all six
+    open heads were read and no competing producer/intake subject was observed.
+  design: |
+    Add one typed, validated reader for the current instance's readiness gap sidecar and
+    feed it into the EXISTING opportunity intake, with repository/instance, trial, gap
+    identity, observed source anchor, freshness and availability. Preserve machine versus
+    operator authority and dedupe against existing task, proposal, feedback and PR evidence.
+    Do not create another timer, a new automatic permission or a competing triage lane.
+    A source record or feedback PR is recorded/pending-triage, not a filed implementation
+    task. Claim filed only with the resulting task ID and plan PR/source receipt; retain
+    rejected, held, unavailable and already-covered outcomes explicitly. A failed or
+    unavailable judgement leaves resumable evidence, not a new needs-human preference.
+    Drive a positive gap through actual reader, candidate collection and existing governed
+    task-producing triage seams in a disposable fixture. Prove resulting task identity and
+    receipt, not merely a new feedback file. Restart and unavailable-source paths remain
+    observable; no unknown evidence becomes empty. Do not consume another repository's gap
+    under this instance's identity. Update the generated core CLI reference if its maintained
+    command text changes. W1-T5433 separately owns atomic producer admission; this task owns
+    the downstream delivery and truthful states. No paid activation, routing change, ordinary
+    PR hold, public publication or new arbitrary data/sample ceiling belongs to this task.
+  acceptance:
+    - claim: "a sourced readiness gap reaches the existing task-producing intake with a resulting task receipt"
+      proof: 'grep: calibration gaps reach governed task triage in test/benchmark-readiness-intake.test.ts'
+    - claim: "recorded evidence and pending or failed triage never claim a filed task"
+      proof: 'grep: calibration gap recording is not task filing in test/benchmark-readiness-intake.test.ts'
+    - claim: "resumption reuses existing work and rejects foreign repository identity"
+      proof: 'grep: calibration gap intake resumes without duplicate or foreign work in test/benchmark-readiness-intake.test.ts'
+    - claim: "the production opportunity collector invokes the readiness source adapter"
+      proof: 'grep: collectBenchmarkReadinessCandidates( in src/lib/opportunity-intake.ts'
+  falsifier: |
+    Remove the production adapter call: the positive gap no longer reaches a resulting task.
+    Return filed after only writing the sidecar: the pending-triage fixture fails. Reuse a
+    different repository identity or forget an existing stable-key task after restart: the
+    scope/dedup fixture fails. Preserve every ordinary PR and paid-arm integrity guard.

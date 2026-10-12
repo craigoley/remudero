@@ -1,0 +1,75 @@
+- id: W1-T8236
+  title: "THE SRE LANE HAS NO DETECTOR FOR A FLEET THAT IS ALIVE BUT NOT FLOWING — every incident producer today watches errors, memory, loop lag, cost or a single run, so a held pause, a stranded task or an idle lane writes no incident; give the lane a registry of fleet-flow detectors, each judged against its own history"
+  repo: remudero
+  depends_on: [W1-T8232, W1-T8233]  # shares src/lib/sre-lane.ts with W1-T8232 and the census test with W1-T8233
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high  # Rule 19: one concern — the seam through which fleet-flow detectors reach the SRE lane
+  band_meaning: span
+  origin: "operator request 2026-10-11 (lean into automation and self improvement: the fleet catches its own failure classes) + 2026-10-11 detection research"
+  plan_refs: [W1-T4384, W1-T4385, W1-T4387, W1-T931, W1-T4417, W1-T5904, W1-T7421]
+  files: [src/lib/fleet-flow-detectors.ts, src/lib/sre-lane.ts, test/the-sre-lane-evaluates-fleet-flow-detectors.test.ts, test/every-incident-rule-reads-a-step-something-writes.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    On 2026-10-11 an operator session found about twelve fleet failure classes by watching the ledger: core paused
+    by a non-fleet supervisor, stranded and starved tasks, inherited reds, a 52-minute recycle drain, review-owner
+    loops, a stalled fix lane, ownerless plan PRs and others. For most of them the ledger already held the signal
+    (`fleet.pause`, `dispatch.lane_refill_held`, `dispatch.lifetime_pressure.infra_only`,
+    `dispatch.circuit_broken.verified`, repeated `sweep.disposed` reasons). None of these is an incident input.
+    READ on origin/main 25067fc89, the producers of `incident.event`:
+      - incident-events.ts: errors POSTed by console and gateway.
+      - incident-invariants.ts: six rules in serve's minute timer (`startIncidentInvariantsMonitor`,
+        src/lib/serve.ts:3130), so they are evaluated only while serve runs. Serve was down until 14:06Z on
+        2026-10-11. Two of the six read steps nothing writes (W1-T8233).
+      - ci-incidents.ts / flake-incident-gardener.ts: tests. cost-anomaly.ts: cost and a run running long, with
+        sweep.ts appending. serve-memory.ts: memory relief.
+    sre-lane.ts `runSreLanePass` (:305) only aggregates incident rows it finds. Its `readEvents`
+    (`daemonSreLaneInput`, :369) reads the live ledger file. It cannot see a flow problem that nobody turned into a
+    row.
+  design: |
+    Operator rulings: no hard thresholds, and the response is tiered and self-healing.
+    1. THE SEAM. New src/lib/fleet-flow-detectors.ts exports `evaluateFleetFlowDetectors(...)` (called from runSreLanePass) and `FleetFlowDetector { id, inputs, evaluate(rows, nowMs,
+       history) }` returning findings `{ name, subject, measured, bound, population, message }`. `message` carries
+       `key=value` subjects (`task=`, `pr=`, `instance=`, `hold=`) so sre-runbooks' `incidentSubject` can read them.
+       The list of detectors the lane runs is `SRE_LANE_DETECTORS` in sre-lane.ts, initially empty. Each detector is its own task and module, registered there.
+    2. JUDGED AGAINST ITS OWN HISTORY. One shared helper, `ownHistoryBound(samples, policy)`, gives a population's
+       trailing p90. That is the statistic the flow and fix-lane gardeners already use for blocked-past-slo. Below
+       the policy's `minSamples` it returns no bound, and the detector is silent, as cost-anomaly is for a thin
+       class. A finding stands only when a long window and its 1/12 short window both exceed the bound, which is
+       incident-invariants' burn shape. Every number comes from history or from an existing policy row, never from
+       a source literal.
+    3. MEMORY-BOUNDED. Detectors read a bounded recent slice of the ledger union through the memoized union reader,
+       never the live file alone (W1-T1013). Their population history is a small rolling record in
+       `state/fleet-flow-detectors.json` (per detector, the recent measures the bound needs), so a pass never
+       re-reads days of archives. The core memory limit stays as it is.
+    4. INTO THE EXISTING PIPELINE. Each pass evaluates the registry before it aggregates, and appends one
+       `incident.event` row per finding (kind `flow`, source `sre-lane`, name = finding name). The fingerprint is
+       kind plus name, never the subject, as cost-anomaly does, so one class is one incident. Re-ledger a still-firing
+       (name, subject) at most once per short window. From there the existing path runs: runbook if one answers,
+       else feedback, triage, task, then W1-T4387's lifecycle measuring the fix.
+    5. CENSUS. Each detector's `inputs` join W1-T8233's census, so a detector that reads a step nobody writes fails
+       CI.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below, using a fake detector.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-sre-lane-evaluates-fleet-flow-detectors.test.ts"
+    - claim: "a registered detector's finding becomes one incident.event row of kind flow"
+      proof: 'grep: test("W1-T8236: a detector finding becomes one flow incident event" in test/the-sre-lane-evaluates-fleet-flow-detectors.test.ts'
+    - claim: "a finding needs both the long and the short window over the population's own bound"
+      proof: 'grep: test("W1-T8236: a finding needs both windows over its own bound" in test/the-sre-lane-evaluates-fleet-flow-detectors.test.ts'
+    - claim: "a population thinner than minSamples is silent"
+      proof: 'grep: test("W1-T8236: a thin population is silent" in test/the-sre-lane-evaluates-fleet-flow-detectors.test.ts'
+    - claim: "a still-firing finding is re-ledgered at most once per short window"
+      proof: 'grep: test("W1-T8236: a still-firing finding re-ledgers once per short window" in test/the-sre-lane-evaluates-fleet-flow-detectors.test.ts'
+    - claim: "detector inputs are in the writer census"
+      proof: 'grep: SRE_LANE_DETECTORS in test/every-incident-rule-reads-a-step-something-writes.test.ts'
+    - claim: "the SRE lane pass calls the detector registry"
+      proof: 'grep: evaluateFleetFlowDetectors( in src/lib/sre-lane.ts'
+  falsifier: |
+    Register a fake detector without the pass evaluating the registry. No `incident.event` row appears and the
+    first test fails. Compare against a fixed literal instead of the population's own p90, and the
+    thin-population and both-windows tests fail.

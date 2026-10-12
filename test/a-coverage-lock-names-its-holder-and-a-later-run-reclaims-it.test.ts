@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { coverageGateLockDir, coverageScratchDir, testWithCoverageLeaf } from "../src/lib/ci-parity.js";
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
+import { finishJudgedRun } from "./helpers/judged-pool-run.js";
 
 function fixture() {
   const root = mkdtempSync("/tmp/rmd-coverage-holder-");
@@ -45,6 +46,7 @@ function successfulCoverage(observe: () => void): PreflightSpawn {
       const raw = opts?.env?.NODE_V8_COVERAGE;
       assert.ok(raw);
       writeFileSync(join(raw, "coverage-1-0000000000000-0.json"), "{}\n");
+      finishJudgedRun(args, opts);
       return { status: 0, stdout: "# tests 1\n# pass 1\n# fail 0\n", stderr: "" };
     }
     if (args.includes("--compact-output")) {

@@ -27,7 +27,6 @@ import { test } from "node:test";
  *  when the handed-over form began to count). A new name, or a count above its row, fails the census;
  *  so does a count BELOW its row: converting a site lowers its row here (or deletes it at 0) in the same PR. */
 const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
-  applyDefuseActions: 1,
   applyGhReadCadence: 1,
   assertOpenWeightToolBoundary: 1,
   assertWorkerEgressEnforcerVersion: 1,
@@ -46,7 +45,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   changeView: 1,
   changedShardProofs: 2,
   checkCliFreshness: 1,
-  checkFixCensusSnapshot: 1,
   checkProofAtAuthorTime: 1,
   ciLearningTaskIdMinter: 1,
   classifyHeadShaAvailability: 1,
@@ -59,7 +57,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   currentBranch: 1,
   daemonCommand: 4,
   daemonSreRunbookHost: 4,
-  dedicatedTargetPlanReloader: 3,
   defaultAdoptionShipDate: 1,
   defaultBinaryPinDeps: 1,
   defaultBlockingSleepSync: 1,
@@ -126,7 +123,7 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   execGhPrReview: 1,
   execGhStatusPost: 1,
   execWhitelistedProof: 1,
-  executeWorktreeRemoval: 2,
+  executeWorktreeRemoval: 1,
   extractReviewFindings: 1,
   fetchMergedCoverageArtifact: 4,
   fetchNewestPrReview: 1,
@@ -155,6 +152,7 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   ghPrView: 1,
   ghUpdateBranch: 2,
   git: 1,
+  githubRepoOfCheckout: 1,
   gitFailureReason: 1,
   gitGrepAnchorTrue: 1,
   grepFilesContaining: 1,
@@ -184,14 +182,14 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   mergedTriageSubjects: 1,
   openPrFileScopes: 1,
   openPrMintTexts: 1,
-  opportunityIntakePortsOver: 2,
+  opportunityIntakePortsOver: 1,
   originUrlAtCut: 1,
   pinnedConfigValue: 1,
-  planPrPreflightAtCommit: 2,
-  planReloader: 1,
+  planPrPreflightAtCommit: 1,
   planSafetyGitSync: 1,
   planTreeIsBehindMain: 1,
   postReviewPending: 1,
+  prepareDefuseTaskIds: 1,
   preserveFixHead: 3,
   probeProofSandbox: 1,
   productionCiJudgePorts: 1,
@@ -201,7 +199,7 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   projectionGithub: 1,
   proofLandingCommit: 1,
   proofRepairRoundRefusalInWorktree: 1,
-  pruneStaleRuns: 4,
+  pruneStaleRuns: 3,
   publishAbandonedFixOwnerAhead: 1,
   readAffectedListings: 1,
   readAffectedSuitesInput: 1,
@@ -209,7 +207,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   readCiFrictionHandFixes: 2,
   readCiFrictionPlanState: 1,
   readCodeScanningAlerts: 1,
-  readDispatchFilingSnapshot: 1,
   readHeadShaRest: 2,
   readLadderPlan: 1,
   readLocalOriginRefHead: 1,
@@ -224,7 +221,7 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   readRunBranchClosedPrsOutput: 1,
   readTaskPrecondition: 1,
   readyDraftViaGh: 1,
-  realArmDeps: 5,
+  realArmDeps: 6, // +1 2026-10-11: the closing-reference guard reads the PR body before a sync arm (ghJson handed over)
   realDeployDeps: 1,
   realReviewWorktree: 1,
   realSharedPauseGitDeps: 1,
@@ -236,7 +233,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   refreshProofToolchain: 1,
   registeredFixWorktreeOwner: 1,
   remotePlanCeilingOnRef: 1,
-  removeAbandonedFixWorktreeOwner: 1,
   renumberPlanPrIds: 1,
   repairPrMetadata: 2,
   requeueActionsJobOutcome: 1,
@@ -284,7 +280,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   vetPinnedConfig: 1,
   worktreeAdd: 5,
   worktreePushExec: 1,
-  worktreeRemove: 1,
   writePrBodyRest: 1,
 };
 
@@ -517,9 +512,11 @@ test("unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts â€
   const fns = topLevelFunctions();
   const pop = population(fns);
   const reach = loopReachable(fns, "daemonCommand");
-  for (const seam of ["checkFixCensusSnapshot", "mergeDirectViaRest"]) {
-    assert.ok((pop.get(seam) ?? 0) > 0 && reach.has(seam), `${seam} hands a sync primitive to its own call and is reached`);
-  }
+  assert.ok((pop.get("mergeDirectViaRest") ?? 0) > 0 && reach.has("mergeDirectViaRest"), "mergeDirectViaRest hands a sync primitive to its own call and is reached");
+  // W1-T7744: checkFixCensusSnapshot keeps its spawnSync seam default, and the census still counts it, but the fix rung
+  // and the census-push repair now await checkFixCensusSnapshotAsync, so the loop no longer reaches the sync form.
+  assert.ok((pop.get("checkFixCensusSnapshot") ?? 0) > 0, "the sync census check's seam default is still counted");
+  assert.ok(!reach.has("checkFixCensusSnapshot"), "no daemon-loop path reaches the sync census check (W1-T7744)");
 
   // Falsifier on the real source: a reached function with no row gains a seam that defaults to the primitive.
   const seamed = fns.map((f) =>

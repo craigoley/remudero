@@ -1,0 +1,58 @@
+- id: W1-T8511
+  title: "A REPLY ON A FEEDBACK GRILL ISSUE ANSWERS THE FEEDBACK RECORD — readEscalationAnswers lands the operator's GitHub reply on a TRIAGE-fb-* GRILL escalation only in plan/questions.ndjson, but a grilled feedback record is answered only by a reply_to entry or answered_by, so the operator's decision is silently dropped and the record stays `grilling` forever"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high # writes operator decisions into feedback records across the answer reader, the console route and the daemon wiring; operator-only authority is unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-12: escalation triage of #9913 and #9894"
+  plan_refs: [W1-T4471, W1-T4676, W1-T42]
+  files: [src/lib/escalation-answers.ts, src/lib/panel-graph.ts, src/run-task.ts, test/a-reply-on-a-feedback-grill-issue-answers-the-feedback-record.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    OBSERVED: escalations #9913 (TRIAGE-fb-1789382125003-abdb87) and #9894 (TRIAGE-fb-1789382055450-2b1a3c), both
+    GRILL issues labelled needs-question, carry an operator reply ("site-intake. …") from the repository owner's
+    account (MEMBER) at 2026-10-07T22:19Z. Five days later, both plan/feedback records on origin/main 35786344b still
+    read `status: grilling`, `answered_by: null`, and no plan/feedback entry has `reply_to` naming either id.
+    WHY: `readEscalationAnswers` (src/lib/escalation-answers.ts, W1-T4471) accepts an operator reply and lands it
+    ONLY through `appendQuestionAnswer` in plan/questions.ndjson, keyed by the issue's task id (`TRIAGE-fb-<id>`).
+    That store steers the fix rung. A grilled feedback record is answered only when `feedbackHasAnswer`
+    (src/lib/human-gate.ts) sees `answered_by` or an entry with `reply_to` naming it, which the console writes through
+    `buildSubmitFeedbackRoute` (src/lib/panel-graph.ts: POST /v1/feedback {replyTo} captures the reply entry, sets the
+    record `answered` with `answeredBy`, and queues both for landing). Nothing connects the two, so every operator
+    decision typed on a feedback GRILL issue is dropped.
+  design: |
+    1. Factor the reply half of `buildSubmitFeedbackRoute` (capture the reply entry with `replyTo`, flip the record to
+       `answered` with `answeredBy`, queue both for landing) into one exported function the route keeps calling
+       unchanged.
+    2. In `readEscalationAnswers`, an accepted answer (comment or reaction) on an issue whose task id is
+       `TRIAGE-<feedback id>` whose record is still `grilling` ALSO applies that function with the answer text, the
+       operator's origin (`issue#<n>:comment:<id>` / reaction) as the reply's `submission_key`. The question-store write
+       is unchanged.
+    3. Idempotent: `findFeedbackBySubmissionKey` makes a second pass a no-op; a record no longer `grilling` is never
+       touched. The dedup is the feedback reply's own key, NOT the question store's recorded origins, so an answer
+       already in plan/questions.ndjson but never applied to its record is applied once.
+    4. The two pending answers (#9913, #9894): both issues are still open, so the first pass after deploy applies them
+       through step 3. Do not hand-edit either record; the test pins that an already-recorded origin with no reply
+       entry is still applied.
+    5. Operator-only authority (G-6) is unchanged: a public commenter's text never reaches the feedback writer.
+    Wire the landing deps the route uses into the daemon's call site in src/run-task.ts.
+  acceptance:
+    - claim: "an operator reply on a TRIAGE-fb GRILL issue captures a reply entry for the grilled record and marks it answered"
+      proof: 'grep: test("W1-T8511: an operator reply on a feedback grill issue answers its record" in test/a-reply-on-a-feedback-grill-issue-answers-the-feedback-record.test.ts'
+    - claim: "a second pass over the same reply writes nothing new"
+      proof: 'grep: test("W1-T8511: a second pass over the same reply writes nothing new" in test/a-reply-on-a-feedback-grill-issue-answers-the-feedback-record.test.ts'
+    - claim: "a reply already in the question store but never applied to its record is applied once"
+      proof: 'grep: test("W1-T8511: an answer already in the question store but not on its record is applied once" in test/a-reply-on-a-feedback-grill-issue-answers-the-feedback-record.test.ts'
+    - claim: "a non-operator comment on a feedback grill issue never reaches the feedback writer"
+      proof: 'grep: test("W1-T8511: a non-operator comment never reaches the feedback record" in test/a-reply-on-a-feedback-grill-issue-answers-the-feedback-record.test.ts'
+  falsifier: |
+    Seed a grilling feedback record and an open GRILL issue for `TRIAGE-<its id>` with one owner comment, then run
+    `readEscalationAnswers`. At origin/main the record stays `grilling` with no reply entry; with the change a reply
+    entry names it and the record reads `answered`. Pre-record the comment's origin in plan/questions.ndjson and the
+    third test still sees the record answered; key the dedup on the question store and it reds.

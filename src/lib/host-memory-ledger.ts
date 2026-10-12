@@ -24,6 +24,8 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
+import type { DatabaseSync } from "node:sqlite";
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -152,6 +154,8 @@ export interface OpenReservationInput {
 export interface MemoryReservationHandle {
   /** The entry id, or undefined when the open itself failed (the worker proceeds regardless). */
   readonly id: string | undefined;
+  /** True only after this handle's entry was successfully published to its existing ledger. */
+  readonly published?: boolean;
   bindRoot(pid: number): void;
   releaseOccupancy(): void;
 }
@@ -320,6 +324,32 @@ export function defaultMemoryLedgerLocation(): { dir: string; scope: "host" | "l
   return { dir: join(slot.dir, "host-memory"), scope: slot.scope === "configured" || slot.scope === "host-scratch" ? "host" : "local" };
 }
 
+const require = createRequire(import.meta.url);
+
+export const MEMORY_ADMISSION_LOCK_BUSY = "ERR_MEMORY_ADMISSION_LOCK_BUSY";
+
+/** The existing SQLite BEGIN IMMEDIATE contract, without a busy wait or a second reservation store.
+ * Its OS lock ends on close or process death. The action is synchronous: never hold it over a spawn or back-off. */
+export function withMemoryAdmissionLock<T>(action: () => T, location = defaultMemoryLedgerLocation()): T {
+  const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+  let db: DatabaseSync | undefined;
+  try {
+    try {
+      db = new DatabaseSync(join(location.dir, ".admission-lock.sqlite"), { timeout: 0 });
+      db.exec("BEGIN IMMEDIATE");
+    } catch (error) {
+      const code = (error as { errcode?: number }).errcode;
+      if (code === 5 || code === 6) throw Object.assign(new Error("admission-lock-held"), { code: MEMORY_ADMISSION_LOCK_BUSY });
+      throw new Error(`admission-lock-unavailable: ${String((error as Error).message ?? error)}`);
+    }
+    const result = action();
+    db.exec("COMMIT");
+    return result;
+  } finally {
+    db?.close();
+  }
+}
+
 interface Context {
   dir: string;
   scope: "host" | "local";
@@ -476,7 +506,7 @@ function mergeAndPersist(ctx: Context, entry: MemoryReservationEntry, deps: Host
   } : entry);
 }
 
-const NOOP_HANDLE: MemoryReservationHandle = { id: undefined, bindRoot: () => undefined, releaseOccupancy: () => undefined };
+const NOOP_HANDLE: MemoryReservationHandle = { id: undefined, published: false, bindRoot: () => undefined, releaseOccupancy: () => undefined };
 
 /**
  * Open one reservation at worker-claim time. NEVER throws: on any failure it logs a diagnostic and
@@ -514,14 +544,17 @@ export function openMemoryReservation(input: OpenReservationInput, deps: HostMem
     recordError(deps, "open", error);
     return NOOP_HANDLE;
   }
+  let published = false;
   try {
     persist(ctx, entry);
+    published = true;
   } catch (error) {
     // The handle keeps the entry in memory and retries the write on bind/release.
     recordError(deps, "open-write", error);
   }
   return {
     id: entry.id,
+    get published() { return published; },
     bindRoot(pid: number): void {
       try {
         const probed = ctx.probe(pid);
@@ -529,6 +562,7 @@ export function openMemoryReservation(input: OpenReservationInput, deps: HostMem
         const identity = { pid, start: probed.state === "alive" ? probed.start : "unknown" };
         entry = { ...entry, roots: union(entry.roots, [identity]), tree: union(entry.tree, [identity]) };
         mergeAndPersist(ctx, entry, deps);
+        published = true;
       } catch (error) {
         recordError(deps, "bind", error);
       }
@@ -829,4 +863,15 @@ export function readMemoryLedger(deps: HostMemoryLedgerOptions = {}): HostMemory
     recordError(deps, "read", error);
     return undefined;
   }
+}
+
+/**
+ * W1-T7720: why the reservation store could not be READ, or `undefined` when it could. A missing,
+ * reset or present store is a reading; only `state: "unreadable"` — or a read that returned nothing at
+ * all (`readMemoryLedger` records a diagnostic and yields `undefined`) — is a read FAILURE. Pure.
+ */
+export function memoryStoreReadFailure(reading: HostMemoryReading | undefined): string | undefined {
+  if (reading === undefined) return "reservation store read returned no reading";
+  if (reading.state !== "unreadable") return undefined;
+  return reading.reason ?? "reservation store unreadable";
 }

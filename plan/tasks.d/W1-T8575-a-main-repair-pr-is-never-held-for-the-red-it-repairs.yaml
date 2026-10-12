@@ -1,0 +1,93 @@
+- id: W1-T8575
+  title: "A MAIN-REPAIR PR IS NEVER HELD FOR THE RED IT REPAIRS — on 2026-10-12 the sweep stood the red-main repair PR #11096 down as base-red (\"proof-discrimination is absent from main's latest run, and main is red ... the branch refreshes once main is green\"), so the PR that would turn main green waited for main to turn green; and a check that judges only the PR's own body was read as inheritable from main"
+  repo: remudero
+  depends_on: []  # W1-T8042 (queued, P1) also edits src/lib/sweep.ts but not decideBaseRed; not serialized, so a deadlocked main is not kept waiting on its chain (W1-T8038, W1-T8041)
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — which reds decideBaseRed may hold while main is red; it spans the repair-PR exemption and the body-scoped-check exemption, both inside decideBaseRed and its stand-down sentence
+  band_meaning: blast-radius
+  origin: "operator standing direction 2026-10-12: fix reds at the root; red main from #11085, deadlocked repair #11096"
+  plan_refs: [W1-T5490, W1-T4351, W1-T6403, W1-T6024, W1-T8042, W1-T8572]
+  files:
+    - src/lib/sweep.ts
+    - test/a-main-repair-pr-is-never-held-for-the-red-it-repairs.test.ts
+    - "src/lib/ledger.ts"
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ on origin/main 5ec079f75. Symbols, not lines.
+    THE INCIDENT. Main went red at 97e3f9136 (#11085). The main-health lane opened #11096 (task main-repair-97e3f9136d82,
+    branch main-repair-fix-97e3f9136d82-1791813063189) with the one-line fix. Its first head f84af4f failed
+    proof-discrimination on its own body's prose proofs (W1-T8572 is that root). Then the core ledger has, at 13:55:09Z,
+    `sweep.base_red.stood_down` check_name proof-discrimination, and on each pass after it `sweep.disposed`:
+    "base red: proof-discrimination is absent from main's latest run (c42bab6ea...), and main is red — no fix dispatched,
+    the branch refreshes once main is green". The same reason repeated at 13:58, 14:00 and 14:05Z. At 14:07Z it read
+    "base red: coverage-ratchet is absent from main's latest run (df8c8f3e0...)". The repair waits for the green it is
+    meant to produce. Nothing in the sweep can break that loop; a session had to hand-repair the body.
+    WHY. `decideBaseRed` (src/lib/sweep.ts), while `main.state === "red"` and main's census `observedChecks` is known,
+    returns `{ kind: "wait" }` for the first failing check whose name is absent from main's run. That arm is deliberate:
+    W1-T5490 added it because lint-plan, claims and the coverage shards are pull_request-only, and on 2026-10-03 an
+    unloadable plan on main reddened them on every PR. Its test "W1-T5490: a pull-request-only red waits while main is
+    red" (test/a-red-main-stands-down-every-fix-it-could-have-caused.test.ts) pins it, and this task keeps it. Two cases
+    it was never meant to cover:
+      (a) THE PR IS MAIN'S REPAIR. Waiting is right for a PR that inherits main's red. It is wrong for the PR that removes
+          it. `decideBaseRed` reads no fact about the PR's purpose. The facts exist: the main-health lane ledgers
+          `main.repair.fix_opened` with the PR url (src/lib/main-health-rung.ts), and `dispatchMainRepairFixRun`
+          (src/run-task.ts) stamps `Remudero-Task: main-repair-<sha12>` (`mainRepairTaskId`), which `OpenPrView.taskId`
+          carries. A revert PR (`main-repair-revert-*`) and a ratchet-record PR (`MAIN_RATCHET_RECORD_BRANCH_PREFIX`) are
+          the same lane.
+      (b) THE CHECK JUDGES ONLY THE PR. proof-discrimination, acceptance-author-gate and commitlint (the job in
+          pr-title-lint.yml) read the PR's own body, title or proofs. Each is a pull_request workflow that also triggers on `edited`
+          (.github/workflows/proof-discrimination-gate.yml, acceptance-author-gate.yml, pr-title-lint.yml), because a
+          body or title edit changes its verdict with no new commit. Main's red cannot reach them, so their red is the
+          PR's own on every PR, not only a repair. lint-plan and the coverage shards run the merged tree and can inherit,
+          which is W1-T5490's case.
+    THE DEADLOCK IS GENERAL TO (a). For a repair PR, whatever check reds first, every inherited-looking red is held until
+    main is green, and main turns green only when a repair merges. The 14:07Z row shows a second check (coverage-ratchet)
+    taking the first one's place.
+    MEASURED on host remudero, ~/rmd-state2/state, 2026-10-12 ~14:10Z. Niced, 85 rotation archives from 10-08 onward
+    plus the live file, rows deduplicated by ts and step. Positive control: 2 `main-repair.pr_opened` rows over the lane's
+    whole life (shipped 10-09, #10192), and 19 `main-repair.dispatching`. Stood down as base-red: 1 of the 2, #11096, with
+    `sweep.base_red.stood_down` and 5 `sweep.disposed` rows naming main as red. #10712 (10-10) was armed on a full PASS
+    with no stand-down row. Small sample: the defect is live; this is not a rate.
+  design: |
+    1. A REPAIR PR IS NEVER HELD. Add `isMainRepairPr(pr, ledgerLines)` in src/lib/sweep.ts. It is true when
+       `pr.taskId` starts with `main-repair-` or a `main.repair.fix_opened` row names `pr.prUrl`. In `decideBaseRed`, a true
+       value returns `{ kind: "own" }` before any main-state arm, so its red goes to the fix lane like any own red. The
+       predicate reads facts the lane already writes. It adds no list of branch names to keep in step.
+    2. A BODY-SCOPED CHECK IS NEVER INHERITED. Export `PR_BODY_SCOPED_CHECKS` from src/lib/sweep.ts:
+       proof-discrimination, acceptance-author-gate and commitlint (pr-title-lint.yml's job). The absent-name arm skips these names when it looks
+       for an absent check. A PR whose only reds are body-scoped returns `own`. W1-T5490's lint-plan case is unchanged.
+       A census test in the new file reads .github/workflows/*.yml and requires every workflow whose `pull_request.types`
+       includes `edited` and whose job name is in ci-gate.yml's REQUIRED list to be in `PR_BODY_SCOPED_CHECKS`, or to be named in an
+       exemption with its reason. ci.yml, ci-gate.yml and unwired-gate.yml trigger on `edited` for other reasons. Positive
+       control: the census finds proof-discrimination by name.
+    3. THE STAND-DOWN SENTENCE STAYS HONEST. The "is absent from main's latest run" reason can no longer be written for a
+       repair PR or a body-scoped check. The test asserts that against the #11096 shape.
+    4. Unchanged: W1-T5490's absent-name wait for tree-running checks, the one-refresh rule, W1-T6024's reproduced-on-main
+       arm, `classifyRedCause` and strike accounting.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-main-repair-pr-is-never-held-for-the-red-it-repairs.test.ts"
+    - claim: "the #11096 shape (main-repair task id, proof-discrimination red, main red with that check absent from its run) gets a fix dispatched, not a stand-down"
+      proof: 'grep: test("W1-T8575: the #11096 shape gets a fix dispatched, not a base-red stand-down" in test/a-main-repair-pr-is-never-held-for-the-red-it-repairs.test.ts'
+    - claim: "a PR the main-health lane opened is never held, whichever check reds, recognised by its main.repair.fix_opened row alone"
+      proof: 'grep: test("W1-T8575: a PR the main-health lane opened is never held for main" in test/a-main-repair-pr-is-never-held-for-the-red-it-repairs.test.ts'
+    - claim: "an ordinary PR red only on a body-scoped check is its own red while main is red, and W1-T5490's lint-plan wait is unchanged"
+      proof: 'grep: test("W1-T8575: a body-scoped red is the PR own while a tree red still waits" in test/a-main-repair-pr-is-never-held-for-the-red-it-repairs.test.ts'
+    - claim: "every required pull_request check that triggers on edited is body-scoped or exempted by name"
+      proof: 'grep: test("W1-T8575: every edited-triggered required check is classified" in test/a-main-repair-pr-is-never-held-for-the-red-it-repairs.test.ts'
+    - claim: "the body-scoped set exists in sweep.ts"
+      proof: "grep: PR_BODY_SCOPED_CHECKS in src/lib/sweep.ts"
+  falsifier: |
+    Delete the `isMainRepairPr` arm, and the #11096 fixture stands down with "is absent from main's latest run" again and
+    no fix is dispatched. Delete proof-discrimination from `PR_BODY_SCOPED_CHECKS`, and the ordinary-PR body-scoped test
+    reads `wait`. Add the body-scoped skip to every name, and W1-T5490's lint-plan test and the tree-red half of this file
+    read `own`. Add a new edited-triggered required workflow, and the census names it.
+  note: |
+    EFFECT, measured after merge from the core ledger with no fixed pass mark: count `sweep.base_red.stood_down` rows whose
+    task_id starts with `main-repair-`, and whose check_name is in `PR_BODY_SCOPED_CHECKS`. Healthy shape: none. Also time
+    from `main-repair.pr_opened` to that PR's merge, against #11096's hand-repaired run.

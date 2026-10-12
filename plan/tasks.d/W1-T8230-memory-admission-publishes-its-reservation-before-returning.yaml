@@ -1,0 +1,70 @@
+- id: W1-T8230
+  title: "MEMORY ADMISSION PUBLISHES ITS RESERVATION BEFORE RETURNING — two overlapping starts can both read no reservations and pass, before either caller records its claim"
+  repo: remudero
+  depends_on: [W1-T7093, W1-T7094]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # One concern: an admitted start and its existing reservation are one transition at every enforce-mode start site
+  band_meaning: blast-radius
+  origin: "operator-approved memory qualification 2026-10-11; no production enforcement activation"
+  plan_refs: [W1-T7093, W1-T7094, W1-T7095, W1-T4632]
+  files: [src/lib/host-memory-admission.ts, src/lib/host-memory-ledger.ts, src/lib/host-memory-learning.ts, src/lib/worker.ts, src/lib/garden-registry.ts, test/an-enforced-memory-budget-waits-in-priority-order.test.ts, test/a-memory-reservation-is-released-only-when-its-whole-tree-is-gone.test.ts, test/a-missing-memory-ledger-never-reads-as-empty.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-11, pinned Node 24.21.0, controlled probe admission-interleaving-v1.json:
+    the actual awaitMemoryAdmission/gatherShadowInputs/evaluateShadowMemory modules admit two
+    900 MiB starts as fits. Both reads see zero reservations; only after both awaits return do
+    the native caller continuations record them. The resulting 1,800 MiB claims exceed the
+    fixture's spare headroom by 100 MiB. The actual post-reservation evaluator defers, and a
+    serial positive control waits until the first reservation is released. No live worker,
+    allocation or production policy change was made; this is NOT measured production overcommit.
+    At main 25067fc894, spawnWorker awaits admission before openOccupancyReservation and
+    childGardenPassSpawn awaits admission before reserve(). The admission's process-local
+    priority queue removes a waiter before its caller can write the reservation; neither that
+    queue nor an atomic individual JSON-file rename serializes check-and-reserve across processes.
+    Guarded complete scope 2026-10-11 20:55:24Z found no plan owner of host-memory-admission.ts.
+    W1-T7093 owns bookkeeping/release, W1-T7094 owns shadow evaluation, W1-T7095 owns priority,
+    W1-T7720 owns unreadable dispatch readings. Open PR 10945 is a separate opt-in private heavy
+    READY hold and explicitly does not wire actual starts; it does not close this gap.
+    Production remains shadow/off. Qualifying this transition is a prerequisite to recommending
+    enforcement, not permission to activate it or to present a budget as a hard resource cap.
+  design: |
+    Reuse the existing ledger and learned estimate, not a second reservation store. In enforce
+    mode, a positively fitting evaluation and publication of that start's identifiable reservation
+    form one short cross-process critical section. A second contender must re-read after the first
+    claim is visible, before it can report fits. Carry the granted handle into the worker/garden
+    spawn wiring: bind its real pid AND start time, avoid reopening/double-counting the estimate,
+    and release occupancy through existing verified-tree/generation semantics on every settlement.
+    Never hold the critical section while awaiting admission back-off, doing provider work,
+    spawning a child or waiting for its completion. Reuse a repository locking contract if suitable;
+    prove the actual same-host, separate-process boundary and crash behavior before choosing it.
+    Keep priority/aging, uncertainty re-read, nothing-to-wait-for and named error fail-open behavior.
+    An unavailable lock/store must be named, never reported as a successful measured fits or zero
+    reservations. Unchanged shadow/off starts must not acquire the admission lock or gain a delay.
+    Pending claims retain owner pid/start plus generation and scope. Cancellation/pre-spawn failure
+    closes only its own never-bound claim; verified owner/generation termination allows recovery.
+    Age alone, stale heartbeat, pid reuse or an unverifiable foreign owner must not delete a claim
+    or interrupt a live worker. No timer, policy promotion, threshold/limit/concurrency increase,
+    production pause/restart, ledger migration or test-slot lease reclamation is in this task.
+    Exercise real spawn/garden ordering with contained harmless executables, plus independent native
+    processes contending on a private shared ledger. Tests must check outcomes and visible claims,
+    not merely spy that a locking helper was called. Record refusals and every interrupted control.
+  acceptance:
+    - claim: "two simultaneous same-process starts and independent native processes cannot both report fits before the first fitting reservation is visible; the next start waits and re-evaluates, while serial fit and priority controls still pass"
+      proof: "unit test: memory admission publishes one reservation before a concurrent start can report fits"
+    - claim: "the real worker and garden spawn boundaries consume the granted handle exactly once, bind process identity, and settle cancellation, pre-spawn failure and eventual completion without double reservations"
+      proof: "unit test: worker and garden starts consume their admitted memory reservation exactly once"
+    - claim: "missing unreadable reset or lock-unavailable state is named rather than measured fits; shadow and off modes never wait on the admission critical section; the existing tiered and error fail-open behavior is preserved"
+      proof: "unit test: admission serialization preserves named uncertainty and unchanged shadow starts"
+    - claim: "a killed pre-spawn owner is recoverable only with verified process or generation termination; live, reused-pid and unknown foreign owners are never reclaimed by age, and no critical section survives a waiting start"
+      proof: "unit test: an interrupted memory admission preserves live ownership and releases only verified claims"
+  falsifier: |
+    Move reservation publication back after the await: the same-process and independent-process
+    concurrent controls must fail. Remove cross-process exclusion while leaving a local queue:
+    the independent-process control fails. Reopen a granted handle at spawn: the exactly-once
+    control fails. Reclaim by age alone or retain the lock during back-off: the ownership or
+    waiting control fails. Every restored control must pass on the committed implementation head.

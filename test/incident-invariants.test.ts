@@ -67,11 +67,11 @@ test("an invariant fires only when both its long and short windows burn", () => 
     // Inside the long window only (older than the short window's own 10-minute reach): a
     // fulfilled dispatch, so the LONG window reads "queue is moving" even though nothing has
     // fulfilled recently.
-    row(NOW_MS - dispatchLongMs + 60_000, { step: "queue.priority_snapshot", queuedPriority1: 1 }),
+    row(NOW_MS - dispatchLongMs + 60_000, { step: "daemon.pause", detail: "hold" }),
     row(NOW_MS - dispatchLongMs + 60_000, { step: "dispatch.settled_set", dispatched: 1, fulfilled: 1, rejected: 0 }),
-    // Inside BOTH windows: priority-1 work is still queued right now, with nothing fulfilled
-    // since -> the SHORT window alone reads stalled.
-    row(NOW_MS - dispatchShortMs / 2, { step: "queue.priority_snapshot", queuedPriority1: 1 }),
+    // Inside BOTH windows: dispatch is held right now, with nothing fulfilled since -> the SHORT
+    // window alone reads stalled.
+    row(NOW_MS - dispatchShortMs / 2, { step: "daemon.pause", detail: "hold" }),
   ];
   const shortOnlyFindings = evaluateIncidentInvariants(shortOnlyBad, NOW_MS);
   assert.ok(
@@ -80,12 +80,12 @@ test("an invariant fires only when both its long and short windows burn", () => 
   );
 });
 
-test("zero fulfilled dispatches with queued priority-one work fires the dispatch-stall rule", () => {
+test("a sustained dispatch hold with no implement run start fires the dispatch-stall rule", () => {
   const longMs = 2 * 60 * 60_000; // dispatch-stall's own long window
   const rows: IncidentInvariantRow[] = [];
-  // Queued priority-1 work is visible throughout both windows...
+  // The daemon records a held dispatch throughout both windows...
   for (let t = NOW_MS - longMs; t <= NOW_MS; t += 10 * 60_000) {
-    rows.push(row(t, { step: "queue.priority_snapshot", queuedPriority1: 2 }));
+    rows.push(row(t, { step: "dispatch.lane_refill_held", reason: "fleet PAUSE hold" }));
   }
   // ...and NOT ONE dispatch pass reports a fulfilled task the whole time (worse: some passes ran
   // and settled nothing, so this is not merely "no evidence" — it's evidence of zero).
@@ -95,8 +95,8 @@ test("zero fulfilled dispatches with queued priority-one work fires the dispatch
 
   const findings = evaluateIncidentInvariants(rows, NOW_MS);
   const stall = findings.find((f) => f.ruleId === DISPATCH_STALL_RULE_ID);
-  assert.ok(stall, "queued priority-1 work + zero fulfilled dispatches, sustained, must fire dispatch-stall");
-  assert.match(stall!.message, /queued priority-1 tasks=2/);
+  assert.ok(stall, "a sustained hold + zero fulfilled dispatches must fire dispatch-stall");
+  assert.match(stall!.message, /dispatch hold rows=12/);
   assert.match(stall!.message, /fulfilled dispatches=0/);
 
   const ledgerLine = invariantFindingLedgerLine(stall!, NOW_MS);
@@ -105,11 +105,11 @@ test("zero fulfilled dispatches with queued priority-one work fires the dispatch
   assert.equal(ledgerLine.name, DISPATCH_STALL_RULE_ID);
 });
 
-test("a fulfilled dispatch in the window clears the dispatch-stall rule even with priority-1 work queued", () => {
+test("a fulfilled dispatch in the window clears the dispatch-stall rule even while dispatch is held", () => {
   const longMs = 2 * 60 * 60_000;
   const rows: IncidentInvariantRow[] = [];
   for (let t = NOW_MS - longMs; t <= NOW_MS; t += 10 * 60_000) {
-    rows.push(row(t, { step: "queue.priority_snapshot", queuedPriority1: 1 }));
+    rows.push(row(t, { step: "daemon.pause", detail: "hold" }));
   }
   rows.push(row(NOW_MS - 5 * 60_000, { step: "dispatch.settled_set", dispatched: 1, fulfilled: 1, rejected: 0 }));
 
@@ -120,7 +120,7 @@ test("a fulfilled dispatch in the window clears the dispatch-stall rule even wit
   );
 });
 
-test("no evidence of queued priority-1 work never fires dispatch-stall, no matter how quiet dispatch is", () => {
+test("no evidence of a dispatch hold never fires dispatch-stall, no matter how quiet dispatch is", () => {
   const findings = evaluateIncidentInvariants([], NOW_MS);
   assert.ok(!findings.some((f) => f.ruleId === DISPATCH_STALL_RULE_ID), "an empty ledger is 'no evidence', never 'stalled'");
 });

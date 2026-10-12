@@ -11,8 +11,8 @@
   origin: "operator session 2026-10-05: throughput research (plan-update CI floor)"
   plan_refs: [W1-T3191, W1-T4395, W1-T4071, W1-T5700]
   files: [test/retro-marker-atomic.test.ts, test/retro-marker-atomic-real-run.test.ts, scripts/test-tier-manifest.json]
-  status: queued
-  priority: 1
+  status: done
+  # operator session 2026-10-12: retire W1-T5902 — W1-T7615 (#10631, f2845db43) met its goal another way: a plan-only PR's ci-shard (1/8) ran 3.0 min on #11077, against a 418 s Test step alone when this was filed.
   attempts: 0
   rationale: |
     MEASURED 2026-10-05: for a PLAN_ONLY diff (#9358) ci-shard (1/8) logged "running 1 of 480

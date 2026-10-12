@@ -1,0 +1,46 @@
+- id: W1-T8510
+  title: "A COMMIT BODY LINE NEVER EXCEEDS COMMITLINT FOR ONE LONG TOKEN — wrapBodyLines breaks only at whitespace, so a ci-friction cause name of 102 characters becomes a 102-character body line, commitlint's body-max-line-length refuses the gardener's commit, and its filing never lands"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: low # message shaping only; the commitlint hook stays the gate
+  band_meaning: span
+  origin: "operator session 2026-10-12: escalation #10269 triage"
+  plan_refs: [W1-T4203, W1-T3483]
+  files: [src/lib/commit-message.ts, test/a-commit-body-line-never-exceeds-commitlint-for-one-long-token.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED: escalation #10269 (BLOCKED, ci-friction-gardener) — the ci-friction gardener's filing failed three
+    passes in a row. Its commit body carried "Full title: chore(plan): the ci-friction gardener drafts a fix for" and
+    then the cause name `ci-friction:check:ci-log:coverage-ratchet:diff-coverage-blocked-this-diff-adds-source-line-s-with-zero`,
+    one 102-character token, on its own line. The commit-msg hook's commitlint refused it with
+    `body's lines must not be longer than 100 characters [body-max-line-length]`, and the gardener retries forever.
+    REPRODUCED on origin/main 35786344b: `wrapBodyLines` (src/lib/commit-message.ts, "breaking on whitespace only")
+    returns line lengths [66, 102, 0, 35] for that exact body. Every caller inherits it: `shapeCommitMessage`
+    (commit-message.ts), the gardener commit in src/run-task.ts (`fitConventionalTitle` + `wrapBodyLines`), and the
+    skill-lifecycle approve messages.
+    W1-T4203 fixed the same shape only inside triage.ts's private `wrapBodyLine`; this shared helper kept it.
+  design: |
+    1. In `wrapBodyLines`, a token longer than `max` is split into pieces of at most `max` characters, preferring the
+       last natural separator (`-`, `:`, `/`, `.`, `_`) within the limit, else a hard cut at `max`. Pieces keep their
+       characters and order: joining the emitted lines back (without inserting anything) reproduces the token.
+    2. Shorter tokens wrap exactly as today; a body with no over-long token produces byte-identical output.
+    3. Do not touch triage.ts's own wrapper or any caller; the fix lives in the one shared helper.
+  acceptance:
+    - claim: "a body carrying a 102-character token wraps into lines of at most 100 characters"
+      proof: 'grep: test("W1-T8510: a 102-character token wraps into lines of at most 100 characters" in test/a-commit-body-line-never-exceeds-commitlint-for-one-long-token.test.ts'
+    - claim: "the split loses no character: the over-long token's pieces rejoin to the original token, cut at a separator when one is within the limit"
+      proof: 'grep: test("W1-T8510: an over-long token splits losslessly, at a separator when one fits" in test/a-commit-body-line-never-exceeds-commitlint-for-one-long-token.test.ts'
+    - claim: "the gardener's commit message for the #10269 cause passes checkCommitMessage"
+      proof: 'grep: test("W1-T8510: the gardener commit for a 102-character cause passes checkCommitMessage" in test/a-commit-body-line-never-exceeds-commitlint-for-one-long-token.test.ts'
+    - claim: "a body with no over-long token wraps byte-identically to before"
+      proof: 'grep: test("W1-T8510: a body without an over-long token wraps as before" in test/a-commit-body-line-never-exceeds-commitlint-for-one-long-token.test.ts'
+  falsifier: |
+    Call `wrapBodyLines` on "Full title: chore(plan): the ci-friction gardener drafts a fix for " followed by the
+    102-character cause from #10269. At origin/main one line is 102 characters long; with the change every line is at
+    most 100 and the pieces rejoin to the cause. Revert the split and the first and third tests red.

@@ -88,7 +88,7 @@ import { loadEscalationLinkSecret, readEscalationLinkSecret, type EscalationOpti
 import { projectClassifiedHumanGates } from "./ask-classification.js";
 import { buildReadModelViewRoutes, oldestAsOf, viewMode, type ViewBodySource } from "./views.js";
 import { createViewEvents, VIEW_EVENTS_PATH, type ViewEvents } from "./view-events.js";
-import { analyticsLegacyView } from "./analytics-view.js";
+import { analyticsLegacyView, captureHostModelApprovals, type HostModelApprovalConfig } from "./analytics-view.js";
 import { NAV_BADGE_NO_COMPOSITE, navBadgeView, navBadgeWithDecisions, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
 import { NOW_VIEW_NAME } from "./now-view.js";
 import { HOST_VIEW_NAME, hostLegacyView, providerPolicyConfigFromStatus, providerRoutingBody, type HostViewData } from "./host-view.js";
@@ -128,6 +128,7 @@ import {
   buildAssistantControlRoute,
   buildAssistantControlCapabilityRoute,
   buildAssistantControlReceiptRoute,
+  buildAssistantActionDiscoveryRoute,
   buildPrActionRoute,
   buildQuietHoursRoute,
   buildResumeRoute,
@@ -219,6 +220,7 @@ import { loadConfig, type WorkerProviderId } from "./config.js";
 import type { Config, ModelApproval } from "./config-schema.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { createServeDrain, exitWithin } from "./serve-drain.js";
+import { publishHostServeEvidence, HOST_SERVE_ERROR_STEP, type HostServePublishOptions } from "./host-serve-evidence.js";
 import { createServeMemoryRegistry, droppableRouteCache, LEGACY_CACHE_VIEWS, readWorkerHeaps, sampleServeMemory, snapshotHolder, startServeMemoryMonitor, viewBodiesHolder,
   withoutRestore, workerThreads, type CgroupHeadroom, type ServeMemoryMonitorOptions, type ServeMemoryRegistry, type TrackedWorker } from "./serve-memory.js";
 import { githubAuthProbe, gatewayPrimedProbe, planLoadedProbe, readModelWarmProbe, type ReadinessProbe } from "./serve-generation.js";
@@ -338,13 +340,15 @@ export interface ServeDeps {
   operatorIdentity?: OperatorIdentityConfig;
   /** The key-set fetch and clock the operator provider uses — injectable so a test is hermetic. */
   operatorIdentityIo?: { fetchImpl?: typeof fetch; clock?: Clock };
-  /** W1-T2562: re-resolve the CURRENT on-disk sha for the shell's staleness chip. Defaults to
-   *  {@link resolveConsoleSha} — the same primitive {@link gateStaleCodeExit} compares against. */
+  /** W1-T2562: re-resolve the CURRENT on-disk sha. Handed to {@link gateStaleCodeExit}, which
+   *  compares {@link consoleSha} against it; absent, the gate calls {@link resolveConsoleSha}. */
   resolveCurrentSha?: () => string;
   /** `planSource` (W1-T5639) qualifies `plan`: absent, the plan is trusted as it always was. */
   board: BoardDeps & Pick<PlanSourceHolder, "planSource">;
   /** Read-only projection of the host's model approvals; no other config field crosses the status wire. */
   modelApprovals?: readonly ModelApproval[];
+  /** Captured once at startup and shared with legacy and cached readers; not a new policy authority. */
+  modelApprovalConfig?: HostModelApprovalConfig;
   /**
    * `plan/feedback/` + `plan/tasks.yaml` root and GitHub trace gateway (panel-graph.ts).
    * Deliberately `Omit<..., "inboxRoot">` — {@link buildServeRoutes} supplies `inboxRoot`
@@ -605,6 +609,8 @@ export interface ServeDeps {
     /** W1-T5355: the threads whose heaps the sample reads; absent, every thread this one spawns after serve is built. */
     workers?: () => readonly TrackedWorker[];
   };
+  /** W1-T8711: the seams of serve's shared producer observation (host-serve-evidence.ts); absent, this host's real store. */
+  hostServeEvidence?: HostServePublishOptions;
 }
 
 /**
@@ -2856,7 +2862,7 @@ function assembleServeRoutes(
   const hostLegacy = hostLegacyView({ control: controlStatusDeps, account: accountUsageDeps, providerRouting: { root: deps.fleetControlRoot, ...deps.providerRouting }, skillsRoot: deps.questionsRoot },
     () => readModel?.body(HOST_VIEW_NAME)?.body.data as HostViewData | undefined);
   // W1-T5055: the analytics view's legacy side merges serve's own per-instance caches, as the worker merges their snapshots.
-  const analyticsLegacy = analyticsLegacyView({ scopes: () => navBadgeScopes().map((scope) => ({ instanceId: scope.instanceId, analytics: scope.analytics })) });
+  const analyticsLegacy = analyticsLegacyView({ scopes: () => navBadgeScopes().map((scope) => ({ instanceId: scope.instanceId, repository: scope.repository, analytics: scope.analytics })), modelApprovalConfig: deps.modelApprovalConfig });
   // The shadow compares the worker's badge with the undecorated legacy one; only the served badge carries decisions.
   const shadowed = withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name], onServed: routeReads.served,
     readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME, TASK_VIEW_NAME],
@@ -2899,6 +2905,7 @@ function assembleServeRoutes(
     buildAssistantControlRoute(assistantControl),
     buildAssistantControlCapabilityRoute(assistantControl),
     buildAssistantControlReceiptRoute(assistantControl),
+    buildAssistantActionDiscoveryRoute(assistantControl),
     buildQuietHoursRoute(fleetControlDeps),
     buildAnswerQuestionRoute(questionDeps),
     buildApproveManualRoute(fleetControlDeps),
@@ -3060,7 +3067,7 @@ function assembleServeRoutes(
       clock: deps.incidents?.clock,
       readStore: deps.incidents?.readStore,
     }),
-    buildGardenersRoute({ stateDir: dirname(deps.ledgerPath) }),
+    buildGardenersRoute({ stateDir: dirname(deps.ledgerPath), repository: deps.assistantRepository }),
   ];
   const routes = boundConsoleReadRoutes(rawRoutes, deps, CONSOLE_READ_ROUTE_BUDGET_MS, memory && { registry: memory, scope: "core" },
     readModel && { source: readModel, instance: deps.instances?.coreInstance ?? CORE_INSTANCE });
@@ -3170,6 +3177,12 @@ export function startIncidentInvariantsMonitor(
  * returned server `close`s, so no timer outlives it.
  */
 function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
+  // The CLI supplies this property only after loadConfig succeeds, including an absent optional list.
+  // Direct callers without a source stay unreported; no directory name is permission evidence.
+  const supplied = deps.modelApprovalConfig ?? (Object.hasOwn(deps, "modelApprovals")
+    ? { capturedAt: systemClock.iso(), approvals: deps.modelApprovals ?? [] } : undefined);
+  const modelApprovalConfig = supplied === undefined ? undefined : captureHostModelApprovals(supplied);
+  deps = { ...deps, modelApprovalConfig };
   // W1-T5355: subscribed before anything below can spawn a thread, so each one's heap is sampled.
   const liveThreads = deps.serveMemory?.workers ?? workerThreads().live;
   const github = deps.board.github;
@@ -3217,9 +3230,11 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   });
   const readModel = deps.readModel && withNeedsYouView(createReadModelWorker({ stateDir: dirname(deps.ledgerPath), instances: readModelInstances(deps), log: deps.log, escalationRepository: deps.assistantRepository,
     registry: { repoPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot), hostPath: deps.registry?.hostRegistryPath ?? DEFAULT_HOST_INSTANCE_REGISTRY_PATH },
-    ...(keepWarm ? { github: { serve: keepWarm, ...walk } } : {}), ...deps.readModel }));
+    ...(keepWarm ? { github: { serve: keepWarm, ...walk } } : {}), ...deps.readModel, modelApprovalConfig }));
   const staleExit = gateStaleCodeExit({
     bootSha: consoleSha,
+    // The caller's "current sha" is what the gate compares against; absent, the gate re-reads git.
+    ...(deps.resolveCurrentSha ? { resolveCurrentSha: deps.resolveCurrentSha } : {}),
     log: deps.log,
     beforeExit: () => {
       readModel?.stop();
@@ -3351,12 +3366,26 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     const stopInvariants = startIncidentInvariantsMonitor(deps.ledgerPath, { ...deps.incidentInvariants, log: deps.log });
     // W1-T5175: serve samples its memory from its own loop, beside the invariants it ledgers. ONE close
     // listener stops both: the server already sits at its listener ceiling.
+    // W1-T8711: the shared producer observation rides the sample cadence above (no timer of its own), once at start and
+    // once at close. It never throws and never waits on anything but one small atomic write.
+    const publishServe = (scenario: "serve-steady" | "serve-stopped"): void => {
+      publishHostServeEvidence({ scenario }, {
+        revision: consoleSha,
+        log: (event) => deps.log?.(HOST_SERVE_ERROR_STEP, event),
+        ...deps.hostServeEvidence,
+      });
+    };
+    publishServe("serve-steady");
     const stopMemory = startServeMemoryMonitor({
       ...deps.serveMemory,
       holders: memory.holders,
-      sample: async (holders) => sampleServeMemory(holders, {
-        usage: deps.serveMemory?.usage, headroom: deps.serveMemory?.headroom, workerHeaps: await readWorkerHeaps(liveThreads()),
-      }),
+      sample: async (holders) => {
+        const sample = sampleServeMemory(holders, {
+          usage: deps.serveMemory?.usage, headroom: deps.serveMemory?.headroom, workerHeaps: await readWorkerHeaps(liveThreads()),
+        });
+        publishServe("serve-steady");
+        return sample;
+      },
       modeOf: (view) => viewMode(readModel, view),
       log: deps.log,
       incident: (line) => appendLedger(deps.ledgerPath, line),
@@ -3364,6 +3393,9 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     server.on("close", () => {
       stopInvariants();
       stopMemory();
+      // A supervised generation closing at a handoff is not serve stopping: its successor publishes its own, and a
+      // supervisor that really stopped is read as stale (unknown), never as an explicit stop it did not make.
+      if (!deps.generation) publishServe("serve-stopped");
     });
   };
   if (deps.generation) server.setMaxListeners(server.getMaxListeners() + 1).once("listening", startLedgerWriters);

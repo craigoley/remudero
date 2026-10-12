@@ -1,0 +1,82 @@
+- id: W1-T5424
+  title: "Classify rotation metadata without hiding unknown ledger artifacts"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "2026-10-03 approved telemetry and Inbox follow-ups; measured ledger corpus"
+  plan_refs: [W1-T1286, W1-T5041, W1-T5341]
+  files: [src/lib/ledger-union.ts, src/lib/ledger.ts, test/ledger-grep-unclassified.test.ts, test/cash-trial.test.ts, test/triage-lane-outcomes.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at 5017ff2f95b0321163f6c4c21256a0f6eb69844b: listedLedgerFiles names every
+    ledger-prefixed non-rotation as unclassified. ledgerCarriedPrefixPath and
+    ledgerRetainedStepsPath produce the canonical carried-prefix and retention metadata.
+    cash-trial.windowedRows and triageOutcomesCommand independently refuse any unclassified
+    path; inboxReplyAuditState cannot establish absence in the same condition. The shared
+    reader itself does not refuse merely because unclassified is nonempty. Do not conflate
+    those outcomes or turn its best-effort ok into a complete-corpus assertion.
+    At 04:22:30 UTC a read-only production control fully read the two metadata files:
+    93 and 2777 bytes, stable by inode/size/mtime and valid under their producer schemas.
+    A six-hour daemon.boot query read 23 files, observed gzip plus live forms, unread empty,
+    torn zero, and three real boot rows. All three auxiliary paths were still unclassified.
+    The backup is NOT established harmless: its complete read had 6615 valid historical
+    rows and one malformed row. Valid timestamps span August 8-20; the malformed row
+    prevents an unconditional complete-corpus/window claim. No file was removed or moved.
+    W1-T1286 deliberately names unknown artifacts rather than taking down best-effort reads.
+    W1-T5041 produces retention metadata; it does not classify it for evidence consumers.
+    W1-T5341 owns fresh prospective calibration, not this narrow enumeration gap.
+    INFERRED: known metadata adds a permanent incomplete-evidence reason to strict consumers.
+    This finding does not prove paid routing is enabled or that fixing metadata alone releases
+    the paid arm: the backup and other integrity predicates can still refuse it.
+  design: |
+    Extend the single ledger corpus classifier to distinguish exactly the two canonical
+    producer-owned metadata paths from unknown ledger artifacts, reusing producer path/schema
+    contracts rather than a broad JSON, suffix or prefix exclusion. Classify only readable,
+    valid metadata; malformed, unexpected-shape or unreadable candidates remain explicitly
+    unclassified/incomplete for strict consumers. Return named auxiliary classifications so
+    an audit can explain what was excluded and why; do not count them as archive files.
+    Keep genuine plain/gzip archives and the live ledger unchanged. Preserve W1-T1286's
+    unknown-artifact naming, unread-rotation refusal and zero-archive controls. An old backup,
+    lock, staging file or other unrecognized form must not disappear through this change.
+    Exercise shared classification through both real strict consumers using valid metadata,
+    corrupt metadata, an unknown backup and missing/read-failed actual rotations. Test cash
+    selection with supplied fixture policy only: no live policy mutation or billed call.
+    Add both metadata helpers to the positive producer/consumer contract control, so a new
+    producer name cannot silently recreate the mismatch. Keep routine reads cheap; avoid
+    decompression or scanning ledger history merely to classify two small metadata files.
+    No paid activation, cost inference, unknown-to-zero conversion, routing change, consent
+    change, blanket PR hold, automatic deletion, backup retirement or new approval step.
+    Any backup disposition needs its own exact-row coverage and malformed-row evidence;
+    leave it visible here and file a separately deduplicated follow-up when justified.
+  acceptance:
+    - claim: "canonical valid producer metadata is explicitly classified and never counted as an archive"
+      proof: 'grep: valid producer metadata is auxiliary evidence not an unclassified archive in test/ledger-grep-unclassified.test.ts'
+    - claim: "corrupt or unreadable metadata and unknown backup artifacts remain visible"
+      proof: 'grep: malformed metadata and unknown backups remain explicitly unclassified in test/ledger-grep-unclassified.test.ts'
+    - claim: "cash evidence does not become unavailable solely because valid rotation metadata exists"
+      proof: 'grep: cash trial evidence tolerates valid metadata but refuses unknown corpus gaps in test/cash-trial.test.ts'
+    - claim: "triage outcome evidence uses the same metadata classification without losing source-gap refusal"
+      proof: 'grep: triage outcomes accept producer metadata and refuse unknown artifacts in test/triage-lane-outcomes.test.ts'
+  falsifier: |
+    Restore the all-ledger-prefixes unclassified rule: both real consumer positive controls
+    fail. Ignore every JSON or backup suffix: the corrupt/unknown controls fail. Count metadata
+    as archives: the archive-count/zero-archive controls fail. Drop unread rotations or invent
+    a zero cost: their existing strict evidence controls must still fail.
+  note: |
+    Atomically reserved from /home/craigoleyagent/rmd-mint on
+    codex/ledger-metadata-plan-1791001598283; refs/rmd-id/W1-T5424 is HELD.
+    Scope-time evidence read all 7120 closed PRs in 72 pages, with #8791 as a positive
+    implementation control. W1-T1286 #2677 and W1-T5041 #8261 have implementation candidates;
+    their source contracts were read rather than inferred from credit alone. A surviving
+    W1-T4393 branch concerns write-rate headroom, not metadata classification. Six actual
+    open PR heads had changed-head controls and no overlapping classifier or strict-reader
+    change. Re-sweep before building; branch presence and filing are not completion.
+    This is one plan shard only. High span records one classifier contract across its cash
+    and triage integration falsifiers, not a broader authority or approval requirement.

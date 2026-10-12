@@ -11,7 +11,7 @@ import type { RunResult } from "./run-result.js";
 import { headroomExhausted, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
-import { checkDispatchGovernors, governorDeferPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict } from "./dispatch-governor.js";
+import { checkDispatchGovernors, checkNewBuildReservation, consultMemoryReads, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadHold, type MemoryReadTracker, type NewBuildReservationVerdict } from "./dispatch-governor.js";
 import { releasedTaskIds, unmetDependencies, unmetTaskPrecondition, type Plan, type Task, type TaskPreconditionOptions, type UnmetTaskPrecondition } from "./plan.js";
 import {
   NO_OBSERVED_SCOPE,
@@ -350,6 +350,10 @@ export interface NextRunnableOpts extends TaskPreconditionOptions {
    *  the pack picks a candidate the real partition then serializes away. Omitted, each candidate is
    *  scored on its bare declaration. */
   observedByTask?: ObservedScopeByTask;
+  /** W1-T8502: tasks that already occupy a lane. They only constrain {@link runnableCandidates}' pack,
+   *  which prefers candidates disjoint from them too, and are never returned (matched by id). Absent or
+   *  empty, the pack is byte-identical to the pack without it. */
+  inFlight?: readonly Task[];
   /** Called once per task whose CACHED in-flight snapshot this live re-check overturned — one
    *  PR-level observation, fired for every terminal state whatever the task's eligibility resolves
    *  to (W1-T1035's crediting MERGED read still fires it). The real wiring corrects the ledgered
@@ -726,7 +730,7 @@ function taskPreconditionHolds(task: Task, opts: NextRunnableOpts): boolean {
 export function runnableCandidates(plan: Plan, isMerged: MergedSet, limit: number, opts: NextRunnableOpts = {}): Task[] {
   if (limit <= 0) return [];
   const eligible = dispatchEligibleCandidates(plan, isMerged, opts);
-  const collected = packDisjointFirst(eligible, limit, opts.observedByTask ?? NO_OBSERVED_SCOPE);
+  const collected = packDisjointFirst(eligible, limit, opts.observedByTask ?? NO_OBSERVED_SCOPE, opts.inFlight ?? []);
   // W1-T2397: observe, then dispatch anyway — the same placement `nextRunnable` uses, one level over,
   // so it cannot alter the batch. This is the DAEMON's selector: `runDaemon` calls this one.
   for (const t of collected) observeOpenSibling(t, opts);
@@ -753,17 +757,21 @@ export function runnableCandidateIds(plan: Plan, isMerged: MergedSet, opts: Next
 
 /** W1-T476's greedy disjointness-first pack: fills up to `limit` slots from `eligible` (already in
  *  {@link dispatchOrder}), each slot preferring the earliest remaining candidate that stays
- *  `files:`-disjoint from everything collected — checked via the real `partitionByFileOverlap`, never
- *  a re-derived glob comparison — and otherwise falling back to the next in dispatchOrder.
+ *  `files:`-disjoint from everything collected and every `inFlight` task (W1-T8502) — checked via the
+ *  real `partitionByFileOverlap`, never a re-derived glob comparison — and otherwise falling back to the
+ *  next in dispatchOrder. An `inFlight` id is never collected.
  *  INVARIANT (determinism): the scan always takes the first match in `remaining`'s current order.
  *  INVARIANT (stability containment): with no two candidates pairwise disjoint, the result is
  *  byte-identical to plain truncation. The pack never reorders what it cannot improve. */
 // Why: the measured 1/1/1 admissions plain truncation produced at lanes 2/3/4 — docs/forensics/drain.md.
-function packDisjointFirst(eligible: readonly Task[], limit: number, observedByTask: ObservedScopeByTask): Task[] {
+function packDisjointFirst(
+  eligible: readonly Task[], limit: number, observedByTask: ObservedScopeByTask, inFlight: readonly Task[],
+): Task[] {
   const collected: Task[] = [];
-  const remaining = [...eligible];
+  const inFlightIds = new Set(inFlight.map((t) => t.id));
+  const remaining = eligible.filter((t) => !inFlightIds.has(t.id));
   while (collected.length < limit && remaining.length > 0) {
-    let pickIndex = remaining.findIndex((candidate) => isDisjointFromEvery(collected, candidate, observedByTask));
+    let pickIndex = remaining.findIndex((candidate) => isDisjointFromEvery([...inFlight, ...collected], candidate, observedByTask));
     if (pickIndex === -1) pickIndex = 0; // no disjoint candidate remains — fall back to dispatchOrder position
     collected.push(remaining[pickIndex]);
     remaining.splice(pickIndex, 1);
@@ -805,7 +813,9 @@ export type StopReason =
    *  from its pass-level read; {@link runDrainLanes} when the memory gate held every lane (W1-T5482). */
   | "memory_governor_deferred"
   /** A quiet-hours hold stopped a single-lane pass or refused every lane at admission (W1-T5657). */
-  | "quiet_hours_deferred";
+  | "quiet_hours_deferred"
+  /** Opt-in heavy READY reservation held NEW implement admission, including an unreadable observation. */
+  | "new_build_deferred";
 
 export interface DrainOpts {
   until?: string;
@@ -868,6 +878,8 @@ export interface DrainSummary {
   stopReason: StopReason;
   /** Human detail: the blocked task + verdict, the reset time, the error, etc. */
   stopDetail?: string;
+  /** Caller-only non-enumerable fatal reason for classification, including falsy throws. */
+  error?: unknown;
   /** How many candidates the FINAL selection declined as INDETERMINATE (W1-T119) — a gateway that
    *  could not ANSWER, never a task that is genuinely ineligible. Reset each pass. A `no_runnable`
    *  with this at 0 is a genuinely empty frontier; the same verdict with it non-zero is a fleet that
@@ -1374,9 +1386,14 @@ export interface DrainDeps extends TaskPreconditionOptions {
    *  W1-T5404, once per single-lane pass in `runDrain`; a throw fails OPEN at both. Never consulted
    *  from the sweep. Optional. */
   checkMemoryGovernor?: () => MemoryGovernorResult | undefined;
+  /** W1-T7720: the unreadable-memory streak tracker and the reservation-store read — see {@link DispatchGovernorDeps}. */
+  memoryReadTracker?: MemoryReadTracker;
+  readMemoryStoreFailure?: () => string | undefined;
   /** The QUIET-HOURS hold, read per single-lane pass and per lane through `checkDispatchGovernors`.
    *  A throw fails open in both loops; the single-lane pass logs the error (W1-T5657). */
   checkQuietHours?: DispatchGovernorDeps["checkQuietHours"];
+  /** Fresh actual-start reading for NEW implement only; throwing UNKNOWN is a named deferral. */
+  checkHeavyNewBuild?: DispatchGovernorDeps["checkHeavyNewBuild"];
   /** W1-T119: true when a task's own GitHub read is INDETERMINATE, re-derived from the SAME
    *  projection `refreshMerged` just built — the same freshness contract as `isOpenPr`. Optional. */
   isIndeterminate?: (taskId: string) => boolean;
@@ -1627,13 +1644,11 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     }
 
     // HOST MEMORY FLOOR (W1-T5404): ordered after queue as `checkDispatchGovernors` orders it. A
-    // throw FAILS OPEN, as it does there — logged, then this pass dispatches as if admitted.
-    let memoryGoverned: MemoryGovernorResult | undefined;
-    try {
-      memoryGoverned = deps.checkMemoryGovernor?.();
-    } catch (e) {
-      log("drain.memory_governor.unreadable", { error: e instanceof Error ? e.message : String(e) });
-    }
+    // TRANSIENT throw FAILS OPEN, as it does there — logged, then this pass dispatches as if admitted.
+    // W1-T7720: a SUSTAINED unreadable streak (the same tracker the daemon path uses) holds the pass.
+    const memoryRead = consultMemoryReads(deps);
+    if (memoryRead.probeError !== undefined) log("drain.memory_governor.unreadable", { error: memoryRead.probeError });
+    const memoryGoverned: MemoryGovernorResult | undefined = memoryRead.governed;
     if (memoryGoverned) {
       log("drain.memory_governor", {
         observed_available_mib: memoryGoverned.observedAvailableMib,
@@ -1643,6 +1658,11 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
         "memory_governor_deferred",
         `${memoryGoverned.observedAvailableMib} MiB available below the ${memoryGoverned.floorMib} MiB memory floor — new dispatch deferred`,
       );
+    }
+
+    if (memoryRead.hold) {
+      log("drain.memory_unreadable", governorDeferPayload({ kind: "memory_unreadable", hold: memoryRead.hold }));
+      return summary("memory_governor_deferred", memoryUnreadableDetail(memoryRead.hold, "new dispatch deferred"));
     }
 
     let quietHours: ReturnType<NonNullable<DrainDeps["checkQuietHours"]>>;
@@ -1801,6 +1821,13 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       return summary("no_runnable", noRunnableDetail({ indeterminate: indeterminateDeclines }));
     }
 
+    // After ALL awaited reads and both natural/curated selection paths; never a pass/tick gate.
+    const reservation = checkNewBuildReservation(deps, next);
+    if (reservation) {
+      log("dispatch.new_build_held", { task: next.id, ...newBuildReservationPayload(reservation) });
+      await flushLifetimePressure();
+      return summary("new_build_deferred", reservation.reason);
+    }
     log("drain.iteration", { task: next.id, attempted: attempted.length + 1, max });
     attempted.push(next.id);
     let result: RunResult;
@@ -1913,6 +1940,12 @@ function readPassGovernor<T>(
   }
 }
 
+/** W1-T7720 — the stop detail of a SUSTAINED unreadable memory reading: the source, the streak age, and
+ *  the derived bound in force with its basis. */
+function memoryUnreadableDetail(hold: MemoryReadHold, tail: string): string {
+  return `memory ${hold.source} unreadable for ${hold.ageMs} ms, past the ${Math.round(hold.boundMs)} ms sustained bound (${hold.basis}): ${hold.error} — ${tail}`;
+}
+
 /** W1-T5482 — the stop of a lane pass whose EVERY lane `verdict` refused at admission: the gate that
  *  held, its reading worded as the pass-level checks word it. An unreadable reading is the deferral
  *  of the gate it came from, with the error kept in the detail. */
@@ -1934,6 +1967,8 @@ function allLanesHeldStop(verdict: DispatchGovernorVerdict): { stopReason: StopR
         stopReason: "memory_governor_deferred",
         stopDetail: `${verdict.result.observedAvailableMib} MiB available below the ${verdict.result.floorMib} MiB memory floor — ${tail}`,
       };
+    case "memory_unreadable":
+      return { stopReason: "memory_governor_deferred", stopDetail: memoryUnreadableDetail(verdict.hold, tail) };
     case "quiet_hours":
       return {
         stopReason: "quiet_hours_deferred",
@@ -2004,12 +2039,22 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
   const headroomEnabled = opts.headroomEnabled ?? true;
   const unreadableDegradedLimit = opts.unreadableDegradedLimit ?? UNREADABLE_DEGRADED_LIMIT;
 
-  const summary = (stopReason: StopReason, stopDetail?: string): DrainSummary => {
+  const summary = (stopReason: StopReason, stopDetail?: string, failure?: { reason: unknown }): DrainSummary => {
     // `indeterminateDeclines` is emitted ALWAYS, including as 0. Omitting it when zero would put
     // the ambiguity straight back — absent would mean either "nothing was indeterminate" or "this
     // build does not count". An explicit 0 states that the frontier was READ and found empty.
     const s: DrainSummary = { attempted, merged, continued, stopReason, stopDetail, indeterminateDeclines, costUsd, resumeCommand: resumeCommand(opts) };
-    log("drain.summary", { ...s });
+    if (failure !== undefined) Object.defineProperty(s, "error", { value: failure.reason, enumerable: false });
+    // Exception identity is a caller-only value: never serialize arbitrary command/error
+    // properties into the durable ledger. The existing human stop detail remains its report.
+    const summaryFields: Record<string, unknown> = { ...s };
+    delete summaryFields.error;
+    try { log("drain.summary", summaryFields); }
+    catch (error) {
+      // A failed fatal reporter cannot replace the original reason with a new logger exception.
+      // Without an already-owned fatal reason, preserve the logger's legacy throw.
+      if (failure === undefined) throw error;
+    }
     return s;
   };
 
@@ -2266,7 +2311,6 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     const partition = partitionByFileOverlap(candidates, deps.observedByTask ?? NO_OBSERVED_SCOPE);
     for (const d of partition.serialized) log("dispatch.serialized", serializedLedgerPayload(d));
     const dispatchSet = partition.dispatch;
-    log("dispatch.concurrent_set", { tasks: dispatchSet.map((t) => t.id), lane_count: laneCount });
 
     // W1-T342's PER-DISPATCH GOVERNOR GATE, APPLIED PER LANE. The pass-level governor reads far above
     // STOP the whole pass; one reading taken before any lane was admitted stood in for EVERY lane, so
@@ -2307,24 +2351,69 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
       return summary(held.stopReason, held.stopDetail);
     }
 
+    const started: Task[] = [];
+    const work: Array<Promise<void>> = [];
+    const settled: PromiseSettledResult<RunResult>[] = [];
+    const dispatchState: { fault?: { taskId?: string; phase: string; reason: unknown } } = {};
+    const rememberFault = (taskId: string | undefined, phase: string, reason: unknown): void => {
+      dispatchState.fault ??= { taskId, phase, reason };
+    };
+    // Once workers are owned, telemetry failures are fatal pass outcomes, not exits that skip
+    // sibling settlement/accounting. Keep the first original reason, never a synthetic run result.
+    const settledLog = (step: string, extra: Record<string, unknown>, taskId?: string): void => {
+      try { log(step, extra); }
+      catch (reason) { /* Retain the reporting failure for the caller after sibling accounting. */ rememberFault(taskId, step, reason); }
+    };
+    let newBuildRefusal: NewBuildReservationVerdict | undefined;
     for (const t of admitted) {
-      attempted.push(t.id);
-      log("drain.iteration", { task: t.id, attempted: attempted.length, max, lane: true });
+      let phase = "admit";
+      try {
+        // Fresh for EACH actual start, even if an earlier runOne synchronously publishes a hold.
+        const reservation = checkNewBuildReservation(deps, t);
+        if (reservation) {
+          newBuildRefusal ??= reservation;
+          log("dispatch.new_build_held", { task: t.id, ...newBuildReservationPayload(reservation) });
+          continue;
+        }
+        phase = "start";
+        const runOne = deps.runOne;
+        let run: Promise<RunResult>;
+        try { run = runOne.call(deps, t.id); }
+        catch (reason) { /* A synchronous worker throw is a rejected actual settlement, never success. */ run = Promise.reject(reason); }
+        const index = work.length;
+        // Attach BOTH handlers immediately after the real invocation, before any bookkeeping or
+        // logging can throw. Retain the rejection itself for the existing lane classifiers below.
+        work.push(Promise.resolve(run).then(
+          (value) => { settled[index] = { status: "fulfilled", value }; },
+          (reason: unknown) => { settled[index] = { status: "rejected", reason }; },
+        ));
+        started.push(t);
+        attempted.push(t.id);
+        phase = "onStarted";
+        log("drain.iteration", { task: t.id, attempted: attempted.length, max, lane: true });
+      } catch (reason) {
+        rememberFault(t.id, phase, reason);
+        break; // Close NEW starts, but never abandon an actually invoked sibling.
+      }
     }
-
-    // CONCURRENT LANES: `allSettled`, never `all` — see this function's own doc. Every sibling's
-    // outcome is recorded below BEFORE the pass decides whether to stop.
-    const settled = await Promise.allSettled(admitted.map((t) => deps.runOne(t.id)));
+    if (started.length === 0 && newBuildRefusal && dispatchState.fault === undefined) {
+      await flushLifetimePressure();
+      return summary("new_build_deferred", newBuildRefusal.reason);
+    }
+    if (started.length > 0) settledLog("dispatch.concurrent_set", { tasks: started.map((t) => t.id), lane_count: laneCount });
+    // Settle accepted siblings before reporting either their outcome or a partial admission hold.
+    await Promise.allSettled(work);
     // THE SETTLED COUNTERPART to `dispatch.concurrent_set`, emitted HERE because the classification
     // loop below ends in early returns and a row written after it would be skipped exactly when it
     // matters. `allSettled` never rejects, so this line is reachable whenever dispatch happened.
-    log("dispatch.settled_set", settledSetPayload(admitted, settled, laneCount));
-    await flushLifetimePressure();
+    settledLog("dispatch.settled_set", settledSetPayload(started, settled, laneCount));
+    try { await flushLifetimePressure(); }
+    catch (reason) { /* Retain lifetime-pressure failure for the error summary. */ rememberFault(undefined, "lifetime_pressure", reason); }
 
     let blocked: { taskId: string; result: RunResult } | undefined;
-    let failure: { taskId: string; message: string } | undefined;
-    for (let i = 0; i < admitted.length; i++) {
-      const t = admitted[i];
+    let failure: { taskId: string; message: string; reason: unknown } | undefined;
+    for (let i = 0; i < started.length; i++) {
+      const t = started[i];
       const outcome = settled[i];
       if (outcome.status === "rejected") {
         const message = String((outcome.reason as Error)?.message ?? outcome.reason);
@@ -2333,7 +2422,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
           // riding the existing `drain.continued` row. Nothing was spent and nothing is credited.
           continued.push({ taskId: t.id, verdict: outcome.reason.reasonClass });
           continuedIds.add(t.id);
-          log("drain.continued", { task: t.id, verdict: outcome.reason.reasonClass, reason: message });
+          settledLog("drain.continued", { task: t.id, verdict: outcome.reason.reasonClass, reason: message }, t.id);
           continue;
         }
         // W1-T5344: one task's delivery failure ends THIS lane only — continued, never re-offered this
@@ -2342,11 +2431,11 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
         if (delivery) {
           continued.push({ taskId: t.id, verdict: "lane_failed" });
           continuedIds.add(t.id);
-          log("drain.lane_failed", { task: t.id, class: delivery.failureClass, error: delivery.firstLine });
+          settledLog("drain.lane_failed", { task: t.id, class: delivery.failureClass, error: delivery.firstLine }, t.id);
           continue;
         }
-        log("drain.lane_error", { task: t.id, message });
-        if (!failure) failure = { taskId: t.id, message }; // first-observed wins the summary detail
+        settledLog("drain.lane_error", { task: t.id, message }, t.id);
+        if (!failure) failure = { taskId: t.id, message, reason: outcome.reason }; // first-observed wins the summary detail
         continue;
       }
       const result = outcome.value;
@@ -2354,7 +2443,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
       if (haltsDrain(result)) {
         // STOP-ON-BLOCK, at pass granularity — LANE-LOCAL: this task took its
         // normal blocked path; it never touched a sibling still in flight.
-        log("drain.blocked", { task: t.id, verdict: result.verdict, pr_url: result.prUrl });
+        settledLog("drain.blocked", { task: t.id, verdict: result.verdict, pr_url: result.prUrl }, t.id);
         if (!blocked) blocked = { taskId: t.id, result };
         continue;
       }
@@ -2363,19 +2452,24 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
         // predicate, so the two paths can never disagree about what halts.
         continued.push({ taskId: t.id, verdict: result.verdict, prUrl: result.prUrl });
         continuedIds.add(t.id);
-        log("drain.continued", { task: t.id, verdict: result.verdict, pr_url: result.prUrl });
+        settledLog("drain.continued", { task: t.id, verdict: result.verdict, pr_url: result.prUrl }, t.id);
         refreshRunBranchState();
         continue;
       }
       merged.push(t.id);
     }
 
-    if (failure) return summary("error", `${failure.taskId}: ${failure.message}`);
+    if (dispatchState.fault !== undefined) {
+      const { taskId, phase, reason } = dispatchState.fault;
+      return summary("error", `${taskId ?? "dispatch"}: ${phase}: ${String((reason as Error)?.message ?? reason)}`, dispatchState.fault);
+    }
+    if (failure) return summary("error", `${failure.taskId}: ${failure.message}`, failure);
     if (blocked) {
       const r = blocked.result;
       return summary("blocked", `${blocked.taskId} → ${r.verdict}${r.prUrl ? ` (${r.prUrl})` : ""}`);
     }
     if (opts.until && merged.includes(opts.until)) return summary("until_reached", opts.until);
+    if (newBuildRefusal && attempted.length < max) return summary("new_build_deferred", newBuildRefusal.reason);
   }
   return summary("max_reached", `${max} task(s)`);
 }

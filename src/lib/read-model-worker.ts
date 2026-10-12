@@ -20,7 +20,8 @@ import { setLedgerMemoRetentionContext } from "./ledger-union.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { AGENT_VIEW_NAME, createAgentView } from "./agent-view.js";
-import { ANALYTICS_VIEW_NAME, createAnalyticsView } from "./analytics-view.js";
+import { ANALYTICS_VIEW_NAME, ANALYTICS_SOURCE_CONSOLE_V1, createAnalyticsView, type HostModelApprovalConfig } from "./analytics-view.js";
+import { captureGardenerSpendSource } from "./gardener-spend.js";
 import { createGithubKeepWarm, type GithubKeepWarm } from "./github-refresh-pacer.js";
 import { ghIssueGateway, tryEscalate, type EscalateDeps, type Escalation, type IssueGateway } from "./escalate.js";
 import { createHostView, HOST_VIEW_NAME, hostViewConfig, type HostViewConfig } from "./host-view.js";
@@ -252,6 +253,8 @@ export interface ReadModelLaneMove {
   heavy: boolean;
   dueAt: number;
   costMs?: number;
+  coldCostMs?: number;
+  restoredCost?: boolean;
 }
 
 export interface ReadModelViewContext {
@@ -466,6 +469,7 @@ export interface ReadModelTickerOptions {
   viewsOnly?: boolean;
   readers?: ReadModelViewReaders;
   lane?: "fast" | "heavy";
+  restoreCosts?: boolean;
 }
 
 export interface IntegrityRequest {
@@ -692,7 +696,13 @@ export interface ReadModelTicker {
 interface ViewUnit {
   view: ReadModelView | ReadModelViewFactory;
   made?: ReadModelView;
+  cold?: boolean;
+  coldCostMs?: number;
   slot?: Slot;
+  costSeeded?: boolean;
+  restoredColdCost?: boolean;
+  storedCost?: string;
+  storedCostIno?: string;
   /** What its last build call took (absent until one ran); `startedAt` is the first call of a bounded build in flight. */
   costMs?: number;
   /** Not rebuilt before this: its last cost divided by {@link READ_MODEL_VIEW_SHARE}, times `stretch`. */
@@ -1097,6 +1107,50 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       .run(entry.view, entry.key, entry.version, entry.generation, entry.etag, JSON.stringify(entry.body)));
   }
 
+  const costKey = (unit: ViewUnit): string => `view_cost:${JSON.stringify([unit.view.name, unit.slot?.instance.name ?? null])}`;
+  function seedUnitCosts(): void {
+    const home = slots[0]?.db;
+    if (!home || opts.restoreCosts === false) return;
+    for (const unit of units) {
+      if (unit.costSeeded || unit.costMs !== undefined) continue;
+      unit.costSeeded = true;
+      try {
+        const raw = home.meta(costKey(unit));
+        if (raw === undefined) continue;
+        const saved = JSON.parse(raw) as { version?: number; holder?: string; costMs?: number; coldCostMs?: number; heavy?: boolean } | null;
+        if (!saved || saved.version !== 1 || typeof saved.holder !== "string" || saved.holder === holder || typeof saved.costMs !== "number" || !Number.isFinite(saved.costMs) || saved.costMs < 0 ||
+          (saved.coldCostMs !== undefined && (typeof saved.coldCostMs !== "number" || !Number.isFinite(saved.coldCostMs) || saved.coldCostMs < 0))) continue;
+        unit.costMs = saved.costMs;
+        unit.coldCostMs = saved.coldCostMs;
+        unit.restoredColdCost = true;
+        unit.heavy = Math.max(saved.costMs, saved.coldCostMs ?? 0) > soloMs;
+        unit.storedCost = raw;
+        unit.storedCostIno = slots[0]?.ino;
+        if (opts.lane === "fast" && unit.heavy) opts.post({ type: "view_lane", view: unit.view.name,
+          ...(unit.slot ? { instance: unit.slot.instance.name } : {}), heavy: true, dueAt: unit.dueAt,
+          costMs: unit.costMs, restoredCost: true, ...(unit.coldCostMs === undefined ? {} : { coldCostMs: unit.coldCostMs }) });
+      } catch (error) {
+        log("read_model.view_cost_read_failed", { view: unit.view.name, ...(unit.slot ? { instance: unit.slot.instance.name } : {}), error: (error as Error).message });
+      }
+    }
+  }
+
+  function persistUnitCost(unit: ViewUnit, laneCostMs: number): void {
+    const home = slots[0];
+    if (switches.projector !== "on" || home?.db === undefined || home.lease === undefined) return;
+    const value = JSON.stringify({ version: 1, holder, costMs: unit.costMs, heavy: laneCostMs > soloMs,
+      ...(unit.coldCostMs === undefined ? {} : { coldCostMs: unit.coldCostMs }) });
+    if (value === unit.storedCost && home.ino === unit.storedCostIno) return;
+    try {
+      const db = home.db;
+      withWriteTransaction(db, home.lease, () => db.prepare("INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v").run(costKey(unit), value));
+      unit.storedCost = value;
+      unit.storedCostIno = home.ino;
+    } catch (error) {
+      log("read_model.view_cost_write_failed", { view: unit.view.name, ...(unit.slot ? { instance: unit.slot.instance.name } : {}), error: (error as Error).message });
+    }
+  }
+
   function viewShadow(): ViewShadow | undefined {
     const home = slots[0];
     if (home?.db === undefined || home.lease === undefined) return undefined;
@@ -1260,14 +1314,22 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     counts.maxMs = Math.max(counts.maxMs, unit.costMs);
     viewBuilds.set(unit, counts);
     const peakMs = (unit.peakMs = Math.max(unit.peakMs ?? 0, unit.costMs));
+    if (unit.cold && succeeded) {
+      unit.coldCostMs = unit.restoredColdCost ? peakMs : Math.max(unit.coldCostMs ?? 0, peakMs);
+      unit.restoredColdCost = undefined;
+      unit.cold = undefined;
+    }
+    const laneCostMs = Math.max(peakMs, unit.coldCostMs ?? 0);
+    if (succeeded) persistUnitCost(unit, laneCostMs);
     unit.dueAt = ready ? paced(unit, finished) : finished;
     if (ready) {
       unit.startedAt = undefined;
       unit.peakMs = undefined;
     }
-    if (opts.lane && ready && yielded > 0 && peakMs > soloMs !== (opts.lane === "heavy")) {
+    if (opts.lane && ready && yielded > 0 && laneCostMs > soloMs !== (opts.lane === "heavy")) {
       unit.heavy = opts.lane === "fast";
-      opts.post({ type: "view_lane", ...named, heavy: unit.heavy, dueAt: unit.dueAt, costMs: peakMs });
+      opts.post({ type: "view_lane", ...named, heavy: unit.heavy, dueAt: unit.dueAt, costMs: peakMs,
+        ...(unit.coldCostMs === undefined ? {} : { coldCostMs: unit.coldCostMs }) });
       letGo(unit);
       reportHeld(true);
     }
@@ -1297,11 +1359,13 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     if (made.name !== spec.name || !!made.perInstance !== !!spec.perInstance || !!made.demand !== !!spec.demand || !!made.snapshotSourced !== !!spec.snapshotSourced) {
       throw new ReadModelViewFactoryMismatch(spec.name);
     }
+    unit.cold = true;
     return (unit.made = made);
   }
   function letGo(unit: ViewUnit): void {
     if (!unit.made || owns(unit)) return;
     unit.made = undefined;
+    unit.cold = undefined;
     unit.startedAt = undefined;
     unit.peakMs = undefined;
   }
@@ -1336,6 +1400,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
    */
   function materialize(now: number, tickStart: number, only?: ViewUnit): void {
     if (units.length === 0) return;
+    seedUnitCosts();
     sweepDemand();
     const home = slots[0]?.db;
     const shadow = home ? storedShadowReadiness(viewShadowPath(opts.stateDir), home, now) : undefined;
@@ -1405,6 +1470,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
           }
         }
       }
+      seedUnitCosts();
       postState(now);
     },
     tick(): void {
@@ -1502,7 +1568,9 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     lane(move: ReadModelLaneMove): void {
       for (const unit of units) {
         if (move.view !== undefined && (unit.view.name !== move.view || unit.slot?.instance.name !== move.instance)) continue;
-        Object.assign(unit, { heavy: move.heavy, dueAt: move.dueAt }, move.costMs === undefined ? {} : { costMs: move.costMs });
+        unit.costSeeded = true;
+        unit.restoredColdCost = move.restoredCost === true;
+        Object.assign(unit, { heavy: move.heavy, dueAt: move.dueAt, coldCostMs: move.coldCostMs }, move.costMs === undefined ? {} : { costMs: move.costMs });
         letGo(unit);
       }
       reportHeld(true);
@@ -1557,6 +1625,8 @@ export interface ReadModelViewsData {
   inboxRoot?: string;
   lane?: "fast" | "heavy";
   host?: HostViewConfig;
+  restoreCosts?: boolean;
+  modelApprovalConfig?: HostModelApprovalConfig;
 }
 
 /** What the projector thread tells its view thread. */
@@ -1628,7 +1698,7 @@ export function runReadModelViewWorker(
     if (stopped) return;
     const demand = createDemandBook({ clock });
     ticker = createReadModelTicker({
-      stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off", demand, ...(data.lane ? { lane: data.lane } : {}),
+      stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off", demand, ...(data.lane ? { lane: data.lane } : {}), ...(data.restoreCosts === false ? { restoreCosts: false } : {}),
       views: [...readModelLaneViews(data, clock, log, demand), ...extra],
     });
     ticker.start();
@@ -1638,7 +1708,7 @@ export function runReadModelViewWorker(
 }
 
 export function readModelLaneViews(
-  data: Pick<ReadModelViewsData, "instances" | "registry" | "inboxRoot" | "host">,
+  data: Pick<ReadModelViewsData, "instances" | "registry" | "inboxRoot" | "host" | "modelApprovalConfig">,
   clock: Clock,
   log: (step: string, extra: Record<string, unknown>) => void,
   demand: DemandBook,
@@ -1647,7 +1717,7 @@ export function readModelLaneViews(
   return [
     { name: NAV_BADGE_VIEW_NAME, create: () => createNavBadgeReadModelView(ledgerSource) },
     { name: "repositories", create: () => createRepositoriesReadModelView(ledgerSource) },
-    { name: ANALYTICS_VIEW_NAME, snapshotSourced: true, create: () => createAnalyticsView() },
+    { name: ANALYTICS_VIEW_NAME, snapshotSourced: true, create: () => createAnalyticsView({ modelApprovalConfig: data.modelApprovalConfig }) },
     readModelStatusView,
     { name: NOW_VIEW_NAME, perInstance: true, readPaced: true, create: () => createNowView({ instances, ledgerSource, clock, log }) },
     { name: INSTANCES_VIEW_NAME, create: () => createInstancesView({ instances, ...data.registry, ledgerSource }) },
@@ -1708,8 +1778,8 @@ export function threadViews(opts: {
     survivor.worker.postMessage(reset);
     opts.log("read_model.view_lane_reclaimed", { lane: survivor.name, from: lane.name, count, reason });
   };
-  const spawnLane = (lane: Lane): void => {
-    const data: ReadModelViewsData = { ...opts.data, kind: READ_MODEL_VIEWS_KIND, lane: lane.name };
+  const spawnLane = (lane: Lane, restoreCosts = true): void => {
+    const data: ReadModelViewsData = { ...opts.data, kind: READ_MODEL_VIEWS_KIND, lane: lane.name, restoreCosts };
     const spawned = lane === fast ? spawnViews(opts.workerUrl ?? new URL(import.meta.url), data) : spawnHeavyViews(opts.workerUrl ?? new URL(import.meta.url), data);
     lane.worker = spawned;
     lane.building = undefined;
@@ -1743,7 +1813,7 @@ export function threadViews(opts: {
       lane.respawn = setTimeout(() => {
         lane.respawn = undefined;
         if (closed) return;
-        spawnLane(lane);
+        spawnLane(lane, false);
         reclaim(lane, "respawn");
       }, delayMs);
       lane.respawn.unref();
@@ -1800,6 +1870,7 @@ export interface ReadModelWorkerData {
   /** The slow lane's units (read-model-slow-lane.ts); absent, no slow lane runs. */
   slowLane?: SlowLaneConfig;
   viewsModule?: string;
+  modelApprovalConfig?: HostModelApprovalConfig;
 }
 
 function hostOf(slowLane: SlowLaneConfig | undefined): { host?: HostViewConfig } {
@@ -1824,7 +1895,7 @@ export function runReadModelWorker(
   setLedgerMemoRetentionContext({ thread: "projector", log, instances: data.instances });
   const holder = randomUUID();
   const views = threadViews({
-    data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}), ...hostOf(data.slowLane) },
+    data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}), ...hostOf(data.slowLane), ...(data.modelApprovalConfig ? { modelApprovalConfig: data.modelApprovalConfig } : {}) },
     relay: (m) => port.postMessage(m), log, clock,
   });
   const post = (m: ReadModelWorkerMessage): void => {
@@ -1835,8 +1906,19 @@ export function runReadModelWorker(
     }
     port.postMessage(m);
   };
-  const slowLaneConfig = data.slowLane && { ...data.slowLane, analytics: data.slowLane.analytics ?? { instances: data.instances.map((i) => ({ name: i.name, stateDir: i.ledgerDir })) } };
-  if (slowLaneConfig) slowLane = threadSlowLane({ config: slowLaneConfig, log, onBodies: (built) => views.accept(built), onSnapshot: (write) => views.snapshot(write) });
+  const slowLaneConfig = data.slowLane && { ...data.slowLane, analytics: data.slowLane.analytics ?? { instances: data.instances.map((i) => ({ name: i.name, stateDir: i.ledgerDir, repository: i.repo })) } };
+  let snapshotWrites = Promise.resolve();
+  if (slowLaneConfig) slowLane = threadSlowLane({ config: slowLaneConfig, log, onBodies: (built) => views.accept(built), onSnapshot: (write) => {
+    snapshotWrites = snapshotWrites.then(async () => {
+      if (stopRequested()) return;
+      const instance = data.instances.find(i => i.name === write.instance);
+      if (!write.ok || !instance) return views.snapshot(write);
+      const source = await captureGardenerSpendSource(instance.ledgerDir);
+      if (stopRequested()) return;
+      views.snapshot({ ...write, bodies: write.bodies.map(body => body.name === ANALYTICS_SOURCE_CONSOLE_V1
+        ? { ...body, body: { ...(body.body as object), gardenerSpendSource: source } } : body) });
+    });
+  } });
   const oracleRunner = threadOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), log });
   const ticker = createReadModelTicker({
     stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder, stopRequested, post, views: [], oracleRunner,
@@ -1982,6 +2064,7 @@ export interface ReadModelWorkerOptions {
   /** What the silent-worker watchdog measures against. */
   clock?: Clock;
   slowLane?: SlowLaneConfig;
+  modelApprovalConfig?: HostModelApprovalConfig;
   /** A module URL whose default export lists views the view thread builds beside the built-in ones. */
   viewsModule?: string;
   /** Sees each worker message after the handle has applied it. */
@@ -2201,6 +2284,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}),
       ...(opts.slowLane ? { slowLane: opts.slowLane } : {}),
       ...(opts.viewsModule ? { viewsModule: opts.viewsModule } : {}),
+      ...(opts.modelApprovalConfig ? { modelApprovalConfig: opts.modelApprovalConfig } : {}),
     };
     // SHARE_ENV, as on every long-lived thread here: escalations need serve's refreshed GH_TOKEN (#9156).
     const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, env: SHARE_ENV });

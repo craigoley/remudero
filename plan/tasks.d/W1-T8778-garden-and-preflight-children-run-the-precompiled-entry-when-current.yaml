@@ -1,0 +1,49 @@
+- id: W1-T8778
+  title: "GARDEN AND PREFLIGHT CHILDREN RUN THE PRECOMPILED ENTRY WHEN IT IS CURRENT — each garden pass and each pre-open fast preflight starts `node --import tsx src/run-task.ts <verb>` with a cold path-keyed tsx cache, about 519 MB peak against 173-182 MB for the bundle W1-T7729 already builds"
+  repo: remudero
+  depends_on: [W1-T8776]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-12: docs/adr/0006-precompiled-daemon-child-entries.md's fourth unfiled follow-up (W1-T7729, #11136)"
+  plan_refs: [W1-T7729, W1-T8775, W1-T8776, W1-T8777]
+  files: [src/lib/garden-registry.ts, src/lib/preopen-gate.ts, src/lib/child-entry-argv.ts, test/garden-and-preflight-children-run-the-precompiled-entry-when-current.test.ts, test/a-garden-child-runs-under-a-heap-cap-at-low-priority.test.ts, test/a-build-is-gated-on-the-fast-preflight-before-its-pr-opens.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    ADR 0006 decision 1 orders the garden and preflight children after the check-proof entry, and its follow-up list
+    says to "switch the garden and preflight children once their verbs are shown to start no self-URL worker" (decision
+    4). Spawn sites at origin/main 2026-10-12: childGardenPassSpawn (src/lib/garden-registry.ts) spawns
+    `[...process.execArgv, --max-old-space-size, process.argv[1], "garden", "run", <name>]`, so it inherits the daemon's
+    tsx loader; the pre-open gate (src/lib/preopen-gate.ts) runs `<worktree>/bin/rmd preflight --fast`, which execs tsx.
+    The garden runs on a cadence, so this is the largest steady tsx churn left (memory core-memory-is-gc-slack, lever E;
+    ADR 0006 measured about 700 MB/h of path-keyed cache churn).
+  design: |
+    1. Prove each verb starts no self-URL worker before switching it: a test drives `garden run <name>` for every
+       registered garden and `preflight --fast`'s code path with worker_threads' Worker made to throw, and the switch
+       covers only the verbs that pass. A verb that does start one stays on tsx until W1-T8777's worker bundles cover
+       it; name it in the report.
+    2. childGardenPassSpawn: when the caller passes no explicit execArgv/entry, build the child through childEntryArgv
+       (W1-T8775) for the run-task entry, dropping the inherited tsx loader flags only when the bundle is current. The
+       heap cap stays last, so V8 still honours it. An explicit execArgv/entry (as tests pass) is used as given.
+    3. The pre-open gate runs the bundle directly when current, else `bin/rmd` as today.
+    4. Ledger `child_entry.spawned` (name, verb, kind bundle|tsx, reason) at both sites, so the bundle share and the
+       peak-RSS change are measurable on the host.
+  acceptance:
+    - claim: "a garden child spawned with a current bundle runs it under plain node, with the heap cap still last and no tsx import"
+      proof: 'grep: test("W1-T8778: a garden child runs the current bundle with its heap cap last" in test/garden-and-preflight-children-run-the-precompiled-entry-when-current.test.ts'
+    - claim: "the pre-open fast preflight runs the current bundle, and falls back to bin/rmd when it is not current"
+      proof: 'grep: test("W1-T8778: the pre-open preflight runs the bundle when current and bin/rmd otherwise" in test/garden-and-preflight-children-run-the-precompiled-entry-when-current.test.ts'
+    - claim: "every switched verb is shown to start no self-URL worker"
+      proof: 'grep: test("W1-T8778: every switched verb starts no self-URL worker" in test/garden-and-preflight-children-run-the-precompiled-entry-when-current.test.ts'
+    - claim: "each switched spawn ledgers which entry kind it ran and why"
+      proof: 'grep: test("W1-T8778: each switched spawn ledgers its entry kind and reason" in test/garden-and-preflight-children-run-the-precompiled-entry-when-current.test.ts'
+    - claim: "the garden child spawn builds through the shared child-entry helper"
+      proof: "grep: childEntryArgv( in src/lib/garden-registry.ts"
+  falsifier: |
+    Keep the inherited `--import tsx` in front of the bundle and the first test's no-tsx assertion fails. Switch a verb
+    that starts a self-URL worker and the third test's throwing Worker trips.

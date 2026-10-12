@@ -920,8 +920,8 @@ function coverageShardSelectionArgs(repoRoot: string, shard: number, base: strin
   ];
 }
 
-function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly string[], concurrency: number): string[] {
-  return testRunArgv([
+function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly string[], concurrency: number, judge: TestJudge, judgedArgs: readonly string[]): string[] {
+  return testRunArgv(judge.judgedNodeTestArgs([
     "--enable-source-maps",
     "--experimental-test-coverage",
     "--test-coverage-exclude=test/**",
@@ -937,7 +937,22 @@ function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly
     "--import",
     TMP_HYGIENE_IMPORT,
     ...testFiles,
-  ], concurrency);
+  ], judgedArgs), concurrency);
+}
+
+// The slice of scripts/pure-test-pool.mjs (the test judge) a coverage shard uses.
+interface JudgedRun { args: string[]; env: Record<string, string>; cleanup: () => void }
+interface TestJudge {
+  prepareJudgedRun(opts: { makeDir: () => string }): JudgedRun;
+  judgedNodeTestArgs(args: readonly string[], judgedArgs: readonly string[]): string[];
+  closeJudgedRun(judged: JudgedRun, files: readonly string[], opts: { status: number; root: string; role: string; prefix: string; log: (line: string) => void }):
+    { verdict: { complete: boolean }; line: string };
+}
+
+// Loaded when a coverage leaf runs, never at import: a sandbox that copies only src/ (the mutation
+// detectors in test/ledger-rotation.test.ts) still imports this module. A plain .mjs, so no types.
+function loadTestJudge(): TestJudge {
+  return require("../../scripts/pure-test-pool.mjs") as TestJudge;
 }
 
 function coverageRawDirHasArtifact(rawDir: string): boolean {
@@ -1006,15 +1021,24 @@ function testWithCoverageShards(
     }
     // Low priority, bounded concurrency, and a heartbeat on the host-wide slot at every shard (W1 test-slot).
     slot.refresh();
-    const child = lowPriorityCommand(process.execPath, coverageShardArgs(shardRoot, shard, testFiles, slot.concurrency), testSlot.binaryExists);
+    // Judged (scripts/pure-test-pool.mjs): node reports a file whose own child exits 0 part-way as
+    // `ok`, so a shard passes only when every file it was given reached its own summary.
+    // Its files live in this run's own scratch, not os.tmpdir(): the shard's TMPDIR is scratchDir too.
+    const judge = loadTestJudge();
+    const judged = judge.prepareJudgedRun({ makeDir: () => mkdtempSync(join(scratchDir, "rmd-pool-run-")) });
+    const child = lowPriorityCommand(process.execPath, coverageShardArgs(shardRoot, shard, testFiles, slot.concurrency, judge, judged.args), testSlot.binaryExists);
     const res = spawn(child.file, child.args, {
       cwd: repoRoot,
-      env: { TMPDIR: scratchDir, NODE_V8_COVERAGE: rawDir },
+      env: { TMPDIR: scratchDir, NODE_V8_COVERAGE: rawDir, ...judged.env },
+    });
+    const verdict = judge.closeJudgedRun(judged, testFiles, {
+      status: res.status ?? 1, root: repoRoot, role: `coverage shard ${shard}/${CI_COVERAGE_SHARD_COUNT}`, prefix: "coverage-ratchet", log: () => {},
     });
     const spawnFailed = spawnFailureDetail(label, res);
     if (spawnFailed) return { ok: false, detail: spawnFailed };
     const output = `${res.stdout ?? ""}${res.stderr ?? ""}`;
-    if (res.status !== 0) return { ok: false, detail: `FAIL — ${label}\n${output.trim()}` };
+    if (res.status !== 0) return { ok: false, detail: `FAIL — ${label}\n${output.trim()}\n${verdict.line}` };
+    if (!verdict.verdict.complete) return { ok: false, detail: `FAIL — ${label}\n${verdict.line}` };
     if (!coverageOutputHasTestSummary(output)) {
       return { ok: false, detail: `FAIL — coverage-ratchet: shard ${shard}/${CI_COVERAGE_SHARD_COUNT} produced no # tests summary; refusing to fold an unverified shard into the coverage total.` };
     }
@@ -2760,6 +2784,13 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     "this file — W1-T3272's expiring-fixture census; it shells a real `git ls-files` but over " +
       "`test/*.test.ts`, the TEST corpus, so it is not a src-population walk. Its gate rides the " +
       "`comment-load-ratchet` job as a step rather than a projected fast-gate census entry",
+  ),
+  refusedForPredicate(
+    "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts",
+    "a",
+    "W1-T7812's shifted-run regression. Its `ls-files` responses are injected single-file fixture listings; " +
+      "the real runner executes named tests in private fixture roots, never walks the tracked src/ population. " +
+      "The src/ text the recognizer sees is its imports of gate-gardener.js and tmp.js",
   ),
   // W1-T2916's suite. The recognizer matches it on `src/` text that is its import of
   // src/lib/settings.js plus prose ("src runtime package uses are dependencies"), but the
