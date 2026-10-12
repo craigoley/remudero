@@ -224,6 +224,27 @@
   src: "ci-learning:7204:commitlint"
   cited: "2026-09-30"
 
+- id: mutation-ratchet-refusal-repair-lane
+  subsystem: ci
+  lifecycle: active
+  files: [src/lib/classify.ts, test/**, stryker.conf.json, scripts/mutation-baseline.json, .github/workflows/ci.yml]
+  fact: >-
+    When a PR diff can move the mutation score for src/lib/classify.ts, the mutation-ratchet job
+    runs Stryker against its scoped tests and compares the result with the ratcheted baseline. Run
+    that gate on the proposed tree before pushing when changing the target or its tests. If it
+    blocks, use the surviving mutant report to add or repair a test that kills the mutant; do not
+    raise the baseline to make the refusal disappear. Changes outside the gate's trigger scope do
+    not run this mutation sample, so check the changed-file trigger before treating a skipped job
+    as evidence that the score passed.
+  evidence: >-
+    The mutation-ratchet gate refused PRs #10954 and #10988, and both were subsequently repaired.
+    The recorded #10954 repair touched src/lib/classify.ts and
+    test/the-daemon-reloads-its-plan-off-the-loop.test.ts. Individual refusal logs were
+    unavailable, so this entry routes workers to the gate's mutant report and does not assert a
+    more specific shared failure cause.
+  src: "ci-learning:10954:mutation-ratchet"
+  cited: "2026-10-12"
+
 - id: lint-plan-refuses-before-pr
   subsystem: ci
   # knowledge gardener: retire lint-plan-refuses-before-pr
