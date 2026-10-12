@@ -1,0 +1,79 @@
+- id: W1-T8711
+  title: "Host-wide serve state comes from a current shared producer, never a peer's local silence"
+  repo: remudero
+  depends_on: [W1-T7094, W1-T8230]
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "2026-10-12 approved performance follow-ups; measured cross-instance budget qualification"
+  plan_refs: [W1-T7094, W1-T7095, W1-T8230, W1-T8472]
+  files: [src/lib/host-serve-evidence.ts, src/lib/host-memory-shadow.ts, src/lib/serve-memory.ts, src/lib/serve.ts, test/a-shadow-memory-verdict-never-delays-a-start.test.ts, test/host-serve-evidence.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED in immutable main b822c93e and the loaded core and console source:
+    serveScenarioOf calls serve stopped when a local ledger has no serve rows for a
+    sufficiently long window. Actual console shadow summary at 2026-10-12T16:07:07.954Z
+    counted one serve-stopped sample, with basis no serve rows in 4702 seconds of ledger.
+    Same-host serve.memory positives bracket it at 16:05:41.907Z and 16:08:41.905Z,
+    with the same process identity. This is a host-wide qualification mismatch, not proof
+    that every admission decision is wrong or that a missing peer ledger proves an outage.
+    The actual-export controls retain fresh-positive, short-missing, long-missing and
+    explicit-stop outcomes. No production policy was changed by these diagnostics.
+    Complete 17:45:17Z open-head and file census and current-main tree scope at
+    40b391682e5dfd43fc3d0c0dd3272ec35500e981 found no open producer-evidence owner.
+    W7094 and W7095 own the existing shadow verdict and fairness; both are implemented.
+    W8230 owns atomic admission reservation, not serve producer observations.
+    W8472 owns predictive calibration of container pressure and its run branches remain
+    untouched. W5061 owns legacy console-cache retirement, not this producer contract;
+    preserve its separate cutover prerequisites. A broad initial file-overlap guard
+    refused on W5061 before any clone or reservation, and its distinct scope was reviewed.
+  design: |
+    Reuse the existing shared host-memory evidence directory and process/generation
+    identity contracts. Serve publishes a small atomic observation on the memory sample
+    cadence it already has, and on existing lifecycle transitions where available.
+    Identify the host boot, producer instance, process and generation, source revision,
+    observation time and serve scenario. Store no ledger payload, credential, environment,
+    request URL, transcript or heap dump. Do not add a polling timer or new production mount.
+    Every same-host consumer reads that authoritative producer evidence, not its own
+    local serve-row absence. A local-only store, missing, unreadable, malformed, stale,
+    future-dated, foreign-host or superseded-generation observation is named unknown.
+    A dated explicit stop may qualify stopped only for the validated current producer
+    generation. Silence or age alone never certifies stopped. An older generation's stop
+    must not overwrite or defeat a newer running generation's positive observation.
+    Reuse the existing cadence/freshness contract and say what a reading establishes;
+    do not invent zero memory, pool unknown with stopped, or double-count resident serve
+    memory already included in host availability. Cold-start reserve remains separate.
+    Wire the actual default publisher and consumer assembly, not only an injected seam.
+    Reader or publisher failure remains bounded, named and nonblocking in shadow mode.
+    Keep mode shadow/off, real starts, reservations, thresholds, limits, concurrency,
+    deployment, ordinary PR flow and all existing holds unchanged. Enforcement or a
+    production policy cutover needs its own qualified proposal and operator approval.
+  acceptance:
+    - claim: "two same-host consumer instances share a fresh authoritative serve observation despite missing peer-local rows"
+      proof: 'unit test: peer local silence never changes a shared current serve observation'
+    - claim: "missing stale corrupt foreign and local-only evidence is named unknown rather than stopped"
+      proof: 'unit test: unavailable host serve evidence is unknown not stopped'
+    - claim: "an old generation stop cannot defeat a current running generation and a verified current explicit stop is retained"
+      proof: 'unit test: host serve evidence fences stop by current generation'
+    - claim: "actual default publication and gathering use the shared contract without delaying starts or counting resident memory twice"
+      proof: 'unit test: default host serve publication and shadow gathering preserve nonblocking starts'
+  falsifier: |
+    Restore peer-local silence to stopped, erase host or generation identity, accept a
+    stale or future timestamp, let an older stop win, suppress a reader/publisher failure,
+    or pool unknown evidence into stopped: a corresponding maintained test must fail.
+    Delete the default publisher/consumer wiring: the real-filesystem integration must
+    fail while injected-only cases may still pass. Keep positive current stop and cold
+    start controls, and verify that unchanged shadow starts and reservation arithmetic
+    retain their existing results. No production experiment is an acceptance proof.
+  note: |
+    W1-T8711 was actually reserved at 2026-10-12T18:00:08Z from the writable operator
+    checkout /home/craigoleyagent/rmd-mint/host-serve-scope-1012-v1, on
+    codex/host-serve-scope-plan-1791827947206. The reservation walk skipped held ids
+    and returned W8711; never use its earlier floor W8678 or delete another reservation.
+    This shard is a filing only. Future tests above are not yet written or executed.
+    Recheck full subject/head scope, implementation credit and active claims before build.
