@@ -28,8 +28,9 @@ function rig() {
   work.git("push", "--quiet", "origin", branch);
   // These are disposable Git fixtures, not validation-tree dependencies or a modified gate.
   symlinkSync(join(ROOT, "node_modules"), join(work.dir, "node_modules"), "dir");
+  writeFileSync(join(work.dir, ".gitignore"), "node_modules/\n");
   writeFileSync(join(work.dir, "commitlint.config.mjs"), readFileSync(join(ROOT, "commitlint.config.mjs")));
-  work.git("add", "commitlint.config.mjs");
+  work.git("add", "commitlint.config.mjs", ".gitignore");
   work.git("commit", "--quiet", "-m", "test(checkpoint): install the unchanged message gate in the fixture");
   work.git("push", "--quiet", "origin", branch);
   const base = work.git("rev-parse", "HEAD");
