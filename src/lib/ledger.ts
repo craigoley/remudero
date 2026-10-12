@@ -568,6 +568,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "automerge.stale_rollup_refreshed", // W1-T6404: the once-per-PR refresh bound; forgotten, it loops.
   "automerge.stale_rollup_refresh_exhausted",
   "automerge.risk_override_observed",
+  // `refusedRefreshClearancesFromLedger` (lib/base-reproduction.ts) memoises a refused refresh by
+  // PR + head + main + files; rotated away, a later pass re-reads and re-probes the same red.
+  "refresh.clearance",
   "incident.event", // W1-T4385: sre-lane.ts files once per fingerprint from these two;
   "incident.sampled", // rotated away, a still-burning incident reads as new and is re-filed.
   // W1-T3646: the advisory repair lease. `priorRepairLease` reads this row to decide whether a
