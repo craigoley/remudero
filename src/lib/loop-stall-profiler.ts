@@ -1,30 +1,22 @@
 /**
- * lib/loop-stall-profiler.ts — W1-T7746: PROFILE AN UNATTRIBUTED LOOP STALL WHILE IT IS HAPPENING.
+ * lib/loop-stall-profiler.ts — W1-T7746: profile an unattributed loop stall WHILE it is happening.
+ * Why (the 2026-10-10 stalls with no sync spawn to blame): plan/tasks.d/W1-T7746-*.yaml.
  *
- * MEASURED 2026-10-10, core daemon, 07:50-09:57Z: 10 `daemon.loop_lag` stalls totalling about 5,990 s.
- * About 53 min of that had no sync spawn to blame. A CPU spin looks the same from outside, and a sampler
- * on the blocked loop records nothing until the block clears ({@link reportLoopLag}'s own doc comment).
- * The 2026-10-08 TS scanner spin (#10176) was found only by a hand-run CPU profile.
+ * A sampler on the blocked loop records nothing until the block clears ({@link reportLoopLag}). So the
+ * watchdog runs in a worker thread. The main loop bumps a shared heartbeat counter each turn. When it has
+ * been still past the bound, the worker opens `inspector.Session.connectToMainThread()` and starts V8's
+ * sampling profiler. The inspector reaches a busy main thread through an interrupt, so the profile samples
+ * the stall itself. It stops when the heartbeat moves again; at most one profile runs at a time.
  *
- * THE WATCHDOG lives in a worker thread, so it keeps running while the main loop does not. The main loop
- * bumps a shared heartbeat counter each turn. When the counter has been still past the bound, the worker
- * opens `inspector.Session.connectToMainThread()` and starts V8's sampling profiler. The inspector reaches
- * a busy main thread through an interrupt, so the profile samples the stall itself. Profiling stops when
- * the heartbeat moves again. At most one profile runs at a time.
- *
- * THE BOUND IS DERIVED, NOT PICKED ({@link loopStallBoundMs}): the daemon's own interval plus a quantile of
- * the lags it has observed in this process, so ordinary lag is not profiled. Until the daemon reports its
- * first tick there is no interval, so no bound, and the watchdog is not started.
- *
+ * THE BOUND IS DERIVED, NOT PICKED ({@link loopStallBoundMs}): the daemon's interval plus a quantile of the
+ * lags it has observed in this process. Before the daemon's first tick there is no bound and no watchdog.
  * MEMORY STAYS BOUNDED: a stall that never ends is profiled in chunks one bound long, and only the newest
- * two are kept. No profile is written to disk; the ledger row carries the top self-time frames only.
- *
+ * two are kept. No profile is written to disk; the ledger row names the top self-time frames only.
  * IT CANNOT TAKE DOWN THE LOOP IT WATCHES: any inspector or watchdog failure writes
- * `daemon.loop_stall_profile_failed` with its reason and disables the watchdog for the rest of the boot.
+ * `daemon.loop_stall_profile_failed` with its reason and disables the watchdog for the boot.
  *
- * A V8 LIMIT, STATED RATHER THAN HIDDEN: one long-running optimized frame that was ALREADY running when the
- * profile started can have its samples credited to its caller. A spin that keeps calling functions is
- * named correctly. That is the scanner shape #10176 had.
+ * A V8 LIMIT: a frame on-stack-replaced BEFORE the profile began has its samples credited to its caller.
+ * A spin that keeps calling functions is named correctly, which is the shape of a scanner spin.
  */
 
 import { Worker } from "node:worker_threads";
