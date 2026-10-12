@@ -236,6 +236,12 @@ test("W1-T8714: a replayed proposal is re-drafted and filed through the inbox pa
   assert.equal(rows[0].outcome, "refiled");
   assert.equal(rows[0].family, "followup");
   assert.equal(f.store().proposals[REFILE].outcome?.outcome, "refiled");
+
+  // The fleet lane's own pass runs the replay: no new timer, no other wiring.
+  const lane = fixture();
+  triageFleetLane({ stateDir: lane.stateDir, ledgerPath: lane.ledgerPath, mergedLastDay: () => 0, approve: () => undefined, clock: fixedClock(SEED_MS) });
+  assert.deepEqual(Object.keys(lane.store().proposals).sort(), POPULATION);
+  assert.equal(lane.drafts()[REFILE], undefined);
 });
 
 test("W1-T8714: each later outcome is recorded once with its reason", () => {
