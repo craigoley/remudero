@@ -28,8 +28,9 @@ for (const form of ["plain", "gzip"] as const) {
       writeFileSync(archive, form === "gzip" ? gzipSync(row("rotation") + "\n") : row("rotation") + "\n");
       assert.equal(ledgerCarriedPrefixPath(live), join(dir, "ledger.ndjson.carried.json"));
       assert.equal(ledgerRetainedStepsPath(live), join(dir, "ledger.ndjson.retained-steps.json"));
-      writeFileSync(ledgerCarriedPrefixPath(live), row("carried-sidecar") + "\n");
-      writeFileSync(ledgerRetainedStepsPath(live), row("retained-sidecar") + "\n");
+      // W1-T5424: a sidecar is classified only when it reads as valid under its producer's shape.
+      writeFileSync(ledgerCarriedPrefixPath(live), JSON.stringify({ bytes: 93, sha256: "d".repeat(64), core: {} }));
+      writeFileSync(ledgerRetainedStepsPath(live), JSON.stringify({ steps: ["run.start"] }));
 
       const readRaw = () => readLedgerUnionRawLinesSync(dir);
       const readRecords = () => readLedgerUnionRecordsSync(dir);
