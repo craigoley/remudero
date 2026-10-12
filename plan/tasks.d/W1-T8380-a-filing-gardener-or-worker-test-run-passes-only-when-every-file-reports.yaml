@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-12: the judged-runs sweep after #11000 (the review's unit-test proof runner)"
   plan_refs: [W1-T5521, W1-T6036, W1-T6091, W1-T3617]
   files: [src/lib/plan-pr-emitter.ts, src/lib/gate-gardener.ts, src/lib/worker-provider.ts, test/a-filing-gardener-or-worker-test-run-passes-only-when-every-file-reports.test.ts]
-  status: queued
+  status: merged
   priority: 1.5
   attempts: 0
   rationale: |

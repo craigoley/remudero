@@ -22,7 +22,7 @@
     - test/w1-t5308-a-long-lane-pool-never-starves-the-freshness-check.test.ts
     - test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts
     - test/owner-dispatch-threading.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -9,7 +9,7 @@
   risk: medium
   band_meaning: blast-radius
   budget_usd: 6.00
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator-approved memory follow-through; isolated committed-module control, 2026-10-12"
   plan_refs: [W1-T8311, W1-T6019, W1-T8230]
