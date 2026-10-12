@@ -25,12 +25,11 @@ import { join } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { defaultInstance, defaultMemoryLedgerLocation, parseProcStat, type LedgerInstance, type ProcessIdentity } from "./host-memory-ledger.js";
-import { SERVE_MEMORY_SAMPLE_MS } from "./incident-invariants.js";
 
 /** The subdirectory of the shared host-memory ledger directory. */
 export const HOST_SERVE_SUBDIR = "serve-evidence";
-/** Three `serve.memory` periods: the cadence serve already publishes on, as the shadow's own silence bound reads it. */
-export const HOST_SERVE_FRESH_MS = 3 * SERVE_MEMORY_SAMPLE_MS;
+/** Three `serve.memory` periods (3 min each, incident-invariants.ts; not imported: that edge closes an import ring). */
+export const HOST_SERVE_FRESH_MS = 3 * 3 * 60_000;
 /** A producer's clock may run a little ahead of a consumer's on one host; further ahead than this is future-dated. */
 export const HOST_SERVE_FUTURE_SKEW_MS = 5_000;
 export const HOST_SERVE_ERROR_STEP = "serve.host_evidence_error";
