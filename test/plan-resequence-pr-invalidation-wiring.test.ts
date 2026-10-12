@@ -65,7 +65,7 @@ function resequenceGh() {
         number: PR_NUMBER,
         html_url: `https://github.com/o/r/pull/${PR_NUMBER}`,
         state: "open",
-        body: `Remudero-Task: ${TASK_ID}\\u000a`,
+        body: `Remudero-Task: ${TASK_ID}\n`,
         updated_at: "2026-09-14T00:00:00Z",
         head: { ref: `run-${TASK_ID}-1789232400000`, sha: SHA },
         auto_merge: null,

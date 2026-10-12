@@ -1,8 +1,11 @@
+import type { CashRequestEffortCount } from "./cash-request-effort.js";
+import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
 import { connect as connectTcp, createServer as createTcpServer, type Socket, type Server } from "node:net";
 import { Agent as HttpAgent, createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createRequire } from "node:module";
-import { execFile, execFileSync, spawnSync } from "node:child_process";
-import { fetchOriginRetryingRefLock, type GitRunner } from "./git-fetch-retry.js";
+import { execFile, execFileSync } from "node:child_process";
+import { fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, type GitRunner } from "./git-fetch-retry.js";
+import { ensureWorktreeConfigEnabledAsync } from "./worktree-config.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync,
@@ -14,6 +17,7 @@ import {
   realpathSync,
   renameSync,
   statSync,
+  statfsSync,
   symlinkSync,
   unlinkSync,
   rmSync,
@@ -25,9 +29,10 @@ import {
 // (W1-T208).
 import fs from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { performance } from "node:perf_hooks";
 import { createSdkMcpServer, query, tool, type Options, type PermissionMode, type SDKUserMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { detectUsageLimitRefusal } from "./classify.js";
@@ -45,6 +50,7 @@ import {
   type WorkerProviderId,
 } from "./config.js";
 import { assertModelAllowed } from "./model-gate.js";
+import { chooseDraftDeployment, readDraftStats, recordDraftRouting, type DraftStats, type DraftChoice } from "./draft-routing.js";
 import { usageSnapshotFromSdk } from "./headroom.js";
 import {
   detectCompactionEvents,
@@ -84,8 +90,10 @@ import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
 // freshness paths compare the same hash — never a parallel implementation that could drift silently. See lib/install-hash.ts
 // for the extraction reason.
 import { hashInstallInputs } from "./install-hash.js";
+import { refreshCanonicalSeed } from "./typecheck-buildinfo.js";
 import { systemClock, type Clock } from "./clock.js";
 import { ghExec, ghJson } from "./github-transport.js";
+import type { ClosingReferenceGuardResult } from "./closing-reference-guard.js";
 import { loadLayeredLearnings, loadLearningsCorpus, lookupWorkerRule, type LayeredLearningsHomes } from "./learnings.js";
 // W1-T2896 acceptance grep token for this shared transport import: github-transport"
 export {
@@ -100,19 +108,31 @@ export {
 } from "./github-transport.js";
 import {
   assertWorkerCredentialFile,
+  classifyWorkerCredentialFile,
+  DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS,
   CLAUDE_CONFIG_REL,
   ensureWorkerKeychain,
   materializeSpawnWorkerHome as materializeWorkerHome,
   perRunWorkerHomeDir,
   reapWorkerHome,
+  seedClaudeFleetCredentials,
+  type ClaudeCredentialSeedEvent,
   workerCredentialFilePath,
+  workerClaudeCredentialDir,
   workerKeychainPaths,
+  WorkerKeychainError,
   type SecurityRunner,
   lostWorkerHomeGrants,
   type WorkerHomeGrantOutcome,
   type WorkerHomeReapResult,
   type WorkerKeychainSummary,
 } from "./worker-home.js";
+import { awaitMemoryAdmission, type AdmissionPorts } from "./host-memory-admission.js";
+import { feedbackLineagePayload, feedbackLineageSnapshot } from "./contributor-admission.js";
+import { envelope as feedbackLineageEnvelope } from "./untrusted-envelope.js";
+import { openLearnedReservation, type LearnedReservation, type LearnedReservationOptions } from "./host-memory-learning.js";
+import type { HostMemoryLedgerOptions, MemoryReservationHandle, WorkerClass } from "./host-memory-ledger.js";
+import { recordShadowMemoryVerdict } from "./host-memory-shadow.js";
 import {
   buildContainedSpawnFn,
   spawnDetachedGroup,
@@ -135,6 +155,8 @@ import {
   type RoutingDrawSeed,
   type RoutingPropensity,
   selectOpenWeightModel,
+  openWeightUsageUsd,
+  OPENWEIGHT_MAX_COMPLETION_TOKENS,
   openWeightDeploymentReady,
   openWeightDeploymentHolds,
   openWeightEstimatedTokens,
@@ -148,12 +170,17 @@ import {
   OPENWEIGHT_FUNCTIONS,
   ProviderCapacityBlockedError,
   type ProviderSelection,
+  type ProviderMixing,
+  selectWorkerProvider,
+  routingDrawValue,
   type ProviderWindowConsumption,
   type ProviderWindowMeasurement,
   OpenWeightUnsupportedResponseFormatError,
   markOpenWeightDeploymentAbsent,
   type OpenWeightModelSelection,
   codexCapabilityForRequestedModel,
+  codexCandidatesForCapability,
+  type WorkerExit,
 } from "./worker-provider.js";
 import {
   resolveProviderRoutingPolicy,
@@ -161,9 +188,23 @@ import {
   selectWorkerProviderForPolicy,
   type ProviderRoutingPreference,
 } from "./provider-routing-policy.js";
+import { FIX_ROUTING_LEARNER, fixRoutingDecisionFields, mountedFixArms, type FixLearnedArms, type FixRoutingWeights } from "./fix-routing-learner.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./provider-routing-status.js";
 import { FIX_WORKER_TOOLS } from "./fix-fence.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
+import {
+  GITDIR_RECORD_PREFIX,
+  HOST_GIT_CONFIG,
+  hostWorktreeGit,
+  hostWorktreeGitAsync,
+  originUrlAtCut,
+  pinnedConfigValue,
+  pinWorktreeGit,
+  REMOTE_RECORD_PREFIX,
+  WorktreePointerRefusedError,
+  worktreeRecordPath,
+  type PinnedWorktreeGit,
+} from "./worktree-git.js";
 
 /** Aggregate token usage off the SDK result envelope's `usage` field (SDK 0.3.209 `sdk.d.ts`: `NonNullableUsage`, snake_case
  * Anthropic-API names, all fields non-nullable). Zeroed when no result envelope was ever seen — a genuine transport failure. */
@@ -186,11 +227,26 @@ export interface ModelUsageEntry {
 }
 
 /** Structured result of one worker run. */
+/** W1-T6027: declared in worker-provider.ts, whose runners produce it, so that file needs no edge back to this one. */
+export type { WorkerExit };
+
+/** W1-T6027: the process end an SDK error reports. The SDK's `getProcessExitError` attaches `signal` to a worker a signal
+ * killed and `exitCode` to one that exited non-zero; any other throw names no process end, so it is `unobserved`. */
+export function workerExitOfError(e: unknown): WorkerExit {
+  const { signal, exitCode } = (typeof e === "object" && e !== null ? e : {}) as { signal?: unknown; exitCode?: unknown };
+  if (typeof signal === "string" && signal.length > 0) return { kind: "signal", signal };
+  if (typeof exitCode === "number" && Number.isInteger(exitCode)) return { kind: "exit", code: exitCode };
+  return { kind: "unobserved" };
+}
+
 export interface WorkerResult {
   /** Backend that executed this call. Optional only for pre-connector test fixtures. */
   provider?: WorkerProviderId;
   sessionId: string;
   costUsd: number;
+  /** W1-T5629: a codex session's NOTIONAL price (`codexNotionalCostUsd`), never billed and never in `costUsd`.
+   *  Absent on every other provider, and on a codex model with no price row. */
+  notionalCostUsd?: number;
   /** Turns the worker actually took (SDK `num_turns`), recorded on BOTH the success and error paths, because turn count seeds
    * mounts.yaml calibration (W1-T5), so a failed run is never `0`. TRAP: `num_turns` does not count the unit
    * `Options.maxTurns` bounds — measured failures landed at cap+1 and one clean success at 17 under a cap of 8 — so never
@@ -210,6 +266,9 @@ export interface WorkerResult {
   /** Result subtype: 'success' | 'error_max_turns' | 'error_max_budget_usd' | … */
   subtype: string;
   isError: boolean;
+  /** W1-T6027: HOW THE WORKER'S PROCESS ENDED, read off the process itself and never off `subtype`. See {@link WorkerExit}.
+   * Every runner sets it; it is optional only for the hand-built fixture literals across test/. */
+  exit?: WorkerExit;
   /** An Anthropic-side api error hit the stream — a `<synthetic>`/`isApiErrorMessage` message. TRAP: the result ENVELOPE may
    * still report `subtype: "success"` (WS-0 envelope shape), so this field is the only place the signal survives. Transient
    * for the classifier: retry, no strike, never a task failure. */
@@ -219,6 +278,18 @@ export interface WorkerResult {
    * rewrites `subtype`. Do not derive a refusal from cost either: seven measured refusals carried a non-zero cost (W1-T2564;
    * docs/forensics/worker.md). */
   usageRefusal?: { matched: string; resetsAtText?: string; resetsAtMs?: number };
+  /** The model declined this run under a SAFEGUARD classifier (`stop_reason: "refusal"`), read off the SDK's own
+   * `model_refusal_no_fallback` (`retried: false`) or `model_refusal_fallback` direction `retry` (`retried: true`,
+   * `fallbackModel` set) system message — the last one seen wins. `category` is `stop_details.category` verbatim, `null` when
+   * the API named none. `api_refusal_explanation` is display-only prose the SDK says never to parse, so it is never read.
+   * OBSERVATIONAL: nothing classifies on this, burns a strike on it or retries on it. Absent when no such message arrived —
+   * never a fabricated value, and never derived from `text` or `subtype`. Distinct from {@link usageRefusal}, an account limit. */
+  safeguardRefusal?: { category: string | null; retried: boolean; originalModel: string; fallbackModel?: string };
+  /** The final `stop_reason` the API reported for this run: the result envelope's `stop_reason` when it carries a string
+   * (`SDKResultSuccess` and `SDKResultError` both declare `string | null`), else the LAST assistant message that carried a
+   * non-null one (a streamed block's `stop_reason` is null; the real value arrives on the envelope). Absent when neither did,
+   * so an early stop (`end_turn` with work owed) and a refusal are measurable instead of unreadable. OBSERVATIONAL only. */
+  finalStopReason?: string;
   /** Permission denials the SDK surfaced (hook/permission blocks). */
   permissionDenials: unknown[];
   /** The exact env the child was spawned with (billing-boundary proof). */
@@ -260,8 +331,12 @@ export interface WorkerResult {
   /** The reasoning effort this call was CONFIGURED to run. Same INPUT-not-output rule as `model`: effort is absent from the
    * SDK result envelope, so this is the configured value (W1-T6). */
   effort: string;
+  /** Cash adapter request parameters; absent for providers without this observation. */
+  requestEfforts?: readonly CashRequestEffortCount[];
   /** Aggregate token usage off the result envelope (zeroed if none was seen). */
   tokens: TokenUsage;
+  /** Explicit stream completeness when reported; absent on legacy results. */
+  tokenUsageState?: "observed" | "partial" | "unavailable";
   /** Per-model breakdown off the envelope's `modelUsage` map (`{}` if none seen). */
   modelUsage: Record<string, ModelUsageEntry>;
   /** The concrete model id the PROVIDER reported serving this call — the served half of the pair whose request half is `model`
@@ -292,7 +367,7 @@ export interface WorkerResult {
    * git fell back to the AMBIENT credential path and the boundary was not in force — the one
    * outcome on this boundary that used to leave no trace anywhere. */
   credentialHelperUnwired?: string;
-  /** W1-T1289: why the egress broker did NOT apply to this spawn in observe mode. Absent when it applied or is off. */
+  /** Egress refusal in observe mode or readiness stall/retry evidence. Absent on healthy readiness or when off. */
   egressUnenforced?: string;
   /** `true` the moment ONE compaction fired (`compactionEvents.length > 0`, MASTER-PLAN 8B). This call's acceptance proofs
    * must then be re-verified against repo state (W1-T3F), never trusted from a possibly-lossy REPORT. */
@@ -404,6 +479,8 @@ export interface RoutingDecision {
   capability?: CodexModelTier;
   /** The live routing experiment this assignment belongs to (src/lib/routing-experiments.ts). */
   ab?: string;
+  /** W1-T5535: the learner that shaped this fix-lane draw. Mutually exclusive with `ab`: a learned draw is no crossover. */
+  learner?: string;
   /** The cash trial this run belongs to, its arm, and why (src/lib/cash-trial.ts). */
   trial?: string;
   trialArm?: string;
@@ -491,6 +568,9 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
  * present, defaulted to `null`, so a silent provider renders an honest unknown rather than a key that looks forgotten, and an
  * unreportable model never fails the run (W1-T6, W1-T36, W1-T2245, W1-T303, W1-T238, W1-T2572). */
 export function workerLedgerFields(r: WorkerResult): {
+  worker_exit?: WorkerExit["kind"];
+  worker_exit_signal?: string;
+  worker_exit_code?: number;
   provider?: WorkerProviderId;
   model: string;
   routed_model?: string;
@@ -500,10 +580,13 @@ export function workerLedgerFields(r: WorkerResult): {
   served_model: string | null;
   served_model_reason?: string;
   effort: string;
+  request_efforts?: readonly CashRequestEffortCount[];
   tokens: TokenUsage;
+  token_usage_state?: "observed" | "partial" | "unavailable";
   cache_read_input_tokens: number;
   cache_creation_input_tokens: number;
   total_cost_usd: number;
+  notional_cost_usd?: number;
   billing_mode: BillingMode;
   account_label?: string;
   verdict: string;
@@ -516,6 +599,11 @@ export function workerLedgerFields(r: WorkerResult): {
   lost_grants?: string[];
   egress_unenforced?: string;
   worker_duration_ms?: number;
+  safeguard_refusal_category?: string | null;
+  safeguard_refusal_retried?: boolean;
+  safeguard_refusal_original_model?: string;
+  safeguard_refusal_fallback_model?: string;
+  final_stop_reason?: string;
   window_consumption?: {
     provider: WorkerProviderId;
     percent_consumed: number | null;
@@ -533,6 +621,9 @@ export function workerLedgerFields(r: WorkerResult): {
 } {
   const stderrExcerpt = workerFailureExcerpt(r);
   return {
+    ...(r.exit ? { worker_exit: r.exit.kind } : {}),
+    ...(r.exit?.kind === "signal" ? { worker_exit_signal: r.exit.signal } : {}),
+    ...(r.exit?.kind === "exit" ? { worker_exit_code: r.exit.code } : {}),
     ...(stderrExcerpt !== undefined ? { stderr_excerpt: stderrExcerpt } : {}),
     // Omitted when every grant landed, so the common case adds no field. Present only when a grant was lost or healed, and
     // then it names which slot and why.
@@ -559,9 +650,13 @@ export function workerLedgerFields(r: WorkerResult): {
       ? { served_model_reason: r.servedModelReason ?? "the provider reported no served model for this call" }
       : {}),
     effort: r.effort,
+    ...(r.requestEfforts === undefined ? {} : { request_efforts: r.requestEfforts }),
     tokens: r.tokens,
+    ...(r.tokenUsageState === undefined ? {} : { token_usage_state: r.tokenUsageState }),
     ...cacheTokenLedgerFields(r.tokens),
     total_cost_usd: r.costUsd,
+    // W1-T5629: beside the billed figure, never in it — budgets and spend series keep reading `total_cost_usd`.
+    ...(r.notionalCostUsd === undefined ? {} : { notional_cost_usd: r.notionalCostUsd }),
     billing_mode: r.provider === "cash" ? "api" : billingMode(r.childEnvKeys),
     max_turns: r.maxTurns,
     // The account this spend is attributed to — a NAME, never a credential, carried verbatim off `WorkerResult.accountLabel`.
@@ -592,6 +687,17 @@ export function workerLedgerFields(r: WorkerResult): {
     // fixture that never spawned; JSON.stringify then drops the key entirely — the same "absent, never guessed" discipline
     // `max_turns` keeps (W1-T477).
     worker_duration_ms: r.workerDurationMs,
+    // Additive and observational: a row with no safeguard refusal and no observed stop reason carries none of these keys, so
+    // it stays byte-identical to before. `safeguard_refusal_category` is `null` (key present) when a refusal named none.
+    ...(r.safeguardRefusal
+      ? {
+          safeguard_refusal_category: r.safeguardRefusal.category,
+          safeguard_refusal_retried: r.safeguardRefusal.retried,
+          safeguard_refusal_original_model: r.safeguardRefusal.originalModel,
+          ...(r.safeguardRefusal.fallbackModel === undefined ? {} : { safeguard_refusal_fallback_model: r.safeguardRefusal.fallbackModel }),
+        }
+      : {}),
+    ...(r.finalStopReason === undefined ? {} : { final_stop_reason: r.finalStopReason }),
     ...(r.windowConsumption
       ? {
           window_consumption: {
@@ -670,6 +776,12 @@ function defaultLogKeychainHeadroom(
   spawn: { runId?: string; taskId?: string },
 ): void {
   console.error(JSON.stringify(workerKeychainHeadroomLogFields(summary, expectedRunMs, spawn)));
+}
+
+/** W1-T6252: a spawn that provisioned or healed the shared Claude credential store says so on stderr. This module
+ * writes no ledger rows; the usage probe's sink in run-task.ts records the same event durably. */
+function logClaudeCredentialSeed(event: ClaudeCredentialSeedEvent): void {
+  console.error(JSON.stringify({ event: `worker.credential_${event.kind}`, store: event.store, prior_verdict: event.priorVerdict }));
 }
 
 // ── Toolchain resolution ──────────────────────────────────────────────────
@@ -962,8 +1074,12 @@ export interface SpawnWorkerArgs {
   egress?: {
     mode?: WorkerEgressMode;
     checkVersion?: (bin: string) => string;
-    startProxy?: (policy: unknown) => Promise<{ httpProxyPort: number; socksProxyPort: number; verifyAllowed(): Promise<void>; close(): Promise<void> }>;
+    startProxy?: (policy: unknown) => Promise<WorkerEgressProxy>;
   };
+  /** The class the host memory ledger records (W1-T7093). Omitted: derived, or recorded as "unclassified". */
+  workerClass?: WorkerClass;
+  /** Test seam for the counterfactual host-memory verdict (W1-T7094). Omitted: the process-installed sink and real reads. */
+  memoryShadow?: Partial<AdmissionPorts>;
   /** Enables the implement lane's read-only rule lookup, with a ledger sink for every call. */
   ruleLookup?: {
     onPulled: (id: string, status: "found" | "missing" | "error") => void;
@@ -1031,6 +1147,11 @@ export interface SpawnWorkerArgs {
     ) => Promise<WorkerResult>;
     /** Test seam: the auction's drawn value in [0, 1), in place of the seeded draw (W1-T4617). */
     draw?: number;
+    /**
+     * W1-T5535: the fix rung's learned acceptance arms. Set ONLY by `runFixRung`; absent, the auction weighs
+     * headroom alone, exactly as before. Ignored for a task enrolled in a live routing experiment.
+     */
+    learnedArms?: FixLearnedArms;
     /** Best-effort durable projection for the console; never allowed to change spawn outcome. */
     writeStatus?: typeof writeProviderRoutingStatus;
     now?: () => number;
@@ -1087,12 +1208,20 @@ export interface SpawnWorkerArgs {
    * catches a sink failure and does not start attributing terminal rows to an event it could not
    * write; routing and billing behavior stay unchanged when telemetry is unavailable. */
   onSelectionAssignment?: (assignment: WorkerSelectionAssignment) => void;
+  draftRouting?: {
+    lane: string;
+    proposalId: string;
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    evaluate: (result: WorkerResult) => { clean: boolean; contractFailed: boolean };
+    readStats?: () => DraftStats;
+    random?: () => number;
+  };
   /** One failed cash-ladder rung that was actually called, before trying its successor. The
    * final rung remains the caller's ordinary worker result; a sink failure never changes flow. */
   onModelFallbackAttempt?: (attempt: {
     selectionAssignmentId?: string;
     model: string;
-    reason: "deployment-absent" | "unsupported-response-format";
+    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract";
     result?: WorkerResult;
   }) => void;
   /** Injectable seam: override the process-group spawn and teardown. Omitted means the real
@@ -1111,6 +1240,9 @@ export interface SpawnWorkerArgs {
    * not have fired when the catch runs, so a holder is read too early exactly when the spawn failed fastest. Wired here but
    * destined for run-task.ts's ledger, which worker.ts cannot reach. Omitted swallows the error as before (W1-T442). */
   onSpawnError?: (err: NodeJS.ErrnoException) => void;
+  /** Receives the worker's bound ROOT pid the moment the SDK spawns it — the same pid `pidRef` tears down. The quiet-worker
+   * watchdog reads the process tree under it (W1-T7807). Must not throw. Omitted leaves behaviour byte-identical. */
+  onWorkerPid?: (pid: number) => void;
   /** Injectable seam: override the SDK's own `query()` entry point. Omitted means the real SDK `query`, a live `claude`
    * subprocess. Tests inject a fake async iterable so the process-group teardown wiring is exercised end to end, on both
    * paths, with no real binary (W1-T117). */
@@ -1125,6 +1257,9 @@ export interface SpawnWorkerArgs {
    * never on total run age — and `spawnWorker` throws {@link WorkerAbandonedError} carrying the evidence. run-task.ts wires
    * the real bound at its dispatch-spawn wrapper, never here (Standing rule 14; W1-T1045). */
   clockBound?: { boundMs: number; now?: () => number; pollMs?: number };
+  /** W1-T5659 — a caller's cancel. Aborting it aborts THIS call's query (chained into the same `options.abortController` the
+   * clock bound uses; one is constructed when only this is set). Omitted leaves behaviour byte-identical. */
+  signal?: AbortSignal;
   /** Observe the per-spawn worker-home reap this teardown already runs. `reapWorkerHome` ALREADY COMPUTES a {@link
    * WorkerHomeReapResult} naming what it removed and why, and that value was discarded in statement position until this.
    * Called on EVERY exit path including a thrown error, never allowed to throw. INSTRUMENTATION ONLY: it observes, it never
@@ -1600,13 +1735,15 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
     considered.push({ provider: input.provider, model: alternative, eligible: true, selected: false, reason: "ladder-alternative" });
   }
   const rule = routingRule(args, input);
-  const ab = rule === "headroom-auction" && experimentTaskIdentity(args.taskId) !== undefined
+  const learner = input.selection?.draw?.learned ? FIX_ROUTING_LEARNER : undefined;
+  const ab = rule === "headroom-auction" && learner === undefined && experimentTaskIdentity(args.taskId) !== undefined
     ? routingExperimentFor({ capability: input.capability, effort: args.effort, considered })
     : undefined;
   return {
     rule,
     ...(input.capability ? { capability: input.capability } : {}),
     ...(ab ? { ab } : {}),
+    ...(learner ? { learner } : {}),
     ...(args.routingTrial
       ? { trial: args.routingTrial.id, trialArm: args.routingTrial.arm, trialReason: args.routingTrial.reason }
       : {}),
@@ -1652,6 +1789,77 @@ export function auctionDrawSeed(
   const unit = experimentTaskIdentity(args.taskId);
   if (experiment && unit) return experimentDrawSeed(experiment, unit);
   return { unit: "spawn", taskId: args.taskId ?? "no-task", attempt: args.runId ?? "no-run", point: spawnDecisionPoint(args) };
+}
+
+/** The concrete model a capacity reading would serve: the arm key's `selected_model`, aliases resolved as the assignment row does. */
+function fixArmModel(
+  args: Pick<SpawnWorkerArgs, "model">,
+  capacity: ProviderCapacity,
+  capabilities: CapabilityLadder | undefined,
+): string | undefined {
+  const model = capacity.model ?? args.model;
+  return model !== undefined && capacity.provider === "claude" ? resolveClaudeModelAlias(model, capabilities) : model;
+}
+
+/** The decision row is the rung's evidence, never a precondition: a sink that throws changes no routing. */
+function emitFixRoutingDecision(learned: FixLearnedArms, fields: Record<string, unknown>): void {
+  try {
+    learned.onDecision?.(fields);
+  } catch (error) {
+    console.error(JSON.stringify({ event: "worker.fix_routing_decision_write_failed", reason: "write-failed", error: String(error) }));
+  }
+}
+
+/**
+ * W1-T5535: shape ONE fix-lane auction by commit acceptance. Steers the Codex read to the arm whose Thompson draw
+ * beats the model the read served (revalidated by that read: a model without headroom is bypassed, never forced),
+ * then weighs every eligible provider's served arm. Never throws: an unreadable re-read keeps the original capacity.
+ */
+async function applyFixLearner(input: {
+  args: SpawnWorkerArgs;
+  learned: FixLearnedArms;
+  capacities: ProviderCapacity[];
+  seed: string;
+  capability: CodexModelTier | undefined;
+  capabilities: CapabilityLadder | undefined;
+  codexPreference: unknown;
+  reservePercent: number;
+  readCodexFor: (preferred: { capability: CodexModelTier; effort: string; model: string }) => Promise<ProviderCapacity>;
+}): Promise<{ capacities: ProviderCapacity[]; mixing: ProviderMixing; weights: FixRoutingWeights }> {
+  const { args, learned, seed, capability, capabilities } = input;
+  let capacities = input.capacities;
+  const codexIndex = capacities.findIndex((capacity) => capacity.provider === "codex");
+  if (codexIndex >= 0 && capability && !input.codexPreference) {
+    const current = capacities[codexIndex];
+    // W1-T6360: only arms the lane's current capability row mounts compete; with no rival to the served model, no draw.
+    const rivals = mountedFixArms(learned.evidence, "codex", codexCandidatesForCapability(capabilities, capability, args.effort))
+      .filter((arm) => arm.model !== current.model);
+    const drawn = rivals.length > 0 ? learned.weigh([...rivals, { provider: "codex", model: current.model }], seed).arms : [];
+    const beat = drawn.find((arm) => arm.model === (current.model ?? ""))?.draw ?? 0;
+    const better = drawn
+      .flatMap((arm) => (arm.draw !== null && arm.model !== "" && arm.model !== current.model && arm.draw > beat ? [{ model: arm.model, draw: arm.draw }] : []))
+      .sort((a, b) => b.draw - a.draw);
+    for (const arm of better.slice(0, 3)) {
+      try {
+        const reread = await input.readCodexFor({ capability, effort: args.effort ?? "default", model: arm.model });
+        if (reread.readable && reread.model === arm.model) {
+          capacities = capacities.map((capacity, index) => (index === codexIndex ? reread : capacity));
+          break;
+        }
+      } catch (error) {
+        console.error(JSON.stringify({ event: "worker.fix_routing_codex_reread_failed", model: arm.model, reason: "read-failed", error: String(error) }));
+      }
+    }
+  }
+  const candidates = capacities
+    .filter((capacity) => providerEligibility(capacity, input.reservePercent).eligible)
+    .map((capacity) => ({ provider: capacity.provider as string, model: fixArmModel(args, capacity, capabilities) }));
+  const weights = learned.weigh(candidates, seed);
+  return {
+    capacities,
+    weights,
+    mixing: { epsilon: weights.epsilon, multipliers: weights.multipliers as ProviderMixing["multipliers"] },
+  };
 }
 
 let claudeCapacityCache: { at: number; value: ProviderCapacity } | undefined;
@@ -1737,7 +1945,16 @@ export async function readClaudeProviderCapacity(
   const now = deps.now ?? Date.now;
   const cacheMs = config.workerProviders?.capacityCacheMs ?? 60_000;
   if (!deps.forceRefresh && claudeCapacityCache && now() - claudeCapacityCache.at < cacheMs) return claudeCapacityCache.value;
-  const session = (deps.openSession ?? openUsageProbeSession)();
+  let session: UsageProbeSession;
+  try {
+    session = (deps.openSession ?? openUsageProbeSession)();
+  } catch (error) {
+    if (!(error instanceof WorkerKeychainError)) throw error;
+    const value: ProviderCapacity = { provider: "claude", readable: false, windows: [],
+      detail: `capacity credential unavailable: ${error.reasonClass}` };
+    claudeCapacityCache = { at: now(), value };
+    return value;
+  }
   try {
     const method = session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
     if (typeof method !== "function") {
@@ -1855,6 +2072,15 @@ export function activeWorkerCount(): number {
   return activeWorkerSpawns;
 }
 
+/** What a claim records in the host memory ledger (W1-T7093). Bookkeeping only: nothing reads it to admit work. */
+export interface WorkerOccupancyReservation {
+  workerClass?: WorkerClass;
+  root?: string;
+  ledger?: HostMemoryLedgerOptions;
+  /** The learned-estimate store and the tree sampler (host-memory-learning.ts). Default: the shared ones. */
+  learning?: Omit<LearnedReservationOptions, "ledger">;
+}
+
 function claimWorkerOccupancy(): () => void {
   activeWorkerSpawns += 1;
   let released = false;
@@ -1865,14 +2091,54 @@ function claimWorkerOccupancy(): () => void {
   };
 }
 
+/** The host memory reservation a claim opens beside its counter, at its class's LEARNED estimate; its tree's peak is
+ * recorded when the occupancy ends. It never throws, and its `releaseOccupancy` never throws either, so neither the claim
+ * nor its release can fail on the ledger's account. */
+function openOccupancyReservation(reservation: WorkerOccupancyReservation): LearnedReservation {
+  return openLearnedReservation(
+    { workerClass: reservation.workerClass ?? "unclassified", ...(reservation.root ? { root: reservation.root } : {}) },
+    { ...reservation.learning, ...(reservation.ledger ? { ledger: reservation.ledger } : {}) },
+  );
+}
+
+/** The class a spawn records when its caller names none: a disposable review sandbox is a review, a spawn carrying the
+ * implement lane's rule lookup is an implement, and anything else says "unclassified" rather than guessing. */
+function workerClassOf(args: Pick<SpawnWorkerArgs, "workerClass" | "sandboxIntent" | "ruleLookup">): WorkerClass {
+  if (args.workerClass) return args.workerClass;
+  if (args.sandboxIntent === "disposable-review") return "review";
+  return args.ruleLookup ? "implement" : "unclassified";
+}
+
+/** The contained spawn, wrapped so each process it starts is bound to the claim's reservation as (pid, start time). */
+function reservationBoundContainment(
+  containment: SpawnWorkerArgs["containment"],
+  memory: MemoryReservationHandle,
+): NonNullable<SpawnWorkerArgs["containment"]> {
+  const spawn = containment?.spawn ?? spawnDetachedGroup;
+  return {
+    ...containment,
+    spawn: (opts, onStderr, onSpawnError) => {
+      const spawned = spawn(opts, onStderr, onSpawnError);
+      memory.bindRoot(spawned.pid);
+      return spawned;
+    },
+  };
+}
+
 /** Claim one process-wide worker slot for the complete async operation and release it on every settlement, including an
- * AbortError/cancellation rejection. Exported so the finally contract is testable without a paid provider spawn. */
-export async function withWorkerOccupancy<T>(operation: () => Promise<T>): Promise<T> {
+ * AbortError/cancellation rejection. Exported so the finally contract is testable without a paid provider spawn. The claim
+ * also opens a host memory ledger reservation, released only once its whole tree is verified gone (W1-T7093). */
+export async function withWorkerOccupancy<T>(
+  operation: () => Promise<T>,
+  reservation: WorkerOccupancyReservation = {},
+): Promise<T> {
   const release = claimWorkerOccupancy();
+  const memory = openOccupancyReservation(reservation);
   try {
     return await operation();
   } finally {
     release();
+    memory.releaseOccupancy();
   }
 }
 
@@ -1965,7 +2231,7 @@ export const WORKER_SETTING_SOURCES: SettingSource[] = WORKER_SPAWN_ISOLATION.se
  * and were never tried. `selectOpenWeightModel` already walks the ladder for CONTEXT FIT; nothing
  * walked it for FAILURE, so a single unusable deployment took the whole run.
  *
- * ONE TRIGGER — the only failure that cannot succeed on a retry of the SAME deployment.
+ * Draft callers additionally walk on a failed output contract (W1-T4067).
  * `OpenWeightUnsupportedResponseFormatError` names the deployment and what it could not honour,
  * and its own message prescribes this remedy. Everything else is deliberately NOT walked: a
  * timeout or truncated reply may be transient and walking turns a blip into a second charge
@@ -1979,9 +2245,10 @@ export async function runOpenWeightWalkingLadder(
   run: (selection: OpenWeightModelSelection) => Promise<WorkerResult>,
   selection: OpenWeightModelSelection,
   onFallbackAttempt?: (attempt: { selection: OpenWeightModelSelection;
-    reason: "deployment-absent" | "unsupported-response-format"; result?: WorkerResult }) => void,
+    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract"; result?: WorkerResult }) => void,
+  contractFailed?: (result: WorkerResult) => boolean,
 ): Promise<WorkerResult> {
-  const rungs = [selection.model, ...selection.alternatives];
+  const rungs = [...new Set([selection.model, ...selection.alternatives])];
   let lastRefusal: unknown;
   for (const [index, model] of rungs.entries()) {
     try {
@@ -1998,6 +2265,11 @@ export async function runOpenWeightWalkingLadder(
         continue;
       }
       if (result.openWeightDeploymentAbsent) markOpenWeightDeploymentAbsent(result.openWeightDeploymentAbsent);
+      if (!result.isError && contractFailed?.(result) && next) {
+        try { onFallbackAttempt?.({ selection: { ...selection, model }, reason: "draft-contract", result }); }
+        catch (error) { console.error(JSON.stringify({ event: "worker.openweight.rung_telemetry_unavailable", reason: String(error) })); }
+        continue;
+      }
       return result;
     } catch (err) {
       if (!(err instanceof OpenWeightUnsupportedResponseFormatError)) throw err;
@@ -2032,8 +2304,34 @@ function sonnetRefusedBeforeTransport(result: WorkerResult): boolean {
     (result.budgetReservedUsd ?? 0) === 0;
 }
 
+/** W1-T7807: wrap a contained spawn so the spawned process's pid is reported to `onWorkerPid` — the root of the process tree
+ * the quiet-worker watchdog reads. With no reporter the spawn is returned untouched. */
+export function withWorkerPidReport<A extends unknown[], R extends { pid: number }>(
+  spawnBase: (...spawnArgs: A) => R,
+  onWorkerPid: ((pid: number) => void) | undefined,
+): (...spawnArgs: A) => R {
+  if (!onWorkerPid) return spawnBase;
+  return (...spawnArgs) => {
+    const spawned = spawnBase(...spawnArgs);
+    onWorkerPid(spawned.pid);
+    return spawned;
+  };
+}
+
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
+  // The ENFORCE mode of the host memory budget: under the shipped "shadow" mode this returns at once and changes
+  // nothing; under "enforce" (an operator ruling in plan/policy.yaml) it waits, tiered and in priority order, while the
+  // start would not fit. It never throws, and an error admits the start (host-memory-admission.ts).
+  const admission = await awaitMemoryAdmission({
+    workerClass: workerClassOf(args),
+    root: () => (args.config ?? loadConfig()).root,
+    ...(args.runId ? { runId: args.runId } : {}),
+    ...(args.taskId ? { taskId: args.taskId } : {}),
+  }, args.memoryShadow);
   const releaseWorkerOccupancy = claimWorkerOccupancy();
+  const memoryReservation = ("reservation" in admission ? admission.reservation : undefined) ??
+    openOccupancyReservation({ workerClass: workerClassOf(args), root: args.config?.root });
+  const boundContainment = reservationBoundContainment(args.containment, memoryReservation);
   try {
   // Validate-before-spawn guard, enforced at the spawn boundary rather than by caller convention. TRAP: `claude -p` SILENTLY
   // IGNORES an invalid settings file and drops containment, so it is validated against the pinned SandboxSettingsSchema
@@ -2044,6 +2342,17 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // one worker's advisory status read must not switch another's home.
   const realHome = process.env.HOME ?? homedir();
   const config = args.config ?? loadConfig();
+  // W1-T7094: the COUNTERFACTUAL host-memory verdict, taken once the start is committed (slot claimed, reservation open,
+  // settings validated). Synchronous, bounded and non-throwing, and its outcome is deliberately unread: admit, defer and
+  // error start identically. SHADOW ONLY: there is no enforce, block or defer path.
+  recordShadowMemoryVerdict({
+    runId: args.runId,
+    taskId: args.taskId,
+    workerClass: workerClassOf(args),
+    reservationId: memoryReservation.id,
+    estimateMib: memoryReservation.estimateMib,
+    root: config.root,
+  }, args.memoryShadow);
   // HOISTED ABOVE PROVIDER SELECTION so the Codex branch cannot return past the HOME redirection the Claude path has had
   // since W1-T18. Below the early return, `codexSpawnEnv` fell back to the operator's real HOME, and a worker shell sourcing
   // an rc file from it re-exported ANTHROPIC_API_KEY past both of Codex's process-boundary exclusions. Computing the path
@@ -2135,17 +2444,17 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     }
   }
   if (!args.mountProvider && !(providers.length === 1 && providers[0] === "claude")) {
-    const capacities = await Promise.all(
+    const readCodexFor = (preferred: typeof routingPolicy.codexModelPreference) =>
+      (args.providerRouting?.readCodex ?? readCodexCapacity)(config, {
+        requestedModel: args.model,
+        requestedEffort: args.effort,
+        ...(preferred ? { preferredModel: preferred } : {}),
+        reservePercent: routingPolicy.reservePercent,
+        ...(args.model && capabilities ? { capabilities } : {}),
+      });
+    let capacities = await Promise.all(
       providers.map((provider) => {
-        if (provider === "codex") {
-          return (args.providerRouting?.readCodex ?? readCodexCapacity)(config, {
-            requestedModel: args.model,
-            requestedEffort: args.effort,
-            ...(routingPolicy.codexModelPreference ? { preferredModel: routingPolicy.codexModelPreference } : {}),
-            reservePercent: routingPolicy.reservePercent,
-            ...(args.model && capabilities ? { capabilities } : {}),
-          });
-        }
+        if (provider === "codex") return readCodexFor(routingPolicy.codexModelPreference);
         if (claudeHealthRoute && !claudeHealthRoute.eligible) return unavailableClaudeCapacity(claudeHealthRoute);
         return (args.providerRouting?.readClaude ?? (() => readClaudeProviderCapacity(config)))()
           .then((capacity) => claudeHealthRoute
@@ -2178,13 +2487,44 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         capabilities?.providerPreference,
       );
       routedCapabilityPreference = auction.capabilityPreference;
-      const routed = selectWorkerProviderForPolicy(
-        capacities,
-        auction.policy,
-        args.providerRouting?.draw ?? auctionDrawSeed(args, auction.policy, capacities, requestedCapability),
-      );
+      // W1-T5535: the draw key is read BEFORE the learner may re-read a Codex model, so a task's experiment enrolment
+      // is judged on the arms the auction would have drawn without the learner.
+      const keyed = auctionDrawSeed(args, auction.policy, capacities, requestedCapability);
+      const draw = args.providerRouting?.draw ?? keyed;
+      const learned = args.providerRouting?.learnedArms;
+      let fixLearning: { mixing: ProviderMixing; weights: FixRoutingWeights } | undefined;
+      if (learned) {
+        const stoodAside = keyed.unit === "task" ? "live-routing-experiment"
+          : auction.policy.preference !== "automatic" ? "operator-preference" : undefined;
+        if (stoodAside) emitFixRoutingDecision(learned, { learner: FIX_ROUTING_LEARNER, applied: false, reason: stoodAside });
+        else {
+          const learning = await applyFixLearner({
+            args, learned, capacities, seed: routingDrawValue(keyed).seed, capability: requestedCapability, capabilities,
+            codexPreference: routingPolicy.codexModelPreference, reservePercent: routingPolicy.reservePercent, readCodexFor,
+          });
+          capacities = learning.capacities;
+          fixLearning = { mixing: learning.mixing, weights: learning.weights };
+        }
+      }
+      const routed = fixLearning
+        ? {
+          selection: selectWorkerProvider(
+            capacities.filter((capacity) => auction.policy.routableProviders.includes(capacity.provider)),
+            auction.policy.reservePercent, draw, fixLearning.mixing,
+          ),
+          preferenceBypass: undefined,
+        }
+        : selectWorkerProviderForPolicy(capacities, auction.policy, draw);
       selection = routed.selection;
       preferenceBypass = routed.preferenceBypass;
+      const learnedProbabilities = selection.draw?.learned?.probabilities;
+      if (fixLearning && learned && learnedProbabilities) {
+        emitFixRoutingDecision(learned, fixRoutingDecisionFields({
+          weights: fixLearning.weights,
+          probabilities: learnedProbabilities,
+          selected: { provider: selection.provider, model: fixArmModel(args, selection.capacity, capabilities) },
+        }));
+      }
     } catch (error) {
       // W1-T3692: A BLOCKED AUCTION IS THE MOMENT CASH SHOULD CARRY THE WORK, NOT A DEAD END.
       // This fires ONLY where dispatch would otherwise stall, so its worst case is spending
@@ -2328,8 +2668,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       }),
     );
     if (selection.provider === "codex") {
-      const runCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
+      const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
         args.providerRouting?.spawnCodex ?? spawnCodexWorker;
+      const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
+        spawnCodex({ ...codexArgs, containment: boundContainment }, workerConfig, capacity);
       if (args.providerRouting?.spawnCodex === undefined) {
         assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
       }
@@ -2414,8 +2756,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     routedClaudePreferenceBypass = preferenceBypass;
   }
   if (args.mountProvider === "codex") {
-    const runCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
+    const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
       args.providerRouting?.spawnCodex ?? spawnCodexWorker;
+    const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
+      spawnCodex({ ...codexArgs, containment: boundContainment }, workerConfig, capacity);
     if (args.providerRouting?.spawnCodex === undefined) {
       assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
     }
@@ -2460,7 +2804,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // body -- the tool schemas and the output contract add a bounded preamble -- and the estimate
     // deliberately OVER-states tokens, so using it rather than the fully serialized body can only
     // make the gate stricter.
-    const openWeight: OpenWeightModelSelection = args.cashOpusEmergency === true
+    let openWeight: OpenWeightModelSelection = args.cashOpusEmergency === true
       ? { model: "claude-opus-5-5", effort: args.effort ?? "medium", capability: "frontier", alternatives: [] }
       : args.cashSonnetEmergency === true
       ? { model: "claude-sonnet-5-5", effort: args.effort ?? "medium", capability: "balanced",
@@ -2478,6 +2822,25 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         ...(args.routingTrial?.arm === "cash" && args.routingTrial.models ? { only: args.routingTrial.models } : {}),
       },
     );
+    let draftChoice: DraftChoice | undefined;
+    let draftReadError: string | undefined;
+    if (args.draftRouting) {
+      let stats: DraftStats | undefined;
+      try {
+        stats = (args.draftRouting.readStats ?? (() => readDraftStats(join(config.root, "state"), args.draftRouting!.lane)))();
+      } catch (error) {
+        draftReadError = String(error);
+        recordDraftRouting(args.draftRouting.log, "draft.routing.error", { lane: args.draftRouting.lane, proposal_id: args.draftRouting.proposalId,
+          error: draftReadError, reason: "stats-read-failed-row-order" });
+      }
+      if (stats) {
+        draftChoice = chooseDraftDeployment(stats, [openWeight.model, ...openWeight.alternatives].map((deployment) => ({
+          deployment, estimatedCostUsd: openWeightUsageUsd(deployment, openWeight.estimatedTokens ?? 1, OPENWEIGHT_MAX_COMPLETION_TOKENS),
+        })), args.draftRouting.random);
+        openWeight = { ...openWeight, model: draftChoice.deployment,
+          alternatives: [openWeight.model, ...openWeight.alternatives].filter((model) => model !== draftChoice!.deployment) };
+      }
+    }
     assertModelAllowed(openWeight.model, config);
     const cashAssignment = (model: string, alternatives: readonly string[]) => emitWorkerSelectionAssignment(args, {
       provider: "cash",
@@ -2492,24 +2855,52 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     let selectionAssignmentId = cashAssignment(openWeight.model, openWeight.alternatives);
     try {
       materializeWorkerHome({ workerHome, realHome });
-      // WALK THE LADDER ON A CAPABILITY REFUSAL, NEVER ON ANYTHING ELSE (see `runOpenWeightWalkingLadder`).
+      // Cash drafts also walk on a broken fragment contract; each rung retains the adapter's cap gate.
       let firstRung = true;
+      let draftContractFailed = false;
+      let draftFallback: { reason: string; model: string } | undefined;
       const result = await runOpenWeightWalkingLadder(
         async (selection) => {
           if (firstRung) firstRung = false;
           else selectionAssignmentId = cashAssignment(selection.model,
             openWeight.alternatives.slice(openWeight.alternatives.indexOf(selection.model) + 1));
-          const rung = await runOpenWeight({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
+          if (args.draftRouting) recordDraftRouting(args.draftRouting.log, "draft.routing.choice", {
+            lane: args.draftRouting.lane, proposal_id: args.draftRouting.proposalId, deployment: selection.model,
+            reason: draftFallback?.reason ?? (draftReadError ? "stats-read-failed-row-order" : draftChoice?.reason),
+            ...(draftFallback ? { previous_deployment: draftFallback.model } : {}),
+            posterior: draftChoice?.arms.find((arm) => arm.deployment === selection.model) ?? {
+              alpha: 1, beta: 1 + [openWeight.model, ...openWeight.alternatives].indexOf(selection.model),
+            },
+          });
+          const rung: WorkerResult = await runOpenWeight({ ...args, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
           rung.selectionAssignmentId = selectionAssignmentId;
           rung.routedModel ??= selection.model;
+          if (args.draftRouting) {
+            let outcome = { clean: false, contractFailed: false };
+            if (!rung.isError && !rung.usageRefusal && !rung.budgetRefused) {
+              try { outcome = args.draftRouting.evaluate(rung); }
+              catch (error) {
+                outcome.contractFailed = true;
+                recordDraftRouting(args.draftRouting.log, "draft.routing.error", { lane: args.draftRouting.lane,
+                  proposal_id: args.draftRouting.proposalId, deployment: selection.model, error: String(error), reason: "output-contract" });
+              }
+            }
+            draftContractFailed = outcome.contractFailed;
+            recordDraftRouting(args.draftRouting.log, "draft.routing.outcome", { lane: args.draftRouting.lane,
+              proposal_id: args.draftRouting.proposalId, deployment: selection.model, session_id: rung.sessionId,
+              selection_assignment_id: selectionAssignmentId,
+              draft_cost_usd: rung.costUsd, clean: outcome.clean, contract_failed: outcome.contractFailed });
+          }
           return rung;
         },
         openWeight,
         (attempt) => {
+          draftFallback = { reason: attempt.reason, model: attempt.selection.model };
           try { args.onModelFallbackAttempt?.({ selectionAssignmentId, model: attempt.selection.model,
             reason: attempt.reason, ...(attempt.result ? { result: attempt.result } : {}) }); }
           catch { console.error(JSON.stringify({ event: "worker.openweight.rung_telemetry_unavailable", reason: "sink-failed" })); }
         },
+        args.draftRouting ? () => draftContractFailed : undefined,
       );
       result.selectionAssignmentId = selectionAssignmentId;
       // W1-T4785: a Sonnet attempt refused before any money moved re-enters as plain cash-fallback so
@@ -2580,6 +2971,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // named reason class so the failure stays queryable. It refuses only the unambiguously unusable. An EXPIRED token is
       // reported and allowed through: nothing here can re-provision, the CLI maintains its own refresh, and refusing would be
       // a bound firing on a healthy condition (recon-cloud-workers-spike stop 6).
+      // Provision or heal the shared credential store BEFORE judging it, or the refusal below fires until someone intervenes.
+      seedClaudeFleetCredentials({ realHome, onEvent: logClaudeCredentialSeed });
       assertWorkerCredentialFile(workerCredentialFilePath(realHome), args.keychain?.readCredentialFile);
     }
     // A grant that FAILED is not a grant that was OPTIONAL. The absent-target skip stays silent, but a target that EXISTS and
@@ -2644,7 +3037,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // group never outlives its own teardown. That closure also owns stderr piping, because a custom spawn gets none from the
     // SDK (W1-T117).
     const pidRef: { pid?: number } = {};
-    const spawnContained = args.containment?.spawn ?? spawnDetachedGroup;
+    const spawnContainedBase = boundContainment.spawn ?? spawnDetachedGroup;
+    const spawnContained: typeof spawnContainedBase = withWorkerPidReport(spawnContainedBase, args.onWorkerPid);
     const teardownContained = args.containment?.teardown ?? ((pgid: number) => void teardownProcessGroup(pgid));
 
     // TRAP (SDK 0.3.209): passing BOTH a `settings` file path and the `sandbox` option throws "Cannot use both …". The
@@ -2708,9 +3102,22 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     let abandonment: WorkerAbandonmentEvidence | undefined;
     let stopWatchdog: (() => void) | undefined;
     let streamObserver = args.streamObserver;
-    if (args.clockBound) {
+    let unchainSignal: (() => void) | undefined;
+    if (args.clockBound || args.signal) {
       const controller = new AbortController();
       options.abortController = controller;
+      if (args.signal) {
+        const sig = args.signal;
+        if (sig.aborted) controller.abort();
+        else {
+          const onAbort = (): void => controller.abort();
+          sig.addEventListener("abort", onAbort, { once: true });
+          unchainSignal = () => sig.removeEventListener("abort", onAbort);
+        }
+      }
+    }
+    if (args.clockBound) {
+      const controller = options.abortController as AbortController;
       const watchdog = createWorkerClockBoundWatchdog(args.clockBound);
       streamObserver = (event) => {
         watchdog.observer(event);
@@ -2758,7 +3165,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
           (args.egress?.checkVersion ?? assertWorkerEgressEnforcerVersion)(claudeBin);
           const policy = JSON.parse(fs.readFileSync(args.settingsFile, "utf8")) as { sandbox?: { network?: Record<string, unknown> } };
           egressProxy = await (args.egress?.startProxy ?? startWorkerEgressProxy)(policy);
-          await verifyWorkerEgressProxy(egressProxy);
+          await verifyWorkerEgressProxy(egressProxy, diagnostic => {
+            egressUnenforced = egressUnenforced ? `${egressUnenforced}; ${diagnostic}` : diagnostic;
+          });
           const network = { ...policy.sandbox?.network, httpProxyPort: egressProxy.httpProxyPort, socksProxyPort: egressProxy.socksProxyPort };
           options.settings = { ...policy, sandbox: { ...policy.sandbox, network } } as Options["settings"];
         } catch (error) {
@@ -2797,6 +3206,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             // Forwarded verbatim, wrapped with the watchdog's observer above when a clock bound is configured. See
             // SpawnWorkerArgs.streamObserver's doc (W1-T942).
             streamObserver,
+            root: config.root,
+            runId: args.runId,
+            taskId: args.taskId,
             // The SAME injected clock the watchdog polls against. Invariant: every `tsMs` this observer sees comes from ONE
             // clock, never a real `Date.now()` racing the watchdog's synthetic one. `undefined` falls back to
             // collectWorkerResult's own `Date.now` (W1-T1045).
@@ -2825,6 +3237,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       throw err;
     } finally {
       stopWatchdog?.();
+      unchainSignal?.();
       // Unconditional: no exit path may leave a handle for a later answer to steer into a dead session (W1-T4673).
       unregisterRunningWorker?.();
       await egressProxy?.close();
@@ -2847,6 +3260,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   }
   } finally {
     releaseWorkerOccupancy();
+    memoryReservation.releaseOccupancy();
   }
 }
 
@@ -2854,28 +3268,134 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
 /** The SDK session type a usage probe needs — narrowed to the control request and teardown, so neither this module nor its
  * callers depend on the experimental method's full shape. */
 export interface UsageProbeSession {
-  usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?: () => Promise<unknown>;
+  initializationResult?: () => Promise<unknown>;
+  usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?: (options?: { skipBehaviors?: boolean }) => Promise<unknown>;
   return?: (v?: unknown) => Promise<unknown>;
 }
 
 /** The injectable seam a test passes so no test ever reaches the real SDK — the same shape and the same purpose as {@link
  * SpawnWorkerArgs.queryFn}. */
-export type UsageProbeQueryFn = (params: { prompt: AsyncIterable<never> }) => UsageProbeSession;
+export type UsageProbeQueryFn = (params: {
+  prompt: AsyncIterable<never>;
+  options: Pick<Options, "env" | "settingSources">;
+}) => UsageProbeSession;
 
-/** A prompt that yields NOTHING. The control request is answered on session setup, so no user message is ever produced: no
- * prompt sent, no turn spent, no tokens billed. */
-async function* emptyUsagePrompt(): AsyncIterable<never> {}
+/** No user message is produced. Keep streaming stdin open until teardown: EOF tells the SDK to
+ * end input and can stop the CLI while its native OAuth initialization is still running. */
+async function* emptyUsagePrompt(untilClosed: Promise<void>): AsyncIterable<never> {
+  await untilClosed;
+}
+
+/** The bounded wait a usage probe gives the native CLI's credential renewal: the clock it reads, the
+ * sleep it polls with, and its upper bound. ONE shape, shared by {@link openUsageProbeSession}'s
+ * `context.refresh` and the waiter itself, rather than a second inline deps object literal
+ * (scripts/deps-interface-baseline.json holds that population to its ceiling). */
+export interface UsageCredentialRefreshWait {
+  clock?: Clock;
+  sleep?: (ms: number) => Promise<void>;
+  maxWaitMs?: number;
+}
+
+/** Keep a Linux file credential requiring native renewal alive long enough for the native CLI to refresh
+ * it. This observes the CLI's atomic replacement; it never refreshes, copies, or logs a token. */
+async function waitForUsageCredentialRefresh(path: string, wait: UsageCredentialRefreshWait = {}): Promise<void> {
+  const clock = wait.clock ?? systemClock;
+  const read = () => {
+    let raw = "";
+    const verdict = classifyWorkerCredentialFile(() => raw = readFileSync(path, "utf8"));
+    const token = verdict.kind === "usable" ? JSON.parse(raw).claudeAiOauth.refreshToken : undefined;
+    return { ...verdict, refreshable: typeof token === "string" && token.length > 0 };
+  };
+  const initial = read();
+  if (initial.kind === "unusable") throw new Error(`usage credential unavailable: ${initial.reasonClass}`);
+  // Pinned CLI 2.1.284 refreshes at now + 300000 >= expiresAt. Observe that same window,
+  // only when this file has a refresh credential; a valid bare access token cannot rotate.
+  if (!initial.refreshable || initial.expiresAtMs === undefined ||
+      initial.expiresAtMs > clock.now() + DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS) return;
+  const maxWaitMs = wait.maxWaitMs ?? 15_000;
+  if (!Number.isFinite(maxWaitMs) || maxWaitMs < 0) throw new Error("invalid usage credential refresh wait bound");
+  const deadline = clock.now() + maxWaitMs;
+  const sleep = wait.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  for (;;) {
+    const remaining = deadline - clock.now();
+    if (remaining <= 0) throw new Error("usage credential refresh did not complete within its bounded wait");
+    await sleep(Math.min(100, remaining));
+    const current = read();
+    if (current.kind === "unusable") throw new Error(`usage credential refresh became unavailable: ${current.reasonClass}`);
+    if (current.expiresAtMs === undefined) throw new Error("usage credential refresh lost its recorded expiry");
+    if (!current.refreshable) throw new Error("usage credential refresh lost its refresh credential");
+    if (current.expiresAtMs > clock.now() + DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS) return;
+  }
+}
+
+function usageHasEnvironmentAuthentication(env: NodeJS.ProcessEnv): boolean {
+  return ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"].some(key => Boolean(env[key])) ||
+    ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_ANTHROPIC_AWS"]
+      .some(key => Boolean(env[key]) && !["0", "false"].includes(env[key]!.toLowerCase()));
+}
 
 /** Open a control-only SDK session for the usage probe. It lives HERE, in the spawn chokepoint, deliberately:
  * test/spawn-guard.test.ts pins that EXACTLY ONE file imports the SDK's runtime `query` and guards it. STREAMING INPUT IS
  * REQUIRED, NOT PREFERRED — the usage control request is documented "only supported when streaming input/output is used" — so
  * this passes an async generator; converting `spawnWorker` itself is a separate decision (W1-T2516-adjacent). */
-export function openUsageProbeSession(runQuery?: UsageProbeQueryFn): UsageProbeSession {
+export function openUsageProbeSession(
+  runQuery?: UsageProbeQueryFn,
+  context: {
+    realHome?: string;
+    platform?: NodeJS.Platform;
+    refresh?: UsageCredentialRefreshWait;
+    /** W1-T6252: told when this probe provisioned or healed the shared credential store; run-task.ts ledgers it. */
+    onCredentialSeed?: (event: ClaudeCredentialSeedEvent) => void;
+  } = {},
+): UsageProbeSession {
   // Guarded on the same condition spawnWorker uses: only a REAL session is refused under a test runner. An injected
   // `runQuery` creates no connection and is not what this stops.
   if (runQuery === undefined) assertLiveSpawnAllowed("openUsageProbeSession (SDK usage probe)");
-  const q = runQuery ?? ((p: { prompt: AsyncIterable<never> }) => query(p as never) as unknown as UsageProbeSession);
-  return q({ prompt: emptyUsagePrompt() });
+  const q = runQuery ?? ((p: Parameters<UsageProbeQueryFn>[0]) => query(p as never) as unknown as UsageProbeSession);
+  const options: Pick<Options, "env" | "settingSources"> = { settingSources: [] };
+  // Linux workers consume the narrowed credential grant; capacity must observe that same store.
+  // Darwin continues to use its existing keychain rather than selecting a different config store.
+  if ((context.platform ?? process.platform) !== "darwin") {
+    // The probe resolves the same shared store a spawn does, so it provisions or heals it the same way first.
+    if (runQuery === undefined) {
+      seedClaudeFleetCredentials({ realHome: context.realHome ?? homedir(), onEvent: context.onCredentialSeed });
+    }
+    options.env = {
+      ...process.env,
+      CLAUDE_CONFIG_DIR: workerClaudeCredentialDir(context.realHome ?? homedir()),
+    };
+    if (!usageHasEnvironmentAuthentication(options.env)) {
+      assertWorkerCredentialFile(join(options.env.CLAUDE_CONFIG_DIR!, ".credentials.json"));
+    }
+  }
+  let closeInput!: () => void;
+  const untilClosed = new Promise<void>((resolve) => { closeInput = resolve; });
+  let session: UsageProbeSession;
+  try {
+    session = q({ prompt: emptyUsagePrompt(untilClosed), options });
+  } catch (error) {
+    closeInput();
+    throw error;
+  }
+  let teardown: Promise<unknown> | undefined;
+  const method = session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+  return {
+    ...(typeof method === "function" ? {
+      usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => {
+        await session.initializationResult?.();
+        if (options.env && !usageHasEnvironmentAuthentication(options.env)) {
+          await waitForUsageCredentialRefresh(join(options.env.CLAUDE_CONFIG_DIR!, ".credentials.json"), context.refresh);
+        }
+        // Only account windows are consumed here. The default also scans seven days of local
+        // transcripts, which adds unrelated filesystem work to every headroom read.
+        return method.call(session, { skipBehaviors: true });
+      },
+    } : {}),
+    return: (value) => {
+      closeInput();
+      return teardown ??= Promise.resolve().then(() => session.return?.(value));
+    },
+  };
 }
 
 /** The 3-value worker activity vocabulary, and no more:
@@ -3079,6 +3599,30 @@ export function createWorkerClockBoundWatchdog(opts: {
   return { observer, start };
 }
 
+/** Read the SDK's safeguard-refusal system message (`model_refusal_no_fallback`, or `model_refusal_fallback` with direction
+ * `retry`) off one raw stream message. `undefined` for every other message — including a `revert`/`sticky` fallback, legacy
+ * swaps that are not a refusal — and for one whose required `original_model` is not a string, so a malformed notice yields no
+ * record rather than an invented model. `api_refusal_explanation` is display-only and deliberately never read. */
+function detectSafeguardRefusal(raw: unknown): WorkerResult["safeguardRefusal"] {
+  const m = raw as {
+    subtype?: unknown;
+    direction?: unknown;
+    original_model?: unknown;
+    fallback_model?: unknown;
+    api_refusal_category?: unknown;
+  };
+  const isFallback = m.subtype === "model_refusal_fallback" && m.direction === "retry";
+  if (!isFallback && m.subtype !== "model_refusal_no_fallback") return undefined;
+  if (typeof m.original_model !== "string" || m.original_model.length === 0) return undefined;
+  const category = typeof m.api_refusal_category === "string" && m.api_refusal_category.length > 0 ? m.api_refusal_category : null;
+  return {
+    category,
+    retried: isFallback,
+    originalModel: m.original_model,
+    ...(isFallback && typeof m.fallback_model === "string" && m.fallback_model.length > 0 ? { fallbackModel: m.fallback_model } : {}),
+  };
+}
+
 /** Reduce the SDK message stream into a {@link WorkerResult}. Split out of spawnWorker so the error-envelope behaviour is
  * unit-testable without a real worker. TRAP (SDK 0.3.209, the WS-1 root cause): the SDK YIELDS the `type:"result"` envelope
  * for an error subtype — carrying `num_turns` and `total_cost_usd` — and only THEN throws, so letting that throw escape loses
@@ -3089,6 +3633,9 @@ export async function collectWorkerResult(
   messages: AsyncIterable<unknown>,
   opts: {
     childEnvKeys: string[];
+    root?: string;
+    runId?: string;
+    taskId?: string;
     stderrChunks?: string[];
     /** Configured input, logged verbatim — defaults to `DEFAULT_MODEL_LABEL`. */
     model?: string;
@@ -3117,6 +3664,8 @@ export async function collectWorkerResult(
   // spawnWorker is local, free setup. No clock injection, because existing tests already drive this loop against near-instant
   // synthetic streams (W1-T477).
   const startedAtMs = Date.now();
+  const toolLineage = createWorkerToolLineage({ provider: "claude", root: opts.root, runId: opts.runId, taskId: opts.taskId });
+  let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
   const blocks: string[] = [];
   const stderrChunks = opts.stderrChunks ?? [];
 
@@ -3132,8 +3681,14 @@ export async function collectWorkerResult(
   let isError = false;
   let apiError = false;
   let usageRefusal: WorkerResult["usageRefusal"];
+  let safeguardRefusal: WorkerResult["safeguardRefusal"];
+  // Envelope value outranks the last assistant message's; both stay `undefined` until a real string is observed.
+  let envelopeStopReason: string | undefined;
+  let assistantStopReason: string | undefined;
   let permissionDenials: unknown[] = [];
   let sawResult = false;
+  // W1-T6027: only an SDK throw reports the process's end; a clean envelope saw none.
+  let exit: WorkerExit = { kind: "unobserved" };
   let tokens: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
   let modelUsage: Record<string, ModelUsageEntry> = {};
   // The LAST real (non-`<synthetic>`) `msg.message.model` seen on the live assistant stream — see {@link
@@ -3146,6 +3701,7 @@ export async function collectWorkerResult(
 
   try {
     for await (const raw of messages) {
+      observeWorkerToolLineage(toolLineage, raw);
       const msg = raw as { type?: string; message?: unknown };
       if (msg.type === "system") {
         // Detect a compaction event LIVE off the SDK's own `compact_boundary` system message, reusing the same detector a
@@ -3156,6 +3712,8 @@ export async function collectWorkerResult(
         // compact_result:"failed"}` — which the boundary detector above never matches, so a FAILED attempt used to leave no
         // trace. No new SDK call and no second stream (W1-T2245).
         compactionFailures.push(...detectCompactionFailures([raw]));
+        // The SDK's two safeguard-refusal notices, read off the SAME raw message. Observational: no strike or retry reads it.
+        safeguardRefusal = detectSafeguardRefusal(raw) ?? safeguardRefusal;
         // A heartbeat: no worker-authored text, but still proof of life for the quiet floor.
         opts.streamObserver?.({ kind: "message", tsMs: nowFn(), turnsSoFar });
       } else if (msg.type === "assistant") {
@@ -3168,6 +3726,9 @@ export async function collectWorkerResult(
         // this turn. Never `modelUsage`, a post-hoc cost breakdown, and never `<synthetic>`, an error placeholder. Last real
         // value wins (W1-T2572).
         if (typeof model === "string" && model.length > 0 && model !== "<synthetic>") servedModel = model;
+        // A streamed block carries `stop_reason: null`, so only a real string replaces an earlier one.
+        const messageStopReason = (msg.message as { stop_reason?: unknown })?.stop_reason;
+        if (typeof messageStopReason === "string" && messageStopReason.length > 0) assistantStopReason = messageStopReason;
         const content = (msg.message as { content?: unknown }).content;
         // ONE assistant SDK message is ONE observed "turn", incremented once here before the block loop, so a message
         // carrying BOTH a text and a tool_use block reports the SAME `turnsSoFar` on both emitted events rather than
@@ -3224,6 +3785,7 @@ export async function collectWorkerResult(
           session_id: string;
           total_cost_usd: number;
           num_turns?: number;
+          stop_reason?: string | null;
           permission_denials?: unknown[];
           // `usage`/`modelUsage` are on BOTH SDKResultSuccess and SDKResultError (sdk.d.ts ground truth) — optional here only
           // to tolerate a synthetic test stream that omits them; a real envelope always carries both.
@@ -3245,6 +3807,7 @@ export async function collectWorkerResult(
         sessionId = r.session_id;
         costUsd = r.total_cost_usd;
         numTurns = typeof r.num_turns === "number" ? r.num_turns : 0;
+        if (typeof r.stop_reason === "string" && r.stop_reason.length > 0) envelopeStopReason = r.stop_reason;
         permissionDenials = r.permission_denials ?? [];
         tokens = {
           input: r.usage?.input_tokens ?? 0,
@@ -3267,6 +3830,7 @@ export async function collectWorkerResult(
         );
       }
     }
+    lineageEnd = "stream-ended";
   } catch (err) {
     // No result envelope was seen ⇒ this is a real failure (bad binary, network, aborted spawn), not an error-subtype result.
     // Re-raise it.
@@ -3276,6 +3840,7 @@ export async function collectWorkerResult(
     const swallowed = String((err as Error)?.message ?? err);
     stderrChunks.push(`\n[collectWorkerResult] error-result throw swallowed: ${swallowed}\n`);
     isError = true;
+    exit = workerExitOfError(err);
     // CLASSIFY THE REFUSAL HERE, while the message still exists. `detectUsageLimitRefusal` (lib/classify.ts) is the fleet's
     // ONE usage-limit detector, already wired into the fix-retry loop; this is a second CALLER, never a second classifier
     // (W1-T2564, W1-T2515).
@@ -3287,8 +3852,11 @@ export async function collectWorkerResult(
         ...(refusal.resetsAtMs === undefined ? {} : { resetsAtMs: refusal.resetsAtMs }),
       };
     }
+  } finally {
+    toolLineage.finish(lineageEnd);
   }
 
+  const finalStopReason = envelopeStopReason ?? assistantStopReason;
   return {
     ...(opts.lostGrants?.length ? { lostGrants: opts.lostGrants } : {}),
     ...(opts.credentialHelperUnwired ? { credentialHelperUnwired: opts.credentialHelperUnwired } : {}),
@@ -3301,8 +3869,11 @@ export async function collectWorkerResult(
     stderr: stderrChunks.join(""),
     subtype,
     isError,
+    exit,
     apiError,
     ...(usageRefusal ? { usageRefusal } : {}),
+    ...(safeguardRefusal ? { safeguardRefusal } : {}),
+    ...(finalStopReason === undefined ? {} : { finalStopReason }),
     permissionDenials,
     childEnvKeys: opts.childEnvKeys,
     accountLabel: opts.accountLabel,
@@ -3688,6 +4259,7 @@ export interface QuestionAnswerEntry {
   /** Non-reversible id of the bearer token that submitted the answer — never the raw token (see lib/panel-actions.ts's
    * `bearerTokenId`). */
   origin: string;
+  contribution?: unknown;
 }
 
 /** Append an operator's ANSWER to the same store `appendQuestion` writes to; the panel's write action is the only caller
@@ -3749,15 +4321,18 @@ export function deliverOperatorAnswerToRunningWorker(
   answerText: string,
   opts: {
     ledger?: (event: string, extra?: Record<string, unknown>) => void;
+    contributions?: readonly unknown[];
     onSteerSettled?: () => void; // TEST-ONLY: fires once the streamInput call above settles, so a test can await that instead of guessing a tick count.
   } = {},
 ): OperatorAnswerDeliveryOutcome {
   const handle = runningWorkers.get(taskId);
   if (!handle) return "no-running-worker";
   const ledger = opts.ledger ?? ((message, extra) => console.error(message, extra));
+  const contributions = feedbackLineageSnapshot(opts.contributions ?? []);
   const sdkMessage: SDKUserMessage = {
     type: "user",
-    message: { role: "user", content: answerText },
+    message: { role: "user", content: contributions.length
+      ? feedbackLineageEnvelope(feedbackLineagePayload(answerText, contributions), "feedback-entry") : answerText },
     parent_tool_use_id: null,
     priority: "next",
   };
@@ -3798,7 +4373,7 @@ export function adhocLaneRoot(config: Config): string {
  * weekend, about 84 hours, so fourteen days is roughly four times that while still bounding a directory growing at 15-88
  * entries a day. AGE IS THE BACKSTOP, NOT THE PREDICATE: {@link reapStaleWorktrees} fails closed on a live pid, a live
  * upstream branch and an incomplete probe, so against the measured population this reclaims ZERO today — the value delivered
- * is the bound (W1-T2847; docs/forensics/worker.md). */
+ * is the bound (W1-T2847; docs/forensics/worker.md). W1-T4065 scales this ceiling by the free-space fraction. */
 export const ADHOC_LANE_REAP_GRACE_MS = 14 * 24 * 60 * 60 * 1000;
 
 /** This rmd install's own root — the same derivation `src/lib/policy.ts` uses from a `src/lib/` module. Its `node_modules` is
@@ -3811,12 +4386,14 @@ function installRootDir(): string {
 /** W1-T2699: point `cwd`'s PER-WORKTREE git config at the socket-based credential helper, resetting any
  *  accumulated `credential.helper` first — an empty value clears git's collected helper list
  *  (MEASURED against git 2.39.5), so the worktree entry added right after is the only one git tries
- *  in this worktree, superseding `deploy/entrypoint.sh`'s global `$GH_TOKEN`-reading helper. */
+ *  in this worktree, superseding `deploy/entrypoint.sh`'s global `$GH_TOKEN`-reading helper.
+ *  W1-T6133: written through the leaf, so the `config.worktree` is the PINNED gitdir's; a pointer the
+ *  leaf refuses throws before the first write, and spawnWorker surfaces it as `credential_helper_unwired`. */
 export function wireCredentialHelperSocket(
   cwd: string,
   socketPath: string,
   writeConfig: (args: string[]) => void = (args) => {
-    execFileSync("git", ["-C", cwd, "config", "--worktree", ...args]);
+    hostWorktreeGit(cwd, ["config", "--worktree", ...args]);
   },
 ): void {
   const helperScript = join(installRootDir(), "scripts", "git-credential-socket-helper.mjs");
@@ -3833,10 +4410,18 @@ export function wireCredentialHelperSocket(
   writeConfig(["--add", "credential.helper", `!node "${helperScript}" "${socketPath}"`]);
 }
 
-/** W1-T5115: `cwd` already routes git to THIS socket, so a second spawn there skips the reset git refuses (exit 5). */
+/** W1-T5115: `cwd` already routes git to THIS socket, so a second spawn there skips the reset git refuses (exit 5).
+ *  W1-T6133: read through the leaf. An unset key (exit 1) reads as empty, as spawnSync's stdout did; a refused
+ *  pointer reads NOT wired, so the writer runs, refuses, and the refusal is surfaced rather than skipped. */
 export function credentialHelperSocketWired(cwd: string, socketPath: string): boolean {
-  const read = (...args: string[]): string =>
-    spawnSync("git", ["-C", cwd, "config", "--worktree", ...args], { encoding: "utf8" }).stdout ?? "";
+  const read = (...args: string[]): string => {
+    try {
+      return hostWorktreeGit(cwd, ["config", "--worktree", ...args]);
+    } catch {
+      // Unset, unreadable or refused: none is evidence of wiring, and the writer reports the last.
+      return "";
+    }
+  };
   const helpers = read("--get-all", "credential.helper").split("\n");
   return read("--get", "credential.useHttpPath").trim() === "true" && helpers[0] === "" && helpers.some((h) => h.includes(`"${socketPath}"`));
 }
@@ -4413,11 +4998,8 @@ export function excludeNodeModulesFromGit(
   try {
     const commonDir =
       deps.commonDir ??
-      ((wt: string) =>
-        execFileSync("git", ["-C", wt, "rev-parse", "--path-format=absolute", "--git-common-dir"], {
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "ignore"],
-        }).trim());
+      // W1-T6122: through the leaf, so a rewritten `.git` pointer cannot aim this write elsewhere.
+      ((wt: string) => hostWorktreeGit(wt, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim());
     const infoDir = join(commonDir(worktreePath), "info");
     const excludeFile = join(infoDir, "exclude");
     let body = "";
@@ -4634,21 +5216,26 @@ export function recordCanonicalCheckoutDrift(
  * runLockPath}'s liveness token — so it is never committed and a later refusal can name the base without re-deriving it via
  * `git merge-base`. */
 export function worktreeBasePath(worktreePath: string): string {
-  return `${worktreePath}.base`;
+  return worktreeRecordPath(worktreePath);
 }
 
 /** Record the base a worktree was just created from. `worktreeAdd` calls this for every worktree it creates, BEFORE the
  * currency check can throw, so a stale-base refusal still leaves an attributable sibling file even though the worktree is
  * about to be abandoned (W1-T405). */
-export function recordWorktreeBase(worktreePath: string, base: string): void {
-  writeFileSync(worktreeBasePath(worktreePath), `${base}\n`);
+export function recordWorktreeBase(worktreePath: string, base: string, gitDir?: string): void {
+  // W1-T6106: the gitdir this worktree was cut with rides on the same record, the anchor the host git leaf
+  // pins every call to; the base sha stays the first line, which is all readWorktreeBase reads.
+  // W1-T6148: so does its origin URL, which the leaf then requires the pinned config to still name.
+  const remote = gitDir === undefined ? undefined : originUrlAtCut(gitDir);
+  writeFileSync(worktreeBasePath(worktreePath), `${base}\n${gitDir === undefined ? "" : `${GITDIR_RECORD_PREFIX}${gitDir}\n`}` +
+    `${remote === undefined ? "" : `${REMOTE_RECORD_PREFIX}${remote}\n`}`);
 }
 
 /** Read a previously-recorded base (see {@link recordWorktreeBase}). `null` when absent or unreadable, never a throw, so a
  * missing record degrades to "unknown" rather than blocking whatever wanted to attribute a refusal. */
 export function readWorktreeBase(worktreePath: string): string | null {
   try {
-    return readFileSync(worktreeBasePath(worktreePath), "utf8").trim();
+    return readFileSync(worktreeBasePath(worktreePath), "utf8").split("\n")[0]!.trim();
   } catch {
     return null;
   }
@@ -4714,11 +5301,23 @@ function shellQuote(value: string): string {
  * worktree's previous hooks. Re-stamping changes only the id; an id that is not a plain token installs nothing (false). */
 export function stampRunWorktreeAssignment(worktreePath: string, assignmentId: string): boolean {
   if (!ASSIGNMENT_ID_RE.test(assignmentId)) return false;
-  const git = (...args: string[]) =>
-    execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-  if (realpathSync(git("rev-parse", "--show-toplevel")) !== realpathSync(worktreePath)) return false;
-  const hooksDir = join(git("rev-parse", "--path-format=absolute", "--git-dir"), ASSIGNMENT_HOOKS_DIRNAME);
-  const current = git("rev-parse", "--path-format=absolute", "--git-path", "hooks");
+  // W1-T6106: the gitdir comes from the host git leaf's pin, never from `rev-parse --git-dir` through the
+  // worktree's own `.git` pointer — a rewritten pointer would aim these hook writes at a worker's directory.
+  let pin: PinnedWorktreeGit;
+  try {
+    pin = pinWorktreeGit(worktreePath);
+  } catch (error) {
+    // A subdirectory, a missing entry or a refused pointer: nothing here is a worktree this run may stamp.
+    if (error instanceof WorktreePointerRefusedError) return false;
+    throw error;
+  }
+  const git = (...args: string[]) => hostWorktreeGit(worktreePath, args).trim();
+  const hooksDir = join(pin.gitDir, ASSIGNMENT_HOOKS_DIRNAME);
+  // The worker's OWN hooks path, read from the pinned config's files (the leaf's override is the host's).
+  const configured = pinnedConfigValue(pin, "core.hooksPath");
+  const commonFile = join(pin.gitDir, "commondir");
+  const common = existsSync(commonFile) ? resolve(pin.gitDir, readFileSync(commonFile, "utf8").trim()) : pin.gitDir;
+  const current = configured === undefined ? join(common, "hooks") : resolve(pin.worktree, configured);
   const priorFile = join(hooksDir, ASSIGNMENT_PRIOR_HOOKS_FILE);
   const prior = current === hooksDir ? readFileSync(priorFile, "utf8").trim() : current;
   mkdirSync(hooksDir, { recursive: true });
@@ -4820,6 +5419,21 @@ function ensureWorktreeConfigEnabled(repoDir: string): void {
   execFileSync("git", ["-C", repoDir, "config", "--local", "extensions.worktreeConfig", "true"]);
 }
 
+/** W1-T6147: the environment for the git that CUTS a tree. `worktree add` checks out and runs post-checkout from the SOURCE
+ * clone's hooks path — a relative `core.hooksPath=hooks` is the base's tracked hooks/, none is the common gitdir's hooks/,
+ * which a codex writer can write — so the leaf's {@link HOST_GIT_CONFIG} rides at command-line precedence (the env form of
+ * `-c`, leaving argv unchanged) and the harness's own hooks dir is the only one git reads. */
+function noHookGitEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) if (!/^GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_\d+|VALUE_\d+)$/.test(k)) env[k] = v;
+  env.GIT_CONFIG_COUNT = String(HOST_GIT_CONFIG.length);
+  HOST_GIT_CONFIG.forEach(([key, value], i) => {
+    env[`GIT_CONFIG_KEY_${i}`] = key;
+    env[`GIT_CONFIG_VALUE_${i}`] = value;
+  });
+  return env;
+}
+
 /** `git worktree add` a fresh branch off origin/<base> for a repo checkout. */
 export function worktreeAdd(
   repoDir: string,
@@ -4865,14 +5479,18 @@ export function worktreeAdd(
   execFileSync(
     "git",
     ["-C", repoDir, "worktree", "add", "-b", branch, "--no-track", worktreePath, base],
-    { stdio: "inherit" },
+    { stdio: "inherit", env: noHookGitEnv() },
   );
   // Record the base BEFORE the currency check below: a refusal throws out of this function with no return value, so the
   // record must already be on disk to be attributable (W1-T405).
   const createdBase = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], {
     encoding: "utf8",
   }).trim();
-  recordWorktreeBase(worktreePath, createdBase);
+  // W1-T6106: read the gitdir NOW, the one moment the `.git` pointer is known to be git's own.
+  const gitDir = execFileSync("git", ["-C", worktreePath, "rev-parse", "--path-format=absolute", "--git-dir"], {
+    encoding: "utf8",
+  }).trim();
+  recordWorktreeBase(worktreePath, createdBase, gitDir);
   const currency = assertWorktreeBaseCurrent(createdBase, ref, {
     readRemoteHead: () => (deps.readRemoteHead ?? defaultReadRemoteHead)(repoDir, ref),
     warn: deps.warn,
@@ -4933,15 +5551,19 @@ function finishWorktreeAdd(
       incomplete: workspaceNodeModulesIncomplete(workspaceLinkResults),
     });
   }
+  // The clone this tree hangs off runs no typecheck of its own: refresh its seed from the linked install's, so the
+  // tree's first `npm run typecheck` starts warm. Silent unless a seed existed and could not be written.
+  const seed = refreshCanonicalSeed(worktreePath);
+  if (seed === "mismatch" || seed === "unwritable") deps.log?.("worktree.typecheck_seed_failed", { worktreePath, outcome: seed });
 }
 
 const execFilePromise = promisify(execFile);
 
 /** Async Git calls used by daemon worktree creation. The two commands whose sync form inherits stdio
  * forward both streams to stderr, including output produced before a failure. */
-async function worktreeGit(args: string[], forwardOutput = false): Promise<string> {
+async function worktreeGit(args: string[], forwardOutput = false, env?: NodeJS.ProcessEnv): Promise<string> {
   try {
-    const { stdout, stderr } = await execFilePromise("git", args, { encoding: "utf8" });
+    const { stdout, stderr } = await execFilePromise("git", args, { encoding: "utf8", ...(env ? { env } : {}) });
     if (forwardOutput) {
       if (stdout) process.stderr.write(stdout);
       if (stderr) process.stderr.write(stderr);
@@ -4962,6 +5584,23 @@ async function worktreeGit(args: string[], forwardOutput = false): Promise<strin
 /** W1-T5120: catch-ups of a freshly cut worktree to a still-moving remote head before the stale-base refusal stands. */
 export const WORKTREE_CATCH_UP_ATTEMPTS = 3;
 
+const worktreeRegistrationTails = new Map<string, Promise<void>>();
+
+async function withWorktreeRegistration<T>(repoDir: string, add: () => Promise<T>): Promise<T> {
+  const key = realpathSync(repoDir);
+  const previous = worktreeRegistrationTails.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  worktreeRegistrationTails.set(key, held);
+  await previous;
+  try {
+    return await add();
+  } finally {
+    release();
+    if (worktreeRegistrationTails.get(key) === held) worktreeRegistrationTails.delete(key);
+  }
+}
+
 export async function worktreeAddAsync(
   repoDir: string,
   worktreePath: string,
@@ -4969,16 +5608,10 @@ export async function worktreeAddAsync(
   base = "origin/main",
   deps: WorktreeAddDepsArg = {},
 ): Promise<void> {
-  let enabled: string | undefined;
-  try {
-    enabled = (await worktreeGit(["-C", repoDir, "config", "--local", "--get", "extensions.worktreeConfig"])).trim();
-  } catch {
-    // An absent setting takes the same migration path as the sync form.
-  }
-  if (enabled !== "true") {
-    await worktreeGit(["-C", repoDir, "config", "--local", "extensions.worktreeConfig", "true"]);
-  }
-  await worktreeGit(["-C", repoDir, "fetch", "origin", "--quiet"], true);
+  await ensureWorktreeConfigEnabledAsync((args) => worktreeGit(["-C", repoDir, ...args]));
+  // W1-T5284: the sync form's ref-lock retry (#8043). Daemon lanes now add concurrently with dispatch,
+  // so two fetches of one repo can race for a ref lock where the sync add serialized them.
+  await fetchOriginRetryingRefLockAsync((args) => worktreeGit(["-C", repoDir, ...args], true));
   const ref = base.replace(/^origin\//, "");
   let localRefHead: string;
   try {
@@ -4987,9 +5620,11 @@ export async function worktreeAddAsync(
     // This is only an observability read; its unreadable marker keeps failure distinct in the row.
     localRefHead = "unreadable";
   }
-  await worktreeGit(["-C", repoDir, "worktree", "add", "-b", branch, "--no-track", worktreePath, base], true);
+  await withWorktreeRegistration(repoDir, () => worktreeGit(["-C", repoDir, "worktree", "add", "-b", branch, "--no-track", worktreePath, base], true, noHookGitEnv()));
   let createdBase = (await worktreeGit(["-C", worktreePath, "rev-parse", "HEAD"])).trim();
-  recordWorktreeBase(worktreePath, createdBase);
+  // W1-T6106: as in worktreeAdd — the gitdir is read while the pointer is still git's own.
+  const gitDir = (await worktreeGit(["-C", worktreePath, "rev-parse", "--path-format=absolute", "--git-dir"])).trim();
+  recordWorktreeBase(worktreePath, createdBase, gitDir);
 
   let remoteHead: string | undefined;
   let remoteError: unknown;
@@ -5013,12 +5648,13 @@ export async function worktreeAddAsync(
     const from = createdBase;
     try {
       await worktreeGit(["-C", repoDir, "fetch", "origin", "--quiet"]);
-      await worktreeGit(["-C", worktreePath, "merge", "--ff-only", "--quiet", remoteHead]);
+      // W1-T6147: the tree has no worktree hooksPath yet, so this merge would run post-merge from the clone's.
+      await worktreeGit(["-C", worktreePath, "merge", "--ff-only", "--quiet", remoteHead], false, noHookGitEnv());
     } catch {
       break; // W1-T5120: a head this fresh worktree cannot fast-forward to stays refused by assertWorktreeBaseCurrent below
     }
     createdBase = (await worktreeGit(["-C", worktreePath, "rev-parse", "HEAD"])).trim();
-    recordWorktreeBase(worktreePath, createdBase);
+    recordWorktreeBase(worktreePath, createdBase, gitDir);
     deps.log?.("worktree.base_caught_up", { from, to: createdBase, attempt });
     await readRemote();
   }
@@ -5085,12 +5721,15 @@ function localBranchExists(repoDir: string, branch: string): boolean {
  * without this the second call died forever. A LEFTOVER BRANCH IS THE COMMON CASE: `git worktree remove` never deletes the
  * branch it was checked out on. NEVER FORCES OR REUSES, and THE RUN ID ITSELF IS NEVER TOUCHED, so ledger attribution is
  * unchanged (W1-T2493; docs/forensics/worker.md). */
-export function uniqueRunBranch(repoDir: string, runId: string): string {
+export function uniqueRunBranch(repoDir: string, runId: string, reserved: ReadonlySet<string> = new Set()): string {
+  // W1-T5284: `reserved` names branches an add still in flight in THIS process has picked but not
+  // yet created — the sync add closed that window by blocking; an awaited add holds it explicitly.
+  const free = (candidate: string): boolean => !reserved.has(candidate) && !localBranchExists(repoDir, candidate);
   const base = `run-${runId}`;
-  if (!localBranchExists(repoDir, base)) return base;
+  if (free(base)) return base;
   for (let n = 2; n < 10_000; n++) {
     const candidate = `${base}-${n}`;
-    if (!localBranchExists(repoDir, candidate)) return candidate;
+    if (free(candidate)) return candidate;
   }
   throw new Error(`uniqueRunBranch: exhausted numbered suffixes for run id ${runId}`);
 }
@@ -5100,14 +5739,21 @@ export function worktreeRemove(repoDir: string, worktreePath: string): void {
   // deletes it. The Claude CLI leaves `/private/tmp/claude-<uid>/<slug>/` behind on a non-graceful exit and nothing else
   // reaps it. Best-effort, guarded, never throws.
   reapWorkerScratch(worktreePath);
-  execFileSync("git", ["-C", repoDir, "worktree", "remove", "--force", worktreePath], {
-    stdio: "inherit",
-  });
+  // Through the hardened leaf: the managed checkout is pinned, so an inherited GIT_DIR / GIT_WORK_TREE / GIT_CONFIG_*
+  // cannot point the removal at another repository, and its own config is vetted first.
+  hostWorktreeGit(repoDir, ["worktree", "remove", "--force", worktreePath], { stdio: "inherit-stdout" });
   removeWorktreeBase(worktreePath); // the sibling base record dies with its worktree
   // Accumulation control, orchestrator-side so it survives a killed worker: reap STALE ORPHAN scratch under the same
   // claude-<uid> root, the fixtures a SIGKILL'd `npm test` leaves behind, which the boot sweep over os.tmpdir() never scans.
   // The 4h ceiling is far above the longest task and far below the 24h boot ceiling, so a live fixture is never reaped and
   // orphans clear within a task cycle. Never throws.
+  sweepStaleWorkerScratch({ maxAgeMs: DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS });
+}
+
+export async function worktreeRemoveAsync(repoDir: string, worktreePath: string): Promise<void> {
+  reapWorkerScratch(worktreePath);
+  await hostWorktreeGitAsync(repoDir, ["worktree", "remove", "--force", worktreePath], { stdio: "inherit-stdout" });
+  removeWorktreeBase(worktreePath);
   sweepStaleWorkerScratch({ maxAgeMs: DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS });
 }
 
@@ -5496,9 +6142,7 @@ export function pruneStaleRuns(
           }
         }
         try {
-          execFileSync("git", ["-C", repoDir, "worktree", "remove", "--force", registered.path], {
-            stdio: "pipe",
-          });
+          hostWorktreeGit(repoDir, ["worktree", "remove", "--force", registered.path]);
           removeRunLock(registered.path); // clear the dead sibling lock so it can't linger
           removeWorktreeBase(registered.path); // the sibling base record dies with its worktree too
           removedWorktrees.push(registered.path);
@@ -5572,13 +6216,17 @@ export type WorktreeKeepReason =
   | "activity-unknown"
   /** Removal itself failed — best-effort, the rest of the pass continues. */
   | "removal-failed"
+  | "locked"
   /** The entry's own `.git` is present but could not be read or parsed, so whether an admin record exists in some parent clone
    * is UNKNOWABLE. An ambiguous signal keeps; it never destroys — the same doctrine `activity-unknown` applies one gate
    * above. See {@link planWorktreeRemoval}. */
   | "git-unreadable"
   /** W1-T2950: the candidate's or a registered worktree's canonical path could not be resolved, so registration could
    *  not be decided. Unknowable never destroys. */
-  | "registration-undecidable";
+  | "registration-undecidable"
+  | "unpushed-commit"
+  | "inflight-lock"
+  | "work-undecidable";
 
 /** The newest mtime anywhere under `dir`, and whether the walk could be trusted. TRAP: a DIRECTORY's mtime advances only when
  * an entry is added to or removed from THAT directory, never when a nested file is modified, so age-gating on the root's own
@@ -5644,7 +6292,7 @@ export interface WorktreeReapSummary {
   kept: string[];
   /** The same entries as `kept`, each paired with why it survived, so a pass that keeps everything is diagnosable rather than
    * silent. Optional so three-field literals keep typechecking; {@link reapStaleWorktrees} always populates it (W1-T378). */
-  keptReasons?: Array<{ name: string; reason: WorktreeKeepReason }>;
+  keptReasons?: Array<{ name: string; reason: WorktreeKeepReason; error?: string }>;
 }
 
 export interface WorktreeReapOpts {
@@ -5676,6 +6324,11 @@ export interface WorktreeReapOpts {
    * candidates such as {@link unmanagedWorktreeLanes}: the removal and keep predicates stay here, but no directory walk over
    * the candidates' common parent is introduced. */
   candidatePaths?: readonly string[];
+  /** Lane-only safety gates, applied before age can permit removal (W1-T4065). */
+  keepReason?: (path: string, branch?: string) => WorktreeKeepReason | undefined;
+  /** Observe a directory before any removal, so census bytes survive an armed pass. */
+  onCandidate?: (path: string) => void;
+  onEnumerationError?: (error: unknown) => void;
 }
 
 /** A {@link WorktreeReapOpts.isPidAlive}-shaped predicate for the one-shot container boot rung: it answers "is THIS the
@@ -5831,11 +6484,12 @@ function executeWorktreeRemoval(
   // `keep` is excluded at the type level, not merely by convention: the caller must have already acted on it (by keeping the
   // entry) before anything here could destroy something.
   plan: Exclude<WorktreeRemovalPlan, { kind: "keep" }>,
+  initializing: boolean,
 ): void {
   if (plan.kind === "git-remove") {
-    execFileSync("git", ["-C", plan.repoDir, "worktree", "remove", "--force", entryPath], {
-      stdio: "pipe",
-    });
+    // The parent is pinned through the hardened leaf: an inherited GIT_DIR cannot redirect the removal, and a parent whose
+    // config holds a key the harness never writes is refused (removal-failed) rather than run.
+    hostWorktreeGit(plan.repoDir, ["worktree", "remove", "--force", ...(initializing ? ["--force"] : []), entryPath]);
     return;
   }
   fs.rmSync(entryPath, { recursive: true, force: true });
@@ -5867,6 +6521,34 @@ function defaultBranchIsLiveUpstream(branch: string, repoDir: string): boolean {
  * HOW an entry is removed lives in {@link planWorktreeRemoval}; a bare `rmSync` here is what stranded records as `prunable`
  * on 2026-07-31 (W1-T175). */
 export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): WorktreeReapSummary {
+  const pass = worktreeReapPass(root, opts);
+  let next = pass.next();
+  while (!next.done) {
+    opts.onCandidate?.(next.value);
+    next = pass.next();
+  }
+  return next.value;
+}
+
+export type AsyncWorktreeReapOpts = Omit<WorktreeReapOpts, "onCandidate"> & {
+  onCandidate?: (path: string) => void | Promise<void>;
+};
+
+/** Same gates and removals as the synchronous reaper, awaiting observation before removal. */
+export async function reapStaleWorktreesAsync(root: string, opts: AsyncWorktreeReapOpts = {}): Promise<WorktreeReapSummary> {
+  const pass = worktreeReapPass(root, opts);
+  let next = pass.next();
+  while (!next.done) {
+    await opts.onCandidate?.(next.value);
+    next = pass.next();
+  }
+  return next.value;
+}
+
+function* worktreeReapPass(
+  root: string,
+  opts: Omit<WorktreeReapOpts, "onCandidate">,
+): Generator<string, WorktreeReapSummary> {
   const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive;
   const maxAgeMs = opts.maxAgeMs ?? DEFAULT_WORKTREE_REAP_GRACE_MS;
   const now = opts.now ?? (() => Date.now());
@@ -5876,10 +6558,10 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
   const reaped: string[] = [];
   const reapedLocks: string[] = [];
   const kept: string[] = [];
-  const keptReasons: Array<{ name: string; reason: WorktreeKeepReason }> = [];
-  const keep = (name: string, reason: WorktreeKeepReason): void => {
+  const keptReasons: Array<{ name: string; reason: WorktreeKeepReason; error?: string }> = [];
+  const keep = (name: string, reason: WorktreeKeepReason, error?: string): void => {
     kept.push(name);
-    keptReasons.push({ name, reason });
+    keptReasons.push({ name, reason, ...(error === undefined ? {} : { error }) });
   };
 
   const candidatePaths = opts.candidatePaths;
@@ -5892,7 +6574,8 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
       rootEntries = fs.readdirSync(root);
       entries = rootEntries.map((name) => ({ name, path: join(root, name) }));
     }
-  } catch {
+  } catch (e) {
+    opts.onEnumerationError?.(e);
     return { reaped, reapedLocks, kept, keptReasons }; // unreadable root — best-effort, never throws
   }
 
@@ -5905,6 +6588,7 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
       continue; // vanished between readdir and stat — someone else's cleanup won the race
     }
     if (!isDir) continue;
+    yield entryPath;
 
     const lockRead = readRunLock(entryPath);
     if (lockRead.kind === "live" && isPidAlive(lockRead.info.pid, lockRead.info)) {
@@ -5929,6 +6613,11 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
     const registration = lookup.kind === "registered" ? { repoDir: lookup.repoDir, branch: lookup.branch } : null;
     if (registration?.branch && branchIsLiveUpstream(registration.branch, registration.repoDir)) {
       keep(name, "live-branch");
+      continue;
+    }
+    const additionalReason = opts.keepReason?.(entryPath, registration?.branch);
+    if (additionalReason !== undefined) {
+      keep(name, additionalReason);
       continue;
     }
 
@@ -5956,8 +6645,25 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
       continue;
     }
     try {
+      let initializing = false;
+      if (removalPlan.repoDir) {
+        const gitdir = readFileSync(join(entryPath, ".git"), "utf8").match(/^gitdir:\s*(.+?)\s*$/m)![1];
+        let lockReason: string | undefined;
+        try {
+          lockReason = readFileSync(join(resolve(entryPath, gitdir), "locked"), "utf8").replace(/\n$/, "");
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+        }
+        if (lockReason !== undefined) {
+          if (lockReason !== "initializing") {
+            keep(name, "locked");
+            continue;
+          }
+          initializing = true;
+        }
+      }
       if (!dryRun) {
-        executeWorktreeRemoval(entryPath, removalPlan);
+        executeWorktreeRemoval(entryPath, removalPlan, initializing);
         removeRunLock(entryPath); // clear the sibling lock so it can't linger widowed
         // The base record is a sibling FILE on disk, so its cleanup belongs INSIDE the dryRun guard: removing it during a
         // survey would destroy state while claiming only to look. One orphan per reap otherwise (W1-T406 x W1-T405 merge
@@ -5965,8 +6671,10 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
         removeWorktreeBase(entryPath);
       }
       reaped.push(name); // SURVEY (dryRun) or real removal — either way this is what qualified
-    } catch {
-      keep(name, "removal-failed"); // best-effort: a removal hiccup never blocks the rest of the pass
+    } catch (e) {
+      const stderr = (e as { stderr?: Buffer | string })?.stderr?.toString();
+      const error = stderr || String((e as Error)?.message ?? e);
+      keep(name, "removal-failed", error);
     }
   }
 
@@ -6034,18 +6742,57 @@ function mergeWorktreeReapSummaries(summaries: readonly WorktreeReapSummary[]): 
   };
 }
 
-/** THE AD-HOC LANE RUNG: the same reaper, pointed at {@link adhocLaneRoot}, shipping SURVEY-FIRST. NO SECOND REMOVAL, BY
- * CONSTRUCTION — it delegates to {@link reapStaleWorktrees} and makes no filesystem call at all, so the 2026-07-31 defect
- * cannot be reinstated here, and the liveness doctrine is inherited whole. It adds roots/candidates only: the ad-hoc root,
- * the registered unmanaged paths, and the lane age ceiling. SURVEY-FIRST IS THE DEFAULT AND THE DEFAULT IS OFF: `enabled`
- * defaults to `false`, so the pass ledgers what it WOULD reclaim while removing nothing. Arming is a separate operator decision (W1-T2847;
- * docs/forensics/worker.md). */
-export function runAdhocLaneReapRung(
+async function laneSizeBytes(path: string): Promise<number> {
+  const out = await new Promise<string>((resolve, reject) => {
+    execFile("du", ["-sk", path], { encoding: "utf8" }, (error, stdout) => {
+      if (error) reject(error);
+      else resolve(stdout);
+    });
+  });
+  const kilobytes = out.trim().split(/\s+/)[0];
+  const bytes = Number(kilobytes) * 1024;
+  if (!kilobytes || !Number.isFinite(bytes) || bytes < 0) throw new Error(`invalid disk usage for ${path}: ${out}`);
+  return bytes;
+}
+
+function laneWorkKeepReason(config: Config, path: string, branch?: string): WorktreeKeepReason | undefined {
+  // Missing is the only lock/stat failure that proves absence; every other failure keeps.
+  const present = (p: string): boolean => {
+    try {
+      lstatSync(p);
+      return true;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw e;
+    }
+  };
+  if (present(runLockPath(path)) && readRunLock(path).kind !== "live") return "work-undecidable";
+  const taskId = [branch ?? "", basename(path)].map((name) => name.match(/^run-(W\d+-T\d+)-\d+$/)?.[1]).find(Boolean);
+  if (taskId && present(join(config.root, "state", "inflight", `${taskId}.lock`))) return "inflight-lock";
+  if (!present(join(path, ".git"))) return undefined;
+  // W1-T6133: an agent session wrote this tree, so every read goes through the leaf; a pointer it refuses
+  // throws WorktreePointerRefusedError, and runAdhocLaneReapRung's keepReason KEEPS the lane for it.
+  const git = (...args: string[]): string => hostWorktreeGit(path, args);
+  const exclusions = ["--remotes"];
+  const remoteRefs = git("for-each-ref", "--format=%(refname)", "refs/remotes/");
+  if (!remoteRefs.trim()) {
+    // A remote-less linked lane inherits the primary checkout's history; only lane-only commits protect it.
+    const dirs = git("rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir").trim().split("\n");
+    // `main-worktree/HEAD` is the common dir's HEAD, read through the pinned gitdir rather than a path it named.
+    if (dirs[0] !== dirs[1]) exclusions.push(git("rev-parse", "--verify", "main-worktree/HEAD").trim());
+  }
+  const unpushed = git("rev-list", "--max-count=1", "HEAD", "--not", ...exclusions);
+  return unpushed.trim() ? "unpushed-commit" : undefined;
+}
+
+/** Survey-first lane reap with one census per pass (W1-T4065). Removal stays in reapStaleWorktrees;
+ * disk pressure changes only the age gate, never the live-work or undecidable gates. */
+export async function runAdhocLaneReapRung(
   config: Config,
   log: (step: string, extra?: Record<string, unknown>) => void,
   deps: {
     root?: () => string;
-    reap?: typeof reapStaleWorktrees;
+    reap?: (root: string, opts: AsyncWorktreeReapOpts) => WorktreeReapSummary | Promise<WorktreeReapSummary>;
     /** Survey-only while this reads false — the shipped default. See the doc above. */
     enabled?: () => boolean;
     maxAgeMs?: number;
@@ -6054,18 +6801,64 @@ export function runAdhocLaneReapRung(
      * BOTH managed roots — see {@link unmanagedWorktreeLanes}. Omitted ⇒ that report is skipped entirely. */
     repoDir?: string;
     listUnmanaged?: typeof unmanagedWorktreeLanes;
+    diskHeadroom?: (path: string) => { freeBytes?: number; totalBytes?: number };
+    sizeBytes?: (path: string) => number | undefined | Promise<number | undefined>;
   } = {},
-): WorktreeReapSummary | null {
+): Promise<WorktreeReapSummary | null> {
+  const summaries: WorktreeReapSummary[] = [];
+  const sizes = new Map<string, number | undefined>();
+  let root = "";
+  let enabled = false;
+  let graceMs = deps.maxAgeMs ?? ADHOC_LANE_REAP_GRACE_MS;
+  let fraction: number | null = null;
+  let error: string | undefined;
   try {
-    const enabled = (deps.enabled ?? (() => false))();
-    const reap = deps.reap ?? reapStaleWorktrees;
-    const root = (deps.root ?? (() => adhocLaneRoot(config)))();
+    enabled = (deps.enabled ?? (() => false))();
+    const reap = deps.reap ?? reapStaleWorktreesAsync;
+    root = (deps.root ?? (() => adhocLaneRoot(config)))();
+    try {
+      const disk = (deps.diskHeadroom ?? ((path: string) => {
+        const stat = statfsSync(path);
+        return { freeBytes: stat.bavail * stat.bsize, totalBytes: stat.blocks * stat.bsize };
+      }))(root);
+      if (Number.isFinite(disk.freeBytes) && disk.freeBytes! >= 0 &&
+          Number.isFinite(disk.totalBytes) && disk.totalBytes! > 0) {
+        fraction = Math.min(1, disk.freeBytes! / disk.totalBytes!);
+        graceMs *= fraction;
+      }
+    } catch (e) {
+      log("adhoc_lane.reap.headroom_error", { error: String(e) });
+    }
     const baseOpts = {
       dryRun: !enabled,
-      maxAgeMs: deps.maxAgeMs ?? ADHOC_LANE_REAP_GRACE_MS,
+      maxAgeMs: graceMs,
       isPidAlive: deps.isPidAlive ?? worktreeLockIsPidAlive,
+      onEnumerationError: (e: unknown): void => {
+        error = String(e);
+        log("adhoc_lane.reap.enumeration_error", { root, error });
+      },
+      // Sequential observation bounds sizing to one child; cache known and unknown sizes per pass.
+      onCandidate: async (path: string): Promise<void> => {
+        if (sizes.has(path)) return;
+        try {
+          const bytes = await (deps.sizeBytes ?? laneSizeBytes)(path);
+          sizes.set(path, bytes !== undefined && Number.isFinite(bytes) && bytes >= 0 ? bytes : undefined);
+        } catch (e) {
+          sizes.set(path, undefined);
+          log("adhoc_lane.reap.measurement_error", { path, error: String(e) });
+        }
+      },
+      keepReason: (path: string, branch?: string): WorktreeKeepReason | undefined => {
+        try {
+          return laneWorkKeepReason(config, path, branch);
+        } catch (e) {
+          log("adhoc_lane.reap.work_undecidable", { path, error: String(e), pointer_refused: e instanceof WorktreePointerRefusedError });
+          return "work-undecidable";
+        }
+      },
     };
-    const rootSummary = reap(root, baseOpts);
+    const rootSummary = await reap(root, baseOpts);
+    summaries.push(rootSummary);
     // LEDGER THE SURVEY EVEN THOUGH NOTHING WAS REMOVED — that IS the deliverable while disarmed. `reapStaleWorktrees`
     // populates `reaped`/`reapedLocks` under `dryRun` precisely so a caller can record what it would have reclaimed
     // (W1-T406's own shape).
@@ -6077,14 +6870,13 @@ export function runAdhocLaneReapRung(
         reaped_locks: rootSummary.reapedLocks.length,
       });
     }
-    const summaries = [rootSummary];
     // NAME AND SWEEP the lanes no cadence can reach: the source is still git's own registration, but the keep/remove
     // decisions stay inside reapStaleWorktrees. Supplying `candidatePaths` is the safety boundary — no parent directory is
     // walked to find unmanaged lanes.
     if (deps.repoDir !== undefined) {
       const unmanaged = (deps.listUnmanaged ?? unmanagedWorktreeLanes)(config, deps.repoDir);
       if (unmanaged.length) {
-        const unmanagedSummary = reap(root, { ...baseOpts, candidatePaths: unmanaged });
+        const unmanagedSummary = await reap(root, { ...baseOpts, candidatePaths: unmanaged });
         summaries.push(unmanagedSummary);
         log("adhoc_lane.unmanaged", {
           count: unmanaged.length,
@@ -6103,8 +6895,30 @@ export function runAdhocLaneReapRung(
     return summary;
   } catch (e) {
     // Best-effort, exactly like the sibling boot sweeps — a reclaim rung never blocks a dispatch.
-    log("adhoc_lane.reap.error", { error: String((e as Error)?.message ?? e) });
+    error = String((e as Error)?.message ?? e);
+    log("adhoc_lane.reap.error", { error });
     return null;
+  } finally {
+    const summary = mergeWorktreeReapSummaries(summaries);
+    const bucket = () => ({ count: 0, bytes: 0, bytes_unknown: 0 });
+    const reaped = bucket();
+    const keptByReason: Record<string, ReturnType<typeof bucket>> = {};
+    const count = (target: ReturnType<typeof bucket>, name: string): void => {
+      target.count++;
+      const bytes = sizes.get(isAbsolute(name) ? name : join(root, name));
+      if (bytes === undefined) target.bytes_unknown++;
+      else target.bytes += bytes;
+    };
+    for (const name of summary.reaped) count(reaped, name);
+    const reasons = new Map((summary.keptReasons ?? []).map((k) => [k.name, k.reason]));
+    for (const name of summary.kept) {
+      const reason = reasons.get(name) ?? "work-undecidable";
+      count(keptByReason[reason] ??= bucket(), name);
+    }
+    log("adhoc_lane.reap.census", {
+      root, dry_run: !enabled, grace_ms: graceMs, free_fraction: fraction,
+      kept_by_reason: keptByReason, reaped, ...(error !== undefined ? { error } : {}),
+    });
   }
 }
 
@@ -6307,7 +7121,16 @@ export function ghPrView(prUrl: string): { state: string; mergeable: string; url
   };
 }
 
-export function ghPrMergeSquash(prUrl: string): string {
+/** `closingReferences` is required, so no caller can merge without the closing-reference guard that
+ *  attemptArm runs (lib/closing-reference-guard.ts): a failed guard withholds the merge. */
+export function ghPrMergeSquash(prUrl: string, closingReferences: (prUrl: string) => ClosingReferenceGuardResult): string {
+  const guard = closingReferences(prUrl);
+  if (guard.state === "failed") {
+    throw new Error(
+      `merge withheld: ${guard.detail ?? "the closing-reference guard failed"} — merging could close an open pull request ` +
+        `this body names: ${prUrl}`,
+    );
+  }
   assertLiveWriteAllowed("gh-pr-merge", `merging ${prUrl}`);
   // TRAP: NO `--delete-branch`. `gh pr merge --help` documents it as deleting the LOCAL branch too, which needs a resolvable
   // current branch — and a caller running from the daemon's deliberately detached checkout has none, so the call failed "not
@@ -6320,19 +7143,19 @@ export function ghPrMergeSquash(prUrl: string): string {
 }
 
 /** Per-spawn sandbox egress broker. The CLI confines sandbox sockets to these listeners;
- * the broker owns the destination policy. CLI model transport and excludedCommands retain
- * their existing boundary. The console is explicitly permitted by the W1-T1289 ruling. */
+ * the broker owns the destination policy. CLI model transport retains
+ * its existing boundary. The console is explicitly permitted by the W1-T1289 ruling. */
 export interface WorkerEgressProxy {
   httpProxyPort: number;
   socksProxyPort: number;
-  verifyAllowed(): Promise<void>;
+  verifyAllowed(onDiagnostic?: (message: string) => void): Promise<void>;
   close(): Promise<void>;
 }
 
 export class WorkerEgressError extends RmdError {
   override name = "WorkerEgressError";
 
-  constructor(message: string) {
+  constructor(message: string, readonly readinessTimeout?: { classification: "loop_stalled" | "proxy_unresponsive"; lagMs: number }) {
     super("install", GENERIC_EXIT_CODE, message);
   }
 }
@@ -6481,7 +7304,7 @@ export async function startWorkerEgressProxy(
   try {
     const httpProxyPort = await listen(http);
     const socksProxyPort = await listen(socks);
-    const verifyAllowed = async () => {
+    const verifyAllowed = async (onDiagnostic?: (message: string) => void) => {
       const canarySockets = new Set<Socket>();
       const canary = createTcpServer(socket => {
         canarySockets.add(socket);
@@ -6494,12 +7317,12 @@ export async function startWorkerEgressProxy(
         const marker = randomUUID();
         control = { host, port };
         const header = "HTTP/1.1 200 Connection Established\r\n\r\n";
-        const httpReply = await egressReadinessExchange(httpProxyPort, `CONNECT ${host}:${port} HTTP/1.1\r\n\r\n${marker}`, header.length + marker.length);
+        const httpReply = await egressReadinessExchange(httpProxyPort, `CONNECT ${host}:${port} HTTP/1.1\r\n\r\n${marker}`, header.length + marker.length, onDiagnostic);
         if (httpReply.toString() !== header + marker) throw new WorkerEgressError("worker HTTP egress positive control failed");
         const name = Buffer.from(host);
         const socksReply = await egressReadinessExchange(socksProxyPort, Buffer.concat([
           Buffer.from([5, 1, 0, 5, 1, 0, 3, name.length]), name, Buffer.from([port >> 8, port & 255]), Buffer.from(marker),
-        ]), 12 + marker.length);
+        ]), 12 + marker.length, onDiagnostic);
         if (!socksReply.subarray(0, 12).equals(Buffer.concat([Buffer.from([5, 0]), SOCKS_REPLY(0)])) || socksReply.subarray(12).toString() !== marker) {
           throw new WorkerEgressError("worker SOCKS egress positive control failed");
         }
@@ -6519,24 +7342,58 @@ export async function startWorkerEgressProxy(
 }
 
 /** Exchange bytes through a real local listener, bounded so failed readiness cannot hang spawn. */
-function egressReadinessExchange(port: number, bytes: Buffer | string, length: number): Promise<Buffer> {
-  return new Promise<Buffer>((resolveReply, reject) => {
+async function egressReadinessExchange(port: number, bytes: Buffer | string, length: number, onDiagnostic?: (message: string) => void): Promise<Buffer> {
+  const exchange = () => new Promise<Buffer>((resolveReply, reject) => {
+    const startedAt = performance.now();
+    const sampleMs = 25;
+    let sampledAt = startedAt;
+    let lagMs = 0;
+    const sample = () => {
+      const now = performance.now();
+      lagMs = Math.max(lagMs, now - sampledAt - sampleMs);
+      sampledAt = now;
+    };
     const socket = connectTcp(port, "127.0.0.1", () => socket.write(bytes));
+    const sampler = setInterval(sample, sampleMs);
     let received = Buffer.alloc(0);
-    socket.setTimeout(EGRESS_READY_MS, () => socket.destroy(new WorkerEgressError("worker egress readiness timed out")));
+    socket.setTimeout(EGRESS_READY_MS, () => {
+      sample();
+      const elapsedMs = performance.now() - startedAt;
+      // A stall must consume at least half the readiness budget; ordinary timer jitter is not a stall.
+      const classification = lagMs >= Math.min(elapsedMs, EGRESS_READY_MS) / 2 ? "loop_stalled" : "proxy_unresponsive";
+      socket.destroy(new WorkerEgressError(`worker egress readiness timed out (${classification} lag ${(lagMs / 1000).toFixed(3)}s)`, { classification, lagMs }));
+    });
+    socket.once("close", () => clearInterval(sampler));
     socket.on("error", reject);
     socket.on("data", chunk => { received = Buffer.concat([received, chunk]); if (received.length >= length) { resolveReply(received); socket.destroy(); } });
     socket.on("end", () => { resolveReply(received); socket.destroy(); });
   });
+  let stalled: WorkerEgressError;
+  try {
+    return await exchange();
+  } catch (error) {
+    if (!(error instanceof WorkerEgressError) || error.readinessTimeout?.classification !== "loop_stalled") throw error;
+    stalled = error;
+  }
+  await new Promise<void>(resolve => setImmediate(resolve));
+  let reply: Buffer;
+  try {
+    reply = await exchange();
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new WorkerEgressError(`${stalled.message.slice(0, -1)}; retry failed: ${reason})`, error instanceof WorkerEgressError ? error.readinessTimeout : undefined);
+  }
+  onDiagnostic?.(`${stalled.message.slice(0, -1)}; retry ok)`);
+  return reply;
 }
 
 /** Both forwarding controls and refusals must succeed before a worker is released. */
-export async function verifyWorkerEgressProxy(proxy: WorkerEgressProxy): Promise<void> {
-  await proxy.verifyAllowed();
-  const http = await egressReadinessExchange(proxy.httpProxyPort, "CONNECT egress-readiness.invalid:443 HTTP/1.1\r\n\r\n", 12);
+export async function verifyWorkerEgressProxy(proxy: WorkerEgressProxy, onDiagnostic?: (message: string) => void): Promise<void> {
+  await proxy.verifyAllowed(onDiagnostic);
+  const http = await egressReadinessExchange(proxy.httpProxyPort, "CONNECT egress-readiness.invalid:443 HTTP/1.1\r\n\r\n", 12, onDiagnostic);
   if (!http.toString().startsWith("HTTP/1.1 403")) throw new WorkerEgressError("worker HTTP egress refusal not established");
   const name = Buffer.from("egress-readiness.invalid");
-  const socks = await egressReadinessExchange(proxy.socksProxyPort, Buffer.concat([Buffer.from([5, 1, 0, 5, 1, 0, 3, name.length]), name, Buffer.from([1, 187])]), 12);
+  const socks = await egressReadinessExchange(proxy.socksProxyPort, Buffer.concat([Buffer.from([5, 1, 0, 5, 1, 0, 3, name.length]), name, Buffer.from([1, 187])]), 12, onDiagnostic);
   if (socks[0] !== 5 || socks[1] !== 0 || socks[2] !== 5 || socks[3] !== 2) throw new WorkerEgressError("worker SOCKS egress refusal not established");
 }
 

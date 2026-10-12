@@ -6,7 +6,9 @@ import { test } from "node:test";
 
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "../src/lib/learnings.js";
+import { loadProposalRegistry } from "../src/lib/inbox.js";
 import {
+  describeSkillInjectionReachability,
   buildSkillEffectivenessReport,
   observeSkillSelection,
   renderSkillEffectivenessReport,
@@ -255,8 +257,15 @@ test("W1-T3101: staging writes a PROPOSAL — approval, not staging, is what mak
 
 const injectable = (name: string): InjectableSkill => ({ name, appliesTo: ["implement"], body: name });
 const allowlist = workerAllowlistFromSettings(undefined);
-const reachable = describeWorkerSkillReachability([]);
-const draft = (name: string): SkillDraft => ({ name, candidateHash: `hash-${name}` }) as SkillDraft;
+const reachable = describeSkillInjectionReachability;
+const draft = (name: string): SkillDraft => ({
+  name,
+  description: "a procedure",
+  candidateHash: `hash-${name}`,
+  procedureKey: `procedure-${name}`,
+  supportingRuns: 2,
+  markdown: `---\nname: ${name}\napplies-to: implement\n---\n\n## Procedure\n\n- Inspect changed files against the acceptance criteria.\n`,
+});
 
 const skillSelectionRow = (runId: string, selected: boolean): Record<string, unknown> => ({
   run_id: runId,
@@ -626,6 +635,25 @@ test("W1-T3379 criterion 6 mutation: without the selection/outcome join, identic
   assert.deepEqual(failed.selected.outcomes, { failed: 1 });
   assert.notEqual(merged.selected.outcomes, failed.selected.outcomes,
     "the run-correlated terminal outcome is the evidence the report must retain");
+});
+
+test("two drafts in one batch with different applies-to get different reachability lines", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}skill-batch-`));
+  const registry = join(dir, "proposals.json");
+  const optedIn = draft("opted-in");
+  const missing = { ...draft("missing"), markdown: draft("missing").markdown.replace("applies-to: implement\n", "") };
+  const rows: Array<[string, Record<string, unknown> | undefined]> = [];
+  stageSkillDrafts(registry, [optedIn, missing], allowlist, reachable, (step, extra) => rows.push([step, extra]));
+  assert.deepEqual(rows.map(([step, extra]) => [step, extra?.staged]), [["skill.staged", true], ["skill.staged", true]]);
+  const proposals = loadProposalRegistry(registry);
+  assert.equal(proposals.length, 2);
+  const positive = proposals.find((p) => p.skillFile?.name === optedIn.name)!;
+  const negative = proposals.find((p) => p.skillFile?.name === missing.name)!;
+  assert.match(positive.summary, /Reachable: .*implement.*loadInjectableSkills.*selectSkillsForTask/);
+  assert.match(negative.summary, /NOT reachable by a worker today: .*no non-empty applies-to/);
+  assert.doesNotMatch(positive.summary + negative.summary, /settingSources/);
+  assert.equal(positive.skillFile?.markdown, optedIn.markdown);
+  assert.equal(negative.skillFile?.markdown, missing.markdown);
 });
 
 test("W1-T3101: stageSkillDrafts logs one skill.staged per draft, carrying the stager's own verdict", () => {

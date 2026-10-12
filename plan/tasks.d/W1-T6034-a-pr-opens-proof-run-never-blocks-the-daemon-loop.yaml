@@ -1,0 +1,41 @@
+- id: W1-T6034
+  title: "A PR-OPEN PROOF RUN NEVER BLOCKS THE DAEMON LOOP — openPullRequestChecked (src/lib/pr-open.ts) runs each filed proof through defaultProofRunner's spawnSync(`rmd check-proof`), and the daemon opens worker PRs on its own loop, so on 2026-10-06 at 15:28Z one 248 s check-proof froze the loop for 400 s (daemon.loop_lag, 6 missed pulse ticks): no sweep, review admission, arm or merge ran, and every timer fired late"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — the PR opener's proof execution moves off the event loop; it gates every PR the daemon opens
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: 400 s daemon.loop_lag at 15:28Z (sync_spawn_top: defaultProofRunner check-proof 248509 ms)"
+  plan_refs: [W1-T4590, W1-T5689, W1-T5521, W1-T5965, W1-T5964]
+  files: [src/lib/pr-open.ts, src/run-task.ts, test/a-pr-opens-proof-run-never-blocks-the-daemon-loop.test.ts]
+  status: merged
+  note: |
+    reservation hand-off: file-research-batch-1791299753634 -> file-6034-1791301749469
+    W1-T6034's commit reached its first branch after PR 9603 merged, so it is filed from this branch.
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 (ledger, read-only): daemon.loop_lag at 15:28:28Z lag_ms 399738, phase pulse,
+    missed_ticks 6, last_step_before_block github.wake.check_settled, sync_spawn_top {via spawnSync, command
+    bin/rmd, first_arg check-proof, duration_ms 248509, caller defaultProofRunner (src/lib/pr-open.ts)}. The
+    last sweep.pass before it was 15:16:47Z. The morning audit (07:16-11:30Z) saw the same caller at about 20 s,
+    so its cost grows with the proof (a whole test file under check-proof's base/head double run on a loaded
+    host). openPullRequestChecked is synchronous, has one production caller in src/run-task.ts (the PR-open
+    seam that builds the REST argv), and calls runProof(proof, mergeBase, repoRoot, target) once per filed
+    criterion in a loop. A loop block this long also makes every bounded timer fire late, which is the shape
+    W1-T5964 had to defend the reviewer-freshness fetch against.
+  design: |
+    Add an async sibling, openPullRequestCheckedAsync, whose default runner awaits execFile (promisified, same
+    argv, cwd, env, maxBuffer) and returns the same OpenPullRequestProofResult, with a nonzero exit code, a
+    signal, a spawn error and a maxBuffer overflow each kept distinct as today's spawnSync result keeps them.
+    The run-task PR-open seam awaits it. The synchronous opener stays for non-daemon callers that are not on
+    the loop. The criteria loop and its verdicts are unchanged; only where the child runs moves.
+  acceptance:
+    - claim: "the daemon's PR-open path runs a filed proof through an awaited child process, so a slow check-proof lets the event loop keep ticking, and its exit, signal and spawn-error outcomes reach the opener exactly as the synchronous runner reports them"
+      proof: "unit test: test/a-pr-opens-proof-run-never-blocks-the-daemon-loop.test.ts"
+  falsifier: |
+    Keep spawnSync in the daemon's opener: a fixture check-proof that sleeps 2 s lets no interval tick land while
+    it runs, and the test fails.

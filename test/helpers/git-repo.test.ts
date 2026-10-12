@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./git-repo.js";
 import { RMD_TMP_PREFIX } from "../../src/lib/tmp.js";
@@ -97,7 +97,7 @@ test("gitRepo: addRemote wires a remote whose url resolves back to another gitRe
 
 test("gitRepo: addWorktree checks out a new branch at a second path, sharing the fixture's identity", () => {
   const repo = gitRepo();
-  const worktreeDir = `${repo.dir}-wt`;
+  const worktreeDir = join(repo.dir, "wt"); // inside the fixture, which removes it (W1-T5625)
   const worktree = repo.addWorktree(worktreeDir, "feature");
   assert.equal(worktree.dir, worktreeDir);
   assert.equal(worktree.git("rev-parse", "--abbrev-ref", "HEAD"), "feature");

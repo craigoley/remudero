@@ -1,0 +1,37 @@
+- id: W1-T5984
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — own-red:required checks red cost 12.19 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-blocker:own-red:required checks red"
+  files:
+    - src/lib/sweep.ts
+    - test/flow-own-red-required-checks-red.test.ts
+  acceptance:
+    - claim: "own-red:required checks red is cleared by its owner without manual intervention"
+      proof: "grep: test(\"W1-T5984: flow-own-red-required-checks-red clears without a person\" in test/flow-own-red-required-checks-red.test.ts"
+  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    own-red:required checks red cost 12.19 PR-hours; owner fix-lane
+    Owner fix-lane failed to clear eligible episodes.
+    Source owner: src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #9222: 6.67 PR-hours — required checks red — ci-log fix, strike 1/2 — mergeability unread this pass; inherited last known "dirty" observed 2026-10-05T10:22:20.986Z for this exact head 8b30cfc (W1-T4470)
+    - PR #9206: 6.03 PR-hours — required checks red — ci-log fix, strike 1/2 — mergeability unread this pass; inherited last known "dirty" observed 2026-10-05T10:22:20.994Z for this exact head f3e3e4f (W1-T4470)
+    - PR #9139: 0.49 PR-hours — required checks red — refused (1 at this head) — retrying the fix round — mergeability unread this pass; inherited last known "clean" observed 2026-10-04T21:49:49.357Z for this exact head de1c49a (W1-T4470)
+    - PR #9397: 0.13 PR-hours — required checks red — ci-log fix, strike 1/2
+    - PR #9380: 0.13 PR-hours — required checks red — ci-log fix, strike 1/2
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it changes merge, deploy or branch-protection policy (\"required checks\") — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-06T17:29:22.161Z"
+    pin: "1a807ec9278ea80cdb60c2d329759f7336255af22c55b30393127f4500d6f27f"

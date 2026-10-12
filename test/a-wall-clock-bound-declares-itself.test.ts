@@ -16,8 +16,15 @@ const HELPER_IMPORT = "helpers/wall-clock-bound.js";
 // It also adds the hung-gh /v1/status budget file: one more declaring file and assertion site.
 // PR #8080 adds the read-model worker's main-loop timing test: one declaring file and two sites.
 // PR #8229 declares the drain watchdog's elapsed-time assertion: one file and one site.
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 26;
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 43;
+// W1-T5481 declares the daemon cadence phase's loop-lag bound: one declaring file and one site.
+// W1-T5521 declares the sweep's two plan-PR rungs' loop-lag bounds: one declaring file and two sites.
+// The off-loop proof runner's kill bound declares its elapsed-time assertion: one file, one site.
+// The object reaper's off-loop prune bound declares its elapsed-time assertion: one file, one site.
+// #10092 replaced the end-of-run daemon-loop test's wall-clock bound with a deterministic witness: one file, one site fewer.
+// The codex probe's app-server reap grace declares its elapsed-time assertion: one file, one site.
+// W1-T6160 declares the hung Git author probe's bound: one declaring file and one site.
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 36;
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 56;
 const WALL_CLOCK_BOUND_FILE_FLOOR = 3;
 const WALL_CLOCK_BOUND_SITE_FLOOR = 4;
 
@@ -105,6 +112,9 @@ function gitGrepLines(args: readonly string[]): string[] {
   return out.split("\n").filter(Boolean);
 }
 
+// A bound declared INSIDE a test/helpers/*.ts wrapper is outside both queries' `test/*.test.ts`
+// pathspec. W1-T6031's waitForServeBanner (test/helpers/serve-boot-banner.ts) is one: its two
+// callers import the wrapper, not this helper, so it moved neither recorded count (measured).
 function declaredMemberFiles(): string[] {
   return gitGrepLines(["grep", "-lF", HELPER_IMPORT, "--", "test/*.test.ts"])
     .filter((file) => file !== THIS_FILE)

@@ -1,6 +1,9 @@
-import { readFileSync } from "node:fs";
-import type { Escalation } from "./escalate.js";
+import { existsSync, readFileSync } from "node:fs";
+import { escalate, type Escalation, type EscalateDeps } from "./escalate.js";
+import { writeAtomic } from "./fs-race-safe.js";
 import { REVIEW_CONTEXT } from "./review.js";
+// @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
+import { planNodePin } from "../../scripts/node-pin-follows-the-image.mjs";
 
 /**
  * The dependency-PR review lane (W1-T54, MASTER-PLAN §5D item 1).
@@ -327,12 +330,13 @@ export function isManifestPath(path: string, readRootManifest?: () => string): b
 
 /** Dependency declarations outside the npm-workspace manifest predicate. The deploy image is a
  * separately packaged surface: Dependabot edits its package manifests directly, and a Node image
- * bump edits the Dockerfile's `FROM` declaration. Keep these three paths explicit rather than
- * widening workspace matching (which would admit fixtures). */
+ * bump edits the Dockerfile's `FROM` declaration, which W1-T6064 syncs into `.nvmrc`. Keep these
+ * paths explicit rather than widening workspace matching (which would admit fixtures). */
 const DEPLOY_DEPENDENCY_DECLARATIONS = new Set([
   "deploy/package.json",
   "deploy/package-lock.json",
   "deploy/Dockerfile",
+  ".nvmrc",
 ]);
 
 /** Is `path` safe for a dependency-only PR, using the repository's real root workspace declaration? */
@@ -357,6 +361,58 @@ export function changedFilesInDiff(diff: string): string[] {
   for (const m of diff.matchAll(/^--- a\/(\S+)/gm)) files.add(m[1]);
   for (const m of diff.matchAll(/^rename (?:from|to) (\S+)/gm)) files.add(m[1]);
   return [...files];
+}
+
+/** W1-T6258 — the I/O a node-pin sync needs; the pass decides, the caller reads and pushes. */
+export interface NodePinSyncIo {
+  /** `git show <sha>:<path>` on the PR head, or undefined when the file cannot be read. */
+  readAtHead(headSha: string, path: string): string | undefined;
+  /** Commit `.nvmrc` = `nvmrc` on the PR head ref and push it; returns the pushed sha. */
+  commitAndPush(input: { headRef: string; headSha: string; nvmrc: string; subject: string }): string;
+}
+
+export type NodePinSyncOutcome =
+  | { kind: "skipped" }
+  | { kind: "in-sync"; pinned: string }
+  | { kind: "synced"; from: string; to: string; pushedSha: string }
+  | { kind: "refused"; reason: "major" | "unreadable" | "push-failed"; detail: string };
+
+/**
+ * W1-T6258 — a Dependabot `deploy/Dockerfile` bump edits `FROM` only, so `.nvmrc` drifts and the
+ * exact-pin image tests go red. When the diff touches the Dockerfile, plan the pin on the PR head's
+ * own Dockerfile and `.nvmrc`; a within-major drift is committed once on the head ref. A synced head
+ * plans `in-sync`, so a second pass pushes nothing. A major or unreadable pin is reported, never synced.
+ */
+export function syncNodePinForImageBump(
+  diff: string,
+  head: { sha: string; ref: string | undefined },
+  io: NodePinSyncIo,
+): NodePinSyncOutcome {
+  if (!changedFilesInDiff(diff).includes("deploy/Dockerfile")) return { kind: "skipped" };
+  const dockerfile = io.readAtHead(head.sha, "deploy/Dockerfile");
+  const nvmrc = io.readAtHead(head.sha, ".nvmrc");
+  if (dockerfile === undefined || nvmrc === undefined || head.ref === undefined) {
+    return { kind: "refused", reason: "unreadable", detail: "deploy/Dockerfile, .nvmrc or the head ref could not be read" };
+  }
+  const plan = planNodePin(dockerfile, nvmrc) as { action: string; image?: string; pinned: string };
+  if (plan.action === "in-sync") return { kind: "in-sync", pinned: plan.pinned };
+  if (plan.action === "major") {
+    return { kind: "refused", reason: "major", detail: `the image moves Node ${plan.pinned} -> ${plan.image}, a major` };
+  }
+  if (plan.action !== "rewrite" || plan.image === undefined) {
+    return { kind: "refused", reason: "unreadable", detail: "deploy/Dockerfile must carry exactly one `FROM node:<x.y.z>-` line" };
+  }
+  try {
+    const pushedSha = io.commitAndPush({
+      headRef: head.ref,
+      headSha: head.sha,
+      nvmrc: `${plan.image}\n`,
+      subject: `chore(deps): .nvmrc follows the image's Node ${plan.image}`,
+    });
+    return { kind: "synced", from: plan.pinned, to: plan.image, pushedSha };
+  } catch (error) {
+    return { kind: "refused", reason: "push-failed", detail: String((error as Error)?.message ?? error) };
+  }
 }
 
 export const ACTION_SHA_PIN_CHANGE_RE = /^([+-])\s*uses:\s*([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+)@([a-f0-9]{40})\s+#\s*(v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)\s*$/i;
@@ -703,7 +759,32 @@ export function buildDepReviewEscalation(args: {
   title: string;
   body: string;
   semverLevel: SemverLevel;
+  hold?: { headSha: string; redChecks: string[] };
 }): Escalation {
+  if (args.hold) {
+    return {
+      class: "BLOCKED",
+      taskId: `dep-review-hold-PR${args.prNumber}`,
+      headSha: args.hold.headSha,
+      cause: "ci",
+      summary: `Aged dependency review hold: ${args.title}`,
+      detail: [
+        `Dependabot PR ${args.prUrl} is held on head ${args.hold.headSha}.`,
+        `Blocker: required check(s) not green: ${args.hold.redChecks.join(", ")}.`,
+        `Owner: repository operator. Inspect the failed check logs, rerun transient failures,`,
+        `or repair the dependency/CI failure and ask Dependabot to rebase or recreate the PR.`,
+        `Do not override failing checks. Green checks resume deterministic review and auto-merge;`,
+        `this issue does not require routine human approval of the dependency bump.`,
+      ].join("\n"),
+      options: [{
+        label: "repair checks",
+        detail: "repository operator: investigate and rerun transient failed checks, or repair the failure and request a Dependabot rebase/recreate",
+        kind: { type: "operator-only" },
+      }],
+      recommendation: "repair checks",
+      consequence: "The dependency PR remains held while its checks are red.",
+    };
+  }
   return {
     class: "MANUAL",
     taskId: `dep-review-PR${args.prNumber}`,
@@ -728,4 +809,68 @@ export function buildDepReviewEscalation(args: {
     ],
     recommendation: "merge",
   };
+}
+
+/** BACKSTOP: allow a full day for transient CI failures before asking the repository operator. */
+export const DEP_REVIEW_HOLD_AGE_MS = 24 * 60 * 60 * 1000;
+
+interface DepReviewHoldState {
+  headSha: string;
+  heldSinceMs: number | null;
+  asks: Array<{ headSha: string; issueUrl: string; retired: boolean }>;
+}
+
+/** Durable per-PR state survives ledger rotation; delivered heads stay recorded after retirement. */
+export function reconcileDepReviewHold(args: {
+  statePath: string;
+  prUrl: string;
+  prNumber: number;
+  title: string;
+  body: string;
+  headSha: string;
+  result: DepReviewResult;
+  nowMs: number;
+  escalationDeps: () => EscalateDeps;
+  log: (step: string, extra: Record<string, unknown>) => void;
+}): void {
+  if (args.result.decision !== "hold" && !existsSync(args.statePath)) return;
+  const state: DepReviewHoldState = existsSync(args.statePath)
+    ? JSON.parse(readFileSync(args.statePath, "utf8"))
+    : { headSha: args.headSha, heldSinceMs: null, asks: [] };
+  if (!state || typeof state !== "object" || typeof state.headSha !== "string" ||
+      !(state.heldSinceMs === null || (typeof state.heldSinceMs === "number" && Number.isFinite(state.heldSinceMs))) ||
+      !Array.isArray(state.asks) || state.asks.some((ask) =>
+        !ask || typeof ask.headSha !== "string" || typeof ask.issueUrl !== "string" || typeof ask.retired !== "boolean")) {
+    throw new Error("invalid dependency hold state; refusing to forget delivered heads");
+  }
+  const save = () => writeAtomic(args.statePath, `${JSON.stringify(state)}\n`);
+  for (const ask of state.asks) {
+    if (ask.retired || (ask.headSha === args.headSha && args.result.decision === "hold")) continue;
+    const issues = args.escalationDeps().issues;
+    if (!issues.closeWithComment) throw new Error("dependency hold issue gateway cannot retire issues");
+    const reason = ask.headSha !== args.headSha
+      ? `Dependency hold head changed from ${ask.headSha} to ${args.headSha}.`
+      : args.result.redChecks.length === 0
+        ? "Dependency hold checks recovered."
+        : `Dependency review no longer holds this head (${args.result.decision}).`;
+    issues.closeWithComment(ask.issueUrl, `${reason} Retiring the old operator ask for ${args.prUrl}.`);
+    ask.retired = true;
+    save();
+    args.log("dep-review.hold_retired", { issue_url: ask.issueUrl, head_sha: ask.headSha, reason });
+  }
+  if (state.headSha !== args.headSha || args.result.decision !== "hold") state.heldSinceMs = null;
+  state.headSha = args.headSha;
+  if (args.result.decision === "hold") state.heldSinceMs ??= args.nowMs;
+  save();
+  if (state.heldSinceMs === null || args.nowMs - state.heldSinceMs < DEP_REVIEW_HOLD_AGE_MS ||
+      state.asks.some((ask) => ask.headSha === args.headSha)) return;
+  const issueUrl = escalate(buildDepReviewEscalation({
+    ...args,
+    semverLevel: args.result.semverLevel,
+    hold: { headSha: args.headSha, redChecks: args.result.redChecks },
+  }), args.escalationDeps());
+  if (!issueUrl) throw new Error("dependency hold escalation not delivered; retry after the issue read recovers");
+  state.asks.push({ headSha: args.headSha, issueUrl, retired: false });
+  save();
+  args.log("dep-review.hold_escalated", { issue_url: issueUrl, head_sha: args.headSha, red_checks: args.result.redChecks });
 }

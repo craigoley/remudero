@@ -58,3 +58,70 @@ Learnings used when offered: 13%. Dangling Why pointers: 1.
 - retire bashrc-accident: Workers offered it have rarely used it, compared with other learnings.
 
 Learnings used when offered: 13%. Dangling Why pointers: 1.
+
+## Pass 2026-10-05T08:50:07.632Z
+
+- retire strikes-exhausted-counts-rows: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 15%. Dangling Why pointers: 1.
+
+## Pass 2026-10-06T09:21:02.674Z
+
+- retire a-board-wide-plan-red-is-main: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 18%. Dangling Why pointers: 1.
+
+## Pass 2026-10-06T10:53:35.712Z
+
+- retire step-names-come-from-source: Workers offered it have rarely used it, compared with other learnings.
+- retire webtools-are-injection-surface: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 18%. Dangling Why pointers: 1.
+
+## Pass 2026-10-06T23:10:18.176Z
+
+- retire daemon-launchd-keepalive-restart: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 19%. Dangling Why pointers: 1.
+
+## Pass 2026-10-07T10:29:54.880Z
+
+- retire canonical-checkout-lags-by-design: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 19%. Dangling Why pointers: 1.
+
+## Pass 2026-10-08T05:37:57.432Z
+
+- retire rollup-dedupe-by-latest-attempt: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 21%. Dangling Why pointers: 1.
+
+## Pass 2026-10-08T09:17:53.791Z
+
+- retire required-check-poster: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 21%. Dangling Why pointers: 1.
+
+## Pass 2026-10-08T15:06:10.551Z
+
+- retire ledger-query-anchors-on-the-step-field: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 22%. Dangling Why pointers: 1.
+
+## Pass 2026-10-09T02:31:55.812Z
+
+- retire lint-plan-refuses-before-pr: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 24%. Dangling Why pointers: 1.
+
+## Pass 2026-10-09T10:04:45.519Z
+
+- retire squash-trailer-gate-task-authoring-lane: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 25%. Dangling Why pointers: 1.
+
+## Pass 2026-10-09T23:05:22.282Z
+
+- retire ci-shard-one-eight-refuses-conflict-markers: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 26%. Dangling Why pointers: 1.

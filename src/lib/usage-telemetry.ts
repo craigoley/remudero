@@ -6,7 +6,7 @@
  *  - `daemon.headroom`: the daemon's own Claude reading (window, percent_used, limit_pct, resets_at).
  *  - `worker.assignment`: every candidate's windows at decision time (Claude AND Codex), plus
  *    `routing.decision` (rule, capability, considered, headroomPercent) on rows written after #6991.
- *  - `implement.done` with `provider: "cash"`: cash-lane dollars (the same selector W1-T4024 uses).
+ *  - Cash-attributed producer receipts: cash-lane modeled dollars, including Inbox drafting.
  *
  * The accumulator is fed from the analytics union pass and checkpointed with it, so it holds only
  * bounded, JSON-plain state: hourly buckets for the last RETAIN_HOURS and one newest decision per run.
@@ -15,6 +15,7 @@
 import type { LiveProviderAccounts } from "./analytics-live-metrics.js";
 import { fixedClock } from "./clock.js";
 import { loadMounts, mountsPath, resolveClaudeModelAlias, type Mounts } from "./mounts.js";
+import { isCashSpendProducer, spendAmountUsd } from "./spend-rows.js";
 
 export const USAGE_PROJECTION_VERSION = "usage-v2";
 export const LEGACY_USAGE_PROJECTION_VERSION = "usage-v1";
@@ -31,7 +32,7 @@ const SUBSCRIPTION_PROVIDERS = new Set(["claude", "codex"]);
 const DECISION_FIELDS = new Set(["rule", "capability", "considered", "headroomPercent"]);
 const SUCCESS_VERDICTS = new Set(["merged", "already_satisfied"]);
 const CASH_COVERAGE =
-  "implement workers only: fix-rung workers record no provider, so their cash spend cannot be attributed";
+  "cash-attributed producer receipts, including Inbox drafting, recon and review; excludes missing provider attribution and subscription costs; not an invoice";
 
 /** One provider window's readings inside one UTC hour. */
 interface HourSample {
@@ -128,6 +129,7 @@ export interface UsageExperimentArm {
 /** Plain-JSON accumulator state; it is the checkpoint shape too. */
 export interface UsageTelemetryState {
   costAccountingVersion?: 1;
+  cashAccountingVersion?: 1;
   trialAccountingVersion?: 1;
   newestHour: number;
   series: Array<{ provider: string; window: string; hours: HourSample[] }>;
@@ -225,7 +227,7 @@ export interface UsageProjection {
 }
 
 export function usageTelemetryState(): UsageTelemetryState {
-  return { trialAccountingVersion: 1, costAccountingVersion: 1, newestHour: 0, series: [], cash: [], cashEvents: [], routing: [], recent: [], markedRuns: [], assignmentsObserved: 0, decisionsObserved: 0 };
+  return { trialAccountingVersion: 1, costAccountingVersion: 1, cashAccountingVersion: 1, newestHour: 0, series: [], cash: [], cashEvents: [], routing: [], recent: [], markedRuns: [], assignmentsObserved: 0, decisionsObserved: 0 };
 }
 
 function text(value: unknown): string | undefined {
@@ -462,7 +464,8 @@ function addAssignment(state: UsageTelemetryState, line: Record<string, unknown>
 }
 
 function addCash(state: UsageTelemetryState, line: Record<string, unknown>, ts: number): void {
-  const usd = percent(line.total_cost_usd) ?? null;
+  const amount = spendAmountUsd(line);
+  const usd = amount !== undefined && amount >= 0 ? amount : null;
   const hour = Math.floor(ts / HOUR_MS);
   if (hour <= state.newestHour - RETAIN_HOURS) return;
   let bucket = state.cash.find((entry) => entry.hour === hour);
@@ -480,14 +483,14 @@ function addCash(state: UsageTelemetryState, line: Record<string, unknown>, ts: 
 /** Fold one ledger row. Rows of any other step are ignored in O(1). */
 export function accumulateUsageLine(state: UsageTelemetryState, line: Record<string, unknown>): void {
   const step = line.step;
-  if (step !== "daemon.headroom" && step !== "worker.assignment" && step !== "implement.done" && step !== "verdict") return;
+  const cashProducer = isCashSpendProducer(line);
+  if (step !== "daemon.headroom" && step !== "worker.assignment" && step !== "implement.done" && step !== "verdict" && !cashProducer) return;
   const ts = Date.parse(text(line.ts) ?? "");
   if (!Number.isFinite(ts)) return;
+  if (cashProducer) addCash(state, line, ts);
   if (step === "worker.assignment") addAssignment(state, line, ts);
   else if (step === "verdict") addVerdict(state, line, ts);
-  else if (step === "implement.done") {
-    if (line.provider === "cash") addCash(state, line, ts);
-  } else {
+  else if (step === "daemon.headroom") {
     const window = text(line.window);
     const used = percent(line.percent_used);
     if (!window || used === undefined) return;

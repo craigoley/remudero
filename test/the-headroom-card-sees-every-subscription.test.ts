@@ -118,7 +118,9 @@ test("W1-T4024: cash spend counts only cash-lane worker rows", () => {
   assert.equal(cash.state, "observed");
   assert.equal(week?.usd, 0.75, "only the two cash-lane implement.done rows");
   assert.equal(week?.rows, 2);
-  assert.match(cash.coverage, /fix-rung/, "the reading states what it cannot attribute");
+  assert.match(cash.coverage, /excludes missing provider attribution/, "the reading states what it cannot attribute");
+  assert.match(cash.coverage, /subscription costs/, "the reading excludes subscription dollars");
+  assert.match(cash.coverage, /not an invoice/, "receipt coverage is not billed cost");
 });
 
 test("W1-T4024: window utilisation and money are separate units", () => {

@@ -1,0 +1,56 @@
+- id: W1-T6147
+  title: "CUTTING A WORKTREE RUNS NO TRACKED OR GITDIR HOOK — worker.ts worktreeAdd and worktreeAddAsync run a raw `git -C <repoDir> worktree add`, which runs post-checkout from whatever hooks path the source clone's config names, or from its common gitdir's hooks/, a directory a codex worker can write through its --add-dir git roots; W1-T6122 recorded both as HARNESS-only and left them raw"
+  repo: remudero
+  depends_on: [W1-T6122]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — which hooks the harness runs when it cuts a worktree
+  band_meaning: span
+  origin: "operator session 2026-10-07: raised by W1-T6121's builder (PR #9794); premise verified read-only on origin/main 0fffd033d before filing"
+  plan_refs: [W1-T6106, W1-T6122, W1-T6146, W1-T1129, W1-T137]
+  files: [src/lib/worker.ts, test/cutting-a-worktree-runs-no-tracked-or-gitdir-hook.test.ts]
+  status: merged
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-07 on origin/main 0fffd033d (W1-T6122 merged as #9790). Static reading only; no hook was planted
+    anywhere real.
+    THE CALL. src/lib/worker.ts `worktreeAdd` runs `execFileSync("git", ["-C", repoDir, "worktree", "add", "-b", branch,
+    "--no-track", worktreePath, base], { stdio: "inherit" })`, and `worktreeAddAsync` the same argv through
+    `worktreeGit`; neither passes `--no-checkout` or any `-c core.hooksPath`. `git worktree add` checks the new tree
+    out and runs the post-checkout hook. Only AFTER it does worktreeAdd set `config --worktree core.hooksPath hooks` on
+    the new tree, so during the add the hook comes from the source clone's own config. W1-T6122's census reason on main
+    (`RAW_SITE_EXCEPTIONS["src/lib/worker.ts"]`, count 9) reads "HARNESS (W1-T6122): worktreeAdd 3 + worktreeAddAsync 6
+    cut and wire the tree before any worker runs", which is true of the NEW tree but not of the hook source.
+    TWO ROUTES. (a) If the clone's config sets a RELATIVE core.hooksPath (hooks/pre-commit's own comment tells an
+    operator to run `git config core.hooksPath hooks`), git resolves it in the tree being checked out, so the TRACKED
+    hooks/post-checkout of `base` runs. `base` is normally origin/main (spike.ts, run-task.ts runTask paths), which
+    makes this route lower risk, but sweep.ts `renumberPlanPrIds` cuts through `worktreeAdd` at `origin/<headRefName>`,
+    a PR's own head. No code in src/, scripts/ or deploy/ sets a repo-level core.hooksPath; whether the fleet's
+    managed clone has one was NOT checked (no host access). (b) With no core.hooksPath, the hook comes from the common
+    gitdir's hooks/ directory. worker-provider.ts `codexExecArgs` grants a writer codex worker its tree's
+    `--git-common-dir` as an `--add-dir` writable root (`codexGitWritableRoots`), so a codex worker can plant
+    `<common>/hooks/post-checkout`, and the NEXT worktreeAdd on that clone, for any lane, runs it as the daemon. Route
+    (b) needs no operator config; it is the stronger of the two by static reading, and the reason this is filed even
+    at P3.
+  design: |
+    (1) Both `worktree add` calls run with `core.hooksPath` pinned to the leaf's `HOST_HOOKS_DIR` (or to an empty
+    hooks dir) at command-line precedence, together with the rest of `HOST_GIT_CONFIG`, so neither a tracked hook nor a
+    gitdir hook runs while the tree is cut; `--no-checkout` followed by a leaf checkout is an acceptable alternative,
+    and the PR says which. (2) The post-add `config --worktree core.hooksPath hooks` step and everything W1-T4614 and
+    W1-T137 rely on afterwards are unchanged. (3) Update W1-T6122's HARNESS reason for worker.ts to say the add runs no
+    hook, so the record matches the code. (4) Argv and outputs otherwise unchanged.
+  acceptance:
+    - claim: "worktreeAdd and worktreeAddAsync cut a fixture worktree from a fixture clone whose common gitdir hooks/post-checkout writes a marker, and from one whose config sets core.hooksPath=hooks with a tracked hooks/post-checkout at the base that writes a marker, without either marker being written, and the new worktree still carries core.hooksPath=hooks in its own worktree config afterwards"
+      proof: "unit test: test/cutting-a-worktree-runs-no-tracked-or-gitdir-hook.test.ts"
+  falsifier: |
+    At origin/main 0fffd033d, worktreeAdd on the fixture clone runs `git worktree add` with no hooks override: the
+    common gitdir's post-checkout runs and writes its marker, and the test fails.
+  notes: |
+    FIXTURES ONLY: the clones, bases and marker hooks are gitRepo() fixtures under the test's tmp dir; nothing touches
+    the managed checkout's hooks or config. Depends on W1-T6122 (#9790, merged 2026-10-07): it owns the census reason
+    this updates. Related, NOT this task: W1-T6146 neutralises attribute-named drivers in the leaf, the same writable
+    gitdir config route; a writable common hooks/ also reaches any OTHER raw host git call that runs hooks in a tree
+    of that clone, which the census's remaining HARNESS and CHECKOUT sites should be read for.

@@ -10,7 +10,8 @@
 
 - id: required-check-poster
   subsystem: ci
-  lifecycle: active
+  # knowledge gardener: retire required-check-poster
+  lifecycle: superseded
   files: [src/lib/review.ts, src/lib/status.ts, ".github/**"]
   fact: >-
     A required check must be posted by the ORCHESTRATOR unconditionally, not solely by a worker: a
@@ -31,7 +32,8 @@
 # ── Measurement traps observed 2026-08-23 (re-derived at 682c5d5a) ──
 - id: rollup-dedupe-by-latest-attempt
   subsystem: sweep
-  lifecycle: active
+  # knowledge gardener: retire rollup-dedupe-by-latest-attempt
+  lifecycle: superseded
   files: [src/lib/sweep.ts, src/lib/open-prs-rest.ts]
   fact: >-
     A check-runs listing with ?filter=all returns SUPERSEDED attempts forever, so a check that was
@@ -118,6 +120,94 @@
   src: measured 2026-09-07 — source-size-ratchet BLOCKED on origin/main across six unrelated open PRs
   cited: "2026-09-07"
 
+- id: ci-shard-one-eight-refuses-conflict-markers
+  subsystem: ci
+  # knowledge gardener: retire ci-shard-one-eight-refuses-conflict-markers
+  lifecycle: superseded
+  files: ["plan/tasks.d/**", "src/run-task.ts", "hooks/pre-commit", ".github/workflows/ci.yml"]
+  fact: >-
+    Before committing or pushing a worker repair that resolves a merge conflict, verify the staged
+    tree contains no leftover conflict markers. Git can mark a conflicted path resolved when it is
+    staged even if marker text remains; a two-parent commit can then reach CI and fail every shard.
+    The harness commit and fix push check for markers, and the pre-commit hook checks every committer.
+  evidence: >-
+    PR #8551's commit 4c047d2bd was a two-parent merge whose src/lib/now-view.ts retained conflict
+    markers; esbuild then failed on the marker text. W1-T5227 records the reproduction and repairs
+    the harness commit, fix push, and pre-commit paths.
+  src: "ci-learning:8551:ci-shard (1/8)"
+  cited: "2026-10-08"
+
+- id: unwired-gate-repair-lane
+  subsystem: ci
+  lifecycle: active
+  files: [".github/workflows/unwired-gate.yml", scripts/unwired-gate-check.mjs, src/lib/ci-parity.ts]
+  fact: >-
+    Before opening a PR that adds or changes a gate-shaped script, npm check script, or its CI
+    registration, run `npm run --silent unwired-gate:check` on the proposed tree. The check reads
+    parsed workflow steps and package.json script calls; register each gate in an executable
+    workflow or package script, and remove stale allowance rows when wiring lands. This is the
+    local check for the unwired-gate refusal, not a textual mention or a unit test of the checker.
+  evidence: >-
+    The unwired-gate gate refused pull requests #10137, #10215, and #10271, and each was repaired.
+    `scripts/unwired-gate-check.mjs` reports gate-shaped scripts that no workflow or package script
+    invokes, plus stale allowances; `.github/workflows/unwired-gate.yml` runs the checker. The
+    individual refusal logs were not available to establish a narrower shared cause.
+  src: "ci-learning:10137:unwired-gate"
+  cited: "2026-10-09"
+
+- id: ci-shard-seven-eight-refusals-reach-task-authoring-lane
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**", "plan/feedback/**", "deploy/**"]
+  fact: >-
+    When ci-shard (7/8) refuses a pull request, inspect that shard's failure before repairing; the
+    repair window included selector-plan updates, deployment tests, feedback proposals, and plan
+    guidance, so the PR list alone does not establish a shared cause. Route the verified failure and
+    its narrow repair into the task-authoring lane, then rerun the affected proof before resubmitting.
+  evidence: >-
+    The window recorded as ci-learning:9979:ci-shard (7/8) includes PRs #9979, #10001, #10135,
+    #10140, #10186, and #10255, each followed by a repair. Their recorded diffs span plan task
+    shards, a CI learning, deployment code/tests, feedback records, and master-plan guidance; the
+    available commit evidence does not establish one common shard failure cause.
+  src: "ci-learning:9979:ci-shard (7/8)"
+  cited: "2026-10-09"
+
+- id: test-slow-shard-single-suite-at-a-time
+  subsystem: ci
+  lifecycle: active
+  files: ["test/**", "scripts/test-tier-manifest.json", ".github/workflows/ci.yml", package.json]
+  fact: >-
+    When verifying test changes or the slow-tier runner, run one full test suite at a time. Do not
+    background or parallelize `node --test` runs; the deny floor refuses concurrent full-suite
+    runs. For focused verification, run one test file or use `--test-name-pattern`. The coverage
+    preflight runs its shards sequentially; let it finish before starting another full suite.
+  evidence: >-
+    The test-slow-shard (1/2) gate refused nine pull requests recorded as
+    ci-learning:9362:test-slow-shard (1/2) (9362, 9379, 9382, 9386, 9396, 9415, 9520, 9527, 9649),
+    and each was repaired. The task's deny-floor constraint identifies overlapping full-suite
+    runs as a refusal condition; this entry directs test authors to serialize full runs and use
+    single-file or name-pattern runs for focused checks. Individual PR failure logs were not
+    available to establish a more specific shared cause.
+  src: "ci-learning:9362:test-slow-shard (1/2)"
+  cited: "2026-10-08"
+
+- id: analyze-javascript-typescript-gate-pre-push-steps
+  subsystem: ci
+  lifecycle: active
+  files: [".github/workflows/codeql.yml", ".github/workflows/ci-gate.yml", "plan/tasks.d/**", src/run-task.ts, src/lib/policy.ts, src/lib/dep-review.ts, "test/**"]
+  fact: >-
+    The Analyze (javascript-typescript) gate is the CodeQL job that ci-gate.yml requires. Before the
+    first push, run `npm run --silent rule15-precheck` if the diff touches plan/, and run
+    `rmd census-membership` for the census suites a src or test change can move, then run the suites
+    it names. Do not wait for the hosted gate to find these; it refuses the same way each time.
+  evidence: >-
+    The Analyze (javascript-typescript) gate refused six pull requests (9362, 9379, 9624, 9703, 9704,
+    9712) in one window, and each was repaired after the refusal. The repairs touched plan/tasks.d
+    shards and learnings entries. Recon did not read the six failure logs, so the shared cause is not
+    verified; this entry names the pre-push steps that cover the surfaces those repairs touched.
+  src: "ci-learning:9362:Analyze (javascript-typescript)"
+  cited: "2026-10-08"
+
 - id: commitlint-pr-title-lane
   subsystem: ci
   lifecycle: active
@@ -133,6 +223,74 @@
     in the window recorded as ci-learning:7204:commitlint.
   src: "ci-learning:7204:commitlint"
   cited: "2026-09-30"
+
+- id: lint-plan-refuses-before-pr
+  subsystem: ci
+  # knowledge gardener: retire lint-plan-refuses-before-pr
+  lifecycle: superseded
+  files: ["plan/tasks.d/**", src/run-task.ts]
+  fact: >-
+    Before opening a PR that adds or edits plan tasks, run `rmd lint-plan --base origin/main` on
+    the proposed tree and repair every blocking finding; a clean lint-plan result is the pre-PR
+    check that prevents the CI gate from refusing the branch.
+  evidence: >-
+    Twenty-seven pull requests in the window recorded as ci-learning:8684:lint-plan were repaired
+    after lint-plan refused them; the common prevention point is the task-authoring lane, which
+    edits task shards and receives matched learnings for that path.
+  src: "ci-learning:8684:lint-plan"
+  cited: "2026-10-08"
+
+- id: claims-gate-lane
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/claims.yaml", "plan/tasks.d/**", src/run-task.ts, "scripts/**", ".github/**"]
+  fact: >-
+    Before opening a PR from the task-authoring lane or changing the claims runner, scripts, or CI
+    configuration, run `npm run --silent claims` on the proposed tree. Repair each failing
+    assertion, or update its claim when system behavior intentionally changed. The claims gate
+    executes these same assertions in CI, including ones affected by other changed paths.
+  evidence: >-
+    The claims job runs `npm run --silent claims`, which executes every assertion in
+    plan/claims.yaml; 26 pull requests in the window recorded as ci-learning:8684:claims were
+    repaired after the claims gate refused them.
+  src: "ci-learning:8684:claims"
+  cited: "2026-10-08"
+
+- id: squash-trailer-gate-task-authoring-lane
+  subsystem: ci
+  # knowledge gardener: retire squash-trailer-gate-task-authoring-lane
+  lifecycle: superseded
+  files: ["plan/tasks.d/**", src/run-task.ts, .github/workflows/ci.yml]
+  fact: >-
+    Before opening a plan-only PR, inspect the commits reachable from its head for
+    `Remudero-Task:` trailers that credit implementation tasks. The squash-trailer-gate refuses
+    when a credited task declares non-plan files, because the PR changes only plan paths. Remove
+    that trailer or include the implementation changes before opening the PR; then rerun the gate
+    after correcting the branch or PR metadata.
+  evidence: >-
+    `scripts/acceptance-author-gate.mjs` applies this refusal only when every changed path is
+    plan-scoped and the trailer-resolved task declares non-plan files. The gate's diagnostic names
+    both remedies. Fourteen repaired pull requests in the window were recorded as
+    ci-learning:5433:squash-trailer-gate.
+  src: "ci-learning:5433:squash-trailer-gate"
+  cited: "2026-10-08"
+
+- id: acceptance-author-gate-task-authoring-lane
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**", src/run-task.ts, ".github/workflows/ci.yml"]
+  fact: >-
+    Before opening a PR from the task-authoring lane, ensure its acceptance block has the required
+    header and at least one executable proof using a supported dialect (`unit test:` or `grep:`),
+    and that each proof matches evidence in the proposed tree. The acceptance-author-gate refuses
+    bodies it cannot judge; repair the block and open a new head so CI evaluates the corrected body.
+  evidence: >-
+    The acceptance-author-gate runs the shared acceptance-author-time predicate on pull request
+    bodies. Pull requests #10003 and #10010 were refused by that gate and repaired; their filing
+    records identify this task-authoring lane and the acceptance-block gate as the recurring
+    refusal surface.
+  src: "ci-learning:10003:acceptance-author-gate"
+  cited: "2026-10-09"
 
 - id: comment-load-ratchet-lane
   subsystem: ci
@@ -155,3 +313,232 @@
     blocks; its CLI signal prints the proposed baseline row when a file exceeds its ceiling.
   src: "ci-learning:5505:comment-load-ratchet"
   cited: "2026-09-29"
+
+- id: a-board-wide-plan-red-is-main
+  subsystem: ci
+  # knowledge gardener: retire a-board-wide-plan-red-is-main
+  lifecycle: superseded
+  files: ["plan/tasks.d/**", .github/workflows/ci.yml, src/lib/sweep.ts]
+  fact: >-
+    When lint-plan, claims and every coverage shard go red together on many unrelated PRs, main's
+    plan does not load. This happened three times: #8714 on 2026-10-02, #8877 on 2026-10-03, and
+    #8922 later that day, each after two machine plan PRs merged duplicate `priority:` keys seconds
+    apart. #8936 was a duplicate fix attempt for the #8922 incident, not another occurrence. Check
+    main-plan-guard on main and search
+    the open PRs for an existing fix first. Once main is green, run `gh api -X PUT
+    repos/<o>/<r>/pulls/<n>/update-branch` on each inherited-red PR: a job re-run replays the OLD
+    merge ref and stays red.
+  assertion: 'test -f test/no-plan-shard-carries-a-duplicate-key.test.ts'
+  src: PRs #8714, #8877, #8922 (incidents); #8936 (duplicate fix attempt for #8922)
+  cited: "2026-10-03"
+
+- id: hand-review-collides-with-the-daemon
+  subsystem: ci
+  lifecycle: active
+  files: [src/lib/review.ts]
+  fact: >-
+    The remudero-review pending claim is read from the LOCAL ledger only, so `rmd review` on one
+    host cannot see a daemon review already in flight, and vice versa. From 09-26 to 10-03, 102
+    reviews reached post time after the PR had merged and were refused; 82 were from the daemon
+    review lane (19 run-task, 1 dep-review). In a sample of 12, the PR had merged 12 seconds to 10
+    minutes earlier, and 11 merges were by the operator identity, consistent with cross-host
+    duplicate work. Until W1-T5540 lands, check the PR's remudero-review status for "review in
+    progress (owned by run ...)" before reviewing by hand.
+  src: "review.post_refused rows 09-26..10-03 (102 total: 82 daemon, 19 run-task, 1 dep-review); W1-T5540"
+  cited: "2026-10-03"
+
+- id: strikes-exhausted-counts-rows
+  subsystem: ci
+  # knowledge gardener: retire strikes-exhausted-counts-rows
+  lifecycle: superseded
+  files: [src/lib/sweep.ts, src/run-task.ts]
+  fact: >-
+    Historical "fix strikes exhausted (2/2)" rows can overstate real strikes. Before W1-T5542,
+    `priorStrikesFor` counted `fix.dispatch` rows and each `runFixRung` pass restarted numbering at
+    strike 1, so two refused rounds could exhaust the display without moving the head or reaching a
+    verdict. That was all 16 exhaustions from 09-26 to 10-03; #8868 later read 3/2. For historical
+    cases, inspect `fix.commit_refused` rows. W1-T5542 has since changed the tally to count round
+    outcomes, not refusals.
+  src: ledger 09-26..10-03; W1-T5542
+  cited: "2026-10-03"
+
+- id: codeql-read-model-lane
+  subsystem: ci
+  lifecycle: active
+  files: [src/lib/ledger-projector.ts, src/lib/read-model-worker.ts, src/lib/board-projection.ts, src/lib/read-model-db.ts]
+  fact: >-
+    When changing the read-model projection or worker lane, inspect the CodeQL `security-and-quality`
+    findings on the pull request and repair each finding in the changed behavior before retrying the
+    gate; this lane repeatedly incurred CodeQL refusals across 28 repaired pull requests.
+  evidence: >-
+    The CodeQL workflow scans JavaScript/TypeScript with `security-and-quality`; the CI learning
+    window records 28 refusals and repairs, including repeated changes to the read-model projector,
+    worker, board projection and database.
+  src: "ci-learning:8075:CodeQL"
+  cited: "2026-10-07"
+
+- id: rule-checks-gate-census-and-plan-scope-refusals
+  subsystem: ci
+  lifecycle: active
+  files: [src/run-task.ts, src/lib/policy.ts, src/lib/dep-review.ts, scripts/census-precheck.mjs, scripts/preflight-author.mjs, src/lib/ledger.ts, src/lib/proof-amendment.ts, "plan/tasks.d/**"]
+  fact: >-
+    When a change touches a listed source or preflight helper, or a plan task shard, run the cheap
+    checks before the first push: `rmd census-membership` (it maps changed paths to the census
+    suites that walk the whole tree), and `npm run --silent rule15-precheck`
+    when the diff touches plan/. A census suite refuses a file that references nothing it touches, so
+    `git grep` cannot find it. A plan/ shard added beside an implementation is refused by the
+    standing rule 15 gate; lift it into a plan-only PR and drop it from this branch.
+  evidence: >-
+    The rule-checks gate refused nine pull requests in the window (ci-learning:9276:rule-checks, with
+    repairs on #9301, #9337, #9358, #9362, #9369, #9380, #9382, #9388). The repairs touched the
+    run-task and census-precheck lane and plan/tasks.d shards, the same paths the census and
+    rule-15 checks walk. Recon did not establish each PR's individual gate failure, so this entry
+    names the shared surface, not a verified per-PR cause.
+  src: "ci-learning:9276:rule-checks"
+  cited: "2026-10-08"
+
+- id: light-gates-pre-push-ratchets
+  subsystem: ci
+  lifecycle: active
+  files:
+    - "plan/tasks.d/**"
+    - "test/**"
+    - ".github/workflows/ci.yml"
+    - "scripts/comment-load-baseline.json"
+    - "scripts/source-size-baseline.json"
+    - "scripts/comment-load-ratchet.mjs"
+    - "scripts/source-size-ratchet.mjs"
+  fact: >-
+    Before pushing a change that touches plan shards, tests, or the light-gates job in
+    .github/workflows/ci.yml, run `npm run --silent comment-load-signal` and
+    `npm run --silent source-size-ratchet`, and record any printed baseline row in the same commit
+    until both print OK. If the diff touches plan/, run `npm run --silent rule15-precheck` before the
+    push. Run `rmd census-membership` for the suites the diff can move. Do not record a number in
+    the negative-reachability, catch-erasure, or source-text-assertion-census ratchets.
+  evidence: >-
+    The light-gates job (.github/workflows/ci.yml, job name light-gates) refused nine pull requests
+    recorded as ci-learning:9301:light-gates (9301, 9358, 9362, 9369, 9379, 9382, 9388, 9396; 9362
+    appears twice), and each was repaired after the gate reported. The repaired files included plan
+    shards, test files, and the preflight author script. Recon did not establish each PR's specific
+    failure reason, so this entry names the pre-push checks rather than a single cause.
+  src: "ci-learning:9301:light-gates"
+  cited: "2026-10-08"
+
+- id: prompt-surface-gate-learning-path-evidence
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**"]
+  fact: >-
+    When a task changes data in a `learnings/*.yaml` shard, the prompt-surface-gate requires a golden
+    verdict under `test/fixtures/golden-verdicts/**`; adding or editing test files alone cannot
+    satisfy a path surface. Comment-only YAML changes are exempt, but any changed learning entry
+    needs the golden fixture in the same diff.
+  evidence: >-
+    The prompt-surface-gate refused seven pull requests in the window recorded as
+    ci-learning:9856:prompt-surface-gate (9856, 9989, 10001, 10015, 10019, 10027, 10035), and each
+    was repaired. The gate implementation confirms that learning-shard path surfaces accept golden
+    verdict fixtures and do not accept test-file evidence; this guidance names that remedy for
+    task authors.
+  src: "ci-learning:9856:prompt-surface-gate"
+  cited: "2026-10-08"
+
+- id: remudero-review-refusals-repaired-by-hand
+  subsystem: ci
+  lifecycle: active
+  files:
+    - "plan/tasks.d/**"
+    - "src/run-task.ts"
+    - "src/lib/policy.ts"
+    - "src/lib/affected-suites.ts"
+    - "src/lib/dep-review.ts"
+    - "test/**"
+    - "learnings/ci.yaml"
+  fact: >-
+    The remudero-review gate refused eight pull requests in one window (#9717, #9819, #9824, #9834,
+    #9838, #9918, #9971, #9979), and each was repaired after the refusal. Before pushing, a worker
+    on a change that touches plan/ runs `npm run --silent rule15-precheck`, and if it adds or edits
+    a claim or proof in a plan task file or shard it lifts that shard into a plan-only PR rather than
+    filing it beside its implementation. A worker on a change that touches src/run-task.ts,
+    src/lib/policy.ts, src/lib/dep-review.ts, or a new test/ file runs `rmd census-membership` and
+    the suites it names. Those are the precheck and census steps that a fix or implementation lane
+    skips before its first push.
+  evidence: >-
+    The remudero-review gate refused eight pull requests recorded as ci-learning:9717:remudero-review
+    (9717, 9819, 9824, 9834, 9838, 9918, 9971, 9979), and each was repaired. The repairs touched the
+    plan/tasks.d shard tree, the run-task and affected-suite selector lane, and census-covered test
+    files. Recon did not establish each PR's individual refusal reason or verify the live GitHub
+    state of those PRs, so this entry names the shared surface and the pre-push steps, not a
+    verified per-PR cause.
+  src: "ci-learning:9717:remudero-review"
+  cited: "2026-10-08"
+
+- id: ci-gate-refusals-repaired-by-hand
+  subsystem: ci
+  lifecycle: active
+  files:
+    - "scripts/comment-load-baseline.json"
+    - "scripts/source-size-baseline.json"
+    - "scripts/test-tier-manifest.json"
+    - "src/run-task.ts"
+    - "src/lib/policy.ts"
+    - "src/lib/dep-review.ts"
+    - "plan/tasks.d/**"
+    - "test/**"
+  fact: >-
+    The ci-gate gate refused 22 pull requests in one window, and each was repaired after the refusal.
+    Before the first push, a worker runs the two cheap ratchets over its own change,
+    `npm run --silent comment-load-signal` and `npm run --silent source-size-ratchet`, and records any
+    BLOCKED baseline line they print. A worker on a change that touches plan/ also runs
+    `npm run --silent rule15-precheck`, and a change that touches src/run-task.ts, src/lib/policy.ts,
+    src/lib/dep-review.ts, or a new test/ file runs `rmd census-membership` and the suites it names.
+    Those are the steps a fix or implementation lane skips before its first push.
+  evidence: >-
+    The ci-gate refusals are recorded as ci-learning:6058:ci-gate (PRs 6058, 6062, 6077, 6078, 6088,
+    6092, 6093, 6096, 6098, 6099, 6105, 6107, 6113, 6135, 6138, 6140, 6148, 6154, 6156, 6171, 6172; 6077
+    appears twice in the source list). Recon did not establish each PR's failure log, merge status, or
+    shared refusal reason, so this entry names the shared pre-push steps, not a verified per-PR cause.
+  src: "ci-learning:6058:ci-gate"
+  cited: "2026-10-09"
+
+- id: head-identity-gate-pre-push-identity
+  subsystem: ci
+  lifecycle: active
+  files: ["scripts/head-identity-gate.mjs", "hooks/pre-push", "src/run-task.ts", "test/**", "plan/tasks.d/**"]
+  fact: >-
+    Before the first push of a branch, give its head an identity the head-identity gate accepts: a
+    run-shaped ref (`run-<taskId>-<epochMs>` for a filed task, `run-unfiled-<epochMs>` for unfiled
+    work), or an anchored `Remudero-Task: <id>` trailer on the head commit. A branch shaped
+    codex/ or claude/ is refused at push, and the gate names the rename, which only works while the
+    branch is still free. Once a pull request is open its head ref cannot be renamed, so the repair
+    is a new head commit carrying the trailer (`git commit --allow-empty`), never an amend or a new PR.
+  evidence: >-
+    The head-identity gate refused pull requests #10671 and #10760 in one window, and each was
+    repaired after the refusal. The gate's refusal text (scripts/head-identity-gate.mjs) names both
+    run-branch forms and the trailer route, and it refuses at push before a pull request exists. The
+    root cause of each refusal was not read from the PR diffs or the gate's logs, so this entry names
+    the identity step a fix lane must take before pushing, not a verified per-PR cause.
+  src: "ci-learning:10671:head-identity-gate"
+  cited: "2026-10-11"
+
+- id: coverage-session-blanking-env-form
+  subsystem: ci
+  lifecycle: active
+  files:
+    - "test/**/*.ts"
+    - "test/setup/**"
+    - "src/lib/tmp.ts"
+    - "scripts/coverage-session-blanking-check.mjs"
+  fact: >-
+    The coverage-session-blanking gate refused 4 pull requests in one window, and each was repaired after
+    the refusal. In a test that spawns a nested `node --test` runner or a child that strips NODE_TEST_CONTEXT,
+    blank NODE_V8_COVERAGE with `env.NODE_V8_COVERAGE = undefined` or `env.NODE_V8_COVERAGE = ""` (or the same
+    as an inline object-literal property). Never use `delete env.NODE_V8_COVERAGE`: node re-injects the variable
+    into every child, so the delete is a no-op and the gate reports it as a defect. Before pushing, run
+    `node scripts/coverage-session-blanking-check.mjs` over your own change.
+  evidence: >-
+    The refusals are recorded as ci-learning:10516:coverage-session-blanking (PRs 10516, 10779 (listed twice),
+    10815). Recon did not fetch each PR's failure log or diff, so this entry names the gate's accepted forms and
+    the pre-push check, not a verified per-PR trigger. Whether src/lib/tmp.ts and test/setup/tmp-hygiene.ts were
+    causal or incidental repairs is not established.
+  src: "ci-learning:10516:coverage-session-blanking"
+  cited: "2026-10-11"

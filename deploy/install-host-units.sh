@@ -48,9 +48,11 @@
 # OVERRIDES (all optional; the *_DIR ones exist so the test suite can run this against a temp tree)
 #   RMD_STATE_DIR RMD_IMAGE RMD_SERVICE_USER RMD_NODE_MAX_OLD_SPACE_MB
 #   RMD_GH_APP_ID RMD_GH_APP_INSTALLATION_ID RMD_GH_APP_PRIVATE_KEY_PATH
+#   RMD_GH_APP_PRIVATE_KEY_HOST_PATH                   optional explicit read-only file mount
 #   RMD_UNIT_DIR RMD_BIN_DIR RMD_LAUNCHER_PATH RMD_REVIVAL_LOG
 #   RMD_CLEANUP_PATH RMD_CLEANUP_LOG RMD_CRONTAB_CMD   (W1-T4770: root-disk janitor + cron)
 #   RMD_TMP_SWEEP_PATH RMD_TMP_SWEEP_CRON_PATH          (W1-T5036: guarded hourly temp sweep)
+#   RMD_LEGACY_USER_UNIT_DIR RMD_HOST_KERNEL            (W1-T5518: legacy user janitor is drift)
 set -euo pipefail
 
 MODE="check"
@@ -102,6 +104,40 @@ read_instance_registry() {
   ' "$registry_file"
 }
 
+# W1-T4863 — THE CREDENTIAL HAS ONE OWNER. Every instance gets its OWN writable claude_dir (D-11:
+# nothing mutable shared), so transcripts, settings and token refreshes of three daemons no longer
+# land in one directory. The subscription credential is the one thing that must still be shared, and
+# it is shared READ-ONLY: the `primary: true` instance's claude_dir holds the one writable copy (the
+# one refresher); every other instance bind-mounts that file :ro over its own directory. The owner is
+# read from the registry's existing `primary` marker, so no new field is added (both shell readers
+# refuse fields they do not know). Prints nothing when no live row is primary.
+registry_primary_claude_dir() {
+  awk '
+    function flush() { if (prim && !ret && dir != "" && out == "") out = dir }
+    { sub(/[[:space:]]+#.*/, "") }
+    /^[[:space:]]*$/ { next }
+    $0 ~ /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { flush(); dir = ""; prim = 0; ret = 0; next }
+    $0 ~ /^    claude_dir:/ { v = $0; sub(/^    claude_dir:[[:space:]]*/, "", v); gsub(/^"|"$/, "", v); dir = v }
+    $0 ~ /^    primary:[[:space:]]*true/ { prim = 1 }
+    $0 ~ /^    retired:[[:space:]]*true/ { ret = 1 }
+    END { flush(); if (out != "") print out }
+  ' "$1"
+}
+
+# The launcher's credential lines. Empty for the owner (its own claude_dir already holds the one
+# writable credential); a non-owner refuses when the owner's file is absent, because docker would
+# otherwise create a DIRECTORY at the mount source and the daemon would boot unauthenticated.
+render_credential_mount() {
+  [ -n "$CREDENTIAL_READONLY_SOURCE" ] || return 0
+  cat <<EOF
+if [ ! -f ${CREDENTIAL_READONLY_SOURCE} ]; then
+  echo "rmd-relaunch: REFUSING — the credential owner's file ${CREDENTIAL_READONLY_SOURCE} is missing." >&2
+  exit 1
+fi
+CREDENTIAL_ARGS=(-v ${CREDENTIAL_READONLY_SOURCE}:/home/node/.claude/.credentials.json:ro)
+EOF
+}
+
 require_abs_path() {
   local name="$1" value="$2"
   case "$value" in
@@ -136,6 +172,7 @@ fi
 GH_APP_ID_V="${RMD_GH_APP_ID:-4648213}"
 GH_APP_INST_V="${RMD_GH_APP_INSTALLATION_ID:-155256285}"
 GH_APP_KEY_V="${RMD_GH_APP_PRIVATE_KEY_PATH:-/home/node/.claude/rmd-app.pem}"
+GH_APP_KEY_HOST_V="${RMD_GH_APP_PRIVATE_KEY_HOST_PATH:-}"
 CLAUDE_DIR="${RMD_CLAUDE_DIR:-/home/${SERVICE_USER}/.claude}"
 CODEX_DIR="${RMD_CODEX_DIR:-/home/${SERVICE_USER}/.codex}"
 CONTAINER_CONFIG_DIR="${RMD_CONTAINER_CONFIG_DIR:-/home/${SERVICE_USER}/.config/remudero-container}"
@@ -148,6 +185,9 @@ SERVICE_UNIT_NAME="rmd-fleet.service"
 WATCHDOG_SERVICE_NAME="rmd-fleet-watchdog.service"
 WATCHDOG_TIMER_NAME="rmd-fleet-watchdog.timer"
 REGISTRY_FILE="${RMD_INSTANCE_REGISTRY:-}"
+# W1-T4863: empty = no registry names an owner, so nothing is overlaid read-only.
+CREDENTIAL_OWNER_DIR=""
+CREDENTIAL_READONLY_SOURCE=""
 
 if [ -n "$INSTANCE_NAME" ]; then
   validate_instance_name "$INSTANCE_NAME"
@@ -184,6 +224,7 @@ if [ -n "$INSTANCE_NAME" ]; then
       gh_app_id) gh_app_id="$value" ;;
       gh_app_installation_id) gh_app_installation_id="$value" ;;
       gh_app_private_key_path) gh_app_private_key_path="$value" ;;
+      gh_app_private_key_host_path) GH_APP_KEY_HOST_V="$value" ;;
       claude_dir) claude_dir="$value" ;;
       codex_dir) codex_dir="$value" ;;
       container_config_dir) container_config_dir="$value" ;;
@@ -221,6 +262,7 @@ EOF
   SERVICE_UNIT_NAME="$service_name"
   WATCHDOG_SERVICE_NAME="$watchdog_service_name"
   WATCHDOG_TIMER_NAME="$watchdog_timer_name"
+  CREDENTIAL_OWNER_DIR="$(registry_primary_claude_dir "$REGISTRY_FILE")"
 fi
 
 # REFUSE RATHER THAN GUESS. Same posture `--print-daemon-run` takes when it cannot find a ledger:
@@ -253,10 +295,25 @@ case "$WATCHDOG_TIMER_NAME" in *.timer) : ;; *) echo "install-host-units: FATAL 
 require_abs_path "launcher_path" "$LAUNCHER"
 require_abs_path "revival_log" "$REVIVAL_LOG"
 require_abs_path "claude_dir" "$CLAUDE_DIR"
+if [ -n "$CREDENTIAL_OWNER_DIR" ]; then
+  require_abs_path "primary claude_dir" "$CREDENTIAL_OWNER_DIR"
+  [ "$CREDENTIAL_OWNER_DIR" = "$CLAUDE_DIR" ] || CREDENTIAL_READONLY_SOURCE="${CREDENTIAL_OWNER_DIR}/.credentials.json"
+fi
 require_abs_path "codex_dir" "$CODEX_DIR"
 require_abs_path "container_config_dir" "$CONTAINER_CONFIG_DIR"
 require_abs_path "cash_secret_dir" "$CASH_SECRET_DIR"
 CASH_SECRET_DIR_SHELL="$(printf '%q' "$CASH_SECRET_DIR")"
+if [ -n "$GH_APP_KEY_HOST_V" ]; then
+  . "$SCRIPT_DIR/app-private-key-mount.sh"
+  app_private_key_mount_args "$GH_APP_KEY_HOST_V" "$GH_APP_KEY_V" || exit 2
+fi
+GH_APP_KEY_SHELL="$(printf '%q' "$GH_APP_KEY_V")"
+
+render_app_private_key_mount() {
+  [ -n "$GH_APP_KEY_HOST_V" ] || return 0
+  cat "$SCRIPT_DIR/app-private-key-mount.sh"
+  printf '\napp_private_key_mount_args %q %q || exit 1\n' "$GH_APP_KEY_HOST_V" "$GH_APP_KEY_V"
+}
 
 # Insert literal shell into the rendered launcher. The outer launcher heredoc is expanded by the
 # installer, so writing dollar signs directly there would read the installer's environment instead
@@ -294,6 +351,543 @@ export RMD_OPENWEIGHT_API_KEY RMD_FOUNDRY_CLAUDE_API_KEY RMD_FOUNDRY_CLAUDE_ENDP
 CASH_BOOT_SECRETS
 }
 
+# Literal shell keeps the installer's environment out of the watchdog's preflight.
+render_deploy_code_refresh() {
+  cat <<'DEPLOY_CODE_REFRESH'
+deploy_code_idle() {
+  local container="$1" processes dir locks match_status
+  if ! processes="$(docker top "$container" -eo pid,args 2>/dev/null)" || [ -z "$processes" ]; then
+    echo "rmd-relaunch: deploy code -- worker probe unreadable; deferring." >&2
+    return 1
+  fi
+  if printf '%s\n' "$processes" | grep -E 'claude .*--output-format|codex .*exec' >/dev/null; then
+    echo "rmd-relaunch: deploy code -- active workers; deferring." >&2
+    DEPLOY_CODE_BUSY=1
+    return 1
+  else
+    match_status=$?
+    if [ "$match_status" -ne 1 ]; then
+      echo "rmd-relaunch: deploy code -- worker probe unreadable (matcher failed); deferring." >&2
+      return 1
+    fi
+  fi
+  for dir in "$STATE_DIR/state/inflight" "$STATE_DIR/worktrees"; do
+    # Missing lock directories mean no locks; an unreadable existing path is unknown.
+    if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then continue; fi
+    if [ ! -d "$dir" ] || ! locks="$(find "$dir" -maxdepth 1 -name '*.lock' -print 2>/dev/null)"; then
+      echo "rmd-relaunch: deploy code -- lock probe unreadable at $dir; deferring." >&2
+      return 1
+    fi
+    if [ -n "$locks" ]; then
+      echo "rmd-relaunch: deploy code -- active locks at $dir; deferring." >&2
+      DEPLOY_CODE_BUSY=1
+      return 1
+    fi
+  done
+}
+
+deploy_code_clean() {
+  local code="$STATE_DIR/remudero" edits
+  if [ ! -e "$code/.git" ]; then
+    echo "rmd-relaunch: deploy code -- checkout missing; deferring." >&2
+    return 1
+  fi
+  if ! edits="$(GIT_OPTIONAL_LOCKS=0 git -C "$code" status --porcelain --untracked-files=all 2>/dev/null)"; then
+    echo "rmd-relaunch: deploy code -- status unreadable; deferring." >&2
+    return 1
+  fi
+  # An UNTRACKED plan/feedback/ file is a daemon capture (gardener handoffs, captureFeedback) in
+  # the feedback-landing lane's inbox: the lane lands it and removes the copy once origin/main
+  # holds its bytes. It is not an edit -- deferring on it froze core's code at one sha (2026-10-10).
+  # It stays safe: nothing here discards it, and ff-only refuses to overwrite an untracked file.
+  if ! edits="$(printf '%s\n' "$edits" | awk 'index($0, "?? plan/feedback/") != 1 && NF')"; then
+    echo "rmd-relaunch: deploy code -- status unfilterable; deferring." >&2
+    return 1
+  fi
+  if [ -n "$edits" ]; then
+    # 2026-10-11 -- A TRACKED EDIT DEFERRED THIS FOR FIVE HOURS, SILENTLY. Tracked edits now climb the
+    # live-edit ladder (src/lib/live-edit-ladder.ts), asked once per tick: preserved at once, escalated
+    # by the daemon at its own restart pressure, restored to HEAD at twice it from a confirmed copy only.
+    if [ "${LIVE_EDITS_ASKED:-0}" != 1 ] && printf '%s\n' "$edits" | awk 'NF && substr($0, 1, 2) != "??" { t = 1 } END { exit !t }'; then
+      LIVE_EDITS_ASKED=1
+      if live_edits_ladder daemon-checkout "$code" &&
+         edits="$(GIT_OPTIONAL_LOCKS=0 git -C "$code" status --porcelain --untracked-files=all 2>/dev/null)" &&
+         [ -z "$(printf '%s\n' "$edits" | awk 'index($0, "?? plan/feedback/") != 1 && NF')" ]; then
+        echo "rmd-relaunch: deploy code -- live edits restored from a confirmed copy; proceeding."
+        return 0
+      fi
+    fi
+    echo "rmd-relaunch: deploy code -- local edits; deferring without discarding them." >&2
+    return 1
+  fi
+}
+
+# One rung of the ladder for one live tree, through the same CLI the progress verdict uses. Returns 0
+# only when it restored that tree; prints its one-line verdict either way.
+live_edits_ladder() {
+  local tree="$1" dir="$2" rmd="$STATE_DIR/remudero/bin/rmd" out line tmo=()
+  if [ ! -x "$rmd" ]; then
+    echo "rmd-relaunch: live edits -- $rmd missing; the ${tree} defers unrecorded." >&2
+    return 1
+  fi
+  command -v timeout >/dev/null 2>&1 && tmo=(timeout 120)
+  if ! out="$(cd "$STATE_DIR/remudero" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" live-edits \
+      --tree "$tree" --checkout "$dir" --state-root "$STATE_DIR/state" --json 2>/dev/null)"; then
+    echo "rmd-relaunch: live edits -- the ladder for the ${tree} failed; deferring." >&2
+    return 1
+  fi
+  line="$(printf '%s\n' "$out" | grep -E '^\{' | tail -n 1 || true)"
+  echo "rmd-relaunch: live edits -- ${tree}: ${line:-no verdict}"
+  case "$line" in *'"restored":true'*) return 0 ;; esac
+  return 1
+}
+
+refresh_deploy_code() {
+  local container="$1" code="$STATE_DIR/remudero" install_head
+  DEPLOY_CODE_BUSY=0
+  deploy_code_idle "$container" || return 1
+  deploy_code_clean || return 1
+  if ! git -C "$code" fetch --quiet origin main 2>/dev/null; then
+    echo "rmd-relaunch: deploy code -- fetch failed; deferring." >&2
+    host_alert_raise deploy-code-fetch-failed "daemon checkout $code: git fetch origin main failed"
+    return 1
+  fi
+  host_alert_clear deploy-code-fetch-failed
+  if ! git -C "$code" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
+    echo "rmd-relaunch: deploy code -- checkout diverged or ancestry unreadable; deferring." >&2
+    host_alert_raise deploy-code-diverged "daemon checkout $code: HEAD is not an ancestor of origin/main (diverged, or ancestry unreadable)"
+    return 1
+  fi
+  host_alert_clear deploy-code-diverged
+  if ! install_head="$(git -C "$CHECKOUT" rev-parse HEAD 2>/dev/null)" || [ -z "$install_head" ] ||
+     ! git -C "$code" merge-base --is-ancestor "$install_head" origin/main 2>/dev/null; then
+    echo "rmd-relaunch: deploy code -- install checkout ancestry unreadable or ahead of origin/main; deferring." >&2
+    return 1
+  fi
+  # The daemon normally boots detached. An ff-only merge advances that HEAD without switching
+  # branches, resetting, cleaning, or restarting its already-loaded process.
+  deploy_code_idle "$container" || return 1
+  deploy_code_clean || return 1
+  if ! git -C "$code" merge --ff-only --quiet origin/main 2>/dev/null; then
+    echo "rmd-relaunch: deploy code -- fast-forward failed; deferring." >&2
+    return 1
+  fi
+  deploy_code_idle "$container" && deploy_code_clean
+}
+
+# W1-T6282 -- THE CODE THAT DECIDES AND PERFORMS A DEPLOY: deploy/, the rmd entrypoint, and
+# src/lib/deployer.ts with every local module it imports (test/a-busy-primary-reaches-its-image-
+# recycle.test.ts walks that import graph and fails when a module is missing here).
+DEPLOY_LOGIC_PATHS=(deploy/ bin/ src/lib/deployer.ts src/lib/action-reconciliation.ts
+  src/lib/baked-runtime-inputs.ts src/lib/clock.ts src/lib/config-schema.ts src/lib/config.ts
+  src/lib/deploy-judge.ts src/lib/drain-lock.ts src/lib/errors.ts src/lib/fleet-control.ts
+  src/lib/fs-race-safe.ts src/lib/ledger-carry.ts src/lib/ledger-path.ts src/lib/ledger-union.ts
+  src/lib/ledger.ts src/lib/live-write-guard.ts src/lib/log-rotation.ts src/lib/plan-scope.ts
+  src/lib/producer-identity.ts src/lib/repo-layout.ts src/lib/worker-containment.ts)
+
+# W1-T6249 -- A REFRESH DEFERRED ONLY ON ACTIVE WORK STILL ASKS deploy-run. Busy ticks ended at
+# `|| exit 0` before deploy-run, so core's image recycle starved for hours on 2026-10-07; deploy-run
+# now hands a busy recycle to recycle-container.sh's own pause-and-drain. Only workers or locks
+# qualify -- an unreadable probe, a dirty tree, or a daemon tree older than the install head's
+# DEPLOY LOGIC defers. W1-T6282: whole-HEAD ancestry was a moving target on a busy repo (the
+# install head moved on every merge, so the tree stayed one merge behind for 80+ min); only the
+# deploy-logic paths must match, which keeps W1-T4917's "deploy code never older than it deploys".
+deploy_code_busy_handoff() {
+  local container="${1:-}" code="$STATE_DIR/remudero" install_head daemon_head rc=0
+  [ "${DEPLOY_CODE_BUSY:-0}" = 1 ] || return 1
+  deploy_code_clean || return 1
+  if ! install_head="$(GIT_OPTIONAL_LOCKS=0 git -C "$CHECKOUT" rev-parse HEAD 2>/dev/null)" || [ -z "$install_head" ] ||
+     ! daemon_head="$(GIT_OPTIONAL_LOCKS=0 git -C "$code" rev-parse HEAD 2>/dev/null)" || [ -z "$daemon_head" ]; then
+    echo "rmd-relaunch: deploy code -- busy, and a head is unreadable; deferring." >&2
+    return 1
+  fi
+  if GIT_OPTIONAL_LOCKS=0 git -C "$code" merge-base --is-ancestor "$install_head" "$daemon_head" 2>/dev/null; then
+    rm -f "$STATE_DIR/state/deploy-logic-lag" 2>/dev/null || true
+    echo "rmd-relaunch: deploy code -- busy; daemon tree ${daemon_head} contains install head ${install_head}, asking deploy-run anyway."
+    return 0
+  fi
+  # Objects only: the busy tree's HEAD and files are untouched, exactly like the daemon's own fetch.
+  GIT_OPTIONAL_LOCKS=0 git -C "$code" fetch --quiet origin main 2>/dev/null || true
+  GIT_OPTIONAL_LOCKS=0 git -C "$code" diff --quiet "$daemon_head" "$install_head" -- "${DEPLOY_LOGIC_PATHS[@]}" 2>/dev/null || rc=$?
+  if [ "$rc" -eq 1 ]; then
+    echo "rmd-relaunch: deploy code -- busy, and daemon tree ${daemon_head} lacks install head ${install_head}'s deploy logic (${DEPLOY_LOGIC_PATHS[*]}); deferring." >&2
+    deploy_logic_lag_pressure "$container" "$daemon_head"
+    return 1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "rmd-relaunch: deploy code -- busy, and daemon tree ${daemon_head} vs install head ${install_head}: deploy logic unreadable (git diff exit ${rc}); deferring." >&2
+    return 1
+  fi
+  rm -f "$STATE_DIR/state/deploy-logic-lag" 2>/dev/null || true
+  echo "rmd-relaunch: deploy code -- busy; daemon tree ${daemon_head} carries install head ${install_head}'s deploy logic, asking deploy-run anyway."
+}
+
+# 2026-10-10 -- THE DEFERRAL ABOVE HAD NO AGE. While workers ran and the daemon tree lacked the
+# install head's deploy logic, every tick deferred, forever; core sat at bf5aea42e from 04:18Z
+# until 06:03Z. It caught up only because the daemon's OWN freshness restart got there: its age
+# pressure (DEPLOY_RESTART_SCORE_THRESHOLD 18 per DEPLOY_RESTART_RATE_CEILING_MS, an hour) decided
+# "drain and restart" at 05:00Z, then waited out its in-flight lanes (45 min), a bounded sweep and a
+# bounded drain. That path is the right one and normally wins -- but nothing here noticed if it
+# never did. So the lag now accrues PRESSURE on the same scale, keyed to the daemon tree's HEAD:
+#   below two horizons (36) -- defer; one horizon is the daemon's own restart decision, one its drain.
+#   at or above           -- hand the daemon to recycle-container.sh's pause-and-drain swap from the
+#                            INSTALL checkout (the current deploy logic, never the lagging tree's), as
+#                            W1-T6249/W1-T6282 do for a busy image recycle. It waits out the workers;
+#                            the replacement boots onto origin/main. A refusal retries after
+#                            WATCHDOG_RECYCLE_GAP_S, and pressure keeps growing until the tree moves.
+# Any move of the daemon tree's HEAD -- its own restart, an idle fast-forward -- resets the clock.
+deploy_logic_lag_pressure() {
+  local container="$1" daemon_head="$2" mark="$STATE_DIR/state/deploy-logic-lag" now since="" head="" pressure
+  now="$(date -u +%s)"
+  { read -r since head < "$mark"; } 2>/dev/null || true
+  case "$since" in ''|*[!0-9]*) since="" ;; esac
+  if [ -z "$since" ] || [ "$head" != "$daemon_head" ] || [ "$since" -gt "$now" ]; then
+    since="$now"
+    mkdir -p "$STATE_DIR/state" 2>/dev/null || true
+    printf '%s %s\n' "$since" "$daemon_head" > "$mark" 2>/dev/null || true
+  fi
+  pressure=$(( (now - since) * 18 / 3600 ))
+  if [ "$pressure" -lt 36 ]; then
+    echo "rmd-relaunch: deploy code -- deploy-logic lag $((now - since))s at ${daemon_head}, pressure ${pressure} < 36; the daemon's own freshness restart has it." >&2
+    return 0
+  fi
+  if [ -z "$container" ] || ! declare -F watchdog_recycle >/dev/null; then
+    echo "rmd-relaunch: deploy code -- deploy-logic lag $((now - since))s, pressure ${pressure} >= 36, but no recycle path is wired; deferring." >&2
+    return 0
+  fi
+  watchdog_recycle "$container" "deploy code" \
+    "deploy-logic lag $((now - since))s at ${daemon_head}, pressure ${pressure} >= 36: the daemon never restarted onto it" || true
+}
+DEPLOY_CODE_REFRESH
+}
+
+# W1-T5688 — the launcher's ACTION LADDER on W1-T5687's `rmd progress-watchdog` verdict. Literal
+# shell (a quoted heredoc), so nothing in it is expanded at render time.
+render_progress_watchdog_ladder() {
+  cat <<'PROGRESS_WATCHDOG_LADDER'
+# W1-T5688 — ACT ON THE PROGRESS VERDICT, NOT ONLY ON A STOPPED CONTAINER. On 2026-10-03 this tick
+# revived 14 times into one crash (each prev_restarts=5) and named CRASH LOOP 3h44m in, in a marker
+# nothing reads; a wedged-but-running daemon was never acted on at all, because the healthy arm's
+# `refresh_deploy_code || exit 0` ended every tick that had workers in flight. Four rungs:
+#   capture-diagnostics -- the verb wrote the bundle; this appends one revival-log line naming it.
+#   recycle             -- deploy/recycle-container.sh, at most once per WATCHDOG_RECYCLE_GAP_S. A
+#                          refusal is logged with its reason and retried on a later tick only.
+#   hold-revive         -- the revive arm starts nothing until origin/main's sha or the image id
+#                          differs from the one recorded when the loop was named. The hold OUTLIVES
+#                          the verdict's 15-minute window: a held daemon writes no boots, so the
+#                          verdict would otherwise lapse and revive the same input every ~20 min.
+#   none / unreadable   -- everything below runs exactly as before this task.
+WATCHDOG_RECYCLE_GAP_S=1800
+WATCHDOG_RECYCLE_AT="$STATE_DIR/state/watchdog-recycle-at"
+WATCHDOG_HOLD="$STATE_DIR/state/watchdog-hold-revive"
+PROGRESS_VERDICT=""
+PROGRESS_STATE=""
+PROGRESS_ACTION=""
+
+watchdog_stamp() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# A string field of the verdict's one-line JSON (JSON.stringify writes no spaces).
+verdict_field() {
+  printf '%s\n' "$PROGRESS_VERDICT" | sed -n 's/.*"'"$1"'":"\([^"]*\)".*/\1/p' | head -n 1
+}
+
+# RMD_SELF_SYNC_DONE=1 skips checkCliFreshness, which would fetch and fast-forward the tree the
+# workers run on -- the very mutation refresh_deploy_code's idle gate exists to withhold.
+read_progress_verdict() {
+  local rmd="$STATE_DIR/remudero/bin/rmd" out tmo=()
+  PROGRESS_VERDICT=""; PROGRESS_STATE=""; PROGRESS_ACTION=""
+  [ -x "$rmd" ] || return 0
+  command -v timeout >/dev/null 2>&1 && tmo=(timeout 120)
+  if ! out="$(cd "$STATE_DIR/remudero" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" progress-watchdog --json --state-root "$STATE_DIR/state" 2>/dev/null)"; then
+    echo "rmd-relaunch: progress-watchdog -- verdict unreadable; acting as before." >&2
+    return 0
+  fi
+  PROGRESS_VERDICT="$(printf '%s\n' "$out" | grep -E '^\{' | tail -n 1 || true)"
+  PROGRESS_STATE="$(verdict_field state)"
+  PROGRESS_ACTION="$(verdict_field action)"
+  echo "rmd-relaunch: progress-watchdog -- ${PROGRESS_STATE:-UNKNOWN} action=${PROGRESS_ACTION:-none}"
+}
+
+note_progress_verdict() {
+  [ "$PROGRESS_ACTION" = "capture-diagnostics" ] || return 0
+  local dir; dir="$(verdict_field dir)"
+  printf '%s watchdog-verdict state=%s action=%s bundle=%s\n' "$(watchdog_stamp)" "$PROGRESS_STATE" \
+    "$PROGRESS_ACTION" "${dir:-skipped}" >> "$REVIVAL_LOG" 2>/dev/null || true
+}
+
+# Returns 0 only when it RAN recycle-container.sh, so the caller ends the tick on one action.
+recycle_on_verdict() {
+  local age
+  [ "$PROGRESS_ACTION" = "recycle" ] || return 1
+  # W1-T6597: the verdict rides along, so the recycle may prove a FROZEN daemon owns what blocks it.
+  age="$(printf '%s\n' "$PROGRESS_VERDICT" | sed -n 's/.*"progressAgeMs":\([0-9]*\).*/\1/p' | head -n 1)"
+  watchdog_recycle "$1" "progress-watchdog" "${PROGRESS_STATE}" "${PROGRESS_STATE} progressAgeMs=${age:-unknown}"
+}
+
+# One recycle-container.sh run, shared by every rung that hands the daemon to its pause-and-drain
+# swap: $2 names the caller, $3 the reason it logs, $4 an RMD_RECYCLE_VERDICT (empty = none).
+# Returns 0 only when it RAN the script.
+watchdog_recycle() {
+  local container="$1" who="$2" why="$3" verdict="${4:-}" now last out rc script="$CHECKOUT/deploy/recycle-container.sh" result reason args=() envs=()
+  now="$(date -u +%s)"
+  last="$(cat "$WATCHDOG_RECYCLE_AT" 2>/dev/null || true)"
+  case "$last" in ''|*[!0-9]*) last="" ;; esac
+  if [ -n "$last" ] && [ "$((now - last))" -lt "$WATCHDOG_RECYCLE_GAP_S" ]; then
+    echo "rmd-relaunch: ${who} -- a recycle ran $((now - last))s ago; at most one per ${WATCHDOG_RECYCLE_GAP_S}s."
+    return 1
+  fi
+  # STAMPED BEFORE THE ATTEMPT: a refusal is retried on a later tick, never in this one. W1-T6598:
+  # and STAMPED AGAIN WHEN IT ENDS, ok or refused, so the gap runs from the end -- a drain wait
+  # longer than WATCHDOG_RECYCLE_GAP_S must not leave the just-booted generation unprotected.
+  mkdir -p "$STATE_DIR/state" 2>/dev/null || true
+  printf '%s\n' "$now" > "$WATCHDOG_RECYCLE_AT" 2>/dev/null || true
+  [ -n "$INSTANCE_NAME" ] && args=(--instance "$INSTANCE_NAME")
+  [ -n "$INSTANCE_REGISTRY" ] && envs=(RMD_INSTANCE_REGISTRY="$INSTANCE_REGISTRY")
+  [ -z "$verdict" ] || envs+=(RMD_RECYCLE_VERDICT="$verdict")
+  echo "rmd-relaunch: ${who} -- ${why}; recycling $container via $script."
+  if [ ! -f "$script" ]; then
+    out="recycle-container.sh missing at $script"; rc=127
+  elif out="$(env ${envs[@]+"${envs[@]}"} RMD_STATE_DIR="$STATE_DIR" RMD_DAEMON_CONTAINER="$container" \
+      bash "$script" ${args[@]+"${args[@]}"} 2>&1)"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  printf '%s\n' "$out"
+  if [ "$rc" -eq 0 ]; then result=ok; reason=replaced; else
+    result=refused
+    reason="$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -n 1 | tr -s '[:space:]' ' ' || true)"
+  fi
+  # W1-T6598: the END stamp -- WATCHDOG_RECYCLE_GAP_S now runs from when this attempt finished.
+  date -u +%s > "$WATCHDOG_RECYCLE_AT" 2>/dev/null || true
+  printf '%s watchdog-recycle result=%s rc=%s reason=%s\n' "$(watchdog_stamp)" "$result" "$rc" "${reason:-none}" \
+    >> "$REVIVAL_LOG" 2>/dev/null || true
+  return 0
+}
+
+# "sha=<origin/main> digest=<image id>" -- the two inputs a revive starts from; unreadable = unknown.
+revive_input() {
+  local code="$STATE_DIR/remudero" sha digest
+  git -C "$code" fetch --quiet origin main >/dev/null 2>&1 || true
+  sha="$(git -C "$code" rev-parse --verify --quiet origin/main 2>/dev/null || true)"
+  digest="$(docker image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
+  printf 'sha=%s digest=%s\n' "${sha:-unknown}" "${digest:-unknown}"
+}
+
+# An input moved only when BOTH readings are known and differ: an unreadable one is no evidence.
+revive_input_changed() {
+  local was="$1" now="$2" key a b
+  for key in sha digest; do
+    a="$(printf '%s\n' "$was" | sed -n 's/.*'"$key"'=\([^ ]*\).*/\1/p')"
+    b="$(printf '%s\n' "$now" | sed -n 's/.*'"$key"'=\([^ ]*\).*/\1/p')"
+    if [ -n "$a" ] && [ -n "$b" ] && [ "$a" != unknown ] && [ "$b" != unknown ] && [ "$a" != "$b" ]; then return 0; fi
+  done
+  return 1
+}
+
+# The last ledger step of each of the newest $1 daemon boots (run_ids that wrote daemon.paths).
+last_steps_before_exit() {
+  tail -n 5000 "$STATE_DIR/state/ledger.ndjson" 2>/dev/null | awk -v n="${1:-0}" '
+    {
+      rid = ""; st = ""
+      if (match($0, /"run_id":"[^"]*"/)) rid = substr($0, RSTART + 10, RLENGTH - 11)
+      if (match($0, /"step":"[^"]*"/)) st = substr($0, RSTART + 8, RLENGTH - 9)
+      if (rid == "" || st == "") next
+      if (st == "daemon.paths" && !(rid in seen)) { seen[rid] = 1; order[++k] = rid }
+      if (rid in seen) last[rid] = st
+    }
+    END {
+      out = ""; from = k - n + 1; if (from < 1) from = 1
+      for (i = from; i <= k; i++) out = out (out == "" ? "" : ",") last[order[i]]
+      print out
+    }' || true
+}
+
+# Returns 0 when the revive must NOT happen this tick.
+hold_revive_on_verdict() {
+  local was now fb steps line
+  if [ ! -f "$WATCHDOG_HOLD" ]; then
+    [ "$PROGRESS_ACTION" = "hold-revive" ] || return 1
+    now="$(revive_input)"
+    fb="$(printf '%s\n' "$PROGRESS_VERDICT" | sed -n 's/.*"failedBoots15m":\([0-9]*\).*/\1/p')"
+    steps="$(last_steps_before_exit "${fb:-0}")"
+    line="$(watchdog_stamp) crash-loop-hold failed_boots=${fb:-unknown} last_steps=${steps:-unknown} $now"
+    mkdir -p "$STATE_DIR/state" 2>/dev/null || true
+    printf '%s\n' "$now" > "$WATCHDOG_HOLD" 2>/dev/null || true
+    printf '%s\n' "$line" >> "$REVIVAL_LOG" 2>/dev/null || true
+    printf '%s\n' "$line" > "$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true
+    host_alert_raise crash-loop "$line"
+    echo "rmd-relaunch: CRASH LOOP -- not reviving into the same input ($now). It revives when origin/main or the image changes; rm $WATCHDOG_HOLD to revive anyway." >&2
+    return 0
+  fi
+  was="$(cat "$WATCHDOG_HOLD" 2>/dev/null || true)"
+  now="$(revive_input)"
+  if revive_input_changed "$was" "$now"; then
+    rm -f "$WATCHDOG_HOLD" 2>/dev/null || true
+    printf '%s crash-loop-release %s was %s\n' "$(watchdog_stamp)" "$now" "$was" >> "$REVIVAL_LOG" 2>/dev/null || true
+    echo "rmd-relaunch: CRASH LOOP hold released -- input changed ($was -> $now); reviving."
+    return 1
+  fi
+  echo "rmd-relaunch: CRASH LOOP hold -- input unchanged ($now); not reviving." >&2
+  return 0
+}
+PROGRESS_WATCHDOG_LADDER
+}
+
+# tsx caches every transpile under os.tmpdir()/tsx-<uid> and has no cache-dir setting. This
+# launcher's ticks run bin/rmd (tsx) on the HOST: under systemd TMPDIR is unset, so the cache sat
+# in /tmp on the 29 GB root disk -- 2.7 GB on 2026-10-06, ~2 GB/day of fresh entries. Move it to
+# the local scratch disk only when that is a mounted filesystem (a bare /mnt/scratch directory IS
+# the root disk); otherwise, or with TMPDIR already set, leave the default. A cache only: the
+# janitor's /mnt/scratch/tmp root prunes stale tsx entries there too. Literal shell, not expanded.
+render_host_tmpdir() {
+  cat <<'HOST_TMPDIR'
+host_tmpdir_on_scratch() {
+  local root mounts mnt dir
+  [ -z "${TMPDIR:-}" ] || return 0
+  root="${RMD_SCRATCH_ROOT:-/mnt/scratch}"
+  mounts="${RMD_SCRATCH_MOUNTS_FILE:-/proc/mounts}"
+  [ -r "$mounts" ] || return 0
+  while IFS=' ' read -r _ mnt _; do
+    [ "$mnt" = "$root" ] || continue
+    dir="$root/tmp"
+    # Sticky and world-writable like /tmp. `|| true`: the launcher runs under set -e.
+    if [ ! -d "$dir" ]; then { mkdir -p "$dir" && chmod 1777 "$dir"; } 2>/dev/null || true; fi
+    if [ -d "$dir" ] && [ -w "$dir" ]; then export TMPDIR="$dir"; fi
+    return 0
+  done < "$mounts"
+  return 0
+}
+host_tmpdir_on_scratch
+HOST_TMPDIR
+}
+
+render_watchdog_tick_snapshot() {
+  cat <<'WATCHDOG_TICK_SNAPSHOT'
+# W1-T6361: cache only successful healthy ticks; unreadable probes always take the full path.
+WATCHDOG_SNAPSHOT="$STATE_DIR/state/watchdog-tick-snapshot"
+WATCHDOG_PROBE_OK=0
+WATCHDOG_VERDICT_READ=0
+WATCHDOG_UNCHANGED_TICKS=0
+WATCHDOG_REMOTE=""
+WATCHDOG_INSTALL=""
+WATCHDOG_CONTAINER=""
+WATCHDOG_LEDGER_MTIME=""
+
+watchdog_healthy() {
+  [ "$PROGRESS_ACTION" = none ] || return 1
+  case "$PROGRESS_STATE" in PROGRESSING|IDLE) return 0 ;; *) return 1 ;; esac
+}
+
+watchdog_save_snapshot() {
+  local tmp
+  [ "$WATCHDOG_PROBE_OK" = 1 ] && watchdog_healthy || return 0
+  [ ! -e "$STATE_DIR/state/DEPLOY_REQUESTED" ] || return 0
+  [ -n "$WATCHDOG_LEDGER_MTIME" ] || return 0
+  mkdir -p "$STATE_DIR/state" 2>/dev/null || return 0
+  tmp="$(mktemp "$WATCHDOG_SNAPSHOT.XXXXXX")" || return 0
+  if (umask 077; printf 'v1|%s|%s|%s|%s|%s|%s\n' "$WATCHDOG_REMOTE" "$WATCHDOG_INSTALL" \
+      "$WATCHDOG_CONTAINER" "$PROGRESS_STATE" "$WATCHDOG_LEDGER_MTIME" "$WATCHDOG_UNCHANGED_TICKS" > "$tmp") &&
+     mv -f "$tmp" "$WATCHDOG_SNAPSHOT"; then :
+  else rm -f "$tmp" 2>/dev/null || true; fi
+}
+
+watchdog_unchanged_tick() {
+  local container="$1" remote ref extra record version sha head identity verdict mtime ticks
+  WATCHDOG_PROBE_OK=0
+  [ ! -e "$STATE_DIR/state/DEPLOY_REQUESTED" ] || return 1
+  if ! remote="$(git -C "$CHECKOUT" ls-remote --exit-code origin refs/heads/main 2>/dev/null)"; then return 1; fi
+  read -r WATCHDOG_REMOTE ref extra <<< "$remote"
+  [ "$ref" = refs/heads/main ] && [ -z "$extra" ] || return 1
+  case "$WATCHDOG_REMOTE" in ''|*[!0-9a-f]*) return 1 ;; esac
+  if ! WATCHDOG_INSTALL="$(git -C "$CHECKOUT" rev-parse HEAD 2>/dev/null)"; then return 1; fi
+  case "$WATCHDOG_INSTALL" in ''|*[!0-9a-f]*) return 1 ;; esac
+  if ! WATCHDOG_CONTAINER="$(docker inspect "$container" --format '{{.Id}} {{.State.Status}} {{.RestartCount}} {{.State.StartedAt}}' 2>/dev/null)"; then return 1; fi
+  case "$WATCHDOG_CONTAINER" in *' running '*) : ;; *) return 1 ;; esac
+  WATCHDOG_LEDGER_MTIME="$(stat -c '%Y' "$STATE_DIR/state/ledger.ndjson" 2>/dev/null || true)"
+  case "$WATCHDOG_LEDGER_MTIME" in ''|*[!0-9]*) WATCHDOG_LEDGER_MTIME="" ;; esac
+  WATCHDOG_PROBE_OK=1
+  record="$(cat "$WATCHDOG_SNAPSHOT" 2>/dev/null)" || return 1
+  case "$record" in *$'\n'*) return 1 ;; esac
+  IFS='|' read -r version sha head identity verdict mtime ticks extra <<< "$record"
+  [ "$version" = v1 ] && [ -z "$extra" ] && [ "$sha" = "$WATCHDOG_REMOTE" ] &&
+    [ "$head" = "$WATCHDOG_INSTALL" ] && [ "$identity" = "$WATCHDOG_CONTAINER" ] || return 1
+  case "$verdict" in PROGRESSING|IDLE) : ;; *) return 1 ;; esac
+  case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
+  case "$ticks" in 0|1|2) : ;; *) return 1 ;; esac
+  PROGRESS_STATE="$verdict"; PROGRESS_ACTION=none
+  WATCHDOG_UNCHANGED_TICKS=$((ticks + 1))
+  # Ledger pulses can advance during a stalled sweep: read the real verdict at least every 15 min.
+  if [ "$WATCHDOG_UNCHANGED_TICKS" -ge 3 ] || [ -z "$WATCHDOG_LEDGER_MTIME" ] ||
+     [ "$WATCHDOG_LEDGER_MTIME" -le "$mtime" ]; then
+    read_progress_verdict
+    WATCHDOG_VERDICT_READ=1
+    WATCHDOG_UNCHANGED_TICKS=0
+    watchdog_healthy || return 1
+  fi
+  watchdog_save_snapshot
+  echo "rmd-relaunch: $container unchanged and healthy -- skipping checkout and deploy work."
+  return 0
+}
+WATCHDOG_TICK_SNAPSHOT
+}
+
+# Core only: recreate an ABSENT remudero-serve/cloudflared (deploy/edge-heal.sh). On EXIT, so every
+# clean tick path reaches it and serve-container.sh can read the App env off a just-revived daemon.
+render_edge_heal() {
+  case "${INSTANCE_NAME:-core}" in core) : ;; *) return 0 ;; esac
+  cat <<'EDGE_HEAL'
+edge_heal_on_exit() {
+  local rc=$?
+  if [ "$rc" -eq 0 ] && [ -x "$CHECKOUT/deploy/edge-heal.sh" ]; then
+    RMD_STATE_DIR="$STATE_DIR" "$CHECKOUT/deploy/edge-heal.sh" ||
+      echo "rmd-relaunch: edge heal incomplete; the next tick re-asks." >&2
+  fi
+  return "$rc"
+}
+trap edge_heal_on_exit EXIT
+EDGE_HEAL
+}
+
+# 2026-10-11 -- THE WATCHDOG'S OWN ALARMS REACH THE ESCALATION SPOOL. The crash-loop marker had no
+# reader, and each refusal below was one journal line per tick. Each now also asks `rmd host-alert`
+# (src/lib/launcher-host-alerts.ts): it counts a refusal per consecutive tick, spools a needs-human
+# escalation once it persists (the deployer's REFUSAL_ESCALATE_AT), and withdraws or closes it when
+# the step next succeeds. A clear spawns rmd only while that condition has an open run, so a healthy
+# tick spawns nothing. Never fatal: the journal line stays, and the heartbeat reads the marker itself.
+render_host_alerts() {
+  cat <<'HOST_ALERTS'
+host_alert() {
+  local condition="$1" rmd="$STATE_DIR/remudero/bin/rmd" out tmo=()
+  shift
+  [ -x "$rmd" ] || return 0
+  command -v timeout >/dev/null 2>&1 && tmo=(timeout 120)
+  if out="$(cd "$STATE_DIR/remudero" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" host-alert --state-root "$STATE_DIR/state" \
+      --instance "${HOST_ALERT_INSTANCE:-}" --condition "$condition" "$@" --json 2>/dev/null)"; then
+    echo "rmd-relaunch: host alert -- $(printf '%s\n' "$out" | grep -E '^\{' | tail -n 1)"
+  else
+    echo "rmd-relaunch: host alert -- rmd host-alert ${condition} failed; the journal line stands." >&2
+  fi
+  return 0
+}
+
+host_alert_raise() { host_alert "$1" --raise "$2"; }
+
+host_alert_clear() {
+  [ -e "$STATE_DIR/state/launcher-alerts/${HOST_ALERT_INSTANCE:-}.$1.json" ] || return 0
+  host_alert "$1" --clear
+}
+
+host_alert_last_line() { printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | tail -n 1 || true; }
+
+crash_loop_live() {
+  local sig
+  sig="$(crash_loop_signature "$REVIVAL_LOG")"
+  [ -n "$sig" ] && [ "${sig%% *}" -ge "$CRASH_LOOP_RUN" ] 2>/dev/null
+}
+HOST_ALERTS
+}
+
 render_launcher() {
   cat <<EOF
 #!/usr/bin/env bash
@@ -307,24 +901,21 @@ REVIVAL_LOG=${REVIVAL_LOG}
 CASH_SECRET_DIR=${CASH_SECRET_DIR_SHELL}
 # W1-T3269 — the checkout this host converges FROM, and the heap the installer requires. Rendered
 # in rather than re-derived, so the converge below uses the same inputs this file was rendered with.
-#
-# W1-T3604 — NOT ${STATE_DIR}/remudero. That is the DAEMON's own working tree (the checkout
-# deploy/entrypoint.sh's freshness sync moves with a detached git checkout, and worker exhaust
-# keeps dirty): journalctl on the live host read 464 refusals in 7 days and zero convergences,
-# because the tree this guard interrogated could never itself satisfy the guard.
-# ${STATE_DIR}/daemon-install is the SAME literal src/lib/install-root.ts's resolveInstallRoot
-# defaults to (config.installRoot, falling back to config.root plus "daemon-install", with
-# STATE_DIR being this script's config.root) — the checkout the deploy supervisor already keeps
-# clean and on main. Spelled out here rather than imported (this is bash, that module is
-# TypeScript) so it MUST be re-read, not re-typed, if that default ever moves. NO BACKTICKS AND NO
-# DOLLAR-PAREN IN THIS COMMENT — W1-T2953 already found that an unquoted heredoc EXECUTES both
-# while rendering.
+# W1-T3604 — daemon freshness sync detaches ${STATE_DIR}/remudero; worker exhaust keeps it dirty.
+# Using it for convergence caused 464 refusals in 7 days; the install tree stays clean and on main.
+# ${STATE_DIR}/daemon-install matches src/lib/install-root.ts's resolveInstallRoot default:
+# config.installRoot falls back to config.root plus "daemon-install"; STATE_DIR is config.root here.
+# Re-read that resolver if the default moves; this shell renderer cannot import TypeScript.
+# W1-T2953 — avoid backticks and dollar-paren here: this unquoted heredoc executes them.
 CHECKOUT=${STATE_DIR}/daemon-install
 UNITS_HEAP_MB=${MAX_OLD_SPACE_MB}
 INSTANCE_NAME=${INSTANCE_NAME:-}
 INSTANCE_REGISTRY=${REGISTRY_FILE:-}
+HOST_ALERT_INSTANCE=${CONTAINER_NAME}
 BOOT=0
 [ "\${1:-}" = "--boot" ] && BOOT=1
+
+$(render_host_tmpdir)
 
 # W1-T3233 — THE REVIVAL LOG'S READER. The record below has been written since W1-T2877 and read by
 # nothing. On 2026-09-09 a core.bare flag in the state checkout made entrypoint.sh exit 1, and this
@@ -394,6 +985,10 @@ if [ "\${1:-}" = "--check-crash-loop" ]; then
   exit 0
 fi
 
+$(render_edge_heal)
+
+$(render_host_alerts)
+
 # W1-T3269 — CONVERGE THIS HOST'S OWN UNITS, THE THIRD QUESTION THIS TICK ALREADY ASKS.
 #
 # The installer had NO automatic caller -- referenced only by its own test, the operator guide and a
@@ -422,15 +1017,15 @@ converge_host_units() {
       date -u +%s > "\$refusal_since" 2>/dev/null || true
       rm -f "\$refusal_alerted" 2>/dev/null || true
     fi
-    refused_at=\$(cat "\$refusal_since" 2>/dev/null || echo "")
-    now=\$(date -u +%s 2>/dev/null || echo "")
-    case "\$refused_at:\$now" in *[!0-9:]*) : ;; *)
-      if [ -n "\$refused_at" ] && [ -n "\$now" ] && [ "\$((now - refused_at))" -ge 21600 ] && [ ! -e "\$refusal_alerted" ]; then
-        echo "rmd-relaunch: ALERT host unit convergence has been refused for at least 6 hours; tracked paths: \$tracked_changes" >&2
-        : > "\$refusal_alerted" 2>/dev/null || true
-      fi
-    ;; esac
-    return 0
+    # 2026-10-11 -- THE STAMP RAISED NOTHING: it fed one stderr line at a fixed six hours, into a journal
+    # nobody reads, and the five-hour incident ended before it. The install checkout now climbs the same
+    # live-edit ladder as the daemon's tree (live_edits_ladder): preserved at once, escalated by the
+    # daemon, and restored to HEAD only from a confirmed copy -- after which this converge proceeds.
+    if ! live_edits_ladder install-checkout "\$CHECKOUT" ||
+       [ -n "\$(git -C "\$CHECKOUT" status --porcelain --untracked-files=no 2>/dev/null || echo unreadable)" ]; then
+      return 0
+    fi
+    echo "rmd-relaunch: units -- the live-edit ladder restored the tracked edits from a confirmed copy; converging."
   fi
   rm -f "\$refusal_since" "\$refusal_alerted" 2>/dev/null || true
 
@@ -440,8 +1035,10 @@ converge_host_units() {
   branch=\$(git -C "\$CHECKOUT" symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
   if [ "\$branch" != "main" ]; then
     echo "rmd-relaunch: units -- checkout is unreadable or not on branch main (branch='\${branch:-none}'); not converging." >&2
+    host_alert_raise units-not-on-main "install checkout \$CHECKOUT is unreadable or not on branch main (branch='\${branch:-none}')"
     return 0
   fi
+  host_alert_clear units-not-on-main
 
   # W1-T3583 -- ADVANCE THE ALREADY-TRUSTED CHECKOUT WITHOUT A DAEMON RESTART. runDeployCycle's own
   # fast-forward (deployer.ts's pullFf) runs only behind its restart-pressure decision, so a clean,
@@ -456,8 +1053,10 @@ converge_host_units() {
   if git -C "\$CHECKOUT" fetch --quiet origin main 2>/dev/null; then
     if ! git -C "\$CHECKOUT" merge --ff-only --quiet origin/main 2>/dev/null; then
       echo "rmd-relaunch: units -- checkout DIVERGED from origin/main (fast-forward refused); not converging." >&2
+      host_alert_raise units-diverged "install checkout \$CHECKOUT DIVERGED from origin/main (fast-forward refused)"
       return 0
     fi
+    host_alert_clear units-diverged
   fi
 
   # CHECK BEFORE INSTALL, ALWAYS. The steady state is a silent no-op, which is what makes a converge
@@ -473,12 +1072,23 @@ converge_host_units() {
   INSTALLER_ENV=(RMD_NODE_MAX_OLD_SPACE_MB="\$UNITS_HEAP_MB")
   if [ -n "\$INSTANCE_NAME" ]; then
     INSTALLER_ENV=(RMD_INSTANCE_REGISTRY="\$INSTANCE_REGISTRY")
-    if env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --instance "\$INSTANCE_NAME" >/dev/null 2>&1; then
+    if units_check=\$(env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --instance "\$INSTANCE_NAME" 2>/dev/null); then
       return 0
     fi
-  elif env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" >/dev/null 2>&1; then
+  elif units_check=\$(env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" 2>/dev/null); then
     return 0
   fi
+
+  # W1-T5518 -- --install never retires a LEGACY user unit, so LEGACY-only drift is named, not
+  # reinstalled on every tick. MISSING or DRIFTED lines beside it still converge.
+  case "\$units_check" in
+    *"install-host-units: MISSING "*|*"install-host-units: DRIFTED "*) : ;;
+    *"install-host-units: LEGACY "*)
+      echo "rmd-relaunch: units -- only LEGACY drift, which --install never retires; not converging:" >&2
+      printf '%s\\n' "\$units_check" | grep -F -e 'LEGACY' -e 'retire it' >&2 || true
+      return 0
+      ;;
+  esac
 
   # Elevation is REQUIRED and never prompted for: the tick runs as the service user while the unit
   # dir is root-owned. No sudo, no converge -- reported, never fatal.
@@ -503,6 +1113,12 @@ converge_host_units() {
   fi
   return 0
 }
+
+$(render_deploy_code_refresh)
+
+$(render_progress_watchdog_ladder)
+
+$(render_watchdog_tick_snapshot)
 
 # THE STOP LEVER OUTRANKS THIS SCRIPT, INCLUDING AT BOOT AND FROM THE WATCHDOG.
 if [ -e "\$STATE_DIR/state/STOP" ]; then
@@ -534,24 +1150,69 @@ fi
 if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   # W1-T3268 -- THE FLAG'S ONLY PATH BACK. The arm that cleared DAEMON_CRASH_LOOP sat on the
   # revival path below, after this very return, so a host that recovered stopped reviving and never
-  # reached it. This is the one place the script observes the daemon HEALTHY.
-  rm -f "\$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true
+  # reached it. This is the one place the script observes the daemon HEALTHY. 2026-10-11: running is
+  # not recovered while the revival log still holds a live run (a slow loop is running between
+  # deaths); the flag clears once crash_loop_signature lapses, and so does its spooled escalation.
+  if [ -e "\$STATE_DIR/state/DAEMON_CRASH_LOOP" ] && ! crash_loop_live; then
+    rm -f "\$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true
+    host_alert_clear crash-loop
+  fi
+  # 2026-10-09 -- A SELF-TUNING memory.high. deploy/memory-high-tuner.sh grows this container's
+  # memory.high while it is throttled and refaulting its page cache with host headroom, and gives it
+  # back under host pressure, never below the policy. BEFORE the unchanged-tick exit: memory pressure
+  # moves while the code does not. Bounded, and never fatal to the tick.
+  if [ "\$BOOT" -eq 0 ] && [ -f "\$CHECKOUT/deploy/memory-high-tuner.sh" ]; then
+    MHT_TMO=(); command -v timeout >/dev/null 2>&1 && MHT_TMO=(timeout 60)
+    \${MHT_TMO[@]+"\${MHT_TMO[@]}"} bash "\$CHECKOUT/deploy/memory-high-tuner.sh" \\
+      --container '${CONTAINER_NAME}' --state-dir "\$STATE_DIR" || true
+  fi
+  if [ "\$BOOT" -eq 0 ] && watchdog_unchanged_tick '${CONTAINER_NAME}'; then exit 0; fi
+  rm -f "\$WATCHDOG_SNAPSHOT" 2>/dev/null || true
+  WATCHDOG_UNCHANGED_TICKS=0
   # CONVERGENCE IS LAST AND ONLY WHEN HEALTHY. A DOWN host needs reviving, not tidying, so nothing
   # here runs before the revive decision; boot is excluded because a host coming up is the worst
   # moment to rewrite its units -- the rule W1-T3245 applied to the recycle decision.
   [ "\$BOOT" -eq 0 ] && converge_host_units
   if [ "\$BOOT" -eq 0 ] && [ -x "\$STATE_DIR/remudero/bin/rmd" ]; then
+    # W1-T5688: THE VERDICT IS READ BEFORE refresh_deploy_code, whose \`|| exit 0\` ends every tick
+    # with workers in flight -- exactly the ticks a wedged daemon produces.
+    [ "\$WATCHDOG_VERDICT_READ" = 1 ] || read_progress_verdict
+    [ "\$PROGRESS_STATE" = CRASH_LOOP ] || rm -f "\$WATCHDOG_HOLD" 2>/dev/null || true
+    note_progress_verdict
+    if recycle_on_verdict '${CONTAINER_NAME}'; then exit 0; fi
+    # W1-T4917: load current deploy code only after a verified idle fast-forward. Running from
+    # daemon-install conflates the invoking checkout with the tree deploy-run acts on.
+    # Refresh the source CLI before loading it; standalone executable entrypoints own their
+    # runtime and retain the supervisor invocation without requiring a source checkout.
+    if [ -f "\$STATE_DIR/remudero/src/run-task.ts" ]; then
+      refresh_deploy_code '${CONTAINER_NAME}' || deploy_code_busy_handoff '${CONTAINER_NAME}' || exit 0
+    fi
     echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
     # W1-T4267: deploy-run reads resourcePolicyDrift for THIS container (named at install time --
     # the rendered launcher has no CONTAINER_NAME of its own) against the build policy it recycles with.
-    RMD_RESOURCE_POLICY_CONTAINER='${CONTAINER_NAME}' RMD_RESOURCE_POLICY_ROLE=build \\
-      "\$STATE_DIR/remudero/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR" || \\
+    if watchdog_deploy_out="\$(cd "\$STATE_DIR/remudero" && \\
+      RMD_RESOURCE_POLICY_CONTAINER='${CONTAINER_NAME}' RMD_RESOURCE_POLICY_ROLE=build \\
+      "\$STATE_DIR/remudero/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR")"; then
+      printf '%s\\n' "\$watchdog_deploy_out"
+      host_alert_clear deploy-run-problem
+      # Exit zero also means deferred: cache only the supervisor's confirmed up-to-date result.
+      case "\$watchdog_deploy_out" in *'### rmd deploy-run — no-op: up-to-date ('*)
+        WATCHDOG_INSTALL="\$(git -C "\$CHECKOUT" rev-parse HEAD 2>/dev/null || true)"
+        [ "\$WATCHDOG_INSTALL" != "\$WATCHDOG_REMOTE" ] || watchdog_save_snapshot
+        ;;
+      esac
+    else
+      printf '%s\\n' "\$watchdog_deploy_out"
       echo "rmd-relaunch: deploy-run reported a problem; the daemon is untouched and the next tick re-asks." >&2
+      host_alert_raise deploy-run-problem "rmd deploy-run --image-drift-only exited non-zero: \$(host_alert_last_line "\$watchdog_deploy_out")"
+    fi
   else
     echo "rmd-relaunch: ${CONTAINER_NAME} already running -- nothing to do."
   fi
   exit 0
 fi
+
+rm -f "\$WATCHDOG_SNAPSHOT" 2>/dev/null || true
 
 # REFUSE AGAINST AN UNMOUNTED STATE ROOT -- the 2026-09-05 fleet-wipe failure mode.
 if ! findmnt -no TARGET /mnt/rmd >/dev/null 2>&1; then
@@ -562,6 +1223,12 @@ if [ ! -s "\$STATE_DIR/state/ledger.ndjson" ]; then
   echo "rmd-relaunch: FATAL -- \$STATE_DIR/state/ledger.ndjson missing or empty; wrong volume?" >&2
   exit 1
 fi
+
+# W1-T5688 — HOLD, DON'T SPEND A BOOT ON AN UNCHANGED INPUT. Before the revival record, so a held
+# tick writes no revive line and the count below only sees boots that actually happened.
+read_progress_verdict
+note_progress_verdict
+if hold_revive_on_verdict; then exit 0; fi
 
 # A REVIVAL MUST LEAVE A TRACE. Recreating the container RESETS docker's RestartCount, so without
 # this record a crash loop is invisible: every beat is fresh and every daemon is young.
@@ -583,20 +1250,34 @@ if [ -n "\$CRASH_LOOP_SIG" ] && [ "\$CRASH_LOOP_N" -ge "\$CRASH_LOOP_RUN" ] 2>/d
     >> "\$REVIVAL_LOG" 2>/dev/null || true
   printf '%s %s consecutive revivals from exit %s\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$CRASH_LOOP_N" "\$CRASH_LOOP_EXIT" \\
     > "\$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true
-else
+  host_alert_raise crash-loop "\$(head -n 1 "\$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true)"
+elif [ -e "\$STATE_DIR/state/DAEMON_CRASH_LOOP" ]; then
   rm -f "\$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true
+  host_alert_clear crash-loop
 fi
 
 $(render_cash_boot_secrets)
 
+APP_PRIVATE_KEY_ARGS=()
+$(render_app_private_key_mount)
+
 docker rm -f ${CONTAINER_NAME} >/dev/null 2>&1 || true
 
+# W1-T6110 -- THE CHECKOUT'S PLAN FIRST. The installed copy changes only at --install, so a bind
+# merged since then reached the deploy tick's drift reading (which reads the checkout) but not this
+# relaunch; the copy stays as the fallback for a host whose checkout is missing.
 SCRATCH_ARGS=()
-if [ -r ${BIN_DIR}/rmd-scratch-mounts ]; then
-  . ${BIN_DIR}/rmd-scratch-mounts
+SCRATCH_LIB="\$CHECKOUT/deploy/scratch-mounts.sh"
+[ -r "\$SCRATCH_LIB" ] || SCRATCH_LIB=${BIN_DIR}/rmd-scratch-mounts
+if [ -r "\$SCRATCH_LIB" ]; then
+  . "\$SCRATCH_LIB"
+  echo "rmd-relaunch: scratch plan from \$SCRATCH_LIB"
   if scratch_plan "\$STATE_DIR" ${CONTAINER_NAME} && scratch_prepare; then scratch_fresh_tmp; fi
   echo "rmd-relaunch: scratch mounts \$SCRATCH_NOTE"
 fi
+
+CREDENTIAL_ARGS=()
+$(render_credential_mount)
 
 # --restart=on-failure:5 IS DELIBERATE: exit 0 is a STOP and must not be undone. Reboot survival is
 # rmd-fleet.service; crash recovery past the budget is rmd-fleet-watchdog.timer.
@@ -610,7 +1291,7 @@ docker run -d --name ${CONTAINER_NAME} \\
   --user 1000:1000 \\
   -e GH_APP_ID=${GH_APP_ID_V} \\
   -e GH_APP_INSTALLATION_ID=${GH_APP_INST_V} \\
-  -e GH_APP_PRIVATE_KEY_PATH=${GH_APP_KEY_V} \\
+  -e GH_APP_PRIVATE_KEY_PATH=${GH_APP_KEY_SHELL} \\
   -e NODE_OPTIONS=--max-old-space-size=${MAX_OLD_SPACE_MB} \\
   -e RMD_RESTART_THROTTLE_S=120 \\
   -e RMD_FRESHNESS_RESTART_MAX=100 \\
@@ -621,6 +1302,8 @@ docker run -d --name ${CONTAINER_NAME} \\
   -v ${CONTAINER_CONFIG_DIR}:/home/node/.config/remudero \\
   -v "\$STATE_DIR":/home/node/Remudero \\
   -v ${CLAUDE_DIR}:/home/node/.claude \\
+  "\${APP_PRIVATE_KEY_ARGS[@]+"\${APP_PRIVATE_KEY_ARGS[@]}"}" \\
+  "\${CREDENTIAL_ARGS[@]+"\${CREDENTIAL_ARGS[@]}"}" \\
   "\${SCRATCH_ARGS[@]+"\${SCRATCH_ARGS[@]}"}" \\
   "\$IMAGE" \\
   ./bin/rmd daemon --repo ${DAEMON_REPO} --allow-self-target
@@ -683,6 +1366,44 @@ OnBootSec=5min
 OnUnitActiveSec=5min
 AccuracySec=30s
 Unit=${WATCHDOG_SERVICE_NAME}
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
+render_acr_login_bin() { cat "${SCRIPT_DIR}/acr-login.sh"; }
+
+render_acr_login_service() {
+  local registry="${REGISTRY:-${IMAGE%%/*}}"
+  registry="${registry%.azurecr.io}"
+  cat <<EOF
+[Unit]
+Description=Refresh the host's Azure Container Registry login
+After=docker.service network-online.target
+RequiresMountsFor=${STATE_DIR}
+
+[Service]
+Type=oneshot
+User=${SERVICE_USER}
+Group=${SERVICE_USER}
+Environment=RMD_ROOT=${STATE_DIR}
+Environment=REGISTRY=${registry}
+ExecStart=${BIN_DIR}/acr-login.sh --refresh
+TimeoutStartSec=5min
+EOF
+}
+
+render_acr_login_timer() {
+  cat <<'EOF'
+[Unit]
+Description=Refresh the registry login before its token expires
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1h
+AccuracySec=1min
+Unit=rmd-acr-login.service
 
 [Install]
 WantedBy=timers.target
@@ -759,18 +1480,11 @@ WantedBy=timers.target
 EOF
 }
 
-# W1-T2953 — CHECK COMPARES DIRECTIVES, INSTALL WRITES EVERYTHING.
-#
-# The comparison was byte-for-byte over files that are mostly PROSE. MEASURED 2026-09-06: six of
-# seven artifacts read DRIFTED against Azure, and most of that was comment wording — the incident
-# forensics were expanded by hand on the host and never returned to the renderer. One red check
-# covering four real guard deletions and two paragraphs of prose is a check nobody can act on, and
-# `--install` looked like the remedy while it would have DELETED the four real guards.
-#
-# A systemd unit's semantics ARE its directives; comments are documentation. So check compares the
-# effective directive lines EXACTLY — every guard deletion is still caught, byte for byte in effect
-# — and stops reporting prose as drift. INSTALL is unchanged and still writes the full rendered
-# text, comments included, so the host keeps the documentation.
+# W1-T2953 — CHECK COMPARES DIRECTIVES, INSTALL WRITES EVERYTHING. A byte-for-byte compare read six
+# of seven artifacts DRIFTED against Azure on 2026-09-06, mostly comment wording, and `--install`
+# looked like the remedy while it would have DELETED four real guards. A unit's semantics ARE its
+# directives, so check compares effective directive lines EXACTLY (every guard deletion is still
+# caught) and ignores prose; install still writes the full text, comments included.
 effective_directives() {
   printf '%s\n' "$1" | sed -e 's/[[:space:]]*$//' -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d'
 }
@@ -787,13 +1501,104 @@ ${UNIT_DIR}/${WATCHDOG_TIMER_NAME}:render_watchdog_timer:0644
 "
 if [ -z "$INSTANCE_NAME" ] || [ "$INSTANCE_NAME" = "core" ]; then
   UNITS="${UNITS}
+${BIN_DIR}/acr-login.sh:render_acr_login_bin:0755
+${UNIT_DIR}/rmd-acr-login.service:render_acr_login_service:0644
+${UNIT_DIR}/rmd-acr-login.timer:render_acr_login_timer:0644
 ${BIN_DIR}/rmd-reap-stray-containers:render_reaper_bin:0755
 ${UNIT_DIR}/rmd-reap-stray.service:render_reaper_service:0644
 ${UNIT_DIR}/rmd-reap-stray.timer:render_reaper_timer:0644
 "
 fi
 
+host_apt() {
+  if [ -n "${RMD_HOST_APT_CMD:-}" ]; then "${RMD_HOST_APT_CMD}" "$@"
+  else "$@"; fi
+}
+
+converge_host_node() {
+  local pin actual node_path major source source_text desired versions package after
+  source="${RMD_NODESOURCE_PATH:-/etc/apt/sources.list.d/nodesource.sources}"
+  node_path="$(command -v node || true)"
+  actual="$(node --version 2>/dev/null || true)"
+  actual="${actual#v}"
+  actual="${actual:-unavailable}"
+  if ! pin="$(cat "${SCRIPT_DIR%/deploy}/.nvmrc" 2>/dev/null)"; then
+    echo "host-node: cannot read checkout .nvmrc; staying on ${actual}, retried next converge"
+    return 0
+  fi
+  pin="${pin#v}"
+  if ! printf '%s\n' "$pin" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+    echo "host-node: invalid .nvmrc pin '${pin}'; staying on ${actual}, retried next converge"
+    return 0
+  fi
+  major="${pin%%.*}"
+  if [ "$MODE" = check ]; then
+    if [ "$actual" != "$pin" ]; then
+      echo "install-host-units: DRIFTED host-node ${actual} != ${pin}"
+      drift=$(( drift + 1 ))
+    else
+      echo "install-host-units: ok      host-node ${actual}"
+    fi
+    return 0
+  fi
+  if [ ! -f "$source" ] || [ "$node_path" != "${RMD_HOST_NODE_PATH:-/usr/bin/node}" ]; then
+    echo "host-node: unmanaged node=${node_path:-missing} version=${actual} source=${source}; unchanged"
+    return 0
+  fi
+  if ! source_text="$(cat "$source")"; then
+    echo "host-node: cannot read ${source}; staying on ${actual}, retried next converge"
+    return 0
+  fi
+  if ! printf '%s\n' "$source_text" | grep -Eq '^URIs:.*https?://deb\.nodesource\.com/node_[0-9]+\.x([/[:space:]]|$)'; then
+    echo "host-node: unmanaged source=${source} node=${node_path} version=${actual}; unchanged"
+    return 0
+  fi
+  if ! desired="$(printf '%s\n' "$source_text" | sed "/^URIs:/s|\(https\{0,1\}://deb\.nodesource\.com/node_\)[0-9][0-9]*\.x|\1${major}.x|g")"; then
+    echo "host-node: cannot render ${source}; staying on ${actual}, retried next converge"
+    return 0
+  fi
+  if [ "$desired" != "$source_text" ]; then
+    if ! printf '%s\n' "$desired" > "$source"; then
+      echo "host-node: cannot write ${source}; staying on ${actual}, retried next converge"
+      return 0
+    fi
+    echo "host-node: source now node_${major}.x"
+  elif [ "$actual" = "$pin" ]; then
+    echo "host-node: in step ${actual}"
+    return 0
+  fi
+  if ! host_apt apt-get update; then
+    echo "host-node: apt-get update failed; staying on ${actual}, retried next converge"
+    return 0
+  fi
+  if [ "$actual" = "$pin" ]; then return 0; fi
+  package="${pin}-1nodesource1"
+  if ! versions="$(host_apt apt-cache madison nodejs)"; then
+    echo "host-node: apt-cache madison failed; staying on ${actual}, retried next converge"
+    return 0
+  fi
+  if ! printf '%s\n' "$versions" | awk -F '|' -v want="$package" '
+    { version=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", version); if (version == want) found=1 }
+    END { exit !found }
+  '; then
+    echo "host-node: ${pin} not yet in node_${major}.x; staying on ${actual}, retried next converge"
+    return 0
+  fi
+  if ! host_apt apt-get install -y "nodejs=${package}"; then
+    echo "host-node: apt-get install failed for ${package}; staying on ${actual}, retried next converge"
+    return 0
+  fi
+  after="$(node --version 2>/dev/null || true)"
+  after="${after#v}"
+  if [ "$after" = "$pin" ]; then
+    echo "host-node: installed ${pin} (${package})"
+  else
+    echo "host-node: install returned success but node is still ${after:-unavailable} != ${pin}; retried next converge"
+  fi
+}
+
 drift=0
+converge_host_node
 for row in $UNITS; do
   [ -n "$row" ] || continue
   path="${row%%:*}"; rest="${row#*:}"; fn="${rest%%:*}"; mode="${rest##*:}"
@@ -844,7 +1649,11 @@ if [ -n "$CLEANUP_PATH" ]; then
     TMP_SWEEP_CRON_CONTENT="$(printf 'SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n%s\n' "$TMP_SWEEP_CRON_LINE")"
   fi
   CLEANUP_LOG="${RMD_CLEANUP_LOG:-$(dirname "$CLEANUP_PATH")/host-cleanup.log}"
-  CLEANUP_CRON_LINE="${CLEANUP_CRON_SCHEDULE} ${CLEANUP_PATH} >> ${CLEANUP_LOG} 2>&1"
+  # Include the service user's disposable worktree root in the same guarded six-hour janitor.
+  # It is separate from /mnt/scratch/worktrees, and omitting it left stale linked trees in rmd-work
+  # accumulating indefinitely. Keep the roots overrideable for hosts with a different layout.
+  CLEANUP_WORKTREE_ROOTS="${RMD_CLEANUP_WORKTREE_ROOTS-/mnt/scratch/worktrees:/home/${SERVICE_USER}/rmd-work}"
+  CLEANUP_CRON_LINE="${CLEANUP_CRON_SCHEDULE} RMD_CLEANUP_WORKTREE_ROOTS=${CLEANUP_WORKTREE_ROOTS} ${CLEANUP_PATH} >> ${CLEANUP_LOG} 2>&1"
   CRONTAB_CMD="${RMD_CRONTAB_CMD-crontab}"
 
   crontab_read() {
@@ -945,9 +1754,82 @@ if [ -n "$CLEANUP_PATH" ]; then
   fi
 fi
 
+# The session slice cap (2026-10-09). The operator capped user-<uid>.slice by hand, and a rebuilt host
+# would come up without it. deploy/resource-policy.sh sizes the cap from this host's RAM; see the
+# note there. MemoryHigh only, never MemoryMax, so a session is throttled and never killed. It is
+# WRITTEN ONLY WHEN ITS DIRECTIVES DIFFER: a current file, even the hand-written one, is left
+# untouched. It is managed in the default/core layout only, and only when the service user's uid
+# resolves. An unresolvable uid or MemTotal is reported and skipped; it is never guessed.
+SESSION_SLICE_DROPIN=""
+SESSION_SLICE_WANT=""
+SESSION_SLICE_WRITTEN=0
+if [ -z "$INSTANCE_NAME" ] || [ "$INSTANCE_NAME" = "core" ]; then
+  # shellcheck source=deploy/resource-policy.sh
+  . "${SCRIPT_DIR}/resource-policy.sh"
+  SESSION_UID="${RMD_SERVICE_UID:-$(id -u "$SERVICE_USER" 2>/dev/null || true)}"
+  case "$SESSION_UID" in
+    ''|*[!0-9]*) echo "install-host-units: skipped session slice cap -- no uid for service user '${SERVICE_USER}'" ;;
+    *)
+      SESSION_SLICE_DROPIN="${UNIT_DIR}/user-${SESSION_UID}.slice.d/50-rmd-cap.conf"
+      resource_policy_session_slice # sets RP_SESSION_* here; the render below runs in a subshell
+      SESSION_SLICE_WANT="$(resource_policy_session_slice_dropin)"
+      if [ -z "$SESSION_SLICE_WANT" ]; then
+        echo "install-host-units: skipped session slice cap -- ${RP_SESSION_NOTE}"
+        SESSION_SLICE_DROPIN=""
+      fi ;;
+  esac
+fi
+if [ -n "$SESSION_SLICE_DROPIN" ]; then
+  if [ -e "$SESSION_SLICE_DROPIN" ] && [ "$(effective_directives "$SESSION_SLICE_WANT")" = "$(effective_directives "$(cat "$SESSION_SLICE_DROPIN" 2>/dev/null)")" ]; then
+    echo "install-host-units: ok      $SESSION_SLICE_DROPIN"
+  elif [ "$MODE" = "check" ]; then
+    if [ -e "$SESSION_SLICE_DROPIN" ]; then
+      echo "install-host-units: DRIFTED $SESSION_SLICE_DROPIN (want: $(effective_directives "$SESSION_SLICE_WANT" | grep -v '^\[' | paste -sd' ' -))"
+    else
+      echo "install-host-units: MISSING $SESSION_SLICE_DROPIN"
+    fi
+    drift=$(( drift + 1 ))
+  else
+    mkdir -p "$(dirname "$SESSION_SLICE_DROPIN")"
+    tmp="${SESSION_SLICE_DROPIN}.tmp.$$"
+    printf '%s\n' "$SESSION_SLICE_WANT" > "$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$SESSION_SLICE_DROPIN"
+    SESSION_SLICE_WRITTEN=1
+    echo "install-host-units: wrote   $SESSION_SLICE_DROPIN (${RP_SESSION_NOTE})"
+  fi
+fi
+
+# W1-T5518 — the retired host-only user janitor (in no repo; 569 false EMERGENCY runs) is drift while
+# its unit files remain. Report only; a real home is read only in the real host layout or via override.
+LEGACY_JANITOR_TIMER="azure-remudero-janitor.timer"
+LEGACY_JANITOR_SERVICE="azure-remudero-janitor.service"
+HOST_KERNEL="${RMD_HOST_KERNEL:-$(uname -s 2>/dev/null || echo unknown)}"
+LEGACY_USER_UNIT_DIR="${RMD_LEGACY_USER_UNIT_DIR-}"
+if [ -z "$LEGACY_USER_UNIT_DIR" ] && [ "$UNIT_DIR" = "/etc/systemd/system" ]; then
+  LEGACY_USER_UNIT_DIR="/home/${SERVICE_USER}/.config/systemd/user"
+fi
+legacy=0
+if [ "$HOST_KERNEL" = "Linux" ] && [ -n "$LEGACY_USER_UNIT_DIR" ]; then
+  for legacy_path in "${LEGACY_USER_UNIT_DIR}/${LEGACY_JANITOR_TIMER}" "${LEGACY_USER_UNIT_DIR}/${LEGACY_JANITOR_SERVICE}" \
+                     "${LEGACY_USER_UNIT_DIR}"/*.wants/"${LEGACY_JANITOR_TIMER}"; do
+    if [ -e "$legacy_path" ] || [ -L "$legacy_path" ]; then
+      echo "install-host-units: LEGACY $legacy_path (the retired host-only user janitor; --install never edits a user unit)"
+      legacy=$(( legacy + 1 ))
+    fi
+  done
+  if [ "$legacy" -gt 0 ]; then
+    echo "install-host-units: retire it as ${SERVICE_USER}: systemctl --user disable --now ${LEGACY_JANITOR_TIMER} && rm -f ${LEGACY_USER_UNIT_DIR}/${LEGACY_JANITOR_TIMER} ${LEGACY_USER_UNIT_DIR}/${LEGACY_JANITOR_SERVICE} && systemctl --user daemon-reload"
+    if [ "$MODE" = "check" ]; then drift=$(( drift + legacy )); fi
+  fi
+fi
+
 if [ "$MODE" = "check" ]; then
   if [ "$drift" -gt 0 ]; then
     echo "install-host-units: ${drift} unit(s) missing or drifted — re-run with --install (as root)." >&2
+    if [ "$legacy" -gt 0 ]; then
+      echo "install-host-units: ${legacy} of them LEGACY — --install does not retire those; run the retire command above as ${SERVICE_USER}." >&2
+    fi
     exit 1
   fi
   echo "install-host-units: all units match this repo."
@@ -960,10 +1842,26 @@ if [ "$UNIT_DIR" = "/etc/systemd/system" ] && command -v systemctl >/dev/null 2>
   systemctl enable "${SERVICE_UNIT_NAME}" >/dev/null
   systemctl enable --now "${WATCHDOG_TIMER_NAME}" >/dev/null
   if [ -z "$INSTANCE_NAME" ] || [ "$INSTANCE_NAME" = "core" ]; then
+    systemctl enable --now rmd-acr-login.timer >/dev/null
     systemctl enable --now rmd-reap-stray.timer >/dev/null
     echo "install-host-units: reloaded systemd and enabled ${SERVICE_UNIT_NAME}, ${WATCHDOG_TIMER_NAME}, rmd-reap-stray.timer"
   else
     echo "install-host-units: reloaded systemd and enabled ${SERVICE_UNIT_NAME}, ${WATCHDOG_TIMER_NAME}"
   fi
   echo "install-host-units: NOTE — the daemon itself was not started or stopped; run ${LAUNCHER} to bring it up."
+fi
+
+# A rewritten slice drop-in takes effect at the daemon-reload above. Confirm it from what systemd
+# holds. If systemd still holds the old value, apply the same values at runtime so the cap is live
+# now and not only after the next reboot.
+if [ "$SESSION_SLICE_WRITTEN" = 1 ] && [ "$UNIT_DIR" = "/etc/systemd/system" ] && command -v systemctl >/dev/null 2>&1; then
+  session_slice="user-${SESSION_UID}.slice"
+  live_high="$(systemctl show "$session_slice" -p MemoryHigh --value 2>/dev/null || true)"
+  if [ "$live_high" = "$((RP_SESSION_HIGH_MIB * 1024 * 1024))" ]; then
+    echo "install-host-units: ${session_slice} MemoryHigh confirmed live at ${RP_SESSION_HIGH_MIB} MiB"
+  elif systemctl set-property --runtime "$session_slice" "MemoryHigh=${RP_SESSION_HIGH_MIB}M" "CPUWeight=${RMD_SESSION_CPU_WEIGHT}" 2>/dev/null; then
+    echo "install-host-units: ${session_slice} read MemoryHigh=${live_high:-unknown} after the reload; applied ${RP_SESSION_HIGH_MIB} MiB at runtime"
+  else
+    echo "install-host-units: WARNING ${session_slice} MemoryHigh reads ${live_high:-unknown}, not ${RP_SESSION_HIGH_MIB} MiB; the file takes effect at the next boot" >&2
+  fi
 fi

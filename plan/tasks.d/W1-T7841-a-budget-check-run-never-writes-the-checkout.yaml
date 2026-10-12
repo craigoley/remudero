@@ -1,0 +1,79 @@
+- id: W1-T7841
+  title: "A BUDGET CHECK RUN NEVER WRITES THE CHECKOUT — `claude-md-budget-ratchet.mjs` defaults `--feedback-dir` to the cwd's plan/feedback, so any test, preflight or hand run on a branch that grows CLAUDE.md drops `plan/feedback/fold-debt-CLAUDE-md-<bytes>.yaml` into the working tree; #10762 patched two test callers one at a time and the default still writes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium  # Rule 19: one concern — only a recording run of the CLAUDE.md budget ratchet may file fold debt
+  band_meaning: span
+  origin: "operator ruling 2026-10-11: tests and preflight never write into the checkout (an agent deleted fold-debt-CLAUDE-md-*.yaml files by hand on 2026-10-10)"
+  plan_refs: [W1-T3320, W1-T2831, W1-T503, W1-T3341]
+  files: [scripts/claude-md-budget-ratchet.mjs, test/a-budget-check-run-never-writes-the-checkout.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    REPRODUCED on origin/main d7f527f62 (2026-10-11). In a scratch clone, add 100 bytes to CLAUDE.md and run
+    `node scripts/claude-md-budget-ratchet.mjs`. It prints "ROUTED: fold filed as fold-debt-CLAUDE-md-16431",
+    exits 0, and `git status --porcelain` shows `?? plan/feedback/fold-debt-CLAUDE-md-16431.yaml`.
+    CURRENT BEHAVIOUR:
+      - scripts/claude-md-budget-ratchet.mjs:249 declares `"feedback-dir"` with default "plan/feedback",
+        relative to the cwd. `fileFoldDebt` (scripts/claude-md-budget-ratchet.mjs:59) falls back to the same
+        path (:60). main() files on every routed run (:316). So every invocation is a recording run: CI's
+        gate step, a test spawn, a preflight-selected suite or an operator's `npm run claude-md-budget-ratchet`.
+      - The §8A net-byte rule routes whenever a branch grows CLAUDE.md under the fold-debt ceiling
+        (`foldDebtCeilingBytes` 18400, scripts/claude-md-budget-baseline.json:7). So the write happens on
+        exactly the doctrine branches an agent is working on.
+      - #10762 (2026-10-10) added `--feedback-dir <tmp>` to two test callers after the files appeared:
+        test/claude-md-budget-ratchet.test.ts ("the REAL committed CLAUDE.md is currently within the recorded
+        size budget cap") and test/the-doctrine-cap-tracks-the-index.test.ts (W1-T3341 (2)). census-precheck
+        runs the first (scripts/census-precheck-parity-baseline.json:35). That fixed two symptoms. The next
+        caller that omits the flag writes into the checkout again, because the default is what is wrong.
+    WHAT THE GATE ITSELF WANTS. W1-T3320 made routing require a filed follow-up, and a run that cannot file
+    still refuses (scripts/claude-md-budget-ratchet.mjs:317-324). That stays true for a recording run. A
+    check run (tests, preflight, a local look) only needs the verdict.
+    SEPARATE OBSERVATION, NOT IN SCOPE. The CI gate step (.github/workflows/ci.yml:1095-1102) writes into the
+    runner's throwaway checkout, and nothing under .github/ reads or uploads plan/feedback (a grep reads 0,
+    with ci.yml's own claude-md-budget-ratchet lines as the positive control). A CI-filed entry may never
+    reach the daemon's inbox. That is reported on its own and does not widen this task.
+    PRECEDENT for the opt-in. scripts/coverage-ratchet.mjs:197-202 refuses to key its CI report on
+    GITHUB_ACTIONS alone, because the suite spawns the script inside CI too. The same applies here, and the
+    test runner's own NODE_TEST_CONTEXT marker (as `deriveLedgerActor` reads it, src/lib/ledger.ts:172)
+    tells a test spawn apart.
+  design: |
+    1. ONLY A RECORDING RUN FILES. Drop the parseArgs default for `--feedback-dir`, so an explicit flag can be
+       detected. A run records fold debt when `--feedback-dir` is given explicitly, or when it is the real CI
+       gate step: GITHUB_ACTIONS is "true" and NODE_TEST_CONTEXT is unset. Only then does it use plan/feedback.
+       ci.yml does not change.
+    2. A CHECK RUN STILL MEASURES AND STILL LANDS. On a routed outcome that is not a recording run, print the
+       full finding as today, then "fold debt NOT filed: not a recording run (the CI gate step files it; pass
+       --feedback-dir to file locally)", and exit 0. It writes nothing. The cap and stop outcomes are
+       unchanged. The refusal when filing fails still applies to a recording run.
+    3. `fileFoldDebt`'s own fallback to "plan/feedback" is removed. A caller has to name the directory, so an
+       import-time caller cannot write into the cwd by accident either.
+    The two `--feedback-dir` call sites #10762 added may stay, since they are explicit recording runs into a
+    temp dir. Tests go in the new file test/a-budget-check-run-never-writes-the-checkout.test.ts, with
+    `test(` titles exactly as in the proofs below. Each test runs the script in a throwaway git repo whose
+    CLAUDE.md grew against its merge base, and asserts the tree with `git status --porcelain`.
+    test/claude-md-budget-ratchet.test.ts and test/a-full-doctrine-budget-routes-a-rule-it-cannot-hold.test.ts
+    must stay green.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-budget-check-run-never-writes-the-checkout.test.ts"
+    - claim: "a routed run outside CI files no fold debt and leaves the working tree clean"
+      proof: 'grep: test("W1-T7841: a ratchet run outside CI files no fold debt into the checkout" in test/a-budget-check-run-never-writes-the-checkout.test.ts'
+    - claim: "a run spawned under the test runner files nothing even when GITHUB_ACTIONS is true"
+      proof: 'grep: test("W1-T7841: a ratchet run under a test runner files no fold debt even in CI" in test/a-budget-check-run-never-writes-the-checkout.test.ts'
+    - claim: "the real CI gate step still files fold debt under plan/feedback"
+      proof: 'grep: test("W1-T7841: the CI gate step still files fold debt" in test/a-budget-check-run-never-writes-the-checkout.test.ts'
+    - claim: "an explicit feedback directory is still a recording run that files there"
+      proof: 'grep: test("W1-T7841: an explicit feedback directory still files there" in test/a-budget-check-run-never-writes-the-checkout.test.ts'
+    - claim: "a check run that does not file still prints the finding and exits 0"
+      proof: 'grep: test("W1-T7841: a run that does not file still prints the finding and lands" in test/a-budget-check-run-never-writes-the-checkout.test.ts'
+  falsifier: |
+    Keep the "plan/feedback" default. The outside-CI run then leaves `?? plan/feedback/fold-debt-CLAUDE-md-<n>.yaml`
+    in the throwaway repo, as the 2026-10-11 reproduction did, and the first test fails. Key recording on
+    GITHUB_ACTIONS alone: the test-runner spawn files, and the second test fails. Stop filing altogether: the CI
+    gate step test finds no entry and fails.

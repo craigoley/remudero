@@ -140,7 +140,7 @@ test("END TO END: a KILLED run leaks its scratch where TMPDIR points, not into t
     // regardless of the env option, so blank it instead. A caller-supplied NODE_V8_COVERAGE (the
     // `named` control below) is left exactly as given -- that value is the thing being measured.
     if (!("NODE_V8_COVERAGE" in env)) childEnv.NODE_V8_COVERAGE = undefined;
-    const child = spawn(process.execPath, ["--experimental-test-coverage", "--test-coverage-exclude=test/**", "--test", spec], {
+    const child = spawn(process.execPath, ["--experimental-test-coverage", "--test-coverage-exclude=test/**", "--test", "--test-reporter=tap", spec], {
       cwd: root,
       env: childEnv,
       stdio: "ignore",

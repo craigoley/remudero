@@ -1,13 +1,20 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
+import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { systemClock } from "./clock.js";
-import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec, Outcome } from "./gardener.js";
+import { fixedClock, systemClock } from "./clock.js";
+import { checkoutHeadStamp } from "./checkout-head.js";
+import { prepareGardenTaskIds, type GardenTaskIdMinter, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec, type Outcome } from "./gardener.js";
 import { gateFireRatesPath, type GateFireRate, type GateFireRateReport } from "./gate-fire-rate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { resolveRepoLayout } from "./repo-layout.js";
+import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency } from "./test-slot.js";
+import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
+import { loadPlan, loadPlanFromYaml, machineFilingAdmissionViolations } from "./plan.js";
+import { loadPolicy } from "./policy.js";
 
 /**
  * lib/gate-gardener.ts (W1-T4116) — the gates tend themselves.
@@ -23,14 +30,135 @@ import { resolveRepoLayout } from "./repo-layout.js";
  *   - DEMOTE: a REQUIRED gate that never refused across at least as many pull requests as a typical
  *     gate, moved to ADVISORY with a GATE_RATIONALE — a `review` class, judged by whether its PR merges.
  * TIGHTEN and REFRESH are judged by refusals repaired against refusals overridden across all gates.
+ * DEFUSE files a remedy for a fixture about to expire; that tally never measures it, so it is judged
+ * by its PR's decision (W1-T5825).
  */
 
-export type GateGardenClass = "tighten" | "refresh" | "demote";
-export const GATE_GARDEN_CLASSES: readonly GateGardenClass[] = ["tighten", "refresh", "demote"];
+export type GateGardenClass = "tighten" | "refresh" | "demote" | "defuse";
+export const GATE_GARDEN_CLASSES: readonly GateGardenClass[] = ["tighten", "refresh", "demote", "defuse"];
+export const DEFUSE_LEAD_DAYS = 21;
+
+interface ExpiringFixture {
+  file: string; line: number; stamp: string; field: string; threshold: string;
+  expiresAt: number; daysLeft: number;
+}
+
+export interface GateDefuseSources {
+  thresholdDays?: number;
+  leadDays?: number;
+  openOrigins?: () => string[];
+  mintTaskId?: GardenTaskIdMinter;
+  admissionViolations?: typeof machineFilingAdmissionViolations;
+  execFile?: (command: string, args: string[], options: { cwd: string; encoding: "utf8" }) => string;
+  /** Runs one test file with the clock shifted `shiftDays` ahead: true when it passes. Throws when
+   *  the run reaches no verdict. Default {@link runSuiteShifted} in the repo checkout. */
+  runSuite?: (file: string, shiftDays: number) => boolean;
+}
+
+/** W1-T6036: the control shift, nonzero so the control loads the same clock preload as the shifted run. */
+export const DEFUSE_CONTROL_SHIFT_DAYS = 0.001;
+export const DEFUSE_VERDICTS_FILE = "gate-gardener-defuse-verdicts.json";
+const DEFUSE_RUN_TIMEOUT_MS = 15 * 60_000;
+type DefuseVerdict = "confirmed" | "shifted_passed" | "control_failed";
+
+export interface ShiftedSuiteMeasurement { passed: boolean; pass: number; tests: number }
+interface ShiftedSuiteOptions {
+  execFile?: (command: string, args: string[], options: {
+    cwd: string; env: NodeJS.ProcessEnv; encoding: "utf8"; stdio: "pipe"; timeout: number; maxBuffer: number;
+  }) => string;
+}
+
+/** The slice of scripts/pure-test-pool.mjs (the test judge) the defuse run uses. A plain .mjs, so no types. */
+interface DefuseJudge {
+  prepareJudgedRun(options: { makeDir: () => string }): { args: string[]; env: Record<string, string>; read(): { tallyText: string; markerText: string } };
+  judgedNodeTestArgs(args: readonly string[], judgedArgs: readonly string[]): string[];
+  judgeRun(files: readonly string[], opts: { status: number; pool: boolean; root: string; tallyText: string; markerText: string }): { complete: boolean; given: number; reported: number; tests: number | null; failed: number | null };
+  describeJudgedRun(role: string, verdict: { complete: boolean }, opts: { prefix: string }): string;
+}
+// Loaded from the orchestrator's own checkout when a defuse runs, never at import (sandboxes copy only src/).
+const loadDefuseJudge = (): DefuseJudge => createRequire(import.meta.url)("../../scripts/pure-test-pool.mjs") as DefuseJudge;
+
+export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number, options: ShiftedSuiteOptions & { measure: true }): ShiftedSuiteMeasurement;
+export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number, options?: ShiftedSuiteOptions & { measure?: false }): boolean;
+/** Shared runner: measured TAP counts prove a crossing (W1-T7812) only when the named file
+ *  reaches its own summary (W1-T8380). A partial exit 0 reaches no verdict. */
+export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number, {
+  execFile = execFileSync,
+  measure = false,
+}: ShiftedSuiteOptions & { measure?: boolean } = {}): ShiftedSuiteMeasurement | boolean {
+  readFileSync(resolve(repoRoot, file)); // Node can report a green wrapper for a missing test path.
+  const privateRoot = mkdtempSync(join(tmpdir(), "rmd-shifted-suite-"));
+  try {
+    const judge = loadDefuseJudge();
+    const judged = judge.prepareJudgedRun({ makeDir: () => {
+      const dir = join(privateRoot, "judge");
+      mkdirSync(dir);
+      return dir;
+    } });
+    const env: NodeJS.ProcessEnv = { ...process.env, FK_SHIFT_DAYS: String(shiftDays), TMPDIR: privateRoot };
+    delete env.RMD_SELF_SYNC_DONE; // the test setup refuses to load under it (W1-T3069)
+    delete env.NODE_TEST_CONTEXT; // inherited from a parent `node --test`, it makes this run report nothing and exit 0
+    const args = judge.judgedNodeTestArgs(["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--import", "./scripts/clock-shift.mjs", file], judged.args);
+    // Niced and bounded (test-slot.ts), but no host-wide slot: one file, and a gardener pass must not queue behind coverage.
+    const load = readHostLoad();
+    const child = lowPriorityCommand(process.execPath, testRunArgv(args, testRunConcurrency(load, defaultTestSlots(load.cores))));
+    const childEnv: NodeJS.ProcessEnv = { ...env, ...judged.env };
+    // Shifted proof children are not part of the enclosing CI coverage measurement. Inheriting
+    // NODE_V8_COVERAGE makes an intentional early-exit fixture corrupt the parent coverage report.
+    childEnv.NODE_V8_COVERAGE = "";
+    childEnv.NODE_OPTIONS = (childEnv.NODE_OPTIONS ?? "")
+      .replace(/(^|\s)(?:"--experimental-test-coverage"|'--experimental-test-coverage'|--experimental-test-coverage)(?=\s|$)/g, "$1")
+      .trim();
+    if (!childEnv.NODE_OPTIONS) delete childEnv.NODE_OPTIONS;
+    let output: string;
+    let status = 0;
+    try {
+      output = execFile(child.file, child.args, { cwd: repoRoot, env: childEnv, encoding: "utf8", stdio: "pipe", timeout: DEFUSE_RUN_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 });
+    } catch (error) {
+      const failure = error as { status?: unknown; signal?: unknown; stdout?: string | Buffer };
+      if (typeof failure.status !== "number" || failure.status === 0 || failure.signal) throw error;
+      status = failure.status;
+      output = String(failure.stdout ?? "");
+    }
+    const count = (name: string): number => {
+      const match = new RegExp(`^# ${name} (\\d+)\\s*$`, "m").exec(output);
+      if (!match) throw new Error(`shifted suite ${file}: no # ${name} TAP summary`);
+      const value = Number(match[1]);
+      if (!Number.isSafeInteger(value)) throw new Error(`shifted suite ${file}: invalid # ${name} TAP count`);
+      return value;
+    };
+    const tests = count("tests"), pass = count("pass"), fail = count("fail"), cancelled = count("cancelled");
+    const skipped = count("skipped"), todo = count("todo");
+    if (tests === 0 || cancelled > 0 || pass + fail === 0 || tests !== pass + fail + cancelled + skipped + todo || (status !== 0 && fail === 0) || (status === 0 && fail > 0)) {
+      throw new Error(`shifted suite ${file}: incomplete TAP verdict (exit ${status}, tests ${tests}, pass ${pass}, fail ${fail}, cancelled ${cancelled})`);
+    }
+    const wrapper = `# Subtest: ${relative(repoRoot, resolve(repoRoot, file))}`;
+    if (!output.split("\n").some((line) => line.startsWith("# Subtest: ") && line !== wrapper)) {
+      throw new Error(`shifted suite ${file}: no named tests in TAP verdict`);
+    }
+    const verdict = judge.judgeRun([file], { status, pool: false, root: repoRoot, ...judged.read() });
+    if (verdict.tests !== tests || verdict.failed !== fail) {
+      throw new Error(`shifted suite ${file}: TAP counts disagree with the end-of-run tally (tests ${verdict.tests}, fail ${verdict.failed})`);
+    }
+    if (!verdict.complete && (status === 0 || verdict.reported !== verdict.given)) {
+      throw new Error(`the run reaches no verdict: ${judge.describeJudgedRun("defuse", verdict, { prefix: "test-judge" })}`);
+    }
+    const measurement = { passed: status === 0, pass, tests };
+    return measure ? measurement : measurement.passed;
+  } finally {
+    rmSync(privateRoot, { recursive: true, force: true });
+  }
+}
+
+/** Census adapter; the gardener keeps its existing boolean seam. */
+export function runSuiteShiftedMeasured(repoRoot: string, file: string, shiftDays: number, options: ShiftedSuiteOptions = {}): ShiftedSuiteMeasurement {
+  return runSuiteShifted(repoRoot, file, shiftDays, { ...options, measure: true });
+}
 
 export type GateEdit =
   | { kind: "row"; key: string; to: number | null }
-  | { kind: "demote"; gate: string; rationale: string };
+  | { kind: "demote"; gate: string; rationale: string }
+  | { kind: "defuse"; finding: ExpiringFixture; leadDays: number; urgent: boolean };
 
 export interface GateGardenAction extends GardenAction<GateGardenClass> {
   /** Repo-relative file the edit lands in. */
@@ -62,6 +190,7 @@ export interface GateProbes {
   cl: { listMeasuredFiles: (r: string) => string[]; countCommentLines: (t: string, p: string) => { comments: number }; evaluateCommentLoadRatchet: (c: Json, b: Json) => LedgerVerdict };
   lb: { loadCorpus: (d: string) => unknown[]; computeActiveChars: (e: unknown[]) => { chars: number; activeCount: number } };
   gm: { readGateLists: (t: string) => { required: Set<string> }; evaluateGateMonotonic: (b: unknown, h: unknown) => { ok: boolean; detail: string } };
+  ef?: { MARGIN_DAYS: number; censusExpiringFixtures: (opts: { files: string[]; readFile: (path: string) => string; now: number; thresholdDays: number; marginDays: number }) => { reported: ExpiringFixture[] } };
 }
 
 export async function loadGateProbes(root: string): Promise<GateProbes> {
@@ -71,7 +200,155 @@ export async function loadGateProbes(root: string): Promise<GateProbes> {
     cl: await load("scripts/comment-load-ratchet.mjs"),
     lb: await load("scripts/learnings-budget-ratchet.mjs"),
     gm: await load("scripts/gate-monotonic-check.mjs"),
+    ef: await load("scripts/expiring-fixture-census.mjs"),
   };
+}
+
+function defuseCandidates(deps: GardenerDeps, probes: GateProbes, sources: GateDefuseSources): GateGardenAction[] {
+  if (!probes.ef) throw new Error("gate gardener: expiring-fixture census probe is missing");
+  const run = (cmd: string, args: string[]): string => sources.execFile
+    ? sources.execFile(cmd, args, { cwd: deps.repoRoot, encoding: "utf8" })
+    : execFileSync(cmd, args, { cwd: deps.repoRoot, encoding: "utf8" });
+  const leadDays = sources.leadDays ?? DEFUSE_LEAD_DAYS;
+  const files = run("git", ["ls-files", "test/*.test.ts"]).trim().split("\n").filter(Boolean);
+  if (files.length === 0) return [];
+  const layout = resolveRepoLayout(deps.repoRoot);
+  const { reported } = probes.ef.censusExpiringFixtures({
+    files, readFile: (path) => readFileSync(join(deps.repoRoot, path), "utf8"),
+    now: (deps.clock ?? systemClock).now(), thresholdDays: sources.thresholdDays ?? loadPolicy(join(layout.planDir, "policy.yaml")).values.sweep.staleDays,
+    marginDays: leadDays,
+  });
+  const byFile = new Map<string, ExpiringFixture>();
+  for (const f of reported) {
+    const prior = byFile.get(f.file);
+    if (!prior || f.expiresAt < prior.expiresAt) byFile.set(f.file, f);
+  }
+  if (byFile.size === 0) return [];
+  const queued = existsSync(layout.planMonolith) ? loadPlan(layout.planMonolith).tasks.filter((t) => t.status === "queued" && !t.retirement).map((t) => t.origin) : [];
+  const open = sources.openOrigins ? sources.openOrigins() : (JSON.parse(run("gh", ["pr", "list", "--state", "open", "--limit", "1000", "--json", "body"])) as Array<{ body: string }>).flatMap((pr) => [...pr.body.matchAll(/expiring-fixture:test\/[^\s"'`]+\.test\.ts/g)].map((m) => m[0]));
+  const covered = new Set([...queued, ...open]);
+  const runSuite = sources.runSuite ?? ((file: string, days: number) => runSuiteShifted(deps.repoRoot, file, days));
+  return [...byFile.values()].flatMap((finding): GateGardenAction[] => {
+    const target = `expiring-fixture:${finding.file}`;
+    if (covered.has(target)) {
+      deps.log("gate_garden.defuse_deferred", defuseEvidence(finding, leadDays));
+      return [];
+    }
+    if (!confirmDefuse(deps, finding, run, runSuite)) return [];
+    return [{ class: "defuse", target, file: finding.file,
+      edit: { kind: "defuse", finding, leadDays, urgent: finding.daysLeft <= probes.ef!.MARGIN_DAYS },
+      reason: `${finding.file}:${finding.line} crosses ${finding.threshold} on ${fixedClock(finding.expiresAt).iso()} (${leadDays}-day lead).` }];
+  });
+}
+
+/**
+ * W1-T6036: a field-name census is a CANDIDATE generator. Measured 2026-10-06, the widened census
+ * named 22 `updated_at`/`updatedAt` rows that no threshold ages, so a finding is filed only when its
+ * file passes at the control shift and fails shifted one day past the crossing. Anything else is
+ * ledgered `gate_garden.defuse_unconfirmed`. A verdict is remembered per blob and crossing day; a
+ * run with no verdict is ledgered `run_error` and retried next pass, never read as red.
+ */
+function confirmDefuse(deps: GardenerDeps, f: ExpiringFixture, run: (cmd: string, args: string[]) => string, runSuite: (file: string, days: number) => boolean): boolean {
+  const crossingDate = fixedClock(f.expiresAt).iso();
+  const evidence = { file: f.file, line: f.line, crossingDate };
+  const path = join(deps.stateDir, DEFUSE_VERDICTS_FILE);
+  const memo = (existsSync(path) ? readJson(path) : {}) as Record<string, DefuseVerdict>;
+  const key = `${run("git", ["hash-object", "--", f.file]).trim()}:${crossingDate.slice(0, 10)}`;
+  let verdict = memo[key];
+  if (!verdict) {
+    try {
+      verdict = !runSuite(f.file, DEFUSE_CONTROL_SHIFT_DAYS) ? "control_failed"
+        : runSuite(f.file, Math.ceil(f.daysLeft) + 1) ? "shifted_passed" : "confirmed";
+    } catch (e) {
+      deps.log("gate_garden.defuse_unconfirmed", { ...evidence, outcome: "run_error", error: String(e) });
+      return false;
+    }
+    writeAtomic(path, JSON.stringify({ ...memo, [key]: verdict }, null, 2) + "\n");
+    if (verdict !== "confirmed") deps.log("gate_garden.defuse_unconfirmed", { ...evidence, outcome: verdict });
+  }
+  return verdict === "confirmed";
+}
+
+function defuseEvidence(f: ExpiringFixture, leadDays: number): Record<string, unknown> {
+  return { file: f.file, line: f.line, crossingDate: fixedClock(f.expiresAt).iso(), leadDays };
+}
+
+/** `s` as a BRE matching itself under the executor's `grep -arn`: one pass over a class holding the
+ *  backslash, so an escape this adds is never itself re-escaped and a `\` in a path stays literal. */
+function breLiteral(s: string): string {
+  return s.replace(/[\\.*[^$]/g, "\\$&");
+}
+
+export function renderDefuseShard(action: GateGardenAction, taskId: string) {
+  if (action.edit.kind !== "defuse") throw new Error("gate gardener: mixed defuse plan");
+  const { finding: f, leadDays, urgent } = action.edit;
+  const crossing = fixedClock(f.expiresAt).iso();
+  const title = `${taskId}: ${f.file} stays defused across ${crossing}`;
+  return renderMachineShard({
+    taskId, title: `Defuse the expiring fixture in ${f.file} before ${crossing}`, origin: action.target,
+    files: [f.file], cost: 1, costPopulation: urgent ? [0, 1] : [1],
+    acceptance: [{ claim: `The census reports no crossing for ${f.file} with now past ${crossing}, and the test remains green across the crossing.`,
+      proof: `grep: test("${breLiteral(title)}" in ${f.file}` }],
+    rationale: [
+      `${f.file}:${f.line}: ${f.field} is stamped ${f.stamp}; ${f.threshold} crosses on ${crossing}.`,
+      `Found ${f.daysLeft} days before crossing using a ${leadDays}-day lead horizon.`,
+      "Use an exemption only when this case is judged against an injected clock; prove it by ageing the fixture across the threshold and rerunning the test, as #8673 did.",
+      "Otherwise make the stamp relative to the test's clock. Moving a fixed date only re-arms the fixture.",
+      "Add the task's regression to this fixture file: run the census immediately before and after crossing, and run the affected case at both clocks.",
+    ],
+  });
+}
+
+function prepareDefuseTaskIds(ws: GardenCheckout, count: number, deps: GardenerDeps, sources: GateDefuseSources, async = false) {
+  if (async && count > 0 && !sources.mintTaskId) throw new Error("gate gardener: async task-id minter is required for defuse filing");
+  return prepareGardenTaskIds(ws, count, sources.mintTaskId ?? ((branch) => {
+    const args = ["--import", "tsx", join(deps.repoRoot, "src/run-task.ts"), "next-task-id", "--reserve", "--branch", branch];
+    const output = sources.execFile
+      ? sources.execFile(process.execPath, args, { cwd: deps.repoRoot, encoding: "utf8" })
+      : execFileSync(process.execPath, args, { cwd: deps.repoRoot, encoding: "utf8" });
+    const id = /^RESERVED (W1-T\d+) on origin/m.exec(output)?.[1];
+    if (!id) throw new Error("gate gardener: task-id reservation returned no held id");
+    return id;
+  }), async);
+}
+
+function assertDefuseAdmission(action: GateGardenAction, deps: GardenerDeps, sources: GateDefuseSources): void {
+  const draft = renderDefuseShard(action, "NEW-1");
+  if (draft.refused) throw new Error(`gate gardener: defuse shard refused (${draft.refused})`);
+  const plan = loadPlanFromYaml(draft.text, "defuse-admission");
+  const reasons = (sources.admissionViolations ?? machineFilingAdmissionViolations)(plan.tasks[0]!, {
+    plan, releasedIds: new Set(), pathExists: (path) => existsSync(join(deps.repoRoot, path)),
+  });
+  if (reasons.length) throw new Error(`gate gardener: defuse shard refused (machine-filing-admission: ${reasons.join("; ")})`);
+}
+
+function applyDefuseActions(ws: GardenCheckout, actions: GateGardenAction[], deps: GardenerDeps, sources: GateDefuseSources, heldIds?: readonly string[]) {
+  if (!ws.branch) throw new Error("gate gardener: filing workspace has no branch for task-id reservation");
+  const paths: string[] = [];
+  for (const [index, action] of actions.entries()) {
+    assertDefuseAdmission(action, deps, sources);
+    const taskId = heldIds ? heldIds[index] : (prepareDefuseTaskIds(ws, 1, deps, sources) as string[])[0];
+    if (!taskId) throw new Error("gate gardener: task-id reservation returned no held id");
+    const rendered = renderDefuseShard(action, taskId);
+    if (rendered.refused) throw new Error(`gate gardener: defuse shard refused (${rendered.refused})`);
+    const stem = action.file.replace(/^test\//, "").replace(/\.test\.ts$/, "").replace(/[^a-zA-Z0-9-]/g, "-");
+    const path = join(resolveRepoLayout(ws.root).planDir, "tasks.d", `${taskId}-defuse-${stem}.yaml`);
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, rendered.text);
+    paths.push(relative(ws.root, path));
+  }
+  const land = ws.land.bind(ws);
+  ws.land = (opts) => {
+    const url = land(opts);
+    if (url) for (const a of actions) {
+      if (a.edit.kind === "defuse") deps.log("gate_garden.defuse_filed", defuseEvidence(a.edit.finding, a.edit.leadDays));
+    }
+    return url;
+  };
+  return { paths, title: `chore(plan): file ${actions.length} expiring fixture remedy task(s)`, body: [
+    "The gate gardener files expiring fixture remedies before the CI margin.", "", "## Acceptance",
+    ...actions.flatMap((a, i) => [`- claim: ${a.target} has a machine-filed remedy`, `  proof: grep: ${a.target} in ${paths[i]}`]),
+  ].join("\n") };
 }
 
 /** TIGHTEN and REFRESH rows for the two per-file ledgers, from each ratchet's own evaluation. */
@@ -179,7 +456,10 @@ export function applyGateActions(root: string, actions: GateGardenAction[], head
   for (const a of actions) byFile.set(a.file, [...(byFile.get(a.file) ?? []), a]);
   for (const [file, list] of byFile) {
     let text = readFileSync(join(root, file), "utf8");
-    for (const a of list) text = a.edit.kind === "row" ? editBaselineRow(text, a.edit.key, a.edit.to) : demoteInCiGate(text, a.edit.gate, a.edit.rationale);
+    for (const a of list) {
+      if (a.edit.kind === "defuse") throw new Error("defuse actions require machine filing");
+      text = a.edit.kind === "row" ? editBaselineRow(text, a.edit.key, a.edit.to) : demoteInCiGate(text, a.edit.gate, a.edit.rationale);
+    }
     if (file === CI_GATE_YML) {
       // The gate-monotonic check itself must read the result as a REVIEWED demotion.
       const verdict = gm.evaluateGateMonotonic(gm.readGateLists(readFileSync(join(root, file), "utf8")), gm.readGateLists(text));
@@ -194,7 +474,7 @@ export function applyGateActions(root: string, actions: GateGardenAction[], head
 }
 
 function prBody(actions: GateGardenAction[], heading: string): string {
-  const proofs = actions.flatMap((a) =>
+  const proofs = actions.flatMap((a) => a.edit.kind === "defuse" ? [] :
     a.edit.kind === "demote"
       ? [`- claim: ${a.edit.gate} is moved to ADVISORY with a reviewed rationale`, `  proof: grep: GATE_RATIONALE: "W1-T4116 gate gardener: ${a.edit.gate} refused 0 in ${CI_GATE_YML}`]
       : a.edit.to === null
@@ -214,23 +494,35 @@ function prBody(actions: GateGardenAction[], heading: string): string {
 }
 
 /** The repo's gates as a gardener spec, over probes loaded by {@link loadGateProbes}. */
-export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes): GardenSpec<GateGardenClass, GateInventory, GateGardenAction, GardenCheckout> {
+export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes, sources: GateDefuseSources = {}): GardenSpec<GateGardenClass, GateInventory, GateGardenAction, GardenCheckout> {
   const clock = deps.clock ?? systemClock;
   return {
     name: "gate",
+    landingRefusal: machineShardLandingGuard({ ...deps, admissionViolations: sources.admissionViolations }),
     classes: GATE_GARDEN_CLASSES,
     review: { demote: "demoting a required gate stops it blocking merges, which is a judgement call." },
+    decision: ["defuse"],
     cheapFingerprint: () => {
-      const head = execFileSync("git", ["-C", deps.repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      const head = checkoutHeadStamp(deps.repoRoot, clock);
       const report = gateFireRatesPath(deps.stateDir);
-      return `${head}:${existsSync(report) ? readFileSync(report, "utf8").length : 0}`;
+      return `${head}:${existsSync(report) ? readFileSync(report, "utf8").length : 0}:${clock.iso().slice(0, 10)}`;
     },
-    inventory: () => gateInventory(deps.repoRoot, deps.stateDir, probes),
+    inventory: () => {
+      const inv = gateInventory(deps.repoRoot, deps.stateDir, probes);
+      if (!existsSync(join(deps.stateDir, "GATE_OFF-defuse"))) inv.candidates.push(...defuseCandidates(deps, probes, sources));
+      return inv;
+    },
     fingerprint: (inv) => inv.candidates.map((a) => a.target).join(","),
     metric: (inv) => inv.tally,
     candidates: (inv) => inv.candidates,
     scorecard: (inv, plan) => ({ candidates: inv.candidates.length, tally: inv.tally, proposed: plan.actions.length }),
-    apply: (ws, plan) => {
+    prepare: (ws, plan, async) => {
+      const actions = plan.acting[0] === "defuse" ? plan.actions : [];
+      for (const action of actions) assertDefuseAdmission(action, deps, sources);
+      return prepareDefuseTaskIds(ws, actions.length, deps, sources, async);
+    },
+    apply: (ws, plan, _scorecard, heldIds) => {
+      if (plan.acting[0] === "defuse") return applyDefuseActions(ws, plan.actions, deps, sources, heldIds);
       const heading = `## Pass ${clock.iso()}`;
       const paths = applyGateActions(ws.root, plan.actions, heading, probes);
       return { paths, title: `chore(gates): the gate gardener proposes to ${plan.acting[0]} ${plan.actions.length} gate row(s)`, body: prBody(plan.actions, heading) };

@@ -16,6 +16,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { installFixtureDuGuard } from "./helpers/fixture-du.js";
 
 const SCRIPT = "scripts/fleet-heartbeat.sh";
 
@@ -27,11 +28,15 @@ function isoAgo(seconds: number): string {
 function beat(lines: string[]): Record<string, string> {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t2961-`));
   try {
+    const bin = join(root, "bin"), home = join(root, "home");
+    mkdirSync(bin); mkdirSync(home);
+    installFixtureDuGuard(bin, [root]);
     mkdirSync(join(root, "state"), { recursive: true });
     writeFileSync(join(root, "state", "ledger.ndjson"), lines.join("\n") + "\n");
     const r = spawnSync("bash", [SCRIPT], {
       encoding: "utf8",
-      env: { ...process.env, RMD_HEARTBEAT_DRY_RUN: "1", RMD_ROOT: root },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, HOME: home,
+        RMD_HEARTBEAT_DRY_RUN: "1", RMD_ROOT: root },
     });
     const out: Record<string, string> = {};
     for (const line of (r.stdout || "").split("\n")) {

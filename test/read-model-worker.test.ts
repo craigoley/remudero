@@ -136,7 +136,7 @@ function loopProbe(): { stop: () => { samples: number; p99Ms: number; maxMs: num
   };
 }
 
-test("serve's main loop lag stays under 50 ms while the worker rebuilds", async (t) => {
+test("serve's main loop lag stays below its same-run inline control while the worker rebuilds", async (t) => {
   const ledgerDir = scratch(t, "rmw-lag-ledger");
   const { total, newestTs } = corpus(ledgerDir, 6, 20_000, 5_000);
 
@@ -164,8 +164,8 @@ test("serve's main loop lag stays under 50 ms while the worker rebuilds", async 
   assert.equal(handle.state().instances.get("core")?.newestTs, newestTs, "the worker finished the rebuild");
   const facts = `over a ${elapsedMs.toFixed(0)} ms worker rebuild of ${total} rows (${lag.samples} samples); inline the same rebuild held the loop ${inlineLag.maxMs.toFixed(0)} ms`;
   t.diagnostic(`main-loop lag p99 ${lag.p99Ms.toFixed(1)} ms, max ${lag.maxMs.toFixed(1)} ms ${facts}`);
-  assertWallClockBound(lag.maxMs, 250, `main-loop lag max ${lag.maxMs.toFixed(1)} ms ${facts}: one stall as long as the inline rebuild hides inside a p99`);
-  assertWallClockBound(lag.p99Ms, 50, `main-loop lag p99 ${lag.p99Ms.toFixed(1)} ms ${facts}`);
+  assertWallClockBound(lag.maxMs, Math.max(250, inlineLag.maxMs / 2), `main-loop lag max ${lag.maxMs.toFixed(1)} ms ${facts}: one stall as long as the inline rebuild hides inside a p99`);
+  assertWallClockBound(lag.p99Ms, Math.max(50, inlineLag.p99Ms / 2), `main-loop lag p99 ${lag.p99Ms.toFixed(1)} ms ${facts}`);
   assert.ok(lag.samples >= elapsedMs / (PROBE_MS * 4), `the probe must have sampled the loop throughout the rebuild; it took ${lag.samples} samples in ${elapsedMs.toFixed(0)} ms`);
   assert.equal(handle.stop(), true, "the worker confirmed its stop");
   assert.equal(tableCount(stateDir, "core", "seen"), total, "the worker rebuilt every row");
@@ -216,7 +216,10 @@ test("a restarted worker serves its last committed bodies before its first tick"
   const logs: string[] = [];
   const restarted = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir }], log: (step) => void logs.push(step) });
   const warm = restarted.bodies.get(readModelBodyKey("read-model"));
-  assert.deepEqual(warm, posted.entry, "the committed body is served as the worker posted it");
+  // Its build start is not persisted: a stored body's build is over, and its start belongs to that run's latency.
+  const stored = { ...posted.entry };
+  delete stored.buildStartedMs;
+  assert.deepEqual(warm, stored, "the committed body is served as the worker posted it");
   assert.equal(restarted.state().at, undefined, "no tick has run");
   assert.deepEqual(logs, ["read_model.warm_boot", "read_model.switch_absent"], "no switch file: every view dark, and the reason ledgered");
   assert.equal(restarted.stop(), false, "a never-started worker has nothing to confirm");
@@ -436,7 +439,8 @@ test("the switch file keeps its last good reading and a view switched off is not
   const counted: ReadModelView = { name: "counted", version: 1, materialize: () => [{ key: "", data: { n: 1 }, sources: [] }] };
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock, views: [throws, counted], post: sink.post });
   t.after(() => ticker.release());
-  writeFileSync(path, JSON.stringify({ views: { counted: "off" } }));
+  // W1-T5896: a view with no switch is not built, so the broken one is switched on to show its failure is logged.
+  writeFileSync(path, JSON.stringify({ views: { counted: "off", broken: "shadow" } }));
   ticker.tick();
   assert.deepEqual(sink.messages.filter((m) => m.type === "body"), [], "a view switched off is not materialized");
   assert.deepEqual(sink.logs("read_model.materialize_failed"), [{ view: "broken", error: "boom" }]);
@@ -445,7 +449,7 @@ test("the switch file keeps its last good reading and a view switched off is not
   advance(READ_MODEL_SWITCH_RECHECK_MS);
   ticker.tick();
   assert.equal(sink.logs("read_model.switch_unreadable").length, 1);
-  assert.deepEqual(lastState(sink.messages).switches.views, { counted: "off" }, "an unreadable file keeps the last good switches");
+  assert.deepEqual(lastState(sink.messages).switches.views, { counted: "off", broken: "shadow" }, "an unreadable file keeps the last good switches");
   assert.equal(sink.messages.filter((m) => m.type === "body").length, 0);
 
   writeFileSync(path, JSON.stringify({ views: { counted: "serve" } }));

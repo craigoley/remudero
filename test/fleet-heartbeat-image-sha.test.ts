@@ -29,6 +29,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { installFixtureDuGuard } from "./helpers/fixture-du.js";
 import { resolveDoctrineForReader } from "../src/lib/learnings.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -95,6 +96,7 @@ function runBeat(opts: BeatOpts = {}): Beat {
   const scriptsDir = join(dir, "scripts");
   const root = join(dir, "root");
   mkdirSync(binDir, { recursive: true });
+  installFixtureDuGuard(binDir, [dir]);
   mkdirSync(scriptsDir, { recursive: true });
   mkdirSync(join(root, "state"), { recursive: true });
   mkdirSync(join(dir, "home"), { recursive: true });

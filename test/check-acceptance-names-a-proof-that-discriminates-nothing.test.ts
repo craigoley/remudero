@@ -149,9 +149,9 @@ test("check-acceptance without a base ref is unchanged", () => {
   }
 });
 
-// ── Acceptance #4: a four-criterion body builds one base worktree ────────────────────────────────
+// ── Acceptance #4: a four-criterion grep body builds NO base worktree ────────────────────────────
 
-test("a four-criterion body builds one base worktree", () => {
+test("a four-criterion grep body builds no base worktree at all", () => {
   const head = headFixture(`this line carries ${NEEDLE}\n`);
   try {
     bodyFile(head, 4);
@@ -164,7 +164,8 @@ test("a four-criterion body builds one base worktree", () => {
       },
     });
 
-    assert.equal(addWorktreeCalls, 1, "N criteria must not build N worktrees — one merge-base tree for the whole body");
+    // Never one per criterion, and for `grep:` proofs not even one: each reads its base blob.
+    assert.equal(addWorktreeCalls, 0, "a grep-only body reads its base blobs — no merge-base worktree for the whole body");
   } finally {
     rmSync(head, { recursive: true, force: true });
   }

@@ -87,7 +87,66 @@ test("invalid byte and row ceilings are refused before the corpus is opened", as
   await assert.rejects(readRetroLedgerNdjson("/not-opened", { maxRows: 0 }), /maxRows must be a positive safe integer/);
 });
 
-test("771 rotations complete under a 128 MiB old-space ceiling", () => {
+test("a live retention cursor preserves newest ownership through duplicates and one-row windows", async () => {
+  const { root, state } = stateDir("retro-live-retention-cursor-");
+  try {
+    const rows = Array.from({ length: 40 }, (_, i) => ({ ts: "2026-09-01T00:00:00.000Z",
+      step: "cursor", value: ["a", "b", "c", "a", "a", "d", "b"][i % 7] }));
+    writePlain(join(state, "ledger.ndjson"), rows);
+    for (const maxRows of [1, 2, 4]) {
+      const expected = new Map<string, number>();
+      let droppedRows = 0;
+      let droppedBytes = 0;
+      let duplicatesCollapsed = 0;
+      let peak = 0;
+      for (const row of rows) {
+        const line = JSON.stringify(row);
+        if (expected.delete(line)) duplicatesCollapsed++;
+        while (expected.size >= maxRows) {
+          const [oldest, cost] = expected.entries().next().value!;
+          expected.delete(oldest);
+          droppedRows++;
+          droppedBytes += cost;
+        }
+        expected.set(line, Buffer.byteLength(line) + 1);
+        peak = Math.max(peak, expected.size);
+      }
+      const read = await readRetroLedgerNdjson(state, { maxRows, maxBytes: 1_000_000 });
+      assert.equal(read.ndjson, [...expected.keys()].join("\n"));
+      assert.equal(read.rowsKept, expected.size);
+      assert.equal(read.droppedRows, droppedRows);
+      assert.equal(read.droppedBytes, droppedBytes);
+      assert.equal(read.duplicatesCollapsed, duplicatesCollapsed);
+      assert.equal(read.dedupeEntriesPeak, peak);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("retro eviction opens one live cursor rather than restarting it for every dropped row", async (t) => {
+  const { root, state } = stateDir("retro-cursor-cost-");
+  try {
+    const rows = Array.from({ length: 101 }, (_, i) => ({ ts: "2026-09-01T00:00:00.000Z",
+      step: "cursor-cost", value: i }));
+    writePlain(join(state, "ledger.ndjson"), rows);
+    const cursors = new Map<Map<unknown, unknown>, number>();
+    const entries = Map.prototype.entries;
+    const spy = t.mock.method(Map.prototype, "entries", function (this: Map<unknown, unknown>) {
+      cursors.set(this, (cursors.get(this) ?? 0) + 1);
+      return entries.call(this);
+    });
+    let read;
+    try { read = await readRetroLedgerNdjson(state, { maxRows: 2, maxBytes: 1_000_000 }); }
+    finally { spy.mock.restore(); }
+    assert.equal(read.droppedRows, 99, "the actual reader really evicted the fixture rows");
+    const matching = [...cursors].filter(([map]) => [...map.keys()].join("\n") === read.ndjson);
+    assert.equal(matching.length, 1, "the real retained identity map is observed");
+    assert.equal(matching[0]![1], 1, "eviction never restarts from the first deleted slot");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("771 rotations complete under a 128 MiB old-space ceiling and a bounded young generation", () => {
   const { root, state } = stateDir("retro-771-rotations-");
   try {
     let index = 0;
@@ -113,14 +172,22 @@ test("771 rotations complete under a 128 MiB old-space ceiling", () => {
 
     const retroUrl = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "lib", "retro.ts")).href;
     const childSource = [
+      'import assert from "node:assert/strict";',
+      'import { getHeapStatistics } from "node:v8";',
       `import { readRetroLedgerNdjson } from ${JSON.stringify(retroUrl)};`,
+      // Node's default young-generation size depends on the host. Pin a smaller
+      // semi-space: V8's three-space multiplier keeps the TOTAL heap ceiling at
+      // 152 MiB, rather than allowing 320 MiB on the standard Linux builder.
+      // Neither the existing old-space cap, corpus nor 20-second bound changes.
+      'const heapLimit = getHeapStatistics().heap_size_limit;',
+      'assert.ok(heapLimit <= (128 + 3 * 8) * 1024 * 1024, `total heap ceiling was ${heapLimit} bytes`);',
       `const read = await readRetroLedgerNdjson(${JSON.stringify(state)}, { maxBytes: 2 * 1024 * 1024 });`,
-      "process.stdout.write(JSON.stringify({ rowsKept: read.rowsKept, droppedRows: read.droppedRows, dedupeEntriesPeak: read.dedupeEntriesPeak, heapUsed: process.memoryUsage().heapUsed }));",
+      "process.stdout.write(JSON.stringify({ rowsKept: read.rowsKept, droppedRows: read.droppedRows, dedupeEntriesPeak: read.dedupeEntriesPeak, heapUsed: process.memoryUsage().heapUsed, heapLimit }));",
     ].join("\n");
     const env = { ...process.env, NODE_V8_COVERAGE: undefined };
     const child = spawnSync(
       process.execPath,
-      ["--max-old-space-size=128", "--import", "tsx", "--input-type=module", "-e", childSource],
+      ["--max-old-space-size=128", "--max-semi-space-size=8", "--import", "tsx", "--input-type=module", "-e", childSource],
       { cwd: join(dirname(fileURLToPath(import.meta.url)), ".."), env, encoding: "utf8", timeout: 20_000 },
     );
 
@@ -130,6 +197,7 @@ test("771 rotations complete under a 128 MiB old-space ceiling", () => {
     assert.equal(result.rowsKept! + result.droppedRows!, index);
     assert.ok(result.dedupeEntriesPeak! < index / 40, `peak Set entries were ${result.dedupeEntriesPeak}`);
     assert.ok(result.heapUsed! < 128 * 1024 * 1024, `child used ${result.heapUsed} heap bytes`);
+    assert.ok(result.heapLimit! <= (128 + 3 * 8) * 1024 * 1024, `total heap ceiling was ${result.heapLimit} bytes`);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

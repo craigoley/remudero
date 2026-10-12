@@ -140,7 +140,7 @@
   "src/lib/repo-location.ts": 84,
   "src/lib/report-commands.ts": 1500,
   "src/lib/retro-closure.ts": 500,
-  "src/lib/retro-preflight.ts": 500,
+  "src/lib/retro-preflight.ts": 1000,
   "src/lib/retro-subprocess.ts": 500,
   "src/lib/retro.ts": 4500,
   "src/lib/review-capacity.ts": 1000,

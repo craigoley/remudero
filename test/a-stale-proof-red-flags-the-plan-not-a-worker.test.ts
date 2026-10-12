@@ -16,7 +16,7 @@ import {
   type OpenPrView,
   type ProofDiscriminationEvidence,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 const TASK = "W1-T4943-FIXTURE";
 const UNTRAILERED_BODY = `Summary\n\n## Acceptance\n\n- claim: "it works"\n  proof: "${"grep: export function renderViews in src/lib/views.ts"}"\n`;

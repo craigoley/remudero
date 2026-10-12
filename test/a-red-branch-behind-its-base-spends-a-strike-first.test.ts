@@ -22,7 +22,7 @@ import {
   ghUpdateBranchArgv,
   redBaseRefreshFactsFromRest,
   runFixRung,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 
 const MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 };
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -127,6 +127,8 @@ test("W1-T2671: the reversed compare maps the base-only gap and exact failing te
   assert.deepEqual(calls, [
     ["api", "repos/acme/remudero/pulls/2671"],
     ["api", "repos/acme/remudero/compare/branch-head...main"],
+    // W1-T7445: behind with a base change, so the PR's own added lines are read too.
+    ["api", "--paginate", "--slurp", "repos/acme/remudero/pulls/2671/files?per_page=100"],
   ]);
   assert.deepEqual(facts, {
     behindBy: 7,

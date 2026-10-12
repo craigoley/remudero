@@ -18,6 +18,10 @@ import { test } from "node:test";
 import { buildSweepHook, runInflightLockSweepRung } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 
+// Keep synthetic dead holders outside the OS PID range. A recycled small PID can belong to an
+// unrelated runner process, making the stale-lock fixture intermittently look live.
+const DEAD_PID = Number.MAX_SAFE_INTEGER;
+
 function rootWithLocks(locks: Array<{ taskId: string; pid: number }>): string {
   const root = mkdtempSync(join(tmpdir(), "rmd-inflight-sweep-"));
   const dir = join(root, "state", "inflight");
@@ -40,7 +44,7 @@ test("the rung reaps a DEAD holder's lock and keeps a live one, on a cadence a b
   // A dead holder that would otherwise linger until the next daemon restart, beside a live one
   // that must survive — the sweep must not reap the run that is actually working.
   const root = rootWithLocks([
-    { taskId: "W1-T900", pid: 65304 },      // dead (the observed lingering-lock shape)
+    { taskId: "W1-T900", pid: DEAD_PID },  // dead (the observed lingering-lock shape)
     { taskId: "W1-T901", pid: process.pid }, // alive — this process
   ]);
   const { log, lines } = capture();
@@ -82,7 +86,7 @@ test("a missing inflight directory sweeps to an empty result without creating on
 });
 
 test("reaped_ids is bounded so a mass reap cannot write an unbounded ledger line", () => {
-  const many = Array.from({ length: 14 }, (_, i) => ({ taskId: `W1-T9${String(i).padStart(2, "0")}`, pid: 65304 }));
+  const many = Array.from({ length: 14 }, (_, i) => ({ taskId: `W1-T9${String(i).padStart(2, "0")}`, pid: DEAD_PID }));
   const root = rootWithLocks(many);
   const { log, lines } = capture();
   const result = runInflightLockSweepRung({ root } as Config, log);
@@ -105,7 +109,7 @@ test("cadence: buildSweepHook (the daemon's per-poll sweep) reaps a stale lock �
   writeFileSync(join(bin, "gh"), '#!/bin/sh\necho "[]"\n', { mode: 0o755 });
   const oldPath = process.env.PATH;
   process.env.PATH = `${bin}:${oldPath}`;
-  const root = rootWithLocks([{ taskId: "W1-T902", pid: 65304 }]);
+  const root = rootWithLocks([{ taskId: "W1-T902", pid: DEAD_PID }]);
   try {
     const ledgerPath = join(root, "ledger.ndjson");
     const log = (step: string, extra: Record<string, unknown> = {}) =>

@@ -7,7 +7,9 @@ import { loadProposalRegistry } from "../src/lib/inbox.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { WORKER_SETTING_SOURCES } from "../src/lib/worker.js";
 import {
+  describeSkillInjectionReachability,
   describeWorkerSkillReachability,
+  PROCEDURAL_STEP_TEXT,
   proceduralCandidateHash,
   READ_WRAPPER_RE,
   renderSkillDraft,
@@ -62,7 +64,10 @@ test("renderSkillDraft: a candidate with two or more supporting runs drafts a SK
   assert.match(draft!.markdown, /^applies-to: implement$/m);
   assert.match(draft!.name, /^implement-clean-single-strike/);
   assert.match(draft!.markdown, /## Procedure/);
-  assert.match(draft!.markdown, /Resolve the task on the first attempt/);
+  // W1-T4270 design (iii): a mixed candidate drafts ONLY its eligible signal's step —
+  // clean_single_strike names the merge outcome, not a technique, so its step is dropped.
+  assert.match(draft!.markdown, /Execute every acceptance criterion as a real, observed proof/);
+  assert.doesNotMatch(draft!.markdown, /Resolve the task on the first attempt/);
   assert.match(draft!.markdown, /## Evidence/);
   assert.match(draft!.markdown, /\[src: run#P1\]/);
   assert.match(draft!.markdown, /\[src: run#P2\]/);
@@ -74,10 +79,12 @@ test("renderSkillDraft: a single-run candidate renders NOTHING — one success i
   assert.equal(renderSkillDraft(candidate({ supportingRuns: 1, runIds: ["P1"] })), undefined);
 });
 
-test("renderSkillDraft: an unmapped signal key still renders (Rule 2 — the signal set is DATA), using the raw key as its own step", () => {
-  const draft = renderSkillDraft(candidate({ shapeKey: "implement:novel_shape", signals: ["novel_shape"] }));
-  assert.ok(draft);
-  assert.match(draft!.markdown, /- novel_shape/);
+test("renderSkillDraft: an unmapped signal key drafts NOTHING (W1-T4270 — an uncatalogued signal is never promoted to an injectable skill)", () => {
+  assert.equal(renderSkillDraft(candidate({ shapeKey: "implement:novel_shape", signals: ["novel_shape"] })), undefined);
+  // Beside an eligible signal, the uncatalogued key is dropped from the steps, never rendered raw.
+  const mixed = renderSkillDraft(candidate({ shapeKey: "implement:fully_executed_proof+novel_shape", signals: ["fully_executed_proof", "novel_shape"] }));
+  assert.ok(mixed);
+  assert.doesNotMatch(mixed!.markdown, /- novel_shape/);
 });
 
 test("renderSkillDrafts renders 'none' when nothing cleared the floor, and names each draft otherwise", () => {
@@ -91,7 +98,9 @@ test("renderSkillDrafts renders 'none' when nothing cleared the floor, and names
 // ── (2) scanSkillDraft: a tool, host or path outside the allowlist is refused, naming the line ─
 
 test("scanSkillDraft: a well-formed draft against the shipped worker.json shape passes clean", () => {
-  const draft = renderSkillDraft(candidate())!;
+  // Well-formed = no Procedure step that only restates its mined outcome (W1-T4283 refuses the
+  // clean_single_strike step), so the allowlist check is exercised on an actionable-only draft.
+  const draft = renderSkillDraft(candidate({ shapeKey: "implement:fully_executed_proof", signals: ["fully_executed_proof"] }))!;
   const allowlist = workerAllowlistFromSettings(fixtureSettings());
   assert.deepEqual(scanSkillDraft(draft, allowlist), { ok: true });
 });
@@ -255,6 +264,47 @@ test("describeWorkerSkillReachability: settingSources including 'project' makes 
   assert.match(result.reason, /discoverable/);
 });
 
+test("a drafted skill whose markdown carries a valid applies-to is reachable through prompt injection after approval", () => {
+  const draft = renderSkillDraft(candidate())!;
+  const result = describeSkillInjectionReachability(draft);
+  assert.equal(result.reachable, true);
+  assert.match(result.reason, /implement/);
+  assert.match(result.reason, /loadInjectableSkills/);
+  assert.match(result.reason, /selectSkillsForTask/);
+  assert.match(result.reason, /after approval/);
+  assert.doesNotMatch(result.reason, /settingSources/);
+});
+
+test("a drafted skill with no applies-to frontmatter line is not reachable through prompt injection", () => {
+  const draft = renderSkillDraft(candidate({ taskType: "unsupported" }))!;
+  const result = describeSkillInjectionReachability(draft);
+  assert.equal(result.reachable, false);
+  assert.match(result.reason, /no non-empty applies-to/);
+  assert.doesNotMatch(result.reason, /settingSources/);
+});
+
+test("describeWorkerSkillReachability s own existing contract false for an empty array and true for project is unchanged", () => {
+  assert.equal(describeWorkerSkillReachability([]).reachable, false);
+  assert.equal(describeWorkerSkillReachability(["project"]).reachable, true);
+});
+
+test("draft injection reachability reads only frontmatter and normalizes comma-separated task types", () => {
+  const draft = renderSkillDraft(candidate())!;
+  for (const markdown of [
+    "## Procedure\n\napplies-to: implement\n",
+    "---\nname: empty\napplies-to: , ,\n---\n\nprocedure\n",
+    "---\nname: empty\napplies-to: \n---\n\nprocedure\n",
+  ]) {
+    assert.equal(describeSkillInjectionReachability({ ...draft, markdown }).reachable, false);
+  }
+  const result = describeSkillInjectionReachability({
+    ...draft,
+    markdown: "---\napplies-to: IMPLEMENT, diagnose\n---\n\nprocedure\n",
+  });
+  assert.equal(result.reachable, true);
+  assert.match(result.reason, /implement, diagnose/);
+});
+
 // ── (5) the retro's gather renders skill drafts beside the fact-line candidates ────────────────
 // (the grep proof `renderSkillDraft(` in src/lib/retro.ts is exercised directly in test/retro.test.ts
 // and by `git grep`; skill-workshop.test.ts owns the unit behaviour renderSkillDraft/renderSkillDrafts
@@ -312,7 +362,10 @@ test("scanSkillDraft: a single-star deny glob stays inside ONE path segment, whe
 
 test("stageSkillDraft refuses a draft whose every Procedure step only restates its mining signal", () => {
   const registryPath = join(tmpDir("skill-workshop-outcome-only-"), "inbox-proposals.json");
-  const draft = renderSkillDraft(candidate())!;
+  // W1-T4270: the renderer drops the outcome label's step, so the outcome-only shape (as staged
+  // before it) is rebuilt by swapping the eligible step back out.
+  const mixed = renderSkillDraft(candidate())!;
+  const draft = { ...mixed, markdown: mixed.markdown.replace(`- ${PROCEDURAL_STEP_TEXT.fully_executed_proof}`, `- ${PROCEDURAL_STEP_TEXT.clean_single_strike}`) };
   const result = stageSkillDraft(registryPath, draft, workerAllowlistFromSettings(fixtureSettings()), REACHABLE_NO);
   assert.equal(result.refused, true);
   assert.equal(result.staged, false);

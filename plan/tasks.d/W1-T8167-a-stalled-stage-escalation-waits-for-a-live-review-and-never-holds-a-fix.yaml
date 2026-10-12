@@ -1,0 +1,81 @@
+- id: W1-T8167
+  title: "A STALLED-STAGE ESCALATION NEVER FIRES ON A REVIEW STILL RUNNING, AND NEVER STANDS DOWN A FIX ROUND — the awaiting-review BACKSTOP 30 opened needs-human issue #10874 for PR #10848 while the review admitted at 13:10:45Z was still running, and that issue then stood the fix rung down twice at 14:00Z as 'this exact (task, PR, head, cause)'"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a stalled-stage escalation is gated on a live owner and keyed by its own cause
+  band_meaning: span
+  origin: "operator approval 2026-10-11 (\"go with your recommendations\"): the W1-T8088 note's separate finding (PR #10848, issue #10874)"
+  plan_refs: [W1-T5900, W1-T8088, W1-T195, W1-T2799, W1-T3579, W1-T913, W1-T2844]
+  files: [src/lib/sweep.ts, src/lib/escalate.ts, test/a-stalled-stage-escalation-waits-for-a-live-review-and-never-holds-a-fix.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-11, core daemon ledger archives on the fleet host (read-only, bounded greps), PR #10848 (W1-T7724),
+    head 37d03bc:
+      - 13:06:37Z: the stage `awaiting-review` begins (`blocker_since`).
+      - 13:10:45Z: `sweep.review_admitted`. The review ran until about 13:51Z (W1-T8088's rationale: worker_duration_ms
+        2347437).
+      - 13:40:28Z: `pr.stuck` with blocker awaiting-review, blocker_age_ms 2030765, diagnosis "unknown signature",
+        bound_minutes 30, bound_kind BACKSTOP. Needs-human issue #10874 opened at about 13:41Z. The review was still
+        running.
+      - 13:55:54Z: the review posted capped, and the blocker became plan-proof-unrunnable.
+      - 14:00:12Z and 14:00:24Z: `fix.stood_down`, site rung.strike, strike 1: "a needs-human escalation for this exact
+        (task, PR, head 37d03bc…, cause) is ALREADY OPEN and awaiting a human (…/issues/10874)". So a stall report about
+        the REVIEW stage blocked the repair of a different blocker.
+    W1-T8088 fixes the dead-owner pending that kept #10848 reading "owner proven dead". Its note names this as a
+    separate finding. Even with W1-T8088, a review that runs past 30 minutes still trips the backstop.
+    READ on origin/main 233304449:
+      - `DEFAULT_SWEEP_POLICY.stageBackstops` (src/lib/sweep.ts:5818) sets "awaiting-review" to a fixed BACKSTOP of 30
+        minutes. `reportStuckStage` (:14016) escalates once the blocker is older than that. For conflict and own-red it
+        first checks for a repair already under way (:14028-14032). For awaiting-review it checks for nothing, not even
+        a `sweep.review_admitted` row for this head with no `review.posted` after it.
+      - The sweep already observes review length: `noteReviewDuration` (:13795) keeps recent review durations for the
+        idle cadence. The backstop does not read them.
+      - `reportStuckStage` calls `deps.escalate` (:14086 onward) with no cause. The fix rung's pre-strike probe
+        (src/run-task.ts:11951) keys on cause `escalationCause(...)`, which is "review" for a PR with no conflict and
+        no red CI, as #10848 was. It matches open issues through `matchDuplicateEscalation`
+        (src/lib/escalate.ts:1066), where cause is an optional dimension that vetoes only when BOTH sides carry one.
+        The stuck issue carries none, so it matches the fix rung's (task, PR, head) and
+        `openEscalationStandDownReason` (src/run-task.ts:9745) stands the strike down. `EscalationCause`
+        (src/lib/escalate.ts:215) has only "review", "ci" and "conflict", so a stall has no cause of its own to give.
+  design: |
+    1. A LIVE REVIEW IS NOT A STALL. Before escalating an awaiting-review stage, `reportStuckStage` looks for a live
+       owner: a `sweep.review_admitted` row for this PR and head inside the stage with no later `review.posted`,
+       `review.post_failed` or `review.post_refused`, or a detached review action in flight in this process. While
+       one exists, it does not escalate. It ledgers `pr.stuck.deferred` (pr, head, blocker, admitted_at), once per
+       (PR, stage).
+    2. THE WAIT COMES FROM OBSERVED REVIEW LENGTH, NOT A FIXED NUMBER. A live review counts as overdue only once
+       its age exceeds what this sweep has observed reviews take (the `noteReviewDuration` window, e.g. its upper
+       quantile). With no observed durations, the existing 30-minute bound is the announced stand-in. An overdue
+       review escalates with the diagnosis "review running past its observed length", not "unknown signature".
+       A stage with no live owner escalates exactly as today.
+    3. A STALL ESCALATION HAS ITS OWN CAUSE. Add a "stage-stall" member to `EscalationCause`, and have
+       `reportStuckStage` pass it to `deps.escalate`. A fix strike's probe always carries "review", "ci" or
+       "conflict", so `matchDuplicateEscalation`'s cause dimension vetoes the match and the stall issue no longer
+       stands a fix round down. Another stall report for the same PR still dedups onto its own issue.
+       `escalationCause` itself is unchanged: it never returns the new member.
+    Tests go in the new file test/a-stalled-stage-escalation-waits-for-a-live-review-and-never-holds-a-fix.test.ts,
+    with `test(` titles exactly as in the proofs below. test/a-pr-whose-stage-stops-moving-is-named-within-thirty-minutes.test.ts
+    must stay green.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-stalled-stage-escalation-waits-for-a-live-review-and-never-holds-a-fix.test.ts"
+    - claim: "an awaiting-review stage past 30 minutes whose admitted review has not posted does not escalate (the #10848 timeline)"
+      proof: 'grep: test("W1-T8167: a review still running is not escalated as a stalled stage" in test/a-stalled-stage-escalation-waits-for-a-live-review-and-never-holds-a-fix.test.ts'
+    - claim: "a live review older than the observed review durations escalates, naming the overrun"
+      proof: 'grep: test("W1-T8167: a review running past its observed length escalates" in test/a-stalled-stage-escalation-waits-for-a-live-review-and-never-holds-a-fix.test.ts'
+    - claim: "an awaiting-review stage with no live review owner still escalates at the bound"
+      proof: 'grep: test("W1-T8167: an awaiting-review stage with no live owner still escalates" in test/a-stalled-stage-escalation-waits-for-a-live-review-and-never-holds-a-fix.test.ts'
+    - claim: "an open stalled-stage issue does not stand down a fix strike at the same head"
+      proof: 'grep: test("W1-T8167: an open stall issue does not stand a fix round down" in test/a-stalled-stage-escalation-waits-for-a-live-review-and-never-holds-a-fix.test.ts'
+  falsifier: |
+    Leave the awaiting-review backstop blind to a live review: the #10848 fixture escalates at 33 minutes with a review
+    admitted and unposted, and "a review still running is not escalated" fails. Escalate the stall with no cause, or
+    with "review": the fix rung's probe matches the stall issue and stands down, and "an open stall issue does not
+    stand a fix round down" fails. Suppress every awaiting-review escalation: the no-owner stage never escalates, and
+    "an awaiting-review stage with no live owner still escalates" fails.

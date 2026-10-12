@@ -20,7 +20,8 @@
  * merged-today.
  */
 
-import { deriveDayCostUsd, deriveWeekCostUsd, utcDayWindowMs } from "./sweep.js";
+import { ledgerGenerationOf } from "./status.js";
+import { deriveDayCostUsd, deriveWeekCostUsd, utcDayWindowMs, utcWeekWindowMs } from "./sweep.js";
 
 /**
  * The GLANCE strip's ledger-derived spend/merge figures — see this module's header.
@@ -56,6 +57,15 @@ export interface GlanceSpend {
   sessionSpendUsd: null;
 }
 
+const glanceSpendMemo = new WeakMap<ReadonlyArray<Record<string, unknown>>, {
+  generation: number; dayStart: number; weekStart: number; spend: GlanceSpend;
+}>();
+let glanceSpendScans = 0;
+
+export function glanceSpendScanCount(): number {
+  return glanceSpendScans;
+}
+
 /**
  * `mergedToday`: one ledger scan, counting `verdict` lines whose `verdict` field is exactly
  * `"merged"` and whose `ts` falls in `now`'s UTC calendar day (the SAME day window
@@ -67,6 +77,13 @@ export interface GlanceSpend {
  */
 export function computeGlanceSpend(lines: ReadonlyArray<Record<string, unknown>>, now: number): GlanceSpend {
   const [dayStart, dayEnd] = utcDayWindowMs(now);
+  const [weekStart] = utcWeekWindowMs(now);
+  const generation = ledgerGenerationOf(lines);
+  const held = generation === undefined ? undefined : glanceSpendMemo.get(lines);
+  if (held && held.generation === generation && held.dayStart === dayStart && held.weekStart === weekStart) {
+    return { ...held.spend };
+  }
+  glanceSpendScans++;
   let mergedToday = 0;
   for (const line of lines) {
     if (line.step !== "verdict" || line.verdict !== "merged") continue;
@@ -75,11 +92,13 @@ export function computeGlanceSpend(lines: ReadonlyArray<Record<string, unknown>>
     if (!Number.isFinite(parsed) || parsed < dayStart || parsed >= dayEnd) continue;
     mergedToday += 1;
   }
-  return {
+  const spend: GlanceSpend = {
     mergedToday,
     channel: "fleet",
     spendTodayUsd: deriveDayCostUsd(lines, now),
     spendWeekUsd: deriveWeekCostUsd(lines, now),
     sessionSpendUsd: null,
   };
+  if (generation !== undefined) glanceSpendMemo.set(lines, { generation, dayStart, weekStart, spend });
+  return { ...spend };
 }

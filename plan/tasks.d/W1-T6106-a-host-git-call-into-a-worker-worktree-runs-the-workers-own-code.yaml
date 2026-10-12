@@ -1,0 +1,90 @@
+- id: W1-T6106
+  title: "A HOST GIT CALL INTO A WORKER WORKTREE RUNS THE WORKER'S OWN CODE — the daemon commits, diffs and pushes with `git -C <worktree>`, which follows the worktree's `.git` pointer and runs its tracked hooks/, both of which the worker can write, so code the model wrote runs as the daemon, with its credentials, outside the worker sandbox"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — what a host git call into a worker worktree is allowed to execute
+  origin: "operator session 2026-10-06: security finding raised by the W1-T6091 builder, verified read-only on origin/main before filing"
+  plan_refs: [W1-T4614, W1-T5016, W1-T2699, W1-T3224, W1-T499, W1-T6091]
+  files: [src/lib/worktree-git.ts, src/lib/git-push.ts, src/lib/worker.ts, src/run-task.ts, src/lib/worker-provider.ts, test/a-host-git-call-into-a-worker-worktree-runs-no-worker-code.test.ts, test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 on origin/main, static reading only (no hostile config was run anywhere).
+    WHERE HOST GIT RUNS WITH A WORKER WORKTREE AS ITS REPO, all as `git -C <worktree>` with the
+    daemon's inherited environment and nothing that pins the gitdir or disables config:
+      src/lib/git-push.ts gitPushRunBranchAsync / gitPushRunBranch — `git -C <worktree> push`, with the
+        daemon's push credentials; src/run-task.ts pushFixRound drives it and also runs `ls-remote`.
+      src/run-task.ts commitWorkerEdits, runPlanScopedFixRound, commitGeneratorOutputViaGit,
+        buildProofAmendmentGitOps — `add` + `commit`; appendTaskTrailerToCommit — `commit --amend`.
+      src/run-task.ts irreversibleSignalForWorktree — `diff origin/main...HEAD` WITHOUT --no-ext-diff;
+        captureWorktreeSnapshotViaGit, preserveTrackedDirtyPatch, inspectFreshReviewerWorktree — status/diff.
+      src/lib/worker.ts stampRunWorktreeAssignment — resolves `rev-parse --git-dir` THROUGH the worktree's
+        `.git` file, then writes hooks and `config --worktree` wherever that pointer says.
+    TWO ROUTES FROM WORKER-WRITTEN BYTES TO HOST EXECUTION:
+      1. THE TRACKED HOOKS DIR, NO `.git` TAMPERING NEEDED. worktreeAdd and worktreeAddAsync (worker.ts) run
+         `git config --worktree core.hooksPath hooks` — RELATIVE, so it resolves to the worktree's own
+         tracked hooks/ directory, which is ordinary source the worker edits. stampRunWorktreeAssignment
+         (W1-T4614) moves core.hooksPath to a private dir under the gitdir, but every hook it writes
+         DELEGATES to that prior dir. So the host's commit runs <worktree>/hooks/pre-commit and
+         commit-msg, and gitPushRunBranchAsync runs <worktree>/hooks/pre-push — the pre-push gate is
+         relied on here by design (run-task.ts: "the harness retries the push through the hook") — at
+         push time, before any review has seen the diff.
+      2. THE `.git` POINTER. A linked worktree's `.git` is a one-line `gitdir:` FILE inside the worktree.
+         Rewritten to point at a directory the worker planted (or at a gitdir whose config `include`s
+         one), every call above honours that gitdir's config: core.fsmonitor, core.hooksPath,
+         core.sshCommand, diff.external / textconv, core.pager, credential.helper, includeIf.
+    CAN THE WORKER WRITE THESE? YES on at least one lane, confirmed in code:
+      src/lib/worker-provider.ts openWeightContainedPath — the open-weight write_file / edit_file
+        tools refuse only paths that resolve OUTSIDE cwd; `.git` and `hooks/pre-push` are inside, and
+        these tools execute in the daemon process itself, not in a sandbox.
+      src/lib/worker-provider.ts openWeightCheckSandboxArgv — RunCheck's bwrap `--bind`s cwd read-write,
+        `.git` included; no `--ro-bind` covers it.
+      settings/worker.json (Claude lanes) — the sandbox has no filesystem.denyWrite at all; the CLI's
+        built-in mandatory write protections name `.git/hooks` and `.git/config` (directory-shaped
+        paths). Whether they cover a linked worktree's `.git` FILE is UNVERIFIED; the tracked hooks/
+        dir is not covered by anything, by design.
+    EXISTING PROTECTIONS, AND WHY NONE CLOSES THIS: no src/ file names core.fsmonitor, safe.directory,
+    GIT_CEILING_DIRECTORIES or a hooksPath of /dev/null. src/lib/review.ts buildProofEnv allowlists the
+    PROOF child's env (W1-T499) and src/lib/replay-harness.ts sourceGit sets GIT_CONFIG_NOSYSTEM=1 and
+    GIT_CONFIG_GLOBAL=/dev/null — both stop system and global config only; repo-local config and the
+    `.git` pointer are untouched. captureWorktreeSnapshotViaGit passes --no-ext-diff on one diff.
+    hooks/deny-floor.sh confines file TOOLS to the worktree (W1-T5016), and `.git` is inside it.
+  design: |
+    Not over-specified; the builder owns the shape. One leaf (src/lib/worktree-git.ts, exporting hostWorktreeGit) is the only
+    way host code runs git with a worker worktree as its repo. It (a) PINS the gitdir: `--git-dir` to the
+    daemon-owned `<commonDir>/worktrees/<name>` that worktreeAdd recorded (its sibling base record), and
+    `--work-tree` to the worktree, never re-deriving either from the `.git` file — and refuses, with a
+    ledger row naming both paths, when the `.git` file no longer holds exactly the pointer worktreeAdd
+    wrote; (b) DISABLES code-executing config on every call: `-c core.fsmonitor=false
+    -c core.hooksPath=/dev/null` plus the others named above (core.sshCommand, diff.external,
+    core.pager, credential.helper as the push path needs), with GIT_CONFIG_NOSYSTEM=1 and
+    GIT_CONFIG_GLOBAL at a harness-owned file, and --no-ext-diff / --no-textconv on diffs.
+    THE PRE-PUSH GATE MUST SURVIVE: hooks are not simply dropped — the push leaf runs the gate (and the
+    W1-T4614 assignment trailer runs the commit-msg step) from the HARNESS's own trusted copy of hooks/
+    (the daemon's code root), never the worktree's tracked copy. openWeightContainedPath also refuses a
+    write whose target is the worktree's `.git` entry. stampRunWorktreeAssignment takes the pinned gitdir
+    from the leaf instead of `rev-parse --git-dir`.
+  acceptance:
+    - claim: "a host git call through the hardened leaf into a fixture worktree whose .git pointer names a planted gitdir with a core.fsmonitor marker command refuses before git runs and the marker is never written; a host commit and push through the leaf never execute the worktree's tracked hooks dir, and the pre-push gate runs from the harness copy"
+      proof: "unit test: test/a-host-git-call-into-a-worker-worktree-runs-no-worker-code.test.ts"
+    - claim: "every host git spawn in src whose repository is a worker worktree goes through the hardened leaf, and a raw git -C spawn into a worktree added to src fails the census naming its file"
+      proof: "unit test: test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts"
+    - claim: "the push leaf calls the hardened worktree git leaf"
+      proof: "grep: hostWorktreeGit( in src/lib/git-push.ts"
+  falsifier: |
+    Route the fixture's commit through today's raw `git -C <worktree> commit`: the planted fsmonitor
+    marker (a fixture-only `touch` of a file under the test's tmp dir) and the fixture worktree's tracked
+    hooks/pre-commit marker are both written, and the first test fails. The census fails at base, where
+    gitPushRunBranchAsync and commitWorkerEdits spawn git directly.
+  notes: |
+    FIXTURES ONLY. The hostile config in these tests is a fixture-local marker command in a gitRepo()
+    fixture under the test's tmp dir; nothing runs against a real worktree or the host.
+    SEPARATE, NOT THIS TASK: review proof execution (src/lib/review.ts defaultProofSpawner) runs the PR's
+    own test code by design; whether that runs sandboxed is its own question. #9753 (open-weight
+    selectOpenWeightUnitTestSuites, W1-T6091's build) adds another host diff into a worktree; it is not
+    on main yet, and the census covers it when it lands.

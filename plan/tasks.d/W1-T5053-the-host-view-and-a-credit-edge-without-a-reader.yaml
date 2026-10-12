@@ -15,7 +15,7 @@
     - test/host-view.test.ts
     - src/lib/account-usage.ts
     - src/lib/read-model-worker.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-10-01 at 431d71762: buildAccountUsageRoute (account-usage.ts) calls appendCreditStateTransition

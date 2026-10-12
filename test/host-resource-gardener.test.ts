@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -64,12 +64,15 @@ function history(over: { host?: string; count?: number; stepMin?: number; freeAt
     const tsMs = NOW - (over.endAgoMs ?? 0) - (n - 1 - i) * step;
     const passEvery = (over.janitorEveryH ?? 6) * HOUR;
     const janitorTs = new Date(Math.floor(tsMs / passEvery) * passEvery).toISOString();
+    const consumers = over.consumers?.(i) ?? {};
     return {
       host: over.host ?? "azure",
       beatTs: new Date(tsMs).toISOString(),
       tsMs,
       values: { root_free_kb: over.freeAt(i, n) },
-      consumers: over.consumers?.(i) ?? {},
+      consumers,
+      devices: { root: "/dev/root" },
+      consumerDevices: Object.fromEntries(Object.keys(consumers).map((k) => [k, "/dev/root"])),
       janitorTs,
       janitorFreedKb: over.freed ?? 4 * 1024,
     };
@@ -273,6 +276,9 @@ test("W1-T4804: a torn sample line and an unreadable state file are survived, no
 
 test("W1-T4804: a filing lands the shard alone through a checkout, which is always disposed", () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-resource-ws-`));
+  // The checkout holds the janitor the shard declares, as main does: lint-plan's admission reads it.
+  mkdirSync(join(root, "deploy"), { recursive: true });
+  writeFileSync(join(root, "deploy", "rmd-host-cleanup.sh"), "#!/bin/sh\n");
   try {
     const filing: ConsumerFiling = {
       host: "azure",

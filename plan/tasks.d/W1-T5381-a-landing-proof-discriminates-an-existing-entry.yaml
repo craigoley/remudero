@@ -10,7 +10,7 @@
   risk: low
   origin: "operator session 90be18e2, 2026-10-02: #8731 red on proof-discrimination"
   files: [src/lib/feedback-landing.ts, test/a-landing-proof-discriminates-an-existing-entry.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-02: the feedback-landing bridge (W1-T243) writes one Acceptance line per landed entry,

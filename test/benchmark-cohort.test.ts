@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -427,11 +427,129 @@ test("benchmark cohorts refuse unproven live rewrites and recover a completed to
     assert.equal(torn.snapshot.liveWatermark?.tailPendingBytes, 12);
     writeFileSync(live, assignment + attempt + later);
     const completed = await runBenchmarkCohortPass(stateDir);
-    assert.equal(completed.state, "complete");
+    assert.equal(completed.state, "complete", JSON.stringify({ reason: completed.snapshot.reason,
+      scannedSources: completed.scannedSources, pendingSources: completed.pendingSources,
+      watermark: completed.snapshot.liveWatermark }));
     assert.equal(completed.snapshot.cohorts[0].workerCallFailure, 1);
     assert.equal(completed.snapshot.sourceRows.assignments, 1);
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("benchmark live rewrites and restorations are checked even when size and mtime match", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-equal-generation-"));
+  try {
+    const live = join(stateDir, "ledger.ndjson");
+    const assignment = row({ ts: "2026-09-26T11:00:00.000Z", step: "worker.assignment",
+      worker_assignment: { id: "a1", selected: { provider: "cash", model: "gpt-5-nano" } } });
+    const attempt = row({ ts: "2026-09-26T11:01:00.000Z", step: "worker.attempt",
+      selection_assignment_id: "a1", success: true });
+    const stamp = new Date("2026-09-26T12:00:00.000Z");
+    const write = (text: string) => { writeFileSync(live, text); utimesSync(live, stamp, stamp); return statSync(live); };
+    const first = write(assignment + attempt);
+    const initial = await runBenchmarkCohortPass(stateDir);
+    assert.equal(initial.state, "complete");
+    const cached = await runBenchmarkCohortPass(stateDir);
+    assert.equal(cached.state, "complete");
+    assert.equal(cached.scannedSources, 0, "an unchanged prefix still uses the existing projection");
+    const corrected = assignment.replace("gpt-5-nano", "gpt-6-luna") + attempt;
+    const rewrittenStat = write(corrected);
+    assert.equal(first.size, rewrittenStat.size, "different bytes share the same actual size");
+    assert.equal(first.mtimeMs, rewrittenStat.mtimeMs, "the file really has the same actual mtime");
+    assert.notEqual(readFileSync(live, "utf8"), assignment + attempt, "a real rewrite is present");
+    const rewritten = await runBenchmarkCohortPass(stateDir);
+    assert.equal(rewritten.state, "unavailable", "metadata equality cannot authorize changed evidence");
+    assert.equal(rewritten.snapshot.reason, "retired-source-evidence-not-reconciled");
+    assert.equal(rewritten.snapshot.cohorts[0].dimensions.model, "gpt-5-nano");
+    const restoredStat = write(assignment + attempt);
+    assert.equal(restoredStat.size, rewrittenStat.size);
+    assert.equal(restoredStat.mtimeMs, rewrittenStat.mtimeMs);
+    const restored = await runBenchmarkCohortPass(stateDir);
+    assert.equal(restored.state, "complete", "restored bytes are actually rescanned, not left indefinitely partial");
+    assert.equal(restored.scannedSources, 1);
+    assert.equal(restored.snapshot.sourceRows.assignments, 1);
+    assert.equal(restored.snapshot.cohorts[0].joinedAttempts, 1);
+    assert.equal(readFileSync(live, "utf8"), assignment + attempt, "the reader never repairs source bytes itself");
+  } finally { rmSync(stateDir, { recursive: true, force: true }); }
+});
+
+test("benchmark cached live verification preserves evidence when its real source disappears", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-cache-read-refused-"));
+  try {
+    const live = join(stateDir, "ledger.ndjson");
+    const assignment = row({ ts: "2026-09-26T11:00:00.000Z", step: "worker.assignment",
+      worker_assignment: { id: "a1", selected: { provider: "cash", model: "gpt-5-nano" } } });
+    writeFileSync(live, assignment);
+    const initial = await runBenchmarkCohortPass(stateDir);
+    assert.equal(initial.state, "complete");
+    const checkpoint = join(stateDir, "benchmark-cohort-v1.json");
+    const saved = readFileSync(checkpoint, "utf8");
+    const missing = await runBenchmarkCohortPass(stateDir, { onBeforeLiveCacheVerify: () => unlinkSync(live) });
+    assert.equal(missing.state, "unavailable");
+    assert.equal(missing.snapshot.reason, "ledger-live-missing-before-scan");
+    assert.equal(missing.snapshot.lastGoodAt, initial.snapshot.asOf);
+    assert.equal(missing.snapshot.sourceRows.assignments, 1, "last good evidence is retained, never an invented empty ledger");
+    assert.equal(missing.scannedSources, 0);
+    assert.equal(missing.pendingSources, 1);
+    assert.equal(readFileSync(checkpoint, "utf8"), saved, "an unreadable cache check cannot overwrite the checkpoint");
+    writeFileSync(live, assignment);
+    assert.equal((await runBenchmarkCohortPass(stateDir)).state, "complete");
+  } finally { rmSync(stateDir, { recursive: true, force: true }); }
+});
+
+test("benchmark cached empty live evidence still requires an existing regular source", async () => {
+  for (const replacement of ["missing", "directory"] as const) {
+    const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-empty-cache-refused-"));
+    try {
+      const live = join(stateDir, "ledger.ndjson");
+      writeFileSync(live, "");
+      const initial = await runBenchmarkCohortPass(stateDir);
+      assert.equal(initial.state, "complete");
+      assert.equal(initial.snapshot.sourceLineage.length, 1, "a real empty source was audited");
+      const checkpoint = join(stateDir, "benchmark-cohort-v1.json");
+      const saved = readFileSync(checkpoint, "utf8");
+      const missing = await runBenchmarkCohortPass(stateDir, { onBeforeLiveCacheVerify: () => {
+        unlinkSync(live);
+        if (replacement === "directory") mkdirSync(live);
+      } });
+      assert.equal(missing.state, "unavailable", `${replacement} source is not verified empty evidence`);
+      assert.equal(missing.snapshot.reason, replacement === "missing" ? "ledger-live-missing-before-scan" : "ledger-live-invalid-before-scan");
+      assert.equal(missing.pendingSources, 1);
+      assert.equal(readFileSync(checkpoint, "utf8"), saved);
+    } finally { rmSync(stateDir, { recursive: true, force: true }); }
+  }
+});
+
+test("benchmark cached live failures retain bounded missing denied invalid and unknown reasons", async () => {
+  const source = row({ ts: "2026-09-26T11:00:00.000Z", step: "worker.assignment",
+    worker_assignment: { id: "a1", selected: { provider: "cash", model: "gpt-5-nano" } } });
+  // Actual disappearing/non-file source controls above cover ENOENT and invalid.
+  // Inject the remaining error arms without changing filesystem permissions or
+  // assuming root/platform permissions; the source and cached projection are real.
+  const failures = [
+    { error: Object.assign(new Error("private source path and token"), { code: "EACCES" }), reason: "ledger-live-denied-before-scan" },
+    { error: Object.assign(new Error("private source path and token"), { code: "EPERM" }), reason: "ledger-live-denied-before-scan" },
+    { error: Object.assign(new Error("private source path and token"), { code: "EIO" }), reason: "ledger-live-unreadable-before-scan" },
+    { error: null, reason: "ledger-live-unreadable-before-scan" },
+  ];
+  for (const failure of failures) {
+    const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-cache-error-class-"));
+    try {
+      writeFileSync(join(stateDir, "ledger.ndjson"), source);
+      const initial = await runBenchmarkCohortPass(stateDir);
+      assert.equal(initial.state, "complete");
+      const checkpoint = join(stateDir, "benchmark-cohort-v1.json");
+      const saved = readFileSync(checkpoint, "utf8");
+      const refused = await runBenchmarkCohortPass(stateDir, { onBeforeLiveCacheVerify: () => { throw failure.error; } });
+      assert.equal(refused.state, "unavailable");
+      assert.equal(refused.snapshot.reason, failure.reason);
+      assert.equal(refused.snapshot.lastGoodAt, initial.snapshot.asOf);
+      assert.equal(refused.snapshot.sourceRows.assignments, 1);
+      assert.equal(refused.pendingSources, 1);
+      assert.equal(JSON.stringify(refused).includes("private source path and token"), false);
+      assert.equal(readFileSync(checkpoint, "utf8"), saved);
+    } finally { rmSync(stateDir, { recursive: true, force: true }); }
   }
 });
 

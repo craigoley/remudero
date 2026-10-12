@@ -1,15 +1,20 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { availableParallelism, tmpdir } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { availableParallelism, hostname, tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 import { readAffectedSuitesInput, selectAffectedSuites, type AffectedSuitesInput } from "./affected-suites.js";
 import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type PreflightSpawn } from "./commit-message.js";
 import { ciControlPlaneParity } from "./ci-control-plane.js";
+import { systemClock } from "./clock.js";
 import { resolveHostPole, type HostPole } from "./host-parity.js";
+import { defaultIsPidAlive } from "./drain-lock.js";
+import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
+import { shortPathWhenTooLong } from "./short-path-root.js";
+import { acquireTestSlot, lowPriorityCommand, TEST_FILE_PEAK_BYTES, testRunArgv, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
 // W1-T3099: the judge's own two primitives, imported rather than re-derived.
 import { criterionFieldTampered, planOnlyDiff } from "./review.js";
 
@@ -31,9 +36,12 @@ const BOUNDED_SUITE_SPAWN_MAX_BUFFER = 64 * 1024 * 1024;
 const SELF_SYNC_GUARD_ENV_NAME = "RMD_SELF_SYNC_DONE";
 const TSX_LOADER_PATH = require.resolve("tsx");
 const WORKER_CONTAINMENT_URL = new URL("./worker-containment.ts", import.meta.url).href;
-export const CI_COVERAGE_SHARD_COUNT = 4;
+export const CI_COVERAGE_SHARD_COUNT = 8;
 const COVERAGE_FREE_RESERVE_BYTES = 20 * 1024 ** 3;
 const MAX_COVERAGE_SCRATCH_PATH = 60;
+/** The host's scratch mount, the default scratch root when it is a mount (deploy/scratch-mounts.sh). */
+const HOST_SCRATCH_ROOT = "/mnt/scratch";
+const SCRATCH_ROOT_ENV_NAME = "RMD_SCRATCH_ROOT";
 
 /** A local route is deliberately narrower than CI parity: it is permission to re-drive one stale
  * verdict, not permission to run an arbitrary check name copied from GitHub. */
@@ -443,7 +451,7 @@ export interface CiParityEntry {
   workflow?: string;
   mirrored: boolean;
   reason?: string;
-  run?: (repoRoot: string, spawn: PreflightSpawn, coverageFreeBytes?: (path: string) => number, coverageLockDiscriminator?: string) => CiParityStepResult[];
+  run?: (repoRoot: string, spawn: PreflightSpawn, coverageFreeBytes?: (path: string) => number, coverageLockDiscriminator?: string, testSlot?: TestSlotOptions) => CiParityStepResult[];
 }
 
 /** Parse ci.yml's top-level job keys. Pure text-in/array-out, so a falsifier hands it a synthetic document. */
@@ -789,23 +797,86 @@ function changedFilesListPath(repoRoot: string, spawn: PreflightSpawn): string {
   return path;
 }
 
-/** The full-suite-with-coverage leaf — CI's four instrumented, source-mapped `node --test`
+/** The full-suite-with-coverage leaf — CI's eight instrumented, source-mapped `node --test`
  *  shards, `test/**` excluded from the ratio, merged into one lcov. INVARIANT: shared by BOTH
  *  callers (coverage-ratchet and {@link runPreflightCoverage}), so the expensive invocation cannot
  *  drift the way a hand-copied argv does.
  *  Why: docs/forensics/ci-parity.md. */
-export function coverageScratchDir(repoRoot: string): string {
+export function coverageScratchDir(repoRoot: string, sameVolume: (a: string, b: string) => boolean = sameDevice): string {
   const name = `rmd-c-${createHash("sha256").update(realpathSync(repoRoot)).digest("hex").slice(0, 12)}`;
   // A nested gate inherits TMPDIR from its caller. Find the same volume root even then.
   let base = resolve(tmpdir());
   try { base = realpathSync(base); } catch { /* The caller's unresolved TMPDIR is refused below. */ }
   for (let path = base; path !== dirname(path); path = dirname(path)) {
-    if (basename(path) === name) {
-      base = dirname(path);
-      break;
+    if (basename(path) === name) return join(dirname(path), name);
+  }
+  // The shard children's TMPDIR is this scratch, and their fixtures bind unix sockets beneath it,
+  // hence MAX_COVERAGE_SCRATCH_PATH. A TMPDIR too long for that (macOS's per-user one) takes the
+  // short /tmp alias of the SAME volume, so the volume and its free-space reserve are unchanged;
+  // one on another volume, or that does not resolve, keeps its base and the length guard refuses it.
+  return shortPathWhenTooLong(join(base, name), (root) => join(root, name),
+    (path) => path.length <= MAX_COVERAGE_SCRATCH_PATH, (root) => sameVolume(root, base));
+}
+
+/** Where a coverage run may put its scratch besides the TMPDIR volume (W1-T5709). */
+export interface CoverageScratchPolicy {
+  /** The scratch root to prefer; `null` disables the preference, absent resolves it from the host. */
+  root?: string | null;
+  /** Whether two directories sit on one device; defaults to comparing `st_dev`. */
+  sameVolume?: (a: string, b: string) => boolean;
+}
+
+function sameDevice(a: string, b: string): boolean {
+  try {
+    return statSync(a).dev === statSync(b).dev;
+  } catch {
+    // A path that cannot be stat'ed cannot be shown to share a volume; the caller then weighs both.
+    return false;
+  }
+}
+
+/** The scratch root a host run prefers: `RMD_SCRATCH_ROOT`, else /mnt/scratch when it is a mount.
+ *  A test process resolves nothing, so no expectation depends on the host it runs on. */
+function resolveCoverageScratchRoot(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  if (env.NODE_TEST_CONTEXT) return undefined;
+  const configured = env[SCRATCH_ROOT_ENV_NAME];
+  if (configured) return configured;
+  return existsSync(HOST_SCRATCH_ROOT) && !sameDevice(HOST_SCRATCH_ROOT, dirname(HOST_SCRATCH_ROOT)) ? HOST_SCRATCH_ROOT : undefined;
+}
+
+type CoverageScratchChoice = { ok: true; dir: string; note: string } | { ok: false; detail: string };
+
+/** Prefers the scratch root over a TMPDIR on another device when the scratch root has the reserve;
+ *  refuses only when neither volume has it, naming both free figures. */
+function chooseCoverageScratch(
+  repoRoot: string,
+  freeBytes: (path: string) => number,
+  policy: CoverageScratchPolicy,
+): CoverageScratchChoice {
+  const tmpDir = coverageScratchDir(repoRoot, policy.sameVolume ?? sameDevice);
+  const tmpBase = dirname(tmpDir);
+  let root = policy.root === undefined ? resolveCoverageScratchRoot() : policy.root ?? undefined;
+  if (root !== undefined) {
+    try {
+      root = realpathSync(root);
+    } catch {
+      // Deliberate: a scratch root that does not resolve is not a candidate; TMPDIR's own check decides.
+      root = undefined;
     }
   }
-  return join(base, name);
+  const tmpNote = `scratch=${tmpBase} (TMPDIR volume)`;
+  if (root === undefined || (policy.sameVolume ?? sameDevice)(root, tmpBase)) return { ok: true, dir: tmpDir, note: tmpNote };
+  const scratchFree = freeBytes(root);
+  if (scratchFree >= COVERAGE_FREE_RESERVE_BYTES) {
+    return { ok: true, dir: join(root, basename(tmpDir)), note: `scratch=${root} (scratch root, preferred over TMPDIR volume ${tmpBase})` };
+  }
+  const tmpFree = freeBytes(tmpBase);
+  if (tmpFree >= COVERAGE_FREE_RESERVE_BYTES) return { ok: true, dir: tmpDir, note: tmpNote };
+  return {
+    ok: false,
+    detail: `FAIL — coverage-ratchet: neither volume has the ${COVERAGE_FREE_RESERVE_BYTES} byte reserve before starting coverage shards: ` +
+      `scratch root ${root} has ${scratchFree} free bytes, TMPDIR volume ${tmpBase} has ${tmpFree} free bytes. Free space on one of them.`,
+  };
 }
 
 export function coverageGateLockDir(repoRoot: string, discriminator?: string): string {
@@ -849,8 +920,8 @@ function coverageShardSelectionArgs(repoRoot: string, shard: number, base: strin
   ];
 }
 
-function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly string[]): string[] {
-  return [
+function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly string[], concurrency: number, judge: TestJudge, judgedArgs: readonly string[]): string[] {
+  return testRunArgv(judge.judgedNodeTestArgs([
     "--enable-source-maps",
     "--experimental-test-coverage",
     "--test-coverage-exclude=test/**",
@@ -866,7 +937,22 @@ function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly
     "--import",
     TMP_HYGIENE_IMPORT,
     ...testFiles,
-  ];
+  ], judgedArgs), concurrency);
+}
+
+// The slice of scripts/pure-test-pool.mjs (the test judge) a coverage shard uses.
+interface JudgedRun { args: string[]; env: Record<string, string>; cleanup: () => void }
+interface TestJudge {
+  prepareJudgedRun(opts: { makeDir: () => string }): JudgedRun;
+  judgedNodeTestArgs(args: readonly string[], judgedArgs: readonly string[]): string[];
+  closeJudgedRun(judged: JudgedRun, files: readonly string[], opts: { status: number; root: string; role: string; prefix: string; log: (line: string) => void }):
+    { verdict: { complete: boolean }; line: string };
+}
+
+// Loaded when a coverage leaf runs, never at import: a sandbox that copies only src/ (the mutation
+// detectors in test/ledger-rotation.test.ts) still imports this module. A plain .mjs, so no types.
+function loadTestJudge(): TestJudge {
+  return require("../../scripts/pure-test-pool.mjs") as TestJudge;
 }
 
 function coverageRawDirHasArtifact(rawDir: string): boolean {
@@ -898,6 +984,9 @@ function testWithCoverageShards(
   lcovPath: string,
   scratchDir: string,
   shardRoot: string,
+  slot: TestSlotLease,
+  testSlot: TestSlotOptions,
+  scratchNote: string,
 ): CiParityLeafResult {
   let retainedCompactBytes = 0;
   let peakBytes = 0;
@@ -930,14 +1019,26 @@ function testWithCoverageShards(
     if (testFiles.length === 0) {
       return { ok: false, detail: `FAIL — ${label} duration-balanced test selection returned no files` };
     }
-    const res = spawn(process.execPath, coverageShardArgs(shardRoot, shard, testFiles), {
+    // Low priority, bounded concurrency, and a heartbeat on the host-wide slot at every shard (W1 test-slot).
+    slot.refresh();
+    // Judged (scripts/pure-test-pool.mjs): node reports a file whose own child exits 0 part-way as
+    // `ok`, so a shard passes only when every file it was given reached its own summary.
+    // Its files live in this run's own scratch, not os.tmpdir(): the shard's TMPDIR is scratchDir too.
+    const judge = loadTestJudge();
+    const judged = judge.prepareJudgedRun({ makeDir: () => mkdtempSync(join(scratchDir, "rmd-pool-run-")) });
+    const child = lowPriorityCommand(process.execPath, coverageShardArgs(shardRoot, shard, testFiles, slot.concurrency, judge, judged.args), testSlot.binaryExists);
+    const res = spawn(child.file, child.args, {
       cwd: repoRoot,
-      env: { TMPDIR: scratchDir, NODE_V8_COVERAGE: rawDir },
+      env: { TMPDIR: scratchDir, NODE_V8_COVERAGE: rawDir, ...judged.env },
+    });
+    const verdict = judge.closeJudgedRun(judged, testFiles, {
+      status: res.status ?? 1, root: repoRoot, role: `coverage shard ${shard}/${CI_COVERAGE_SHARD_COUNT}`, prefix: "coverage-ratchet", log: () => {},
     });
     const spawnFailed = spawnFailureDetail(label, res);
     if (spawnFailed) return { ok: false, detail: spawnFailed };
     const output = `${res.stdout ?? ""}${res.stderr ?? ""}`;
-    if (res.status !== 0) return { ok: false, detail: `FAIL — ${label}\n${output.trim()}` };
+    if (res.status !== 0) return { ok: false, detail: `FAIL — ${label}\n${output.trim()}\n${verdict.line}` };
+    if (!verdict.verdict.complete) return { ok: false, detail: `FAIL — ${label}\n${verdict.line}` };
     if (!coverageOutputHasTestSummary(output)) {
       return { ok: false, detail: `FAIL — coverage-ratchet: shard ${shard}/${CI_COVERAGE_SHARD_COUNT} produced no # tests summary; refusing to fold an unverified shard into the coverage total.` };
     }
@@ -977,10 +1078,58 @@ function testWithCoverageShards(
   peakBytes = Math.max(peakBytes, Number(mergeMetrics[3]));
   return {
     ok: true,
-    detail: `PASS — coverage-ratchet:test-with-coverage (${CI_COVERAGE_SHARD_COUNT} shard(s)); ` +
+    detail: `PASS — coverage-ratchet:test-with-coverage (${CI_COVERAGE_SHARD_COUNT} shard(s)); ${scratchNote}; ${slot.note}; ` +
       `merged coverage/lcov.info; rawBytes=${rawBytes} compactBytes=${retainedCompactBytes} ` +
       `mergeInputBytes=${mergeMetrics[1]} stagingBytes=${mergeMetrics[2]} peakBytes=${peakBytes}`,
   };
+}
+
+interface CoverageLockHolder {
+  pid: number;
+  host: string;
+  startedAt: string;
+  scratch: string;
+}
+
+function parseCoverageLockHolder(raw: string): CoverageLockHolder {
+  const holder = JSON.parse(raw);
+  if (!Number.isSafeInteger(holder?.pid) || holder.pid <= 0 ||
+      typeof holder.host !== "string" || holder.host.length === 0 ||
+      typeof holder.startedAt !== "string" || !Number.isFinite(Date.parse(holder.startedAt)) ||
+      typeof holder.scratch !== "string") {
+    throw new Error("unattributed coverage lock: invalid holder record");
+  }
+  return holder;
+}
+
+function acquireCoverageLock(lockDir: string): { reason: string } | undefined {
+  try {
+    mkdirSync(lockDir);
+    return undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") return { reason: `cannot acquire ${lockDir}: ${String(error)}` };
+  }
+  try {
+    let scratch: string | undefined;
+    const result = reclaimStaleLock(join(lockDir, "holder.json"), {
+      parseHolder: parseCoverageLockHolder,
+      isStale: (holder) => {
+        scratch = holder.scratch;
+        return isHolderStale(holder, { isPidAlive: defaultIsPidAlive });
+      },
+    });
+    if (result.outcome === "live") return { reason: `another local gate owns ${lockDir} (pid ${result.holder.pid} on ${result.holder.host})` };
+    if (result.outcome !== "reclaimed") return { reason: `another local gate owns ${lockDir}; unattributed or changed lock (${result.outcome})` };
+    if (scratch !== undefined && isAbsolute(scratch) && /^rmd-c-[0-9a-f]{12}$/.test(basename(scratch))) {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+    // An empty-only removal cannot erase a replacement holder's record (W1-T5655).
+    rmdirSync(lockDir);
+    mkdirSync(lockDir);
+    return undefined;
+  } catch (error) {
+    return { reason: `another local gate owns ${lockDir}; unattributed or unreclaimable lock (${String(error)})` };
+  }
 }
 
 export function testWithCoverageLeaf(
@@ -990,8 +1139,12 @@ export function testWithCoverageLeaf(
     return Number(stats.bavail * stats.bsize);
   },
   lockDiscriminator?: string,
+  testSlot: TestSlotOptions = {},
+  scratchPolicy: CoverageScratchPolicy = {},
 ): CiParityLeafResult {
-  const stableScratch = coverageScratchDir(repoRoot);
+  const chosen = chooseCoverageScratch(repoRoot, freeBytes, scratchPolicy);
+  if (!chosen.ok) return { ok: false, detail: chosen.detail };
+  const stableScratch = chosen.dir;
   const activeTmp = process.env.TMPDIR;
   if (pathIsWithin(repoRoot, stableScratch) || stableScratch.length > MAX_COVERAGE_SCRATCH_PATH) {
     return { ok: false, detail: `FAIL — coverage-ratchet: scratch path ${stableScratch} must be outside the checkout and at most ${MAX_COVERAGE_SCRATCH_PATH} characters; set TMPDIR to a short isolated scratch volume.` };
@@ -1001,16 +1154,19 @@ export function testWithCoverageLeaf(
     return { ok: false, detail: `FAIL — coverage-ratchet: scratch volume has ${available} free bytes; need ${COVERAGE_FREE_RESERVE_BYTES} before starting coverage shards. Set TMPDIR to an isolated scratch volume with sufficient space.` };
   }
   const lockDir = coverageGateLockDir(repoRoot, lockDiscriminator);
-  try {
-    mkdirSync(lockDir);
-  } catch (error) {
-    return { ok: false, detail: `FAIL — coverage-ratchet: another local gate owns ${lockDir}; wait for it to finish or use an isolated scratch volume (${String(error)}).` };
-  }
+  const lockFailure = acquireCoverageLock(lockDir);
+  if (lockFailure !== undefined) return { ok: false, detail: `FAIL — coverage-ratchet: ${lockFailure.reason}` };
   const nested = activeTmp !== undefined && existsSync(stableScratch) && pathIsWithin(stableScratch, activeTmp);
 
   let scratchDir = stableScratch;
   let ownedNestedScratch: string | undefined;
+  let slot: TestSlotLease | undefined;
   try {
+    const holder: CoverageLockHolder = {
+      pid: process.pid, host: hostname(), startedAt: systemClock.iso(),
+      scratch: nested ? join(stableScratch, "n-pending") : stableScratch,
+    };
+    writeFileSync(join(lockDir, "holder.json"), JSON.stringify(holder), { flag: "wx" });
     mkdirSync(join(repoRoot, "coverage"), { recursive: true });
     if (nested) {
       // Resolve aliases before making the child; never clear an outer gate's scratch.
@@ -1022,11 +1178,17 @@ export function testWithCoverageLeaf(
       mkdirSync(stableScratch, { recursive: true });
       scratchDir = realpathSync(stableScratch);
     }
-    return testWithCoverageShards(repoRoot, spawn, lcovPath, scratchDir, join(scratchDir, "raw-shards"));
+    writeFileSync(join(lockDir, "holder.json"), JSON.stringify({ ...holder, scratch: scratchDir }));
+    // The per-checkout lock above guards THIS scratch; the host-wide slot bounds every checkout's runs.
+    slot = acquireTestSlot("coverage-ratchet:test-with-coverage", { perFileBytes: TEST_FILE_PEAK_BYTES, ...testSlot });
+    const shards = testWithCoverageShards(repoRoot, spawn, lcovPath, scratchDir, join(scratchDir, "raw-shards"), slot, testSlot, chosen.note);
+    // A pass already names the root; a refusal names it too, so the operator sees which volume was weighed.
+    return shards.ok ? shards : { ...shards, detail: `${shards.detail}\n(${chosen.note})` };
   } finally {
+    slot?.release();
     if (ownedNestedScratch !== undefined) {
       rmSync(ownedNestedScratch, { recursive: true, force: true });
-    } else {
+    } else if (!nested) {
       rmSync(stableScratch, { recursive: true, force: true });
     }
     rmSync(lockDir, { recursive: true, force: true });
@@ -1716,9 +1878,10 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
     job: "commitlint",
     mirrored: false,
     reason:
-      "this job lints the SQUASH-MERGE PR TITLE (github.event.pull_request.title), which does not exist until the PR is opened; " +
-      "rmd preflight's default (no-flag) route already lints the commit-range header/body shape locally via the commitlint and " +
-      "emitter-checks steps, which is the closest local proxy available pre-push",
+      "this job bundles the one-runner gates (W1-T4399) and posts each gate's verdict as its own check run; every bundled gate is " +
+      "mirrored by its own row in this table, and the PR-title lint has no local equivalent: the title is read from GitHub " +
+      "(github.event.pull_request.title), which does not exist until the PR is opened. rmd preflight's default (no-flag) route " +
+      "lints the commit-range header/body shape locally via the commitlint and emitter-checks steps",
   },
   {
     job: "leak-grep",
@@ -1731,10 +1894,10 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   {
     job: "coverage-ratchet",
     mirrored: true,
-    run: (repoRoot, spawn, coverageFreeBytes = undefined, coverageLockDiscriminator = undefined) => {
+    run: (repoRoot, spawn, coverageFreeBytes = undefined, coverageLockDiscriminator = undefined, testSlot = undefined) => {
       const lcovPath = join(repoRoot, "coverage", "lcov.info");
       const refresh = runStep("coverage-ratchet:base-refresh", () => refreshOriginMain(repoRoot, spawn));
-      const test = runStep("coverage-ratchet:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, coverageFreeBytes, coverageLockDiscriminator));
+      const test = runStep("coverage-ratchet:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, coverageFreeBytes, coverageLockDiscriminator, testSlot));
       if (!test.ok) return [refresh, test];
       const ratchet = runStep("coverage-ratchet:ratchet", () =>
         shellOut(spawn, "coverage-ratchet.mjs", process.execPath, [join(repoRoot, "scripts", "coverage-ratchet.mjs"), "--lcov", lcovPath, "--baseline", join(repoRoot, "scripts", "coverage-baseline.json")], {
@@ -1826,7 +1989,7 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
               spawn,
               "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/containment.test.ts",
               process.execPath,
-              ["--test", "--import", "tsx", "--import", TMP_HYGIENE_IMPORT, join(repoRoot, "test", "containment.test.ts")],
+              ["--test", "--test-reporter=tap", "--import", "tsx", "--import", TMP_HYGIENE_IMPORT, join(repoRoot, "test", "containment.test.ts")],
               { cwd: repoRoot },
             ),
           ),
@@ -2008,14 +2171,7 @@ export const PR_WORKFLOW_PARITY_TABLE: CiParityEntry[] = [
     workflow: "unwired-gate.yml",
     job: "unwired-gate",
     mirrored: true,
-    run: (repoRoot, spawn) => [
-      runStep("unwired-gate:mkdtemp", () =>
-        shellOut(spawn, "npm run --silent mkdtemp-callsite-check", "npm", ["run", "--silent", "mkdtemp-callsite-check"], { cwd: repoRoot }),
-      ),
-      runStep("unwired-gate:check", () =>
-        shellOut(spawn, "npm run --silent unwired-gate:check", "npm", ["run", "--silent", "unwired-gate:check"], { cwd: repoRoot }),
-      ),
-    ],
+    run: runUnwiredGateChecks,
   },
 ];
 
@@ -2025,6 +2181,8 @@ export interface CiParityDeps {
   coverageFreeBytes?: (path: string) => number;
   /** Isolates a fake nested parity fixture from its parent's real coverage lock. Production omits this. */
   coverageLockDiscriminator?: string;
+  /** Seams for the host-wide test slot the coverage run takes. Production omits this. */
+  testSlot?: TestSlotOptions;
   /** Test seam for ci.yml's half of the drift check — production reads it off disk. */
   ciYamlText?: string;
   /** Test seam for the standalone pull-request workflow half of the drift check. */
@@ -2036,6 +2194,46 @@ export interface CiParityDeps {
 export interface CiParityResult {
   steps: CiParityStepResult[];
   ok: boolean;
+}
+
+function runUnwiredGateChecks(repoRoot: string, spawn: PreflightSpawn): CiParityStepResult[] {
+  return [
+    runStep("unwired-gate:mkdtemp", () =>
+      shellOut(spawn, "npm run --silent mkdtemp-callsite-check", "npm", ["run", "--silent", "mkdtemp-callsite-check"], { cwd: repoRoot }),
+    ),
+    runStep("unwired-gate:check", () =>
+      shellOut(spawn, "npm run --silent unwired-gate:check", "npm", ["run", "--silent", "unwired-gate:check"], { cwd: repoRoot }),
+    ),
+  ];
+}
+
+export interface CiParityAdmissionResult extends CiParityResult {
+  execution: "completed" | "not-run";
+}
+
+/** The interactive full-validation route checks the same cleanup/wiring controls first.
+ * A failed or unreadable admission records its own cause and leaves full parity explicitly
+ * unrun. Once admitted, the existing engine still runs every registered job independently.
+ * Worker ratchets and the default preflight route do not acquire a full-suite invocation. */
+export function runCiParityAdmitted(repoRoot: string, deps: CiParityDeps = {}): CiParityAdmissionResult {
+  const admission = runUnwiredGateChecks(repoRoot, deps.spawn ?? defaultPreflightSpawn).map((step) => ({
+    ...step,
+    name: `ci-parity:admission:${step.name}`,
+    detail: `ci-parity:admission:${step.detail}`,
+  }));
+  if (admission.some((step) => !step.ok)) {
+    return {
+      ok: false,
+      execution: "not-run",
+      steps: [...admission, {
+        name: "ci-parity:not-run",
+        ok: false,
+        detail: "ci-parity:not-run: FAIL — admission did not pass; full CI parity was NOT RUN; resolve the named admission result and re-run",
+      }],
+    };
+  }
+  const full = runCiParity(repoRoot, deps);
+  return { ...full, execution: "completed", steps: [...admission, ...full.steps] };
 }
 
 /** `rmd preflight --ci-parity`'s engine. Prepends `ci-parity:drift` (red the moment a
@@ -2079,7 +2277,7 @@ export function runCiParity(repoRoot: string, deps: CiParityDeps = {}): CiParity
   const jobSteps = [...CI_PARITY_TABLE, ...standaloneTable].flatMap((entry): CiParityStepResult[] => {
     if (!entry.mirrored) return [excludedStep(entry.job, entry.reason ?? "no reason recorded")];
     try {
-      return entry.run!(repoRoot, spawn, deps.coverageFreeBytes, deps.coverageLockDiscriminator);
+      return entry.run!(repoRoot, spawn, deps.coverageFreeBytes, deps.coverageLockDiscriminator, deps.testSlot);
     } catch (e) {
       return [toolchainFailure(`${entry.job}:error`, e)];
     }
@@ -2331,6 +2529,13 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     },
   },
   refusedForPredicate(
+    "test/node-24-runtime-compatibility.test.ts",
+    "c",
+    "W1-T5882's Node 24 suite. It walks tracked src/, scripts/ and bin/ via git ls-files and asserts every nested `node --test` " +
+      "argv names a reporter and no Worker is handed process.execArgv, but it carries no baseline or exemption table: an exempt " +
+      "spawn says so inline at its own call site (`node-test-reporter: exempt`), so every violation bites, not only new ones",
+  ),
+  refusedForPredicate(
     "test/a-census-suite-is-unreachable-from-the-symbols-a-diff-changes.test.ts",
     "a",
     "W1-T2680's own suite. Its single ls-files call is `git ls-files test/*.test.ts`, used as a CONTROL to size the test " +
@@ -2349,6 +2554,12 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     "a",
     "its sole ls-files call is `--error-unmatch <one file>` against a synthetic fixture repo — a single tracked-path check, not a " +
       "population walk",
+  ),
+  refusedForPredicate(
+    "test/a-stale-dirty-fix-owner-is-preserved-and-reclaimed.test.ts",
+    "a",
+    "its `git ls-files --unmerged` call inspects one synthetic fix-owner fixture repo, not the tracked src/ population; " +
+      "the `src/` text is import paths, and the suite asserts owner-recovery behavior rather than a property of every src file",
   ),
   refusedForPredicate(
     "test/an-active-learning-is-reachable-by-some-file.test.ts",
@@ -2521,34 +2732,18 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
       "selected — never a property every walked file must hold, and it carries no baseline table",
   ),
   refusedForPredicate(
+    "test/the-affected-suite-reach-ratchet.test.ts",
+    "a",
+    "W1-T5702's reach ratchet. Its `git ls-files` over src/, scripts/, bin/ and test/ builds the selector's import graph " +
+      "and asserts three AGGREGATES of it (run-task.ts importer count, largest SCC, median reach) against " +
+      "scripts/affected-reach-baseline.json — a tree-wide fact, never a property each walked file must hold, the same shape " +
+      "as test/env-var-registry.test.ts below",
+  ),
+  refusedForPredicate(
     "test/tracked-source-write-guard.test.ts",
     "a",
     "listTrackedTestFiles shells `git ls-files -- test` — test/ only; src/ is the PROTECTED target this suite guards, not the " +
       "population it walks and asserts over",
-  ),
-  // W1-T2643's OWN proof file. Its prose and its own recognizer-exercising tests inevitably
-  // mention "ls-files" and "src/" (the same self-reference test/nothing-tells-you-which-census-
-  // suites-your-change-joins.test.ts already has above), which trips the text-substring
-  // recognizer — proven by the drift-guard test below catching itself before this entry existed.
-  // It never shells `git ls-files` itself (only `git grep`, via censusPopulationDrift), so it
-  // fails clause (a) exactly like its W1-T2523 sibling.
-  refusedForPredicate(
-    "test/the-census-admission-set-is-derived-not-enumerated.test.ts",
-    "a",
-    "this file — meta-tests CENSUS_POPULATION/censusPopulationDrift/FAST_GATE_STEPS themselves; its one real git call is " +
-      "`git grep`, never `git ls-files`, so it is not itself a src-population walk",
-  ),
-  // W1-T2644's OWN proof file, the same self-reference shape its sibling directly above already
-  // has: it discusses (and, for the UNCLASSIFIED test, fabricates fixture text containing) both
-  // "ls-files" and "src/", which trips the recognizer's text-substring match. It never shells
-  // `git ls-files` itself — only `censusPopulationDrift`'s own `git grep` seam, under a mock —
-  // so it fails clause (a) exactly like the entry above it.
-  refusedForPredicate(
-    "test/the-census-roster-is-named-not-numbered.test.ts",
-    "a",
-    "this file — asserts CENSUS_SUITE_ROSTER/CENSUS_POPULATION/censusPopulationDrift/FAST_GATE_STEPS stay one consistent " +
-      "source; every git call it makes is through a mocked PreflightSpawn, never a real `git ls-files`, so it is not itself " +
-      "a src-population walk",
   ),
   // W1-T2647's OWN proof file — self-reference shape as its siblings above; only real git call
   // is `git grep`, never `git ls-files`, so it fails clause (a).
@@ -2562,6 +2757,14 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
   // It is also why this suite is NOT projected into FAST_GATE_STEPS: the census it covers runs as
   // a step on `comment-load-ratchet`, and an ADMITTED member with no npm script of its own cannot
   // be projected (CENSUS_ADMITTED_MEMBERS narrows on `script`).
+  // The nested-preflight census (#9724). Its one real `git ls-files` is scoped to `test/*.ts`, the
+  // TEST corpus; the `src/` text the recognizer sees is its fixture import line. Same route as above.
+  refusedForPredicate(
+    "test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts",
+    "a",
+    "the nested-preflight census. Its `git ls-files` is scoped to `test/*.ts`, the test corpus; its `src/` " +
+      "text is a fixture import line, so it is not a src-population walk",
+  ),
   // W1-T3086's shard-lint ratchet. The recognizer matches it on the `src/` text of its two imports
   // (src/lib/plan.js, src/lib/task-linter.js) plus a real `git ls-files` — but that call is
   // `git ls-files plan/tasks.d/*.yaml plan/tasks.d/*.yml`, the PLAN shard population, and the
@@ -2581,6 +2784,13 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     "this file — W1-T3272's expiring-fixture census; it shells a real `git ls-files` but over " +
       "`test/*.test.ts`, the TEST corpus, so it is not a src-population walk. Its gate rides the " +
       "`comment-load-ratchet` job as a step rather than a projected fast-gate census entry",
+  ),
+  refusedForPredicate(
+    "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts",
+    "a",
+    "W1-T7812's shifted-run regression. Its `ls-files` responses are injected single-file fixture listings; " +
+      "the real runner executes named tests in private fixture roots, never walks the tracked src/ population. " +
+      "The src/ text the recognizer sees is its imports of gate-gardener.js and tmp.js",
   ),
   // W1-T2916's suite. The recognizer matches it on `src/` text that is its import of
   // src/lib/settings.js plus prose ("src runtime package uses are dependencies"), but the
@@ -2623,13 +2833,16 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
   ),
 ];
 
+export const RULE_SUITE_NAME_RE = /(?:census|ratchet|baseline)/i;
+
 /** Minimum discovered rule-check files required to keep the fast lane from silently collapsing. */
 export const MIN_RULE_SUITE_COUNT = 20;
 
 /**
  * Return the committed test files that form the quick rule-check population. The census roster
  * contributes suites whose names do not advertise their shape; the filename convention catches
- * every other census, ratchet, and baseline suite. `git ls-files` is intentional: preflight runs
+ * other census, ratchet, and baseline suites unless a header declares @not-a-rule-suite: <reason>.
+ * Roster members cannot opt out. `git ls-files` is intentional: preflight runs
  * after the commit exists, so a newly added untracked suite cannot make its own population test
  * pass before Git can see it.
  */
@@ -2644,9 +2857,21 @@ export function listRuleSuites(repoRoot: string): string[] {
   }
   const tracked = new Set(result.stdout.split(/\r?\n/).filter(Boolean));
   const roster = new Set(CENSUS_POPULATION.map((member) => member.testFile));
-  const ruleName = /(?:census|ratchet|baseline)/i;
   const suites = [...tracked]
-    .filter((path) => path.endsWith(".test.ts") && (roster.has(path) || ruleName.test(path.slice("test/".length))))
+    .filter((path) => {
+      if (!path.endsWith(".test.ts")) return false;
+      if (roster.has(path)) return true;
+      if (!RULE_SUITE_NAME_RE.test(path.slice("test/".length))) return false;
+      const text = readFileSync(join(repoRoot, path), "utf8");
+      const header = text.match(/^\s*(?:(?:\/\/[^\r\n]*(?:\r?\n|$)|\/\*[\s\S]*?\*\/)\s*)*/)![0];
+      const markers = [...header.matchAll(/@not-a-rule-suite\b([^\r\n]*)/g)];
+      for (const marker of markers) {
+        if (!/^[ \t]*:[ \t]*\S/.test(marker[1]!.replace(/\*\/.*$/, "").trimEnd())) {
+          throw new Error(`${path}: @not-a-rule-suite requires a reason`);
+        }
+      }
+      return markers.length === 0;
+    })
     .sort();
   if (suites.length < MIN_RULE_SUITE_COUNT) {
     throw new Error(`rule-check population too small: found ${suites.length}, expected at least ${MIN_RULE_SUITE_COUNT}`);
@@ -2851,7 +3076,7 @@ export interface FastGateStep {
   script: string;
   reason: string;
   /** A small repository-local runner that is not a package.json npm script. */
-  runner?: "rule-checks";
+  runner?: "rule-checks" | "census-precheck";
   boundMs?: number;
   /** Retain bounded stdout on PASS. Only evidence-producing signals may opt in. */
   retainSuccessOutput?: boolean;
@@ -2991,6 +3216,18 @@ export const FAST_GATE_STEPS: FastGateStep[] = [
       "plain local git+fs read (never node --test, never a network call) that refuses a branch claiming a task (by an anchored " +
       "Remudero-Task trailer, or by filing a plan/tasks.d/ shard) whose head ref does not carry the run-<taskId>-<epochMs> shape " +
       "seven modules read for dispatch visibility and merge credit (scripts/worker-branch-shape.mjs)",
+  },
+  {
+    job: "census-precheck",
+    script: "census-precheck",
+    runner: "census-precheck",
+    reason:
+      "same-class (W1-T6435) — the census precheck hooks/pre-push runs (node scripts/census-precheck.mjs --base origin/main). " +
+      "Nothing installs that hook in an operator or agent clone, so a hand-built PR passed this preflight and reddened a census " +
+      "in CI (#10108: host-capability-fixtures). Exit 2 is the precheck's own 'could not measure'; the hook does not block on " +
+      "it and neither does this step, but it is named UNMEASURED in the detail, never a silent pass. Deliberately no `boundMs` " +
+      "(it spawns bounded suite children and a merge-base worktree, so it stays out of the census-class cost median) and no " +
+      "`remedyFiles` (its remedy is the offending change, never a baseline file)",
   },
 ];
 
@@ -3389,6 +3626,27 @@ function withoutNodeTestContext<T>(fn: () => T): T {
   }
 }
 
+/**
+ * W1-T6435 — the census-precheck leaf: the SAME command hooks/pre-push runs for the branch's own
+ * tree, with the SAME exit reading (0 pass, 2 "could not measure" not blocking, anything else
+ * refuses). Exit 2 is reported as UNMEASURED by name so it never reads as a measured pass.
+ */
+function censusPrecheckLeaf(repoRoot: string, spawn: PreflightSpawn): CiParityLeafResult {
+  const label = "node scripts/census-precheck.mjs --base origin/main";
+  const args = ["scripts/census-precheck.mjs", "--base", "origin/main"];
+  const res = withoutNodeTestContext(() => spawn(process.execPath, args, { cwd: repoRoot }));
+  const spawnFailed = spawnFailureDetail(label, res);
+  if (spawnFailed) return { ok: false, detail: spawnFailed };
+  if (res.status === 2) {
+    const why = (res.stdout + res.stderr).trim();
+    return {
+      ok: true,
+      detail: `PASS — ${label}: UNMEASURED (exit 2) — the precheck could not measure; not blocking, as in the pre-push hook, and NOT a measured pass${why ? `\n${why}` : ""}`,
+    };
+  }
+  return shellOut(() => res, label, process.execPath, args, { cwd: repoRoot });
+}
+
 /** `rmd preflight --fast`'s engine. One step per {@link FAST_GATE_STEPS} entry, run and reported
  *  independently, the same discipline as {@link runCiParity}. A script absent from
  *  `package.json`'s "scripts" reports `SCRIPT MISSING`, distinct from `FAIL` (the script ran and
@@ -3426,6 +3684,7 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
           ),
         );
       }
+      if (runner === "census-precheck") return censusPrecheckLeaf(repoRoot, spawn);
       if (!scriptNames.has(script)) {
         return { ok: false, detail: `SCRIPT MISSING — "${script}" is not defined in package.json's "scripts"; this step did not run` };
       }
@@ -3445,11 +3704,17 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   // PASS TWO: with every census cost measured on the SAME machine in the SAME run, a runaway is
   // the entry costing several times the run's TYPICAL (median) entry — a ratio neither a slow
   // runner nor one accidentally-fast sibling can manufacture (W1-T3408). An entry whose own
-  // command FAILED is left alone. TIERED: a first crossing is re-measured once, alone; only a
+  // command FAILED is left alone. TIERED: a first crossing is re-measured once; only a
   // SECOND crossing beyond a 10% confirmation margin refuses — a loaded runner crossed by 2%
   // on PR #6821, and current no-draft census crossed by 0.7–5.7%, with PASSing commands.
+  // W1-T5676: the re-measure is judged against the median-cost entry RE-TIMED back to back with
+  // it, never pass one's median — a reference fixed at pass-one load refused a 4897ms re-measure
+  // against 4884ms on a loaded host (2026-10-04). The median POSITION never crosses: a crossing
+  // entry costs over 4x the median, the entry there at most 2x it.
   const threshold = censusRunawayThresholdMs([...censusCosts.values()]);
   if (threshold !== undefined) {
+    const byCost = [...censusCosts].sort((a, b) => a[1] - b[1]);
+    const referenceIndex = byCost[Math.floor(byCost.length / 2)]![0];
     for (const [i, firstMs] of censusCosts) {
       if (firstMs <= threshold || !steps[i].ok) continue;
       const { job, script } = gateSteps[i];
@@ -3463,11 +3728,16 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
         steps[i] = { ...again, detail: `${again.detail} (on the re-measure after ${firstMs}ms crossed ${threshold}ms)` };
         continue;
       }
-      const confirmationThreshold = Math.ceil(threshold * FAST_GATE_CENSUS_REMEASURE_MARGIN);
+      const reference = gateSteps[referenceIndex];
+      const refAgainMs = timedCensus(reference.script).elapsedMs;
+      const refAgain = `${reference.job} re-timed back to back at ${refAgainMs}ms`;
+      const confirmationThreshold = Math.ceil(
+        Math.max(FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, refAgainMs) * FAST_GATE_CENSUS_RUNAWAY_MULTIPLE * FAST_GATE_CENSUS_REMEASURE_MARGIN,
+      );
       if (againMs <= confirmationThreshold) {
         steps[i] = {
           ...steps[i],
-          detail: `${steps[i].detail} — RE-MEASURED: ${firstMs}ms crossed the ${threshold}ms runaway bound once; one re-run took ${againMs}ms, within the ${confirmationThreshold}ms confirmation margin (passed)`,
+          detail: `${steps[i].detail} — RE-MEASURED: ${firstMs}ms crossed the ${threshold}ms runaway bound once; one re-run took ${againMs}ms, against ${refAgain}, within the ${confirmationThreshold}ms confirmation margin (passed)`,
         };
         continue;
       }
@@ -3477,8 +3747,8 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
         ok: false,
         detail:
           `${job}: RUNAWAY — npm run --silent ${script} took ${measured}, the re-measure over ${confirmationThreshold}ms ` +
-          `(${FAST_GATE_CENSUS_RUNAWAY_MULTIPLE}x this run's median census cost, floored at ` +
-          `${FAST_GATE_CENSUS_REFERENCE_FLOOR_MS}ms); its own result would have PASSed. Refused by a bound ` +
+          `(${FAST_GATE_CENSUS_RUNAWAY_MULTIPLE}x the median-cost entry ${refAgain}, floored at ` +
+          `${FAST_GATE_CENSUS_REFERENCE_FLOOR_MS}ms, plus the margin); its own result would have PASSed. Refused by a bound ` +
           `derived from this run's own measurements, never by a written constant a growing corpus outgrows`,
       };
     }
@@ -3570,6 +3840,8 @@ export interface PreflightCoverageDeps {
   coverageFreeBytes?: (path: string) => number;
   /** Isolates fake coverage-mode fixtures from the parent full gate's real checkout lock. */
   coverageLockDiscriminator?: string;
+  /** Seams for the host-wide test slot the coverage run takes. Production omits this. */
+  testSlot?: TestSlotOptions;
   /** Test seam — production reads the lcov this mode's own step just wrote. */
   lcovText?: string;
 }
@@ -3639,7 +3911,7 @@ export function runPreflightCoverage(repoRoot: string, deps: PreflightCoverageDe
   });
 
   const lcovPath = join(repoRoot, "coverage", "lcov.info");
-  const test = runStep("coverage-mode:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, deps.coverageFreeBytes, deps.coverageLockDiscriminator));
+  const test = runStep("coverage-mode:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, deps.coverageFreeBytes, deps.coverageLockDiscriminator, deps.testSlot));
   steps.push(test);
   if (!test.ok) return { steps, ok: false };
 

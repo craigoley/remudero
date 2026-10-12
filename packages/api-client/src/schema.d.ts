@@ -102,7 +102,7 @@ export interface components {
       /** W1-T404 -- present only on a 403 refused for an insufficient WRITE TIER by src/lib/service.ts's dispatch gate, which `enforceWriteTiers` turns on and `rmd serve`'s production wiring sets (W1-T500). `low` (bookkeeping), `middle` (reversible but disruptive, or a spend force multiplier) or `high` (spends money or moves code) -- the tier the caller's credential was missing, alongside `required_scope: write`. */
       required_tier?: "low" | "middle" | "high";
     };
-    /** One task's projected merge-state, derived from GitHub (src/lib/status.ts's `StatusProjection` -- never written back to plan/tasks.yaml). This is the per-task "live state" the read-only board (W3-T2) renders. */
+    /** One task's projected merge-state, derived from GitHub (src/lib/status.ts's `StatusProjection` -- never written back to plan/tasks.yaml). This is the per-task "live state" the read-only board (W3-T2) renders. GET /v1/status also carries BoardRow's sparse enrichment below; the bare SSE projection may omit that enrichment. */
     StatusProjection: {
       /** The plan task id (plan/tasks.yaml's `id`). */
       taskId: string;
@@ -115,6 +115,32 @@ export interface components {
       prNumber?: number;
       prUrl?: string;
       prState?: string;
+      /** The board row's plan title, or its escalation title for a task-less escalation. */
+      title?: string;
+      risk?: "low" | "medium" | "high";
+      /** The last ledger activity naming this task; absent when none was observed. */
+      lastActivityAt?: string;
+      /** Observed accumulated spend for the current in-flight run, including measured zero. */
+      liveSpendUsd?: number;
+      /** Observed accumulated turns for the current in-flight run. */
+      liveTurns?: number;
+      /** The run is in flight but has no spend evidence yet; not a measured zero. */
+      liveSpendPending?: true;
+      /** An open escalation not superseded by a later dispatch; unreadable state keeps it visible. */
+      needsHuman?: true;
+      escalationIssueUrl?: string;
+      escalationTitle?: string;
+      /** The escalation's current open state could not be confirmed. */
+      escalationUnverified?: true;
+      escalationOpenedAt?: string;
+      /** Human verification is required and the task has not been credited merged. */
+      verifyHumanPending?: true;
+      /** An open PR suggests running, without recent worker activity or a live lock. */
+      processUnevidenced?: true;
+      /** A dispatched run has neither a terminal verdict nor current PR or activity evidence. */
+      orphaned?: true;
+      /** The row's observed remudero-review state; absent when no PR is attributed. */
+      reviewState?: "success" | "failure" | "pending" | "none" | "unreadable" | "not-applicable";
       /** Trailer search hits rejected by the ownership/anchor asserts, each with a machine-readable reason. Present only when a candidate was actually rejected. */
       rejected_candidates?: ({
         pr: string;
@@ -171,6 +197,8 @@ export interface components {
       repairLadder?: {
         state: "running" | "stalled" | "unreadable";
       };
+      /** W1-T5373: the needs-you composite's decision count, spliced by src/lib/serve.ts's `withStatusNeedsYou` through the shared `consumeHumanGateCounts`; the same number the nav badge's `inbox.decisions` and the composite's `needsYou` report. Never derived from `counts.blocked`. */
+      needsYou?: HumanGateCountSummary;
       staleness?: ConsoleResponseStaleness;
     };
     /** GET /v1/status's header counts (src/lib/board.ts's `CountSummary`), derived from the same `tasks`. */
@@ -293,11 +321,39 @@ export interface components {
       subscription: (RepoSubscriptionUsage) | (null);
       modelsused: (string)[] | null;
     };
-    /** NOT COMPUTED: no config key holds a per-repository proof policy, worker pool size or alert threshold. Every field is always null; see `not_computed.settings`. */
+    /** A repository's EFFECTIVE settings, read-only (W1-T5178). On the operating instance's own repository, `proofpolicy` and `workerpoolsize` come from the instance's plan/policy.yaml and `alertthreshold` from the repository's plan/alert-policy.yaml; each carries `configSource` and `source`, and a value with no readable source stays null with its reason in `reasons` (and `not_computed.settings`). A portfolio row for another repository carries only the three null values; its own instance's summary reports them. */
     RepoDashboardSettings: {
-      proofpolicy: null;
-      workerpoolsize: null;
-      alertthreshold: null;
+      /** The timeout the acceptance-proof executor enforces. */
+      proofpolicy: ({
+        timeoutMs: number;
+      }) | (null);
+      /** The instance's dispatch lane count (plan/policy.yaml sweep.dispatchLanes). */
+      workerpoolsize: number | null;
+      /** The alert disposition policy — severities eligible to act, and the critical path globs by category. */
+      alertthreshold: ({
+        actSeverities: (string)[];
+        criticalPaths: Record<string, (string)[]>;
+      }) | (null);
+      /** Whether each value is the organization default or a repository override; null when unread. */
+      configSource?: {
+        proofpolicy: "organization-default" | "repository-override" | null | null;
+        workerpoolsize: "organization-default" | "repository-override" | null | null;
+        alertthreshold: "organization-default" | "repository-override" | null | null;
+      };
+      /** The file (and key) each value was read from; null when unread. */
+      source?: {
+        proofpolicy: string | null;
+        workerpoolsize: string | null;
+        alertthreshold: string | null;
+      };
+      /** The newest read source file's modification time — when the settings last changed, never the read's own clock, so a re-materialize over unchanged files keeps the view's etag. Null when no source file was read. */
+      freshness?: string | null;
+      /** Why each null setting has no value. */
+      reasons?: {
+        proofpolicy?: string;
+        workerpoolsize?: string;
+        alertthreshold?: string;
+      };
     };
     /** One repository action. `path` is relative to the operating instance's `/v1/i/<instance>/` prefix: `toggleonoff` is POST control/pause or control/resume (write scope, chosen from the current flag), `viewlogs` is GET recent. `configure` and `test_run` are never available. */
     RepoAction: {
@@ -449,6 +505,29 @@ export interface components {
       actionId: string;
       detail?: string;
     };
+    /** The verified actor's own admitted actions on this exact target that lack a verified completion receipt. Read-only evidence, never permission to retry. Only a cursor-less, complete answer with verifiedEmpty true certifies that nothing is pending; partial and unavailable answers never do. */
+    AssistantActionDiscovery: {
+      contract: "assistant-action-discovery-v1";
+      source: {
+        instance: string;
+        repository: string | null;
+        bootSha: string;
+      };
+      observedAt: string;
+      completeness: "complete" | "partial" | "unavailable";
+      limitations: ("legacy_claims_without_identity" | "unreadable_entries" | "oversized_entries" | "unsupported_entries" | "unverifiable_entries" | "corpus_changed" | "corpus_over_listing_bound" | "file_budget" | "byte_budget" | "time_budget" | "page_size" | "store_unavailable")[];
+      pending: ({
+        actionId: string;
+        action: "pause" | "resume" | "stop";
+        instance: string;
+        repository: string | null;
+        submittedAt: string;
+        status: "claimed_unknown" | "receipt_unverified";
+      })[];
+      /** Opaque, bound to the verified actor and exact target; discloses no store path. */
+      continuation: string | null;
+      verifiedEmpty: boolean;
+    };
     /** POST /v1/questions/answer's body -- an operator's answer to a QUESTION-contract entry (worker.ts's plan/questions.ndjson), addressed by the task it was raised on (v0 routing has no path params, src/lib/service.ts). */
     AnswerQuestionRequest: {
       taskId: string;
@@ -557,6 +636,10 @@ export interface components {
       discharged?: boolean;
       /** GET /v1/feedback only (W1-T1257): true when `discharged` could not be determined because the merged-set read failed or was truncated -- a partial read, never mistaken for "not discharged". Mutually exclusive with `discharged`; a read-time decoration only, exactly like `unverified`. */
       dischargeUndecidable?: boolean;
+      /** GET /v1/feedback only (W1-T5524): `queued` while this entry's decision is staged under the state root for the daemon's landing sweep (W1-T5460) and not yet on origin/main; absent once the sweep drops the record. Read fresh from the queue on every request; never written to plan/feedback/<id>.yaml. While `queued`, `status` and `answered_by` are the queued record's, not the checkout's (W1-T5627), and `?status=` filters on them, so a decided entry no longer reads `proposed`. */
+      landing?: "queued";
+      /** GET /v1/feedback only (W1-T5524): true on every entry when the landing queue could not be read -- a failed read, never mistaken for "nothing queued". Mutually exclusive with `landing`; a read-time decoration only, exactly like `dischargeUndecidable`. */
+      landingUnknown?: boolean;
     };
     /** GET /v1/feedback's body -- every captured feedback entry, oldest first. Served through the console read cache (src/lib/serve.ts's `boundConsoleReadRoute`), so `rmd serve` also splices in `staleness`; a cold or stalled cache answers `{entries: [], staleness}`. With `?limit=` or `?cursor=`, `entries` is one page and `page` says where the next one starts. */
     FeedbackInboxResult: {
@@ -589,6 +672,7 @@ export interface components {
     };
     /** GET /v1/inbox?section=<name>'s body: that one lane under its own key, exactly as the whole body carries it (`needsYou` an object of four lanes, every other section one page of an array), plus `counts` and, for a list section, `page`. */
     InboxSectionResult: {
+      planSource?: PlanSource;
       ready?: (InboxReadyItem)[];
       drafting?: (InboxDraftingItem)[];
       notReady?: (InboxNotReadyItem)[];
@@ -598,6 +682,8 @@ export interface components {
       counts: InboxCounts;
       page?: ReadPage;
       staleness?: ConsoleResponseStaleness;
+      /** W1-T5897 -- under serve's slow lane, the `generatedAt` of the persisted classification this body was built from. */
+      classifiedAt?: string;
     };
     /** POST /v1/feedback's body -- submit feedback from the panel (ALWAYS captured with origin: ui, never taken from this body). `replyTo`, if given, must name an existing entry parked `grilling` -- this is "answer a grill" v1 (src/lib/panel-graph.ts's header explains why): the answer is captured as a fresh feedback entry that re-enters triage, rather than a second, parallel answer-delivery primitive ahead of the still-unbuilt W1-T42 grill mechanics. */
     SubmitFeedbackRequest: {
@@ -610,6 +696,8 @@ export interface components {
     SubmitFeedbackResult: {
       ok: boolean;
       entry: FeedbackEntry;
+      /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when staging or its queue confirmation fails, with `landing_error` recorded in the `panel.feedback_submitted` ledger row (W1-T5731). */
+      landing?: "queued";
     };
     /** One bounded activity, workstream, or authoritative artifact row. */
     OperatorActivityItem: {
@@ -735,6 +823,8 @@ export interface components {
       id: string;
       status: string;
       proposalPr: string | null;
+      /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when the record was not staged. */
+      landing?: "queued";
     };
     OperatorAgentEvidence: {
       label: string;
@@ -1844,10 +1934,10 @@ export interface components {
       clearPolicy: "expires" | "explicit-clear-required";
       /** Present only when `clearPolicy` is `expires`. */
       expiresAt?: string;
-      /** The capabilities this stop blocks. The code's type is `string[] | "*"`: the literal string "*" (the default) blocks every capability. This document's OpenAPI subset (scripts/generate-api-client.mjs) has no union, so only the array arm is typed here -- a consumer must accept the string "*" as well. */
-      affectedCapabilities: (string)[];
-      /** The delegation classes this stop blocks. The code's type is `string[] | "*"`: the literal string "*" (the default) blocks every class; as for `affectedCapabilities`, only the array arm is typed here and a consumer must accept "*" as well. */
-      affectedDelegationClasses: (string)[];
+      /** The capabilities this stop blocks: an allowlist, or the literal string "*" (the default), which blocks every capability (the code's `string[] | "*"`). */
+      affectedCapabilities: ((string)[]) | ("*");
+      /** The delegation classes this stop blocks: an allowlist, or the literal string "*" (the default), which blocks every class (the code's `string[] | "*"`). */
+      affectedDelegationClasses: ((string)[]) | ("*");
       /** The incident record this stop is accountable to; every receipt of its lifecycle links back to it. */
       incidentReceiptId: string;
     };
@@ -2091,6 +2181,8 @@ export interface components {
       mode?: string;
       taskId: string;
       feedback: FeedbackEntry;
+      /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when the record was not staged. */
+      landing?: "queued";
     };
     ExternalEffectPostcondition: {
       path: string;
@@ -2398,6 +2490,69 @@ export interface components {
       feedbackId: string | null;
       pr: number | null;
     };
+    GardenerRuntimeEntry: {
+      name: string;
+      enabled: boolean;
+      scope: "repository" | "host" | "fleet";
+      cadenceMs: number;
+      phase: "scheduled" | "queued" | "running" | "completed" | "failed" | "cancelled" | "idle";
+      observedAt: string;
+      passId: string | null;
+      nextDueAt: string | null;
+      queueMs: number | null;
+      executionMs: number | null;
+      exit: number | null;
+      reason: "inputs-unchanged" | "process-completed" | "process-failed" | "signal-or-cancelled" | "spawn-failed" | null | null;
+      attempts: number;
+      completions: number;
+      failures: number;
+      lastCompletedAt: string | null;
+      lastSuccessAt: string | null;
+      lastFailureAt: string | null;
+    };
+    /** Bounded registered off-loop gardener receipts. Counters cover this daemon run only. Completed means process exit zero, not a measured improvement. Host/fleet scope is not attributed to a repository. Missing cost or outcome attribution is never zero. */
+    GardenersResult: {
+      version: 1;
+      repository: string;
+      daemonRunId: string;
+      codeSha: string | null;
+      configuredAt: string;
+      observedAt: string;
+      generatedAt: string;
+      gardens: (GardenerRuntimeEntry)[];
+      coverage: "registered-off-loop";
+      counterWindow: "daemon-run";
+      outcomeAssessment: "not_collected";
+      spend: null;
+      opportunityEvidence?: GardenerOpportunityEvidence;
+    };
+    /** Independent saved opportunity registry, not the registered off-loop gardener inventory. All counts are stored classifications, not newly verified PR/deployment/benefit evidence. No cost or causal improvement claim is made. Missing, mixed, invalid or oversized registries are unavailable, not zero. Empty arrays have no reconciliation timestamp. */
+    GardenerOpportunityEvidence: (GardenerOpportunityReport) | (GardenerOpportunityUnavailable);
+    GardenerOpportunityReport: {
+      version: 1;
+      repository: string;
+      readAt: string;
+      coverage: "saved-opportunity-registry";
+      countSemantics: "reported_states_not_verified_outcomes";
+      state: "reported";
+      total: number;
+      counts: Record<string, number>;
+      oldestReconciledAt: string | null;
+      latestReconciledAt: string | null;
+    };
+    GardenerOpportunityUnavailable: {
+      version: 1;
+      repository: string | null;
+      readAt: string;
+      coverage: "saved-opportunity-registry";
+      countSemantics: "reported_states_not_verified_outcomes";
+      state: "unavailable";
+      reason: "scope_unavailable" | "not_collected" | "unreadable" | "malformed" | "oversized" | "repository_mismatch" | "clock_skew" | "corpus_changed";
+    };
+    GardenersUnavailable: {
+      error: "gardeners_unavailable";
+      reason: "not_collected" | "unreadable" | "repository_mismatch" | "clock_skew";
+    };
     /** GET /v1/incidents's body -- the lifecycle store, newest `lastSeen` first. */
     IncidentsResult: {
       incidents: (IncidentRecord)[];
@@ -2518,8 +2673,24 @@ export interface components {
       reasonKind: "file-order" | "unmet-dependency" | "circuit-breaker" | "blocked";
       reason: string;
     };
-    /** GET /v1/plan/view's body -- progress, per-section counts and the frontier off one plan projection. */
+    /** W1-T5639 (src/lib/serve-plan-reload.ts's `PlanSourceOutcome`): where the plan behind a response came from. `loaded` is a successful read, an intentionally empty plan included. `unavailable` is a plan serve has not yet read: nothing derived from it is evidence, so a count, classification or decision is never served from it. `stale` is a dated last-known-good plan whose latest refresh failed (`failure`); it is never a current generation. `generation` moves only on a successful read. Never inferred from a task count. */
+    PlanSource: {
+      state: "loaded" | "unavailable" | "stale";
+      /** Plans adopted so far; 0 while the first read has not succeeded. */
+      generation: number;
+      /** What was read -- a commit (`ref:<repo>@<sha>`) or the plan files' identity. Absent while unavailable. */
+      identity?: string;
+      /** When the plan this response carries was read. Absent while unavailable. */
+      observedAt?: string;
+      /** The latest failed read, present on `unavailable` and `stale`. The reason is bounded text. */
+      failure?: {
+        reason: string;
+        failedAt: string;
+      };
+    };
+    /** GET /v1/plan/view's body -- progress, per-section counts and the frontier off one plan projection. Under an `unavailable` `planSource` it carries `progress.unknown` with no counts, and empty `sections` and `frontier` that are NOT evidence of an empty plan. */
     PlanViewResult: {
+      planSource?: PlanSource;
       progress: PlanProgress;
       sections: (PlanSectionCount)[];
       frontier: (FrontierRow)[];
@@ -2725,8 +2896,372 @@ export interface components {
           needsYou?: number;
           fleet?: number;
           reason?: string;
+          /** W1-T5373: the Inbox decision count, the needs-you composite's read through the shared consumer; `needsYou` above stays the proposal-lane count it always was. */
+          decisions?: HumanGateCountSummary;
         };
       };
+    };
+    /** One console-v1 metric (src/lib/analytics-route.ts's `ConsoleV1Metric`); `value` is null, never 0, when not collected. */
+    AnalyticsViewMetric: {
+      key: "runs.completed" | "tokens.total" | "cache.reuse" | "cost.modeled.usd" | "duration.p50.ms" | "queue.pending";
+      class: "observed" | "provider_reported" | "modeled";
+      value: number | null;
+      notCollectedReason?: string;
+    };
+    /** Optional cached gardener cost evidence (W1-T8484), scoped to the current daemon generation. Only exact parent passes admit canonical producer receipts. A priced subtotal is distinct from a complete total; absent correlation, prices or retained-corpus coverage stay unknown. Host and fleet gardeners contribute no repository cost. */
+    GardenerSpend: {
+      version: "gardener-spend-v1";
+      state: "not_collected" | "partial" | "complete";
+      reason: "missing_registry" | "invalid_registry" | "over_budget" | "missing_materialization" | "scope_mismatch" | "correlation_not_available" | "ledger_unavailable" | "incomplete_evidence" | "priced_receipts";
+      observedAt: string | null;
+      materializedAt: string | null;
+      totalUsd: number | null;
+      pricedSubtotalUsd: number | null;
+      counts: {
+        priced: number | null;
+        unpriced: number | null;
+        unlinked: number | null;
+      };
+      window: {
+        from: string;
+        through: string;
+      } | null;
+      coverage: {
+        retainedCorpus: "not_collected" | "partial" | "complete";
+        truncated: boolean | null;
+      };
+      gardens: ({
+        name: string;
+        enabled: boolean;
+        scope: "repository" | "host" | "fleet";
+        totalUsd: number | null;
+        pricedSubtotalUsd: number | null;
+      })[];
+    };
+    /** GET /v1/views/analytics (docs/views.md, src/lib/analytics-view.ts; W1-T5055): every instance's console-v1 analytics merged in core. The read-model worker builds it from the `source_snapshot` rows the slow lane's analytics refresh commits per instance, so it answers from them after a restart. One `analytics:<instance>` source per instance: unavailable before its first refresh, stale with phase `failed` when its last refresh failed (the kept snapshot is still merged). */
+    AnalyticsView: {
+      view: "analytics";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        modelApprovals?: HostModelApprovalsEvidence;
+        /** The counted instances' metrics merged, in catalog order. Sums are summed, `cache.reuse` is the ratio of the summed token terms, and `duration.p50.ms` the median of every instance's runs together; nothing is averaged. `instances` is how many instances had a value. */
+        overview: ({
+          key: "runs.completed" | "tokens.total" | "cache.reuse" | "cost.modeled.usd" | "duration.p50.ms" | "queue.pending";
+          class: "observed" | "provider_reported" | "modeled";
+          value: number | null;
+          notCollectedReason?: string;
+          instances: number;
+        })[];
+        /** How many instances the overview counts, of how many serve projects; `missing` have no snapshot yet. */
+        coverage: {
+          counted: number;
+          of: number;
+          missing: (string)[];
+        };
+        /** Each instance's own metrics, or a `reason` when it has no snapshot yet. */
+        instances: ({
+          instanceId: string;
+          /** Registry/config identity captured in the persisted snapshot; absent on older snapshots, never guessed from ledger rows. */
+          repository?: string;
+          metrics?: (AnalyticsViewMetric)[];
+          gardenerSpend?: GardenerSpend;
+          reason?: string;
+          details?: AnalyticsStoredDetails;
+        })[];
+      };
+    };
+    /** Bounded immutable capture of the serving host's loaded model-approval configuration. capturedAt is the startup observation, not an analytics refresh, permission grant or worker adoption receipt. Expiry is retained for a separate console read-time evaluation. Absent on older producers; a missing or rejected corpus is never a measured empty approval list. */
+    HostModelApprovalsEvidence: ({
+      version: "host-model-approvals-v1";
+      scope: "serving-host";
+      sourceKind: "loaded-config";
+      capturedAt: string;
+      state: "reported";
+      approvals: ({
+        model: string;
+        approvedBy: string;
+        approvedAt: string;
+        expiresAt?: string;
+      })[];
+    }) | ({
+      version: "host-model-approvals-v1";
+      scope: "serving-host";
+      sourceKind: "loaded-config";
+      capturedAt: string | null;
+      state: "unavailable";
+      reason: "invalid_source" | "over_budget" | "clock_skew";
+    });
+    /** Additive analytics-details-v1 transport over matching committed signals and usage rows. Reported is not a freshness verdict; read analytics:<instance> for freshness. Consumers validate the carried projection schemas. Missing/mixed snapshots, unreadable or unsupported bodies and response-budget refusals stay explicitly unavailable, not empty healthy defaults. */
+    AnalyticsStoredDetails: ({
+      version: "analytics-details-v1";
+      state: "reported";
+      asOf: string;
+      payloadBytes: number;
+      signals: {
+        version: "console-signals-v1";
+        timeSeries: (AnalyticsStoredSeries)[];
+        spend: {
+          cash: AnalyticsStoredCashSpend;
+        };
+        routingTelemetry: AnalyticsStoredRouting;
+      };
+      /** null means usage was not collected; it is not a fabricated zero-cost reading. */
+      usage: (null) | (AnalyticsStoredUsage);
+    }) | ({
+      version: "analytics-details-v1";
+      state: "unavailable";
+      asOf: string | null;
+      reason: string;
+    });
+    AnalyticsStoredSeries: {
+      id: string;
+      name: string;
+      window: string;
+      bucketWidth: string;
+      aggregation: string;
+      coverage?: "observed" | "not-collected";
+      comment?: string;
+      points: ({
+        t: string;
+        value?: number | null;
+        gap?: boolean;
+        note?: string;
+        unpricedRows?: number;
+      })[];
+    };
+    AnalyticsStoredCashSpend: {
+      state: "observed" | "not-collected";
+      unit: "usd";
+      asOf: string | null;
+      coverage: string;
+      reason?: string;
+      windows: ({
+        name: "7d" | "30d";
+        days: number;
+        fromDay: string;
+        toDay: string;
+        usd: number;
+        rows: number;
+        unpricedRows?: number;
+        complete: boolean;
+        reason?: string;
+      })[];
+    };
+    AnalyticsStoredRouting: {
+      version: "routing-v1";
+      evidenceState: "observed" | "not-collected-in-retained-ledger";
+      assignmentsObserved: number;
+      terminalResultsObserved: number;
+      terminalResultsWithoutAssignment: number;
+      assignmentsWithoutTerminalResult: number;
+      buckets: ({
+        provider: string;
+        assignedModel: string;
+        taskType: string;
+        routingRule: string;
+        assignments: number;
+        terminalResults: number;
+        successes: number;
+        failures: number;
+        totalTokens: number;
+        totalDurationMs: number;
+        totalCostUsd: number;
+        unpricedCostRows?: number;
+        fallbackReasons: ({
+          reason: string;
+          count: number;
+        })[];
+      })[];
+      daily: ({
+        day: string;
+        terminalResults: number;
+        totalTokens: number;
+        totalCostUsd: number;
+        unpricedCostRows?: number;
+      })[];
+      stepUps: {
+        total: number;
+        byStep: ({
+          step: "implement.step_up" | "fix.step_up";
+          count: number;
+        })[];
+        byTargetModel: ({
+          model: string;
+          count: number;
+        })[];
+      };
+      preferenceOutcomes: ({
+        preferredProvider: string;
+        selectedProvider: string;
+        selectedModel: string;
+        outcome: "kept" | "bypassed";
+        reason?: string;
+        count: number;
+      })[];
+    };
+    AnalyticsStoredUsage: {
+      version: "usage-v1" | "usage-v2";
+      asOf: string | null;
+      coverage: {
+        from: string | null;
+        to: string | null;
+        note: string;
+      };
+      subscriptions: ({
+        provider: string;
+        state: "observed" | "stale" | "not-collected";
+        windows: (AnalyticsStoredUsageWindow)[];
+      })[];
+      cash: {
+        unit: "usd";
+        state: "observed" | "not-collected";
+        coverage: string;
+        windows: ({
+          name: "1h" | "24h" | "today-utc" | "7d" | "30d";
+          usd: number;
+          rows: number;
+          unpricedRows?: number;
+          complete: boolean;
+          reason?: string;
+        })[];
+        byModel24h: ({
+          model: string;
+          usd: number;
+          unpricedRows: number;
+        })[];
+        series: ({
+          hour: string;
+          usd: number;
+          rows: number;
+          unpricedRows: number;
+        })[];
+      };
+      routing: {
+        state: "observed" | "not-collected";
+        assignmentsObserved: number;
+        decisionsObserved: number;
+        recent: (AnalyticsStoredUsageAssignment)[];
+        aggregates: {
+          last24h: AnalyticsStoredUsageAggregate;
+          last7d: AnalyticsStoredUsageAggregate;
+        };
+        experiments: (AnalyticsStoredUsageExperiment)[];
+      };
+    };
+    AnalyticsStoredUsageWindow: {
+      name: string;
+      kind: "5h" | "weekly" | "other";
+      durationMs: number | null;
+      usedPercent: number;
+      remainingPercent: number;
+      limitPercent: number | null;
+      resetsAt: string | null;
+      asOf: string;
+      source: "ledger" | "live-status";
+      state: "observed" | "stale";
+      burn: {
+        lastHourPercent: number | null;
+        last24hPercent: number | null;
+        ratePercentPerHour: number | null;
+      };
+      projectedExhaustionAt: string | null;
+      exhaustsBeforeReset: boolean | null;
+      series: ({
+        hour: string;
+        usedPercent: number;
+        maxUsedPercent: number;
+        samples: number;
+      })[];
+    };
+    AnalyticsStoredUsageAssignment: {
+      id: string;
+      ts: string;
+      runId: string | null;
+      taskId: string | null;
+      lane: string | null;
+      requested: {
+        model: string;
+        effort: string;
+      };
+      selected: {
+        provider: string;
+        model: string;
+        effort: string;
+      };
+      rule: string;
+      ruleSource: "decision" | "legacy-mode";
+      capability: string | null;
+      considered: ({
+        provider: string;
+        model?: string;
+        eligible: boolean;
+        selected: boolean;
+        reason?: string;
+      })[];
+      headroomPercent: Record<string, number | null>;
+      reservePercent: number | null;
+      cashWhileSubscriptionHadRoom: boolean;
+      assignmentsInRun: number;
+      markers: Record<string, string>;
+    };
+    AnalyticsStoredUsageAggregate: {
+      windowHours: number;
+      total: number;
+      cashWhileSubscriptionHadRoom: number;
+      byModel: ({
+        provider: string;
+        model: string;
+        count: number;
+        sharePercent: number;
+      })[];
+      byTier: ({
+        tier: string;
+        count: number;
+        sharePercent: number;
+      })[];
+      byRule: ({
+        rule: string;
+        count: number;
+        sharePercent: number;
+      })[];
+      byProvider: ({
+        provider: string;
+        count: number;
+        sharePercent: number;
+      })[];
+      rows: ({
+        provider: string;
+        model: string;
+        tier: string;
+        rule: string;
+        count: number;
+      })[];
+    };
+    AnalyticsStoredUsageExperiment: {
+      trialId?: string;
+      trialArm?: string;
+      reason?: string;
+      reasonFull?: string;
+      reasonState?: "observed" | "not-collected" | "too-large";
+      reasonAsOf?: string;
+      marker: string;
+      value: string;
+      provider: string;
+      model: string;
+      runs: number;
+      assignments: number;
+      terminals: number;
+      successes: number;
+      successRatePercent: number | null;
+      meanAssignmentsPerRun: number;
+      meanDurationMs: number | null;
+      costUsd: number;
+      unpricedTerminals: number;
+      meanCostPerTerminalUsd: number | null;
     };
     /** GET /v1/views/read-model (docs/views.md): the Phase 1 read model's own status, one body per serve, materialized by the read-model worker (src/lib/read-model-worker.ts). Each instance's `ledger:<instance>` source is re-judged at request time, so a stalled projector reads stale. */
     ReadModelStatusView: {
@@ -2863,6 +3398,11 @@ export interface components {
             writes: (string)[];
             /** Routes only core answers */
             coreOnly?: (string)[];
+            /** Whether the instance conversation writes (`inbox/thread/reply`, `inbox/thread/read`) are usable; `read-only` names why in `reason` (an old daemon without the contract). */
+            inbox?: {
+              mode: "read-write" | "read-only";
+              reason?: string;
+            };
           };
         })[];
         hostRegistry: "in_sync" | "drifted" | "unreadable" | "malformed";
@@ -2890,6 +3430,23 @@ export interface components {
       reason?: string;
       lane?: "ready" | "drafting" | "notReady" | "declined";
       decision?: "file" | "merge";
+      /** A not-ready item's classified state (W1-T5340). */
+      state?: "not_ready" | "deferred_with_trigger";
+      /** The unfired trigger holding a `deferred_with_trigger` proposal (src/lib/inbox.ts's `ProposalTrigger`). */
+      trigger?: {
+        description: string;
+        fired: boolean;
+      };
+      /** How the operator resolves a not-ready or deferred proposal (W1-T5340). */
+      resolution?: {
+        method: "POST";
+        path: "/v1/inbox/reframe";
+        fields: {
+          proposalId: string;
+        };
+      };
+      /** A `needsYou` item's shared ASK/RECORD classification (src/lib/ask-classification.ts, W1-T5340). */
+      classification?: "ASK" | "RECORD";
     };
     /** Where one page of a paged view sits (docs/views.md, design D9). `next` is the next page's `cursor`, absent on the last; every page's body stays under 64 KiB. */
     ViewPage: {
@@ -2934,6 +3491,120 @@ export interface components {
         page: ViewPage;
       };
     };
+    /** GET /v1/views/workstreams (docs/views.md, src/lib/workstreams-view.ts; W1-T5050, P4-T11): the operator activity page as one body across instances. Each entry is what GET /v1/operator-activity answers for that instance, built by the same function in the read-model worker from the projector's `activity_ring` (the newest rows of any step) plus the instance checkout's plan. Rebuilt on a ring insert, a plan change or a GitHub snapshot re-save, debounced 1 s. Dark until state/read-model/switches.json sets `workstreams` to `serve`. */
+    WorkstreamsView: {
+      view: "workstreams";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        instances: ({
+          instance: string;
+          activity: OperatorActivityResult;
+        })[];
+      };
+    };
+    /** GET /v1/views/host (docs/views.md, src/lib/host-view.ts; W1-T5053, P4-T14): the console's /host page in one read. Each part is the body its route answers, built by the same function: `control` GET /v1/control/status, `accountUsage` GET /v1/account-usage without its `*AgeMs` fields, `providerRouting` GET /v1/provider-routing, `skills` GET /v1/skills's list, `selfMeasurement` GET /v1/self-measurement. `gauges` are the exact disk and REST rate-limit readings (the `now` view carries them as bands). Built in the read-model worker's view thread at most once a minute, the rate limit and the measurement union read asynchronously. The view writes nothing; the credit-state edge is ledgered by the slow lane. Dark until state/read-model/switches.json sets `host` to `serve`. */
+    HostView: {
+      view: "host";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        control: FleetControlStatus;
+        accountUsage: AccountUsageSnapshot;
+        providerRouting: ProviderRoutingStatus;
+        skills: (SkillEntry)[];
+        selfMeasurement: (SelfMeasurementRows) | (SelfMeasurementUnreadable);
+        gauges: {
+          /** statfs `bavail * bsize` of core's state dir, exact. */
+          diskFreeBytes?: number;
+          /** `gh api rate_limit`'s `resources.core.remaining`, exact. */
+          rateLimitRemaining?: number;
+          /** Why a gauge is absent, per gauge. */
+          reasons?: Record<string, string>;
+        };
+      };
+    };
+    /** GET /v1/views/actions (docs/views.md, src/lib/actions-view.ts; W1-T5052, P4-T13): the actions page as one body across instances. Each entry is what GET /v1/action-results answers, unfiltered, for that instance, built by the same function in the read-model worker from the projector's `external_effect.reconciled` facts. Rebuilt when such a fact is applied. Dark until state/read-model/switches.json sets `actions` to `serve`. */
+    ActionsView: {
+      view: "actions";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        instances: ({
+          instance: string;
+          results: ExternalActionResultsEnvelope;
+        })[];
+      };
+    };
+    /** GET /v1/views/agent?instance=&part= (docs/views.md, src/lib/agent-view.ts; W1-T5051, P4-T12): the agent pages' reads as one materialized body per (instance, part). Each part's `body` is what its route answers for that instance, computed by the route's own readers over the instance's `panel.*` facts in the read-model worker, from a fold persisted per instance and advanced one bounded chunk per pass. `proposals` is core's one proposal engine (the nav badge's) over the instance's committed analytics snapshot; without one it carries a `reason`, never an empty list. Dark until state/read-model/switches.json sets `agent` to `serve`. */
+    AgentView: {
+      view: "agent";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        instance: string;
+        part: "proposals" | "history" | "settings" | "experiments" | "delegations" | "follow-ups" | "promotions" | "actions" | "consequences" | "intent-plans";
+        /** The instance's `owner/name`, when serve names one. */
+        repository?: string;
+        /** The part's route body: proposals = AgentProposals; history = GET /v1/operator-agent/proposals; settings = GET /v1/operator-agent/settings; experiments, delegations, follow-ups, promotions, actions, consequences and intent-plans = the GET of that name under /v1/operator-agent/. */
+        body: (AgentProposals) | (OperatorAgentProposalList) | (OperatorAgentSettingsResult) | (OperatorAgentExperimentList) | (DelegationProfileList) | (FollowUpList) | (OperatorAgentPromotionList) | (OperatorAgentActionList) | (OperatorAgentPendingConsequenceRead) | (IntentPlanList);
+        /** The settings part only, when the instance names a repository: GET /v1/operator-agent/settings?repository=<repository>. */
+        scoped?: OperatorAgentSettingsResult;
+      };
+    };
+    /** GET /v1/views/incidents (docs/views.md, src/lib/incidents-view.ts; W1-T5054, P4-T15): the console's /incidents page as one body across instances. `store` is GET /v1/incidents' list (or the reason it answers 503), re-read when the store file's fingerprint moves. Each instance's `emergency.active` is GET /v1/operator-agent/emergency/status's `active`, computed by the same function over the agent view's persisted `panel.*` fold. `liveness` is a band over the newest projected `daemon.*` row, never the raw heartbeat time. Dark until state/read-model/switches.json sets `incidents` to `serve`. */
+    IncidentsView: {
+      view: "incidents";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        store: ({
+          state: "ok";
+          incidents: (IncidentRecord)[];
+        }) | ({
+          state: "unavailable";
+          /** `malformed` or `unreadable`, as GET /v1/incidents' 503 names it. */
+          reason: string;
+        });
+        instances: ({
+          instance: string;
+          emergency: {
+            active: (EmergencyStop)[];
+          };
+          /** A band over the newest projected `daemon.*` row: `down` past the fleet's stale-heartbeat bound (or a quiet-mode pulse's, whichever is longer), `unknown` before any. */
+          liveness: {
+            state: "up" | "down" | "unknown";
+            since?: string;
+          };
+        })[];
+      };
+    };
+    /** The agent view's `proposals` part (W1-T5051): the proposals core's engine generates for the instance from its committed analytics snapshot and its operator-agent history, not terminal in that history and at or above its repository's confidence threshold, highest confidence first. Either `proposals` or `reason`. */
+    AgentProposals: {
+      proposals?: ({
+        proposalId: string;
+        category: string;
+        signal: string;
+        confidence: number;
+      })[];
+      /** Why no proposal is generated (no repository, or no committed analytics snapshot yet). */
+      reason?: string;
+    };
     /** GET /v1/views/needs-you (docs/views.md, src/lib/needs-you-view.ts): a view of views (P4-T08). Serve recomposes it from the bodies it holds, every instance's `now` and the `inbox` view's `section=needsYou` page, whenever one moves; it reads no store. An input with no usable body is absent with a reason, never zero. Dark until state/read-model/switches.json sets `needs-you` to `serve`. */
     NeedsYouView: {
       view: "needs-you";
@@ -2944,6 +3615,10 @@ export interface components {
       /** The union of the inputs' sources, by name. A missing input adds an `unavailable` `read-model:<now|inbox>@<instance>` source carrying the reason. */
       sources: (ViewSource)[];
       data: {
+        /** W1-T5340: every source's human gates, classified ASK/RECORD by the shared classifier, with each unavailable or partial source named rather than counted as zero. */
+        humanGates?: HumanGateProjection;
+        /** W1-T5373, the composite's header count, read from `humanGates` through the shared consumer. */
+        needsYou?: HumanGateCountSummary;
         /** Every present instance's open decisions, newest `askedAt` first (undated last). */
         decisions: (NowDecision)[];
         /** The `inbox` view's `section=needsYou` first page; absent with `reasons.inbox`. */
@@ -3019,6 +3694,8 @@ export interface components {
             disposition: string;
             queueClass: "actionable" | "active" | "ready-held" | "waiting" | "unknown";
             held: boolean;
+            /** The PR head's remudero-review state from the board snapshot; absent from bodies built before it was projected. */
+            reviewState?: "success" | "failure" | "pending" | "none" | "unreadable" | "not-applicable";
           })[];
         };
         /** Blocked PRs and merge holds, most urgent tone first. */
@@ -3058,6 +3735,8 @@ export interface components {
         decisionsMore?: number;
         /** Optional, uncapped source-qualified decision projection; preserves version-3 consumers. */
         humanGates?: HumanGateProjection;
+        /** W1-T5373, optional; this instance's count read through the shared consumer, with its display page. */
+        needsYou?: HumanGateCountSummary;
         /** Why a decision source was not read for this instance, by kind (`grill`, `task_question`): both live in core, so another instance names why. Its decisions are absent, never zero. */
         decisionsReasons?: {
           grill?: string;
@@ -3114,6 +3793,51 @@ export interface components {
         reason?: string;
       })[];
     };
+    /** W1-T5373: one surface's needs-you number, from src/lib/human-gate.ts's `consumeHumanGateCounts`. Counted over every gate before any display cap; exact only under complete source coverage. */
+    HumanGateCountSummary: {
+      inbox: HumanGateCount;
+      /** Observed Inbox kinds; the enclosing count supplies completeness. */
+      byKind: {
+        escalation?: number;
+        manual_approval?: number;
+        task_question?: number;
+        feedback_grill?: number;
+        feedback_proposal?: number;
+        feedback_new?: number;
+        proposal?: number;
+        dependency_review?: number;
+        held_root?: number;
+        verify_human?: number;
+        pin_drift?: number;
+        stale_reviewer?: number;
+        blocked_pr?: number;
+        merge_held?: number;
+        operator_item?: number;
+      };
+      /** Change-management gates, labelled separately and never added to `inbox`. */
+      changeManagement: HumanGateCount;
+      /** Present when the surface displays a page; `more` is what the page leaves out. */
+      display?: {
+        shown: number;
+        more: HumanGateCount;
+      };
+      /** Kinds some readable source covers, and kinds no supplied source reads yet. */
+      kinds: {
+        covered: ("escalation" | "manual_approval" | "task_question" | "feedback_grill" | "feedback_proposal" | "feedback_new" | "proposal" | "dependency_review" | "held_root" | "verify_human" | "pin_drift" | "stale_reviewer" | "blocked_pr" | "merge_held" | "operator_item")[];
+        missing: ("escalation" | "manual_approval" | "task_question" | "feedback_grill" | "feedback_proposal" | "feedback_new" | "proposal" | "dependency_review" | "held_root" | "verify_human" | "pin_drift" | "stale_reviewer" | "blocked_pr" | "merge_held" | "operator_item")[];
+      };
+      instances: ({
+        instance: string;
+        inbox: HumanGateCount;
+      })[];
+      /** Every source that did not attest complete coverage, with its reason. */
+      uncertain: ({
+        name: string;
+        instance: string | null;
+        state: "partial" | "unavailable";
+        reason: string;
+      })[];
+    };
     /** One open thing the operator answers, with the ONE route that steers the answer. `answer.tier` is that route's write tier: a `high` one still needs the console's /v1/confirm nonce. `fields` are sent as given; the operator's own input goes in the route's text field (`text` for /v1/feedback, `answer` for /v1/questions/answer) or, for `choice`, the `disposition` picked from `options`. */
     NowDecision: {
       /** Stable: `grill:<feedbackId>`, `question:<task>:<ts>`, `manual:<task>:<issueUrl>` or `escalation:<task>:<issueUrl>`. */
@@ -3161,6 +3885,12 @@ export interface components {
         servedModel?: string;
         requestedModel?: string;
       };
+      /** The run's worker liveness from its newest `worker.state` transition (BoardRow.workerState). The console's fleet map evidences a worker process only from this; absent means no transition was seen. */
+      workerState?: "working" | "tool-executing" | "quiet";
+      /** When the run went quiet; present only while `workerState` is `quiet`. */
+      workerStateSince?: string;
+      /** Running only on an open PR's strength, with no live lock and no recent activity. */
+      processUnevidenced?: true;
     };
     /** The console's actionQueueFromStatus, precomputed. `strike` is parsed once from the sweep's reason in every form it writes, replacing the console's regex; `sortAt` is the time of the sweep row that began the PR's current disposition (a re-emitted one does not move it). */
     NowAction: {
@@ -3214,10 +3944,10 @@ export interface components {
       entries: (RecentActivityEntry)[];
       staleness?: ConsoleResponseStaleness;
     };
-    /** One `measurement_cadence.ran` ledger row (src/lib/measurement-cadence.ts's `MeasurementCadenceRowEntry`). `result` is keyed by cadence verb (camelCased) and each value is that verb's SUMMARY (`summarizeMeasurementValue`): scalars, short strings and array counts. The verb set grows with the cadence, so the map is genuinely open. */
+    /** One `measurement_cadence.ran` ledger row (src/lib/measurement-cadence.ts's `MeasurementCadenceRowEntry`). `result` is keyed by cadence verb (camelCased) and each value is that verb's SUMMARY (`summarizeMeasurementValue`): scalars, short strings and array counts. The verb set grows with the cadence, so the map is genuinely open, and so is each summary (`true`, not `{}`, so the strict view validator reads it open too: GET /v1/views/host). */
     SelfMeasurementRow: {
       ts: string;
-      result: Record<string, unknown>;
+      result: Record<string, never>;
     };
     /** The newest measurement rows, newest first. */
     SelfMeasurementRows: {
@@ -3241,6 +3971,91 @@ export interface components {
       proof: string;
       satisfied_by?: string;
       holdout?: boolean;
+    };
+    /** GET /v1/views/task?instance=&id= (src/lib/task-view.ts; W1-T6370): a demand-materialized task page. Missing tasks return 200 with found=false; unavailable inputs carry their evidence in sources and, when the body is thin, data.reason. */
+    TaskView: {
+      view: "task";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: TaskViewData;
+    };
+    /** The actual TaskViewData from src/lib/task-view.ts, built from at most 400 newest fact rows. */
+    TaskViewData: {
+      instance: string;
+      id: string;
+      /** False when no projection row, plan record or fact names the task. */
+      found: boolean;
+      reason?: string;
+      task?: {
+        title: string;
+        type: string;
+        risk: string;
+        priority?: number;
+        status: string;
+        dependsOn: (string)[];
+        rationale?: string;
+        acceptance: (AcceptanceCriterion)[];
+      };
+      projection?: {
+        status: "queued" | "recon" | "prompted" | "running" | "review" | "fixing" | "diagnosing" | "blocked" | "merged" | "done";
+        merged: boolean;
+        source: "ledger" | "pr-field" | "manual-completion" | "trailer" | "head-branch" | "correction" | "none" | "throttled";
+        prNumber?: number;
+        prUrl?: string;
+        prState?: string;
+        phase?: "recon" | "implement" | "review" | "fix-rung";
+        startedAt?: string;
+        workerState?: "working" | "tool-executing" | "quiet";
+      };
+      /** Owned runs within the bounded fact window; only the newest ten get gateway PR details. */
+      runs: (TaskViewRun)[];
+      /** The newest fifty fact rows, newest first. */
+      facts: ({
+        seq: number;
+        ts: string;
+        step: string;
+        runId?: string;
+      })[];
+      /** True when the fact read reaches its 400-row limit. */
+      factsTruncated: boolean;
+      tail?: {
+        runId: string;
+        lines: (string)[];
+      };
+      trace: {
+        runs: number;
+        merged: boolean;
+        costUsd: number;
+        lastVerdict?: string;
+        firstTs?: string;
+        lastTs?: string;
+      };
+    };
+    /** TaskCardRun extended with optional gateway PR evidence (src/lib/task-view.ts). */
+    TaskViewRun: {
+      runId: string;
+      verdict?: string;
+      costUsd?: number;
+      prUrl?: string;
+      pr?: TaskViewPr;
+    };
+    TaskViewPr: {
+      url: string;
+      number?: number;
+      /** The gateway's state, or unknown with a reason when it cannot resolve the PR. */
+      state: string;
+      title?: string;
+      reason?: string;
+    };
+    /** A dark view or a demand miss; a demand miss includes reason and retryMs. */
+    TaskViewUnavailable: {
+      error: "view_disabled" | "view_shadow" | "view_not_ready";
+      view: "task";
+      reason?: "timeout" | "saturated" | "no_worker";
+      retryMs?: number;
     };
     /** One owned run in a task card's history -- read from the ledger, no GitHub call. */
     TaskCardRun: {
@@ -3375,6 +4190,8 @@ export interface components {
     };
     /** One READY-to-ratify proposal (src/lib/panel-graph.ts's `InboxReadyItem`); the drafted tasks ride along so the operator sees exactly what APPROVE would file. */
     InboxReadyItem: {
+      /** Present on needsYou lane items only. */
+      classification?: "ASK" | "RECORD";
       proposalId: string;
       /** The raw proposal summary (the console's Details). */
       summary: string;
@@ -3385,21 +4202,41 @@ export interface components {
     };
     /** One proposal an Architect worker is drafting right now (src/lib/panel-graph.ts's `InboxDraftingItem`). */
     InboxDraftingItem: {
+      /** Present on needsYou lane items only. */
+      classification?: "ASK" | "RECORD";
       proposalId: string;
       summary: string;
       plain: PlainInboxMessage;
       /** When the drafting worker was spawned; an empty string when unrecorded. */
       spawnedAt: string;
     };
-    /** W1-T2604: one not-ready proposal with the exact predicate failures that hold it (src/lib/panel-graph.ts's `InboxNotReadyItem`). Carries no affordance. */
+    /** W1-T2604: one not-ready proposal with the exact predicate failures that hold it (src/lib/panel-graph.ts's `InboxNotReadyItem`). W1-T5340 adds its classified `state`, a deferred item's `trigger`, and the reframe `resolution`. */
     InboxNotReadyItem: {
+      /** Present on needsYou lane items only. */
+      classification?: "ASK" | "RECORD";
       proposalId: string;
       summary: string;
       plain: PlainInboxMessage;
       reasons: (InboxPredicateFailure)[];
+      state?: "not_ready" | "deferred_with_trigger";
+      /** The unfired trigger holding a `deferred_with_trigger` proposal (src/lib/inbox.ts's `ProposalTrigger`). */
+      trigger?: {
+        description: string;
+        fired: boolean;
+      };
+      /** How the operator resolves a not-ready or deferred proposal (W1-T5340). */
+      resolution?: {
+        method: "POST";
+        path: "/v1/inbox/reframe";
+        fields: {
+          proposalId: string;
+        };
+      };
     };
     /** W1-T3408: one DECLINED proposal (src/lib/panel-graph.ts's `InboxDeclinedItem`), so POST /v1/inbox/restore's argument is discoverable. Nothing here is actionable except restore. */
     InboxDeclinedItem: {
+      /** Present on needsYou lane items only. */
+      classification?: "ASK" | "RECORD";
       proposalId: string;
       summary: string;
       plain: PlainInboxMessage;
@@ -3426,6 +4263,7 @@ export interface components {
     };
     /** GET /v1/inbox's body (src/lib/panel-graph.ts's `buildInboxRoute`). Deferred, ratified and retired proposals are never returned. The four top-level lanes hold every owner's items; `needsYou` and `fleet` split them by who must act. `declined`, `needsYou` and `fleet` are optional ONLY because the console cache's cold fallback body (serve.ts's `fallbackBodyForCachedRead`) carries just `ready`, `drafting` and `notReady`; every handler-computed body carries all six. */
     InboxResult: {
+      planSource?: PlanSource;
       ready: (InboxReadyItem)[];
       drafting: (InboxDraftingItem)[];
       notReady: (InboxNotReadyItem)[];
@@ -3434,6 +4272,8 @@ export interface components {
       fleet?: (InboxFleetItem)[];
       counts?: InboxCounts;
       staleness?: ConsoleResponseStaleness;
+      /** W1-T5897 -- under serve's slow lane, the `generatedAt` of the persisted classification this body was built from. */
+      classifiedAt?: string;
     };
     /** One stored daily digest (src/lib/serve.ts's `ConsoleInboxDigestEntry`). */
     InboxDigestEntry: {
@@ -3500,6 +4340,7 @@ export interface components {
     };
     /** GET /v1/inbox/threads's body -- waiting-on-you first, then most recent activity. */
     InboxThreadsResult: {
+      planSource?: PlanSource;
       threads: (InboxThreadSummary)[];
     };
     InboxAttentionCensusSourceState: "observed" | "partial" | "unavailable";
@@ -3523,6 +4364,7 @@ export interface components {
     };
     /** Read-only core-daemon census. Snapshot counts may overcount actionability when a release source is missing; verifiedCounts are conservative lower bounds. No proposal is changed. */
     InboxAttentionCensusResult: {
+      planSource?: PlanSource;
       scope: "core";
       state: "complete" | "partial";
       countSemantics: "observed_snapshot_not_verified";
@@ -3600,7 +4442,7 @@ export interface components {
     };
     /** A non-2xx body from POST /v1/inbox/thread/reply's handler. `delivery` says whether the reply is known not to be stored (`not_delivered`) or cannot be confirmed (`unverified`). */
     InboxThreadReplyRefusal: {
-      error: "not_found" | "reply_store_unavailable" | "reply_intent_conflict" | "reply_in_progress";
+      error: "not_found" | "reply_store_unavailable" | "reply_intent_conflict" | "reply_in_progress" | "inbox_not_ready";
       detail?: string;
       delivery?: "not_delivered" | "unverified";
       replyId?: string;
@@ -3652,10 +4494,12 @@ export interface components {
       proposalId: string;
       restored: boolean;
     };
-    /** A handler-level refusal from an inbox route, always with a human-readable `detail`. `not_found` (no active proposal / no current operator thread), `not_ready` (approve of a proposal not currently READY -- detail is `refusalReason`), `already_ratified`, `already_declined`, `not_declined` (src/lib/inbox.ts's `applyProposalVerdict`), `seq_ahead` (a read mark past the last message), `thread_store_unreadable`. */
+    /** A handler-level refusal from an inbox route, always with a human-readable `detail`. `not_found` (no active proposal / no current operator thread), `not_ready` (approve of a proposal not currently READY -- detail is `refusalReason`), `already_ratified`, `already_declined`, `not_declined` (src/lib/inbox.ts's `applyProposalVerdict`), `seq_ahead` (a read mark past the last message), `thread_store_unreadable`, `inbox_not_ready` (W1-T5897: serve's slow lane has not persisted an inbox classification yet), `plan_source_unavailable` (W1-T5639: serve has not read the plan, so nothing is derived from a placeholder). */
     InboxRefusal: {
-      error: "not_found" | "not_ready" | "already_ratified" | "already_declined" | "not_declined" | "seq_ahead" | "thread_store_unreadable";
+      error: "not_found" | "not_ready" | "already_ratified" | "already_declined" | "not_declined" | "seq_ahead" | "thread_store_unreadable" | "inbox_not_ready" | "plan_source_unavailable";
       detail: string;
+      /** Present on `plan_source_unavailable`: the outcome that refused the read, with its bounded failure reason. */
+      planSource?: PlanSource;
     };
     /** POST /v1/escalation/reply's body (src/lib/panel-actions.ts's `validateEscalationReply`). `taskId`, `class`, `cause` and `prRef` derive the escalation's thread id (`thread:<taskId>::<class>::<cause|->::<prRef|->`, src/lib/inbox-thread.ts's `deriveThreadId`). */
     EscalationReplyRequest: {
@@ -3687,6 +4531,8 @@ export interface components {
       threadId: string;
       feedback: FeedbackEntry;
       interpretation: ReplyInterpretation;
+      /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when the record was not staged. */
+      landing?: "queued";
     };
     /** The closed set of routes a signed escalation answer link may name, each at the write tier serve.ts registers for it (src/lib/escalate.ts's `ESCALATION_OPTION_ROUTES`). */
     EscalationOptionRoute: "/v1/manual/approve" | "/v1/drain/kick" | "/v1/drain/run" | "/v1/inbox/approve" | "/v1/skills/run" | "/v1/control/pause" | "/v1/control/resume" | "/v1/control/stop" | "/v1/escalation/mark-handled" | "/v1/questions/answer" | "/v1/drain/feedback" | "/v1/auth/scope";
@@ -4137,6 +4983,17 @@ export interface paths {
         };
     };
   };
+  "/v1/control/assistant-action/discovery": {
+    get: {
+      responses: {
+          "200": AssistantActionDiscovery;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "503": AssistantActionDiscovery;
+        };
+    };
+  };
   "/v1/questions/answer": {
     post: {
       responses: {
@@ -4199,6 +5056,7 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+          "503": Error;
         };
     };
   };
@@ -4210,6 +5068,7 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+          "503": Error;
         };
     };
   };
@@ -4240,6 +5099,7 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+          "503": Error;
         };
     };
   };
@@ -4362,6 +5222,17 @@ export interface paths {
           "404": AssistantControlLookup;
           "409": AssistantControlLookup;
           "503": AssistantControlLookup;
+        };
+    };
+  };
+  "/v1/i/{instance}/control/assistant-action/discovery": {
+    get: {
+      responses: {
+          "200": AssistantActionDiscovery;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "503": AssistantActionDiscovery;
         };
     };
   };
@@ -5052,6 +5923,16 @@ export interface paths {
         };
     };
   };
+  "/v1/views/analytics": {
+    get: {
+      responses: {
+          "200": AnalyticsView;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
   "/v1/views/read-model": {
     get: {
       responses: {
@@ -5125,6 +6006,75 @@ export interface paths {
     get: {
       responses: {
           "200": NeedsYouView;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/workstreams": {
+    get: {
+      responses: {
+          "200": WorkstreamsView;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/host": {
+    get: {
+      responses: {
+          "200": HostView;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/actions": {
+    get: {
+      responses: {
+          "200": ActionsView;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/task": {
+    get: {
+      responses: {
+          "200": TaskView;
+          "304": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": TaskViewUnavailable;
+          "500": Error;
+        };
+    };
+  };
+  "/v1/views/agent": {
+    get: {
+      responses: {
+          "200": AgentView;
+          "304": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/incidents": {
+    get: {
+      responses: {
+          "200": IncidentsView;
           "304": undefined;
           "401": Error;
           "403": Error;
@@ -5262,6 +6212,16 @@ export interface paths {
         };
     };
   };
+  "/v1/gardeners": {
+    get: {
+      responses: {
+          "200": GardenersResult;
+          "401": Error;
+          "403": Error;
+          "503": GardenersUnavailable;
+        };
+    };
+  };
   "/v1/incidents": {
     get: {
       responses: {
@@ -5333,6 +6293,7 @@ export interface paths {
           "400": Error;
           "401": Error;
           "403": Error;
+          "503": InboxRefusal;
         };
     };
   };
@@ -5352,6 +6313,7 @@ export interface paths {
           "401": Error;
           "403": Error;
           "500": InboxRefusal;
+          "503": InboxRefusal;
         };
     };
   };
@@ -5362,6 +6324,7 @@ export interface paths {
           "401": Error;
           "403": Error;
           "500": InboxRefusal;
+          "503": InboxRefusal;
         };
     };
   };
@@ -5373,6 +6336,7 @@ export interface paths {
           "403": Error;
           "404": InboxRefusal;
           "500": InboxRefusal;
+          "503": InboxRefusal;
         };
     };
   };
@@ -5510,6 +6474,7 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+          "503": Error;
         };
     };
   };

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
   clearDailyCostCeilingOverride,
@@ -196,6 +197,19 @@ function throwsPolicyError(fn: () => unknown, msgRe: RegExp): void {
     (e: unknown) => e instanceof PolicyError && msgRe.test((e as Error).message),
   );
 }
+
+test("W1-T3116: maintenance policy bounds refuse unsafe cadence and retry limits", () => {
+  const raw = parseYaml(readFileSync(SHIPPED, "utf8")) as { objectReap: Record<string, { value: number }> };
+  const path = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}maintenance-policy-`)), "policy.yaml");
+  const changes: Array<[string, number]> = [["intervalMs", 1], ["maxFailures", 1.5], ["maxActiveLanes", -1],
+    ["backoffMs", 0], ["maxBackoffMs", 1]];
+  for (const [key, value] of changes) {
+    const broken = structuredClone(raw);
+    broken.objectReap[key].value = value;
+    writeFileSync(path, stringifyYaml(broken));
+    assert.throws(() => loadPolicy(path), /objectReap/);
+  }
+});
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -534,6 +548,8 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     "worktreeReapBoot.enabled",
     // W1-T3092: the object reaper rung, same net-new posture as the line above.
     "objectReap.enabled",
+    "objectReap.intervalMs", "objectReap.probeIntervalMs", "objectReap.timeoutMs",
+    "objectReap.backoffMs", "objectReap.maxBackoffMs", "objectReap.maxFailures", "objectReap.maxActiveLanes",
     "sweep.tmpMaxAgeMs",
     // W1-T378: `worktreeReapGraceMs` is net-new for the same reason as sweep.tmpMaxAgeMs — it is
     // NOT a lift of DEFAULT_PRUNE_GRACE_MS. It is a deliberately SEPARATE dial (the cadence

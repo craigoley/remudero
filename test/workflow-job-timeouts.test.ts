@@ -187,8 +187,9 @@ test("the coverage aggregator survives the observed ten-minute raw V8 merge and 
   assert.ok(typeof shardMinutes === "number" && shardMinutes > 0, "coverage shards need a finite bound");
   assert.ok(typeof aggregatorMinutes === "number" && aggregatorMinutes > 10,
     "PR #8080's raw V8 merge was cancelled at the former 10-minute aggregator bound");
-  assert.ok((shardMinutes + aggregatorMinutes) * 60 < waitCapSeconds,
-    "ci-gate must outwait the coverage shard and its dependent aggregator, including scheduling room");
+  const dependencySeconds = (shardMinutes + aggregatorMinutes) * 60;
+  assert.ok(waitCapSeconds - dependencySeconds >= 300,
+    "ci-gate must leave at least five minutes beyond the coverage shard and its dependent aggregator");
 });
 
 // ── acceptance 4: the coupling to ci-gate's cap is written down in ci.yml itself ────────────

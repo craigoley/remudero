@@ -38,8 +38,8 @@ real self-sync re-exec sets on its own child, so it skips the whole check, not e
 | `rmd daemon --repo <name> [--max <n>] [--poll-ms <n>]` | Persistent scheduler loop — the same machinery as `drain`, but self-pacing and STOP/PAUSE/headroom-aware, so it keeps running across new plan merges. `--repo` picks the repo to drain (refuses to drain its own source repo unattended without `--allow-self-target`). |
 | `rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]` | Generate the `launchd` unit that execs `rmd daemon --repo <name>`. Loading it live is a separate, operator-run step. |
 | `rmd stop [--reason <text>]` | **One-shot** hard kill: the currently running drain/daemon halts within one tick; auto-clears once that run ends. A no-op-that-warns when nothing is running. |
-| `rmd pause [--reason <text>]` | **Persistent** hold: no new spawns, but an in-flight task always finishes (verdict + merge). Cleared only by `resume`. |
-| `rmd resume` | Clears both `stop` and `pause`. |
+| `rmd pause [--instance <name>] [--reason <text>]` | **Persistent** hold of ONE instance (the one `--instance` names, else the instance whose registry `state_dir` is this `config.root`; an unresolvable target refuses before writing): no new spawns, but an in-flight task always finishes (verdict + merge). Cleared only by `resume`. `--fleet` is the separate fleet-wide hold. See control-surface.md. |
+| `rmd resume [--instance <name>]` | Clears that instance's `stop` and `pause`; never the fleet-wide hold, which only `rmd resume --fleet` clears. |
 | `rmd away [on\|off]` | Set/show operator presence (default `attended`). `away` batches `MANUAL`/`HARD_STOP` escalations into the since-you-last-checked recap for an async verdict instead of a real-time page; `attended` (or no argument to show current mode) delivers exactly as before. Never gates dispatch — presence keys delivery only. |
 | `rmd board [--repo <owner/repo> ...]` | Print what is open, and what is RED, across every configured fleet repository. Read-only: it makes one GitHub list call per repository, names unavailable repositories explicitly, and never gates or mutates work (W1-T3685). |
 | `rmd repair-ladder [--json]` | Read-only report of the repair ladder's durable stalled state, provider capacity, and each paid fallback's price and cap. It never enables a fallback or edits config (W1-T3718). |
@@ -64,6 +64,10 @@ real self-sync re-exec sets on its own child, so it skips the whole check, not e
 | `rmd ledger-grep <pattern>` | The deduplicated union of ALL THREE corpus forms — every `state/ledger.*.ndjson.gz` archive, every UNCOMPRESSED `state/ledger.*.ndjson` rotation, and the live `state/ledger.ndjson`. Naming only two answers silently wrong: rotations exist in both forms, `ledgerRotationEntries` reads both, and a hand-written glob that omits the plain one under-reports with no error, matched against `<pattern>` — replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson \| sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count **before** any match, then exits non-zero, naming the globbed directory, when zero archive files were read — never falling back to a live-file-only count. Read-only: writes no ledger line, no state file, deletes/moves nothing. |
 | `rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...` | Checks a Claude Code auto-memory directory (its `MEMORY.md` index plus one file per memory): index lines whose file is gone, files the index does not list, files without a name/description block, the index size against Claude Code's load limit (200 lines / about 25 KB), and memories that repeat a doctrine rule or learning in this repo. `--fix` moves dangling index lines to `MEMORY.archive.md` and lists unlisted files; it never deletes a memory. `--merge <from-dir>` moves one store into the first directory named. Exits non-zero on findings when `--fix` is not given. |
 | `rmd pr-owner <pr-number>` | Whether the LOCAL ledger shows a fix lane owning one PR — a read of `fix.*` rows keyed by that pr number, printed with the owning lane and the row that proves it. READ-ONLY and host-local: it writes no ledger line, opens no PR, and touches no git state. It answers from the ledger this host holds, so a lane that claimed the PR on another host is invisible to it — an absent owner is 'this host has no record', never 'nobody owns it'. |
+| `rmd claim <task-id> [--drop]` | Takes the dispatch claim the fleet honours for a hand build (W1-T5859): pushes `refs/rmd-dispatch/<task-id>` through the same git-ref create-if-absent claim the fleet's own lanes take, with the same anchor message, so dispatch sees a hand-built task before its branch or PR exists. Refuses a task id that is not in the plan on `origin/main`. Prints `claimed refs/rmd-dispatch/<id>` and exits 0 when created; exits 1 naming the holder when taken, and exits 1 without claiming when origin is unreachable. `--drop` removes the claim only when its anchor's host is this host (an abandoned hand build), never another host's. No release verb is needed: the existing release arms drop the claim once the task has landed. |
+| `rmd progress-watchdog [--json] [--state-root <dir>]` | Names a stalled sweep by its **progress**, not its pulse (W1-T5687): reads the ledger union (every archive plus the live ledger) and prints one verdict — PROGRESSING; IDLE (no open PRs); STALLED (newest progress row over 15 min old: `capture-diagnostics`; over 30 min: `recycle`); CRASH_LOOP (3 or more `daemon.paths` boots in 15 min that never reached `daemon.boot`: `hold-revive`); or UNKNOWN (no rows, or no open-PR count — never a silent `none`). Progress is only a `sweep.pass`, `review.posted` or `verdict.merged` row; `daemon.*` and `runtime.*` rows are a pulse, which is why the 318-minute crash loop of 2026-10-03 read live to every daemon-prefix reader. The open-PR count is the newest `sweep.pass` row's `enumerated` field. On `capture-diagnostics` it writes one bundle (ledger tail, `docker ps`, the tenant's `docker logs --tail`, the verdict) under `<state>/diagnostics/progress-<ts>/`, at most one per 15 min — its only write. It recycles nothing; acting on `recycle` / `hold-revive` from the host launcher is W1-T5688. |
+| `rmd live-edits --tree <daemon-checkout\|install-checkout> --checkout <dir> --state-root <dir> [--json]` | One rung of the live-edit ladder (2026-10-11), run by the host watchdog for the daemon checkout and the install checkout. Tracked edits are written at once to a patch under `<state>/recovery/live-edits/<tree>/` and to `refs/rmd-recovery/live-edits/<host>/<ts>`, read back and re-applied before they count as a copy. At the daemon's own freshness restart pressure the daemon opens one needs-human issue; at twice it, and only with a confirmed copy of these exact edits, the tracked paths are restored to HEAD so the checkout fast-forwards. The host has no GitHub credential, so this verb spools its escalation and restore notice under `<state>/escalation-spool/` and the daemon posts them. |
+| `rmd host-alert --state-root <dir> --instance <name> --condition <condition> (--raise <message> \| --clear) [--json]` | The host watchdog's own alarms (2026-10-11), asked by the launcher: `crash-loop` (the `state/DAEMON_CRASH_LOOP` marker), `units-not-on-main`, `units-diverged`, `deploy-code-fetch-failed`, `deploy-code-diverged` and `deploy-run-problem`. A refusal is counted per consecutive tick under `<state>/launcher-alerts/`: at the deployer's `REFUSAL_PERSISTING_AT` it is ledgered as `launcher_alert.persisting`, and at `REFUSAL_ESCALATE_AT` one needs-human escalation is spooled under `<state>/escalation-spool/` for the daemon to post. A crash loop is spooled at once. `--clear`, run when the launcher sees the step succeed, withdraws a still-spooled escalation or spools the close of the one the daemon opened. The heartbeat also publishes the crash-loop marker as `crash_loop_verdict`, which `fleet-heartbeat-watch.yml` raises as its `CRASH_LOOP` arm. |
 | `rmd routing-ab [--json]` | Compares the arms of each live routing experiment (today: Sol vs Sonnet on sonnet/high work, operator ruling 2026-09-24) over the ledger union: tasks, merges, merge rate, fix dispatches per task, median worker minutes, tokens and notional cost per arm. An arm under the experiment's minimum sample reads "insufficient sample", never a verdict, and the revisit date is flagged once due. Read-only. |
 | `rmd benchmark-aa --trial <manifest.json>` | Reports an A/A integrity trial (W1-T4575) over a public-fixture or opted-in cohort: two labels on one pinned stack, each task labeled by a sha256 draw over trial and task ids so retries never move it. Shows the sample ratio against 50/50, assignment-to-terminal-to-verified joins, per-arm missingness, fallbacks, crossovers, censoring and the difference with a 95% interval; cash, notional, invoice and unknown cost stay separate. Never declares a winner. Writes one dated private report with a privacy-safe receipt; a refresh that cannot read its sources keeps it and marks it stale. |
 | `rmd benchmark-paid-pilot activate --request <request.json> --aa-report <aa-report.json>` / `report --pilot <id>` / `pause --pilot <id>` / `resume --pilot <id>` | The approved $100/7-day paid model pilot (W1-T4603). `activate` is the only way it starts: it refuses by name unless the cited A/A receipt is current (under 24 hours), untampered and free of integrity concerns, then writes the immutable protocol and a privacy-safe receipt once (UTC start and expiry, the $100 cash ceiling, three consented repos, seed and population, pinned arms and revisions, outcome, maturity window, uncertainty method, stopping rule). The seven days start at activation, and a second activation refuses without restarting the clock. Only the paid arm pauses (missing or ambiguous cost evidence, expiry, exhausted budget, allocation drift, an unreadable source the spend window needs); subscription dispatch, review, CI and merge keep flowing. `report` writes a private report by task class and arm, keeps the last dated report when a source fails, and declares no winner before the stopping rule. `pause`/`resume` append to the pilot's control file: a pause stops new paired trials and new paid-arm work, and in-flight attempts finish. A `design: "paired"` protocol (W1-T4625) runs two extra isolated side attempts on a seeded sample of tasks at normal dispatch admission, graded by the task's own proofs; a shadow protocol only records the decisions. |
@@ -77,6 +81,7 @@ real self-sync re-exec sets on its own child, so it skips the whole check, not e
 | `rmd coverage-improve [--lcov <path>]` | Tier two of the absolute coverage gate (W1-T470): when this run's branch coverage (read from `--lcov`, default `coverage/lcov.info`) sits in the 85–90% pass-with-debt band, ranks the `src/` files owning the most uncovered branches (a **count**, never a percentage — computed fresh every run, `lib/coverage-improvement.ts`) and files **one** `plan/feedback/` entry naming them via `captureFeedback`, never a shard written straight into `plan/tasks.d/` (no such minter exists) and never one entry per file. Dedupes against the ledger union (`lib/ledger-grep.ts`, never the live file alone) keyed on the exact set of files currently owning the debt — an unchanged debt profile is skipped; a shifted one files again. ≥90% (healthy) and <85% (tier three, a separate remediation loop) are both no-ops here. Inert until wired into the coverage CI job's own step, a deliberately separate PR (Rule 25). |
 | `rmd verdict-calibration` | The correctness join (W1-T424): joins every armed merge's ledgered review verdict (`lib/verdict-calibration.ts`'s `mineVerdictRows`, over the ledger union, never the live file alone) to post-merge git reality, and reports per verdict class (full PASS / keyword floor / degraded arm) the revert rate and follow-up-fix rate over a stated window, each denominator **named** (n of N armed merges) with an UNMEASURABLE arm for rows whose merge sha or verdict class could not be recovered — never a rate over a silently shrunken denominator. Below a minimum population floor a class prints its count and refuses the rate. The attribution window + overlap rule (`ATTRIBUTION_POLICY`) print alongside the figures, so the metric travels with its rule. Host-side only: the ledger lives on the daemon host. Read-only: files nothing, proposes nothing in v1. |
 | `rmd autonomy-rate` | The **quantity** figure beside `verdict-calibration`'s correctness join (W1-T437): the zero-touch merge rate over every `Remudero-Task:`-trailer-bearing merge on the read git history (`lib/autonomy.ts`'s `zeroTouchMergeRate`, over the ledger union, never the live file alone). Each merge is classified zero-touch or human-touched, and every touch that fired is **named** on its own row — not auto-armed, fix-rung strikes, reframe, operator note, capped override, fix-rung human evidence — then split by verdict class (full PASS / keyword floor / degraded arm / unclassified) so the class split shows where the next ratchet notch is safe. Prints the current `decideAutoMergeArm` arming posture beside the measured rate and proposes no policy change. Zero archive files under the state dir reports the window UNMEASURED, naming the reason, never a rate from the live ledger alone. Host-side only: the ledger lives on the daemon host. Read-only: files nothing, proposes nothing. |
+| `rmd hand-worktree <taskId> [--parent <abs dir>]` | Create a hand build's `run-<taskId>-<epochMs>` worktree from fresh origin/main with no upstream, at an absolute path, and node_modules hard-linked (`cp -al`) from a worktree on the same filesystem with an identical package-lock.json. With no such donor it prints `npm ci` as the next step and the free space. See [the CLI reference](cli-reference.md#rmd-hand-worktree). |
 | `rmd next-task-id --branch <filing-branch>` | Reserve the next free `W1-T<n>` on origin as `refs/rmd-id/<id>` and record the branch that will file it. A normal invocation claims the id; `--offline` and `--no-reserve` do not. An unreadable source refuses the reservation. See [the CLI reference](cli-reference.md#rmd-next-task-id) for all flags and [minting a task id](#minting-a-task-id) for the host procedure. |
 | `rmd note <id> <text...>` | Record an operator guidance note against a task or proposal, into `plan/operator-notes.ndjson` — the weekly feedback docket's fifth capture surface, gathered across **all** tasks (the task scoping applies to prompt injection only). The text is **positional**: `rmd reframe`'s required `--feedback` flag is why that surface reads zero. Also available as `rmd approve <id> --note "<text>"`, which chains this exact write **after** the ratification lands. State-side only: no git, no gh, no PR. |
 | `rmd retro [--dry-run]` | Sync the plan from the ledger (the Architect retro's deterministic gather half). `--dry-run` prints the gather + calibration table only. |
@@ -101,7 +106,7 @@ real self-sync re-exec sets on its own child, so it skips the whole check, not e
 | `rmd up [--port <n>] [--host <addr>] [--allow-off-main]` | Full resume: runs install-freshness first, refuses to resume an off-`main` checkout unless `--allow-off-main` is given, loads the daemon `launchd` service, confirms/starts the serve `launchd` service, and prints a resume report (daemon pid, the console URL with its read token, the in-flight/queued head, needs-human count). Idempotent — already up verifies and reports, never a double start. |
 | `rmd sync [--dry-run]` | The sanctioned dedupe-then-pull recipe as one verb, for exactly the case `checkCliFreshness` refuses — behind `origin/main` AND dirty. Classifies every `git status --porcelain` path against the origin/main blob, so a working-tree copy identical to what is incoming is dropped rather than treated as a conflict. `--dry-run` reports the classification without touching the tree. |
 | `rmd status [--json]` | "Is it running, and why is it stalled" from ONE read model. **Local** (no network): LIVENESS (daemon/serve/deploy-supervisor running/pid/boot-time, running HEAD vs `origin/main` with a STALE flag, crash-loop), LATCHES (every state marker — STOP/PAUSE/DEPLOY_FAILED/DEPLOY_AUTO/inflight locks/pending kicks/drain-now — with its age and stated consequence), LAST CYCLE (the newest `daemon.summary`). **Derived**: BLOCKERS BY CLASS (circuit-broken w/ its reset condition, `dispatch.indeterminate` w/ the gh-window note, blocked PRs by the reason `rmd sweep` already named), QUEUE HEAD (next dispatchables, a perpetually re-attempted task flagged with its observed per-cycle cost, and — W1-T450 — a STALL line when candidates are present but no `run.start` anywhere is newer than a bound derived from this host's own observed dispatch cadence, so eligible-but-not-dispatching stops rendering identically to eligible-and-about-to-dispatch; silent on an empty queue or an unreadable/absent `run.start`, and never a gate), INBOX (ready/not-ready counts, the head item's not-ready reason), HEADROOM (newest telemetry + enforcement on/off from the same switch the daemon reads) — these read a batched GitHub gateway and degrade to a stated unknown on an outage, never a gate on the local sections above. Each section ends with at most one next action. `--json` emits the exact same read model the text renders — the future console Now tab's intended data source. |
-| `rmd doctor [--json]` | ONE **local, read-only** health check with a meaningful exit code — `0` OK / `1` any WARN / `2` any FAIL, with bad args exiting `64` so exit 2 always means a check failed and never a typo. **No network and no healthy daemon required**: every check reads the ledger, `state/`, `plan/`, `/proc` or `ps`, so it answers from a cold ssh session while `remudero-serve` is down and the API budget is exhausted — which is exactly when the console-side checks are unavailable. Checks: ledger freshness (newest `daemon.*` row vs two poll intervals), dispatch stall (eligible pool vs THIS host's own observed cadence), dispatch liveness (consecutive `daemon.alive` rows stuck in the sweep phase), pause honoured (a `PAUSE` held while dispatch continued), lock-vs-process divergence, lane-less workers, stale git `index.lock` (report only), disk headroom, and memory/swap from `/proc/meminfo` — never the cgroup limit, since an unlimited container reads `max` and would report unbounded headroom on a host that had already frozen. Every check prints its measured value beside its threshold, with one summary line first, short enough for a cron subject. **Read-only: `--fix` is refused by name**, because every repair path already has an owner and a second actor mutating state a live daemon depends on is the measured hazard. |
+| `rmd doctor [--json]` | ONE **local, read-only** health check with a meaningful exit code — `0` OK / `1` any WARN / `2` any FAIL, with bad args exiting `64` so exit 2 always means a check failed and never a typo. **No network and no healthy daemon required**: every check reads the ledger, `state/`, `plan/`, `/proc` or `ps`, so it answers from a cold ssh session while `remudero-serve` is down and the API budget is exhausted — which is exactly when the console-side checks are unavailable. Checks: ledger freshness (newest `daemon.*` row vs two poll intervals), dispatch stall (eligible pool vs THIS host's own observed cadence), dispatch liveness (consecutive `daemon.alive` rows stuck in the sweep phase), pause honoured (a `PAUSE` held while dispatch continued), lock-vs-process divergence, lane-less workers, stale git `index.lock` (report only), disk headroom, and memory/swap from `/proc/meminfo` — never a container's cgroup limit, since the freeze was the host's and one container's `memory.max`/`memory.high` headroom cannot show a host that had already frozen. Every check prints its measured value beside its threshold, with one summary line first, short enough for a cron subject. **Read-only: `--fix` is refused by name**, because every repair path already has an owner and a second actor mutating state a live daemon depends on is the measured hazard. |
 | `rmd sweep [--repo <name>] [--dry-run]` | Level-triggered PR-pipeline reconciler: re-derives every open PR's disposition and takes the one gated action (arm merge, fix, close, or escalate). The daemon runs this every poll. |
 | `rmd fix <pr-number> [--repo <name>]` | Operator verb for the fix rung sweep uses — manual override to drive a stuck PR through the same fix path. |
 | `rmd case-file <task-id> [--json]` | Read-only, source-stamped task evidence from the local ledger union and current GitHub PR head. Assignment, review, CI, merge, deployment and runtime remain separate; missing evidence is shown as unavailable. |
@@ -859,6 +864,68 @@ with no node, no `rmd` and no checkout, which rules out an `rmd` verb outright �
 `checkCliFreshness` first, which would fast-forward the very checkout the container being recycled
 is bind-mounting.
 
+#### Commissioning or replacing a target's Git author (W1-T6160)
+
+Every commit a target's workers make carries the author in that container's `RMD_GIT_AUTHOR_NAME`
+and `RMD_GIT_AUTHOR_EMAIL`. An **ordinary** recycle keeps a non-empty outgoing pair over anything
+exported in your shell (W1-T3454): a live container's own value is never silently replaced by a stale
+export. So exporting a new pair and recycling **cannot** fix a bad author. The explicit operation can:
+
+```sh
+# Run from the host, detached as for any recycle. The pair comes from the environment only, never argv.
+export RMD_GIT_AUTHOR_NAME='<the GitHub account display name>'
+export RMD_GIT_AUTHOR_EMAIL='<an email verified on that GitHub account>'
+./deploy/recycle-container.sh --instance site --commission-git-author
+```
+
+- **Initial commission (fresh target).** With no container yet, add `--first-boot` exactly as for
+  any first recycle. The pair is carried into the new container and booted.
+- **Bad-identity replacement.** With a live container, the requested pair replaces the container's
+  author. If the container's HOME already holds a different `user.name`/`user.email`, that is
+  replaced too. `deploy/entrypoint.sh` treats a complete `RMD_GIT_AUTHOR_*` pair as authoritative at
+  every boot, and stops with `git identity: FAILED ...` rather than booting on an author it could
+  not write or read back.
+- **Ordinary preservation afterwards.** The pair persists only as the two declared
+  `RMD_GIT_AUTHOR_*` names on the container. Later ordinary recycles carry it across, and no
+  force switch stays behind. An undeclared runtime variable still refuses the recycle as before.
+
+**Preflight refuses before anything is touched**: no pause, pull, stop, removal or identity write.
+It refuses when `--instance` is missing or repeated, or when `--container`, `--image` or
+`--registry` would retarget away from the registry. It refuses when the name is undeclared or
+declared twice, or when another instance shares its `container_name` or `state_dir`. It refuses when
+the live container does not mount the instance's `state_dir`, or when `repos/<repo>` exists but is
+not a checkout. It also refuses a partial, blank, whitespace-only or control-character pair, a name
+containing `<`/`>`, a value git would trim, or an email that is not one `local@domain.tld` address.
+The refusal names the input that failed, never its value.
+
+**Verification is part of the operation.** After the ordinary graceful replacement (pause, bounded
+drain, smoke, stop, rm, run, image and runtime-contract checks), the script reads the replacement's
+own environment, which must carry the pair. It then runs `git var GIT_AUTHOR_IDENT` as uid
+1000:1000 from the target checkout (`repos/<repo>`, else the daemon's own `remudero` tree). That
+must resolve to the pair within `RMD_RECYCLE_AUTHOR_PROBE_TIMEOUT_S` (default 120s). A matching
+global config is not enough. A repository-local identity or a `GIT_AUTHOR_*` variable that masks it
+fails the operation, as do a failed probe and a timed-out probe. On failure the replacement is left
+running for diagnosis.
+
+**Every run ends in one receipt**, printed and appended to the target's ledger as
+`recycle.git_author_commission`. It carries `target`, `container`,
+`operation=commission-git-author`, `outcome=verified|refused|failed` and the `phase`. It never
+carries an author value or a credential. A refusal or failure also prints a `recovery:` line:
+
+| phase | meaning | recovery |
+|---|---|---|
+| `preflight`, `capture` (refused) | nothing was touched | fix the named input, re-run |
+| `pull`, `drain`, `smoke` | old container untouched, still running | resolve the refusal, re-run |
+| `replace` | old container may be stopped, PAUSE may remain | re-run to finish |
+| `verify-env` | replacement lacks the pair | re-run with both names exported |
+| `verify-identity` | probe failed, timed out, or masked | `docker logs <container>` for `git identity: FAILED`; for a local mask, `git -C <checkout> config --local --unset-all user.name` (and `user.email`) inside the container; for an environment mask, remove the variable from the image/launch; then re-run |
+
+**What this does not certify.** Local validation and the effective-identity probe prove which author
+git will write. They do not prove that GitHub maps that email to an account, or that the account is
+a member of the Vercel team whose previews must accept its commits. Both are operational
+prerequisites: confirm the email is verified on the intended GitHub account and that account has
+Vercel team access **before** commissioning. This operation adds no token and calls no live service.
+
 ### Bringing up the console container (`remudero-serve`)
 
 The console the fleet is actually read from — `console.remudero.com` — is a **separate container**,
@@ -1238,6 +1305,79 @@ container lifecycle was exercised by running it — proof 3 is a separate, delib
 operator-timed action, because taking an unscheduled reboot of a live fleet host is exactly the
 kind of decision this script does not make on its own.
 
+### Container runtimes on the scratch NVMe (RMD_RUNTIME_ON_SCRATCH, opt-in)
+
+Approved 2026-10-08. Docker's data-root moves from `/mnt/rmd/docker` to `/mnt/scratch/docker`, and
+containerd's root (`/var/lib/containerd`) becomes a bind from `/mnt/scratch/containerd`, so image
+pulls and layer I/O leave the IOPS-capped data disk. Nothing changes until the operator runs the
+installer with `RMD_RUNTIME_ON_SCRATCH=1`. Design and evidence:
+docs/forensics/install-container-runtime-mount-order.md.
+
+**The trap.** Do NOT express the new bind as an fstab line. fstab mounts run during local-fs,
+BEFORE `rmd-scratch.service` mounts the NVMe, so the bind would capture an empty directory on the
+29 GB OS disk, and containerd would pull every image onto `/`. The installer instead renders
+`var-lib-containerd.mount`, which runs after `rmd-scratch.service` and fails (Assert, not Condition)
+unless `/mnt/scratch` is mounted. It refuses to install while fstab still mounts
+`/var/lib/containerd`. A `15-remudero-scratch-runtime.conf` guard in both `docker.service.d` and
+`containerd.service.d` makes each service exit before starting on an unmounted scratch.
+
+**The window** (root on the host; drain first):
+
+```sh
+# 1. Warm copy while everything runs
+sudo nice -n 19 ionice -c3 rsync -aHAX --numeric-ids /mnt/rmd/containerd/ /mnt/scratch/containerd/
+sudo nice -n 19 ionice -c3 rsync -aHAX --numeric-ids /mnt/rmd/docker/ /mnt/scratch/docker/
+# 2. rmd pause in core, console and site; wait for no in-flight run. Stop the three watchdog timers.
+sudo systemctl stop docker.socket docker.service containerd.service
+# 3. Final delta, then unmount the OLD bind (an already-mounted /var/lib/containerd would satisfy
+#    the new unit and containerd would keep running from /mnt/rmd)
+sudo rsync -aHAX --numeric-ids --delete /mnt/rmd/containerd/ /mnt/scratch/containerd/
+sudo rsync -aHAX --numeric-ids --delete /mnt/rmd/docker/ /mnt/scratch/docker/
+sudo systemctl stop var-lib-containerd.mount && ! mountpoint -q /var/lib/containerd
+# 4. fstab: comment out exactly this line (the installer prints it if it is still active)
+#      /mnt/rmd/containerd /var/lib/containerd none bind,nofail 0 0
+sudo cp -p /etc/fstab /etc/fstab.bak-2026-10-08 && sudoedit /etc/fstab
+# 5. daemon.json: it holds only data-root today; keep the backup for the rollback
+sudo cp -p /etc/docker/daemon.json /etc/docker/daemon.json.bak-2026-10-08
+echo '{ "data-root": "/mnt/scratch/docker" }' | sudo tee /etc/docker/daemon.json
+# 6. Install (renders the unit, both guards, the rmd-scratch dirs drop-in; one daemon-reload)
+sudo RMD_RUNTIME_ON_SCRATCH=1 RMD_STATE_DIR=/home/craigoleyagent/rmd-state2 \
+  RMD_SCRATCH_STATE_DIRS="/mnt/rmd/remudero-console-state /home/craigoleyagent/rmd-site-state" \
+  ./deploy/install-container-runtime-mount-order.sh --install
+# 7. Bring them up in order, then restart the timers and rmd resume each daemon
+sudo systemctl start var-lib-containerd.mount containerd.service docker.service
+```
+
+**Verify** (ground truth first, then the script's own check):
+
+```sh
+findmnt /var/lib/containerd             # SOURCE is the NVMe device with [/containerd]
+docker info --format '{{.DockerRootDir}}'   # /mnt/scratch/docker
+df -h / /mnt/scratch                    # / does not grow while images pull
+sudo RMD_RUNTIME_ON_SCRATCH=1 RMD_STATE_DIR=/home/craigoleyagent/rmd-state2 \
+  ./deploy/install-container-runtime-mount-order.sh   # exit 0 and "containerd and docker run from /mnt/scratch"
+```
+
+**Roll back** (`/mnt/rmd/docker` and `/mnt/rmd/containerd` stay untouched for at least a week):
+
+```sh
+sudo systemctl stop docker.socket docker.service containerd.service var-lib-containerd.mount
+sudo ./deploy/install-container-runtime-mount-order.sh --uninstall-scratch-runtime   # refuses while the mount is active
+sudo cp -p /etc/fstab.bak-2026-10-08 /etc/fstab
+sudo cp -p /etc/docker/daemon.json.bak-2026-10-08 /etc/docker/daemon.json
+sudo systemctl daemon-reload && sudo mount /var/lib/containerd
+sudo systemctl start containerd.service docker.service
+sudo RMD_STATE_DIR=/home/craigoleyagent/rmd-state2 \
+  RMD_SCRATCH_STATE_DIRS="/mnt/rmd/remudero-console-state /home/craigoleyagent/rmd-site-state" \
+  ./deploy/install-container-runtime-mount-order.sh --install   # re-renders 20- with /mnt/rmd/docker
+```
+
+**After a deallocate** the NVMe comes back empty. `rmd-scratch.service` formats and mounts it, its
+`ExecStartPost` drop-in re-creates `/mnt/scratch/containerd`, and both services start on empty
+stores. The watchdog re-pulls and recreates the daemons; serve and cloudflared rely on their own
+self-heal. If the NVMe fails to mount, both services stay down and say why in the journal, rather
+than filling `/`.
+
 ### Host units: the launcher, boot unit, watchdog and reaper (W1-T2877)
 
 `deploy/install-host-units.sh` provisions everything that makes a VM a **fleet host**, as opposed to
@@ -1285,6 +1425,16 @@ instances:
     codex_dir: /var/lib/remudero/credentials/codex
     container_config_dir: /etc/remudero/container-config
 ```
+
+An optional `gh_app_private_key_host_path` declares a separate readable host key file. With this
+field, `gh_app_private_key_path` is its absolute container destination (for example
+`/run/remudero/github-app.pem`); both installer and recycler mount the file read-only with Docker's
+`--mount` syntax. Legacy records without the host field retain their existing mount resolution.
+The explicit file is checked before lifecycle actions, shared with the pre-stop worker smoke,
+and verified against the replacement container's actual mount source and read-only mode. A missing
+or writable mount is a failed runtime contract, not successful adoption. This does not select or
+change a Claude OAuth store. `RMD_GH_APP_PRIVATE_KEY_HOST_PATH` provides the same input without a
+registry field.
 
 `--instance example` renders only `rmd-example-fleet.*` and `remudero-example-relaunch.sh`; it does
 not check, install, relaunch, or recycle another instance. STOP/PAUSE markers remain under that instance's
@@ -1354,6 +1504,42 @@ there mean a daemon crash-looping under a watchdog that keeps papering over it.
 
 This installer does **not** start or stop the daemon. Bring it up with `~/rmd-relaunch.sh`, or let
 `rmd-fleet.service` do it at boot.
+
+#### Serve and cloudflared self-heal (`deploy/edge-heal.sh`)
+
+The **core** launcher (no `--instance`, or `--instance core`) runs `deploy/edge-heal.sh` from
+`<state>/daemon-install` on every tick that exits 0. That covers boot, a healthy daemon, a revived
+daemon and `state/STOP`; a refused tick (for example an unmounted `/mnt/rmd`) skips it. It recreates
+`remudero-serve` and `cloudflared` only when they are **absent**. That is what a Docker data root on
+wiped scratch looks like after an Azure deallocate. A stopped container stays with its
+`unless-stopped` policy. When both containers exist, the step costs one `docker container inspect`
+each.
+
+- **Serve absent:** it runs `deploy/serve-container.sh` in create mode, with the tick's state root.
+  Because the step runs after the daemon is revived, the script can read the GitHub App env from it.
+- **cloudflared absent:** it runs `cloudflare/cloudflared:latest` on `rmd-net` with
+  `--restart=unless-stopped`. The token file is mounted read-only and passed as
+  `tunnel --no-autoupdate run --token-file /etc/cloudflared/token` (cloudflared 2025.4.0 or later),
+  so the token never appears in argv, env or `docker inspect`. If the token file is missing or
+  empty, it logs one `REFUSING` line and creates nothing.
+- **`rmd-net` absent:** it creates the network only when no `cloudflared` exists. A new network next
+  to a live tunnel would leave the tunnel on the old network.
+
+The token file defaults to `/etc/remudero/cloudflared-token` (override:
+`RMD_CLOUDFLARED_TOKEN_FILE`). The heal only stats the file. cloudflared reads it inside the
+container as uid 65532 (the image's nonroot user), so a `root:root 0600` file would be unreadable
+there. Create it owned by that uid, readable by nobody else on the host:
+
+```
+sudo install -d -m 0755 /etc/remudero
+sudo install -m 0400 -o 65532 -g 65532 /dev/stdin /etc/remudero/cloudflared-token   # paste the token, then ^D
+```
+
+**One-off migration off the inline token.** The live `cloudflared` was created by hand with
+`--token <TOKEN>` on its command line, which `docker inspect` shows. Rotate the token in Cloudflare,
+write the new one to the file, then run `deploy/edge-heal.sh --migrate-cloudflared` as the service
+user. It refuses without the file, pulls the image, removes the old container and recreates it in
+the token-file shape. The tunnel is down for a few seconds.
 
 
 ### Rotating the service tokens

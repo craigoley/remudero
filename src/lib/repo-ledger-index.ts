@@ -140,13 +140,20 @@ export const REPO_ROW_PROJECTION = {
   },
 };
 
+/**
+ * How far a ledger projector had read when a summary read its `repo_row` table: the greatest row identity
+ * `(ts_ms, h)` it held, in the projector's own key order. `h` is the signed first 8 bytes of sha1(line), in decimal.
+ */
+export type RepoLedgerWatermark = { tsMs: number; h: string };
+
 export interface RepoLedgerIndex {
-  refresh(ledgerPath: string, nowMs: number): RepoLedgerIndexPass;
+  /** With `through`, only rows at or before that identity: the rows a projector at that watermark had read. */
+  refresh(ledgerPath: string, nowMs: number, through?: RepoLedgerWatermark): RepoLedgerIndexPass;
 }
 
 export function createRepoLedgerIndex(windowMs: number, fs: RepoLedgerIndexFs = realRepoLedgerIndexFs): RepoLedgerIndex {
   const rotations = new Map<string, number>();
-  const kept = new Map<string, { tsMs: number; row: Row }>();
+  const kept = new Map<string, { tsMs: number; h: bigint; row: Row }>();
   let liveOffset = 0;
   let liveHead = "";
   let lastDaemonMs: number | undefined;
@@ -168,13 +175,14 @@ export function createRepoLedgerIndex(windowMs: number, fs: RepoLedgerIndexFs = 
         if (lastDaemonMs === undefined || tsMs > lastDaemonMs) lastDaemonMs = tsMs;
         continue;
       }
-      const key = createHash("sha1").update(line).digest("base64");
-      if (!kept.has(key)) kept.set(key, { tsMs, row: compact(row) });
+      const digest = createHash("sha1").update(line).digest();
+      const key = digest.toString("base64");
+      if (!kept.has(key)) kept.set(key, { tsMs, h: digest.readBigInt64BE(0), row: compact(row) });
     }
   };
 
   return {
-    refresh(ledgerPath, nowMs) {
+    refresh(ledgerPath, nowMs, through) {
       const dir = dirname(ledgerPath);
       const liveName = basename(ledgerPath);
       // A run.start before the window still names the repository of a verdict inside it.
@@ -210,7 +218,9 @@ export function createRepoLedgerIndex(windowMs: number, fs: RepoLedgerIndexFs = 
         bytesRead += end;
       }
       for (const [key, entry] of kept) if (entry.tsMs < oldestMs) kept.delete(key);
-      return { present: true, rows: [...kept.values()].map((entry) => entry.row), lastDaemonMs, filesRead, bytesRead };
+      const last = through && { tsMs: through.tsMs, h: BigInt(through.h) };
+      const read = last ? [...kept.values()].filter((e) => e.tsMs < last.tsMs || (e.tsMs === last.tsMs && e.h <= last.h)) : [...kept.values()];
+      return { present: true, rows: read.map((entry) => entry.row), lastDaemonMs, filesRead, bytesRead };
     },
   };
 }

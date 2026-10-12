@@ -27,6 +27,8 @@ export const LIVE_ANALYTICS_REFRESH_INTERVAL_MS = 15_000;
 const HEADROOM_TAIL_BYTES = 2 * 1024 * 1024;
 /** A headroom row older than this many of the daemon's own sampling intervals is stale. */
 const HEADROOM_STALE_INTERVALS = 3;
+/** How old a provider reading may be before analytics calls it stale: three of the daemon's own sampling intervals. */
+const displayStaleAfterMs = HEADROOM_STALE_INTERVALS * HEADROOM_SAMPLE_MAX_AGE_MS;
 export const HEADROOM_FALLBACK_REASON = "source: the daemon's own daemon.headroom ledger reading; no routing probe was available";
 
 type JsonRecord = Record<string, unknown>;
@@ -178,9 +180,19 @@ export function createLiveAnalyticsSnapshotCache(deps: LiveAnalyticsSnapshotCach
       // The adapter represents the absent provider snapshot explicitly.
     }
     let fallback: LiveProviderSnapshot | undefined;
-    if (!provider || provider.state === "not-probed" || (provider.state === "unknown" && provider.reason === "absent")) {
+    const absent = !provider || provider.state === "not-probed" || (provider.state === "unknown" && provider.reason === "absent");
+    // The routing file's 60 s bound is the ROUTER's cache validity, not how old a reading may be
+    // before the console calls it stale: it lapses whenever no worker spawns for a minute, a healthy
+    // idle fleet. A lapsed reading is judged against the daemon's own sampling cadence instead, the
+    // bound the headroom fallback already uses; one older than that yields to a fresh, newer reading.
+    if (provider?.freshness === "stale" && clock.now() - Date.parse(provider.observedAt ?? "") <= displayStaleAfterMs) {
+      provider = { ...provider, freshness: "fresh" };
+    }
+    const lapsed = provider?.freshness === "stale";
+    if (absent || lapsed) {
       try {
-        fallback = readHeadroom(deps.root, clock.now());
+        const reading = readHeadroom(deps.root, clock.now());
+        if (absent || (reading?.freshness === "fresh" && Date.parse(reading.observedAt ?? "") > Date.parse(provider!.observedAt ?? ""))) fallback = reading;
       } catch {
         // A failed fallback read leaves the routing snapshot's own explicit state in place.
       }

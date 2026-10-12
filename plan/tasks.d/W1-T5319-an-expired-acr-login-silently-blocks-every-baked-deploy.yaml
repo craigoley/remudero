@@ -11,7 +11,7 @@
   band_meaning: blast-radius
   origin: "operator session 5da5b764, 2026-10-02 12:46Z driver note: serve --replace refused on an expired ACR token"
   files: [deploy/acr-login.sh, deploy/serve-container.sh, deploy/host-update.sh, deploy/recycle-container.sh, deploy/install-host-units.sh, scripts/fleet-heartbeat.sh, src/lib/host-resource-gardener.ts, test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-02 12:46Z on the fleet host: deploy/serve-container.sh --replace refused with "target

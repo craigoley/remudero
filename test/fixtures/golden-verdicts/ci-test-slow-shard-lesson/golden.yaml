@@ -1,0 +1,13 @@
+violation: none
+rule: >
+  W1-T6152: the lane that trips test-slow-shard (1/2) must receive the
+  serialized-suite lesson through a matched learning, with an executable proof.
+verdict:
+  state: success
+  capped: false
+  testTheater: false
+  criteriaTampered: false
+arm: true
+criteria:
+  - met: true
+    proof_exec: executed_pass

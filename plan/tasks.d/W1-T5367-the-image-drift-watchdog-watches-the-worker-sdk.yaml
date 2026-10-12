@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-02: daemon loop-stall diagnosis"
   plan_refs: ["W1-T4061", "W1-T3240", "W1-T496"]
   files: [src/lib/deployer.ts, test/the-image-drift-watchdog-watches-the-worker-sdk.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

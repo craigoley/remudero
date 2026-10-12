@@ -5,10 +5,11 @@ import { dirname, join, relative } from "node:path";
 import { stringify } from "yaml";
 import { systemClock, type Clock } from "./clock.js";
 import { partitionCodeqlQualityAlerts, codeqlQualityProposalId } from "./codeql-quality-intake.js";
+import { collectBenchmarkReadinessCandidates, readinessGapOutcome, readReadinessGapSidecar, type ReadinessGapOutcome, type ReadinessGapRead } from "./benchmark-readiness-intake.js";
 import { ciFrictionOrigin, ciFrictionRoundsFromLedger, priceCiFrictionCauses, readCiFrictionLedgerRecords, readGateFireRateReport } from "./ci-friction-gardener.js";
 import { feedbackEntryPath, listFeedback, type FeedbackEntry } from "./feedback.js";
 import type { GateFireRateReport } from "./gate-fire-rate.js";
-import type { GardenerDeps } from "./gardener.js";
+import { syncGardenWorkspace, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps } from "./gardener.js";
 import { ghJson } from "./github-transport.js";
 import { loadProposalRegistry, updateProposalRegistry, type Proposal } from "./inbox.js";
 import { familyTrackRecord, judgeMachineShard } from "./machine-filing-judge.js";
@@ -25,10 +26,12 @@ import { loadCreditStore } from "./status.js";
 import { gateFireRatesPath } from "./gate-fire-rate.js";
 
 export interface OpportunityCandidate {
-  source: "standing-debt" | "codeql-quality" | "ci-friction" | "followup";
+  source: "standing-debt" | "codeql-quality" | "ci-friction" | "followup" | "benchmark-readiness";
   repo: string;
   key: string;
   observedAt: string;
+  /** When the source itself recorded the evidence, where that differs from this pass's observation. */
+  recordedAt?: string;
   anchor: string;
   availability: "available";
   freshness: "fresh";
@@ -54,12 +57,14 @@ export interface OpportunityIntakePorts {
   readStandingDebt: () => string;
   readCodeql: () => CodeScanningAlertsRead;
   readFriction: () => { records: LedgerRecord[]; gateFireRates?: GateFireRateReport };
+  /** The readiness gap sidecar for this repository; absent means the source is not wired, not that it is empty. */
+  readReadinessGaps?: () => ReadinessGapRead;
   readWork: () => OpportunityWork;
   riskJudge: (input: RiskJudgeInput) => Promise<RiskJudgeVerdict>;
   riskPolicy?: RiskPolicy;
   fileCandidate: (candidate: OpportunityCandidate) => Promise<string | undefined>;
   stageProposal: (candidate: OpportunityCandidate, reasons: string[]) => void;
-  dispose?: () => void;
+  dispose?: () => void | Promise<void>;
 }
 
 export interface OpportunityIntakeResult {
@@ -69,6 +74,8 @@ export interface OpportunityIntakeResult {
   prUrl?: string;
   unavailable: string[];
   deduped: string[];
+  /** For a readiness candidate: where it truly stands. A routed pass is recorded/pending/held, never "filed". */
+  readiness?: ReadinessGapOutcome;
 }
 
 /** Each source keeps its own denominator and units; incomparable prices are never summed. */
@@ -122,6 +129,9 @@ export function collectOpportunityCandidates(ports: OpportunityIntakePorts, work
     const reason = `ci-friction/followup unavailable: ${String(error)}`;
     unavailable.push(reason);
   }
+  const readiness = collectBenchmarkReadinessCandidates(ports);
+  candidates.push(...readiness.candidates);
+  unavailable.push(...readiness.unavailable);
   return { candidates, unavailable };
 }
 
@@ -144,115 +154,165 @@ function covered(candidate: OpportunityCandidate, work: OpportunityWork): boolea
 /** One routing pass; judgement failure holds evidence rather than manufacturing a human decision. */
 export async function runOpportunityIntake(ports: OpportunityIntakePorts): Promise<OpportunityIntakeResult> {
   try {
-    let work: OpportunityWork;
+    const result = await routeOpportunity(ports);
+    if (result.candidate?.source !== "benchmark-readiness") return result;
+    let work: OpportunityWork | undefined;
     try { work = ports.readWork(); }
-    catch (error) { return { status: "unavailable", deduped: [], unavailable: [`dedupe unavailable: ${String(error)}`] }; }
-    const { candidates, unavailable } = collectOpportunityCandidates(ports, work);
-    const result: OpportunityIntakeResult = { status: "empty", unavailable, deduped: [] };
-    const candidate = candidates.find((entry) => {
-      if (!covered(entry, work)) return true;
-      result.deduped.push(entry.key);
-      return false;
-    });
-    if (!candidate) return { ...result, status: unavailable.length ? "unavailable" : "empty" };
-    const task: Task = {
-      id: `OPPORTUNITY-${candidate.key}`, title: candidate.remedy, repo: candidate.repo,
-      depends_on: [], type: "implement", verify: "human", risk: "low", status: "queued",
-      attempts: 0, author_class: "machine", origin: candidate.key,
-      prompt: JSON.stringify(candidate),
-    };
-    const plan: Plan = { tasks: work.tasks, byId: new Map(work.tasks.map((entry) => [entry.id, entry])) };
-    const judgement = await judgeMachineShard(task, familyTrackRecord(plan, candidate.source, (id) => {
-      const origin = work.tasks.find((entry) => entry.id === id)?.origin;
-      return origin !== undefined && work.mergedKeys.includes(`${candidate.repo}/${origin}`);
-    }), {
-      riskJudge: ports.riskJudge, policy: ports.riskPolicy ?? DEFAULT_RISK_POLICY, clock: ports.clock,
-    });
-    if (judgement.kind === "unavailable") return { ...result, status: "unavailable", unavailable: [...unavailable, judgement.reason] };
-    if (judgement.ruling.action === "escalate" && judgement.ruling.verdict !== "high") return { ...result, status: "held", candidate };
-    // Re-read after the paid judgement; another writer may have filed this source in the meantime.
-    let currentWork: OpportunityWork;
-    try { currentWork = ports.readWork(); }
-    catch (error) { return { ...result, status: "unavailable", unavailable: [...unavailable, `dedupe recheck unavailable: ${String(error)}`] }; }
-    if (covered(candidate, currentWork)) return { ...result, deduped: [...result.deduped, candidate.key] };
-    if (candidate.authority === "operator" || judgement.ruling.action === "escalate") {
-      candidate.authority = "operator";
-      ports.stageProposal(candidate, judgement.ruling.reasons);
-      return { ...result, status: "promoted", candidate, destination: "inbox" };
-    }
-    const prUrl = await ports.fileCandidate(candidate);
-    return { ...result, status: prUrl ? "promoted" : "held", candidate, destination: "plan-pr", prUrl };
+    catch (error) { return { ...result, readiness: { key: result.candidate.key, state: "unavailable", reason: `work unreadable: ${String(error)}` } }; }
+    return { ...result, readiness: readinessGapOutcome(result.candidate, work, result) };
   } finally {
-    ports.dispose?.();
+    await ports.dispose?.();
   }
+}
+
+async function routeOpportunity(ports: OpportunityIntakePorts): Promise<OpportunityIntakeResult> {
+  let work: OpportunityWork;
+  try { work = ports.readWork(); }
+  catch (error) { return { status: "unavailable", deduped: [], unavailable: [`dedupe unavailable: ${String(error)}`] }; }
+  const { candidates, unavailable } = collectOpportunityCandidates(ports, work);
+  const result: OpportunityIntakeResult = { status: "empty", unavailable, deduped: [] };
+  const candidate = candidates.find((entry) => {
+    if (!covered(entry, work)) return true;
+    result.deduped.push(entry.key);
+    return false;
+  });
+  if (!candidate) return { ...result, status: unavailable.length ? "unavailable" : "empty" };
+  const task: Task = {
+    id: `OPPORTUNITY-${candidate.key}`, title: candidate.remedy, repo: candidate.repo,
+    depends_on: [], type: "implement", verify: "human", risk: "low", status: "queued",
+    attempts: 0, author_class: "machine", origin: candidate.key,
+    prompt: JSON.stringify(candidate),
+  };
+  const plan: Plan = { tasks: work.tasks, byId: new Map(work.tasks.map((entry) => [entry.id, entry])) };
+  const judgement = await judgeMachineShard(task, familyTrackRecord(plan, candidate.source, (id) => {
+    const origin = work.tasks.find((entry) => entry.id === id)?.origin;
+    return origin !== undefined && work.mergedKeys.includes(`${candidate.repo}/${origin}`);
+  }), {
+    riskJudge: ports.riskJudge, policy: ports.riskPolicy ?? DEFAULT_RISK_POLICY, clock: ports.clock,
+  });
+  if (judgement.kind === "unavailable") return { ...result, status: "unavailable", unavailable: [...unavailable, judgement.reason] };
+  if (judgement.ruling.action === "escalate" && judgement.ruling.verdict !== "high") return { ...result, status: "held", candidate };
+  // Re-read after the paid judgement; another writer may have filed this source in the meantime.
+  let currentWork: OpportunityWork;
+  try { currentWork = ports.readWork(); }
+  catch (error) { return { ...result, status: "unavailable", unavailable: [...unavailable, `dedupe recheck unavailable: ${String(error)}`] }; }
+  if (covered(candidate, currentWork)) return { ...result, deduped: [...result.deduped, candidate.key] };
+  if (candidate.authority === "operator" || judgement.ruling.action === "escalate") {
+    candidate.authority = "operator";
+    ports.stageProposal(candidate, judgement.ruling.reasons);
+    return { ...result, status: "promoted", candidate, destination: "inbox" };
+  }
+  const prUrl = await ports.fileCandidate(candidate);
+  return { ...result, status: prUrl ? "promoted" : "held", candidate, destination: "plan-pr", prUrl };
 }
 
 /** Use the daemon's existing checkout/landing ports and feedback-to-plan workflow, with no timer. */
 export function productionOpportunityIntakePorts(garden: GardenerDeps, deps: Partial<Pick<OpportunityIntakePorts, "readCodeql" | "readFriction" | "riskJudge">> & {
   readPulls?: (repo: string) => unknown;
 } = {}): OpportunityIntakePorts {
-  const clock = garden.clock ?? systemClock;
-  recordMeasurementCadenceFire(join(garden.stateDir, "last-intake-cadence-codeqlQuality.json"), clock.date(), 24 * 60 * 60 * 1000);
-  const ws = garden.openWorkspace();
+  recordIntakeCadence(garden);
+  const ws = syncGardenWorkspace(garden.openWorkspace());
   try {
-    const remote = execFileSync("git", ["-C", ws.root, "remote", "get-url", "origin"], { encoding: "utf8" }).trim();
-    const matched = /github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?$/.exec(remote);
-    if (!matched) throw new Error("opportunity intake requires a GitHub repository identity");
-    const repo = `${matched[1]}/${matched[2]}`;
-    const layout = resolveRepoLayout(ws.root);
-    let records: LedgerRecord[] | undefined;
-    let judge = deps.riskJudge;
-    return {
-      repo, clock, dispose: () => ws.dispose(),
-      standingDebtAnchor: relative(ws.root, layout.masterPlan),
-      readStandingDebt: () => readFileSync(layout.masterPlan, "utf8"),
-      readCodeql: deps.readCodeql ?? (() => readCodeScanningAlerts(matched[1]!, matched[2]!)),
-      readFriction: deps.readFriction ?? (() => {
-        const gateFireRates = readGateFireRateReport(garden.stateDir);
-        if (existsSync(gateFireRatesPath(garden.stateDir)) && !gateFireRates) throw new Error("gate fire-rate report unreadable");
-        return { records: records ??= readCiFrictionLedgerRecords(garden.stateDir), gateFireRates };
-      }),
-      readWork: () => {
-        const pages = deps.readPulls ? deps.readPulls(repo) : ghJson(["api", `repos/${repo}/pulls?state=open&per_page=100`, "--paginate", "--slurp"]);
-        if (!Array.isArray(pages) || pages.some((page) => !Array.isArray(page))) throw new Error("open PR dedupe corpus unreadable");
-        const tasks = loadPlan(layout.planMonolith).tasks;
-        const proposals = loadProposalRegistry(join(garden.stateDir, "inbox-proposals.json"));
-        for (const record of loadProposalRecords(join(layout.planDir, "proposals.d"))) {
-          if (record.status === "open" && record.source) proposals.push({ id: record.source, summary: record.title, evidenceAnchors: [] });
-        }
-        const credited = loadCreditStore(join(garden.stateDir, "merge-credit.json"));
-        const mergedKeys = tasks.filter((task) => credited[task.id] && task.origin).map((task) => `${repo}/${task.origin}`);
-        return { tasks, proposals, mergedKeys, prs: pages.flat().map((pr) => ({ body: String(pr.body ?? "") })), feedback: listFeedback(ws.root) };
-      },
-      riskPolicy: readRiskPolicy(policyPath(ws.root)),
-      riskJudge: (input) => {
-        if (!judge) {
-          const mounts = loadMounts(mountsPath(ws.root));
-          judge = realRiskJudge({ mount: mounts.machine_filing_judge ?? resolveRiskJudgeMount(mounts), cwd: ws.root, settingsFile: join(ws.root, "settings", "worker.json"), log: garden.log });
-        }
-        return judge(input);
-      },
-      stageProposal: (candidate, reasons) => {
-        updateProposalRegistry(join(garden.stateDir, "inbox-proposals.json"), (current) => {
-          if (current.some((entry) => entry.id === opportunityKey(candidate))) return null;
-          return [...current, { id: opportunityKey(candidate), summary: `${candidate.remedy}\nOpportunity-Key: ${opportunityKey(candidate)}\n${JSON.stringify(candidate)}\n${reasons.join("\n")}`, evidenceAnchors: [] }];
-        });
-      },
-      fileCandidate: async (candidate) => {
-        const key = opportunityKey(candidate);
-        const id = `fb-opportunity-${createHash("sha256").update(key).digest("hex").slice(0, 24)}`;
-        const entry: FeedbackEntry = {
-          id, ts: clock.iso(), raw: `Opportunity-Key: ${key}\n${JSON.stringify(candidate)}\nDraft one bounded task through the normal triage and machine-filing judge, with author_class: machine. Preserve origin: ${candidate.key} and the exact Opportunity-Key line on the task. Establish executable acceptance before filing.`,
-          origin: "cli", status: "new", attachments: [], proposal_pr: null, submission_key: key,
-        };
-        const path = feedbackEntryPath(ws.root, id);
-        mkdirSync(dirname(path), { recursive: true });
-        writeFileSync(path, stringify(entry));
-        return ws.land({ paths: [relative(ws.root, path)], title: "chore(plan): route one measured opportunity for governed triage", body: `Route one source-qualified candidate through the existing feedback-to-plan workflow.\n\nOpportunity-Key: ${key}\n\n${JSON.stringify(candidate)}` });
-      },
-    };
+    return opportunityIntakePortsOver(ws, garden, deps);
   } catch (error) {
     ws.dispose();
     throw error;
   }
+}
+
+/** {@link productionOpportunityIntakePorts} over the daemon's async port: the checkout's fetch and
+ *  worktree add are awaited, so the loop keeps ticking while they run (W1-T5740). */
+export async function openOpportunityIntakePorts(garden: GardenerDeps, deps: OpportunityIntakeSources = {}): Promise<OpportunityIntakePorts> {
+  recordIntakeCadence(garden);
+  const ws = await garden.openWorkspace();
+  try {
+    return opportunityIntakePortsOver(ws, garden, deps);
+  } catch (error) {
+    await ws.dispose();
+    throw error;
+  }
+}
+
+type OpportunityIntakeSources = NonNullable<Parameters<typeof productionOpportunityIntakePorts>[1]>;
+
+function recordIntakeCadence(garden: GardenerDeps): void {
+  recordMeasurementCadenceFire(join(garden.stateDir, "last-intake-cadence-codeqlQuality.json"), (garden.clock ?? systemClock).date(), 24 * 60 * 60 * 1000);
+}
+
+/** The [owner, name] of a checkout's origin remote, or null when it is not a GitHub remote. */
+export function githubRepoOfCheckout(root: string): [string, string] | null {
+  const remote = execFileSync("git", ["-C", root, "remote", "get-url", "origin"], { encoding: "utf8" }).trim();
+  const matched = /github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?$/.exec(remote);
+  return matched ? [matched[1]!, matched[2]!] : null;
+}
+
+/** "owner/name" for a checkout, or undefined when it has no GitHub origin; the readiness driver then records gaps without an identity, which intake refuses. */
+export function githubRepoSlugOfCheckout(root: string): string | undefined {
+  try {
+    const matched = githubRepoOfCheckout(root);
+    return matched ? `${matched[0]}/${matched[1]}` : undefined;
+  } catch (error) {
+    void error; // no origin remote: the identity is unknown, and unknown is never guessed
+    return undefined;
+  }
+}
+
+function opportunityIntakePortsOver(ws: GardenCheckout | GardenCheckoutAsync, garden: GardenerDeps, deps: OpportunityIntakeSources): OpportunityIntakePorts {
+  const clock = garden.clock ?? systemClock;
+  const matched = githubRepoOfCheckout(ws.root);
+  if (!matched) throw new Error("opportunity intake requires a GitHub repository identity");
+  const repo = `${matched[0]}/${matched[1]}`;
+  const layout = resolveRepoLayout(ws.root);
+  let records: LedgerRecord[] | undefined;
+  let judge = deps.riskJudge;
+  return {
+    repo, clock, dispose: () => ws.dispose(),
+    standingDebtAnchor: relative(ws.root, layout.masterPlan),
+    readStandingDebt: () => readFileSync(layout.masterPlan, "utf8"),
+    readCodeql: deps.readCodeql ?? (() => readCodeScanningAlerts(matched[0], matched[1])),
+    readFriction: deps.readFriction ?? (() => {
+      const gateFireRates = readGateFireRateReport(garden.stateDir);
+      if (existsSync(gateFireRatesPath(garden.stateDir)) && !gateFireRates) throw new Error("gate fire-rate report unreadable");
+      return { records: records ??= readCiFrictionLedgerRecords(garden.stateDir), gateFireRates };
+    }),
+    readReadinessGaps: () => readReadinessGapSidecar(garden.stateDir, repo),
+    readWork: () => {
+      const pages = deps.readPulls ? deps.readPulls(repo) : ghJson(["api", `repos/${repo}/pulls?state=open&per_page=100`, "--paginate", "--slurp"]);
+      if (!Array.isArray(pages) || pages.some((page) => !Array.isArray(page))) throw new Error("open PR dedupe corpus unreadable");
+      const tasks = loadPlan(layout.planMonolith).tasks;
+      const proposals = loadProposalRegistry(join(garden.stateDir, "inbox-proposals.json"));
+      for (const record of loadProposalRecords(join(layout.planDir, "proposals.d"))) {
+        if (record.status === "open" && record.source) proposals.push({ id: record.source, summary: record.title, evidenceAnchors: [] });
+      }
+      const credited = loadCreditStore(join(garden.stateDir, "merge-credit.json"));
+      const mergedKeys = tasks.filter((task) => credited[task.id] && task.origin).map((task) => `${repo}/${task.origin}`);
+      return { tasks, proposals, mergedKeys, prs: pages.flat().map((pr) => ({ body: String(pr.body ?? "") })), feedback: listFeedback(ws.root) };
+    },
+    riskPolicy: readRiskPolicy(policyPath(ws.root)),
+    riskJudge: (input) => {
+      if (!judge) {
+        const mounts = loadMounts(mountsPath(ws.root));
+        judge = realRiskJudge({ mount: mounts.machine_filing_judge ?? resolveRiskJudgeMount(mounts), cwd: ws.root, settingsFile: join(ws.root, "settings", "worker.json"), log: garden.log });
+      }
+      return judge(input);
+    },
+    stageProposal: (candidate, reasons) => {
+      updateProposalRegistry(join(garden.stateDir, "inbox-proposals.json"), (current) => {
+        if (current.some((entry) => entry.id === opportunityKey(candidate))) return null;
+        return [...current, { id: opportunityKey(candidate), summary: `${candidate.remedy}\nOpportunity-Key: ${opportunityKey(candidate)}\n${JSON.stringify(candidate)}\n${reasons.join("\n")}`, evidenceAnchors: [] }];
+      });
+    },
+    fileCandidate: async (candidate) => {
+      const key = opportunityKey(candidate);
+      const id = `fb-opportunity-${createHash("sha256").update(key).digest("hex").slice(0, 24)}`;
+      const entry: FeedbackEntry = {
+        id, ts: clock.iso(), raw: `Opportunity-Key: ${key}\n${JSON.stringify(candidate)}\nDraft one bounded task through the normal triage and machine-filing judge, with author_class: machine. Preserve origin: ${candidate.key} and the exact Opportunity-Key line on the task. Establish executable acceptance before filing.`,
+        origin: "cli", status: "new", attachments: [], proposal_pr: null, submission_key: key,
+      };
+      const path = feedbackEntryPath(ws.root, id);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, stringify(entry));
+      return ws.land({ paths: [relative(ws.root, path)], title: "chore(plan): route one measured opportunity for governed triage", body: `Route one source-qualified candidate through the existing feedback-to-plan workflow.\n\nOpportunity-Key: ${key}\n\n${JSON.stringify(candidate)}` });
+    },
+  };
 }

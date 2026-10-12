@@ -14,7 +14,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { aaArmFor, aaStackHash, buildAaAllocationReceipt, buildBenchmarkAaReport, parseAaTrialManifest, readAaLedgerEvidence,
@@ -141,6 +141,36 @@ function registeredProtocols(stateDir: string): { protocol: ProspectiveAaProtoco
   });
 }
 
+/** W1-T5341: a trial's own live ledger rows; a torn line is skipped, an absent ledger reads as no rows. */
+export function prospectiveAaLedgerRows(stateDir: string, trialId: string): Record<string, unknown>[] {
+  return readLines(ledgerLivePath(prospectiveAaDir(stateDir, trialId)));
+}
+
+/** One registration a state root holds: its protocol, or the named reason the protocol does not verify. */
+export interface ProspectiveAaRegistration {
+  trialId: string;
+  protocol: ProspectiveAaProtocol | null;
+  reason: string | null;
+  paused: boolean;
+}
+
+/** W1-T5341: every registration under one state root, unverifiable ones included by name. An absent or unreadable root
+ *  is `unreadable`, never "none": a caller reconciling instances cannot prove no duplicate trial from a root it never read. */
+export function listProspectiveAaRegistrations(stateDir: string):
+  { state: "read"; registrations: ProspectiveAaRegistration[] } | { state: "unreadable"; reason: string } {
+  if (!existsSync(stateDir)) return { state: "unreadable", reason: "state-dir-absent" };
+  let names: string[];
+  try { names = existsSync(join(stateDir, PROTOCOL_ROOT)) ? readdirSync(join(stateDir, PROTOCOL_ROOT)) : []; }
+  catch (error) {
+    return { state: "unreadable", reason: `protocol-root-unreadable:${(error as NodeJS.ErrnoException).code ?? "unknown"}` };
+  }
+  return { state: "read", registrations: names.sort().map((trialId) => {
+    const loaded = loadProtocol(stateDir, trialId);
+    return { trialId, protocol: loaded.ok ? loaded.protocol : null, reason: loaded.ok ? null : loaded.reason,
+      paused: isPaused(prospectiveAaDir(stateDir, trialId)) };
+  }) };
+}
+
 /** How one admission's pair ended. Observational only: nothing in normal dispatch reads it. */
 export interface ProspectiveAaPairResult {
   state: "inert" | "not-eligible" | "refused" | "measured" | "unmeasurable";
@@ -167,6 +197,9 @@ export interface ProspectiveAaPairInput {
   env?: NodeJS.ProcessEnv;
   clock?: Clock;
   harnessRevision?: BenchmarkStackEvidence["harnessRevision"];
+  /** W1-T5341: prompt, tool, scorer and environment pins derived from the executing runtime. A field given here is
+   *  recorded beside the manifest's pin, and an unknown or disagreeing runtime pin refuses the pair before any spawn. */
+  runtimeRevisions?: Omit<BenchmarkStackEvidence, "harnessRevision">;
   dispatchAttempt?: PairedAttemptDispatch<string>;
   dispatchRefusal?: string;
   grade?: PairedGrader;
@@ -191,6 +224,36 @@ function harnessReason(receipt: PairContext["receipt"], stack: AaTrialManifest["
   const harness = receipt.stack.harnessRevision;
   if (harness.state !== "observed") return `harness-unpinned:${harness.reason}`;
   return harness.value.toLowerCase() === stack.harnessRevision ? null : "harness-off-pin";
+}
+
+const RUNTIME_FIELDS = ["promptRevision", "toolRevision", "scorerRevision", "environmentRevision"] as const;
+
+/** The manifest's pins with each runtime pin recorded beside its field: two disagreeing pins read as conflicting. */
+function withRuntimeRevisions(evidence: BenchmarkStackEvidence, runtime: ProspectiveAaPairInput["runtimeRevisions"]): BenchmarkStackEvidence {
+  if (runtime === undefined) return evidence;
+  const merged: BenchmarkStackEvidence = { ...evidence };
+  for (const field of RUNTIME_FIELDS) {
+    const pin = runtime[field];
+    if (pin === undefined) continue;
+    if ("state" in pin) { merged[field] = pin; continue; }
+    const manifest = evidence[field];
+    const manifestPins = manifest === undefined || "state" in manifest ? [] : Array.isArray(manifest) ? manifest : [manifest];
+    merged[field] = [...manifestPins, ...(Array.isArray(pin) ? pin : [pin])];
+  }
+  return merged;
+}
+
+/** A runtime pin that is unknown, or that disagrees with the registered stack, refuses the pair before any spawn. */
+function runtimeRevisionReasons(receipt: PairContext["receipt"], stack: AaTrialManifest["stack"],
+  runtime: ProspectiveAaPairInput["runtimeRevisions"]): string[] {
+  if (runtime === undefined) return [];
+  return RUNTIME_FIELDS.filter((field) => runtime[field] !== undefined).flatMap((field) => {
+    const evidence = receipt.stack[field];
+    if (evidence.state !== "observed") {
+      return [evidence.reason === "conflicting-pins" ? `runtime-pin-drift:${field}` : `runtime-pin-unknown:${field}:${evidence.reason}`];
+    }
+    return evidence.value.toLowerCase() === stack[field] ? [] : [`runtime-pin-drift:${field}`];
+  });
 }
 
 async function gradeAttempt(context: PairContext, label: string, attempt: PairedAttemptResult | null): Promise<{ grade: PairedGrade | null; reasons: string[] }> {
@@ -281,7 +344,8 @@ async function prospectiveAaPair(input: ProspectiveAaPairInput, claim: () => boo
   const ledger = ledgerLivePath(prospectiveAaDir(input.stateDir, protocol.trialId));
   const pin = pinOf(protocol.manifest.stack);
   const task = protocol.manifest.tasks.find((candidate) => candidate.taskId === input.task.id)!;
-  const stackEvidence = pairedStackEvidence({ revisions: revisionsOf(protocol.manifest.stack) }, input.harnessRevision);
+  const stackEvidence = withRuntimeRevisions(pairedStackEvidence({ revisions: revisionsOf(protocol.manifest.stack) }, input.harnessRevision),
+    input.runtimeRevisions);
   const context: PairContext = { input, protocol, pairId: `aapair-${sha256(`${protocol.trialId}\0${input.task.id}`).slice(0, 16)}`,
     order: prospectiveAaOrder(protocol.manifest, input.task.id), stackEvidence,
     receipt: benchmarkRunAssignmentReceipt({ id: "", requested: { model: pin.model, effort: pin.effort }, selected: pin },
@@ -293,6 +357,7 @@ async function prospectiveAaPair(input: ProspectiveAaPairInput, claim: () => boo
     && (row.aa_prospective as { admitted?: unknown } | undefined)?.admitted === true)) reasons.push("task-already-paired");
   const harness = harnessReason(context.receipt, protocol.manifest.stack);
   if (harness !== null) reasons.push(harness);
+  reasons.push(...runtimeRevisionReasons(context.receipt, protocol.manifest.stack, input.runtimeRevisions));
   if (input.dispatchAttempt === undefined) reasons.push(input.dispatchRefusal ?? "attempt-dispatch-not-wired");
   if (reasons.length === 0 && !claim()) reasons.push("pair-in-flight");
   context.write(input.task.id, STEPS.decision, { aa_prospective: { trial_id: protocol.trialId, pair_id: context.pairId, task_id: input.task.id,

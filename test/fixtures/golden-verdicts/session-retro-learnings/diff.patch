@@ -1,0 +1,53 @@
+diff --git a/learnings/ci.yaml b/learnings/ci.yaml
+index 1111111..2222222 100644
+--- a/learnings/ci.yaml
++++ b/learnings/ci.yaml
+@@ -155,0 +156,26 @@
++- id: a-board-wide-plan-red-is-main
++  subsystem: ci
++  lifecycle: active
++  files: ["plan/tasks.d/**", ".github/workflows/ci.yml", "src/lib/sweep.ts"]
++  fact: >-
++    Broad plan-related CI reds point to invalid main YAML; repair main before updating affected PR branches.
++  src: PRs #8714, #8877, #8922
++  cited: "2026-10-03"
++
++- id: hand-review-collides-with-the-daemon
++  subsystem: ci
++  lifecycle: active
++  files: ["src/lib/review.ts"]
++  fact: >-
++    Review pending claims are host-local; inspect the exact SHA's status before starting a second review.
++  src: "review.post_refused rows; W1-T5540"
++  cited: "2026-10-03"
++
++- id: strikes-exhausted-counts-rows
++  subsystem: ci
++  lifecycle: active
++  files: ["src/lib/sweep.ts", "src/run-task.ts"]
++  fact: >-
++    Historical exhausted-strike rows may count refusals; inspect refusal outcomes on old ledger records.
++  src: "ledger rows; W1-T5542"
++  cited: "2026-10-03"
+diff --git a/learnings/testing.yaml b/learnings/testing.yaml
+index 3333333..4444444 100644
+--- a/learnings/testing.yaml
++++ b/learnings/testing.yaml
+@@ -107,0 +108,17 @@
++- id: a-proof-must-fail-at-base
++  subsystem: testing
++  lifecycle: active
++  files: ["test/**", "scripts/proof-discrimination-gate.mjs"]
++  fact: >-
++    Acceptance proofs must pass on the change and fail at the merge base to prove discrimination.
++  src: PR#8866
++  cited: "2026-10-03"
++
++- id: title-tests-with-the-plan-proof
++  subsystem: testing
++  lifecycle: active
++  files: ["test/**", "plan/tasks.d/**"]
++  fact: >-
++    Name tests with the exact plan proof phrase so review can select them.
++  src: PR#8861
++  cited: "2026-10-03"

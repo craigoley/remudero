@@ -11,7 +11,7 @@
   band_meaning: span
   origin: "operator ask 2026-10-02: make the ci-friction gardener self-improve from PR fixes that slip through automation or require fixes (operator session 90be18e2)"
   files: [src/lib/ci-friction-remedy.ts, src/lib/ci-friction-gardener.ts, src/run-task.ts, test/w1-t5300-a-hand-fix-is-ci-friction-evidence.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-02: the ci-friction gardener (#8657) prices only what the fleet's own fix lane spends

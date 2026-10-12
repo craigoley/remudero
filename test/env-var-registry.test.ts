@@ -10,26 +10,31 @@ import { isRegisteredHarnessEnvName, registeredHarnessEnvVars } from "../src/lib
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const ENV_LITERAL = /(["'`])(RMD_[A-Z0-9_]+|REMUDERO_[A-Z0-9_]+)\1/g;
+const ENV_DOT_ACCESS = /(?<![\w$])(?:[$A-Z_a-z][$\w]*)?[eE][nN][vV]\s*(?:\?\.|\.)\s*(RMD_[A-Z0-9_]+|REMUDERO_[A-Z0-9_]+)(?![\w$])/g;
 
-function srcFiles(): string[] {
-  return execFileSync("git", ["ls-files", "src/**/*.ts"], { cwd: REPO_ROOT, encoding: "utf8" })
+export function srcFiles(): string[] {
+  return execFileSync("git", ["ls-files", "src/*.ts", "src/**/*.ts"], { cwd: REPO_ROOT, encoding: "utf8" })
     .split("\n")
     .filter(Boolean);
 }
 
-function declaredHarnessEnvNames(): string[] {
+export function harnessEnvNamesInSource(text: string): string[] {
+  return [
+    ...[...text.matchAll(ENV_LITERAL)].map((match) => match[2]!),
+    ...[...text.matchAll(ENV_DOT_ACCESS)].map((match) => match[1]!),
+  ];
+}
+
+export function declaredHarnessEnvNames(): string[] {
   const names = new Set<string>();
   for (const file of srcFiles()) {
     const text = readFileSync(join(REPO_ROOT, file), "utf8");
-    for (const match of text.matchAll(ENV_LITERAL)) {
-      const name = match[2];
-      if (name) names.add(name);
-    }
+    for (const name of harnessEnvNamesInSource(text)) names.add(name);
   }
   return [...names].sort();
 }
 
-test("every RMD_ or REMUDERO_ env-name literal in src is registered once", () => {
+test("every RMD_ or REMUDERO_ env-name literal or dot read in src is registered once", () => {
   const declared = declaredHarnessEnvNames();
   const registered = ENV_REGISTRY.map((entry) => entry.name).sort();
 

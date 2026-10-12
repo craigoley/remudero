@@ -1,0 +1,101 @@
+- id: W1-T7998
+  title: "A DEAD DIRTY FIX OWNER AT THE PR'S CURRENT HEAD IS KEPT FOREVER — on 2026-10-11 a fix round that died after pushing 3874a18 to PR #10829 left sweep-W1-T7899-1791711829493 on that same head with staged deletes and an untracked copy of the same files, every later fix claim was declined as dirty_worktree, and the claim-decline backstop then held the PR at that head (escalation #10837)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — a dead owner's residue on the PR's current head must not hold its fix lane forever
+  band_meaning: span
+  origin: "operator approval 2026-10-11: file the follow-ups from the PR #10829 (W1-T7899) fix-lane stall and escalation #10837"
+  plan_refs: [W1-T7719, W1-T6362, W1-T6355, W1-T5974, W1-T5919, W1-T6434, W1-T7899]
+  files: [src/run-task.ts, src/lib/sweep.ts, test/a-dead-dirty-fix-owner-at-the-current-head-is-reclaimed.test.ts, test/a-stale-dirty-fix-owner-is-preserved-and-reclaimed.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-11 in the core daemon's live ledger (/mnt/rmd/state2/state/ledger.ndjson on the host).
+      - A ci-log fix round for PR #10829 (W1-T7899) claimed at 09:43:48Z. Its worktree
+        /home/node/Remudero/worktrees/sweep-W1-T7899-1791711829493 was created at 09:43:49Z (the epoch in its name).
+        The round pushed 3874a18, the PR's head since then, and wrote no fix.done row.
+      - sweep.fix.checkout_claim_declined at 10:24:43Z, 10:48:14Z and 11:09:04Z. Each has reason
+        registered_worktree_owner, owner_recovery_reason dirty_worktree and head_sha 3874a188b279.
+      - From 12:11Z every sweep.disposed row reads "FIX_CLAIM_DECLINE_BACKSTOP 3 reached, no further claim is
+        attempted at this head while that worktree exists". pr.stuck at 10:36Z opened escalation #10837.
+    THE OWNER, READ ON THE HOST WITHOUT LOCKS (GIT_OPTIONAL_LOCKS=0, read-only):
+      - HEAD is refs/heads/run-W1-T7899-1791709889016 at 3874a188b279. That equals the PR head.
+      - `status --porcelain` shows staged `D` of five files under
+        test/fixtures/golden-verdicts/ci-coverage-session-blanking-lesson/ and `??` of that same directory.
+      - captureRegisteredFixOwnerSnapshot therefore reads treeState "untracked_dirty"
+        (readOwnerHasTrackedWork is true), with localSha === remoteSha.
+    THE ADAPTIVE IDLE BOUND WAS NOT WHAT KEPT IT. registeredFixOwnerIdleBoundMs over the live ledger's 165 fix.done
+    spans is about 9.3 min (p95). The owner was 41 min old at the first decline.
+    READ on origin/main e076e2a85, src/run-task.ts decideRegisteredFixOwnerRecovery:
+      - The untracked_dirty arm returns "preserve-stale-dirty" (W1-T7719, #10700) only when
+        `snapshot.localSha !== snapshot.remoteSha`. Any other untracked_dirty tree gets keep/dirty_worktree.
+      - So a dead owner whose residue sits on the PR's CURRENT head is kept, with claim and process census both
+        clear and the owner far past the idle bound. W1-T7719 chose that on purpose. Its test
+        "W1-T7719: a dirty owner at the current head is still kept" asserts keep for exactly this snapshot
+        (`{ ...snapshot, remoteSha: f.localSha }`).
+      - W1-T6362 already decided the sibling case the other way. Staged-only residue of a proven-dead owner on the
+        CURRENT head is preserved to a recovery ref and reclaimed. Its comment in src/lib/sweep.ts says the old
+        current-head refusal "held the PR's fix lane until FIX_CLAIM_DECLINE_BACKSTOP escalated it to a human".
+        This is the same failure, for tracked plus untracked residue.
+      - The backstop (fixDispatchHoldAtHead, src/lib/sweep.ts) stops attempting the claim while the owner path
+        exists. So once it trips, the recovery decision is never asked again at that head, even after the owner
+        becomes reclaimable.
+    WHY RECLAIMING IS SAFE. The decision admits a reclaim only with the claim and the process census both clear
+    and the owner idle past the adaptive bound. That is the same liveness proof W1-T6362 and W1-T7719 already
+    trust. W1-T7719's preserve step saves the worktree diff, the index diff and the untracked files under
+    config.root/recovery and verifies them before any reset, so nothing is lost. W1-T6434 shows a preserved
+    patch to the next fix round.
+    SUPERSESSION, STATED. This narrows W1-T7719's criterion 2 ("an untracked_dirty owner at the PR's current head
+    stays kept as dirty_worktree") to owners that are live, claimed, younger than the bound, or unreadable. The
+    operator approved fixing this on 2026-10-11. The W1-T7719 test keeps its title and its keep cases. Only the
+    dead-and-idle current-head assertion moves to this task's test, with the opposite verdict.
+    OVERLAP. lint-plan reports W1-T100 (route blocked_ci to the ci-log fix path) as sharing src/run-task.ts and
+    src/lib/sweep.ts. That is the whole-file surface only: W1-T100 does not touch registered fix-owner recovery, as
+    W1-T7719 already recorded.
+  design: |
+    Operator ruling: no hard thresholds. Add no fixed strike count or age constant. Reuse the adaptive idle
+    bound (registeredFixOwnerIdleBoundMs) and the existing liveness proofs.
+    1. DECISION. In decideRegisteredFixOwnerRecovery's untracked_dirty arm, drop the
+       `localSha !== remoteSha` conjunct. All the other conjuncts stay. A known localSha and remoteSha are both
+       still required, but they may now be equal. The existing preserve-stale-dirty path in src/lib/sweep.ts
+       (preserve, verify, ledger row, reset, remove) then runs unchanged. If the preserve needs to tell a
+       current-head reclaim from a superseded one, add a field to the
+       sweep.fix.checkout_owner_stale_dirty_preserved row (e.g. `at_current_head: true`). Do not add a new arm.
+    2. NO-HISTORY FALLBACK. Today a null idle bound (no fix.done history) keeps the owner forever. Give the
+       decision a documented fallback derived from data the daemon already holds. For example, use the fix
+       worker's own enforced wall-clock budget, past which no live round can still own the tree. Name the source
+       in a comment and in the PR body. Do not add a new constant.
+    3. THE BACKSTOP DOES NOT HIDE A RECLAIMABLE OWNER. While fixDispatchHoldAtHead holds a claim-decline at a
+       head, each pass re-asks the owner recovery decision. The decision is local and needs no GitHub read. Use
+       the same capture and decide functions the claim path uses. If the decision now admits a preserve or
+       reclaim arm, the hold lifts and the claim proceeds in that pass. A decision that still says keep leaves the
+       hold and its single escalation exactly as today.
+    4. W1-T7719's test file: in "W1-T7719: a dirty owner at the current head is still kept", remove only the
+       first assertion (dead, idle, clear owner with remoteSha === localSha → keep). Keep the loop of keep cases
+       (null/short age, null bound, null shas, unknown or changed remote, unknown history). The other W1-T7719
+       tests stay unchanged.
+    Tests go in a new file, test/a-dead-dirty-fix-owner-at-the-current-head-is-reclaimed.test.ts, with `test(`
+    titles verbatim as in the proofs below. Drive the decision with snapshots. Drive capture, preserve and reclaim
+    against a real gitRepo() fixture that replays the 10-11 shape: a worktree AT the PR's current head holding
+    staged deletes and an untracked copy of the same files.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-dead-dirty-fix-owner-at-the-current-head-is-reclaimed.test.ts"
+    - claim: "a dead untracked_dirty owner at the PR's current head, idle past the bound, is preserved and reclaimed"
+      proof: 'grep: test("W1-T7998: a dead dirty owner at the current head is preserved and reclaimed" in test/a-dead-dirty-fix-owner-at-the-current-head-is-reclaimed.test.ts'
+    - claim: "an untracked_dirty owner at the current head with a live claim or process, or younger than the bound, stays kept"
+      proof: 'grep: test("W1-T7998: a live or young dirty owner at the current head is still kept" in test/a-dead-dirty-fix-owner-at-the-current-head-is-reclaimed.test.ts'
+    - claim: "with no fix.done history the bound falls back to a derived value, never keep-forever"
+      proof: 'grep: test("W1-T7998: no fix-round history still yields a finite idle bound" in test/a-dead-dirty-fix-owner-at-the-current-head-is-reclaimed.test.ts'
+    - claim: "a claim-decline hold lifts in the pass where the owner becomes reclaimable"
+      proof: 'grep: test("W1-T7998: a backstop hold re-asks the owner decision and lifts when it is reclaimable" in test/a-dead-dirty-fix-owner-at-the-current-head-is-reclaimed.test.ts'
+  falsifier: |
+    Keep the `localSha !== remoteSha` conjunct. The current-head snapshot then still reads keep/dirty_worktree and
+    the reclaim test fails, which is the 10-11 #10829 stall. Return keep for a null bound, and the no-history test
+    reads keep. Leave fixDispatchHoldAtHead holding on the decline count and path alone. A ledger with three
+    declines and an owner that has since become reclaimable then still returns a hold, so the backstop test fails.

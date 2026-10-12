@@ -5,31 +5,34 @@ import {
   cpSync,
   existsSync,
   fstatSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
+  realpathSync,
   readSync,
   readdirSync,
   renameSync,
   rmSync,
   statSync,
+  writeFileSync,
   writeSync,
 } from "node:fs";
-import { createHash } from "node:crypto";
-import { hostname } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { hostname, tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { ExternalEffectResult } from "./action-reconciliation.js";
 import { defaultIsPidAlive, parseDrainLockInfo, type DrainLockInfo } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from "./fs-race-safe.js";
-import { LEDGER_FILENAME } from "./ledger-path.js";
+import { LEDGER_CARRIED_PREFIX_SUFFIX, LEDGER_FILENAME, LEDGER_RETAINED_STEPS_SUFFIX } from "./ledger-path.js";
 import { assertLedgerPathNotLive } from "./live-write-guard.js";
 import { rotationStampIso } from "./ledger-union.js";
-import { pruneCarriedRows } from "./ledger-carry.js";
+import { PLAN_ONLY_REVIEW_MARKER_STEP, planOnlyReviewMarkers, PR_TERMINAL_STEP, pruneCarriedRows } from "./ledger-carry.js";
 import { resolveProducerIdentity, type ProducerIdentity } from "./producer-identity.js";
-import { WORKER_SCOPE_ENV } from "./worker-containment.js";
+import { WORKER_SCOPE_ENV, readGardenerOrigin } from "./worker-containment.js";
 
 /** Append-only NDJSON ledger (MASTER-PLAN §9). One JSON object per line, keyed by task id; `ts` and
  *  `host` are stamped at write time. Every worker and brain-plane call spreads the same telemetry
@@ -134,11 +137,18 @@ export function isRealStrike(evidence: { workerRan: boolean; judgmentPosted: boo
 // never asked of the caller (design note i, plan/tasks.d — "the operator teaches by doing").
 
 /** Who wrote a ledger row, as {@link deriveLedgerActor} derives it. */
-export type LedgerActor = "daemon" | "worker" | "operator";
+export type LedgerActor = "daemon" | "worker" | "service" | "host_automation" | "test" |
+  "operator_human" | "operator_ai" | "unknown" | "operator";
+
+export function markLedgerProcessActor(actor: "daemon" | "service" | "host_automation"): void {
+  process.env.REMUDERO_PROCESS_ACTOR = actor;
+}
 
 /** In-process signal the daemon's OWN command sets on itself once, at boot — see
  *  {@link markDaemonProcessActor}. Nothing else ever sets this. */
 const DAEMON_PROCESS_ACTOR_ENV = "REMUDERO_DAEMON_PROCESS";
+
+export const DAEMON_PID_ENV = "REMUDERO_DAEMON_PID";
 
 /** Mark THIS process as the daemon. Call once, at the top of `daemonCommand` (run-task.ts),
  *  before its first `appendLedger` call. Every ledger row this process (or anything it calls
@@ -146,43 +156,71 @@ const DAEMON_PROCESS_ACTOR_ENV = "REMUDERO_DAEMON_PROCESS";
  *  that same write also carries a worker's own markers, which win first (see
  *  {@link deriveLedgerActor}'s ordering). */
 export function markDaemonProcessActor(): void {
+  markLedgerProcessActor("daemon");
   process.env[DAEMON_PROCESS_ACTOR_ENV] = "1";
+  process.env[DAEMON_PID_ENV] = String(process.pid); // children read the daemon's /proc growth (host-memory-shadow.ts)
 }
 
 /**
- * Derive the actor for a ledger row from process context alone (design note i). ORDER MATTERS: a
- * worker subprocess's own marker ({@link WORKER_SCOPE_ENV}, worker-containment.ts's
- * `workerMarkerEnv`) is checked FIRST, so a worker spawned BY the daemon — which inherits the
- * daemon's `DAEMON_PROCESS_ACTOR_ENV` via plain env inheritance, plus its own fresh worker
- * markers layered on top by `spawnWorker`/`worker-provider.ts` — is still reported `"worker"`,
- * never `"daemon"`. Neither marker present is the operator's own shell: nothing marks that today,
- * and nothing should — the ABSENCE of both markers is what identifies it, never a positive signal
- * of its own.
+ * W1-T4068: tests win over inherited markers; workers win over their spawning service's kind.
+ * An operator requires a Claude session marker or a terminal; absence is unknown.
  */
-export function deriveLedgerActor(env: NodeJS.ProcessEnv = process.env): LedgerActor {
+export function deriveLedgerActor(
+  env: NodeJS.ProcessEnv = process.env,
+  isTTY: boolean = env === process.env && process.stdin.isTTY === true,
+): LedgerActor {
+  if (env.NODE_TEST_CONTEXT) return "test";
   if (env[WORKER_SCOPE_ENV]) return "worker";
+  const kind = env.REMUDERO_PROCESS_ACTOR;
+  if (kind === "service" || kind === "host_automation" || kind === "daemon") return kind;
   if (env[DAEMON_PROCESS_ACTOR_ENV]) return "daemon";
-  return "operator";
+  if (env.CLAUDECODE === "1" || env.CLAUDE_CODE_SESSION_ID) return "operator_ai";
+  return isTTY ? "operator_human" : "unknown";
 }
 
-/** {@link LedgerActor} widened with `"unknown"` — a row written before this task stamped
- *  nothing, reported as unknown rather than guessed (design note i, last sentence). */
-export type LedgerRowActor = LedgerActor | "unknown";
+/** Historical `operator` rows remain readable but cannot establish positive operator evidence. */
+export type LedgerRowActor = LedgerActor;
 
 /** Read a parsed ledger line's actor. A missing or malformed `actor` field reports `"unknown"`,
  *  NEVER inferred from any other field on the row — the one read-side rule this task adds.
  *  Falsifier: test/hand-run-census.test.ts. */
 export function ledgerRowActor(line: { actor?: unknown }): LedgerRowActor {
-  return line.actor === "daemon" || line.actor === "worker" || line.actor === "operator" ? line.actor : "unknown";
+  switch (line.actor) {
+    case "daemon": case "worker": case "service": case "host_automation": case "test":
+    case "operator_human": case "operator_ai": case "operator": return line.actor;
+    default: return "unknown";
+  }
+}
+
+export const LEDGER_FUTURE_STAMP_TOLERANCE_MS = 10 * 60_000;
+export const LEDGER_FUTURE_STAMP_STEP = "ledger.future_stamp";
+
+/** W1-T5407: the flag for a row whose `ts` runs past `mtimeMs`, a kernel clock no skewed process clock moves. */
+function futureStampRow(record: Record<string, unknown>, mtimeMs: number): Record<string, unknown> | undefined {
+  const skewMs = Date.parse(String(record.ts)) - mtimeMs;
+  if (!(skewMs > LEDGER_FUTURE_STAMP_TOLERANCE_MS)) return undefined;
+  return {
+    ts: fixedClock(mtimeMs).iso(),
+    host: record.host,
+    actor: record.actor,
+    actor_pid: record.actor_pid,
+    run_id: record.run_id,
+    task_id: record.task_id,
+    step: LEDGER_FUTURE_STAMP_STEP,
+    claimed_ts: record.ts,
+    skew_ms: skewMs,
+    flagged_step: record.step,
+    flagged_actor: record.actor,
+    flagged_host: record.host,
+  };
 }
 
 /**
  * Append one line. The record is issued as exactly ONE `writeSync` and the kernel's acceptance is
  * checked, so a writer's record is never split across two syscalls with another appender's line in
  * the gap. `O_APPEND` already makes concurrent appenders safe; this is NOT a lock (W1-T206). A
- * short write is LOUD, never retried. Falsifier: test/ledger-atomic.test.ts.
- * Why: the read-side torn-line contract, and why a lock was rejected (W1-T206;
- * docs/forensics/ledger.md#appendledger).
+ * short write is LOUD, never retried. Falsifier: test/ledger-atomic.test.ts. Why (the torn-line
+ * contract; a lock rejected): docs/forensics/ledger.md#appendledger.
  *
  * `identity` stamps the writing machine onto every row under the same `host` key this repo's
  * lock-holder records use. Appended LAST so no caller shifts; injectable only so one test can
@@ -205,19 +243,43 @@ export interface LedgerWriterDeps {
 export function appendLedger(
   path: string,
   line: LedgerLine,
-  opts: { ceilingBytes?: number; identity?: () => string; actor?: () => LedgerActor } = {},
+  opts: {
+    ceilingBytes?: number;
+    identity?: () => string;
+    actor?: () => LedgerActor;
+    clock?: Clock;
+    fstat?: (fd: number) => { mtimeMs: number };
+  } = {},
 ): void {
-  assertLedgerPathNotLive(path);
+  const actor = (opts.actor ?? deriveLedgerActor)();
+  if (deriveLedgerActor() === "test" || actor === "test") {
+    const outside = (rel: string) => rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+    if (outside(relative(resolve(tmpdir()), resolve(path)))) {
+      throw new Error(`ledger: REFUSED test append outside the temporary root: ${path}`);
+    }
+    let ancestor = resolve(path);
+    while (!existsSync(ancestor) && dirname(ancestor) !== ancestor) ancestor = dirname(ancestor);
+    const rel = relative(realpathSync(tmpdir()), realpathSync(ancestor));
+    if (outside(rel)) {
+      throw new Error(`ledger: REFUSED test append outside the temporary root: ${path}`);
+    }
+    assertLedgerPathNotLive(path, { ...process.env, NODE_TEST_CONTEXT: "test", RMD_ALLOW_LIVE_WRITES: undefined });
+  } else {
+    assertLedgerPathNotLive(path);
+  }
   mkdirSync(dirname(path), { recursive: true });
   const record = {
-    ts: new Date().toISOString(),
+    ts: (opts.clock ?? systemClock).iso(),
     host: (opts.identity ?? hostname)(),
-    actor: (opts.actor ?? deriveLedgerActor)(),
     actor_pid: process.pid,
     ...line,
+    gardener_origin: readGardenerOrigin(),
+    actor,
   };
   const buf = Buffer.from(JSON.stringify(record) + "\n", "utf8");
-  const fd = openSync(path, "a");
+  const rows = [buf];
+  let behind: Buffer[];
+  const fd = openSync(path, "a+");
   try {
     const written = writeSync(fd, buf, 0, buf.length);
     if (written !== buf.length) {
@@ -226,12 +288,24 @@ export function appendLedger(
           `the record may be torn; see readLedgerLines' torn-line handling`,
       );
     }
+    let flag: Record<string, unknown> | undefined;
+    try {
+      flag = futureStampRow(record, (opts.fstat ?? fstatSync)(fd).mtimeMs);
+    } catch (err) {
+      console.error(`ledger: could not stat ${path} to check the row's ts for future skew: ${String(err)}`);
+    }
+    if (flag) {
+      rows.push(Buffer.from(JSON.stringify(flag) + "\n", "utf8"));
+      writeSync(fd, rows[1]!, 0, rows[1]!.length);
+    }
+    behind = rowsBehindRotationSeal(fd, rows);
   } finally {
     closeSync(fd);
   }
+  if (behind.length > 0) reappendBehindSeal(path, behind);
   // W1-T209: opportunistic, lazy rotation — the only place the ledger grows, so the only place
-  // that needs to notice it has grown past the ceiling. One extra statSync on every under-ceiling
-  // call; the full read-and-rewrite cost only on the call that crosses it.
+  // that needs to notice it has grown past the ceiling. A stat and small sidecar read on each
+  // call; the full read-and-rewrite cost only on the call that crosses the effective ceiling.
   if (ledgerExceedsRotationCeiling(path, opts.ceilingBytes)) {
     rotateLedger(path, { ceilingBytes: opts.ceilingBytes });
   }
@@ -436,6 +510,9 @@ export const LEDGER_ROTATION_SMOOTHING_WINDOW_MS = 5 * 60_000;
  *  rotation fired — the one case where the window itself would be the defect. */
 export const LEDGER_ROTATION_BACKSTOP_MULTIPLIER = 4;
 
+/** W1-T4393: least real time since the last archive that measures an append rate; less is a burst. */
+export const LEDGER_ROTATION_MIN_RATE_SAMPLE_MS = 60_000;
+
 /** W1-T2244: the one row an operator produces when they act on a risk-judge escalation instead of
  *  taking its "merge it by hand" escape hatch in silence. Written by `recordRiskOverride`, read
  *  back head-bound by {@link riskOverrideFromLedger} so a record never outlives the diff it judged
@@ -484,6 +561,13 @@ export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number
  */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "run.start",
+  "memory_read.recovered", // W1-T7720: past recovery durations derive the sustained-unreadable bound.
+  "sweep.fix.owner_residue_preserved", // W1-T6434: the next fix round reads the preserved patch it names.
+  "automerge.rearmed_after_disarm",
+  "automerge.rearm_exhausted",
+  "automerge.stale_rollup_refreshed", // W1-T6404: the once-per-PR refresh bound; forgotten, it loops.
+  "automerge.stale_rollup_refresh_exhausted",
+  "automerge.risk_override_observed",
   "incident.event", // W1-T4385: sre-lane.ts files once per fingerprint from these two;
   "incident.sampled", // rotated away, a still-burning incident reads as new and is re-filed.
   // W1-T3646: the advisory repair lease. `priorRepairLease` reads this row to decide whether a
@@ -491,6 +575,12 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // test that derives this set from its consumers -- not a log line nobody reads.
   "repair.lease_posted",
   "pr.opened",
+  "pr.open_satisfied_by_main", // the backlog gardener retires the task from it; rotated away, a satisfied task is rebuilt.
+  "pr.rehome.started", // W1-T7448: a resumed re-home reuses its started branch name; rotated away, it opens a second.
+  "pr.rehomed", // W1-T7448: a completed re-home is never repeated for the same head.
+  "pr.stuck", // W1-T5900: runSweep dedupes a stalled stage across passes and rotation.
+  "pr.stuck.resolved", // Retain its resolution so rotation cannot resolve the same stage again.
+  "selector-shadow.observation", // W1-T5925: the shadow verdict folds every row; rotated away, it forgets.
   // W1-T2594: provider-diverse reviewer routing resolves this row by exact task + PR + head.
   // Rotating it away would make an unchanged head route differently after maintenance.
   "pr.head_provider",
@@ -503,6 +593,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // both read it as forward progress, resetting a halted task's breaker. Rotated away, a released
   // task's next restart would seed straight back from the still-live `dispatch.circuit_broken` row above.
   "dispatch.breaker_released",
+  "dispatch.breaker_judged", // W1-T7742: a judge's continue resets the streak like a release; its rulings dedup.
+  "run.freshness_handoff", // W1-T7747: a parked checkpoint's resume receipt (daemon.ts pendingWorkerBoundaryHandoffs).
   // W1-T2910: `status.ts`'s projection reads this row to derive an independent-failure block and
   // clears it on a later dispatch (src/lib/status.ts, the `line.step === "dispatch.blocked_independent"`
   // arm). Rotated away, a block that was recorded stops being visible and the subtree is re-dispatched
@@ -517,6 +609,11 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // Readers: taskAttributableLifetimeDispatches and routeAdaptiveLifetimePressure.
   "daemon.spawn_infra_blocked",
   "dispatch.lifetime_pressure.infra_only",
+  "dispatch.cost_of_delay.fallback", // W1-T4064: dispatchValueContextForSelection dedups on the last of
+  "dispatch.cost_of_delay.ready", // these two; rotated away, a restart re-logs the same fallback.
+  // W1-T7814: the memory governor's history read calibrates the dispatch memory floor.
+  // Losing its observations would make it relearn from an empty window after each rotation.
+  "dispatch_memory_observed",
   // W1-T316: `escalateLifetimeCapExceeded`'s (run-task.ts) dedup marker, written whether or not
   // delivery succeeds; dropping it re-opens a duplicate lifetime-cap escalation.
   "dispatch.lifetime_capped.escalated",
@@ -554,6 +651,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "dispatch.starvation.cleared",
   "verdict",
   "verdict.merged",
+  PR_TERMINAL_STEP, // W1-T5318: pruneCarriedRows' terminal fact, and runPrTerminalReconcile's live dedup
   "correction.provenance",
   "sweep.disposed",
   // W1-T4351: sweep.ts's `decideBaseRed` reads main's latest run and each head's base-red record;
@@ -561,6 +659,20 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "main.health.observed",
   "sweep.base_red.stood_down",
   "sweep.base_red.refresh",
+  "refresh.clearance", // refusedRefreshClearancesFromLedger memoizes refusal evidence across passes.
+  "sweep.ci_timeout_refresh.attempted",
+  "sweep.ci_timeout_refresh.outcome",
+  "sweep.ci_timeout_refresh.escalated",
+  "sweep.actions_incident_hold",
+  "sweep.actions_incident_hold.escalated",
+  "sweep.base_reproduction", // W1-T5528: sweep.ts's probe cache and prior reproduced verdict
+  "refresh.clearance", // refusedRefreshClearancesFromLedger prevents re-probing a decided refusal across passes/rotation.
+  "sweep.reviewer_freshness_probe", // W1-T5771: freshnessBackoff's held re-probe backoff; lost, it resets
+  "sweep.capped_host_gap_rereview", // W1-T7837: priorActionsFromLedger releases the delivered-review key on it; hostGapRereviewFacts paces by it
+  "sweep.review_host_gap_rereview", // W1-T7850: priorActionsFromLedger releases the delivered-review key on it; hostGapRereviewFacts paces by it
+  "sweep.fix.checkout_claim_declined",
+  "sweep.fix.dispatch_failed",
+  "fix.strike_refunded", // W1-T5528: `fixLedgerRowsForHead` drops each refunded strike by this row
   "escalation.issue_opened",
   // W1-T3166. READER: the operator asking "has the judge ever run, and what has it demoted", and
   // W1-T3167's re-judge rung, which must not re-ask a settled question. "escalation.demoted" was
@@ -593,6 +705,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // so losing either one inverts the answer.
   "panel.proposal_restored",
   "fix.dispatch",
+  "fix.retrigger",
   "fix.review",
   // W1-T1110: sweep.ts's `fixRungStalledWithoutNewHead` reads "fix.ci_not_green"/"fix.resolved"
   // beside "fix.review"; losing either re-strands the PR against a head nothing will move again.
@@ -605,7 +718,29 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "fix.commit_refused",
   // W1-T4207: `lastCommitRefusalPromptLines` (run-task.ts) reads its `subtype` to name the last refused paths.
   "fix.done",
+  "fix.progress_judged", // the sweep labels each judged PR from its newest judgement; rotated away, the label reverts to the stale strike ratio.
+  "fix.needs_design", // W1-T5532: preserve the explicit hand-off for the next fix-lane decision.
+  "fix.scope_amendment", // W1-T5534: runFixRung and lookupIdentity resume pending amendments after rotation.
   "fix.resolved",
+  "fix.exhausted", // W1-T5966: with fix.done/resolved, status.ts FIX_LANE_TERMINAL_STEPS ends a fix.dispatch
+  "fix.stood_down", // round on these; lost, a finished round reads in flight. autonomy.ts strikeCount reads
+  "fix.superseded", // fix.exhausted beside fix.resolved, and a fix.stood_down's issue_url as human evidence.
+  "fix.superseded_unknown",
+  "fix.spawn_abandoned",
+  "sweep.fix.error", // the same round's crashed-spawn outcome, with its cost.
+  "fix.base_refreshed", // ci-friction-gardener prices a round by it (CI_FRICTION_LEDGER_STEPS).
+  "sweep.check_requeued", // W1-T5935: requeuedCheckKeysFromLedger (sweep.ts) bounds one requeue per head and check.
+  "sweep.check_requeue.deferred", // W1-T5920: voids a spent key in that same fold.
+  "sweep.ci_gate_reaggregated", // W1-T5958: reaggregatedCiGateKeysFromLedger, once per head and sibling run.
+  "main.run_gap.dispatched", // mainRunGapHistoryFromLedger: lost, a gap commit's workflows dispatch again.
+  "main.repair.bisecting", // W1-T7760 mainBisectionFromLedger: lost, a probe in flight is dispatched a second time.
+  "main.repair.probe_concluded", // W1-T7760 mainBisectionFromLedger: lost, a concluded probe is re-run and the bisection restarts.
+  "refusal_amendment.drafted", // noPrVerdictRowsFromLedger: lost, a settled no_pr refusal is re-drafted.
+  "sre.governor", // governorTiersFromLedger: lost, a stopped runbook re-pauses and re-pages; on change only.
+  "sweep.plan_repair", // planRepairHistoryFromLedger: the per-head repair and once-per-PR stale-base key.
+  "plan_repair.dispatch", // priorPlanRepairStrikesFromLedger: lost, the plan-repair strike budget resets.
+  "sweep.missing_task_trailer_repaired", // priorActionsFromLedger: one body edit per PR, head and task.
+  "sweep.codeql_blocker.dispatch", // codeqlBlockerDispatched: one CodeQL repair per PR, head and alert.
   // W1-T1095: `fixRebaseAlreadySpent` (run-task.ts) reads this to enforce "at most one rebase per
   // blocked PR"; no timer backs it, so losing it restores an unbounded rebase-and-retry.
   "fix.rebased",
@@ -623,6 +758,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // archived away, a completed migration reads as `hold` and the rung submits it again.
   "dep-review.migrate.completed",
   "review.posted",
+  "review.skipped_stale_reviewer_code", // W1-T3691: preserve the daemon's freshness restart history across boots.
+  // status.ts's plan-only credit refusal reads it once rotation stops carrying a merged PR's review rows.
+  PLAN_ONLY_REVIEW_MARKER_STEP,
   "review.post_refused",
   "review.cannot_evaluate_escalated",
   // W1-T913: `lastPendingReviewStatusFromLedger` (review.ts) reads this back for per-head
@@ -640,21 +778,34 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // impl-DF: the idle rung's reason tally. A HUMAN reads it to tell "starved of work" from
   // "everything filtered"; it is emitted only on change, so rotation would drop a long idle's cause.
   "daemon.idle_reasons",
+  // W1-T4939: `rmd status` sums these hourly (and restart-flushed partial) rows over the last 24 hours. The
+  // daemon restarts on merges, so each row is scarce and a rotation that archived it loses the account.
+  "lane.idle_summary",
   "sweep.post_fix_redriven",
   "sweep.stale_red_redrive.released",
-  // W1-T970: sweep.ts's `priorActionsFromLedger` builds a sha-keyed `riskRefused` set off this
-  // step; losing it re-arms a head a risk judge explicitly refused.
+  "sweep.strike_ladder.refreshed",
+  "sweep.strike_ladder.requeued",
+  "sweep.strike_ladder.digest_opened",
+  "sweep.strike_ladder.digest_appended",
+  "sweep.strike_ladder.held", // W1-T5635: a conflict hold at this main tip counts as already refreshed
+  "sweep.plan_round.pushed",
+  "sweep.plan_round.refused",
+  // W1-T970: sweep.ts builds a sha-keyed `riskRefused` set off the escalated row, and (W1-T5403)
+  // `handedOffHeadAwaitingJudgment` reads the decision row; losing either re-arms or re-judges a head.
   "risk_judge.escalated",
+  "risk_judge.decision",
   // W1-T186: `priorActionsFromLedger` counts these to enforce ABSENT_REPUSH_CAP. The line IS the
   // bound — archived away, every rotation re-earns the PR another empty commit.
   "sweep.absent_repush",
   // `escalatePostReviewStall` (run-task.ts) counts these back for its episode key. `escalate()`
   // skips its dedup when no PR is named, so archiving this marker pages PER SWEEP TICK.
   "sweep.post_review.stalled.escalated",
-  // `detectPostReviewStall` (sweep.ts) counts the run of `.failed` lines and RESETS on a `.done`,
-  // so both decide. Without them a rotation mid-stall resets the run and the stall goes unnoticed.
+  // `detectPostReviewStall` counts `.failed` and resets on `.done`; rotation must not reset its streak.
   "sweep.post_review.done",
   "sweep.post_review.failed",
+  // Exact-input delay joins retain the per-step bound; missing source receipts remain unmeasured.
+  "sweep.review_eligible",
+  "sweep.review_admitted",
   // W1-T393 (MASTER-PLAN §11 D-10): retro.ts's `mutationGateLifetime` folds this into
   // `mutation-ratchet`'s LIFETIME record, so archiving it resets that figure on every rotation.
   "mutation.ratchet_verdict",
@@ -698,12 +849,18 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T1212: run-task.ts derives `updatedForWorkflow` from this row's `stale_workflow` field;
   // dropping it re-selects the same stale-gate PR every pass, spending the head for nothing.
   "sweep.update_branch.updated",
-  // W1-T1015: reviewOrphansFor joins the successful update row to the reviewed old head. The
-  // attempted/conflict/error siblings are retained with it so rotation cannot erase the evidence
-  // that an update was attempted but did not mint a new head; only `.updated` suppresses an orphan.
+  // W1-T1015: reviewOrphansFor joins the successful update row to the reviewed old head. Its
+  // attempted/conflict/error/head-moved/up-to-date siblings (W1-T5949) are kept so rotation cannot
+  // erase evidence that an update ran but minted no new head; only `.updated` suppresses an orphan.
   "sweep.update_branch.attempted",
+  "sweep.update_branch.pending_guard",
   "sweep.update_branch.conflict",
   "sweep.update_branch.error",
+  "sweep.update_branch.head-moved",
+  "sweep.update_branch.up-to-date",
+  // W1-T5903: runSweep reads this row back to write ONE skipped_queue row per PR and head; dropping
+  // it on rotation would re-log the same stand-down every pass.
+  "sweep.update_branch.skipped_queue",
   // W1-T1235: `latestGhRateLimitRefusalsFromLedger` (run-task.ts) reads the newest row per bucket
   // for `rmd status`'s GITHUB BUCKETS section. Kept here, not in the render set, because GitHub's
   // resets outlast RENDER_STEP_RETENTION_WINDOW_MS and an operator needs the LAST refusal however
@@ -730,6 +887,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   EMERGENCY_STOP_CLEARED_LEDGER_STEP,
   OPERATOR_PREFERENCE_PROPOSED_LEDGER_STEP,
   OPERATOR_PREFERENCE_EVENT_LEDGER_STEP,
+  "review.finding", // W1-T5019: verifiedReviewFindingsForFix (run-task.ts) feeds repair prompts.
   // KEEP THE W1-T964 TRIO LAST, immediately before the Set's close: test/ledger-rotation.test.ts
   // anchors its mutation check on those three lines followed by `]);` and asserts the needle occurs
   // EXACTLY once. A block appended after them silently breaks that anchor.
@@ -928,6 +1086,12 @@ export function appendDailyCostCeilingOverrideAudit(ledgerPath: string, audit: D
  *  bursts of 12 rotations a second, observed live (docs/forensics/ledger.md#max_retained_lines_per_step). */
 export const MAX_RETAINED_LINES_PER_STEP = 200;
 
+export const REVIEW_POSTED_RETAINED_ROWS = 140; // W1-T5517 PRIMARY CONTROL: 200 x the 70% of rows newest for their task
+export const SWEEP_DISPOSED_RECENT_WINDOW_MS = 24 * 3_600_000; // W1-T5517: every sweep.disposed row inside it carries
+export const SWEEP_DISPOSED_STANDING_WINDOW_MS = 7 * 24 * 3_600_000; // W1-T5517: dueRepairFilings' default window
+export const LEDGER_CORE_TARGET_SHARE = 0.9; // W1-T5517: the carried core's declared share of the fixed ceiling
+const SWEEP_REPAIR_DISPOSITIONS: ReadonlySet<unknown> = new Set(["blocked-fixable", "blocked-ambiguous", "stale", "conflicted"]);
+
 /** Minimal fs surface {@link ledgerExceedsRotationCeiling} and {@link rotateLedger} need,
  *  injectable so a test proves the ceiling check without ever touching a real file. */
 export interface LedgerRotationFsDeps {
@@ -940,16 +1104,22 @@ const realRotationFs: LedgerRotationFsDeps = {
   statSize: (path) => statSync(path).size,
 };
 
-/** True iff `path` exists and is larger than `ceilingBytes` (default {@link
- *  LEDGER_ROTATION_CEILING_BYTES}) — an absent ledger never "exceeds" anything (nothing to
- *  rotate, same absence-is-not-proof-of-anything doctrine status.ts's readers already use). */
+/** True iff `path` exceeds its carried effective ceiling, base `ceilingBytes` (default {@link
+ *  LEDGER_ROTATION_CEILING_BYTES}). An absent ledger never "exceeds" anything: nothing to rotate. */
 export function ledgerExceedsRotationCeiling(
   path: string,
   ceilingBytes: number = LEDGER_ROTATION_CEILING_BYTES,
   fsDeps: LedgerRotationFsDeps = realRotationFs,
 ): boolean {
   if (!fsDeps.existsSync(path)) return false;
-  return fsDeps.statSize(path) > ceilingBytes;
+  const carried = readCarriedPrefix(path);
+  const effective = carried?.effectiveCeilingBytes;
+  const rate = carried?.rateBytesPerHour;
+  const limit = typeof effective === "number" && Number.isSafeInteger(effective) &&
+    typeof rate === "number" && Number.isFinite(rate) && rate > 0
+    ? Math.min(ceilingBytes * LEDGER_ROTATION_BACKSTOP_MULTIPLIER, Math.max(ceilingBytes, effective))
+    : ceilingBytes;
+  return fsDeps.statSize(path) > limit;
 }
 
 /** One snapshot line, parsed ONCE and carried by reference through `rotateLedger`'s whole
@@ -976,14 +1146,56 @@ function parseLedgerLine(raw: string): ParsedLedgerLine {
   }
 }
 
-function readSyncRange(path: string, start: number, end: number): string {
+function readSyncRange(path: string, start: number, end: number): Buffer {
   const fd = openSync(path, "r");
   try {
     const buf = Buffer.alloc(end - start);
     readSync(fd, buf, 0, end - start, start);
-    return buf.toString("utf8");
+    return buf;
   } finally {
     closeSync(fd);
+  }
+}
+
+const ROTATION_SEAL_STEP = "ledger.rotation_sealed";
+const ROTATION_SEAL_MARK = Buffer.from(`"step":"${ROTATION_SEAL_STEP}"`, "utf8");
+
+/** W1-T5514: seal the replaced inode (`fd`, O_APPEND), then copy every row before the seal from
+ *  `from` on into the NEW live `path`, a torn tail newline-terminated (see {@link rotateLedger}). */
+function drainReplacedInode(fd: number, from: number, path: string, nowIso: string): void {
+  const seal = Buffer.from(rotationRow(ROTATION_SEAL_STEP, { nonce: randomUUID() }, nowIso), "utf8");
+  writeSync(fd, seal, 0, seal.length);
+  const buf = Buffer.alloc(fstatSync(fd).size - from);
+  const view = buf.subarray(0, readSync(fd, buf, 0, buf.length, from));
+  const sealAt = view.indexOf(seal);
+  let rows = view.subarray(0, sealAt < 0 ? view.length : sealAt);
+  if (rows.length > 0 && rows[rows.length - 1] !== 0x0a) {
+    console.error(`ledger: rotation drained a torn ${rows.length}-byte tail into ${path}; kept, newline-terminated`);
+    rows = Buffer.concat([rows, Buffer.from("\n")]);
+  }
+  if (rows.length > 0) appendFileSync(path, rows);
+}
+
+/** W1-T5514: `rows` this appender wrote AFTER a rotation's seal on an inode it already replaced
+ *  (`nlink` 0), so its drain never copied them. Before the seal, or no seal yet: the drain has them. */
+function rowsBehindRotationSeal(fd: number, rows: Buffer[]): Buffer[] {
+  const st = fstatSync(fd);
+  if (st.nlink > 0) return [];
+  const all = Buffer.alloc(st.size);
+  readSync(fd, all, 0, st.size, 0);
+  const sealAt = all.indexOf(ROTATION_SEAL_MARK);
+  return sealAt < 0 ? [] : rows.filter((row) => all.lastIndexOf(row) > sealAt);
+}
+
+function reappendBehindSeal(path: string, rows: Buffer[]): void {
+  for (let behind: Buffer[] = [Buffer.concat(rows)]; behind.length > 0; ) {
+    const fd = openSync(path, "a+");
+    try {
+      writeSync(fd, behind[0]!, 0, behind[0]!.length);
+      behind = rowsBehindRotationSeal(fd, behind);
+    } finally {
+      closeSync(fd);
+    }
   }
 }
 
@@ -1022,14 +1234,14 @@ export function ledgerRotationLockPath(ledgerPath: string): string {
 }
 
 /** Sidecar naming the retained core the last rotation wrote back as the live file's prefix, as
- *  `{bytes, sha256}`. Every row in that prefix was archived when it first arrived, so the next
+ *  `{bytes, sha256, rateBytesPerHour, effectiveCeilingBytes}`. Every prefix row is already archived, so the next
  *  rotation archives only the bytes after it. Ends in `.json`, so no reader lists it as an archive. */
 export function ledgerCarriedPrefixPath(ledgerPath: string): string {
-  return `${ledgerPath}.carried.json`;
+  return `${ledgerPath}${LEDGER_CARRIED_PREFIX_SUFFIX}`;
 }
 
 export function ledgerRetainedStepsPath(ledgerPath: string): string {
-  return `${ledgerPath}.retained-steps.json`;
+  return `${ledgerPath}${LEDGER_RETAINED_STEPS_SUFFIX}`;
 }
 
 interface RetainedStepsRecord {
@@ -1052,6 +1264,42 @@ function readRetainedSteps(ledgerPath: string): RetainedStepsRead {
   } catch {
     return { status: "unreadable" };
   }
+}
+
+function lastByKey(rows: readonly ParsedLedgerLine[], keyOf: (p: ParsedLedgerLine) => string | undefined): Map<string, ParsedLedgerLine> {
+  const last = new Map<string, ParsedLedgerLine>();
+  for (const p of rows) {
+    const key = keyOf(p);
+    if (key !== undefined) last.set(key, p);
+  }
+  return last;
+}
+
+function dropSupersededReviews<T extends ParsedLedgerLine>(rows: T[]): T[] { // W1-T5517: superseded for every live reader
+  const newest = lastByKey(rows, (p) => (p.step === "review.posted" && typeof p.json?.task_id === "string" ? p.json.task_id : undefined));
+  const input = (j: Record<string, unknown>): string => JSON.stringify([j.pr_url, j.head_sha, j.review_input_digest]);
+  return rows.filter((p) => {
+    const n = p.step === "review.posted" && typeof p.json?.task_id === "string" ? newest.get(p.json.task_id) : undefined;
+    if (n === undefined || n === p || !p.json || !n.json) return true;
+    return input(p.json) === input(n.json) // reviewAttemptsForInput counts every row of the newest input
+      || p.json.failure_class === "instrument_entangled" // previousInstrumentEntanglementFromLedger reads any head
+      || (n.json.state !== "success" && !Array.isArray(n.json.unmet_criteria)); // unmetFromLedger carries claims past it
+  });
+}
+
+function boundSweepRows(rows: readonly ParsedLedgerLine[], nowMs: number): ParsedLedgerLine[] { // W1-T5517: while a reader reads it
+  const newestWhere = (has: (j: Record<string, unknown>) => boolean): Map<string, ParsedLedgerLine> =>
+    lastByKey(rows, (p) => (p.step === "sweep.disposed" && p.json && has(p.json) ? String(p.json.pr_number) : undefined));
+  const newest = [newestWhere(() => true), newestWhere((j) => typeof j.main_tip_sha === "string"), newestWhere((j) => typeof j.blocker === "string")];
+  return rows.filter((p) => {
+    const j = p.json;
+    const ageMs = p.tsMs === undefined ? undefined : nowMs - p.tsMs;
+    if (p.step !== "sweep.disposed" || !j || ageMs === undefined || ageMs <= SWEEP_DISPOSED_RECENT_WINDOW_MS) return true;
+    if (typeof j.keep_head_branch === "string") return true; // keepReversiblyClosedHeads, at any age
+    if (ageMs > SWEEP_DISPOSED_STANDING_WINDOW_MS) return false;
+    return (j.acted === true && SWEEP_REPAIR_DISPOSITIONS.has(j.disposition)) // dueRepairFilings and the stale close
+      || newest.some((byPr) => byPr.get(String(j.pr_number)) === p); // streaks, merge state, base-caused tip, blocker clock
+  });
 }
 
 function rotationRow(step: string, fields: Record<string, unknown>, nowIso: string): string {
@@ -1096,20 +1344,29 @@ function sha256Hex(buf: Buffer): string {
   return createHash("sha256").update(buf).digest("hex");
 }
 
-/** Leading bytes of `snapshot` already archived: the recorded length when the snapshot still starts
- *  with exactly those bytes, else 0 — a missing, corrupt or mismatched sidecar archives the whole
- *  snapshot. Content-addressed, so a stale sidecar can cost duplication and never a row. */
-function archivedPrefixBytes(ledgerPath: string, snapshot: Buffer): number {
-  let carried: { bytes?: unknown; sha256?: unknown } | null;
+interface CarriedPrefix {
+  bytes?: unknown;
+  sha256?: unknown;
+  rateBytesPerHour?: unknown;
+  effectiveCeilingBytes?: unknown;
+}
+
+function readCarriedPrefix(ledgerPath: string): CarriedPrefix | null {
   try {
-    carried = JSON.parse(readFileSync(ledgerCarriedPrefixPath(ledgerPath), "utf8")) as typeof carried;
-  } catch {
-    // deliberate: no readable sidecar means nothing is known to be archived — archive it all.
-    return 0;
+    return JSON.parse(readFileSync(ledgerCarriedPrefixPath(ledgerPath), "utf8")) as CarriedPrefix | null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.error(`ledger: unreadable carried prefix ${ledgerCarriedPrefixPath(ledgerPath)}: ${String(error)}`);
+    }
+    return null;
   }
+}
+
+/** Leading bytes already archived; an unknown prefix duplicates the snapshot and never loses a row. */
+function archivedPrefixBytes(carried: CarriedPrefix | null, snapshot: Buffer): number | undefined {
   const bytes = carried?.bytes;
-  if (typeof bytes !== "number" || !Number.isSafeInteger(bytes) || bytes < 0 || bytes > snapshot.length) return 0;
-  return sha256Hex(snapshot.subarray(0, bytes)) === carried?.sha256 ? bytes : 0;
+  if (typeof bytes !== "number" || !Number.isSafeInteger(bytes) || bytes < 0 || bytes > snapshot.length) return undefined;
+  return sha256Hex(snapshot.subarray(0, bytes)) === carried?.sha256 ? bytes : undefined;
 }
 
 /** What the rotation lock records about its holder — the SAME `{pid, host, startedAt}` shape
@@ -1360,9 +1617,9 @@ export interface LedgerRotationResult {
  *   4. The rename is withdrawn when a `dev`+`ino` compare shows the live path is no longer the
  *      snapshotted inode, leaving the archive already written on disk.
  *
- * One appender: appendLedger holds no long-lived descriptor, so a delta read immediately before the
- * rename folds any line appended since the snapshot into the live file. What lands between that
- * read and the rename syscall is the one residual sliver, the same one `logrotate` has.
+ * Concurrent appenders (W1-T5514): rows landing after the catch-up read hit the old inode. An fd held
+ * across the rename seals it and drains every row before the seal into the new live file; an appender
+ * that finds its row AFTER the seal on an unlinked inode re-appends it. No row is lost or doubled.
  * Why: without the lock the second rotator's catch-up saw the first's smaller live file, took an
  * empty tail and renamed over it (R-1; docs/forensics/ledger.md#rotateledger).
  */
@@ -1531,6 +1788,8 @@ export function rotateLedger(
     /** Cadence window, default {@link LEDGER_ROTATION_SMOOTHING_WINDOW_MS}; 0 rotates on every crossing. */
     smoothingWindowMs?: number;
     retainedSteps?: ReadonlySet<string>;
+    /** Test seam (W1-T5514): runs with the new live file staged, immediately before the rename. */
+    beforeRename?: () => void;
   } = {},
 ): LedgerRotationResult {
   const ceilingBytes = opts.ceilingBytes ?? LEDGER_ROTATION_CEILING_BYTES;
@@ -1563,7 +1822,7 @@ export function rotateLedger(
       current: missing.length === 0,
       record,
       unreadable: shared.status === "unreadable",
-    });
+    }, opts.beforeRename);
     if (result.rotated) {
       const steps = [...new Set([...own, ...(record?.steps ?? [])])].sort();
       const lastFullRotationMs = missing.length === 0 ? systemClock.now() : record?.lastFullRotationMs;
@@ -1594,10 +1853,11 @@ interface RotationRetention {
 /** The rotation proper — runs ONLY with the rotation lock held (see {@link rotateLedger}). */
 function rotateLedgerLocked(
   path: string,
-  ceilingBytes: number,
+  fixedCeilingBytes: number,
   archiveFsDeps: ArchiveNamingFs,
   now: (() => Date) | undefined,
   retention: RotationRetention,
+  beforeRename?: () => void,
 ): LedgerRotationResult {
   const { size: size0, content: snapshot, bytes: snapshotBytes, identity: snapshotIdentity } = readSnapshotWithIdentity(path);
   const lastFull = retention.current ? retention.record?.lastFullRotationMs : undefined;
@@ -1609,13 +1869,25 @@ function rotateLedgerLocked(
   // W1-T4100: heal on-disk names that ran ahead of their write time; the newest safe stamp is the
   // floor this rotation's own name must clear.
   const dir = dirname(path);
+  const previous = readCarriedPrefix(path);
+  const prefixBytes = archivedPrefixBytes(previous, snapshotBytes);
+  const mtimes = archiveMtimes(dir, archiveFsDeps).map((a) => a.mtimeMs);
+  const elapsedMs = mtimes.length > 0 ? systemClock.now() - mtimes.reduce((a, b) => Math.max(a, b)) : 0;
+  // A sub-minute burst extrapolates to an hourly rate that pins the ceiling at the backstop: skip it.
+  const sample = prefixBytes !== undefined && elapsedMs >= LEDGER_ROTATION_MIN_RATE_SAMPLE_MS
+    ? (size0 - prefixBytes) * 3_600_000 / elapsedMs : 0;
+  const priorRate = previous?.rateBytesPerHour;
+  const rateBytesPerHour = sample > 0 && Number.isFinite(sample)
+    ? typeof priorRate === "number" && Number.isFinite(priorRate) && priorRate > 0
+      ? priorRate / 2 + sample / 2 : sample
+    : 0;
   const lastArchiveMs = reconcileArchiveStamps(dir, archiveFsDeps);
   let requestedMs = now ? now().getTime() : systemClock.now();
   if (lastArchiveMs !== undefined && requestedMs <= lastArchiveMs) requestedMs = lastArchiveMs + 1;
   // DELTA ARCHIVING: the carried prefix is the core the previous rotation wrote back, already
   // archived, so only what follows it goes to a new archive. Re-copying it made adjacent archives
   // share 99.3% of rows (fleet host, 2026-09-23). An empty delta writes no archive at all.
-  const delta = snapshotBytes.subarray(archivedPrefixBytes(path, snapshotBytes));
+  const delta = snapshotBytes.subarray(prefixBytes ?? 0);
   const plainArchivePath = datedArchivePath(path, new Date(requestedMs));
   // The landed archive's own mtime is the clock `now` cannot corrupt (see healIfAheadOfOwnMtime).
   const archivePath =
@@ -1704,13 +1976,13 @@ function rotateLedgerLocked(
     return withinWindow;
   });
 
-  const carried = pruneCarriedRows(candidates);
+  const carried = dropSupersededReviews(pruneCarriedRows(candidates));
+  const reviewMarkers = planOnlyReviewMarkers(candidates, carried);
   archivedLineCount += candidates.length - carried.length;
   candidates = carried;
 
-  // ── PASS 3: sweep.disposed dedup — keep the single acted:true line per `pr@head` if one exists,
-  // else the most recent for that key. Every other duplicate is a same-outcome re-poll, and a
-  // still-open PR re-logging its disposition every pass is the loudest source of bloat (W1-T244). ─
+  // ── PASS 3: sweep.disposed dedup — one line per `pr@head` (its newest acted:true, else its newest);
+  // every other is a same-outcome re-poll (W1-T244). Then W1-T5517's age bound, boundSweepRows. ─
   const sweepGroups = new Map<string, ParsedLedgerLine[]>();
   const nonSweepCandidates: ParsedLedgerLine[] = [];
   for (const p of candidates) {
@@ -1734,11 +2006,14 @@ function rotateLedgerLocked(
     archivedLineCount += group.length - 1;
   }
   candidates = [...nonSweepCandidates, ...dedupedSweep];
+  const passed = new Set(candidates);
+  const bounded = new Set(boundSweepRows(originalOrder.filter((p) => passed.has(p)), nowMs));
+  archivedLineCount += candidates.length - bounded.size;
+  candidates = candidates.filter((p) => bounded.has(p));
 
-  // ── PASS 4: per-step count cap — bounds every OTHER decision/model-attribution step to the
-  // newest MAX_RETAINED_LINES_PER_STEP lines, because those sets are otherwise unbounded.
-  // sweep.disposed and the health, deploy and render steps carry their own bound and are excluded
-  // here. ─────────────────────────────────────────────────────────────────────────────────────
+  // ── PASS 4: per-step count cap — the newest MAX_RETAINED_LINES_PER_STEP lines of every OTHER
+  // decision/model-attribution step (review.posted: REVIEW_POSTED_RETAINED_ROWS), else unbounded.
+  // sweep.disposed and the health, deploy and render steps carry their own bound. ──────────────
   const byStep = new Map<string, ParsedLedgerLine[]>();
   for (const p of candidates) {
     const key = p.step ?? "";
@@ -1752,13 +2027,13 @@ function rotateLedgerLocked(
       step === "sweep.disposed" ||
       isHealthOrDeployStep(step) ||
       (!isModelAttributionStep(step) && isRenderRelevantStep(step)) ||
-      group.length <= MAX_RETAINED_LINES_PER_STEP
+      group.length <= (step === "review.posted" ? REVIEW_POSTED_RETAINED_ROWS : MAX_RETAINED_LINES_PER_STEP)
     ) {
       capped.push(...group);
       continue;
     }
     // group is in file order (chronological); drop the oldest excess, keep the newest cap.
-    const excess = group.length - MAX_RETAINED_LINES_PER_STEP;
+    const excess = group.length - (step === "review.posted" ? REVIEW_POSTED_RETAINED_ROWS : MAX_RETAINED_LINES_PER_STEP);
     archivedLineCount += excess;
     capped.push(...group.slice(excess));
   }
@@ -1768,19 +2043,24 @@ function rotateLedgerLocked(
   const survivors = new Set(capped);
   let keptCandidates = originalOrder.filter((p) => survivors.has(p));
 
-  // Catch-up: fold in anything appended to the live path since the snapshot above, so a
-  // concurrent appendLedger call landing in that window is never silently dropped.
+  // Catch-up to the last newline; the post-rename drain copies everything from `drainFrom` on.
   const sizeNow = statSync(path).size;
-  const tail = sizeNow > size0 ? readSyncRange(path, size0, sizeNow) : "";
-  const tailBytes = Buffer.byteLength(tail, "utf8");
+  const rawTail = sizeNow > size0 ? readSyncRange(path, size0, sizeNow) : Buffer.alloc(0);
+  const tailBytes = rawTail.lastIndexOf(0x0a) + 1;
+  const tail = rawTail.subarray(0, tailBytes).toString("utf8");
+  const drainFrom = size0 + tailBytes;
 
   let keptLines = keptCandidates.map((p) => p.raw);
   let keptBytes = keptLines.length > 0 ? Buffer.byteLength(keptLines.join("\n") + "\n", "utf8") : 0;
+  // W1-T4393: preserve passes 1-4's core and add an hour of smoothed appends, within the backstop.
+  const ceilingBytes = rateBytesPerHour > 0
+    ? Math.min(fixedCeilingBytes * LEDGER_ROTATION_BACKSTOP_MULTIPLIER, Math.max(fixedCeilingBytes, Math.ceil(keptBytes + rateBytesPerHour)))
+    : fixedCeilingBytes;
 
   // ── THE CONVERGENCE INVARIANT (W1-T244). Even after every bound above the retained core can
   // still exceed the ceiling. Post-rotation the live ledger MUST be strictly below it, or rotation
-  // cannot terminate. Shed the OLDEST retained lines by `ts`, never the newest, and leave one
-  // pointer line naming the archive. Falsifier: test/ledger-rotation-convergence.test.ts. Why: the
+  // cannot terminate. Shed the OLDEST retained lines by `ts`, never the newest nor a correction (W1-T5551),
+  // and leave one pointer line naming the archive. Falsifier: test/ledger-rotation-convergence.test.ts. Why: the
   // core once exceeded the ceiling live (docs/forensics/ledger.md#rotateledger). ───────────────
   let shedCount = 0;
   if (keptBytes + tailBytes >= ceilingBytes) {
@@ -1801,8 +2081,9 @@ function rotateLedgerLocked(
     // headroom — otherwise the very next append could put it straight back over. The invariant is
     // strictly enforced either way; this makes "converged" durable rather than a hair's-width pass.
     const targetBytes = Math.floor(ceilingBytes * 0.9);
-    const byAge = [...keptCandidates].sort((a, b) => (a.tsMs ?? 0) - (b.tsMs ?? 0));
-    const stillKept = new Set(byAge);
+    const sheddable = keptCandidates.filter((p) => p.step !== "correction.provenance");
+    const byAge = sheddable.sort((a, b) => (a.tsMs ?? 0) - (b.tsMs ?? 0));
+    const stillKept = new Set(keptCandidates);
     for (const victim of byAge) {
       if (keptBytes + tailBytes + pointerBytes < targetBytes) break;
       stillKept.delete(victim);
@@ -1829,35 +2110,52 @@ function rotateLedgerLocked(
       }) + "\n";
   }
 
+  const coreBytes = Buffer.from(coreContent, "utf8");
+  const stepBytes = new Map<string, number>();
+  for (const p of keptCandidates) stepBytes.set(p.step ?? "", (stepBytes.get(p.step ?? "") ?? 0) + Buffer.byteLength(p.raw, "utf8") + 1);
+  const coreShare = Number((coreBytes.length / fixedCeilingBytes).toFixed(4));
+  const coreRecord = { core_bytes: coreBytes.length, ceiling_bytes: fixedCeilingBytes, core_share: coreShare, target_share: LEDGER_CORE_TARGET_SHARE,
+    heaviest_steps: [...stepBytes].sort((a, b) => b[1] - a[1]).slice(0, 5) };
   const recarriedCount = recarry.rows.filter((p) => keptCandidates.includes(p)).length;
   const noteContent =
     (recarriedCount > 0 || recarry.torn.length > 0
       ? rotationRow("ledger.recarried", { count: recarriedCount, archives: recarry.archives, unreadable_archives: recarry.torn }, nowIso)
       : "") +
-    (retention.unreadable ? rotationRow("ledger.retained_steps_unreadable", { path: ledgerRetainedStepsPath(path) }, nowIso) : "");
+    reviewMarkers.map((marker) => rotationRow(PLAN_ONLY_REVIEW_MARKER_STEP, marker, nowIso)).join("") +
+    (retention.unreadable ? rotationRow("ledger.retained_steps_unreadable", { path: ledgerRetainedStepsPath(path) }, nowIso) : "") +
+    (rateBytesPerHour > 0
+      ? rotationRow("ledger.rotation_headroom", { rate_bytes_per_hour: rateBytesPerHour, ceiling_bytes: ceilingBytes }, nowIso)
+      : "") +
+    (coreShare > LEDGER_CORE_TARGET_SHARE ? rotationRow("ledger.rotation_core_over_target", coreRecord, nowIso) : "");
   const newLiveContent = coreContent + noteContent + pointerContent + tail;
-  const swapped = writeFileAtomic(path, newLiveContent, () => {
-    // Immediately before the rename: is the live path STILL the inode this rotation snapshotted?
-    // If not, something replaced it and renaming would clobber it. (A ledger REMOVED mid-rotation
-    // already throws out of the catch-up stat above; this guard decides only same file or other.)
-    const st = statSync(path);
-    return st.dev === snapshotIdentity.dev && st.ino === snapshotIdentity.ino;
-  });
-  if (!swapped) {
-    console.error(
-      `ledger: rotation of ${path} withdrawn — the live file changed identity since the snapshot ` +
-        `(another rotator replaced it); its lines are untouched and the snapshot archive ${archivePath} is kept`,
-    );
-    return { rotated: false };
+  let replaced: number | undefined;
+  try {
+    const swapped = writeFileAtomic(path, newLiveContent, () => {
+      beforeRename?.();
+      replaced = openSync(path, "a+");
+      const st = fstatSync(replaced);
+      return st.dev === snapshotIdentity.dev && st.ino === snapshotIdentity.ino;
+    });
+    if (!swapped) {
+      console.error(
+        `ledger: rotation of ${path} withdrawn — the live file changed identity since the snapshot ` +
+          `(another rotator replaced it); its lines are untouched and the snapshot archive ${archivePath} is kept`,
+      );
+      return { rotated: false };
+    }
+    drainReplacedInode(replaced!, drainFrom, path, nowIso);
+  } finally {
+    if (replaced !== undefined) closeSync(replaced);
   }
-  const coreBytes = Buffer.from(coreContent, "utf8");
-  writeFileAtomic(ledgerCarriedPrefixPath(path), JSON.stringify({ bytes: coreBytes.length, sha256: sha256Hex(coreBytes) }));
+  writeFileAtomic(ledgerCarriedPrefixPath(path), JSON.stringify({
+    bytes: coreBytes.length, sha256: sha256Hex(coreBytes), rateBytesPerHour, effectiveCeilingBytes: ceilingBytes, core: coreRecord,
+  }));
 
   return {
     rotated: true,
     archivePath,
     archivedLineCount,
-    retainedLineCount: keptLines.length + (pointerContent ? 1 : 0),
+    retainedLineCount: keptLines.length + noteContent.split("\n").filter(Boolean).length + (pointerContent ? 1 : 0),
     recarriedLineCount: recarriedCount,
   };
 }
@@ -1901,22 +2199,41 @@ export interface StateBackupSnapshot {
   archiveDir: string;
   /** Relative paths of every file the snapshot copied, sorted, relative to `state/`. */
   entries: string[];
+  /** W1-T5545: rotations hard-linked to the last snapshot, files removed mid-copy, torn bytes cut. */
+  linked: string[];
+  vanished: string[];
+  ledgerTrimmedBytes: number;
 }
 
-/** Recursively lists every FILE (never a directory) under `root`, as sorted paths relative to
- *  `root`, skipping any relative path in `excluded`. ONE walk shared by staging, the post-copy
- *  verification and {@link restoreState}, so a traversal fix applies to all three. */
+/** Test-only strike points (`beforeCopy`, `afterLedgerRead`); `maxRaceAttempts` bounds every race. */
+export interface SnapshotStateOptions {
+  now?: () => Date;
+  copy?: (srcRoot: string, dstRoot: string, relPaths: readonly string[]) => void;
+  beforeCopy?: (rel: string) => void;
+  afterLedgerRead?: (attempt: number) => void;
+  maxRaceAttempts?: number;
+}
+
+// KIND: BACKSTOP — a healthy ledger settles on the first or second read (a few MB, read in ms).
+export const STATE_BACKUP_MAX_RACE_ATTEMPTS = 5;
+
+/** A rotation archive (`ledger.<ISO stamp>.ndjson[.gz]`): renamed in once, never modified. */
+export function isLedgerArchiveRelPath(rel: string): boolean {
+  return /^ledger\.\d{4}-\d{2}-\d{2}T[^/]*\.ndjson(\.gz)?$/.test(rel);
+}
+
+/** Every FILE under `root`, sorted, minus `excluded` — ONE walk for staging, verify and restore. Types
+ *  come from readdir, so a temp file renamed away mid-walk cannot fail it (W1-T5545). */
 function listStateFiles(root: string, excluded: ReadonlySet<string> = new Set()): string[] {
   const out: string[] = [];
   const walk = (relDir: string): void => {
     const absDir = relDir ? join(root, relDir) : root;
-    for (const name of readdirSync(absDir).sort()) {
-      const rel = relDir ? join(relDir, name) : name;
+    for (const d of readdirSync(absDir, { withFileTypes: true })) {
+      const rel = relDir ? join(relDir, d.name) : d.name;
       if (excluded.has(rel)) continue;
-      const abs = join(absDir, name);
-      const st = statSync(abs);
-      if (st.isDirectory()) walk(rel);
-      else if (st.isFile()) out.push(rel);
+      const kind = d.isSymbolicLink() ? statSync(join(absDir, d.name)) : d;
+      if (kind.isDirectory()) walk(rel);
+      else if (kind.isFile()) out.push(rel);
     }
   };
   walk("");
@@ -1928,17 +2245,104 @@ function listStateFiles(root: string, excluded: ReadonlySet<string> = new Set())
  *  0600 by design, and a backup that widened them on restore would be a regression. */
 function copyStateFiles(srcRoot: string, dstRoot: string, relPaths: readonly string[]): void {
   for (const rel of relPaths) {
-    const src = join(srcRoot, rel);
-    const dst = join(dstRoot, rel);
+    copyOneStateFile(join(srcRoot, rel), join(dstRoot, rel), statSync(join(srcRoot, rel)).mode);
+  }
+}
+
+function copyOneStateFile(src: string, dst: string, mode: number): void {
+  mkdirSync(dirname(dst), { recursive: true });
+  cpSync(src, dst, { force: true, preserveTimestamps: true });
+  try {
+    chmodSync(dst, mode);
+  } catch {
+    // best-effort: the bytes are copied; permission preservation is a hardening, not the contract.
+  }
+}
+
+/** Rotations first, the live ledger LAST, so rows rotated out before the read are already copied. */
+function liveCopyOrder(entries: readonly string[]): string[] {
+  const rank = (rel: string): number => (isLedgerArchiveRelPath(rel) ? 0 : rel === STATE_BACKUP_LEDGER_RELPATH ? 2 : 1);
+  return [...entries].sort((a, b) => rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/** The live ledger cut at its last `\n`, re-read while size/mtime/inode move; one fd checks AND reads. */
+function readLedgerThroughFd(src: string, attempt: number, afterRead?: (attempt: number) => void) {
+  const fd = openSync(src, "r");
+  try {
+    const before = fstatSync(fd);
+    const bytes = readFileSync(fd);
+    afterRead?.(attempt);
+    return { before, bytes, after: fstatSync(fd) };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function captureLiveLedger(src: string, dst: string, attempts: number, afterRead?: (attempt: number) => void): number {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const { before, bytes, after } = readLedgerThroughFd(src, attempt, afterRead);
+    const renamed = statSync(src).ino !== before.ino;
+    const raced = renamed || bytes.length !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs;
+    if (raced) continue;
+    const whole = bytes.lastIndexOf(0x0a) + 1;
     mkdirSync(dirname(dst), { recursive: true });
-    const srcStat = statSync(src);
-    cpSync(src, dst, { force: true });
-    try {
-      chmodSync(dst, srcStat.mode);
-    } catch {
-      // best-effort — an fs that refuses chmod (e.g. some network mounts) still has the
-      // bytes copied correctly; permission preservation is a hardening, not the contract.
+    writeFileSync(dst, bytes.subarray(0, whole), { mode: before.mode & 0o777 });
+    return bytes.length - whole;
+  }
+  throw new StateBackupError(
+    `state backup: the live ledger ${src} changed during each of ${attempts} copy attempts — refusing to publish a torn copy`,
+  );
+}
+
+/** Default copier: an unchanged rotation is hard-linked; a vanished file is RECORDED, never hidden. */
+function liveStateCopier(previous: string | undefined, opts: SnapshotStateOptions, report: Omit<StateBackupSnapshot, "archiveDir" | "entries">) {
+  const attempts = opts.maxRaceAttempts ?? STATE_BACKUP_MAX_RACE_ATTEMPTS;
+  return (srcRoot: string, dstRoot: string, relPaths: readonly string[]): void => {
+    for (const rel of relPaths) {
+      opts.beforeCopy?.(rel);
+      const src = join(srcRoot, rel);
+      const dst = join(dstRoot, rel);
+      if (rel === STATE_BACKUP_LEDGER_RELPATH) {
+        report.ledgerTrimmedBytes = captureLiveLedger(src, dst, attempts, opts.afterLedgerRead);
+        continue;
+      }
+      try {
+        const st = statSync(src);
+        const prior = previous !== undefined && isLedgerArchiveRelPath(rel) ? join(previous, rel) : undefined;
+        const priorSt = prior !== undefined && existsSync(prior) ? statSync(prior) : undefined;
+        if (prior !== undefined && priorSt?.size === st.size && Math.abs(priorSt.mtimeMs - st.mtimeMs) < 1) {
+          mkdirSync(dirname(dst), { recursive: true });
+          rmSync(dst, { force: true });
+          linkSync(prior, dst);
+          report.linked.push(rel);
+          continue;
+        }
+        copyOneStateFile(src, dst, st.mode);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT" || existsSync(src)) throw err;
+        report.vanished.push(rel);
+      }
     }
+  };
+}
+
+function newestStateBackup(backupsRoot: string): string | undefined {
+  const name = readdirSync(backupsRoot, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && d.name.startsWith("state-backup."))
+    .map((d) => d.name)
+    .sort()
+    .pop();
+  return name === undefined ? undefined : join(backupsRoot, name);
+}
+
+/** Read from DISK whichever copier ran: after the trim, an unparseable line is corruption. */
+function assertStagedLedgerParses(stagedLedger: string, stateDir: string): void {
+  const lines = readFileSync(stagedLedger, "utf8").split("\n");
+  const tail = lines.pop();
+  const bad = lines.findIndex((line) => parseLedgerLine(line).json === undefined);
+  if (bad >= 0 || tail !== "") {
+    const where = bad >= 0 ? `line ${bad + 1} does not parse as JSON` : "its last line has no newline";
+    throw new StateBackupError(`state backup: the ledger copied from ${stateDir}: ${where} — refusing to publish it`);
   }
 }
 
@@ -1948,29 +2352,37 @@ function datedStateBackupDir(backupsRoot: string, now: Date): string {
 }
 
 /**
- * Snapshots `stateDir` into a freshly-created, dated directory under `backupsRoot`. ATOMIC PUBLISH:
- * every copy is staged into a temp dir, verified from disk rather than from the in-memory list, and
- * only then renamed into its final dated name, so a process death mid-copy leaves at most an
- * orphaned temp dir. `backupsRoot` is never inside `stateDir`, which would recurse into its own
- * prior backups. VERIFICATION (design note ii — "a snapshot that is not verified is not a backup"):
- * throws {@link StateBackupError} when the staged copy is empty, or when the source held the ledger
- * or the proposals register and the staged copy does not. `opts.copy` overrides staging for ONE
- * reason, to make that verification falsifiable: `copyStateFiles` copies every entry or throws, so
- * the "staged copy lost a file" arm is otherwise unreachable, and an unreachable check is
- * indistinguishable from an absent one. Only test/state-backup.test.ts supplies it.
+ * Snapshots `stateDir` into a dated directory under `backupsRoot` (never inside `stateDir`): staged,
+ * verified from disk, then renamed. Throws {@link StateBackupError} on an empty copy, a lost ledger or
+ * proposals register, or an unparseable ledger line; `opts.copy` only makes the lost-file arm falsifiable.
+ * LIVE-SAFE (W1-T5545): runs with the fleet up; a mid-copy rotation is chased by re-listing, and only a
+ * race outlasting the bound refuses.
  */
-export function snapshotState(stateDir: string, backupsRoot: string, opts: { now?: () => Date; copy?: (srcRoot: string, dstRoot: string, relPaths: readonly string[]) => void } = {}): StateBackupSnapshot {
-  const now = opts.now ?? (() => new Date());
-  const copy = opts.copy ?? copyStateFiles;
+export function snapshotState(stateDir: string, backupsRoot: string, opts: SnapshotStateOptions = {}): StateBackupSnapshot {
+  const now = opts.now ?? systemClock.date;
+  const attempts = opts.maxRaceAttempts ?? STATE_BACKUP_MAX_RACE_ATTEMPTS;
+  const report: Omit<StateBackupSnapshot, "archiveDir" | "entries"> = { linked: [], vanished: [], ledgerTrimmedBytes: 0 };
   let tmpDir: string | undefined;
   try {
     if (!existsSync(stateDir)) {
       throw new StateBackupError(`state backup: source state dir does not exist: ${stateDir}`);
     }
     mkdirSync(backupsRoot, { recursive: true });
+    const copy = opts.copy ?? liveStateCopier(newestStateBackup(backupsRoot), opts, report);
     tmpDir = mkdtempSync(join(backupsRoot, ".state-backup-tmp-"));
     const sourceEntries = listStateFiles(stateDir, STATE_BACKUP_EXCLUDED_RELPATHS);
-    copy(stateDir, tmpDir, sourceEntries);
+    copy(stateDir, tmpDir, liveCopyOrder(sourceEntries));
+    for (let pass = 1; ; pass++) {
+      const have = new Set([...listStateFiles(tmpDir), ...report.vanished]);
+      const late = listStateFiles(stateDir, STATE_BACKUP_EXCLUDED_RELPATHS).filter((rel) => isLedgerArchiveRelPath(rel) && !have.has(rel));
+      if (late.length === 0) break;
+      if (pass >= attempts) {
+        throw new StateBackupError(
+          `state backup: rotations kept landing in ${stateDir} across ${attempts} copy passes (${late.join(", ")}) — refusing to publish a snapshot that may miss their rows`,
+        );
+      }
+      copy(stateDir, tmpDir, liveCopyOrder([...late, STATE_BACKUP_LEDGER_RELPATH]));
+    }
 
     const staged = listStateFiles(tmpDir);
     if (staged.length === 0) {
@@ -1984,11 +2396,12 @@ export function snapshotState(stateDir: string, backupsRoot: string, opts: { now
         `state backup: snapshot of ${stateDir} is missing ${missing.join(", ")}, present in the source — refusing to publish it`,
       );
     }
+    if (staged.includes(STATE_BACKUP_LEDGER_RELPATH)) assertStagedLedgerParses(join(tmpDir, STATE_BACKUP_LEDGER_RELPATH), stateDir);
 
     const archiveDir = datedStateBackupDir(backupsRoot, now());
     renameSync(tmpDir, archiveDir);
     tmpDir = undefined;
-    return { archiveDir, entries: staged };
+    return { archiveDir, entries: staged, ...report };
   } catch (err) {
     if (err instanceof StateBackupError) throw err;
     throw new StateBackupError(`state backup: snapshot of ${stateDir} failed: ${(err as Error).message}`, { cause: err });

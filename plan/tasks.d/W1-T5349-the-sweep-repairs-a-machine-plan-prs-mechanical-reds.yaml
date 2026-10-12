@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-02: plan-only red PRs with no repair route research"
   plan_refs: [W1-T4351, W1-T3390, W1-T5279, W1-T5348]
   files: [src/lib/sweep.ts, test/the-sweep-repairs-a-machine-plan-prs-mechanical-reds.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

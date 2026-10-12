@@ -1,0 +1,3 @@
+- id: ci-shard-one-eight-refuses-conflict-markers
+  # knowledge gardener: retire ci-shard-one-eight-refuses-conflict-markers
+  lifecycle: superseded

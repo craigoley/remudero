@@ -48,7 +48,7 @@ import {
   runFixRebase,
   runFixRung,
   type FixRungOutcome,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { Config } from "../src/lib/config.js";

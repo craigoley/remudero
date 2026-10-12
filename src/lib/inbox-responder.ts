@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { systemClock, type Clock } from "./clock.js";
 import { buildDecisionSummarySpawnArgs } from "./feedback.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { declinedReasonInLedger, parseProposalRegistry } from "./inbox.js";
+import { declinedReasonInLedger, deriveTaskReferent, parseProposalRegistry } from "./inbox.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
 import type { InboxClassification } from "./inbox.js";
 import { machineTokens, plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
@@ -123,22 +123,25 @@ export function buildAttentionCensus(input: AttentionCensusInput) {
   });
   const items = [...input.views, ...terminalHistory].map((view) => {
     const classification = byId.get(view.proposalId);
-    const taskId = /^verify-human:(W\d+-T[A-Za-z0-9]+)$/.exec(view.proposalId)?.[1];
+    const humanTaskId = /^verify-human:(W\d+-T[A-Za-z0-9]+)$/.exec(view.proposalId)?.[1];
+    const taskId = humanTaskId ?? deriveTaskReferent(view.proposalId);
     const task = taskId ? input.taskFacts.get(taskId) : undefined;
     const judge = taskId ? input.judgeByTask.get(taskId) : undefined;
-    const released = taskId ? input.releasedTaskIds.has(taskId) : false;
+    const released = humanTaskId !== undefined && input.releasedTaskIds.has(humanTaskId);
     const sourceFacts: Array<{ source: string; detail: string }> = [];
     if (classification) sourceFacts.push({ source: "classification", detail: `${view.proposalId}: ${classification.state}${classification.reasons.length ? `; predicates: ${classification.reasons.map((reason) => reason.predicate).join(", ")}` : ""}` });
     if (task) sourceFacts.push({ source: "plan", detail: `${taskId}: verify: ${task.verify}; repo: ${task.repo}; ${task.title}` });
     if (task?.status === "blocked" && task.retirement) sourceFacts.push({ source: "plan-lifecycle", detail: `${taskId}: status blocked; retirement ${task.retirement}` });
     if (task?.dispatchHold) sourceFacts.push({ source: "plan-lifecycle", detail: `${taskId}: dispatch_hold: true; a release receipt alone cannot make this task dispatchable` });
     if (task?.risk === "high") sourceFacts.push({ source: "plan", detail: `${taskId}: risk: high in the filed task` });
-    if (judge) sourceFacts.push({ source: "judge", detail: `${judge.decision}: ${judge.reason.slice(0, 300)}` });
+    if (judge) sourceFacts.push({ source: "judge", detail: `${humanTaskId ? "" : "Task verification context, not a proposal ruling: "}${judge.decision}: ${judge.reason.slice(0, 300)}` });
     if (released) sourceFacts.push({ source: "ledger", detail: input.releaseReceipts?.get(taskId!) ?? `${taskId}: ratify.approved released verify-human` });
     if (taskId && input.mergedTaskIds?.has(taskId)) sourceFacts.push({ source: "githubProjection", detail: `${taskId}: merged task credit observed` });
     if (classification?.retiredReason) sourceFacts.push({ source: "classification", detail: classification.retiredReason });
     const whyMe = view.attention === "decision"
-      ? taskId ? task?.dispatchHold
+      ? taskId ? !humanTaskId
+        ? `Proposal ${view.proposalId} references ${taskId}; its recommendation requires review. The task's verification mode is context, not approval of this proposal.`
+        : task?.dispatchHold
         ? `${taskId} still has an explicit dispatch hold. A release receipt does not lift it; the operator must review the held task.`
         : `${taskId} requires an operator decision${task ? ` (verify: ${task.verify})` : "; task evidence unavailable"}.`
         : `Proposal ${view.proposalId} is ready for an operator decision.`
@@ -167,7 +170,7 @@ export function buildAttentionCensus(input: AttentionCensusInput) {
       else decisionReadiness.unknown += 1;
     }
   }
-  const contradictoryRelease = items.some((item) => item.taskId && input.releasedTaskIds.has(item.taskId) && item.attention === "decision");
+  const contradictoryRelease = items.some((item) => item.taskId && item.proposalId === `verify-human:${item.taskId}` && input.releasedTaskIds.has(item.taskId) && item.attention === "decision");
   const missingReferent = items.some((item) => (item.taskId && !input.taskFacts.has(item.taskId)) || item.classification === "unavailable");
   const state = Object.values(input.sources).every((source) => source === "observed") && !contradictoryRelease && !missingReferent ? "complete" : "partial";
   const verifiedCounts = state === "complete" ? { ...counts } : { decision: 0, reply: 0, in_progress: 0, history: 0, awaiting_daemon: 0 };

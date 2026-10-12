@@ -214,7 +214,7 @@ export function runSuite(suite, days, exec = execFileSync) {
   try {
     exec(
       process.execPath,
-      ["--test", "--import", "tsx", "--import", join(REPO, "scripts", "clock-shift.mjs"), join("test", `${suite}.test.ts`)],
+      ["--test", "--test-reporter=tap", "--import", "tsx", "--import", join(REPO, "scripts", "clock-shift.mjs"), join("test", `${suite}.test.ts`)],
       { cwd: REPO, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, TMPDIR: isolatedTmp, FK_SHIFT_DAYS: String(days) } },
     );
     return { failed: false, output: "" };

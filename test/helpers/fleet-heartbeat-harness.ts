@@ -10,6 +10,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { installFixtureDuGuard, type FixtureDuCall } from "./fixture-du.js";
 
 export const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const REAL_SCRIPT = join(REPO_ROOT, "scripts", "fleet-heartbeat.sh");
@@ -25,6 +26,8 @@ export interface Beat {
   stderr: string;
   /** Every stubbed `git` invocation, in order. */
   calls: Call[];
+  /** Native fixture sizes and explicit refusals of host-wide scans, never invented zero readings. */
+  duCalls: FixtureDuCall[];
   /** The payload piped to `git hash-object` — the bytes actually PUBLISHED, not the dry-run print. */
   published: string;
   /** The tree entry piped to `git mktree`. */
@@ -72,9 +75,15 @@ export interface BeatOpts {
   tsx?: boolean;
   /** Seed a previous-beat state file so `since_prev_beat_s` is computable. Default true. */
   prevBeat?: boolean;
+  /** The previous beat's timestamp, when `prevBeat` is seeded. Default 2020-01-01T00:00:00Z. */
+  prevBeatTs?: string;
+  /** Files written under `<root>/state/`, keyed by their path relative to it. */
+  stateFiles?: Record<string, string>;
   env?: Record<string, string>;
   /** A `date` to put on PATH ahead of the real one, for the BSD-branch tests. */
   dateStub?: string;
+  /** Explicit platform for namespace controls; other callers retain the native default. */
+  unameStub?: string;
   /**
    * A container-runtime stub reached through `RMD_HEARTBEAT_DOCKER` (W1-T483). Written to the stub
    * bin dir and named EXPLICITLY rather than shadowing `docker` on PATH, because this host really
@@ -106,6 +115,7 @@ export function runBeat(opts: BeatOpts = {}): Beat {
   mkdirSync(scriptsDir, { recursive: true });
   mkdirSync(join(root, "state"), { recursive: true });
   mkdirSync(join(dir, "home"), { recursive: true });
+  const du = installFixtureDuGuard(binDir, [dir, rec]);
 
   // THE SUBJECT IS THE COMMITTED FILE. Copied only so INSTALL_DIR is controllable and mutants have
   // something to edit; equality is asserted below so a drifted copy cannot quietly pass.
@@ -140,7 +150,11 @@ export function runBeat(opts: BeatOpts = {}): Beat {
     );
   }
   if (opts.prevBeat !== false) {
-    writeFileSync(join(root, "state", "heartbeat-last.txt"), "2020-01-01T00:00:00Z\n");
+    writeFileSync(join(root, "state", "heartbeat-last.txt"), `${opts.prevBeatTs ?? "2020-01-01T00:00:00Z"}\n`);
+  }
+  for (const [rel, body] of Object.entries(opts.stateFiles ?? {})) {
+    mkdirSync(dirname(join(root, "state", rel)), { recursive: true });
+    writeFileSync(join(root, "state", rel), body);
   }
 
   writeFileSync(join(binDir, "git"), gitStub(), { mode: 0o755 });
@@ -148,6 +162,10 @@ export function runBeat(opts: BeatOpts = {}): Beat {
   if (opts.dateStub) {
     writeFileSync(join(binDir, "date"), opts.dateStub, { mode: 0o755 });
     chmodSync(join(binDir, "date"), 0o755);
+  }
+  if (opts.unameStub) {
+    writeFileSync(join(binDir, "uname"), opts.unameStub, { mode: 0o755 });
+    chmodSync(join(binDir, "uname"), 0o755);
   }
   if (opts.hostnameStub) {
     writeFileSync(join(binDir, "hostname"), opts.hostnameStub, { mode: 0o755 });
@@ -199,6 +217,7 @@ export function runBeat(opts: BeatOpts = {}): Beat {
     stdout: r.stdout ?? "",
     stderr: r.stderr ?? "",
     calls,
+    duCalls: du.calls(),
     published: read("payload"),
     treeInput: read("treeinput"),
   };

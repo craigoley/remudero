@@ -15,19 +15,28 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
+import { isMainThread, parentPort, SHARE_ENV, Worker, workerData } from "node:worker_threads";
+import { setLedgerMemoRetentionContext } from "./ledger-union.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
+import { AGENT_VIEW_NAME, createAgentView } from "./agent-view.js";
+import { ANALYTICS_VIEW_NAME, ANALYTICS_SOURCE_CONSOLE_V1, createAnalyticsView, type HostModelApprovalConfig } from "./analytics-view.js";
+import { captureGardenerSpendSource } from "./gardener-spend.js";
 import { createGithubKeepWarm, type GithubKeepWarm } from "./github-refresh-pacer.js";
 import { ghIssueGateway, tryEscalate, type EscalateDeps, type Escalation, type IssueGateway } from "./escalate.js";
-import { createInboxThreadView } from "./inbox-thread-view.js";
-import { createInstancesView } from "./instances-view.js";
+import { createHostView, HOST_VIEW_NAME, hostViewConfig, type HostViewConfig } from "./host-view.js";
+import { createIncidentsView, INCIDENTS_VIEW_NAME } from "./incidents-view.js";
+import { createInboxThreadView, INBOX_THREAD_VIEW_NAME } from "./inbox-thread-view.js";
+import { createInstancesView, INSTANCES_VIEW_NAME } from "./instances-view.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector, type ProjectorTickResult } from "./ledger-projector.js";
-import { createNavBadgeReadModelView } from "./nav-badge-view.js";
-import { createNowView } from "./now-view.js";
+import { createNavBadgeReadModelView, NAV_BADGE_VIEW_NAME } from "./nav-badge-view.js";
+import { createNowView, NOW_VIEW_NAME } from "./now-view.js";
+import { createOperatorAgentRowsView, OPERATOR_AGENT_ROWS_VIEW } from "./operator-agent-read-model.js";
 import { createTaskView, type ReadModelInstanceState as TaskViewInstanceState } from "./task-view.js";
-import { createDemandBook, type DemandBook } from "./view-demand.js";
+import { createWorkstreamsView, WORKSTREAMS_VIEW_NAME } from "./workstreams-view.js";
+import { ACTIONS_VIEW_NAME, createActionsView } from "./actions-view.js";
+import { createDemandBook, TASK_VIEW_NAME, type DemandBook } from "./view-demand.js";
 import {
   ORACLE_DEFAULT_WINDOW_MS,
   ORACLE_DRIFT_INTERVAL_MS,
@@ -55,13 +64,17 @@ import {
   peekLease,
   quickCheckReadModel,
   releaseLease,
+  SOURCE_SNAPSHOT_DDL,
   withWriteTransaction,
+  writeSourceSnapshot,
   type ReadModelDb,
   type ReadModelLease,
+  type SourceSnapshotWrite,
 } from "./read-model-db.js";
 import { threadSlowLane, type SlowLane, type SlowLaneBodies, type SlowLaneConfig } from "./read-model-slow-lane.js";
 import { readModelCommand } from "./read-model-cli.js";
 import { createRepositoriesReadModelView } from "./repositories-view.js";
+import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeapsAnswer } from "./worker-heaps.js";
 import { createViewShadow, fileShadowStore, readShadowEvidence, storedShadowReadiness, viewShadowPath, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ViewShadow } from "./view-shadow.js";
 import { effectiveViewMode, oldestAsOf, READ_MODEL_STATUS_VIEW, shadowSampled, shownReadiness, viewEtag, type EffectiveViewMode, type ViewBody, type ViewBodyEntry, type ViewSource, type ViewSwitchMode } from "./views.js";
 import { describeSource, judgeSource, type SourcePhase } from "./view-freshness.js";
@@ -98,6 +111,27 @@ const READ_MODEL_ORACLE_KIND = "remudero-read-model-oracle" as const;
  * so unbudgeted bodies alone held ticks of 2-4 s beside a catch-up.
  */
 export const READ_MODEL_VIEW_SHARE = 0.4;
+/**
+ * A read-paced view ({@link ReadModelView.readPaced}) keeps its cost / share cadence while one of its
+ * readers was served within this. Past it, each build finished with no read doubles the wait to the next,
+ * and the next read puts the unit back on its unstretched schedule, so a stale unit is rebuilt on the next
+ * tick. MEASURED 2026-10-06 20:25Z to 10-08 18:38Z: `now@core` was rebuilt 5,320 times for 25,605 s of CPU,
+ * while `now`, `needs-you`, `nav-badge` and `/v1/status` were read in 20 of those 46 hours, and by the
+ * console in 7. An open console reads `nav-badge` about every minute, inside this window.
+ */
+export const READ_MODEL_READ_HOT_MS = 2 * 60_000;
+/**
+ * BACKSTOP: the most an unread unit's interval stretches. `now@core` (cost ~4.8 s, interval ~12 s) is
+ * then rebuilt about every 6.4 min, at ~1/32 of its read cost. Each tier is reached by one more unread
+ * build, so a unit read now and then sits low on the ladder, and any read drops it back to the bottom.
+ */
+export const READ_MODEL_IDLE_STRETCH_MAX = 32;
+/** Main posts one read of a path to the worker at most this often: well inside {@link READ_MODEL_READ_HOT_MS}. */
+export const READ_MODEL_READ_NOTE_MS = 5_000;
+/** `GET /v1/views/versions` (view-events.ts's VIEW_VERSIONS_PATH): a console polling every view's version reads them all. */
+const READ_MODEL_EVERY_VIEW_PATHS: ReadonlySet<string> = new Set(["/v1/views/versions"]);
+/** A legacy read that serves a view's body inside its own answer: `/v1/status` carries `needs-you`'s human gates. */
+const READ_MODEL_LEGACY_VIEW_READS: Readonly<Record<string, string>> = { "/v1/status": "needs-you" };
 /** Work outstanding without a commit for this long is stalled; serve watches silent workers too. */
 export const READ_MODEL_STALL_MS = 60_000;
 /**
@@ -203,12 +237,25 @@ export type ReadModelWorkerMessage =
   | { type: "log"; step: string; extra: Record<string, unknown> }
   /** A key the slow lane's view no longer has (a page that emptied): serve forgets its body. */
   | { type: "drop"; view: string; key: string }
-  /** Each non-ledger source's latest reading, posted once per tick when one changed: a body whose data did not move is not re-posted, but its sources still age. */
-  | { type: "sources"; sources: ViewSource[] }
+  /** Each source's latest reading, posted once per tick when one changed (`bodies`: per body, ledger included), so an unmoved body is judged by its last build. */
+  | { type: "sources"; sources: ViewSource[]; bodies?: Array<{ view: string; key: string; sources: ViewSource[] }> }
   /** The heartbeat inside a long tick: `open` before a store's open (its quick_check), `opened` with what it took, `commit` per applied transaction. */
   | { type: "progress"; instance: string; phase: "open" | "opened" | "commit"; ms?: number; rows?: number }
   /** The view thread's own heartbeat, read by the projector thread's view lane and never relayed to serve. */
-  | { type: "view_unit"; view: string; instance?: string; phase: "start" | "end" };
+  | { type: "view_unit"; view: string; instance?: string; phase: "start" | "end" }
+  | ({ type: "view_lane"; view: string } & ReadModelLaneMove)
+  /** W1-T5480: the heaps of the threads this worker spawned, answering serve's memory sample. */
+  | ThreadHeapsAnswer;
+
+export interface ReadModelLaneMove {
+  view?: string;
+  instance?: string;
+  heavy: boolean;
+  dueAt: number;
+  costMs?: number;
+  coldCostMs?: number;
+  restoredCost?: boolean;
+}
 
 export interface ReadModelViewContext {
   now: number;
@@ -225,13 +272,33 @@ export interface ReadModelView {
   materialize(ctx: ReadModelViewContext): Array<{ key: string; data: unknown; sources: ViewSource[] }>;
   /** Work ahead of `materialize`, one bounded step per `more()`; false while some remains, and no body is built before it is done. */
   prepare?(ctx: ReadModelViewContext, more: () => boolean): boolean;
+  stages?(ctx: ReadModelViewContext): Record<string, number> | undefined;
   /** The shadow comparator's legacy side for one key, computed in the worker beside the view's body. */
   legacy?(key: string, now: number, data: unknown): ShadowLegacy | undefined;
   /** Its bodies are per instance: each instance's is built, timed and paced as a unit of its own. */
   perInstance?: boolean;
   /** Its keys are built on demand (view-demand.ts): `materialize` returns only the keys the ticker's demand book holds live. */
   demand?: true;
+  snapshotSourced?: true;
+  /**
+   * Its cadence follows its readers: kept while it or a view built from it was read within
+   * {@link READ_MODEL_READ_HOT_MS}, stretched while nobody reads it, restored by the next read. Serve
+   * judges every source at request time, so a body read before its rebuild says it is stale.
+   */
+  readPaced?: true;
 }
+
+export interface ReadModelViewFactory {
+  name: string;
+  perInstance?: true;
+  demand?: true;
+  snapshotSourced?: true;
+  /** {@link ReadModelView.readPaced}: the unit is paced by the factory's flag, so a view made cold after a lane move keeps it. */
+  readPaced?: true;
+  create(): ReadModelView;
+}
+
+const isViewFactory = (view: ReadModelView | ReadModelViewFactory): view is ReadModelViewFactory => "create" in view;
 
 /** Why a projector that is not fresh is not: the structured half of its `reason`. */
 function ledgerPhase(state: ReadModelInstanceState): SourcePhase {
@@ -252,6 +319,25 @@ export function ledgerSource(state: ReadModelInstanceState, now: number, staleMs
   if (behindMs > staleMs) return stale(`projector ${Math.round(behindMs / 1000)} s behind${state.reason ? `: ${state.reason}` : ""}`);
   if (state.reason) return stale(state.reason);
   return { ...base, ...lag };
+}
+
+/** Of a body's own source and a later reading of it, the one read last. */
+function newerReading(own: ViewSource, reading: ViewSource | undefined): ViewSource {
+  if (!reading) return own;
+  const at = (source: ViewSource): number => (source.asOf === null ? Number.NEGATIVE_INFINITY : Date.parse(source.asOf));
+  return at(reading) >= at(own) ? reading : own;
+}
+
+/** A body's `ledger:` source by the rows its build read: once the projector holds newer rows it lags by their age, stale past the ledger budget. */
+export function builtLedgerSource(built: ViewSource, state: ReadModelInstanceState, now: number, staleMs: number = READ_MODEL_LEDGER_STALE_MS): ViewSource {
+  const current = ledgerSource(state, now, staleMs);
+  const builtMs = built.asOf === null ? Number.NaN : Date.parse(built.asOf);
+  const headMs = state.newestTs === null ? Number.NaN : Date.parse(state.newestTs);
+  if (!Number.isFinite(builtMs) || !Number.isFinite(headMs) || headMs <= builtMs) return current;
+  const lagMs = Math.max(0, now - builtMs);
+  const behind = { ...current, asOf: built.asOf, lagMs };
+  if (current.state !== "fresh" || lagMs <= staleMs) return behind;
+  return { ...behind, state: "stale", phase: "behind", reason: `built from the ledger as of ${built.asOf}, ${Math.round(lagMs / 1000)} s old (budget ${Math.round(staleMs / 1000)} s); the projector has newer rows` };
 }
 
 /** The read model's own status, one body per serve: what each projector has applied and who holds it. */
@@ -276,7 +362,75 @@ export const readModelStatusView: ReadModelView = {
 };
 
 /** Every view the worker materializes; later Phase 1 views register here. */
-export const READ_MODEL_VIEWS: readonly ReadModelView[] = [createNavBadgeReadModelView(ledgerSource), createRepositoriesReadModelView(ledgerSource), readModelStatusView];
+export const READ_MODEL_VIEWS: readonly ReadModelView[] = [createNavBadgeReadModelView(ledgerSource), createRepositoriesReadModelView(ledgerSource), createAnalyticsView(), readModelStatusView];
+
+export interface ReadModelViewReader {
+  consumer: string;
+  reader: string;
+  view?: string;
+}
+
+export type ReadModelViewReaders = Readonly<Record<string, readonly ReadModelViewReader[]>>;
+
+export const READ_MODEL_VIEW_READERS: ReadModelViewReaders = {
+  [READ_MODEL_STATUS_VIEW]: [
+    { consumer: "GET /v1/views/read-model", reader: "serve.ts servedByDefault" },
+    { consumer: "every auto switch", reader: "views.ts shownReadiness" },
+  ],
+  [NOW_VIEW_NAME]: [{ consumer: "needs-you", reader: "needs-you-view.ts composeNeedsYou", view: "needs-you" }],
+  "needs-you": [
+    { consumer: "GET /v1/status", reader: "serve.ts needsYouGates via withStatusNeedsYou" },
+    { consumer: NAV_BADGE_VIEW_NAME, reader: "needs-you-view.ts withNeedsYouView; serve.ts navBadgeWithDecisions", view: NAV_BADGE_VIEW_NAME },
+  ],
+  [OPERATOR_AGENT_ROWS_VIEW]: [{ consumer: "the operator agent", reader: "operator-agent-read-model.ts createOperatorAgentRowsSource: legacy only on an explicit off" }],
+};
+
+function readModelViewRead(view: string, switches: ReadModelSwitches, readers: ReadModelViewReaders, seen: Set<string>): boolean {
+  seen.add(view);
+  return (readers[view] ?? []).some(({ view: consumer }) => consumer === undefined
+    || (!seen.has(consumer) && ((switches.views[consumer] ?? "off") !== "off" || readModelViewRead(consumer, switches, readers, seen))));
+}
+
+export function readModelViewBuilt(view: string, switches: ReadModelSwitches, readers: ReadModelViewReaders = READ_MODEL_VIEW_READERS): boolean {
+  const mode = switches.views[view];
+  if (mode !== undefined) return mode !== "off";
+  return readModelViewRead(view, switches, readers, new Set());
+}
+
+/**
+ * The views a read of `path` reads, directly or through a view built from them ({@link READ_MODEL_VIEW_READERS}):
+ * `/v1/views/nav-badge` reads `nav-badge`, `needs-you` and `now`. A per-instance copy (`/v1/i/<x>/...`) reads what
+ * its core path does; `/v1/views/versions` reads every view in `names`; any other path reads none.
+ */
+export function viewsReadBy(path: string, names: readonly string[], readers: ReadModelViewReaders = READ_MODEL_VIEW_READERS): string[] {
+  const base = path.split("?")[0]!.replace(/^\/v1\/i\/[^/]+\//, "/v1/");
+  if (READ_MODEL_EVERY_VIEW_PATHS.has(base)) return [...names];
+  const direct = base.startsWith("/v1/views/") ? base.slice("/v1/views/".length) : READ_MODEL_LEGACY_VIEW_READS[base];
+  if (!direct) return [];
+  const read = new Set([direct]);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const [view, list] of Object.entries(readers)) {
+      if (read.has(view) || !list.some(({ view: consumer }) => consumer !== undefined && read.has(consumer))) continue;
+      read.add(view);
+      grew = true;
+    }
+  }
+  return [...read];
+}
+
+/** The instance a read names (`?instance=` or a `/v1/i/<x>/` copy) and the view it reads directly: only that view's unit for that instance is warmed. */
+export function readScopeOf(path: string): { direct?: string; instance?: string } {
+  const [route = "", query = ""] = path.split("?");
+  const instance = new URLSearchParams(query).get("instance") ?? /^\/v1\/i\/([^/]+)\//.exec(route)?.[1];
+  const base = route.replace(/^\/v1\/i\/[^/]+\//, "/v1/");
+  const direct = base.startsWith("/v1/views/") ? base.slice("/v1/views/".length) : undefined;
+  return { ...(direct ? { direct } : {}), ...(instance ? { instance } : {}) };
+}
+
+export function scopedReadPath(path: string, instance: string | undefined): string {
+  return instance === undefined ? path : `${path}?instance=${encodeURIComponent(instance)}`;
+}
 
 const LEDGER_SOURCE_PREFIX = "ledger:";
 
@@ -290,7 +444,7 @@ export interface ReadModelTickerOptions {
   post: (message: ReadModelWorkerMessage) => void;
   clock?: Clock;
   holder?: string;
-  views?: readonly ReadModelView[];
+  views?: ReadonlyArray<ReadModelView | ReadModelViewFactory>;
   tickMs?: number;
   /** Checked between instances and inside every projector transaction, so a stop lands mid-rebuild. */
   stopRequested?: () => boolean;
@@ -313,6 +467,9 @@ export interface ReadModelTickerOptions {
   integrityCheck?: (request: IntegrityRequest, done: (result: IntegrityResult) => void) => void;
   /** Projects nothing: attaches to the stores the projector thread holds, takes its states from `observe`, and builds view bodies only. */
   viewsOnly?: boolean;
+  readers?: ReadModelViewReaders;
+  lane?: "fast" | "heavy";
+  restoreCosts?: boolean;
 }
 
 export interface IntegrityRequest {
@@ -347,10 +504,11 @@ export function checkReadModelIntegrity(
 
 /** One thread per check, which exits when done: a check is rare, and one that dies is reported, never hung on. */
 export function threadIntegrityCheck(workerUrl?: URL): NonNullable<ReadModelTickerOptions["integrityCheck"]> {
-  return (request, done) => {
+  // Named: serve's memory sample names each thread by the function that spawned it (serve-memory.ts).
+  const spawnIntegrityCheck: NonNullable<ReadModelTickerOptions["integrityCheck"]> = (request, done) => {
     let settled = false;
     let failure = "";
-    const thread = new Worker(workerUrl ?? new URL(import.meta.url), { workerData: { kind: READ_MODEL_INTEGRITY_KIND, request }, execArgv: process.execArgv });
+    const thread = new Worker(workerUrl ?? new URL(import.meta.url), { workerData: { kind: READ_MODEL_INTEGRITY_KIND, request } });
     thread.unref();
     thread.on("message", (result: IntegrityResult) => {
       settled = true;
@@ -361,6 +519,7 @@ export function threadIntegrityCheck(workerUrl?: URL): NonNullable<ReadModelTick
       if (!settled) done({ ok: false, corrupt: false, error: `the integrity thread exited with code ${code}${failure}`, ms: 0 });
     });
   };
+  return spawnIntegrityCheck;
 }
 
 /** A recycle loop's issue to open (through {@link tryEscalate}, its dedup and its failure row) or to close. */
@@ -384,7 +543,7 @@ export function answerReadModelIssueRequest(request: ReadModelIssueRequest, issu
 export function threadIssueRequest(workerUrl?: URL): (request: ReadModelIssueRequest) => Promise<ReadModelIssueAnswer> {
   return (request) => new Promise((resolve) => {
     let failure = "";
-    const thread = new Worker(workerUrl ?? new URL(import.meta.url), { workerData: { kind: READ_MODEL_ISSUE_KIND, request }, execArgv: process.execArgv });
+    const thread = new Worker(workerUrl ?? new URL(import.meta.url), { workerData: { kind: READ_MODEL_ISSUE_KIND, request } });
     thread.unref();
     thread.on("message", (answer: ReadModelIssueAnswer) => resolve(answer));
     thread.on("error", (error) => void (failure = `: ${error.message}`));
@@ -451,9 +610,9 @@ export function threadOracle(opts: { workerUrl?: URL; escalationRepository?: str
     pending = undefined;
     waiting?.done(result);
   };
-  const spawn = (): Worker => {
+  const spawnOracle = (): Worker => {
     const data: ReadModelOracleData = { kind: READ_MODEL_ORACLE_KIND, ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}) };
-    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv, resourceLimits: { maxOldGenerationSizeMb: READ_MODEL_ORACLE_HEAP_MB } });
+    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, env: SHARE_ENV, resourceLimits: { maxOldGenerationSizeMb: READ_MODEL_ORACLE_HEAP_MB } });
     spawned.unref();
     spawned.on("message", (msg: { type?: string; id?: number; result?: OracleSliceResult }) => {
       if (msg.type === "done" && msg.id === pending?.id) settle(msg.result!);
@@ -468,7 +627,7 @@ export function threadOracle(opts: { workerUrl?: URL; escalationRepository?: str
   };
   return {
     run: (request, done) => {
-      worker ??= spawn();
+      worker ??= spawnOracle();
       pending = { id: ++seq, done };
       worker.postMessage({ type: "check", id: pending.id, request });
     },
@@ -520,22 +679,48 @@ export interface ReadModelTicker {
   release(): number;
   /** Takes every key of a view the slow lane built: each is served like a materialized body, and a key not among them is dropped. */
   accept(built: SlowLaneBodies): void;
+  acceptSnapshot(write: SourceSnapshotWrite): boolean;
   /** A views-only ticker's instance states, as the projector thread last posted them. */
   observe(instances: readonly ReadModelInstanceState[]): void;
   /** Main asked for a key of a demand view. True when the key is new, and its view is due at once. */
   want(view: string, key: string): boolean;
   /** Builds `view` now, in a pass of its own ahead of whatever else is due: main is waiting on a wanted key for 300 ms. */
   buildNow(view: string): void;
+  /** Serve answered a read of `path`: each read-paced view it reads ({@link viewsReadBy}) goes back on its unstretched cadence. */
+  read(path: string): void;
+  lane(move: ReadModelLaneMove): void;
+  peer(entry: ReadModelBodyEntry): void;
 }
 
 /** One view, or one instance's share of a per-instance view: the unit the pass budgets, times and paces. */
 interface ViewUnit {
-  view: ReadModelView;
+  view: ReadModelView | ReadModelViewFactory;
+  made?: ReadModelView;
+  cold?: boolean;
+  coldCostMs?: number;
   slot?: Slot;
-  /** What its last build took; absent until it has run once. */
+  costSeeded?: boolean;
+  restoredColdCost?: boolean;
+  storedCost?: string;
+  storedCostIno?: string;
+  /** What its last build call took (absent until one ran); `startedAt` is the first call of a bounded build in flight. */
   costMs?: number;
-  /** Not rebuilt before this: its last cost divided by {@link READ_MODEL_VIEW_SHARE}. */
+  /** Not rebuilt before this: its last cost divided by {@link READ_MODEL_VIEW_SHARE}, times `stretch`. */
   dueAt: number;
+  /** A read-paced unit's multiplier on that wait: 1 while read, doubled by each build finished unread. */
+  stretch?: number;
+  /** When it would be due unstretched; a read pulls `dueAt` back to it. */
+  baseDueAt?: number;
+  startedAt?: number;
+  peakMs?: number;
+  heavy?: boolean;
+  lastBuiltAt?: number;
+}
+
+class ReadModelViewFactoryMismatch extends RmdError {
+  constructor(view: string) {
+    super("read-model", GENERIC_EXIT_CODE, `the ${view} factory made a view that does not match what it declares`);
+  }
 }
 
 class ReadModelStopRequested extends RmdError {
@@ -632,8 +817,11 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   const latest = new Map<string, ViewBody>();
   const clocks = new Map<string, { key: string; source: ViewSource }>();
   let clocksMoved = false;
+  const readings = new Map<string, { key: string; body: { view: string; key: string; sources: ViewSource[] } }>();
+  const movedReadings = new Set<string>();
   let comparator: { db: ReadModelDb; shadow: ViewShadow } | undefined;
   let deferredLoggedAt = Number.NEGATIVE_INFINITY;
+  let heldLoggedAt = Number.NEGATIVE_INFINITY;
   let switches = DEFAULT_READ_MODEL_SWITCHES;
   let switchesMtimeMs = -1;
   let switchesCheckedAt = Number.NEGATIVE_INFINITY;
@@ -718,7 +906,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     if (slot.state.lease !== "held") log("read_model.lease_acquired", { instance: slot.instance.name, holder, was: slot.state.lease });
     if (!slot.projector) {
       const db = slot.db;
-      withWriteTransaction(db, got.lease, () => db.exec(VIEW_BODY_DDL));
+      withWriteTransaction(db, got.lease, () => db.exec(`${VIEW_BODY_DDL} ${SOURCE_SNAPSHOT_DDL}`));
       slot.projector = createLedgerProjector({
         ledgerDir: slot.instance.ledgerDir, db, lease: got.lease, clock,
         beforeCheckpoint: () => {
@@ -919,6 +1107,50 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       .run(entry.view, entry.key, entry.version, entry.generation, entry.etag, JSON.stringify(entry.body)));
   }
 
+  const costKey = (unit: ViewUnit): string => `view_cost:${JSON.stringify([unit.view.name, unit.slot?.instance.name ?? null])}`;
+  function seedUnitCosts(): void {
+    const home = slots[0]?.db;
+    if (!home || opts.restoreCosts === false) return;
+    for (const unit of units) {
+      if (unit.costSeeded || unit.costMs !== undefined) continue;
+      unit.costSeeded = true;
+      try {
+        const raw = home.meta(costKey(unit));
+        if (raw === undefined) continue;
+        const saved = JSON.parse(raw) as { version?: number; holder?: string; costMs?: number; coldCostMs?: number; heavy?: boolean } | null;
+        if (!saved || saved.version !== 1 || typeof saved.holder !== "string" || saved.holder === holder || typeof saved.costMs !== "number" || !Number.isFinite(saved.costMs) || saved.costMs < 0 ||
+          (saved.coldCostMs !== undefined && (typeof saved.coldCostMs !== "number" || !Number.isFinite(saved.coldCostMs) || saved.coldCostMs < 0))) continue;
+        unit.costMs = saved.costMs;
+        unit.coldCostMs = saved.coldCostMs;
+        unit.restoredColdCost = true;
+        unit.heavy = Math.max(saved.costMs, saved.coldCostMs ?? 0) > soloMs;
+        unit.storedCost = raw;
+        unit.storedCostIno = slots[0]?.ino;
+        if (opts.lane === "fast" && unit.heavy) opts.post({ type: "view_lane", view: unit.view.name,
+          ...(unit.slot ? { instance: unit.slot.instance.name } : {}), heavy: true, dueAt: unit.dueAt,
+          costMs: unit.costMs, restoredCost: true, ...(unit.coldCostMs === undefined ? {} : { coldCostMs: unit.coldCostMs }) });
+      } catch (error) {
+        log("read_model.view_cost_read_failed", { view: unit.view.name, ...(unit.slot ? { instance: unit.slot.instance.name } : {}), error: (error as Error).message });
+      }
+    }
+  }
+
+  function persistUnitCost(unit: ViewUnit, laneCostMs: number): void {
+    const home = slots[0];
+    if (switches.projector !== "on" || home?.db === undefined || home.lease === undefined) return;
+    const value = JSON.stringify({ version: 1, holder, costMs: unit.costMs, heavy: laneCostMs > soloMs,
+      ...(unit.coldCostMs === undefined ? {} : { coldCostMs: unit.coldCostMs }) });
+    if (value === unit.storedCost && home.ino === unit.storedCostIno) return;
+    try {
+      const db = home.db;
+      withWriteTransaction(db, home.lease, () => db.prepare("INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v").run(costKey(unit), value));
+      unit.storedCost = value;
+      unit.storedCostIno = home.ino;
+    } catch (error) {
+      log("read_model.view_cost_write_failed", { view: unit.view.name, ...(unit.slot ? { instance: unit.slot.instance.name } : {}), error: (error as Error).message });
+    }
+  }
+
   function viewShadow(): ViewShadow | undefined {
     const home = slots[0];
     if (home?.db === undefined || home.lease === undefined) return undefined;
@@ -942,7 +1174,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   /** One materialized body: its source readings are noted, and it is persisted and posted only when its ETag moved. */
-  function publish(name: string, version: number, key: string, data: unknown, sources: ViewSource[], generation: number): void {
+  function publish(name: string, version: number, key: string, data: unknown, sources: ViewSource[], generation: number, buildStartedMs?: number): void {
     for (const source of sources) {
       if (source.name.startsWith(LEDGER_SOURCE_PREFIX)) continue;
       const reading = JSON.stringify({ ...source, lagMs: undefined });
@@ -950,12 +1182,17 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       clocks.set(source.name, { key: reading, source });
       clocksMoved = true;
     }
+    const id = `${name}\u0000${key}`;
+    const read = JSON.stringify(sources.map((source) => ({ ...source, lagMs: undefined })));
+    if (readings.get(id)?.key !== read) {
+      readings.set(id, { key: read, body: { view: name, key, sources } });
+      movedReadings.add(id);
+    }
     const stale = sources.some((source) => source.state !== "fresh");
     const etag = viewEtag(name, version, stale, data);
-    const id = `${name}\u0000${key}`;
     if (lastEtag.get(id) === etag) return;
     const body: ViewBody = { view: name, version, generatedAt: clock.iso(), asOf: oldestAsOf(sources), stale, sources, data };
-    const entry: ReadModelBodyEntry = { view: name, key, version, generation, etag, body };
+    const entry: ReadModelBodyEntry = { view: name, key, version, generation, etag, body, ...(buildStartedMs !== undefined ? { buildStartedMs } : {}) };
     if (switches.projector === "on") persist(entry);
     lastEtag.set(id, etag);
     latest.set(id, body);
@@ -1003,27 +1240,158 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }
   }
 
+  const unswitched = new Map<string, { builds: number; ms: number }>();
+  const viewBuilds = new Map<ViewUnit, { calls: number; builds: number; ms: number; maxMs: number }>();
+  let viewBuildsFrom = clock.now();
+  function reportViewBuilds(): void {
+    const now = clock.now();
+    if (now - viewBuildsFrom < 10 * 60_000) return;
+    for (const [unit, tally] of viewBuilds) {
+      if (tally.calls === 0 && tally.ms === 0) continue;
+      log("read_model.view_builds", {
+        view: unit.view.name,
+        ...(unit.slot ? { instance: unit.slot.instance.name } : {}),
+        thread: viewsOnly ? "views" : "projector",
+        ...(opts.lane ? { lane: opts.lane } : {}),
+        ...tally, window: [viewBuildsFrom, now],
+      });
+    }
+    viewBuilds.clear();
+    viewBuildsFrom = now;
+  }
+  /** When serve last answered a read of each view; a view never read counts from this ticker's start. */
+  const readAt = new Map<string, number>();
+  const pacedFrom = clock.now();
+  function lastReadOf(unit: ViewUnit): number {
+    const whole = readAt.get(unit.view.name);
+    const own = unit.slot ? readAt.get(`${unit.view.name}@${unit.slot.instance.name}`) : undefined;
+    return whole === undefined && own === undefined ? pacedFrom : Math.max(whole ?? Number.NEGATIVE_INFINITY, own ?? Number.NEGATIVE_INFINITY);
+  }
+
+  /** A finished build's next due time: cost / share, stretched for a read-paced unit nobody has read lately. */
+  function paced(unit: ViewUnit, finished: number): number {
+    const waitMs = unit.costMs! / READ_MODEL_VIEW_SHARE;
+    unit.baseDueAt = finished + waitMs;
+    if (unit.view.readPaced !== true) return unit.baseDueAt;
+    const idleMs = finished - lastReadOf(unit);
+    unit.stretch = idleMs < READ_MODEL_READ_HOT_MS ? 1 : Math.min(READ_MODEL_IDLE_STRETCH_MAX, (unit.stretch ?? 1) * 2);
+    return finished + waitMs * unit.stretch;
+  }
+
   function build(unit: ViewUnit, now: number, ctx: ReadModelViewContext, generation: number, allowanceMs: number): void {
     const { view } = unit;
     const started = clock.now();
     const named = { view: view.name, ...(unit.slot ? { instance: unit.slot.instance.name } : {}) };
     if (viewsOnly) opts.post({ type: "view_unit", ...named, phase: "start" });
     let ready = true;
+    let succeeded = false;
+    let yielded = 0;
+    let calls = 0;
+    const scoped = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
+    const buildStartedMs = (unit.startedAt ??= started);
+    let live: ReadModelView | undefined;
     try {
-      const scoped = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
-      ready = view.prepare?.(scoped, stepsUntil(started + allowanceMs)) ?? true;
-      for (const { key, data, sources } of ready ? view.materialize(scoped) : []) publish(view.name, view.version, key, data, sources, generation);
+      live = viewOf(unit);
+      ready = live.prepare?.(scoped, stepsUntil(started + allowanceMs)) ?? true;
+      if (ready) {
+        calls++;
+        for (const { key, data, sources } of live.materialize(scoped)) {
+          yielded++;
+          publish(view.name, live.version, key, data, sources, generation, buildStartedMs);
+        }
+      }
+      succeeded = ready && yielded > 0;
     } catch (error) {
       log("read_model.materialize_failed", { view: view.name, error: (error as Error).message });
     }
     const finished = clock.now();
+    if (succeeded) unit.lastBuiltAt = finished;
     unit.costMs = finished - started;
-    unit.dueAt = ready ? finished + unit.costMs / READ_MODEL_VIEW_SHARE : finished;
+    const counts = viewBuilds.get(unit) ?? { calls: 0, builds: 0, ms: 0, maxMs: 0 };
+    counts.calls += calls;
+    counts.builds += yielded > 0 ? 1 : 0;
+    counts.ms += unit.costMs;
+    counts.maxMs = Math.max(counts.maxMs, unit.costMs);
+    viewBuilds.set(unit, counts);
+    const peakMs = (unit.peakMs = Math.max(unit.peakMs ?? 0, unit.costMs));
+    if (unit.cold && succeeded) {
+      unit.coldCostMs = unit.restoredColdCost ? peakMs : Math.max(unit.coldCostMs ?? 0, peakMs);
+      unit.restoredColdCost = undefined;
+      unit.cold = undefined;
+    }
+    const laneCostMs = Math.max(peakMs, unit.coldCostMs ?? 0);
+    if (succeeded) persistUnitCost(unit, laneCostMs);
+    unit.dueAt = ready ? paced(unit, finished) : finished;
+    if (ready) {
+      unit.startedAt = undefined;
+      unit.peakMs = undefined;
+    }
+    if (opts.lane && ready && yielded > 0 && laneCostMs > soloMs !== (opts.lane === "heavy")) {
+      unit.heavy = opts.lane === "fast";
+      opts.post({ type: "view_lane", ...named, heavy: unit.heavy, dueAt: unit.dueAt, costMs: peakMs,
+        ...(unit.coldCostMs === undefined ? {} : { coldCostMs: unit.coldCostMs }) });
+      letGo(unit);
+      reportHeld(true);
+    }
     if (viewsOnly) opts.post({ type: "view_unit", ...named, phase: "end" });
-    if (unit.costMs > passMs) log("read_model.slow_view", { ...named, ms: unit.costMs, passMs, thread: viewsOnly ? "views" : "projector" });
+    const stages = unit.costMs > passMs ? live?.stages?.(scoped) : undefined;
+    const tally = switches.views[view.name] === undefined ? unswitched.get(view.name) ?? { builds: 0, ms: 0 } : undefined;
+    if (tally) unswitched.set(view.name, { builds: tally.builds + 1, ms: tally.ms + unit.costMs });
+    if (unit.costMs > passMs) log("read_model.slow_view", { ...named, ms: unit.costMs, passMs, thread: viewsOnly ? "views" : "projector", ...(stages ? { stages } : {}), ...(tally ? { unswitched: unswitched.get(view.name) } : {}) });
   }
 
-  const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => switches.views[unit.view.name] !== "off" && unit.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt);
+  const readers = opts.readers ?? READ_MODEL_VIEW_READERS;
+  let builtFor: ReadModelSwitches | undefined;
+  let builtViews = new Set<string>();
+  const built = (view: string): boolean => {
+    if (builtFor !== switches) {
+      builtFor = switches;
+      builtViews = new Set(views.filter((v) => readModelViewBuilt(v.name, switches, readers)).map((v) => v.name));
+    }
+    return builtViews.has(view);
+  };
+  const owns = (unit: ViewUnit): boolean => opts.lane === undefined || (unit.heavy === true) === (opts.lane === "heavy");
+  function viewOf(unit: ViewUnit): ReadModelView {
+    const spec = unit.view;
+    if (!isViewFactory(spec)) return spec;
+    if (unit.made) return unit.made;
+    const made = spec.create();
+    if (made.name !== spec.name || !!made.perInstance !== !!spec.perInstance || !!made.demand !== !!spec.demand || !!made.snapshotSourced !== !!spec.snapshotSourced) {
+      throw new ReadModelViewFactoryMismatch(spec.name);
+    }
+    unit.cold = true;
+    return (unit.made = made);
+  }
+  function letGo(unit: ViewUnit): void {
+    if (!unit.made || owns(unit)) return;
+    unit.made = undefined;
+    unit.cold = undefined;
+    unit.startedAt = undefined;
+    unit.peakMs = undefined;
+  }
+  function legacyOf(name: string, key: string, now: number, data: unknown): ShadowLegacy | undefined {
+    const spec = views.find((view) => view.name === name);
+    if (!spec) return undefined;
+    const made = isViewFactory(spec) ? units.flatMap((unit) => (unit.view === spec && unit.made ? [unit.made] : [])) : [spec];
+    for (const view of made) {
+      const legacy = view.legacy?.(key, now, data);
+      if (legacy) return legacy;
+    }
+    return undefined;
+  }
+  function reportHeld(moved = false): void {
+    if (!viewsOnly || !opts.lane) return;
+    const now = clock.now();
+    if (!moved && now - heldLoggedAt < 10 * 60_000) return;
+    heldLoggedAt = now;
+    const held = units.filter((unit) => unit.lastBuiltAt !== undefined && !owns(unit) && (!isViewFactory(unit.view) || unit.made)).map((unit) => ({
+      view: unit.view.name,
+      ...(unit.slot ? { instance: unit.slot.instance.name } : {}),
+      minutesSinceBuild: Math.max(0, now - unit.lastBuiltAt!) / 60_000,
+    }));
+    log("read_model.view_lane_held", { lane: opts.lane, count: held.length, units: held });
+  }
+  const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => owns(unit) && built(unit.view.name) && unit.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt);
 
   /**
    * Builds the due view units, oldest first, in what is left of the pass that began at `tickStart`.
@@ -1032,6 +1400,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
    */
   function materialize(now: number, tickStart: number, only?: ViewUnit): void {
     if (units.length === 0) return;
+    seedUnitCosts();
     sweepDemand();
     const home = slots[0]?.db;
     const shadow = home ? storedShadowReadiness(viewShadowPath(opts.stateDir), home, now) : undefined;
@@ -1059,10 +1428,30 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }
   }
 
+  function writeSnapshot(write: SourceSnapshotWrite): boolean {
+    const home = slots[0]!;
+    if (viewsOnly && observedAt !== Number.NEGATIVE_INFINITY) attachViews(home, clock.now());
+    const named = { instance: write.instance, ok: write.ok };
+    if (switches.projector !== "on" || home.db === undefined || home.lease === undefined) {
+      log("read_model.source_snapshot_dropped", { ...named, reason: switches.projector !== "on" ? "projector switched off" : "this serve does not hold the home store's lease" });
+      return false;
+    }
+    try {
+      writeSourceSnapshot(home.db, home.lease, write);
+    } catch (error) {
+      log("read_model.source_snapshot_failed", { ...named, error: (error as Error).message });
+      return false;
+    }
+    return true;
+  }
+
   const postState = (now: number): void => {
-    if (clocksMoved) {
+    reportViewBuilds();
+    if (clocksMoved || movedReadings.size > 0) {
       clocksMoved = false;
-      opts.post({ type: "sources", sources: [...clocks.values()].map((clock) => clock.source) });
+      const bodies = [...movedReadings].map((id) => readings.get(id)!.body);
+      movedReadings.clear();
+      opts.post({ type: "sources", sources: [...clocks.values()].map((clock) => clock.source), ...(bodies.length > 0 ? { bodies } : {}) });
     }
     if (!viewsOnly) opts.post({ type: "state", at: now, instances: slots.map((slot) => ({ ...slot.state })), switches });
   };
@@ -1081,6 +1470,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
           }
         }
       }
+      seedUnitCosts();
       postState(now);
     },
     tick(): void {
@@ -1091,6 +1481,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         if (observedAt === Number.NEGATIVE_INFINITY) return;
         for (const slot of slots) attachViews(slot, now);
         materialize(now, now);
+        reportHeld();
         return postState(now);
       }
       // The oracle's slices wait while any instance is still applying a backlog.
@@ -1121,7 +1512,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       const body = latest.get(`${request.view}\u0000${request.key}`);
       try {
         const legacy = request.legacy
-          ?? (body ? views.find((view) => view.name === request.view)?.legacy?.(request.key, clock.now(), body.data) : undefined);
+          ?? (body ? legacyOf(request.view, request.key, clock.now(), body.data) : undefined);
         const shadow = body && legacy ? viewShadow() : undefined;
         if (!body || !legacy || !shadow) return false;
         shadow.compare({ view: request.view, key: request.key, requests: request.requests, legacy, body });
@@ -1137,8 +1528,23 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         if (observedAt === Number.NEGATIVE_INFINITY) return;
         for (const slot of slots) attachViews(slot, now);
       }
-      for (const unit of units) if (unit.view.name === view && switches.views[view] !== "off") materialize(now, now, unit);
+      for (const unit of units) if (unit.view.name === view && owns(unit) && built(view)) materialize(now, now, unit);
       postState(now);
+    },
+    read(path: string): void {
+      const now = clock.now();
+      const read = new Set(viewsReadBy(path, views.map((view) => view.name), readers));
+      const { direct, instance } = readScopeOf(path);
+      const only = (name: string): string | undefined =>
+        instance !== undefined && name === direct && views.some((view) => view.name === name && view.perInstance) ? instance : undefined;
+      for (const view of read) readAt.set(only(view) === undefined ? view : `${view}@${only(view)}`, now);
+      for (const unit of units) {
+        if (!read.has(unit.view.name) || (unit.stretch ?? 1) === 1) continue;
+        const scope = only(unit.view.name);
+        if (scope !== undefined && unit.slot?.instance.name !== scope) continue;
+        unit.stretch = 1;
+        if (unit.baseDueAt !== undefined) unit.dueAt = Math.min(unit.dueAt, unit.baseDueAt);
+      }
     },
     want(view: string, key: string): boolean {
       if (!opts.demand || !demandViews.includes(view)) return false;
@@ -1158,6 +1564,25 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       } catch (error) {
         log("read_model.materialize_failed", { view: built.view, error: (error as Error).message });
       }
+    },
+    lane(move: ReadModelLaneMove): void {
+      for (const unit of units) {
+        if (move.view !== undefined && (unit.view.name !== move.view || unit.slot?.instance.name !== move.instance)) continue;
+        unit.costSeeded = true;
+        unit.restoredColdCost = move.restoredCost === true;
+        Object.assign(unit, { heavy: move.heavy, dueAt: move.dueAt, coldCostMs: move.coldCostMs }, move.costMs === undefined ? {} : { costMs: move.costMs });
+        letGo(unit);
+      }
+      reportHeld(true);
+    },
+    peer(entry: ReadModelBodyEntry): void {
+      lastEtag.set(`${entry.view}\u0000${entry.key}`, entry.etag);
+      latest.set(`${entry.view}\u0000${entry.key}`, entry.body);
+    },
+    acceptSnapshot(write: SourceSnapshotWrite): boolean {
+      if (opts.lane !== "heavy" && !writeSnapshot(write)) return false;
+      for (const unit of units) if (unit.view.snapshotSourced) unit.dueAt = 0;
+      return true;
     },
     observe(instances): void {
       observedAt = clock.now();
@@ -1198,6 +1623,10 @@ export interface ReadModelViewsData {
   viewsModule?: string;
   /** The inbox root the `inbox-thread` view reads its thread store from; absent, that view reports why it has no body. */
   inboxRoot?: string;
+  lane?: "fast" | "heavy";
+  host?: HostViewConfig;
+  restoreCosts?: boolean;
+  modelApprovalConfig?: HostModelApprovalConfig;
 }
 
 /** What the projector thread tells its view thread. */
@@ -1205,7 +1634,11 @@ export type ReadModelViewsInput =
   | { type: "state"; instances: ReadModelInstanceState[] }
   | { type: "shadow"; request: ShadowRequest }
   | { type: "bodies"; built: SlowLaneBodies }
+  | { type: "snapshot"; snapshot: SourceSnapshotWrite }
   | { type: "want"; view: string; key: string }
+  | { type: "read"; path: string }
+  | ({ type: "lane" } & ReadModelLaneMove)
+  | { type: "peer"; entry: ReadModelBodyEntry }
   | { type: "stop" };
 
 /**
@@ -1219,7 +1652,8 @@ export function runReadModelViewWorker(
   clock: Clock = systemClock,
 ): void {
   const post = (m: ReadModelWorkerMessage): void => port.postMessage(m);
-  const log = (step: string, extra: Record<string, unknown>): void => post({ type: "log", step, extra });
+  const log = readModelWorkerLog(post, true, data.lane);
+  setLedgerMemoRetentionContext({ thread: "views", ...(data.lane ? { lane: data.lane } : {}), log, instances: data.instances });
   let ticker: ReadModelTicker | undefined;
   let timer: NodeJS.Timeout | undefined;
   let stopped = false;
@@ -1241,7 +1675,11 @@ export function runReadModelViewWorker(
       } catch (error) {
         log("read_model.want_failed", { view: msg.view, error: (error as Error).message });
       }
-    } else ticker.accept(msg.built);
+    } else if (msg.type === "read") ticker.read(msg.path);
+    else if (msg.type === "snapshot") ticker.acceptSnapshot(msg.snapshot);
+    else if (msg.type === "lane") ticker.lane(msg);
+    else if (msg.type === "peer") ticker.peer(msg.entry);
+    else ticker.accept(msg.built);
   };
   port.on("message", handle);
   const loop = (): void => {
@@ -1258,14 +1696,10 @@ export function runReadModelViewWorker(
       log("read_model.views_module_failed", { module: data.viewsModule, error: (error as Error).message });
     }
     if (stopped) return;
-    const now = createNowView({ instances: data.instances, ledgerSource, clock, log });
-    const instances = createInstancesView({ instances: data.instances, ...data.registry, ledgerSource });
     const demand = createDemandBook({ clock });
-    const task = createTaskView({ instances: data.instances, ledgerSource, clock, demand, log });
-    const inboxThread = createInboxThreadView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), clock, demand, log });
     ticker = createReadModelTicker({
-      stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off", demand,
-      views: [...READ_MODEL_VIEWS, now, instances, task, inboxThread, ...extra],
+      stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off", demand, ...(data.lane ? { lane: data.lane } : {}), ...(data.restoreCosts === false ? { restoreCosts: false } : {}),
+      views: [...readModelLaneViews(data, clock, log, demand), ...extra],
     });
     ticker.start();
     for (const msg of early.splice(0)) handle(msg);
@@ -1273,20 +1707,52 @@ export function runReadModelViewWorker(
   })();
 }
 
+export function readModelLaneViews(
+  data: Pick<ReadModelViewsData, "instances" | "registry" | "inboxRoot" | "host" | "modelApprovalConfig">,
+  clock: Clock,
+  log: (step: string, extra: Record<string, unknown>) => void,
+  demand: DemandBook,
+): Array<ReadModelView | ReadModelViewFactory> {
+  const instances = data.instances;
+  return [
+    { name: NAV_BADGE_VIEW_NAME, create: () => createNavBadgeReadModelView(ledgerSource) },
+    { name: "repositories", create: () => createRepositoriesReadModelView(ledgerSource) },
+    { name: ANALYTICS_VIEW_NAME, snapshotSourced: true, create: () => createAnalyticsView({ modelApprovalConfig: data.modelApprovalConfig }) },
+    readModelStatusView,
+    { name: NOW_VIEW_NAME, perInstance: true, readPaced: true, create: () => createNowView({ instances, ledgerSource, clock, log }) },
+    { name: INSTANCES_VIEW_NAME, create: () => createInstancesView({ instances, ...data.registry, ledgerSource }) },
+    { name: TASK_VIEW_NAME, demand: true, create: () => createTaskView({ instances, ledgerSource, clock, demand, log }) },
+    { name: INBOX_THREAD_VIEW_NAME, demand: true, create: () => createInboxThreadView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), clock, demand, log }) },
+    { name: WORKSTREAMS_VIEW_NAME, create: () => createWorkstreamsView({ instances, ledgerSource, clock, log }) },
+    { name: ACTIONS_VIEW_NAME, create: () => createActionsView({ instances, ledgerSource }) },
+    { name: HOST_VIEW_NAME, create: () => createHostView({ ...(data.host ? { config: data.host } : {}), ledgerSource, clock }) },
+    { name: AGENT_VIEW_NAME, snapshotSourced: true, create: () => createAgentView({ instances, ledgerSource, log }) },
+    { name: INCIDENTS_VIEW_NAME, create: () => createIncidentsView({ instances, ledgerSource }) },
+    { name: OPERATOR_AGENT_ROWS_VIEW, create: () => createOperatorAgentRowsView(ledgerSource) },
+  ];
+}
+
+export function readModelWorkerLog(post: (message: ReadModelWorkerMessage) => void, viewsOnly: boolean, lane?: "fast" | "heavy"): (step: string, extra: Record<string, unknown>) => void {
+  return (step, extra) => post({ type: "log", step, extra: { ...extra, thread: viewsOnly ? "views" : "projector", ...(lane ? { lane } : {}) } });
+}
+
 /** The projector thread's handle on its view thread. */
 export interface ReadModelViewLane {
   state(instances: ReadModelInstanceState[]): void;
   shadow(request: ShadowRequest): void;
   accept(built: SlowLaneBodies): void;
+  snapshot(write: SourceSnapshotWrite): void;
   /** Main asked for a key of a demand view. */
   want(view: string, key: string): void;
+  /** Serve answered a read of `path`: both lanes, since either may own a unit it reads. */
+  read(path: string): void;
   close(): void;
 }
 
 /**
- * Spawns the view thread and relays what it posts. Its watchdog judges a build by the thread's own
- * heartbeat and only reports one that runs past {@link READ_MODEL_STALL_MS}: killing it would only
- * restart the same build from cold. A thread that dies is respawned after a doubling delay.
+ * Spawns the fast view thread, and a heavy one for units over the solo budget (W1-T5885), and relays what they post.
+ * Its watchdog judges each lane by its own heartbeat and reports a build past {@link READ_MODEL_STALL_MS}: killing
+ * it would restart the same build cold. A dead lane is respawned after a doubling delay; the other reclaims its units.
  */
 export function threadViews(opts: {
   data: Omit<ReadModelViewsData, "kind">;
@@ -1297,62 +1763,98 @@ export function threadViews(opts: {
   every?: (run: () => void, ms: number) => () => void;
 }): ReadModelViewLane {
   const clock = opts.clock ?? systemClock;
-  let worker: Worker | undefined;
-  let deaths = 0;
   let closed = false;
-  let respawn: NodeJS.Timeout | undefined;
-  let building: { view: string; instance?: string; since: number; reported: boolean } | undefined;
-  const spawn = (): void => {
-    const data: ReadModelViewsData = { ...opts.data, kind: READ_MODEL_VIEWS_KIND };
-    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv });
-    worker = spawned;
-    building = undefined;
+  interface Lane { name: "fast" | "heavy"; worker?: Worker; deaths: number; respawn?: NodeJS.Timeout; building?: { view: string; instance?: string; since: number; reported: boolean } }
+  const fast: Lane = { name: "fast", deaths: 0 };
+  const heavy: Lane = { name: "heavy", deaths: 0 };
+  const other = (lane: Lane): Lane => (lane === fast ? heavy : fast);
+  const reset: ReadModelViewsInput = { type: "lane", heavy: false, dueAt: 0 };
+  const heavyUnits = new Set<string>();
+  const reclaim = (lane: Lane, reason: "exit" | "respawn"): void => {
+    const survivor = other(lane);
+    const count = survivor.name === "fast" ? heavyUnits.size : 0;
+    heavyUnits.clear();
+    if (!survivor.worker) return;
+    survivor.worker.postMessage(reset);
+    opts.log("read_model.view_lane_reclaimed", { lane: survivor.name, from: lane.name, count, reason });
+  };
+  const spawnLane = (lane: Lane, restoreCosts = true): void => {
+    const data: ReadModelViewsData = { ...opts.data, kind: READ_MODEL_VIEWS_KIND, lane: lane.name, restoreCosts };
+    const spawned = lane === fast ? spawnViews(opts.workerUrl ?? new URL(import.meta.url), data) : spawnHeavyViews(opts.workerUrl ?? new URL(import.meta.url), data);
+    lane.worker = spawned;
+    lane.building = undefined;
     spawned.unref();
     spawned.on("message", (msg: ReadModelWorkerMessage) => {
+      if (msg.type === "view_lane") {
+        const id = JSON.stringify([msg.view, msg.instance]);
+        if (msg.heavy) heavyUnits.add(id);
+        else heavyUnits.delete(id);
+        opts.log("read_model.view_lane_moved", {
+          view: msg.view, ...(msg.instance !== undefined ? { instance: msg.instance } : {}),
+          from: lane.name, to: msg.heavy ? "heavy" : "fast", costMs: msg.costMs,
+          soloMs: READ_MODEL_LEASE_RENEW_MS * READ_MODEL_PASS_SHARE * READ_MODEL_VIEW_SHARE,
+        });
+        if (!heavy.worker && !heavy.respawn && !closed) spawnLane(heavy);
+        return other(lane).worker?.postMessage({ ...msg, type: "lane" } satisfies ReadModelViewsInput);
+      }
+      if (msg.type === "body" && lane === heavy) fast.worker?.postMessage({ type: "peer", entry: msg.entry } satisfies ReadModelViewsInput);
       if (msg.type !== "view_unit") return opts.relay(msg);
-      deaths = 0;
-      building = msg.phase === "start" ? { view: msg.view, ...(msg.instance ? { instance: msg.instance } : {}), since: clock.now(), reported: false } : undefined;
+      lane.deaths = 0;
+      lane.building = msg.phase === "start" ? { view: msg.view, ...(msg.instance ? { instance: msg.instance } : {}), since: clock.now(), reported: false } : undefined;
     });
-    spawned.on("error", (error) => opts.log("read_model.views_failed", { error: String(error?.message ?? error) }));
+    spawned.on("error", (error) => opts.log("read_model.views_failed", { lane: lane.name, error: String(error?.message ?? error) }));
     spawned.on("exit", (code) => {
-      if (worker !== spawned || closed) return;
-      worker = undefined;
-      deaths++;
-      const delayMs = Math.min(opts.data.tickMs * 2 ** deaths, READ_MODEL_MAX_BACKOFF_MS);
-      opts.log("read_model.views_exited", { code, deaths, respawnInMs: delayMs, ...(building ? { view: building.view } : {}) });
-      respawn = setTimeout(() => {
-        respawn = undefined;
-        if (!closed) spawn();
+      if (lane.worker !== spawned || closed) return;
+      lane.worker = undefined;
+      lane.deaths++;
+      reclaim(lane, "exit");
+      const delayMs = Math.min(opts.data.tickMs * 2 ** lane.deaths, READ_MODEL_MAX_BACKOFF_MS);
+      opts.log("read_model.views_exited", { lane: lane.name, code, deaths: lane.deaths, respawnInMs: delayMs, ...(lane.building ? { view: lane.building.view } : {}) });
+      lane.respawn = setTimeout(() => {
+        lane.respawn = undefined;
+        if (closed) return;
+        spawnLane(lane, false);
+        reclaim(lane, "respawn");
       }, delayMs);
-      respawn.unref();
+      lane.respawn.unref();
     });
   };
   const stopWatch = (opts.every ?? everyUnref)(() => {
-    if (!building || building.reported) return;
-    const ms = clock.now() - building.since;
-    if (ms < READ_MODEL_STALL_MS) return;
-    building.reported = true;
-    opts.log("read_model.view_build_long", { view: building.view, ...(building.instance ? { instance: building.instance } : {}), ms });
+    for (const lane of [fast, heavy]) {
+      const building = lane.building;
+      if (!building || building.reported || clock.now() - building.since < READ_MODEL_STALL_MS) continue;
+      building.reported = true;
+      opts.log("read_model.view_build_long", { lane: lane.name, view: building.view, ...(building.instance ? { instance: building.instance } : {}), ms: clock.now() - building.since });
+    }
   }, READ_MODEL_SWITCH_RECHECK_MS);
-  const send = (msg: ReadModelViewsInput): void => worker?.postMessage(msg);
-  spawn();
+  const send = (msg: ReadModelViewsInput, lanes = [fast, heavy]): void => {
+    for (const lane of lanes) lane.worker?.postMessage(msg);
+  };
+  spawnLane(fast);
   return {
     state: (instances) => send({ type: "state", instances }),
-    shadow: (request) => send({ type: "shadow", request }),
-    accept: (built) => send({ type: "bodies", built }),
+    shadow: (request) => send({ type: "shadow", request }, [fast]),
+    accept: (built) => send({ type: "bodies", built }, [fast]),
+    snapshot: (write) => send({ type: "snapshot", snapshot: write }),
     want: (view, key) => send({ type: "want", view, key }),
+    read: (path) => send({ type: "read", path }),
     close: () => {
       closed = true;
       stopWatch();
-      clearTimeout(respawn);
-      const running = worker;
-      worker = undefined;
-      running?.postMessage({ type: "stop" } satisfies ReadModelViewsInput);
-      // The stop lets the thread close its connections; one still mid-build past the bound is terminated.
-      setTimeout(() => void running?.terminate(), READ_MODEL_STOP_WAIT_MS).unref();
+      for (const lane of [fast, heavy]) {
+        clearTimeout(lane.respawn);
+        const running = lane.worker;
+        lane.worker = undefined;
+        running?.postMessage({ type: "stop" } satisfies ReadModelViewsInput);
+        // The stop lets the thread close its connections; one still mid-build past the bound is terminated.
+        setTimeout(() => void running?.terminate(), READ_MODEL_STOP_WAIT_MS).unref();
+      }
     },
   };
 }
+
+const spawnViews = (url: URL, data: ReadModelViewsData): Worker => new Worker(url, { workerData: data, env: SHARE_ENV });
+const spawnHeavyViews = (url: URL, data: ReadModelViewsData): Worker => new Worker(url, { workerData: data, env: SHARE_ENV });
 
 export interface ReadModelWorkerData {
   kind: typeof READ_MODEL_WORKER_KIND;
@@ -1368,6 +1870,12 @@ export interface ReadModelWorkerData {
   /** The slow lane's units (read-model-slow-lane.ts); absent, no slow lane runs. */
   slowLane?: SlowLaneConfig;
   viewsModule?: string;
+  modelApprovalConfig?: HostModelApprovalConfig;
+}
+
+function hostOf(slowLane: SlowLaneConfig | undefined): { host?: HostViewConfig } {
+  const host = hostViewConfig(slowLane);
+  return host ? { host } : {};
 }
 
 /** The worker branch's body: tick on a timer until asked to stop, then release and signal. */
@@ -1376,25 +1884,41 @@ export function runReadModelWorker(
   data: ReadModelWorkerData,
   clock: Clock = systemClock,
 ): void {
+  // W1-T5480: booked before the first spawn below, so serve's memory sample can ask for each heap.
+  const threads = workerThreads();
   const signal = new Int32Array(data.signal);
   const stopRequested = (): boolean => Atomics.load(signal, 0) === 1;
   const [owner, repo] = data.escalationRepository?.split("/") ?? [];
   const escalation = owner && repo ? { issues: ghIssueGateway(owner, repo), ledgerPath: join(data.stateDir, LEDGER_FILENAME), runId: READ_MODEL_WORKER_KIND } : undefined;
   let slowLane: SlowLane | undefined;
-  const log = (step: string, extra: Record<string, unknown>): void => port.postMessage({ type: "log", step, extra } satisfies ReadModelWorkerMessage);
+  const log = readModelWorkerLog((message) => port.postMessage(message), false);
+  setLedgerMemoRetentionContext({ thread: "projector", log, instances: data.instances });
   const holder = randomUUID();
   const views = threadViews({
-    data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}) },
+    data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}), ...hostOf(data.slowLane), ...(data.modelApprovalConfig ? { modelApprovalConfig: data.modelApprovalConfig } : {}) },
     relay: (m) => port.postMessage(m), log, clock,
   });
   const post = (m: ReadModelWorkerMessage): void => {
     if (m.type === "state") {
+      slowLane?.views(m.switches.views);
       slowLane?.lease(m.instances[0]?.lease === "held");
       views.state(m.instances);
     }
     port.postMessage(m);
   };
-  if (data.slowLane) slowLane = threadSlowLane({ config: data.slowLane, log, onBodies: (built) => views.accept(built) });
+  const slowLaneConfig = data.slowLane && { ...data.slowLane, analytics: data.slowLane.analytics ?? { instances: data.instances.map((i) => ({ name: i.name, stateDir: i.ledgerDir, repository: i.repo })) } };
+  let snapshotWrites = Promise.resolve();
+  if (slowLaneConfig) slowLane = threadSlowLane({ config: slowLaneConfig, log, onBodies: (built) => views.accept(built), onSnapshot: (write) => {
+    snapshotWrites = snapshotWrites.then(async () => {
+      if (stopRequested()) return;
+      const instance = data.instances.find(i => i.name === write.instance);
+      if (!write.ok || !instance) return views.snapshot(write);
+      const source = await captureGardenerSpendSource(instance.ledgerDir);
+      if (stopRequested()) return;
+      views.snapshot({ ...write, bodies: write.bodies.map(body => body.name === ANALYTICS_SOURCE_CONSOLE_V1
+        ? { ...body, body: { ...(body.body as object), gardenerSpendSource: source } } : body) });
+    });
+  } });
   const oracleRunner = threadOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), log });
   const ticker = createReadModelTicker({
     stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder, stopRequested, post, views: [], oracleRunner,
@@ -1432,8 +1956,10 @@ export function runReadModelWorker(
     timer = setTimeout(loop, data.tickMs);
   };
   port.on("message", (msg) => {
+    if (answerThreadHeaps(port, msg, threads)) return;
     if (msg.type === "shadow") return void views.shadow(msg as unknown as ShadowRequest);
     if (msg.type === "want") return void views.want((msg as unknown as { view: string }).view, (msg as unknown as { key: string }).key);
+    if (msg.type === "read") return void views.read((msg as unknown as { path: string }).path);
     if (msg.type !== "stop") return;
     Atomics.store(signal, 0, 1);
     finish();
@@ -1499,9 +2025,11 @@ export interface ReadModelWorkerHandle {
   state(): { at?: number; instances: ReadonlyMap<string, ReadModelInstanceState>; switches: ReadModelSwitches; warmBoot?: string };
   body(view: string, key?: string): ReadModelBodyEntry | undefined;
   /** Re-judge persisted sources against the latest worker state. */
-  judge(sources: readonly ViewSource[], now: number): ViewSource[];
+  judge(sources: readonly ViewSource[], now: number, body?: { view: string; key: string }): ViewSource[];
   /** The switch file as the main thread last read it. */
   switches(): ReadModelSwitches;
+  /** Each `auto` view's effective mode as the switch recheck last resolved it (views.ts's `ViewBodySource.autoMode`). */
+  autoMode?(view: string): EffectiveViewMode | undefined;
   start(): void;
   /** Asks the worker to release its leases and waits, bounded, for it. True when it confirmed. */
   stop(): boolean;
@@ -1517,6 +2045,8 @@ export interface ReadModelWorkerHandle {
   onBody(listener: (entry: ReadModelBodyEntry) => void): () => void;
   /** A reader was served: paces the worker's GitHub keep-warm as serve's own is paced. */
   noteGithubRead?(): void;
+  /** Serve answered a read-scoped route for `instance` (a known one, else all): the read-paced views it reads keep their cadence (posted at most every {@link READ_MODEL_READ_NOTE_MS} per path and instance). */
+  noteViewRead?(path: string, instance?: string): void;
 }
 
 export interface ReadModelWorkerOptions {
@@ -1534,6 +2064,7 @@ export interface ReadModelWorkerOptions {
   /** What the silent-worker watchdog measures against. */
   clock?: Clock;
   slowLane?: SlowLaneConfig;
+  modelApprovalConfig?: HostModelApprovalConfig;
   /** A module URL whose default export lists views the view thread builds beside the built-in ones. */
   viewsModule?: string;
   /** Sees each worker message after the handle has applied it. */
@@ -1563,6 +2094,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   const bodies = new Map<string, ReadModelBodyEntry>();
   const instances = new Map<string, ReadModelInstanceState>();
   const sourceClocks = new Map<string, ViewSource>();
+  const bodyReadings = new Map<string, ReadonlyMap<string, ViewSource>>();
   let switches = DEFAULT_READ_MODEL_SWITCHES;
   let at: number | undefined;
   const home = opts.instances[0]?.name ?? "core";
@@ -1585,17 +2117,17 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   refreshSwitches();
   let stopSwitchWatch: () => void = () => {};
   let driven: ShadowSample | undefined;
-  /** Each `auto` view's effective mode as last ledgered; one entering auto starts as legacy (`shadow`). */
+  /** Each `auto` view's effective mode as last ledgered; one entering auto starts as legacy (`shadow`). Routes read it via `autoMode`. */
   const autoModes = new Map<string, EffectiveViewMode>();
   const noteAutoModes = (): void => {
     for (const view of autoModes.keys()) if (mainSwitches.views[view] !== "auto") autoModes.delete(view);
     for (const [view, mode] of Object.entries(mainSwitches.views)) {
       if (mode !== "auto") continue;
       const readiness = shownReadiness({ body: (name) => bodies.get(readModelBodyKey(name)) }, view);
-      const effective = effectiveViewMode(mode, readiness)!;
       const was = autoModes.get(view) ?? "shadow";
+      const effective = effectiveViewMode(mode, readiness, was)!;
       autoModes.set(view, effective);
-      if (effective !== was) opts.log?.(effective === "serve" ? VIEW_AUTO_PROMOTED_STEP : VIEW_AUTO_DEMOTED_STEP, { view, reason: readiness.reason, samples: readiness.samples, lastRealMs: readiness.lastRealMs });
+      if (readiness && effective !== was) opts.log?.(effective === "serve" ? VIEW_AUTO_PROMOTED_STEP : VIEW_AUTO_DEMOTED_STEP, { view, reason: readiness.reason, samples: readiness.samples, lastRealMs: readiness.lastRealMs });
     }
   };
 
@@ -1605,6 +2137,8 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   let deaths = 0;
   let respawnTimer: NodeJS.Timeout | undefined;
   const clock = opts.clock ?? systemClock;
+  /** When each path's read was last posted to the worker ({@link READ_MODEL_READ_NOTE_MS}). */
+  const readNotedAt = new Map<string, number>();
   /** When the running worker last said anything; a worker that ticks posts its state four times a second. */
   let heardAt = clock.now();
   let silenceLogged = false;
@@ -1725,9 +2259,12 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       posted.add(readModelBodyKey(msg.entry.view, msg.entry.key));
       for (const listener of bodyListeners) listener(msg.entry);
     } else if (msg.type === "log") opts.log?.(msg.step, msg.extra);
-    else if (msg.type === "drop") bodies.delete(readModelBodyKey(msg.view, msg.key));
-    else if (msg.type === "sources") {
+    else if (msg.type === "drop") {
+      bodies.delete(readModelBodyKey(msg.view, msg.key));
+      bodyReadings.delete(readModelBodyKey(msg.view, msg.key));
+    } else if (msg.type === "sources") {
       for (const source of msg.sources) sourceClocks.set(source.name, source);
+      for (const body of msg.bodies ?? []) bodyReadings.set(readModelBodyKey(body.view, body.key), new Map(body.sources.map((source) => [source.name, source])));
     } else if (msg.type === "progress") {
       if (msg.phase === "opened") slowestOpenMs = Math.max(slowestOpenMs, msg.ms ?? 0);
     } else if (msg.type === "state") {
@@ -1747,14 +2284,18 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}),
       ...(opts.slowLane ? { slowLane: opts.slowLane } : {}),
       ...(opts.viewsModule ? { viewsModule: opts.viewsModule } : {}),
+      ...(opts.modelApprovalConfig ? { modelApprovalConfig: opts.modelApprovalConfig } : {}),
     };
-    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv });
+    // SHARE_ENV, as on every long-lived thread here: escalations need serve's refreshed GH_TOKEN (#9156).
+    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, env: SHARE_ENV });
     signal = new Int32Array(shared);
     worker = spawned;
     heardAt = clock.now();
     phase = undefined;
     spawned.unref();
-    spawned.on("message", onMessage);
+    // A heap answer is not a sign of progress: the watchdog never hears it, so a loop that died still recycles.
+    const heapAnswer = askNestedThreadHeaps(spawned);
+    spawned.on("message", (msg: ReadModelWorkerMessage) => void (heapAnswer(msg) || onMessage(msg)));
     spawned.on("error", (error) => opts.log?.("read_model.worker_failed", { error: String(error?.message ?? error) }));
     spawned.on("exit", (code) => {
       if (worker !== spawned || stopping) return;
@@ -1771,11 +2312,12 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     bodies,
     state: () => ({ ...(at === undefined ? {} : { at }), instances, switches, ...(warm.reason ? { warmBoot: warm.reason } : {}) }),
     body: (view, key = "") => bodies.get(readModelBodyKey(view, key)),
-    judge: (sources, now) => sources.map((source) => {
-      if (!source.name.startsWith(LEDGER_SOURCE_PREFIX)) return judgeSource(sourceClocks.get(source.name) ?? source, now);
+    judge: (sources, now, body) => sources.map((source) => {
+      const read = body ? newerReading(source, bodyReadings.get(readModelBodyKey(body.view, body.key))?.get(source.name)) : undefined;
+      if (!source.name.startsWith(LEDGER_SOURCE_PREFIX)) return judgeSource(read ?? sourceClocks.get(source.name) ?? source, now);
       const instance = source.name.slice(LEDGER_SOURCE_PREFIX.length);
       const state = instances.get(instance);
-      if (state?.tickedAt !== undefined) return ledgerSource(state, now);
+      if (state?.tickedAt !== undefined) return read ? builtLedgerSource(read, state, now) : ledgerSource(state, now);
       const committed = committedAt.get(instance);
       if (committed !== undefined && now - committed <= READ_MODEL_LEDGER_STALE_MS) {
         return describeSource({ name: source.name, asOf: source.asOf, state: "fresh", lagMs: Math.max(0, now - committed) });
@@ -1796,6 +2338,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       return replaced;
     },
     switches: () => mainSwitches,
+    autoMode: (view) => autoModes.get(view),
     shadow: (request) => worker?.postMessage({ type: "shadow", ...request }),
     want: (view, key) => {
       if (!worker) return false;
@@ -1808,6 +2351,13 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       return () => bodyListeners.delete(listener);
     },
     noteGithubRead: () => workerWarm?.noteRead(),
+    noteViewRead: (route, instance) => {
+      const now = clock.now();
+      const path = scopedReadPath(route, instance !== undefined && opts.instances.some((known) => known.name === instance) ? instance : undefined);
+      if (!worker || now - (readNotedAt.get(path) ?? Number.NEGATIVE_INFINITY) < READ_MODEL_READ_NOTE_MS) return;
+      readNotedAt.set(path, now);
+      worker.postMessage({ type: "read", path });
+    },
     start: () => {
       if (worker || stopping) return;
       spawn();

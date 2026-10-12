@@ -226,7 +226,7 @@ test("W1-T2446 ACCEPTANCE 3: the hoisted release reuses releaseDispatchClaim ver
   const block = runTaskSrc.slice(markerStart, blockEnd);
 
   // Reuses the EXISTING pure decision/apply function -- no bespoke drop logic invented here.
-  assert.match(block, /releaseDispatchClaim\(/);
+  assert.match(block, /releaseDispatchClaim(?:Async)?\(/);
   assert.match(block, /evidenceObserved:\s*true/);
 
   // NO timer, NO clock, NO pacing knob anywhere in the new block.

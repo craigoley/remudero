@@ -3,6 +3,9 @@ import { join } from "node:path";
 import {
   type OperatorMessageSlot,
 } from "./operator-message.js";
+import { hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, TYPECHECK_COLD_PEAK_BYTES, TYPECHECK_WARM_PEAK_BYTES } from "./typecheck-buildinfo.js";
+import { dirIsWritable, prepareTypecheckRun } from "./typecheck-run.js";
+import { acquireTestSlot, readMemoryHeadroom, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
 
 /**
  * Conventional-Commits shaping for commit messages the harness builds (MASTER-PLAN §6A, the
@@ -517,10 +520,21 @@ export function commitlintStep(
  * Step 2/3 — `tsc -p tsconfig.json --noEmit`, the same invocation CI's `ci` job runs. `npm test`
  * strips types via `tsx` without checking them, so a green test run is not a compile (PR #477).
  */
-export function typecheckStep(repoRoot: string, spawn: PreflightSpawn = defaultPreflightSpawn): PreflightStepResult {
+export function typecheckStep(
+  repoRoot: string,
+  spawn: PreflightSpawn = defaultPreflightSpawn,
+  testSlot: TestSlotOptions = {},
+  canWrite: (dir: string) => boolean = dirIsWritable,
+): PreflightStepResult {
+  let slot: TestSlotLease | undefined;
   try {
     const tsc = join(repoRoot, "node_modules", ".bin", "tsc");
-    const res = spawn(tsc, ["-p", "tsconfig.json", "--noEmit"], { cwd: repoRoot });
+    const prepared = prepareTypecheckRun(repoRoot, canWrite);
+    if (!hasUsableTypecheckBuildInfo(prepared.buildInfo, installedTypescriptVersion(repoRoot))) {
+      slot = acquireTestSlot("typecheck:preflight", { memoryBytes: TYPECHECK_COLD_PEAK_BYTES, ...testSlot });
+    }
+    const tight = lowMemoryTypecheckArgs((testSlot.memoryHeadroom ?? readMemoryHeadroom)(), slot ? TYPECHECK_COLD_PEAK_BYTES : TYPECHECK_WARM_PEAK_BYTES);
+    const res = spawn(tsc, [...prepared.args, ...tight], { cwd: repoRoot });
     const spawnFailed = spawnFailureDetail("typecheck", res);
     if (spawnFailed) return { name: "typecheck", ok: false, detail: spawnFailed };
     const ok = res.status === 0;
@@ -533,6 +547,8 @@ export function typecheckStep(repoRoot: string, spawn: PreflightSpawn = defaultP
     };
   } catch (e) {
     return { name: "typecheck", ok: false, detail: `typecheck: FAIL — ${String((e as Error)?.message ?? e)}` };
+  } finally {
+    slot?.release();
   }
 }
 

@@ -89,3 +89,96 @@ documents is `/mnt/rmd/containerd /var/lib/containerd none bind,nofail 0 0`, so 
 must be up before Docker or containerd can trust that path is the one enclosing the BIND
 SOURCE, not the bind target itself. Falls back to the mount enclosing CONTAINERD_ROOT directly
 when it is not itself a bind mount (e.g. a single-disk host).
+
+## Comments compacted for the scratch-runtime mode (2026-10-08)
+
+Base revision: origin/main at 2d7fa62b29367db30c314904f2193577a831e198. These blocks were
+shortened to keep the script under its comment-load ceiling when `RMD_RUNTIME_ON_SCRATCH` was
+added; the text below is the removed original, verbatim.
+
+### Base lines 13-17 — TRAP and Why
+
+TRAP: per systemd.mount(5), a `nofail` mount is only WANTED, never ordered before the
+local-filesystem target — a bind mount existing does not make a service wait for it.
+Why: closes the third path of the 2026-09-05 Azure reboot defect (W1-T2856, PR #4021); full
+incident in docs/forensics/install-container-runtime-mount-order.md.
+
+### Base lines 22-26 — TEST SEAMS
+
+TEST SEAMS (production defaults shown; a real host never sets these)
+  RMD_DOCKER_DROPIN_DIR     default /etc/systemd/system/docker.service.d
+  RMD_CONTAINERD_DROPIN_DIR default /etc/systemd/system/containerd.service.d
+  RMD_CONTAINERD_ROOT       default /var/lib/containerd
+  RMD_PROC_MOUNTS_FILE      default /proc/mounts
+
+### Base lines 88-90 — resolve_data_mount
+
+the mount BACKING /var/lib/containerd (the fstab shape docs/operator-guide.md documents),
+not the bind target itself — the bind source's own enclosing mount is what must be up first.
+Falls back to the mount enclosing CONTAINERD_ROOT directly when it is not itself a bind mount.
+
+## Moving both runtime roots to /mnt/scratch (RMD_RUNTIME_ON_SCRATCH=1, 2026-10-08)
+
+The operator approved moving Docker's data-root and containerd's root from the IOPS-capped data
+disk (`/mnt/rmd`) to the ephemeral local NVMe (`/mnt/scratch`) on 2026-10-08. The operator
+procedure is in docs/operator-guide.md, "Container runtimes on the scratch NVMe".
+
+### The trap
+
+`/mnt/scratch` is not in fstab. `rmd-scratch.service` (`After=local-fs.target`) formats the disk if
+it is blank, then mounts it, and exits 0 with the disk UNMOUNTED when that fails. An fstab line
+`/mnt/scratch/containerd /var/lib/containerd none bind,nofail 0 0` runs during local-fs, BEFORE
+`rmd-scratch.service`, so it would bind an empty directory on the 29 GB OS disk, and containerd
+would then pull every image onto `/`. The script therefore refuses to install while any active
+fstab line still mounts `/var/lib/containerd`, prints that line, and never edits fstab itself.
+
+### Why a mount unit, and why fstab must lose its line
+
+systemd.mount(5): when a mount point is configured in both fstab and a unit file, the unit file
+wins. The fstab generator writes into the generator directory, which sorts after
+`/etc/systemd/system`. That precedence is not enough on its own. The generator still adds its
+`local-fs.target` dependency, and `mount -a` or `mount /var/lib/containerd` would still read the
+fstab line and bind the OLD root over the new one. One source of truth means the fstab line goes.
+
+### The unit's choices
+
+- `Requires=` and `After=rmd-scratch.service` order the bind after the script that mounts the disk.
+- `AssertPathIsMountPoint=/mnt/scratch`, not `ConditionPathIsMountPoint=`. A failed Condition only
+  SKIPS the unit; containerd, which requires it through `RequiresMountsFor=/var/lib/containerd`,
+  would start anyway on the bare directory. A failed Assert fails the start job, and containerd
+  fails with it.
+- `DefaultDependencies=no`, plus an explicit `Conflicts=` and `Before=umount.target`. A local mount
+  unit's default dependencies add `Before=local-fs.target`. With `After=rmd-scratch.service`, which
+  is itself `After=local-fs.target`, that is an ordering cycle, and systemd would break it by
+  deleting a job.
+- The bind source must exist, and a deallocate wipes the disk. A drop-in on `rmd-scratch.service`
+  (`ExecStartPost`) re-creates `/mnt/scratch/containerd` (mode 0711) when the disk is mounted. This
+  needs `Type=oneshot`, so that `After=` waits for `ExecStartPost` to finish. Install refuses any
+  other Type. Docker creates its own data-root.
+
+### The guards
+
+`15-remudero-scratch-runtime.conf` in both `docker.service.d` and `containerd.service.d` holds one
+`ExecStartPre=` that exits 1 unless `/mnt/scratch` is a mount point. containerd's guard also
+requires `/var/lib/containerd` to be one. Drop-ins apply in filename order, so the guard runs
+before `20-`'s `rmd-scratch-mounts --restore`, which would otherwise `mkdir` on `/`. The guards
+sit in their own files so that the rollback deletes them without re-rendering the `20-` files.
+
+### Why daemon.json is not rewritten
+
+`/etc/docker/daemon.json` belongs to Docker, and an operator may add keys to it. If the script
+rewrote it, the change would be hidden, and the rollback would have to remember to undo it. So
+install READS `data-root`, refuses unless it equals `/mnt/scratch/docker`, and prints the exact
+value to set. The operator makes that edit (with a backup) and restores it on rollback, as with
+fstab. Scratch install also never calls `docker info`: Docker is stopped during the window, and
+the root it would report is the old one.
+
+### What check mode proves
+
+Static (install and check): no active fstab bind; daemon.json `data-root`; the mount unit's
+`What=` and `FragmentPath` (the unit file, not fstab); both services' effective `ExecStartPre`
+contain the guard; `rmd-scratch.service` is `Type=oneshot` and its `ExecStartPost` re-creates the
+source. Live (check only): `ActiveState=active`, and `/proc/self/mountinfo` shows
+`/var/lib/containerd` on the SAME device as `/mnt/scratch` with fs-root `/containerd`. `/proc/mounts`
+cannot answer that, because it shows a bind mount's DEVICE rather than its source directory. Last,
+`docker info` must report `DockerRootDir=/mnt/scratch/docker`.

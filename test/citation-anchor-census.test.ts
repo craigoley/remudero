@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -270,11 +270,32 @@ test("CLI: scanning ZERO plan/tasks.d/ shards is an operational failure (refuses
 
 // ── real corpus smoke test: the actual scan this task exists to run ─────────────────────────────
 
+function assertCorpusEnumeration(cwd: string): ReturnType<typeof loadCorpus> {
+  const corpus = loadCorpus({ cwd });
+  const shardFiles = readdirSync(join(cwd, "plan", "tasks.d"))
+    .filter((file) => file.endsWith(".yaml") || file.endsWith(".yml"));
+  assert.equal(corpus.shardCount, shardFiles.length, "every YAML shard must be enumerated, including fieldless shards");
+  assert.ok(corpus.units.some((u: { id: string }) => u.id === "MASTER-PLAN.md"), "MASTER-PLAN.md unit missing");
+  assert.ok(corpus.units.some((u: { id: string }) => u.id !== "MASTER-PLAN.md"), "representative shard prose unit missing");
+  return corpus;
+}
+
+test("the citation corpus enumerates fieldless shards without requiring a prose unit for them", () => {
+  const dir = buildFixtureCorpus("# fixture narrative\n", "- id: W1-T9001\n  rationale: 'A measured claim cites #3305.'\n");
+  try {
+    writeFileSync(join(dir, "plan", "tasks.d", "W1-T9002-fieldless.yml"), "- id: W1-T9002\n  title: Fieldless record\n  repo: remudero\n  type: implement\n  verify: auto\n  files: []\n");
+    const corpus = assertCorpusEnumeration(dir);
+    assert.equal(corpus.shardCount, 2);
+    assert.deepEqual(corpus.units.map((u: { id: string }) => u.id), ["MASTER-PLAN.md", "W1-T9001"]);
+    assert.match(corpus.units[1].text, /#3305/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("loadCorpus reads the REAL repo's monolith and every plan/tasks.d/ shard without throwing", () => {
-  const { units, shardCount } = loadCorpus({ cwd: REPO_ROOT });
+  const { shardCount } = assertCorpusEnumeration(REPO_ROOT);
   assert.ok(shardCount > 900, `expected >900 plan/tasks.d shards, got ${shardCount}`);
-  assert.ok(units.some((u: { id: string }) => u.id === "MASTER-PLAN.md"), "MASTER-PLAN.md unit missing");
-  assert.ok(units.length > shardCount, "expects at least one prose unit per shard plus the monolith");
 });
 
 test("CLI against the REAL repo root exits 0 and declares its precision (3/3 on today's ANCHOR_SHAPES)", () => {

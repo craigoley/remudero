@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -84,6 +84,7 @@ function containerEnvLines(opts: { drop?: string | string[]; extra?: string; ove
 /** Per-STUB_MODE container env, as raw `docker inspect --format Config.Env`-shaped lines. */
 const CONTAINER_ENV_BY_MODE: Record<string, string[]> = {
   good: containerEnvLines(),
+  "tag-moved": containerEnvLines(),
   "pull-fail": containerEnvLines(),
   "wrong-image": containerEnvLines(),
   "hung-fixrung": containerEnvLines(),
@@ -107,6 +108,9 @@ const CONTAINER_ENV_BY_MODE: Record<string, string[]> = {
     },
   }),
 };
+
+/** The shared tag's env after another instance pulled a new Node base: only NODE_VERSION moved. */
+const TAG_MOVED_IMAGE_ENV = IMAGE_ENV_LINES.map((line) => (line.startsWith("NODE_VERSION=") ? "NODE_VERSION=24.21.0" : line));
 
 /** Per-STUB_MODE image env — always the five baked names, `shadow-declared` also bakes GH_APP_ID. */
 const IMAGE_ENV_BY_MODE: Record<string, string[]> = {
@@ -154,6 +158,9 @@ function writeStubs(dir: string): void {
     '      case "$fmt" in',
     "        *Config.Env*)",
     '          case "$STUB_MODE" in image-env-unknown) exit 1 ;; esac',
+    // tag-moved: another instance's pull has re-pointed the shared tag at a newer base, so the TAG
+    // resolves to a different NODE_VERSION than the image this container was created from.
+    `          case "$STUB_MODE:$1" in tag-moved:test-registry/remudero:old) ${TAG_MOVED_IMAGE_ENV.map((l) => `echo "${l}"`).join("; ")}; echo ""; exit 0 ;; esac`,
     ...bashCaseEchoLines(IMAGE_ENV_BY_MODE, IMAGE_ENV_LINES).map((l) => `  ${l}`),
     "          exit 0 ;;",
     "        *) echo \"sha256:PULLEDID\"; exit 0 ;;",
@@ -270,6 +277,7 @@ interface RunOpts {
 }
 
 function runRecycle(mode: string, opts: RunOpts = {}): Run {
+  if (opts.scriptPath) cpSync(join(REPO_ROOT, "deploy", "acr-login.sh"), join(dirname(opts.scriptPath), "acr-login.sh"));
   const dir = mkdtempSync(join(tmpdir(), "recycle-stub-"));
   const rec = mkdtempSync(join(tmpdir(), "recycle-rec-"));
   const state = opts.stateDir ?? mkdtempSync(join(tmpdir(), "recycle-state-"));
@@ -707,8 +715,22 @@ test("W1-T3611: a live pid in the live container still refuses the recycle — t
 const HOST_UPDATE_SCRIPT = join(REPO_ROOT, "deploy", "host-update.sh");
 const SHARED_RUNTIME_VARS_FILE = join(REPO_ROOT, "deploy", "runtime-env-vars.sh");
 
-function printDaemonRunEnvNames(scriptPath: string = HOST_UPDATE_SCRIPT): string[] {
-  const r = spawnSync("bash", [scriptPath, "--print-daemon-run"], { encoding: "utf8", cwd: REPO_ROOT });
+function printDaemonRunEnvNames(scriptPath: string = HOST_UPDATE_SCRIPT, extraEnv: Record<string, string> = {}): string[] {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}print-daemon-env-`));
+  const r = spawnSync("bash", [scriptPath, "--print-daemon-run"], {
+    encoding: "utf8",
+    cwd: REPO_ROOT,
+    env: {
+      ...process.env,
+      RMD_STATE_DIR: join(dir, "state-root"),
+      RMD_OP_DIR: join(dir, "op"),
+      RMD_CLAUDE_DIR: join(dir, "claude"),
+      RMD_CODEX_DIR: join(dir, "codex"),
+      RMD_CONTAINER_CONFIG_DIR: join(dir, "config"),
+      RMD_SCRATCH: "off",
+      ...extraEnv,
+    },
+  });
   assert.equal(r.status, 0, `--print-daemon-run failed: ${r.stderr}`);
   const out = r.stdout ?? "";
   const block = out.slice(out.indexOf("docker run -d --name remudero-daemon"), out.indexOf("./bin/rmd daemon"));
@@ -738,6 +760,16 @@ test("W1-T1069: an undeclared runtime variable makes the recycle refuse and name
   assert.equal(run.calls.filter(isStop).length, 0, "the container must not be stopped");
   assert.equal(run.calls.filter(isRm).length, 0, "the container must not be removed");
   assert.equal(run.calls.filter(isRun).length, 0, "no replacement may start");
+});
+
+test("an image env read from the container's own image survives another instance moving the shared tag", () => {
+  // 2026-10-07 Node 24 rollout: site recycled first and its pull moved `remudero:latest`; console
+  // and core then read NODE_VERSION through the moved tag, saw 22.22.3 != 24.21.0, and refused.
+  const run = runRecycle("tag-moved");
+  assert.doesNotMatch(run.stderr, /carries a runtime variable this recycle does not declare/);
+  assert.ok(run.calls.filter(isRun).length > 0, "the recycle proceeds to a replacement");
+  const envRead = run.calls.find((c) => c.bin === "docker" && c.argv[0] === "image" && c.argv.some((a) => a.includes("Config.Env")));
+  assert.equal(envRead?.argv.at(-1), "sha256:PULLEDID", "the image env is read by the container's resolved image id, not its tag");
 });
 
 test("a derived scratch variable is regenerated by the launch, so the recycle accepts it", () => {
@@ -855,10 +887,31 @@ test("W1-T1069: both scripts read the same declared name list", () => {
   assert.deepEqual([...recycleFallback].sort(), [...sharedNames].sort(), "recycle-container.sh's fallback array must match deploy/runtime-env-vars.sh");
   assert.deepEqual([...hostUpdateFallback].sort(), [...sharedNames].sort(), "host-update.sh's fallback array must match deploy/runtime-env-vars.sh");
 
-  // And the static `-e` passthrough block host-update.sh prints must name every declared variable —
-  // exactly, so a name added to the list without a matching passthrough line is caught here too.
-  const printedNames = printDaemonRunEnvNames();
-  assert.deepEqual([...printedNames].sort(), [...sharedNames].sort(), "the printed passthrough names must match the declared list exactly");
+  assert.deepEqual(printDaemonRunEnvNames().sort(), [...sharedNames].sort(), "the default scratch-off launch must carry exactly the retained names");
+});
+
+test("The printed daemon launch includes derived names only with usable scratch mounts", () => {
+  const sharedSrc = readFileSync(SHARED_RUNTIME_VARS_FILE, "utf8");
+  const sharedNames = extractBashArray(sharedSrc, "RMD_DAEMON_RUNTIME_ENV_VARS");
+
+  // With scratch mounted and enabled, the launch prints retained and mount-derived variables.
+  // Compare both lists exactly, without widening the retained-variable contract checked above.
+  const scratch = scratchFixture();
+  const printedNames = printDaemonRunEnvNames(HOST_UPDATE_SCRIPT, scratch.env);
+  const derivedNames = extractBashArray(sharedSrc, "RMD_DERIVED_RUNTIME_ENV_VARS");
+  const expectedPrintedNames = [...sharedNames, ...derivedNames];
+  assert.equal(new Set(expectedPrintedNames).size, expectedPrintedNames.length, "retained and derived names must be distinct");
+  assert.deepEqual([...printedNames].sort(), expectedPrintedNames.sort(), "the printed launch names must match both declared lists exactly");
+  for (const extraEnv of [
+    { ...scratch.env, RMD_SCRATCH: "off" },
+    { ...scratch.env, RMD_SCRATCH_MOUNTS_FILE: join(scratch.root, "no-mounts-table") },
+  ]) {
+    assert.deepEqual(
+      printDaemonRunEnvNames(HOST_UPDATE_SCRIPT, extraEnv).sort(),
+      [...sharedNames].sort(),
+      "without usable scratch mounts the printed launch must carry exactly the retained names",
+    );
+  }
 });
 
 test("Git author names stay declared across every recycle surface", () => {
@@ -1051,9 +1104,12 @@ test("a switched-on daemon recycle binds the rebuildable dirs to scratch and its
     [join(base, "worktrees"), "/home/node/Remudero/worktrees"],
     [join(base, "tmp"), "/home/node/Remudero/tmp"],
     [join(base, "remudero-coverage"), "/home/node/Remudero/.remudero-coverage"],
+    [join(base, "repos"), "/home/node/Remudero/repos"],
     [join(base, "repos-coverage"), "/home/node/Remudero/repos/.remudero-coverage"],
     [join(base, "read-model"), "/home/node/rmd-scratch/read-model"],
     [join(base, "worker-homes"), "/home/node/rmd-scratch/worker-homes"],
+    // W1-T6090: one host-wide dir, not per state key, so the runtime contract checks it too.
+    [join(scratch.root, "rmd", "test-slots"), "/home/node/rmd-scratch/test-slots"],
     [join(base, "containers", "remudero-daemon", "tmp"), "/tmp"],
   ];
   const containerTmp = binds[binds.length - 1][0];
@@ -1066,6 +1122,7 @@ test("a switched-on daemon recycle binds the rebuildable dirs to scratch and its
   for (const [src, dest] of binds) assert.ok(argv.includes(`${src}:${dest}`), `bound ${dest}: ${argv.join(" ")}`);
   assert.ok(argv.includes("RMD_READ_MODEL_DB_DIR=/home/node/Remudero/state:/home/node/rmd-scratch/read-model"));
   assert.ok(argv.includes("RMD_WORKER_HOME_DIR=/home/node/Remudero:/home/node/rmd-scratch/worker-homes"), "the daemon's worker homes follow their bind");
+  assert.ok(argv.includes("RMD_TEST_SLOT_DIR=/home/node/rmd-scratch/test-slots"), "the daemon's test runs find the host-wide slot");
   for (const [src] of binds) assert.ok(existsSync(src), `created ${src}`);
   assert.deepEqual(readdirSync(containerTmp), [], "the new container starts with an empty /tmp, as a new container always did");
   assert.deepEqual(readFileSync(join(state, ".scratch-mounts"), "utf8").trim().split("\n"), binds.map(([src]) => src).sort(), "the boot-time restore list names every bound dir");

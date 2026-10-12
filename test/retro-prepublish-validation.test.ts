@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   RETRO_PREFLIGHT_CAPTURE_BYTES,
@@ -53,7 +55,7 @@ test("production retro finalization regenerates, calls the real preflight, then 
     "regenerateHarnessArtifacts();",
     "const preflightOptions: RunRetroPrepublishPreflightOptions = {",
     "await runRetroPrepublishPreflight(preflightOptions)",
-    "gitPushRunBranch(worktreePath);",
+    "await gitPushRunBranchAsync(worktreePath);",
     'log("pr.opened"',
     "saveMarker(markerPath, nextMarker);",
     "const reviewCode = await reviewCommand(prNum);",
@@ -68,7 +70,7 @@ test("production recovers and owns an existing exact-head PR before provider-sti
     "const remotePrExisted = Boolean(prUrl);",
     "checkPrOwnership(prUrl, branch",
     "const preflightOptions: RunRetroPrepublishPreflightOptions = {",
-    "gitPushRunBranch(worktreePath);",
+    "await gitPushRunBranchAsync(worktreePath);",
     "if (!prUrl) {\n      const prCreate",
   ]);
   assert.match(source, /workerProviders: \{ \.\.\.config\.workerProviders, enabled: \[worker\.provider\] \}/);
@@ -137,15 +139,34 @@ test("retro prepublish runs the dynamically enumerated plan-reading suites throu
     return commandResult(0, "# tests 2\n# pass 2\n");
   };
 
-  const result = await runRetroPrepublishPreflight({
-    worktreePath: "/tmp/retro-worktree",
-    provenance,
-    remotePrExisted: false,
-    repair: async () => assert.fail("a passing preflight must not resume the Architect"),
-    regenerateHarnessArtifacts: async () => assert.fail("a passing preflight must not regenerate twice"),
-    log: (step, extra) => rows.push({ step, extra }),
-    deps: { run, now: (() => { let now = 1_000; return () => (now += 25); })() },
-  });
+  // W1-T6111: the suite run takes a host-wide slot and is niced. Fix the slot and the host's
+  // priority binaries so the spawned argv does not depend on the machine running this test.
+  const slotRoot = mkdtempSync(join(tmpdir(), "rmd-retro-prepublish-slot-"));
+  let result;
+  try {
+    result = await runRetroPrepublishPreflight({
+      worktreePath: "/tmp/retro-worktree",
+      provenance,
+      remotePrExisted: false,
+      repair: async () => assert.fail("a passing preflight must not resume the Architect"),
+      regenerateHarnessArtifacts: async () => assert.fail("a passing preflight must not regenerate twice"),
+      log: (step, extra) => rows.push({ step, extra }),
+      deps: {
+        run,
+        now: (() => { let now = 1_000; return () => (now += 25); })(),
+        testSlot: {
+          dir: join(slotRoot, "slots"),
+          slots: 1,
+          load: () => ({ cores: 8, load1: 0 }),
+          memoryHeadroom: () => undefined,
+          binaryExists: (path) => path === "/usr/bin/nice",
+          log: () => {},
+        },
+      },
+    });
+  } finally {
+    rmSync(slotRoot, { recursive: true, force: true });
+  }
 
   assert.deepEqual(result, { ok: true, attempts: 1, suiteCount: 2, repaired: false });
   assert.equal(calls.length, 2);
@@ -155,11 +176,16 @@ test("retro prepublish runs the dynamically enumerated plan-reading suites throu
     cwd: "/tmp/retro-worktree",
   });
   assert.deepEqual(calls[1], {
-    command: process.execPath,
+    command: "/usr/bin/nice",
     args: [
+      "-n",
+      "10",
+      process.execPath,
       "scripts/test-with-retry.mjs",
       process.execPath,
       "--test",
+      "--test-concurrency=6",
+      "--test-reporter=tap",
       "--import", "tsx",
       "--import", "./test/setup/tmp-hygiene.ts",
       "test/a.test.ts",

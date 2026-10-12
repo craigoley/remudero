@@ -1,0 +1,85 @@
+- id: W1-T6078
+  title: "THE CLOCK SWEEP STOPS DESCRIBING A PROBE THAT NO LONGER EXISTS — since W1-T6035 (#9669) scripts/clock-shift.mjs shifts fs stat times, yet six test comments, CLOCK_ARTIFACTS' prune-liveness reason and docs/forensics/clock-shift.md still say mtimes are not shiftable, and scripts/clock-sweep-baseline.json still forgives 7 of its 11 recorded suites that the last completed +400d sweep (run 36045188675, 2026-09-24) already read `ok`, worktree-reap-liveness among them"
+  repo: remudero
+  depends_on: [W1-T6035]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — what the repo says scripts/clock-shift.mjs cannot shift, and the drift it forgives on that account; nine files, comments and one ratchet file, no behaviour
+  band_meaning: span
+  origin: "operator session 2026-10-06: follow-up of #9669 (W1-T6035)"
+  plan_refs: [W1-T6035, W1-T1128, W1-T3276, W1-T5102, W1-T378]
+  files: [scripts/clock-sweep-baseline.json, scripts/clock-sweep.mjs, docs/forensics/clock-shift.md, test/worktree-reap-liveness.test.ts, test/cost-governor.test.ts, test/daemon-crashloop-wiring.test.ts, test/run-task.test.ts, test/fleet-heartbeat.test.ts, test/host-update-reclaim.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 at origin/main a76291b3. scripts/clock-shift.mjs now says "shift Date.now()/`new Date()`
+    AND fs stat times forward" and "utimes/futimes/lutimes un-shift a Date or number argument".
+    STALE TEXT, verbatim:
+    - test/worktree-reap-liveness.test.ts, the comment above `touchNow`: "age-gate on REAL FILESYSTEM MTIMES, which
+      `scripts/clock-shift.mjs` cannot shift (it monkeypatches only this process's `Date`)" and "A file/dir created
+      via `writeFileSync`/`mkdirSync` gets its mtime from the REAL OS clock, so under clock-sweep's future shift a
+      fixture meant to read as "just written" instead reads as `Date.now() - mtimeMs` days old". Also
+      `touchNow(deep); // writeFileSync's own mtime is real-clock; re-stamp from the injected clock`.
+    - test/cost-governor.test.ts, test/daemon-crashloop-wiring.test.ts, test/run-task.test.ts, each:
+      "line updates `home`'s own mtime to the REAL OS clock (mtimes are not shiftable, same mechanism
+      CLOCK_ARTIFACTS' prune-liveness/serve.glance entries cite)".
+    - test/fleet-heartbeat.test.ts ("since `scripts/clock-shift.mjs` monkeypatches only THIS process's global `Date`,
+      never a child process's") and test/host-update-reclaim.test.ts ("it monkeypatches only THIS process's global
+      `Date`, never a child process's"): the child-process half is still true, but "only ... `Date`" is not.
+    - scripts/clock-sweep.mjs CLOCK_ARTIFACTS: `["prune-liveness", "compares a real FILESYSTEM MTIME against the
+      shifted clock — mtimes are not shiftable, so a just-created directory reads as 400 days old. ..."]`.
+    - docs/forensics/clock-shift.md quotes the old header VERBATIM at f148a130, including "test/prune-liveness.test.ts
+      compares a real FILESYSTEM MTIME against a shifted `Date.now()`. mtimes are not shiftable". That block is an
+      archive and must stay verbatim. What is missing is a note that W1-T6035 superseded it.
+    THE BASELINE. scripts/clock-sweep-baseline.json: `driftCeiling: 11`, `driftingSuitesAtCapture` 11 names,
+    captured 2026-08-22. W1-T6035's design deferred lowering it "once a CI sweep confirms it". No clock-sweep run
+    has completed since: of all 53 runs the API lists, 25 cancelled (newest 2026-10-06T19:00Z), 12 failure (newest
+    2026-09-24), 16 success (newest 2026-09-08), which is W1-T5102's 30-minute cap. The last COMPLETED sweep,
+    run 36045188675 (2026-09-24, +400d, before #9669), read:
+      ok   cost-governor, daemon-triage-guard-wiring, fleet-heartbeat, host-update-reclaim,
+           install-symlink-refusal, serve-service-boot, worktree-reap-liveness
+      FAIL daemon-crashloop-wiring, run-task, serve.density-ia, serve.live-state
+      plus "NEW DRIFT — 13 suite(s)" and "OVER CEILING — 17 drifting suite(s)".
+    So worktree-reap-liveness stopped drifting BEFORE #9669, through its own `touchNow` re-stamp. Locally, from a
+    git-archive of a76291b3 (no .git, borrowed node_modules): worktree-reap-liveness passes 20/20 at +0, +30 and
+    +400 under the new probe, and 20/20 at +30 and +400 under the pre-#9669 probe. fleet-heartbeat passes 55/55 and
+    host-update-reclaim 40/40, at +0 and +400. cost-governor (7 of 36), daemon-triage-guard-wiring (4/4),
+    install-symlink-refusal (2/7) and serve-service-boot (1/1) fail identically at +0 and +400 on this host,
+    because they are environment-bound, so for those four the CI run is the only evidence.
+    prune-liveness fails 3 of 22 at +0 on this host (the W1-T175 cadence cases), so whether its CLOCK_ARTIFACTS
+    exclusion is now stale could NOT be measured. classifySweep fails a sweep on a stale exclusion at any ceiling,
+    so the next completed sweep will report it.
+  design: |
+    (1) scripts/clock-sweep-baseline.json: remove the seven names the 2026-09-24 sweep read `ok` from
+    driftingSuitesAtCapture, and lower driftCeiling from 11 to 4, the length of the remaining recorded set.
+    Drift outside that set already fails as NEW DRIFT at any count, so a ceiling above 4 forgives nothing. Keep
+    `_comment` verbatim (test/clock-sweep.test.ts pins its rule). Update capturedAt/capturedAgainst to name run
+    36045188675. If a removed suite drifts again, it is reported as new drift, which is the ratchet working.
+    (2) scripts/clock-sweep.mjs: rewrite the prune-liveness reason. Its original mechanism ended with W1-T6035,
+    and the exclusion stays until a completed sweep shows the suite passing shifted, which classifySweep reports
+    as a stale exclusion. Do not remove the entry: its current behaviour is unmeasured. This file is in
+    clock-sweep.yml's pull_request paths, so the advisory sweep will run on the PR and will probably be cancelled
+    at 30 minutes (W1-T5102). That is expected and gates nothing.
+    (3) Rewrite the test comments to say the probe now shifts the file clock (W1-T6035). Keep each explicit
+    re-stamp: it still pins the fixture's age to the injected clock, and a child process's clock still does not
+    move. Fix fleet-heartbeat and host-update-reclaim to "shifts only THIS process's clocks". Comment-only edits:
+    no assertion changes.
+    (4) docs/forensics/clock-shift.md: add a dated note after the module-header block saying the prune-liveness
+    and mtime lines are superseded by W1-T6035 (#9669). Leave the quoted block verbatim.
+    The proofs are greps on lines this change adds, because a comment and ratchet edit has no behaviour for a unit
+    test to discriminate.
+  acceptance:
+    - claim: "the reap-liveness suite's fixture comment names the file-clock shift W1-T6035 added"
+      proof: "grep: W1-T6035 in test/worktree-reap-liveness.test.ts"
+    - claim: "CLOCK_ARTIFACTS' prune-liveness reason no longer claims mtimes are unshiftable and names W1-T6035"
+      proof: "grep: W1-T6035 in scripts/clock-sweep.mjs"
+    - claim: "the drift ceiling falls to the four recorded suites the last completed sweep still read failing"
+      proof: "grep: driftCeiling\": 4, in scripts/clock-sweep-baseline.json"
+    - claim: "the forensics archive notes that its mtime lines are superseded"
+      proof: "grep: W1-T6035 in docs/forensics/clock-shift.md"
+  falsifier: |
+    Leave any of the four files unedited: its grep reads 0 lines, as it does at a76291b3 today, and that proof
+    fails. Raising the ceiling instead of lowering it fails the third grep.

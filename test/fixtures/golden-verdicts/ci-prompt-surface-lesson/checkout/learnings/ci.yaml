@@ -1,0 +1,17 @@
+- id: prompt-surface-gate-learning-path-evidence
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**"]
+  fact: >-
+    When a task changes data in a `learnings/*.yaml` shard, the prompt-surface-gate requires a golden
+    verdict under `test/fixtures/golden-verdicts/**`; adding or editing test files alone cannot
+    satisfy a path surface. Comment-only YAML changes are exempt, but any changed learning entry
+    needs the golden fixture in the same diff.
+  evidence: >-
+    The prompt-surface-gate refused seven pull requests in the window recorded as
+    ci-learning:9856:prompt-surface-gate (9856, 9989, 10001, 10015, 10019, 10027, 10035), and each
+    was repaired. The gate implementation confirms that learning-shard path surfaces accept golden
+    verdict fixtures and do not accept test-file evidence; this guidance names that remedy for
+    task authors.
+  src: "ci-learning:9856:prompt-surface-gate"
+  cited: "2026-10-08"

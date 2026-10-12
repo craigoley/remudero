@@ -117,6 +117,18 @@ jobs:
           ! is_dispatch_stalled "unknown" || fail "an unreadable dispatch verdict must stay silent, not alarm"
           echo "self-check: build arm discriminates, and stays silent on building and unknown"
 
+          is_spool_undelivered() { case "$1" in UNDELIVERED*) return 0 ;; *) return 1 ;; esac; }
+          is_spool_undelivered "UNDELIVERED — 1 host-side escalation(s) pending" || fail "an UNDELIVERED spool verdict did not read as undelivered"
+          ! is_spool_undelivered "ok" || fail "an empty spool raised the spool arm"
+          ! is_spool_undelivered "pending — 1 host-side escalation(s) spooled since the previous beat" || fail "a just-spooled entry raised the spool arm before the daemon had a tick"
+          echo "self-check: spool arm raises only an undelivered host-side escalation"
+
+          is_crash_loop() { case "$1" in CRASH_LOOP*) return 0 ;; *) return 1 ;; esac; }
+          is_crash_loop "CRASH_LOOP — 2026-10-11T07:00:00Z 5 consecutive revivals from exit 1" || fail "a CRASH_LOOP verdict did not read as a crash loop"
+          ! is_crash_loop "ok" || fail "a host with no crash-loop marker raised the crash-loop arm"
+          ! is_crash_loop "" || fail "a beat that predates the crash-loop field raised the crash-loop arm"
+          echo "self-check: crash-loop arm raises only on the launcher's own marker"
+
           # (ii) the beat script parses, and reports the three states it exists to separate.
           bash -n scripts/fleet-heartbeat.sh || fail "scripts/fleet-heartbeat.sh does not parse"
           work=$(mktemp -d)
@@ -162,6 +174,34 @@ jobs:
           # goes silent here and reads identically to a power cut; this one must still report.
           beat brokeninstall | grep -q '^daemon_verdict=live$' || fail "the broken-install beat lost the daemon signal it must still carry"
           echo "self-check: the beat script separates healthy / dead-daemon / broken-install"
+
+          # (ii.a) 2026-10-11: a host-side escalation the daemon has not posted. Just spooled, it is
+          # pending; once a daemon drain pass has run after it and it is still there, UNDELIVERED.
+          # Each beat is captured whole and grepped from a here-string, never piped into `grep -q`:
+          # the payload is long, and a reader that exits early would SIGPIPE the beat under pipefail.
+          seed spooled 45 healthy
+          mkdir -p "$work/spooled/root/state/escalation-spool"
+          printf '{"firstAt":"%s","lastAt":"%s","headline":"deploy-run: image recycle keeps being refused"}\n' "$(iso_ago 600)" "$(iso_ago 600)" \
+            > "$work/spooled/root/state/escalation-spool/escalate-0123456789abcdef.json"
+          spool_beat="$(beat spooled)"
+          grep -q '^escalation_spool_verdict=pending' <<<"$spool_beat" || fail "a just-spooled host escalation did not read as pending"
+          grep -q '^escalation_spool_entry=.*image recycle keeps being refused' <<<"$spool_beat" || fail "the beat dropped the spooled escalation's headline"
+          printf '%s\n' "$(iso_ago 60)" > "$work/spooled/root/state/escalation-spool/.drain-pass"
+          spool_beat="$(beat spooled)"
+          grep -q '^escalation_spool_verdict=UNDELIVERED' <<<"$spool_beat" || fail "an entry a later drain pass could not post did not read as UNDELIVERED"
+          spool_beat="$(beat healthy)"
+          grep -q '^escalation_spool_verdict=ok$' <<<"$spool_beat" || fail "an empty spool did not read as ok"
+          echo "self-check: the beat separates an empty / pending / undelivered host escalation spool"
+
+          # (ii.a2) 2026-10-11: the launcher's crash-loop marker, read by the beat itself, so a host
+          # whose daemon is dying (and so cannot drain the spool) still reports it off-host.
+          seed crashloop 45 healthy
+          printf '%s 5 consecutive revivals from exit 1\n' "$(iso_ago 120)" > "$work/crashloop/root/state/DAEMON_CRASH_LOOP"
+          crash_beat="$(beat crashloop)"
+          grep -q '^crash_loop_verdict=CRASH_LOOP — .*5 consecutive revivals from exit 1$' <<<"$crash_beat" || fail "the launcher's crash-loop marker did not reach the beat"
+          crash_beat="$(beat healthy)"
+          grep -q '^crash_loop_verdict=ok$' <<<"$crash_beat" || fail "a host with no crash-loop marker did not read as ok"
+          echo "self-check: the beat carries the launcher's crash-loop marker"
 
           # (ii.b) THE DEPLOY-SUPERVISOR TICK (W1-T2349). The daemon and install fields above can
           # all read healthy while the SEPARATE deploy-supervisor cycle has stopped ticking — that
@@ -240,6 +280,13 @@ jobs:
           is_daemon_stale() { case "$1" in STALE*) return 0 ;; *) return 1 ;; esac; }
           daemon_expected() { case " ${DAEMON_EXPECTED_BRANCHES} " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
           is_dispatch_stalled() { case "$1" in STALLED*) return 0 ;; *) return 1 ;; esac; }
+          # 2026-10-11: host-side escalations the daemon could not post (src/lib/host-escalation-spool.ts).
+          # The beat names UNDELIVERED only on the daemon's own evidence, so this arm has no timeout.
+          is_spool_undelivered() { case "$1" in UNDELIVERED*) return 0 ;; *) return 1 ;; esac; }
+          # 2026-10-11: the launcher's crash-loop marker (state/DAEMON_CRASH_LOOP), read by the beat in
+          # bash. A crash-looping daemon cannot drain the spool, and each revival writes fresh daemon.*
+          # rows, so neither the spool arm nor the daemon arm sees it. Ranked under BEAT_STALE only.
+          is_crash_loop() { case "$1" in CRASH_LOOP*) return 0 ;; *) return 1 ;; esac; }
 
           # THE LOOP NEVER EXITS EARLY, IN EITHER DIRECTION, AND THAT IS THE FIX. A `break` or an
           # `exit 1` on the first stale branch would hide every host after it; an early success on
@@ -266,6 +313,8 @@ jobs:
             sup_verdict=$(printf '%s\n' "$payload" | sed -n 's/^supervisor_verdict=//p' | tail -n 1)
             dmn_verdict=$(printf '%s\n' "$payload" | sed -n 's/^daemon_verdict=//p' | tail -n 1)
             dsp_verdict=$(printf '%s\n' "$payload" | sed -n 's/^dispatch_verdict=//p' | tail -n 1)
+            spool_verdict=$(printf '%s\n' "$payload" | sed -n 's/^escalation_spool_verdict=//p' | tail -n 1)
+            crash_verdict=$(printf '%s\n' "$payload" | sed -n 's/^crash_loop_verdict=//p' | tail -n 1)
 
             # THE CONDITION LEADS THE REPORT, NAMED EXPLICITLY (design note vi) — this workflow's
             # issue title reads "the machine has stopped reporting", which is WRONG for a fresh
@@ -277,6 +326,9 @@ jobs:
             if [ "$age_s" -gt "$threshold_s" ]; then
               kind="BEAT_STALE"
               condition="BEAT STALE — the machine itself has stopped reporting (${age_m}m, threshold ${STALE_AFTER_MINUTES}m)"
+            elif daemon_expected "$branch" && is_crash_loop "$crash_verdict"; then
+              kind="CRASH_LOOP"
+              condition="DAEMON CRASH LOOP — the host watchdog named a crash loop: ${crash_verdict}"
             elif daemon_expected "$branch" && is_dispatch_stalled "$dsp_verdict"; then
               kind="BUILD_STALLED"
               condition="BUILD STALLED — the daemon is alive but has dispatched nothing: ${dsp_verdict}"
@@ -286,6 +338,9 @@ jobs:
             elif is_supervisor_stale "$sup_verdict"; then
               kind="SUPERVISOR_STALE"
               condition="DEPLOY-SUPERVISOR STALE — the beat is fresh but the deploy cycle has stopped: ${sup_verdict}"
+            elif is_spool_undelivered "$spool_verdict"; then
+              kind="SPOOL_UNDELIVERED"
+              condition="HOST ESCALATIONS UNDELIVERED — the host spooled alerts the daemon has not posted: ${spool_verdict}"
             else
               kind="FRESH"
               condition="fresh — beat ${age_m}m old, deploy-supervisor ${sup_verdict:-unknown}"
@@ -312,6 +367,9 @@ jobs:
             if [ "$age_s" -gt "$threshold_s" ]; then
               stale=$(( stale + 1 ))
               echo "heartbeat-watch: STALE — '${branch}' has not beaten for ${age_m} minute(s)." >&2
+            elif daemon_expected "$branch" && is_crash_loop "$crash_verdict"; then
+              stale=$(( stale + 1 ))
+              echo "heartbeat-watch: DAEMON CRASH LOOP — '${branch}': ${crash_verdict}" >&2
             elif daemon_expected "$branch" && is_dispatch_stalled "$dsp_verdict"; then
               stale=$(( stale + 1 ))
               echo "heartbeat-watch: BUILD STALLED — '${branch}': ${dsp_verdict}" >&2
@@ -321,6 +379,9 @@ jobs:
             elif is_supervisor_stale "$sup_verdict"; then
               stale=$(( stale + 1 ))
               echo "heartbeat-watch: DEPLOY-SUPERVISOR STALE — '${branch}': ${sup_verdict}" >&2
+            elif is_spool_undelivered "$spool_verdict"; then
+              stale=$(( stale + 1 ))
+              echo "heartbeat-watch: HOST ESCALATIONS UNDELIVERED — '${branch}': ${spool_verdict}" >&2
             else
               echo "heartbeat-watch: fresh — '${branch}' is ${age_m} minute(s) old."
             fi
@@ -377,9 +438,11 @@ jobs:
           title_for() {
             case "$2" in
               BEAT_STALE)        echo "fleet-heartbeat ($1): the machine has stopped reporting" ;;
+              CRASH_LOOP)        echo "fleet-heartbeat ($1): the daemon is crash-looping" ;;
               BUILD_STALLED)     echo "fleet-heartbeat ($1): the daemon is alive but has dispatched nothing" ;;
               DAEMON_STALE)      echo "fleet-heartbeat ($1): the beat is fresh but the daemon has stopped polling" ;;
               SUPERVISOR_STALE)  echo "fleet-heartbeat ($1): the deploy cycle has stopped" ;;
+              SPOOL_UNDELIVERED) echo "fleet-heartbeat ($1): host-side escalations are not reaching GitHub" ;;
               *)                 echo "fleet-heartbeat ($1): unhealthy" ;;
             esac
           }

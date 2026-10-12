@@ -1,0 +1,69 @@
+- id: W1-T5892
+  title: "THE LIVE COVERAGE FLIP REQUIRES A FRESH NIGHTLY FLOOR — a narrowed pull request reads its absolute coverage floor from the newest coverage-nightly (kept 14 days) or coverage-merged (kept 1 day) lcov and refuses when none is readable, so flipping RMD_AFFECTED_SUITE_LIVE while the nightly is unhealthy blocks every source PR"
+  repo: remudero
+  depends_on: [W1-T5705]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — the live flag cannot take effect without a readable floor
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-05: W1-T5705 (#9350) builder's follow-up 2; workflow edit is an operator build (W1-T5351)"
+  plan_refs: [W1-T5705, W1-T5704, W1-T5811, W1-T5891, W1-T5930]
+  files: [.github/workflows/ci.yml, .github/workflows/coverage-nightly.yml, scripts/coverage-floor.mjs, test/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts, test/the-live-selection-narrows-the-coverage-lane.test.ts, src/lib/review.ts, test/helpers/gh-shim.ts, test/helpers/gh-shim.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on W1-T5705's head b490fd5b (#9350). When any coverage shard narrowed, the
+    aggregator's Coverage ratchet step downloads the absolute floor from the newest completed
+    `coverage-nightly` run on main or a ci.yml merge_group run (`coverage-merged`), moving on when
+    a download fails and refusing when none can be read. Nightly artifacts are kept 14 days and
+    coverage-merged 1 day, and a red nightly raises a needs-human issue (W1-T5811) but does not
+    stop the live flag. So a nightly outage while the flag is on blocks every narrowed source PR
+    on an infrastructure fault unrelated to the PR.
+  design: |
+    A narrowed shard runs only when a successful, complete, readable floor exists within a stated
+    24-hour bound (tagged BACKSTOP); otherwise the global decision falls back to full with a named
+    reason. Preserve flag-off behavior, the final full merge-group run and required gate names.
+    Select one floor for the entire workflow before narrow tests; all shard consumers and the
+    aggregate ratchet use that exact pinned artifact, never independently choose newest or silently
+    replace it after execution. Reuse the existing nightly/merged producers and bounded GitHub
+    ingestion; do not add another schedule or collector. No live flag/protection change in this task.
+    The dependency-free coverage-floor helper validates repository, successful run/attempt and
+    trusted main or merge-group producer, positive complete LCOV, artifact/source identity, recorded
+    zero shard exits, Node/runtime and loader/dependency/coverage-policy identity, age and digest.
+    Add the missing provenance to both current producers before relying on it; legacy/unverifiable,
+    failed, partial, expired, future-dated, incompatible Node22/24 or digest-mismatched artifacts
+    cannot authorize narrowing. A failed nightly can upload its measurement before its test-exit
+    gate: completed is not success. Bound candidate/artifact reads and leave refusal evidence.
+    Report the historical-baseline absolute floor separately from current-head added-line coverage
+    and final full integration assurance. A valid narrow run whose pinned input later becomes
+    unreadable still refuses; never relabel its partial current-head LCOV as an absolute floor.
+    Update the existing live-selector workflow controls to execute the new single admission owner
+    and pinned shard/aggregate consumers; preserve flag-off, final full integration and refused-input
+    behavior instead of keeping assertions for independently chosen per-shard floors.
+    Exercise the real workflow body and builtin helper with real local artifacts and subprocesses;
+    synthetic GitHub transport only. Controls include valid fresh success, completed-red upload,
+    missing/expired/partial/malformed artifacts, head/attempt/repository/digest disagreement,
+    boundary clock and Node22/24 separation, shared pinned choice and failure propagation.
+  acceptance:
+    - claim: "with the live flag on and no successful compatible pinned coverage-nightly or coverage-merged artifact within the 24-hour bound, every shard falls back to full with a named reason; a complete fresh success authorizes narrowing against one verified floor, failed or incompatible artifacts never do, and flag-off behavior is unchanged"
+      proof: "grep: node scripts/coverage-floor\\.mjs select coverage-floor-pin in .github/workflows/ci.yml"
+  falsifier: |
+    Narrow without checking the floor: the no-artifact fixture narrows and the test fails. Accept a
+    completed-red upload, different runtime/digest or independently select a replacement after the
+    tests: the corresponding real helper/workflow control fails.
+  note: |
+    Operator recon 2026-10-06 on main77317874: ci.yml lists --status completed and accepts the first
+    downloadable LCOV; coverage-nightly uploads before its final zero-test-exit gate. These bytes
+    prove a latent failed-run admission gap, not that a bad artifact was consumed. Live flag is0.
+    The added producer/helper files and provenance contract are declared before implementation.
+    Author admission 2026-10-06 found copied Git/GitHub transport fixtures and an unregistered
+    gate-rule helper. Register only coverage-floor.mjs on the existing instrument surface;
+    preserve shared fixture identity and use the existing gh shim for bounded JSON/binary
+    artifact transport. Add binary fixture output and its real child controls in the shared
+    helper rather than duplicating a new PATH executable. Acceptance, high risk, complete
+    floor bounds, full infrastructure assurance and the disabled live flag remain unchanged.
+    The existing physical-line source proof now escapes the module suffix dot as a basic
+    regular expression; its claim and invoked workflow marker remain identical.

@@ -1,0 +1,2 @@
+- claim: the light-gates lesson is present in a matched CI learning
+  proof: "grep: ci-learning:9301:light-gates in learnings/ci.yaml"

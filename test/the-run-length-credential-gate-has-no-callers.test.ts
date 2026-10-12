@@ -103,7 +103,7 @@ function fakeQueryFnNoSpawn(): Parameters<typeof spawnWorker>[0]["queryFn"] {
 
 function baseArgs(dir: string, claudeBin: string, extra: Record<string, unknown> = {}) {
   const settingsFile = join(dir, "worker.json");
-  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }));
+  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }));
   return {
     cwd: dir,
     permissionMode: "bypassPermissions" as const,

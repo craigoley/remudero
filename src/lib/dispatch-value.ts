@@ -1,13 +1,10 @@
 /**
- * Measured value calibration for dispatch (W1-T3412, reworked by W1-T5112).
- *
- * Pure. The command layer reads the ledger union and hands over its rows; the selector receives
- * only the immutable result. Value per task class is P(merge per dispatched attempt) divided by
- * cost per attempt over a trailing window, each smoothed toward the fleet-wide figure, so a thin
- * class sits near the fleet mean instead of being refused. Only an unreadable corpus refuses.
+ * Pure dispatch calibration (W1-T3412, W1-T5112, W1-T4064). Readers supply committed filing
+ * dates and ledger evidence; cost of delay and stride passes never consult the wall clock.
  */
 import { createHash } from "node:crypto";
 import { deriveTaskClass } from "./task-class.js";
+import { streakRefusal } from "./non-worker-verdict.js";
 
 /** Keeps the pooled prior strictly inside (0, 1) so a zero-merge fleet still yields a proper Beta. */
 const PRIOR_RATE_EPSILON = 1e-3;
@@ -28,6 +25,16 @@ export interface DispatchValueTask {
 export interface DispatchValueContext {
   readonly scoreByClass: ReadonlyMap<string, number>;
   readonly openDependentFanoutByTaskId: ReadonlyMap<string, number>;
+  readonly costOfDelayByTaskId?: ReadonlyMap<string, number>;
+  readonly stridePassByTaskId?: ReadonlyMap<string, number>;
+  readonly costOfDelayFallback?: boolean;
+  /** W1-T7534: open tasks the filing history cannot date — left unscored, ordered after the scored tier. */
+  readonly costOfDelayUnscored?: readonly string[];
+}
+
+export interface CostOfDelaySnapshot {
+  readonly planTreeSha: string;
+  readonly filedAtByTaskId: ReadonlyMap<string, number>;
 }
 
 /** One class's smoothed estimate over the window. `mean` is the posterior merge probability per attempt. */
@@ -52,8 +59,54 @@ export type DispatchValueCalibration =
     }
   | { kind: "refused"; reasons: readonly string[] };
 
+const sortedByJson = new WeakSet<ReadonlyArray<Record<string, unknown>>>();
+
+/**
+ * `rows` ordered by each row's `JSON.stringify` under `localeCompare` — the evidence order calibration has
+ * always used — with each row serialised ONCE. The comparator used to serialise both rows on every comparison:
+ * ~2 n log n serialisations, about 2 GB of strings per sort over the fleet's 61,803 evidence rows (2026-10-10).
+ * The comparisons are the same, so the order is the same. The result is frozen and remembered as sorted, so
+ * {@link buildDispatchValueContext} does not sort it again.
+ */
+export function sortRowsByJson(rows: ReadonlyArray<Record<string, unknown>>): ReadonlyArray<Record<string, unknown>> {
+  if (sortedByJson.has(rows)) return rows;
+  const keyed = rows.map((row) => ({ row, key: JSON.stringify(row) }));
+  keyed.sort((a, b) => a.key.localeCompare(b.key));
+  const sorted = Object.freeze(keyed.map(({ row }) => row));
+  sortedByJson.add(sorted);
+  return sorted;
+}
+
 /** The ledger steps {@link estimateClassValues} reads, for the command layer's union filter. */
 export const DISPATCH_VALUE_LEDGER_STEPS = ["run.start", "verdict", "verdict.merged"] as const;
+
+/**
+ * Date each task id from `git log --first-parent --reverse --format=filing:%ct -p --unified=0` over the plan:
+ * an id's first added `id:` line under a `filing:<epoch>` header is its filing time. W1-T7534: the id token
+ * includes a letter suffix (W1-T12e, W1-T1B), as the plan loader accepts; a bare `\d+\b` stopped inside the
+ * token, left that task undated, and (before unscored tasks were contained) refused every task's cost of delay.
+ */
+export function filingDatesFromPlanHistory(history: string): Map<string, number> {
+  const filedAtByTaskId = new Map<string, number>();
+  let at = NaN;
+  for (const line of history.split("\n")) {
+    const timestamp = /^filing:(\d+)$/.exec(line);
+    if (timestamp) at = Number(timestamp[1]) * 1000;
+    const id = /^\+\s*(?:-\s*)?id:\s*["']?([A-Z][A-Z0-9]*-T\d+[A-Za-z]*)\b/.exec(line)?.[1];
+    if (id && Number.isFinite(at) && !filedAtByTaskId.has(id)) filedAtByTaskId.set(id, at);
+  }
+  return filedAtByTaskId;
+}
+
+/** W1-T7534: the `dispatch.cost_of_delay.ready` row. Its dedup key is per plan tree while any open task is
+ * unscored, so the undatable ids are ledgered once per tree without disabling the ordering. */
+export function costOfDelayReadyRow(
+  planTreeSha: string, context: Pick<DispatchValueContext, "costOfDelayUnscored">,
+): { key: string; plan_tree_sha: string; unscored?: readonly string[] } {
+  const unscored = context.costOfDelayUnscored ?? [];
+  if (unscored.length === 0) return { key: "ready", plan_tree_sha: planTreeSha };
+  return { key: `ready:${planTreeSha}`, plan_tree_sha: planTreeSha, unscored };
+}
 
 /** A plan task's id (`W1-T123`, `CONSOLE-T7`); synthetic lane runs (RETRO, TRIAGE-…) are not build attempts. */
 const PLAN_TASK_ID = /^[A-Z][A-Z0-9]*-T\d+$/;
@@ -235,8 +288,10 @@ export function buildDispatchValueContext(
   nowMs: number,
   unionComplete = true,
   seed?: string,
+  snapshot?: CostOfDelaySnapshot,
 ): DispatchValueCalibration {
   if (!unionComplete) return { kind: "refused", reasons: ["incomplete-union"] };
+  if (snapshot) rows = sortRowsByJson(rows);
   const { byClass, fleet } = estimateClassValues(rows, nowMs);
   const estimates = new Map(byClass);
   const refusals: string[] = [];
@@ -252,15 +307,107 @@ export function buildDispatchValueContext(
   }
   const scoreByClass = new Map<string, number>();
   for (const [taskClass, estimate] of estimates) {
-    const score = seed === undefined ? estimate.value : valueOf(betaDraw(estimate.alpha, estimate.beta, seed, taskClass), estimate.costPerAttempt);
+    const drawSeed = snapshot?.planTreeSha ?? seed;
+    const score = drawSeed === undefined ? estimate.value : valueOf(betaDraw(estimate.alpha, estimate.beta, drawSeed, taskClass), estimate.costPerAttempt);
     scoreByClass.set(taskClass, score);
+  }
+  const context: DispatchValueContext = { scoreByClass, openDependentFanoutByTaskId: openDependentFanout(tasks, openTaskIds) };
+  if (snapshot) {
+    const scheduled = costOfDelayContext(tasks, rows, openTaskIds, nowMs, snapshot, context, estimates);
+    if (scheduled.kind === "refused") return scheduled;
+    Object.assign(context, scheduled.context);
   }
   return {
     kind: "ready",
-    context: Object.freeze({ scoreByClass, openDependentFanoutByTaskId: openDependentFanout(tasks, openTaskIds) }),
+    context: Object.freeze(context),
     estimates,
     fleet,
     refusals,
+  };
+}
+
+function costOfDelayContext(
+  tasks: readonly DispatchValueTask[], rows: ReadonlyArray<Record<string, unknown>>,
+  openIds: ReadonlySet<string>, nowMs: number, snapshot: CostOfDelaySnapshot,
+  context: DispatchValueContext, estimates: ReadonlyMap<string, ClassValueEstimate>,
+): { kind: "ready"; context: Pick<DispatchValueContext, "costOfDelayByTaskId" | "stridePassByTaskId" | "costOfDelayUnscored"> }
+  | { kind: "refused"; reasons: readonly string[] } {
+  if (!snapshot.planTreeSha || !Number.isFinite(nowMs)) return { kind: "refused", reasons: ["unreadable-snapshot"] };
+  const starts = new Map<string, { id: string; at: number }>();
+  const outcomes = new Map<string, { at: number; stale: boolean }>();
+  const lastVerdicts = new Map<string, { at: number; row: Record<string, unknown> }>();
+  for (const row of rows) {
+    const at = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+    if (!Number.isFinite(at) || at > nowMs || typeof row.run_id !== "string" || typeof row.task_id !== "string") continue;
+    if ((row.step === "run.start" || row.step === "dispatch.refused_already_merged") && PLAN_TASK_ID.test(row.task_id)) {
+      const previous = starts.get(row.run_id);
+      if (!previous || at < previous.at) starts.set(row.run_id, { id: row.task_id, at });
+    }
+    if (row.step === "dispatch.refused_already_merged" || (row.step === "verdict" && typeof row.verdict === "string")) {
+      const stale = row.step === "dispatch.refused_already_merged" || ["already_satisfied", "no_pr", "task_already_merged"].includes(String(row.verdict));
+      const previous = outcomes.get(row.run_id);
+      if (!previous || at > previous.at) outcomes.set(row.run_id, { at, stale });
+    }
+    if (row.step === "verdict") {
+      const previous = lastVerdicts.get(row.run_id);
+      if (!previous || at > previous.at) lastVerdicts.set(row.run_id, { at, row });
+    }
+  }
+  const ages = new Map<number, { valid: number; total: number }>();
+  const counts = new Map<string, number>();
+  for (const [runId, start] of [...starts].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+    // A run no worker tried (restart yield, claim race, infra refusal, failed harness checkpoint) spends no
+    // stride: the breaker's own set, {@link streakRefusal}. MEASURED 2026-10-11: W1-T7742's 7 starts were all
+    // non-worker, so its pass was 8/score and every fresh priority-1 task outranked it.
+    const verdict = lastVerdicts.get(runId);
+    if (!verdict || streakRefusal(verdict.row) === undefined) counts.set(start.id, (counts.get(start.id) ?? 0) + 1);
+    const filedAt = snapshot.filedAtByTaskId.get(start.id);
+    const outcome = outcomes.get(runId);
+    if (filedAt === undefined || !Number.isFinite(filedAt) || filedAt > start.at || !outcome || outcome.at < start.at) continue;
+    const age = start.at - filedAt;
+    const tally = ages.get(age) ?? { valid: 0, total: 0 };
+    tally.total++;
+    if (!outcome.stale) tally.valid++;
+    ages.set(age, tally);
+  }
+  const samples = [...ages].sort(([a], [b]) => a - b);
+  const valid = samples.reduce((sum, [, tally]) => sum + tally.valid, 0);
+  const total = samples.reduce((sum, [, tally]) => sum + tally.total, 0);
+  const prior = (valid + 1) / (total + 2);
+  const costOfDelayByTaskId = new Map<string, number>();
+  const stridePassByTaskId = new Map<string, number>();
+  const costOfDelayUnscored: string[] = [];
+  for (const task of [...tasks].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) {
+    if (!openIds.has(task.id)) continue;
+    const filedAt = snapshot.filedAtByTaskId.get(task.id);
+    // W1-T7534: one undatable task (an id the filing scan cannot read, a future date) is left unscored;
+    // compareDispatch orders it after the scored population, and every other task keeps its stride.
+    if (filedAt === undefined || !Number.isFinite(filedAt) || filedAt > nowMs) {
+      costOfDelayUnscored.push(task.id);
+      continue;
+    }
+    const estimate = estimates.get(deriveTaskClass(task));
+    if (!estimate || estimate.costPerAttempt <= 0) return { kind: "refused", reasons: [`${task.id}:unmeasured-cost`] };
+    const age = nowMs - filedAt;
+    const nearest = samples.reduce<typeof samples[number] | undefined>((best, sample) =>
+      best === undefined || Math.abs(sample[0] - age) < Math.abs(best[0] - age) ? sample : best, undefined);
+    const probability = nearest === undefined ? prior
+      : (nearest[1].valid + DISPATCH_VALUE_PRIOR_WEIGHT * prior) / (nearest[1].total + DISPATCH_VALUE_PRIOR_WEIGHT);
+    const classScore = context.scoreByClass.get(deriveTaskClass(task));
+    // One unit is the task's own impact; open dependents add units. Posterior/cost-per-merge
+    // gives every class a share even when its raw merge count is zero.
+    const mergeProbability = estimate.alpha / (estimate.alpha + estimate.beta);
+    const score = probability * (1 + (context.openDependentFanoutByTaskId.get(task.id) ?? 0)) * (classScore ?? NaN) * mergeProbability;
+    // Each unique dispatch consumes one stride. Rebuilding from all starts survives restarts
+    // and keeps a frequently selected high-score task from monopolizing a fixed frontier.
+    const pass = (1 + (counts.get(task.id) ?? 0)) / score;
+    if (!Number.isFinite(score) || !Number.isFinite(pass) || score <= 0) return { kind: "refused", reasons: [`${task.id}:unmeasured-score`] };
+    costOfDelayByTaskId.set(task.id, score);
+    stridePassByTaskId.set(task.id, pass);
+  }
+  return {
+    kind: "ready",
+    context: { costOfDelayByTaskId, stridePassByTaskId, ...(costOfDelayUnscored.length === 0 ? {} : { costOfDelayUnscored }) },
   };
 }
 

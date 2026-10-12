@@ -23,6 +23,19 @@ if ! REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
   exit 0
 fi
 
+# ── W1-T5227: A CONFLICT MARKER NEVER REACHES A COMMIT ────────────────────────────────────────
+#
+# `git add` marks a conflicted path resolved whatever it holds, so a half-resolved merge can be staged
+# and sealed (4c047d2bd). `git diff --cached --check` is git's own detector; only its "leftover conflict
+# marker" findings count here (whitespace findings are not this hook's concern). This runs BEFORE the
+# early `exit 0` below, which is for commits that stage no .ts/.mjs file: a marker in a .md, .yaml or
+# .sh file must be refused too. `--check` exits non-zero on a finding, hence the `|| true`.
+MARKERS="$(git diff --cached --check 2>&1 | grep -E ': leftover conflict marker' || true)"
+if [ -n "$MARKERS" ]; then
+  echo "pre-commit refused: a conflict marker is staged. Resolve it before committing:" >&2
+  echo "$MARKERS" >&2
+  exit 1
+fi
 
 # ── W1-T4430: THE TIER SEEDING THAT ONCE RAN HERE IS GONE ─────────────────────────────────────
 #

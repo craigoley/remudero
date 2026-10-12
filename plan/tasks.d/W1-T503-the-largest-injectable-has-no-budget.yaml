@@ -65,9 +65,9 @@
     next rule is ordinary retro work once the gate exists.
   acceptance:
     - claim: "a CLAUDE.md bigger than the recorded capBytes turns the gate red and the failure is attributable without rerunning anything"
-      proof: "unit test: the claude-md budget ratchet fails a file that outgrows the baseline"
+      proof: "unit test: file OVER the cap"
     - claim: "a CLAUDE.md at or under the recorded capBytes passes, so the gate cannot block a healthy PR"
-      proof: "unit test: the claude-md budget ratchet passes a file at exactly the ceiling"
+      proof: "unit test: claude-md-budget-ratchet CLI: file AT the cap"
     - claim: "the red-path message quantifies the excess so the fixing session knows the size of the fold it owes"
       proof: "unit test: the claude-md budget failure names the overage in bytes"
     - claim: "the check gates merges rather than advising — it is in ci-gate's REQUIRED set"
@@ -76,9 +76,20 @@
   origin: oper#gstack-recon-2026-08-15
   plan_refs: ["W1-T38"]
   files: [.github/workflows/ci.yml, .github/workflows/ci-gate.yml, scripts/claude-md-budget-ratchet.mjs, scripts/claude-md-budget-baseline.json, test/claude-md-budget-ratchet.test.ts]
-  status: queued
+  status: merged
   attempts: 0
-  note: "risk:high IS SET UP FRONT because `files:` spans three subsystems — .github/workflows/,
+  note: "OPERATOR RULING 2026-10-06: credit W1-T503 as done. It shipped as #1863 (head
+    run-W1-T503-1786805282249, merged 2026-08-15T23:38:43Z as 4e4f7b66; build commit 194a6fbc,
+    feat(ci): cap CLAUDE.md's byte size with a ceiling ratchet). On origin/main be9482ea
+    scripts/claude-md-budget-ratchet.mjs, scripts/claude-md-budget-baseline.json and
+    test/claude-md-budget-ratchet.test.ts exist, and ci.yml runs the claude-md-budget-ratchet step,
+    whose outcome reports under the learnings-budget-ratchet check in the REQUIRED list of ci-gate.yml.
+    rmd plan-reconcile names W1-T503 WINDOW-SHORT (merged outside its credit scan windows) and asks
+    for a hand flip in a plan-only PR, which this is. The flip re-lints the record, so the two unit-test
+    proofs are re-anchored on the titles the shipped suite carries today (later PRs renamed them);
+    the claims are unchanged.
+
+    risk:high IS SET UP FRONT because `files:` spans three subsystems — .github/workflows/,
     scripts/, test/ — and `sizingViolation` (src/lib/task-linter.ts) blocks at >=2 below that
     band; the band is Rule 19's SPAN, not blast radius (a read-only measurement job that can only
     ever fail a PR, never change runtime behavior). budget_usd 35 — one small .mjs mirrored from

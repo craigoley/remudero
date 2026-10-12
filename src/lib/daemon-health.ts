@@ -41,7 +41,7 @@
  */
 
 import { readFileSync, statfsSync } from "node:fs";
-import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import { ghExec } from "./github-transport.js";
 import type { ServerResponse } from "node:http";
 import { readLedgerLines, type LedgerReader } from "./status.js";
@@ -49,6 +49,8 @@ import { systemClock, type Clock } from "./clock.js";
 import { DEFAULT_POLL_INTERVAL_MS, IDLE_STARVED_PULSE_MS, IDLE_STARVED_PULSE_STEP } from "./poll-interval.js";
 import type { Route } from "./service.js";
 import { parseGhRateLimitHeaders } from "./worker.js";
+
+type EventLoopDelayHistogram = ReturnType<typeof monitorEventLoopDelay>;
 
 /** {@link deriveLastPoll}'s result — see this module's header for each field's own source. */
 export interface DaemonPollInfo {
@@ -93,11 +95,11 @@ export function deriveLastPoll(
 /** Minimal shape {@link readDiskFreeBytes} needs off a `statfs` result — real `fs.statfsSync`
  *  returns more fields; only these two are consulted. */
 export interface StatfsLike {
-  bavail: number;
-  bsize: number;
+  bavail: number | bigint;
+  bsize: number | bigint;
   /** Total blocks. Optional so an existing caller's two-field fixture still satisfies the shape;
    *  {@link readDiskTotalBytes} returns `undefined` without it rather than inventing a size. */
-  blocks?: number;
+  blocks?: number | bigint;
 }
 
 /**
@@ -119,18 +121,31 @@ function readStatfs(path: string, statfs: (path: string) => StatfsLike): StatfsL
   }
 }
 
-export function readDiskFreeBytes(path: string, statfs: (path: string) => StatfsLike = statfsSync): number | undefined {
+function nativeStatfs(path: string): StatfsLike {
+  return statfsSync(path, { bigint: true });
+}
+
+function diskBlockBytes(blocks: number | bigint | undefined, size: number | bigint): number | undefined {
+  if (blocks === undefined || (typeof blocks === "number" && !Number.isSafeInteger(blocks)) ||
+      (typeof size === "number" && !Number.isSafeInteger(size))) return undefined;
+  const count = BigInt(blocks), blockSize = BigInt(size);
+  if (count < 0n || blockSize <= 0n) return undefined;
+  const bytes = count * blockSize;
+  return bytes > BigInt(Number.MAX_SAFE_INTEGER) ? undefined : Number(bytes);
+}
+
+export function readDiskFreeBytes(path: string, statfs: (path: string) => StatfsLike = nativeStatfs): number | undefined {
   const stat = readStatfs(path, statfs);
-  return stat === undefined ? undefined : stat.bavail * stat.bsize;
+  return stat === undefined ? undefined : diskBlockBytes(stat.bavail, stat.bsize);
 }
 
 /** Total volume size — `blocks * bsize` — the denominator a PROPORTIONAL headroom threshold needs.
  *  Same injectable `statfs` and same fail-soft contract as {@link readDiskFreeBytes}: `undefined`
  *  when unreadable or when the shape carries no `blocks`, never a fabricated size, because a wrong
  *  denominator would move a threshold rather than skip one. */
-export function readDiskTotalBytes(path: string, statfs: (path: string) => StatfsLike = statfsSync): number | undefined {
+export function readDiskTotalBytes(path: string, statfs: (path: string) => StatfsLike = nativeStatfs): number | undefined {
   const stat = readStatfs(path, statfs);
-  return stat === undefined || stat.blocks === undefined ? undefined : stat.blocks * stat.bsize;
+  return stat === undefined ? undefined : diskBlockBytes(stat.blocks, stat.bsize);
 }
 
 /**
@@ -361,9 +376,9 @@ const LAG_WINDOW_MS = 60_000;
 /** A rolling one-minute `monitorEventLoopDelay` window, started on first read. */
 export function createEventLoopLagMonitor(
   clock: Clock = systemClock,
-  histogram: () => IntervalHistogram = () => monitorEventLoopDelay({ resolution: 20 }),
+  histogram: () => EventLoopDelayHistogram = () => monitorEventLoopDelay({ resolution: 20 }),
 ): () => EventLoopLag | undefined {
-  let hist: IntervalHistogram | undefined;
+  let hist: EventLoopDelayHistogram | undefined;
   let startedAt = 0;
   return () => {
     if (!hist) {

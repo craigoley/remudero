@@ -17,7 +17,7 @@ let sequence = 0;
 function fixture(t: TestContext) {
   const remote = gitRepo({ kind: "self-credit-remote", bare: true });
   const parent = gitRepo({ kind: "self-credit-parent" });
-  const work = parent.addWorktree(join(dirname(parent.dir), `rmd-self-credit-${process.pid}-${sequence++}`), "fixture");
+  const work = parent.addWorktree(join(parent.dir, `rmd-self-credit-${sequence++}`), "fixture");
   t.after(() => work.cleanup());
   for (const dir of ["hooks", "scripts/lib", "plan/tasks.d", "src"]) mkdirSync(join(work.dir, dir), { recursive: true });
   copyFileSync(join(ROOT, "hooks", "pre-push"), join(work.dir, "hooks", "pre-push"));

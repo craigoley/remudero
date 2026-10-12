@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
-import { CI_PARITY_TABLE, parseCiJobNames, runCiParity as runCiParityEngine, type CiParityDeps } from "../src/lib/ci-parity.js";
+import { defaultPreflightSpawn, type PreflightSpawn } from "../src/lib/commit-message.js";
+import { CI_PARITY_TABLE, parseCiJobNames, runCiParityAdmitted, runCiParity as runCiParityEngine, type CiParityDeps } from "../src/lib/ci-parity.js";
 import { preflightCommand } from "../src/run-task.js";
 import { skipInMutationSandbox } from "./helpers/mutation-sandbox.js";
 import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -53,7 +55,7 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
     // that wants a failing resolve can still override it.
     if (file === "git" && args[0] === "rev-parse") return { status: 0, stdout: `${PINNED_BASE_SHA}\n`, stderr: "" };
     if (file === process.execPath && args.some((arg) => arg.endsWith("scripts/test-tier-manifest.mjs")) && args.includes("--select-all")) {
-      const shard = args[args.indexOf("--shard") + 1]?.match(/^(\d+)\/4$/)?.[1];
+      const shard = args[args.indexOf("--shard") + 1]?.match(/^([1-8])\/8$/)?.[1];
       return shard ? { status: 0, stdout: `test/coverage-shard-${shard}.test.ts\n`, stderr: "" } : { status: 1, stdout: "", stderr: "invalid selector shard" };
     }
     const coverage = coverageParitySpawnResult(file, args, opts);
@@ -205,12 +207,12 @@ test("coverage-ratchet job: the diff piped into diff-coverage.mjs is exactly wha
 
 // ── acceptance 3: coverage flags — source maps, test/** excluded, balanced full manifest ────
 
-test("coverage-ratchet job: coverage retains source maps and test exclusions while four duration-balanced selectors partition the full manifest", () => {
+test("coverage-ratchet job: coverage retains source maps and test exclusions while eight duration-balanced selectors partition the full manifest", () => {
   const { spawn, calls } = recordingSpawn();
   runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
 
   const coverageCalls = calls.filter((c) => c.args.includes("--experimental-test-coverage"));
-  assert.equal(coverageCalls.length, 4, "expected one coverage invocation for every CI shard");
+  assert.equal(coverageCalls.length, 8, "expected one coverage invocation for every CI shard");
   for (const coverageCall of coverageCalls) {
     assert.ok(coverageCall.args.includes("--enable-source-maps"), "source maps must be enabled — without it lcov's DA: line numbers disagree with git diff's (W1-T210)");
     assert.ok(coverageCall.args.includes("--test-coverage-exclude=test/**"), "test/** must stay excluded from the coverage ratio, same as ci.yml");
@@ -220,7 +222,7 @@ test("coverage-ratchet job: coverage retains source maps and test exclusions whi
     .filter((c) => c.args.some((arg) => arg.endsWith("scripts/test-tier-manifest.mjs")) && c.args.includes("--select-all"))
     .map((c) => c.args[c.args.indexOf("--shard") + 1])
     .sort();
-  assert.deepEqual(selectorShards, ["1/4", "2/4", "3/4", "4/4"], "the coverage selectors must partition the complete manifest");
+  assert.deepEqual(selectorShards, ["1/8", "2/8", "3/8", "4/8", "5/8", "6/8", "7/8", "8/8"], "the coverage selectors must partition the complete manifest");
 });
 
 test("coverage-ratchet job: the coverage invocation's argv has no scope-narrowing parameter at all — the function that builds it is not parameterized by a caller-supplied file list, so a scoped call is structurally impossible, not just discouraged", () => {
@@ -459,4 +461,122 @@ test("preflightCommand: WITHOUT --ci-parity, none of the ci-parity steps run or 
     3,
     "exactly the three shipped hand-route steps",
   );
+});
+
+test("full preflight admission: a cleanup refusal starts no full-suite child and still reports wiring", () => {
+  const { spawn, calls } = recordingSpawn({ "mkdtemp-callsite-check": { status: 1, stderr: "test/example.test.ts: forbidden temporary prefix" } });
+  const result = runCiParityAdmitted(REPO_ROOT, { spawn });
+  assert.equal(result.ok, false);
+  assert.equal(result.execution, "not-run");
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["run", "--silent", "mkdtemp-callsite-check"],
+    ["run", "--silent", "unwired-gate:check"],
+  ]);
+  assert.match(result.steps[0].detail, /forbidden temporary prefix/);
+  assert.ok(result.steps.some((step) => step.name.endsWith("unwired-gate:check") && step.ok));
+  assert.match(result.steps.find((step) => step.name === "ci-parity:not-run")!.detail, /full CI parity was NOT RUN/);
+});
+
+test("full preflight admission: unreadable cleanup retains toolchain failure and starts no full suite", () => {
+  const calls: string[] = [];
+  const spawn: PreflightSpawn = (_file, args) => {
+    calls.push(args.join(" "));
+    if (args.includes("mkdtemp-callsite-check")) throw new Error("EACCES: cleanup scanner unavailable");
+    return { status: 0, stdout: "", stderr: "" };
+  };
+  const result = runCiParityAdmitted(REPO_ROOT, { spawn });
+  assert.equal(result.execution, "not-run");
+  assert.equal(calls.length, 2);
+  assert.match(result.steps[0].detail, /toolchain unavailable.*EACCES/);
+  assert.ok(result.steps[1].ok, "the independent wiring result remains present");
+});
+
+test("full preflight admission: a child without an exit remains an unavailable spawn result", () => {
+  const spawn: PreflightSpawn = (_file, args) => args.includes("mkdtemp-callsite-check")
+    ? { status: null, stdout: "", stderr: "", error: "ENOENT: npm unavailable" }
+    : { status: 0, stdout: "", stderr: "" };
+  const result = runCiParityAdmitted(REPO_ROOT, { spawn });
+  assert.equal(result.execution, "not-run");
+  assert.match(result.steps[0].detail, /SPAWN FAILURE.*ENOENT/);
+});
+
+test("full preflight admission: passing controls invoke the existing full engine once", () => {
+  const { spawn, calls } = recordingSpawn();
+  const result = runCiParityAdmitted(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER, coverageLockDiscriminator: randomUUID() });
+  assert.equal(result.execution, "completed");
+  assert.equal(result.steps.filter((step) => step.name === "ci-parity:drift").length, 1);
+  assert.equal(result.steps.filter((step) => step.name === "ci:typecheck").length, 1);
+  assert.ok(result.steps.some((step) => step.name.startsWith("ci:test")));
+  assert.equal(result.steps.some((step) => step.name === "ci-parity:not-run"), false);
+  assert.equal(calls.filter((call) => call.args.includes("test:ci")).length, 1, "the unchanged full-suite fallback launches exactly once");
+  assert.equal(calls.filter((call) => call.args.includes("mkdtemp-callsite-check")).length, 2, "admission and the unchanged full engine both retain the real guard");
+});
+
+test("full preflight admission: a later full-suite failure remains failed with independent later jobs", () => {
+  const { spawn } = recordingSpawn({ "test:ci": { status: 1, stderr: "fixture full-suite refusal" } });
+  const result = runCiParityAdmitted(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER, coverageLockDiscriminator: randomUUID() });
+  assert.equal(result.execution, "completed");
+  assert.equal(result.ok, false);
+  assert.match(result.steps.find((step) => step.name === "ci:test")!.detail, /FAIL/);
+  assert.ok(result.steps.some((step) => step.name === "claims" && step.ok));
+});
+
+test("full preflight admission: actual npm cleanup rejects an unreapable tracked fixture before full validation", () => {
+  const repository = gitRepo({ kind: "preflight-admission", seedCommit: false });
+  const fixture = repository.dir;
+  try {
+    mkdirSync(join(fixture, "scripts", "lib"), { recursive: true });
+    mkdirSync(join(fixture, "test"));
+    for (const name of ["mkdtemp-callsite-check.mjs", "lib/argv.mjs", "lib/repo-root.mjs"]) {
+      cpSync(join(REPO_ROOT, "scripts", name), join(fixture, "scripts", name));
+    }
+    writeFileSync(join(fixture, "package.json"), JSON.stringify({ type: "module", scripts: {
+      "mkdtemp-callsite-check": "node scripts/mkdtemp-callsite-check.mjs",
+      // This fixture isolates the real cleanup control; it does not claim wiring coverage.
+      "unwired-gate:check": "node --eval \"process.exit(0)\"",
+    } }));
+    writeFileSync(join(fixture, "test", "example.test.ts"), "import { mkdtempSync } from 'node:fs';\nmkdtempSync(join(tmpdir(), 'unreapable-example-'));\n");
+    repository.git("add", "--all");
+    const refused = runCiParityAdmitted(fixture);
+    assert.equal(refused.execution, "not-run");
+    assert.match(refused.steps[0].detail, /example\.test\.ts/);
+    assert.match(refused.steps[0].detail, /unreapable-example-/);
+    assert.equal(refused.steps.some((step) => step.name === "ci:typecheck"), false);
+
+    writeFileSync(join(fixture, "test", "example.test.ts"), "import { mkdtempSync } from 'node:fs';\nmkdtempSync(join(tmpdir(), 'rmd-example-'));\n");
+    const fallback = recordingSpawn();
+    const spawn: PreflightSpawn = (file, args, opts) => args.includes("mkdtemp-callsite-check") || args.includes("unwired-gate:check")
+      ? defaultPreflightSpawn(file, args, opts)
+      : fallback.spawn(file, args, opts);
+    const admitted = runCiParityAdmitted(fixture, { spawn, ciYamlText: "jobs: {}", workflowTexts: {}, prWorkflowParityTable: [], coverageFreeBytes: () => Number.MAX_SAFE_INTEGER, coverageLockDiscriminator: randomUUID() });
+    assert.equal(admitted.execution, "completed");
+    assert.ok(admitted.steps[0].ok && admitted.steps[1].ok, "the corrected prefix really passes both admission children");
+    assert.equal(admitted.steps.filter((step) => step.name === "ci:typecheck").length, 1);
+    assert.equal(fallback.calls.filter((call) => call.args.includes("test:ci")).length, 1);
+  } finally {
+    repository.cleanup();
+  }
+});
+
+test("full preflight admission: the command persists failure and names full parity as unrun", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "rmd-preflight-admission-summary-"));
+  const summary = join(fixture, "summary.json");
+  const { spawn, calls } = recordingSpawn({ "mkdtemp-callsite-check": { status: 1, stderr: "fixture forbidden prefix" } });
+  const originalLog = console.log;
+  const lines: string[] = [];
+  console.log = (...args: unknown[]) => { lines.push(args.join(" ")); };
+  try {
+    const code = await preflightCommand(["--ci-parity", "--no-fast", "--summary-file", summary], { spawn });
+    assert.equal(code, 1);
+    const durable = JSON.parse(readFileSync(summary, "utf8"));
+    assert.equal(durable.ok, false);
+    assert.ok(durable.steps.some((step: { name: string; ok: boolean }) => step.name === "ci-parity:not-run" && !step.ok));
+    assert.equal(durable.steps.some((step: { name: string }) => step.name.startsWith("ci:test")), false);
+    assert.ok(lines.some((line) => /full CI parity was NOT RUN/.test(line)));
+    assert.ok(lines.some((line) => /^\n?### rmd preflight: FAIL/.test(line)), "the command never renders unrun full parity as a passing preflight");
+    assert.equal(calls.some((call) => call.args.includes("test:ci")), false);
+  } finally {
+    console.log = originalLog;
+    rmSync(fixture, { recursive: true, force: true });
+  }
 });

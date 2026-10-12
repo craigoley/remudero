@@ -70,19 +70,27 @@ test("W1-T4595: a Codex worker streaming several MiB of ordinary events complete
   }
 });
 
-test("W1-T4595: a single unbounded line is still refused, and the stream keeps a large backstop", async () => {
+test("W1-T4595: an oversized unfinished line spills and fails on exit, and the stream keeps a large backstop", { timeout: 5000 }, async () => {
   assert.ok(CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES >= 32 * CODEX_WORKER_STDOUT_MAX_BYTES, "the stream backstop sits far above the retention budget");
   const codex = fakeCodex();
   try {
     codex.stdout.write('{"type":"turn.started"');
     codex.stdout.write("x".repeat(CODEX_WORKER_STDOUT_MAX_BYTES + 1));
-    await assert.rejects(codex.run, (error: unknown) => {
-      assert.ok(isCodexWorkerOutputLimitError(error));
-      assert.equal(error.stream, "stdout");
-      assert.equal(error.limitBytes, CODEX_WORKER_STDOUT_MAX_BYTES, "the retention budget, not the backstop, refuses it");
-      assert.ok(error.pendingLineBytes > CODEX_WORKER_STDOUT_MAX_BYTES, "what it held was one unterminated line");
-      return true;
-    });
+    assert.equal(codex.teardowns(), 0, "retention pressure does not terminate the worker");
+    codex.stdout.end();
+    codex.proc.emit("exit", 0);
+    const result = (await codex.run) as {
+      text: string; isError: boolean; subtype: string;
+      outputTruncation?: { limitBytes: number; retainedBytes: number; spilledBytes: number };
+    };
+    assert.equal(result.isError, true, "malformed output without a result still fails");
+    assert.equal(result.subtype, "error_codex");
+    assert.equal(result.text, "");
+    assert.ok(result.outputTruncation);
+    assert.equal(result.outputTruncation.limitBytes, CODEX_WORKER_STDOUT_MAX_BYTES);
+    assert.ok(result.outputTruncation.retainedBytes <= CODEX_WORKER_STDOUT_MAX_BYTES);
+    assert.equal(result.outputTruncation.spilledBytes,
+      Buffer.byteLength('{"type":"turn.started"') + CODEX_WORKER_STDOUT_MAX_BYTES + 1);
     assert.equal(codex.teardowns(), 1);
   } finally {
     rmSync(codex.home, { recursive: true, force: true });

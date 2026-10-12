@@ -27,10 +27,14 @@
 
 import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
+import { require as tsRequire } from "tsx/cjs/api";
 
 /** Days of warning before a fixture actually expires. One CI-week: long enough that the failure
  *  lands as a named warning someone can act on, short enough not to flag half the corpus. */
 export const MARGIN_DAYS = 7;
+
+/** W1-T7812: the operator's 24 h tier requires a measured verdict before charging a crossing. */
+export const NEAR_CROSSING_HOURS = 24;
 
 const MS_PER_DAY = 86_400_000;
 
@@ -44,14 +48,18 @@ export const EXEMPT_MARKER = "expiring-fixture: exempt";
 
 /**
  * Set (to any truthy string) by ci.yml ONLY on the `ci` job's push-to-main lane (W1-T3655), never
- * on a `pull_request` run. On that lane `origin/main` IS the commit under test -- the run has no
- * earlier base to inherit a crossing FROM, so treating it as one would let a stamp sitting on main
- * excuse itself as "inherited" and go green on the one run that exists to catch it. This is the
- * arm the task's own falsifier calls "the one most likely to be got wrong, since it fails open and
- * looks green": an explicit flag set by the caller who KNOWS which lane it is beats inferring it
- * from a `rev-parse` comparison a coincidental match could satisfy by accident.
+ * on a `pull_request` run. On that lane `origin/main` IS the commit under test, so it is never read
+ * as a base: a stamp sitting on main would excuse itself as "inherited" on the one run that exists
+ * to watch it. W1-T5826: the lane attributes against the push's PARENT instead, which ci.yml passes
+ * explicitly (`--base HEAD^`). A crossing already on that parent is a calendar crossing no push
+ * planted -- warned ahead, never a red main; one this push introduced or moved still blocks. No
+ * explicit base, or an unreadable one, keeps the reading strict -- the flag decides the arm, never
+ * a `rev-parse` comparison a coincidental match could satisfy by accident.
  */
 export const CENSUS_MAIN_BRANCH_RUN = "CENSUS_MAIN_BRANCH_RUN";
+
+/** An `offsetDays` that is the sweep's own staleness policy, read where `main` reads it. */
+export const STALE_DAYS_OFFSET = "sweep.staleDays";
 
 /**
  * The fields a live threshold ages against `Date.now()`, and where that happens.
@@ -59,6 +67,11 @@ export const CENSUS_MAIN_BRANCH_RUN = "CENSUS_MAIN_BRANCH_RUN";
  * This table is the one thing that can silently go stale, so {@link assertFieldsStillAged} pins
  * every row against its own source: rename the field or drop the comparison and the census FAILS
  * rather than quietly covering nothing. That is the difference between a gate and an ornament.
+ *
+ * W1-T6036: `offsetDays` is how long after its stamp a row's threshold fires. A deadline fires AT
+ * its instant, so dating it a staleness threshold later reported a crossing two weeks after it
+ * happened. The `updated_at`/`updatedAt` rows are the wire names one rename away from
+ * `lastActivityAt`: main went red on `updated_at: "2026-09-22T12:00:00Z"` while this read OK.
  */
 export const AGED_FIELDS = [
   {
@@ -67,32 +80,166 @@ export const AGED_FIELDS = [
     source: "src/lib/sweep.ts",
     // `deriveDisposition` parses this field and compares the resulting ageDays to policy.staleDays.
     evidence: ["Date.parse(pr.lastActivityAt)", "policy.staleDays"],
+    offsetDays: STALE_DAYS_OFFSET,
+  },
+  {
+    // The GitHub REST wire name for the same instant: mapRestPr copies it to updatedAt.
+    field: "updated_at",
+    threshold: "sweep.staleDays (REST updated_at -> updatedAt -> lastActivityAt)",
+    source: "src/lib/open-prs-rest.ts",
+    evidence: ["updatedAt: row.updated_at"],
+    offsetDays: STALE_DAYS_OFFSET,
+  },
+  {
+    // buildOpenPrViews copies it to lastActivityAt, which deriveDisposition ages.
+    field: "updatedAt",
+    threshold: "sweep.staleDays (updatedAt -> lastActivityAt)",
+    source: "src/run-task.ts",
+    evidence: ["lastActivityAt: pr.updatedAt"],
+    offsetDays: STALE_DAYS_OFFSET,
   },
   {
     field: "deadline",
     threshold: "follow-up policy evaluation time",
     source: "src/lib/follow-up-policy.ts",
     evidence: ["Date.parse(candidate.deadline)", "<= now"],
+    offsetDays: 0,
   },
   {
     field: "snoozedUntil",
     threshold: "follow-up policy evaluation time",
     source: "src/lib/follow-up-policy.ts",
     evidence: ["Date.parse(current.snoozedUntil)", "> now"],
+    offsetDays: 0,
   },
   {
     field: "freshUntil",
     threshold: "operator preference evaluation time",
     source: "src/lib/preference-policy.ts",
     evidence: ["Date.parse(preference.freshUntil)", "now >"],
+    offsetDays: 0,
   },
   {
     field: "retroAttemptAt",
     threshold: "automated retro attempt backoff",
     source: "src/lib/retro.ts",
-    evidence: ["Date.parse(lastAttempt.retroAttemptAt)", "now.getTime() >= nextEligibleAtMs"],
+    // The first failure's wait; a streak doubles it, so this is the earliest the row can cross.
+    evidence: ["Date.parse(lastAttempt.retroAttemptAt)", "now.getTime() >= nextEligibleAtMs", "baseDelayMs: 6 * 60 * 60 * 1000"],
+    offsetDays: 0.25,
+  },
+  {
+    field: "from",
+    threshold: "feedback age observation-window start",
+    source: "src/lib/human-gate.ts",
+    evidence: ["Date.parse(supplied.window.from)", "input.now >= Date.parse(supplied.window.from)"],
+    offsetDays: 0,
+  },
+  {
+    field: "through",
+    threshold: "feedback age observation-window end",
+    source: "src/lib/human-gate.ts",
+    evidence: ["Date.parse(supplied.window.through)", "input.now <= Date.parse(supplied.window.through)"],
+    offsetDays: 0,
+  },
+  {
+    // W1-T7650-class gap (2026-10-10): a ledger row's `ts` is read inside a TRAILING WINDOW whose
+    // right edge is the real clock. test/new-work-is-ordered-by-cost-of-delay.test.ts stamped its
+    // rows `ts: new Date(NOW - DAY)` off a fixed `NOW`, while `dispatchValueContextForSelection`
+    // takes its `nowMs` from a real `git commit` date -- so every row aged out of the 7-day window
+    // at 2026-10-10T12:00Z and main went red with no diff involved. `ts` is in nearly every ledger
+    // fixture, so this row is SCOPED by `consumers`: only a test file that reaches the real-clock
+    // reader is measured against it. A file that drives the pure function with an injected clock
+    // never names those symbols and is never read here.
+    field: "ts",
+    threshold: "dispatch-value trailing window (DISPATCH_VALUE_WINDOW_MS, 7 days, real-clock right edge)",
+    source: "src/lib/dispatch-value.ts",
+    evidence: ["DISPATCH_VALUE_WINDOW_MS = 7 * 24 * 60 * 60_000", "const since = nowMs - windowMs", "ts >= since"],
+    offsetDays: 7,
+    consumers: ["dispatchValueContextForSelection", ".buildDispatchValueContext?.("],
+    // Its stamps are DERIVED from a file clock anchor, never written as literals -- see
+    // `stampsOnLine`. Opt-in per row: MEASURED 2026-10-10, resolving derived stamps for the sweep
+    // rows above surfaced three new crossings (a-requeue-never-cancels-a-sibling-run,
+    // stacked-child-fix-hold, the-sweep-repairs-a-machine-plan-prs-mechanical-reds) and all three
+    // stayed green with their anchor aged a month back -- `runSweep` takes the injected clock.
+    derived: true,
   },
 ];
+
+/** True when `row` applies to a file with this text: an unscoped row applies everywhere, a row
+ *  with `consumers` only where the file names one of the real-clock entry points it lists. */
+export function rowAppliesTo(row, text) {
+  return !row.consumers || row.consumers.some((c) => text.includes(c));
+}
+
+/** A row's key, bare, quoted or JSON-escaped inside a string, after a left word boundary, then an
+ *  ISO stamp in any quote: `field: "…"`, `"field":"…"`, `\"field\":\"…\"`. */
+function stampRe(field) {
+  return new RegExp(`(?:^|[^\\w$])\\\\?["'\u0060]?${field}\\\\?["'\u0060]?\\s*:\\s*\\\\?["'\u0060](\\d{4}-\\d{2}-\\d{2}T[^"'\u0060\\\\]*)`);
+}
+
+// ── THE DERIVED STAMP (2026-10-10) ──────────────────────────────────────────────────────────────
+//
+// `stampRe` reads a stamp only when the ISO literal sits ON the field's line. The bomb that took
+// main red on 2026-10-10 never did: the literal lived ONCE, in a file-level clock anchor
+// (`const NOW = Date.parse("2026-10-04T12:00:00Z")`), and every row was DERIVED from it
+// (`ts: new Date(NOW - DAY).toISOString()`). The literal scan measured zero stamps in that file and
+// reported OK. A derived stamp is the same fixed date with arithmetic in front of it, so it is
+// resolved here and judged exactly like a literal one: same margin, same base attribution, same
+// exemption marker, for every row that sets `derived: true`. An offset the resolver cannot
+// evaluate is skipped, never guessed.
+
+const ANCHOR_RE = /^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::\s*number\s*)?=\s*(?:Date\.parse\(\s*["'\u0060](\d{4}-\d{2}-\d{2}T[^"'\u0060]*)["'\u0060]\s*\)|new Date\(\s*["'\u0060](\d{4}-\d{2}-\d{2}T[^"'\u0060]*)["'\u0060]\s*\)\.getTime\(\))\s*;?\s*$/;
+const UNIT_RE = /^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::\s*number\s*)?=\s*([\d_]+(?:\s*\*\s*[\d_]+)*)\s*;?\s*$/;
+
+/** File-level clock anchors and numeric unit constants (`DAY = 86_400_000`), by name. */
+export function fileClockConstants(text) {
+  const anchors = new Map();
+  const units = new Map();
+  for (const line of text.split("\n")) {
+    const a = ANCHOR_RE.exec(line);
+    if (a) {
+      const ms = Date.parse(a[2] ?? a[3]);
+      if (!Number.isNaN(ms)) anchors.set(a[1], ms);
+      continue;
+    }
+    const u = UNIT_RE.exec(line);
+    if (u) units.set(u[1], u[2].split("*").reduce((acc, n) => acc * Number(n.trim().replace(/_/g, "")), 1));
+  }
+  return { anchors, units };
+}
+
+/** `ANCHOR`, `ANCHOR - DAY`, `ANCHOR - 30 * DAY + 2 * HOUR`, `ANCHOR - 60_000`: the ms value, or
+ *  undefined for anything else (a call, a local, an unknown unit). */
+export function resolveAnchorExpr(expr, { anchors, units }) {
+  const tokens = expr.replace(/\s+/g, "").match(/^([A-Za-z_$][\w$]*)((?:[+-][\w$*]+)*)$/);
+  if (!tokens || !anchors.has(tokens[1])) return undefined;
+  let total = anchors.get(tokens[1]);
+  for (const [, sign, term] of tokens[2].matchAll(/([+-])([\w$*]+)/g)) {
+    let value = 1;
+    for (const factor of term.split("*")) {
+      if (/^[\d_]+$/.test(factor)) value *= Number(factor.replace(/_/g, ""));
+      else if (units.has(factor)) value *= units.get(factor);
+      else return undefined;
+    }
+    total += sign === "-" ? -value : value;
+  }
+  return total;
+}
+
+function derivedStampRe(field) {
+  return new RegExp(`(?:^|[^\\w$])["'\u0060]?${field}["'\u0060]?\\s*:\\s*new Date\\(([^()]+)\\)\\.toISOString\\(\\)`);
+}
+
+/** Every stamp `row` measures on `line`: the literal one, or one derived from a file clock anchor. */
+export function stampsOnLine(line, row, constants) {
+  const literal = stampRe(row.field).exec(line);
+  if (literal) return [literal[1]];
+  if (!row.derived || !constants || constants.anchors.size === 0) return [];
+  const derived = derivedStampRe(row.field).exec(line);
+  if (!derived) return [];
+  const ms = resolveAnchorExpr(derived[1], constants);
+  return ms === undefined ? [] : [new Date(ms).toISOString()];
+}
 
 /** The population ratchet: each file's measured fixture count as captured on W1-T3334.
  *
@@ -322,21 +469,25 @@ export function censusExpiringFixtures({ files, readFile, now, thresholdDays, ma
   let population = 0;
 
   for (const file of files) {
-    const lines = readFile(file).split("\n");
+    const text = readFile(file);
+    const lines = text.split("\n");
+    const constants = fileClockConstants(text);
+    const rows = AGED_FIELDS.filter((row) => rowAppliesTo(row, text));
     for (const [index, line] of lines.entries()) {
-      for (const row of AGED_FIELDS) {
-        // The stamp as it is actually written in a fixture: `field: "2026-08-26T18:15:00Z"`.
-        const m = new RegExp(`${row.field}\\s*:\\s*"(\\d{4}-\\d{2}-\\d{2}T[^"]*)"`).exec(line);
-        if (!m) continue;
+      for (const row of rows) {
+        // The stamp as it is actually written in a fixture: `field: "2026-08-26T18:15:00Z"`, or
+        // derived from a fixed anchor: `field: new Date(NOW - DAY).toISOString()`.
+        const [stampText] = stampsOnLine(line, row, constants);
+        if (stampText === undefined) continue;
         population += 1;
         populationByFile[file] = (populationByFile[file] ?? 0) + 1;
 
-        const stamp = Date.parse(m[1]);
+        const stamp = Date.parse(stampText);
         if (Number.isNaN(stamp)) continue;
-        const expiresAt = stamp + thresholdDays * MS_PER_DAY;
+        const expiresAt = stamp + (row.offsetDays === STALE_DAYS_OFFSET ? thresholdDays : row.offsetDays) * MS_PER_DAY;
         const daysLeft = (expiresAt - now) / MS_PER_DAY;
 
-        const record = { file, line: index + 1, field: row.field, threshold: row.threshold, stamp: m[1], expiresAt, daysLeft };
+        const record = { file, line: index + 1, field: row.field, threshold: row.threshold, stamp: stampText, expiresAt, daysLeft };
 
         // The marker may sit on the line itself or on the comment line directly above it.
         const nearby = `${line}\n${index > 0 ? lines[index - 1] : ""}`;
@@ -365,10 +516,10 @@ export function censusExpiringFixtures({ files, readFile, now, thresholdDays, ma
     for (const file of new Set(reported.map((r) => r.file))) {
       const baseText = readBaseFile(file);
       if (baseText === undefined) continue; // absent at base ⇒ every stamp in it is this diff's
+      const baseConstants = fileClockConstants(baseText);
       for (const line of baseText.split("\n")) {
         for (const row of AGED_FIELDS) {
-          const m = new RegExp(`${row.field}\\s*:\\s*"(\\d{4}-\\d{2}-\\d{2}T[^"]*)"`).exec(line);
-          if (m) inheritedKeys.add(`${file}\u0000${row.field}\u0000${m[1]}`);
+          for (const stampText of stampsOnLine(line, row, baseConstants)) inheritedKeys.add(`${file}\u0000${row.field}\u0000${stampText}`);
         }
       }
     }
@@ -389,15 +540,38 @@ export function refusePopulationDrop(currentByFile, recordedByFile = RECORDED_PO
   return drops.sort((a, b) => a.file.localeCompare(b.file));
 }
 
-/**
- * The ONE place "does this run block" is decided (W1-T3839). `formatReport`'s headline and
- * `main()`'s exit code both call this rather than each re-deriving `introduced` themselves, so a
- * BLOCKED headline and a zero exit cannot drift apart again the way they did before this existed:
- * a crossing this diff introduced, or a population drop, blocks; an inherited-only crossing does
- * not (W1-T3655) -- see the header note (iv) for why that boundary itself is unchanged.
- */
+export function proveNearCrossings(reported, runSuite, controlShiftDays) {
+  const byFile = new Map();
+  for (const row of reported) {
+    if (row.daysLeft > 0 && row.daysLeft * 24 < NEAR_CROSSING_HOURS) {
+      const rows = byFile.get(row.file) ?? [];
+      rows.push(row);
+      byFile.set(row.file, rows);
+    }
+  }
+  for (const [file, rows] of byFile) {
+    const shiftDays = Math.ceil(Math.max(...rows.map((r) => r.daysLeft))) + 1;
+    let verification;
+    try {
+      const control = runSuite(file, controlShiftDays);
+      if (!control.passed) {
+        verification = { verdict: "control_failed", reason: "file is red without any shift", ...control };
+      } else {
+        const shifted = runSuite(file, shiftDays);
+        verification = { verdict: shifted.passed ? "shifted_passed" : "confirmed", shiftDays, ...shifted };
+      }
+    } catch (error) {
+      verification = { verdict: "run_error", reason: String(error) };
+    }
+    for (const row of rows) row.verification = verification;
+  }
+}
+
+/** Headline and exit share this decision: near crossings need verdicts; further crossings keep attribution. */
 export function isBlocked({ reported, populationDrop = [] }) {
-  const introduced = reported.filter((r) => r.inherited !== true);
+  const introduced = reported.filter((r) => r.verification
+    ? r.verification.verdict !== "shifted_passed"
+    : r.inherited !== true);
   return introduced.length > 0 || populationDrop.length > 0;
 }
 
@@ -420,25 +594,29 @@ export function formatReport({ population, reported, exempt, alreadyExpired = []
     if (out.length > 0) out.push("");
     const introduced = reported.filter((r) => r.inherited !== true);
     const inherited = reported.filter((r) => r.inherited === true);
-    // W1-T3839: THE HEADLINE STATES WHAT THIS RUN DECIDED, NOT WHAT EXISTS. `introduced` is the
-    // only thing THIS run charges -- see `isBlocked`, the single place that decision is made, which
-    // `main()` also calls for the exit code so the two can never read this tree differently. When
-    // every crossing here is inherited (introduced.length === 0) this run charges nothing, so the
-    // headline must not say BLOCKED even though crossings are still reported below (iii) -- a
-    // BLOCKED headline next to a zero exit is exactly the contradiction this task exists to close.
-    if (introduced.length > 0) {
+    // W1-T3839: the headline states the same decision as the exit code.
+    if (isBlocked({ reported, populationDrop })) {
       out.push(`expiring-fixture-census: BLOCKED -- ${reported.length} fixture(s) CROSS their threshold within ${marginDays} day(s):`);
-    } else {
+    } else if (reported.every((r) => r.inherited === true && !r.verification)) {
       out.push(
         `expiring-fixture-census: CLEAR -- this run charges nothing; ${reported.length} inherited crossing(s) reported below, owned ` +
-          `by the base and caught on the push-to-main lane (${CENSUS_MAIN_BRANCH_RUN}):`,
+          `by the base and warned ahead of its red date on the push-to-main lane (${CENSUS_MAIN_BRANCH_RUN}):`,
       );
+    } else {
+      out.push(`expiring-fixture-census: CLEAR -- near crossings stayed green in their shifted re-runs; ${reported.length} crossing(s) reported below:`);
     }
     for (const r of [...reported].sort((a, b) => a.daysLeft - b.daysLeft)) {
       const owner = r.inherited === true ? "  [inherited from the base -- NOT this diff]" : "";
       out.push(`  - ${r.file}:${r.line}  ${r.field}="${r.stamp}" vs ${r.threshold}  --  goes red ${expiryDay(r.expiresAt)} (${r.daysLeft.toFixed(1)}d)${owner}`);
+      const proof = r.verification;
+      if (proof) {
+        out.push(`    ${proof.verdict}${proof.reason ? ` -- ${proof.reason}` : ` -- ${proof.pass}/${proof.tests} pass with Date.now shifted +${proof.shiftDays}d`}`);
+        if (proof.verdict === "shifted_passed") {
+          out.push(`    ${EXEMPT_MARKER} -- suite remains green across the crossing; ${proof.pass}/${proof.tests} pass with Date.now shifted +${proof.shiftDays}d`);
+        }
+      }
     }
-    if (introduced.length > 0) {
+    if (introduced.some((r) => !r.verification || r.verification.verdict === "confirmed")) {
       out.push(`  TO FIX: stamp the fixture from the clock (see test/stale-ci-gate-wiring.test.ts), or, if it must`);
       out.push(`  stay fixed, age it past the threshold, re-run, and if nothing fails say so: ${EXEMPT_MARKER} -- <why>.`);
       out.push(`  Moving the constant forward only re-arms the same bomb on a later date.`);
@@ -485,16 +663,48 @@ export function encodeAnnotation(text) {
   return text.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
 }
 
-/** Write the report to the two channels a job can actually reach. No-op unless RMD_CI_REPORT is set. */
-export function emitCiReport(tool, report, { blocked, env = process.env, log = console.log, append = null } = {}) {
+/** One inherited crossing as a single line: file, line, threshold and the date it goes red. */
+export function describeWarning(r) {
+  return `${r.file}:${r.line} ${r.field}="${r.stamp}" vs ${r.threshold} -- goes red ${expiryDay(r.expiresAt)}, inherited from the push's parent (not charged; defuse it before then)`;
+}
+
+/** Write the report to the two channels a job can actually reach. No-op unless RMD_CI_REPORT is set.
+ *  `warnings` (W1-T5826) are the main lane's inherited crossings: a `::warning` each, anchored to
+ *  the fixture's file and line, plus one step-summary line each -- named ahead, never a red. */
+export function emitCiReport(tool, report, { blocked, warnings = [], env = process.env, log = console.log, append = null } = {}) {
   if (!env.RMD_CI_REPORT) return false;
   if (blocked) log(`::error title=${tool}::${encodeAnnotation(report)}`);
+  for (const w of warnings) log(`::warning file=${w.file},line=${w.line},title=${tool}::${encodeAnnotation(describeWarning(w))}`);
   const summaryPath = env.GITHUB_STEP_SUMMARY;
   if (summaryPath) {
     const write = append ?? appendFileSync;
-    write(summaryPath, `### ${tool}\n\n\u0060\u0060\u0060\n${report}\n\u0060\u0060\u0060\n\n`);
+    const warned = warnings.map((w) => `- :warning: ${describeWarning(w)}\n`).join("");
+    write(summaryPath, `### ${tool}\n\n${warned}${warned ? "\n" : ""}\u0060\u0060\u0060\n${report}\n\u0060\u0060\u0060\n\n`);
   }
   return true;
+}
+
+/** `--base <ref>` from the CLI: the explicit base to attribute crossings against, else undefined. */
+export function baseArg(argv) {
+  const i = argv.indexOf("--base");
+  return i >= 0 && argv[i + 1] ? argv[i + 1] : undefined;
+}
+
+/** A reader for `<baseRef>:<path>`, or undefined when the ref does not resolve (a shallow clone, a
+ *  fresh local repo, a root commit's absent parent) -- the gate then reads strict, as it always has. */
+function baseFileReader(execFile, baseRef) {
+  try {
+    execFile("git", ["rev-parse", "--verify", `${baseRef}^{commit}`], { encoding: "utf8", stdio: "pipe" });
+  } catch {
+    return undefined;
+  }
+  return (path) => {
+    try {
+      return execFile("git", ["show", `${baseRef}:${path}`], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024, stdio: "pipe" });
+    } catch {
+      return undefined; // absent at base ⇒ the file is this diff's own
+    }
+  };
 }
 
 export function main({
@@ -514,8 +724,12 @@ export function main({
     assertFieldListComplete({ files: srcFiles, readFile, agedFields: [...AGED_FIELDS, ...KNOWN_UNCOVERED_CLOCK_FIELDS] });
   },
   recordedPopulationByFile = RECORDED_POPULATION_BY_FILE,
-  baseRefOverride,
+  argv = [],
+  baseRefOverride = baseArg(argv),
   env = process.env,
+  append = null,
+  runSuite,
+  repoRoot = process.cwd(),
 } = {}) {
   assertAged();
   assertComplete();
@@ -523,30 +737,12 @@ export function main({
   // The threshold comes from the policy the sweep actually loads, never a copy of the number here.
   const policy = JSON.parse(execFile("node", ["--import", "tsx", "-e", "import {loadDefaultPolicy} from './src/lib/policy.ts'; console.log(JSON.stringify(loadDefaultPolicy().values.sweep));"], { encoding: "utf8" }));
   // Default to origin/main rather than requiring a workflow change to pass it: CI checks out with
-  // fetch-depth 0, so the ref is present. Unreadable (a shallow clone, a fresh local repo) leaves
-  // `readBaseFile` undefined and the gate behaves exactly as it did before attribution existed.
-  const baseRef = baseRefOverride ?? "origin/main";
-  let readBaseFile;
-  // W1-T3655: on the base's own run there is no earlier base to inherit FROM -- see
-  // CENSUS_MAIN_BRANCH_RUN's own comment for why this is checked BEFORE the rev-parse probe
-  // rather than folded into it. `readBaseFile` stays undefined, so every crossing reads exactly as
-  // strict as it would with no base readable at all.
-  if (env[CENSUS_MAIN_BRANCH_RUN]) {
-    readBaseFile = undefined;
-  } else {
-    try {
-      execFile("git", ["rev-parse", "--verify", `${baseRef}^{commit}`], { encoding: "utf8", stdio: "pipe" });
-      readBaseFile = (path) => {
-        try {
-          return execFile("git", ["show", `${baseRef}:${path}`], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024, stdio: "pipe" });
-        } catch {
-          return undefined; // absent at base ⇒ the file is this diff's own
-        }
-      };
-    } catch {
-      readBaseFile = undefined;
-    }
-  }
+  // fetch-depth 0, so the ref is present. Unreadable leaves `readBaseFile` undefined: strict.
+  // W1-T3655/W1-T5826: on the base's own run `origin/main` is the commit under test, so only an
+  // EXPLICIT base -- ci.yml's `--base HEAD^`, the push's parent -- is read; without one, strict.
+  const mainLane = Boolean(env[CENSUS_MAIN_BRANCH_RUN]);
+  const baseRef = mainLane ? baseRefOverride : (baseRefOverride ?? "origin/main");
+  const readBaseFile = baseRef ? baseFileReader(execFile, baseRef) : undefined;
   const result = censusExpiringFixtures({
     files,
     readFile,
@@ -554,20 +750,18 @@ export function main({
     thresholdDays: policy.staleDays,
     readBaseFile,
   });
+  if (result.reported.some((r) => r.daysLeft > 0 && r.daysLeft * 24 < NEAR_CROSSING_HOURS)) {
+    const shared = tsRequire("../src/lib/gate-gardener.ts", import.meta.url);
+    proveNearCrossings(result.reported, runSuite ?? ((file, days) => shared.runSuiteShiftedMeasured(repoRoot, file, days)), shared.DEFUSE_CONTROL_SHIFT_DAYS);
+  }
   const populationDrop = refusePopulationDrop(result.populationByFile, recordedPopulationByFile);
   const report = formatReport({ ...result, populationDrop });
   log(report);
-  // ATTRIBUTION NAMES THE OWNER, AND NOW DOES MOVE THE GATE FOR THE HALF IT CAN PROVE IS NOT THIS
-  // DIFF'S (W1-T3655). W1-T3388 deliberately left every crossing blocking, inherited or not,
-  // because nothing observed `main` -- a non-blocking inherited crossing would have been a warning
-  // no gate enforced, and the bomb would still reach its own red date unfixed. ci.yml's `ci` job
-  // now runs this census on its push-to-main lane too (CENSUS_MAIN_BRANCH_RUN, see above), so a
-  // stamp sitting on main is caught by the run that owns it. With that run in place, a crossing
-  // marked `inherited === true` is reported -- never hidden -- but no longer charged to a PR that
-  // did not plant it; only a crossing this diff itself introduced, or a population drop, blocks.
+  // W1-T7812: near verdicts decide the block; W1-T5826 warnings remain for further inherited crossings.
   const blocked = isBlocked({ reported: result.reported, populationDrop });
-  emitCiReport("expiring-fixture-census", report, { blocked });
+  const warnings = mainLane ? result.reported.filter((r) => r.inherited === true && !r.verification) : [];
+  emitCiReport("expiring-fixture-census", report, { blocked, warnings, env, log, append });
   return blocked ? 1 : 0;
 }
 
-if (process.argv[1] && process.argv[1].endsWith("expiring-fixture-census.mjs")) process.exit(main());
+if (process.argv[1] && process.argv[1].endsWith("expiring-fixture-census.mjs")) process.exit(main({ argv: process.argv.slice(2) }));

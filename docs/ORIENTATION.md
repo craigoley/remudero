@@ -1,22 +1,42 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-10-03T00:02:41.332Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-10-06T11:39:39.273Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-15 run(s) since the last retro marker. Verdicts: {"blocked_containment":2,"failed":5,"handed_off":2,"incomplete":5,"merged":1}.
+27 run(s) since the last retro marker. Verdicts: {"handed_off":7,"incomplete":5,"merged":15}.
 
 ### Shipped since marker
-- RETRO → https://github.com/craigoley/remudero/pull/8721 (gate-side merge; run ended incomplete)
-- TRIAGE-fb-1789303258903-a19164 → https://github.com/craigoley/remudero/pull/8726 (gate-side merge; run ended incomplete)
-- W1-T5308 → https://github.com/craigoley/remudero/pull/8738 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
+- W1-T5633 → https://github.com/craigoley/remudero/pull/9471 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5653 → https://github.com/craigoley/remudero/pull/9497 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5657 → https://github.com/craigoley/remudero/pull/9508 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5658 → https://github.com/craigoley/remudero/pull/9517 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5659 → https://github.com/craigoley/remudero/pull/9521 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5661 → https://github.com/craigoley/remudero/pull/9524 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5696 → https://github.com/craigoley/remudero/pull/9534 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5710 → https://github.com/craigoley/remudero/pull/9509 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5721 → https://github.com/craigoley/remudero/pull/9525 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5722 → https://github.com/craigoley/remudero/pull/9499 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5730 → https://github.com/craigoley/remudero/pull/9510 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5731 → https://github.com/craigoley/remudero/pull/9515 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5733 → https://github.com/craigoley/remudero/pull/9514 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5741 → https://github.com/craigoley/remudero/pull/9522 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5744 → https://github.com/craigoley/remudero/pull/9520 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5747 → https://github.com/craigoley/remudero/pull/9529 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5764 → https://github.com/craigoley/remudero/pull/9526 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5766 → https://github.com/craigoley/remudero/pull/9531 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5780 → https://github.com/craigoley/remudero/pull/9533 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5807 → https://github.com/craigoley/remudero/pull/9536 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5827 → https://github.com/craigoley/remudero/pull/9538 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5843 → https://github.com/craigoley/remudero/pull/9541 (gate-side merge; run ended handed_off)
+- W1-T5974 → https://github.com/craigoley/remudero/pull/9500 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
 
 ## Next runnable task
 
-**W1-T3990** — FEEDBACK LANDING MUST POST remudero-review BEFORE ARMING AUTO-MERGE — landing PR creation currently arms GitHub auto-merge with the required review context absent, so a healthy data-only landing can sit blocked until an operator runs rmd review
+**W1-T4939** — THE IDLE-LANE ACCOUNT BARELY RECORDS — W1-T4837's summary is emitted once per window from memory, the daemon restarts on merges before most windows close, and rotation may shed the rows; only 2 lane.idle_summary rows exist a day after it shipped. Flush the account on restart, keep the rows through rotation, and show them in rmd status
 
 - risk: high · depends_on: (none)
 
@@ -45,11 +65,17 @@ not by re-deriving state from the full plan and ledger.
 - 8B. The loop never waits on a human unless the plan says so. Idle = groom.
 - 9. OSS defaults must be defensible on a stranger's machine; yolo is a documented opt-in.
 - 10. This document is truth. Every session syncs it before acting and after shipping.
-- 11. Isolation and containment are PROVEN PER RUN by probe, never assumed from configuration. A
+- 11. Isolation and containment are PROVEN by probe — once per boot and again on any change of the
+  probe's inputs — never assumed from configuration. A
   setting that "should" isolate (ZDOTDIR, a sandbox block, a stripped env) is a hypothesis until a
-  preflight probe confirms it on THIS machine, THIS run — config that happens to work by accident of
+  preflight probe confirms it on THIS machine, for THIS image, harness and worker policy — config that
+  happens to work by accident of
   the host (PR #8: isolation held only because `~/.bashrc` was absent) must fail closed the moment the
-  accident ends. See FIELD FINDING 11, W1-T17.
+  accident ends. See FIELD FINDING 11, W1-T17. [operator ruling 2026-10-02, W1-T5346: a process
+  reuses a passing proof only while every input the probes read — image build sha, harness revision,
+  rendered worker settings, hook content, CLI version, provider — is unchanged (`probeVerdictKey`),
+  and ledgers each reuse with the proving run; a failed probe is never cached and holds every later
+  run until a probe passes.]
 - 12. Supervision is deterministic; judgment is advisory. An LLM may RECOMMEND a halt; only code may
   ENFORCE one. The flight judge and specialist panels (§4B) return verdicts a deterministic
   controller acts on; no LLM sits in the merge decision, and none edits code. See §4B, W1-T20/21/22,

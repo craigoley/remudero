@@ -5,10 +5,14 @@
   type: implement
   verify: auto
   risk: medium
-  priority: 4
-  status: queued
+  status: blocked
+  retirement: retired
   # backlog gardener: band=4 evidence=3c3c3e63206b3d07
   attempts: 0
+  note: |
+    OPERATOR RULING 2026-10-05: retire this task as satisfied by W1-T4397 (merged as abea57d7). Verified 2026-10-05 on origin/main: scripts/diff-class.mjs classifies doctrine/x/y.md, CLAUDE.md, AGENTS.md and all three together as DOCS_ONLY, both plain and --coverage-class.
+    The operator approved this retirement in the operator session ("go with all of your
+    recommended follow ups"). No other task, dependency or acceptance criterion changes.
   files:
     - scripts/diff-class.mjs
     - test/diff-class.test.ts

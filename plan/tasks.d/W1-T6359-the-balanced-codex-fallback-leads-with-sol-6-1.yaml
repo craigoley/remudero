@@ -1,0 +1,31 @@
+- id: W1-T6359
+  title: "THE BALANCED CODEX FALLBACK LEADS WITH SOL 6.1 — FALLBACK_CODEX_MODELS.balanced (src/lib/worker-provider.ts) still lists gpt-6-luna, gpt-5.6-luna, gpt-5.5 with no Sol at all, while every configured balanced seat (.remudero/mounts.yaml capabilities.codex.balanced) leads gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — the code fallback for the balanced tier matches the configured Sol 6.1 order
+  band_meaning: span
+  origin: "operator session 2026-10-08: Sol 6.1 adoption audit (operator: 'we should add Sol 6.1 everywhere')"
+  plan_refs: []
+  files: [src/lib/worker-provider.ts, test/a-missing-capability-table-downgrades-a-frontier-lane-silently.test.ts, test/the-balanced-codex-fallback-leads-with-sol-6-1.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main e1f0f8950: FALLBACK_CODEX_MODELS.frontier already leads gpt-6.1-sol, but .balanced is
+    [gpt-6-luna, gpt-5.6-luna, gpt-5.5]. When a capability table is missing (the path
+    test/a-missing-capability-table-downgrades-a-frontier-lane-silently.test.ts pins), a balanced Codex lane drops
+    to Luna instead of Sol 6.1. The operator ruled 2026-10-08 that Sol 6.1 should be used everywhere Sol is offered;
+    the mounts' balanced row already leads 6.1 (docs/model-routing.md "2026-10-02 Sol 6.1 switch").
+  design: |
+    Set FALLBACK_CODEX_MODELS.balanced to [gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol], matching the mounts' balanced
+    order, and update the existing missing-capability-table test's pinned arrays to the new order. Economy and
+    frontier fallbacks are unchanged.
+  acceptance:
+    - claim: "with no capability table, a balanced Codex lane routes gpt-6.1-sol first"
+      proof: 'grep: test("W1-T6359: a balanced fallback leads with gpt-6.1-sol" in test/the-balanced-codex-fallback-leads-with-sol-6-1.test.ts'
+  falsifier: |
+    Keep the Luna list: the balanced fallback's first model is gpt-6-luna and the test fails.

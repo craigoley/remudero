@@ -292,13 +292,82 @@ function taskCitationForms(taskId: string): string[] {
   return forms;
 }
 
-function citesTaskId(event: GitCommitEvent, taskId: string): boolean {
-  const subject = ` ${event.subject.toLowerCase()} `;
-  const body = ` ${event.body.toLowerCase()} `;
-  return taskCitationForms(taskId).some((form) => {
-    const re = new RegExp(`[(\\s,:]${escapeRegExp(form.toLowerCase())}[)\\s,:.]`);
-    return re.test(subject) || re.test(body);
+// W1-T6301 — THE CITATION INDEX. A form cites a commit when, in the commit's lowercased and
+// space-padded subject or body, it is preceded by one of `(\s,:` and followed by one of `)\s,:.`.
+// The per-call shape this replaces compiled that regex for EVERY (row, commit, form) and
+// re-lowercased every commit each time — O(rows × commits) compiles, 186 s of one daemon profile.
+// For a form containing NONE of the delimiter characters `()\s,:.`, a bounded match is exactly a
+// maximal non-delimiter run whose left neighbour is in the left class and right neighbour in the
+// right class — so each commit is tokenized ONCE and a lookup answers identically. A form that
+// does contain a delimiter (or is empty) cannot be a token and falls back to the regex, compiled
+// once per task id per report, never per commit. Exported only so the test suite can drive each
+// class's accept and reject arms (the negative-reachability ratchet).
+export const CITATION_RUN_RE = /[^()\s,:.]+/g;
+export const CITATION_SEPARATOR_RE = /[()\s,:.]/;
+export const CITATION_LEFT_RE = /[(\s,:]/;
+export const CITATION_RIGHT_RE = /[)\s,:.]/;
+
+function addCitedTokens(padded: string, into: Set<string>): void {
+  CITATION_RUN_RE.lastIndex = 0;
+  for (let m = CITATION_RUN_RE.exec(padded); m !== null; m = CITATION_RUN_RE.exec(padded)) {
+    const start = m.index;
+    const end = start + m[0].length;
+    if (start > 0 && end < padded.length && CITATION_LEFT_RE.test(padded[start - 1]!) && CITATION_RIGHT_RE.test(padded[end]!)) {
+      into.add(m[0]);
+    }
+  }
+}
+
+/** One report's commits, prepared ONCE: lowercased+padded text, parsed timestamps, and the
+ *  token → citing-commit-indices map. `citing(taskId)` is memoized per task id. */
+interface CommitIndex {
+  readonly commits: readonly GitCommitEvent[];
+  readonly tsMs: readonly number[];
+  citing(taskId: string): { order: readonly number[]; set: ReadonlySet<number> };
+}
+
+function buildCommitIndex(commits: readonly GitCommitEvent[]): CommitIndex {
+  const lowered: Array<{ subject: string; body: string }> = [];
+  const byToken = new Map<string, number[]>();
+  const tsMs: number[] = [];
+  commits.forEach((c, i) => {
+    const subject = ` ${c.subject.toLowerCase()} `;
+    const body = ` ${c.body.toLowerCase()} `;
+    lowered.push({ subject, body });
+    tsMs.push(new Date(c.ts).getTime());
+    const tokens = new Set<string>();
+    addCitedTokens(subject, tokens);
+    addCitedTokens(body, tokens);
+    for (const t of tokens) {
+      const list = byToken.get(t);
+      if (list) list.push(i);
+      else byToken.set(t, [i]);
+    }
   });
+  const memo = new Map<string, { order: readonly number[]; set: ReadonlySet<number> }>();
+  return {
+    commits,
+    tsMs,
+    citing(taskId) {
+      const hit = memo.get(taskId);
+      if (hit) return hit;
+      const set = new Set<number>();
+      for (const rawForm of taskCitationForms(taskId)) {
+        const form = rawForm.toLowerCase();
+        if (form.length > 0 && !CITATION_SEPARATOR_RE.test(form)) {
+          for (const i of byToken.get(form) ?? []) set.add(i);
+          continue;
+        }
+        const re = new RegExp(`[(\\s,:]${escapeRegExp(form)}[)\\s,:.]`);
+        lowered.forEach((l, i) => {
+          if (re.test(l.subject) || re.test(l.body)) set.add(i);
+        });
+      }
+      const entry = { order: [...set].sort((a, b) => a - b), set };
+      memo.set(taskId, entry);
+      return entry;
+    },
+  };
 }
 
 /** Arming precedes the actual GitHub merge by seconds to minutes (the ledger `ts` and git's
@@ -310,14 +379,16 @@ const CLOCK_SKEW_SLACK_MS = 60 * 60 * 1000;
  * The row's merge commit: the EARLIEST commit citing `taskId` at or after `armedTs` minus
  * {@link CLOCK_SKEW_SLACK_MS}. "Earliest after the arm" is what distinguishes the merge itself
  * from a LATER commit that also cites the same task id — a genuine follow-up fix, never
- * mistaken for the merge because it necessarily sorts after it.
+ * mistaken for the merge because it necessarily sorts after it. Returns the commit's INDEX in
+ * `index.commits`; candidates stay in dump order before the stable sort, so a tie on `ts`
+ * resolves exactly as the per-commit scan did.
  */
-function locateMergeCommit(commits: readonly GitCommitEvent[], taskId: string, armedTs: string): GitCommitEvent | undefined {
+function locateMergeCommit(index: CommitIndex, taskId: string, armedTs: string): number | undefined {
   const floorMs = new Date(armedTs).getTime() - CLOCK_SKEW_SLACK_MS;
-  return commits
-    .filter((c) => citesTaskId(c, taskId))
-    .filter((c) => new Date(c.ts).getTime() >= floorMs)
-    .sort((a, b) => a.ts.localeCompare(b.ts))[0];
+  return index
+    .citing(taskId)
+    .order.filter((i) => index.tsMs[i]! >= floorMs)
+    .sort((a, b) => index.commits[a]!.ts.localeCompare(index.commits[b]!.ts))[0];
 }
 
 function shaNames(candidate: string, mergeSha: string): boolean {
@@ -331,15 +402,17 @@ function shaNames(candidate: string, mergeSha: string): boolean {
  *  a `This reverts commit <sha>` body naming `merge`'s own sha, or a `Revert`-typed subject that
  *  also cites `taskId` (GitHub's default revert PR subject quotes the original title verbatim,
  *  which is where the task-id citation the original merge carried survives). */
-function wasReverted(commits: readonly GitCommitEvent[], merge: GitCommitEvent, taskId: string, windowDays: number): boolean {
-  const mergedMs = new Date(merge.ts).getTime();
+function wasReverted(index: CommitIndex, mergeIdx: number, taskId: string, windowDays: number): boolean {
+  const merge = index.commits[mergeIdx]!;
+  const mergedMs = index.tsMs[mergeIdx]!;
   const windowEndMs = mergedMs + windowDays * 24 * 60 * 60 * 1000;
-  return commits.some((c) => {
-    const ts = new Date(c.ts).getTime();
+  const cites = index.citing(taskId).set;
+  return index.commits.some((c, i) => {
+    const ts = index.tsMs[i]!;
     if (!(ts > mergedMs && ts <= windowEndMs)) return false;
     const bodyMatch = /This reverts commit\s+([0-9a-f]{7,40})/i.exec(c.body);
-    if (bodyMatch && shaNames(bodyMatch[1], merge.sha)) return true;
-    return /^revert\b/i.test(c.subject.trim()) && citesTaskId(c, taskId);
+    if (bodyMatch && shaNames(bodyMatch[1]!, merge.sha)) return true;
+    return /^revert\b/i.test(c.subject.trim()) && cites.has(i);
   });
 }
 
@@ -353,14 +426,16 @@ function filesOverlap(a: readonly string[], b: readonly string[]): boolean {
 
 /** {@link ATTRIBUTION_POLICY}'s overlap rule, applied to one merge — see the module doc's
  *  "over-attribution guard" paragraph for why citing NEITHER attributes to nothing. */
-function hasFollowupFix(commits: readonly GitCommitEvent[], merge: GitCommitEvent, taskId: string, windowDays: number): boolean {
-  const mergedMs = new Date(merge.ts).getTime();
+function hasFollowupFix(index: CommitIndex, mergeIdx: number, taskId: string, windowDays: number): boolean {
+  const merge = index.commits[mergeIdx]!;
+  const mergedMs = index.tsMs[mergeIdx]!;
   const windowEndMs = mergedMs + windowDays * 24 * 60 * 60 * 1000;
-  return commits.some((c) => {
+  const cites = index.citing(taskId).set;
+  return index.commits.some((c, i) => {
     if (!FIX_TYPE_RE.test(c.subject.trim())) return false;
-    const ts = new Date(c.ts).getTime();
+    const ts = index.tsMs[i]!;
     if (!(ts > mergedMs && ts <= windowEndMs)) return false;
-    return filesOverlap(c.files, merge.files) || citesTaskId(c, taskId);
+    return filesOverlap(c.files, merge.files) || cites.has(i);
   });
 }
 
@@ -490,6 +565,9 @@ export function verdictCalibrationReport(
   const policy = opts.policy ?? ATTRIBUTION_POLICY;
   const minPopulationFloor = opts.minPopulationFloor ?? MIN_POPULATION_FLOOR;
   const commits = opts.gitReadError ? [] : parseGitEventDump(gitDump);
+  // W1-T6301 — parse once, index once: every row below looks its task id up in this index
+  // instead of re-lowercasing and re-matching every commit per row.
+  const index = buildCommitIndex(commits);
 
   const totals = new Map<VerdictClass, { total: number; reverted: number; fixed: number; lanes: Set<string>; taskIds: string[] }>(
     VERDICT_CLASSES.map((c) => [c, { total: 0, reverted: 0, fixed: 0, lanes: new Set<string>(), taskIds: [] }]),
@@ -523,8 +601,8 @@ export function verdictCalibrationReport(
       );
       continue;
     }
-    const merge = locateMergeCommit(commits, row.taskId, row.armedTs);
-    if (!merge) {
+    const merge = locateMergeCommit(index, row.taskId, row.armedTs);
+    if (merge === undefined) {
       pushUnmeasurable(
         row,
         `no commit on the read git history cites ${row.taskId} at or after its arm timestamp ` +
@@ -545,11 +623,11 @@ export function verdictCalibrationReport(
     laneBucket.total += 1;
     laneBucket.taskIds.push(row.taskId);
     laneTotals.set(key, laneBucket);
-    if (wasReverted(commits, merge, row.taskId, policy.windowDays)) {
+    if (wasReverted(index, merge, row.taskId, policy.windowDays)) {
       bucket.reverted += 1;
       laneBucket.reverted += 1;
     }
-    if (hasFollowupFix(commits, merge, row.taskId, policy.windowDays)) {
+    if (hasFollowupFix(index, merge, row.taskId, policy.windowDays)) {
       bucket.fixed += 1;
       laneBucket.fixed += 1;
     }

@@ -352,7 +352,7 @@ function timedHarness(startIso: string) {
   const rollup = createRouteReadRollup({ clock: clockFromMillisFn(() => now), write: (row) => rows.push(row), elapsed: () => monotonic });
   rollup.start();
   const timed = (path: string, ms: number, contentType = "application/json; charset=utf-8"): void => {
-    const res = Object.assign(new EventEmitter(), { getHeader: (name: string) => (name === "content-type" ? contentType : undefined) });
+    const res = Object.assign(new EventEmitter(), { statusCode: 200, getHeader: (name: string) => (name === "content-type" ? contentType : undefined) });
     void rollup.wrap({ method: "GET", path, scope: "read", handler: () => { monotonic += ms; } }).handler(req(), res as unknown as ServerResponse, {} as never);
     res.emit("finish");
   };
@@ -368,7 +368,8 @@ test("the route read rollup times each get from finish into p50 and p99 per path
   h.timed("/v1/views/events", 5_000, "text/event-stream");
   const summary = h.rollup.summary();
   const route = (path: string) => summary.routes.find((r) => r.path === path)!;
-  assert.deepEqual(route("/v1/views/now").latency, { n: 100, maxMs: 40, buckets: { "1": 98, "50": 2 }, p50Ms: 1, p99Ms: 40 });
+  const firstHourLatency = { n: 100, maxMs: 40, buckets: { "1": 98, "50": 2 }, p50Ms: 1, p99Ms: 40 };
+  assert.deepEqual(route("/v1/views/now").latency, { ...firstHourLatency, statusClass: { "2xx": firstHourLatency } });
   assert.deepEqual([route("/v1/status").latency?.p50Ms, route("/v1/status").latency?.p99Ms], [120, 120], "a percentile never reads above the slowest sample");
   assert.equal(route("/v1/views/events").latency, undefined, "an event stream's lifetime is not a handler time");
   assert.equal(route("/v1/views/events").fleet?.reads, 1, "but its open is still a counted read");
@@ -377,7 +378,7 @@ test("the route read rollup times each get from finish into p50 and p99 per path
   h.at("2026-10-01T11:00:10Z");
   h.rollup.tick();
   assert.equal(h.rows.length, 1);
-  assert.deepEqual(h.rows[0]!.latency!["/v1/views/now"], { n: 100, maxMs: 40, buckets: { "1": 98, "50": 2 }, p50Ms: 1, p99Ms: 40 });
+  assert.deepEqual(h.rows[0]!.latency!["/v1/views/now"], { ...firstHourLatency, statusClass: { "2xx": firstHourLatency } });
   for (let i = 0; i < 100; i++) h.timed("/v1/views/now", 2.5);
   const later = h.rollup.summary().routes.find((r) => r.path === "/v1/views/now")!.latency!;
   assert.deepEqual([later.n, later.buckets, later.p50Ms, later.p99Ms], [200, { "1": 98, "3": 100, "50": 2 }, 3, 3], "the totals are cumulative histograms");
@@ -492,7 +493,7 @@ test("a carried hour keeps its latency stale counts and stream counts in the one
   const rows: RouteReadsRow[] = [];
   const make = () => createRouteReadRollup({ stateDir: dir, clock: clockFromMillisFn(() => now), write: (row) => rows.push(row), elapsed: () => monotonic });
   const timed = (rollup: ReturnType<typeof make>, ms: number): void => {
-    const res = Object.assign(new EventEmitter(), { getHeader: () => "application/json" });
+    const res = Object.assign(new EventEmitter(), { statusCode: 200, getHeader: () => "application/json" });
     void rollup.wrap({ method: "GET", path: "/v1/views/now", scope: "read", handler: () => { monotonic += ms; } }).handler(req(), res as unknown as ServerResponse, {} as never);
     res.emit("finish");
   };
@@ -517,7 +518,8 @@ test("a carried hour keeps its latency stale counts and stream counts in the one
   b.tick();
   assert.equal(rows.length, 1, "one row for the hour across the swap");
   const row = rows[0]!;
-  assert.deepEqual(row.latency!["/v1/views/now"], { n: 2, maxMs: 2.5, buckets: { "1": 1, "3": 1 }, p50Ms: 1, p99Ms: 2.5 }, "the standby's 400 ms smoke read is not timed");
+  const carriedLatency = { n: 2, maxMs: 2.5, buckets: { "1": 1, "3": 1 }, p50Ms: 1, p99Ms: 2.5 };
+  assert.deepEqual(row.latency!["/v1/views/now"], { ...carriedLatency, statusClass: { "2xx": carriedLatency } }, "the standby's 400 ms smoke read is not timed");
   assert.deepEqual([row.staleness!.served, row.staleness!.stale], [1, 1], "the standby's served view is not counted");
   assert.deepEqual(row.streams!.views, { opened: 2, closed: 0, peak: 1, handovers: { recycle: 1 }, subscribers: 1 }, "the live gauge is the promoted generation's");
   stopB();

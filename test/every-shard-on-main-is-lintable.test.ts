@@ -37,12 +37,16 @@ const VIOLATING_SHARD_BASELINE = [
   "plan/tasks.d/W1-T283-needs-me-non-plan-escalations.yaml",
   "plan/tasks.d/W1-T284-skills-panel-unregistered.yaml",
   "plan/tasks.d/W1-T285-accept-status-no-consumer.yaml",
+  // W1-T5677: latent, not new — two MERGED shards whose companion test differs from the shard slug.
+  // Only the scoped --base pass supplied the slug, so --all discounted them; it now agrees.
+  "plan/tasks.d/W1-T2547-docs-awareness-fires-on-a-size-ledger.yaml",
   "plan/tasks.d/W1-T2861-a-source-file-cannot-outgrow-its-baseline.yaml",
   "plan/tasks.d/W1-T289-lock-reclaim-toctou.yaml",
   "plan/tasks.d/W1-T3071-rmd-help-mints-a-github-app-token-before-it-prints-usage.yaml",
   "plan/tasks.d/W1-T3139-catch-erasure-baseline-slack-blocks-main.yaml",
   "plan/tasks.d/W1-T326-record-daemon-parallelism-ruling.yaml",
   "plan/tasks.d/W1-T3318-ruling-a-gate-repairs-or-routes-it-does-not-block.yaml",
+  "plan/tasks.d/W1-T3320-the-byte-caps-drop-the-rule-instead-of-routing-it.yaml", // W1-T5677, as above
 ];
 
 interface ShardLintReport {

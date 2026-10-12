@@ -5,10 +5,12 @@ import {
   ratchetContractLines,
   commitMessageContractLines,
   WORKER_PR_AUTHORITY_LINES,
+  GH_PR_EDIT_FALLBACK_LINES,
 } from "./compaction.js";
 import type { CapabilityReceipt } from "./capability-grant.js";
 import { GENERATED_LEDGER_CLASSES, isCompanionPath } from "./companion-paths.js";
 import type { RemedyFileForGate } from "./ci-parity.js";
+import { diffCoverageTargets, renderDiffCoverageTargets } from "./diff-coverage-targets.js";
 import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, neutralizeFenceMarkers } from "./fix-fence.js";
 import { renderDoctrinePreamble } from "./learnings.js";
 import { isInPlanScope, outOfPlanScopeFiles } from "./plan-architect.js";
@@ -17,12 +19,17 @@ import { citation } from "./provenance.js";
 import type { CriterionVerdict } from "./review.js";
 import {
   describeCiLogUnavailable,
+  ADDITIVE_REGISTRATION_SURFACES,
+  isAdditiveRegistrationChange,
   REGENERABLE_ARTIFACT_GENERATORS,
+  type RegistrationChange,
   type ActionableGateFailure,
   type CiFailure,
   type MergeConflictEvidence,
   type ProofDiscriminationEvidence,
+  type PriorPartialWork,
 } from "./sweep.js";
+export type { PriorPartialWork };
 import { envelope } from "./untrusted-envelope.js";
 
 /** W1-T4106: four hand-backgrounded coverage suites swap-thrashed the fleet host; hooks/deny-floor.sh
@@ -85,16 +92,45 @@ export const ONE_TEST_SUITE_AT_A_TIME_LINE =
 export function scopeGuardOutOfScopeFiles(
   diffFiles: readonly string[],
   declaredFiles: readonly string[] | undefined,
+  registrationChanges: readonly RegistrationChange[] = [],
 ): string[] {
   if (diffFiles.length === 0) return [];
   if (!declaredFiles || declaredFiles.length === 0) return [...diffFiles];
   const declared = new Set(declaredFiles);
+  const admittedRegistrations = declaredFiles.every(isInPlanScope) ? [] : registrationChanges.filter(isAdditiveRegistrationChange).map((change) => change.path);
   return diffFiles.filter(
     (f) =>
       !declared.has(f) &&
+      !admittedRegistrations.includes(f) &&
       !Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, f) &&
       !isCompanionPath(f, GENERATED_LEDGER_CLASSES),
   );
+}
+
+/** W1-T5118: `"plan"` grades a diff by plan-scope membership, `"files"` by exact declared files. */
+export type FixScopeRegime = "plan" | "files";
+
+/**
+ * W1-T5118: is the PR being repaired a plan-only FILING? Read from the PR's own captured diff,
+ * never from a title, branch name, task type or the task's declared files. Only a NON-EMPTY
+ * baseline whose every path is plan-scoped qualifies; an absent or empty one never invents it.
+ */
+export function isPlanFilingBaseline(baselineDiffFiles?: readonly string[]): boolean {
+  return !!baselineDiffFiles && baselineDiffFiles.length > 0 && baselineDiffFiles.every(isInPlanScope);
+}
+
+/**
+ * W1-T5118: the ONE regime selection the fix prompt and the pre-strike guard both read. A task
+ * whose declared files are all plan-scoped stays `"plan"`. An observed plan-only filing is
+ * `"plan"` too, even when its shard declares future src/test paths, so a repair keeps it a
+ * filing. Everything else keeps the exact declared-file regime.
+ */
+export function fixScopeRegime(
+  declaredFiles: readonly string[] | undefined,
+  baselineDiffFiles?: readonly string[],
+): FixScopeRegime {
+  if (declaredFiles && declaredFiles.length > 0 && declaredFiles.every(isInPlanScope)) return "plan";
+  return isPlanFilingBaseline(baselineDiffFiles) ? "plan" : "files";
 }
 
 /**
@@ -118,11 +154,13 @@ export function scopeGuardOutOfScopeFiles(
 export function outOfDeclaredScopeFiles(
   files: readonly string[],
   declaredFiles: readonly string[] | undefined,
+  registrationChanges: readonly RegistrationChange[] = [],
+  regime: FixScopeRegime = fixScopeRegime(declaredFiles),
 ): string[] {
   if (!declaredFiles || declaredFiles.length === 0) return [];
-  return declaredFiles.every(isInPlanScope)
+  return regime === "plan"
     ? outOfPlanScopeFiles([...files])
-    : scopeGuardOutOfScopeFiles(files, declaredFiles);
+    : scopeGuardOutOfScopeFiles(files, declaredFiles, registrationChanges);
 }
 
 // ── FIX-RUNG FAILURE-MODE TAXONOMY (W1-T94, W1-T76 follow-up) ────────────────
@@ -150,8 +188,8 @@ export function outOfDeclaredScopeFiles(
 // because `OpenPrView` carries it and this module already imports OpenPrView
 // from sweep.js; the reverse import would be circular (W1-T100).
 
-/** The six known fix-rung failure modes. See the taxonomy note above. */
-export type FixMode = "reviewer-unmet" | "body-coverage" | "ci-log" | "merge-conflict" | "gate-fix" | "proof-discrimination" | (string & {});
+/** The known fix-rung failure modes. See the taxonomy note above. */
+export type FixMode = "reviewer-unmet" | "body-coverage" | "ci-log" | "merge-conflict" | "gate-fix" | "proof-discrimination" | "plan-gate" | (string & {});
 
 /**
  * The block evidence a fix dispatch derives its MODE from. `review` carries a
@@ -185,8 +223,11 @@ export type FixMode = "reviewer-unmet" | "body-coverage" | "ci-log" | "merge-con
  * `review.unmetCriteria` is empty (design note i) — never a widening of `unmetCriteria`,
  * never checked when it is non-empty (see {@link FIX_MODE_RULES}'s `gate-fix` row).
  */
+export type FixReviewFinding = { criterionIndex: number; path: string; line: number; mechanism: string; remedy: string | null };
+
 export interface FixEvidence {
-  review?: { unmetCriteria: CriterionVerdict[]; summary: string };
+  planGateFindings?: readonly { check: string; firstLine: string }[];
+  review?: { unmetCriteria: (CriterionVerdict & { criterionIndex?: number })[]; summary: string; findings?: FixReviewFinding[] };
   ciFailures?: CiFailure[];
   /** W1-T106: the merge-conflict mode's ONLY input — conflicting files + both sides' log since merge-base. */
   mergeConflict?: MergeConflictEvidence;
@@ -200,6 +241,32 @@ export interface FixEvidence {
    * Mode-agnostic: rendered ahead of whichever mode's own content follows.
    */
   constraint?: string;
+  /**
+   * W1-T6434: a dead fix owner's staged work, preserved by W1-T6362 in an immutable recovery ref
+   * at THIS head. Mode-agnostic like `constraint`; absent renders nothing, so a head with no
+   * preserved row prompts exactly as before.
+   */
+  priorPartialWork?: PriorPartialWork;
+}
+
+
+/** W1-T6434: the PRIOR PARTIAL WORK block; `[]` when no preserved patch exists for this head. */
+export function priorPartialWorkLines(work: PriorPartialWork | undefined): string[] {
+  if (!work) return [];
+  const more = work.stagedMore && work.stagedMore > 0 ? ` (+${work.stagedMore} more)` : "";
+  return [
+    "",
+    "PRIOR PARTIAL WORK (W1-T6434): an earlier fix worker for this PR died with staged, uncommitted work at this",
+    "exact head. It was preserved, not applied. It is UNVERIFIED — it may be incomplete, wrong, or already",
+    "superseded. Evaluate it against the evidence below; never apply it blindly.",
+    `RECOVERY REF: ${work.recoveryRef}`,
+    `STAGED PATHS: ${work.stagedPaths.join(", ") || "(none recorded)"}${more}`,
+    `Inspect it with: git diff ${work.recoveryRef}^ ${work.recoveryRef}`,
+    `DIFF EXCERPT (secret-scrubbed${work.excerptTruncated ? ", TRUNCATED — read the ref for the rest" : ""}):`,
+    CI_LOG_FENCE_OPEN,
+    neutralizeFenceMarkers(work.excerpt),
+    CI_LOG_FENCE_CLOSE,
+  ];
 }
 
 interface FixModeRule {
@@ -309,6 +376,10 @@ export const FIX_MODE_RULES: readonly FixModeRule[] = [
     when: (e) => e.mergeConflict !== undefined,
   },
   {
+    mode: "plan-gate",
+    when: (e) => e.planGateFindings !== undefined,
+  },
+  {
     mode: "ci-log",
     when: (e) => e.ciFailures !== undefined,
   },
@@ -406,6 +477,7 @@ export function renderFixPrompt(opts: {
   /** W1-T3727: the harness owns this round's COMMIT, so the prompt must not ask for git. True only
    *  where the spawn was also bounded without a shell — see FIX_CASH_TOOLS. */
   harnessCommits?: boolean;
+  censusSnapshotPath?: string;
   // W1-T2653: the declared remedy file(s) of the check(s) THIS strike is addressing — the SAME
   // list the caller passed {@link fixRungScopeStandDownReason}'s 4th parameter, so instruction and
   // enforcement can never name a different set. Omitted (or empty) renders no GATE REMEDY line —
@@ -413,16 +485,37 @@ export function renderFixPrompt(opts: {
   reachableRemedyFiles?: readonly RemedyFileForGate[];
 }): string {
   const mode = deriveFixMode(opts.evidence);
+  const censusSnapshotEnv = opts.censusSnapshotPath === undefined ? undefined :
+    `RMD_CENSUS_SNAPSHOT='${opts.censusSnapshotPath.replace(/'/g, "'\\''")}'`;
   const header = `You are a FIX worker for task ${opts.task.id} (${opts.task.title}) — round ${opts.round}.\nMODE: ${mode}.`;
   // W1-T78: an operator's clarification answer, when present, is carried
   // VERBATIM ahead of the mode-specific content — mode-agnostic, never dropped.
-  const constraintBlock = opts.evidence.constraint
+  const operatorConstraintBlock = opts.evidence.constraint
     ? [
         "",
         "OPERATOR CONSTRAINT (the clarification-question rung, W1-T78 — answered; carried verbatim):",
         opts.evidence.constraint,
       ]
     : [];
+  // W1-T6434: a preserved dead-owner patch rides the same mode-agnostic slot.
+  const constraintBlock = [...operatorConstraintBlock, ...priorPartialWorkLines(opts.evidence.priorPartialWork)];
+  if (mode === "plan-gate") {
+    return [header, ...constraintBlock,
+      `STAGEABLE PLAN PATHS: ${(opts.task.files ?? []).join(", ")}. Edit only these exact paths.`,
+      "The parent owns the commit, REST metadata write and push. You have no shell; save your edits.",
+      "Never edit src/, test/, another plan path, or an existing task's untouched criterion.",
+      "W1-T3231 self-credit rule: a filing cannot carry a Remudero-Task trailer for a task it introduces.",
+      "Every proof must discriminate this head from its merge base; passing at both is a stale proof.",
+      "Return COMMIT_MESSAGE: type(plan): subject. Metadata proposals are optional:",
+      "PR_TITLE: type(plan): subject",
+      "PR_ACCEPTANCE: followed by a complete ## Acceptance block, ending with END_PR_ACCEPTANCE.",
+      "The parent applies proposals only after the same preflight passes on the new commit and metadata.",
+      CI_LOG_FENCE_OPEN,
+      ...(opts.evidence.planGateFindings ?? []).map((f) => neutralizeFenceMarkers(`[${f.check}] ${f.firstLine}`)),
+      ...(opts.evidence.ciFailures ?? []).map((f) => neutralizeFenceMarkers(`[${f.name}] ${f.logTail}`)),
+      CI_LOG_FENCE_CLOSE,
+    ].join("\n");
+  }
   // W1-T1227: named EXPLICITLY, mode-agnostic (every branch below splices this in), so the fix
   // worker cannot claim it was never told. Omitted only when the task declares no `files` scope
   // at all — silence here is never a licence, it is simply nothing to report.
@@ -433,9 +526,12 @@ export function renderFixPrompt(opts: {
   // Empty whenever `baselineDiffFiles` was never captured (fail OPEN, matching that guard's own
   // discipline) or simply carries nothing out of scope; either way the block below renders no
   // INHERITED SCOPE line, matching the clean path's existing shape.
+  // W1-T5118: the SAME `fixScopeRegime` call the pre-strike guard makes, read from the baseline.
+  const scopeRegime = fixScopeRegime(opts.task.files, opts.baselineDiffFiles);
+  const planFiling = scopeRegime === "plan" && !(opts.task.files ?? []).every(isInPlanScope);
   const inheritedOutOfScope =
     opts.task.files && opts.task.files.length > 0 && opts.baselineDiffFiles
-      ? outOfDeclaredScopeFiles(opts.baselineDiffFiles, opts.task.files)
+      ? outOfDeclaredScopeFiles(opts.baselineDiffFiles, opts.task.files, [], scopeRegime)
       : [];
   // W1-T2651: the ONE bounded exception to "do not push it" — a path this repo's own generator
   // registry declares (the SAME registry {@link scopeGuardOutOfScopeFiles} now reads, never a
@@ -443,18 +539,27 @@ export function renderFixPrompt(opts: {
   // is graded by plan-scope membership instead ({@link outOfDeclaredScopeFiles}'s own regime
   // selection), which this registry was never wired into, so promising the exception there would
   // contradict the pre-strike gate that actually runs against that PR.
-  const planOnlyTask = !!opts.task.files && opts.task.files.length > 0 && opts.task.files.every(isInPlanScope);
+  const planOnlyTask = !!opts.task.files && opts.task.files.length > 0 && scopeRegime === "plan";
   const registryPaths = Object.keys(REGENERABLE_ARTIFACT_GENERATORS).sort();
   const scopeBlock =
     opts.task.files && opts.task.files.length > 0
       ? [
           "",
-          `DECLARED SCOPE (W1-T1227): this task's PR may only touch: ${opts.task.files.join(", ")}. If the ` +
-            `genuine fix requires a path outside that list, do NOT push it — say so in your REPORT's ` +
-            `'## Follow-ups' section instead and leave the branch as-is; this task's declared scope is not ` +
-            `yours to widen. A commit outside declared scope is PUSHED AND FLAGGED (\`scope_guard.overrun\`), ` +
-            `not blocked — but the NEXT round's fix rung stands down on any NEW out-of-scope path THIS rung ` +
-            `adds, so treat "do not push it" as the real rule, not a formality.`,
+          planFiling
+            ? `PLAN FILING SCOPE (W1-T5118): this PR is a plan-only filing — every path it carried before ` +
+              `this round is plan-scoped: ${(opts.baselineDiffFiles ?? []).join(", ")}. Keep it a filing: you ` +
+              `MAY repair that shard or another plan/** path, but do NOT add any path outside plan scope, ` +
+              `including this task's own declared future path(s): ` +
+              `${opts.task.files.filter((f) => !isInPlanScope(f)).join(", ")}. The implement run builds those ` +
+              `after this filing merges; adding them here makes the PR a Standing Rule 15 mixture, and the ` +
+              `next round's fix rung stands down on any non-plan path this rung adds. If the genuine fix ` +
+              `needs one, say so in your REPORT's '## Follow-ups' section instead and leave the branch as-is.`
+            : `DECLARED SCOPE (W1-T1227): this task's PR may only touch: ${opts.task.files.join(", ")}. If the ` +
+              `genuine fix requires a path outside that list, do NOT push it — say so in your REPORT's ` +
+              `'## Follow-ups' section instead and leave the branch as-is; this task's declared scope is not ` +
+              `yours to widen. A commit outside declared scope is PUSHED AND FLAGGED (\`scope_guard.overrun\`), ` +
+              `not blocked — but the NEXT round's fix rung stands down on any NEW out-of-scope path THIS rung ` +
+              `adds, so treat "do not push it" as the real rule, not a formality.`,
           // W1-T2653: named EXPLICITLY per failing check — a fix worker told only "some registry
           // permits some path" (the REGISTRY EXCEPTION line below) still has to trust that the gate
           // it is looking at is one of the ones covered; this line removes that inference by naming
@@ -489,6 +594,16 @@ export function renderFixPrompt(opts: {
                   `"do NOT push it" rule above verbatim; this is not a general licence to widen scope.`,
               ]
             : []),
+          ...(!planOnlyTask && (opts.evidence.ciFailures ?? []).some((failure) =>
+            /census|registry|bound-kind|authority-ratchet/.test(failure.name) ||
+            ADDITIVE_REGISTRATION_SURFACES.some((row) => failure.logTail.includes(row.literal) || failure.logTail.includes(row.path)))
+            ? [`ADDITIVE REGISTRATION EXCEPTION (W1-T5691): ADDITIVE_REGISTRATION_SURFACES in src/lib/sweep.ts ` +
+                `permits purely added rows inside these named literals: ` +
+                ADDITIVE_REGISTRATION_SURFACES.map((row) => `${row.path} (${row.literal}${"shrinkOnly" in row ? "; removed rows only" : ""})`).join(", ") +
+                `. You MAY save these bounded registrations outside files:. An edited or deleted existing row ` +
+                `in a registry, changes outside its literal, or baseline growth remain out of scope. ` +
+                `The harness validates the diff and records admitted registrations on its commit row.`]
+            : []),
           ...(inheritedOutOfScope.length > 0
             ? [
                 `INHERITED SCOPE (W1-T2607): this branch already carries path(s) outside the declared list ` +
@@ -501,6 +616,14 @@ export function renderFixPrompt(opts: {
       : [];
   const footer = [
     "",
+    "Report exactly one anchored `FIX_OUTCOME:` line before COMMIT_MESSAGE/PR_URL, choosing one outcome:",
+    "FIX_OUTCOME: FIXED — the saved edits fix this head; name COMMIT_MESSAGE if you can.",
+    "FIX_OUTCOME: BASE_RED — the failing tests also fail at origin/main's tip; the harness verifies before refunding a strike.",
+    "FIX_OUTCOME: FLAKE — rerun the failing jobs once on this head; only green CI refunds the strike.",
+    "FIX_OUTCOME: NEEDS_SCOPE <path>[,<path>...] — name repo-relative paths with no ..; non-test paths go to scope escalation. " +
+      "Leave those out-of-scope edits saved (uncommitted) in the worktree when you report — never revert them: the scope amendment admits only paths this round actually changed.",
+    "FIX_OUTCOME: NEEDS_DESIGN <reason> — name the design blocker in at most 500 characters; no second round runs on this head.",
+    ...(!planOnlyTask ? ["Files under test/ may be added or edited although undeclared (R1); weakened assertions are judged by the reviewer's test-theater and assertion-discrimination gates."] : []),
     `Amend the SAME branch (${opts.branch}) — do NOT open a new PR and do NOT create a fix/*`,
     // W1-T136/W1-T137 class: the fix rung authors its OWN commit message and, until now, was
     // told NOTHING about the format — #427/#428 blocked on a 111-char round-3 header. Same
@@ -511,6 +634,13 @@ export function renderFixPrompt(opts: {
     // because CI went red, and a ratchet an earlier round left unrecorded is the commonest reason.
     ...ratchetContractLines(),
     ONE_TEST_SUITE_AT_A_TIME_LINE,
+    ...(censusSnapshotEnv ? [
+      "When your check tool accepts command arguments, check the edited tree with the harness's read-only census snapshot:",
+      `${censusSnapshotEnv} node scripts/census-precheck.mjs`,
+      `${censusSnapshotEnv} node --test --test-reporter=tap --import tsx --import ./test/setup/tmp-hygiene.ts test/the-affected-suite-reach-ratchet.test.ts`,
+      "If your tool only offers run_check(unit_test/typecheck), save your edits and report that limit; the harness runs these census checks before committing.",
+      "Repair any census refusal before finishing. NOT MEASURED is not a passing verdict; hosted CI remains required.",
+    ] : []),
     // W1-T464: this rung used to spread ciParityContractLines() here — the same
     // `rmd preflight --ci-parity` obligation the implement contract carried (W1-T295) — but the
     // orchestrator never gated on a preflight failure (run-task.ts's own handling of it has no
@@ -528,7 +658,7 @@ export function renderFixPrompt(opts: {
         `harness commits them onto ${opts.branch} and pushes. Name the commit subject on its own`,
         "line, anchored exactly like PR_URL: `COMMIT_MESSAGE: <type>(<scope>): <subject>` —",
         "Conventional Commits, lower-case subject, at most 100 CHARACTERS total. A longer or",
-        "missing line is refused and your edits are NOT committed, so the round produces nothing.",
+        "missing line is refused unless you state FIXED with saved edits; then the harness derives a subject.",
         `Your PR body`,
       ]
       : [`Then: \`git push origin HEAD\` (no -u) — never force-push. Your PR body`]),
@@ -539,6 +669,9 @@ export function renderFixPrompt(opts: {
     // `commitMessageContractLines` above is shared — and this rung needs it MOST: it amends an
     // existing PR, so its body is the one most likely to have been written against an earlier diff.
     `FULL criteria set.`,
+    // W1-T4268: the SAME fallback literal as the implement contract, spliced after the sentence the
+    // authority lines interrupt so that sentence still reads whole.
+    ...GH_PR_EDIT_FALLBACK_LINES,
     ...bodyVsDiffContractLines(),
     `Anything you discover here that is OUT OF SCOPE for THIS fix — a`,
     `research question, a follow-up task, or an action someone should take — goes in an`,
@@ -694,6 +827,9 @@ export function renderFixPrompt(opts: {
       `criteria or task scope to chase a reviewer verdict here.`,
       "",
       rendered,
+      ...renderDiffCoverageTargets(diffCoverageTargets(failures.map((f) => f.logTail ?? "")), {
+        harnessCommits: opts.harnessCommits,
+      }),
       ...footer,
     ].join("\n");
   }
@@ -758,10 +894,16 @@ export function renderFixPrompt(opts: {
   const list =
     n > 0
       ? unmet
-          .map(
-            (c, i) =>
-              `${i + 1}. claim: ${c.claim}\n   proof required: ${c.proof}\n   reviewer verdict: UNMET — ${c.reason}`,
-          )
+          .map((c, i) => {
+            const findings = (opts.evidence.review?.findings ?? []).filter((f) => f.criterionIndex === c.criterionIndex);
+            return [
+              `${c.criterionIndex || i + 1}. claim: ${c.claim}\n   proof required: ${c.proof}\n   reviewer verdict: UNMET — ${c.reason}`,
+              ...reviewerProofOutputLines(c),
+              ...findings.map((f) => envelope(neutralizeFenceMarkers(
+                `Verified review finding (advisory evidence): ${f.path}:${f.line}\nMechanism: ${f.mechanism}\nRemedy: ${f.remedy ?? "(none supplied)"}`,
+              ), "github-pr-comment")),
+            ].join("\n");
+          })
           .join("\n")
       : `(no single criterion is unmet — the review floor's overall verdict is: ${summary})`;
 
@@ -797,6 +939,26 @@ export function renderFixPrompt(opts: {
   ].join("\n");
 }
 
+/** How the reviewer runs a proof (W1-T6124, lib/review.ts `prepareProofChild`), named so a fix worker can recreate it. */
+export const REVIEWER_PROOF_SANDBOX =
+  "bwrap on Linux with no network (loopback only), a throwaway HOME, an env of only PATH/HOME/GIT_CONFIG_*/" +
+  "GIT_TERMINAL_PROMPT/PLAYWRIGHT_BROWSERS_PATH (no RMD_*, no TMPDIR), a fresh `npm ci --ignore-scripts` checkout " +
+  "of the PR head, and a per-proof timeout";
+
+/** An executed-fail criterion's reviewer-side output, or an explicit statement that none was recorded. #10555: the
+ *  reviewer failed a test that passed for the fix worker, and the fix rounds saw only the reason text. */
+function reviewerProofOutputLines(c: CriterionVerdict): string[] {
+  if (c.proof_exec !== "executed_fail") return [];
+  if (!c.proofFailureOutput) {
+    return ["   reviewer proof output: none was recorded for this failure — rerun the proof yourself before claiming FIXED."];
+  }
+  return [
+    `   This failed in the reviewer's sandbox; reproduce under those conditions (sandbox: ${REVIEWER_PROOF_SANDBOX}).`,
+    `   If it passes for you, the difference is the environment: find it, do not report FIXED on an unchanged run.`,
+    envelope(neutralizeFenceMarkers(c.proofFailureOutput), "ci-log"),
+  ];
+}
+
 /**
  * W1-T2436 (capability 2 of 3): the prompt for the worker THIS rung dispatches when an entangled
  * PR's own review names the DISJOINT instrument/src split (`review.instrumentEntanglementPaths`,
@@ -816,7 +978,10 @@ export function renderPrerequisitePrPrompt(args: {
   prUrl: string;
   instrumentPaths: readonly string[];
   srcPaths: readonly string[];
+  /** W1-T5810: the required `run-unfiled-<epochMs>` head the rung minted. */
+  prerequisiteBranch: string;
 }): string {
+  const head = args.prerequisiteBranch;
   return [
     `Task ${args.task.id} (${args.task.title})'s own pull request ${args.prUrl} (branch \`${args.branch}\`) was ` +
       `refused by the blocked_review fix rung under Standing rule 25: it changes measurement-instrument ` +
@@ -826,7 +991,9 @@ export function renderPrerequisitePrPrompt(args: {
     "Your job is DIFFERENT: open a NEW, SEPARATE pull request — the prerequisite — that carries ONLY the " +
       "instrument-surface change below, standing on its own and passing its own CI. Do this:",
     "",
-    "1. Starting from a fresh branch off `origin/main` (never the branch above — leave it untouched), bring " +
+    `1. Create the branch \`${head}\` off \`origin/main\` (\`git switch -c ${head} origin/main\`) — that exact ` +
+      "name and no other, since head-identity-gate refuses any head outside its forms and GitHub cannot rename " +
+      "an open pull request's head; never the branch above, leave it untouched. Bring " +
       "over ONLY these instrument-surface path(s), exactly as they read on that branch right now:",
     ...args.instrumentPaths.map((p) => `   - ${p}`),
     "2. These src/ path(s) belong to the ORIGINAL pull request and must NOT appear in your new one:",
@@ -835,7 +1002,11 @@ export function renderPrerequisitePrPrompt(args: {
       "anything the instrument-surface change requires to pass CI by itself. Do not assume the split is " +
       "mechanical: a plain `git mv`/cherry-pick of the same hunk has already been tried twice and failed CI " +
       "both times.",
-    "4. Push your branch and open the pull request against `main` with `gh pr create`.",
+    `4. Push \`${head}\` and open the pull request against \`main\` with \`gh pr create --head ${head}\`. ` +
+      "Its body MUST carry a `## Acceptance` section (acceptance-author-gate refuses a body without one): one " +
+      "bullet per claim, `- <claim> | unit test: <literal test title>` or `- <claim> | grep: <pattern> in <path>`, " +
+      "each on ONE line, at least one proof naming a line this pull request adds. Put no `Remudero-Task:` " +
+      "trailer in the body or the commits — this prerequisite builds no filed task, so a trailer is a false credit.",
     "5. Leave the ORIGINAL branch/PR entirely alone — no push, no edit, no comment on it.",
     "",
     "End your REPORT with a line reading exactly: PR_URL: <the new pull request's url>",

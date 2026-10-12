@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
+import { defaultPreflightSpawn, type PreflightSpawn } from "../src/lib/commit-message.js";
 import { FAST_GATE_CENSUS_BOUND_MS, FAST_GATE_STEPS, runPreflightFast } from "../src/lib/ci-parity.js";
 
 // ── W1-T2478: the fast gate admits the census class under a MEASURED bound ─────────────────────
@@ -74,26 +75,89 @@ test("FAST_GATE_STEPS: exactly seven census entries, each bound at the shared FA
   }
   assert.equal(
     NON_CENSUS_STEPS.length,
-    13,
+    14,
     "the seven pre-existing npm-script gates plus W1-T2491's branch-shape gate, W1-T2488's source-size-ratchet, the " +
       "comment-load ratchet, W1-T3702's lint-plan gate and the plan-shaped self-path-proof ratchet (a dir-walk suite, " +
-      "so a plain step rather than a census member), plus W1-T4433's tree-derived rule-check runner",
+      "so a plain step rather than a census member), plus W1-T4433's tree-derived rule-check runner, plus " +
+      "W1-T6435's census-precheck (the pre-push hook's own command)",
   );
 });
 
-test("runPreflightFast: run for real (unmocked, real spawn, real package.json) over ONLY the census entries, every one measures under the bound and passes on this HEAD", () => {
-  // Isolated from the seven pre-existing entries via the `steps` seam — one of those seven
-  // (cli-reference:check) is independently fragile in a sandboxed test runner (tsx's own IPC
-  // pipe setup, unrelated to this task's diff), and this claim is specifically about the census
-  // class this task adds, not a re-verification of the other seven's own environment.
-  const result = runPreflightFast(REPO_ROOT, { steps: CENSUS_STEPS });
-  // W1-T2898: `ledger-literal-census` joins on the same terms — clause (a) satisfied (it asserts a property EVERY enumerated src/ file must hold) and MEASURED at a 452ms median, well under the bound. Named rather than counted, so the addition stays a reviewed one.
-  assert.equal(result.steps.length, 7);
-  for (const step of result.steps) {
-    assert.equal(step.ok, true, `expected ${step.name} to pass on a clean HEAD: ${step.detail}`);
-    assert.doesNotMatch(step.detail, /BOUND EXCEEDED/, `${step.name} must not report BOUND EXCEEDED on a clean, fast run`);
+/** Observe the production spawn without replacing the command or its outcome. */
+function recordingRealSpawn() {
+  const calls: { args: string[]; result: ReturnType<PreflightSpawn> }[] = [];
+  const spawn: PreflightSpawn = (file, args, opts) => {
+    const result = defaultPreflightSpawn(file, args, opts);
+    calls.push({ args, result });
+    return result;
+  };
+  return { spawn, calls };
+}
+
+function assertCommandOutcomes(
+  result: ReturnType<typeof runPreflightFast>,
+  steps: typeof CENSUS_STEPS,
+  calls: ReturnType<typeof recordingRealSpawn>["calls"],
+) {
+  assert.equal(calls.length, steps.length, "every command runs once under the controlled clock");
+  assert.equal(result.steps.length, steps.length);
+  for (const [index, step] of steps.entries()) {
+    const command = calls[index];
+    const reported = result.steps[index];
+    assert.deepEqual(command.args, ["run", "--silent", step.script]);
+    assert.notEqual(command.result.status, null, `${step.job}: command must actually exit: ${command.result.error}`);
+    assert.equal(reported.name, step.job);
+    assert.equal(reported.ok, command.result.status === 0, `${step.job} must preserve its real exit status`);
+    assert.ok(reported.detail.startsWith(`${step.job}: ${reported.ok ? "PASS" : "FAIL"}`), reported.detail);
+    if (!reported.ok) {
+      const output = (command.result.stdout + command.result.stderr).trim();
+      assert.ok(reported.detail.endsWith(output), `${step.job} must retain its real failure output`);
+    }
+    assert.doesNotMatch(reported.detail, /RUNAWAY|BOUND EXCEEDED/, "timing admission has separate deterministic tests");
   }
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, calls.every(({ result }) => result.status === 0), "aggregate status reflects command outcomes");
+}
+
+test("runPreflightFast: run for real (unmocked, real spawn, real package.json) over ONLY the census entries preserves each command's actual outcome", () => {
+  // A census can legitimately reject the current tree. This integration test owns command
+  // orchestration; each census owns its assertions and runs independently in CI. Control only
+  // the clock so host contention cannot trigger re-measures in this outcome comparison.
+  const { spawn, calls } = recordingRealSpawn();
+  let tick = 0;
+  const result = runPreflightFast(REPO_ROOT, { spawn, steps: CENSUS_STEPS, now: () => tick++ * 1000 });
+  assertCommandOutcomes(result, CENSUS_STEPS, calls);
+  for (const { result: command } of calls) {
+    assert.match(command.stdout, /(?:^|\n)(?:#|ℹ) tests [1-9][0-9]*/, "the nested census must run tests, never silently skip them");
+  }
+});
+
+test("W1-T7248 pins the cause of the intermittent failure", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-test-fast-gate-outcomes-"));
+  try {
+    // Real npm commands force a failure before a success, independent of the repository's
+    // census findings. Both output streams must survive, and a later success cannot erase FAIL.
+    writeFileSync(join(root, "outcome.cjs"),
+      'console.log(`stdout-${process.argv[2]}`); console.error(`stderr-${process.argv[2]}`); process.exit(Number(process.argv[2]));\n');
+    writeFileSync(join(root, "package.json"), JSON.stringify({ scripts: {
+      "fixture-fails": "node outcome.cjs 7",
+      "fixture-passes": "node outcome.cjs 0",
+    } }));
+    const steps = [
+      { job: "fixture-failure-census", script: "fixture-fails", reason: "failure before success", boundMs: FAST_GATE_CENSUS_BOUND_MS },
+      { job: "fixture-success-census", script: "fixture-passes", reason: "success after failure", boundMs: FAST_GATE_CENSUS_BOUND_MS },
+    ];
+    const { spawn, calls } = recordingRealSpawn();
+    let tick = 0;
+    const result = runPreflightFast(root, { spawn, steps, now: () => tick++ * 1000 });
+    assert.deepEqual(calls.map(({ result }) => result.status), [7, 0], "positive control: real failure before real success");
+    assertCommandOutcomes(result, steps, calls);
+    assert.deepEqual(result.steps.map((step) => step.ok), [false, true]);
+    assert.match(result.steps[0].detail, /stdout-7/);
+    assert.match(result.steps[0].detail, /stderr-7/);
+    assert.equal(result.ok, false, "later success must not conceal the earlier failure");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // ═══════════════════ acceptance: "a census suite measured over the bound is refused by ═════════
@@ -111,7 +175,7 @@ test("runPreflightFast: an entry whose OWN measured wall time runs away from its
   const { spawn } = recordingSpawn(); // every call returns {status: 0} — the underlying command WOULD pass
   // Three steps, six reads: two cheap siblings (0->1000ms, 1000->2000ms) then the runaway
   // 2000->32000ms (30s, well over 4x the 1000ms median of [1000, 1000, 30000]).
-  const clockTicks = [0, 1000, 1000, 2000, 2000, 32000, 32000, 62000]; // then one re-measure, also 30s
+  const clockTicks = [0, 1000, 1000, 2000, 2000, 32000, 32000, 62000, 62000, 63000]; // then one re-measure, also 30s, then the 1000ms reference re-time (W1-T5676)
   let tick = 0;
   const now = () => clockTicks[tick++];
   const syntheticSteps = [
@@ -132,6 +196,8 @@ test("runPreflightFast: an entry whose OWN measured wall time runs away from its
 
   assert.equal(step.ok, false);
   assert.match(step.detail, /RUNAWAY/);
+  assert.doesNotMatch(step.detail, /NaN/, "the fake clock covers the reference re-time");
+  assert.match(step.detail, /re-timed back to back at 1000ms/, "the fake clock covers the reference re-time");
   assert.match(step.detail, /would have PASSed/, "the underlying command DID succeed — refusal is the measured bound, not the command's own exit code");
   assert.doesNotMatch(step.detail, /FAIL —/, "must not be reported as an ordinary command failure");
   assert.equal(result.ok, false);
@@ -171,7 +237,7 @@ test("package.json: every census:* script names exactly ONE test file, never the
   }
 });
 
-test("runPreflightFast: mocked end-to-end over all thirteen FAST_GATE_STEPS, no spawn call ever names test:ci, a bare npm test, or the test/**/*.test.ts glob", () => {
+test("runPreflightFast: mocked end-to-end over all fourteen FAST_GATE_STEPS, no spawn call ever names test:ci, a bare npm test, or the test/**/*.test.ts glob", () => {
   const { spawn, calls } = recordingSpawn();
   runPreflightFast(REPO_ROOT, { spawn, packageJsonText: REAL_PACKAGE_JSON });
   assert.equal(calls.length, FAST_GATE_STEPS.length, "exactly one spawn per curated step, no extras");
@@ -182,6 +248,9 @@ test("runPreflightFast: mocked end-to-end over all thirteen FAST_GATE_STEPS, no 
     if (FAST_GATE_STEPS[index]?.runner === "rule-checks") {
       assert.equal(call.file, process.execPath);
       assert.deepEqual(call.args, ["--import", "tsx", "scripts/list-rule-suites.mjs", "--run"]);
+    } else if (FAST_GATE_STEPS[index]?.runner === "census-precheck") {
+      assert.equal(call.file, process.execPath);
+      assert.deepEqual(call.args, ["scripts/census-precheck.mjs", "--base", "origin/main"]);
     } else {
       assert.equal(call.file, "npm", "ordinary FAST_GATE_STEPS entries remain npm-script calls");
     }
@@ -212,6 +281,7 @@ test("census:bound-kind targets test/bound-kind-declared.test.ts, and that suite
     process.execPath,
     [
       "--test",
+      "--test-reporter=tap",
       "--import",
       "tsx",
       "--import",
@@ -306,7 +376,7 @@ test("runPreflightFast: with the census entries removed from `steps`, a spawn th
     const call = calls.find((c) => c.args.includes(step.script));
     assert.equal(call, undefined, `${step.script} must never be spawned once the census steps are removed from the list`);
   }
-  // 13: the 12 existing non-census gates plus the tree-derived rule-check runner.
-  assert.equal(result.steps.length, 13);
+  // 14: the 12 existing non-census gates plus the tree-derived rule-check runner and W1-T6435's census-precheck.
+  assert.equal(result.steps.length, 14);
   assert.equal(result.ok, true, "with every pre-existing step at its default clean PASS and no census step present, the run reads green — the exact blind spot #3304 fell through");
 });

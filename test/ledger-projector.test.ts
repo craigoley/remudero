@@ -87,6 +87,7 @@ test("the fact store keeps decision render and panel steps and a line's identity
   assert.equal(isFactStep("run.start"), true);
   assert.equal(isFactStep("implement.done"), true);
   assert.equal(isFactStep("worker.assignment"), true);
+  assert.equal(isFactStep("worker.state"), true, "the now view carries workerState from it");
   assert.equal(isFactStep("panel.operator_agent_proposal"), true);
   assert.equal(isFactStep("worker.activity"), false);
   const a = ledgerLineIdentity(line(T0, "run.start"));
@@ -429,6 +430,36 @@ test("the activity ring keeps the newest rows of any step and drops the oldest",
   const clean = store(t, ledgerDir, clock);
   clean.tick();
   assert.deepEqual(ring(clean.db), ring(s.db), "a clean rebuild keeps the same ring");
+});
+
+test("the activity ring places a row whose ts is not its first key by its parsed ts", (t) => {
+  const ledgerDir = scratch(t, "projector-ledger");
+  const late = JSON.stringify({ step: "worker.activity", ts: new Date(T0 + 5_000).toISOString() });
+  const untimed = JSON.stringify({ step: "worker.activity", ts: "not a time" });
+  writeFileSync(join(ledgerDir, LIVE), body([line(T0, "run.start"), late, untimed]));
+  const s = store(t, ledgerDir, fixedClock(T0 + 10_000));
+  s.tick();
+  const placed = new Map(s.db.prepare("SELECT ts_ms, body FROM activity_ring").all().map((row) => [String(row.body), Number(row.ts_ms)]));
+  assert.equal(placed.get(late), T0 + 5_000, "ranked by its ts, as the route ranks it, not at epoch 0");
+  assert.equal(placed.get(untimed), 0, "a ts that does not parse keeps the identity's epoch 0");
+  assert.equal(placed.get(line(T0, "run.start")), T0);
+});
+
+test("a version-1 activity ring, ordered by hash, is rebuilt in place with the applied order", (t) => {
+  const ledgerDir = scratch(t, "projector-ledger");
+  const rows = [line(T0, "run.start", { n: 1 }), line(T0, "worker.activity", { n: 2 }), line(T0, "daemon.tick", { n: 3 })];
+  writeFileSync(join(ledgerDir, LIVE), body(rows));
+  const clock = fixedClock(T0 + 10_000);
+  const db = openProjectorReadModel(scratch(t, "projector-state"), "core", clock);
+  t.after(() => db.close());
+  const got = acquireLease(db, { clock });
+  assert.ok(got.ok);
+  createLedgerProjector({ ledgerDir, db, lease: got.lease, clock }).tick();
+  db.exec(`DROP TABLE activity_ring;
+    CREATE TABLE activity_ring(ts_ms INTEGER NOT NULL, h INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(ts_ms, h)) WITHOUT ROWID;
+    UPDATE meta SET v = '1' WHERE k = 'projection:activity_ring';`);
+  assert.equal(createLedgerProjector({ ledgerDir, db, lease: got.lease, clock }).tick().fresh, rows.length, "the store re-reads the ledger in place");
+  assert.deepEqual(db.prepare("SELECT body FROM activity_ring ORDER BY ts_ms, seq").all().map((row) => String(row.body)), rows, "same-millisecond rows keep the file's order");
 });
 
 test("the task activity projection keeps each task's newest row of any step", (t) => {

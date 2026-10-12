@@ -12,7 +12,7 @@ import {
 import { createService } from "../src/lib/service.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { withViewShadow, type ShadowRequest } from "../src/lib/view-shadow.js";
-import { buildReadModelViewRoutes, READ_MODEL_STATUS_VIEW, viewEtag, type ViewBodySource, type ViewDefinition } from "../src/lib/views.js";
+import { buildReadModelViewRoutes, READ_MODEL_STATUS_VIEW, viewEtag, viewMode, type ViewBodySource, type ViewDefinition } from "../src/lib/views.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 const VIEW = "legacy-view";
@@ -123,18 +123,67 @@ test("an auto view losing readiness is demoted once and answers legacy", async (
 
   await post(handle, status(true));
   recheck();
-  await post(handle, status(null));
-  recheck();
-  assert.deepEqual(auto().slice(2).map(([step]) => step), [VIEW_AUTO_PROMOTED_STEP, VIEW_AUTO_DEMOTED_STEP]);
-  assert.match(String(auto().at(-1)?.[1]), /shadow readiness unknown/, "readiness that went missing demotes, and says so");
-  assert.deepEqual(await read(), { from: "legacy" });
-
-  await post(handle, status(true));
+  assert.deepEqual(auto().slice(2).map(([step]) => step), [VIEW_AUTO_PROMOTED_STEP]);
   writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { [VIEW]: "shadow" } }));
   recheck();
   writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { [VIEW]: "auto" } }));
   recheck();
   assert.equal(auto().at(-1)?.[0], VIEW_AUTO_PROMOTED_STEP, "a view re-entering auto starts from legacy");
+});
+
+/** A started handle with `VIEW` switched auto, the GET route over it, and its view.auto_* rows. */
+async function autoHarness(t: TestCtx, kind: string) {
+  const stateDir = scratch(t, kind);
+  mkdirSync(join(stateDir, "read-model"), { recursive: true });
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { [VIEW]: "auto" } }));
+  const rows: Array<[string, Record<string, unknown> | undefined]> = [];
+  let recheck: () => void = () => assert.fail("the switch watch never started");
+  const handle = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], workerUrl: echoWorker(t, stateDir), stopWaitMs: 20,
+    log: (step, extra) => void rows.push([step, extra]), every: (run) => ((recheck = run), () => undefined) });
+  t.after(() => handle.stop());
+  const { read } = await routes(t, handle);
+  handle.start();
+  await post(handle, entry(VIEW, { from: "read-model" }));
+  const steps = (): string[] => rows.filter(([step]) => step.startsWith("view.auto_")).map(([step]) => step);
+  /** The route's mode and the recheck's mode, which must always be the same answer. */
+  const modes = (): [unknown, unknown] => [viewMode(handle, VIEW), handle.autoMode?.(VIEW)];
+  return { handle, recheck: () => recheck(), read, steps, modes };
+}
+
+test("a promoted auto view keeps serving while its readiness is momentarily unknown", async (t) => {
+  const { handle, recheck, read, steps, modes } = await autoHarness(t, "auto-unknown-holds");
+  await post(handle, status(true));
+  recheck();
+  assert.deepEqual(steps(), [VIEW_AUTO_PROMOTED_STEP]);
+  await post(handle, status(null));
+  recheck();
+  recheck();
+  assert.deepEqual(steps(), [VIEW_AUTO_PROMOTED_STEP], "a status body that shows no readiness is not a demotion");
+  assert.deepEqual(modes(), ["serve", "serve"], "the route and the recheck agree it still serves");
+  assert.deepEqual(await read(), { from: "read-model" });
+});
+
+test("a promoted auto view is still demoted by an explicit not-ready", async (t) => {
+  const { handle, recheck, read, steps, modes } = await autoHarness(t, "auto-notready-demotes");
+  await post(handle, status(true));
+  recheck();
+  await post(handle, status(null));
+  recheck();
+  await post(handle, status(false));
+  recheck();
+  assert.deepEqual(steps(), [VIEW_AUTO_PROMOTED_STEP, VIEW_AUTO_DEMOTED_STEP], "a real diff demotes once");
+  assert.deepEqual(modes(), ["shadow", "shadow"]);
+  assert.deepEqual(await read(), { from: "legacy" });
+});
+
+test("a cold boot with unknown readiness resolves an auto view to shadow", async (t) => {
+  const { handle, recheck, read, steps, modes } = await autoHarness(t, "auto-cold-boot");
+  assert.deepEqual(modes(), ["shadow", undefined], "before any recheck the route has no prior state and stays legacy");
+  await post(handle, status(null));
+  recheck();
+  assert.deepEqual(steps(), [], "unknown at boot changes nothing");
+  assert.deepEqual(modes(), ["shadow", "shadow"]);
+  assert.deepEqual(await read(), { from: "legacy" });
 });
 
 test("auto is a switch mode the file and the switch verb accept", (t) => {

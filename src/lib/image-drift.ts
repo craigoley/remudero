@@ -1,42 +1,13 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { BAKED_RUNTIME_SOURCE_PATHS } from "./baked-runtime-inputs.js";
 
 /**
- * W1-T1021 IMAGE DRIFT DETECTION — the running container's image can fall arbitrarily far
- * behind `main` and nothing notices. `.github/workflows/acr-build.yml` is `workflow_dispatch:`
- * only (no push trigger), so a merge never rebuilds the image on its own; meanwhile
- * `deploy/entrypoint.sh` resolves `TREE="$CONFIG_ROOT/remudero"`, fetches+checks it out on every
- * boot and `cd`s into it before running `./bin/rmd` — so `src/`, `test/`, `plan/`, `bin/`,
- * `scripts/` AND `node_modules` (bootstrapped by the entrypoint, freshened by
- * `ensureInstallFresh`) are all LIVE off the mount and take effect on the next freshness
- * restart with no rebuild at all.
- *
- * EXACTLY TWO PATHS ARE BAKED, RE-DERIVED FROM `deploy/Dockerfile`'S OWN LINES, NOT ASSUMED:
- * `COPY --chown=node:node deploy/entrypoint.sh /usr/local/bin/rmd-entrypoint` is what
- * `ENTRYPOINT` actually execs (never the mount's copy), and the Dockerfile's own apt
- * installs/`ARG`s/base image are baked with it. A `COPY . .` snapshot also lands at `/app`, but
- * the entrypoint `cd`s away from it before running anything, so it is inert rather than
- * authoritative. A change under `src/` (or anywhere outside these two paths) MUST NOT trigger
- * this detector — see {@link BAKED_PATHS}.
- *
- * THE COMPARISON INPUT ALREADY EXISTS AND NEEDS NO NEW PLUMBING. `deploy/Dockerfile`'s
- * `ARG RMD_BUILD_SHA=unknown` / `RUN printf '%s\n' "${RMD_BUILD_SHA}" > /etc/rmd-build-sha &&
- * chmod 0444 /etc/rmd-build-sha` stamps the commit `acr-build.yml` built FROM (it passes
- * `--build-arg "RMD_BUILD_SHA=${GITHUB_SHA}"`), readable with a plain `readFileSync` from inside
- * the running container — no Docker socket, no `docker exec`, no runtime query (that class of
- * read is `scripts/fleet-heartbeat.sh`'s job, from the HOST; this module runs INSIDE, where the
- * stamp is an ordinary 0444 file). {@link checkImageDrift} is therefore the whole gap: nothing
- * else in this tree ever joined the stamp to the baked paths' own git history.
- *
- * THREE DEGRADED CASES, each a real outcome rather than a guessed drift:
- *   - The stamp file is ABSENT off-container (a plain dev checkout, no `/etc/rmd-build-sha` at
- *     all) → {@link ImageDriftFinding} `"not-applicable"`, never drift.
- *   - The stamp is not a git-hex sha — `ARG RMD_BUILD_SHA=unknown`'s own default makes a
- *     hand-built image write the literal string `"unknown"`, and `scripts/fleet-heartbeat.sh`
- *     already guards the identical case with `*[!0-9a-fA-F]*` — → `"unmeasurable"`, never drift.
- *   - The stamp names a commit this checkout's local git history cannot resolve (a shallow
- *     clone, a rewritten history) → `"unmeasurable"` for the same reason: a detector that
- *     reports drift on any of these three would fire on every developer machine.
+ * Compare the image build stamp with paths that execute from the image. The entrypoint and image
+ * layers are baked, as is the serve supervisor launched from /app. Serve generations and workers
+ * execute from mounted checkouts. The supervisor's runtime import closure is checked separately
+ * so its dependencies cannot silently fall out of the build and drift catalogs.
+ * An absent stamp is not applicable; an invalid stamp or unavailable history remains unmeasurable.
  */
 
 /**
@@ -59,12 +30,8 @@ export const IMAGE_DRIFT_STEP = "daemon.image_drift";
 // not among this task's declared files, and widening an undeclared shared module is out of this
 // one concern's scope, not an oversight.
 
-/** The exactly-two paths COPY'd into the image at build time — re-derived from
- *  `deploy/Dockerfile`'s own `COPY --chown=node:node deploy/entrypoint.sh …` /
- *  `ENTRYPOINT […, "/usr/local/bin/rmd-entrypoint"]` lines and its own apt/`ARG` layers. Every
- *  other path (`src/`, `test/`, `plan/`, `bin/`, `scripts/`, `node_modules`) is served LIVE from
- *  the entrypoint's own mount-and-checkout, so a change there must never report as image drift. */
-export const BAKED_PATHS: readonly string[] = ["deploy/entrypoint.sh", "deploy/Dockerfile"];
+/** Entrypoint/image layers and the source imported by the image-resident supervisor. */
+export const BAKED_PATHS: readonly string[] = ["deploy/entrypoint.sh", "deploy/Dockerfile", ...BAKED_RUNTIME_SOURCE_PATHS];
 
 /** Where `deploy/Dockerfile` stamps the build sha (`RUN printf '%s\n' "${RMD_BUILD_SHA}" >
  *  /etc/rmd-build-sha && chmod 0444 /etc/rmd-build-sha`) — a plain 0444 file inside the image,

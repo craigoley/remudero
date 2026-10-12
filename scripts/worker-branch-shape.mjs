@@ -21,6 +21,7 @@
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 import { parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
 import { git, gitOrThrow } from "./lib/git.mjs";
@@ -136,6 +137,53 @@ export function declaredTaskIds(worktreePath) {
   return [...ids];
 }
 
+/** A PR-number exemption needs proven absence, not the legacy reader's best-effort empty set.
+ * Parse the same YAML list format as the plan loader, including quoted and flow-style ids.
+ * Keep readable claims even when another file is unreadable; incomplete evidence never grants
+ * an exemption. This complete read is needed only for a PR-number trailer.
+ * @param {string} worktreePath
+ */
+export function inspectDeclaredTaskIds(worktreePath) {
+  let parseYaml;
+  try {
+    // The dependency-free pre-push self-credit mode must still run before an install.
+    // No parser means no proven absence, never an ad-hoc exemption.
+    ({ parse: parseYaml } = createRequire(import.meta.url)("yaml"));
+  } catch {
+    return { ids: declaredTaskIds(worktreePath), complete: false };
+  }
+  const ids = new Set();
+  let complete = true;
+  const readIds = (path) => {
+    try {
+      const text = readFileSync(path, "utf8");
+      for (const id of planTaskIdsFromText(text)) ids.add(id);
+      const entries = parseYaml(text);
+      if (!Array.isArray(entries)) throw new Error("plan is not a list");
+      for (const entry of entries) {
+        if (!entry || typeof entry !== "object" || typeof entry.id !== "string" || !entry.id.trim()) {
+          throw new Error("plan entry has no readable task id");
+        }
+        ids.add(entry.id);
+      }
+    } catch {
+      complete = false;
+    }
+  };
+  readIds(join(worktreePath, "plan", "tasks.yaml"));
+  const shardDir = join(worktreePath, "plan", "tasks.d");
+  try {
+    for (const file of readdirSync(shardDir)) {
+      if (/\.ya?ml$/.test(file)) readIds(join(shardDir, file));
+    }
+  } catch {
+    complete = false;
+  }
+  return { ids: [...ids], complete };
+}
+
+const AD_HOC_PR_ID_RE = /^PR-[1-9][0-9]*$/;
+
 function readFileIfPresent(path) {
   try {
     return readFileSync(path, "utf8");
@@ -158,12 +206,14 @@ export function claimedTaskIds({ commitMessages, addedFiles, readFile, headRef, 
 
 /** The gate's own predicate: refuses only an id REQUIRED to carry the run-<taskId>-<epochMs>
  *  shape that does not; claiming no task always passes, whatever the name.
- *  Falsifier: test/a-worker-branch-must-be-shaped-for-dispatch.test.ts. Why: a trailer-claimed
+ *  Falsifier: test/a-worker-branch-must-be-shaped-for-dispatch.test.ts. Why: a filed trailer-claimed
  *  id is always required, a shard-only id only when the diff is not plan-only — a plan-only
  *  filing is not a build claim (W1-T2530). docs/forensics/worker-branch-shape.md#evaluateworkerbranchshape-w1-t2530
- * @param {{ headRef: string | undefined, commitMessages: string | undefined, addedFiles: readonly string[], readFile: (path: string) => string | undefined, changedFiles?: readonly string[], declaredTaskIds?: readonly string[] }} input
+ *  A trailer-only PR-number proven absent from the complete plan is the existing-ad-hoc-PR
+ *  repair documented by head-identity-gate.mjs, not a filed task's dispatch claim.
+ * @param {{ headRef: string | undefined, commitMessages: string | undefined, addedFiles: readonly string[], readFile: (path: string) => string | undefined, changedFiles?: readonly string[], declaredTaskIds?: readonly string[], declaredTaskIdsComplete?: boolean }} input
  */
-export function evaluateWorkerBranchShape({ headRef, commitMessages, addedFiles, readFile, changedFiles = [], declaredTaskIds = [] }) {
+export function evaluateWorkerBranchShape({ headRef, commitMessages, addedFiles, readFile, changedFiles = [], declaredTaskIds = [], declaredTaskIdsComplete = false }) {
   const trailerIds = new Set(trailerTaskIds(commitMessages));
   const shardIds = new Set(shardTaskIds(addedFiles, readFile));
   const headRefIds = new Set(headRefTaskIds(headRef, declaredTaskIds));
@@ -194,16 +244,20 @@ export function evaluateWorkerBranchShape({ headRef, commitMessages, addedFiles,
     };
   }
 
-  // A shard-only id is exempt exactly when the diff is plan-only — see this function's doc above.
-  const requiresShape = claimed.filter((id) => trailerIds.has(id) || headRefIds.has(id) || !planOnly);
-  const exemptByPlanOnlyFiling = claimed.filter((id) => !requiresShape.includes(id));
+  const adHocPrIds = new Set(claimed.filter((id) => declaredTaskIdsComplete && AD_HOC_PR_ID_RE.test(id) &&
+    trailerIds.has(id) && !declaredTaskIds.includes(id) && !shardIds.has(id) && !headRefIds.has(id)));
+  // This exemption never consumes a mixed filed claim or an added shard's claim.
+  const requiresShape = claimed.filter((id) => !adHocPrIds.has(id) && (trailerIds.has(id) || headRefIds.has(id) || !planOnly));
+  const exemptByPlanOnlyFiling = claimed.filter((id) => !requiresShape.includes(id) && !adHocPrIds.has(id));
 
   if (requiresShape.length === 0) {
     return {
       ok: true,
       message:
-        `claims ${exemptByPlanOnlyFiling.join(", ")} only by filing a plan/tasks.d/ shard on a plan-only diff — a filing is not ` +
-        "a build, so it is exempt from the run-<taskId>-<epochMs> shape check (W1-T2530)",
+        [
+          adHocPrIds.size > 0 ? `ad-hoc PR identity ${[...adHocPrIds].join(", ")} is absent from the complete plan — not a filed-task dispatch claim` : "",
+          exemptByPlanOnlyFiling.length > 0 ? `claims ${exemptByPlanOnlyFiling.join(", ")} only by filing a plan/tasks.d/ shard on a plan-only diff — a filing is not a build, so it is exempt from the run-<taskId>-<epochMs> shape check (W1-T2530)` : "",
+        ].filter(Boolean).join("; "),
     };
   }
 
@@ -376,7 +430,9 @@ export function main(argv, runGit = gitOrThrow) {
   const commitMessages = commitMessagesSinceBase(worktreePath, mergeBase);
   const addedFiles = addedFilesSinceBase(worktreePath, mergeBase);
   const changedFiles = changedFilesSinceBase(worktreePath, mergeBase);
-  const planTaskIds = declaredTaskIds(worktreePath);
+  const planInventory = trailerTaskIds(commitMessages).some((id) => AD_HOC_PR_ID_RE.test(id))
+    ? inspectDeclaredTaskIds(worktreePath)
+    : { ids: declaredTaskIds(worktreePath), complete: false };
   const readFile = (path) => {
     try {
       return readFileSync(join(worktreePath, path), "utf8");
@@ -385,7 +441,7 @@ export function main(argv, runGit = gitOrThrow) {
     }
   };
 
-  const result = evaluateWorkerBranchShape({ headRef, commitMessages, addedFiles, readFile, changedFiles, declaredTaskIds: planTaskIds });
+  const result = evaluateWorkerBranchShape({ headRef, commitMessages, addedFiles, readFile, changedFiles, declaredTaskIds: planInventory.ids, declaredTaskIdsComplete: planInventory.complete });
   if (!result.ok) {
     console.error(`worker-branch-shape: ${result.message}`);
     process.exitCode = 1;

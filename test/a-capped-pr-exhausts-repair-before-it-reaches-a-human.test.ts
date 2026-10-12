@@ -22,7 +22,7 @@ import {
   type OpenPrView,
   type ProofDiscriminationEvidence,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { gitRepo } from "./helpers/git-repo.js";

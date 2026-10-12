@@ -16,10 +16,25 @@ raw: "Cross-repo planning blocker: running rmd plan mode create from
   successor."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/10727
+summary:
+  headline: Fix target-repo proof checks and preserve verdicts on planner retry
+  what_happened: Plan creation found the right successor task, but core-only proof
+    checks rejected valid console unit and Playwright suites. The retry also
+    failed to retain a valid verdict, so no plan PR was created and the console
+    lifecycle task remains blocked.
+  decision: Update proof checks to derive test roots and runners from the selected
+    repository, and make retries retain and require a valid verdict.
+  options:
+    - label: Repair planner
+      consequence: Console proofs can be accepted and the successor plan can proceed
+        with a valid verdict.
+    - label: Keep core-only checks
+      consequence: Valid console proofs remain rejected and the lifecycle successor
+        stays blocked.
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -362,6 +362,27 @@ test("computeTypeOnlyRanges: an `interface`/object-`type` declaration with no ma
   assert.deepEqual(ranges, []);
 });
 
+test("diff-coverage CLI recognizes an erased inline interface while runtime tails and invalid syntax still block", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-diff-coverage-inline-interface-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const source = join(dir, "inline.ts"), lcov = join(dir, "inline.lcov"), diff = join(dir, "inline.diff");
+  writeFileSync(lcov, "TN:\nSF:inline.ts\nDA:1,0\nLF:1\nLH:0\nend_of_record\n");
+  for (const [text, erased] of [
+    ["export interface Count extends Effort { requests: number }", true],
+    ["interface Count { nested: { requests: number }; callback(): void }", true],
+    ["export interface Count { requests: number }; process.exit(0);", false],
+    ["export interface Count { requests: number", false],
+    ["const count = { requests: 1 };", false],
+  ] as const) {
+    writeFileSync(source, text + "\n");
+    writeFileSync(diff, `diff --git a/inline.ts b/inline.ts\n--- a/inline.ts\n+++ b/inline.ts\n@@ -0,0 +1 @@\n+${text}\n`);
+    const result = spawnSync(process.execPath, [SCRIPT, "--lcov", lcov, "--diff", diff], { cwd: dir });
+    assert.equal(result.status, erased ? 0 : 1, result.stdout.toString() + result.stderr.toString());
+    if (erased) assert.match(result.stdout.toString(), /exempt \(type-only\) inline\.ts:1/);
+    else assert.match(result.stderr.toString(), /BLOCKED/);
+  }
+});
+
 test("computeTypeOnlyRanges: a `const` object LITERAL (real runtime value, not a type declaration) is never exempted -- only `interface`/`type X = {` openers qualify", async () => {
   const { computeTypeOnlyRanges } = await import(pathToFileURL(SCRIPT).href);
   const ranges = computeTypeOnlyRanges("const config = {\n  retries: 3,\n};\n");
@@ -508,4 +529,3 @@ test("W1-T4099: a process-boundary directive over a flushThenExit exit is honour
   const control = computeBoundaryRanges(src.replace("void flushThenExit(exitCodeFor(err));", "logIt(err);"));
   assert.equal(control.errors.length, 1, "control: without an exit call the directive is still refused");
 });
-

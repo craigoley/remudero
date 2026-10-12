@@ -407,7 +407,7 @@ test("DAEMON WIRING: the production runOne supplies a material freshness handoff
     assert.equal(result.verdict, "handed_off");
     assert.ok(forwarded, "the daemon runOne invokes its configured runTask implementation");
     assert.equal(
-      forwarded.externalWaitFreshness?.(),
+      await forwarded.externalWaitFreshness?.(),
       undefined,
       "a low-weight advance a busy daemon defers does not end the run's CI wait (W1-T5037)",
     );
@@ -423,7 +423,7 @@ test("DAEMON WIRING: the production runOne supplies a material freshness handoff
     );
     rmSync(join(root, "state", "PAUSE"), { force: true });
     assert.deepEqual(
-      forwarded.externalWaitFreshness?.(),
+      await forwarded.externalWaitFreshness?.(),
       {
         stale: true,
         oldSha,

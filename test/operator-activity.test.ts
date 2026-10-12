@@ -12,6 +12,11 @@ import {
   buildPanelReadRoutes,
   type PanelGraphDeps,
   type OperatorActivityEnvelope,
+  groupIncidentObservations,
+  incidentIdentity,
+  projectIncidentLifecycle,
+  projectOperatorActivityIncidents,
+  type IncidentObservation,
 } from "../src/lib/panel-graph.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { readLedgerUnionBounded, type StatusProjection } from "../src/lib/status.js";
@@ -377,4 +382,129 @@ test("unit test: a warm operator activity refresh parses no ledger rotation", as
   } finally {
     rmSync(fx.dir, { recursive: true, force: true });
   }
+});
+
+// ── W1-T3854: incident identity and lifecycle ─────────────────────────────────────────────
+
+
+function obs(id: string, observedAt: string, over: Partial<IncidentObservation> = {}): IncidentObservation {
+  return {
+    id,
+    observedAt,
+    repository: "craigoley/remudero",
+    failureClass: "ci_red",
+    scope: "W1-T1",
+    release: "sha-1",
+    discriminator: { name: "cause_key", values: ["lint-timeout"] },
+    title: "CI red",
+    ...over,
+  };
+}
+
+const NOW = Date.parse("2026-10-01T00:00:00.000Z");
+
+test("unit test: repeated incident observations group without losing evidence rows", () => {
+  const rows = [obs("e1", "2026-09-20T10:00:00.000Z"), obs("e2", "2026-09-20T11:00:00.000Z"), obs("e3", "2026-09-20T11:00:00.000Z")];
+  const groups = groupIncidentObservations(rows);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0]!.count, 3);
+  assert.deepEqual(groups[0]!.observations.map((o) => o.id).sort(), ["e1", "e2", "e3"]);
+  assert.equal(groups[0]!.identity.grouped, true);
+  assert.equal(groups[0]!.firstObservedAt, "2026-09-20T10:00:00.000Z");
+  // Through the ledger adapter: the same rows, every one still inspectable on the single card.
+  const ledgerRows = rows.map((o, i) => ({ step: "run.fail", id: o.id, ts: o.observedAt, task_id: "W1-T1", repo: "craigoley/remudero", failure_class: "ci_red", cause_key: "lint-timeout", head_sha: `sha-${i}` }));
+  const cards = projectOperatorActivityIncidents(ledgerRows, [], NOW);
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0]!.group.observations.length, ledgerRows.length);
+  assert.equal(cards[0]!.state, "new");
+});
+
+test("unit test: ambiguous incident identity splits instead of guessing a group", () => {
+  const ambiguous = obs("a1", "2026-09-20T10:00:00.000Z", { discriminator: { name: "cause_key", values: ["lint-timeout", "oom"] } });
+  const identity = incidentIdentity(ambiguous);
+  assert.equal(identity.grouped, false);
+  if (identity.grouped) throw new Error("expected ungroupable");
+  assert.equal(identity.reason, "discriminator-ambiguous");
+  // Same title, materially different causes: never merged on the title.
+  const groups = groupIncidentObservations([
+    obs("t1", "2026-09-20T10:00:00.000Z"),
+    obs("t2", "2026-09-20T10:01:00.000Z", { discriminator: { name: "cause_key", values: ["oom"] } }),
+    ambiguous,
+    obs("a2", "2026-09-20T10:02:00.000Z", { discriminator: { name: "cause_key", values: ["lint-timeout", "oom"] } }),
+  ]);
+  assert.equal(groups.length, 4);
+  assert.equal(groups.reduce((n, g) => n + g.observations.length, 0), 4);
+  // A different scope or failure class is a different incident too.
+  assert.notEqual(incidentIdentity(obs("x", "2026-09-20T10:00:00.000Z")).key, incidentIdentity(obs("x", "2026-09-20T10:00:00.000Z", { scope: "W1-T2" })).key);
+  assert.notEqual(incidentIdentity(obs("x", "2026-09-20T10:00:00.000Z")).key, incidentIdentity(obs("x", "2026-09-20T10:00:00.000Z", { failureClass: "other" })).key);
+});
+
+test("unit test: incident regression requires a newer observed event than the resolution", () => {
+  const group = groupIncidentObservations([obs("e1", "2026-09-20T10:00:00.000Z"), obs("e2", "2026-09-20T12:00:00.000Z", { release: "sha-2" })])[0]!;
+  const resolution = (resolvedAt: string, extra: Record<string, unknown> = {}) => ({
+    key: group.key,
+    resolution: { cites: { kind: "pr" as const, ref: "#42" }, resolvedAt, ...extra },
+  });
+  // Resolved after both events: replaying the old ones does not reopen.
+  const resolved = projectIncidentLifecycle(group, resolution("2026-09-20T13:00:00.000Z"), NOW);
+  assert.equal(resolved.state, "resolved");
+  // An event exactly AT the resolution instant is not newer.
+  assert.equal(projectIncidentLifecycle(group, resolution("2026-09-20T12:00:00.000Z"), NOW).state, "resolved");
+  // A strictly newer event regresses and names itself and its release.
+  const regressed = projectIncidentLifecycle(group, resolution("2026-09-20T11:00:00.000Z"), NOW);
+  assert.equal(regressed.state, "regressed");
+  assert.equal(regressed.regressedBy, "e2");
+  assert.equal(regressed.regressedInRelease, "sha-2");
+  // A replay of an event the resolver already saw never reopens, even with a later timestamp.
+  assert.equal(projectIncidentLifecycle(group, resolution("2026-09-20T11:00:00.000Z", { coveredObservationIds: ["e2"] }), NOW).state, "resolved");
+  // A resolution that cites no commit/PR/receipt is not honoured.
+  const uncited = projectIncidentLifecycle(group, { key: group.key, resolution: { resolvedAt: "2026-09-20T13:00:00.000Z" } }, NOW);
+  assert.equal(uncited.state, "unmeasurable");
+});
+
+test("unit test: incident snooze reopens on new activity and preserves the record", () => {
+  const before = groupIncidentObservations([obs("e1", "2026-09-20T10:00:00.000Z")])[0]!;
+  const snooze = { snoozedAt: "2026-09-21T00:00:00.000Z", reopenOnNewActivity: true };
+  const held = projectIncidentLifecycle(before, { key: before.key, snooze }, NOW);
+  assert.equal(held.state, "snoozed");
+  assert.equal(held.visible, false);
+  assert.equal(held.group.observations.length, 1);
+  // New activity after the snooze makes it visible again; nothing was deleted.
+  const after = groupIncidentObservations([obs("e1", "2026-09-20T10:00:00.000Z"), obs("e2", "2026-09-22T00:00:00.000Z")])[0]!;
+  const reopened = projectIncidentLifecycle(after, { key: after.key, snooze }, NOW);
+  assert.equal(reopened.state, "active");
+  assert.equal(reopened.visible, true);
+  assert.equal(reopened.reason, "snooze-new-activity");
+  assert.equal(reopened.group.observations.length, 2);
+  // Time and condition triggers.
+  const timed = { snoozedAt: "2026-09-21T00:00:00.000Z", until: "2026-09-30T00:00:00.000Z" };
+  assert.equal(projectIncidentLifecycle(before, { key: before.key, snooze: timed }, Date.parse("2026-09-25T00:00:00.000Z")).state, "snoozed");
+  assert.equal(projectIncidentLifecycle(before, { key: before.key, snooze: timed }, NOW).state, "active");
+  const conditional = { snoozedAt: "2026-09-21T00:00:00.000Z", condition: "after the lint fix ships" };
+  assert.equal(projectIncidentLifecycle(before, { key: before.key, snooze: conditional }, NOW).state, "snoozed");
+  assert.equal(projectIncidentLifecycle(before, { key: before.key, snooze: { ...conditional, conditionMet: true } }, NOW).state, "active");
+  // A snooze with no trigger is rejected, never an indefinite hide.
+  const forever = projectIncidentLifecycle(before, { key: before.key, snooze: { snoozedAt: "2026-09-21T00:00:00.000Z" } }, NOW);
+  assert.notEqual(forever.state, "snoozed");
+  assert.equal(forever.visible, true);
+  assert.match(forever.reason, /snooze-rejected: no-trigger/);
+});
+
+test("unit test: incident identity reports ungroupable when its discriminator is unavailable", () => {
+  const missing = obs("m1", "2026-09-20T10:00:00.000Z", { discriminator: undefined });
+  const identity = incidentIdentity(missing);
+  assert.equal(identity.grouped, false);
+  if (identity.grouped) throw new Error("expected ungroupable");
+  assert.equal(identity.reason, "discriminator-unavailable");
+  const empty = incidentIdentity(obs("m2", "2026-09-20T10:00:00.000Z", { discriminator: { name: "cause_key", values: [] } }));
+  assert.equal(empty.grouped, false);
+  // Two such observations never collapse into a duplicate-free or grouped card, and they are unmeasurable.
+  const groups = groupIncidentObservations([missing, obs("m1", "2026-09-20T10:00:00.000Z", { discriminator: undefined })]);
+  assert.equal(groups.length, 2);
+  for (const group of groups) assert.equal(projectIncidentLifecycle(group, undefined, NOW).state, "unmeasurable");
+  // A ledger row naming a failure class but no cause stays ungroupable end to end.
+  const cards = projectOperatorActivityIncidents([{ step: "run.fail", ts: "2026-09-20T10:00:00.000Z", task_id: "W1-T1", failure_class: "ci_red" }], [], NOW);
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0]!.state, "unmeasurable");
+  assert.equal(cards[0]!.visible, true);
 });

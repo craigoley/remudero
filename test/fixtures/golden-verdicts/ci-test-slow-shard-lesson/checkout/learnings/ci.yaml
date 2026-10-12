@@ -1,0 +1,18 @@
+- id: test-slow-shard-single-suite-at-a-time
+  subsystem: ci
+  lifecycle: active
+  files: ["test/**", "scripts/test-tier-manifest.json", ".github/workflows/ci.yml", package.json]
+  fact: >-
+    When verifying test changes or the slow-tier runner, run one full test suite at a time. Do not
+    background or parallelize `node --test` runs; the deny floor refuses concurrent full-suite
+    runs. For focused verification, run one test file or use `--test-name-pattern`. The coverage
+    preflight runs its shards sequentially; let it finish before starting another full suite.
+  evidence: >-
+    The test-slow-shard (1/2) gate refused nine pull requests recorded as
+    ci-learning:9362:test-slow-shard (1/2) (9362, 9379, 9382, 9386, 9396, 9415, 9520, 9527, 9649),
+    and each was repaired. The task's deny-floor constraint identifies overlapping full-suite
+    runs as a refusal condition; this entry directs test authors to serialize full runs and use
+    single-file or name-pattern runs for focused checks. Individual PR failure logs were not
+    available to establish a more specific shared cause.
+  src: "ci-learning:9362:test-slow-shard (1/2)"
+  cited: "2026-10-08"

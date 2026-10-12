@@ -211,11 +211,12 @@ test("W1-T3655: ci.yml's push-to-main lane actually invokes the census, strictly
   // W1-T4399: comment-load-ratchet's real PR-side work now runs as a step of the `commitlint`
   // job (its own ci.yml job key stays registered but permanently skipped, if: false), so the
   // PR-only guard is read off `commitlint` instead.
+  // W1-T5522: the job also runs on merge_group (the group commit, against the queue base), never push.
   const ratchetJob = doc.jobs["commitlint"];
   assert.equal(
     ratchetJob?.if,
-    "github.event_name == 'pull_request'",
-    "commitlint (comment-load-ratchet's new home) must stay PR-only -- the census reaches main through `ci`, not by relaxing this job",
+    "github.event_name == 'pull_request' || github.event_name == 'merge_group'",
+    "commitlint (comment-load-ratchet's new home) must never run on push -- the census reaches main through `ci`, not by relaxing this job",
   );
 });
 

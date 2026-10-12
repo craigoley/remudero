@@ -13735,3 +13735,8 @@
     asymmetric: a recursion or a cancel-in-progress bug either spins the gate or leaves a cancelled
     ci-gate as the newest run, which reads as a hard red. The guards in design (ii)/(iii) are load-bearing
     criteria, not defensive extras."
+
+# W1-T5972 assessment: W1-T3764 is ELIGIBLE FOR RETIREMENT, no scope update needed. Its record
+# (plan/tasks.d/W1-T3764-*.yaml) is already `retirement: closed`; #6029 made the control accept
+# /^(?:hooks\/pre-push:)?1:#!\/bin\/sh$/m and test/a-proof-can-name-an-extensionless-file.test.ts
+# passes (6/6) on main. Nothing left to change; W1-T5973 (scope update) is therefore moot.

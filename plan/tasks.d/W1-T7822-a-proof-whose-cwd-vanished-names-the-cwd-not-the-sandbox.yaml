@@ -1,0 +1,74 @@
+- id: W1-T7822
+  title: "A PROOF WHOSE CWD VANISHED NAMES THE CWD, NOT THE SANDBOX — `spawnFailureText` turns every ENOENT into `bwrap is not installed`, and a reclaimed review worktree raises ENOENT first from `proofSandboxArgv`'s realpath of the cwd, so PR #10741's proofs were graded a missing-sandbox host gap when their checkout had been deleted mid-review"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — a vanished proof cwd is named as itself, never as a missing sandbox
+  band_meaning: span
+  origin: "operator session 2026-10-10: PR #10741's review proofs failed when the review worktree was reclaimed mid-review (the reclaim race is open PR #10770); filed at operator request 2026-10-10"
+  plan_refs: [W1-T6124, W1-T305, W1-T4587]
+  files: [src/lib/review.ts, src/lib/sweep.ts, test/a-proof-whose-cwd-vanished-names-the-cwd-not-the-sandbox.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main 9b942cbd5.
+    - `spawnFailureText` (src/lib/review.ts:1685) maps ANY `err.code === "ENOENT"` to
+      `${PROOF_SANDBOX_BINARY} is not installed` (review.ts:1687), without asking what was missing.
+    - Node raises ENOENT for a missing cwd as well as a missing binary. In bwrap mode the first thing to touch
+      the cwd is `proofSandboxArgv`, whose `realpathSync(input.cwd)` (review.ts:1903) throws ENOENT.
+      `prepareProofChild` (review.ts:1985) catches it and rethrows
+      `new ProofSandboxUnavailableError(spawnFailureText(error))` (review.ts:2006). `startCheckSync`
+      (review.ts:2010) and `startCheckAsync` (review.ts:2025) wrap their own spawn the same way, so a cwd
+      deleted between prepare and start-check gets the same misreport.
+    - `judgeCriterion` grades every `ProofSandboxUnavailableError` `not_executable` with
+      `proof_skip: "runner-absent"` and "the proof sandbox could not start (...)" (review.ts:3938-3944).
+    - REPRODUCED 2026-10-10 on origin/main. With the sandbox pinned to bwrap (`setProofSandboxForTests`)
+      and a removed temp dir as cwd, both `defaultProofSpawner` (review.ts:2057) and
+      `defaultAsyncProofSpawner` (review.ts:2110) threw `ProofSandboxUnavailableError: proof sandbox could
+      not start: bwrap is not installed`. The throw came from `prepareProofChild` (review.ts:2006), not from
+      either start-check. So a check placed only in `startCheckSync`/`startCheckAsync` would never run for
+      a cwd that was already gone. The check has to come before `proofSandboxArgv`.
+    - On 2026-10-10, PR #10741's review proofs were graded this way only because the review worktree had
+      been reclaimed mid-review (as read by the operator session). Open PR #10770 fixes that reclaim race. It
+      does not fix the label, and a review that does not trust its own sandbox evidence sends the operator to
+      the wrong host problem.
+    - Review reuse also keys on the reason. `assessReviewReuse` (src/lib/sweep.ts:363) refuses to reuse a
+      verdict carrying `proof_skip === "runner-absent"` (sweep.ts:375). A new reason that is not added there
+      would let a vanished-cwd verdict be reused as if its evidence were readable.
+  design: |
+    1. Add a `ProofCwdMissingError` (an RmdError, like `ProofSandboxUnavailableError`) whose message is
+       `proof cwd no longer exists: <cwd>`.
+    2. Check `existsSync(cwd)` and throw it:
+       - at the top of `prepareProofChild`, before `proofSandboxArgv` or any temp HOME is made, so both the
+         bwrap and the unsandboxed modes name it;
+       - again at the top of `startCheckSync` and `startCheckAsync`, for a cwd that goes away between
+         prepare and start-check.
+       A `ProofCwdMissingError` passes through the existing catches unwrapped. `spawnFailureText` keeps its
+       ENOENT arm for a real missing binary.
+    3. Add `"cwd-missing"` to `ProofSkipReason` (review.ts:283) and to its doc. `judgeCriterion` catches
+       `ProofCwdMissingError` before `ProofSandboxUnavailableError` and grades it `proof_exec:
+       "not_executable"`, `proof_skip: "cwd-missing"`, with a reason that includes
+       "proof cwd no longer exists" and "not executed, keyword floor applied". It is never a pass and never
+       `executed_fail`.
+    4. Add `criterion.proof_skip === "cwd-missing"` to the unreadable-evidence list in `assessReviewReuse`
+       (sweep.ts:371-379).
+  acceptance:
+    - claim: "defaultProofSpawner with the sandbox pinned to bwrap and a removed cwd throws ProofCwdMissingError naming the cwd, not bwrap is not installed"
+      proof: 'grep: test("W1-T7822: the sync proof spawner names a vanished cwd, not a missing sandbox" in test/a-proof-whose-cwd-vanished-names-the-cwd-not-the-sandbox.test.ts'
+    - claim: "defaultAsyncProofSpawner under the same setup rejects with ProofCwdMissingError"
+      proof: 'grep: test("W1-T7822: the async proof spawner names a vanished cwd, not a missing sandbox" in test/a-proof-whose-cwd-vanished-names-the-cwd-not-the-sandbox.test.ts'
+    - claim: "judgeCriterion grades a proof whose cwd vanished not_executable with proof_skip cwd-missing"
+      proof: 'grep: test("W1-T7822: judgeCriterion grades a vanished cwd as cwd-missing" in test/a-proof-whose-cwd-vanished-names-the-cwd-not-the-sandbox.test.ts'
+    - claim: "an absent sandbox binary with a live cwd still reads bwrap is not installed"
+      proof: 'grep: test("W1-T7822: an absent sandbox binary with a live cwd still reads as not installed" in test/a-proof-whose-cwd-vanished-names-the-cwd-not-the-sandbox.test.ts'
+    - claim: "review reuse refuses a verdict whose criterion carries proof_skip cwd-missing"
+      proof: 'grep: test("W1-T7822: review reuse refuses a verdict with a cwd-missing proof" in test/a-proof-whose-cwd-vanished-names-the-cwd-not-the-sandbox.test.ts'
+  falsifier: |
+    Remove the cwd check from `prepareProofChild`. The removed-cwd spawn then throws
+    `ProofSandboxUnavailableError: ... bwrap is not installed` from review.ts:2006, as it does on main today,
+    and the first three tests fail. Drop the `cwd-missing` arm from `assessReviewReuse` and the fifth fails.
+    A fix that maps every ENOENT to the cwd message fails the fourth.

@@ -6,7 +6,7 @@ import { threadId, Worker } from "node:worker_threads";
 
 import { createBoardProjectionWorker } from "../src/lib/board-worker.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { reloadServePlan } from "../src/lib/serve-plan-reload.js";
+import { packPlanBlobs, reloadServePlan } from "../src/lib/serve-plan-reload.js";
 import { PLAN_PIN_ADOPT_FAILED_STEP, PLAN_PIN_ADOPTED_STEP, publishThreadPlan, threadPlanPin, threadStrictPlan } from "../src/lib/thread-plan.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -72,7 +72,7 @@ const adoptions = (rows: Row[], path?: string): Row[] => rows.filter(([step, row
 test("a plan-only commit the slot's working tree never sees reaches the board worker and a views thread after reloadServePlan", async (t) => {
   const fixture = slot();
   const { ids } = boardWorker(t, fixture);
-  const view = new Worker(new URL("./helpers/plan-pin-view-thread.ts", import.meta.url), { workerData: { planPath: fixture.planPath, ledgerDir: fixture.dir, ids: ["W1-T1", "W1-T2"] }, execArgv: process.execArgv });
+  const view = new Worker(new URL("./helpers/plan-pin-view-thread.ts", import.meta.url), { workerData: { planPath: fixture.planPath, ledgerDir: fixture.dir, ids: ["W1-T1", "W1-T2"] } });
   t.after(() => void view.terminate());
   const viewIds = async (): Promise<string[]> => {
     const answer = new Promise<string[]>((resolve) => view.once("message", resolve));
@@ -132,15 +132,16 @@ test("a worker started after the reload asks for the current plan and adopts it"
   assert.deepEqual(await until(ids, (now) => now.includes("W1-T2"), "a late worker adopts the published plan"), ["W1-T1", "W1-T2"]);
 });
 
-test("a worker that cannot read the pinned commit keeps its plan and the failure is ledgered", async (t) => {
+test("a worker that cannot parse the pinned plan keeps its plan and the failure is ledgered", async (t) => {
   const fixture = slot();
   const { ids } = boardWorker(t, fixture);
   await until(ids, (now) => now.length > 0, "the board worker is ready");
   const rows: Row[] = [];
-  const missing = "0".repeat(40);
-  publishThreadPlan({ path: fixture.planPath, repoDir: fixture.dir, ref: missing }, { plan: loadPlan(fixture.planPath), quarantined: [] }, (step, extra = {}) => void rows.push([step, extra]));
+  const unparseable = fixture.shas[2]!;
+  const text = packPlanBlobs([{ label: `${unparseable}:plan/tasks.yaml`, text: "- id: [unclosed\n  title: {" }]);
+  publishThreadPlan({ path: fixture.planPath, repoDir: fixture.dir, ref: unparseable }, { plan: loadPlan(fixture.planPath), quarantined: [], text }, (step, extra = {}) => void rows.push([step, extra]));
   const [, failed] = (await until(() => rows.filter(([step]) => step === PLAN_PIN_ADOPT_FAILED_STEP), (found) => found.length > 0, "the failure row"))[0]!;
-  assert.equal(failed.ref, missing);
+  assert.equal(failed.ref, unparseable);
   assert.match(String(failed.reason), /./);
   assert.deepEqual(ids(), ["W1-T1"], "the worker keeps serving its last plan");
 });

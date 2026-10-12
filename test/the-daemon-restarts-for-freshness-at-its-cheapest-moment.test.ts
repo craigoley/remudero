@@ -7,6 +7,7 @@ import { runDaemon, type DaemonFreshness } from "../src/lib/daemon.js";
 import {
   DEPLOY_RESTART_RATE_CEILING_MS,
   DEPLOY_RESTART_SCORE_THRESHOLD,
+  FRESHNESS_COALESCE_WINDOW_MS,
   decideFreshnessRestart,
   freshnessAdvanceWorth,
 } from "../src/lib/deploy-judge.js";
@@ -128,16 +129,18 @@ test("W1-T4945: a change to the daemon own loop still drains and restarts while 
   const lines: Line[] = [];
   let releaseSweep: (() => void) | undefined;
   let passes = 0;
+  let nowMs = Date.now();
   const daemon = runDaemon(
     fixturePlan(),
     {
       refreshMerged: () => () => true,
       runOne: async (id) => okResult(id),
-      sleep: async () => {},
+      now: () => new Date(nowMs),
+      sleep: async () => { nowMs += FRESHNESS_COALESCE_WINDOW_MS.value / 2; },
       log: (step, extra = {}) => {
         lines.push({ step, extra });
         // The exit waits for the pass still running; let it finish once the decision is made.
-        if (step === "daemon.freshness_decision") setTimeout(() => releaseSweep?.(), 5);
+        if (step === "daemon.freshness_decision" && extra.action === "restart") setTimeout(() => releaseSweep?.(), 5);
       },
       sweep: async () => {
         passes++;
@@ -146,16 +149,21 @@ test("W1-T4945: a change to the daemon own loop still drains and restarts while 
       },
       checkFreshness: () => staleWith(["src/lib/daemon.ts"]),
     },
-    { sweepWallClockBoundMs: 60_000 },
+    { sweepWallClockBoundMs: 24 * 60 * 60_000 },
   );
   const summary = await within(daemon, 5_000);
   releaseSweep?.();
   assert.notEqual(summary, "timed-out");
   const made = decisions(lines);
-  assert.equal(made.length, 1);
-  assert.equal(made[0]!.action, "restart");
-  assert.equal(made[0]!.busy, true);
-  assert.equal(made[0]!.weight, DEPLOY_RESTART_SCORE_THRESHOLD.value);
+  assert.deepEqual(made.map((row) => row.action), ["defer", "restart"]);
+  for (const row of made) {
+    assert.equal(row.busy, true);
+    assert.equal(row.weight, DEPLOY_RESTART_SCORE_THRESHOLD.value);
+  }
+  const coalesced = lines.filter((l) => l.step === "daemon.freshness_coalesced").map((l) => l.extra);
+  assert.deepEqual(coalesced.map((row) => row.action), ["hold", "restart"]);
+  assert.deepEqual(coalesced.map((row) => row.held_ms), [FRESHNESS_COALESCE_WINDOW_MS.value / 2, FRESHNESS_COALESCE_WINDOW_MS.value]);
+  assert.equal(coalesced.at(-1)!.reason, "window_quiet");
   assert.equal((summary as { stopReason: string }).stopReason, "stale");
 });
 

@@ -163,6 +163,7 @@ test("test-with-retry: a duration-tier command retries only the failed files thr
   assert.equal(retry.cmd, process.execPath);
   assert.deepEqual(retry.args, [
     "--test",
+    "--test-reporter=tap",
     "--import",
     "tsx",
     "--import",

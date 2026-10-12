@@ -1,0 +1,50 @@
+- id: W1-T6061
+  title: "SITE AND CONSOLE RECYCLE AGAIN — since W1-T4863 gave each instance its own claude_dir, recycle-container resolves the App key under ~/.claude-site and ~/.claude-console, which were never created, so every site and console recycle refuses and both run images 46+ baked commits stale"
+  repo: remudero
+  depends_on: []
+  dispatch_hold: true
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: Node 24 rollout readiness check (host, read-only)"
+  plan_refs: [W1-T4863, W1-T4198, W1-T5883, W1-T6095]
+  files: [.remudero/daemon-instances.yaml, test/site-and-console-recycle-again.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-06T22:20Z on the Azure host: site's deploy.restart_refused row and both
+    state/DEPLOY_FAILED markers (site 22:20:33Z, console 17:15:03Z) carry recycle-container's refusal
+    "the App private key is missing or empty on this host at /home/craigoleyagent/.claude-site/rmd-app.pem".
+    The repo registry (W1-T4863) sets site's claude_dir to .claude-site and console's to
+    .claude-console; recycle-container reads that registry and maps the container key path through
+    claude_dir, and neither host directory exists. The host's /etc registry, which the launchers and
+    units use, still gives both the shared /home/craigoleyagent/.claude, and all three running
+    containers mount it. remudero-site-daemon has run since 2026-10-04T01:02Z, 46 baked-path commits
+    behind; console since 10-05T17:44Z. W1-T4863's split is half-built: install-host-units.sh mounts
+    the owner's .credentials.json read-only into a non-primary instance, but recycle-container.sh has
+    no such mount, so a recycle into ~/.claude-site would start a container with no Claude credential.
+  design: |
+    AMENDED 2026-10-06 (operator ruling: align the repo to the live host). Site and console's
+    claude_dir in .remudero/daemon-instances.yaml is the credential owner's /home/craigoleyagent/.claude
+    again, matching /etc and the running containers, so recycle-container finds the App key and the
+    recycled container keeps the credential it runs with today. The per-instance split returns with
+    W1-T6095, which first teaches the recycler the owner-credential mount. A test reads the registry
+    and refuses a live non-primary instance whose claude_dir differs from the primary's while
+    recycle-container.sh carries no read-only .credentials.json mount, so the split re-opens only
+    once the recycler can carry it.
+  acceptance:
+    - claim: "every live instance recycles with the credential directory it runs with"
+      proof: 'grep: test("W1-T6061: no instance gets its own claude_dir before the recycler mounts the owner''s credential" in test/site-and-console-recycle-again.test.ts'
+  falsifier: |
+    Put site's claude_dir back to .claude-site: the test names site, because recycle-container.sh still
+    mounts no owner credential.
+  note: |
+    DISPATCH HOLD: operator hand build (2026-10-06). After merge each instance's watchdog pulls the
+    registry and recycles on its next tick; verify on the host, per instance: docker inspect image
+    id moved, `docker exec <c> node --version`, and state/DEPLOY_FAILED retracted. State roots: core
+    /home/craigoleyagent/rmd-state2, site /home/craigoleyagent/rmd-site-state, console
+    /mnt/rmd/remudero-console-state. Do this BEFORE W1-T5883 merges.

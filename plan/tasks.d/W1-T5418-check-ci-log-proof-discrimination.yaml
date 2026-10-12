@@ -37,3 +37,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.88
+    reasons:
+      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The declared scope includes scripts/proof-discrimination-gate.mjs, but the record does not explain how preventing fix rounds preserves proof discrimination; whether the remedy changes review policy cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The acceptance proof greps for a test declaration; that alone does not establish the claimed behavior that the harness no longer spends a fix round on this cause."
+    judged_at: "2026-10-03T04:10:54.681Z"
+    pin: "e73fc496a11329738de6e2fd583e0c3bf5bee59fbd7a0430b32df613cbab9a14"

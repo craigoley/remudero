@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-02: gap review of W1-T5016 (#8683)"
   plan_refs: [W1-T5016]
   files: [hooks/deny-floor.sh, settings/worker.json, test/worker-grep-and-glob-stay-in-the-worktree.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

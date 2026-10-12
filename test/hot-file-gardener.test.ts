@@ -140,6 +140,11 @@ const nowMs = Date.parse("2026-09-29T12:00:00.000Z");
 
 function fixture(kind: string, ledger: LedgerRecord[], land: GardenCheckout["land"], origins: string[] = []) {
   const repo = gitRepo({ kind });
+  // The hot files are on main, as the files a restructuring shard declares must be for lint-plan's admission.
+  mkdirSync(join(repo.dir, "scripts"), { recursive: true });
+  for (const hot of ["scripts/test-tier-manifest.json", "scripts/comment-load-baseline.json"]) writeFileSync(join(repo.dir, hot), "{}\n");
+  repo.git("add", "scripts");
+  repo.git("commit", "-q", "-m", "seed hot files");
   const stateDir = join(repo.dir, "state");
   mkdirSync(stateDir, { recursive: true });
   const events: Array<{ step: string; extra?: Record<string, unknown> }> = [];
@@ -181,7 +186,7 @@ test("W1-T4803: the costliest untracked hot file is filed plan-only with its rem
   assert.equal(pass.prUrl, "https://github.com/acme/remudero/pull/99");
   assert.equal(landed.length, 1);
   assert.equal(landed[0]!.length, 1, "ONE path: the shard alone, never a garden log beside it");
-  assert.match(landed[0]![0]!, /^plan\/tasks\.d\/W1-T9601-hot-file-.*\.yaml$/);
+  assert.match(landed[0]![0]!, /^plan\/tasks\.d\/W1-T9601-two-prs-never-conflict-on-.*\.yaml$/);
   assert.equal(rule15SplitViolation(diff).refused, false, "a shard-only filing is the plan-only shape Rule 15 exempts");
   assert.ok(planOnlyDiff(diff));
 

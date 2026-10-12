@@ -106,7 +106,7 @@ test("a whole-plan lint-plan test builds no real GitHub gateway", async () => {
   try {
     const result = spawnSync(
       process.execPath,
-      ["--test", "--import", "tsx", "--import", HYGIENE_HREF, "--import", GH_FIRST_HREF, ...LINT_PLAN_FAMILY],
+      ["--test", "--test-reporter=tap", "--import", "tsx", "--import", HYGIENE_HREF, "--import", GH_FIRST_HREF, ...LINT_PLAN_FAMILY],
       { cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined, RMD_TEST_GH_FIRST_DIR: recorder.dir } },
     );
     const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
@@ -132,7 +132,7 @@ function runFixture(source: string): { status: number | null; output: string } {
   try {
     const file = join(dir, "fixture.test.mjs");
     writeFileSync(file, source, "utf8");
-    const result = spawnSync(process.execPath, ["--test", "--import", "tsx", "--import", HYGIENE_HREF, file], {
+    const result = spawnSync(process.execPath, ["--test", "--test-reporter=tap", "--import", "tsx", "--import", HYGIENE_HREF, file], {
       cwd: REPO_ROOT,
       encoding: "utf8",
       // This proof file is itself running under `node --test` — without clearing this, the

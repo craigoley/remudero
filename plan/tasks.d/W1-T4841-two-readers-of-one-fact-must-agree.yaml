@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-flow-improve-1790732974000 -> plan-flow-improve-1790732974000"
   plan_refs: [W1-T4820]
   files: [src/lib/reader-agreement.ts, src/lib/sweep.ts, test/two-readers-of-one-fact-must-agree.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-29: the board read W1-T2982's streak as 1,584 where the deduplicated ledger holds 32 dispatches

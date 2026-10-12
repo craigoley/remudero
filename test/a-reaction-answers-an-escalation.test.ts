@@ -100,14 +100,14 @@ function fakeGateway(
 
 // ── 1: the owner's thumbs-up accepts the recommended option ───────────────────────────────────
 
-test("W1-T4676: the owner's thumbs-up accepts the recommended option", () => {
+test("W1-T4676: the owner's thumbs-up accepts the recommended option", async () => {
   const root = tmpRoot();
   const ledgerPath = join(root, "state", "ledger.ndjson");
   const e = escalation();
   const issue: OpenIssue = { number: 1001, url: "https://github.com/craigoley/remudero/issues/1001", body: renderIssueBody(e) };
   const gateway = fakeGateway(issue, [ownerReaction(5001, "+1")]);
 
-  const result = readEscalationAnswers(root, "RUN-1", gateway, { ledgerPath }, fixedClock(CLOCK_MS));
+  const result = await readEscalationAnswers(root, "RUN-1", gateway, { ledgerPath }, fixedClock(CLOCK_MS));
   assert.deepEqual(result, { accepted: 1, ignored: 0, unreadable: 0 });
 
   const stored = readQuestionsStore(root);
@@ -126,21 +126,21 @@ test("W1-T4676: the owner's thumbs-up accepts the recommended option", () => {
   assert.equal(evidence!.constraint, "retry");
 
   // Idempotent per reaction id — a re-poll of the same reaction creates nothing new.
-  const second = readEscalationAnswers(root, "RUN-2", gateway, { ledgerPath }, fixedClock(CLOCK_MS));
+  const second = await readEscalationAnswers(root, "RUN-2", gateway, { ledgerPath }, fixedClock(CLOCK_MS));
   assert.equal(second.accepted, 0);
   assert.equal(readQuestionsStore(root).length, 1);
 });
 
 // ── 2: the owner's thumbs-down declines it, recorded distinctly ───────────────────────────────
 
-test("W1-T4676: the owner's thumbs-down declines the recommended option", () => {
+test("W1-T4676: the owner's thumbs-down declines the recommended option", async () => {
   const root = tmpRoot();
   const ledgerPath = join(root, "state", "ledger.ndjson");
   const e = escalation();
   const issue: OpenIssue = { number: 1002, url: "u1002", body: renderIssueBody(e) };
   const gateway = fakeGateway(issue, [ownerReaction(5002, "-1")]);
 
-  const result = readEscalationAnswers(root, "RUN-1", gateway, { ledgerPath });
+  const result = await readEscalationAnswers(root, "RUN-1", gateway, { ledgerPath });
   assert.deepEqual(result, { accepted: 1, ignored: 0, unreadable: 0 });
 
   const stored = readQuestionsStore(root);
@@ -158,7 +158,7 @@ test("W1-T4676: the owner's thumbs-down declines the recommended option", () => 
 
 // ── 3: the fleet's own reaction (and anyone else's) is never read as an answer ─────────────────
 
-test("W1-T4676: the fleet's own reaction is never read as an answer", () => {
+test("W1-T4676: the fleet's own reaction is never read as an answer", async () => {
   const root = tmpRoot();
   const ledgerPath = join(root, "state", "ledger.ndjson");
   const e = escalation();
@@ -172,7 +172,7 @@ test("W1-T4676: the fleet's own reaction is never read as an answer", () => {
     { id: 5005, content: "+1", authorLogin: "rando", authorType: "User" },
   ]);
 
-  const result = readEscalationAnswers(root, "RUN-1", gateway, { ledgerPath });
+  const result = await readEscalationAnswers(root, "RUN-1", gateway, { ledgerPath });
   assert.deepEqual(result, { accepted: 1, ignored: 0, unreadable: 0 }, "exactly the owner's reaction is accepted");
 
   const stored = readQuestionsStore(root);
@@ -181,7 +181,7 @@ test("W1-T4676: the fleet's own reaction is never read as an answer", () => {
 
   // Re-polling with the SAME table (the fleet's ack and the third party's +1 persist on GitHub
   // forever) still lands nothing new — neither is EVER read as an answer, not just skipped once.
-  const second = readEscalationAnswers(root, "RUN-2", gateway, { ledgerPath });
+  const second = await readEscalationAnswers(root, "RUN-2", gateway, { ledgerPath });
   assert.deepEqual(second, { accepted: 0, ignored: 0, unreadable: 0 });
   assert.equal(readQuestionsStore(root).length, 1);
 
@@ -190,7 +190,7 @@ test("W1-T4676: the fleet's own reaction is never read as an answer", () => {
   const botUnderOwnerLogin: EscalationIssueReaction = { id: 5006, content: "+1", authorLogin: OWNER_LOGIN, authorType: "Bot" };
   const root2 = tmpRoot();
   const gateway2 = fakeGateway({ ...issue, number: 1004 }, [botUnderOwnerLogin]);
-  const result2 = readEscalationAnswers(root2, "RUN-1", gateway2, { ledgerPath: join(root2, "state", "ledger.ndjson") });
+  const result2 = await readEscalationAnswers(root2, "RUN-1", gateway2, { ledgerPath: join(root2, "state", "ledger.ndjson") });
   assert.deepEqual(result2, { accepted: 0, ignored: 0, unreadable: 0 });
   assert.deepEqual(readQuestionsStore(root2), []);
 
@@ -203,14 +203,14 @@ test("W1-T4676: the fleet's own reaction is never read as an answer", () => {
 
 // ── 4: a non-vote reaction is skipped, like a reply naming no option ───────────────────────────
 
-test("W1-T4676: a reaction that isn't a vote is skipped and records nothing", () => {
+test("W1-T4676: a reaction that isn't a vote is skipped and records nothing", async () => {
   const root = tmpRoot();
   const ledgerPath = join(root, "state", "ledger.ndjson");
   const e = escalation();
   const issue: OpenIssue = { number: 1005, url: "u1005", body: renderIssueBody(e) };
   const gateway = fakeGateway(issue, [ownerReaction(5007, "heart")]);
 
-  const result = readEscalationAnswers(root, "RUN-1", gateway, { ledgerPath });
+  const result = await readEscalationAnswers(root, "RUN-1", gateway, { ledgerPath });
   assert.deepEqual(result, { accepted: 0, ignored: 0, unreadable: 0 });
   assert.deepEqual(readQuestionsStore(root), []);
   assert.deepEqual(gateway.reactedOnIssue, []);
@@ -225,7 +225,7 @@ test("W1-T4676: a reaction that isn't a vote is skipped and records nothing", ()
 
 // ── 5: a gateway with no reaction surface at all reads zero reactions, never crashes ───────────
 
-test("W1-T4676: a gateway that omits listReactions/ownerLogin reads zero issue-level reactions", () => {
+test("W1-T4676: a gateway that omits listReactions/ownerLogin reads zero issue-level reactions", async () => {
   const root = tmpRoot();
   const ledgerPath = join(root, "state", "ledger.ndjson");
   const e = escalation();
@@ -235,13 +235,13 @@ test("W1-T4676: a gateway that omits listReactions/ownerLogin reads zero issue-l
     listComments: () => [],
     reactPlusOne: () => assert.fail("never reached"),
   };
-  assert.deepEqual(readEscalationAnswers(root, "RUN-1", legacyGateway, { ledgerPath }), { accepted: 0, ignored: 0, unreadable: 0 });
+  assert.deepEqual(await readEscalationAnswers(root, "RUN-1", legacyGateway, { ledgerPath }), { accepted: 0, ignored: 0, unreadable: 0 });
   assert.deepEqual(readQuestionsStore(root), []);
 });
 
 // ── the degraded read: a failed reaction list is counted, never mistaken for "nothing new" ─────
 
-test("W1-T4676: an unreadable reaction list is counted as unreadable and the issue's comments still land", () => {
+test("W1-T4676: an unreadable reaction list is counted as unreadable and the issue's comments still land", async () => {
   const root = tmpRoot();
   const ledgerPath = join(root, "state", "ledger.ndjson");
   const e = escalation();
@@ -255,7 +255,7 @@ test("W1-T4676: an unreadable reaction list is counted as unreadable and the iss
     },
     reactPlusOne: () => {},
   };
-  const result = readEscalationAnswers(root, "RUN-1", gateway, { ledgerPath });
+  const result = await readEscalationAnswers(root, "RUN-1", gateway, { ledgerPath });
   assert.deepEqual(result, { accepted: 1, ignored: 0, unreadable: 1 });
   assert.deepEqual(readQuestionsStore(root).map((r) => r.origin), ["issue#1007:comment:6001"]);
 });
@@ -280,10 +280,10 @@ test("W1-T4676: ghEscalationAnswerGateway reads issue reactions over REST and ac
     { id: 7001, content: "+1", user: { login: "craigoley", type: "User" } },
     { id: 7002, user: null },
   ]);
-  await withShim([{ when: "issues/31/reactions", stdout: reactions }], (calls) => {
+  await withShim([{ when: "issues/31/reactions", stdout: reactions }], async (calls) => {
     const gateway = ghEscalationAnswerGateway("o", "r");
     assert.equal(gateway.ownerLogin, "o");
-    assert.deepEqual(gateway.listReactions!(31), [
+    assert.deepEqual(await gateway.listReactions!(31), [
       { id: 7001, content: "+1", authorLogin: "craigoley", authorType: "User" },
       { id: 7002, content: "", authorLogin: "", authorType: "User" },
     ]);
@@ -298,7 +298,7 @@ test("W1-T4676: ghEscalationAnswerGateway reads issue reactions over REST and ac
 });
 
 test("W1-T4676: ghEscalationAnswerGateway refuses a reactions page that is not a JSON array", async () => {
-  await withShim([{ when: "issues/32/reactions", stdout: JSON.stringify({ message: "Not Found" }) }], () => {
-    assert.throws(() => ghEscalationAnswerGateway("o", "r").listReactions!(32), /expected a JSON array page/);
+  await withShim([{ when: "issues/32/reactions", stdout: JSON.stringify({ message: "Not Found" }) }], async () => {
+    await assert.rejects(async () => ghEscalationAnswerGateway("o", "r").listReactions!(32), /expected a JSON array page/);
   });
 });

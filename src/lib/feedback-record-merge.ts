@@ -21,7 +21,8 @@
  * single source of truth for "earlier" here and must move in lockstep with `FEEDBACK_STATUSES`.
  */
 
-import { parse as parseYaml } from "yaml";
+import { isDeepStrictEqual } from "node:util";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 /** Mirrors `feedback.ts`'s `FEEDBACK_STATUSES` verbatim (§7B) — array position IS the lifecycle
  *  rank a landing may only move forward through. `new` at rank 0 is the one status that may
@@ -49,7 +50,7 @@ interface RecordShape {
 
 export type FeedbackRecordMergeDecision =
   /** The local bytes should be staged — a genuine advance, or `upstreamBytes` names no record yet. */
-  | { readonly kind: "take-local" }
+  | { readonly kind: "take-local"; readonly content?: string }
   /** Nothing should be staged — upstream already carries everything the local copy does, at the
    *  same lifecycle rank; re-staging local bytes would gain nothing. */
   | { readonly kind: "keep-upstream" }
@@ -112,6 +113,12 @@ export function mergeFeedbackRecord(upstreamBytes: string | undefined, localByte
   }
   const upstream = upstreamParsed.record;
   const local = localParsed.record;
+  const takeLocal = (): FeedbackRecordMergeDecision => {
+    if (upstream.contribution == null || isDeepStrictEqual(upstream.contribution, local.contribution)) {
+      return { kind: "take-local" };
+    }
+    return { kind: "take-local", content: stringifyYaml({ ...local, contribution: upstream.contribution }) };
+  };
 
   const upstreamRank = typeof upstream.status === "string" ? STATUS_RANK.get(upstream.status) : undefined;
   const localRank = typeof local.status === "string" ? STATUS_RANK.get(local.status) : undefined;
@@ -143,9 +150,9 @@ export function mergeFeedbackRecord(upstreamBytes: string | undefined, localByte
       };
     }
     const gained = HISTORY_FIELDS.some((field) => hasHistory(local, field) && !hasHistory(upstream, field));
-    return gained ? { kind: "take-local" } : { kind: "keep-upstream" };
+    return gained ? takeLocal() : { kind: "keep-upstream" };
   }
 
   // localRank > upstreamRank: a genuine advance — lands exactly as it did before this task.
-  return { kind: "take-local" };
+  return takeLocal();
 }

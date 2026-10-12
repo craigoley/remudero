@@ -1,0 +1,10 @@
+- id: ci-shard-seven-eight-refusals-reach-task-authoring-lane
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**", "plan/feedback/**", "deploy/**"]
+  fact: >-
+    When ci-shard (7/8) refuses a pull request, inspect that shard's failure before repairing.
+  evidence: >-
+    The window recorded as ci-learning:9979:ci-shard (7/8) includes six repaired pull requests.
+  src: "ci-learning:9979:ci-shard (7/8)"
+  cited: "2026-10-09"

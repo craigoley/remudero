@@ -15,7 +15,7 @@
     - src/lib/actions-view.ts
     - test/actions-view.test.ts
     - src/lib/read-model-worker.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-10-01: /v1/action-results is served by action-results.ts over a serve-side rotation memo.

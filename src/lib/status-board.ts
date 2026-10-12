@@ -30,6 +30,7 @@ import { isQueueDispatchRunStart } from "./ledger.js";
 // Why: the TOCTOU-race test — docs/forensics/status-board.md
 import fs from "node:fs";
 import { join } from "node:path";
+import { hostname } from "node:os";
 import {
   detectDaemonCrashLoop,
   DEFAULT_CRASHLOOP_WINDOW,
@@ -50,7 +51,7 @@ import {
   type LearningsInjectionTotals,
 } from "./digest.js";
 import { deployAutoPath, deployFailedAlertPath, sameCommit } from "./deployer.js";
-import { dispatchClaimRef } from "./dispatch-claim.js";
+import { dispatchClaimRef, dispatchClaimAgeMs, readDispatchClaimAnchor, staleDispatchClaimEscalations, type DispatchClaimObservation, type DispatchClaimEscalation } from "./dispatch-claim.js";
 import {
   checkOperatorMessage,
   type OperatorMessage,
@@ -89,9 +90,10 @@ import {
 } from "./inbox.js";
 import { loadPlan, type MergedResolver, type Plan, type RetirementReason } from "./plan.js";
 import { readOperatorReleases } from "./machine-filing-judge.js";
-import { automergeHoldFromLedger, type AutomergeHold } from "./review.js";
+import { automergeHoldFromLedger, describeHoldSetter, holdClaimMismatch, type AutomergeHold, type MergeHoldActor } from "./review.js";
 import {
   buildLedgerIndex,
+  type LedgerIndex,
   DEFAULT_MAX_TASK_DISPATCHES,
   dispatchesWithoutNewOwnedPr,
   isDispatchBreakerTripped,
@@ -424,6 +426,21 @@ export interface CacheHitSection {
   totals?: CacheHitTotals;
 }
 
+/** W1-T4939 IDLE LANE — build-lane minutes spent idle while work existed, by cause, summed over the `lane.idle_summary`
+ *  rows (hourly, plus the partial rows a daemon exit flushes) whose window ended in the last 24 hours. */
+export interface IdleLaneSection {
+  found: boolean;
+  /** The look-back this section sums over. */
+  windowHours: number;
+  rows: number;
+  /** Rows a daemon exit flushed before their hour closed (`partial: true`). */
+  partialRows: number;
+  idleMinutes: number;
+  /** Only causes with a non-zero total appear. */
+  minutesByCause: Record<string, number>;
+  largestCause: string | null;
+}
+
 /** W1-T940: learnings-injection drop pressure over the SAME ledger window, via digest.ts's {@link
  *  aggregateLearningsInjection} — ONE traversal. `found: false` renders explicit absence, never a fabricated `dropped:
  *  0`. */
@@ -444,6 +461,8 @@ export interface CostAnomalyRow {
   sampleSize: number;
   /** The `cost.anomaly` ledger line's own `ts`, when present. */
   ts?: string;
+  /** W1-T5374: the money fields the row did not carry, which read 0 above; a reader says unknown, never $0.00. */
+  unknown?: Array<"cost_usd" | "median_cost_usd">;
 }
 
 /** W1-T1021 IMAGE DRIFT — the newest un-dismissed `daemon.image_drift` row: a baked path changed on `main` AFTER the
@@ -470,6 +489,12 @@ export interface MergeHeldRow {
   /** Why — {@link AutomergeHold.reason}, carried through unchanged; never a reason this board invents from a check or
    *  review field. */
   reason: string;
+  /** W1-T7721 — the writer-gathered actor ({@link AutomergeHold.actor}); absent on rows older than the field. */
+  actor?: MergeHoldActor;
+  /** W1-T7721 — true when the actor contradicts the claimed `by` (an agent wrote a row naming someone else). */
+  claimMismatch?: boolean;
+  /** W1-T7721 — `by` plus who really set it, e.g. "Craig Oley (claimed); written by agent session …". */
+  setter?: string;
 }
 
 /** THE FLEET IS RUNNING ON THE FALLBACK TOKEN RIGHT NOW — the newest `github_app.token_refresh_failed` is newer than
@@ -501,6 +526,8 @@ export interface UncreditedBuildRow {
 /** NEEDS ME — the board's own escalation surface, distinct from `rmd serve`'s HTML "Needs me" panel, which is
  *  task-escalation-driven. A future sentinel is a new field here, not a new section. */
 export interface NeedsMeSection {
+  dispatchClaims?: DispatchClaimEscalation[];
+  dispatchClaimsUnknownReason?: string;
   /** Queued machine filings still parked for a person or the ratified judge. Unknown when merge or
    *  durable release state cannot be read; a missing gateway never becomes a reassuring zero. */
   parkedProposals?: { count?: number; taskIds: string[]; unknownReason?: string };
@@ -522,6 +549,7 @@ export interface NeedsMeSection {
 
 export interface StatusBoardModel {
   generatedAt: string;
+  repositoryMaintenance?: RepositoryMaintenanceStatus[];
   liveness: LivenessSection;
   latches: LatchesSection;
   /** W1-T3381: `cadenceMarkerRows` judged against `CADENCE_MARKERS` — the judge's own seat on the
@@ -535,7 +563,42 @@ export interface StatusBoardModel {
   headroom: HeadroomSection;
   cacheHit: CacheHitSection;
   learningsInjection: LearningsInjectionSection;
+  /** W1-T4939. Optional so a model assembled before this section existed still renders; `buildStatusBoard` always sets it. */
+  idleLane?: IdleLaneSection;
   needsMe: NeedsMeSection;
+}
+
+export interface RepositoryMaintenanceStatus {
+  repo: string;
+  outcome: string;
+  reason: string;
+  durationMs?: number;
+  looseBefore?: number;
+  looseAfter?: number;
+  bytesBefore?: number;
+  bytesAfter?: number;
+  nextRetry?: number;
+  lastSuccess?: number;
+  lastFailure?: number;
+  retryPending: boolean;
+  gcLogVerdict: string;
+}
+
+export function repositoryMaintenanceStatus(lines: readonly Record<string, unknown>[]): RepositoryMaintenanceStatus[] {
+  const latest = new Map<string, RepositoryMaintenanceStatus>();
+  for (const row of lines) {
+    if (!String(row.step).startsWith("repository_maintenance.")) continue;
+    const repo = String(row.repo ?? "unknown");
+    latest.set(repo, { repo, outcome: String(row.outcome ?? "unknown"), reason: String(row.reason ?? "unknown"),
+      durationMs: row.duration_ms as number | undefined,
+      looseBefore: row.loose_before as number | undefined, looseAfter: row.loose_after as number | undefined,
+      bytesBefore: row.bytes_before as number | undefined, bytesAfter: row.bytes_after as number | undefined,
+      nextRetry: row.next_retry as number | undefined, lastSuccess: row.last_success as number | undefined,
+      lastFailure: row.last_failure as number | undefined, retryPending: row.retry_pending === true,
+      gcLogVerdict: String(row.gc_log_after ?? row.gc_log_before ?? "unknown"),
+    });
+  }
+  return [...latest.values()];
 }
 
 // ── Deps ─────────────────────────────────────────────────────────────────────────────────────
@@ -610,6 +673,7 @@ export interface StatusBoardDeps {
    *  operator can drop"; this read makes that true. ONE `git ls-remote`; `{status: "unreachable"}` is never "no claim
    *  held". */
   readDispatchClaims?: (repoDir: string) => DispatchClaimsRead;
+  localHost?: string;
 }
 
 // ── origin/main (local, no fetch) ───────────────────────────────────────────────────────────
@@ -649,10 +713,10 @@ function defaultReadSharedPauseState(repoDir: string): SharedPauseRead {
 
 /** W1-T2270: every held `refs/rmd-dispatch/<taskId>` claim via exactly ONE `git ls-remote` — {@link
  *  defaultReadSharedPauseState}'s cost profile over a namespace. `"unreachable"` on a nonzero exit: a failed read is
- *  never `"clear"`. `holder` is the anchor's own sha, never a second round trip to decode the pid and host. */
+ *  never `"clear"`. Anchor metadata is read at that exact SHA; an unreadable age stays unknown. */
 export type DispatchClaimsRead =
   | { readonly status: "clear" }
-  | { readonly status: "held"; readonly claims: ReadonlyArray<{ readonly taskId: string; readonly holder: string }> }
+  | { readonly status: "held"; readonly claims: ReadonlyArray<DispatchClaimObservation> }
   | { readonly status: "unreachable" };
 
 /** Every `refs/rmd-dispatch/<taskId>` line off the `ls-remote`, parsed the same split-on-tab way {@link
@@ -685,7 +749,21 @@ function defaultReadDispatchClaims(repoDir: string): DispatchClaimsRead {
     return { status: "unreachable" };
   }
   const claims = parseDispatchClaimLsRemote(stdout);
-  return claims.length ? { status: "held", claims } : { status: "clear" };
+  return claims.length ? { status: "held", claims: claims.map((claim) => ({
+    ...claim,
+    ...readDispatchClaimAnchor(claim.holder, {
+      run: (args) => {
+        try {
+          return { status: 0, stdout: execFileSync("git", ["-C", repoDir, ...args], {
+            encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+          }), stderr: "" };
+        } catch (error) {
+          const failure = error as { status?: number; stderr?: string | Buffer; message?: string };
+          return { status: failure.status ?? 1, stdout: "", stderr: String(failure.stderr ?? failure.message ?? error) };
+        }
+      },
+    }),
+  })) } : { status: "clear" };
 }
 
 // ── Ledger derivation ────────────────────────────────────────────────────────────────────────
@@ -1132,15 +1210,16 @@ function buildLatchRows(
   }
 
   // Shared cross-host PAUSE hold (W1-T2264) — `refs/rmd-pause/hold`, a git ref every row above is blind to, read via
-  // ONE `ls-remote`. DEDUP, LOCAL FIRST: `rmd pause` writes the local flag AND pushes this ref, so a self-paused host
-  // would show its hold twice.
+  // ONE `ls-remote`. Since W1-T7727 only `rmd pause --fleet` writes it (a plain `rmd pause` holds one instance's local
+  // flag). LOCAL FIRST: this instance's own PAUSE row already says it is held, so the fleet-wide row appears once that
+  // flag is gone; the gate (checkSharedPause) reads the same order.
   if (!rows.some((r) => r.name === "PAUSE")) {
     const sharedPause = readSharedPauseState();
     if (sharedPause === "held") {
       rows.push({
         name: "SHARED_PAUSE",
         consequence:
-          `no new task spawns fleet-wide until \`rmd resume\` clears ${sharedPauseRef()} — ` +
+          `no new task spawns fleet-wide until \`rmd resume --fleet\` clears ${sharedPauseRef()} — ` +
           "any in-flight task still completes",
       });
     } else if (sharedPause === "unreachable") {
@@ -1161,19 +1240,21 @@ function buildLatchRows(
   // this row makes it findable.
   const dispatchClaims = readDispatchClaims();
   if (dispatchClaims.status === "held") {
-    for (const { taskId, holder } of dispatchClaims.claims) {
+    for (const { taskId, holder, identity, metadataError } of dispatchClaims.claims) {
       // W1-T2446: "with no landed work observed" was asserted UNCONDITIONALLY, so for a task whose work HAD landed the
       // board kept saying it had not. `isMerged` is the SAME projection this render already built; the drop stays the
       // operator's.
       rows.push({
         name: `dispatch-claim:${taskId}`,
-        consequence: isMerged(taskId)
+        ageMs: dispatchClaimAgeMs(identity, nowMs),
+        consequence: (isMerged(taskId)
           ? `${taskId}'s dispatch claim ${dispatchClaimRef(taskId)} is held (holder ${holder}) — ${taskId} ` +
             `is credited MERGED, so this claim is stale, not live-guarded work: drop it with ` +
             `git push origin :${dispatchClaimRef(taskId)}`
           : `${taskId}'s dispatch claim ${dispatchClaimRef(taskId)} is held (holder ${holder}) with no ` +
             `landed work observed — a new dispatch of ${taskId} is refused until an operator drops it: ` +
-            `git push origin :${dispatchClaimRef(taskId)}`,
+            `git push origin :${dispatchClaimRef(taskId)}`) +
+          (metadataError ? ` — age unknown: ${metadataError}` : ""),
       });
     }
   } else if (dispatchClaims.status === "unreachable") {
@@ -1394,10 +1475,11 @@ function projectPlanOnce(
   ledgerPath: string,
   lines: Array<Record<string, unknown>>,
   now: () => number,
+  ledgerIndex?: LedgerIndex,
 ): { projections?: Map<string, StatusProjection>; unknownReason?: string } {
   if (!plan) return { unknownReason: "plan/tasks.yaml is unreadable — dispatch eligibility cannot be resolved" };
   if (!github) return { unknownReason: "no GitHub gateway configured for this read" };
-  const deriveDeps: DeriveDeps = { ledgerPath, github, readLedger: () => lines, now };
+  const deriveDeps: DeriveDeps = { ledgerPath, github, readLedger: () => lines, now, ...(ledgerIndex ? { ledgerIndex } : {}) };
   let projections: Map<string, StatusProjection> | undefined;
   try {
     projections = projectPlan(plan, deriveDeps);
@@ -1487,11 +1569,13 @@ export function deriveCircuitBrokenBlockers(
   lines: Array<Record<string, unknown>>,
   plan: Plan | undefined,
   projections: Map<string, StatusProjection> | undefined,
+  // W1-T6253: buildStatusBoard's one index for the whole board; omitted, this section builds its own.
+  shared?: LedgerIndex,
 ): CircuitBrokenBlocker[] {
   const out: CircuitBrokenBlocker[] = [];
   // W1-T3523's orphan predicate needs the ledger's newest timestamp. Build the shared index once
   // for this whole board section rather than re-scanning the complete ledger for each task.
-  const index = buildLedgerIndex(lines);
+  const index = shared ?? buildLedgerIndex(lines);
   for (const taskId of distinctDispatchedTaskIds(lines)) {
     if (!isDispatchBreakerTripped(lines, taskId, DEFAULT_MAX_TASK_DISPATCHES, index)) continue;
     const planTask = plan?.tasks.find((t) => t.id === taskId);
@@ -1604,16 +1688,18 @@ function deriveRetiredBlockers(plan: Plan | undefined): RetiredBlocker[] {
   return out;
 }
 
-function deriveBlockers(
-  plan: Plan | undefined,
+export interface BlockedPrSections {
+  blockedPrs: BlockedPrBlocker[];
+  blockedPrsUnverifiedReason?: string;
+  mergeHeld: MergeHeldRow[];
+}
+
+/** W1-T6267: derive the sections both boards consume without latches, queue work or process reads. */
+export function deriveBlockedPrSections(
   lines: Array<Record<string, unknown>>,
-  projections: Map<string, StatusProjection> | undefined,
-  github: GitHub | undefined,
-  limit: number,
-): BlockersSection {
-  const circuitBroken = deriveCircuitBrokenBlockers(lines, plan, projections);
-  const indeterminate = deriveIndeterminateBlockers(lines, projections);
-  const retired = deriveRetiredBlockers(plan);
+  github?: GitHub,
+  limit = 5,
+): BlockedPrSections {
   let blockedPrs: BlockedPrBlocker[] = [];
   let blockedPrsUnverifiedReason: string | undefined;
   const raw = rawBlockedPrCandidates(lines);
@@ -1630,6 +1716,19 @@ function deriveBlockers(
       blockedPrsUnverifiedReason = `${raw.length} blocked-PR ledger ${raw.length === 1 ? "entry" : "entries"} could not be checked against live GitHub state (${reason}) — withheld rather than replay possibly-stale history as current`;
     }
   }
+  return { blockedPrs, blockedPrsUnverifiedReason, mergeHeld: deriveMergeHeld(lines) };
+}
+
+function deriveBlockers(
+  plan: Plan | undefined,
+  lines: Array<Record<string, unknown>>,
+  projections: Map<string, StatusProjection> | undefined,
+  { blockedPrs, blockedPrsUnverifiedReason }: BlockedPrSections,
+  index: LedgerIndex,
+): BlockersSection {
+  const circuitBroken = deriveCircuitBrokenBlockers(lines, plan, projections, index);
+  const indeterminate = deriveIndeterminateBlockers(lines, projections);
+  const retired = deriveRetiredBlockers(plan);
   const rows: BlockerRow[] = [...circuitBroken, ...indeterminate, ...blockedPrs, ...retired];
   const section: BlockersSection = { rows, blockedPrsUnverifiedReason };
   section.nextAction = pickNextAction(BLOCKERS_NEXT_ACTIONS, section);
@@ -1683,6 +1782,7 @@ export function deriveQueueHead(
   // W1-T1205: OPTIONAL and TRAILING, so every existing caller — doctorCommand's deliberately network-free call among
   // them — keeps its byte-identical no-exclusion behaviour. `buildStatusBoard` supplies the one real reader.
   hasPushedRunBranch?: (taskId: string) => boolean,
+  shared?: LedgerIndex,
 ): QueueHeadSection {
   if (!plan || !projections || ghUnknownReason) {
     const section: QueueHeadSection = {
@@ -1697,7 +1797,7 @@ export function deriveQueueHead(
   // Keep the per-task breaker callbacks below O(task rows), including W1-T3523's
   // ledger-derived orphan clock. Rebuilding this index inside each callback made /v1/status
   // cross its production-corpus wall-clock bound.
-  const index = buildLedgerIndex(lines);
+  const index = shared ?? buildLedgerIndex(lines);
   const isMerged: MergedSet = (id) => projections.get(id)?.merged === true;
   const isIndeterminate = (id: string) => projections.get(id)?.indeterminate === true;
   const isCircuitTripped = (id: string) => isDispatchBreakerTripped(lines, id, DEFAULT_MAX_TASK_DISPATCHES, index);
@@ -1930,6 +2030,45 @@ function deriveHeadroomDegraded(
   return best;
 }
 
+const IDLE_LANE_STATUS_WINDOW_HOURS = 24;
+
+/** W1-T4939: sum the `lane.idle_summary` rows whose window closed within the last day, by cause. A row is placed by its
+ *  own `window_end_ms` (falling back to `ts`); one with neither, or a non-finite figure, is skipped, never counted as 0. */
+function deriveIdleLane(lines: ReadonlyArray<Record<string, unknown>>, nowMs: number): IdleLaneSection {
+  const sinceMs = nowMs - IDLE_LANE_STATUS_WINDOW_HOURS * 3_600_000;
+  const minutesByCause: Record<string, number> = {};
+  let rows = 0;
+  let partialRows = 0;
+  for (const line of lines) {
+    if (line.step !== "lane.idle_summary") continue;
+    const endMs = typeof line.window_end_ms === "number" ? line.window_end_ms : typeof line.ts === "string" ? Date.parse(line.ts) : NaN;
+    if (!Number.isFinite(endMs) || endMs < sinceMs || endMs > nowMs) continue;
+    const byCause = line.minutes_by_cause;
+    if (typeof byCause !== "object" || byCause === null) continue;
+    rows++;
+    if (line.partial === true) partialRows++;
+    for (const [cause, minutes] of Object.entries(byCause)) {
+      if (typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0) minutesByCause[cause] = (minutesByCause[cause] ?? 0) + minutes;
+    }
+  }
+  let idleMinutes = 0;
+  let largestCause: string | null = null;
+  for (const cause of Object.keys(minutesByCause)) {
+    minutesByCause[cause] = Math.round(minutesByCause[cause]! * 100) / 100;
+    idleMinutes += minutesByCause[cause]!;
+    if (largestCause === null || minutesByCause[cause]! > minutesByCause[largestCause]!) largestCause = cause;
+  }
+  return {
+    found: rows > 0,
+    windowHours: IDLE_LANE_STATUS_WINDOW_HOURS,
+    rows,
+    partialRows,
+    idleMinutes: Math.round(idleMinutes * 100) / 100,
+    minutesByCause,
+    largestCause,
+  };
+}
+
 function deriveHeadroom(lines: Array<Record<string, unknown>>, nowMs: number, enforced: boolean): HeadroomSection {
   const { ts, telemetry } = deriveHeadroomLatest(lines);
   const tsParsed = ts ? Date.parse(ts) : NaN;
@@ -1969,6 +2108,16 @@ function latestHoldTaskId(lines: ReadonlyArray<Record<string, unknown>>, prNumbe
 /** W1-T1000003 — the hold row(s) this board renders, keyed on {@link automergeHoldFromLedger} ALONE, never re-derived
  *  from check or review fields. One row per PR a hold ever named, present only while still held; a fleet-wide hold
  *  renders one row naming no PR. */
+function mergeHeldFields(hold: AutomergeHold): Pick<MergeHeldRow, "by" | "reason" | "actor" | "claimMismatch" | "setter"> {
+  return {
+    by: hold.by,
+    reason: hold.reason,
+    ...(hold.actor ? { actor: hold.actor } : {}),
+    claimMismatch: holdClaimMismatch(hold),
+    setter: describeHoldSetter(hold),
+  };
+}
+
 function deriveMergeHeld(lines: ReadonlyArray<Record<string, unknown>>): MergeHeldRow[] {
   const prNumbers = new Set<number>();
   for (const l of lines) {
@@ -1979,19 +2128,20 @@ function deriveMergeHeld(lines: ReadonlyArray<Record<string, unknown>>): MergeHe
   for (const prNumber of [...prNumbers].sort((a, b) => a - b)) {
     const hold = automergeHoldFromLedger(lines, prNumber);
     if (!hold) continue;
-    rows.push({ prNumber, taskId: latestHoldTaskId(lines, prNumber), by: hold.by, reason: hold.reason });
+    rows.push({ prNumber, taskId: latestHoldTaskId(lines, prNumber), ...mergeHeldFields(hold) });
   }
   if (prNumbers.size === 0) {
     // No PR-scoped hold row was ever recorded, so a currently-standing hold can only be fleet-scoped. A real PR number
     // always accompanies a PR-scoped row, so a sentinel no PR is ever numbered can only match a fleet-wide row.
     const fleetHold = automergeHoldFromLedger(lines, MERGE_HELD_FLEET_SENTINEL_PR);
-    if (fleetHold) rows.push({ by: fleetHold.by, reason: fleetHold.reason });
+    if (fleetHold) rows.push(mergeHeldFields(fleetHold));
   }
   return rows;
 }
 
 function deriveNeedsMe(
   lines: ReadonlyArray<Record<string, unknown>>,
+  mergeHeld: MergeHeldRow[],
   projections: Map<string, StatusProjection> | undefined,
   plan?: Plan,
   operatorReleasedIds: ReadonlySet<string> = new Set(),
@@ -2013,6 +2163,29 @@ function deriveNeedsMe(
             .sort();
           return { count: taskIds.length, taskIds };
         })();
+  const { costAnomaly, imageDrift, tokenFallback, uncreditedBuilds } = deriveOperatorItems(lines, projections);
+
+  // W1-T4192: read merge state off the SAME projections, so a held root is never judged on a second derivation.
+  const heldRoots =
+    plan && projections ? heldDependencyRoots(plan, (id) => projections.get(id)?.merged === true) : undefined;
+
+  return {
+    parkedProposals,
+    costAnomaly,
+    imageDrift,
+    mergeHeld,
+    uncreditedBuilds,
+    ...(tokenFallback ? { tokenFallback } : {}),
+    ...(heldRoots ? { heldRoots } : {}),
+  };
+}
+
+/** W1-T5374: NEEDS ME's four operator-item producers, exported so the now view's human-gate adapter classifies the
+ *  SAME rows this board renders rather than a second derivation of them. */
+export function deriveOperatorItems(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  projections: ReadonlyMap<string, StatusProjection> | undefined,
+): Pick<NeedsMeSection, "costAnomaly" | "imageDrift" | "tokenFallback" | "uncreditedBuilds"> {
   // W1-T931: this board's read of `cost.anomaly` rows — never a re-derivation of the detector's math, which lives in
   // cost-anomaly.ts. DEDUPED BY `run_id`, LAST ONE WINS.
   // Why: the concurrent-write risk — docs/forensics/status-board.md
@@ -2024,6 +2197,7 @@ function deriveNeedsMe(
     const ts = typeof l.ts === "string" ? l.ts : undefined;
     const existing = byRunId.get(runId);
     if (existing && !isNewer(ts, existing.ts)) continue;
+    const unknown = (["cost_usd", "median_cost_usd"] as const).filter((field) => typeof l[field] !== "number");
     byRunId.set(runId, {
       runId,
       taskId: typeof l.task_id === "string" ? l.task_id : "?",
@@ -2033,6 +2207,7 @@ function deriveNeedsMe(
       multiplier: typeof l.multiplier === "number" ? l.multiplier : 0,
       sampleSize: typeof l.sample_size === "number" ? l.sample_size : 0,
       ts,
+      ...(unknown.length > 0 ? { unknown } : {}),
     });
   }
   const costAnomaly = [...byRunId.values()].sort((a, b) => (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
@@ -2069,10 +2244,6 @@ function deriveNeedsMe(
       ? { reason: lastFail.reason, ...(lastFail.ts ? { ts: lastFail.ts } : {}), ...(lastOkTs ? { lastOkTs } : {}) }
       : undefined;
 
-  // W1-T1000003: currently-standing operator merge holds — a pure re-read of the SAME hold reader sweep.ts and
-  // run-task.ts already consult, never a second gateway or ledger pass.
-  const mergeHeld = deriveMergeHeld(lines);
-
   // W1-T2392: READ, never re-derive. `deriveStatus` already decided this per task and put it on the projection; this
   // walks the SAME map, so no second plan pass. Sorted by task id so the block is stable between renders.
   const uncreditedBuilds: UncreditedBuildRow[] = [];
@@ -2083,19 +2254,7 @@ function deriveNeedsMe(
   }
   uncreditedBuilds.sort((a, b) => a.taskId.localeCompare(b.taskId));
 
-  // W1-T4192: read merge state off the SAME projections, so a held root is never judged on a second derivation.
-  const heldRoots =
-    plan && projections ? heldDependencyRoots(plan, (id) => projections.get(id)?.merged === true) : undefined;
-
-  return {
-    parkedProposals,
-    costAnomaly,
-    imageDrift,
-    mergeHeld,
-    uncreditedBuilds,
-    ...(tokenFallback ? { tokenFallback } : {}),
-    ...(heldRoots ? { heldRoots } : {}),
-  };
+  return { costAnomaly, imageDrift, uncreditedBuilds, ...(tokenFallback ? { tokenFallback } : {}) };
 }
 
 function readOperatorReleasesForBoard(root: string): { ids: ReadonlySet<string>; reason?: string } {
@@ -2227,12 +2386,15 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   // W1-T2446: HOISTED from the derived-half block below — LATCHES needs the merge-credit projection the other sections
   // build, to correct the held dispatch-claim row's text. It reads only values already in scope.
   const plan = deps.plan ?? tryLoadDefaultPlan(deps.repoDir);
-  const { projections, unknownReason: ghUnknownReason } = projectPlanOnce(plan, deps.github, ledgerPath, lines, now);
+  // W1-T6253: one index for the projection and both sections, and none at all while the rows' generation is unchanged.
+  const ledgerIndex = buildLedgerIndex(lines);
+  const { projections, unknownReason: ghUnknownReason } = projectPlanOnce(plan, deps.github, ledgerPath, lines, now, ledgerIndex);
   const isMerged: MergedSet = (id) => projections?.get(id)?.merged === true;
 
   // ── LATCHES ──
+  const dispatchClaims = readDispatchClaims(deps.repoDir);
   const rows = buildLatchRows(root, nowMs, isPidAlive, () => readSharedPauseState(deps.repoDir), originSha, () =>
-    readDispatchClaims(deps.repoDir), isMerged,
+    dispatchClaims, isMerged,
   );
   const latchesSection: LatchesSection = { rows, nextAction: undefined };
   latchesSection.nextAction = pickNextAction(LATCHES_NEXT_ACTIONS, latchesSection);
@@ -2272,13 +2434,14 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   // ahead of LATCHES (W1-T2446) — this section reuses them, never re-derives them.
   const queueHeadLimit = deps.queueHeadLimit ?? 5;
 
-  const blockers = deriveBlockers(plan, lines, projections, deps.github, queueHeadLimit);
+  const blockedPrSections = deriveBlockedPrSections(lines, deps.github, queueHeadLimit);
+  const blockers = deriveBlockers(plan, lines, projections, blockedPrSections, ledgerIndex);
   // W1-T1205: the SAME `hasPushedRunBranch` predicate the real dispatcher binds, read here rather than shared with it —
   // this is its own, unbatched call site. ONE sweep per render, never one per candidate.
   const readPushedRunBranches = deps.readPushedRunBranches ?? defaultReadPushedRunBranches;
   const pushedRunBranchIds = runBranchTaskIds(readPushedRunBranches(deps.repoDir));
   const queueHead = deriveQueueHead(plan, lines, projections, ghUnknownReason, queueHeadLimit, nowMs, (id) =>
-    pushedRunBranchIds.has(id),
+    pushedRunBranchIds.has(id), ledgerIndex,
   );
   const grepAnchorTrue = deps.grepAnchorTrue ?? ((a: EvidenceAnchor) => gitGrepAnchorTrue(deps.repoDir, "origin/main", a));
   const readProposalRegistry =
@@ -2300,13 +2463,24 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
     totals: learningsInjectionTotals,
   };
 
+  // ── W1-T4939: IDLE LANE — the same `lines` window, one more pure fold, no second ledger read. ──
+  const idleLane = deriveIdleLane(lines, nowMs);
+
   // ── W1-T931: NEEDS ME — same `lines` window every other section above already read, one
   // extra pure fold (deriveNeedsMe), no second ledger read. ──────────────────────────────────
   const operatorReleases = readOperatorReleasesForBoard(root);
-  const needsMe = deriveNeedsMe(lines, projections, plan, operatorReleases.ids, operatorReleases.reason);
+  const needsMe = deriveNeedsMe(lines, blockedPrSections.mergeHeld, projections, plan, operatorReleases.ids, operatorReleases.reason);
+  needsMe.dispatchClaims = staleDispatchClaimEscalations(
+    dispatchClaims.status === "held" ? dispatchClaims.claims : [], nowMs, deps.localHost ?? hostname(),
+  );
+  if (dispatchClaims.status === "unreachable") needsMe.dispatchClaimsUnknownReason = "claim state is unreadable; escalation recovery is unconfirmed";
+  else if (dispatchClaims.status === "held" && dispatchClaims.claims.some((claim) => !claim.identity)) {
+    needsMe.dispatchClaimsUnknownReason = "claim age is unknown; stale-claim escalation recovery is unconfirmed";
+  }
 
   return {
     generatedAt: new Date(nowMs).toISOString(),
+    repositoryMaintenance: repositoryMaintenanceStatus(lines),
     liveness,
     latches: latchesSection,
     cadence: cadenceSection,
@@ -2317,6 +2491,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
     headroom,
     cacheHit,
     learningsInjection,
+    idleLane,
     needsMe,
   };
 }
@@ -2621,6 +2796,26 @@ function renderLearningsInjectionBlock(s: LearningsInjectionSection): string[] {
   return out;
 }
 
+/** W1-T4939: the idle-lane account as the operator reads it — total, then each cause largest first. An empty window says
+ *  so rather than printing a zero that would read as "the lanes were never idle". */
+function renderIdleLaneBlock(i: IdleLaneSection): string[] {
+  const out = [sectionRule("IDLE LANE", SECTION_RULE_WIDTH)];
+  if (!i.found) {
+    out.push(`no idle-lane summary rows in the last ${i.windowHours} hours`);
+    return out;
+  }
+  out.push(`idle minutes (${i.windowHours}h): ${i.idleMinutes}  rows: ${i.rows} (${i.partialRows} partial)`);
+  const causes = Object.keys(i.minutesByCause).sort((a, b) => i.minutesByCause[b]! - i.minutesByCause[a]! || a.localeCompare(b));
+  out.push(causes.length ? causes.map((c) => `${c}: ${i.minutesByCause[c]}`).join("  ") : "no idle minute in these rows");
+  return out;
+}
+
+/** W1-T5374: one anomaly money field as rendered: unknown when the row did not carry it, never a verified $0.00. */
+export function costAnomalyUsd(row: CostAnomalyRow, field: "cost_usd" | "median_cost_usd"): string {
+  if (row.unknown?.includes(field)) return "unknown";
+  return `$${(field === "cost_usd" ? row.costUsd : row.medianCostUsd).toFixed(2)}`;
+}
+
 /** W1-T931 — one line per un-dismissed `cost.anomaly` row, naming the run, its class, its cost and the median exceeded.
  *  W1-T1021 adds an image-drift row naming both shas. `nothing needs you` only when NEITHER has anything to report. */
 function renderNeedsMeBlock(n: NeedsMeSection): string[] {
@@ -2632,6 +2827,8 @@ function renderNeedsMeBlock(n: NeedsMeSection): string[] {
     n.mergeHeld.length === 0 &&
     n.uncreditedBuilds.length === 0 &&
     !n.tokenFallback &&
+    (n.dispatchClaims ?? []).length === 0 &&
+    !n.dispatchClaimsUnknownReason &&
     (n.heldRoots ?? []).length === 0;
   if (otherSignalsQuiet && (!parked || parked.count === 0) && parked?.unknownReason === undefined) {
     out.push("nothing needs you");
@@ -2657,9 +2854,14 @@ function renderNeedsMeBlock(n: NeedsMeSection): string[] {
         `installation's (${since})`,
     );
   }
+  if (n.dispatchClaimsUnknownReason) out.push(`dispatch claims : unknown — ${n.dispatchClaimsUnknownReason}`);
+  for (const claim of n.dispatchClaims ?? []) {
+    out.push(`stale dispatch claim : ${claim.ref} (holder ${claim.holder}), age ${formatAgeMs(claim.ageMs)} — ` +
+      `${claim.detail} ${claim.options[0]!.detail}`);
+  }
   for (const r of n.mergeHeld) {
     const target = r.prNumber !== undefined ? `PR #${r.prNumber}${r.taskId ? ` (${r.taskId})` : ""}` : "the whole fleet";
-    out.push(`merge held : ${target} — held by ${r.by}: ${r.reason}`);
+    out.push(`merge held : ${target} — held by ${r.setter ?? r.by}: ${r.reason}`);
   }
   // W1-T2392: names the task, the PR and WHICH prose surface carried the id, and says what to do — a warning nobody can
   // act on is noise.
@@ -2678,8 +2880,8 @@ function renderNeedsMeBlock(n: NeedsMeSection): string[] {
   }
   for (const r of n.costAnomaly) {
     out.push(
-      `cost.anomaly : ${r.taskId} (${r.runId}) [${r.taskClass}] $${r.costUsd.toFixed(2)} vs class median ` +
-        `$${r.medianCostUsd.toFixed(2)} (>${r.multiplier}x, n=${r.sampleSize})`,
+      `cost.anomaly : ${r.taskId} (${r.runId}) [${r.taskClass}] ${costAnomalyUsd(r, "cost_usd")} vs class median ` +
+        `${costAnomalyUsd(r, "median_cost_usd")} (>${r.multiplier}x, n=${r.sampleSize})`,
     );
   }
   if (n.imageDrift) {
@@ -2790,6 +2992,12 @@ export function renderStatusBoardText(model: StatusBoardModel, opts: { colourEna
   // Each block renders into its own array so the presence projection can read what the reader actually sees. The join
   // below reproduces the previous concatenation line for line.
   const blocks: { label: string; section: unknown; rendered: string[] }[] = [
+    ...(model.repositoryMaintenance?.length ? [{ label: "repository maintenance", section: model.repositoryMaintenance,
+      rendered: ["### repository maintenance", ...model.repositoryMaintenance.map((row) =>
+        `${row.repo}: ${row.outcome} — ${row.reason}; gc log ${row.gcLogVerdict}; ` +
+        `loose ${row.looseBefore ?? "unknown"} -> ${row.looseAfter ?? "unknown"}; ` +
+        `duration ${row.durationMs ?? "unknown"}ms; retry ${row.retryPending ? row.nextRetry : "none"}; ` +
+        `last success ${row.lastSuccess ?? "unknown"}; last failure ${row.lastFailure ?? "unknown"}`)] }] : []),
     { label: "liveness", section: model.liveness, rendered: renderLivenessBlock(model.liveness, enabled) },
     { label: "latches", section: model.latches, rendered: renderLatchesBlock(model.latches) },
     { label: "cadence", section: model.cadence, rendered: renderCadenceBlock(model.cadence) },
@@ -2804,6 +3012,7 @@ export function renderStatusBoardText(model: StatusBoardModel, opts: { colourEna
       section: model.learningsInjection,
       rendered: renderLearningsInjectionBlock(model.learningsInjection),
     },
+    ...(model.idleLane ? [{ label: "idle lane", section: model.idleLane, rendered: renderIdleLaneBlock(model.idleLane) }] : []),
     { label: "needs me", section: model.needsMe, rendered: renderNeedsMeBlock(model.needsMe) },
   ];
   const lines: string[] = [`### rmd status — ${model.generatedAt}`, ""];

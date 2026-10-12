@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-flow-improve-1790732974000 -> plan-flow-improve-1790732974000"
   plan_refs: []
   files: [src/lib/plan.ts, src/lib/retro.ts, test/a-merged-fix-is-re-measured-against-its-symptom.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-29: several fixes were proven only by re-running a live query by hand after merge: #7854 (a

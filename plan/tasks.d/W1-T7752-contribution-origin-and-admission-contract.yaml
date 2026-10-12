@@ -1,0 +1,54 @@
+- id: W1-T7752
+  title: Preserve contribution origin and classify admission without activating a new gate
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  author_class: operator
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "Operator-approved contributor-safety briefs; 2026-10-10 instruction to file admission, close-and-escalate and PR-flow gardener work, preserve owner override and trusted flow, and start implementation without settings or infrastructure changes."
+  files: [src/lib/contributor-admission.ts, src/lib/open-prs-rest.ts, test/contributor-admission.test.ts, test/open-prs-rest.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED at main 688f222c: RestPullRow/mapRestPr discard PR author and source/target repository
+    identities. Existing review admission is lane admission, not contributor admission. Original
+    origin must survive normalization before a privileged consumer can make a sound decision.
+    This is a faithful filing of the operator-approved admission brief, not an autonomous trust ruling.
+    INFERRED: a generic, pure classifier is the smallest independently testable first implementation.
+    Production identities belong in an explicitly supplied policy, not public runtime defaults.
+  design: |
+    Preserve nullable author and head/base repository identities from authenticated REST reads.
+    Classify trusted, confirmed-external and unknown separately using stable actor ID/type, explicit
+    owner/service scopes, and fresh verified membership in a configured organization. Names, email,
+    branch shape, author_association, same-repository heads and the target namespace grant no trust.
+    A pinned owner/service still works when membership lookup is unavailable; an unpinned actor does
+    not become external merely because membership lookup failed. Bind decisions to repository, PR,
+    current head, actor, action, evidence and policy fingerprint. Missing, stale or malformed evidence
+    is unknown. Public tests use synthetic identities. No enforcement, closures, network reads,
+    GitHub settings, infrastructure, private dependency or extra approval requirement in this task.
+  acceptance:
+    - claim: The public REST normalizer calls the origin contract from production source
+      proof: 'grep: contributionOriginFromRest( in src/lib/open-prs-rest.ts'
+    - claim: REST enumeration preserves author and repository provenance without changing legacy sparse rows
+      proof: 'unit test: W1-T7752: REST origin survives enumeration without changing legacy sparse rows'
+    - claim: Explicit owner and scoped service identities stay trusted during a membership outage
+      proof: 'unit test: W1-T7752: pinned trusted identities survive an unknown membership read'
+    - claim: Fresh verified organization membership admits a member even from a fork
+      proof: 'unit test: W1-T7752: verified organization membership admits its member on a fork'
+    - claim: A familiar login, branch, association or same-repository head cannot grant trust
+      proof: 'unit test: W1-T7752: familiar metadata cannot grant trust'
+    - claim: Missing, malformed, negative and stale evidence remain distinct from an outage
+      proof: 'unit test: W1-T7752: malformed or stale identity remains unknown'
+    - claim: A decision cannot be reused after head, target, actor, action or policy changes
+      proof: 'unit test: W1-T7752: admission receipt changes with head target actor action and policy'
+  falsifier: |
+    Remove origin propagation: enumeration fails. Admit by login, association or head location:
+    the negative-control test fails. Collapse unavailable membership into confirmed-external:
+    outage assertions fail. Omit a binding field from the receipt: its corresponding mutation
+    assertion fails. Implementation must demonstrate failing tests before the fix and a reverted
+    load-bearing mutation; green file-presence assertions alone are not acceptance.

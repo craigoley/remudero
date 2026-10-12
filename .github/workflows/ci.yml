@@ -25,7 +25,7 @@
 # own synthetic commit gets the full instrumented suite AND the slow tier, on the exact tree that
 # is about to land, with no separate wiring. `coverage-ratchet`'s few PR-scoped shell guards are
 # widened (never replaced — pull_request keeps every byte of its existing, separately-tested
-# behavior) to also treat `merge_group` as real work; see that job's own comments.
+# behavior) to also treat `merge_group` as real work. W1-T5940 since narrows a group to its affected suites.
 #
 # Why: the measurements, incidents and design arguments compacted out of this file are archived
 # verbatim in docs/forensics/ci-yml.md, per docs/comment-standard.md.
@@ -101,7 +101,7 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8]
     # W1-T1009: HEAVY band. 35m/2100s sits in the gap between the longest observed non-hung run
     # (1637s) and the first observed hang (2647s). INVARIANT: it must stay strictly below
-    # ci-gate.yml's WAIT_CAP_SECONDS (2400s), or ci-gate times out first and the misattribution
+    # ci-gate.yml's WAIT_CAP_SECONDS (4500s), or ci-gate times out first and the misattribution
     # defect returns intact. Re-derive this if that cap is ever retuned (W1-T312).
     timeout-minutes: 35
     steps:
@@ -115,9 +115,43 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+      - name: Admit setup only for a shard with work
+        id: admission
+        run: |
+          : > admission-files.txt
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ -n "${GITHUB_BASE_REF}" ]; then
+            if git fetch --no-tags origin "${GITHUB_BASE_REF}" && git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" > admission-files.txt; then
+              echo "CI admission: fresh diff available."
+            else
+              : > admission-files.txt
+            fi
+          fi
+          SETUP="$(node scripts/ci-shard-admission.mjs --changed-files admission-files.txt --shard ${{ matrix.shard }})" || SETUP="true"
+          case "$SETUP" in false) ;; *) SETUP="true" ;; esac
+          BROWSER="$SETUP"
+          if [ "$SETUP" != "false" ] && [ "${{ matrix.shard }}" = "1" ] && ! grep -qxF ".github/workflows/ci.yml" admission-files.txt; then
+            BROWSER="$(node scripts/ci-shard-admission.mjs --changed-files admission-files.txt --shard 2)" || BROWSER="true"
+            case "$BROWSER" in false) ;; *) BROWSER="true" ;; esac
+          fi
+          if [ "$SETUP" != "false" ] && [ "${{ matrix.shard }}" = "1" ] && [ -n "$(node scripts/flake-screen.mjs --list 2>/dev/null || echo unknown)" ]; then
+            BROWSER="true"
+          fi
+          echo "setup=${SETUP}" >> "$GITHUB_OUTPUT"
+          echo "browser=${BROWSER}" >> "$GITHUB_OUTPUT"
+          echo "- ci shard ${{ matrix.shard }}/8: setup=${SETUP}, browser=${BROWSER} (W1-T5697: shard 1 keeps setup for Typecheck; its browser serves Test, or a ci.yml diff's guard-mutation suites); full required coverage is unchanged." >> "$GITHUB_STEP_SUMMARY"
+      - name: Restore npm cache only for admitted work
+        if: ${{ steps.admission.outputs.setup != 'false' }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
           cache: npm
       - name: Install (clean, from lockfile)
-        run: npm ci
+        run: |
+          if [ "${{ steps.admission.outputs.setup }}" != "false" ]; then
+            npm ci
+          else
+            echo "CI admission: no dependency install for an idle source shard."
+          fi
       - name: Determine Playwright's pinned browser version (cache key input)
         id: playwright-version
         run: |
@@ -126,11 +160,13 @@ jobs:
       # R-50: caches the downloaded browser binary only, keyed on runner OS plus the exact
       # playwright version pinned in package-lock.json, never a lockfile hash. No apt interaction.
       - name: Cache Playwright's Chromium download
+        if: ${{ steps.admission.outputs.browser != 'false' }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
       - name: Install Playwright's Chromium (W1-T153 shell a11y/responsive tests need a real headless browser — Lighthouse-equivalent axe-core scan, 390px/1440px no-hscroll, fleet-control read-back/STOP-confirm interaction)
+        if: ${{ steps.admission.outputs.browser != 'false' }}
         # NO `--with-deps`, and that is the whole fix: it is what invoked apt, and apt is what
         # failed. Measured on a green run, `--with-deps` installed nine FONT packages and no
         # browser dependency at all — every Chromium shared library is already in the runner image
@@ -144,7 +180,12 @@ jobs:
         # FALSIFIER: test/workflow-playwright-install.test.ts refuses `--with-deps` and every
         # retry/wait token in either install step.
         # Why: W1-T1027 filed it, W1-T1034 (#2223) measured it — docs/forensics/ci-yml.md.
-        run: npx playwright install chromium
+        run: |
+          if [ "${{ steps.admission.outputs.setup }}" != "false" ]; then
+            npx playwright install chromium
+          else
+            echo "CI admission: no browser download for an idle source shard."
+          fi
       - name: Typecheck
         # §5 TIER 2, quality gate 4/4 (W1-T98): this step is TS-strict's actual enforcement. A
         # strict-mode violation anywhere in src/**/test/** fails it and blocks merge via ci-gate.
@@ -169,6 +210,13 @@ jobs:
         # no `run:` body here may name one (#3187). Falsifier: test/push-ci-on-main.test.ts.
         id: classify
         run: |
+          if [ "${{ steps.admission.outputs.setup }}" = "false" ]; then
+            cp admission-files.txt changed-files.txt
+            : > test-only-run.txt
+            echo "class=SOURCE" >> "$GITHUB_OUTPUT"
+            echo "rename_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # PUSH-SAFE BY CONSTRUCTION, and that is an INVARIANT not a preference:
           # test/push-ci-on-main.test.ts asserts no `run:` body in THIS job mentions
           # any request-scoped context token — this job also runs on a push to
@@ -220,6 +268,22 @@ jobs:
           : > test-only-run.txt
           if [ "$CLASS" = "SOURCE" ] && [ -s changed-files.txt ]; then
             node --import tsx scripts/diff-class.mjs --test-only-run --changed-files changed-files.txt > test-only-run.txt 2>>diff-class.log || : > test-only-run.txt
+            if [ ! -s test-only-run.txt ] && [ "$(node scripts/diff-class.mjs --coverage-class --changed-files changed-files.txt 2>>diff-class.log || echo NO_SRC)" = "NO_SRC" ]; then echo full > test-only-run.txt; fi
+          fi
+      - name: Select the merge group's suites (W1-T5940)
+        # Suites the combined diff and each member commit affect, or `full`; the base is a step env (push-safe).
+        env:
+          GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" != "merge_group" ] || [ "${{ steps.admission.outputs.setup }}" = "false" ]; then
+            exit 0
+          fi
+          node --import tsx -e 'const r = process.cwd() + "/"; const m = await import(r + "scripts/test-tier-manifest.mjs"); await m.writeMergeGroupSelection(process.argv[1], process.argv[2], { load: (p) => import(r + p) });' \
+            "$GROUP_BASE" merge-group-suites.txt || echo full > merge-group-suites.txt
+          if [ "$(head -n 1 merge-group-suites.txt)" = "full" ]; then
+            echo "- W1-T5940: merge group selection: **full run** (the selection was unusable)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- W1-T5940: merge group selection: **$(grep -c . merge-group-suites.txt)** suite(s) of $(find test -maxdepth 1 -name '*.test.ts' | grep -c .)." >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Test
         # W1-T255: routed through scripts/test-with-retry.mjs (`npm run test:ci`), not plain
@@ -262,6 +326,11 @@ jobs:
           TIER_BASE="HEAD"
           if [ -n "${GITHUB_BASE_REF}" ]; then
             TIER_BASE="origin/${GITHUB_BASE_REF}"
+          fi
+          MERGE_GROUP_SEL="$(head -n 1 merge-group-suites.txt 2>/dev/null || true)"
+          if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "merge_group" ] && [ -n "$MERGE_GROUP_SEL" ] && [ "$MERGE_GROUP_SEL" != "full" ]; then
+            cp merge-group-suites.txt affected-suites-selected.txt
+            CLASS="AFFECTED"
           fi
           # W1-T4406: ONE FLAG (this workflow's own top-level env; default "0"). Until the W1-T4404
           # shadow record earns the flip, this block never fires and a pull_request SOURCE diff
@@ -369,19 +438,19 @@ jobs:
               }
               run_main_ceiling_gate learnings-budget-ratchet learnings-budget-ratchet
               run_main_ceiling_gate claude-md-budget-ratchet claude-md-budget-ratchet
-              run_main_ceiling_gate comment-load-signal comment-load-signal -- --base HEAD^
+              run_main_ceiling_gate comment-load-signal comment-load-signal -- --base HEAD^ --strict
               # W1-T3655: THE CENSUS WATCHES ITS OWN BASE. expiring-fixture-census otherwise only
               # rides `comment-load-ratchet`, a `pull_request`-only job (W1-T1033) -- so a fixture
               # stamp already sitting on `main` reddened every open PR beside it while no run was
-              # ever charged with fixing it (MEASURED 2026-09-16: one main-branch stamp took
-              # #5725, #5733, #5734, #5736, #5738 and #5739 red at once, each paying the same
-              # diagnosis separately). It is not an `npm run` script, so it is invoked directly
-              # rather than through `run_main_ceiling_gate` above. `CENSUS_MAIN_BRANCH_RUN=1`
-              # forces the STRICT reading: on this lane `origin/main` IS the commit under test, so
-              # reading it as an earlier base to inherit a crossing from would let a main-branch
-              # bomb excuse itself on the one run that exists to catch it.
+              # ever charged with fixing it (MEASURED 2026-09-16: one main-branch stamp took six
+              # PRs red at once). It is not an `npm run` script, so it is invoked directly.
+              # `CENSUS_MAIN_BRANCH_RUN=1` stops it reading `origin/main` (the commit under test)
+              # as a base; W1-T5826 (operator, 2026-10-05): `--base HEAD^` attributes against the
+              # push's parent instead, so a crossing this push planted blocks while one the
+              # calendar brought to an untouched stamp is a `::warning` ahead of its red date.
+              # An unreadable HEAD^ reads strict. A population drop still blocks.
               echo "::group::main-ceiling-drift:expiring-fixture-census"
-              CENSUS_MAIN_BRANCH_RUN=1 RMD_CI_REPORT=1 node scripts/expiring-fixture-census.mjs || {
+              CENSUS_MAIN_BRANCH_RUN=1 RMD_CI_REPORT=1 node scripts/expiring-fixture-census.mjs --base HEAD^ || {
                 CODE=1
                 echo "main-ceiling-drift: expiring-fixture-census BLOCKED on main itself"
               }
@@ -423,6 +492,8 @@ jobs:
           mkdir -p "$FLAKE_RETRY_DIR"
           grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-${{ matrix.shard }}.log" || : > "$FLAKE_RETRY_DIR/shard-${{ matrix.shard }}.log"
           exit "$CODE"
+      - name: Flake-screen the test files this pull request adds (scripts/flake-screen.mjs — shard 1 reruns them under load for the predicted coverage makespan; one failed run fails the shard)
+        run: node scripts/flake-screen.mjs --shard ${{ matrix.shard }}
       - name: Workflow guard mutation (W1-T3220 — a ci.yml skip guard that no test can distinguish turns a required check into a green no-op)
         run: |
           # NO EARLY `exit 0` IN THIS STEP, DELIBERATELY. The check below enumerates skip-shaped
@@ -535,6 +606,39 @@ jobs:
         with:
           name: test-tier-manifest-proposal
           path: test-tier-manifest.next.json
+          retention-days: 7
+          if-no-files-found: ignore
+      - name: Download every coverage shard's instrumented duration evidence (best-effort)
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: coverage-duration-*
+          path: coverage-duration-shards
+      - name: Download the ledger snapshot the coverage shards weighed (W1-T4071; best-effort)
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: coverage-ledger-snapshot-*
+          path: coverage-ledger-snapshots
+      - name: Build the instrumented next-manifest proposal the coverage split weighs (W1-T5923; never writes the checkout ledger)
+        continue-on-error: true
+        run: |
+          mapfile -t DURATION_FILES < <(find coverage-duration-shards -type f -name '*.json' -print 2>/dev/null | sort)
+          if [ "${#DURATION_FILES[@]}" -eq 0 ]; then
+            echo "- W1-T5923: no instrumented duration evidence was available; no coverage-lane manifest proposal produced." >> "$GITHUB_STEP_SUMMARY"
+          else
+            SNAPSHOT="$(find coverage-ledger-snapshots -type f -name 'ledger-snapshot.manifest' -print 2>/dev/null | sort | head -n 1)"
+            node scripts/test-tier-manifest.mjs --manifest scripts/test-tier-coverage-manifest.json \
+              --record-evidence "${DURATION_FILES[@]}" ${SNAPSHOT:+--snapshot "$SNAPSHOT"} --ewma 0.5 \
+              --output test-tier-coverage-manifest.next.json
+            echo "- W1-T5923: attached an instrumented next-manifest proposal from ${#DURATION_FILES[@]} coverage shard artifact(s) (W1-T4071: EWMA onto ${SNAPSHOT:-the committed ledger})." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Publish the instrumented next duration manifest proposal
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-tier-coverage-manifest-proposal
+          path: test-tier-coverage-manifest.next.json
           retention-days: 7
           if-no-files-found: ignore
 
@@ -668,7 +772,7 @@ jobs:
     # so it is a third Playwright-carrying job and must be banded like the other two rather than
     # left at the light-band 10-15m: under the observed non-hung tail a light bound kills honest
     # work. 35m is the derived heavy FLOOR, and it stays strictly below ci-gate.yml's
-    # WAIT_CAP_SECONDS (2400s = 40m) so ci-gate never times out first and misattributes the hang.
+    # WAIT_CAP_SECONDS (4500s = 75m) so ci-gate never times out first and misattributes the hang.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -677,20 +781,6 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-      - name: Install (clean, from lockfile)
-        run: npm ci
-      - name: Determine Playwright's pinned browser version (cache key input)
-        id: playwright-version
-        run: |
-          VERSION="$(node -e "console.log(require('./package-lock.json').packages['node_modules/playwright'].version)")"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-      - name: Cache Playwright's Chromium download
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
-      - name: Install Playwright's Chromium (the slow tier includes browser-backed console suites)
-        run: npx playwright install chromium
       - name: Check every test file is tiered (W1-T2904 unwired-gate wiring — `test:tier:check` refuses an untiered file so the fast/slow split can trust scripts/test-tier-manifest.json before either tier runs)
         run: |
           # A push has no base branch; the tier check is a per-PR admission gate that main already passed.
@@ -707,7 +797,16 @@ jobs:
           fi
           git fetch --no-tags origin "${GITHUB_BASE_REF}" >/dev/null 2>&1 || true
           git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" > changed-files.txt 2>/dev/null || : > changed-files.txt
-          CLASS="$(node --import tsx scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
+          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt --coverage-class 2>diff-class.log)" || CLASS="SOURCE"
+          if [ "$CLASS" = "TEST_ONLY" ]; then
+            TEST_ONLY_RUN="$(node scripts/diff-class.mjs --test-only-run --changed-files changed-files.txt 2>>diff-class.log)" || TEST_ONLY_RUN=""
+            if [ "$(printf '%s\n' "$TEST_ONLY_RUN" | head -n 1)" = "files" ]; then
+              echo "W1-T5700: only *.test.ts files changed — ci-shard runs exactly those suites, slow ones included; test-slow skips."
+              CLASS="SOURCE"
+            else
+              echo "W1-T5700: a test helper, fixture or setup file changed and coverage-ratchet skips TEST_ONLY — test-slow runs the slow tier."
+            fi
+          fi
           echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
           case "$CLASS" in
             PLAN_ONLY|DOCS_ONLY) ;;
@@ -717,7 +816,7 @@ jobs:
               exit 0
               ;;
           esac
-          if ! node --import tsx scripts/diff-class.mjs --list-plan-reading-suites --changed-files changed-files.txt > plan-reading-suites.txt; then
+          if ! node scripts/diff-class.mjs --list-plan-reading-suites --changed-files changed-files.txt > plan-reading-suites.txt; then
             echo "established=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -730,8 +829,40 @@ jobs:
             cat plan-reading-selector.log
             echo "established=false" >> "$GITHUB_OUTPUT"
           fi
+      - name: Install (clean, from lockfile)
+        if: ${{ steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
+        run: npm ci
+      - name: Determine Playwright's pinned browser version (cache key input)
+        id: playwright-version
+        run: |
+          VERSION="$(node -e "console.log(require('./package-lock.json').packages['node_modules/playwright'].version)")"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright's Chromium download
+        if: ${{ steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+      - name: Install Playwright's Chromium (the slow tier includes browser-backed console suites)
+        if: ${{ steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
+        run: npx playwright install chromium
+      - name: Select the merge group's suites (W1-T5940 — the same selection ci-shard makes)
+        env:
+          GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" != "merge_group" ]; then
+            exit 0
+          fi
+          node --import tsx -e 'const r = process.cwd() + "/"; const m = await import(r + "scripts/test-tier-manifest.mjs"); await m.writeMergeGroupSelection(process.argv[1], process.argv[2], { load: (p) => import(r + p) });' \
+            "$GROUP_BASE" merge-group-suites.txt || echo full > merge-group-suites.txt
       - name: Run the slow tier (scripts/test-tier-manifest.json's slow-tier files; none recorded yet still exits 0)
         run: |
+          MERGE_GROUP_SEL="$(head -n 1 merge-group-suites.txt 2>/dev/null || true)"
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ] && [ -n "$MERGE_GROUP_SEL" ] && [ "$MERGE_GROUP_SEL" != "full" ] \
+            && node scripts/test-tier-manifest.mjs --select-candidates merge-group-suites.txt --shard 1/8 --base HEAD > /dev/null; then
+            echo "W1-T5940: merge group selected $(grep -c . merge-group-suites.txt) suite(s); ci-shard runs them, slow tier included."
+            exit 0
+          fi
           if [ "${{ steps.plan-reading.outputs.established }}" = "true" ]; then
             echo "W1-T3191: exact plan-reading matrix established — slow-tier files are already distributed across its eight shards; suppressing duplicate execution."
             echo "- plan-reading matrix established: test-slow registered successfully and suppressed duplicate execution" >> "$GITHUB_STEP_SUMMARY"
@@ -870,7 +1001,7 @@ jobs:
               ;;
           esac
   commitlint:
-    # W1-T4399 — ~17 one-minute gates (commitlint, leak-grep, learnings-budget-ratchet,
+    # W1-T4399 — ~17 one-minute gates (rule-checks, leak-grep, learnings-budget-ratchet,
     # jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise,
     # containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate,
     # task-id-existence, source-size, comment-load-ratchet, baseline-monotonic) used to be their
@@ -882,8 +1013,8 @@ jobs:
     # matrix, mutation-ratchet's Stryker cache) stays its own job, untouched below. (iii)
     # `continue-on-error` means one step failing never skips the next — every step below always
     # runs and always reports.
-    name: commitlint
-    # WHY THIS JOB KEEPS THE `commitlint` KEY rather than a new one, e.g. `light-gates`: adding a
+    name: light-gates
+    # WHY THIS JOB KEEPS THE `commitlint` KEY under its `light-gates` name (W1-T5695): adding a
     # genuinely NEW ci.yml job key would force a matching new entry in src/lib/ci-parity.ts
     # (test/preflight-ci-parity.test.ts asserts ci.yml's job list against that table in both
     # directions), and Standing rule 25 refuses a single PR editing that table beside the workflow
@@ -894,34 +1025,43 @@ jobs:
     # names, permanently `if: false` rather than deleted or renamed — deleting one is the same
     # ci-parity.ts problem as above, and renaming one breaks a DIFFERENT invariant:
     # test/every-pr-check-is-required-or-advisory.test.ts derives every REQUIRED/ADVISORY entry
-    # from a real job's `name:` and refuses one nothing derives. So THIS job's own check run is
-    # ALSO still named "commitlint" (unchanged), same as every other stub below reuses its own
-    # original name — meaning a skipped stub and this job's real, checks-API-posted result for
-    # that same gate share one name on every PR. ci-gate.yml's own read already groups check runs
-    # by name and keeps only the latest `started_at` (W1-T123, for the identical "a rerun leaves an
-    # earlier attempt behind" case), unmodified, which is what resolves that duplicate: this job
-    # needs real work first (checkout, `npm ci`, the gates themselves), so its post always lands
-    # later than a stub's near-instant skip. `if: false` never queues a runner, so a stub costs
-    # nothing at runtime.
+    # from a real job's `name:` and refuses one nothing derives. So every stub below reuses its own
+    # original name — a skipped stub and this job's checks-API post for that gate share one name.
+    # W1-T5695: no RUNNABLE job shares a posted name (the PR title lint is pr-title-lint.yml's
+    # `commitlint` alone), each post's external_id is `run:<run>:<attempt>:job:<id>`, and
+    # ci-gate.yml's read keeps the latest `started_at` per name AND producer class ("posted" or
+    # "job"), so a job's later success never masks a failed post (#8905) and a stub's skip never
+    # fails. `if: false` never queues a runner, so a stub costs nothing at runtime.
+    # W1-T5522: also on the group commit (two PRs can each bump one recorded literal from one base);
+    # there every base read is GATE_BASE, the queue's landing base, never HEAD^1 (the previous entry)
+    # or a stale origin/main. pull_request argv is unchanged. Test: the-merge-queue-runs-the-recorded-*.
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group' # W1-T1033/W1-T5522
     timeout-minutes: 15
+    env:
+      GATE_BASE: ${{ github.event.merge_group.base_sha }} # empty on pull_request
     permissions:
       contents: read
       checks: write # W1-T4399: to post each gate's own check run below.
-      pull-requests: read # W1-T351: commitlint's `gh pr view` step needs this.
+      pull-requests: read # task-id-existence's open-PR read (`--require-open-prs`) needs this.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
         with:
           fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        id: setup-node
         with:
           node-version-file: .nvmrc
           cache: npm
       - name: Determine this diff's fast-lane class (shared by every path-scoped gate below — see each original job's own comment, compacted to docs/forensics/ci-yml.md, for why each is scoped the way it is)
         id: classify
         run: |
-          git diff --name-only HEAD^1...HEAD > changed-files.txt || : > changed-files.txt
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            git diff --name-only HEAD^1...HEAD > changed-files.txt || : > changed-files.txt
+          else
+            git diff --name-only "$GATE_BASE"...HEAD > changed-files.txt || : > changed-files.txt
+          fi
           CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
           case "$CLASS" in
             PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
@@ -931,26 +1071,16 @@ jobs:
           echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
           echo "W1-T3512 fast-lane: this diff classifies as ${CLASS}."
       - name: Install (clean, from lockfile)
+        id: install
         run: npm ci
 
       - name: rule-checks population (tree-derived census and ratchet suites, without coverage)
         id: rule-checks
         continue-on-error: true
-        run: node --import tsx scripts/list-rule-suites.mjs --run
-
-      - name: commitlint (the PR title — read LIVE via `gh pr view`, not the opened-event payload snapshot)
-        id: commitlint
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          PR_TITLE="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title --jq .title)"
-          if [ -z "$PR_TITLE" ]; then
-            echo "::error::commitlint: gh pr view returned an EMPTY title for PR #$PR_NUMBER -- this is an empty read (API/auth failure), distinct from a non-conventional title. Do not edit the title to fix this; investigate the gh call."
-            exit 1
-          fi
-          printf '%s\n' "$PR_TITLE" | npx commitlint --config commitlint.config.mjs --verbose
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/gate-reports"
+          node --import tsx scripts/list-rule-suites.mjs --run 2>&1 | tee "$RUNNER_TEMP/gate-reports/rule-checks.log"
 
       - name: leak-grep (plaintext secret tripwire)
         id: leak-grep
@@ -967,7 +1097,9 @@ jobs:
         continue-on-error: true
         env:
           BASE_SHA: HEAD^1
-        run: npm run --silent claude-md-budget-ratchet
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then export BASE_SHA="$GATE_BASE"; fi
+          npm run --silent claude-md-budget-ratchet
 
       - name: jscpd-gate (duplication ceiling)
         id: jscpd-gate
@@ -988,7 +1120,12 @@ jobs:
       - name: lint-plan (rmd lint-plan, PR-changed tasks only)
         id: lint-plan
         continue-on-error: true
-        run: npm run --silent lint-plan -- --base HEAD^1
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            npm run --silent lint-plan -- --base HEAD^1
+          else
+            npm run --silent lint-plan -- --base "$GATE_BASE"
+          fi
 
       - name: dependency-cruiser fitness rules
         id: depcruise
@@ -1007,7 +1144,11 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          git diff --name-only HEAD^1...HEAD > changed-files.txt
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            git diff --name-only HEAD^1...HEAD > changed-files.txt
+          else
+            git diff --name-only "$GATE_BASE"...HEAD > changed-files.txt
+          fi
           cat changed-files.txt
           node --import tsx .github/scripts/containment-diff-trigger.ts changed-files.txt
           MATCHED="$(grep '^matched=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)"
@@ -1031,6 +1172,7 @@ jobs:
 
       - name: prompt-surface-gate (requires golden evidence for prompt/learnings edits)
         id: prompt-surface-gate
+        if: github.event_name == 'pull_request' # W1-T5522: the PR's own evidence; a skip posts success
         continue-on-error: true
         run: |
           git fetch --no-tags origin "${GITHUB_BASE_REF}" >/dev/null 2>&1 || true
@@ -1041,13 +1183,23 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-        run: npm run --silent task-id-existence:check -- --require-open-prs
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then # W1-T5522: a queued PR is open and would match itself
+            node scripts/task-id-existence-check.mjs --base "$GATE_BASE"
+          else
+            npm run --silent task-id-existence:check -- --require-open-prs
+          fi
 
       - name: source-size (growth informs review and follow-up work; measurement failure still refuses)
         id: source-size
         if: steps.classify.outputs.class == 'SOURCE'
         continue-on-error: true
-        run: npm run --silent source-size-signal
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then
+            npm run --silent source-size-signal -- --base "$GATE_BASE"
+          else
+            npm run --silent source-size-signal
+          fi
 
       - name: Comment-load ratchet (no file grows past its ceiling; no added block over 25 lines)
         id: comment-load-ratchet
@@ -1057,7 +1209,11 @@ jobs:
           # W1-T3720: tee each bundled gate's report so the reporting step can name the refuser.
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/gate-reports"
-          npm run --silent comment-load-signal 2>&1 | tee "$RUNNER_TEMP/gate-reports/comment-load-ratchet.log"
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then
+            npm run --silent comment-load-signal -- --base "$GATE_BASE" 2>&1 | tee "$RUNNER_TEMP/gate-reports/comment-load-ratchet.log"
+          else
+            npm run --silent comment-load-signal 2>&1 | tee "$RUNNER_TEMP/gate-reports/comment-load-ratchet.log"
+          fi
 
       - name: Expiring-fixture census (no fixture crosses its threshold inside the margin)
         id: expiring-fixture-census
@@ -1068,6 +1224,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/gate-reports"
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then git update-ref refs/remotes/origin/main "$GATE_BASE"; fi # W1-T5522: no base flag
           node scripts/expiring-fixture-census.mjs 2>&1 | tee "$RUNNER_TEMP/gate-reports/expiring-fixture-census.log"
 
       - name: Console-parity ratchet (every verb maps to a route or a stated cli-only reason)
@@ -1082,17 +1239,24 @@ jobs:
       - name: baseline-monotonic (no SCORE_TABLE floor/ceiling regresses against origin/main without a reviewed bumpRationale)
         id: baseline-monotonic
         continue-on-error: true
-        run: node scripts/baseline-monotonic-check.mjs
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then
+            node scripts/baseline-monotonic-check.mjs --base "$GATE_BASE"
+          else
+            node scripts/baseline-monotonic-check.mjs
+          fi
 
       - name: Report each gate's result under its own required check-run name (checks API — W1-T4399 design (i))
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }} # W1-T5522: the group commit
           POSTING_JOB_ID: ${{ job.check_run_id }}
+          POSTING_RUN_ID: ${{ github.run_id }}
+          POSTING_RUN_ATTEMPT: ${{ github.run_attempt }}
           GATE_REPORT_DIR: ${{ runner.temp }}/gate-reports
+          SETUP_OUTCOMES: checkout=${{ steps.checkout.outcome }} setup-node=${{ steps.setup-node.outcome }} classify=${{ steps.classify.outcome }} install=${{ steps.install.outcome }}
           OUTCOME_RULE_CHECKS: ${{ steps.rule-checks.outcome }}
-          OUTCOME_COMMITLINT: ${{ steps.commitlint.outcome }}
           OUTCOME_LEAK_GREP: ${{ steps.leak-grep.outcome }}
           OUTCOME_LEARNINGS_BUDGET_RATCHET: ${{ steps.learnings-budget-ratchet.outcome }}
           OUTCOME_CLAUDE_MD_BUDGET_RATCHET: ${{ steps.claude-md-budget-ratchet.outcome }}
@@ -1122,6 +1286,13 @@ jobs:
           # native job conclusion computed before this task).
           # W1-T3720: the NAME stays the required context; a failing check is TITLED by the gate(s)
           # that refused (scripts/bundled-gate-report.mjs, `<step-id>=<outcome>` args).
+          SETUP_FAILED=""
+          SETUP_OBSERVED=false
+          for setup in ${SETUP_OUTCOMES:-}; do
+            SETUP_OBSERVED=true
+            case "${setup##*=}" in success) ;; *) SETUP_FAILED="${SETUP_FAILED:+$SETUP_FAILED }${setup}" ;; esac
+          done
+          [ "$SETUP_OBSERVED" = true ] || SETUP_FAILED="setup-outcomes=unavailable"
           report() {
             local check_name="$1"
             shift
@@ -1135,11 +1306,15 @@ jobs:
             done
             title="$(node scripts/bundled-gate-report.mjs "$check_name" "$@")" || title="$check_name"
             [ -n "$title" ] || title="$check_name"
+            if [ -n "$SETUP_FAILED" ]; then
+              conclusion="failure"
+              title="${check_name}: setup did not succeed (${SETUP_FAILED}), so no gate ran"
+            fi
             while true; do
               if error=$(gh api "repos/${GITHUB_REPOSITORY}/check-runs" \
                 -f "name=${check_name}" \
                 -f "head_sha=${HEAD_SHA}" \
-                -f "external_id=job:${POSTING_JOB_ID}" \
+                -f "external_id=run:${POSTING_RUN_ID}:${POSTING_RUN_ATTEMPT}:job:${POSTING_JOB_ID}" \
                 -f "status=completed" \
                 -f "conclusion=${conclusion}" \
                 -f "output[title]=${title}" \
@@ -1157,7 +1332,7 @@ jobs:
             done
             echo "W1-T4399: reported ${check_name} = ${conclusion} (step outcome(s): $*); title: ${title}"
           }
-          report "commitlint" "${OUTCOME_COMMITLINT}" "${OUTCOME_RULE_CHECKS}"
+          report "rule-checks" "${OUTCOME_RULE_CHECKS}"
           report "leak-grep" "${OUTCOME_LEAK_GREP}"
           report "learnings-budget-ratchet" "learnings-budget-ratchet=${OUTCOME_LEARNINGS_BUDGET_RATCHET}" "claude-md-budget-ratchet=${OUTCOME_CLAUDE_MD_BUDGET_RATCHET}"
           report "jscpd-gate" "${OUTCOME_JSCPD_GATE}"
@@ -1210,11 +1385,12 @@ jobs:
     # W1-T1009: HEAVY band. Unlike `ci`, this job runs the whole suite under
     # `--experimental-test-coverage`, and W1-T2430's measurement found every one of THIS job's
     # cancellations died on the `Test with coverage` step below, none on `npx playwright install` —
-    # same band as `ci`, for its own reason and at its own number. The 39m/2340s ceiling holds until
-    # real matrix runs establish a safe lower bound. INVARIANT: it must stay strictly below
-    # ci-gate.yml's WAIT_CAP_SECONDS (2400s), or ci-gate times out first and the misattribution
-    # defect returns intact; re-derive it if that cap is retuned (W1-T312).
-    timeout-minutes: 39
+    # same band as `ci`, for its own reason and at its own number. PR #9943's shard 1 reached the
+    # former 39m ceiling during Test with coverage (37m36s in that step, after setup) before the
+    # suite completed. Give the measured long tail 49m; with the 20m aggregator, ci-gate's 75m
+    # WAIT_CAP_SECONDS leaves six minutes of scheduling room. FALSIFIER:
+    # test/workflow-job-timeouts.test.ts enforces that full dependency path and the margin.
+    timeout-minutes: 49
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1228,16 +1404,20 @@ jobs:
         # `isInPlanScope` from src/lib/plan-scope.ts. Two of the repo's three scope predicates
         # already disagree; a bash reimplementation here would be a fourth (W1-T2428, Q1). It fails
         # closed twice over: the script resolves an unreadable, empty or malformed input to SOURCE,
-        # and this step clamps stdout to the four known coverage tokens, so even a bare Node invocation that
+        # and this step clamps stdout to the five known coverage tokens, so even a bare Node invocation that
         # cannot start leaves CLASS=SOURCE. `plan-scope.ts` is a dependency-free leaf and Node 22.22.3
         # strips its type annotations, so this runs before npm ci. On a push, changed-files.txt is left
         # empty and the script's own empty-list rule resolves it to SOURCE.
         # TRAP: step-level bash, never a YAML `if:` — the class is READ by the bash guards below.
         id: classify
         run: |
-          # W1-T4406: `merge_group` joins `pull_request` here — its own synthetic commit's first
-          # parent is the target branch's tip, exactly like a PR's, so HEAD^1...HEAD is the diff
-          # that is about to land, not a shallow guess.
+          # W1-T5940: each member already passed this instrumented run; NO_SRC is the existing skip class.
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then
+            echo "W1-T5940: merge group — coverage-ratchet skips; ci-shard confirms the combination."
+            : > changed-files.txt
+            echo "class=NO_SRC" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then
             git diff --name-only HEAD^1...HEAD > changed-files.txt || true
           else
@@ -1245,7 +1425,7 @@ jobs:
           fi
           CLASS="$(node scripts/diff-class.mjs --coverage-class --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
           case "$CLASS" in
-            PLAN_ONLY|DOCS_ONLY|TEST_ONLY|SOURCE) ;;
+            PLAN_ONLY|DOCS_ONLY|TEST_ONLY|NO_SRC|SOURCE) ;;
             *) CLASS="SOURCE" ;;
           esac
           cat diff-class.log || true
@@ -1297,6 +1477,25 @@ jobs:
             exit 0
           fi
           npx playwright install chromium
+      - name: Resolve the CI ledger snapshot the coverage split weighs (W1-T4071)
+        # The newest proposal uploaded 10+ min before this run was created: one artifact for all eight shards.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p coverage "${RUNNER_TEMP}/coverage-ledger"
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "${{ steps.classify.outputs.class }}" = "SOURCE" ] \
+            && CREATED="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --jq .created_at 2>/dev/null)" \
+            && CUTOFF="$(date -u -d "${CREATED} - 10 minutes" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" \
+            && LEDGER_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=test-tier-coverage-manifest-proposal&per_page=100" \
+              --jq "[.artifacts[] | select((.expired | not) and .created_at < \"${CUTOFF}\")] | sort_by(.created_at, .id) | last | .id // empty" 2>/dev/null)" \
+            && [ -n "$LEDGER_ID" ] \
+            && gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${LEDGER_ID}/zip" > "${RUNNER_TEMP}/coverage-ledger/snapshot.zip" 2>/dev/null \
+            && unzip -p "${RUNNER_TEMP}/coverage-ledger/snapshot.zip" test-tier-coverage-manifest.next.json > coverage/ledger-snapshot.manifest 2>/dev/null; then
+            echo "W1-T4071: weighing the coverage split on CI ledger artifact ${LEDGER_ID} (uploaded before ${CUTOFF})."
+          else
+            rm -f coverage/ledger-snapshot.manifest
+            echo "W1-T4071: no CI ledger snapshot resolved; the committed instrumented ledger is weighed."
+          fi
       - name: Test with coverage (spec output to the CI log, lcov to a file — src/** only, test/** excluded from the ratio)
         # W1-T220 defect 1: a `spec` reporter to stdout runs alongside the `lcov` reporter pair.
         # With `--test-reporter=lcov` alone, a failing run's CI log carried zero test output — just
@@ -1318,8 +1517,9 @@ jobs:
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ] || { echo "W1-T1033: coverage-ratchet only runs its real work on pull_request/merge_group; skipping the real test-with-coverage run on a ${GITHUB_EVENT_NAME} event (see this job's own comment above)."; exit 0; }
           CLASS="${{ steps.classify.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T2428 fast-lane: class=${CLASS} — skipping Test with coverage (no src/**/test/** path in this diff, so coverage cannot newly move)."
-            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Test with coverage** (no src/**/test/** path in this diff)" >> "$GITHUB_STEP_SUMMARY"
+            case "$CLASS" in PLAN_ONLY|DOCS_ONLY) WHY="no src/**/test/** path" ;; *) WHY="no src/** path" ;; esac
+            echo "W1-T2428 fast-lane: class=${CLASS} — skipping Test with coverage (${WHY} in this diff, so coverage cannot newly move)."
+            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Test with coverage** (${WHY} in this diff)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           # W1-T1217: `--import ./test/setup/tmp-hygiene.ts` is NOT optional here and its absence
@@ -1356,7 +1556,38 @@ jobs:
           # ci-gate's list — it must still register and still fail on a coverage regression. The
           # comment two blocks below is what makes artifact absence fail closed: no step in this job
           # carries a YAML conditional, so a failing shard makes the stable aggregator refuse.
-          if ! node scripts/test-tier-manifest.mjs --select-all --shard ${{ matrix.shard }}/8 --base HEAD^1 \
+          SELECTION="all"
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "${RMD_AFFECTED_SUITE_LIVE:-0}" = "1" ]; then
+            git diff -U0 HEAD^1...HEAD > "${RUNNER_TEMP}/affected.diff" 2>/dev/null || : > "${RUNNER_TEMP}/affected.diff"
+            node --import tsx -e '
+              import { readFileSync, writeFileSync } from "node:fs";
+              const root = process.env.GITHUB_WORKSPACE || process.cwd();
+              const [changedPath, diffPath, outPath] = process.argv.slice(1);
+              const changed = readFileSync(changedPath, "utf8").split("\n").map((l) => l.trim()).filter(Boolean);
+              const mod = await import(root + "/src/lib/affected-suites.ts");
+              const { callerReachableSuites } = await import(root + "/src/lib/ci-parity.ts");
+              const { defaultPreflightSpawn } = await import(root + "/src/lib/commit-message.ts");
+              const symbols = () => mod.changedSymbols(readFileSync(diffPath, "utf8"), (p) => readFileSync(root + "/" + p, "utf8"));
+              const sel = mod.affectedSelectionOrFull(changed, () => mod.readAffectedSuitesInput(root, changed,
+                { symbolSuites: callerReachableSuites(symbols(), root, defaultPreflightSpawn).suites }));
+              const narrow = sel.fullRun ? [] : sel.narrow ?? [];
+              writeFileSync(outPath, narrow.length === 0 ? "full\n" : narrow.join("\n") + "\n");
+              console.log("W1-T5705: live coverage selection -> " + (narrow.length === 0 ? "FULL: " + (sel.reasons[0] ?? "no narrow set") : narrow.length + " narrow suite(s)"));
+            ' changed-files.txt "${RUNNER_TEMP}/affected.diff" coverage-narrow-suites.txt || echo "full" > coverage-narrow-suites.txt
+            if [ "$(head -n 1 coverage-narrow-suites.txt 2>/dev/null || true)" != "full" ] \
+              && node scripts/test-tier-manifest.mjs --select-candidates coverage-narrow-suites.txt --shard ${{ matrix.shard }}/8 --base HEAD^1 \
+                > coverage-test-files.txt 2> coverage-shard-selection.log && grep -q . coverage-test-files.txt; then
+              SELECTION="narrow"
+            else
+              cat coverage-shard-selection.log 2>/dev/null || true
+              echo "W1-T5705: no usable narrow selection for this shard; running its full --select-all shard."
+            fi
+          fi
+          echo "$SELECTION" > coverage-selection.txt
+          # W1-T5923: weigh the split on this lane's own instrumented durations.
+          if [ "$SELECTION" = "all" ] && ! node scripts/test-tier-manifest.mjs --select-all --shard ${{ matrix.shard }}/8 --base HEAD^1 \
+            --instrumented-manifest scripts/test-tier-coverage-manifest.json --snapshot coverage/ledger-snapshot.manifest \
+            --workers 3 --selection-output coverage/selected-files.json \
             > coverage-test-files.txt 2> coverage-shard-selection.log; then
             cat coverage-shard-selection.log || true
             echo "coverage-ratchet: duration-balanced test selection failed; refusing to run a partial or unclassified coverage shard."
@@ -1378,6 +1609,7 @@ jobs:
             --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=tap --test-reporter-destination=stderr \
             --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
+            --test-reporter=./scripts/test-duration-reporter.mjs --test-reporter-destination=coverage/test-durations.json \
             --test --import tsx --import ./test/setup/tmp-hygiene.ts "${COVERAGE_TEST_FILES[@]}" \
             2>&1 | tee "${RUNNER_TEMP}/coverage-test-output.log"
           TEST_EXIT="${PIPESTATUS[0]}"
@@ -1416,16 +1648,15 @@ jobs:
         run: |
           mkdir -p coverage-artifact
           printf '%s\n' "${GITHUB_EVENT_NAME}:${{ steps.classify.outputs.class }}" > coverage-artifact/class
+          printf '%s\n' "$(cat coverage-selection.txt 2>/dev/null || echo all)" > coverage-artifact/selection
+          if [ -s coverage/selected-files.json ]; then cp coverage/selected-files.json coverage-artifact/selected-files.json; fi
           if [ -s coverage/lcov.info ]; then
-            # The raw process reports were 514 MB for ONE shard on this PR's first live run.
-            # Deduplicate repeated source maps locally while retaining every process boundary and
-            # V8 range. The aggregator reconstructs those reports, then pinned Node maps and merges
-            # every shard's bundle before assigning LCOV line/branch IDs.
-            mkdir -p coverage/compact
+            # W1-T5923: source-map every process report HERE, in parallel (~70% of the serial merge);
+            # the aggregator replays the recorded line state and range merge in order, byte-identically.
             mkdir -p coverage-artifact/raw
-            node --expose-internals scripts/coverage-merge-ratchet.mjs --compact-output coverage/compact coverage/raw
+            node --expose-internals scripts/coverage-merge-ratchet.mjs --premap-output coverage/premapped coverage/raw
             cp coverage/lcov.info coverage-artifact/lcov.info
-            cp coverage/compact/coverage-*.json coverage-artifact/raw/
+            cp coverage/premapped/coverage-*.json coverage-artifact/raw/
           else
             echo "${GITHUB_EVENT_NAME}:${{ steps.classify.outputs.class }}" > coverage-artifact/skipped
           fi
@@ -1436,6 +1667,20 @@ jobs:
           path: coverage-artifact
           retention-days: 1
           if-no-files-found: error
+      - name: Upload this coverage shard's instrumented duration evidence (W1-T5923 — read by flake-retry-aggregate)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-duration-shard-${{ matrix.shard }}
+          path: coverage/test-durations.json
+          retention-days: 7
+          if-no-files-found: ignore
+      - name: Upload the ledger snapshot this coverage shard weighed (W1-T4071 — read by flake-retry-aggregate)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-ledger-snapshot-shard-${{ matrix.shard }}
+          path: coverage/ledger-snapshot.manifest
+          retention-days: 1
+          if-no-files-found: ignore
       - name: Upload this coverage shard's flake-retry evidence (W1-T4398 — read by flake-retry-aggregate)
         # No YAML conditional (the #729 discipline above), so this runs only when the shard is
         # green — which is exactly when a recovered flake would otherwise leave no record. A red
@@ -1584,7 +1829,7 @@ jobs:
             case "$VALUE" in
               # W1-T4406: merge_group:* joins the whitelist alongside pull_request:* — the classify
               # step above now computes a real class for a merge_group run too.
-              pull_request:PLAN_ONLY|pull_request:DOCS_ONLY|pull_request:TEST_ONLY|pull_request:SOURCE|merge_group:PLAN_ONLY|merge_group:DOCS_ONLY|merge_group:TEST_ONLY|merge_group:SOURCE|push:SOURCE) ;;
+              pull_request:PLAN_ONLY|pull_request:DOCS_ONLY|pull_request:TEST_ONLY|pull_request:NO_SRC|pull_request:SOURCE|merge_group:PLAN_ONLY|merge_group:DOCS_ONLY|merge_group:TEST_ONLY|merge_group:NO_SRC|merge_group:SOURCE|push:SOURCE) ;;
               *)
                 echo "coverage-ratchet: coverage-shard-${SHARD} carried unrecognised class metadata '${VALUE}'."
                 exit 1
@@ -1597,6 +1842,15 @@ jobs:
               exit 1
             fi
           done
+          SELECTIONS=()
+          for SHARD in 1 2 3 4 5 6 7 8; do
+            if [ -s "coverage-shards/coverage-shard-${SHARD}/selected-files.json" ]; then SELECTIONS+=("coverage-shards/coverage-shard-${SHARD}/selected-files.json"); fi
+          done
+          if [ "${#SELECTIONS[@]}" -eq 8 ]; then
+            node scripts/test-tier-manifest.mjs --check-partition "${SELECTIONS[@]}"
+          else
+            echo "W1-T4071: ${#SELECTIONS[@]} of 8 shards recorded a full split; no partition (every file once, one ledger) to check."
+          fi
           EVENT="${EXPECTED%%:*}"
           CLASS="${EXPECTED#*:}"
           echo "event=${EVENT}" >> "$GITHUB_OUTPUT"
@@ -1612,7 +1866,7 @@ jobs:
           fi
           for SHARD in 1 2 3 4 5 6 7 8; do
             RAW_DIR="coverage-shards/coverage-shard-${SHARD}/raw"
-            if ! find "$RAW_DIR" -maxdepth 1 -type f -name 'coverage-bundle-*.json' -print -quit 2>/dev/null | grep -q .; then
+            if ! find "$RAW_DIR" -maxdepth 1 -type f \( -name 'coverage-bundle-*.json' -o -name 'coverage-corpus-*.json' -o -name 'coverage-premapped-*.json' \) -print -quit 2>/dev/null | grep -q .; then
               echo "coverage-ratchet: expected compact V8 coverage for shard ${SHARD}; refusing a partial merge."
               exit 1
             fi
@@ -1654,21 +1908,44 @@ jobs:
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ] || { echo "W1-T1033: coverage-ratchet only runs its real work on pull_request/merge_group; skipping on a ${GITHUB_EVENT_NAME} event (no pr.diff was computed above)."; exit 0; }
           CLASS="${{ steps.coverage-artifact.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T2428 fast-lane: class=${CLASS} — skipping Diff coverage (no pr.diff was computed above; no src/**/test/** path in this diff to check)."
-            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Diff coverage**" >> "$GITHUB_STEP_SUMMARY"
+            case "$CLASS" in PLAN_ONLY|DOCS_ONLY) WHY="no src/**/test/** path" ;; *) WHY="no src/** path" ;; esac
+            echo "W1-T2428 fast-lane: class=${CLASS} — skipping Diff coverage (no pr.diff was computed above; ${WHY} in this diff to check)."
+            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Diff coverage** (${WHY} in this diff)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           node scripts/diff-coverage.mjs --lcov coverage/lcov.info --diff pr.diff
       - name: Coverage ratchet (blocks a PR whose branch coverage is below the absolute floor)
         env:
           RMD_CI_REPORT: "1"
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           # W1-T4406: merge_group widens this guard alongside pull_request (never replaces it).
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ] || { echo "W1-T1033: coverage-ratchet only runs its real work on pull_request/merge_group; skipping on a ${GITHUB_EVENT_NAME} event (no coverage/lcov.info was collected above)."; exit 0; }
           CLASS="${{ steps.coverage-artifact.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ]; then
             echo "W1-T2428 fast-lane: class=${CLASS} — skipping Coverage ratchet (no coverage/lcov.info was collected above; no src/** path in this diff can move the aggregate)."
-            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Coverage ratchet**" >> "$GITHUB_STEP_SUMMARY"
+            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Coverage ratchet** (no src/** path in this diff)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if grep -qsx narrow coverage-shards/coverage-shard-*/selection; then
+            LCOV=""
+            { gh run list --workflow coverage-nightly.yml --branch main --status completed --limit 5 --json databaseId,createdAt \
+                --jq '.[] | "\(.createdAt) \(.databaseId) coverage-nightly"' || true
+              gh run list --workflow ci.yml --event merge_group --status completed --limit 5 --json databaseId,createdAt \
+                --jq '.[] | "\(.createdAt) \(.databaseId) coverage-merged"' || true; } | sort -r > floor-runs.txt
+            while read -r _ RUN ARTIFACT; do
+              if gh run download "$RUN" -n "$ARTIFACT" -D "floor-${RUN}" && [ -s "floor-${RUN}/lcov.info" ]; then
+                LCOV="floor-${RUN}/lcov.info"
+                echo "W1-T5705: this PR ran a narrowed selection; the absolute floor is read from ${ARTIFACT} run ${RUN}."
+                break
+              fi
+            done < floor-runs.txt
+            if [ -z "$LCOV" ]; then
+              echo "::error::W1-T5705: a narrowed selection found no nightly or merge-group lcov to read the absolute floor from; refusing."
+              exit 1
+            fi
+            node scripts/coverage-ratchet.mjs --lcov "$LCOV" --baseline scripts/coverage-baseline.json
             exit 0
           fi
           node scripts/coverage-ratchet.mjs --lcov coverage/lcov.info --baseline scripts/coverage-baseline.json
@@ -1944,22 +2221,21 @@ jobs:
     # `always()` IS LOAD-BEARING: without it a failing needed job SKIPS this job, and GitHub counts a
     # skipped required check as passing. FALSIFIER: test/the-ci-gate-does-not-hold-a-runner.test.ts.
     #
-    # W1-T4406: DELIBERATELY STAYS `pull_request`-only, unlike every job it `needs:`. This gate's
-    # own REQUIRED list (ci-gate.yml) names ~26 checks, most of them ~17 one-runner gates the
-    # `commitlint` job posts (commitlint, lint-plan, jscpd-gate, claims, ...) that are themselves
-    # `if: github.event_name == 'pull_request'` and would never register on a `merge_group` commit
-    # — so waiting on the full list there would time out and deadlock the queue on every entry
-    # (the exact skipped/absent-required-check class INVARIANT 2 above exists to avoid). The merge
-    # queue's own ruleset is expected to require the underlying check NAMES this file's `ci`,
-    # `coverage-ratchet` and `test-slow` jobs already post unconditionally — not this aggregate —
-    # exactly as W1-T4405's design note keeps `remudero-review` off the queue's own requirements.
+    # W1-T4406/W1-T5515: IT RUNS ON THE MERGE QUEUE'S GROUP COMMIT TOO. Branch protection requires
+    # this context, and a job skipped on `merge_group` is a skipped required check that GitHub counts
+    # as passing: the 2026-09-29 sandbox rehearsal saw the queue merge a group whose `ci` was red.
+    # The full REQUIRED list cannot be waited on there (seven names come from pull_request-only
+    # workflows and never register), so on `merge_group` the step passes `--event merge_group` and
+    # the runner gates on ci-gate.yml's MERGE_GROUP_REQUIRED (`ci`, `coverage-ratchet`, `test-slow`,
+    # all `needs:` of this job). SHA falls back to github.sha, the group head, where the PR head sha
+    # is empty. FALSIFIER: test/the-ci-gate-reports-on-the-merge-group-commit.test.ts.
     name: ci-gate
     runs-on: ubuntu-latest
     needs: [squash-trailer-gate, ci, flake-retry-aggregate, ci-required, test-slow-shard, test-slow, commitlint, leak-grep, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic]
     # `always()` must still aggregate a FAILED dependency, but alone it also survives normal
     # cancellation and keeps a superseded PR run's concurrency slot occupied (W1-T4604).
     # GitHub re-evaluates this job condition when cancelling: the second arm releases that run.
-    if: ${{ always() && !cancelled() && github.event_name == 'pull_request' }}
+    if: ${{ always() && !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
     # Light band. Its wait starts only after every ci.yml job has finished, so it covers stragglers
     # from OTHER workflows alone (all done by minute 4 on every PR measured): a 900 s WAIT_CAP_SECONDS
     # here, plus ci-gate.yml's 600 s grace window, still ends inside this bound — so the gate's own
@@ -1971,7 +2247,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
-      SHA: ${{ github.event.pull_request.head.sha }}
+      SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       WAIT_CAP_SECONDS: "900"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1982,4 +2258,4 @@ jobs:
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: Aggregate sibling check results (ci-gate.yml's own step — fail only on a REAL failure)
-        run: node scripts/ci-gate-from-contract.mjs
+        run: node scripts/ci-gate-from-contract.mjs --event "${{ github.event_name }}"

@@ -296,6 +296,8 @@ diskFreeBytes?, rateLimitRemaining?, daemon{ state, at?, reason? }, reasons? }, 
 - `tasks[].lastActivityAt` and `actions[].sortAt` move only on a row that changed something: a
   `sweep.disposed` row re-emitting the disposition already recorded for that PR is not activity.
 - `groups` is the console's `groupBoard` as ordered id lists.
+- `tasks[].workerState` (`working`/`tool-executing`/`quiet`), `workerStateSince` (quiet only) and `processUnevidenced` are
+  the board row's worker liveness, added without a version bump: /fleet evidences a worker process only from them.
 - `actions[].strike` is `{ n, of }`, parsed once from the sweep's reason.
 - `health` is the selected instance's own host probe. A field it could not read is absent and named in `health.reasons`.
 - `decisions[]` is every open thing the operator answers (`src/lib/now-decisions.ts`), newest first, at most 50
@@ -323,6 +325,106 @@ diskFreeBytes?, rateLimitRemaining?, daemon{ state, at?, reason? }, reasons? }, 
   sources. Those are GET /v1/status's board and PR queue over the instance's live file only, plus a fresh
   host probe of that instance, computed in the worker (`createNowView`'s `legacy`).
 - Probe gauges come from the view whenever both probes read them, so two samples moments apart are not a diff.
+
+## `host` (version 1)
+
+`GET /v1/views/host`: the console's /host page in one read (arch Phase 4 §1.1 and §5, P4-T14, W1-T5053,
+`src/lib/host-view.ts`). Schema: `HostView`. Dark until `switches.json` sets `host` to `serve`.
+
+`data`: each part is the body its route answers, built by the same function.
+- `control` (GET /v1/control/status), `accountUsage` (GET /v1/account-usage, without its `*AgeMs` fields,
+  which move on every sample; each `*AsOf` stays), `providerRouting` (GET /v1/provider-routing), `skills`
+  (GET /v1/skills's list) and `selfMeasurement` (GET /v1/self-measurement).
+- `gauges`: the EXACT disk free bytes of core's state dir and the REST `rate_limit` remaining, with
+  `reasons` naming why one is absent. `now` carries the same gauges as bands.
+
+Built in the read-model worker's view thread, re-sampled at most once a minute (`HOST_PROBE_INTERVAL_MS`).
+`gh api rate_limit` and the self-measurement ledger union are read asynchronously there; each answer lands
+in the next build without a file re-read. Sources: `host-probe:<i>` (the sample time), `account:<i>` (the
+account cache's `usageAsOf`, stale while the usage is unknown) and `ledger:<i>`.
+- The GET writes nothing. The credit-state edge is ledgered by the slow lane's credit-edge unit, once
+  per change, whether or not anyone reads (§5 GET write 1).
+- Shadow side: serve's computation over the same deps its routes answer with, the gauges and the
+  measurement taken from the view's latest body (as `now` takes its probe gauges).
+
+## `workstreams` (version 1)
+
+`GET /v1/views/workstreams`: the operator activity page, one body across instances (arch Phase 4 §1.1,
+P4-T11, W1-T5050, `src/lib/workstreams-view.ts`). Schema: `WorkstreamsView`. Dark until `switches.json` sets
+`workstreams` to `serve`; until then the console reads `/v1/operator-activity` as before.
+
+`data.instances[]`: `{ instance, activity }`, one per projected instance, where `activity` is exactly what
+`GET /v1/operator-activity` answers for it (`OperatorActivityResult`), built by the same
+`buildOperatorActivityProjection` over the projector's `activity_ring` (the newest 500 rows of any step)
+instead of a request-time ledger union. The plan half reads what the route reads: the checkout's plan,
+`projectPlan` over the live ledger and the persisted GitHub snapshot, and the dispatcher's frontier.
+- Rebuilt when the ring takes an insert, the plan changes or the GitHub snapshot is re-saved, once the first
+  unbuilt change is 1 s old: a burst of inserts costs one build.
+- Sources: `ledger:<i>`, `plan:<i>` and `github:<i>` per instance.
+- Shadow side: the route's computation (its memoized ledger union, up to the ring's newest row) over the
+  same build's plan half, so a diff is a ring row the union disagrees with.
+
+## `actions` (version 1)
+
+`GET /v1/views/actions`: the actions page, one body across instances (arch Phase 4 §1.1, P4-T13, W1-T5052,
+`src/lib/actions-view.ts`). Schema: `ActionsView`. Dark until `switches.json` sets `actions` to `serve`;
+until then the console reads `/v1/action-results` as before.
+
+`data.instances[]`: `{ instance, results }`, one per projected instance, where `results` is exactly what
+`GET /v1/action-results` answers with no filter (`ExternalActionResultsEnvelope`), built by the same
+`buildActionResultsProjection` over the projector's `external_effect.reconciled` facts (every rotation the
+projector applied) instead of a request-time ledger union. A filtered read (`taskId`, `actionId`,
+`changedSince`, `limit`) stays on the route.
+- Rebuilt only when a reconciled fact is applied: each tick folds the facts past the last `seq` it read.
+- Sources: `ledger:<i>` per instance.
+- Shadow side: the route's computation (its memoized ledger union, torn rows classified as the route does)
+  up to the projector's newest applied row at the build, so a diff is a reconciled row the two disagree on.
+- The route's window applies: its union reads only the rotations within `STATUS_BOARD_WINDOW_MS` of the newest
+  (at least `STATUS_BOARD_MIN_ROTATIONS`). No rotation retains a reconciled row, so each sits in one file at or
+  before its stamp, and the view keeps the facts stamped after the newest rotation the window leaves out
+  (`rotationWindowExcludedThroughMs`, the union's own selection). A window move rebuilds the body.
+- A torn row is not seen: the projector keeps no text of it to classify. Where the route answers
+  `ledger-partial`, the view answers the rows it holds, and the shadow shows that diff.
+
+## `agent` (version 1)
+
+`GET /v1/views/agent?instance=&part=`: the agent pages' reads, one body per (instance, part) (arch Phase 4
+§1.1 and §7.1, P4-T12, W1-T5051, `src/lib/agent-view.ts`). Schema: `AgentView`. Both parameters are required.
+Dark until `switches.json` sets `agent` to `serve`; until then the console reads `/v1/operator-agent/*` as before.
+
+`data`: `{ instance, part, repository?, body, scoped? }`. `body` is exactly what the part's route answers for the
+instance: `history` = `GET /v1/operator-agent/proposals`, `settings` = `GET /v1/operator-agent/settings` (with
+`scoped` = its `?repository=` read), and `experiments`, `delegations`, `follow-ups`, `promotions`, `actions`,
+`consequences`, `intent-plans` = the GET of that name. Each is computed by the route's own readers over the
+instance's `panel.*` facts. `proposals` is core's one proposal engine (the nav badge's `operatorAgentCandidates`)
+over the instance's committed analytics `source_snapshot` and its history: `{ proposals }`, or `{ reason }` before
+a first analytics refresh or for an instance with no repository, never an empty list it cannot vouch for.
+- The fold is persisted per instance (`agent_fold(instance, last_seq, state_json)`): only facts past the committed
+  `seq` are read, one 5,000-`seq` chunk per pass step, and each chunk that moved the state commits it with that
+  `seq` in one fenced transaction. A restart resumes from the committed pair; a refused commit (lost lease) keeps
+  the in-memory fold and the last committed pair.
+- Rebuilt when the fold moves, the analytics snapshot's as-of moves, or a minute passes (expiries and staleness).
+- Sources: `ledger:<i>`; `proposals` adds `analytics:<i>`.
+- Shadow side: the routes' computation over the ledger union read the routes' way, up to the fold's newest row.
+- Not yet a part: `capabilities` (core serves no such route). `/context` stays a direct keyed GET.
+
+## `incidents` (version 1)
+
+`GET /v1/views/incidents`: the /incidents page, one body across instances (arch Phase 4 §1.1, P4-T15, W1-T5054,
+`src/lib/incidents-view.ts`). Schema: `IncidentsView`. Dark until `switches.json` sets `incidents` to `serve`;
+until then the console reads `/v1/incidents`, each instance's emergency status and daemon health as before.
+
+`data`: `{ store, instances[] }`.
+- `store`: `{ state: "ok", incidents }`, exactly `GET /v1/incidents`' list (`incidentsNewestFirst`), or
+  `{ state: "unavailable", reason }` where that route answers 503. Re-read only when the store file's fingerprint
+  (size, mtime, inode) moves. Source: `incidents-store:<home>`, as of the file's mtime.
+- `instances[].emergency.active`: `GET /v1/operator-agent/emergency/status`'s `active`, by the same
+  `activeEmergencyStopsAt`, over the agent view's persisted `panel.*` fold (no ledger read). Source: `ledger:<i>`.
+- `instances[].liveness`: a band over the newest projected `daemon.*` row (`instanceLiveness`, as `instances`
+  carries it). The raw heartbeat time is never carried, so a beat inside the band does not move the ETag.
+- Shadow side: `GET /v1/incidents` over a fresh store read (paired with the body's store as-of, so a write in
+  between is `timing`), and each emergency status route over the ledger union read the routes' way, up to the
+  fold's newest row at the build. Liveness is the body's own reading: no route bands a heartbeat.
 
 ## `instances` (version 1)
 
@@ -355,6 +457,26 @@ and `ledger:<instance>` per projected instance.
 also the view's shadow side. The console's `RMD_CONTROL_REPO_INSTANCES` and
 `RMD_CONTROL_ANALYTICS_INSTANCES` retire only after the `agent`, `analytics` and `usage` views fold
 every instance in core (CONSOLE-T102).
+
+### Cached analytics details
+
+`analytics.data.instances[]` optionally carries `repository`, captured from the server's configured
+instance/registry identity when the snapshot was made. Old snapshots with no identity stay unreported;
+neither an instance name nor a historical ledger label supplies one.
+
+Each warm instance also carries an additive `details` envelope (`analytics-details-v1`). `reported`
+means the same-as-of `console-signals-v1` and `usage-v1` source rows were read; it is not a metric
+validation or freshness verdict. Consumers validate the nested projection's own version and schema.
+The instance's `analytics:<instance>` source governs snapshot freshness, including failures on either
+detail source. `usage: null` is uncollected, never zero subscription use. No live provider/queue values
+or private agent memory are fabricated or transported in these details.
+
+Snapshots missing a companion row, with mismatched times, unsupported/corrupt bodies or over-budget
+details explicitly name an unavailable reason without erasing the instance's metrics. Details are
+parsed only when their source as-of keys change; there is no request-time ledger scan or provider call.
+The optional signal/usage payload is capped at 256 KiB per instance and 1.5 MiB across the response,
+leaving space under the console's existing 2 MiB view ceiling. Later over-budget instances retain their
+metrics and identity but get a visible details refusal, not silent truncation or a complete-spend claim.
 
 ## Console latency: `POST /v1/console/telemetry` (Phase 2)
 

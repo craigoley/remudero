@@ -27,8 +27,8 @@
 // run, the only process given NODE_V8_COVERAGE=<raw-dir> (not this wrapper, which would otherwise
 // write its own raw report), and the ONLY source of coverage figures; a failed file is re-run once
 // UNINSTRUMENTED (no coverage flags, no reporter files), so a retry can never move the lcov. A failure
-// no file can be named for is not retried at all — re-running the whole instrumented suite is what
-// the 2026-08-28 ruling removed. A pass on retry prints FLAKE-RETRY-RECOVERED, never a clean pass.
+// no file can be named for keeps its verdict, except W1-T6592's all-pass empty-coverage failure:
+// drop empty reports, rebuild lcov, or retry coverage once. Recovery prints FLAKE-RETRY-RECOVERED.
 //
 // A deterministic failure fails BOTH attempts -- red is unchanged, the retry cannot mask a real
 // break. TEST_RETRY=0 disables the retry entirely (the first attempt's exit code is final) -- a
@@ -52,10 +52,13 @@
 // task (the retry always fires on a non-zero first attempt, same as today).
 
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { gitOrThrow } from "./lib/git.mjs";
+import { newTestCoverage, renderCoverageSummary } from "./coverage-merge-ratchet.mjs";
+import { closeJudgedRun, judgedNodeTestArgs, POOL_ISOLATION_FLAG, prepareJudgedRun, testFilesInArgv, unreportedFilesIn } from "./pure-test-pool.mjs";
 
 /**
  * W1-T2715 — A TEST THAT WRITES INTO THE TRACKED TREE IS OBSERVED BY EVERY OTHER WORKER, and the
@@ -254,6 +257,16 @@ function isNodeCommand(cmd) {
   return basename(cmd) === "node" || basename(cmd).startsWith("node.");
 }
 
+/** The failure parsers above read TAP only. Node 22 defaulted a piped `node --test` to TAP; Node 24
+ *  defaults to `spec` on every stream, which would leave a failing run with no attributable file, no
+ *  scoped retry and no flake-ledger row. So a Node test command that names no reporter is given TAP
+ *  explicitly; one that names its own reporter is left as written. */
+export function withTapReporter(cmd, args) {
+  if (!isNodeCommand(cmd) || !args.includes("--test") || args.some((arg) => arg.startsWith("--test-reporter"))) return [...args];
+  const at = args.indexOf("--test") + 1;
+  return [...args.slice(0, at), "--test-reporter=tap", ...args.slice(at)];
+}
+
 function isTestFileSelector(arg) {
   return /\.test\.(?:[cm]?[jt]s)$/.test(arg) || (/[*?[\]]/.test(arg) && /\.test\./.test(arg));
 }
@@ -267,7 +280,7 @@ export function retryInvocationForFailedFiles(cmd, args, failedFiles) {
   if (args[0]?.endsWith("scripts/test-tier-manifest.mjs")) {
     return {
       cmd,
-      args: ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", ...failedFiles],
+      args: ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", ...failedFiles],
       scoped: true,
     };
   }
@@ -309,10 +322,55 @@ export function coverageRetryInvocation(cmd, args, failedFiles, env = process.en
   }
   // EMPTY, NOT DELETED: Node copies its own NODE_V8_COVERAGE into any child whose env lacks the
   // key, so a deleted key still hands an enclosing coverage run's directory to the retry.
-  return { cmd, args: [...retained, ...failedFiles], env: { ...env, NODE_V8_COVERAGE: "" } };
+  return { cmd, args: [...withTapReporter(cmd, retained), ...failedFiles], env: { ...env, NODE_V8_COVERAGE: "" } };
 }
 
-function runOnce(cmd, args, env = process.env) {
+/**
+ * A PASS IS A RUN THAT FINISHED (2026-10-11 follow-up to #10894). Every attempt this wrapper spawns
+ * that is itself a `node --test` run — `test:ci`, the coverage shard's instrumented pass, every
+ * failed-file retry — is judged by scripts/pure-test-pool.mjs: it passes only when every test file it
+ * names reached its own summary with `# fail 0`. Node reports a file whose child exits 0 part-way as
+ * `ok`, so exit 0 alone is not a pass. A file the judge names as unreported is one this wrapper
+ * retries, like a file with a `not ok`. A wrapped runner that is not `node --test` itself
+ * (scripts/test-tier-manifest.mjs) judges its own children and prints the same lines.
+ */
+function isNodeTestRun(cmd, args) {
+  return isNodeCommand(cmd) && args.includes("--test");
+}
+
+async function runOnce(cmd, args, env = process.env) {
+  if (!isNodeTestRun(cmd, args)) return runChild(cmd, args, env);
+  const judged = prepareJudgedRun();
+  const files = testFilesInArgv(args, process.cwd());
+  const first = await runChild(cmd, judgedNodeTestArgs(args, judged.args), { ...env, ...judged.env });
+  const lines = [];
+  const { status, verdict } = closeJudgedRun(judged, files, {
+    status: first.code,
+    pool: args.includes(POOL_ISOLATION_FLAG),
+    root: process.cwd(),
+    role: "node --test",
+    log: (line) => {
+      lines.push(line);
+      process.stderr.write(`${line}\n`);
+    },
+  });
+  return { code: status, output: `${first.output}\n${lines.join("\n")}\n`, unreported: verdict.missing };
+}
+
+/**
+ * The files a failed attempt names: each `not ok` file, and each file the judge never heard finish.
+ * An attempt this wrapper judged itself carries its verdict's `unreported` list, and only that list
+ * is trusted: the output also holds what the tests printed, and a test of the judge prints judge lines
+ * about its own fixture files. A wrapped runner that judges its own children (the tier manifest) is
+ * read from its output, keeping only files that exist here.
+ */
+export function failedFilesOf(attempt, cwd = process.cwd()) {
+  const named = attempt.unreported ?? unreportedFilesIn(attempt.output).filter((file) => existsSync(resolve(cwd, file)));
+  const unreported = named.map((file) => (isAbsolute(file) ? relative(cwd, file) : file).split(sep).join("/"));
+  return [...new Set([...parseFailingTestFiles(attempt.output, cwd), ...unreported.filter((rel) => rel !== ".." && !rel.startsWith("../"))])].sort();
+}
+
+function runChild(cmd, args, env = process.env) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { stdio: ["inherit", "pipe", "pipe"], env });
     let combined = "";
@@ -363,8 +421,22 @@ export function shouldAttemptRetry({ budgetSeconds, firstPassElapsedMs }) {
   return remainingSeconds >= firstPassSeconds;
 }
 
+/**
+ * W1-T7125: the label after `FLAKE-RETRY: <headline> — `. Names are normally joined with ", ", but a
+ * test title may itself contain ", " -- a consumer splitting on ", " would read one title as two
+ * incidents. So whenever the plain join would be ambiguous (a name containing ", ", or a label
+ * that would start with "[" and be mistaken for the array form) the names are written as a JSON
+ * string array instead. Consumers parse a "[...]" label as that array and still split the plain
+ * form, so logs written before this change stay readable.
+ */
+export function formatFlakeLabel(names) {
+  if (names.length === 0) return "(no test name parsed from output)";
+  const plain = names.join(", ");
+  return names.some((n) => n.includes(", ")) || plain.startsWith("[") ? JSON.stringify(names) : plain;
+}
+
 function recordFlakeEvidence(headline, names) {
-  const label = names.length > 0 ? names.join(", ") : "(no test name parsed from output)";
+  const label = formatFlakeLabel(names);
   const line = `FLAKE-RETRY: ${headline} — ${label}`;
   console.log(line);
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
@@ -373,10 +445,121 @@ function recordFlakeEvidence(headline, names) {
   }
 }
 
+function coverageOptions(args) {
+  const values = (flag) => args.flatMap((arg, index) => {
+    if (arg === flag) return [args[index + 1]];
+    return arg.startsWith(`${flag}=`) ? [arg.slice(flag.length + 1)] : [];
+  });
+  const reporters = values("--test-reporter");
+  const destinations = values("--test-reporter-destination");
+  return {
+    output: destinations[reporters.indexOf("lcov")],
+    excludeGlobs: values("--test-coverage-exclude"),
+    includeGlobs: values("--test-coverage-include"),
+    sourceMaps: args.includes("--enable-source-maps"),
+  };
+}
+
+function rebuildCoverage(rawDir, args) {
+  try {
+    const { output, ...options } = coverageOptions(args);
+    const { TestCoverage } = createRequire(import.meta.url)("internal/test_runner/coverage");
+    const collector = newTestCoverage(TestCoverage, { cwd: process.cwd(), ...options });
+    collector.coverageDirectory = resolve(rawDir);
+    const summary = collector.summary();
+    if (summary.files.length === 0) throw new Error("no source coverage remains after dropping unreportable files");
+    writeFileSync(output, renderCoverageSummary(summary));
+    return 0;
+  } catch (error) {
+    console.error(`test-with-retry: coverage rebuild failed: ${error.message}`);
+    return /failed to parse coverage file/.test(error.message) || error instanceof TypeError ? 2 : 1;
+  }
+}
+
+// W1-T8585: the run's OWN summary is the TAP summary block after the LAST `# tests` line. A nested
+// `node --test` prints a bare summary of its own earlier. Only summary lines are read, so interleaved
+// spec lines do not split the block; a label missing or repeated in it means no summary (null).
+const SUMMARY_LINE = /^# (tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) (\d+(?:\.\d+)?)$/;
+
+function finalSummary(output) {
+  const lines = output.split(/\r?\n/).map((line) => line.trimEnd().match(SUMMARY_LINE)).filter(Boolean);
+  const start = lines.findLastIndex(([, label]) => label === "tests");
+  if (start < 0) return null;
+  const counts = {};
+  for (const [, label, value] of lines.slice(start)) {
+    if (label in counts) return null;
+    counts[label] = Number(value);
+  }
+  return ["tests", "pass", "fail", "cancelled"].every((label) => label in counts) ? counts : null;
+}
+
+function finalSummaryAllPass(output) {
+  const counts = finalSummary(output);
+  return counts !== null && counts.tests > 0 && counts.tests === counts.pass && counts.fail === 0 && counts.cancelled === 0;
+}
+
+function emptyCoverageFailure(cmd, args, output) {
+  return isNodeCommand(cmd) && args.includes("--test") && args.includes("--experimental-test-coverage") &&
+    /ERR_OPERATION_FAILED[^\n]*(?:coverage file is empty:|failed to parse coverage file )/.test(output) &&
+    finalSummaryAllPass(output);
+}
+
+// A child killed mid-write leaves a truncated report; it moves beside rawDir as evidence, never deleted.
+function unparseableCoverage(path) {
+  try {
+    JSON.parse(readFileSync(path, "utf8"));
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+async function recoverEmptyCoverage(treeBefore, first, cmd, args, rawDir) {
+  const dropped = [];
+  try {
+    for (const entry of readdirSync(rawDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !/^coverage-\d+-\d{13}-\d+\.json$/.test(entry.name)) continue;
+      const path = join(rawDir, entry.name);
+      if (statSync(path).size === 0) {
+        unlinkSync(path);
+        dropped.push(path);
+      } else if (unparseableCoverage(path)) {
+        const aside = `${resolve(rawDir)}-unparseable`;
+        mkdirSync(aside, { recursive: true });
+        renameSync(path, join(aside, entry.name));
+        dropped.push(`${path} (truncated, kept in ${aside})`);
+      }
+    }
+  } catch (error) {
+    console.error(`test-with-retry: could not drop empty or truncated coverage files: ${error.message}`);
+    return reportTrackedTreeDirt(treeBefore, first.code);
+  }
+  if (dropped.length === 0 || !coverageOptions(args).output) return reportTrackedTreeDirt(treeBefore, first.code);
+  const env = { ...process.env, NODE_V8_COVERAGE: "" };
+  // The rebuild is this script, not a test run, even though the coverage command's own args ride along.
+  const rebuilt = await runChild(process.execPath, ["--expose-internals", fileURLToPath(import.meta.url), "--rebuild-coverage", rawDir, ...args], env);
+  let code = rebuilt.code;
+  if (code === 1) {
+    console.log(`FLAKE-RETRY: coverage rebuild failed — retrying the coverage shard once — ${dropped.join(", ")}`);
+    const second = await runOnce(cmd, args, { ...env, NODE_V8_COVERAGE: rawDir });
+    code = second.code;
+    if (code !== 0) recordFlakeEvidence("retry ALSO failed", parseFailingTestNames(second.output));
+  }
+  if (code === 0) {
+    const line = `FLAKE-RETRY-RECOVERED: dropped unreportable coverage file(s) — ${dropped.join(", ")}`;
+    console.log(line);
+    if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, line + "\n");
+  }
+  // W1-T8585: the rebuild repairs coverage only; a run whose own summary is not all-pass keeps its code.
+  return reportTrackedTreeDirt(treeBefore, code === 0 && finalSummaryAllPass(first.output) ? 0 : first.code || 1);
+}
+
 export async function main(argv) {
+  if (argv[0] === "--rebuild-coverage") return rebuildCoverage(argv[1], argv.slice(2));
   const coverageFirstPass = argv[0] === "--coverage-first-pass";
   const rawCoverageDir = coverageFirstPass ? argv[1] : undefined;
-  const [cmd, ...args] = coverageFirstPass ? argv.slice(2) : argv;
+  const [cmd, ...given] = coverageFirstPass ? argv.slice(2) : argv;
+  const args = cmd ? withTapReporter(cmd, given) : given;
   if (!cmd || (coverageFirstPass && !rawCoverageDir)) {
     console.error("usage: test-with-retry.mjs <command> [args...]");
     console.error("       test-with-retry.mjs --coverage-first-pass <raw-coverage-dir> <command> [args...]");
@@ -394,13 +577,15 @@ export async function main(argv) {
     return reportTrackedTreeDirt(treeBefore, 0);
   }
 
+  if (coverageFirstPass) reportUnparseableCoverage(first, rawCoverageDir);
+
   if (process.env.TEST_RETRY === "0") {
     return reportTrackedTreeDirt(treeBefore, first.code);
   }
 
   const firstPassElapsedMs = Date.now() - startedAt;
   const firstNames = parseFailingTestNames(first.output);
-  const failedFiles = parseFailingTestFiles(first.output);
+  const failedFiles = failedFilesOf(first);
   recordFlakeEvidence("first attempt failed", firstNames);
   appendFlakeLedger(parseFailingTestEntries(first.output), "first attempt failed");
 
@@ -416,6 +601,9 @@ export async function main(argv) {
     return reportTrackedTreeDirt(treeBefore, first.code);
   }
 
+  // W1-T8585: a run that names a failing test or file is never recovered by dropping coverage.
+  const namedFailure = firstNames.length > 0 || failedFiles.length > 0;
+  if (coverageFirstPass && !namedFailure && emptyCoverageFailure(cmd, args, first.output)) return recoverEmptyCoverage(treeBefore, first, cmd, args, rawCoverageDir);
   if (coverageFirstPass) return coverageRetry(treeBefore, first.code, coverageRetryInvocation(cmd, args, failedFiles), failedFiles, firstNames);
 
   const retry = retryInvocationForFailedFiles(cmd, args, failedFiles);
@@ -431,6 +619,41 @@ export async function main(argv) {
     appendFlakeLedger(parseFailingTestEntries(second.output), "retry ALSO failed");
   }
   return reportTrackedTreeDirt(treeBefore, second.code);
+}
+
+/**
+ * W1-T5767: pass 1 failed with zero test failures and node warned it "Could not report code
+ * coverage" -- a raw V8 file was unparseable (e.g. cut at 64 KiB). Names each such file (name,
+ * bytes, pid) on stdout and $GITHUB_STEP_SUMMARY. Reports only: the exit code is untouched and
+ * nothing is retried.
+ */
+function reportUnparseableCoverage(first, rawDir) {
+  if (!/Could not report code coverage/.test(first.output)) return;
+  if (Number(first.output.match(/^# fail (\d+)$/m)?.[1]) !== 0) return;
+  let names;
+  try {
+    names = readdirSync(rawDir);
+  } catch {
+    return;
+  }
+  for (const name of names.sort()) {
+    const m = name.match(/^coverage-(\d+)-.*\.json$/);
+    if (!m) continue;
+    const path = join(rawDir, name);
+    try {
+      JSON.parse(readFileSync(path, "utf8"));
+    } catch (err) {
+      let bytes = -1;
+      try {
+        bytes = statSync(path).size;
+      } catch {
+        /* vanished between read and stat */
+      }
+      const line = `COVERAGE-REPORT-FAILED: ${name} bytes=${bytes} pid=${m[1]} (${err instanceof Error ? err.message : String(err)})`;
+      console.log(line);
+      if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, line + "\n");
+    }
+  }
 }
 
 /** W1-T4398 — the coverage lane's pass two. Pass one's code stands when nothing can be retried. */
