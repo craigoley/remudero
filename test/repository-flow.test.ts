@@ -129,6 +129,9 @@ test("W1-T8684: bounded flow refuses incompatible sources without losing Analyti
   assert.equal(publicRepositoryFlow(circular, repository, iso(now)).reason, "invalid_source");
   assert.equal(await captureRepositoryFlow(root, state, undefined, fixedClock(now)), undefined);
   assert.equal(await captureRepositoryFlow(root, state, "invalid", fixedClock(now)), undefined);
+  const badPath = await captureRepositoryFlow(root, null as unknown as string, repository, fixedClock(now));
+  assert.equal(badPath!.sources.ledgerCorpus, "unavailable");
+  assert.ok(badPath!.gaps.includes("ledger collection failed; repair totals are unavailable"));
 });
 
 test("repository flow bounds evidence not counts and preserves incomplete source clocks", async t => {

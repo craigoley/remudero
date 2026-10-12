@@ -10,6 +10,7 @@ import type { BoardPrRest } from "./open-prs-rest.js";
 export const REPOSITORY_FLOW_VERSION = "repository-flow-v1";
 /** BACKSTOP: optional graph evidence leaves room for existing Analytics in the same response. */
 export const REPOSITORY_FLOW_MAX_BYTES = 64 * 1024;
+/** BACKSTOP: reserve remaining view space for ordinary metrics, sources and gardener costs. */
 export const REPOSITORY_FLOW_FLEET_MAX_BYTES = 256 * 1024;
 /** BACKSTOP: the board's own complete-cache limit, not a cap on displayed link counts. */
 const MAX_PRS = 100000;
@@ -91,7 +92,7 @@ export function publicRepositoryFlow(value: unknown, repository: string, materia
     }
     return parsed.data;
   } catch {
-    return empty(repository, now, "invalid_source");
+    return { ...empty(repository, now, "invalid_source"), reason: "invalid_source" };
   }
 }
 
@@ -175,7 +176,11 @@ export async function captureRepositoryFlow(root: string, stateDir: string, repo
       }
     } });
   try { for await (const row of stream) { void row; } }
-  catch { complete = false; }
+  catch {
+    // The public ledgerCorpus remains partial/unavailable and repair totals cannot claim completeness.
+    complete = false;
+    gaps.add("ledger collection failed; repair totals are unavailable");
+  }
   result.sources.ledgerObservedAt = live ? clock.iso() : null;
   result.sources.ledgerCorpus = live && complete ? "observed" : live || earliest !== undefined ? "partial" : "unavailable";
   result.sources.earliestLedgerAt = earliest === undefined ? null : fixedClock(earliest).iso();
