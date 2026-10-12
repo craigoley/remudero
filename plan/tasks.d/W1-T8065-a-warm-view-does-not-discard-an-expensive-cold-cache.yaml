@@ -11,7 +11,7 @@
   origin: "Operator approval 2026-10-11: fix remaining memory and swapping causes, preserve serve, run governed gates and retain the backlog"
   plan_refs: [W1-T6368, W1-T6019]
   files: [src/lib/read-model-worker.ts, test/a-view-lane-constructs-only-the-views-it-owns.test.ts]
-  status: queued
+  status: merged
   priority: 2.5
   attempts: 0
   rationale: |
