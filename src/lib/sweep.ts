@@ -18730,7 +18730,7 @@ export async function runSweepLightPass(
     reviewReservations,
     log: deps.log,
   });
-  const claimFixAdmission = repairAdmission.claim;
+  const claimFixAdmission = deps.claimFixAdmission ?? repairAdmission.claim;
   const selectedNumbers = new Set<number>([
     ...spawning.map((p) => p.prNumber),
     ...planFilings.map((p) => p.prNumber),

@@ -48181,14 +48181,16 @@ export function lightPassActionable(
   // the full sweep's own guards (decideSweepArm, the W1-T5403 risk judge, holds, dedups); it spawns
   // no worker. Default false, so every 2- and 3-argument caller keeps its original shape.
   armAllowed: boolean = false,
+  // W1-T8086: the ordinary own-red lane uses the existing per-claim fix-capacity admission.
+  ownRedFixAllowed: boolean = false,
 ): boolean {
   if (disposition === "post-review") return true;
   if (disposition === "mergeable") return armAllowed;
   // The two dispositions whose ACTION is `dispatchFix` — the only lane that spawns a worker.
-  // `blocked-fixable` alone gains the second admitting arm above; `conflicted`'s sole action is
+  // `blocked-fixable` also admits requeues and capacity-gated own-red fixes; `conflicted`'s action is
   // always `dispatchFix` (merge-conflict resolution), so it stays gated on `fixRungAllowed` only
   // — W1-T1211's own widening, deliberately untouched (design note iii, unchanged by this task).
-  if (disposition === "blocked-fixable") return fixRungAllowed || requeueLaneOnly;
+  if (disposition === "blocked-fixable") return fixRungAllowed || requeueLaneOnly || ownRedFixAllowed;
   if (disposition === "conflicted") return fixRungAllowed;
   return false;
 }
@@ -48326,7 +48328,7 @@ export function buildSweepLightHook(
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
   return withMainHealthOnLightPass(async (scope?: LightPassScope) => {
     // W1-T4053: a freshness drain's pass. The fix rung reads closed and the requeue batch never forms,
-    // so `post-review` is the only lane left — the same restriction a working in-flight run imposes.
+    // so `post-review` is the only lane left.
     const reviewOnly = scope?.reviewOnly === true;
     try {
       const openPrs = await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
@@ -48360,7 +48362,7 @@ export function buildSweepLightHook(
       // `dispatchFix`, so admitting its `blocked-fixable` disposition here — even though
       // `fixRungAllowed` is false — can never spend a fix-rung strike. Every other open PR
       // (including a `blocked-fixable` PR with a genuine, non-cancelled failure) stays in the
-      // batch below, gated by `fixRungAllowed` exactly as before this task.
+      // batch below, where the existing fix-capacity claim gates own-red workers (W1-T8086).
       // W1-T7214: a ready PR main moved under is refreshed HERE, once over the whole snapshot (never
       // per PR — W1-T528), before either batch below can arm it on the base main has left. Only a
       // ready PR is probed, so a pass with none spends no compare read. The refreshed PR sits out
@@ -48394,11 +48396,9 @@ export function buildSweepLightHook(
             runId,
             log,
             reviewerCodeRecovery,
-            // W1-T1211: `post-review` always, and the fix rung TOO when every in-flight run is
-            // demonstrably waiting rather than working — see `lightPassActionable` and
-            // `runIsAwaitingExternal` above. Read once per tick, not per PR, so the whole fan-out
-            // sees one consistent answer.
-            actionable: (d) => lightPassActionable(d, fixRungAllowed, false, !reviewOnly),
+            // W1-T8086: own-red fixes use per-claim capacity on ordinary passes; review-only still
+            // stands them down. Conflicted keeps W1-T1211's waiting-run gate, read once per tick.
+            actionable: (d) => lightPassActionable(d, fixRungAllowed, false, !reviewOnly, !reviewOnly),
             // W1-T5922: the arm's own reads, wired as the full hook wires them.
             readLiveStateAtAct: effects.readLiveState,
             // W1-T7734: the light pass re-derives a moved head in-pass too, as the full pass does.
