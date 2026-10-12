@@ -1,0 +1,52 @@
+- id: W1-T8829
+  title: "AN INBOX MESSAGE SAYS WHAT HAPPENS IF NOBODY DECIDES — the writer's decision card has no such part, so every writer-made message takes its kind's template line, and a machine-judge item (no template) tells the operator \"No decision or change is made by viewing this summary.\""
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high # spans the shared decision card and the inbox writer (Rule 19); the card change is optional-field only
+  band_meaning: span
+  origin: "operator session 2026-10-12: console inbox review (\"we were supposed to have an interpreter making this more understandable\")"
+  plan_refs: [W1-T4087, W1-T2498, W1-T313]
+  files: [src/lib/inbox-plain.ts, src/lib/feedback.ts, test/an-inbox-message-says-what-happens-if-nobody-decides.test.ts, test/every-inbox-message-is-plain-language.test.ts, test/inbox-plain-source.test.ts, test/decision-summary.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-12 on the Azure host's state/inbox-plain.json (344 messages, 338 model-written): every machine-judge
+    item's `ifNothingHappens` reads "No decision or change is made by viewing this summary." — e.g. W1-T5418, W1-T5309,
+    W1-T6166, W1-T7271, W1-T7531, W1-T7739 — a sentence that tells the operator nothing about the consequence of waiting.
+    ROOT CAUSE on origin/main e0dde45ac: `askWriter` (src/lib/inbox-plain.ts ~226) builds the message from the shared
+    decision card (`validateDecisionSummary`, src/lib/feedback.ts ~168), which has no "if nothing happens" part, and so
+    sets `ifNothingHappens: plainTemplate(proposal).ifNothingHappens` — the comment says "the kind's template states it".
+    `machine-judge` has no template, so it falls to `UNKNOWN_TEMPLATE` (~184), whose line is the non-answer; the
+    verify-human and ruling templates (~138, ~144) are non-answers of the same shape. The model is never asked.
+  design: |
+    1. The decision card gains an OPTIONAL `if_nothing_happens` string (bounded like `decision`, one line). It stays optional
+       in `validateDecisionSummary`, so escalation and triage cards that omit it validate exactly as today.
+    2. The inbox writer's context (`writerContext`) asks for it explicitly: what concretely happens if the operator does
+       nothing (for a parked fix: "the fix stays parked and the CI cost it targets continues"; for a verify-human item:
+       "the task stays blocked"). `askWriter` uses the card's value when present.
+    3. `checkPlainMessage` refuses a non-answer: an `ifNothingHappens` that is about viewing the summary, or that says only
+       that no decision is made, is a problem the writer is re-asked with (the existing one-retry path), then the template.
+    4. The templates that hold a non-answer (UNKNOWN_TEMPLATE, verify-human, ruling) are rewritten to state a real
+       consequence from what the kind always means (a parked item stays parked; a blocked task stays blocked).
+    5. Backfill: the plain store's source fingerprint includes a contract version, bumped here, so every stored message is
+       re-written once by the existing backfill rather than served stale.
+  acceptance:
+    - claim: "a writer-made message carries the writer's own if-nothing-happens line"
+      proof: 'grep: test("W1-T8829: the writer states what happens if nobody decides" in test/an-inbox-message-says-what-happens-if-nobody-decides.test.ts'
+    - claim: "a message whose if-nothing-happens line is a non-answer is refused and rewritten"
+      proof: 'grep: test("W1-T8829: a non-answer about viewing the summary is refused" in test/an-inbox-message-says-what-happens-if-nobody-decides.test.ts'
+    - claim: "no template, the machine-judge fallback included, states a non-answer"
+      proof: 'grep: test("W1-T8829: every template states a real consequence of waiting" in test/an-inbox-message-says-what-happens-if-nobody-decides.test.ts'
+    - claim: "an escalation or triage card without the new part still validates"
+      proof: 'grep: test("W1-T8829: a decision card without if_nothing_happens still validates" in test/an-inbox-message-says-what-happens-if-nobody-decides.test.ts'
+    - claim: "stored messages from the old contract are re-written by the backfill"
+      proof: 'grep: test("W1-T8829: a message stored under the old contract is written again" in test/an-inbox-message-says-what-happens-if-nobody-decides.test.ts'
+  falsifier: |
+    Write the plain message for `machine-judge:W1-T5418` with a canned writer card that carries if_nothing_happens. At
+    origin/main the message reads "No decision or change is made by viewing this summary."; with the change it carries the
+    writer's line, and a card whose line is that sentence is refused.
