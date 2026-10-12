@@ -11,8 +11,8 @@
   origin: "operator session 2026-10-07: coverage lane critical path after W1-T5923 (#9740)"
   plan_refs: [W1-T5923, W1-T5902, W1-T6086, W1-T3290]
   files: [test/retro-marker-atomic-real-run.test.ts, test/retro-marker-atomic-publish.test.ts, test/retro-marker-atomic-ownership.test.ts, test/retro-marker-atomic-integrity.test.ts, test/retro-marker-atomic-checkout.test.ts, scripts/test-tier-coverage-manifest.json, scripts/test-tier-manifest.json, test/the-retro-marker-suite-spreads-across-coverage-shards.test.ts]
-  status: queued
-  priority: 2
+  status: done
+  # operator session 2026-10-12: retire W1-T6173 — its 852 s premise is gone after W1-T7615 (#10631): the suite's 31 tests summed 24.2 s instrumented on #11004's coverage-shard (5/8), 2026-10-12.
   attempts: 0
   rationale: |
     READ 2026-10-07 on origin/main after #9740: scripts/test-tier-coverage-manifest.json's heaviest

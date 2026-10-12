@@ -2,7 +2,20 @@
 import { createHash, randomUUID } from "node:crypto";
 import { canarySuiteDigest, type CanaryCase } from "./model-canary-suite.js";
 import { executeCanary, type CanaryExecutionPorts, type CanaryPin } from "./model-canary-runner.js";
-import type { CanaryRun } from "./model-canary-metrics.js";
+import type { CanaryRun, CanaryTrialBlock } from "./model-canary-metrics.js";
+
+export interface CanaryContextContract {
+  version: "canary-context-slot-v1";
+  bytes: 2048 | 16384 | 65536;
+  treatment: "first-use" | "repeat";
+  namespace: string;
+  protocolDigest: string;
+  day: string;
+  seed: string;
+  pins: CanaryPin[];
+  aa: boolean;
+  trial: CanaryTrialBlock;
+}
 
 export function contextCanaryProtocol(bytes: 2048 | 16384 | 65536,
   treatment: "first-use" | "repeat", namespace: string) {
