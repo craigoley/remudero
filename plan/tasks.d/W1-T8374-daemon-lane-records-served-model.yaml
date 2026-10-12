@@ -1,0 +1,23 @@
+- id: W1-T8374
+  title: "The daemon lane's worker calls name their served model in only 44.7% of joined calls (17/38, 7-day window) — restore servedModel at the daemon ledger write site or record why the lane legitimately lacks it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "evidence-coverage-v1 over benchmark-quality-v1 reports lane `daemon`, field `servedModel`: 17/38 joined worker calls (44.7%) against the field's 90.0% floor, first seen 2026-09-28T05:55:37Z. A reading under the floor is a chronic gap no baseline excuses (W1-T4640). Daemon rows are written with lane: daemon and task_id DAEMON at src/run-task.ts (two appendLedger sites); src/lib/benchmark-evidence.ts names what each terminal field reads."
+  design: |
+    DIAGNOSE FIRST. Find which daemon-lane worker calls land without served_model: a provider whose stream carries no model id (W1-T4650 / W1-T4707 already name that as an unreportable reason, not missing data), or a daemon write path that drops WorkerResult.servedModel before appendLedger.
+    THEN EITHER restore: thread the worker's servedModel into the daemon-lane terminal row so benchmark-evidence reads it; OR, where the provider declares the model unreportable, record the named servedModelReason so the lane is excused honestly rather than counted missing.
+    Rule 19 / #588 merits: risk high because one integration test must drive the daemon terminal writer and feed its actual row into the benchmark evidence reader, proving model/reason preservation across both files; isolated writer or reader tests cannot establish that invariant.
+    NOT IN SCOPE: lowering the 90% floor, editing the gardener, or touching other lanes (ci-judge, review, isolation etc. have their own entries).
+  acceptance:
+    - claim: "one integration test drives both daemon terminal appendLedger sites and feeds their actual rows into the benchmark evidence reader: a reported served model is retained and counted observed, while a provider-declared unreportable model retains its named reason and is classified as excused rather than missing"
+      proof: "unit test: test/daemon-lane-served-model.test.ts"
+  risk: high
+  origin: feedback#evidence-coverage-daemon-served-model
+  plan_refs: ["§7B"]
+  files: [src/run-task.ts, src/lib/benchmark-evidence.ts, test/daemon-lane-served-model.test.ts]
+  status: queued
+  attempts: 0
