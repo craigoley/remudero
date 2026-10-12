@@ -1,0 +1,52 @@
+- id: W1-T8831
+  title: "THE OPERATOR CAN ARCHIVE OR SNOOZE AN INBOX ITEM — an email inbox needs both, and core has no route or field for either, so every parked item stays in front of the operator until it is approved or declined"
+  repo: remudero
+  depends_on: [W1-T8825]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high # new low-tier write routes plus a served field and two view sections (Rule 19)
+  band_meaning: span
+  origin: "operator session 2026-10-12: console inbox review; mockup https://claude.ai/artifact/A4JqyAFckCYDJaEzPxopRC"
+  plan_refs: [W1-T2604, W1-T3407, W1-T4088]
+  files: [src/lib/panel-graph.ts, src/lib/inbox-view.ts, openapi/daemon.yaml, scripts/console-parity-ratchet.mjs, test/the-operator-can-archive-or-snooze-an-inbox-item.test.ts, test/route-wiring.test.ts, test/the-console-draws-the-graph-it-computes.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    The operator asked for the inbox to work like email (2026-09-22 and 2026-10-12). On origin/main e0dde45ac the only
+    per-item verbs are approve, decline, restore, reframe and thread reply (src/lib/panel-graph.ts); nothing lets the
+    operator set an item aside without deciding it, so 25 not-ready and 18 parked items sit in the same list as the 8 that
+    need a decision. Snooze exists only for follow-ups (src/lib/follow-up-policy.ts ~87), not inbox items.
+  design: |
+    PINNED CONTRACT (the console files against exactly these names):
+      POST /v1/inbox/archive   body { "proposalId": string, "archived": boolean }            scope write, tier low
+      POST /v1/inbox/snooze    body { "proposalId": string, "until": string | null }         scope write, tier low
+                               (`until` RFC 3339 UTC in the future; null wakes the item now)
+      each served inbox item gains
+        archivedAt?:   string   (RFC 3339 UTC, present while archived)
+        snoozedUntil?: string   (RFC 3339 UTC, present while snoozed)
+      `GET /v1/views/inbox` gains sections "archived" and "snoozed" (added to INBOX_VIEW_SECTIONS); an archived or snoozed
+      item is listed there and excluded from needsYou / ready / drafting / notReady / declined, and from `counts`.
+    1. State lives in a rotation-proof store under the state dir (not the ledger, which compaction prunes), keyed by
+       proposal id; both writes are idempotent and ledgered (`inbox.archived`, `inbox.snoozed`) with the operator name.
+    2. The view stays clock-free (src/lib/inbox-view.ts keeps no clock in data): the slow lane schedules a recompute at
+       the earliest `snoozedUntil`, so a snooze comes due by re-emitting the pages, not by comparing against now per read.
+    3. Archiving changes no proposal state: approve / decline / restore still work on an archived item, and acting on one
+       un-archives it. A proposal that leaves the registry drops its archive/snooze entry.
+    4. Same auth and audit as /v1/inbox/reframe; documented in openapi/daemon.yaml; both routes join the route-wiring
+       and console-parity registries.
+  acceptance:
+    - claim: "archiving moves an item to the archived section and out of needsYou and its counts, and un-archiving restores it"
+      proof: 'grep: test("W1-T8831: an archived item leaves needsYou and comes back when unarchived" in test/the-operator-can-archive-or-snooze-an-inbox-item.test.ts'
+    - claim: "a snoozed item is hidden until its time and returns when the scheduled recompute runs"
+      proof: 'grep: test("W1-T8831: a snoozed item returns when its snooze comes due" in test/the-operator-can-archive-or-snooze-an-inbox-item.test.ts'
+    - claim: "both routes are low-tier writes that refuse an unknown proposal and a past snooze time"
+      proof: 'grep: test("W1-T8831: archive and snooze refuse an unknown proposal and a past time" in test/the-operator-can-archive-or-snooze-an-inbox-item.test.ts'
+    - claim: "archive and snooze state survives ledger compaction"
+      proof: 'grep: test("W1-T8831: archive and snooze state outlives ledger rotation" in test/the-operator-can-archive-or-snooze-an-inbox-item.test.ts'
+  falsifier: |
+    POST /v1/inbox/archive {proposalId: "machine-judge:W1-T5309", archived: true} against a fixture inbox. At origin/main the
+    route is a 404 and the item stays in needsYou; with the change it is listed under section=archived with archivedAt and
+    needsYou's counts drop by one.
