@@ -106,16 +106,21 @@ export function topSelfFrames(profiles: readonly CpuProfile[], n = LOOP_STALL_TO
     .slice(0, n);
 }
 
-/** THE WATCHDOG, run as a CommonJS worker from this string so it needs no loader in either the tsx or the
- *  built daemon. Its timer starts first and keeps the worker alive while an inspector reply waits on the
- *  main thread: a worker with nothing but a pending inspector reply exits with code 0. */
+/** THE WATCHDOG, run as an eval worker from this string so it needs no loader in either the tsx or the
+ *  built daemon. It reads builtins through `process.getBuiltinModule`: an eval worker inherits
+ *  `--input-type=module`, where `require` is undefined. Its timer starts first and keeps the worker alive while an inspector reply waits on the
+ *  main thread: a worker with nothing but a pending inspector reply exits with code 0.
+ *  TRAP: the Profiler domain is enabled only at the first stall. A session that ever enabled it resets V8's
+ *  process-wide precise coverage to best-effort when it disconnects, so an eager enable would blank the
+ *  coverage of every test process that starts a daemon with this telemetry. */
 export const LOOP_STALL_WATCHDOG_SOURCE = `
-const { parentPort, workerData } = require("node:worker_threads");
-const inspector = require("node:inspector");
+const { parentPort, workerData } = process.getBuiltinModule("node:worker_threads");
+const inspector = process.getBuiltinModule("node:inspector");
 const shared = new Int32Array(workerData.shared);
 let session;
 let timer;
 let attached = false;
+let enabled = false;
 let busy = false;
 let stall;
 let lastBeat = Atomics.load(shared, ${BEAT});
@@ -130,6 +135,7 @@ const post = (method, params) => new Promise((resolve, reject) =>
 const run = (step) => { busy = true; step().then(() => { busy = false; }, fail); };
 const begin = async (beat, now) => {
   stall = { beat, startedAt: lastChangeAt, chunkAt: now, previous: undefined };
+  if (!enabled) { await post("Profiler.enable"); enabled = true; }
   await post("Profiler.setSamplingInterval", { interval: Atomics.load(shared, ${SAMPLING_US}) });
   await post("Profiler.start");
 };
@@ -165,12 +171,10 @@ tick();
 try {
   session = new inspector.Session();
   session.connectToMainThread();
-  post("Profiler.enable").then(() => {
-    attached = true;
-    lastChangeAt = performance.now();
-    parentPort.postMessage({ kind: "ready" });
-  }, fail);
+  attached = true;
+  parentPort.postMessage({ kind: "ready" });
 } catch (error) {
+  // Reason: no session means no watchdog; fail() reports why, and the main thread disables it for the boot.
   fail(error);
 }
 `;
@@ -237,6 +241,7 @@ export function startLoopStallProfiler(options: LoopStallProfilerOptions = {}): 
       heartbeat = setTimeout(beat, period());
       heartbeat.unref();
     } catch (error) {
+      // Reason: a timer callback must not throw into the daemon; disable() records it as the failure row.
       disable(`heartbeat: ${String((error as Error)?.message ?? error)}`);
     }
   };
@@ -257,9 +262,8 @@ export function startLoopStallProfiler(options: LoopStallProfilerOptions = {}): 
     heartbeat = setTimeout(beat, period());
     heartbeat.unref();
     const held = options.spawn?.(LOOP_STALL_WATCHDOG_SOURCE, { shared: shared.buffer as SharedArrayBuffer })
-      ?? new Worker(LOOP_STALL_WATCHDOG_SOURCE, { eval: true, workerData: { shared: shared.buffer } });
+      ?? new Worker(LOOP_STALL_WATCHDOG_SOURCE, { eval: true, execArgv: [], workerData: { shared: shared.buffer } });
     worker = held;
-    held.unref();
     held.on("message", (message: WatchdogMessage) => {
       if (worker !== held) return;
       try {
@@ -267,11 +271,14 @@ export function startLoopStallProfiler(options: LoopStallProfilerOptions = {}): 
         else if (message.kind === "failed") disable(message.reason);
         else record(message);
       } catch (error) {
+        // Reason: a row that cannot be written ends profiling for the boot; disable() records why.
         disable(`profile row: ${String((error as Error)?.message ?? error)}`);
       }
     });
     held.on("error", (error: Error) => { if (worker === held) disable(`watchdog error: ${error.message}`); });
     held.on("exit", (code: number) => { if (worker === held) disable(`watchdog exited: ${code}`); });
+    // After the listeners: a 'message' listener attached after unref() refs the worker, and the daemon could not exit.
+    held.unref();
   };
   return {
     observe(reading, log) {
@@ -290,6 +297,7 @@ export function startLoopStallProfiler(options: LoopStallProfilerOptions = {}): 
         try {
           start();
         } catch (error) {
+          // Reason: a watchdog that cannot start must cost the profile, never the tick; disable() records why.
           disable(`watchdog start: ${String((error as Error)?.message ?? error)}`);
         }
       }

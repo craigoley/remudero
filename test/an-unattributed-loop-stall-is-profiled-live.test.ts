@@ -3,6 +3,7 @@
 // the stall's top self-time frames beside the interval's sync-spawn time.
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
+import v8 from "node:v8";
 import { Worker } from "node:worker_threads";
 import test from "node:test";
 import { reportTickLag } from "../src/lib/daemon.js";
@@ -41,6 +42,13 @@ function stallTheLoop(ms: number): void {
 
 const INTERVAL_MS = 250;
 
+/** A profile enables V8's Profiler domain, and that session's disconnect resets precise coverage for the whole
+ *  process. Write what this process has measured first, so a coverage run keeps it (a no-op outside one). */
+function stopProfiled(telemetry: ReturnType<typeof startReadPlaneTelemetry>): void {
+  v8.takeCoverage();
+  telemetry.stop();
+}
+
 test("W1-T7746: a main-thread busy loop past the bound is profiled and its function is the top frame in the ledger row", async () => {
   const rows: Row[] = [];
   const telemetry = startReadPlaneTelemetry();
@@ -57,7 +65,7 @@ test("W1-T7746: a main-thread busy loop past the bound is profiled and its funct
     assert.ok(Number(row.lag_ms) >= Number(row.bound_ms), `lag ${row.lag_ms} past bound ${row.bound_ms}`);
     assert.equal(rows.filter((r) => r.step === "daemon.loop_stall_profile_failed").length, 0);
   } finally {
-    telemetry.stop();
+    stopProfiled(telemetry);
   }
 });
 
@@ -104,7 +112,7 @@ test("W1-T7746: the profile row carries sync_spawn_ms and the unattributed remai
     assert.ok(Number(row.unattributed_ms) >= 300, `unattributed_ms ${row.unattributed_ms}`);
     assert.equal((row.top_frames as Frame[])[0]?.function, "busyLoopPastTheBound");
   } finally {
-    telemetry.stop();
+    stopProfiled(telemetry);
   }
 });
 
@@ -113,7 +121,7 @@ test("W1-T7746: an inspector failure writes loop_stall_profile_failed and the lo
   const log = (step: string, extra?: Record<string, unknown>) => { rows.push({ step, ...extra }); };
   const telemetry = startReadPlaneTelemetry({ stallProfiler: {
     spawn: (source, workerData) => new Worker(
-      `require("node:inspector").Session.prototype.connectToMainThread = () => { throw new Error("inspector unavailable"); };\n${source}`,
+      `process.getBuiltinModule("node:inspector").Session.prototype.connectToMainThread = () => { throw new Error("inspector unavailable"); };\n${source}`,
       { eval: true, workerData }),
   } });
   let fired = 0;
@@ -174,7 +182,7 @@ test("W1-T7746: a failing watchdog start, heartbeat, exit or logger disables the
     await waitFor(() => (thrown.includes("daemon.loop_stall_profile_failed") ? true : undefined));
     assert.deepEqual(thrown, ["daemon.loop_stall_profile", "daemon.loop_stall_profile_failed"]);
   } finally {
-    telemetry.stop();
+    stopProfiled(telemetry);
   }
 });
 
@@ -216,4 +224,16 @@ test("W1-T7746: the daemon hands each tick's lag to the profiler and still repor
   reportTickLag({ readLoopTelemetry: throwing }, sample, log);
   assert.match(String(rows.find((r) => r.step === "daemon.loop_stall_profile_failed")?.reason), /^observe: profiler gone/);
   assert.equal(rows.find((r) => r.step === "daemon.loop_lag")?.lag_ms, 2500);
+});
+
+test("W1-T7746: an armed watchdog does not hold the daemon process open", () => {
+  const module = new URL("../src/lib/read-plane.ts", import.meta.url).href;
+  const script = `const { startReadPlaneTelemetry } = await import(${JSON.stringify(module)});
+const telemetry = startReadPlaneTelemetry();
+telemetry.sample.observeLoopLag({ lagMs: 1, intervalMs: 1000 }, (step, extra) => console.log(step, JSON.stringify(extra)));
+if (!(await telemetry.stallProfiler.ready())) console.log("watchdog not attached");
+setTimeout(() => console.log("exiting"), 300);`;
+  const out = childProcess.execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script],
+    { encoding: "utf8", timeout: 30_000 });
+  assert.equal(out.trim(), "exiting");
 });
