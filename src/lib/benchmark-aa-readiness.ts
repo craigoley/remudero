@@ -21,8 +21,9 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { appendFileSync, closeSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { appendFileSync, closeSync, fstatSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { IMMUTABLE_REVISION_RE, type AaTrialManifest, type BenchmarkAaCommandInput, type BenchmarkAaReport } from "./benchmark-aa.js";
@@ -33,6 +34,8 @@ import type { BenchmarkStackEvidence } from "./benchmark-run.js";
 import { PAID_PILOT_AA_RECEIPT_MAX_AGE_MS } from "./benchmark-paid-pilot.js";
 import { systemClock, type Clock } from "./clock.js";
 import { loadConfig, type Config } from "./config.js";
+import { defaultIsPidAlive } from "./drain-lock.js";
+import { isHolderStale } from "./fs-race-safe.js";
 import { CORE_INSTANCE, DEFAULT_INSTANCE_STATE_BASE } from "./instance-gateway.js";
 import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, parseInstanceRegistry } from "./instance-registry.js";
 import type { PairedAttemptDispatch, PairedGrader } from "./paired-trial.js";
@@ -319,7 +322,7 @@ export interface BenchmarkAaReadinessResult {
   report: { state: BenchmarkAaReport["state"]; verdict: BenchmarkAaReport["verdict"]; reportHash: string } | null;
   receipt: { state: "emitted"; path: string; reportHash: string } | { state: "withheld"; gaps: ReadinessGap[] };
   nextGap: ReadinessGap | null;
-  followUp: { key: string; state: "recorded" | "already-recorded" } | null;
+  followUp: ReadinessGapAdmission | null;
   /** The driver runs beside ordinary work: it pauses, holds and routes nothing, and never touches the paid pilot. */
   holds: { dispatch: false; pr: false; daemon: false };
   paidPilot: "not-activated";
@@ -331,20 +334,103 @@ function gapOf(reason: string): ReadinessGap {
   return { kind, machineRepairable: repairable, detail: reason };
 }
 
+/** The outcome of one admission attempt. `pending` is an explicit "not admitted by this call", never "already recorded". */
+export type ReadinessGapAdmission = { key: string; state: "recorded" | "already-recorded" } | { key: string; state: "pending"; reason: string };
+
+/** Test seam: `beforeAppend` runs after this writer owns the key and before it appends (the competing-writer barrier). */
+export interface ReadinessGapAdmissionSeams { beforeAppend?: () => void; isPidAlive?: (pid: number) => boolean }
+
+const ADMISSIONS_DIR = "benchmark-aa-readiness.admissions";
+const inFlightAdmissions = new Set<string>();
+
+interface AdmissionClaim { version: 1; key: string; repo: string | null; gen: number; pid: number; host: string; startedAt: string; record: unknown }
+
+/** True when `text` holds a canonical record for `key` under `repo`; a line that only mentions the key is not one. */
+function holdsCanonicalGap(text: string, key: string, repo: string | undefined): boolean {
+  return text.split("\n").some((line) => {
+    let value: unknown;
+    try { value = JSON.parse(line); } catch { return false; }
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+    const row = value as Record<string, unknown>;
+    const gap = row.gap as Record<string, unknown> | null | undefined;
+    return row.key === key && typeof row.ts === "string" && Number.isFinite(Date.parse(row.ts)) && typeof row.trialId === "string"
+      && typeof gap === "object" && gap !== null && typeof gap.kind === "string" && typeof gap.machineRepairable === "boolean"
+      && typeof gap.detail === "string" && key === `${row.trialId}:${gap.kind}` && row.repo === repo;
+  });
+}
+
+/** The whole file behind `fd`, read from offset 0 whatever the descriptor position (an append descriptor keeps moving). */
+function readFd(fd: number): string {
+  const size = fstatSync(fd).size;
+  const buffer = Buffer.alloc(size);
+  let read = 0;
+  while (read < size) {
+    const n = readSync(fd, buffer, read, size - read, read);
+    if (n === 0) break;
+    read += n;
+  }
+  return buffer.subarray(0, read).toString("utf8");
+}
+
+function readClaim(path: string): AdmissionClaim | null {
+  try {
+    const value = JSON.parse(readFileSync(path, "utf8")) as Partial<AdmissionClaim>;
+    return value.version === 1 && Number.isInteger(value.pid) && typeof value.host === "string" && typeof value.startedAt === "string"
+      ? value as AdmissionClaim : null;
+  } catch { return null; }
+}
+
+/** Atomically publish a complete claim: the claim path either does not exist or already holds the whole claim. */
+function publishClaim(path: string, claim: AdmissionClaim): boolean {
+  const tmp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  writeFileSync(tmp, JSON.stringify(claim), { flag: "wx" });
+  try { linkSync(tmp, path); return true; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") return false; throw error; }
+  finally { unlinkSync(tmp); }
+}
+
 /**
- * Records one gap per trial and gap kind in the local sidecar; a second run that finds the same gap does not record it twice.
- * Recording is NOT filing: a task exists only once the opportunity intake's triage has produced one (benchmark-readiness-intake.ts).
- * `repo` is the GitHub identity of the checkout that observed the gap; the reader refuses a record that lacks it or names another.
+ * Admits one gap per repository, trial and gap kind in the local sidecar, exactly once under competing writers. A writer
+ * first claims the key by atomically publishing a durable claim (carrying the whole record, so an interrupted admission can
+ * be finished from it); a competing writer sees `pending` while the owner lives and takes over the next claim generation only
+ * once the owner is provably gone. Claims are never deleted. Recording is NOT filing: a task exists only once the opportunity
+ * intake's triage has produced one (benchmark-readiness-intake.ts). `repo` is the GitHub identity of the observing checkout.
  */
-export function recordReadinessGap(stateDir: string, trialId: string, gap: ReadinessGap, nowIso: string, repo?: string): BenchmarkAaReadinessResult["followUp"] {
+export function recordReadinessGap(stateDir: string, trialId: string, gap: ReadinessGap, nowIso: string, repo?: string,
+  seams: ReadinessGapAdmissionSeams = {}): ReadinessGapAdmission {
   const path = join(stateDir, READINESS_FOLLOW_UPS_FILE);
   const key = `${trialId}:${gap.kind}`;
+  const record = { ts: nowIso, key, trialId, gap, ...(repo === undefined ? {} : { repo }) };
   const fd = openSync(path, "a+");
   try {
-    const recorded = readFileSync(fd, "utf8").split("\n").some((line) => line.includes(`"key":${JSON.stringify(key)}`));
-    if (recorded) return { key, state: "already-recorded" };
-    appendFileSync(fd, `${JSON.stringify({ ts: nowIso, key, trialId, gap, ...(repo === undefined ? {} : { repo }) })}\n`);
-    return { key, state: "recorded" };
+    const recordedNow = (text = readFd(fd)): boolean => holdsCanonicalGap(text, key, repo);
+    // The descriptor is opened at offset 0, so the first read is a whole-file read; later reads must re-read from 0.
+    if (recordedNow(readFileSync(fd, "utf8"))) return { key, state: "already-recorded" };
+    const dir = join(stateDir, ADMISSIONS_DIR);
+    mkdirSync(dir, { recursive: true });
+    const stem = createHash("sha256").update(JSON.stringify([repo ?? null, key])).digest("hex").slice(0, 32);
+    const alive = seams.isPidAlive ?? defaultIsPidAlive;
+    let owned = "";
+    for (let gen = 0; owned === ""; gen++) {
+      const claimPath = join(dir, `${stem}.${gen}.claim`);
+      const claim: AdmissionClaim = { version: 1, key, repo: repo ?? null, gen, pid: process.pid, host: hostname(), startedAt: new Date().toISOString(), record };
+      if (publishClaim(claimPath, claim)) { owned = claimPath; break; }
+      if (recordedNow()) return { key, state: "already-recorded" };
+      const holder = readClaim(claimPath);
+      if (holder === null) return { key, state: "pending", reason: `admission claim ${claimPath} is unreadable; its owner is unknown` };
+      const abandoned = holder.pid === process.pid && holder.host === hostname()
+        ? !inFlightAdmissions.has(claimPath) : isHolderStale(holder, { isPidAlive: alive });
+      if (!abandoned) return { key, state: "pending", reason: `admission of ${key} is owned by pid ${holder.pid} on ${holder.host}` };
+    }
+    inFlightAdmissions.add(owned);
+    try {
+      seams.beforeAppend?.();
+      const text = readFd(fd);
+      if (holdsCanonicalGap(text, key, repo)) return { key, state: "already-recorded" };
+      appendFileSync(fd, `${text === "" || text.endsWith("\n") ? "" : "\n"}${JSON.stringify(record)}\n`);
+      fsyncSync(fd);
+      return { key, state: "recorded" };
+    } finally { inFlightAdmissions.delete(owned); }
   } finally { closeSync(fd); }
 }
 
@@ -503,7 +589,7 @@ export async function benchmarkAaReadinessCommand(rest: string[], run: (request:
     print(`  pairs ${result.run.dispatchedPairs} run now, ${result.run.completedBefore} completed before${result.run.stoppedBy ? `; stopped: ${result.run.stoppedBy}` : ""}`);
     for (const refusal of result.refusals) print(`  refused: ${refusal}`);
     if (result.receipt.state === "emitted") print(`  receipt ${result.receipt.reportHash.slice(0, 16)} written to ${result.receipt.path}`);
-    else if (result.nextGap) print(`  next gap: ${result.nextGap.detail}${result.followUp ? ` (gap ${result.followUp.state}; recorded, not a filed task)` : ""}`);
+    else if (result.nextGap) print(`  next gap: ${result.nextGap.detail}${result.followUp ? ` (gap ${result.followUp.state === "pending" ? `admission pending: ${result.followUp.reason}` : `${result.followUp.state}; recorded, not a filed task`})` : ""}`);
   }
   return result.state === "receipt-emitted" ? 0 : 1;
 }

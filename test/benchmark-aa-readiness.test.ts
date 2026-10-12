@@ -5,7 +5,8 @@
 import assert from "node:assert/strict";
 import fs, { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
@@ -13,7 +14,7 @@ import {
 } from "../src/lib/benchmark-aa-prospective.js";
 import {
   benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, READINESS_FOLLOW_UPS_FILE, runBenchmarkAaReadiness,
-  runtimePinRefusals,
+  recordReadinessGap, runtimePinRefusals,
   type BenchmarkAaReadinessInput, type ReadinessTask, type RuntimePins,
 } from "../src/lib/benchmark-aa-readiness.js";
 import { clockFromMillisFn, fixedClock } from "../src/lib/clock.js";
@@ -286,7 +287,7 @@ test("calibration refuses API billing without blocking PR flow", async () => {
   assert.deepEqual(result.holds, { dispatch: false, pr: false, daemon: false }, "ordinary dispatch, PRs and the daemon are never held");
   const trialDir = prospectiveAaDir(stateDir, TRIAL);
   assert.equal(existsSync(join(trialDir, "controls.ndjson")), false, "the trial is not paused and nothing is held");
-  assert.deepEqual(readdirSync(stateDir).sort(), ["benchmark-aa-prospective", READINESS_FOLLOW_UPS_FILE].sort(),
+  assert.deepEqual(readdirSync(stateDir).sort(), ["benchmark-aa-prospective", "benchmark-aa-readiness.admissions", READINESS_FOLLOW_UPS_FILE].sort(),
     "no paid-pilot protocol, hold or control file is written");
   assert.deepEqual(readdirSync(trialDir), ["protocol.json"]);
   assert.equal(result.nextGap?.machineRepairable, false, "api billing is an operator setting, not a machine repair");
@@ -393,6 +394,104 @@ test("calibration preserves the opened follow-up file when its path is replaced"
     t.mock.restoreAll();
     syncBuiltinESMExports();
   }
+});
+
+const GAP = { kind: "stage-missing", machineRepairable: true, detail: "stage-missing:a:verified:1" };
+const NOW = "2026-10-12T00:00:00.000Z";
+const claimsOf = (stateDir: string) => readdirSync(join(stateDir, "benchmark-aa-readiness.admissions")).filter((name) => name.endsWith(".claim")).sort();
+const rowsOf = (stateDir: string) => readFileSync(join(stateDir, READINESS_FOLLOW_UPS_FILE), "utf8").split("\n").filter((line) => line !== "");
+
+/** Rewrite the claim a crashed admission left behind so it names a different owner process. */
+function reassignClaim(stateDir: string, name: string, pid: number): void {
+  const path = join(stateDir, "benchmark-aa-readiness.admissions", name);
+  writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), pid, startedAt: new Date().toISOString() }));
+}
+
+test("competing calibration gap writers admit one record", () => {
+  const stateDir = root();
+  let competitor: ReturnType<typeof recordReadinessGap> | undefined;
+  let crossed = 0;
+  // Writer A owns the key and stands at the pre-append barrier; writer B observes the same absent key right there.
+  const owner = recordReadinessGap(stateDir, TRIAL, GAP, NOW, "owner/repo", { beforeAppend: () => {
+    crossed++;
+    competitor = recordReadinessGap(stateDir, TRIAL, GAP, NOW, "owner/repo", { beforeAppend: () => { crossed++; } });
+  } });
+  assert.equal(owner.state, "recorded");
+  assert.equal(competitor?.state, "pending", "the competing writer neither appends nor claims ownership while the owner lives");
+  assert.equal(crossed, 1, "only the owner crossed the pre-append barrier");
+  assert.equal(rowsOf(stateDir).length, 1, "one canonical row");
+  assert.equal(claimsOf(stateDir).length, 1, "contested ownership is never deleted or duplicated");
+  // Sequential positive control: the same key again is already recorded and adds nothing.
+  assert.equal(recordReadinessGap(stateDir, TRIAL, GAP, NOW, "owner/repo").state, "already-recorded");
+  assert.equal(rowsOf(stateDir).length, 1);
+  // Another repository identity is a different key and is admitted independently.
+  assert.equal(recordReadinessGap(stateDir, TRIAL, GAP, NOW, "other/repo").state, "recorded");
+  assert.equal(rowsOf(stateDir).length, 2);
+});
+
+test("interrupted calibration gap admission resumes safely", () => {
+  const stateDir = root();
+  const crash = () => { throw new Error("crash"); };
+  // The owner died after claiming, before appending: no row exists and the claim is left behind.
+  assert.throws(() => recordReadinessGap(stateDir, TRIAL, GAP, NOW, "owner/repo", { beforeAppend: crash }), /crash/);
+  assert.equal(rowsOf(stateDir).length, 0);
+  assert.equal(claimsOf(stateDir).length, 1);
+  // A live different owner with no record is explicit pending, not already-recorded, and its claim is untouched.
+  reassignClaim(stateDir, claimsOf(stateDir)[0]!, process.ppid);
+  const pending = recordReadinessGap(stateDir, TRIAL, GAP, NOW, "owner/repo");
+  assert.equal(pending.state, "pending");
+  assert.equal(rowsOf(stateDir).length, 0, "a pending owner is not replayed over");
+  // Once that owner is gone the restart admits exactly one real record, not zero.
+  const dead = spawnSync(process.execPath, ["-e", ""]).pid!;
+  reassignClaim(stateDir, claimsOf(stateDir)[0]!, dead);
+  assert.equal(recordReadinessGap(stateDir, TRIAL, GAP, NOW, "owner/repo").state, "recorded");
+  assert.equal(rowsOf(stateDir).length, 1);
+  assert.equal(claimsOf(stateDir).length, 2, "recovery takes the next claim generation; the old claim is kept");
+  assert.equal(recordReadinessGap(stateDir, TRIAL, GAP, NOW, "owner/repo").state, "already-recorded", "a restart does not replay it");
+  assert.equal(rowsOf(stateDir).length, 1);
+  // An owner that appended and then died leaves a claim AND a record: nothing is re-admitted.
+  const before = claimsOf(stateDir);
+  recordReadinessGap(stateDir, "trial-2", GAP, NOW, "owner/repo");
+  reassignClaim(stateDir, claimsOf(stateDir).find((name) => !before.includes(name))!, dead);
+  assert.equal(recordReadinessGap(stateDir, "trial-2", GAP, NOW, "owner/repo").state, "already-recorded");
+  assert.equal(rowsOf(stateDir).length, 2);
+});
+
+test("calibration gap admission preserves replaced and corrupt evidence", () => {
+  const stateDir = root();
+  const key = `${TRIAL}:${GAP.kind}`;
+  const corrupt = `{"key":${JSON.stringify(key)},"ts":"not-a-date"}`;
+  const historical = JSON.stringify({ ts: NOW, key: "old:trial-not-registered", trialId: "old", gap: { ...GAP, kind: "trial-not-registered" }, repo: "owner/repo" });
+  // A torn tail that merely mentions the key is not a canonical prior record and is kept byte for byte.
+  const prior = `${historical}\n${corrupt}\n{"key":${JSON.stringify(key)},"ts`;
+  writeFileSync(join(stateDir, READINESS_FOLLOW_UPS_FILE), prior);
+  assert.equal(recordReadinessGap(stateDir, TRIAL, GAP, NOW, "owner/repo").state, "recorded", "corrupt evidence does not suppress the gap");
+  const text = readFileSync(join(stateDir, READINESS_FOLLOW_UPS_FILE), "utf8");
+  assert.ok(text.startsWith(prior), "historical, corrupt and torn rows are preserved unchanged");
+  const lines = text.slice(prior.length).split("\n");
+  assert.equal(lines[0], "", "the torn tail is terminated, not merged into the new row");
+  assert.equal((JSON.parse(lines[1]!) as { key: string }).key, key);
+  // An unreadable claim is explicit pending evidence: nothing is admitted over it and it is not deleted.
+  const other = root();
+  assert.throws(() => recordReadinessGap(other, TRIAL, GAP, NOW, "owner/repo", { beforeAppend: () => { throw new Error("crash"); } }), /crash/);
+  const claim = join(other, "benchmark-aa-readiness.admissions", claimsOf(other)[0]!);
+  writeFileSync(claim, "{ torn");
+  const unreadable = recordReadinessGap(other, TRIAL, GAP, NOW, "owner/repo");
+  assert.equal(unreadable.state, "pending");
+  assert.equal(readFileSync(claim, "utf8"), "{ torn", "the contested claim is preserved");
+  assert.equal(rowsOf(other).length, 0);
+  // The opened file, not the path, receives the record when the path is replaced mid-admission.
+  const replacedDir = root();
+  const path = join(replacedDir, READINESS_FOLLOW_UPS_FILE);
+  const moved = join(replacedDir, "original.ndjson");
+  writeFileSync(path, historical + "\n");
+  const result = recordReadinessGap(replacedDir, TRIAL, GAP, NOW, "owner/repo", { beforeAppend: () => {
+    renameSync(path, moved);
+    writeFileSync(path, "replacement\n");
+  } });
+  assert.equal(result.state, "recorded");
+  assert.equal(readFileSync(path, "utf8"), "replacement\n", "the replacement file is untouched");
+  assert.equal(readFileSync(moved, "utf8").trim().split("\n").length, 2, "the opened original received the one record");
 });
 
 test("calibration distinguishes unreadable population and follow-up files from absence", async () => {
