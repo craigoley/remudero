@@ -13,7 +13,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { combinedStatusRestArgs, prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
 // W1-T2895: review.ts imports "src/lib/plan-scope" through the leaf module below.
 import { isInPlanScope } from "./plan-scope.js";
-import { loadPlanAtRef, readBlobsAtRef, readBlobsAtRefAsync, visibleCriteria, type AcceptanceCriterion, type GitBlobRunner, type TaskRisk } from "./plan.js";
+import { defaultGitRunnerAsync, loadPlanAtRef, loadPlanAtRefAsync, readBlobsAtRef, readBlobsAtRefAsync, visibleCriteria, type AcceptanceCriterion, type GitBlobRunner, type Task, type TaskRisk } from "./plan.js";
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
@@ -7095,31 +7095,103 @@ export function resolvePlanCriteriaAtHead(
     // W1-T2623: the read-identity probes only run when there is a `source` line to append them to — no extra git
     // calls spent naming bytes nobody is about to be told were read.
     const identity = criteria.length ? formatPlanReadIdentityAtHead(gitRunner, headSha, planRelPath) : undefined;
-    return {
-      criteria,
-      taskId,
-      taskDeclaredFiles: t?.files,
-      taskRisk: t?.risk,
-      taskBudgetUsd: t?.budget_usd,
-      source: criteria.length
-        ? `plan at ${headSha} task ${taskId} (${criteria.length} criteria)` + (identity ? ` — read: ${identity}` : "")
-        : undefined,
-    };
+    return planCriteriaAtHeadResult(t, taskId, headSha, criteria, identity);
   } catch (e) {
     // A duplicate id or an unreadable git object at headSha — named, never swallowed into a silent empty plan
     // (mirrors resolvePlanCriteriaForReview's own divergence shape). W1-T2511: the reason ALONE cannot say which it
     // was, because git will not, so one extra `cat-file -e` separates the two causes and the next reader need not
     // re-run probes.
-    return {
-      criteria: [],
-      taskId,
-      divergence: {
-        taskId,
-        reason: String((e as Error)?.message ?? e),
-        cause: classifyHeadShaAvailability(repoRoot, headSha, runGit),
-      },
-    };
+    return planCriteriaAtHeadDivergence(taskId, e, classifyHeadShaAvailability(repoRoot, headSha, runGit));
   }
+}
+
+function planCriteriaAtHeadResult(
+  t: Task | undefined,
+  taskId: string,
+  headSha: string,
+  criteria: AcceptanceCriterion[],
+  identity: string | undefined,
+): PlanCriteriaAtHeadResult {
+  return {
+    criteria,
+    taskId,
+    taskDeclaredFiles: t?.files,
+    taskRisk: t?.risk,
+    taskBudgetUsd: t?.budget_usd,
+    source: criteria.length
+      ? `plan at ${headSha} task ${taskId} (${criteria.length} criteria)` + (identity ? ` — read: ${identity}` : "")
+      : undefined,
+  };
+}
+
+function planCriteriaAtHeadDivergence(
+  taskId: string,
+  e: unknown,
+  cause: PlanCriteriaAtHeadDivergence["cause"],
+): PlanCriteriaAtHeadResult {
+  return { criteria: [], taskId, divergence: { taskId, reason: String((e as Error)?.message ?? e), cause } };
+}
+
+/** {@link resolvePlanCriteriaAtHead} through AWAITED git (W1-T7743): the same trailer extraction, plan read, criteria,
+ *  read-identity and divergence classification, with no `execFileSync` on the caller's event loop. The sync form stays
+ *  for CLI callers off the loop. */
+export async function resolvePlanCriteriaAtHeadAsync(
+  body: string,
+  repoRoot: string,
+  planRelPath: string,
+  headSha: string,
+  runGit?: (args: string[], stdin?: string) => Promise<string>,
+): Promise<PlanCriteriaAtHeadResult> {
+  const taskId = extractTaskTrailerId(body ?? "");
+  if (taskId === undefined) return { criteria: [] };
+  const gitRunner = runGit ?? defaultGitRunnerAsync(repoRoot);
+  try {
+    const plan = await loadPlanAtRefAsync(repoRoot, planRelPath, headSha, gitRunner);
+    const t = plan.byId.get(taskId);
+    const criteria = t?.acceptance?.length ? t.acceptance : [];
+    const identity = criteria.length ? await formatPlanReadIdentityAtHeadAsync(gitRunner, headSha, planRelPath) : undefined;
+    return planCriteriaAtHeadResult(t, taskId, headSha, criteria, identity);
+  } catch (e) {
+    return planCriteriaAtHeadDivergence(taskId, e, await classifyHeadShaAvailabilityAsync(headSha, gitRunner));
+  }
+}
+
+/** {@link classifyHeadShaAvailability} through an awaited runner: the same one `cat-file -e` probe and the same verdicts. */
+export async function classifyHeadShaAvailabilityAsync(
+  headSha: string,
+  runGit: (args: string[], stdin?: string) => Promise<string>,
+): Promise<"absent-object" | "readable-object" | "undetermined"> {
+  try {
+    await runGit(["cat-file", "-e", `${headSha}^{commit}`]);
+    return "readable-object";
+  } catch (e) {
+    const status = (e as { status?: unknown; code?: unknown } | null);
+    // execFile reports a non-zero exit as a numeric `code`; a spawn failure carries a string code (ENOENT) instead.
+    return typeof status?.status === "number" || typeof status?.code === "number" ? "absent-object" : "undetermined";
+  }
+}
+
+/** {@link formatPlanReadIdentityAtHead} through an awaited runner. NEVER THROWS. */
+async function formatPlanReadIdentityAtHeadAsync(
+  runGit: (args: string[], stdin?: string) => Promise<string>,
+  headSha: string,
+  planRelPath: string,
+): Promise<string | undefined> {
+  let blobOid: string;
+  try {
+    blobOid = (await runGit(["rev-parse", `${headSha}:${planRelPath}`])).trim();
+  } catch {
+    return undefined; // identity is optional legibility: the criteria bytes already resolved
+  }
+  const shardRelDir = join(dirname(planRelPath), "tasks.d");
+  let shardSuffix = "";
+  try {
+    const treeOid = (await runGit(["rev-parse", `${headSha}:${shardRelDir}`])).trim();
+    shardSuffix = ` + ${shardRelDir}/@${treeOid.slice(0, 12)}`;
+  } catch {
+    // No tasks.d/ at this ref — the same tolerance as the sync form.
+  }
+  return `${planRelPath}@${blobOid.slice(0, 12)}${shardSuffix}`;
 }
 
 /** One PR-authoring path's coverage — design item (i), W1-T952: "write down which the fix COVERS and which it

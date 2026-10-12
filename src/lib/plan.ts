@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
+import { execFile, execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
@@ -1060,11 +1060,7 @@ export function loadPlanAtRef(
   } catch {
     shardListing = "";
   }
-  const shardRelPaths = shardListing
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && (line.endsWith(".yaml") || line.endsWith(".yml")))
-    .sort();
+  const shardRelPaths = shardPathsFromListing(shardListing);
   // ONE `git cat-file --batch` for every shard, never one `git show` per shard: the spawn count
   // is what made this O(tasks ever filed) on a path the write-scoped approve gate runs
   // synchronously (see {@link readBlobsAtRef} for the measurement).
@@ -1079,11 +1075,77 @@ export function loadPlanAtRef(
   } catch (err) {
     throw new PlanError(`cannot read plan shard at ${ref} in ${repoRoot}: ${String(err)}`);
   }
+  return mergePlanBlobs(withShardBlobs(blobs, ref, shardRelPaths, shardBlobs));
+}
+
+/** The shard paths `git ls-tree --name-only` listed: yaml only, sorted. Shared by {@link loadPlanAtRef} and its awaited form. */
+function shardPathsFromListing(listing: string): string[] {
+  return listing
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && (line.endsWith(".yaml") || line.endsWith(".yml")))
+    .sort();
+}
+
+function withShardBlobs(
+  blobs: Array<{ label: string; text: string }>,
+  ref: string,
+  shardRelPaths: string[],
+  shardBlobs: string[],
+): Array<{ label: string; text: string }> {
   shardRelPaths.forEach((shardRelPath, i) => {
     blobs.push({ label: `${ref}:${shardRelPath}`, text: shardBlobs[i] });
   });
+  return blobs;
+}
 
-  return mergePlanBlobs(blobs);
+/** `git -C <repoRoot> <args>` as an awaited child (never `execFileSync`), `stdin` piped, the sync default's 64 MiB buffer. */
+export function defaultGitRunnerAsync(repoRoot: string): (args: string[], stdin?: string) => Promise<string> {
+  return (args, stdin) =>
+    new Promise((resolve, reject) => {
+      const child = execFile("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }, (err, stdout) => {
+        if (err) reject(err);
+        else resolve(stdout);
+      });
+      // A git that exits before reading stdin makes the write EPIPE; its exit status above is the outcome.
+      child.stdin?.on("error", () => undefined);
+      child.stdin?.end(stdin ?? "");
+    });
+}
+
+/**
+ * {@link loadPlanAtRef} with every git call AWAITED (W1-T7743): the same plan, the same {@link PlanError}s, the same
+ * shard listing, one `cat-file --batch` and {@link mergePlanBlobs} merge, but no `execFileSync` on the caller's event
+ * loop. The daemon's per-tick plan reload and the reviewer's at-head read use this form.
+ */
+export async function loadPlanAtRefAsync(
+  repoRoot: string,
+  planRelPath: string,
+  ref = "HEAD",
+  runGit: (args: string[], stdin?: string) => Promise<string> = defaultGitRunnerAsync(repoRoot),
+): Promise<Plan> {
+  let monolithBlob: string;
+  try {
+    monolithBlob = await runGit(["show", `${ref}:${planRelPath}`]);
+  } catch (err) {
+    throw new PlanError(`cannot read plan file at ${ref}:${planRelPath} in ${repoRoot}: ${String(err)}`);
+  }
+  const blobs: Array<{ label: string; text: string }> = [{ label: `${ref}:${planRelPath}`, text: monolithBlob }];
+  const shardRelDir = join(dirname(planRelPath), "tasks.d");
+  let shardListing = "";
+  try {
+    shardListing = await runGit(["ls-tree", "--name-only", ref, `${shardRelDir}/`]);
+  } catch {
+    shardListing = ""; // no tasks.d/ at this ref: the same tolerance loadPlanAtRef applies
+  }
+  const shardRelPaths = shardPathsFromListing(shardListing);
+  let shardBlobs: string[];
+  try {
+    shardBlobs = await readBlobsAtRefAsync(runGit, ref, shardRelPaths);
+  } catch (err) {
+    throw new PlanError(`cannot read plan shard at ${ref} in ${repoRoot}: ${String(err)}`);
+  }
+  return mergePlanBlobs(withShardBlobs(blobs, ref, shardRelPaths, shardBlobs));
 }
 
 /**

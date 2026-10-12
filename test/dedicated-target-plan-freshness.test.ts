@@ -36,17 +36,17 @@ test("dedicatedTargetPlanReloader: a SELF target gets no reloader — that arm b
   );
 });
 
-test("dedicatedTargetPlanReloader: returns null on the FIRST tick — the boot plan already came from that sha", () => {
+test("dedicatedTargetPlanReloader: returns null on the FIRST tick — the boot plan already came from that sha", async () => {
   const r = dedicatedTargetPlanReloader({ isSelf: false, planPath: "/x" }, () => {}, {
     fetch: () => {},
     treeSha: () => "sha-boot",
     load: () => ({ tasks: [] }) as unknown as Plan,
   });
   assert.ok(r, "a non-self dedicated target gets a reloader");
-  assert.equal(r!(), null, "no reload is reported for the sha the boot already loaded");
+  assert.equal(await r!(), null, "no reload is reported for the sha the boot already loaded");
 });
 
-test("dedicatedTargetPlanReloader: null while the tree sha is unchanged, a fresh plan when it moves", () => {
+test("dedicatedTargetPlanReloader: null while the tree sha is unchanged, a fresh plan when it moves", async () => {
   let sha = "sha-1";
   let loads = 0;
   let resets = 0;
@@ -61,20 +61,20 @@ test("dedicatedTargetPlanReloader: null while the tree sha is unchanged, a fresh
       return { tasks: [{ id: "NEW" }] } as unknown as Plan;
     },
   })!;
-  assert.equal(r(), null); // first tick records the sha
-  assert.equal(r(), null, "unchanged sha must not re-parse the plan");
+  assert.equal(await r!(), null); // first tick records the sha
+  assert.equal(await r!(), null, "unchanged sha must not re-parse the plan");
   assert.equal(loads, 0, "the common path costs no parse at all");
   sha = "sha-2";
-  const fresh = r();
+  const fresh = await r();
   assert.ok(fresh, "a moved tree sha yields a fresh plan");
   assert.equal(loads, 1);
   assert.equal(resets, 1, "the working tree is reset to origin/main exactly once per genuine change, before the parse");
-  assert.equal(r(), null, "and it settles again on the new sha");
+  assert.equal(await r!(), null, "and it settles again on the new sha");
   assert.equal(loads, 1, "exactly one parse per genuine change");
   assert.equal(resets, 1, "and exactly one reset — an unchanged tick resets nothing");
 });
 
-test("dedicatedTargetPlanReloader: fetches EVERY call, unlike planReloader — nothing else keeps a non-self target's origin/main current between dispatches", () => {
+test("dedicatedTargetPlanReloader: fetches EVERY call, unlike planReloader — nothing else keeps a non-self target's origin/main current between dispatches", async () => {
   let fetches = 0;
   const r = dedicatedTargetPlanReloader({ isSelf: false, planPath: "/x" }, () => {}, {
     fetch: () => {
@@ -83,23 +83,23 @@ test("dedicatedTargetPlanReloader: fetches EVERY call, unlike planReloader — n
     treeSha: () => "same-sha",
     load: () => ({ tasks: [] }) as unknown as Plan,
   })!;
-  r();
-  r();
-  r();
+  await r();
+  await r();
+  await r();
   assert.equal(fetches, 3, "every tick fetches for itself — this reloader has no free ride from checkFreshness");
 });
 
-test("dedicatedTargetPlanReloader: a THROWING fetch propagates — the SAME generic daemon.plan_reload_failed catch planReloader already relies on, never a swallowed error here", () => {
+test("dedicatedTargetPlanReloader: a THROWING fetch propagates — the SAME generic daemon.plan_reload_failed catch planReloader already relies on, never a swallowed error here", async () => {
   const r = dedicatedTargetPlanReloader({ isSelf: false, planPath: "/x" }, () => {}, {
     fetch: () => {
       throw new Error("git fetch origin failed");
     },
     treeSha: () => "s",
   })!;
-  assert.throws(() => r(), /git fetch origin failed/);
+  await assert.rejects(() => r(), /git fetch origin failed/);
 });
 
-test("dedicatedTargetPlanReloader: resets the WORKING TREE before parsing — a fetched origin/main ref alone is not enough", () => {
+test("dedicatedTargetPlanReloader: resets the WORKING TREE before parsing — a fetched origin/main ref alone is not enough", async () => {
   // THE BUG THIS PINS: `load` is a plain filesystem read of `target.planPath`, never a `git show
   // <ref>:<path>`. A self target gets away with reading a possibly-stale working tree because the
   // deploy supervisor restarts the whole process on any main move (see the function's own doc); a
@@ -120,14 +120,14 @@ test("dedicatedTargetPlanReloader: resets the WORKING TREE before parsing — a 
       return { tasks: [] } as unknown as Plan;
     },
   })!;
-  r(); // first tick: records the boot sha
+  await r(); // first tick: records the boot sha
   assert.deepEqual(order, ["fetch", "treeSha"], "no reset and no parse on the boot-recording tick");
   order.length = 0;
-  r(); // unchanged
+  await r(); // unchanged
   assert.deepEqual(order, ["fetch", "treeSha"], "an unchanged tick resets nothing — only a genuine move earns the cost");
   order.length = 0;
   sha = "sha-2";
-  r(); // genuine move
+  await r(); // genuine move
   assert.deepEqual(
     order,
     ["fetch", "treeSha", "resetWorkingTree", "load"],
@@ -279,7 +279,7 @@ test("W1-T3554 acceptance 3: the reload is observed only BETWEEN workers, never 
 // test proves the fetch really does pick up a commit pushed to a real local "origin" remote AFTER
 // boot, never merely a working-tree edit.
 
-test("W1-T3554: dedicated reloader defaults use target checkout", () => {
+test("W1-T3554: dedicated reloader defaults use target checkout", async () => {
   const bare = gitRepo({ bare: true, kind: "w1t3554-bare" });
   const work = gitRepo({ kind: "w1t3554-work" });
   let clone: GitRepo | undefined;
@@ -303,8 +303,8 @@ test("W1-T3554: dedicated reloader defaults use target checkout", () => {
 
     const r = dedicatedTargetPlanReloader({ isSelf: false, planPath: join(clone.dir, "plan", "tasks.yaml") }, () => {})!;
     assert.ok(r, "a non-self dedicated target gets a reloader");
-    assert.equal(r(), null, "first tick records the boot sha without reporting a reload");
-    assert.equal(r(), null, "unchanged tree ⇒ still null, and crucially NO THROW");
+    assert.equal(await r(), null, "first tick records the boot sha without reporting a reload");
+    assert.equal(await r(), null, "unchanged tree ⇒ still null, and crucially NO THROW");
 
     // Push a plan change to the TARGET's origin/main from the SEPARATE working checkout — never
     // touching the daemon's own clone directly, exactly like a merged PR would.
@@ -316,7 +316,7 @@ test("W1-T3554: dedicated reloader defaults use target checkout", () => {
     work.git("commit", "-q", "-m", "filed");
     work.git("push", "-q", "origin", "main");
 
-    const fresh = r();
+    const fresh = await r();
     assert.ok(fresh, "a moved target plan tree yields a reload, picked up by the reloader's OWN fetch");
     assert.deepEqual(fresh!.tasks.map((t) => t.id), ["A", "B-NEW"], "and it is the NEW plan");
     rmSync(outside, { recursive: true, force: true });
