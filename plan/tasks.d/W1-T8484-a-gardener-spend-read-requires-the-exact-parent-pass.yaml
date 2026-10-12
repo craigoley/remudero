@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   priority: 1.2
   budget_usd: 24.00
-  risk: medium
+  risk: high
   origin: "operator console gardener follow-up 2026-10-12; observed /v1/i/core/gardeners spend:null with 129 registered pass attempts"
   plan_refs: [W1-T4949, W1-T4950, W1-T5527, W1-T6466]
   files: [src/lib/gardener-spend.ts, src/lib/analytics-view.ts, src/lib/read-model-worker.ts, src/lib/ledger-steps.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/a-gardener-spend-read-requires-the-exact-parent-pass.test.ts]
@@ -60,6 +60,8 @@
       proof: 'unit test: W1-T8484: real worker refresh serves gardener spend without request-time scans'
     - claim: "overflow or missing correlation preserves independently valid Analytics"
       proof: 'unit test: W1-T8484: missing or over-budget gardener spend preserves Analytics'
+    - claim: "the production Analytics materializer invokes the gardener spend fold"
+      proof: 'grep: foldGardenerSpend( in src/lib/analytics-view.ts'
   falsifier: |
     Planned literal tests live in test/a-gardener-spend-read-requires-the-exact-parent-pass.test.ts.
     Remove the exact parent/scope join: a different pass/repo/generation with a priced child must
