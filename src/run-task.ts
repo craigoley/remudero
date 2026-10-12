@@ -54648,16 +54648,20 @@ export async function openMainRatchetRecordPr(
 }
 
 /** W1-T6403 — the daemon's {@link MainRepairLane}: the fix worker, the revert PR, and the recorded baseline above. */
-export function mainRepairLaneFor(owner: string, repo: string, config: Config, ledgerPath: string, runId: string): MainRepairLane {
+export function mainRepairLaneFor(
+  owner: string, repo: string, config: Config, ledgerPath: string, runId: string,
+  dispatchFix: typeof dispatchMainRepairFixRun = dispatchMainRepairFixRun,
+  openRevert: typeof openMainRepairRevertPr = openMainRepairRevertPr,
+): MainRepairLane {
   // W1-T8572: the failing test files each fix request carried, so the revert of the same merge proves itself with them.
   const testFilesBySha = new Map<string, readonly string[]>();
   return {
     openFixPr: (request) => {
       testFilesBySha.set(request.offendingSha, request.testFiles);
-      return dispatchMainRepairFixRun(owner, repo, config, request, ledgerPath, runId);
+      return dispatchFix(owner, repo, config, request, ledgerPath, runId);
     },
     openRevertPr: (request) =>
-      openMainRepairRevertPr(owner, repo, config, request, ledgerPath, runId, undefined, testFilesBySha.get(request.offendingSha) ?? []),
+      openRevert(owner, repo, config, request, ledgerPath, runId, undefined, testFilesBySha.get(request.offendingSha) ?? []),
     recordRatchet: (request) => openMainRatchetRecordPr(owner, repo, config, request, ledgerPath, runId),
   };
 }

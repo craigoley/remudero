@@ -32,6 +32,7 @@ import {
   mainRepairAcceptanceCriteria,
   mainRepairFixBody,
   mainRepairFixPrompt,
+  mainRepairLaneFor,
   mainRepairRevertBody,
   mainRepairTaskId,
 } from "../src/run-task.js";
@@ -287,6 +288,51 @@ test("W1-T8572: a no-test-file worker that opens its own PR is ledgered as an un
     assert.equal(row?.pr_url, FIX_PR);
     assert.deepEqual(row?.inert_proofs, [PROSE]);
     assert.equal(row?.count, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("W1-T8572: the repair lane dispatches the fix and carries its test files into the matching revert", async () => {
+  const workerBodies: string[] = [];
+  const h = harness((bodyFile) => {
+    workerBodies.push(readFileSync(bodyFile, "utf8"));
+    return `REPORT\nPR_URL: ${FIX_PR}\n`;
+  });
+  const config = { root: h.root } as Config;
+  const revertBodies: string[] = [];
+  const revertPrUrl = `${FIX_PR}-revert`;
+  const lane = mainRepairLaneFor(OWNER, "fixture-repo", config, h.ledgerPath, "R",
+    (owner, repo, cfg, req, ledgerPath, runId) =>
+      dispatchMainRepairFixRun(owner, repo, cfg, req, ledgerPath, runId, h.deps),
+    async (owner, repo, cfg, req, ledgerPath, runId, fetch, testFiles) => {
+      assert.deepEqual([owner, repo, cfg, ledgerPath, runId, fetch],
+        [OWNER, "fixture-repo", config, h.ledgerPath, "R", undefined]);
+      revertBodies.push(mainRepairRevertBody(req, { testFiles }));
+      return { prUrl: revertPrUrl };
+    },
+  );
+  const fix = request([SPENT_CHECK_TEST]);
+  const otherFix = { ...request(["test/b.test.ts"]), offendingSha: "a".repeat(40) };
+  const revert: MainRepairRevertRequest = {
+    branch: fix.branch,
+    headSha: fix.headSha,
+    offendingSha: fix.offendingSha,
+    failingChecks: fix.failingChecks,
+    fixPrUrl: FIX_PR,
+    whyFixInsufficient: "fix PR made no progress",
+  };
+  const proofs = (body: string) => parseAcceptanceBlock(body).map((c) => c.proof);
+  try {
+    assert.equal(await lane.openFixPr(fix), FIX_PR);
+    assert.equal(await lane.openFixPr(otherFix), FIX_PR);
+    assert.deepEqual(workerBodies.map(proofs), [[`unit test: ${SPENT_CHECK_TEST}`], ["unit test: test/b.test.ts"]]);
+    assert.deepEqual(await lane.openRevertPr(revert), { prUrl: revertPrUrl });
+    assert.deepEqual(proofs(revertBodies[0]!), [`unit test: ${SPENT_CHECK_TEST}`]);
+    assert.deepEqual(await lane.openRevertPr({ ...revert, offendingSha: otherFix.offendingSha }), { prUrl: revertPrUrl });
+    assert.deepEqual(proofs(revertBodies[1]!), ["unit test: test/b.test.ts"]);
+    assert.deepEqual(await lane.openRevertPr({ ...revert, offendingSha: "b".repeat(40) }), { prUrl: revertPrUrl });
+    assert.deepEqual(revertBodies[2], mainRepairRevertBody({ ...revert, offendingSha: "b".repeat(40) }));
   } finally {
     h.cleanup();
   }
