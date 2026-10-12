@@ -2,6 +2,7 @@ import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import { createHash } from "node:crypto";
+import { promisedFollowUps, unreportedFollowUps, type PromisedFollowUp, type FollowUpPlanRecord } from "./promised-follow-ups.js";
 import { createRequire } from "node:module";
 import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
@@ -65,7 +66,7 @@ export type PostableReviewState = ReviewState;
  *  commits, provider choice and model sampling. Bumped to v2 (W1-T3580) because W1-T3564 changed proof-execution
  *  semantics (the closed console suite registry) without advancing this revision, so a v1 terminal cached before
  *  that change stayed an exact cache hit and replayed instead of executing the newly routable proofs. */
-export const REVIEW_ENGINE_REVISION = "reviewer-scope-context-v2";
+export const REVIEW_ENGINE_REVISION = "promised-followups-snapshot-v3";
 /** Changes both exact-head identities when the proof loader's verdict semantics change. */
 const PROOF_LOAD_REVISION = "cannot-load-v1";
 
@@ -87,6 +88,7 @@ export interface ReviewDecisionDigestInput {
   /** The full implement report is material only when supplied: preserving omission keeps legacy
    * digest identities stable, while a current worker refusal cannot replay a prior clean verdict. */
   implementationReport?: string;
+  promisedFollowUpObservation?: PromisedFollowUpObservation;
   body?: string;
   acceptance: readonly AcceptanceCriterion[];
   declaredFiles?: readonly string[];
@@ -112,6 +114,11 @@ export function reviewDecisionDigest(input: ReviewDecisionDigestInput): string {
     diff: input.diff,
     report: input.report,
     ...(input.implementationReport !== undefined ? { implementationReport: input.implementationReport } : {}),
+    ...(input.promisedFollowUpObservation !== undefined &&
+      (input.promisedFollowUpObservation.state === "unknown" || input.promisedFollowUpObservation.promised.length > 0)
+      ? { promisedFollowUps: input.promisedFollowUpObservation.state === "unknown" ? { state: "unknown" }
+        : { state: "complete", promised: input.promisedFollowUpObservation.promised,
+          unfiled: unreportedFollowUps(input.promisedFollowUpObservation.promised, "", input.promisedFollowUpObservation.planRecords) } } : {}),
     body: input.body ?? null,
     acceptance,
     declaredFiles: input.declaredFiles ?? [],
@@ -433,6 +440,10 @@ export type ReportSubstituteCause =
   | { kind: "fetch-failed" };
 
 /** The evidence the JUDGE reads: the PR diff, the implement REPORT, optional LLM verdicts. */
+export type PromisedFollowUpObservation =
+  | { state: "complete"; headSha?: string; baseSha?: string; promised: PromisedFollowUp[]; planRecords: FollowUpPlanRecord[] }
+  | { state: "unknown"; reason: string };
+
 export interface ReviewEvidence {
   /** The RESOLVED canonical `owner/repo` this review's proofs execute against (W1-T3525) — reused
    *  from wherever the caller already resolved it (e.g. `resolveDaemonTarget`, W1-T1062), never
@@ -454,6 +465,8 @@ export interface ReviewEvidence {
    * remains authoritative for prose/diff checks while this optional channel supplies only the
    * strict `REFUSED:` grammar. */
   implementationReport?: string;
+  /** One awaited, exact-head/base observation, also included in the review decision identity. */
+  promisedFollowUpObservation?: PromisedFollowUpObservation;
   /** True when `report` is NOT the PR body (W1-T1100): `runTaskBody` (run-task.js) substitutes the worker's own chat
    *  text after a failed body read, so an outage degrades to judging the narrative rather than stalling the review.
    *  TRAP: unmarked, a substitute failed two OPPOSITE ways on #2395 — {@link bodyContradictsDiff} manufactured a
@@ -538,6 +551,8 @@ export interface UnwiredAdvisory {
 /** The rolled-up review verdict — exactly what {@link postReviewStatus} posts. */
 export interface ReviewVerdict {
   state: ReviewState;
+  /** Provenance of the structural promise check; absent on an unchanged no-promise review. */
+  promisedFollowUpObservation?: PromisedFollowUpObservation;
   /** A proof runner could not load files even after its bounded refresh and retry. */
   cannotEvaluate?: boolean;
   /** W1-T6124: present when this review started a proof child WITHOUT the bwrap sandbox, naming why ({@link
@@ -4754,6 +4769,56 @@ export function reviewScopeContext(
   };
 }
 
+/** Observe promises before decision claiming. Git reads are awaited, bounded and pinned to two immutable objects. */
+export async function observePromisedFollowUps(args: {
+  diff: string; headSha: string; headCheckoutDir?: string;
+  task: { id: string; sourcePath?: string };
+  runGit?: (args: string[], stdin?: string) => Promise<string>;
+}): Promise<PromisedFollowUpObservation> {
+  const empty: PromisedFollowUpObservation = { state: "complete", promised: [], planRecords: [] };
+  const paths = changedFiles(walkDiff(args.diff)).filter(path => /^docs\/adr\/[^/]+\.md$/.test(path));
+  const taskPath = args.task.sourcePath?.match(/(?:^|[:/])(plan\/tasks(?:\.yaml|\.d\/[^/]+\.ya?ml))$/)?.[1];
+  if (paths.length === 0 && args.task.sourcePath === undefined) return empty;
+  if (!args.headCheckoutDir) return { state: "unknown", reason: "promise source requires the exact PR-head checkout" };
+  const deadline = performance.now() + 45_000;
+  let incomplete = false;
+  const runGit = async (argv: string[], stdin?: string): Promise<string> => {
+    try {
+      if (performance.now() >= deadline) throw new Error("promise source read deadline expired");
+      if (args.runGit) return await args.runGit(argv, stdin);
+      return await new Promise<string>((resolveRead, reject) => {
+        const child = execFile("git", ["-C", args.headCheckoutDir!, ...argv], {
+          encoding: "utf8", maxBuffer: 16 << 20, timeout: Math.max(1, Math.min(15_000, Math.floor(deadline - performance.now()))),
+          env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+        }, (error, stdout) => error ? reject(error) : resolveRead(stdout));
+        child.stdin?.on("error", () => undefined);
+        child.stdin?.end(stdin ?? "");
+      });
+    } catch (error) { incomplete = true; throw error; }
+  };
+  try {
+    if (args.task.sourcePath !== undefined && taskPath === undefined) throw new Error("promise task source path is unavailable");
+    const [headSha, baseSha] = (await runGit(["rev-parse", "HEAD", "origin/main"])).trim().split("\n");
+    if (headSha !== args.headSha || !/^[a-f0-9]{40}$/.test(baseSha ?? "")) throw new Error("promise source is not the exact head/pinned origin/main");
+    const present = paths.length ? (await runGit(["ls-tree", "--name-only", headSha, "--", ...paths])).trim().split("\n").filter(Boolean) : [];
+    const blobs = await readBlobsAtRefAsync(runGit, headSha, present);
+    const contents = new Map(present.map((path, index) => [path, blobs[index]!]));
+    const promised = promisedFollowUps(present, path => contents.get(path)!).map(promise => ({ ...promise, taskId: args.task.id }));
+    if (taskPath !== undefined) {
+      const [blob] = await readBlobsAtRefAsync(runGit, baseSha!, [taskPath]);
+      promised.push(...promisedFollowUps([taskPath], () => blob!).filter(promise => promise.taskId === args.task.id));
+    }
+    if (promised.length === 0) return empty;
+    const plan = await loadPlanAtRefAsync(args.headCheckoutDir, "plan/tasks.yaml", baseSha!, runGit);
+    if (incomplete) throw new Error("promise plan census was incomplete");
+    if ((await runGit(["rev-parse", "HEAD"])).trim() !== headSha) throw new Error("promise source head changed during observation");
+    const unique = promised.filter((promise, index) => promised.findIndex(p => p.path === promise.path && p.text === promise.text && p.taskId === promise.taskId) === index);
+    return { state: "complete", headSha, baseSha, promised: unique,
+      planRecords: plan.tasks.filter(task => unique.some(promise => promise.taskId !== undefined && task.plan_refs?.includes(promise.taskId)))
+        .map(task => ({ id: task.id, title: task.title, plan_refs: task.plan_refs, rationale: task.rationale, prompt: task.prompt })) };
+  } catch (error) { return { state: "unknown", reason: `promise source unavailable: ${String(error)}` }; }
+}
+
 /** IMPLEMENTATION-SHAPED (W1-T458 design (ii)): `src/` or `test/` only. Narrowing to these two prefixes is what turns
  *  the raw "touches ANY declared path" false-positive rate — 52%, inflated by plan filings and docs PRs — into the
  *  honest ~11% the advisory-not-refusal call rests on. */
@@ -5036,6 +5101,18 @@ export function judgeReview(
       criterionRefusals[i],
     ),
   );
+  const promiseObservation = evidence.promisedFollowUpObservation ??
+    (diffFiles.some(path => /^docs\/adr\/[^/]+\.md$/.test(path))
+      ? { state: "unknown" as const, reason: "promise source was not observed" } : undefined);
+  if (promiseObservation?.state === "unknown") {
+    verdicts.push({ claim: "promised follow-ups reported for harvest", proof: "", met: false, floorMet: false,
+      reason: promiseObservation.reason, proof_exec: "cannot_evaluate", loadError: promiseObservation.reason });
+  } else if (promiseObservation && promiseObservation.promised.length > 0) {
+    const missing = unreportedFollowUps(promiseObservation.promised, evidence.implementationReport ?? "", promiseObservation.planRecords);
+    verdicts.push({ claim: "promised follow-ups reported for harvest", proof: "", met: missing.length === 0, floorMet: missing.length === 0,
+      reason: missing.length ? `unreported promised follow-ups (copy each into a typed ## Follow-ups entry): ${missing.map(p => `${p.path}: ${p.text}`).join("; ")}`
+        : "every promised follow-up is harvestable or named in a linked origin/main plan record", proof_exec: "not_executable" });
+  }
   const testTheater = detectTestTheater(evidence.diff);
 
   // W1-T58 (Standing rule 15 — RATIFIES P3): see {@link ReviewVerdict.criteriaTampered}'s doc. `!planOnly` is the
@@ -5218,6 +5295,8 @@ export function judgeReview(
 
   return {
     state,
+    ...(promiseObservation !== undefined && (promiseObservation.state === "unknown" || promiseObservation.promised.length > 0)
+      ? { promisedFollowUpObservation: promiseObservation } : {}),
     cannotEvaluate,
     ...proofSandboxRecord(unsandboxedBefore),
     criteria: verdicts,

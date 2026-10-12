@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { promisedFollowUps, unreportedFollowUps, parseHarvestableFollowUps } from "../src/lib/promised-follow-ups.js";
-import { judgeReview } from "../src/lib/review.js";
+import { judgeReview, observePromisedFollowUps, reviewDecisionDigest, reviewInputDigest, REVIEW_ENGINE_REVISION } from "../src/lib/review.js";
 import { parseFollowups } from "../src/lib/worker.js";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const path = "docs/adr/0007-example.md";
 const adr = "# Decision\n\n- Follow-up tasks this record files:\n  - source-keyed child bundle store\n    with atomic publication;\n  - bounded heavy READY escalation\n\n## Other\n- not promised\n";
@@ -72,4 +76,70 @@ test("the guard and real worker harvest share exactly one parser grammar", () =>
 
 test("unreadable promise files are not silently certified as empty", () => {
   assert.throws(() => promisedFollowUps([path], () => { throw new Error("EACCES"); }), /EACCES/);
+});
+
+test("a later filing rearms the same-head decision but unrelated main churn does not", () => {
+  const input = { headSha: "a".repeat(40), diff, report: "body", acceptance: criteria, promisedFollowUpObservation: observation() };
+  const prior = reviewDecisionDigest(input);
+  assert.equal(prior, reviewDecisionDigest({ ...input, promisedFollowUpObservation: { ...observation(), baseSha: "c".repeat(40) } }));
+  assert.notEqual(prior, reviewDecisionDigest({ ...input, promisedFollowUpObservation: observation(promises, [{ id: "W1-T9999", title: promises[0]!.text, plan_refs: ["W1-T7729"] }]) }));
+  assert.notEqual(reviewInputDigest(input.headSha, input.report), reviewInputDigest(input.headSha, input.report, "reviewer-scope-context-v2"));
+  assert.equal(REVIEW_ENGINE_REVISION, "promised-followups-snapshot-v3");
+});
+
+test("missing exact-head promise evidence is pending, never a successful empty list", () => {
+  const result = judgeReview(criteria, { diff, report: "a real change", promisedFollowUpObservation: { state: "unknown", reason: "native read failed" } });
+  assert.equal(result.state, "pending");
+  assert.equal(result.cannotEvaluate, true);
+  assert.match(result.summary, /native read failed/);
+});
+
+test("the real Git observer reads the head ADR and only a pinned origin/main's filings", async t => {
+  const repo = gitRepo(); t.after(() => repo.cleanup());
+  mkdirSync(join(repo.dir, "plan"));
+  const records = '- id: W1-T7729\n  title: owner\n  repo: remudero\n  type: implement\n  verify: auto\n  status: queued\n';
+  writeFileSync(join(repo.dir, "plan/tasks.yaml"), records);
+  repo.git("add", "."); repo.git("commit", "-m", "owner on main");
+  const base = repo.git("rev-parse", "HEAD"); repo.git("update-ref", "refs/remotes/origin/main", base);
+  repo.git("switch", "-c", "promise-head");
+  mkdirSync(dirname(join(repo.dir, path)), { recursive: true }); writeFileSync(join(repo.dir, path), adr);
+  repo.git("add", "."); repo.git("commit", "-m", "ADR at PR head"); const head = repo.git("rev-parse", "HEAD");
+  const args = { diff: repo.git("diff", `${base}...${head}`), headSha: head, headCheckoutDir: repo.dir, task: { id: "W1-T7729", sourcePath: join(repo.dir, "plan/tasks.yaml") } };
+  const first = await observePromisedFollowUps(args);
+  assert.equal(first.state, "complete");
+  if (first.state !== "complete") return;
+  assert.deepEqual(first.promised, promises);
+  assert.equal(first.baseSha, base);
+  const material = { headSha: head, diff: args.diff, report: "same body", acceptance: criteria };
+  const oldDecision = reviewDecisionDigest({ ...material, promisedFollowUpObservation: first });
+  repo.git("switch", "-c", "filing-only", base);
+  writeFileSync(join(repo.dir, "plan/tasks.yaml"), records + '- id: W1-T9999\n  title: "bounded heavy READY escalation"\n  plan_refs: [W1-T7729]\n  repo: remudero\n  type: implement\n  verify: auto\n  status: queued\n');
+  repo.git("add", "."); repo.git("commit", "-m", "file one promise"); const filed = repo.git("rev-parse", "HEAD");
+  repo.git("update-ref", "refs/remotes/origin/main", filed); repo.git("switch", "promise-head");
+  const second = await observePromisedFollowUps(args);
+  assert.equal(second.state, "complete");
+  if (second.state !== "complete") return;
+  assert.equal(second.baseSha, filed); assert.equal(second.planRecords[0]?.id, "W1-T9999");
+  assert.deepEqual(unreportedFollowUps(second.promised, "", second.planRecords), [promises[0]]);
+  assert.notEqual(oldDecision, reviewDecisionDigest({ ...material, promisedFollowUpObservation: second }));
+  assert.equal((await observePromisedFollowUps({ ...args, headSha: "f".repeat(40) })).state, "unknown");
+});
+
+test("failed Git reads, invalid task paths and absent head checkouts remain UNKNOWN", async () => {
+  const args = { diff, headSha: "a".repeat(40), headCheckoutDir: "/never-read", task: { id: "W1-T7729" } };
+  const failed = await observePromisedFollowUps({ ...args, runGit: async () => { throw new Error("controlled native failure"); } });
+  assert.equal(failed.state, "unknown");
+  assert.equal((await observePromisedFollowUps({ ...args, task: { ...args.task, sourcePath: "outside-plan.yaml" } })).state, "unknown");
+  assert.equal((await observePromisedFollowUps({ ...args, headCheckoutDir: undefined })).state, "unknown");
+  assert.deepEqual(await observePromisedFollowUps({ ...args, diff: "+++ b/src/example.ts\n+changed" }), { state: "complete", promised: [], planRecords: [] });
+});
+
+test("production observes promises before claiming, then supplies that same observation to the judge", () => {
+  const source = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+  const start = source.indexOf("async function runReview("); const body = source.slice(start, source.indexOf("async function ", start + 20));
+  assert.ok(start >= 0);
+  assert.ok(body.indexOf("await observePromisedFollowUps(") < body.indexOf("reviewDecisionDigest({"));
+  assert.ok(body.indexOf("reviewDecisionDigest({") < body.indexOf("await claimReviewDecision({"));
+  const judge = body.slice(body.indexOf("await judgeReviewAsync(criteria"));
+  assert.match(judge, /promisedFollowUpObservation,/);
 });

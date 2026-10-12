@@ -1,4 +1,5 @@
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
+import { parseHarvestableFollowUps } from "./promised-follow-ups.js";
 import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
 import { connect as connectTcp, createServer as createTcpServer, type Socket, type Server } from "node:net";
 import { Agent as HttpAgent, createServer as createHttpServer, request as httpRequest } from "node:http";
@@ -4219,18 +4220,7 @@ export interface FollowupEntry {
  * own why. An absent section returns `null`, and a line naming none of the three types is skipped silently rather than
  * failing the whole report (W1-T105). */
 export function parseFollowups(text: string): FollowupEntry[] | null {
-  // `(?![\s\S])` is TRUE end-of-string, unaffected by the /m flag the leading `^` needs. TRAP: a bare `$` under /m matches
-  // before EVERY newline, so the lazy body would stop at the section's first line instead of running to its end.
-  const section = text.match(/^[ \t]*##[ \t]*Follow-ups[ \t]*\n([\s\S]*?)(?=\n[ \t]*##[ \t]|(?![\s\S]))/im);
-  if (!section) return null;
-  const entries: FollowupEntry[] = [];
-  const lineRe = /^[ \t]*(?:[-*][ \t]*)?(research|task|action)[ \t]*:[ \t]*(.+?)[ \t]*$/gim;
-  let m: RegExpExecArray | null;
-  while ((m = lineRe.exec(section[1]))) {
-    const followupText = m[2].trim();
-    if (followupText) entries.push({ type: m[1].toLowerCase() as FollowupEntry["type"], text: followupText });
-  }
-  return entries.length > 0 ? entries : null;
+  return parseHarvestableFollowUps(text);
 }
 
 /** Append a QUESTION to the durable side-channel store, `plan/questions.ndjson` — one JSON object per line, so it is diffable,
