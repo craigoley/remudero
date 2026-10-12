@@ -1,0 +1,120 @@
+- id: W1-T8533
+  title: "A REFRESH DECISION READS HISTORY THAT SURVIVES LEDGER ROTATION — W1-T8396 (#11085) refuses a second refresh on a red a refresh already failed to clear, but two of the four steps it reads (sweep.base_fixed.refresh, refresh.clearance) are not retained, the core ledger rotates about hourly, and 7 of 13 measured same-red repeat refreshes (10-08..10-12) straddled a rotation, so the guard would not see the first refresh"
+  repo: remudero
+  depends_on: [W1-T8396]  # its readers (refreshRecordsFromLedger, refusedRefreshClearancesFromLedger) and its refresh.clearance step are what this retains
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — every row a refresh decision reads outlives the PR it gates; it spans the rotation's retained set and the sweep's history read
+  band_meaning: span
+  origin: "operator approval 2026-10-12 (\"Go\")"
+  plan_refs: [W1-T8396, W1-T6405, W1-T4351, W1-T4935, W1-T3471, W1-T244, W1-T1262, W1-T1201]
+  files:
+    - src/lib/ledger.ts
+    - src/lib/sweep.ts
+    - src/lib/base-reproduction.ts
+    - test/a-refresh-decision-reads-history-that-survives-ledger-rotation.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ on origin/main ab8287511 and on #11085's head 359c50bf2 (run-W1-T8396-1791806888000, open, unmerged). Symbols, not lines.
+    WHAT THE REFRESH DECISIONS READ, AND WHAT IS RETAINED (`DECISION_RELEVANT_LEDGER_STEPS`, src/lib/ledger.ts, checked by
+    importing the exported set):
+      - `fix.base_refreshed`: retained on main and on the head.
+      - `sweep.base_red.refresh`: retained on main and on the head.
+      - `sweep.base_fixed.refresh`: NOT retained on main or on the head. Main ALREADY reads it to decide:
+        `baseRedHistoryFromLedger` (src/lib/sweep.ts) adds it to the once-per-head `refreshed` set, and the W1-T6405 arm in
+        `runSweep` reads `currentRows.findLast(...BASE_FIXED_REFRESH_STEP...)`. #11085 adds a third reader,
+        `refreshRecordsFromLedger` (src/lib/base-reproduction.ts).
+      - `refresh.clearance` (`REFRESH_CLEARANCE_STEP`, new in #11085): NOT retained. `refusedRefreshClearancesFromLedger`
+        reads it as the refusal memo.
+    HOW THE READERS READ: the live file only, not the union. `runSweep` builds `ledgerLines` from `readLedger`, which is
+    `deps.readLedger ?? readLedgerLines` and is marked `ledger-read-intent: live` ("this fold reads the live file only, never
+    rotations"). #11085 feeds `refreshRecordsFromLedger` and `refusedRefreshClearancesFromLedger` that same `ledgerLines`.
+    `readLedgerLines` (src/lib/status.ts) never resolves rotations. So retention is the whole question, and a pruned row
+    is invisible. The fix rung's own arm passes `priorRefresh: false` and reads no refresh history, so only the sweep arms
+    are exposed.
+    WHY THE EXISTING CENSUS MISSED IT: test/ledger-rotation.test.ts "DECISION_RELEVANT_LEDGER_STEPS: derived from
+    consumers, not hardcoded" scans `consumerFiles` (base-reproduction.ts is not one of them) with `equalityRead`, which
+    matches only a STRING LITERAL after `.step ===`. Every read above compares against a constant (`BASE_FIXED_REFRESH_STEP`,
+    `REFRESH_CLEARANCE_STEP`), so the census cannot see it. (The same blind spot hides six non-refresh constant reads on
+    main. They are out of this task's scope and reported separately to the operator.)
+    MEASURED on host remudero, ~/rmd-state2/state, 2026-10-12 ~13:00Z. Reads were niced and covered the 77 rotations of
+    10-09..10-12 plus the live file, with rows deduplicated by step, run, ts and PR, because carried rows repeat across
+    rotations:
+      - Rotation cadence: 83 rotations from 10-08 to 10-12. The gap between rotations is p50 64 min, p90 107 min, max 371 min.
+      - `sweep.base_fixed.refresh`: 62 rows on 41 PRs in the rotations (60 updated, 2 head-moved), and 0 rows in the live
+        file. The newest, at 11:37:15Z, was already gone after the 12:22:51Z rotation. Positive control: the same read
+        found 29 `fix.base_refreshed` and 5 `sweep.base_red.refresh` rows in the rotations. The live file still held 37 and
+        9 of them, back to 10-06 and 10-05, because those two are retained.
+      - Repeats: 10 PRs took more than one base-fixed refresh. #10190 took four on the same test file in 65 minutes, #10553
+        took three on test/ci-parity.test.ts, and #10787 took five. Of the 13 consecutive same-red pairs, 7 had a rotation
+        between them. After that rotation the first row is not in the live file, so #11085's rule 3 would read "no prior
+        refresh" and refresh again.
+      - No pr@head took two refreshes. Main's own once-per-head key, `${pr}@${head}`, is therefore not yet hurt: an update
+        makes a new head anyway. The exposure starts when W1-T8396 keys refresh history by PR, so this task depends on it
+        and lands right behind it.
+    RETENTION ALONE IS NOT ENOUGH. Retained steps are still capped at the newest `MAX_RETAINED_LINES_PER_STEP` rows per
+    step (pass 4 of `rotateLedger`), and the W1-T244 convergence pass sheds the oldest retained rows when the core is over
+    its ceiling. A PR open longer than the span those rows cover loses its history again. The sweep already has the shape
+    for this: `contradictoryPrior` (W1-T4935) reads a per-PR, step-filtered union with `resolveLedgerUnion`, and
+    `readArmLedgerUnion` (W1-T3471) notes "a live miss is not enough to call a verdict absent". Both read the union only on
+    the rare path.
+  design: |
+    1. RETAIN WHAT THE REFRESH DECISIONS READ. Add `"sweep.base_fixed.refresh"` and `"refresh.clearance"` to
+       `DECISION_RELEVANT_LEDGER_STEPS` as literal string entries, each with a comment that names its reader, like the
+       neighbouring `"sweep.base_red.refresh"` entry.
+    2. A LIVE MISS IS NOT ABSENCE FOR A PR OLDER THAN THE LIVE WINDOW. In `runSweep`, before an arm acts on "no prior
+       refresh" for PR N, decide whether the live file can vouch for N's whole life. It can when, for every refresh step
+       the decision reads, the oldest live row of that step is no newer than `pr.createdAt` (OpenPrView, W1-T1201). When it
+       cannot, because `createdAt` is absent or predates that oldest row, read N's rows of those steps from the union, once
+       per PR per pass. Use the `contradictoryPrior` shape: `resolveLedgerUnion` with a `"pr_number":N[,}]` pattern and a
+       step filter. Fold the union rows into `refreshRecordsFromLedger`, `refusedRefreshClearancesFromLedger` and
+       `baseRedHistoryFromLedger`. The bound is the PR's own age, measured against the live file's own span, so it has no
+       fixed count or window. A PR the live file covers pays no union read.
+    3. AN UNREADABLE HISTORY IS NAMED, NEVER READ AS "NO PRIOR REFRESH". When that union read fails or is incomplete
+       (`!ok`, unread or unclassified rotations), rule 3's `priorRefresh` is unknown, not false. In that case the
+       `refresh.clearance` row carries `history: "unreadable"` with the unread sources. The decision falls back to the
+       evidence W1-T8396 already has, which needs no history: the main-delta pre-filter and the trial-merge probe. It never
+       refreshes on the bare absence of a record. A history that was read records `history: "live"` or `history: "union"`.
+    4. CENSUS. In the new test file, scan src/lib/sweep.ts, src/run-task.ts and src/lib/base-reproduction.ts for every
+       `.step === X` and `.step !== X`, where X is a string literal or an identifier that resolves to an
+       `export const X = "<step>"` anywhere under src/. Keep each resolved step whose value contains `refresh`, and assert
+       that every one is in `DECISION_RELEVANT_LEDGER_STEPS`. Positive control: the scan must find at least the four steps
+       named above, asserted by name, so a broken pattern cannot pass on an empty set. Negative control: the same scanner,
+       run over an in-memory source that compares against a new `*_REFRESH_STEP` constant missing from the set, must report
+       it. Export no production helper for this; the scanner lives in the test.
+    Unchanged: what each arm decides from a complete history, the per-step cap and the convergence pass, and every
+    non-refresh reader. Tests use a temp state dir and the real `rotateLedger`, with no live ledger and no network. A rotation
+    fixture forces rotation with filler rows; the union case puts a PR's refresh row only in a rotation archive.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-refresh-decision-reads-history-that-survives-ledger-rotation.test.ts"
+    - claim: "every step a refresh decision reads, by literal or by exported constant, is in DECISION_RELEVANT_LEDGER_STEPS"
+      proof: 'grep: test("W1-T8533: every step a refresh decision reads is in the retention set" in test/a-refresh-decision-reads-history-that-survives-ledger-rotation.test.ts'
+    - claim: "the refresh-step census finds the four known steps by name and reports an unretained refresh step"
+      proof: 'grep: test("W1-T8533: the refresh census finds the four known steps and reports an unretained one" in test/a-refresh-decision-reads-history-that-survives-ledger-rotation.test.ts'
+    - claim: "a base-fixed refresh row survives a real rotation, and the sweep still refuses a second refresh on the same red"
+      proof: 'grep: test("W1-T8533: a refresh row survives rotation and still refuses a second refresh on the same red" in test/a-refresh-decision-reads-history-that-survives-ledger-rotation.test.ts'
+    - claim: "a PR older than the live file's span reads its refresh history from the rotations"
+      proof: 'grep: test("W1-T8533: a PR older than the live window reads its refresh history from the rotations" in test/a-refresh-decision-reads-history-that-survives-ledger-rotation.test.ts'
+    - claim: "an unreadable refresh history is named on the clearance row and never read as no prior refresh"
+      proof: 'grep: test("W1-T8533: an unreadable refresh history is named and never read as no prior refresh" in test/a-refresh-decision-reads-history-that-survives-ledger-rotation.test.ts'
+    - claim: "the base-fixed refresh step is retained"
+      proof: 'grep: "sweep\.base_fixed\.refresh" in src/lib/ledger.ts'
+    - claim: "the refresh clearance step is retained"
+      proof: 'grep: "refresh\.clearance" in src/lib/ledger.ts'
+  falsifier: |
+    Remove `"sweep.base_fixed.refresh"` from `DECISION_RELEVANT_LEDGER_STEPS`. The census reds by name, and in the rotation
+    test the refresh row is archived and the sweep refreshes the same red a second time, as #10190 and #10787 would have
+    after a rotation. Restrict the census to string literals, as test/ledger-rotation.test.ts does today, and its positive
+    control fails, because none of the four reads is a literal on main. Drop the union fallback, and the old-PR test sees a
+    second refresh. Treat an unreadable union as "no prior refresh", and the last test sees a refresh with no history row.
+  note: |
+    EFFECT, measured after merge from the core ledger with no numeric pass mark: per PR, count same-red refreshes (the
+    same checks and test files) that follow an earlier one, before and after W1-T8396 plus this task. Healthy shape: no
+    same-red repeat unless the clearance row names merged-probe or prefilter evidence, or `history: "unreadable"`. Also
+    count `history: "union"` rows, which is how often the live window fell short of a PR's life, and the size of the live
+    core after rotation, which shows what the two retained steps cost.
