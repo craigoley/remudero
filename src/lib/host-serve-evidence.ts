@@ -22,7 +22,7 @@
 import { mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { defaultInstance, defaultMemoryLedgerLocation, parseProcStat, type LedgerInstance, type ProcessIdentity } from "./host-memory-ledger.js";
 import { SERVE_MEMORY_SAMPLE_MS } from "./incident-invariants.js";
@@ -137,7 +137,7 @@ function defaultProcess(): ProcessIdentity | undefined {
   }
 }
 
-const PROCESS_STARTED_AT = Math.round(Date.now() - process.uptime() * 1000);
+const PROCESS_STARTED_AT = Math.round(systemClock.now() - process.uptime() * 1000);
 
 function safeName(text: string): string {
   return text.replace(/[^A-Za-z0-9._-]/g, "_") || "_";
@@ -181,7 +181,7 @@ export function publishHostServeEvidence(
       hostBoot,
       producer: { instance: instance.name, hostUnique: instance.hostUnique },
       process: identity,
-      generation: { startedAt: new Date(startedAtMs).toISOString() },
+      generation: { startedAt: fixedClock(startedAtMs).iso() },
       revision: opts.revision ?? null,
       observedAt: clock.iso(),
       scenario: observation.scenario,
@@ -218,7 +218,7 @@ function withdrawSuperseded(dir: string, prefix: string, keep: string, mine: Hos
       if (older) (opts.remove ?? ((target: string) => rmSync(target, { force: true })))(path);
     }
   } catch (error) {
-    diagnose(opts, "withdraw", reasonOf(error));
+    diagnose(opts, "withdraw", reasonOf(error)); // Housekeeping only: a file left behind is fenced on read.
   }
 }
 
@@ -267,7 +267,7 @@ export function readHostServeEvidence(opts: HostServeEvidenceOptions = {}): Host
       try {
         row = shaped(safeParse(read(join(dir, name))));
       } catch (error) {
-        diagnose(opts, "read", reasonOf(error));
+        diagnose(opts, "read", reasonOf(error)); // Named once; the file counts as corrupt, which can only widen to unknown.
       }
       if (!row) {
         corrupt += 1;
