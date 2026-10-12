@@ -109,7 +109,7 @@ function depsServing(body: string, overrides: Partial<AlertFixDispatchDeps> = {}
   };
 }
 
-async function ledgerRowsFor(deps: AlertFixDispatchDeps, label: string): Promise<Array<Record<string, unknown>>> {
+async function rowsAfterDispatch(deps: AlertFixDispatchDeps, label: string): Promise<Array<Record<string, unknown>>> {
   const root = mkdtempSync(join(tmpdir(), `rmd-w1t8625-${label}-`));
   const ledgerPath = join(root, "ledger.ndjson");
   try {
@@ -173,7 +173,7 @@ test("W1-T8625: the alert-fix prompt carries a proof grammar whose examples all 
 test("W1-T8625: an alert-fix body with a prose proof is ledgered as a defect", async () => {
   const body = "Fixes the alert.\n\nAcceptance:\n- the alert is fixed | the build passes\n\norigin: alert#code-scanning-8625\n";
   assert.equal(acceptanceAuthorTimeCheck(body).ok, true, "sanity: the existing author-time check passes this body");
-  const rows = await ledgerRowsFor(depsServing(body), "prose");
+  const rows = await rowsAfterDispatch(depsServing(body), "prose");
   assert.ok(rows.some((r) => r.step === "alert-fix.pr_opened"), "positive control: the dispatch reached the opened PR");
   const defects = inertDefectRows(rows);
   assert.equal(defects.length, 1, "a prose-proof body ledgers exactly one inert-proofs defect");
@@ -195,7 +195,7 @@ test("W1-T8625: a prose proof naming a test path is still an inert proof", async
   );
   assert.deepEqual(inertAcceptanceProofs("no acceptance header in this body"), [], "no block means no proofs to count");
 
-  const rows = await ledgerRowsFor(depsServing(`Acceptance:\n- the alert is fixed | test/x.test.ts passes\n`), "path");
+  const rows = await rowsAfterDispatch(depsServing(`Acceptance:\n- the alert is fixed | test/x.test.ts passes\n`), "path");
   const defects = inertDefectRows(rows);
   assert.equal(defects.length, 1, "the dispatcher ledgers the bare-path prose proof");
   assert.deepEqual(defects[0].inert_proofs, ["test/x.test.ts passes"]);
@@ -206,7 +206,7 @@ test("W1-T8625: a trailered alert-fix body with a prose proof is still ledgered"
   const check = acceptanceAuthorTimeCheck(body);
   assert.equal(check.ok, true, "positive control: the trailer arm returns ok before it reads the block");
   assert.match(check.message, /trailer present/, "and it says so — it never looked at the proofs");
-  const rows = await ledgerRowsFor(depsServing(body), "trailer");
+  const rows = await rowsAfterDispatch(depsServing(body), "trailer");
   const defects = inertDefectRows(rows);
   assert.equal(defects.length, 1, "the trailer arm must not short-circuit the inert-proof count");
   assert.deepEqual(defects[0].inert_proofs, ["the build passes"]);
@@ -218,14 +218,14 @@ test("W1-T8625: an alert-fix body whose proofs all execute ledgers no defect", a
     "- the guard rejects the bad input | unit test: W1-T8625 fixture: the fixed path rejects the bad input\n" +
     "- the guard is wired | grep: readFileIfExists( in src/lib/fs-safe.ts\n" +
     "\nRemudero-Task: alert-code-scanning-8625\n";
-  const rows = await ledgerRowsFor(depsServing(body), "clean");
+  const rows = await rowsAfterDispatch(depsServing(body), "clean");
   assert.ok(rows.some((r) => r.step === "alert-fix.pr_opened"), "positive control: the dispatch reached the opened PR");
   assert.equal(rows.filter((r) => r.step === "alert-fix.acceptance_defect").length, 0, "an executable body ledgers no defect");
   assert.equal(rows.filter((r) => r.step === "alert-fix.acceptance_check_error").length, 0);
 });
 
 test("W1-T8625: an unreadable opened body is ledgered as a check error, never as a clean body", async () => {
-  const rows = await ledgerRowsFor(
+  const rows = await rowsAfterDispatch(
     depsServing("unused", {
       readPrBody: () => {
         throw new Error("gh: could not resolve to a PullRequest");

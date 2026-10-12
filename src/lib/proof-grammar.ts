@@ -1,10 +1,7 @@
 import { isDemonstrationProof, isDialectPrefixed, parseAcceptanceBlock, parseWhitelistedProof } from "./review.js";
 
-/**
- * The `grep:` dialect rules, worded once and spread into BOTH grammars below (W1-T8625). They are true of the reviewer's
- * executor whoever writes the proof — a filing worker or a worker opening a PR for its own change — so a second copy
- * would only drift.
- */
+// W1-T8625: the `grep:` rules, true of the executor whoever writes the proof, worded ONCE and spread into both
+// grammars below.
 const GREP_PROOF_DIALECT_RULES: readonly string[] = [
   "  A `grep:` with no ` in <path>` clause is REFUSED, and the path may not contain `*` or `..`. The",
   "  pattern is a BASIC regex — `[ * ^ $` are refused; `(` and `)` are safe, so `someSymbol(` is the",
@@ -16,34 +13,14 @@ const GREP_PROOF_DIALECT_RULES: readonly string[] = [
 ];
 
 /**
- * The acceptance-proof dialect, as prompt text — the ONE copy both task-filing lanes read.
- *
- * WHY THIS EXISTS. A task's `proof:` values are EXECUTED at review time (`parseWhitelistedProof`,
- * review.ts:781) and are lint-gated before that (`proofDialectViolations` /
- * `proofResolvabilityViolations`, task-linter.ts:529/646). CI runs `rmd lint-plan` in
- * changed-tasks-only mode, and a newly-filed task is by definition changed — so a task whose proofs
- * do not parse cannot merge, no matter how good the task is.
- *
- * Neither filing prompt stated that grammar. Measured on `src/lib/triage.ts` before this module
- * landed: ZERO occurrences of "proof", "unit test:", "grep:" or "dialect" in 561 lines. The real
- * cost, on a real paid run: the auto-triage rung fired at 01:00:33Z, spent $1.48, opened PR #1102
- * proposing W1-T286 — and `lint-plan` failed it with SIX blocking violations (four proof-dialect,
- * two proof-resolvability) on proofs the worker itself wrote. Four of its five proofs were
- * unexecutable: two free prose, two `grep:`-prefixed with no `in <path>` clause. A human hand-edited
- * four lines to unblock it, changing all four to `unit test: test/fs-race-alerts.test.ts`.
- *
- * WHY ONE SHARED CONST AND NOT A LINE IN EACH PROMPT. `rmd triage` and `rmd plan` both file new
- * tasks and both hit the identical gate, so the words are identical; two copies would drift, and the
- * drift would be invisible until the next $1.48 fire. test/proof-grammar.test.ts extracts every
- * example proof FROM THIS TEXT and runs it through the real parser and the real metacharacter
- * linter, so an example that stops parsing fails the build — see that file for what that does and
- * does not prove.
- *
- * KEEP IT SHORT. Every line here is read on every fire, by a worker that also has to hold the rest
- * of the prompt in mind. Only BLOCKING rules earned a line: `lintTask` returns
- * `ok: violations.every((v) => v.severity !== "block")` (task-linter.ts), so a `warn` cannot stall a
- * filing. Deliberately omitted for that reason: the call-site rule (`callSiteViolations`, default
- * `warn`) and the unescaped-`.` metacharacter case (`BRE_WARNING_METACHARS`, warn).
+ * The acceptance-proof dialect, as prompt text — the ONE copy both task-filing lanes (`rmd triage`, `rmd plan`) read.
+ * A task's `proof:` values are EXECUTED at review (`parseWhitelistedProof`) and lint-gated by CI's changed-tasks
+ * `rmd lint-plan` before that, so a newly filed task whose proofs do not parse cannot merge. Neither prompt stated the
+ * grammar: auto-triage spent $1.48 on PR #1102 (W1-T286) and lint-plan failed it with SIX blocking violations on proofs
+ * the worker wrote — two free prose, two `grep:` with no `in <path>`. One shared const, because two copies drift.
+ * test/proof-grammar.test.ts lifts every example proof FROM THIS TEXT through the real parser and metacharacter linter.
+ * KEEP IT SHORT: only BLOCKING lint rules earned a line (`lintTask`'s `ok` ignores `warn`), so the call-site rule and
+ * the unescaped-`.` case are omitted on purpose.
  */
 export const ACCEPTANCE_PROOF_GRAMMAR: readonly string[] = [
   "  ACCEPTANCE PROOFS are EXECUTED by the reviewer, and CI's `rmd lint-plan` REFUSES free prose on",
@@ -57,18 +34,11 @@ export const ACCEPTANCE_PROOF_GRAMMAR: readonly string[] = [
 ];
 
 /**
- * W1-T8625 — THE PR-BODY SIBLING of {@link ACCEPTANCE_PROOF_GRAMMAR}, for a worker that writes the PR body for the change
- * it makes in the SAME PR (the alert-fix lane today; W1-T8572's main-repair lane next).
- *
- * WHY NOT THE FILING GRAMMAR AS IT STANDS. That one is framed for FILING ("its test does not exist yet", "DEFAULT TO THE
- * WHOLE-FILE `unit test:` FORM") and shows YAML `proof: "..."` lines. A PR body's block is `- <claim> | <proof>` bullets
- * with the bare proof after the pipe, and a whole-file `unit test:` on a file that already passes on main passes at base
- * too — W1-T362 grades that stale, so proof-discrimination still fails. Main-repair PR #11096 carried prose proofs and
- * failed exactly there. The `grep:` rules are shared verbatim ({@link GREP_PROOF_DIALECT_RULES}).
- *
- * test/an-alert-fix-pr-carries-proofs-the-reviewer-can-execute.test.ts lifts each `- <claim> | ...` example bullet OUT
- * OF THE PROMPT TEXT, fills its placeholders and runs it through `parseAcceptanceBlock` and `parseWhitelistedProof`, so an
- * example that stops parsing fails the build. Keep each example bullet on its own line with nothing after the proof.
+ * W1-T8625 — the PR-BODY sibling, for a worker writing the body of the PR that carries its own change (alert-fix;
+ * W1-T8572 main repair next). Not the filing grammar as it stands: that one teaches YAML `proof:` lines and the
+ * whole-file `unit test:` form, and a test file already passing on main passes at base too, so proof-discrimination
+ * fails (#11096). W1-T8625's test lifts each `- <claim> | ...` example bullet from the prompt and parses it; keep one
+ * per line, with nothing after its proof.
  */
 export const PR_BODY_ACCEPTANCE_GRAMMAR: readonly string[] = [
   "  ACCEPTANCE PROOFS are EXECUTED by the reviewer. A proof with no dialect is prose, and prose caps",
@@ -85,15 +55,11 @@ export const PR_BODY_ACCEPTANCE_GRAMMAR: readonly string[] = [
 ];
 
 /**
- * W1-T8625 — the proofs in a PR body's Acceptance block that the reviewer will NOT execute, in block order; `[]` when
- * every proof executes or the body has no block. ONE pure helper, shared by every lane that checks a body it opened
- * (the alert-fix dispatcher; W1-T8572 reuses it for main repair) so the lanes cannot disagree on what "inert" means.
- *
- * A proof is inert when `!isDialectPrefixed(p) || isDemonstrationProof(p) || parseWhitelistedProof(p) === null` — the
- * falsifier test `plan-proposals.ts` already applies. `parseWhitelistedProof(...) === null` ALONE is not enough: its
- * W1-T65 legacy bare-path match ACCEPTS dialect-less prose that names a test path (`test/x.test.ts passes`), the shape
- * #11096 carried. Parses the body itself rather than trusting `acceptanceAuthorTimeCheck`, whose trailer arm returns
- * `ok` before it reads the block.
+ * W1-T8625 — a PR body's Acceptance proofs the reviewer will NOT execute, in block order (`[]` when all execute or
+ * there is no block). The ONE helper every lane checking a body it opened uses (W1-T8572 reuses it), with
+ * plan-proposals.ts's falsifier test: `parseWhitelistedProof(...) === null` alone misses dialect-less prose naming a
+ * test path, which its W1-T65 legacy bare-path match accepts. It parses the body itself, because
+ * `acceptanceAuthorTimeCheck`'s trailer arm returns before it reads the block.
  */
 export function inertAcceptanceProofs(body: string): string[] {
   return parseAcceptanceBlock(body)
