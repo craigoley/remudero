@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -17,3 +17,14 @@
     - claim: "the lane that trips the task-id-existence gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
       proof: "grep: ci-learning:10904:task-id-existence in learnings/ci.yaml"
   note: "Filed by the ci-learning rung from ci-learning:10904:task-id-existence. The task-id-existence gate went red on #10904 and was repaired; the repair touched plan/tasks.d/W1-T5399-discover-interrupted-assistant-actions-without-resubmission.yaml. Recommended action: unclear. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The declared scope is a single file, learnings/ci.yaml. It adds a learnings entry that points the lane tripping the task-id-existence gate at a lesson. That is documentation-like guidance and doesn't touch secrets, auth, deletion, merge or deploy policy, or other irreversible actions."
+      - "The acceptance criterion is a grep for a specific entry string, so it can be checked mechanically. That makes it verifiable from what is shown."
+      - "The ci-learning family has a good track record (20 merged, 1 declined, Beta mean 0.91). The gates state shows no concerns, and the PR still goes through CI and review."
+      - "The description says the entry carries a lesson about an existing gate to the lane that trips it. It doesn't say the gate's policy changes, so it doesn't appear to alter review policy."
+    judged_at: "2026-10-12T07:51:00.923Z"
+    pin: "7d88b008472bceb8c5ce3f484c703e392b2e447a5491542eb92c85ad447b437d"

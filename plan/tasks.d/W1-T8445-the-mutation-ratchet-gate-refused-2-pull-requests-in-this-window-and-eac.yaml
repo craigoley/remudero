@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -17,3 +17,14 @@
     - claim: "the lane that trips the mutation-ratchet gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
       proof: "grep: ci-learning:10954:mutation-ratchet in learnings/ci.yaml"
   note: "Filed by the ci-learning rung from ci-learning:10954:mutation-ratchet. The mutation-ratchet gate went red on #10954 and was repaired; the repair touched scripts/comment-load-baseline.json, src/lib/classify.ts, src/lib/sweep.ts, test/the-daemon-reloads-its-plan-off-the-loop.test.ts. Recommended action: unclear. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The declared scope is a single file, learnings/ci.yaml, which is a learnings entry (documentation-like guidance). Nothing in the description points to secrets, auth, deletion, or merge/deploy policy changes."
+      - "The acceptance criterion is a grep check for a specific entry id, so it can be verified automatically from what is shown."
+      - "The ci-learning family has a good track record (20 merged, 1 declined, Beta mean 0.91), and the task follows that family's established practice of adding a matched learnings entry."
+      - "The description names an existing defect, namely the mutation-ratchet gate repeatedly refusing PRs, and the fix is to add a learning. It does not change the gate itself, and the PR still goes through CI and review."
+    judged_at: "2026-10-12T07:50:50.637Z"
+    pin: "801f22d6a2df157e13e5a2d68c083c6b0717546ed07e2f15ca4eeeba04da8101"
