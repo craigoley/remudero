@@ -57,12 +57,31 @@ test("W1-T8472: a container projection without lift adds no container-ceiling re
   assert.deepEqual(live.reasons, []);
   assert.equal(live.numbers.containerBasis,
     "projection does not predict pressure: 84% of 215 flagged verdicts were followed by it, against 86% of all (noise 5%)");
+
+  const spacing = memory.SWAP_STALL_WINDOW_MS + 1;
+  const noisy = memory.containerLiftOf([
+    ...Array.from({ length: 30 }, (_, i) => ({
+      at: NOW - memory.SWAP_STALL_WINDOW_MS - i * spacing, flagged: true, pressed: i < 3,
+    })),
+    ...Array.from({ length: 70 }, () => ({
+      at: NOW - memory.SWAP_STALL_WINDOW_MS - 31 * spacing, flagged: false, pressed: false,
+    })),
+  ], NOW);
+  assert.ok("samples" in noisy);
+  assert.equal(noisy.afterProjection, 0.1);
+  assert.equal(noisy.afterAny, 0.03);
+  const withinNoise = memory.evaluateShadowMemory(inputs({ containerLift: noisy }), POLICY);
+  assert.deepEqual(withinNoise.reasons, [], "a positive lift inside the flagged share's noise cannot defer");
+  assert.equal(withinNoise.numbers.containerBasis,
+    "projection does not predict pressure: 10% of 30 flagged verdicts were followed by it, against 3% of all (noise 11%)");
 });
 
 test("W1-T8472: a container projection with lift adds container-ceiling and names its shares", () => {
   const lift = memory.containerLiftOf(history(true), NOW);
   assert.ok("samples" in lift);
   assert.ok(lift.afterProjection - lift.afterAny > lift.noise);
+  assert.equal(lift.noise, 2 * Math.sqrt(lift.afterProjection * (1 - lift.afterProjection) / lift.samples),
+    "the flagged share supplies its own sampling noise");
   const verdict = memory.evaluateShadowMemory(inputs({ containerLift: lift }), POLICY);
   assert.deepEqual(verdict.reasons, ["container-ceiling"]);
   const pct = (v: number) => `${Math.round(v * 100)}%`;
@@ -180,6 +199,9 @@ test("W1-T8472: each verdict records its projection flag and outcome in the pres
   assert.deepEqual(readdirSync(join(root, "state")), [memory.CONTAINER_PRESSURE_FILE], "the existing store is the only file");
   assert.equal(rows.filter((r) => r.step === memory.SHADOW_STEP).length, 3);
   assert.ok(rows.filter((r) => r.step === memory.SHADOW_STEP).every((r) => r.mode === "shadow"));
+  for (const row of rows.filter((r) => r.step === memory.SHADOW_STEP)) {
+    assert.match((row.numbers as memory.ShadowVerdict["numbers"]).containerBasis, /^projection does not predict pressure:/);
+  }
 });
 
 test("container history stays capped, and legacy or torn stores fall back to the projection alone", (t) => {

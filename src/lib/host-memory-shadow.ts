@@ -702,7 +702,7 @@ export function containerLiftOf(history: ContainerLiftSample[], now: number): Co
   }
   const afterAny = closed.filter((s) => followed(s.at)).length / closed.length;
   const afterProjection = flagged.filter((s) => followed(s.at)).length / flagged.length;
-  return { samples: flagged.length, afterProjection, afterAny, noise: 2 * Math.sqrt(afterAny * (1 - afterAny) / flagged.length) };
+  return { samples: flagged.length, afterProjection, afterAny, noise: 2 * Math.sqrt(afterProjection * (1 - afterProjection) / flagged.length) };
 }
 
 function containerPredictsPressure(relation: ContainerLift | undefined): { counts: boolean; basis: string } {
