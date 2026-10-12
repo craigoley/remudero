@@ -19,5 +19,7 @@
   origin: feedback#evidence-coverage-daemon-tokens
   plan_refs: ["§7B"]
   files: [src/run-task.ts, src/lib/benchmark-evidence.ts, test/daemon-lane-tokens.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=5a875ace3cdc09e5
   attempts: 0
