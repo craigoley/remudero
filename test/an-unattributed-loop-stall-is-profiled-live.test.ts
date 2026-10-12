@@ -49,26 +49,6 @@ function stopProfiled(telemetry: ReturnType<typeof startReadPlaneTelemetry>): vo
   telemetry.stop();
 }
 
-test("W1-T7746: a main-thread busy loop past the bound is profiled and its function is the top frame in the ledger row", async () => {
-  const rows: Row[] = [];
-  const telemetry = startReadPlaneTelemetry();
-  try {
-    telemetry.sample.observeLoopLag({ lagMs: 1, intervalMs: INTERVAL_MS }, (step, extra) => rows.push({ step, ...extra }));
-    assert.equal(await telemetry.stallProfiler.ready(), true);
-    await sleep(INTERVAL_MS);
-    stallTheLoop(1500);
-    const row = await waitFor(() => rows.find((r) => r.step === "daemon.loop_stall_profile"));
-    const frames = row.top_frames as Frame[];
-    assert.equal(frames[0]?.function, "busyLoopPastTheBound");
-    assert.match(frames[0]!.url, /an-unattributed-loop-stall-is-profiled-live\.test\.ts/);
-    assert.ok(frames[0]!.self_ms > 0);
-    assert.ok(Number(row.lag_ms) >= Number(row.bound_ms), `lag ${row.lag_ms} past bound ${row.bound_ms}`);
-    assert.equal(rows.filter((r) => r.step === "daemon.loop_stall_profile_failed").length, 0);
-  } finally {
-    stopProfiled(telemetry);
-  }
-});
-
 test("W1-T7746: the profile bound follows the interval and the observed lag history", () => {
   const quiet = Array.from({ length: 100 }, () => 5);
   const noisy = Array.from({ length: 100 }, (_, i) => i * 100);
@@ -92,27 +72,6 @@ test("W1-T7746: the profile bound follows the interval and the observed lag hist
   } finally {
     quietProfiler.stop();
     noisyProfiler.stop();
-  }
-});
-
-test("W1-T7746: the profile row carries sync_spawn_ms and the unattributed remainder", async () => {
-  const rows: Row[] = [];
-  const telemetry = startReadPlaneTelemetry();
-  try {
-    telemetry.sample.observeLoopLag({ lagMs: 1, intervalMs: INTERVAL_MS }, (step, extra) => rows.push({ step, ...extra }));
-    assert.equal(await telemetry.stallProfiler.ready(), true);
-    await sleep(INTERVAL_MS);
-    childProcess.execFileSync(process.execPath, ["-e", "setTimeout(() => {}, 400)"]);
-    stallTheLoop(1500);
-    const row = await waitFor(() => rows.find((r) => r.step === "daemon.loop_stall_profile"));
-    const lagMs = Number(row.lag_ms);
-    const syncSpawnMs = Number(row.sync_spawn_ms);
-    assert.ok(syncSpawnMs >= 400, `sync_spawn_ms ${syncSpawnMs}`);
-    assert.equal(row.unattributed_ms, lagMs - syncSpawnMs);
-    assert.ok(Number(row.unattributed_ms) >= 300, `unattributed_ms ${row.unattributed_ms}`);
-    assert.equal((row.top_frames as Frame[])[0]?.function, "busyLoopPastTheBound");
-  } finally {
-    stopProfiled(telemetry);
   }
 });
 
@@ -171,19 +130,6 @@ test("W1-T7746: a failing watchdog start, heartbeat, exit or logger disables the
   assert.equal(await unlogged.ready(), false);
   unlogged.stop();
 
-  // A logger that throws on the profile row itself: the row is lost, the watchdog is disabled, the loop runs on.
-  const thrown: string[] = [];
-  const telemetry = startReadPlaneTelemetry();
-  try {
-    telemetry.sample.observeLoopLag({ lagMs: 1, intervalMs: INTERVAL_MS }, (step) => { thrown.push(step); throw new Error("ledger full"); });
-    assert.equal(await telemetry.stallProfiler.ready(), true);
-    await sleep(INTERVAL_MS);
-    stallTheLoop(400);
-    await waitFor(() => (thrown.includes("daemon.loop_stall_profile_failed") ? true : undefined));
-    assert.deepEqual(thrown, ["daemon.loop_stall_profile", "daemon.loop_stall_profile_failed"]);
-  } finally {
-    stopProfiled(telemetry);
-  }
 });
 
 test("W1-T7746: top self-time frames skip V8 bookkeeping nodes and order by self time", () => {
@@ -240,4 +186,64 @@ telemetry.stallProfiler.ready().then((attached) => {
   const out = childProcess.execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script],
     { encoding: "utf8", timeout: 30_000 });
   assert.equal(out.trim(), "exiting");
+});
+
+// THE PROFILING TESTS COME LAST. Each enables V8's Profiler domain, whose session resets this process's precise
+// coverage when it disconnects (stopProfiled snapshots it first), so a test placed after one reads uncovered.
+
+test("W1-T7746: a logger that throws on the profile row disables the watchdog, never the loop", async () => {
+  // The row is lost and the watchdog disabled; the stall itself already ended, so the loop runs on.
+  const thrown: string[] = [];
+  const telemetry = startReadPlaneTelemetry();
+  try {
+    telemetry.sample.observeLoopLag({ lagMs: 1, intervalMs: INTERVAL_MS }, (step) => { thrown.push(step); throw new Error("ledger full"); });
+    assert.equal(await telemetry.stallProfiler.ready(), true);
+    await sleep(INTERVAL_MS);
+    stallTheLoop(400);
+    await waitFor(() => (thrown.includes("daemon.loop_stall_profile_failed") ? true : undefined));
+    assert.deepEqual(thrown, ["daemon.loop_stall_profile", "daemon.loop_stall_profile_failed"]);
+  } finally {
+    stopProfiled(telemetry);
+  }
+});
+
+test("W1-T7746: a main-thread busy loop past the bound is profiled and its function is the top frame in the ledger row", async () => {
+  const rows: Row[] = [];
+  const telemetry = startReadPlaneTelemetry();
+  try {
+    telemetry.sample.observeLoopLag({ lagMs: 1, intervalMs: INTERVAL_MS }, (step, extra) => rows.push({ step, ...extra }));
+    assert.equal(await telemetry.stallProfiler.ready(), true);
+    await sleep(INTERVAL_MS);
+    stallTheLoop(1500);
+    const row = await waitFor(() => rows.find((r) => r.step === "daemon.loop_stall_profile"));
+    const frames = row.top_frames as Frame[];
+    assert.equal(frames[0]?.function, "busyLoopPastTheBound");
+    assert.match(frames[0]!.url, /an-unattributed-loop-stall-is-profiled-live\.test\.ts/);
+    assert.ok(frames[0]!.self_ms > 0);
+    assert.ok(Number(row.lag_ms) >= Number(row.bound_ms), `lag ${row.lag_ms} past bound ${row.bound_ms}`);
+    assert.equal(rows.filter((r) => r.step === "daemon.loop_stall_profile_failed").length, 0);
+  } finally {
+    stopProfiled(telemetry);
+  }
+});
+
+test("W1-T7746: the profile row carries sync_spawn_ms and the unattributed remainder", async () => {
+  const rows: Row[] = [];
+  const telemetry = startReadPlaneTelemetry();
+  try {
+    telemetry.sample.observeLoopLag({ lagMs: 1, intervalMs: INTERVAL_MS }, (step, extra) => rows.push({ step, ...extra }));
+    assert.equal(await telemetry.stallProfiler.ready(), true);
+    await sleep(INTERVAL_MS);
+    childProcess.execFileSync(process.execPath, ["-e", "setTimeout(() => {}, 400)"]);
+    stallTheLoop(1500);
+    const row = await waitFor(() => rows.find((r) => r.step === "daemon.loop_stall_profile"));
+    const lagMs = Number(row.lag_ms);
+    const syncSpawnMs = Number(row.sync_spawn_ms);
+    assert.ok(syncSpawnMs >= 400, `sync_spawn_ms ${syncSpawnMs}`);
+    assert.equal(row.unattributed_ms, lagMs - syncSpawnMs);
+    assert.ok(Number(row.unattributed_ms) >= 300, `unattributed_ms ${row.unattributed_ms}`);
+    assert.equal((row.top_frames as Frame[])[0]?.function, "busyLoopPastTheBound");
+  } finally {
+    stopProfiled(telemetry);
+  }
 });
