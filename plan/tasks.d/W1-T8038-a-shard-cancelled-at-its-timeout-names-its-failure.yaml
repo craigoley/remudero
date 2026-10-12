@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-11: file the fix-lane follow-ups from the PR #10829 / #10852 ci-shard (7/8)|(8/8) timeouts after the W1-T6085 pure-test pool (#10834)"
   plan_refs: [W1-T6085, W1-T94, W1-T2291, W1-T3345, W1-T1223, W1-T2671, W1-T100]
   files: [src/run-task.ts, src/lib/ci-friction-gardener.ts, src/lib/sweep.ts, test/a-shard-cancelled-at-its-timeout-names-its-failure.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

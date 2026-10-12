@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-11: a review that could not run its proofs because of a host gap is re-reviewed, not body-repaired (evidence PR #10741, 2026-10-10)"
   plan_refs: [W1-T3669, W1-T3306, W1-T7243, W1-T7822, W1-T5840, W1-T3704, W1-T3390]
   files: [src/lib/sweep.ts, src/lib/classify.ts, test/a-host-gap-review-is-re-reviewed-not-body-repaired.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
