@@ -624,17 +624,9 @@ else
   echo "serve-container: resource policy NOT applied — ${SCRIPT_ROOT}/deploy/resource-policy.sh is absent"
 fi
 
-# ── 5b. W1-T8311: AN AUTOMATIC REPLACE IS ADMITTED BY FRESH HOST PRESSURE, OR HELD ─────────────
-# The watchdog's serve convergence (src/lib/serve-policy-convergence.ts) runs this script with
-# RMD_SERVE_REPLACE_ADMISSION=required and the host memory budget's existing thresholds
-# (plan/policy.yaml sweep.hostMemoryBudget). Stopping the console under memory pressure turns that
-# pressure into downtime and a cold boot, so the replace reads the host NOW (MemAvailable, swap-in
-# over a short window, memory PSI) before its first destructive step, and again right before it.
-# The candidate's peak is the policy's measured serve cold start; the old console's resident memory
-# is credited because it is stopped before the new one starts. An unreadable reading or threshold
-# is a named HOLD, never zero pressure. A hold exits ${SERVE_REPLACE_HELD_EXIT:-75} with the old
-# container, image, mounts, credentials and route untouched. An operator's own run sets nothing and
-# is not gated: replacing the console by hand stays a deliberate act.
+# ── 5b. W1-T8311: AN AUTOMATIC REPLACE IS ADMITTED BY FRESH HOST PRESSURE, OR HELD (exit 75) ───
+# serve-policy-convergence.ts sets RMD_SERVE_REPLACE_ADMISSION=required and the host budget's thresholds;
+# an unreadable reading is a named hold. An operator's hand run sets nothing and is not gated.
 SERVE_REPLACE_ADMISSION="${RMD_SERVE_REPLACE_ADMISSION:-}"
 SERVE_REPLACE_HELD_EXIT=75
 ADMIT_MEMINFO_PATH="${RMD_SERVE_ADMIT_MEMINFO_PATH:-/proc/meminfo}"
@@ -649,7 +641,6 @@ serve_replace_hold() {
 
 admit_number() { [[ "${1}" =~ ^[0-9]+([.][0-9]+)?$ ]]; }
 
-# Resident MiB of the running console, from `docker stats`; empty when unreadable (no credit then).
 serve_resident_mib() {
   docker stats --no-stream --format '{{.MemUsage}}' "${CONTAINER_NAME}" 2>/dev/null | awk '
     { u = $1; n = u; sub(/[A-Za-z]+$/, "", n); unit = u; sub(/^[0-9.]+/, "", unit)
@@ -661,7 +652,7 @@ serve_resident_mib() {
 serve_replace_admission() {
   local stage="$1"
   [ "${SERVE_REPLACE_ADMISSION}" = "required" ] || return 0
-  [ "${CONTAINER_EXISTS}" -eq 1 ] || return 0 # no console to preserve
+  [ "${CONTAINER_EXISTS}" -eq 1 ] || return 0
   local reserve="${RMD_SERVE_ADMIT_HOST_RESERVE_MIB:-}" swap_max="${RMD_SERVE_ADMIT_SWAPIN_MAX:-}"
   local some_max="${RMD_SERVE_ADMIT_PSI_SOME_AVG10_MAX:-}" full_max="${RMD_SERVE_ADMIT_PSI_FULL_AVG10_MAX:-}"
   local candidate="${RMD_SERVE_ADMIT_CANDIDATE_MIB:-}"
