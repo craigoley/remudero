@@ -61,6 +61,7 @@ import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB } from "./host-memory-ledger.js";
 import { ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./host-memory-shadow.js";
+import { installedDaemonSlackReclaimer, reclaimLedgerFields, type SlackReclaimRecord } from "./daemon-memory-policy.js";
 import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
 } from "./pr-blocker.js";
@@ -13714,6 +13715,40 @@ export interface FixHostPressure {
   containerFloorMib?: number;
   binding?: "host" | "container";
   tier?: "fits" | "host-short" | "container-short" | "nothing-to-wait-for";
+  /** W1-T8401: the daemon's reclaim before this reading would have held container-short; the reading is then the
+   *  fresh one taken after it. */
+  reclaim?: SlackReclaimRecord;
+}
+
+/** The daemon's own reclaim, as a reading's caller hands it in: given the container working set, reclaim once and call
+ *  `reread` after a collection. Undefined when this process has no reclaimer. */
+export type SlackReclaim = (containerWorkingSetMib: number | undefined, reread: () => number | undefined) => SlackReclaimRecord | undefined;
+
+/** The production reclaim: this process's installed reclaimer (only the daemon installs one). */
+export const installedSlackReclaim: SlackReclaim = (workingSetMib, reread) =>
+  installedDaemonSlackReclaimer()?.reclaim(workingSetMib, reread);
+
+/**
+ * W1-T8401 — RECLAIM BEFORE HOLDING. A reading that would hold dispatch container-short first asks the daemon to give
+ * back its own slack (`reclaim`: a full collection under the tightest growth factor, paced by evidence), then decides
+ * on the fresh reading `reread` takes, carrying the reclaim on it for the hold row. Any other tier, or no reclaimer,
+ * returns `first` unchanged. A paced or unavailable reclaim keeps `first`, named.
+ */
+export function reclaimBeforeHold<T extends { tier?: string; container?: ContainerMemoryHeadroom; reclaim?: SlackReclaimRecord }>(
+  first: T,
+  reread: () => T,
+  reclaim: SlackReclaim | undefined,
+): T {
+  if (first.tier !== "container-short" || reclaim === undefined) return first;
+  const workingSet = (reading: T) => reading.container !== undefined && "workingSetMib" in reading.container
+    ? reading.container.workingSetMib : undefined;
+  let fresh: T | undefined;
+  const record = reclaim(workingSet(first), () => {
+    fresh = reread();
+    return workingSet(fresh);
+  });
+  if (record === undefined) return first;
+  return { ...(record.outcome === "reclaimed" && fresh !== undefined ? fresh : first), reclaim: record };
 }
 
 /** The workers a pressure reading admits at `perWorkerMib` each: none when unreadable, at least one when the container
@@ -13727,6 +13762,15 @@ export function pressureWorkers(pressure: FixHostPressure, perWorkerMib: number)
 export function readFixHostPressure(
   floorMib: number,
   read: (path: string) => string = path => readFileSync(path, "utf8"),
+  container?: { read: () => ContainerMemoryHeadroom; ownWorkLive: () => boolean; reclaim?: SlackReclaim },
+): FixHostPressure {
+  const once = () => readFixHostPressureOnce(floorMib, read, container);
+  return reclaimBeforeHold(once(), once, container?.reclaim);
+}
+
+function readFixHostPressureOnce(
+  floorMib: number,
+  read: (path: string) => string,
   container?: { read: () => ContainerMemoryHeadroom; ownWorkLive: () => boolean },
 ): FixHostPressure {
   let meminfo: string;
@@ -13764,6 +13808,7 @@ export function productionFixPressure(floorMib: number, ledgerPath: string): Fix
   return readFixHostPressure(floorMib, undefined, {
     read: () => readContainerMemoryHeadroom(),
     ownWorkLive: () => ownContainerWorkLive(dirname(dirname(ledgerPath))),
+    reclaim: installedSlackReclaim,
   });
 }
 
@@ -13836,6 +13881,7 @@ export function createSweepFixAdmissionController(input: {
       pressure_binding: state.pressure?.binding,
       pressure_tier: state.pressure?.tier,
       pressure_host_available_mib: state.pressure?.hostAvailableMib,
+      ...reclaimLedgerFields(state.pressure?.reclaim),
       pending_reservations: reservations,
     });
   };
@@ -19370,6 +19416,7 @@ export function logQueueGovernorDeferral(
     pressure_binding: result.pressure?.binding,
     pressure_tier: result.pressure?.tier,
     pressure_host_available_mib: result.pressure?.hostAvailableMib,
+    ...reclaimLedgerFields(result.pressure?.reclaim),
   });
 }
 
@@ -19538,6 +19585,8 @@ export interface MemoryGovernorResult {
   /** fits; host-short or container-short (deferred); nothing-to-wait-for: the container is short but no live
    *  work in it can free memory, so waiting cannot help and the dispatch is admitted, named. */
   tier?: "fits" | "host-short" | "container-short" | "nothing-to-wait-for";
+  /** W1-T8401: the daemon's reclaim before a container-short hold (see {@link reclaimBeforeHold}). */
+  reclaim?: SlackReclaimRecord;
 }
 
 /** The memory governor's pure predicate: STRICTLY BELOW `policy.memoryFloorMib` available, NEW
@@ -19596,6 +19645,7 @@ export function logMemoryObservation(
       binding: result.binding,
       tier: result.tier,
     }),
+    ...reclaimLedgerFields(result.reclaim),
   });
 }
 

@@ -1658,6 +1658,9 @@ import {
   armOutcomeArmed,
   checkCostGovernor,
   checkMemoryGovernor,
+  installedSlackReclaim,
+  reclaimBeforeHold,
+  type SlackReclaim,
   checkQueueGovernor,
   productionFixPressure,
   deriveQueueGovernorTrailingFlow,
@@ -1799,7 +1802,10 @@ import {
 } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
-import { applyDaemonMemoryPolicy, createDaemonMemoryGovernor, readDaemonMemoryPolicy } from "./lib/daemon-memory-policy.js";
+import {
+  applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy,
+  reclaimLedgerFields,
+} from "./lib/daemon-memory-policy.js";
 import { workerThreads, type TrackedWorker } from "./lib/worker-heaps.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
@@ -3445,7 +3451,7 @@ export function watchDispatchSpawn(
           }
           undeclaredPaths = checkpoint.undeclared;
         }
-        await (seams.push ?? gitPushRunBranchAsync)(cwd);
+        await pushRestartCheckpoint(cwd, seams.push); // W1-T8397: the recycle/quiet/restart round end skips the PR gate too
       } catch (error) {
         return { ended: false, reason: `checkpoint failed: ${String((error as Error)?.message ?? error)}` };
       }
@@ -3488,8 +3494,14 @@ export async function commitAndPushRestartCheckpoint(
     if (!checkpoint.committed) throw new Error(`restart checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}`);
     undeclared = checkpoint.undeclared;
   }
-  await (seams.push ?? gitPushRunBranchAsync)(worktreePath, { prGates: false }); // a checkpoint opens no PR: see worktreePushExecAsync
+  await pushRestartCheckpoint(worktreePath, seams.push);
   return { undeclared };
+}
+
+/** W1-T8397: THE one restart-checkpoint push, shared by `commitAndPushRestartCheckpoint` and the `watchDispatchSpawn`
+ * `endRound` round end so the two cannot drift: a checkpoint opens no PR, so it skips the PR gate (see worktreePushExecAsync). */
+export async function pushRestartCheckpoint(worktreePath: string, push: typeof gitPushRunBranchAsync = gitPushRunBranchAsync): Promise<void> {
+  await push(worktreePath, { prGates: false });
 }
 
 /** W1-T8008: the `run.freshness_handoff` and `freshness_yield` verdict fields of a boundary yield, naming the undeclared paths. */
@@ -35589,6 +35601,7 @@ function queueGovernorGateFor(
       pressure_available_mib: result.pressure?.availableMib, pressure_floor_mib: result.pressure?.floorMib,
       pressure_reason: result.pressure?.reason, pressure_binding: result.pressure?.binding, pressure_tier: result.pressure?.tier,
       pressure_host_available_mib: result.pressure?.hostAvailableMib,
+      ...reclaimLedgerFields(result.pressure?.reclaim),
       tier: result.tier, deferred: result.deferred });
     if (!result.deferred) {
       admission = result;
@@ -35725,10 +35738,14 @@ export function memoryGovernorGateFor(
   // too, so a test never reads the cgroup of whatever container runs it.
   readContainer: (() => ContainerMemoryHeadroom) | undefined = readAvailableMib === undefined ? () => readContainerMemoryHeadroom() : undefined,
   ownWorkLive: () => boolean = () => ownContainerWorkLive(dirname(dirname(ledgerPath))),
+  // W1-T8401: a container-short reading first asks the daemon to reclaim its own slack, then decides on a fresh one.
+  reclaim: SlackReclaim | undefined = installedSlackReclaim,
 ): () => MemoryGovernorResult | undefined {
   return () => {
-    const available = readAvailableMibBounded(readAvailableMib ?? readAvailableMemoryMib, ledgerPath, runId, policy);
-    const result = checkMemoryGovernor(available, policy, readContainer?.(), ownWorkLive);
+    const once = () => checkMemoryGovernor(
+      readAvailableMibBounded(readAvailableMib ?? readAvailableMemoryMib, ledgerPath, runId, policy), policy, readContainer?.(), ownWorkLive,
+    );
+    const result = reclaimBeforeHold(once(), once, reclaim);
     // EVERY dispatch, including the ones it admits (design (iv)) — never gated on `result.deferred`.
     logMemoryObservation(result, appendLedger, ledgerPath, runId);
     return result.deferred ? result : undefined;
@@ -39755,6 +39772,17 @@ export async function daemonCommand(
   // The daemon's rolling rss+swap samples, kept across rotations and restarts for the memory budget's daemon split.
   const daemonFootprint = createDaemonFootprint(daemonFootprintPath(join(config.root, "state")));
   installDaemonFootprint(daemonFootprint);
+  // W1-T8401: before a container-short hold the daemon reclaims its own slack (one tightest-factor collection, paced
+  // by its footprint's own variance) and ledgers what it freed and the heap ceiling it would derive, in shadow.
+  const daemonMemoryGovernor = createDaemonMemoryGovernor({ policy: memoryPolicyRead.policy });
+  const slackReclaimer = createDaemonSlackReclaimer({
+    policy: memoryPolicyRead.policy,
+    inForcePercent: () => daemonMemoryGovernor.inForcePercent?.() ?? memoryPolicyRead.policy.heapGrowingPercent,
+    footprintBytes: () => daemonFootprint.samples().map((sample) => sample.bytes),
+    log: (record) => log("daemon.slack_reclaim", { ...record }),
+  });
+  installDaemonSlackReclaimer(slackReclaimer);
+  log("daemon.heap_ceiling_shadow", { basis: "boot", ...slackReclaimer.derivedCeiling() });
   try {
     try { await gardenerRuntime.flush(); } catch { log("garden.telemetry_failed", { reason: "runtime-inventory-write-failed" }); }
     // W1-T7744: the filing read is awaited here, before the loop, and behind each selection after — never on the loop.
@@ -39776,7 +39804,7 @@ export async function daemonCommand(
         }) : undefined,
         readLoopTelemetry: loopTelemetry.sample,
         readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha, { generation: runId, footprint: daemonFootprint }),
-        memoryGovernor: createDaemonMemoryGovernor({ policy: memoryPolicyRead.policy }),
+        memoryGovernor: daemonMemoryGovernor,
         lastStepBeforeBlock: () => lastReadPlaneStep,
         idleStarvedSupervised: process.env.RMD_IDLE_STARVED_SUPERVISED === "1" && !target.isSelf && !flagValue(rest, "--plan"),
         confirmedOpenPrCount: boardOpenPrCount.readConfirmed,
