@@ -1874,17 +1874,13 @@ function draftAbsenceProofViolations(task: import("./plan.js").Task): DraftLintV
   return out;
 }
 
-/** W1-T8714: the lint options BOTH floors pass to `lintTask` — the draft rung ({@link lintDraftedFragment}) and the
- *  approve repair ({@link relintRatificationFragment}). A drafted task is new by definition, so it lints as a filing:
- *  `riskTransition` with no base task makes an undeclared risk:high band a block. Held once so the two cannot drift
- *  apart again: they did, and 40 READY drafts were refused at approve (53 approve.error rows, 2026-09-25..10-12). */
 export const DRAFT_FILING_LINT_OPTIONS = Object.freeze({
   riskTransition: Object.freeze({ baseTask: undefined }),
   proofSelfPath: "block",
 } as const);
 
-/** Lint a drafted fragment exactly as `rmd approve` will. A fragment that does not parse is itself one block
- *  violation, so it drives a redraft rather than being cached as NOT-READY. */
+/** Lint a drafted fragment exactly as `rmd approve` will: both pass {@link DRAFT_FILING_LINT_OPTIONS} (W1-T8714), a new
+ *  task's filing lint. A fragment that does not parse is one block violation, so it drives a redraft. */
 export function lintDraftedFragment(
   fragmentYaml: string,
   proposalId: string,
@@ -3285,7 +3281,7 @@ function carryRatificationRationale(fragmentYaml: string, proposal: Ratification
   return carried;
 }
 
-/** Repair only the two mechanical filing failures. Scalar ranges keep all other authored YAML bytes intact. */
+/** Repair only mechanical filing failures (proofs, sizing, W1-T8714's undeclared band). Ranges keep all other bytes. */
 export function relintRatificationFragment(fragmentYaml: string, proposalId: string):
   | { ok: true; fragmentYaml: string }
   | { ok: false; reason: string } {
@@ -3326,8 +3322,6 @@ export function relintRatificationFragment(fragmentYaml: string, proposalId: str
     }
 
     const band = fields.get("band_meaning", true);
-    // W1-T8714: an already-high draft that declares no band gets the declaration that admits a span and exempts
-    // nothing, inserted after its risk line. Either declared band is the author's and is left alone.
     const risk = fields.get("risk", true);
     if (task.risk === "high" && task.band_meaning === undefined && isScalar(risk) && risk.range) {
       const endOfLine = fragmentYaml.indexOf("\n", risk.range[1]);
