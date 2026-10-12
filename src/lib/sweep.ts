@@ -31,7 +31,7 @@ import {
   probeCacheFromLedger, probeCacheKey, refundedStrikeKeys, strikesToRefund, type BaseProbeFile, type BaseProbeResult,
   assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshClearanceKey,
   refreshedOnSameRed, refreshRecordsFromLedger, refusedRefreshClearancesFromLedger,
-  type ImportClosureRead, type RefreshArm, type RefreshClearance,
+  type ImportClosureRead, type RefreshArm, type RefreshClearance, type RefreshHistorySource,
 } from "./base-reproduction.js";
 export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
 import { parse as parseYaml } from "yaml";
@@ -14407,6 +14407,7 @@ export async function runSweep(
     const fixedFiles = fields.blocker === "own-red"
       ? fixedOnMainTestFiles(pr, mainTipSha, deps.behindMainByPr, reproductionCache) : undefined;
     if (fixedFiles !== undefined && mainTipSha !== undefined) {
+      readRefreshHistory(pr);
       const refreshKey = `${pr.prNumber}@${pr.headSha}`;
       const prior = currentRows.findLast(row => (row.step === BASE_FIXED_REFRESH_STEP || row.step === BASE_RED_REFRESH_STEP) &&
         row.pr_number === pr.prNumber && row.head_sha === pr.headSha);
@@ -14733,12 +14734,45 @@ export async function runSweep(
   // W1-T8396 — every refresh step, keyed by PR and red, and the refusals already decided.
   const refreshRecords = refreshRecordsFromLedger(ledgerLines);
   const refusedClearances = refusedRefreshClearancesFromLedger(ledgerLines);
+  const refreshSteps = ["fix.base_refreshed", BASE_RED_REFRESH_STEP, BASE_FIXED_REFRESH_STEP, REFRESH_CLEARANCE_STEP];
+  const oldestRefreshRow = new Map<string, number>();
+  for (const row of ledgerLines) {
+    if (typeof row.step !== "string" || !refreshSteps.includes(row.step)) continue;
+    const at = Date.parse(String(row.ts));
+    if (Number.isFinite(at)) oldestRefreshRow.set(row.step, Math.min(at, oldestRefreshRow.get(row.step) ?? Infinity));
+  }
+  const refreshHistory = new Map<number, { source: RefreshHistorySource; unread: string[] }>();
+  // W1-T8533: retention is capped; only a live span covering the PR's whole life proves absence.
+  const readRefreshHistory = (pr: OpenPrView): { source: RefreshHistorySource; unread: string[] } => {
+    const cached = refreshHistory.get(pr.prNumber);
+    if (cached !== undefined) return cached;
+    const created = Date.parse(pr.createdAt ?? "");
+    if (Number.isFinite(created) && refreshSteps.every(step => (oldestRefreshRow.get(step) ?? Infinity) <= created)) {
+      const history = { source: "live" as const, unread: [] };
+      refreshHistory.set(pr.prNumber, history);
+      return history;
+    }
+    const union = resolveLedgerUnion(dirname(deps.ledgerPath), `"pr_number":${pr.prNumber}[,}]`, undefined, { step: refreshSteps });
+    const rows = parseLedger(union.matches.join("\n"));
+    const records = refreshRecordsFromLedger(rows).get(pr.prNumber) ?? [];
+    refreshRecords.set(pr.prNumber, [...records, ...(refreshRecords.get(pr.prNumber) ?? [])]);
+    for (const [key, evidence] of refusedRefreshClearancesFromLedger(rows)) {
+      if (!refusedClearances.has(key)) refusedClearances.set(key, evidence);
+    }
+    for (const key of baseRedHistoryFromLedger(rows).refreshed) baseRedHistory.refreshed.add(key);
+    const unread = [...union.unread, ...(union.unclassified ?? [])];
+    if (!union.ok && unread.length === 0) unread.push(dirname(deps.ledgerPath));
+    const history = { source: !union.ok || unread.length > 0 ? "unreadable" as const : "union" as const, unread };
+    refreshHistory.set(pr.prNumber, history);
+    return history;
+  };
   /** W1-T8396 — may merging main clear this head's red? Main's delta since the head's merge base, each
    *  failing test's import closure, the refresh history and a trial merge decide; one row records it.
    *  A refusal already recorded for this head and main is reused, never re-read or re-probed. */
   const assessRefresh = async (
     pr: OpenPrView, arm: RefreshArm, checks: readonly string[], testFiles: readonly string[], mainSha: string,
   ): Promise<RefreshClearance> => {
+    const history = readRefreshHistory(pr);
     const memo = refreshClearanceKey(pr.prNumber, pr.headSha, mainSha, testFiles);
     const decided = refusedClearances.get(memo);
     if (decided !== undefined) return { refresh: false, evidence: decided, reason: "this head's refusal at this main is already recorded" };
@@ -14759,10 +14793,12 @@ export async function runSweep(
     const clearance = await assessRefreshClearance({
       failingTestFiles: testFiles,
       reach: mainPathsReachingRed({ failingTestFiles: testFiles, mainChangedFiles, closure, isHarnessPath: isCiHarnessPath }),
-      priorRefresh: refreshedOnSameRed(refreshRecords, pr.prNumber, checks, testFiles),
+      priorRefresh: refreshedOnSameRed(refreshRecords, pr.prNumber, checks, testFiles) ? true
+        : history.source === "unreadable" ? undefined : false,
     }, deps.reproduceFailingTestsOnMerge ? () => deps.reproduceFailingTestsOnMerge!(pr, testFiles, mainSha) : undefined);
     appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: REFRESH_CLEARANCE_STEP,
-      ...refreshClearanceFields({ arm, pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainSha, checks, test_files: testFiles }, clearance) });
+      ...refreshClearanceFields({ arm, pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainSha, checks, test_files: testFiles },
+        clearance, history.source, history.unread) });
     if (!clearance.refresh) refusedClearances.set(memo, clearance.evidence);
     return clearance;
   };
@@ -17118,7 +17154,11 @@ export async function runSweep(
               }
               // W1-T4351 — A RED MAIN ALSO CARRIES IS NOT THIS DIFF'S. Stand down while main is red,
               // then spend this pass's ONE update-branch press once main is green; never a fix.
-              const baseRed = decideBaseRed(pr, mainLatestRun, baseRedHistory);
+              let baseRed = decideBaseRed(pr, mainLatestRun, baseRedHistory);
+              if (baseRed.kind === "refresh") {
+                readRefreshHistory(pr);
+                baseRed = decideBaseRed(pr, mainLatestRun, baseRedHistory);
+              }
               if (baseRed.kind !== "own") {
                 baseRedStandDownPrs.add(pr.prNumber);
                 acted = false;
@@ -17129,6 +17169,14 @@ export async function runSweep(
                 const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, check_name: baseRed.check, main_sha: mainSha,
                   ...(decidedSha !== mainSha ? { main_decided_by_sha: decidedSha } : {}) };
                 if (baseRed.kind === "refresh" && deps.updateBranch && baseRedRefreshPr === undefined) {
+                  if (readRefreshHistory(pr).source === "unreadable") {
+                    const clearance = await assessRefresh(pr, "base-red", (pr.ciFailures ?? []).map(failure => failure.name),
+                      baseReproductionFiles(pr.ciFailures ?? []), mainSha);
+                    if (!clearance.refresh) {
+                      standDownReason = `base red refresh refused: ${clearance.evidence} — ${clearance.reason}`;
+                      break;
+                    }
+                  }
                   baseRedRefreshPr = pr.prNumber;
                   let outcome: string;
                   try {
@@ -17372,6 +17420,7 @@ export async function runSweep(
                 // W1-T6405: main's fix can land BEFORE this head's first probe, so nothing was ever
                 // reproduced — a head BEHIND that main still takes it once before any fix round.
                 const fixedOnMain = !previouslyReproduced && (deps.behindMainByPr?.get(pr.prNumber) ?? 0) > 0;
+                if (verdict === "clear" && (previouslyReproduced || fixedOnMain)) readRefreshHistory(pr);
                 const refreshable = verdict === "clear" && (previouslyReproduced || fixedOnMain) && !baseRedHistory.refreshed.has(key);
                 // W1-T8396: a test passing on main is as consistent with "the PR broke it" as with "main
                 // fixed it" — refresh only on evidence the merge can clear it; a refusal is the PR's own red.
