@@ -254,6 +254,33 @@ export function prepareJudgedRun({ makeDir = () => mkdtempSync(join(tmpdir(), "r
   };
 }
 
+/** How an inline tally line begins on stdout (see {@link inlineJudgedArgs}). */
+const INLINE_TALLY_PREFIX = '{"version":1,';
+
+/**
+ * The judge's tally reporter for a run whose child cannot see this checkout: the review's proof child
+ * runs sandboxed with only the PR head bound, and with a declared env that carries no marker path. So
+ * the reporter rides the argv as a `data:` URL and writes its one tally line to stdout, after the
+ * run's own reporter output; {@link splitInlineTally} takes it back off.
+ */
+export function inlineJudgedArgs() {
+  const source = Buffer.from(readFileSync(TALLY_REPORTER, "utf8")).toString("base64");
+  return [`--test-reporter=data:text/javascript;base64,${source}`, "--test-reporter-destination=stdout"];
+}
+
+/** True when a `node --test` argv already carries {@link inlineJudgedArgs}'s reporter. */
+export function hasInlineJudge(args) {
+  return args.some((arg) => arg.startsWith("--test-reporter=data:text/javascript;base64,"));
+}
+
+/** An {@link inlineJudgedArgs} run's stdout split into the reporters' own output and the tally line ("" when absent). */
+export function splitInlineTally(stdout) {
+  const lines = String(stdout).split("\n");
+  const at = lines.findLastIndex((line) => line.startsWith(INLINE_TALLY_PREFIX));
+  if (at < 0) return { output: String(stdout), tallyText: "" };
+  return { output: [...lines.slice(0, at), ...lines.slice(at + 1)].join("\n"), tallyText: lines[at] };
+}
+
 const realOrResolved = (path) => {
   try {
     return realpathSync(path);

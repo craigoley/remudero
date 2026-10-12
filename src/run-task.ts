@@ -222,7 +222,7 @@ import { realThreadDecider, registryThreadItems, type ThreadDecisionContext } fr
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
-import { checkpointRemaining, isWipSubject, judgeCheckpointStop, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
+import { checkpointRemaining, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
 import { PREOPEN_GATE_STEP, renderPreopenGatePrompt, runPreopenGate, type PreopenGateResult } from "./lib/preopen-gate.js";
 import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
@@ -1225,7 +1225,7 @@ import {
   taskRecordPath,
   readBlobsAtRef,
   mergePlanBlobs,
-  loadPlanAtRef,
+  loadPlanAtRefAsync,
 } from "./lib/plan.js";
 import { exitCodeFor, GENERIC_EXIT_CODE, RmdError } from "./lib/errors.js";
 import { flushThenExit } from "./lib/flush-exit.js";
@@ -1494,6 +1494,7 @@ import {
   reviewLedgerLegibilityFields,
   reviewLedgerReasons,
   resolvePlanCriteriaAtHead,
+  resolvePlanCriteriaAtHeadAsync,
   type PlanCriteriaAtHeadDivergence,
   type PlanCriteriaAtHeadResult,
   parseWhitelistedProof,
@@ -2619,7 +2620,7 @@ export function buildSweepEffects(
     dispatchFixPreflightStandDownImpl: dispatchFixPreflightStandDown,
     ghLiveStateImpl: ghLiveState,
     fixRungTaskForImpl: fixRungTaskFor,
-    resolveTaskContractAtHeadImpl: resolveFixRungTaskContractAtHead,
+    resolveTaskContractAtHeadImpl: resolveFixRungTaskContractAtHeadAsync,
     createFixRungWorktreeImpl: createFixRungWorktreeWithToolchain,
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit,
     runFixRungImpl: (opts) => {
@@ -5073,15 +5074,18 @@ export function lastCommitSubject(worktreePath: string): string | undefined {
   }
 }
 
-/** A build PR's title: the branch's newest non-checkpoint subject, never a `wip:` one (#10482). */
-export function branchPrTitle(worktreePath: string): string | undefined {
+/** A build PR's title, never a `wip:` one (#10482). With its filed task it is the task's own title (W1-T7952),
+ *  so a checkpoint-only branch never opens as "chore: yield at worker" and no merge commit (`--no-merges`, so
+ *  the restore merge too, #10936) lends it words or a type; with no task, the newest non-checkpoint subject. */
+export function branchPrTitle(worktreePath: string, task?: { id: string; title?: string }): string | undefined {
   try {
-    const subjects = hostWorktreeGit(worktreePath, ["log", "--format=%s", "origin/main..HEAD"]).split("\n");
-    return prTitleFromBranchCommits(subjects) ?? lastCommitSubject(worktreePath);
+    const subjects = hostWorktreeGit(worktreePath, ["log", "--format=%s", ...(task ? ["--no-merges"] : []), "origin/main..HEAD"]).split("\n");
+    return (task && prTitleForTask(subjects, task)) || (prTitleFromBranchCommits(subjects) ?? lastCommitSubject(worktreePath));
   } catch (e) {
-    // An unreadable range falls back to the tip subject, the pre-#10482 behaviour.
+    // An unreadable range falls back to the tip subject, the pre-#10482 behaviour; a filed task still names its PR.
     void e;
-    return lastCommitSubject(worktreePath);
+    const tip = lastCommitSubject(worktreePath);
+    return (task && prTitleForTask(tip ? [tip] : [], task)) || tip;
   }
 }
 
@@ -5131,7 +5135,7 @@ export async function restoreBoundaryCheckpoint(
       ...(probe.verdict === "unreadable" ? { reason: probe.reason } : {}) };
   }
   const merged = (await git(["commit-tree", probe.tree, "-p", checkpoint.headSha, "-p", mainSha, "-m",
-    `wip: merge main into the restored checkpoint\n\nRemudero-Task: ${taskId}`])).trim();
+    `chore(wip): merge main into the restored checkpoint\n\nRemudero-Task: ${taskId}`])).trim();
   await git(["reset", "--hard", "--quiet", merged]);
   return { base: "main", headSha: merged };
 }
@@ -16513,6 +16517,7 @@ interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   claimReserver?: DispatchClaimReserverAsync;
   containmentExec?: ProbeExecutor;
   externalWaitFreshness?: ExternalWaitFreshness;
+  restartAtWorkerBoundary?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
   externalWaitRecycle?: () => string | undefined;
   handOffAtPrOpen?: boolean;
   isolationExec?: IsolationProbeExecutor;
@@ -17416,6 +17421,9 @@ async function runTask(
      *  spawning a real sandboxed worker. Default: the real spawn-backed executor. */
     containmentExec?: ProbeExecutor;
     externalWaitFreshness?: ExternalWaitFreshness;
+    /** W1-T7806: the daemon's latched restart, read at each worker boundary; reading it releases this lane's hold
+     *  on refill. A set latch yields the run even when its own `externalWaitFreshness` read would not. Daemon only. */
+    restartAtWorkerBoundary?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
     externalWaitRecycle?: () => string | undefined;
     /** W1-T5345: hand the PR to the sweep at the first CI poll ({@link PollDeps.handOffAtPrOpen}). Daemon only. */
     handOffAtPrOpen?: boolean;
@@ -19765,7 +19773,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     let impl!: WorkerResult;
     // W1-T7697: retain disk work before releasing a lane; a failed checkpoint is never a handoff.
     const yieldAtWorkerBoundary = async (waitingOn: string): Promise<RunResult | undefined> => {
-      const freshness = await opts.externalWaitFreshness?.();
+      const freshness = opts.restartAtWorkerBoundary?.() ?? await opts.externalWaitFreshness?.();
       const recycle = freshness ? undefined : opts.externalWaitRecycle?.();
       if (!freshness && !recycle) return undefined;
       let undeclared: readonly string[] = [];
@@ -20573,8 +20581,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     if (!prUrl) {
       let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
       try {
-        // W1-T6034: the filed proofs run as awaited children, off the daemon loop.
-        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, branchPrTitle(worktreePath), opts.prOpenProofRunner, true);
+        // W1-T6034: the filed proofs run as awaited children, off the daemon loop. W1-T7952: titled after the task.
+        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true);
       } catch (err) {
         if (!(err instanceof PrOpenRefusedError)) throw err;
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
@@ -20859,7 +20867,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // W1-T3557: ALWAYS wired in production — `worktreePath` is this rung's own checkout,
           // the SAME one `headCheckoutDir` above already points at, so no extra fetch is spent
           // resolving the plan at whatever head this round's push just landed.
-          resolveTaskContractAtHead: (prUrlArg, taskIdArg) => resolveFixRungTaskContractAtHead(prUrlArg, taskIdArg, worktreePath),
+          resolveTaskContractAtHead: (prUrlArg, taskIdArg) => resolveFixRungTaskContractAtHeadAsync(prUrlArg, taskIdArg, worktreePath),
           runReview,
           fetchPrBody: fetchPrBodyViaGh,
           // W1-T3506: the SAME worktree this round pushes to, run through the SAME proof
@@ -22566,6 +22574,26 @@ export function resolveFixRungTaskContractAtHead(
 }
 
 /**
+ * W1-T7743: {@link resolveFixRungTaskContractAtHead} through AWAITED git — the form the daemon's fix rung and the
+ * sweep's fix dispatch wire, because the sync one parks the daemon loop on `execFileSync` for every read. The head sha
+ * read stays `readHeadSha` (injectable); only the plan read at that head is awaited.
+ */
+export async function resolveFixRungTaskContractAtHeadAsync(
+  prUrl: string,
+  taskId: string,
+  repoDir: string,
+  readHeadSha: (prUrl: string) => string = readHeadShaRest,
+): Promise<PlanCriteriaAtHeadResult | undefined> {
+  let headSha: string;
+  try {
+    headSha = readHeadSha(prUrl);
+  } catch {
+    return undefined; // an unreadable HEAD is unreadable regardless of which read failed first
+  }
+  return resolvePlanCriteriaAtHeadAsync(`Remudero-Task: ${taskId}`, repoDir, "plan/tasks.yaml", headSha);
+}
+
+/**
  * A DIVERGENCE between the two independent resolvers that decide whether a trailered PR body gets
  * judged: the CI gate's `declaredPlanTaskIds` (scripts/acceptance-author-gate.mjs, a line scan
  * over `- id:` — deliberately NOT `loadPlan`, so a plan defect elsewhere never red-lights a body
@@ -22899,7 +22927,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // `reportBody` still carries the real PR body unchanged to the fallback and reviewer below.
   if (taskId && !reviewTaskIdFromBody(body)) body = `Remudero-Task: ${taskId}`;
   if (taskId) {
-    const resolved = resolvePlanCriteriaAtHead(body, subjectRepoDir, "plan/tasks.yaml", view.headRefOid);
+    const resolved = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", view.headRefOid);
     criteria = resolved.criteria;
     if (resolved.source) source = resolved.source;
     taskDeclaredFiles = resolved.taskDeclaredFiles;
@@ -36925,10 +36953,10 @@ export function planReloader(
   allowStale: boolean,
   log: (step: string, extra?: Record<string, unknown>) => void,
   deps: {
-    treeSha?: () => string;
-    load?: (planPath: string) => Plan;
+    treeSha?: () => string | Promise<string>;
+    load?: (planPath: string) => Plan | Promise<Plan>;
   } = {},
-): (() => Plan | null) | undefined {
+): (() => Promise<Plan | null>) | undefined {
   if (!target.isSelf) return undefined;
   // `-C` IS LOAD-BEARING. Without it this ran in the DAEMON PROCESS's working directory, which is
   // not the checkout, so every tick threw `fatal: not a git repository` — caught and ledgered as
@@ -36943,16 +36971,16 @@ export function planReloader(
   const planRepoRoot = dirname(dirname(target.planPath));
   const planRelativePath = relative(planRepoRoot, target.planPath) || "plan/tasks.yaml";
   const repoDirForGit = planRepoRoot;
+  // W1-T7743: AWAITED children, never `execFileSync` — the tick awaits this reload, so a slow git (10.7 s measured)
+  // no longer parks the daemon's event loop.
   const treeSha =
     deps.treeSha ??
-    (() =>
-      execFileSync("git", ["-C", repoDirForGit, "rev-parse", "origin/main:plan"], {
-        encoding: "utf8",
-      }).trim());
-  const load = deps.load ?? (() => loadPlanAtRef(planRepoRoot, planRelativePath, "origin/main"));
+    (async () =>
+      (await execFilePromise("git", ["-C", repoDirForGit, "rev-parse", "origin/main:plan"], { encoding: "utf8" })).stdout.trim());
+  const load = deps.load ?? (() => loadPlanAtRefAsync(planRepoRoot, planRelativePath, "origin/main"));
   let lastSha: string | undefined;
-  return () => {
-    const sha = treeSha();
+  return async () => {
+    const sha = await treeSha();
     if (lastSha === undefined) {
       // First tick: record the boot's sha WITHOUT reloading. The plan we were handed already came
       // from this sha, so reporting a reload here would be a lie and would log a no-op every boot.
@@ -36979,7 +37007,7 @@ export function planReloader(
     // Do not advance the observed sha until the committed ref has parsed successfully. A transient
     // fetch/object/read failure must be retried on the next tick, rather than permanently pinning
     // the daemon to the old plan while claiming it observed the new one.
-    const fresh = load(target.planPath);
+    const fresh = await load(target.planPath);
     lastSha = sha;
     log("daemon.plan_changed", { tree_sha: sha.slice(0, 12), allow_stale: allowStale });
     return fresh;
@@ -37007,12 +37035,12 @@ export function dedicatedTargetPlanReloader(
   target: { isSelf: boolean; planPath: string },
   log: (step: string, extra?: Record<string, unknown>) => void,
   deps: {
-    fetch?: () => void;
-    treeSha?: () => string;
-    resetWorkingTree?: () => void;
-    load?: (planPath: string) => Plan;
+    fetch?: () => unknown;
+    treeSha?: () => string | Promise<string>;
+    resetWorkingTree?: () => unknown;
+    load?: (planPath: string) => Plan | Promise<Plan>;
   } = {},
-): (() => Plan | null) | undefined {
+): (() => Promise<Plan | null>) | undefined {
   // Mirrors `planReloader`'s own early return, inverted: THIS reloader exists only for the arm
   // `planReloader` refuses. Wiring (below) never hands a self target here, but the guard keeps
   // this function correct in isolation, not merely correct-by-caller-discipline.
@@ -37024,13 +37052,13 @@ export function dedicatedTargetPlanReloader(
   // WHILE a worker runs) — an idle dedicated daemon would otherwise never see a merged change.
   const fetch =
     deps.fetch ??
-    (() => execFileSync("git", ["-C", repoDirForGit, "fetch", "--quiet", "origin"], { stdio: "pipe" }));
+    (async () => {
+      await execFilePromise("git", ["-C", repoDirForGit, "fetch", "--quiet", "origin"]);
+    });
   const treeSha =
     deps.treeSha ??
-    (() =>
-      execFileSync("git", ["-C", repoDirForGit, "rev-parse", "origin/main:plan"], {
-        encoding: "utf8",
-      }).trim());
+    (async () =>
+      (await execFilePromise("git", ["-C", repoDirForGit, "rev-parse", "origin/main:plan"], { encoding: "utf8" })).stdout.trim());
   // RESETS THE WORKING TREE, UNLIKE `planReloader`: `load` below is a plain filesystem read, never
   // a `git show <ref>:<path>`, so a fetched ref alone leaves it reading whatever boot's own
   // `git reset --hard origin/main` (the `!target.isSelf` branch above) last checked out. Self gets
@@ -37041,15 +37069,17 @@ export function dedicatedTargetPlanReloader(
   // content forever, which is worse than never reloading: it would look fixed.
   const resetWorkingTree =
     deps.resetWorkingTree ??
-    (() => execFileSync("git", ["-C", repoDirForGit, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" }));
+    (async () => {
+      await execFilePromise("git", ["-C", repoDirForGit, "reset", "--hard", "--quiet", "origin/main"]);
+    });
   const load = deps.load ?? ((pp: string) => loadPlan(pp));
   let lastSha: string | undefined;
-  return () => {
+  return async () => {
     // A failed fetch propagates — caught by `runDaemon`'s own `daemon.plan_reload_failed` wrapper
     // (the SAME generic catch `planReloader`'s own treeSha throw already relies on), never
     // swallowed here. Keeping the plan we already have is the correct degrade either way.
-    fetch();
-    const sha = treeSha();
+    await fetch();
+    const sha = await treeSha();
     if (lastSha === undefined) {
       // First tick: record the boot's sha without reloading — see `planReloader`'s identical
       // comment for why reporting a reload here would be a lie. The working tree already matches
@@ -37060,7 +37090,7 @@ export function dedicatedTargetPlanReloader(
     }
     if (sha === lastSha) return null;
     lastSha = sha;
-    resetWorkingTree();
+    await resetWorkingTree();
     log("daemon.target_plan_changed", { tree_sha: sha.slice(0, 12) });
     return load(target.planPath);
   };
@@ -37079,7 +37109,7 @@ export function resolveReloadPlan(
   target: { isSelf: boolean; planPath: string },
   allowStale: boolean,
   log: (step: string, extra?: Record<string, unknown>) => void,
-): (() => Plan | null) | undefined {
+): (() => Promise<Plan | null>) | undefined {
   return target.isSelf ? planReloader(target, allowStale, log) : dedicatedTargetPlanReloader(target, log);
 }
 
@@ -39721,7 +39751,7 @@ export async function daemonCommand(
         // opening its PR against the WRONG owner. That partial fix is worse than today's honest
         // self-owner-only behaviour and is exactly what test/owner-dispatch-threading.test.ts
         // refuses.
-        runOne: (taskId) =>
+        runOne: (taskId, runOptions) =>
           runTaskFn(taskId, {
             planPath: target.planPath,
             config,
@@ -39745,6 +39775,7 @@ export async function daemonCommand(
             // existing adapter is material-and-clean only; unassessed, dirty, and degraded
             // readings remain undefined and therefore cannot manufacture a restart.
             externalWaitFreshness: daemonFreshnessReads(effectiveRepoRoot).externalWaitFreshness,
+            restartAtWorkerBoundary: runOptions?.restartAtWorkerBoundary,
             externalWaitRecycle: () => recyclePauseDetail(config.root),
             // W1-T5345: a daemon lane is free once its PR is open — the sweep owns CI wait and review.
             handOffAtPrOpen: true,

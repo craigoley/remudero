@@ -12,7 +12,7 @@
   plan_refs: [W1-T1272, W1-T4998, W1-T5720, W1-T5721, W1-T7806, W1-T7697]
   files: [src/lib/daemon.ts, test/a-latched-restart-exits-when-its-last-lane-settles.test.ts]
   status: queued
-  priority: 2
+  priority: 1
   attempts: 0
   rationale: |
     MEASURED 2026-10-11 (core daemon ledger, copied read-only to ~/Remudero-notes/restart-churn-2026-10-11/ledger-copy;
