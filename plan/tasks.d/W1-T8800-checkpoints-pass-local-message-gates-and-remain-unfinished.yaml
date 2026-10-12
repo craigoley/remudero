@@ -1,0 +1,62 @@
+- id: W1-T8800
+  title: Checkpoints pass local message gates and remain unfinished through resume and publication
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18
+  risk: high
+  band_meaning: span
+  priority: 2
+  origin: operator#2026-10-12-checkpoint-author-followups
+  plan_refs: [W1-T502, W1-T7096, W1-T7952, W1-T6013]
+  rationale: |
+    At main a6d61e0c42, compaction.ts teaches wip: checkpoints and claims they never
+    block a merge. watchDispatchSpawn and commitAndPushRestartCheckpoint emit that
+    same non-conventional type. The shipped local commitlintStep and
+    emitterChecksStep validate every non-merge commit in origin/main..HEAD, so a
+    durable harness checkpoint stops preflight-author before affected tests. The
+    W7754 native 53XPvz named this exact inherited checkpoint; its receipts and
+    approved historical message-only repair remain retained, not relabeled green.
+    Hosted title-only commitlint and local range validation are distinct contracts.
+    W502 merged as PR1856; W7096 merged as PR10350; W7952 merged as PR11011. Their
+    existing durability, resume judgment and task-derived title features are not
+    rebuilt. W6013 has remote run branches; this task does not change its title
+    policy or claim its work. Fresh complete four-open-head trees have no own new
+    checkpoint-message subject diff, with a real W502 title/corpus positive control.
+  design: |
+    1. Reuse unfinished-checkpoint.ts for a shared conventional checkpoint subject
+       builder: chore(wip): followed by the existing reason, shaped with the existing
+       conventional limits. Keep body, remudero-context, remaining and task trailer
+       intact; do not rewrite old commits or main history. Wire both actual harness
+       checkpoint emitters. The restored-main chore(wip) merge stays recognized.
+    2. Teach that same subject in the implement prompt and compaction anchor. State
+       the hosted-title/local-range distinction accurately, including local hooks.
+       A final commit/PR title is not a checkpoint. Keep recon read-only, explicit
+       task-derived PR titles, no-subject-override squash behavior and current
+       continuation judgment/backstops. Legacy wip: tips still resume; never declare
+       an unfinished checkpoint complete by merely removing its marker.
+    3. Drive real restart and quiet/recycle/restart callback emitters on disposable
+       Git fixtures, with explicit fixture identity and local bare remotes only.
+       Pass their actual nonempty committed ranges through the production
+       commitlintStep and emitterChecksStep, including a terminal conventional
+       commit. Prove old wip: fails those unchanged gates, new checkpoints pass,
+       remaining/body/trailer survive, and resume/title behavior stays unfinished.
+       Exercise no-diff, refusal and failed-push outcomes without real worker spawn.
+    4. Delete the actual subject correction/wiring and observe named failures;
+       restore and pass. Commit before measuring, instrument every changed source
+       SF, and run one native author per distinct final committed tree. Reproduce
+       new native failures on its actual unchanged pin. No gate/config/baseline
+       exemption, checkpoint-history rewrite, activation, scheduler or owner-override
+       change. Obtain normal companion scope before any additional necessary file.
+  acceptance:
+    - claim: Real harness checkpoints pass unchanged local message gates while retaining unfinished lineage
+      proof: 'unit test: checkpoint emitters pass local range gates without erasing unfinished work'
+    - claim: Implement and continuation contracts distinguish checkpoint subjects from terminal publication
+      proof: 'unit test: checkpoint prompt and continuation agree with local range and hosted title contracts'
+    - claim: Both real emitters use the shared conventional checkpoint subject builder
+      proof: 'grep: function checkpointCommitSubject in src/lib/unfinished-checkpoint.ts'
+  files: [src/lib/compaction.ts, src/lib/unfinished-checkpoint.ts, src/run-task.ts, test/worker-checkpoint-contract.test.ts, test/checkpoint-publication-contract.test.ts]
+  status: queued
+  attempts: 0

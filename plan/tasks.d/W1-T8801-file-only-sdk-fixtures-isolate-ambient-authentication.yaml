@@ -1,0 +1,57 @@
+- id: W1-T8801
+  title: File-only SDK credential fixtures isolate ambient authentication without changing owner precedence
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10
+  risk: medium
+  band_meaning: blast-radius
+  priority: 2
+  origin: operator#2026-10-12-checkpoint-author-followups
+  plan_refs: [W1-T1087, W1-T7809, W1-T7756]
+  rationale: |
+    At current main a6d61e0c42 the same six file-only SDK cases still inherit
+    process.env. Production openUsageProbeSession intentionally honors environment
+    authentication first. In the retained W7756 unchanged-base 32f61d8b12 reproduction
+    all six failed; removing only ambient ANTHROPIC_API_KEY in a disposable test-child
+    environment made all six pass. This is fixture precondition evidence, not a
+    production auth failure or a native PASS. The existing explicit owner/provider
+    precedence case already saves, clears and restores eight auth selectors.
+    W1087 daemon fixture isolation shipped as PR2371, but not these SDK fixtures.
+    W7809 capacity-aware author selection shipped as PR10773 and is not rebuilt.
+    The Darwin priority fixture has already been corrected in PR10937: no duplicate
+    platform repair. Complete main/all four OPEN-head subject corpus/title controls
+    show no new file-only SDK fixture repair; every selected source blob was read.
+  design: |
+    1. Establish file-only authentication only inside the subscription-credential
+       fixtures, using a small local fileOnlyUsageAuthentication helper that records
+       and restores the existing eight selectors with the test-context cleanup hook.
+       Restore absent versus present values after success AND failure. No suite-wide
+       production environment scrub, credential writes, worker.ts edit, SDK/network
+       default, cache/baseline waiver or forced skip.
+    2. Drive the actual six named credential refusal/rotation cases from a verified
+       disposable test child whose eight selectors contain synthetic ambient values.
+       Include the existing owner/environment/Darwin precedence positive control.
+       Prove complete TAP and actual case selection, not a wrapper or zero-test count.
+       Verify the child restores its ambient selectors and the parent environment is
+       unchanged without printing real secret values. Use correct child tsx/tmp
+       preload and inherit the admitted parent's host budget, never a nested second
+       slot or a real SDK transport.
+    3. A cleanup error-path test must prove restoration when the fixture body throws.
+       Removing the actual fixture helper/calls must fail the six real file-only
+       cases under ambient auth; restoring must pass, with owner precedence intact.
+       Commit before native validation and retain every original failed receipt.
+       New native failures require complete actual-pin base attribution. No production
+       credentials, admission policy/SHADOW mode, owner override or scheduler change.
+  acceptance:
+    - claim: File-only SDK fixtures pass under ambient auth and restore the caller environment
+      proof: 'unit test: file-only SDK fixtures preserve ambient caller auth and owner precedence'
+    - claim: Fixture authentication cleanup restores exact absence and values even when the body fails
+      proof: 'unit test: file-only SDK fixture authentication restores after a failing body'
+    - claim: The real subscription fixtures establish a scoped file-only authentication precondition
+      proof: 'grep: function fileOnlyUsageAuthentication in test/headroom-sdk-source.test.ts'
+  files: [test/headroom-sdk-source.test.ts, test/headroom-sdk-fixture-environment.test.ts]
+  status: queued
+  attempts: 0
