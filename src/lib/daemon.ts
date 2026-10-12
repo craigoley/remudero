@@ -5684,8 +5684,13 @@ export async function runDaemon(
             ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log),
             dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
             excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...pendingMergedCredit, ...passIds]),
+            inFlight: [...inFlightTasks],
           });
           const fits = partitionByFileOverlap([...inFlightTasks, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
+          const poolIds = new Set(pool.map((t) => t.id));
+          for (const d of fits.serialized) {
+            if (poolIds.has(d.task)) log("dispatch.serialized", serializedLedgerPayload(d));
+          }
           next = fits.dispatch.find((t) => !inFlightTasks.has(t));
           if (next) nextSnapshot = snapshot;
         };

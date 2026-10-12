@@ -350,6 +350,8 @@ export interface NextRunnableOpts extends TaskPreconditionOptions {
    *  the pack picks a candidate the real partition then serializes away. Omitted, each candidate is
    *  scored on its bare declaration. */
   observedByTask?: ObservedScopeByTask;
+  /** W1-T8502: tasks already occupying lanes constrain the pack and are never returned. */
+  inFlight?: readonly Task[];
   /** Called once per task whose CACHED in-flight snapshot this live re-check overturned — one
    *  PR-level observation, fired for every terminal state whatever the task's eligibility resolves
    *  to (W1-T1035's crediting MERGED read still fires it). The real wiring corrects the ledgered
@@ -726,7 +728,7 @@ function taskPreconditionHolds(task: Task, opts: NextRunnableOpts): boolean {
 export function runnableCandidates(plan: Plan, isMerged: MergedSet, limit: number, opts: NextRunnableOpts = {}): Task[] {
   if (limit <= 0) return [];
   const eligible = dispatchEligibleCandidates(plan, isMerged, opts);
-  const collected = packDisjointFirst(eligible, limit, opts.observedByTask ?? NO_OBSERVED_SCOPE);
+  const collected = packDisjointFirst(eligible, limit, opts.observedByTask ?? NO_OBSERVED_SCOPE, opts.inFlight);
   // W1-T2397: observe, then dispatch anyway — the same placement `nextRunnable` uses, one level over,
   // so it cannot alter the batch. This is the DAEMON's selector: `runDaemon` calls this one.
   for (const t of collected) observeOpenSibling(t, opts);
@@ -753,17 +755,18 @@ export function runnableCandidateIds(plan: Plan, isMerged: MergedSet, opts: Next
 
 /** W1-T476's greedy disjointness-first pack: fills up to `limit` slots from `eligible` (already in
  *  {@link dispatchOrder}), each slot preferring the earliest remaining candidate that stays
- *  `files:`-disjoint from everything collected — checked via the real `partitionByFileOverlap`, never
- *  a re-derived glob comparison — and otherwise falling back to the next in dispatchOrder.
+ *  `files:`-disjoint from in-flight and collected tasks via `partitionByFileOverlap`, otherwise
+ *  falling back to the next in dispatchOrder. In-flight ids are excluded (W1-T8502).
  *  INVARIANT (determinism): the scan always takes the first match in `remaining`'s current order.
  *  INVARIANT (stability containment): with no two candidates pairwise disjoint, the result is
  *  byte-identical to plain truncation. The pack never reorders what it cannot improve. */
 // Why: the measured 1/1/1 admissions plain truncation produced at lanes 2/3/4 — docs/forensics/drain.md.
-function packDisjointFirst(eligible: readonly Task[], limit: number, observedByTask: ObservedScopeByTask): Task[] {
+function packDisjointFirst(eligible: readonly Task[], limit: number, observedByTask: ObservedScopeByTask, inFlight: readonly Task[] = []): Task[] {
   const collected: Task[] = [];
-  const remaining = [...eligible];
+  const inFlightIds = new Set(inFlight.map((t) => t.id));
+  const remaining = eligible.filter((t) => !inFlightIds.has(t.id));
   while (collected.length < limit && remaining.length > 0) {
-    let pickIndex = remaining.findIndex((candidate) => isDisjointFromEvery(collected, candidate, observedByTask));
+    let pickIndex = remaining.findIndex((candidate) => isDisjointFromEvery([...inFlight, ...collected], candidate, observedByTask));
     if (pickIndex === -1) pickIndex = 0; // no disjoint candidate remains — fall back to dispatchOrder position
     collected.push(remaining[pickIndex]);
     remaining.splice(pickIndex, 1);
