@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -67,6 +68,14 @@ interface ShiftedSuiteOptions {
   }) => string;
 }
 
+interface DefuseJudge {
+  prepareJudgedRun(options: { makeDir: () => string }): { args: string[]; env: Record<string, string>; read(): { tallyText: string; markerText: string } };
+  judgedNodeTestArgs(args: readonly string[], judgedArgs: readonly string[]): string[];
+  judgeRun(files: readonly string[], opts: { status: number; pool: boolean; root: string; tallyText: string; markerText: string }): { complete: boolean; given: number; reported: number };
+  describeJudgedRun(role: string, verdict: { complete: boolean }, opts: { prefix: string }): string;
+}
+const loadDefuseJudge = (): DefuseJudge => createRequire(import.meta.url)("../../scripts/pure-test-pool.mjs") as DefuseJudge;
+
 export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number, options: ShiftedSuiteOptions & { measure: true }): ShiftedSuiteMeasurement;
 export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number, options?: ShiftedSuiteOptions & { measure?: false }): boolean;
 /** Shared runner: only a complete TAP verdict proves a crossing (W1-T7812). */
@@ -77,17 +86,23 @@ export function runSuiteShifted(repoRoot: string, file: string, shiftDays: numbe
   readFileSync(resolve(repoRoot, file)); // Node can report a green wrapper for a missing test path.
   const privateRoot = mkdtempSync(join(tmpdir(), "rmd-shifted-suite-"));
   try {
+    const judge = loadDefuseJudge();
+    const judged = judge.prepareJudgedRun({ makeDir: () => {
+      const dir = join(privateRoot, "judge");
+      mkdirSync(dir);
+      return dir;
+    } });
     const env: NodeJS.ProcessEnv = { ...process.env, FK_SHIFT_DAYS: String(shiftDays), TMPDIR: privateRoot };
     delete env.RMD_SELF_SYNC_DONE; // the test setup refuses to load under it (W1-T3069)
     delete env.NODE_TEST_CONTEXT; // inherited from a parent `node --test`, it makes this run report nothing and exit 0
-    const args = ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--import", "./scripts/clock-shift.mjs", file];
+    const args = judge.judgedNodeTestArgs(["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--import", "./scripts/clock-shift.mjs", file], judged.args);
     // Niced and bounded (test-slot.ts), but no host-wide slot: one file, and a gardener pass must not queue behind coverage.
     const load = readHostLoad();
     const child = lowPriorityCommand(process.execPath, testRunArgv(args, testRunConcurrency(load, defaultTestSlots(load.cores))));
     let output: string;
     let status = 0;
     try {
-      output = execFile(child.file, child.args, { cwd: repoRoot, env, encoding: "utf8", stdio: "pipe", timeout: DEFUSE_RUN_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 });
+      output = execFile(child.file, child.args, { cwd: repoRoot, env: { ...env, ...judged.env }, encoding: "utf8", stdio: "pipe", timeout: DEFUSE_RUN_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 });
     } catch (error) {
       const failure = error as { status?: unknown; signal?: unknown; stdout?: string | Buffer };
       if (typeof failure.status !== "number" || failure.status === 0 || failure.signal) throw error;
@@ -109,6 +124,10 @@ export function runSuiteShifted(repoRoot: string, file: string, shiftDays: numbe
     const wrapper = `# Subtest: ${relative(repoRoot, resolve(repoRoot, file))}`;
     if (!output.split("\n").some((line) => line.startsWith("# Subtest: ") && line !== wrapper)) {
       throw new Error(`shifted suite ${file}: no named tests in TAP verdict`);
+    }
+    const verdict = judge.judgeRun([file], { status, pool: false, root: repoRoot, ...judged.read() });
+    if (!verdict.complete && (status === 0 || verdict.reported !== verdict.given)) {
+      throw new Error(`the run reaches no verdict: ${judge.describeJudgedRun("defuse", verdict, { prefix: "test-judge" })}`);
     }
     const measurement = { passed: status === 0, pass, tests };
     return measure ? measurement : measurement.passed;

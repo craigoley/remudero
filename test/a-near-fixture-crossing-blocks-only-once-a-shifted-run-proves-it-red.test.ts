@@ -103,6 +103,26 @@ test("W1-T7812: a re-run with no verdict blocks as run_error", () => {
     assert.equal(code, 1, "a green file wrapper is not a measured test verdict");
     assert.match(output.join("\n"), /run_error.*no named tests/);
     assert.doesNotMatch(output.join("\n"), /expiring-fixture: exempt/);
+
+    writeFileSync(join(root, file), `import { test } from "node:test";
+test("completed", () => {});
+test("exits before finishing", async () => {
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  process.exit(0);
+});
+`);
+    output.length = 0;
+    const interrupted = census.main({
+      execFile: (command: string, args: string[]) => command === "node"
+        ? JSON.stringify({ staleDays: 14 }) : args[0] === "ls-files" ? file : "",
+      readFile: () => `updated_at: "${stamp(0.5)}",`, now: () => NOW,
+      log: (line: string) => output.push(line), assertAged: () => undefined,
+      assertComplete: () => undefined, recordedPopulationByFile: {}, repoRoot: root,
+    });
+    assert.equal(interrupted, 1, "a partial test file cannot earn an exemption");
+    assert.match(output.join("\n"), /run_error.*never reported/);
+    assert.doesNotMatch(output.join("\n"), /expiring-fixture: exempt/);
+    assert.throws(() => gardener.runSuiteShifted(root, file, 2), /never reported/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -213,9 +233,14 @@ test("W1-T7812: incomplete TAP counts block as run_error and clean the private r
   const summary = "# Subtest: measured\n# tests 2\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n";
   const roots: string[] = [];
   const run = (output: string, error?: Error) => measured(root, file, 2, {
-    execFile: (_command: string, _args: string[], options: { env: NodeJS.ProcessEnv }) => {
+    execFile: (_command: string, args: string[], options: { env: NodeJS.ProcessEnv }) => {
       roots.push(options.env.TMPDIR!);
       assert.ok(existsSync(options.env.TMPDIR!));
+      const destination = args.find((arg) => arg.startsWith("--test-reporter-destination=") && arg.endsWith("tally.json"));
+      if (destination) writeFileSync(destination.slice(destination.indexOf("=") + 1), JSON.stringify({
+        summary: { tests: Number(/# tests (\d+)/.exec(output)?.[1]), failed: Number(/# fail (\d+)/.exec(output)?.[1]) },
+        fileSummaries: [file],
+      }));
       if (error) throw error;
       return output;
     },
