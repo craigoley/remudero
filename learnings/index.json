@@ -102,6 +102,7 @@
         "skipped-check-deadlock",
         "squash-trailer-gate-task-authoring-lane",
         "strikes-exhausted-counts-rows",
+        "task-id-existence-cited-id-must-resolve",
         "test-slow-shard-single-suite-at-a-time",
         "unwired-gate-repair-lane"
       ],
@@ -120,6 +121,7 @@
         "plan/claims.yaml",
         "plan/feedback/**",
         "plan/tasks.d/**",
+        "plan/tasks.yaml",
         "scripts/**",
         "scripts/census-precheck.mjs",
         "scripts/comment-load-baseline.json",
@@ -131,8 +133,10 @@
         "scripts/preflight-author.mjs",
         "scripts/source-size-baseline.json",
         "scripts/source-size-ratchet.mjs",
+        "scripts/task-id-existence-check.mjs",
         "scripts/test-tier-manifest.json",
         "scripts/unwired-gate-check.mjs",
+        "src/**",
         "src/lib/affected-suites.ts",
         "src/lib/board-projection.ts",
         "src/lib/ci-parity.ts",
@@ -156,7 +160,9 @@
         "test/setup/**"
       ],
       "symbols": [],
-      "error_signatures": []
+      "error_signatures": [
+        "task-id-existence: FAILED"
+      ]
     },
     "failures.yaml": {
       "entries": [

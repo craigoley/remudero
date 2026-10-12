@@ -542,3 +542,26 @@
     causal or incidental repairs is not established.
   src: "ci-learning:10516:coverage-session-blanking"
   cited: "2026-10-11"
+
+- id: task-id-existence-cited-id-must-resolve
+  subsystem: ci
+  lifecycle: active
+  files:
+    - "src/**"
+    - "deploy/**"
+    - "plan/tasks.d/**"
+    - "plan/tasks.yaml"
+    - "scripts/task-id-existence-check.mjs"
+  error_signatures: ["task-id-existence: FAILED"]
+  fact: >-
+    The task-id-existence gate refused 1 pull request in one window, and it was repaired after the refusal. Every
+    W1-T<n> cited under src/, deploy/ or plan/ must resolve to a reservation ref or to a `- id:` line in plan/tasks.yaml
+    or plan/tasks.d/*.yaml, so a citation of an id that is neither reserved nor declared fails the gate. Before pushing,
+    run `npm run --silent task-id-existence:check` over your own change.
+  evidence: >-
+    The refusal is recorded as ci-learning:10904:task-id-existence. The repair touched
+    plan/tasks.d/W1-T5399-discover-interrupted-assistant-actions-without-resubmission.yaml. Recon did not read #10904's
+    failure log or diff, so the exact refusal reason for that PR is not established; this entry names the gate's rule
+    and its pre-push check, not a verified per-PR trigger.
+  src: "ci-learning:10904:task-id-existence"
+  cited: "2026-10-12"
