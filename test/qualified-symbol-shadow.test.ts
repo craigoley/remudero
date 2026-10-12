@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { qualifiedSymbolShadow, qualifiedShadowFailures } from "../src/lib/qualified-symbol-shadow.js";
 import type { AffectedSuitesInput } from "../src/lib/affected-suites.js";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { gitRepo } from "./helpers/git-repo.js";
+import { main } from "../scripts/select-affected-suites.mjs";
 
 const files = new Map([
   ["scripts/target.mjs", "export function main() {}"],
@@ -57,4 +61,30 @@ test("qualified shadow reports an oracle miss instead of claiming a smaller sele
     { file: "test/namesake.test.ts", floor: "missed", proposed: "missed" },
     { file: "test/target.test.ts", floor: "selected", proposed: "selected" },
   ]);
+});
+
+test("qualified shadow CLI emits a real Git-backed proposal and names an unreadable corpus", (t) => {
+  const repo = gitRepo();
+  t.after(() => repo.cleanup());
+  for (const [path, content] of files) {
+    mkdirSync(dirname(join(repo.dir, path)), { recursive: true });
+    writeFileSync(join(repo.dir, path), content);
+  }
+  repo.git("add", "."); repo.git("commit", "-m", "seed qualified shadow corpus");
+  const changed = join(repo.dir, "changed.txt"), diff = join(repo.dir, "change.diff");
+  writeFileSync(changed, "scripts/target.mjs\n");
+  writeFileSync(diff, "+++ b/scripts/target.mjs\n@@ -1 +1 @@\n-export function main() {}\n+export function main() { return 1; }\n");
+  const lines: string[] = [];
+  t.mock.method(console, "log", (line: string) => { lines.push(line); });
+  const args = ["--changed-files", changed, "--diff", diff, "--qualified-symbol-shadow"];
+  assert.equal(main(args, { root: repo.dir, summaryPath: undefined }), 0);
+  const read = () => JSON.parse(lines.find((line) => line.startsWith("QUALIFIED-SYMBOL-SHADOW: "))!.slice(25));
+  const observed = read();
+  assert.equal(observed.mode, "shadow");
+  assert.equal(observed.skipsNothing, true);
+  assert.ok(observed.qualified.includes("test/target.test.ts"), "the Git-backed corpus sees its positive control");
+  assert.ok(observed.excludedNamesakes.includes("test/namesake.test.ts"));
+  lines.length = 0;
+  assert.equal(main(args, { root: join(repo.dir, "missing"), summaryPath: undefined }), 0);
+  assert.match(read().fallback, /could not produce a qualified corpus/);
 });
