@@ -95,7 +95,8 @@ export function isQualitySuspect(events: CompactionEvent[]): boolean {
  * footer in run-task.ts), so the two can never drift.
  *
  * HOSTED commitlint reads the PR title live (W1-T129/W1-T351). LOCAL preflight-author and
- * preflight run commitlintStep and emitterChecksStep over the commit range; a commit hook
+ * preflight run commitlintStep over the range with configured ignores and emitterChecksStep
+ * over its non-merge commits; a commit hook
  * validates an individual message. Squashing branch history does not waive these local gates.
  * Checkpoints are conventional yet unfinished; both the final subject and explicit PR title
  * must name the finished work, never its checkpoint. No history or validation policy changes.
@@ -107,7 +108,8 @@ export function isQualitySuspect(events: CompactionEvent[]): boolean {
 export function commitMessageContractLines(): string[] {
   return [
     "- COMMIT MESSAGE — HOSTED `commitlint` checks the PR TITLE, read LIVE via `gh pr view`.",
-    "  LOCAL preflight/preflight-author run commitlint and emitter-checks on every commit in the range.",
+    "  LOCAL preflight/preflight-author check the branch commit range, not only a title:",
+    "  commitlint applies its configured ignore rules; emitter-checks validates non-merge commits.",
     "  Commit hooks validate individual messages too. This repo squash-merges every PR, but",
     "  discarding branch history at merge does NOT waive local range checks or make a checkpoint final.",
     "  Use `chore(checkpoint):` for unfinished checkpoints; legacy `wip:` history still resumes",
