@@ -1,6 +1,6 @@
 /**
  * lib/loop-stall-profiler.ts — W1-T7746: profile an unattributed loop stall WHILE it is happening.
- * Why (the 2026-10-10 stalls with no sync spawn to blame): plan/tasks.d/W1-T7746-*.yaml.
+ * Why: W1-T7746 records the 2026-10-10 stalls with no sync spawn to blame.
  *
  * A sampler on the blocked loop records nothing until the block clears ({@link reportLoopLag}). So the
  * watchdog runs in a worker thread. The main loop bumps a shared heartbeat counter each turn. When it has
@@ -19,7 +19,7 @@
  * A spin that keeps calling functions is named correctly, which is the shape of a scanner spin.
  */
 
-import { Worker } from "node:worker_threads";
+import { SHARE_ENV, Worker } from "node:worker_threads";
 import { performance } from "node:perf_hooks";
 
 export type StallLog = (step: string, extra?: Record<string, unknown>) => void;
@@ -262,7 +262,8 @@ export function startLoopStallProfiler(options: LoopStallProfilerOptions = {}): 
     heartbeat = setTimeout(beat, period());
     heartbeat.unref();
     const held = options.spawn?.(LOOP_STALL_WATCHDOG_SOURCE, { shared: shared.buffer as SharedArrayBuffer })
-      ?? new Worker(LOOP_STALL_WATCHDOG_SOURCE, { eval: true, execArgv: [], workerData: { shared: shared.buffer } });
+      ?? new Worker(LOOP_STALL_WATCHDOG_SOURCE,
+        { eval: true, execArgv: [], workerData: { shared: shared.buffer }, env: SHARE_ENV });
     worker = held;
     held.on("message", (message: WatchdogMessage) => {
       if (worker !== held) return;
