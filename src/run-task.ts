@@ -3451,7 +3451,7 @@ export function watchDispatchSpawn(
           }
           undeclaredPaths = checkpoint.undeclared;
         }
-        await (seams.push ?? gitPushRunBranchAsync)(cwd);
+        await pushRestartCheckpoint(cwd, seams.push); // W1-T8397: the recycle/quiet/restart round end skips the PR gate too
       } catch (error) {
         return { ended: false, reason: `checkpoint failed: ${String((error as Error)?.message ?? error)}` };
       }
@@ -3494,8 +3494,14 @@ export async function commitAndPushRestartCheckpoint(
     if (!checkpoint.committed) throw new Error(`restart checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}`);
     undeclared = checkpoint.undeclared;
   }
-  await (seams.push ?? gitPushRunBranchAsync)(worktreePath, { prGates: false }); // a checkpoint opens no PR: see worktreePushExecAsync
+  await pushRestartCheckpoint(worktreePath, seams.push);
   return { undeclared };
+}
+
+/** W1-T8397: THE one restart-checkpoint push, shared by `commitAndPushRestartCheckpoint` and the `watchDispatchSpawn`
+ * `endRound` round end so the two cannot drift: a checkpoint opens no PR, so it skips the PR gate (see worktreePushExecAsync). */
+export async function pushRestartCheckpoint(worktreePath: string, push: typeof gitPushRunBranchAsync = gitPushRunBranchAsync): Promise<void> {
+  await push(worktreePath, { prGates: false });
 }
 
 /** W1-T8008: the `run.freshness_handoff` and `freshness_yield` verdict fields of a boundary yield, naming the undeclared paths. */
