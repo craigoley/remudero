@@ -1,0 +1,25 @@
+- id: W1-T8350
+  title: "THE GARDENER PR ci_wall_clock STAGE SLOWED — p50 18.5 min against a 8.5 min baseline over the last 24 h"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-regression:gardener:ci_wall_clock:all"
+  files:
+    - .github/workflows/ci.yml
+    - test/the-gardener-ci-wall-clock-flow-stage-recovers.test.ts
+  acceptance:
+    - claim: "the gardener ci_wall_clock stage returns under 2x its baseline p50"
+      proof: "grep: test(\"the gardener ci_wall_clock stage recovers\" in test/the-gardener-ci-wall-clock-flow-stage-recovers.test.ts"
+  note: "Filed by the flow gardener (W1-T5904). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The gardener does not re-file this stage while this task is open."
+  rationale: |
+    gardener PRs, stage ci_wall_clock: p50 18.5 min against a 8.5 min baseline (rolling).
+    Last 24 h: n 15, p50 18.5, p90 19.8 min.
+    Slowest PRs: #10934 (24.1 min), #10781 (19.8 min), #10959 (19.5 min).
+    Find what these PRs share at this stage before changing a bound.
