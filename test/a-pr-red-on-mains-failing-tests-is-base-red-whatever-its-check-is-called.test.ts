@@ -70,6 +70,9 @@ function harness(rows: Row[]) {
     },
     updateBranch: (p) => { refreshed.push(p.prNumber); return "updated"; },
     ledgerPath: "/dev/null/w1-t6024.ndjson", runId: "W1-T6024-test", now: () => NOW,
+    // These rows model the complete history, including refreshes written by earlier fixture passes.
+    readRefreshLedgerUnion: stateDir => ({ stateDir, archiveFiles: [], archiveCount: 0,
+      liveFileRead: true, unread: [], ok: true, matches: rows.map(row => JSON.stringify(row)) }),
     readLedger: () => [...rows], appendLine: (_path, row) => { rows.push(row); }, readMainTip: () => tip,
     reproduceFailingTestsOnMain: async (_pr, files, sha) => { probed.push(...files); return probe(files, sha); },
   };

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../src/lib/config.js";
@@ -47,6 +47,10 @@ function harness(rows: Row[] = [{ step: "main.health.observed", sha: MAIN, state
     updateBranch: (pr) => { refreshed.push(pr.prNumber); return "updated"; },
     ledgerPath: "/dev/null/base-reproduction.ndjson", runId: "W1-T5528-test", now: () => NOW,
     readLedger: () => [...rows], appendLine: (_path, row) => { rows.push(row); }, readMainTip: () => MAIN,
+    readRefreshLedgerUnion: stateDir => ({
+      stateDir, archiveFiles: [], archiveCount: 0, liveFileRead: true, unread: [], ok: true,
+      matches: rows.map(row => JSON.stringify(row)),
+    }),
   };
   return { rows, fixed, refreshed, deps, sweep: (prs = [redPr(), peer()]) => runSweep(prs, deps, DEFAULT_SWEEP_POLICY) };
 }
@@ -377,9 +381,15 @@ test("W1-T5528: default production probing executes real passing and failing tes
   fixture.git("add", "package.json", "package-lock.json", "test");
   fixture.git("commit", "-m", "fixture");
   const sha = fixture.git("log", "-1", "--format=%H");
-  const probe = buildBaseReproductionProbe({ root } as Config, repo, join(root, "ledger.ndjson"), () => {});
+  const probe = buildBaseReproductionProbe({ root } as Config, repo, join(root, "ledger.ndjson"), () => {}, {
+    // The sandbox mounts the installed modules, so the fixture must link there without an unmounted intermediate checkout.
+    link: (_repo, tree) => {
+      symlinkSync(realpathSync(join(repo, "node_modules")), join(tree, "node_modules"), "dir");
+      return "linked";
+    },
+  });
   const result = await probe(redPr(), ["test/pass.test.ts", "test/fail.test.ts", "test/absent.test.ts", "test/broken.test.ts"], sha);
-  assert.deepEqual(result.map((file) => file.outcome), ["passes", "fails", "absent", "unrunnable"]);
+  assert.deepEqual(result.map((file) => file.outcome), ["passes", "fails", "absent", "unrunnable"], JSON.stringify(result));
   assert.ok(result.every((file) => file.cached === false && file.duration_ms >= 0));
   assert.equal(existsSync(join(root, "worktrees", `base-repro-${sha.slice(0, 12)}`)), false);
 });

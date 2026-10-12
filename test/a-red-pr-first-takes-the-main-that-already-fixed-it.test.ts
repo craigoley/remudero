@@ -52,6 +52,10 @@ function harness(rows: Row[], behindBy: number) {
     behindMainByPr: new Map([[PR, behindBy]]),
     ledgerPath: "/dev/null/w1-t6405.ndjson", runId: "W1-T6405-test", now: () => NOW,
     readLedger: () => [...rows], appendLine: (_path, row) => { rows.push(row); }, readMainTip: () => MAIN,
+    readRefreshLedgerUnion: stateDir => ({
+      stateDir, archiveFiles: [], archiveCount: 0, liveFileRead: true, unread: [], ok: true,
+      matches: rows.map(row => JSON.stringify(row)),
+    }),
   };
   return { rows, fixed, refreshed, probes, escalations, deps };
 }

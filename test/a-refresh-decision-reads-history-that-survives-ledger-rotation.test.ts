@@ -154,6 +154,25 @@ test("W1-T8533: a PR older than the live window reads its refresh history from t
   assert.equal(reads, 1, "all decisions for this PR share one union read per pass");
 });
 
+test("W1-T8533: convergence-shed refresh history still prevents a second refresh", async t => {
+  const f = fixture(t);
+  const bloat = Array.from({ length: 20 }, (_, n) => ({ ts: at(20), step: "run.start",
+    run_id: `bloat-${n}`, task_id: `W1-BLOAT-${n}`, detail: "x".repeat(1000) }));
+  assert.ok(bloat.length < MAX_RETAINED_LINES_PER_STEP, "the per-step cap cannot cause this loss");
+  f.rotate([prior(), ...bloat, health()]);
+  const live = readLedgerLines(f.path);
+  assert.ok(live.some(row => row.step === "ledger.rotation_shed"), "the convergence pass shed retained rows");
+  assert.equal(live.some(row => row.step === "sweep.base_fixed.refresh" && row.pr_number === PR), false);
+  const h = harness(f.path);
+  h.deps.reproduceFailingTestsOnMerge = h.probe("passes");
+  await h.run();
+  assert.deepEqual(h.refreshed, []);
+  assert.deepEqual(h.fixed, [PR]);
+  assert.deepEqual(h.merged, []);
+  assert.equal(h.clearance()?.evidence, "repeat");
+  assert.equal(h.clearance()?.history, "union");
+});
+
 test("W1-T8533: an unreadable refresh history is named and never read as no prior refresh", async t => {
   const f = fixture(t);
   f.write([health()]);
@@ -178,6 +197,32 @@ test("W1-T8533: a covered live window avoids the union, including the no-prior-r
   await h.run();
   assert.deepEqual(h.refreshed, [PR]);
   assert.equal(h.clearance()?.history, "live");
+});
+
+test("W1-T8533: an invalid live timestamp cannot vouch for a PR's history", async t => {
+  const f = fixture(t);
+  f.rotate([prior()]);
+  f.write([...liveWindow().map(row => row.step === "sweep.base_fixed.refresh" ? { ...row, ts: "invalid" } : row), health()]);
+  const h = harness(f.path);
+  h.deps.reproduceFailingTestsOnMerge = h.probe("passes");
+  await h.run();
+  assert.deepEqual(h.refreshed, []);
+  assert.deepEqual(h.merged, []);
+  assert.equal(h.clearance()?.history, "union");
+  assert.equal(h.clearance()?.evidence, "repeat");
+});
+
+test("W1-T8533: a clearance refusal survives a real rotation and still prevents probing", async t => {
+  const f = fixture(t);
+  f.rotate([...liveWindow(), { ts: at(30), step: "refresh.clearance", pr_number: PR,
+    head_sha: HEAD, main_sha: MAIN, test_files: [FILE], refresh: false, evidence: "merged-probe" }, health()]);
+  assert.equal(readLedgerLines(f.path).findLast(row => row.step === "refresh.clearance" && row.pr_number === PR)?.refresh, false);
+  const h = harness(f.path, { readRefreshLedgerUnion: () => { assert.fail("the retained live window covers this PR"); } });
+  h.deps.reproduceFailingTestsOnMerge = h.probe("passes");
+  await h.run();
+  assert.deepEqual(h.refreshed, []);
+  assert.deepEqual(h.merged, []);
+  assert.deepEqual(h.fixed, [PR]);
 });
 
 test("W1-T8533: unreadable history still uses main-delta and trial-merge evidence", async t => {
@@ -306,4 +351,64 @@ test("W1-T8533: a fileless red with unknown history requires independent path ev
   assert.deepEqual(reached.countedPaths, [FILE]);
   const complete = await assessRefreshClearance({ failingTestFiles: [], reach: undefined, priorRefresh: false }, undefined);
   assert.equal(complete.refresh, true);
+});
+
+test("W1-T8533: an inconclusive trial merge cannot refresh on unknown history alone", async () => {
+  const other = "test/other.test.ts";
+  const files = [FILE, other];
+  const probes = [
+    undefined,
+    async () => { throw new Error("trial merge setup failed"); },
+    async () => Object.assign([], { reason: "probe refused", setup_error: "merge conflict" }),
+    async () => [{ file: FILE, outcome: "unrunnable" as const, duration_ms: 1, cached: false }],
+    async () => [
+      { file: FILE, outcome: "fails" as const, duration_ms: 1, cached: false },
+      { file: other, outcome: "passes" as const, duration_ms: 1, cached: false },
+    ],
+  ];
+  for (const probe of probes) {
+    for (const reach of [undefined, { counted: [], complete: false }]) {
+      const decision = await assessRefreshClearance({ failingTestFiles: files, reach, priorRefresh: undefined }, probe);
+      assert.equal(decision.refresh, false);
+      assert.match(decision.reason, /history.*unreadable/);
+    }
+    const reached = await assessRefreshClearance({ failingTestFiles: files,
+      reach: { counted: [FILE], complete: true }, priorRefresh: undefined }, probe);
+    assert.equal(reached.refresh, true, "main's changed paths provide independent evidence");
+    const known = await assessRefreshClearance({ failingTestFiles: files, reach: undefined, priorRefresh: false }, probe);
+    assert.equal(known.refresh, true, "complete history preserves the existing decision");
+  }
+});
+
+test("W1-T8533: the sweep records an inconclusive probe with unreadable history and dispatches a fix", async t => {
+  const f = fixture(t);
+  f.write([health()]);
+  const h = harness(f.path);
+  h.deps.reproduceFailingTestsOnMerge = h.probe("unrunnable");
+  await h.run();
+  assert.deepEqual(h.refreshed, []);
+  assert.deepEqual(h.fixed, [PR]);
+  assert.deepEqual(h.merged, [PR]);
+  const row = h.clearance();
+  assert.equal(row?.history, "unreadable");
+  assert.equal(row?.merged_verdict, "unrunnable");
+  assert.equal(row?.refresh, false);
+  assert.match(String(row?.reason), /history.*unreadable/);
+});
+
+test("W1-T8533: the green-main base-red arm cannot treat unreadable refresh history as absence", async t => {
+  for (const evidence of ["none", "delta", "probe"] as const) {
+    const f = fixture(t);
+    f.write([{ ...health(), state: "green" }, { ts: at(30), step: "sweep.base_red.stood_down",
+      pr_number: PR, head_sha: HEAD, check_name: CHECK }]);
+    const h = harness(f.path, evidence === "delta" ? {
+      readRedBaseRefreshFacts: async () => ({ behindBy: 2, baseChangedFiles: [FILE] }),
+    } : {});
+    if (evidence === "probe") h.deps.reproduceFailingTestsOnMerge = h.probe("passes");
+    await h.run();
+    assert.deepEqual(h.refreshed, evidence === "none" ? [] : [PR]);
+    assert.equal(h.clearance()?.history, "unreadable");
+    assert.equal(h.clearance()?.arm, "base-red");
+    assert.equal(h.clearance()?.refresh, evidence !== "none");
+  }
 });

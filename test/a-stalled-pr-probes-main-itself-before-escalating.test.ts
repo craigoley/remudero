@@ -47,6 +47,9 @@ function harness(history: Row[] = [stalled()], overrides: Partial<SweepDeps> = {
       return files.map(passing);
     },
     ledgerPath: "/dev/null/w1-t6433.ndjson", runId: "W1-T6433-test", now: () => NOW,
+    // The in-memory fixture is the complete history; never read /dev/null as an archive corpus.
+    readRefreshLedgerUnion: stateDir => ({ stateDir, archiveFiles: [], archiveCount: 0,
+      liveFileRead: true, unread: [], ok: true, matches: rows.map(row => JSON.stringify(row)) }),
     readLedger: () => [...rows], appendLine: (_path, row) => { rows.push(row); }, ...overrides,
   };
   return { rows, probes, refreshed, fixes, escalations, deps };

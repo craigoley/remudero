@@ -83,6 +83,12 @@ async function sweep(prs: OpenPrView[], ledger: Record<string, unknown>[], over:
       ledgerPath: "/dev/null/w1-t4351.ndjson",
       runId: "W1-T4351-test",
       readLedger: () => ledger,
+      // This in-memory ledger is the fixture's complete history, including earlier passes.
+      readRefreshLedgerUnion: (stateDir, pattern, _fs, options) => ({
+        stateDir, archiveFiles: [], archiveCount: 0, liveFileRead: true, unread: [], ok: true,
+        matches: ledger.filter(row => options?.step?.includes(String(row.step)))
+          .map(row => JSON.stringify(row)).filter(line => new RegExp(pattern).test(line)),
+      }),
       // Shared with `readLedger`, so a later pass folds what an earlier one wrote.
       appendLine: (_path, line) => {
         ledger.push(line);

@@ -223,8 +223,9 @@ export async function assessRefreshClearance(
     return { refresh: false, evidence: "prefilter", countedPaths: [], reason:
       "main changed no failing test file, no module the failing tests import, and no CI harness path since the head's merge base" };
   }
-  if (probeMerge === undefined) return { refresh: input.priorRefresh !== undefined, evidence: "unrunnable", ...counted,
-    reason: input.priorRefresh === undefined ? "refresh history is unreadable and the trial-merge probe is unwired"
+  const unknownWithoutPaths = input.priorRefresh === undefined && (countedPaths === undefined || countedPaths.length === 0);
+  if (probeMerge === undefined) return { refresh: !unknownWithoutPaths, evidence: "unrunnable", ...counted,
+    reason: unknownWithoutPaths ? "refresh history is unreadable and the trial-merge probe is unwired"
       : "the trial-merge probe is unwired; keeping today's refresh" };
   // A probe that throws is a setup failure carrying its reason, the same shape main's probe records.
   const probed: BaseProbeResult = await probeMerge().then((result) => result,
@@ -236,6 +237,8 @@ export async function assessRefreshClearance(
     return { refresh: false, evidence: "merged-probe", ...merged, reason: "every failing test file still fails on a trial merge with main" };
   }
   if (mergedVerdict === "clear") return { refresh: true, evidence: "merged-probe", ...merged, reason: "the failing test files pass on a trial merge with main" };
+  if (unknownWithoutPaths) return { refresh: false, evidence: mergedVerdict, ...merged,
+    reason: `refresh history is unreadable and the ${mergedVerdict} trial merge supplies no clearance evidence` };
   const why = probed.setup_error ?? probed.reason;
   return { refresh: true, evidence: mergedVerdict, ...merged, reason: mergedVerdict === "partial"
     ? "some failing test files still fail on the trial merge; keeping today's refresh"

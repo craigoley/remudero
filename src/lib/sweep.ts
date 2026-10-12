@@ -17143,7 +17143,7 @@ export async function runSweep(
               }
               // W1-T4351 — A RED MAIN ALSO CARRIES IS NOT THIS DIFF'S. Stand down while main is red,
               // then spend this pass's ONE update-branch press once main is green; never a fix.
-              refreshHistoryFor(pr);
+              const refreshHistory = refreshHistoryFor(pr);
               const baseRed = decideBaseRed(pr, mainLatestRun, baseRedHistory);
               if (baseRed.kind !== "own") {
                 baseRedStandDownPrs.add(pr.prNumber);
@@ -17155,6 +17155,14 @@ export async function runSweep(
                 const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, check_name: baseRed.check, main_sha: mainSha,
                   ...(decidedSha !== mainSha ? { main_decided_by_sha: decidedSha } : {}) };
                 if (baseRed.kind === "refresh" && deps.updateBranch && baseRedRefreshPr === undefined) {
+                  if (refreshHistory.history === "unreadable") {
+                    const clearance = await assessRefresh(pr, "base-red", testFileChecks(pr.ciFailures ?? []),
+                      baseReproductionFiles(pr.ciFailures ?? []), mainSha);
+                    if (!clearance.refresh) {
+                      standDownReason = `base red: ${baseRed.check}; branch refresh refused: ${clearance.reason}`;
+                      break;
+                    }
+                  }
                   baseRedRefreshPr = pr.prNumber;
                   let outcome: string;
                   try {

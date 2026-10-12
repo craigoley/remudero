@@ -35,6 +35,10 @@ test("W1-T5490: a pull-request-only red waits while main is red", async () => {
   const run = () => runSweep([pr(), { ...pr(), prNumber: 9000, checksState: "green", reviewState: "success", ciFailures: undefined }], {
     ledgerPath: "/dev/null/t5490", runId: "T5490", now: () => NOW,
     readLedger: () => rows, appendLine: (_path, row) => { rows.push(row); },
+    readRefreshLedgerUnion: stateDir => ({
+      stateDir, archiveFiles: [], archiveCount: 0, liveFileRead: true, unread: [], ok: true,
+      matches: rows.map(row => JSON.stringify(row)),
+    }),
     arm: () => {}, close: () => {}, escalate: () => {}, postReview: async () => {},
     dispatchFix: (p) => { dispatched.push(p.prNumber); },
     updateBranch: (p) => { updated.push(p.prNumber); return "updated"; },
