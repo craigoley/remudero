@@ -244,6 +244,38 @@ test("W1-T7812: incomplete, killed, and summary-less runner output never passes"
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("W1-T7812: shifted proof children do not inherit outer coverage instrumentation", () => {
+  const root = fixture();
+  const file = join(root, "test", "coverage.test.ts");
+  writeFileSync(file, 'import { test } from "node:test";\\ntest("measured", () => {});\\n');
+  const previousOptions = process.env.NODE_OPTIONS;
+  const previousCoverage = process.env.NODE_V8_COVERAGE;
+  process.env.NODE_OPTIONS = "--experimental-test-coverage";
+  process.env.NODE_V8_COVERAGE = "/tmp/outer-test-coverage";
+  const output = "# Subtest: measured\\n# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0\\n";
+  try {
+    const result = measured(root, file, 2, {
+      execFile: (_command: string, args: string[], options: { env: NodeJS.ProcessEnv }) => {
+        assert.equal(options.env.NODE_V8_COVERAGE, undefined);
+        assert.doesNotMatch(options.env.NODE_OPTIONS ?? "", /--experimental-test-coverage/);
+        const destination = args.find((arg) => arg.startsWith("--test-reporter-destination=") && arg.endsWith("tally.json"));
+        assert.ok(destination);
+        writeFileSync(destination.slice(destination.indexOf("=") + 1), JSON.stringify({
+          summary: { tests: 1, failed: 0 }, fileSummaries: [file],
+        }));
+        return output;
+      },
+    });
+    assert.deepEqual(result, { passed: true, pass: 1, tests: 1 });
+  } finally {
+    if (previousOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = previousOptions;
+    if (previousCoverage === undefined) delete process.env.NODE_V8_COVERAGE;
+    else process.env.NODE_V8_COVERAGE = previousCoverage;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T7812: incomplete TAP counts block as run_error and clean the private root", () => {
   const root = fixture();
   const file = join(root, "test", "counts.test.ts");
