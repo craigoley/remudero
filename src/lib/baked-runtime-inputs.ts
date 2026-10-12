@@ -10,6 +10,7 @@ export const BAKED_RUNTIME_SOURCE_PATHS: readonly string[] = [
   "src/lib/errors.ts",
   "src/lib/fleet-control.ts",
   "src/lib/fs-race-safe.ts",
+  "src/lib/gardener-origin.ts",
   "src/lib/git-fetch-retry.ts",
   "src/lib/git-lock-reclaim.ts",
   "src/lib/install-hash.ts",
