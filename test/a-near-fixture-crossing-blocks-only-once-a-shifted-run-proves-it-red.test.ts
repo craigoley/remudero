@@ -256,7 +256,7 @@ test("W1-T7812: shifted proof children do not inherit outer coverage instrumenta
   try {
     const result = measured(root, file, 2, {
       execFile: (_command: string, args: string[], options: { env: NodeJS.ProcessEnv }) => {
-        assert.equal(options.env.NODE_V8_COVERAGE, undefined);
+        assert.equal(options.env.NODE_V8_COVERAGE, "");
         assert.doesNotMatch(options.env.NODE_OPTIONS ?? "", /--experimental-test-coverage/);
         const destination = args.find((arg) => arg.startsWith("--test-reporter-destination=") && arg.endsWith("tally.json"));
         assert.ok(destination);
