@@ -48,6 +48,22 @@ export function hostBudget({ cores, load1, headroomBytes }, { stepRuntimeMs = AU
       cpuWorkers, memoryWorkers: memoryWorkers ?? null, slotConcurrency: slotConcurrency ?? null } };
 }
 
+/** A validated native-profile run may spend its fixed remaining deadline, not a second
+ *  unrelated wall-share budget. This changes time only: CPU/memory/lease workers stay intact.
+ *  The caller uses this only AFTER readRuntimeProfile has validated closed current-tree evidence. */
+export function deadlineHostBudget(budget, { deadline, now = Date.now() } = {}) {
+  if (!Number.isFinite(deadline) || !Number.isFinite(now) ||
+      !Number.isSafeInteger(budget.workers) || budget.workers < 1 || budget.workers > AUTHOR_MAX_WORKERS ||
+      !Number.isSafeInteger(budget.inputs?.stepRuntimeMs) || budget.inputs.stepRuntimeMs <= 0) {
+    throw new Error('deadline host budget: invalid fixed deadline or admitted capacity');
+  }
+  const wallMs = Math.max(0, Math.floor(Math.min(budget.inputs.stepRuntimeMs,
+    deadline - now - AUTHOR_SHUTDOWN_RESERVE_MS)));
+  return { ...budget, wallMs, budgetMs: budget.workers * wallMs, wallShare: null,
+    source: 'validated-native-fixed-deadline',
+    inputs: { ...budget.inputs, deadline, pricedAtMs: now, shutdownReserveMs: AUTHOR_SHUTDOWN_RESERVE_MS } };
+}
+
 /** The priced cost of `suites` in suite-milliseconds: each at its manifest duration, an unknown file at the
  *  manifest median, never below {@link AUTHOR_MIN_SUITE_COST_MS}; times the author runtime safety factor. */
 export function priceSelection(suites, manifest) {
@@ -66,7 +82,8 @@ export function priceSelection(suites, manifest) {
 export function capacityVerdict(suites, manifest, budget) {
   const price = priceSelection(suites, manifest);
   return { fits: price.costMs <= budget.budgetMs, ...price, budgetMs: budget.budgetMs, workers: budget.workers,
-    wallMs: budget.wallMs, wallShare: budget.wallShare, inputs: budget.inputs };
+    wallMs: budget.wallMs, wallShare: budget.wallShare, inputs: budget.inputs,
+    budgetSource: budget.source ?? 'legacy-wall-share' };
 }
 
 /**
@@ -313,13 +330,14 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         try {
           receipt.testSlot = { outcome: slot.outcome, concurrency: slot.concurrency, waitedMs: slot.waitedMs, note: slot.note };
           let runtimeProfile, runtimeManifest;
-          const admitRuntime = (stage, staticReserveMs, files = receipt.suites) => {
+          const admitRuntime = (stage, staticReserveMs, files = receipt.suites,
+            workers = Math.min(AUTHOR_MAX_WORKERS, slot.concurrency)) => {
             if (deadline === undefined) return;
             if (!['acquired', 'inherited'].includes(slot.outcome)) throw new Error('runtime admission requires a real slot; unslotted fallback is not deadline-fit capacity');
             runtimeProfile ??= readRuntimeProfile(root, values['runtime-profile'], runtimeBindings(root, receipt.headSha, authorEnvironment(process.env)));
             runtimeManifest ??= JSON.parse(readFileSync(join(root, 'scripts/test-tier-manifest.json'), 'utf8'));
             const decision = runtimeDeadlineFit(files, runtimeManifest, runtimeProfile, {
-              workers: Math.min(4, slot.concurrency), deadline, ...(staticReserveMs === undefined ? {} : { staticReserveMs }),
+              workers, deadline, ...(staticReserveMs === undefined ? {} : { staticReserveMs }),
             });
             receipt.runtimeAdmission = { stage, profile: relative(root, resolve(root, values['runtime-profile'])), ...decision };
             progress({ name: 'runtime-admission', stage, fits: decision.fits });
@@ -347,7 +365,12 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             let manifest = { files: {} };
             try { manifest = JSON.parse(readFileSync(join(root, 'scripts/test-tier-manifest.json'), 'utf8')); }
             catch (error) { receipt.manifestUnavailable = error.message; }
-            const budget = hostBudget((host ?? readHostCapacityInputs)(), { slotConcurrency: host ? undefined : slot.concurrency });
+            const legacyBudget = hostBudget((host ?? readHostCapacityInputs)(), { slotConcurrency: slot.concurrency });
+            // A deadline without a validated native profile was refused before static work.
+            // Never expand workers or restart the deadline to admit a larger selection.
+            const budget = runtimeProfile ? deadlineHostBudget(legacyBudget, { deadline }) : legacyBudget;
+            const executionWorkers = runtimeProfile ? budget.workers : Math.min(AUTHOR_MAX_WORKERS, slot.concurrency);
+            receipt.executionWorkers = executionWorkers;
             const verdict = capacityVerdict(receipt.suites, manifest, budget);
             receipt.capacity = verdict;
             let ranSuites = receipt.suites;
@@ -373,7 +396,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
               console.log('affected-tests: NOT RUN — the plan-only selection named no suite; lint-plan-fast is the check');
             } else if (!notRun) {
             const testsName = receipt.tiered ? 'affected-tests-subset' : 'affected-tests';
-            admitRuntime('before-tests', 0, ranSuites);
+            admitRuntime('before-tests', 0, ranSuites, executionWorkers);
             // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
             // The host-wide test slot, a load-derived concurrency (never above the old 4) and nice (test-slot.ts).
             slot.refresh();
@@ -385,7 +408,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             // `ok` with a whole summary, so the step passes only when every suite reached its own summary.
             const judged = prepareJudgedRun();
             const child = lowPriorityCommand(process.execPath, testRunArgv(judgedNodeTestArgs(['--test', '--test-reporter=tap', ...durationArgs,
-              '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...ranSuites], judged.args), Math.min(4, slot.concurrency)));
+              '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...ranSuites], judged.args), executionWorkers));
             const tests = runStep(testsName, child.args, child.file, judged.env);
             const judge = closeJudgedRun(judged, ranSuites, { status: tests.status ?? 1, root, role: testsName, prefix: 'preflight-author' });
             const testsOk = completeTestResult(tests) && judge.verdict.complete;
