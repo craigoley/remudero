@@ -2720,7 +2720,6 @@
     "test/the-console-inbox-can-decline-a-proposal.test.ts": 1900,
     "test/the-console-request-path-does-not-block.test.ts": 67,
     "test/the-console-signals-projection-carries-routing-telemetry.test.ts": 3,
-    "test/the-container-ceiling-learns-where-its-pressure-begins.test.ts": 5,
     "test/the-contract-census-lives-with-its-consumer.test.ts": 6,
     "test/the-contract-says-what-the-daemon-sends.test.ts": 75,
     "test/the-contradictory-disposition-escalates-once-per-head.test.ts": 4500,
