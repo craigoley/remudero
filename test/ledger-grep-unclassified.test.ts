@@ -17,7 +17,7 @@
  * unread (found-but-unopenable) rotation, unchanged.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -190,6 +190,64 @@ test("both rotation forms still classify from the name before any read, unaffect
     assert.ok(result.matches.some((l) => l.includes("only-in-plain")), "the plain form was read without gunzip");
     assert.ok(result.matches.some((l) => l.includes("only-in-live")));
     assert.deepEqual(result.unclassified, [], "no decoy exists in this corpus, so unclassified is empty");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── (6) W1-T5424: producer metadata is classified only when valid; unknown artifacts stay visible ─
+
+const META_SHA = "b".repeat(64);
+
+test("valid producer metadata is auxiliary evidence not an unclassified archive", () => {
+  const dir = tmpStateDir("rmd-ledger-metadata-valid-");
+  try {
+    writeGzArchive(dir, "ledger.2026-07-01T00-00-00-000Z.ndjson.gz", ['{"ts":"2026-07-01T00:00:00.000Z","step":"run.start"}']);
+    writeFileSync(join(dir, "ledger.ndjson"), '{"ts":"2026-08-01T00:00:00.000Z","step":"run.start"}\n');
+    writeFileSync(join(dir, "ledger.ndjson.carried.json"), JSON.stringify({ bytes: 93, sha256: META_SHA, rateBytesPerHour: 0, effectiveCeilingBytes: 10, core: {} }));
+    writeFileSync(join(dir, "ledger.ndjson.retained-steps.json"), JSON.stringify({ steps: ["run.start"] }));
+
+    const result = resolveLedgerUnion(dir, "run\\.start");
+
+    assert.deepEqual(result.unclassified, []);
+    assert.equal(result.archiveCount, 1, "metadata is never counted as an archive");
+    assert.deepEqual(basenames(result.archiveFiles), ["ledger.2026-07-01T00-00-00-000Z.ndjson.gz"]);
+    assert.deepEqual(
+      (result.auxiliary ?? []).map((a) => [a.path.split("/").pop(), a.kind]),
+      [["ledger.ndjson.carried.json", "carried-prefix"], ["ledger.ndjson.retained-steps.json", "retained-steps"]],
+      "the audit can name what was excluded and why",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("malformed metadata and unknown backups remain explicitly unclassified", () => {
+  const dir = tmpStateDir("rmd-ledger-metadata-bad-");
+  try {
+    writeGzArchive(dir, "ledger.2026-07-01T00-00-00-000Z.ndjson.gz", ['{"ts":"2026-07-01T00:00:00.000Z","step":"run.start"}']);
+    writeFileSync(join(dir, "ledger.ndjson"), '{"ts":"2026-08-01T00:00:00.000Z","step":"run.start"}\n');
+    writeFileSync(join(dir, "ledger.ndjson.carried.json"), "{not json");
+    writeFileSync(join(dir, "ledger.ndjson.retained-steps.json"), JSON.stringify({ steps: [1, 2] }));
+    writeFileSync(join(dir, "ledger.ndjson.bak"), "old backup\n");
+
+    const result = resolveLedgerUnion(dir, "run\\.start");
+
+    assert.deepEqual(basenames(result.unclassified ?? []).sort(), [
+      "ledger.ndjson.bak",
+      "ledger.ndjson.carried.json",
+      "ledger.ndjson.retained-steps.json",
+    ]);
+    assert.deepEqual(result.auxiliary, []);
+    assert.equal(result.archiveCount, 1);
+
+    // A valid carried file beside an unreadable (directory) retained-steps path: only the readable one classifies.
+    rmSync(join(dir, "ledger.ndjson.retained-steps.json"));
+    mkdirSync(join(dir, "ledger.ndjson.retained-steps.json"));
+    writeFileSync(join(dir, "ledger.ndjson.carried.json"), JSON.stringify({ bytes: 1, sha256: META_SHA }));
+    const partial = resolveLedgerUnion(dir, "run\\.start");
+    assert.deepEqual(basenames(partial.unclassified ?? []).sort(), ["ledger.ndjson.bak", "ledger.ndjson.retained-steps.json"]);
+    assert.deepEqual((partial.auxiliary ?? []).map((a) => a.kind), ["carried-prefix"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
