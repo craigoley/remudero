@@ -107,7 +107,7 @@ export function runSuiteShifted(repoRoot: string, file: string, shiftDays: numbe
     // NODE_V8_COVERAGE makes an intentional early-exit fixture corrupt the parent coverage report.
     delete childEnv.NODE_V8_COVERAGE;
     childEnv.NODE_OPTIONS = (childEnv.NODE_OPTIONS ?? "")
-      .replace(/(^|\\s)(?:"--experimental-test-coverage"|'--experimental-test-coverage'|--experimental-test-coverage)(?=\\s|$)/g, "$1")
+      .replace(/(^|\s)(?:"--experimental-test-coverage"|'--experimental-test-coverage'|--experimental-test-coverage)(?=\s|$)/g, "$1")
       .trim();
     if (!childEnv.NODE_OPTIONS) delete childEnv.NODE_OPTIONS;
     let output: string;
