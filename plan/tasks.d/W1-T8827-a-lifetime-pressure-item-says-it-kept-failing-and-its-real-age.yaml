@@ -1,0 +1,44 @@
+- id: W1-T8827
+  title: "A LIFETIME-PRESSURE ITEM SAYS IT KEPT FAILING, AND ITS REAL AGE — the lifetime-pressure path judges with ageDays 0, and the verify-human proposal text then tells the operator weeks-old tasks were \"filed `verify: human` 0 days ago\", which is wrong twice"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high # spans the run-task lifetime-pressure path and the verify-human judge's proposal text (Rule 19)
+  band_meaning: span
+  origin: "operator session 2026-10-12: console inbox review (W1-T147, W1-T204, W1-T5717, W2-T2, W3-T4, W1-T12e, W3-T7 all read \"0 days ago\")"
+  plan_refs: [W1-T3887, W1-T2635]
+  files: [src/run-task.ts, src/lib/verify-human-judge.ts, test/a-lifetime-pressure-item-says-it-kept-failing-and-its-real-age.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-12 22:05Z in the console inbox: W1-T147, W1-T204, W1-T5717, W2-T2, W3-T4, W1-T12e and W3-T7 each read
+    "was filed `verify: human` 0 days ago and a judge reads it as still needing you" although several are weeks old (W1-T216,
+    sent by the other path, correctly reads 49 days).
+    ROOT CAUSE on origin/main e0dde45ac: the adaptive lifetime-pressure path in src/run-task.ts (~51950-51960) builds its
+    `ShardUnderJudgement` with `ageDays: 0` and routes it through `routeVerifyHumanBacklog`; `proposalFromJudgedShard` and
+    `automationProposalFromJudgedShard` (src/lib/verify-human-judge.ts ~292, ~310) then word EVERY proposal as "was filed
+    `verify: human` N days ago". These tasks were sent because their builds kept failing (attributable dispatches with no
+    owned PR), not because anyone filed them `verify: human`.
+  design: |
+    1. `ShardUnderJudgement` names why it is being judged: `route: "verify-human" | "lifetime-pressure"`.
+    2. The lifetime-pressure path computes the real age from a recorded source (the shard's first commit on main, or its
+       first dispatch row), never 0 as a placeholder, and passes its attributable dispatch count.
+    3. The proposal text says what actually happened per route: a lifetime-pressure item reads "<id> kept failing to build
+       (<n> attempts over <d> days) and a judge reads it as still needing you"; a verify-human item keeps today's wording
+       with its real age. The judge's prompt keeps its existing AGE line, now true.
+    4. The proposal id format is unchanged, so existing inbox rows, threads and declines keep matching.
+  acceptance:
+    - claim: "a lifetime-pressure item's proposal says it kept failing, with its attempt count and real age"
+      proof: 'grep: test("W1-T8827: a lifetime-pressure proposal says the build kept failing and how long" in test/a-lifetime-pressure-item-says-it-kept-failing-and-its-real-age.test.ts'
+    - claim: "the lifetime-pressure path never judges with a placeholder age of zero for an old task"
+      proof: 'grep: test("W1-T8827: an old task is judged with its real age" in test/a-lifetime-pressure-item-says-it-kept-failing-and-its-real-age.test.ts'
+    - claim: "a verify-human proposal keeps its wording and its id"
+      proof: 'grep: test("W1-T8827: a verify-human proposal keeps its wording and id" in test/a-lifetime-pressure-item-says-it-kept-failing-and-its-real-age.test.ts'
+  falsifier: |
+    Run the lifetime-pressure shard builder for a task first committed 30 days ago with 4 attributable dispatches. At
+    origin/main the shard's ageDays is 0 and the proposal reads "was filed `verify: human` 0 days ago"; with the change it
+    reads that the build kept failing over 4 attempts and 30 days.

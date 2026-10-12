@@ -1,0 +1,55 @@
+- id: W1-T8826
+  title: "AN INBOX OPTION IS A BUTTON THAT DOES WHAT IT SAYS — the plain message's options (\"Keep parked\", \"Request clearer proof\", \"Approve now\") are prose with no route, so the console can only print them and repeat the approve/decline/edit forms beside them"
+  repo: remudero
+  depends_on: [W1-T8829, W1-T8825]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high # maps operator-facing options onto write routes across the writer and the served view (Rule 19)
+  band_meaning: span
+  origin: "operator session 2026-10-12: console inbox review; mockup https://claude.ai/artifact/A4JqyAFckCYDJaEzPxopRC"
+  plan_refs: [W1-T4087, W1-T2604, W1-T3407]
+  files: [src/lib/inbox-plain.ts, src/lib/feedback.ts, src/lib/panel-graph.ts, test/an-inbox-option-is-a-button-that-does-what-it-says.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-12: the stored plain messages give the operator good choices (W1-T5418: "Keep parked" / "Request
+    clearer proof" / "Approve now"; W3-T7: "Assign a reviewer" / "Close the item"), but `PlainOption` (src/lib/inbox-plain.ts
+    ~34) is only `{label, consequence}`. Nothing maps a choice onto the route that performs it, so the console renders the
+    raw approve / decline / edit forms on every row instead of the choices.
+    The routes exist on origin/main e0dde45ac (src/lib/panel-graph.ts): POST /v1/inbox/approve {proposalId} (high tier, a
+    READY proposal only), POST /v1/inbox/decline {proposalId, reason} (low), POST /v1/inbox/reframe {proposalId, feedback}
+    (low), POST /v1/inbox/thread/reply {threadId, text} (low; threadId = `thread:<proposalId>::inbox::-::-`).
+  design: |
+    PINNED CONTRACT (the console files against exactly these names):
+      each `plain.options[i]` on a served inbox item gains
+        intent:  "approve" | "decline" | "reframe" | "reply" | "keep"
+        action?: { "method": "POST", "path": string, "fields": object, "input"?: "reason" | "feedback" | "text" }
+      where, per intent:
+        approve -> { POST, "/v1/inbox/approve", {proposalId} }                  served ONLY when the item's lane is "ready"
+        decline -> { POST, "/v1/inbox/decline", {proposalId}, input: "reason" }
+        reframe -> { POST, "/v1/inbox/reframe", {proposalId}, input: "feedback" }
+        reply   -> { POST, "/v1/inbox/thread/reply", {threadId}, input: "text" }
+        keep    -> no `action` (doing nothing is the choice)
+      An option whose intent has no valid route for its lane carries no `action`; the console shows it as a reply
+      suggestion. `input` names the one free-text field the console must collect before posting; `fields` holds the rest.
+    1. The writer tags each option with its intent (an optional `intent` on the decision card's option, validated against the
+       enum; escalation/triage cards without it validate as today). An untagged stored option is served with intent "reply"
+       and no action until the backfill re-writes it (W1-T8829's contract version bump covers that).
+    2. `action` is attached at serve time in `inboxLanes` from intent + lane + proposal id, never stored, so a lane change
+       (ready -> declined) changes the served action with no re-write.
+    3. Nothing new is writable: every action points at an existing route with its existing tier and auth.
+  acceptance:
+    - claim: "a ready item's approve option carries the approve route and a not-ready item's does not"
+      proof: 'grep: test("W1-T8826: approve is actionable only on a ready item" in test/an-inbox-option-is-a-button-that-does-what-it-says.test.ts'
+    - claim: "decline, reframe and reply options carry their route and name the one text input to collect"
+      proof: 'grep: test("W1-T8826: a decline, reframe or reply option names its route and its input" in test/an-inbox-option-is-a-button-that-does-what-it-says.test.ts'
+    - claim: "a keep option and an untagged stored option carry no action"
+      proof: 'grep: test("W1-T8826: keep and untagged options carry no action" in test/an-inbox-option-is-a-button-that-does-what-it-says.test.ts'
+  falsifier: |
+    Serve the inbox lanes for `machine-judge:W1-T5418` (lane ready) with a stored message whose options are tagged keep /
+    reframe / approve. At origin/main the options carry no `intent` or `action`; with the change "Approve now" carries
+    POST /v1/inbox/approve and "Request clearer proof" POST /v1/inbox/reframe with input "feedback", and the same item in
+    the declined lane serves no approve action.

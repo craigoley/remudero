@@ -1,0 +1,45 @@
+- id: W1-T8828
+  title: "A RATIFICATION STAMP CARRIES NO DATE THE MODEL INVENTED — stampLineViolations checks only the opening and the task list, so drafted stamps reach the operator (and MASTER-PLAN.md) with dates like 2023-10-10T00:00:00Z and 12:34:56Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high # tightens the draft lint and updates two suites that pin today's stamp (Rule 19); refusals fall through the existing redraft path
+  band_meaning: span
+  origin: "operator session 2026-10-12: console inbox review (W1-T7739's stamp reads 2023-10-10T00:00:00Z)"
+  plan_refs: [W1-T4864, W1-T4048]
+  files: [src/lib/inbox.ts, test/a-ratification-stamp-carries-no-date-the-model-invented.test.ts, test/a-ratification-draft-is-refused-before-it-reaches-ci.test.ts, test/a-better-drafter-retries-the-proposals-a-worse-one-failed.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-12 22:05Z in the console inbox: the drafted stamp for machine-judge:W1-T7739 reads
+    "(2023-10-10T00:00:00Z) -> NEW-1, NEW-2" and machine-judge:W1-T5418's "(2026-10-03T12:34:56Z)": dates the drafting model
+    made up, shown to the operator as the item's metadata.
+    VERIFIED on origin/main e0dde45ac: the STAMP is the model's text (`parseDraftedCandidate`, src/lib/inbox.ts ~1655);
+    `stampLineViolations` (~1127) checks only that it opens "- <proposalId> (" and lists exactly the fragment's ids. Its own
+    doc says the stamp is written into MASTER-PLAN.md verbatim and is "checked, not rewritten", so an invented date becomes a
+    permanent record.
+  design: |
+    1. `stampLineViolations` (and so `lintDraftedFragment`) refuses any date or time inside the stamp other than the
+       canonical "RATIFIED <YYYY-MM-DD>" whose date is the drafting clock's UTC date (an injected clock, defaulting to the
+       system clock). An ISO timestamp, a time of day or any other year in the stamp is a `draft-stamp` block.
+    2. The draft prompt's stamp instruction names the canonical form with the clock's date filled in, so a compliant model
+       never guesses one.
+    3. Refusal behaviour is unchanged: a refused stamp falls through the existing redraft / next-model path; the stamp is
+       still checked, never rewritten, so the operator still approves exactly what lands.
+    4. NEW-<n> placeholder ids stay legal inside the stamp (they are the fragment's ids); the console shows
+       `draftedTasks[].title` instead of the stamp, which a console task covers.
+  acceptance:
+    - claim: "a stamp carrying an invented timestamp or another year is refused"
+      proof: 'grep: test("W1-T8828: a stamp with a timestamp the model invented is refused" in test/a-ratification-stamp-carries-no-date-the-model-invented.test.ts'
+    - claim: "a stamp whose RATIFIED date is the drafting clock's date passes"
+      proof: 'grep: test("W1-T8828: a stamp dated by the drafting clock passes" in test/a-ratification-stamp-carries-no-date-the-model-invented.test.ts'
+    - claim: "the draft prompt names the canonical stamp with the clock's date"
+      proof: 'grep: test("W1-T8828: the draft prompt hands the model the stamp date" in test/a-ratification-stamp-carries-no-date-the-model-invented.test.ts'
+  falsifier: |
+    Lint "- machine-judge:W1-T7739 (2023-10-10T00:00:00Z) -> NEW-1, NEW-2." against a fragment holding NEW-1 and NEW-2 with
+    the clock at 2026-10-12. At origin/main it passes; with the change it is a draft-stamp block, and the same stamp reading
+    "(fix) — RATIFIED 2026-10-12 -> NEW-1, NEW-2." passes.
