@@ -105,7 +105,7 @@ export function runSuiteShifted(repoRoot: string, file: string, shiftDays: numbe
     const childEnv: NodeJS.ProcessEnv = { ...env, ...judged.env };
     // Shifted proof children are not part of the enclosing CI coverage measurement. Inheriting
     // NODE_V8_COVERAGE makes an intentional early-exit fixture corrupt the parent coverage report.
-    delete childEnv.NODE_V8_COVERAGE;
+    childEnv.NODE_V8_COVERAGE = "";
     childEnv.NODE_OPTIONS = (childEnv.NODE_OPTIONS ?? "")
       .replace(/(^|\s)(?:"--experimental-test-coverage"|'--experimental-test-coverage'|--experimental-test-coverage)(?=\s|$)/g, "$1")
       .trim();
