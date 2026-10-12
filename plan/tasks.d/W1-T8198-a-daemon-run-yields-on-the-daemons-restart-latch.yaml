@@ -10,7 +10,11 @@
   band_meaning: span
   origin: "operator approval 2026-10-11 (Craig: go with your recommendations): restart-churn measurement, ~/Remudero-notes/restart-churn-2026-10-11. Filed as its own task instead of amending W1-T7806, which is in flight and whose shard another filing PR is amending the same day."
   plan_refs: [W1-T7806, W1-T8139, W1-T7697, W1-T3793, W1-T5282, W1-T6093, W1-T4945]
-  files: [src/run-task.ts, test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts]
+  # operator-amendment-2026-10-12: #11133 (this task's build) went red in coverage shard 2 on
+  # "W1-T7806: a clear latch leaves the run's own freshness read at the boundary", which pins the
+  # own-read yield this task replaces (its comment: "replacing the run's own read is W1-T8198's separate
+  # decision"). That suite was undeclared, so the build could not update it.
+  files: [src/run-task.ts, test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts, test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts]
   status: queued
   priority: 0.9 # operator-2026-10-12: 160 freshness handoffs in the live ledger; W1-T7729 yielded 5x, W1-T8472 3x, W1-T7735 6x today without a PR; this gates every long build
   attempts: 0
