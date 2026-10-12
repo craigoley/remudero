@@ -29,7 +29,7 @@ import { defaultIsPidAlive, parseDrainLockInfo, type DrainLockInfo } from "./dra
 import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from "./fs-race-safe.js";
 import { LEDGER_CARRIED_PREFIX_SUFFIX, LEDGER_FILENAME, LEDGER_RETAINED_STEPS_SUFFIX } from "./ledger-path.js";
 import { assertLedgerPathNotLive } from "./live-write-guard.js";
-import { rotationStampIso } from "./ledger-union.js";
+import { isValidRetainedStepsMetadata, rotationStampIso } from "./ledger-union.js";
 import { PLAN_ONLY_REVIEW_MARKER_STEP, planOnlyReviewMarkers, PR_TERMINAL_STEP, pruneCarriedRows } from "./ledger-carry.js";
 import { resolveProducerIdentity, type ProducerIdentity } from "./producer-identity.js";
 import { WORKER_SCOPE_ENV, readGardenerOrigin } from "./worker-containment.js";
@@ -595,6 +595,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "dispatch.breaker_released",
   "dispatch.breaker_judged", // W1-T7742: a judge's continue resets the streak like a release; its rulings dedup.
   "run.freshness_handoff", // W1-T7747: a parked checkpoint's resume receipt (daemon.ts pendingWorkerBoundaryHandoffs).
+  "implement.checkpoint_dropped", // Retain the resolution too, so rotation cannot revive a dropped handoff receipt.
   // W1-T2910: `status.ts`'s projection reads this row to derive an independent-failure block and
   // clears it on a later dispatch (src/lib/status.ts, the `line.step === "dispatch.blocked_independent"`
   // arm). Rotated away, a block that was recorded stops being visible and the subtree is re-dispatched
@@ -735,6 +736,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "main.run_gap.dispatched", // mainRunGapHistoryFromLedger: lost, a gap commit's workflows dispatch again.
   "main.repair.bisecting", // W1-T7760 mainBisectionFromLedger: lost, a probe in flight is dispatched a second time.
   "main.repair.probe_concluded", // W1-T7760 mainBisectionFromLedger: lost, a concluded probe is re-run and the bisection restarts.
+  "main.repair.fix_opened", // W1-T8575 mainRepairPrUrlsFromLedger (sweep.ts): lost, a red-main repair PR is held for the red it repairs.
   "refusal_amendment.drafted", // noPrVerdictRowsFromLedger: lost, a settled no_pr refusal is re-drafted.
   "sre.governor", // governorTiersFromLedger: lost, a stopped runbook re-pauses and re-pages; on change only.
   "sweep.plan_repair", // planRepairHistoryFromLedger: the per-head repair and once-per-PR stale-base key.
@@ -1257,10 +1259,10 @@ function readRetainedSteps(ledgerPath: string): RetainedStepsRead {
   if (!existsSync(path)) return { status: "absent" };
   try {
     const raw = JSON.parse(readFileSync(path, "utf8")) as Partial<RetainedStepsRecord>;
-    if (!Array.isArray(raw.steps) || !raw.steps.every((x) => typeof x === "string")) return { status: "unreadable" };
+    if (!isValidRetainedStepsMetadata(raw)) return { status: "unreadable" };
     const last = typeof raw.lastFullRotationMs === "number" && Number.isFinite(raw.lastFullRotationMs) ? raw.lastFullRotationMs : undefined;
     const deferral = raw.lastDeferral && typeof raw.lastDeferral.key === "string" && typeof raw.lastDeferral.atMs === "number" ? raw.lastDeferral : undefined;
-    return { status: "ok", record: { steps: raw.steps, lastFullRotationMs: last, lastDeferral: deferral } };
+    return { status: "ok", record: { steps: raw.steps as string[], lastFullRotationMs: last, lastDeferral: deferral } };
   } catch {
     return { status: "unreadable" };
   }
