@@ -135,6 +135,44 @@ function recentIds(body: Record<string, unknown>): string[] {
   return [...new Set(((body.entries ?? []) as Array<{ taskId: string }>).map((e) => e.taskId))].sort();
 }
 
+test("cached host approvals capture loaded startup configuration through the real HTTP route", async (t) => {
+  const { deps } = fleet(t);
+  const approvedAt = "2026-01-01T00:00:00.000Z";
+  const rows = [{ model: "host-model", approvedBy: "operator", approvedAt, privateNote: "private-sentinel" }];
+  deps.modelApprovals = rows;
+  await withServer(deps, async (url) => {
+    const first = await get(url, "/v1/views/analytics");
+    assert.equal(first.status, 200);
+    const data = first.body.data as { modelApprovals: { state: string; capturedAt: string; approvals: unknown[]; scope: string } };
+    assert.equal(data.modelApprovals.state, "reported");
+    assert.equal(data.modelApprovals.scope, "serving-host");
+    assert.ok(Number.isFinite(Date.parse(data.modelApprovals.capturedAt)));
+    assert.deepEqual(data.modelApprovals.approvals, [{ model: "host-model", approvedBy: "operator", approvedAt }]);
+    assert.equal(JSON.stringify(first.body).includes("private-sentinel"), false);
+    rows[0]!.model = "changed-after-startup";
+    const second = await get(url, "/v1/views/analytics");
+    assert.deepEqual((second.body.data as Record<string, unknown>).modelApprovals, data.modelApprovals,
+      "reads retain the same immutable startup source, not a request-time configuration reread");
+    assert.equal((await fetch(`${url}/v1/views/analytics`)).status, 401);
+  });
+});
+
+test("cached host approvals distinguish an absent startup source from an optional empty loaded list", async (t) => {
+  const { deps } = fleet(t);
+  await withServer(deps, async (url) => {
+    const read = await get(url, "/v1/views/analytics");
+    assert.equal(read.status, 200);
+    assert.equal(Object.hasOwn(read.body.data as object, "modelApprovals"), false);
+  });
+  await withServer({ ...deps, modelApprovals: undefined }, async (url) => {
+    const read = await get(url, "/v1/views/analytics");
+    assert.equal(read.status, 200);
+    const evidence = (read.body.data as Record<string, unknown>).modelApprovals as { state: string; approvals: unknown[] };
+    assert.equal(evidence.state, "reported");
+    assert.deepEqual(evidence.approvals, [], "the CLI supplied the optional list after a successful config load");
+  });
+});
+
 test("each registered instance is served under its own prefix from its own state", async (t) => {
   const { deps } = fleet(t);
   await withServer(deps, async (url) => {

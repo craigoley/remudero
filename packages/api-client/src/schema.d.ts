@@ -2917,6 +2917,7 @@ export interface components {
       stale: boolean;
       sources: (ViewSource)[];
       data: {
+        modelApprovals?: HostModelApprovalsEvidence;
         /** The counted instances' metrics merged, in catalog order. Sums are summed, `cache.reuse` is the ratio of the summed token terms, and `duration.p50.ms` the median of every instance's runs together; nothing is averaged. `instances` is how many instances had a value. */
         overview: ({
           key: "runs.completed" | "tokens.total" | "cache.reuse" | "cost.modeled.usd" | "duration.p50.ms" | "queue.pending";
@@ -2942,6 +2943,27 @@ export interface components {
         })[];
       };
     };
+    /** Bounded immutable capture of the serving host's loaded model-approval configuration. capturedAt is the startup observation, not an analytics refresh, permission grant or worker adoption receipt. Expiry is retained for a separate console read-time evaluation. Absent on older producers; a missing or rejected corpus is never a measured empty approval list. */
+    HostModelApprovalsEvidence: ({
+      version: "host-model-approvals-v1";
+      scope: "serving-host";
+      sourceKind: "loaded-config";
+      capturedAt: string;
+      state: "reported";
+      approvals: ({
+        model: string;
+        approvedBy: string;
+        approvedAt: string;
+        expiresAt?: string;
+      })[];
+    }) | ({
+      version: "host-model-approvals-v1";
+      scope: "serving-host";
+      sourceKind: "loaded-config";
+      capturedAt: string | null;
+      state: "unavailable";
+      reason: "invalid_source" | "over_budget" | "clock_skew";
+    });
     /** Additive analytics-details-v1 transport over matching committed signals and usage rows. Reported is not a freshness verdict; read analytics:<instance> for freshness. Consumers validate the carried projection schemas. Missing/mixed snapshots, unreadable or unsupported bodies and response-budget refusals stay explicitly unavailable, not empty healthy defaults. */
     AnalyticsStoredDetails: ({
       version: "analytics-details-v1";

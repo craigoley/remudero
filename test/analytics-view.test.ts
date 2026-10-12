@@ -94,7 +94,7 @@ function metric(data: AnalyticsViewData, key: string): { value: number | null; i
 }
 
 /** Two instances' stores, a ticker building only the analytics view over them, and its latest analytics body. */
-function world(t: TestCtx, clock: Clock, opts: { stateDir?: string; holder?: string; names?: string[] } = {}) {
+function world(t: TestCtx, clock: Clock, opts: { stateDir?: string; holder?: string; names?: string[]; modelApprovalConfig?: { capturedAt: string; approvals: unknown } } = {}) {
   const stateDir = opts.stateDir ?? scratch(t, "analytics-view-state");
   const instances = (opts.names ?? ["core", "site"]).map((name) => ({ name, ledgerDir: join(stateDir, "ledgers", name) }));
   for (const { ledgerDir: dir } of instances) {
@@ -105,7 +105,7 @@ function world(t: TestCtx, clock: Clock, opts: { stateDir?: string; holder?: str
   if (!existsSync(readModelSwitchesPath(stateDir))) switchViewsOn(stateDir, [ANALYTICS_VIEW_NAME]);
   const posted: ReadModelWorkerMessage[] = [];
   const ticker = createReadModelTicker({
-    stateDir, instances, views: [createAnalyticsView()],
+    stateDir, instances, views: [createAnalyticsView({ modelApprovalConfig: opts.modelApprovalConfig })],
     clock, holder: opts.holder ?? "holder-1", oracle: "off", post: (m) => void posted.push(m),
   });
   ticker.start();
@@ -120,6 +120,83 @@ function world(t: TestCtx, clock: Clock, opts: { stateDir?: string; holder?: str
   const reading = (name: string): ViewSource | undefined => posted.flatMap((m) => (m.type === "sources" ? m.sources : [])).findLast((s) => s.name === name);
   return { stateDir, ticker, posted, body, logs, reading };
 }
+
+test("cached model approvals use loaded host provenance independent of analytics source time", async () => {
+  const { clock } = handClock(T0);
+  const capturedAt = iso(T0 - 10 * MINUTE);
+  const view = analyticsLegacyView({ scopes: () => [], clock, modelApprovalConfig: { capturedAt,
+    approvals: [{ model: "gpt-6-astra", approvedBy: "fixture-operator", approvedAt: iso(T0 - 20 * MINUTE), expiresAt: iso(T0 + MINUTE) }] } });
+  const result = view.compute(new URLSearchParams());
+  assert.ok("data" in result);
+  assert.deepEqual(result.data.modelApprovals, { version: "host-model-approvals-v1", scope: "serving-host", sourceKind: "loaded-config",
+    capturedAt, state: "reported", approvals: [{ model: "gpt-6-astra", approvedBy: "fixture-operator",
+      approvedAt: iso(T0 - 20 * MINUTE), expiresAt: iso(T0 + MINUTE) }] });
+  assert.equal(result.data.coverage.counted, 0, "host permission records do not fabricate repository coverage");
+  assert.equal(JSON.stringify(result.data.modelApprovals).includes("repository"), false);
+});
+
+test("cached model approvals whitelist and bound loaded host records without granting repository permission", async () => {
+  const { clock } = handClock(T0);
+  const record = { model: "gpt-6-astra", approvedBy: "fixture-operator", approvedAt: iso(T0 - MINUTE), secret: "private-sentinel" };
+  const read = async (approvals: unknown) => {
+    const result = analyticsLegacyView({ scopes: () => [], clock, modelApprovalConfig: { capturedAt: iso(T0), approvals } }).compute(new URLSearchParams());
+    assert.ok("data" in result);
+    return result.data.modelApprovals;
+  };
+  const valid = await read([record]);
+  assert.equal(valid?.state, "reported");
+  assert.equal(JSON.stringify(valid).includes("private-sentinel"), false);
+  assert.deepEqual(violations(valid, SPEC.components.schemas.HostModelApprovalsEvidence), []);
+  for (const approvals of [[{ model: "x" }], Array.from({ length: 101 }, (_, i) => ({ ...record, model: `model-${i}` })), [record, record],
+    [{ ...record, approvedAt: iso(T0 + MINUTE) }], [{ ...record, expiresAt: "invalid" }], [{ ...record, approvedBy: " " }],
+    [{ ...record, model: "x".repeat(161) }], null]) {
+    const invalid = await read(approvals);
+    assert.equal(invalid?.state, "unavailable");
+    assert.equal(invalid && "approvals" in invalid, false, "a rejected corpus is not a measured empty list");
+    assert.deepEqual(violations(invalid, SPEC.components.schemas.HostModelApprovalsEvidence), []);
+  }
+  const oversized = Array.from({ length: 100 }, (_, i) => ({ ...record, model: `m${i}${"x".repeat(150)}`, approvedBy: "界".repeat(160) }));
+  assert.equal((await read(oversized))?.state, "unavailable");
+  const throwing = Object.defineProperty({}, "model", { get() { throw Error("private-sentinel"); } });
+  assert.equal((await read([throwing]))?.state, "unavailable");
+});
+
+test("cached model approvals retain unknown invalid and expired semantics", async () => {
+  const { clock } = handClock(T0);
+  const read = async (input?: { capturedAt: string; approvals: unknown }) => {
+    const result = analyticsLegacyView({ scopes: () => [], clock, modelApprovalConfig: input }).compute(new URLSearchParams());
+    assert.ok("data" in result);
+    return result.data.modelApprovals;
+  };
+  assert.equal(await read(), undefined, "a caller with no configured source never invents an empty corpus");
+  const empty = await read({ capturedAt: iso(T0), approvals: [] });
+  assert.deepEqual(empty, { version: "host-model-approvals-v1", scope: "serving-host", sourceKind: "loaded-config",
+    capturedAt: iso(T0), state: "reported", approvals: [] });
+  for (const capturedAt of ["invalid", iso(T0 + MINUTE)]) assert.equal((await read({ capturedAt, approvals: [] }))?.state, "unavailable");
+  const expired = await read({ capturedAt: iso(T0 - MINUTE), approvals: [{ model: "claude-fable-5-1", approvedBy: "fixture-operator",
+    approvedAt: iso(T0 - 10 * MINUTE), expiresAt: iso(T0) }] });
+  assert.equal(expired?.state, "reported");
+  if (expired?.state === "reported") assert.equal(expired.approvals[0].expiresAt, iso(T0), "expiry is retained for a separate read-time evaluation, not recaptured as fresh config");
+  const invalidClock = analyticsLegacyView({ scopes: () => [], clock: { ...clock, now: () => NaN }, modelApprovalConfig: { capturedAt: iso(T0), approvals: [] } }).compute(new URLSearchParams());
+  assert.ok("data" in invalidClock);
+  assert.equal(invalidClock.data.modelApprovals?.state, "unavailable");
+});
+
+test("cached model approvals reach the real worker view and survive a warm restart without request fanout", (t) => {
+  const { clock } = handClock(T0);
+  const modelApprovalConfig = { capturedAt: iso(T0 - MINUTE), approvals: [] };
+  const first = world(t, clock, { names: ["core"], modelApprovalConfig });
+  t.after(() => first.ticker.release());
+  assert.equal(first.ticker.acceptSnapshot(written("core", snapshotOf(CORE_LINES, T0 - 2 * MINUTE))), true);
+  first.ticker.tick();
+  assert.equal(metric(first.body().data, "runs.completed").value, 2);
+  assert.deepEqual(first.body().data.modelApprovals, { version: "host-model-approvals-v1", scope: "serving-host", sourceKind: "loaded-config",
+    capturedAt: modelApprovalConfig.capturedAt, state: "reported", approvals: [] });
+  first.ticker.release();
+  const resumed = world(t, clock, { names: ["core"], stateDir: first.stateDir, holder: "resumed", modelApprovalConfig });
+  t.after(() => resumed.ticker.release());
+  assert.deepEqual(resumed.body().data.modelApprovals, first.body().data.modelApprovals);
+});
 
 test("analytics fixtures explicitly enable snapshots while an unswitched analytics view stays dark", (t) => {
   const { clock } = handClock(T0);
@@ -557,7 +634,7 @@ test("the read-model worker commits a real slow lane's analytics refresh and ser
   let onMessage: ((msg: { type?: string }) => void) | undefined;
   runReadModelWorker(
     { on: (_event, run) => (onMessage = run), postMessage: (m) => void posted.push(m as ReadModelWorkerMessage), close: () => {} },
-    { kind: "remudero-read-model", stateDir, instances: [{ name: "core", ledgerDir, repo: "craigoley/remudero" }], tickMs: 20, signal: new SharedArrayBuffer(8), slowLane: { intervalMs: 60_000 } },
+    { kind: "remudero-read-model", stateDir, instances: [{ name: "core", ledgerDir, repo: "craigoley/remudero" }], tickMs: 20, signal: new SharedArrayBuffer(8), slowLane: { intervalMs: 60_000 }, modelApprovalConfig: { capturedAt: iso(T0), approvals: [] } },
   );
   t.after(() => onMessage?.({ type: "stop" }));
   const merged = (): AnalyticsViewData | undefined => {
@@ -569,6 +646,7 @@ test("the read-model worker commits a real slow lane's analytics refresh and ser
   assert.deepEqual(merged()?.coverage, { counted: 1, of: 1, missing: [] }, JSON.stringify(posted.filter((m) => m.type === "log")));
   assert.equal(metric(merged()!, "runs.completed").value, 2);
   assert.equal(merged()!.instances[0]!.repository, "craigoley/remudero", "the real worker supplies the identity to its default analytics unit");
+  assert.deepEqual(merged()!.modelApprovals, { version: "host-model-approvals-v1", scope: "serving-host", sourceKind: "loaded-config", capturedAt: iso(T0), state: "reported", approvals: [] }, "the default worker relays the same source to its actual view thread");
   onMessage?.({ type: "stop" });
 });
 
