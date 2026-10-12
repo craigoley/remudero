@@ -54280,7 +54280,7 @@ async function openCheckedMainRepairPr(
   deps: MainRepairFixDispatchDeps,
 ): Promise<string | undefined> {
   const diffText = (deps.readDiff ?? diffSinceMergeBase)(worktreePath);
-  if (!diffText?.trim()) {
+  if (diffText === undefined || diffText.trim() === "") {
     log("main-repair.no_change", { branch, reason: diffText === undefined ? "diff unreadable" : "the branch adds nothing to origin/main" });
     return undefined;
   }
