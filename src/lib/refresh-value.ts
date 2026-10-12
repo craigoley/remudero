@@ -199,6 +199,20 @@ export function forcedRefreshDecisionRow(fields: {
   return { ...row, decision_id: `${String(row.decision_id)}:${fields.forcedBy}`, overlap: "unweighed" };
 }
 
+/** The forced row's fields for a caller whose own `log(step, extra)` stamps `run_id`/`task_id`/`step`
+ *  (the fix lane). A head the caller never read is `unread`, so the decision id still names the path. */
+export function forcedRefreshDecisionFields(fields: {
+  prNumber: number;
+  headSha?: string;
+  forcedBy: string;
+  reason: string;
+}): Record<string, unknown> {
+  const { run_id: _run, task_id: _task, step: _step, ...rest } = forcedRefreshDecisionRow({
+    runId: "", prNumber: fields.prNumber, headSha: fields.headSha ?? "unread", forcedBy: fields.forcedBy, reason: fields.reason,
+  });
+  return rest;
+}
+
 /** True when this exact decision (id and verdict) is already on the ledger: a pass that reaches the
  *  same skip on the same head writes nothing new. */
 export function refreshDecisionRecorded(

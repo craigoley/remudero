@@ -24,6 +24,7 @@ import {
   refreshRequestRow,
 } from "../src/lib/refresh-value.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { runFixRebase } from "../src/run-task.js";
 import { refreshStaleRollupAfterRefusal, runLightPassReadyRefresh, type ArmedStalledPr } from "../src/lib/sweep.js";
 import {
   DEFAULT_SWEEP_POLICY,
@@ -306,4 +307,31 @@ test("W1-T7735: a repair-driven refresh keeps its own trigger and still writes a
   assert.equal(typeof row?.predicted_cost_ci_min, "number");
   assert.ok(rows.indexOf(row!) < rows.findIndex((r) => r.step === "automerge.stale_rollup_refreshed"),
     "the decision row is written before the press");
+});
+
+test("W1-T7735: the fix lane's rebase writes a forced decision row before it presses update-branch", async () => {
+  // W1-T1095's rebase repairs a fault (a merged prerequisite this head lacks), so it is never weighed,
+  // but it writes the same decision row the sweep's repairs do, so the tuning sees its CI cost too.
+  const rows: { step: string; extra?: Record<string, unknown> }[] = [];
+  const pressed: number[] = [];
+  const result = await runFixRebase(
+    { prUrl: "https://github.com/craigoley/remudero/pull/7040", prerequisitePr: 7039, reviewPassed: false, strikes: 1 },
+    {
+      log: (step, extra) => { rows.push({ step, ...(extra === undefined ? {} : { extra }) }); },
+      say: () => {},
+      ledgerLines: () => [],
+      readMergeFacts: () => ({ mergeable: "MERGEABLE", behindBy: 3 }),
+      updateBranch: (n) => { pressed.push(n); return { ok: true }; },
+    },
+  );
+  assert.equal(result.rebased, true);
+  assert.deepEqual(pressed, [7040]);
+  const index = rows.findIndex((r) => r.step === REFRESH_DECIDED_STEP);
+  const row = rows[index]?.extra;
+  assert.equal(row?.forced_by, "fix-rebase");
+  assert.equal(row?.decision, "refresh");
+  assert.equal(row?.pr_number, 7040);
+  assert.equal(row?.overlap, "unweighed");
+  assert.match(String(row?.reason), /prerequisite #7039 merged/);
+  assert.ok(index >= 0 && index < rows.findIndex((r) => r.step === "fix.rebased"), "the decision row precedes the press");
 });

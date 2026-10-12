@@ -9,7 +9,7 @@ import { readPlaneWorkerInput, runReadPlaneWorker, readPlaneWorkerLog } from "./
 import { globSync, renameSync } from "node:fs";
 import { remeasureSettledGoals, withGoalRemeasurement } from "./lib/goals.js";
 import { judgeCiEscalation, productionCiJudgePorts, singleFlightCiJudge, withCiJudgeAfterSweep, type CiJudgeIo } from "./lib/ci-escalation-judge.js";
-import { judgeRefreshOverlap, productionRefreshJudgePorts } from "./lib/refresh-value.js";
+import { forcedRefreshDecisionFields, judgeRefreshOverlap, productionRefreshJudgePorts, REFRESH_DECIDED_STEP } from "./lib/refresh-value.js";
 // The doctorCommand-only reads (DOCTOR_USAGE_EXIT, buildDoctorReport, readGitLocks, readMemInfo,
 // readPauseAgeMs, refuseUnsupportedArgs, classifyReadFailure, readDiskTotalBytes,
 // classifyWorktreeBase, MemInfo, WorktreeBaseRow, readNvmrcVersion) moved with doctorCommand to src/lib/report-commands.ts
@@ -10660,6 +10660,8 @@ export async function runFixRebase(
     return { rebased: false, reason: decision.reason };
   }
 
+  io.log(REFRESH_DECIDED_STEP, forcedRefreshDecisionFields({ prNumber: target.number, forcedBy: "fix-rebase", // W1-T7735
+    reason: decision.reason }));
   const result = await io.updateBranch(target.number);
   if (!result.ok) {
     const reason = `update-branch failed — ${result.error ?? "no error reported"}`;
@@ -12186,6 +12188,8 @@ export async function runFixRung(opts: {
           refresh: decision.refresh,
         });
         if (decision.refresh) {
+          deps.log(REFRESH_DECIDED_STEP, forcedRefreshDecisionFields({ prNumber, forcedBy: "fix-pre-strike", // W1-T7735
+            reason: `base changed ${decision.matchingBaseFiles.join(", ")}` }));
           const updated = await deps.updateBranch(prNumber);
           if (updated.ok) {
             const reason =

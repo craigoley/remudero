@@ -17930,6 +17930,9 @@ export async function runSweep(
                     matching_base_files: decision.matchingBaseFiles,
                   });
                   staleBaseAttemptedPrNumber = pr.prNumber;
+                  appendLine(deps.ledgerPath, forcedRefreshDecisionRow({ runId: deps.runId, prNumber: pr.prNumber, headSha: pr.headSha, // W1-T7735
+                    forcedBy: "stale-base", reason: `base changed ${decision.matchingBaseFiles.join(", ")}`,
+                    ...(pr.taskId === undefined ? {} : { taskId: pr.taskId }) }));
                   try {
                     const outcome = await deps.updateBranch!(pr);
                     appendLine(deps.ledgerPath, {
