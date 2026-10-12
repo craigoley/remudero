@@ -9,17 +9,21 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { IMAGE_RECYCLE_FAILURE_BACKOFF_MS, type DeployDeps, type ResourcePolicyDrift } from "../src/lib/deployer.js";
 import type { Escalation, IssueGateway } from "../src/lib/escalate.js";
+import { loadHostMemoryBudgetPolicy } from "../src/lib/host-memory-shadow.js";
 import {
   SERVE_POLICY_CONTAINER,
   SERVE_POLICY_FAILED_FILE,
+  SERVE_REPLACE_HELD_EXIT,
+  ServeReplaceHeld,
   realServePolicyDeps,
+  serveReplaceAdmissionEnv,
   runServePolicyCycle,
   serveHandoffOpen,
 } from "../src/lib/serve-policy-convergence.js";
@@ -212,7 +216,7 @@ test("the shipped serve wiring reads the serve role against remudero-serve and r
     assert.equal(seams.serveHandoffInProgress!(), false);
 
     seams.replaceServe!();
-    assert.deepEqual(calls.at(-1), ["env", `RMD_STATE_DIR=${root}`, "bash", join(root, "deploy", "serve-container.sh"), "--replace"]);
+    assert.deepEqual(calls.at(-1), ["env", `RMD_STATE_DIR=${root}`, ...serveReplaceAdmissionEnv(loadHostMemoryBudgetPolicy()), "bash", join(root, "deploy", "serve-container.sh"), "--replace"]);
     assert.deepEqual(seams.servePolicyDrift!(), [], "the replaced container is on the policy");
 
     // The failure record round-trips through state/, and clears.
@@ -264,5 +268,122 @@ test("the shipped serve wiring stays dark off the primary instance and reads fau
   } finally {
     rmSync(site.root, { recursive: true, force: true });
     rmSync(bare, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T8311: the replace re-checks fresh host pressure before it can stop the console ───────────
+
+/** A contained install: the REAL launcher (deploy/ linked in), a fake docker that only records, fake /proc files. */
+function launcherFixture(): { root: string; log: string; proc: string; env: NodeJS.ProcessEnv; exec: (cmd: string, args: string[]) => string } {
+  const { root } = fixture();
+  rmSync(join(root, "deploy"), { recursive: true, force: true });
+  symlinkSync(join(REPO_ROOT, "deploy"), join(root, "deploy"));
+  for (const dir of ["bin", "proc", "code", "gens"]) mkdirSync(join(root, dir), { recursive: true });
+  const log = join(root, "docker.log");
+  writeFileSync(log, "");
+  writeFileSync(join(root, "bin", "docker"), [
+    "#!/usr/bin/env bash",
+    'echo "docker $*" >> "${FAKE_DOCKER_LOG}"',
+    'case "$1" in',
+    '  inspect) case "$*" in *Running*) echo true ;; *Networks*) echo yes ;; esac; exit 0 ;;',
+    '  stats) echo "5632MiB / 7.5GiB"; exit 0 ;;',
+    '  logs) echo "listening on http://0.0.0.0:4317"; exit 0 ;;',
+    '  network) echo "cloudflared remudero-serve"; exit 0 ;;',
+    "esac",
+    "exit 0",
+    "",
+  ].join("\n"));
+  chmodSync(join(root, "bin", "docker"), 0o755);
+  // A runner with the Azure CLI installed must never reach a real registry login from this fixture.
+  writeFileSync(join(root, "bin", "az"), "#!/usr/bin/env bash\necho \"az $*\" >> \"${FAKE_DOCKER_LOG}\"\nexit 0\n");
+  chmodSync(join(root, "bin", "az"), 0o755);
+  const proc = join(root, "proc");
+  writeFileSync(join(proc, "meminfo"), "MemTotal: 16000000 kB\nMemAvailable: 12000000 kB\n");
+  writeFileSync(join(proc, "vmstat"), "pswpin 100\n");
+  writeFileSync(join(proc, "psi"), "some avg10=0.50 avg60=0.10 avg300=0.00 total=1\nfull avg10=0.10 avg60=0.00 avg300=0.00 total=1\n");
+  const env: NodeJS.ProcessEnv = {
+    PATH: `${join(root, "bin")}:/usr/bin:/bin`, HOME: root, GH_TOKEN: "fixture-token", FAKE_DOCKER_LOG: log,
+    RMD_SERVE_REPO_DIR: join(root, "code"), RMD_SERVE_GENS_DIR: join(root, "gens"), RMD_SERVE_DOCKERENV_PATH: join(root, "no-dockerenv"),
+    RMD_INSTANCE_REGISTRY: join(root, "no-registry"), RMD_MEMINFO_PATH: join(root, "no-meminfo"), RMD_SERVE_BANNER_WAIT_S: "1",
+    RMD_SERVE_ADMIT_MEMINFO_PATH: join(proc, "meminfo"), RMD_SERVE_ADMIT_VMSTAT_PATH: join(proc, "vmstat"),
+    RMD_SERVE_ADMIT_PSI_PATH: join(proc, "psi"), RMD_SERVE_ADMIT_SAMPLE_S: "0.05",
+  };
+  // The shipped process seam, with only its environment contained.
+  const exec = (cmd: string, args: string[]): string => execFileSync(cmd, args, { encoding: "utf8", env, stdio: "pipe" });
+  return { root, log, proc, env, exec };
+}
+
+const DESTRUCTIVE = /^docker (stop|rm|run|pull|network connect)\b/m;
+
+test("serve convergence cannot stop the console before pressure admission", () => {
+  // Injected ports: a held launcher is a HOLD, never a failure, a back-off or an escalation.
+  const held = harness({ replaceServe: () => { throw new ServeReplaceHeld("psi", "memory PSI full avg10 2.53 (max 2)"); } });
+  const out = runServePolicyCycle(held.deps, TICK);
+  assert.equal(out.replaced, false);
+  assert.match(out.reason, /fresh host pressure refused it \(psi: memory PSI full avg10 2\.53/);
+  assert.deepEqual(held.rows.map((r) => r.step), ["deploy.serve_policy_replace", "deploy.serve_policy_held"]);
+  assert.equal(held.rows[1]!.data?.hold, "psi");
+  assert.deepEqual(held.rows[1]!.data?.drift, DRIFT);
+  assert.deepEqual([held.failures, held.escalations, held.cleared], [[], [], 0], "nothing was replaced, so nothing failed");
+
+  // The shipped wiring hands the launcher the budget's own thresholds and reads its held exit.
+  const budget = loadHostMemoryBudgetPolicy(join(REPO_ROOT, "plan", "policy.yaml"));
+  assert.deepEqual(serveReplaceAdmissionEnv(budget), [
+    "RMD_SERVE_REPLACE_ADMISSION=required", `RMD_SERVE_ADMIT_HOST_RESERVE_MIB=${budget.hostReserveMib}`,
+    `RMD_SERVE_ADMIT_SWAPIN_MAX=${budget.swapInPagesPerSecMax}`, `RMD_SERVE_ADMIT_PSI_SOME_AVG10_MAX=${budget.psiSomeAvg10Max}`,
+    `RMD_SERVE_ADMIT_PSI_FULL_AVG10_MAX=${budget.psiFullAvg10Max}`, `RMD_SERVE_ADMIT_CANDIDATE_MIB=${budget.serveColdStartReserveMib}`,
+  ]);
+  const { root: wired } = fixture();
+  try {
+    const launched: string[][] = [];
+    const refuse = (status: number) => (cmd: string, args: string[]): string => {
+      launched.push([cmd, ...args]);
+      throw Object.assign(new Error("Command failed"), { status, stderr: "serve-container: HELD (host_headroom) — MemAvailable 3954 MiB < need 4096 MiB (before docker stop). remudero-serve was left untouched.\n" });
+    };
+    const heldSeam = realServePolicyDeps({ installPath: wired, stateRoot: wired }, refuse(SERVE_REPLACE_HELD_EXIT), undefined, () => budget).replaceServe!;
+    assert.throws(heldSeam, (err: unknown) => err instanceof ServeReplaceHeld && err.hold === "host_headroom" && /3954 MiB/.test(err.message));
+    assert.deepEqual(launched[0]!.slice(0, 2 + 6), ["env", `RMD_STATE_DIR=${wired}`, ...serveReplaceAdmissionEnv(budget)]);
+    const failedSeam = realServePolicyDeps({ installPath: wired, stateRoot: wired }, refuse(1), undefined, () => budget).replaceServe!;
+    assert.throws(failedSeam, (err: unknown) => !(err instanceof ServeReplaceHeld), "any other exit is still a failure");
+    const before = launched.length;
+    const noPolicy = realServePolicyDeps({ installPath: wired, stateRoot: wired }, refuse(0), undefined, () => { throw new Error("policy.yaml: ENOENT"); }).replaceServe!;
+    assert.throws(noPolicy, (err: unknown) => err instanceof ServeReplaceHeld && err.hold === "policy_unread");
+    assert.equal(launched.length, before, "no admission thresholds, no launch at all");
+  } finally {
+    rmSync(wired, { recursive: true, force: true });
+  }
+
+  // The REAL launcher through the shipped seam: pressure holds before any destructive docker call.
+  const f = launcherFixture();
+  try {
+    const cycle = (): { out: ReturnType<typeof runServePolicyCycle>; h: Harness } => {
+      const seams = realServePolicyDeps({ installPath: f.root, stateRoot: f.root }, f.exec, undefined, () => budget);
+      const h = harness({ replaceServe: seams.replaceServe });
+      return { out: runServePolicyCycle(h.deps, TICK), h };
+    };
+    // The 22:57Z host: 4 146 167 808 B available, under a 2 GiB reserve + 7.5 GiB cold start - 5.5 GiB freed.
+    writeFileSync(join(f.proc, "meminfo"), "MemAvailable: 4049000 kB\n");
+    const tight = cycle();
+    assert.equal(tight.out.replaced, false);
+    assert.equal(tight.h.rows.at(-1)!.data?.hold, "host_headroom", tight.out.reason);
+    assert.doesNotMatch(readFileSync(f.log, "utf8"), DESTRUCTIVE, "the old container, image and route were never touched");
+    assert.equal(tight.h.failures.length, 0);
+
+    writeFileSync(join(f.proc, "meminfo"), "MemAvailable: 12000000 kB\n");
+    writeFileSync(join(f.proc, "psi"), "some avg10=3.00 avg60=0.10 avg300=0.00 total=1\nfull avg10=2.53 avg60=0.00 avg300=0.00 total=1\n");
+    assert.equal(cycle().h.rows.at(-1)!.data?.hold, "psi");
+    rmSync(join(f.proc, "psi"));
+    assert.equal(cycle().h.rows.at(-1)!.data?.hold, "pressure_unread", "an unreadable PSI is a hold, never zero pressure");
+    assert.doesNotMatch(readFileSync(f.log, "utf8"), DESTRUCTIVE);
+
+    // Positive control: admitted, the same launcher stops, removes and recreates in that order.
+    writeFileSync(join(f.proc, "psi"), "some avg10=0.50 avg60=0.10 avg300=0.00 total=1\nfull avg10=0.10 avg60=0.00 avg300=0.00 total=1\n");
+    writeFileSync(f.log, "");
+    const admitted = cycle();
+    assert.equal(admitted.out.replaced, true, admitted.out.reason);
+    const calls = readFileSync(f.log, "utf8").split("\n").map((l) => /^docker (stats|stop|rm|run)\b/.exec(l)?.[1]).filter(Boolean);
+    assert.deepEqual(calls, ["stats", "stats", "stop", "rm", "run"], "a fresh admission (twice) precedes the stop");
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
   }
 });

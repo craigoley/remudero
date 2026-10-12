@@ -12,6 +12,10 @@
  * the container are read again; a failure records the back-off and opens a needs-human issue.
  * W1-T6125: binds also apply only at create, so W1-T6110's mount-plan reading drifts serve the same
  * way, under the same holds; an UNKNOWN reading (no plan, scratch off, no inspect) is never drift.
+ * W1-T8311: those holds never read the HOST. The launcher stops and removes the old console, so the
+ * automatic replace passes it the host memory budget's thresholds and the launcher re-checks fresh
+ * host pressure before its first destructive step. Its named refusal ({@link ServeReplaceHeld}) is a
+ * HOLD: the old container stays, and no failure, back-off or escalation is recorded.
  */
 import { execFileSync } from "node:child_process";
 import { readFileSync, unlinkSync } from "node:fs";
@@ -34,6 +38,7 @@ import {
 import { ghIssueGateway, tryEscalate, type Escalation, type IssueGateway } from "./escalate.js";
 import { isPaused } from "./fleet-control.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { loadHostMemoryBudgetPolicy, type HostMemoryBudgetPolicy } from "./host-memory-shadow.js";
 
 export const SERVE_POLICY_CONTAINER = "remudero-serve";
 export const SERVE_POLICY_FAILED_FILE = "SERVE_POLICY_FAILED";
@@ -49,6 +54,30 @@ const HANDOFF_CLOSED_STEPS = [
   "serve.supervisor_start",
   "serve.supervisor_ready",
 ];
+
+/** deploy/serve-container.sh's exit when fresh host pressure refuses the replace; nothing was changed. */
+export const SERVE_REPLACE_HELD_EXIT = 75;
+
+/** The launcher held the replace on a named admission refusal: the old container is untouched. */
+export class ServeReplaceHeld extends Error {
+  constructor(readonly hold: string, detail: string) {
+    super(`${hold}: ${detail}`);
+    this.name = "ServeReplaceHeld";
+  }
+}
+
+/** The environment that makes the launcher admit the replace on fresh host pressure, from the budget's existing values. */
+export function serveReplaceAdmissionEnv(policy: HostMemoryBudgetPolicy): string[] {
+  return [
+    "RMD_SERVE_REPLACE_ADMISSION=required",
+    `RMD_SERVE_ADMIT_HOST_RESERVE_MIB=${policy.hostReserveMib}`,
+    `RMD_SERVE_ADMIT_SWAPIN_MAX=${policy.swapInPagesPerSecMax}`,
+    `RMD_SERVE_ADMIT_PSI_SOME_AVG10_MAX=${policy.psiSomeAvg10Max}`,
+    `RMD_SERVE_ADMIT_PSI_FULL_AVG10_MAX=${policy.psiFullAvg10Max}`,
+    // the measured serve cold-start peak: what the new console needs once the old one is stopped
+    `RMD_SERVE_ADMIT_CANDIDATE_MIB=${policy.serveColdStartReserveMib}`,
+  ];
+}
 
 export type ServeImageDrift = { expected: string; actual: string } | { kind: "unknown"; reason: string };
 
@@ -196,6 +225,12 @@ export function runServePolicyCycle(
       error = `image still off the daemon after the replace (${"kind" in imageAfter ? imageAfter.reason : `expected=${imageAfter.expected} actual=${imageAfter.actual}`})`;
     }
   } catch (err) {
+    if (err instanceof ServeReplaceHeld) {
+      // W1-T8311: an admission refusal changed nothing; the next tick asks again with a fresh reading
+      const reason = `${decision.reason}, but fresh host pressure refused it (${err.message}) — the old console was kept`;
+      deps.log("deploy.serve_policy_held", { reason, hold: err.hold, ...rows });
+      return { replaced: false, reason, drift, mountDrift, imageDrift };
+    }
     // the launcher's refusal is carried to the failure row, the back-off record and the escalation below
     error = err instanceof Error ? err.message : String(err);
   }
@@ -215,6 +250,7 @@ export function realServePolicyDeps(
   o: Pick<RealDeployOpts, "installPath" | "stateRoot">,
   exec: (cmd: string, args: string[]) => string = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8" }),
   issuesFor: (owner: string, repo: string) => IssueGateway = ghIssueGateway,
+  budget: () => HostMemoryBudgetPolicy = () => loadHostMemoryBudgetPolicy(),
 ): Partial<Parameters<typeof runServePolicyCycle>[0]> {
   let registryText: string;
   try {
@@ -257,7 +293,21 @@ export function realServePolicyDeps(
       }
     },
     replaceServe: () => {
-      exec("env", [`RMD_STATE_DIR=${o.stateRoot}`, "bash", join(o.installPath, "deploy", "serve-container.sh"), "--replace"]);
+      let admission: string[];
+      try {
+        admission = serveReplaceAdmissionEnv(budget());
+      } catch (err) {
+        throw new ServeReplaceHeld("policy_unread", err instanceof Error ? err.message : String(err));
+      }
+      try {
+        exec("env", [`RMD_STATE_DIR=${o.stateRoot}`, ...admission, "bash", join(o.installPath, "deploy", "serve-container.sh"), "--replace"]);
+      } catch (err) {
+        const status = (err as { status?: unknown }).status;
+        if (status !== SERVE_REPLACE_HELD_EXIT) throw err;
+        const stderr = String((err as { stderr?: unknown }).stderr ?? "");
+        const held = /HELD \(([a-z_]+)\) — (.*)/.exec(stderr);
+        throw new ServeReplaceHeld(held?.[1] ?? "held", held?.[2] ?? (err instanceof Error ? err.message : String(err)));
+      }
     },
     servePolicyLastFailedAtMs: () => {
       try {
