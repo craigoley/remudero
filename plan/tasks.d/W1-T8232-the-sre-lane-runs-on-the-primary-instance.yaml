@@ -11,7 +11,7 @@
   origin: "operator rulings 2026-09-23 (SRE gardener: own lane, broad runbooks behind an independent governor) + 2026-10-11 detection research"
   plan_refs: [W1-T4385, W1-T4386, W1-T4390, W1-T4527, W1-T7727, W1-T4417]
   files: [src/lib/sre-lane.ts, src/run-task.ts, test/the-sre-lane-runs-on-the-primary-instance.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
