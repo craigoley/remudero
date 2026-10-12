@@ -1,0 +1,23 @@
+- id: W1-T8384
+  title: "The daemon lane's worker calls carry measured token counts in only 63.2% of joined calls (24/38, 7-day window) — restore tokens at the daemon ledger write site or record why the lane legitimately lacks it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "evidence-coverage-v1 over benchmark-quality-v1 reports lane `daemon`, field `tokens`: 24/38 joined worker calls (63.2%) against the field's 90.0% floor, first seen 2026-09-28T05:55:37Z. A reading under the floor is a chronic gap no baseline excuses (W1-T4640). Daemon rows are written with lane: daemon and task_id DAEMON at src/run-task.ts (appendLedger sites); src/lib/benchmark-evidence.ts counts tokens observed only when terminal.tokensMeasured is true (both input and output non-negative)."
+  design: |
+    DIAGNOSE FIRST. Find which daemon-lane worker calls land without input/output token counts: a provider stream that reports no usage, or a daemon write path that drops WorkerResult token usage before appendLedger.
+    THEN EITHER restore: thread the worker's input/output tokens into the daemon-lane terminal rows so benchmark-evidence reads them as measured; OR, where the provider legitimately reports no usage, record a named reason so the lane is excused honestly rather than counted missing.
+    Rule 19 / #588 merits: risk high because one integration test must drive the daemon terminal writer and feed its actual row into the benchmark evidence reader, proving token preservation across both files; isolated tests cannot establish that invariant.
+    NOT IN SCOPE: lowering the 90% floor, editing the gardener, or touching other lanes or fields (servedModel is W1-T8374).
+  acceptance:
+    - claim: "one integration test drives the daemon terminal appendLedger sites and feeds their actual rows into the benchmark evidence reader: reported input/output tokens are retained and counted measured, while a provider-declared no-usage call retains its named reason and is classified excused rather than missing"
+      proof: "unit test: test/daemon-lane-tokens.test.ts"
+  risk: high
+  origin: feedback#evidence-coverage-daemon-tokens
+  plan_refs: ["§7B"]
+  files: [src/run-task.ts, src/lib/benchmark-evidence.ts, test/daemon-lane-tokens.test.ts]
+  status: queued
+  attempts: 0
