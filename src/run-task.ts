@@ -2938,7 +2938,8 @@ export function retroErrorLedgerFields(error: unknown): Record<string, unknown> 
 // src/lib/report-commands.ts, which imports it directly from lib/worker.js.
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 import { memoryStoreReadFailure, readMemoryLedger, sweepMemoryReservations } from "./lib/host-memory-ledger.js";
-import { createMemoryReadTracker, type MemoryReadHold, type MemoryReadSource, type MemoryReadTracker } from "./lib/dispatch-governor.js";
+import { createMemoryReadTracker, type DispatchGovernorDeps, type MemoryReadHold, type MemoryReadSource, type MemoryReadTracker } from "./lib/dispatch-governor.js";
+import { heavyNewBuildGate } from "./lib/heavy-build-reservation.js";
 import { withSyncChildReservation } from "./lib/host-memory-learning.js";
 import { installShadowMemorySink, ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./lib/host-memory-shadow.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
@@ -36220,6 +36221,8 @@ async function drainCommand(
      *  `gh` round-trip or a real issue. Production passes nothing and gets the real reader,
      *  the real predicate and the real escalator. */
     quotaCheck?: { readGhQuota?: () => GhRateLimitBuckets; escalate?: typeof escalateQuotaExhaustion };
+    /** Opt-in NEW-build reservation reader; production uses the private-dir environment adapter. */
+    checkHeavyNewBuild?: DispatchGovernorDeps["checkHeavyNewBuild"];
     /** Injectable clock for the daily-cost consultation. Production keeps the real clock. */
     now?: () => number;
     /** W1-T5347: injectable `MemAvailable` reading for the wired memory gate. Production omits it
@@ -36632,6 +36635,8 @@ async function drainCommand(
         readMemoryStoreFailure: () => memoryStoreReadFailure(readMemoryLedger()),
         checkQuietHours: () =>
           isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
+        // Separate from tick/retro/triage/SRE governors; consulted only at NEW implement start.
+        checkHeavyNewBuild: deps.checkHeavyNewBuild ?? heavyNewBuildGate(log, { dir: process.env.RMD_HEAVY_READY_DIR }),
         // W1-T2513: `planSnapshot` is the coalescer built above — every lane of a tick shares
         // ONE origin fetch + ONE plan parse instead of paying for it per lane.
         runOne: (taskId) => runTask(taskId, { planPath, config, allowStale, planSnapshot: planSyncCoalescer.sync, productionProgressJudge: true }),
@@ -38957,6 +38962,8 @@ export async function daemonCommand(
     /** Best-effort boot projection for provider routing; production writes one bounded state file. */
     writeProviderRoutingStatus?: (root: string, input: ProviderRoutingWriteInput) => void;
     bootClaimReserver?: DispatchClaimReserver;
+    /** Opt-in NEW-build reservation reader; production uses the private-dir environment adapter. */
+    checkHeavyNewBuild?: DispatchGovernorDeps["checkHeavyNewBuild"];
     /** Injectable clock for the daily-cost consultation. Production keeps the real clock. */
     now?: () => number;
     /** W1-T5347: injectable `MemAvailable` reading for the wired memory gate — see drainCommand's
@@ -39904,6 +39911,8 @@ export async function daemonCommand(
         readMemoryStoreFailure: () => memoryStoreReadFailure(readMemoryLedger()),
         checkQuietHours: () =>
           isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
+        // Separate from tick/retro/triage/SRE governors; consulted only at NEW implement start.
+        checkHeavyNewBuild: deps.checkHeavyNewBuild ?? heavyNewBuildGate(log, { dir: process.env.RMD_HEAVY_READY_DIR }),
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
         // W1-T1062 (THE DISPATCH-PATH THREADING FIX): `owner: target.owner` is the whole task.
         // Without it, `target.owner` (resolved above, possibly a FOREIGN owner from an
