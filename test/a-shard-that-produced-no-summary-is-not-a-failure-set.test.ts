@@ -204,7 +204,7 @@ test("acceptance 2 (control, real node --test binary, MEASURED not assumed): a s
   // other three genuinely receive an empty slice -- the real mechanism a `class=SOURCE` shard hits
   // whenever the file count and the shard count don't divide evenly onto every shard.
   writeFileSync(join(dir, "only.test.mjs"), "import test from 'node:test';\ntest('present', () => {});\n");
-  const result = spawnSync(process.execPath, ["--test", "--test-shard=3/4", "only.test.mjs"], {
+  const result = spawnSync(process.execPath, ["--test", "--test-reporter=tap", "--test-shard=3/4", "only.test.mjs"], {
     cwd: dir,
     encoding: "utf8",
     env: freshTestProcessEnv(),

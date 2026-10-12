@@ -1,0 +1,13 @@
+violation: none
+rule: >
+  W1-T5961: the rule-checks remedy must reach the worker lane that changes run-task,
+  census helpers, and plan shards; the cited incident must execute as the task's proof.
+verdict:
+  state: success
+  capped: false
+  testTheater: false
+  criteriaTampered: false
+arm: true
+criteria:
+  - met: true
+    proof_exec: executed_pass

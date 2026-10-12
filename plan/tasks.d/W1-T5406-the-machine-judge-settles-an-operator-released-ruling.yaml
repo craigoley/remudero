@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: follow-up to W1-T5359 (#8789)"
   plan_refs: [W1-T5317]
   files: [src/lib/machine-filing-judge.ts, test/the-machine-judge-settles-an-operator-released-ruling.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

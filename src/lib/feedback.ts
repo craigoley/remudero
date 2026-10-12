@@ -1,10 +1,17 @@
 import { execFileSync } from "node:child_process";
 import { ghExec } from "./github-transport.js";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { feedbackLineageAuthority, observeFeedbackAdmission } from "./authority.js";
+import { fixedClock, systemClock } from "./clock.js";
+import {
+  classifyContribution, feedbackPublicationSteps, type FeedbackPublicationContext, type AdmissionDecision, type ContributionActor,
+  type FeedbackAdmissionSubject, type FeedbackAdmissionContext,
+} from "./contributor-admission.js";
+export type { FeedbackAdmissionContext } from "./contributor-admission.js";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { landFeedback, landFeedbackStatusContent, type LandFeedbackOpts } from "./feedback-landing.js";
+import { landFeedback, landFeedbackStatusContent, readQueuedFeedbackRecords, type LandFeedbackOpts } from "./feedback-landing.js";
 import type { Mount, Mounts } from "./mounts.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
@@ -111,6 +118,8 @@ export interface FeedbackEntry {
    * REPLIES TO, via `POST /v1/escalation/reply` — a DIFFERENT edge than `reply_to`, which names
    * another feedback entry rather than a thread. `null`/absent when none was supplied. */
   thread_id?: string | null;
+  /** W1-T7754: immutable original-source evidence, not a replayable authority grant. */
+  contribution?: FeedbackContribution | null;
 }
 
 // ── Decision summaries (W1-T313) ─────────────────────────────────────────────
@@ -625,8 +634,16 @@ function openUpstreamFeedbackPr(
   entryId: string,
   content: string,
   gh: UpstreamGhExec,
+  publication?: { context: FeedbackPublicationContext; contribution: unknown },
 ): { prUrl?: string; error?: string } {
   const slug = `${home.owner}/${home.repo}`;
+  const observation = feedbackPublicationSteps(publication?.context,
+    publication === undefined ? [] : [publication.contribution], slug, "upstream-publication");
+  let next = observation.next();
+  while (!next.done) {
+    try { next = observation.next({ status: 200, body: JSON.parse(gh(["api", next.value])) }); }
+    catch (error) { next = observation.throw(error); }
+  }
   try {
     const repoInfo = JSON.parse(gh(["api", `repos/${slug}`])) as { default_branch: string };
     const base = repoInfo.default_branch;
@@ -695,6 +712,86 @@ function resolveAttachments(root: string, id: string, inputs: string[]): string[
   return out;
 }
 
+export interface FeedbackContributionAdmission {
+  outcome: AdmissionDecision["outcome"];
+  reason: string;
+  receipt_key: string;
+  policy_version: string | null;
+}
+
+export interface FeedbackContribution {
+  kind: FeedbackAdmissionSubject["kind"] | "unresolved";
+  source_ref: string;
+  url: string | null;
+  actor: ContributionActor | null;
+  association: string | null;
+  observed_at: string;
+  admission: FeedbackContributionAdmission;
+  relayed_by: string[];
+  derived_from: string | null;
+  subject?: FeedbackAdmissionSubject;
+}
+
+export interface FeedbackContributionInput extends FeedbackAdmissionSubject {
+  url?: string;
+}
+
+function copyActor(actor: ContributionActor | null | undefined): ContributionActor | null {
+  if (actor == null) return null;
+  return {
+    ...(actor.id === undefined ? {} : { id: actor.id }),
+    ...(actor.type === undefined ? {} : { type: actor.type }),
+    ...(actor.login === undefined ? {} : { login: actor.login }),
+  };
+}
+
+/** Classify one outside item for the `feedback` action; returns the lineage to record. */
+export function admitFeedbackContribution(input: FeedbackContributionInput, context: FeedbackAdmissionContext = {}): FeedbackContribution {
+  const subject: FeedbackAdmissionSubject = {
+    kind: input.kind, sourceRef: input.sourceRef, observedAtMs: input.observedAtMs,
+    ...(input.origin === undefined ? {} : { origin: input.origin }),
+    ...(input.repository === undefined ? {} : { repository: input.repository }),
+    ...(input.itemId === undefined ? {} : { itemId: input.itemId }),
+    ...(input.issueNumber === undefined ? {} : { issueNumber: input.issueNumber }),
+    ...(input.revision === undefined ? {} : { revision: input.revision }),
+    ...(input.parent === undefined ? {} : { parent: input.parent }),
+  };
+  const decision: AdmissionDecision = context.mode !== "shadow" || context.policy === undefined
+    ? { outcome: "unknown", reason: "no-admission-policy",
+      receiptKey: createHash("sha256").update(JSON.stringify([subject, "feedback", "no-admission-policy"])).digest("hex") }
+    : classifyContribution(subject, "feedback", context.policy, context.memberships ?? [], context.nowMs ?? systemClock.now());
+  return {
+    kind: input.kind,
+    source_ref: input.sourceRef,
+    url: input.url ?? null,
+    actor: copyActor(input.origin?.actor),
+    association: input.origin?.association ?? null,
+    observed_at: Number.isFinite(input.observedAtMs) ? fixedClock(input.observedAtMs).iso() : "",
+    admission: { outcome: decision.outcome, reason: decision.reason, receipt_key: decision.receiptKey,
+      policy_version: context.policy?.version ?? null },
+    relayed_by: [],
+    derived_from: null,
+    subject: structuredClone(subject),
+  };
+}
+
+/** Preserve the original contributor; a trusted relay cannot replace it. */
+export function inheritFeedbackLineage(
+  parent: Pick<FeedbackEntry, "id" | "origin" | "contribution">, relayedBy: string,
+): FeedbackContribution | null {
+  if (parent.contribution) {
+    return { ...structuredClone(parent.contribution), relayed_by: [...(parent.contribution.relayed_by ?? []), relayedBy],
+      derived_from: parent.contribution.derived_from ?? parent.id };
+  }
+  const legacy = feedbackLineageAuthority(parent);
+  if (legacy.autonomous) return null;
+  return {
+    kind: "unresolved", source_ref: String(parent.origin), url: null, actor: null, association: null, observed_at: "",
+    admission: { outcome: "unknown", reason: legacy.reason, receipt_key: "", policy_version: null },
+    relayed_by: [relayedBy], derived_from: parent.id,
+  };
+}
+
 export interface CaptureFeedbackOptions {
   raw: string;
   attachments?: string[];
@@ -702,9 +799,9 @@ export interface CaptureFeedbackOptions {
   /** Explicit id, overriding the default random `fb-<epoch>-<hex>` id. Machine-origin intake
    *  passes a deterministic id so a re-run's `existsSync` check is the whole dedup mechanism. */
   id?: string;
-  /** W1-T243 test seam only — passed through verbatim to {@link landFeedback} after the write.
-   *  Real callers never set this; a test injects a fake `gh` to exercise the bridge without
-   *  hitting real GitHub. */
+  /** Passed verbatim to {@link landFeedback} after the write. A console route sets `stateRoot`: nothing
+   *  lands here, the route stages the record with `queueFeedbackRecord` (W1-T5525), and the
+   *  `submissionKey` guard also scans that queue (W1-T5628). A test injects a fake `gh`. */
   land?: LandFeedbackOpts;
   /** W1-T350: the four-section expansion of `raw`, already produced by the caller's own
    * preview→arm→confirm round trip before this capture ever runs. `undefined`/`null` leaves
@@ -726,27 +823,26 @@ export interface CaptureFeedbackOptions {
    * UNTOUCHED ({@link findFeedbackBySubmissionKey}); `undefined` always files fresh. Why: the
    * reasoning against reusing `id` for dedup is archived in docs/forensics/feedback.md. */
   submissionKey?: string;
+  /** W1-T7754: source input and explicit shadow context; derived entries preserve their parent. */
+  contribution?: FeedbackContributionInput;
+  admission?: FeedbackAdmissionContext;
+  derivedFrom?: { entry: Pick<FeedbackEntry, "id" | "origin" | "contribution">; relayedBy: string };
 }
 
 /** Find an existing feedback entry by its console-minted `submission_key` (W1-T2302) —
- * {@link captureFeedback}'s never-clobber guard, run before it ever writes. `null` when nothing
- * carries this key. A linear scan over {@link listFeedback} rather than a second index, so it
- * survives a daemon restart with nothing new to go stale. */
-export function findFeedbackBySubmissionKey(root: string, key: string): FeedbackEntry | null {
-  return listFeedback(root).find((e) => e.submission_key === key) ?? null;
+ * {@link captureFeedback}'s never-clobber guard. `null` when nothing carries this key. A linear
+ * scan over {@link listFeedback} and, given `stateRoot`, its landing queue — no second index. */
+export function findFeedbackBySubmissionKey(root: string, key: string, stateRoot?: string): FeedbackEntry | null {
+  const queued = stateRoot === undefined ? [] : ([...readQueuedFeedbackRecords(stateRoot).values()] as unknown as FeedbackEntry[]);
+  return [...listFeedback(root), ...queued].find((e) => e.submission_key === key) ?? null;
 }
 
-/** Capture one feedback item: writes `plan/feedback/<id>.yaml` with `status: new`, copying any
- * local-path attachments alongside it. The write is synchronous filesystem I/O only — no
- * network, no LLM — so `rmd feedback` always returns effectively immediately.
- *
- * After the write, this also attempts to LAND the entry onto `origin/main` (W1-T243) and, when
- * a home-repo pointer is configured and this checkout is not the home repo, to open a PR
- * against it (W1-T397). Both steps are best-effort and NEVER throw. Why: the full
- * landing/upstream sequencing is archived in docs/forensics/feedback.md. */
+/** Capture locally before best-effort landing (W1-T243) and upstreaming to a configured home
+ * (W1-T397). Local writes/attachments need no network; later publication can use the network.
+ * Landing/upstream failures never discard the local entry. See docs/forensics/feedback.md. */
 export function captureFeedback(root: string, opts: CaptureFeedbackOptions): FeedbackEntry {
   if (opts.submissionKey) {
-    const existing = findFeedbackBySubmissionKey(root, opts.submissionKey);
+    const existing = findFeedbackBySubmissionKey(root, opts.submissionKey, opts.land?.stateRoot);
     if (existing) return existing;
   }
   const raw = opts.raw.trim();
@@ -761,6 +857,10 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
   const id = opts.id ?? generateFeedbackId();
   mkdirSync(feedbackDir(root), { recursive: true });
   const attachments = resolveAttachments(root, id, opts.attachments ?? []);
+  const contribution = opts.derivedFrom !== undefined
+    ? inheritFeedbackLineage(opts.derivedFrom.entry, opts.derivedFrom.relayedBy)
+    : opts.admission?.mode === "shadow" && opts.contribution !== undefined
+      ? admitFeedbackContribution(opts.contribution, opts.admission) : null;
   let entry: FeedbackEntry = {
     id,
     ts: new Date().toISOString(),
@@ -774,10 +874,14 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
     expansion: opts.expansion ?? null,
     submission_key: opts.submissionKey ?? null,
     thread_id: opts.threadId ?? null,
+    ...(contribution === null ? {} : { contribution }),
   };
   writeFileSync(feedbackEntryPath(root, id), stringifyYaml(entry));
+  observeFeedbackAdmission(entry, opts.admission, "capture");
+  const publication = opts.admission?.mode === "shadow" ? { mode: "shadow" as const,
+    record: opts.admission.record ?? (() => {}) } : undefined;
   try {
-    landFeedback(root, opts.land ?? {});
+    landFeedback(root, { ...opts.land, ...(publication === undefined ? {} : { publication }) });
   } catch {
     // landFeedback already swallows its own failures — a defensive second layer only.
   }
@@ -787,8 +891,10 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
       const git = opts.upstream?.git ?? defaultUpstreamGit(root);
       const current = resolveCurrentRepoFromGit(git);
       if (!isUpstreamSelfTarget(current, home)) {
+        observeFeedbackAdmission(entry, opts.admission, "upstream-capture");
         const gh = opts.upstream?.gh ?? defaultUpstreamGh();
-        const { prUrl, error } = openUpstreamFeedbackPr(home, id, stringifyYaml(entry), gh);
+        const { prUrl, error } = openUpstreamFeedbackPr(home, id, stringifyYaml(entry), gh,
+          publication === undefined ? undefined : { context: publication, contribution: entry.contribution });
         entry = {
           ...entry,
           upstream: prUrl
@@ -850,7 +956,9 @@ export function setFeedbackStatus(
   if (!(FEEDBACK_STATUSES as readonly string[]).includes(status)) {
     throw new FeedbackError(`invalid status "${status}" — must be one of ${FEEDBACK_STATUSES.join(", ")}`);
   }
-  const entry = readFeedbackEntry(root, id);
+  // W1-T5628: a queued record is newer than the checkout, and a console capture exists only there.
+  const queued = opts.land?.stateRoot === undefined ? undefined : readQueuedFeedbackRecords(opts.land.stateRoot).get(feedbackEntryRepoPath(id));
+  const entry = (queued as unknown as FeedbackEntry | undefined) ?? readFeedbackEntry(root, id);
   const updated: FeedbackEntry = {
     ...entry,
     status,

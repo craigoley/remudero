@@ -24,8 +24,11 @@
 // MCP endpoint (docs/troubleshooting.md, "The full test suite cannot pass inside the agent
 // container"). Refusing is safer than defaulting.
 import { spawnSync } from "node:child_process";
+import { statSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const targets = process.argv.slice(2);
+const targets = process.argv.slice(2).filter((arg) => arg !== "" && arg !== "--").map((arg) => resolve(arg));
 
 if (targets.length === 0) {
   console.error(
@@ -39,6 +42,15 @@ if (targets.length === 0) {
       "(inside an agent container it cannot pass honestly — see docs/troubleshooting.md).",
     ].join("\n"),
   );
+  process.exit(2);
+}
+
+const invalid = targets.filter((target) => {
+  try { return !statSync(target).isFile(); }
+  catch { return true; }
+});
+if (invalid.length > 0) {
+  console.error(`check: every target must name an existing test file: ${invalid.join(", ")}`);
   process.exit(2);
 }
 
@@ -59,10 +71,14 @@ function run(label, file, args) {
 const testCode = run(
   `scoped tests (${targets.length} file${targets.length === 1 ? "" : "s"})`,
   "node",
-  ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", ...targets],
+  // node-test-reporter: exempt — a person reads this on their terminal, where spec is the right reporter.
+  ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--", ...targets],
 );
 
-const tscCode = run("tsc --noEmit (whole project, as of NOW)", "npx", ["--no-install", "tsc", "-p", "tsconfig.json", "--noEmit"]);
+// Through `npm run typecheck`'s own wrapper: incremental against this checkout's buildinfo (seeded from the canonical
+// checkout's), and a cold check waits for a host test slot — the same diagnostics as plain tsc (src/lib/typecheck-run.ts).
+const typecheckScript = resolve(dirname(fileURLToPath(import.meta.url)), "typecheck.mjs");
+const tscCode = run("tsc --noEmit (whole project, as of NOW)", "node", ["--import", "tsx", typecheckScript]);
 
 console.log(
   [

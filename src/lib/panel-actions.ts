@@ -26,7 +26,17 @@ import {
   verifyOptionLink,
   type OptionLinkClaims,
 } from "./escalate.js";
-import { verifiedActor, type Route } from "./service.js";
+import { OPERATOR_SESSION_HEADER, verifiedActor, type Route } from "./service.js";
+import {
+  ASSISTANT_CLAIM_VERSION,
+  DiscoveryContinuationError,
+  MAX_DISCOVERY_PAGE,
+  assistantClaimFingerprint,
+  isExactAssistantReceipt,
+  readAssistantActionDiscovery,
+  type AssistantClaimV2,
+  type DiscoveryBudget,
+} from "./assistant-action-discovery.js";
 import { appendLedger, RISK_OVERRIDE_RECORDED_STEP, RISK_OVERRIDE_REASON_CLASSES, RISK_OVERRIDE_DISPOSITIONS, type RiskOverrideReasonClass, type RiskOverrideDisposition } from "./ledger.js";
 import type { RiskJudgeVerdictLabel } from "./risk-judge.js";
 import { isPaused, isPrActionName, isPrActionSwitchedOff, isQuietHours, isStopped, isSafeTaskId, pauseDetail, requestDrainNow, requestKick, requestPrAction, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail, type FleetControlInfo, type PrActionName, type PrActionRequest, type ResumeResult } from "./fleet-control.js";
@@ -36,7 +46,8 @@ import { hashToken } from "./last-seen.js";
 import { readLedgerLines, DEFAULT_LIVENESS_BOUND_MS, type LedgerReader } from "./status.js";
 import { deriveLastPoll } from "./daemon-health.js";
 import { deriveThreadId, readThread, appendThreadMessage, type ThreadIdentity } from "./inbox-thread.js";
-import { captureFeedback } from "./feedback.js";
+import { captureFeedback, feedbackEntryRepoPath } from "./feedback.js";
+import { queueFeedbackRecord } from "./feedback-landing.js";
 import { applyOperatorMergeHold, type OperatorMergeHoldAction } from "./operator-merge-hold.js";
 import {
   interpretReply,
@@ -269,38 +280,39 @@ export interface ControlStatusDeps extends Pick<PanelActionDeps, "root" | "ledge
   livenessBoundMs?: number;
 }
 
-/** GET /v1/control/status — read-scoped. Derives Pause/Resume/STOP/quiet-hours button states
- *  from the actual fleet-control flag files, never stateless buttons. Also carries `daemonLive`,
- *  read once per request from the same heartbeat GET /v1/daemon-health computes. */
+/** GET /v1/control/status — read-scoped. Pause/Resume/STOP/quiet-hours states from the real flag files, never
+ *  stateless buttons, plus `daemonLive` from the same heartbeat GET /v1/daemon-health computes. */
 export function buildControlStatusRoute(deps: ControlStatusDeps): Route {
   return {
     method: "GET",
     path: "/v1/control/status",
     scope: "read",
-    handler: (_req, res) => {
-      const now = deps.now ?? Date.now;
-      const readLedger = deps.readLedger ?? readLedgerLines;
-      const livenessBoundMs = deps.livenessBoundMs ?? DEFAULT_LIVENESS_BOUND_MS;
-      // A read that throws (permissions, I/O) is caught HERE, not inside readLedgerLines (which
-      // has ~50 other call sites, some load-bearing) — a rendering-only degrade to `unknown`
-      // rather than a 500 that blanks the whole panel.
-      let verdict: DaemonLivenessVerdict;
-      try {
-        verdict = deriveDaemonLiveness(readLedger(deps.ledgerPath), now(), livenessBoundMs);
-      } catch {
-        verdict = { reason: "ledger-unreadable" };
-      }
-      const status: FleetControlStatus = {
-        paused: isPaused(deps.root),
-        pauseDetail: pauseDetail(deps.root),
-        stopped: isStopped(deps.root),
-        stopDetail: stopDetail(deps.root),
-        quietHours: isQuietHours(deps.root),
-        daemonLive: verdict.live,
-        daemonLiveReason: verdict.reason,
-      };
-      sendJson(res, 200, status);
-    },
+    handler: (_req, res) => sendJson(res, 200, controlStatusBody(deps)),
+  };
+}
+
+/** The route's body, also the `host` view's control part (host-view.ts); `lines` is a ledger read the caller already holds. */
+export function controlStatusBody(deps: ControlStatusDeps, lines?: ReadonlyArray<Record<string, unknown>>): FleetControlStatus {
+  const now = deps.now ?? Date.now;
+  const readLedger = deps.readLedger ?? readLedgerLines;
+  const livenessBoundMs = deps.livenessBoundMs ?? DEFAULT_LIVENESS_BOUND_MS;
+  // A read that throws (permissions, I/O) is caught HERE, not inside readLedgerLines (which
+  // has ~50 other call sites, some load-bearing) — a rendering-only degrade to `unknown`
+  // rather than a 500 that blanks the whole panel.
+  let verdict: DaemonLivenessVerdict;
+  try {
+    verdict = deriveDaemonLiveness(lines ?? readLedger(deps.ledgerPath), now(), livenessBoundMs);
+  } catch {
+    verdict = { reason: "ledger-unreadable" };
+  }
+  return {
+    paused: isPaused(deps.root),
+    pauseDetail: pauseDetail(deps.root),
+    stopped: isStopped(deps.root),
+    stopDetail: stopDetail(deps.root),
+    quietHours: isQuietHours(deps.root),
+    daemonLive: verdict.live,
+    daemonLiveReason: verdict.reason,
   };
 }
 
@@ -379,13 +391,14 @@ export function buildStopRoute(deps: PanelActionDeps): Route {
 // ── POST /v1/control/assistant-action ───────────────────────────────────────
 
 /** Shared claim root and exact target for the existing panel control helpers (W1-T4763). */
-export interface AssistantControlOptions extends Pick<PanelActionDeps, "root" | "ledgerPath"> {
+export interface AssistantControlOptions extends Pick<PanelActionDeps, "root" | "ledgerPath" | "clock"> {
   claimRoot: string;
   instance: string;
   repository?: string;
   bootSha?: string;
   afterClaim?: () => void;
   afterEffect?: () => void;
+  discoveryBudget?: Partial<DiscoveryBudget>;
 }
 
 type AssistantControlAction = "pause" | "resume" | "stop";
@@ -480,7 +493,8 @@ export function buildAssistantControlReceiptRoute(deps: AssistantControlOptions)
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return sendJson(res, 404, { status: "not_found", actionId });
         return sendJson(res, 503, { status: "unavailable", actionId, detail: "claim is unreadable" });
       }
-      if (!isRecord(claim) || typeof claim.actorHash !== "string" || typeof claim.instance !== "string" || typeof claim.fingerprint !== "string") {
+      if (!isRecord(claim) || typeof claim.actorHash !== "string" || typeof claim.instance !== "string" || typeof claim.fingerprint !== "string"
+        || (claim.version !== undefined && (claim.version !== ASSISTANT_CLAIM_VERSION || claim.actionId !== actionId))) {
         return sendJson(res, 503, { status: "unavailable", actionId, detail: "claim identity is incomplete" });
       }
       if (claim.actorHash !== assistantActorHash(actor) || claim.instance !== deps.instance || claim.repository !== (deps.repository ?? null)) {
@@ -493,7 +507,10 @@ export function buildAssistantControlReceiptRoute(deps: AssistantControlOptions)
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return sendJson(res, 202, { status: "claimed_unknown", actionId });
         return sendJson(res, 503, { status: "unavailable", actionId, detail: "receipt is unreadable" });
       }
-      if (!isRecord(receipt) || receipt.status !== "completed" || receipt.actionId !== actionId || receipt.instance !== deps.instance || receipt.repository !== (deps.repository ?? undefined)) {
+      const exact = claim.version === ASSISTANT_CLAIM_VERSION
+        ? isExactAssistantReceipt(receipt, { actionId, action: claim.action as AssistantClaimV2["action"], instance: deps.instance, repository: deps.repository ?? null })
+        : isRecord(receipt) && receipt.status === "completed" && receipt.actionId === actionId && receipt.instance === deps.instance && receipt.repository === (deps.repository ?? undefined);
+      if (!exact) {
         return sendJson(res, 503, { status: "unavailable", actionId, detail: "receipt identity is incomplete" });
       }
       sendJson(res, 200, receipt);
@@ -531,11 +548,13 @@ export function buildAssistantControlRoute(deps: AssistantControlOptions): Route
       }
       const paths = assistantControlPaths(deps, input.actionId);
       const actorHash = assistantActorHash(operator);
-      const fingerprint = createHash("sha256").update(JSON.stringify({ actorHash, instance: input.instance, repository: deps.repository ?? null, action: input.action, reason: input.reason ?? null })).digest("hex");
+      const fingerprint = assistantClaimFingerprint({ actorHash, instance: input.instance, repository: deps.repository ?? null, action: input.action, reason: input.reason ?? null });
+      const claim: AssistantClaimV2 = { version: ASSISTANT_CLAIM_VERSION, actionId: input.actionId, action: input.action, actorHash,
+        instance: deps.instance, repository: deps.repository ?? null, submittedAt: (deps.clock ?? systemClock).iso(), fingerprint };
       let admitted = false;
       try {
         mkdirSync(paths.dir, { recursive: true });
-        writeExclusive(paths.claim, JSON.stringify({ fingerprint, actorHash, instance: deps.instance, repository: deps.repository ?? null }));
+        writeExclusive(paths.claim, JSON.stringify(claim));
         syncDirectory(paths.dir);
         admitted = true;
       } catch (error) {
@@ -556,7 +575,7 @@ export function buildAssistantControlRoute(deps: AssistantControlOptions): Route
         }
         try {
           const receipt = JSON.parse(readFileSync(paths.receipt, "utf8")) as unknown;
-          if (isRecord(receipt) && receipt.status === "completed" && receipt.actionId === input.actionId && receipt.instance === deps.instance) {
+          if (isExactAssistantReceipt(receipt, { actionId: input.actionId, action: input.action, instance: deps.instance, repository: deps.repository ?? null })) {
             sendJson(res, 200, receipt);
             return;
           }
@@ -580,6 +599,43 @@ export function buildAssistantControlRoute(deps: AssistantControlOptions): Route
         sendJson(res, 503, { status: "unknown", actionId: input.actionId, detail: "admitted action has no durable completion receipt; manual reconciliation required" });
       }
     }),
+  };
+}
+
+function sendPrivateJson(res: ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "private, no-store",
+    vary: `authorization, ${OPERATOR_SESSION_HEADER}`,
+  });
+  res.end(JSON.stringify(body));
+}
+
+export function buildAssistantActionDiscoveryRoute(deps: AssistantControlOptions): Route {
+  return {
+    method: "GET", path: "/v1/control/assistant-action/discovery", scope: "read",
+    handler: async (req, res) => {
+      const actor = verifiedActor(req);
+      if (!actor) return sendPrivateJson(res, 403, { error: "verified_operator_required" });
+      const params = new URL(req.url ?? "", "http://localhost").searchParams;
+      if ([...params.keys()].some((key) => key !== "limit" && key !== "cursor")) return sendPrivateJson(res, 400, { error: "unknown_discovery_parameter" });
+      const rawLimit = params.get("limit");
+      if (rawLimit !== null && (!/^[0-9]{1,3}$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > MAX_DISCOVERY_PAGE)) {
+        return sendPrivateJson(res, 400, { error: "invalid_limit", detail: `limit must be 1-${MAX_DISCOVERY_PAGE}` });
+      }
+      const cursor = params.get("cursor");
+      if (cursor !== null && !/^[A-Za-z0-9_-]{1,512}$/.test(cursor)) return sendPrivateJson(res, 400, { error: "invalid_continuation" });
+      try {
+        const discovery = await readAssistantActionDiscovery({
+          claimRoot: deps.claimRoot, actorHash: assistantActorHash(actor), instance: deps.instance, repository: deps.repository ?? null,
+          bootSha: deps.bootSha, limit: rawLimit === null ? undefined : Number(rawLimit), continuation: cursor, budget: deps.discoveryBudget,
+        });
+        sendPrivateJson(res, discovery.completeness === "unavailable" ? 503 : 200, discovery);
+      } catch (error) {
+        if (error instanceof DiscoveryContinuationError) return sendPrivateJson(res, 400, { error: "invalid_continuation" });
+        throw error;
+      }
+    },
   };
 }
 
@@ -843,10 +899,11 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
         appendThreadMessage(identity, "escalation", followUp, { threadStorePath: deps.threadStorePath });
       }
 
-      const entry = captureFeedback(deps.root, { raw: input.text, origin: "ui", threadId });
       const origin = bearerTokenId(req);
-      // W1-T4471: the store `operatorVerdictEvidence` (lib/sweep.ts) reads; `input.taskId` is
-      // required above, so the answer always names its task.
+      // W1-T5525: serve mounts this route on config.root, the state root the daemon's landing sweep drains.
+      const entry = captureFeedback(deps.root, { raw: input.text, origin: "ui", threadId, land: { stateRoot: deps.root } });
+      const staged = queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.root);
+      // W1-T4471: the store `operatorVerdictEvidence` (lib/sweep.ts) reads; `input.taskId` is required above.
       const recordedToQuestionStore = appendQuestionAnswer(deps.root, {
         ts: (deps.clock ?? systemClock).iso(),
         task: input.taskId,
@@ -859,8 +916,9 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
         interpretation: interpretation.status,
         flows_to: "plan/questions.ndjson",
         recorded_to_question_store: recordedToQuestionStore,
+        ...(staged.queued ? { landing: "queued" } : { landing_error: staged.error }),
       });
-      sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, feedback: entry, interpretation });
+      sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, feedback: entry, interpretation, ...(staged.queued ? { landing: "queued" } : {}) });
     }),
   };
 }

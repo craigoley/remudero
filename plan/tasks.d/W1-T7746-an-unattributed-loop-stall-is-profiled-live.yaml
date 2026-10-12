@@ -1,0 +1,70 @@
+- id: W1-T7746
+  title: "AN UNATTRIBUTED LOOP STALL IS PROFILED WHILE IT HAPPENS — about 53 min of the 2026-10-10 core loop stalls (07:50-09:57Z) has no sync spawn to blame, and a sampler on the blocked loop records nothing until the block clears, so a watchdog thread profiles the main thread past an adaptive bound and the ledger names its top frames"
+  repo: remudero
+  depends_on: [W1-T7745]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — live attribution of a loop stall's CPU time; it runs inside the daemon process
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-10: core daemon loop-stall investigation (daemon.loop_lag 07:50-09:57Z), operator asked for flow improvements"
+  plan_refs: [W1-T4041, W1-T5718, W1-T4075, W1-T7745]
+  files: [src/lib/loop-stall-profiler.ts, src/lib/read-plane.ts, src/lib/daemon.ts, test/an-unattributed-loop-stall-is-profiled-live.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-10 on the core daemon. Between 07:50 and 09:57Z it logged 10 `daemon.loop_lag` stalls,
+    about 5,990 s in total. The attributed share:
+    - about 44 min was the CI-learning rung, fixed by #10615;
+    - the 171 `sync_spawn_top` entries name the sync spawns.
+    About 53 min remains unattributed: lag with no spawn to blame.
+    A CPU spin looks the same from outside. On 2026-10-08 a TS scanner spin (#10176) was found only by a
+    hand-run CPU profile plus `Debugger.pause`.
+
+    READ on origin/main 4e1831b94.
+    - `reportLoopLag` (src/lib/daemon.ts:1613) says it in its own doc comment: "a sampler on the blocked loop
+      records nothing WHILE the block is in force". Its threshold is one whole interval past due, so it is
+      derived, not picked.
+    - Nothing in src/ imports `node:inspector`, and no profile is ever taken.
+    - The read plane already runs a worker thread (src/lib/read-plane.ts). A worker can attach to the main
+      thread with `inspector.Session.connectToMainThread()`, and V8's sampling profiler samples the main
+      thread while its JS is busy.
+
+    DEPENDS ON W1-T7745. D's per-interval `sync_spawn_ms` is what separates a spawn stall from an unexplained one.
+    Without it, every profile row would double-count the spawn time W1-T7744, W1-T7743, W1-T7742 and W1-T7747 remove. D also edits
+    src/lib/daemon.ts and src/lib/read-plane.ts. Parallel agents editing one file broke main (#10349 and #10353
+    were each green and together reddened main, 2026-10-09).
+  design: |
+    1. `startLoopStallProfiler` (src/lib/loop-stall-profiler.ts) is started by `startReadPlaneTelemetry`
+       (src/lib/read-plane.ts) and stopped by its `stop()`. A watchdog in a worker thread watches a heartbeat the main loop posts each turn. When the heartbeat has
+       been silent past the bound, it opens `connectToMainThread()`, runs `Profiler.start`, and stops when the
+       heartbeat resumes. At most one profile runs at a time.
+    2. ADAPTIVE BOUND, no constant. It is derived from the daemon's own interval and its recent `loop_lag`
+       history, as a quantile of observed lags kept in-process, so ordinary lag is not profiled. Profiling
+       stops itself when the loop resumes. If the loop never resumes, the profile keeps only a rolling window
+       sized by the same bound, so memory stays bounded.
+    3. On resume, the main thread writes `daemon.loop_stall_profile`:
+       - `lag_ms` and the interval's `sync_spawn_ms` (from W1-T7745);
+       - `unattributed_ms`, their difference;
+       - the top self-time frames as `{ function, url, line, self_ms }`, ordered by self time.
+       No profile file is written to disk.
+    4. The watchdog cannot take down the loop it watches. Any inspector failure writes
+       `daemon.loop_stall_profile_failed` with its reason and disables the watchdog for the boot.
+  acceptance:
+    - claim: "the read plane starts the loop-stall profiler"
+      proof: "grep: startLoopStallProfiler( in src/lib/read-plane.ts"
+    - claim: "a deliberate busy loop on the main thread past the bound is profiled, and the ledger row names the busy function as its top self-time frame"
+      proof: 'grep: test("W1-T7746: a main-thread busy loop past the bound is profiled and its function is the top frame in the ledger row" in test/an-unattributed-loop-stall-is-profiled-live.test.ts'
+    - claim: "the profile bound is derived from the interval and the observed lag history, not a constant"
+      proof: 'grep: test("W1-T7746: the profile bound follows the interval and the observed lag history" in test/an-unattributed-loop-stall-is-profiled-live.test.ts'
+    - claim: "the profile row carries the interval sync_spawn_ms and the unattributed remainder"
+      proof: 'grep: test("W1-T7746: the profile row carries sync_spawn_ms and the unattributed remainder" in test/an-unattributed-loop-stall-is-profiled-live.test.ts'
+    - claim: "an inspector failure writes loop_stall_profile_failed and leaves the loop running"
+      proof: 'grep: test("W1-T7746: an inspector failure writes loop_stall_profile_failed and the loop keeps running" in test/an-unattributed-loop-stall-is-profiled-live.test.ts'
+  falsifier: |
+    Without the watchdog there is no `daemon.loop_stall_profile` row, and the first test fails. Name a constant
+    bound: the second test's two lag histories give the same bound. Drop D's `sync_spawn_ms` from the row: the
+    third test finds no `unattributed_ms`. Let an inspector error escape: the fourth test's loop timer stops
+    firing.

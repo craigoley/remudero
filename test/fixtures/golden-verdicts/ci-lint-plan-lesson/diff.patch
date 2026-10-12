@@ -1,0 +1,19 @@
+diff --git a/learnings/ci.yaml b/learnings/ci.yaml
+index 1111111..2222222 100644
+--- a/learnings/ci.yaml
++++ b/learnings/ci.yaml
+@@ -136,0 +137,13 @@
++- id: lint-plan-refuses-before-pr
++  subsystem: ci
++  lifecycle: active
++  files: ["plan/tasks.d/**", src/run-task.ts]
++  fact: >-
++    Before opening a PR that adds or edits plan tasks, run `rmd lint-plan --base origin/main` on
++    the proposed tree and repair every blocking finding; a clean lint-plan result is the pre-PR
++    check that prevents the CI gate from refusing the branch.
++  evidence: >-
++    Twenty-seven pull requests in the window recorded as ci-learning:8684:lint-plan were repaired
++    after lint-plan refused them; the common prevention point is the task-authoring lane, which
++    edits plan/tasks.d/** and receives matched learnings for that path.
++  src: "ci-learning:8684:lint-plan"
++  cited: "2026-10-08"

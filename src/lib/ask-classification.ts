@@ -19,11 +19,24 @@
  * what a sibling escalation for the same task classifies as.
  */
 
-import type { InboxState } from "./inbox.js";
+import type { InboxClassification, InboxState } from "./inbox.js";
 import type { RundownLine } from "./drain.js";
+import { projectHumanGates, type HumanGateObservation, type HumanGateSource } from "./human-gate.js";
+import { inboxOwner } from "./inbox-owner.js";
+
+export type AskRecordItem =
+  | { kind: "proposal"; state: InboxState; owner?: "operator" | "fleet" }
+  | { kind: "escalation"; resolved: boolean }
+  | { kind: "question"; answered: boolean }
+  | { kind: "rundown"; outcome: RundownLine["outcome"] }
+  | { kind: "gate"; gate: HumanGateObservation; resolved?: boolean };
+
+export type ClassifiedHumanGateSource = Omit<HumanGateSource, "gates"> & {
+  gates: readonly (HumanGateObservation & { classification?: AskRecordItem })[];
+};
 
 /**
- * One item ASK/RECORD classification routes, over the four source shapes the design names:
+ * One item ASK/RECORD classification routes, over the source shapes the design names:
  *
  *  - `proposal`  — an inbox proposal's current {@link InboxState} (inbox.ts).
  *  - `escalation` — a needs-human escalation issue (escalate.ts, W1-T8/T77's BLOCKED-AMBIGUOUS
@@ -32,6 +45,7 @@ import type { RundownLine } from "./drain.js";
  *  - `question`  — a W1-T78 clarification question: `answered` is true once the operator has
  *    answered it, false while it is still an open, decidable ask.
  *  - `rundown`   — one post-drain rundown outcome line (drain.ts's {@link RundownLine}, W1-T141).
+ *  - `gate`      — a source-owned human gate, retained until its source resolves it (W1-T5340).
  *
  * Pure and total: every value of every shape maps to exactly one of ASK or RECORD.
  */
@@ -40,16 +54,18 @@ import type { RundownLine } from "./drain.js";
  * classifier, consulted by both renderers, makes single-destination routing a property of the
  * DATA rather than of two independently-written templates agreeing by convention").
  */
-export function classifyAskRecordItem(item: { kind: "proposal"; state: InboxState } | { kind: "escalation"; resolved: boolean } | { kind: "question"; answered: boolean } | { kind: "rundown"; outcome: RundownLine["outcome"] }): "ASK" | "RECORD" {
+export function classifyAskRecordItem(item: AskRecordItem): "ASK" | "RECORD" {
   switch (item.kind) {
     case "proposal":
-      return item.state === "ready" || item.state === "not_ready" || item.state === "deferred_with_trigger"
+      return item.owner !== "fleet" && (item.state === "ready" || item.state === "not_ready" || item.state === "deferred_with_trigger")
         ? "ASK"
         : "RECORD";
     case "escalation":
       return item.resolved ? "RECORD" : "ASK";
     case "question":
       return item.answered ? "RECORD" : "ASK";
+    case "gate":
+      return item.resolved ? "RECORD" : "ASK";
     case "rundown":
       // THE FALSIFIER: a rundown line reports what happened to a change, and never itself asks a
       // question — ALWAYS RECORD, even when the same task also carries an open, ASK-classified
@@ -60,4 +76,23 @@ export function classifyAskRecordItem(item: { kind: "proposal"; state: InboxStat
       throw new Error(`classifyAskRecordItem: unclassified item kind ${JSON.stringify((exhaustive as { kind?: unknown }).kind)}`);
     }
   }
+}
+
+export function projectClassifiedHumanGates(sources: readonly ClassifiedHumanGateSource[]) {
+  return projectHumanGates(sources.map((source) => ({
+    ...source, gates: source.gates.filter((gate) => classifyAskRecordItem(gate.classification ?? { kind: "gate", gate }) === "ASK"),
+  })));
+}
+
+export function projectProposalHumanGates(
+  classifications: readonly Pick<InboxClassification, "proposalId" | "state" | "trigger">[],
+  instance = "core",
+) {
+  const gates: ClassifiedHumanGateSource["gates"] = classifications.map((item) => ({
+    classification: { kind: "proposal", state: item.state, owner: inboxOwner({ id: item.proposalId }) },
+    kind: "proposal", subject: item.proposalId, ownerSurface: "inbox", openedAt: null, url: null,
+    reason: item.trigger?.description ?? (item.state === "ready" ? "proposal is ready to ratify" : "proposal needs reframing"),
+    resolutionVerb: item.state === "ready" ? "ratify" : "reframe",
+  }));
+  return projectClassifiedHumanGates([{ name: "proposals", instance, state: "complete", gates }]);
 }

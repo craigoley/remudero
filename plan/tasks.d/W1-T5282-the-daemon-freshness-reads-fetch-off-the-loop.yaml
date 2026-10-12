@@ -12,7 +12,7 @@
   origin: "operator session 2026-10-02: core daemon CPU profile (E36) and #8674's follow-up audit"
   plan_refs: [W1-T3793, W1-T5127, W1-T4229, W1-T4477]
   files: [src/lib/daemon.ts, src/lib/self-sync.ts, src/lib/git-fetch-retry.ts, src/run-task.ts, test/the-daemon-freshness-reads-never-block-the-loop.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-02. A live CPU profile of the core daemon caught a 49 s loop stall whose stack was

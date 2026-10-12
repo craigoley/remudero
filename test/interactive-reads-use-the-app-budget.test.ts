@@ -166,9 +166,9 @@ test("W1-T4085: the default minter is not an attempt on a host with no GH_APP_* 
 
 test("W1-T4085: ghInteractiveRead spawns gh carrying the minted token", async () => {
   await withCache(async (env) => {
-    // The shared shim echoes its stdout inside double quotes, so `$GH_TOKEN` prints the identity
-    // the child process actually received.
-    const shim = ghShim([{ when: "pr view 7", stdout: "$GH_TOKEN" }], { kind: "gh-interactive-read" });
+    // The shared shim answers its stdout verbatim, so the route names the env var it should print:
+    // the identity the child process actually received.
+    const shim = ghShim([{ when: "pr view 7", stdoutEnv: "GH_TOKEN" }], { kind: "gh-interactive-read" });
     try {
       const out = await ghInteractiveRead(["pr", "view", "7"], {
         encoding: "utf8",

@@ -18,14 +18,14 @@ name: CI gate
 # Why: the synthwatch #102 replay, the class-bug argument and the branch-protection flip are in
 # docs/forensics/ci-gate-yml.md (W1-T24).
 #
-# W1-T4406: this CONTRACT's REQUIRED list is a `pull_request`-time list — most of its ~17
-# one-runner entries are steps of ci.yml's `commitlint` job, itself `if: github.event_name ==
-# 'pull_request'`, so they never register on a GitHub merge queue's `merge_group` commit. ci.yml's
-# own embedded `ci-gate` job (the one that runs this contract on every non-`edited` event)
-# deliberately stays `pull_request`-only for exactly that reason — see its own comment. The merge
-# queue's ruleset is expected to require the underlying check names ci.yml's `ci`, `coverage-
-# ratchet` and `test-slow` jobs already post unconditionally (they gained a `merge_group` trigger
-# in that same task), not this aggregate; nothing in THIS file needed to change for that.
+# W1-T4406/W1-T5515: REQUIRED below is the `pull_request`-time list. Seven of its names come from
+# workflows that never trigger on `merge_group`, so a merge queue's group commit cannot produce them.
+# MERGE_GROUP_REQUIRED, beside it, is the subset whose producing ci.yml job DOES run there (`ci`,
+# `coverage-ratchet`, `test-slow`, and since W1-T5522 the light gates); ci.yml's `ci-gate` job selects it on a group commit by passing
+# `--event merge_group` to scripts/ci-gate-from-contract.mjs, which refuses an absent, empty or
+# non-subset list. The step below is shared, unchanged, by both modes; the PR-only gates already
+# passed on the PR head, the precondition for entering the queue. FALSIFIER:
+# test/the-ci-gate-reports-on-the-merge-group-commit.test.ts derives the subset from ci.yml.
 
 on:
   pull_request:
@@ -48,11 +48,11 @@ jobs:
   ci-gate:
     name: ci-gate
     runs-on: ubuntu-latest
-    # INVARIANT: this bound must exceed what it bounds. WAIT_CAP_SECONDS (3900s) plus
-    # GRACE_WINDOW_SECONDS (600s) is a 75m worst case, so 80m stays a finite, loud ceiling above
+    # INVARIANT: this bound must exceed what it bounds. WAIT_CAP_SECONDS (4500s) plus
+    # GRACE_WINDOW_SECONDS (600s) is an 85m worst case, so 90m stays a finite, loud ceiling above
     # it instead of GitHub's 360m default (R-50). FALSIFIER:
     # test/ci-cache-concurrency-and-job-timeouts.test.ts asserts this timeout exceeds that sum.
-    timeout-minutes: 80
+    timeout-minutes: 90
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
@@ -83,6 +83,7 @@ jobs:
         "claims",
         "learnings-budget-ratchet",
         "commitlint",
+        "rule-checks",
         "api-client-drift",
         "no-hand-rolled-fetch",
         "prompt-surface-gate",
@@ -100,6 +101,34 @@ jobs:
         "coverage-session-blanking",
         "baseline-monotonic",
         "test-slow"
+        ]
+      # W1-T5515: the REQUIRED names a `merge_group` commit produces — those whose ci.yml job runs on
+      # that event (neither `if: false` nor the pull_request-only guard). Read ONLY under the
+      # runner's explicit `--event merge_group`; no other event, and this file's own job, never
+      # consults it. Same one-name-per-line format as REQUIRED.
+      # W1-T5522: plus every name ci.yml's `commitlint` job posts with a constituent step that runs
+      # there (the recorded-literal ratchets). prompt-surface-gate stays out: its only step is
+      # pull_request-guarded, so requiring it would be vacuous.
+      MERGE_GROUP_REQUIRED: >-
+        [
+        "ci",
+        "coverage-ratchet",
+        "test-slow",
+        "rule-checks",
+        "leak-grep",
+        "learnings-budget-ratchet",
+        "jscpd-gate",
+        "claims",
+        "assertion-discrimination",
+        "lint-plan",
+        "depcruise",
+        "containment-probe",
+        "api-client-drift",
+        "no-hand-rolled-fetch",
+        "task-id-existence",
+        "source-size",
+        "comment-load-ratchet",
+        "baseline-monotonic"
         ]
       # Never waited on, never failed for: ci-gate is self, and remudero-review is a separate
       # required context the orchestrator posts directly rather than a check-run.
@@ -123,22 +152,23 @@ jobs:
       # REQUIRED "once it is live on main". It refuses a REQUIRED context demoted with no reviewed
       # GATE_RATIONALE; promoting it is a one-line follow-up after it has run clean on main.
       #
-      # W1-T4399: ~17 one-runner gates (commitlint, lint-plan, depcruise, containment-probe,
+      # W1-T4399: ~17 one-runner gates (rule-checks, lint-plan, depcruise, containment-probe,
       # jscpd-gate, claims, learnings-budget-ratchet, api-client-drift, no-hand-rolled-fetch,
       # prompt-surface-gate, leak-grep, assertion-discrimination, task-id-existence,
-      # comment-load-ratchet, source-size, baseline-monotonic) now run as STEPS of one
-      # job in ci.yml (the former `commitlint` job, expanded in place — see its own header comment
-      # there for why it keeps that key rather than a new one), which posts each gate's result
-      # under its OWN unchanged name via the checks API. No name here changes and no name is added:
-      # every one of the sixteen OTHER gates keeps its own ci.yml job key, registered but
+      # comment-load-ratchet, source-size, baseline-monotonic) now run as STEPS of one job in
+      # ci.yml (key `commitlint`, named `light-gates` — its own header comment says why it keeps
+      # that key), which posts each gate's result under its OWN name via the checks API. Every
+      # one of the sixteen OTHER gates keeps its own ci.yml job key, registered but
       # permanently `if: false`, under its ORIGINAL `name:` (never renamed — this file's REQUIRED/
       # ADVISORY entries derive from a real job's `name:`, and a rename would leave the original
       # stale). So a skipped stub and the consolidated job's real post SHARE one name on every PR;
-      # this file's own read already groups by name and keeps only the latest `started_at`
-      # (W1-T123), unmodified, which is what resolves that duplicate.
+      # this file's read groups by name AND producer class (W1-T5695), and a skip never fails.
+      # W1-T5695: `light-gates` is that job's own run, green by construction (continue-on-error
+      # steps); each gate it runs is posted under its own REQUIRED name, `rule-checks` included.
       ADVISORY: >-
         [
         "squash-trailer-gate",
+        "light-gates",
         "gate-monotonic",
         "flake-retry-aggregate",
         "test-slow-shard (1/2)",
@@ -178,15 +208,15 @@ jobs:
       GRACE_POLL_INTERVAL_SECONDS: "60"
       # W1-T312's original n=10 sample (2026-08-03, p95 ~1345s) justified 2400s, but PR #8080
       # showed the dependent coverage path needs a larger bound: the coverage shard can take 39m,
-      # then its aggregator has a 20m cap. 3900s is a finite 65m wait with six minutes beyond
-      # those two job caps; the regression test measures the whole dependency path. Env, like the
+      # then its aggregator has a 20m cap. The 4500s (75m) wait leaves six minutes beyond the
+      # 49m shard plus 20m aggregator; the regression test measures the whole dependency path. Env, like the
       # grace knobs above, lets tests shrink it. The original sample is in
       # docs/forensics/ci-gate-yml.md (W1-T312).
-      WAIT_CAP_SECONDS: "3900"
+      WAIT_CAP_SECONDS: "4500"
       # One recent successful ci-gate run (34709784197, 2026-09-12) emitted 73 wait-loop reads
       # before its siblings completed. Preserve the 15s observation cadence while checks are
       # first registering, then move to 60s: later reads only observe remote state and cannot
-      # make a required check complete sooner. At the 3900s cap this is at most 81 wait reads
+      # make a required check complete sooner. At the 4500s cap this is at most 91 wait reads
       # instead of 261, while adding no more than 60s to a long-tail terminal observation.
       WAIT_FAST_WINDOW_SECONDS: "300"
       WAIT_POLL_INTERVAL_SECONDS: "15"
@@ -200,7 +230,7 @@ jobs:
           # on `set -u` if either is ever left unset.
           GRACE_WINDOW_SECONDS="${GRACE_WINDOW_SECONDS:-600}"
           GRACE_POLL_INTERVAL_SECONDS="${GRACE_POLL_INTERVAL_SECONDS:-60}"
-          WAIT_CAP_SECONDS="${WAIT_CAP_SECONDS:-2400}"
+          WAIT_CAP_SECONDS="${WAIT_CAP_SECONDS:-4500}"
           WAIT_FAST_WINDOW_SECONDS="${WAIT_FAST_WINDOW_SECONDS:-300}"
           WAIT_POLL_INTERVAL_SECONDS="${WAIT_POLL_INTERVAL_SECONDS:-15}"
           WAIT_SLOW_POLL_INTERVAL_SECONDS="${WAIT_SLOW_POLL_INTERVAL_SECONDS:-60}"
@@ -233,12 +263,20 @@ jobs:
             # the latest `started_at`, breaking same-second ties by numeric check-run id -- a
             # name whose failed attempt is followed by a later success reads as that success;
             # everything downstream evaluates ONLY this deduped, latest-per-name list.
+            # W1-T5695: the group is name AND PRODUCER CLASS -- "posted" when external_id is
+            # ci.yml's `run:<run>:<attempt>:job:<id>` (or the older `job:<id>`), else "job" --
+            # never the full external_id, so a rerun of the posting job still supersedes its own
+            # earlier post, while a later same-name job success can no longer hide a failed post
+            # (#8905). A name is not ready while ANY of its groups is incomplete (steps 1 and 3).
             # (`--slurp` can't combine with `-q`, so flatten the page array with a separate jq.)
             local raw attempt=1
             while [ "${attempt}" -le "${RETRY_ATTEMPTS}" ]; do
               if raw="$(gh api "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" --paginate --slurp)"; then
-                jq -c '[ .[].check_runs[] | {id, name, status, conclusion, started_at} ]
-                        | group_by(.name)
+                jq -c '[ .[].check_runs[] | {id, name, status, conclusion, started_at, external_id}
+                          | .producer = (if ((.external_id // "")
+                                             | test("^(run:[0-9]+:[0-9]+:)?job:[0-9]+$"))
+                                         then "posted" else "job" end) ]
+                        | group_by([.name, .producer])
                         | map(max_by([.started_at, (.id // 0)]))' <<< "${raw}"
                 return 0
               fi
@@ -274,7 +312,8 @@ jobs:
           while :; do
             runs="$(runs_json)" || unreadable_die
             not_ready="$(jq -r --argjson req "${REQUIRED}" '
-              ([ .[] | select(.status=="completed") | .name ]) as $done
+              (([ .[] | select(.status=="completed") | .name ] | unique)
+                - [ .[] | select(.status!="completed") | .name ]) as $done
               | ($req - $done)
               | .[]' <<< "${runs}")"
             [ -z "${not_ready}" ] && break
@@ -344,7 +383,8 @@ jobs:
               sleep "${GRACE_POLL_INTERVAL_SECONDS}"
               runs="$(runs_json)" || unreadable_die
               not_ready="$(jq -r --argjson req "${REQUIRED}" '
-                ([ .[] | select(.status=="completed") | .name ]) as $done
+                (([ .[] | select(.status=="completed") | .name ] | unique)
+                  - [ .[] | select(.status!="completed") | .name ]) as $done
                 | ($req - $done)
                 | .[]' <<< "${runs}")"
               # Not every required name is terminal yet (a rerun is mid-flight) -- keep polling

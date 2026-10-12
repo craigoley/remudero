@@ -1,9 +1,13 @@
+import { recordCashRequestEffort, type CashRequestEffortCount } from "./cash-request-effort.js";
+import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
 import { CashResponsesConversation } from "./cash-responses.js";
 import { randomUUID } from "node:crypto";
 import { execFile as execFileChild, execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { constants as fsConstants, accessSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { constants as fsConstants, accessSync, appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+import { StringDecoder } from "node:string_decoder";
 import { promisify } from "node:util";
 import { Worker } from "node:worker_threads";
 import {
@@ -12,9 +16,21 @@ import {
   type CapabilityUseRequest,
 } from "./capability-grant.js";
 import { reconcileExternalEffect, type ExternalEffectRequest, type ExternalEffectResult } from "./action-reconciliation.js";
+import {
+  affectedSelectionOrFull,
+  changedSymbols,
+  symbollessSourceFiles,
+  type AffectedSelection,
+  type AffectedSuitesInput,
+} from "./affected-suites.js";
+import { callerReachableSuites } from "./ci-parity.js";
+import { defaultPreflightSpawn, type PreflightSpawn } from "./commit-message.js";
+import { appendLedger } from "./ledger.js";
+import { ledgerPathFor } from "./ledger-path.js";
 import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
+import { hostWorktreeGit, recordedWorktreeGitDir } from "./worktree-git.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
 import { withFleetCashAllowanceLock } from "./cash-allowance-lock.js";
@@ -22,10 +38,15 @@ import type { UsageSnapshot } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
 import { validateWorkerSettingsFile } from "./settings.js";
-import { withTempDir } from "./tmp.js";
+import { makeTempDir, withTempDir } from "./tmp.js";
 import { assertModelAllowed, modelAllowed } from "./model-gate.js";
 import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWindow } from "./version-switchback.js";
 import type { ModelApproval } from "./config-schema.js";
+import {
+  hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, seedFromCanonical, TYPECHECK_BUILDINFO_NAME, TYPECHECK_COLD_PEAK_BYTES,
+  TYPECHECK_WARM_PEAK_BYTES,
+} from "./typecheck-buildinfo.js";
+import { acquireTestSlotAsync, defaultTestSlots, readHostLoad, readMemoryHeadroom, testRunConcurrency, TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "./test-slot.js";
 import { selectFromRoutingPool, type RoutingPoolDecision, type RoutingPoolRequest, type RoutingPoolSnapshot } from "./model-pool.js";
 import {
   spawnDetachedGroup,
@@ -75,6 +96,8 @@ interface CodexSpawnArgs {
   effort?: string;
   maxTurns?: number;
   tools?: string[];
+  /** The shell-less surface a caller declares only when its harness owns git (run-task.ts's coherence rule). */
+  cashTools?: readonly string[];
   sandboxIntent?: "disposable-review";
   sandboxReadRoots?: string[];
   runId?: string;
@@ -92,17 +115,29 @@ interface CodexSpawnArgs {
   clockBound?: { boundMs: number; now?: () => number; pollMs?: number };
 }
 
+/** W1-T6027: how a worker's process ended. `exit` carries a code (0 included) and `signal` the signal's name, each as the
+ * runner OBSERVED it. `unobserved` is for a runner that saw no process end: the cash HTTP runner, or a claude envelope with
+ * no SDK throw. It is never read as exit 0. Re-exported by worker.ts beside `WorkerResult.exit`. */
+export type WorkerExit = { kind: "exit"; code: number } | { kind: "signal"; signal: string } | { kind: "unobserved" };
+
 interface CodexWorkerResult {
   provider: "codex";
+  /** W1-T6148: what the harness did with a codex writer's edits; absent when its caller commits them. */
+  harnessCommit?: CodexHarnessCommit;
   sessionId: string;
   costUsd: number;
+  /** W1-T5629: NOTIONAL, never billed — see {@link codexNotionalCostUsd}. Absent when the model is unpriced. */
+  notionalCostUsd?: number;
   numTurns: number;
   maxTurns?: number;
   text: string;
   blocks: string[];
   stderr: string;
+  outputTruncation?: CodexOutputTruncation;
   subtype: string;
   isError: boolean;
+  /** W1-T6027: the child's own `exit(code, signal)`, never derived from `subtype`. */
+  exit: WorkerExit;
   apiError: boolean;
   usageRefusal?: UsageLimitRefusal;
   permissionDenials: unknown[];
@@ -111,6 +146,7 @@ interface CodexWorkerResult {
   model: string;
   effort: string;
   tokens: { input: number; output: number; cacheRead: number; cacheCreation: number };
+  tokenUsageState: "observed" | "partial" | "unavailable";
   modelUsage: Record<string, never>;
   /** W1-T4650: always `null` — see {@link CODEX_SERVED_MODEL_REASON}, which says why. */
   servedModel?: null;
@@ -477,6 +513,20 @@ export interface RoutingDraw {
   seed: string;
   key?: RoutingDrawKey;
   probabilities: Array<{ provider: WorkerProviderId; probability: number }>;
+  /** W1-T5535: present ONLY when a learned mixing shaped the probabilities; each provider's three shares. */
+  learned?: {
+    epsilon: number;
+    probabilities: Array<{ provider: WorkerProviderId; headroom: number; learned: number; final: number }>;
+  };
+}
+
+/**
+ * W1-T5535: a learned per-provider multiplier on the headroom weights, mixed with the pure-headroom
+ * probabilities as `(1 - epsilon) * p_learned + epsilon * p_headroom`. Absent, the selector is unchanged.
+ */
+export interface ProviderMixing {
+  epsilon: number;
+  multipliers: Partial<Record<WorkerProviderId, number>>;
 }
 
 function resolveRoutingDraw(source: number | RoutingDrawSeed): { value: number; seed: string; key?: RoutingDrawKey; order?: readonly WorkerProviderId[] } {
@@ -498,6 +548,7 @@ export function selectWorkerProvider(
   capacities: ProviderCapacity[],
   reservePercent = 5,
   draw: number | RoutingDrawSeed = 0,
+  mixing?: ProviderMixing,
 ): ProviderSelection {
   const eligible = capacities
     .filter((capacity) => providerEligibility(capacity, reservePercent).eligible)
@@ -512,18 +563,26 @@ export function selectWorkerProvider(
     })
     .sort((a, b) => b.tightestRemainingPercent - a.tightestRemainingPercent);
   if (eligible.length === 0) throw new ProviderCapacityBlockedError(capacities);
-  const totalWeight = eligible.reduce((sum, item) => sum + item.allocationWeight, 0);
+  const headroomTotal = eligible.reduce((sum, item) => sum + item.allocationWeight, 0);
+  const mixed = mixing ? mixedProbabilities(eligible, headroomTotal, mixing) : undefined;
+  // The walk's weights ARE the probabilities when a mixing is present, else the headroom weights themselves.
+  const walkWeight = (item: { allocationWeight: number }, index: number) => mixed ? mixed[index].final : item.allocationWeight;
+  const totalWeight = mixed ? mixed.reduce((sum, entry) => sum + entry.final, 0) : headroomTotal;
   const resolved = resolveRoutingDraw(draw);
   const recorded: RoutingDraw = {
     method: ROUTING_DRAW_METHOD,
     value: resolved.value,
     seed: resolved.seed,
     ...(resolved.key ? { key: resolved.key } : {}),
-    probabilities: eligible.map((item) => ({ provider: item.provider, probability: item.allocationWeight / totalWeight })),
+    probabilities: eligible.map((item, index) => ({ provider: item.provider, probability: walkWeight(item, index) / totalWeight })),
+    ...(mixed && mixing
+      ? { learned: { epsilon: mixing.epsilon, probabilities: mixed.map((entry, index) => ({ provider: eligible[index].provider, ...entry })) } }
+      : {}),
   };
-  const weighted = eligible.map((item) => ({
+  const weighted = eligible.map((item, index) => ({
     ...item,
-    allocationSharePercent: item.allocationWeight / totalWeight * 100,
+    walkWeight: walkWeight(item, index),
+    allocationSharePercent: walkWeight(item, index) / totalWeight * 100,
     draw: recorded,
   }));
   // The walk's order moves no probability; an experiment fixes it so one task-keyed value reads as one arm.
@@ -535,10 +594,39 @@ export function selectWorkerProvider(
   const targetWeight = resolved.value * totalWeight;
   let cumulativeWeight = 0;
   for (const item of walk) {
-    cumulativeWeight += item.allocationWeight;
-    if (targetWeight < cumulativeWeight) return item;
+    cumulativeWeight += item.walkWeight;
+    if (targetWeight < cumulativeWeight) return stripWalkWeight(item);
   }
-  return walk[walk.length - 1];
+  return stripWalkWeight(walk[walk.length - 1]);
+}
+
+/** The walk weight is the selector's own bookkeeping: the returned selection keeps its pre-W1-T5535 shape. */
+function stripWalkWeight<T extends { walkWeight: number }>(item: T): Omit<T, "walkWeight"> {
+  const { walkWeight: _walkWeight, ...selection } = item;
+  return selection;
+}
+
+/** Each provider's headroom share, its share once weighted by its learned multiplier, and the epsilon mix. */
+function mixedProbabilities(
+  eligible: ReadonlyArray<{ provider: WorkerProviderId; allocationWeight: number }>,
+  headroomTotal: number,
+  mixing: ProviderMixing,
+): Array<{ headroom: number; learned: number; final: number }> {
+  const positive = (value: number | undefined): value is number => typeof value === "number" && value > 0;
+  const known = eligible.map((item) => mixing.multipliers[item.provider]).filter(positive);
+  // A provider with no learned multiplier takes the mean of the others', so it is neither favoured nor starved.
+  const fallback = known.length > 0 ? known.reduce((sum, value) => sum + value, 0) / known.length : 1;
+  const raw = eligible.map((item) => {
+    const multiplier = mixing.multipliers[item.provider];
+    return item.allocationWeight * (positive(multiplier) ? multiplier : fallback);
+  });
+  const rawTotal = raw.reduce((sum, value) => sum + value, 0);
+  const epsilon = Math.min(Math.max(mixing.epsilon, 0), 1);
+  return eligible.map((item, index) => {
+    const headroom = item.allocationWeight / headroomTotal;
+    const learned = raw[index] / rawTotal;
+    return { headroom, learned, final: (1 - epsilon) * learned + epsilon * headroom };
+  });
 }
 
 /**
@@ -709,7 +797,7 @@ interface CodexModelListResult {
  */
 const FALLBACK_CODEX_MODELS: Record<CodexModelTier, string[]> = {
   economy: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.3-codex-spark", "gpt-5.4-mini"],
-  balanced: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.5"],
+  balanced: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"],
   frontier: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"],
 };
 const SAFE_CODEX_MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,95}$/;
@@ -887,6 +975,7 @@ export interface OpenWeightContextWindow {
 }
 
 export const OPENWEIGHT_CONTEXT_WINDOWS: Readonly<Record<string, OpenWeightContextWindow>> = {
+  "claude-haiku-5-5": { totalTokens: 1_000_000, readAt: "2026-10-07" },
   "gpt-oss-120b": { totalTokens: 131_072, readAt: "2026-09-15" },
   "gpt-5-nano": { totalTokens: 272_000, readAt: "2026-09-15" },
   // A DELIBERATE FLOOR, NOT A MEASURED CEILING. Microsoft's published gpt-5.6 rates are
@@ -1439,6 +1528,8 @@ export async function readCodexRuntime(
     /** Real-time source for the deadline-overrun check. Injected ONLY by tests: a fake clock in
      *  production would defeat the very stall this measurement exists to detect. */
     monotonicNow?: () => number;
+    /** Receives each spawned app-server's exit, so an off-thread probe can let it be reaped before its thread ends. */
+    onChildSpawned?: (exited: Promise<void>) => void;
   },
 ): Promise<CodexRuntimeResult> {
   const spawn = deps.spawn ?? ((command, args, options) => spawnChild(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] }));
@@ -1451,6 +1542,10 @@ export async function readCodexRuntime(
     // A synchronous spawn failure excludes Codex without erasing its reason.
     return codexRuntimeFailure(`app-server spawn failed: ${(error as Error).message}`);
   }
+  deps.onChildSpawned?.(new Promise<void>((exited) => {
+    child.once("exit", () => exited());
+    child.once("error", () => exited());
+  }));
 
   return new Promise<CodexRuntimeResult>((resolve) => {
     let settled = false;
@@ -1579,7 +1674,7 @@ function codexCapacityHedgeDelay(timeoutMs: number): number {
 export async function readCodexRuntimeWithTimeoutHedge(
   config: Config,
   bin: string,
-  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & { clock: Pick<Clock, "now"> },
+  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & { clock: Pick<Clock, "now">; onChildSpawned?: (exited: Promise<void>) => void },
 ): Promise<CodexRuntimeResult> {
   const timeoutMs = deps.timeoutMs ?? 10_000;
   const hedgeDelayMs = codexCapacityHedgeDelay(timeoutMs);
@@ -1670,6 +1765,31 @@ export async function readCodexRuntimeWithTimeoutHedge(
       hedgeTimer = setTimeout(startHedge, remainingHedgeDelayMs);
     }
   });
+}
+
+/** Upper bound on waiting for a SIGKILLed app-server to exit before a probe thread reports. */
+export const CODEX_PROBE_REAP_GRACE_MS = 2_000;
+
+/**
+ * The off-thread probe's read. A child spawned on a worker thread is reaped by that thread's event
+ * loop, so the probe must not report (and be terminated) while a killed app-server is still
+ * unreaped: otherwise the dead child stays a zombie of the daemon process.
+ */
+export async function readCodexRuntimeAwaitingReap(
+  config: Config,
+  bin: string,
+  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & { clock: Pick<Clock, "now"> },
+  graceMs = CODEX_PROBE_REAP_GRACE_MS,
+): Promise<CodexRuntimeResult> {
+  const exits: Promise<void>[] = [];
+  const result = await readCodexRuntimeWithTimeoutHedge(config, bin, { ...deps, onChildSpawned: (exited) => exits.push(exited) });
+  let grace: NodeJS.Timeout | undefined;
+  await Promise.race([
+    Promise.all(exits),
+    new Promise<void>((done) => { grace = setTimeout(done, graceMs); }),
+  ]);
+  clearTimeout(grace);
+  return result;
 }
 
 export function readCodexRuntimeOffThread(
@@ -1849,11 +1969,20 @@ export interface ParsedCodexEvents {
   text: string;
   blocks: string[];
   tokens: { input: number; output: number; cacheRead: number; cacheCreation: number };
+  tokenUsageState: "observed" | "partial" | "unavailable";
   numTurns: number;
   isError: boolean;
   subtype: string;
   errors: string[];
   usageRefusal?: UsageLimitRefusal;
+  outputTruncation?: CodexOutputTruncation;
+}
+
+export interface CodexOutputTruncation {
+  limitBytes: number;
+  retainedBytes: number;
+  droppedBytes: number;
+  spilledBytes: number;
 }
 
 /** PRIMARY CONTROL (W1-T4595): the most stdout one Codex worker may RETAIN (W1-T3490's heap), not stream. */
@@ -1945,40 +2074,80 @@ class CodexJsonlAccumulator {
   private input = 0;
   private output = 0;
   private cacheRead = 0;
+  private completedTurns = 0;
+  private usageTurns = 0;
+  private missingUsageTurns = 0;
+  private turnInProgress = false;
   private numTurns = 0;
   private usageRefusal: UsageLimitRefusal | undefined;
   private pending = "";
   private keptBytes = 0;
+  private droppedBytes = 0;
+  private spilledBytes = 0;
+  private spilling = false;
+  private failed = false;
   private readonly eventBytes: Record<CodexEventByteKind, number> = Object.fromEntries(
     CODEX_EVENT_BYTE_KIND_KEYS.map((key) => [key, 0]),
   ) as Record<CodexEventByteKind, number>;
 
-  constructor(private nowMs: number) {}
+  constructor(private nowMs: number, private readonly pendingFile?: string, private readonly observeToolLineage?: (raw: unknown) => void) {}
 
   push(chunk: string, nowMs = this.nowMs): void {
     this.nowMs = nowMs;
-    this.pending += chunk;
-    for (;;) {
-      const newline = this.pending.indexOf("\n");
-      if (newline < 0) return;
-      this.consumeLine(this.pending.slice(0, newline));
-      this.pending = this.pending.slice(newline + 1);
+    let offset = 0;
+    while (offset < chunk.length) {
+      const newline = chunk.indexOf("\n", offset);
+      const part = chunk.slice(offset, newline < 0 ? chunk.length : newline);
+      if (this.pendingFile && !this.spilling && this.retainedBytes() + Buffer.byteLength(part) > CODEX_WORKER_STDOUT_MAX_BYTES) {
+        writeFileSync(this.pendingFile, this.pending, { mode: 0o600 });
+        this.spilledBytes += this.pendingLineBytes();
+        this.pending = "";
+        this.spilling = true;
+      }
+      if (this.spilling) {
+        appendFileSync(this.pendingFile!, part);
+        this.spilledBytes += Buffer.byteLength(part);
+      } else {
+        this.pending += part;
+      }
+      if (newline < 0) break;
+      this.consumePending();
+      offset = newline + 1;
     }
   }
 
-  finish(): ParsedCodexEvents {
-    if (this.pending.trim()) this.consumeLine(this.pending);
+  private consumePending(): void {
+    const line = this.spilling ? readFileSync(this.pendingFile!, "utf8") : this.pending;
     this.pending = "";
+    this.spilling = false;
+    this.consumeLine(line);
+    if (this.pendingFile) this.boundRetained();
+  }
+
+  finish(): ParsedCodexEvents {
+    if (this.spilling || this.pending.trim()) this.consumePending();
+    const text = this.blocks.at(-1) ?? "";
+    if (this.droppedBytes > 0 && this.blocks.length > 1) this.blocks.splice(1, 0, this.truncationMarker(this.droppedBytes));
+    else if (this.spilledBytes > 0 && this.droppedBytes === 0) this.blocks.splice(1, 0, `\n[Codex stdout buffer truncated: ${this.spilledBytes} bytes spilled to disk]\n`);
+    this.keptBytes = [...this.blocks, ...this.errors].reduce((sum, value) => sum + Buffer.byteLength(value), 0);
     return {
       sessionId: this.sessionId,
-      text: this.blocks.at(-1) ?? "",
+      text,
       blocks: this.blocks,
       tokens: { input: this.input, output: this.output, cacheRead: this.cacheRead, cacheCreation: 0 },
+      tokenUsageState: this.usageTurns === 0 ? "unavailable"
+        : this.missingUsageTurns > 0 || this.failed || this.turnInProgress || this.numTurns > this.completedTurns ? "partial" : "observed",
       numTurns: this.numTurns,
-      isError: this.errors.length > 0,
-      subtype: this.errors.length > 0 ? "error_codex" : "success",
+      isError: this.failed,
+      subtype: this.failed ? "error_codex" : "success",
       errors: this.errors,
       ...(this.usageRefusal ? { usageRefusal: this.usageRefusal } : {}),
+      ...(this.droppedBytes > 0 || this.spilledBytes > 0 ? { outputTruncation: {
+        limitBytes: CODEX_WORKER_STDOUT_MAX_BYTES,
+        retainedBytes: this.retainedBytes(),
+        droppedBytes: this.droppedBytes,
+        spilledBytes: this.spilledBytes,
+      } } : {}),
     };
   }
 
@@ -1995,17 +2164,55 @@ class CodexJsonlAccumulator {
     return this.pendingLineBytes() + this.keptBytes;
   }
 
+  private truncationMarker(bytes: number): string {
+    return `\n[Codex output truncated: ${bytes} bytes omitted]\n`;
+  }
+
+  private boundText(text: string, limit: number): string {
+    const raw = Buffer.from(text);
+    if (raw.length <= limit) return text;
+    const allowance = Math.max(0, limit - 80);
+    let head = Math.floor(allowance / 2);
+    let tail = raw.length - (allowance - head);
+    while (head > 0 && (raw[head]! & 0xc0) === 0x80) head--;
+    while (tail < raw.length && (raw[tail]! & 0xc0) === 0x80) tail++;
+    const dropped = tail - head;
+    this.droppedBytes += dropped;
+    return raw.subarray(0, head).toString() + this.truncationMarker(dropped) + raw.subarray(tail).toString();
+  }
+
+  private boundRetained(): void {
+    const budget = CODEX_WORKER_STDOUT_MAX_BYTES - 128;
+    const bytes = (values: string[]) => values.reduce((sum, value) => sum + Buffer.byteLength(value), 0);
+    while (this.errors.length > 1 && bytes(this.errors) > budget / 4) this.droppedBytes += Buffer.byteLength(this.errors.pop()!);
+    if (this.errors.length) this.errors[0] = this.boundText(this.errors[0]!, budget / 4);
+    const blockBudget = budget - bytes(this.errors);
+    while (this.blocks.length > 2 && bytes(this.blocks) > blockBudget) this.droppedBytes += Buffer.byteLength(this.blocks.splice(1, 1)[0]!);
+    if (bytes(this.blocks) > blockBudget) {
+      if (this.blocks.length === 1) this.blocks[0] = this.boundText(this.blocks[0]!, blockBudget);
+      else {
+        const headBudget = Math.min(Buffer.byteLength(this.blocks[0]!), Math.floor(blockBudget / 2));
+        this.blocks[0] = this.boundText(this.blocks[0]!, headBudget);
+        this.blocks[1] = this.boundText(this.blocks[1]!, blockBudget - Buffer.byteLength(this.blocks[0]!));
+      }
+    }
+    this.keptBytes = bytes(this.blocks) + bytes(this.errors);
+  }
+
   private consumeLine(line: string): void {
     if (!line.trim()) return;
     let event: CodexJsonEvent;
     try {
       event = JSON.parse(line) as CodexJsonEvent;
     } catch {
+      this.observeToolLineage?.(null);
       this.eventBytes.malformed += Buffer.byteLength(line, "utf8") + 1;
       // Preserve malformed output in the returned error verdict instead of treating it as absence.
       this.errors.push(`unparseable Codex event: ${line.slice(0, 160)}`);
+      this.failed = true;
       return;
     }
+    this.observeToolLineage?.(event);
     const eventType = typeof event.type === "string" ? event.type : undefined;
     const itemType = typeof event.item?.type === "string" ? event.item.type : undefined;
     const combined = itemType && eventType ? `${eventType}:${itemType}` : eventType;
@@ -2014,17 +2221,35 @@ class CodexJsonlAccumulator {
       : "other";
     this.eventBytes[kind] += Buffer.byteLength(line, "utf8") + 1;
     if (event.type === "thread.started" && typeof event.thread_id === "string") this.sessionId = event.thread_id;
-    if (event.type === "turn.started") this.numTurns += 1;
+    if (event.type === "turn.started") {
+      this.numTurns += 1;
+      this.turnInProgress = true;
+    }
     if (event.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") {
       this.blocks.push(event.item.text);
       this.keptBytes += Buffer.byteLength(event.item.text, "utf8");
     }
-    if (event.type === "turn.completed" && event.usage) {
-      this.input += event.usage.input_tokens ?? 0;
-      this.output += event.usage.output_tokens ?? 0;
-      this.cacheRead += event.usage.cached_input_tokens ?? 0;
+    if (event.type === "turn.completed") {
+      this.turnInProgress = false;
+      this.completedTurns += 1;
+      const input = event.usage?.input_tokens;
+      const output = event.usage?.output_tokens;
+      const cached = event.usage?.cached_input_tokens;
+      if (typeof input === "number" && Number.isSafeInteger(input) && input >= 0
+        && typeof output === "number" && Number.isSafeInteger(output) && output >= 0
+        && typeof cached === "number" && Number.isSafeInteger(cached) && cached >= 0 && cached <= input
+        && [this.input + input, this.output + output, this.cacheRead + cached].every(Number.isSafeInteger)) {
+        this.input += input;
+        this.output += output;
+        this.cacheRead += cached;
+        this.usageTurns += 1;
+      } else {
+        this.missingUsageTurns += 1;
+      }
     }
     if (event.type === "turn.failed" || event.type === "error") {
+      this.failed = true;
+      this.turnInProgress = false;
       const message = event.error?.message ?? event.type;
       this.errors.push(message);
       this.keptBytes += Buffer.byteLength(message, "utf8");
@@ -2122,37 +2347,11 @@ function isWithin(root: string, candidate: string): boolean {
  */
 function isGitWorktree(cwd: string): boolean {
   try {
-    return execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim() === "true";
+    return hostWorktreeGit(cwd, ["rev-parse", "--is-inside-work-tree"]).trim() === "true";
   } catch {
     // `git` missing, not a repo, or the probe otherwise failed to prove worktree membership --
     // treat as "not a worktree" so the bypass stays fail-closed on any unproven cwd.
     return false;
-  }
-}
-
-/**
- * Resolve only this checkout's Git administrative directories. Codex workspace-write protects
- * `.git` by default, while Remudero implementation prompts require the worker to commit. Linked
- * worktrees need both the per-worktree git dir and their shared common dir; paths outside the
- * configured Remudero root are refused instead of widening the sandbox from repository metadata.
- */
-export function codexGitWritableRoots(cwd: string, configRoot: string): string[] {
-  try {
-    const root = physicalPath(configRoot);
-    const output = execFileSync(
-      "git",
-      ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
-      { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    );
-    return [...new Set(output.split("\n").map((line) => line.trim()).filter(Boolean).map(physicalPath))]
-      .filter((candidate) => isWithin(root, candidate));
-  } catch (error) {
-    // A non-repository or unreadable Git layout earns no extra writable root, never a broad grant.
-    return [];
   }
 }
 
@@ -2248,6 +2447,76 @@ export function codexPreToolUseProfile(settingsFile: string): string[] {
   ];
 }
 
+function codexReadOnly(args: CodexSpawnArgs): boolean {
+  return args.sandboxIntent !== "disposable-review" && Array.isArray(args.tools) &&
+    !args.tools.some((tool) => ["Write", "Edit", "NotebookEdit", "MultiEdit"].includes(tool));
+}
+
+/**
+ * W1-T6148 — WHO COMMITS A CODEX WRITER'S EDITS. The worker cannot (no gitdir write), so: its CALLER when
+ * the caller told it the harness owns git (a shell-less bound, or a declared cash surface — the coherence
+ * rule run-task.ts holds), else this module, after the run, through the host git leaf.
+ */
+export function codexHarnessCommits(args: Pick<CodexSpawnArgs, "sandboxIntent" | "tools" | "cashTools">): boolean {
+  if (args.sandboxIntent === "disposable-review" || codexReadOnly(args as CodexSpawnArgs)) return false;
+  const shellLess = Array.isArray(args.tools) && !args.tools.includes("Bash");
+  return args.cashTools === undefined && !shellLess;
+}
+
+/** Told to a codex writer whose edits {@link commitCodexWriterEdits} commits. */
+export const CODEX_HARNESS_COMMITS_PART =
+  "GIT: your sandbox cannot write this repository's git directory, so do not run `git commit`, `git push` or any git " +
+  "command that writes. The harness commits every change you leave in the worktree when you finish. End your final " +
+  "message with one line `COMMIT_MESSAGE: <conventional-commit subject, at most 100 characters>`.\n\n";
+
+const CODEX_FALLBACK_SUBJECT = "chore: commit the Codex worker's edits (harness commit, W1-T6148)";
+
+/** The subject a codex writer asked for: its last anchored `COMMIT_MESSAGE:` line, as worker.ts reads one. */
+export function codexCommitSubject(text: string): string {
+  const matches = [...text.matchAll(/^[ \t]*COMMIT_MESSAGE:[ \t]*(.+)$/gim)];
+  const subject = matches.at(-1)?.[1]?.trim() ?? "";
+  return subject.length > 0 && subject.length <= 100 ? subject : CODEX_FALLBACK_SUBJECT;
+}
+
+export type CodexHarnessCommit =
+  | { outcome: "committed"; sha: string }
+  | { outcome: "nothing-to-commit" | "not-a-harness-worktree" }
+  | { outcome: "refused"; reason: string };
+
+/** Commit what a codex writer left in `cwd`, through the leaf (pinned gitdir, vetted config, harness hooks).
+ *  Only in a tree `worktreeAdd` cut and recorded: a checkout the harness did not cut is never committed in. */
+export function commitCodexWriterEdits(cwd: string, text: string): CodexHarnessCommit {
+  if (recordedWorktreeGitDir(cwd) === null) return { outcome: "not-a-harness-worktree" };
+  try {
+    if (hostWorktreeGit(cwd, ["status", "--porcelain"]).trim() === "") return { outcome: "nothing-to-commit" };
+    hostWorktreeGit(cwd, ["add", "-A"]);
+    hostWorktreeGit(cwd, ["commit", "-q", "-m", codexCommitSubject(text)]);
+    return { outcome: "committed", sha: hostWorktreeGit(cwd, ["rev-parse", "HEAD"]).trim() };
+  } catch (error) {
+    // Not a success: the edits stay uncommitted and the reason is the row the caller's no-commit verdict cites.
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(JSON.stringify({ event: "codex.harness_commit_refused", cwd, reason }));
+    return { outcome: "refused", reason };
+  }
+}
+
+/**
+ * A Codex WRITER's grant to the host-wide test slot (#10612's src/lib/typecheck-run.ts). Its shell inherits only the
+ * "core" variables and its bwrap binds `/` read-only, so without this a model's own `npm run typecheck` resolves no
+ * {@link TEST_SLOT_DIR_ENV} and falls to a sandbox-local `/tmp/rmd-test-slots` (test-slot.ts `resolveTestSlotDir`):
+ * a cold check that serialises against nothing on the host. Grant the ONE directory (lock records only, no credential,
+ * no git config) and name it, plus the host's slot count, in the shell. Nothing outside the fleet (unset), and nothing
+ * inside a test process, so a suite run in a fleet container builds the same argv as on a Mac.
+ */
+export function codexTestSlotArgs(env: NodeJS.ProcessEnv = process.env): string[] {
+  const dir = env[TEST_SLOT_DIR_ENV];
+  if (!dir || env.NODE_TEST_CONTEXT) return [];
+  const args = ["--add-dir", dir, "-c", `shell_environment_policy.set.${TEST_SLOT_DIR_ENV}=${JSON.stringify(dir)}`];
+  const slots = Number(env[TEST_SLOTS_ENV]);
+  if (Number.isSafeInteger(slots) && slots >= 1) args.push("-c", `shell_environment_policy.set.${TEST_SLOTS_ENV}=${JSON.stringify(String(slots))}`);
+  return args;
+}
+
 function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">): string[] {
   const model = selection?.model ?? config.workerProviders?.codexModel;
   // Never unnamed: with no --model, Codex runs the ACCOUNT default, which is gpt-6-astra (2026-09-22).
@@ -2255,7 +2524,7 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   assertModelAllowed(model, config);
   const effort = selection?.effort === "default" ? undefined : selection?.effort;
   const disposableReview = args.sandboxIntent === "disposable-review";
-  const readOnly = !disposableReview && Array.isArray(args.tools) && !args.tools.some((tool) => ["Write", "Edit", "NotebookEdit", "MultiEdit"].includes(tool));
+  const readOnly = codexReadOnly(args);
   const skipGitRepoCheck = readOnly && !isGitWorktree(args.cwd);
   const disposableReadRoots = disposableReview
     ? [...new Set((args.sandboxReadRoots ?? []).filter(isAbsolute).map(physicalPath))]
@@ -2315,13 +2584,16 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   if (args.resumeSessionId && (readOnly || disposableReview)) {
     return ["exec", "resume", ...shared, args.resumeSessionId, "-"];
   }
-  const gitWritableRoots = readOnly || disposableReview ? [] : codexGitWritableRoots(args.cwd, config.root);
+  // W1-T6148: NO `--add-dir` for the tree's git dir or common dir. A writer that could write either could
+  // plant config the host's authenticated push honours, so the harness commits for it instead
+  // ({@link commitCodexWriterEdits}).
   return [
     "exec",
     ...shared,
     ...(disposableReview ? [] : ["--sandbox", readOnly ? "read-only" : "workspace-write"]),
     ...(readOnly || disposableReview ? [] : ["-c", "sandbox_workspace_write.network_access=true"]),
-    ...gitWritableRoots.flatMap((root) => ["--add-dir", root]),
+    // Writers only: a reader or review runs no typecheck that needs the host slot.
+    ...(readOnly || disposableReview ? [] : codexTestSlotArgs()),
     "-C", args.cwd,
     "-",
   ];
@@ -2491,7 +2763,18 @@ export interface OpenWeightPrice {
   readAt: string;
 }
 
+/** Haiku's whole-request tier includes uncached input, cache reads and cache creation.
+ *  Reserve the dearer one-hour cache-write rate; actual Azure invoice cost remains separate. */
+export const FOUNDRY_HAIKU_PRICE: OpenWeightPrice = {
+  inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.5, cachedInputUsdPerMillion: 0.01,
+  cacheWriteUsdPerMillion: 0.2, reservationInputUsdPerMillion: 0.2,
+  longContext: { thresholdInputTokens: 100_000, inputUsdPerMillion: 0.5, outputUsdPerMillion: 2.5,
+    cachedInputUsdPerMillion: 0.05, cacheWriteUsdPerMillion: 1, reservationInputUsdPerMillion: 1 },
+  readAt: "2026-10-07",
+};
+
 export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
+  "claude-haiku-5-5": FOUNDRY_HAIKU_PRICE,
   // Azure serverless published rate. These are the two numbers this adapter has always used;
   // they are unchanged, and are now this deployment's ROW rather than the provider's default.
   "gpt-oss-120b": { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.6, readAt: "2026-09-14" },
@@ -2528,6 +2811,15 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
   },
 };
 
+/** Codex analytics only; these rows never admit a cash deployment (W1-T5664). */
+export const CODEX_NOTIONAL_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
+  ...OPENWEIGHT_PRICES,
+  // https://developers.openai.com/api/docs/models/gpt-6-sol
+  "gpt-6-sol": { inputUsdPerMillion: 2, outputUsdPerMillion: 10, cachedInputUsdPerMillion: 0.2, readAt: "2026-10-08" },
+  // https://developers.openai.com/api/docs/models/gpt-5.6-sol
+  "gpt-5.6-sol": { inputUsdPerMillion: 4, outputUsdPerMillion: 20, cachedInputUsdPerMillion: 0.4, readAt: "2026-10-08" },
+};
+
 /** Separate protocol and provider, but the same atomic cash allowance. */
 export const FOUNDRY_OPUS_PRICE: OpenWeightPrice = {
   inputUsdPerMillion: 4, outputUsdPerMillion: 20,
@@ -2540,13 +2832,14 @@ export const FOUNDRY_OPUS_PRICE: OpenWeightPrice = {
  * same discipline as the Opus row, so a later cache_control cannot undercount.
  */
 export const FOUNDRY_SONNET_PRICE: OpenWeightPrice = {
-  inputUsdPerMillion: 2, outputUsdPerMillion: 10,
-  reservationInputUsdPerMillion: 4, readAt: "2026-09-29",
+  inputUsdPerMillion: 2, outputUsdPerMillion: 10, cachedInputUsdPerMillion: 0.1,
+  reservationInputUsdPerMillion: 4, readAt: "2026-10-07",
 };
 
 /** The deployment -> price table the Foundry Claude adapter serves. A deployment absent from it is
  *  not a Foundry Claude deployment, and the adapter refuses it. */
 export const FOUNDRY_CLAUDE_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
+  "claude-haiku-5-5": FOUNDRY_HAIKU_PRICE,
   "claude-opus-5-5": FOUNDRY_OPUS_PRICE,
   "claude-sonnet-5-5": FOUNDRY_SONNET_PRICE,
 };
@@ -2627,6 +2920,7 @@ export function openWeightResponseFormatField(
 }
 
 export const OPENWEIGHT_TEMPERATURE: Readonly<Record<string, number | null>> = {
+  "claude-haiku-5-5": null,
   "gpt-oss-120b": 0,
   "gpt-5-nano": null,
   // MEASURED 2026-09-16 with the adapter's own URL and api-version: `temperature: 0` returns
@@ -2752,6 +3046,22 @@ export function openWeightUsageUsd(deployment: string, promptTokens: number, com
     cached * (rate.cachedInputUsdPerMillion ?? rate.inputUsdPerMillion) +
     written * (rate.cacheWriteUsdPerMillion ?? rate.inputUsdPerMillion) +
     completionTokens * rate.outputUsdPerMillion) / 1_000_000;
+}
+
+/**
+ * W1-T5629: the NOTIONAL dollars of one codex session — what its tokens would cost at the routed model's published
+ * BASE rate, so a codex row stops reading as free beside Claude's notional price. Never billed: the subscription
+ * charges no per-request dollar, so this rides `notional_cost_usd` and `costUsd` stays 0 for every budget and cap.
+ * Base rate because the tokens are a SESSION sum, and the long-context tier prices a single request. Codex input
+ * includes its cached input. `undefined`, never 0, for a model {@link CODEX_NOTIONAL_PRICES} does not price.
+ */
+export function codexNotionalCostUsd(model: string, tokens: { input: number; output: number; cacheRead: number }): number | undefined {
+  if (!Object.hasOwn(CODEX_NOTIONAL_PRICES, model)) return undefined;
+  const price = CODEX_NOTIONAL_PRICES[model];
+  const cached = Math.min(tokens.input, tokens.cacheRead);
+  return ((tokens.input - cached) * price.inputUsdPerMillion +
+    cached * (price.cachedInputUsdPerMillion ?? price.inputUsdPerMillion) +
+    tokens.output * price.outputUsdPerMillion) / 1_000_000;
 }
 
 /** The allowance file. A fleet override must point at the same pre-migrated host mount in every cash instance. */
@@ -3165,6 +3475,8 @@ export interface OpenWeightWorkerResult {
   stderr: string;
   subtype: string;
   isError: boolean;
+  /** W1-T6027: always `unobserved` — an HTTP runner has no process whose end it could see. */
+  exit: WorkerExit;
   apiError: boolean;
   permissionDenials: unknown[];
   /** This adapter runs in the daemon, not a child worker process. The Azure key is absent. */
@@ -3172,6 +3484,8 @@ export interface OpenWeightWorkerResult {
   model: string;
   routedModel?: string;
   effort: string;
+  /** Counts of actual adapter fetch invocations by observed parameter, including failures. */
+  requestEfforts: readonly CashRequestEffortCount[];
   selectionAssignmentId?: string;
   tokens: { input: number; output: number; cacheRead: number; cacheCreation: number };
   modelUsage: Record<string, never>;
@@ -3212,14 +3526,22 @@ export const OPENWEIGHT_FUNCTIONS: Record<string, { name: string; description: s
   Edit: { name: "edit_file", description: "Replace one exact UTF-8 string in a file under the worker cwd.", required: ["path", "old_string", "new_string"] },
   Grep: { name: "grep_files", description: "Find a literal string in UTF-8 files under the worker cwd.", required: ["query"] },
   Glob: { name: "glob_files", description: "List files under the worker cwd by a suffix-like pattern.", required: ["pattern"] },
-  RunCheck: { name: "run_check", description: "Run ONE permitted repository check by name (unit_test, typecheck). Fixed argv: it takes no paths or flags. No shell; no network.", required: ["check"] },
+  RunCheck: { name: "run_check", description: "Run ONE permitted repository check by name (unit_test, typecheck). Fixed argv: it takes no paths or flags; unit_test runs only the suites the harness selects from your diff, and refuses a selection too broad to run here. No shell; no network.", required: ["check"] },
 };
+
+/** The `--import` chain package.json's `test`/`test:ci` scripts load before any suite: tsx, then
+ *  test/setup/tmp-hygiene.ts, which installs the temp-dir reaper and the no-live-remote guards. A
+ *  `node --test` without it runs every fixture unguarded. The path is relative to the check's cwd,
+ *  the worktree root (`--chdir cwd`). Parity with package.json is enforced by test.
+ *  {@link openWeightCheckArgv} drops the setup import in a tree that has no such file. */
+export const TEST_SETUP_IMPORT = "./test/setup/tmp-hygiene.ts";
+export const TEST_PROCESS_GUARD_IMPORTS: readonly string[] = ["--import", "tsx", "--import", TEST_SETUP_IMPORT];
 
 /** Checks an open-weight worker may run, as fixed argv — never a command string (W1-T3617).
  *  NOTHING HERE MAY REACH THE NETWORK OR THE FORGE (no git/gh/curl/install): the worker produces a
  *  diff and the ORCHESTRATOR pushes, the boundary hooks/deny-floor.sh already enforces. */
 export const OPENWEIGHT_CHECKS: Readonly<Record<string, readonly string[]>> = {
-  unit_test: ["node", "--import", "tsx", "--test"],
+  unit_test: ["node", ...TEST_PROCESS_GUARD_IMPORTS, "--test", "--test-reporter=tap"],
   typecheck: ["node_modules/.bin/tsc", "-p", "tsconfig.json", "--noEmit"],
   // READ-ONLY git, SUBCOMMAND PINNED. W1-T3572's "no git" meant no FORGE authority; these carry no
   // push and no network, and are what the recon/diagnose prompts name. `git push` is absent, not
@@ -3361,10 +3683,12 @@ export class OpenWeightUnlistedCheckError extends RmdError {
  * suppression precedent to lean on. A sanitizer the analyser cannot see is a sanitizer the next
  * reader cannot see either.
  *
- * THE COST, STATED: a lane cannot scope `unit_test` to one file, so it runs the whole suite.
- * That is the read-only lanes' actual need (git status/diff/log and typecheck take no path), and
- * re-admitting caller arguments is a separate, deliberate decision rather than a default. */
-export function openWeightCheckArgv(check: unknown, paths: unknown): string[] {
+ * THE COST, STATED: a lane cannot scope `unit_test` to one file. In a tree carrying the selector
+ * (W1-T6091) the HARNESS scopes it instead — {@link openWeightUnitTestPlan} appends the suites
+ * {@link selectOpenWeightUnitTestSuites} derives from git, never from the model. Consumer trees
+ * use changed tests and source basename matches instead. This argv is only the prefix;
+ * {@link openWeightUnitTestPlan} must append an explicit suite list before it runs. */
+export function openWeightCheckArgv(check: unknown, paths: unknown, cwd?: string): string[] {
   if (typeof check !== "string" || !Object.prototype.hasOwnProperty.call(OPENWEIGHT_CHECKS, check)) {
     throw new OpenWeightUnlistedCheckError(typeof check === "string" ? check : String(check));
   }
@@ -3373,7 +3697,230 @@ export function openWeightCheckArgv(check: unknown, paths: unknown): string[] {
   if (paths !== undefined) {
     throw new OpenWeightUnlistedCheckError(`${check} with caller arguments — every check runs a FIXED argv`);
   }
-  return [...OPENWEIGHT_CHECKS[check]];
+  const argv = [...OPENWEIGHT_CHECKS[check]];
+  // A CONSUMER REPO HAS NO SETUP FILE. Loading a missing `--import` fails before any test runs, so
+  // a tree without it runs exactly what main ran: tsx alone. Remudero's own tree always has it.
+  const at = argv.indexOf(TEST_SETUP_IMPORT);
+  if (cwd !== undefined && at > 0 && !existsSync(join(cwd, TEST_SETUP_IMPORT))) argv.splice(at - 1, 2);
+  return argv;
+}
+
+/** The typecheck runs incremental against a buildinfo in the worker's private home — the sandbox's one writable bind
+ *  besides the worktree, so it is never part of the diff — seeded from the canonical checkout's on first use. Same
+ *  diagnostics as a cold check at about half its peak memory (lib/typecheck-buildinfo.ts). Harness-built: the model
+ *  still supplies no argument. */
+export function openWeightIncrementalTypecheck(argv: readonly string[], cwd: string, workerHome: string): string[] {
+  const buildInfo = join(workerHome, TYPECHECK_BUILDINFO_NAME);
+  seedFromCanonical(cwd, buildInfo);
+  return [...argv, "--incremental", "--tsBuildInfoFile", buildInfo];
+}
+
+// ── W1-T6091: THE unit_test CHECK RUNS THE DIFF'S AFFECTED SUITES ────────────────────────────
+// MEASURED 2026-10-06: the whole suite is ~21 min against OPENWEIGHT_CHECK_TIMEOUT_MS's 10, so a
+// whole-tree unit_test always timed out, at ~70 core-minutes a call, and left no ledger row.
+
+/** A tree with this marker uses the affected-suites model; consumers use the basename rule. */
+export const OPENWEIGHT_UNIT_TEST_SELECTOR_MARKER = "scripts/diff-class.mjs";
+/** PRIMARY CONTROL: above this many selected suites the check refuses rather than run. At the
+ *  cap below, forty suites is the most that plausibly finishes inside OPENWEIGHT_CHECK_TIMEOUT_MS. */
+export const OPENWEIGHT_UNIT_TEST_MAX_SUITES = 40;
+/** `--test-concurrency` for a harness-scoped run: node's default is cores-1, which on the fleet
+ *  host is 7 suites at once per lane, each spawning git and tsx. W1-T6090's testRunConcurrency
+ *  replaces this constant when it lands. */
+export const OPENWEIGHT_UNIT_TEST_CONCURRENCY = 2;
+/** Prefix that runs a scoped check below the daemon's own priority. */
+export const OPENWEIGHT_UNIT_TEST_NICE: readonly string[] = ["nice", "-n", "10"];
+/** BACKSTOP on computing the selection itself (git reads plus the census listings): it fires
+ *  only when a listing hangs, and the overrun is a refusal naming it. */
+export const OPENWEIGHT_UNIT_TEST_SELECTION_TIMEOUT_MS = 2 * 60_000;
+/** One row per run_check call, any check. Deliberately NOT in DECISION_RELEVANT_LEDGER_STEPS
+ *  (lib/ledger.ts): nothing decides on it; it prices the check, so rotation may archive it. */
+export const OPENWEIGHT_RUN_CHECK_LEDGER_STEP = "cash.run_check";
+/** The prefix every refusal of a too-broad selection carries, so a lane reads one sentence. */
+export const OPENWEIGHT_UNIT_TEST_TOO_BROAD = "selection too broad for an open-weight check — run in CI";
+
+const UNIT_TEST_SUITE = /^test\/[^\0\n]*\.test\.ts$/;
+const CONSUMER_UNIT_TEST_SUITE = /(?:^|\/)[^/\0\n]+\.(?:test|spec)\.(?:[cm]?[jt]s|[jt]sx)$/;
+const CONSUMER_UNIT_TEST_SCOPE_RULE = "consumer: changed tests + changed source basenames";
+/** This module's own checkout: the selector's helper scripts run from HERE, never from the
+ *  worktree, whose files the model writes and which therefore run only inside the sandbox. */
+const HARNESS_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+function fullSelection(reason: string): AffectedSelection {
+  return { suites: [], fullRun: true, reasons: [`full run: ${reason}`], recentOnly: { floor: [] } };
+}
+
+/**
+ * The suites a worktree's diff against its merge base with origin/main affects, by the same
+ * selector `preflight-author.mjs`'s authorSelection uses: the NARROW arm (changed tests, suites
+ * naming a changed symbol or its src/ caller, path readers and namers) when every changed source
+ * file names a symbol, else the floor. Every input is read from git and from files as DATA;
+ * the census listings come from {@link HARNESS_ROOT}'s diff-class.mjs pointed at the worktree,
+ * since the worktree's own copy is model-writable code this process must not execute.
+ * Anything unreadable is a FULL selection naming why — never a narrower guess.
+ */
+export function selectOpenWeightUnitTestSuites(cwd: string, spawn: PreflightSpawn = (file, args, opts) => {
+  if (file !== "git") return defaultPreflightSpawn(file, args, opts);
+  try {
+    const stdout = hostWorktreeGit(opts?.cwd ?? cwd, args, {
+      maxBuffer: 64 * 1024 * 1024, env: opts?.env, input: opts?.input,
+    });
+    return { status: 0, stdout, stderr: "" };
+  } catch (error) {
+    const result = error as { status?: number; stdout?: string; stderr?: string };
+    if (typeof result.status !== "number") throw error;
+    return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+  }
+}): AffectedSelection {
+  const root = realpathSync(cwd);
+  const run = (file: string, args: string[], at = root): string => {
+    const r = spawn(file, args, { cwd: at });
+    if (r.status !== 0) throw new Error(`${file} ${args.slice(0, 3).join(" ")} exited ${r.status}: ${(r.stderr ?? "").trim().slice(0, 200)}`);
+    return r.stdout;
+  };
+  const lines = (text: string) => text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const consumer = !existsSync(join(root, OPENWEIGHT_UNIT_TEST_SELECTOR_MARKER));
+  let base: string;
+  let changed: string[];
+  let tracked: string[];
+  try {
+    base = run("git", ["merge-base", "origin/main", "HEAD"]).trim();
+    const paths = consumer ? (text: string) => text.split("\0").filter(Boolean) : lines;
+    const untracked = paths(run("git", ["ls-files", ...(consumer ? ["-z"] : []), "--others", "--exclude-standard"]));
+    changed = [...new Set([
+      ...paths(run("git", ["diff", "--name-only", ...(consumer ? ["-z", "--diff-filter=ACMRT"] : []), base])),
+      ...untracked,
+    ])].sort();
+    tracked = paths(run("git", ["ls-files", ...(consumer ? ["-z"] : ["--", "src", "scripts", "bin", "test"])]));
+    if (consumer) {
+      const sourceNames = new Set(changed.filter((path) => !CONSUMER_UNIT_TEST_SUITE.test(path) && /\.(?:[cm]?[jt]s|[jt]sx)$/.test(path))
+        .map((path) => basename(path).replace(/\.[^.]+$/, "")));
+      const candidates = [...new Set([...tracked, ...untracked])];
+      const suites = candidates.filter((path) => CONSUMER_UNIT_TEST_SUITE.test(path) && existsSync(join(root, path)) &&
+        (changed.includes(path) || sourceNames.has(basename(path).replace(/\.(?:test|spec)\.[^.]+$/, "")))).sort();
+      for (const suite of suites) openWeightContainedPath(root, suite);
+      if (suites.length > 0 && existsSync(join(root, "package.json"))) {
+        const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { scripts?: { test?: unknown } };
+        if (pkg.scripts?.test !== undefined &&
+          (typeof pkg.scripts.test !== "string" || !/\bnode\b[^\n]*\s--test(?:\s|$)/.test(pkg.scripts.test))) {
+          return fullSelection("consumer unit_test requires node --test suites; the declared test runner is unsupported");
+        }
+      }
+      return { suites: suites.map((path) => path.startsWith("-") ? `./${path}` : path),
+        fullRun: false, reasons: [CONSUMER_UNIT_TEST_SCOPE_RULE], recentOnly: { floor: [] } };
+    }
+  } catch (err) {
+    // No readable diff means no narrow answer: a FULL selection naming why, which then refuses.
+    return fullSelection(`the worktree's diff could not be read — ${(err as Error).message}`);
+  }
+  return affectedSelectionOrFull(changed, (): AffectedSuitesInput => {
+    const diff = run("git", ["diff", "-U0", base, "--", "src", "scripts", "bin"]);
+    const readFile = (path: string) => readFileSync(join(root, path), "utf8");
+    const symbolless = symbollessSourceFiles(changed, diff, readFile);
+    const symbols = symbolless.length > 0 ? [] : changedSymbols(diff, readFile);
+    const files = new Map<string, string>();
+    for (const path of tracked) {
+      if (!/\.(?:ts|mts|mjs|js|cjs)$/.test(path) || !existsSync(join(root, path))) continue;
+      files.set(path, readFile(path));
+    }
+    const dir = makeTempDir("ow-unit-test");
+    try {
+      const list = join(dir, "changed.txt");
+      writeFileSync(list, changed.join("\n") + "\n");
+      const diffClass = join(HARNESS_ROOT, "scripts", "diff-class.mjs");
+      const listing = (flag: string) =>
+        lines(run(process.execPath, ["--import", "tsx", diffClass, flag, "--changed-files", list, "--plan-reading-root", root], HARNESS_ROOT));
+      const prose = changed.some((f) => !/^(?:src|scripts|bin|test)\//.test(f));
+      const pathReaders = [...listing("--list-census-suites"), ...(prose ? listing("--list-plan-reading-suites") : [])];
+      return {
+        files,
+        pathReaders,
+        ...(symbolless.length > 0 ? {} : { symbolSuites: symbols.length === 0 ? [] : callerReachableSuites(symbols, root, spawn).suites }),
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+/** What one `unit_test` call does with a selection: run an explicit file list, run nothing, or
+ *  refuse with the reason. A whole-tree run is never one of the outcomes. */
+export type OpenWeightUnitTestPlan =
+  | { kind: "run"; argv: string[]; suites: string[] }
+  | { kind: "empty"; reasons: string[] }
+  | { kind: "refused"; reason: string; suites: number };
+
+/** `baseArgv` is the fixed prefix. Only present suites matching the tree's naming rule run. */
+export function openWeightUnitTestPlan(
+  selection: AffectedSelection, baseArgv: readonly string[], cwd: string,
+  concurrency = OPENWEIGHT_UNIT_TEST_CONCURRENCY,
+): OpenWeightUnitTestPlan {
+  if (selection.fullRun) {
+    return { kind: "refused", reason: `${OPENWEIGHT_UNIT_TEST_TOO_BROAD}: ${selection.reasons.join("; ")}`, suites: 0 };
+  }
+  const suitePattern = existsSync(join(cwd, OPENWEIGHT_UNIT_TEST_SELECTOR_MARKER)) ? UNIT_TEST_SUITE : CONSUMER_UNIT_TEST_SUITE;
+  const suites = [...new Set(selection.narrow ?? selection.suites)]
+    .filter((s) => suitePattern.test(s) && existsSync(join(cwd, s)))
+    .sort();
+  if (suites.length > OPENWEIGHT_UNIT_TEST_MAX_SUITES) {
+    return {
+      kind: "refused",
+      reason: `${OPENWEIGHT_UNIT_TEST_TOO_BROAD}: ${suites.length} affected suites exceed the ${OPENWEIGHT_UNIT_TEST_MAX_SUITES}-suite bound`,
+      suites: suites.length,
+    };
+  }
+  if (suites.length === 0) return { kind: "empty", reasons: selection.reasons };
+  const argv = [...OPENWEIGHT_UNIT_TEST_NICE, ...baseArgv, `--test-concurrency=${concurrency}`, ...suites];
+  return { kind: "run", argv, suites };
+}
+
+/** {@link selectOpenWeightUnitTestSuites} in a child process, so its git reads and listings never
+ *  block the daemon's event loop. It runs THIS checkout's code (cwd {@link HARNESS_ROOT}) with the
+ *  check's credential-free env; a child that fails or overruns is a FULL selection naming why. */
+export async function selectOpenWeightUnitTestSuitesOffLoop(cwd: string, env: Record<string, string>): Promise<AffectedSelection> {
+  const code = "const m = await import(process.argv[1]);" +
+    "process.stdout.write(JSON.stringify(m.selectOpenWeightUnitTestSuites(process.argv[2])));";
+  try {
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      ["--import", "tsx", "--input-type=module", "--eval", code, import.meta.url, cwd],
+      { cwd: HARNESS_ROOT, env, encoding: "utf8", timeout: OPENWEIGHT_UNIT_TEST_SELECTION_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
+    );
+    return JSON.parse(stdout) as AffectedSelection;
+  } catch (err) {
+    // A failed or overrun selection is never an empty one: it is FULL, so the check refuses.
+    const e = err as { killed?: boolean; message?: string };
+    return fullSelection(e.killed === true
+      ? `the selection overran ${OPENWEIGHT_UNIT_TEST_SELECTION_TIMEOUT_MS / 1000}s`
+      : `the selection failed — ${String(e.message ?? err).slice(0, 300)}`);
+  }
+}
+
+/** Where a run_check row goes, and whose run it belongs to. */
+export interface OpenWeightRunCheckLedger {
+  config: Config;
+  runId?: string;
+  taskId?: string;
+  clock: Pick<Clock, "now" | "iso">;
+}
+
+function ledgerRunCheck(
+  ledger: OpenWeightRunCheckLedger,
+  row: { check: unknown; outcome: "ran" | "empty" | "refused"; suites: number | null; startedAt: number; exitCode?: number; timedOut?: boolean; reason?: string; scopeRule?: string },
+): void {
+  appendLedger(ledgerPathFor(ledger.config), {
+    run_id: ledger.runId ?? "unattributed",
+    task_id: ledger.taskId ?? "unattributed",
+    step: OPENWEIGHT_RUN_CHECK_LEDGER_STEP,
+    check: String(row.check),
+    outcome: row.outcome,
+    suites: row.suites,
+    duration_ms: ledger.clock.now() - row.startedAt,
+    exit_code: row.exitCode ?? null,
+    timed_out: row.timedOut ?? false,
+    ...(row.scopeRule !== undefined ? { scope_rule: row.scopeRule } : {}),
+    ...(row.reason !== undefined ? { reason: row.reason.slice(0, 500) } : {}),
+  });
 }
 
 /** The one tool the adapter does NOT execute itself: the daemon brokers it. Declared to the model
@@ -3417,6 +3964,20 @@ function openWeightTools(
     }));
 }
 
+/** W1-T6106: the open-weight write tools' path — contained like a read, and never the worktree's `.git`
+ *  entry, which a host git call would otherwise follow. hooks/ stays writable: it is product source here, and
+ *  the host never executes the worktree's copy. */
+export function openWeightWritablePath(cwd: string, candidate: unknown): string {
+  const target = openWeightContainedPath(cwd, candidate);
+  const root = realpathSync(cwd);
+  let existing = target;
+  while (!existsSync(existing) && dirname(existing) !== existing) existing = dirname(existing);
+  for (const rel of [relative(root, target), relative(root, realpathSync(existing))]) {
+    if (rel.split(sep)[0]!.toLowerCase() === ".git") throw new Error("tool path names the worktree's .git entry, which only the harness writes");
+  }
+  return target;
+}
+
 function openWeightContainedPath(cwd: string, candidate: unknown): string {
   if (typeof candidate !== "string" || candidate.trim() === "") throw new Error("tool path must be a non-empty string");
   const root = realpathSync(cwd);
@@ -3458,20 +4019,21 @@ async function executeOpenWeightTool(
   checkEnv: Record<string, string>,
   workerHome: string,
   runCheck: ((input: OpenWeightCheckInput) => string | Promise<string>) | undefined,
+  ledger: OpenWeightRunCheckLedger,
 ): Promise<unknown> {
   switch (name) {
     case "read_file":
       return { content: readFileSync(openWeightContainedPath(cwd, args.path), "utf8") };
     case "write_file": {
       if (typeof args.content !== "string") throw new Error("write_file content must be a string");
-      const path = openWeightContainedPath(cwd, args.path);
+      const path = openWeightWritablePath(cwd, args.path);
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, args.content, "utf8");
       return { written: relative(realpathSync(cwd), path) };
     }
     case "edit_file": {
       if (typeof args.old_string !== "string" || typeof args.new_string !== "string") throw new Error("edit_file strings must be strings");
-      const path = openWeightContainedPath(cwd, args.path);
+      const path = openWeightWritablePath(cwd, args.path);
       const before = readFileSync(path, "utf8");
       const at = before.indexOf(args.old_string);
       if (at < 0 || before.indexOf(args.old_string, at + args.old_string.length) >= 0) {
@@ -3484,7 +4046,36 @@ async function executeOpenWeightTool(
       // W1-T3617. Argv BUILT FIRST, so an unlisted check refuses before anything spawns; execFileSync
       // takes an array and never a shell, while runOpenWeightCheck puts even repository code in a
       // fresh network namespace before it runs.
-      const argv = openWeightCheckArgv(args.check, args.paths);
+      const startedAt = ledger.clock.now();
+      let argv = openWeightCheckArgv(args.check, args.paths, cwd);
+      if (args.check === "typecheck") argv = openWeightIncrementalTypecheck(argv, cwd, workerHome);
+      // Every unit_test runs a harness-derived file list, or nothing, or refuses.
+      let suites: number | null = null;
+      let scopeRule: string | undefined;
+      if (args.check === "unit_test") {
+        scopeRule = existsSync(join(cwd, OPENWEIGHT_UNIT_TEST_SELECTOR_MARKER))
+          ? "harness: affected suites" : CONSUMER_UNIT_TEST_SCOPE_RULE;
+        const load = readHostLoad();
+        const concurrency = scopeRule === CONSUMER_UNIT_TEST_SCOPE_RULE
+          ? testRunConcurrency(load, defaultTestSlots(load.cores)) : OPENWEIGHT_UNIT_TEST_CONCURRENCY;
+        const plan = openWeightUnitTestPlan(await selectOpenWeightUnitTestSuitesOffLoop(cwd, checkEnv), argv, cwd, concurrency);
+        if (plan.kind === "refused") {
+          ledgerRunCheck(ledger, { check: args.check, outcome: "refused", suites: plan.suites, startedAt, reason: plan.reason, scopeRule });
+          return { check: args.check, ran: false, suites: plan.suites, refused: plan.reason };
+        }
+        if (plan.kind === "empty") {
+          const output = `no suite is affected by this worktree's diff; nothing ran (${plan.reasons.join("; ") || "no changed file reaches a suite"})`;
+          ledgerRunCheck(ledger, { check: args.check, outcome: "empty", suites: 0, startedAt, reason: plan.reasons.join("; "), scopeRule });
+          return { check: args.check, ran: false, suites: 0, output };
+        }
+        argv = plan.argv;
+        suites = plan.suites.length;
+      }
+      const scoped = suites === null ? {} : { suites };
+      const slot = args.check === "typecheck" &&
+        !hasUsableTypecheckBuildInfo(join(workerHome, TYPECHECK_BUILDINFO_NAME), installedTypescriptVersion(cwd))
+        ? await acquireTestSlotAsync("typecheck:bwrap", { memoryBytes: TYPECHECK_COLD_PEAK_BYTES }) : undefined;
+      if (args.check === "typecheck") argv = [...argv, ...lowMemoryTypecheckArgs(readMemoryHeadroom(), slot ? TYPECHECK_COLD_PEAK_BYTES : TYPECHECK_WARM_PEAK_BYTES)];
       try {
         const stdout = await (runCheck ?? runOpenWeightCheck)({
           argv,
@@ -3492,14 +4083,18 @@ async function executeOpenWeightTool(
           workerHome,
           env: checkEnv,
         });
-        return { check: args.check, exitCode: 0, output: stdout.slice(-20_000) };
+        ledgerRunCheck(ledger, { check: args.check, outcome: "ran", suites, startedAt, exitCode: 0, scopeRule });
+        return { check: args.check, exitCode: 0, output: stdout.slice(-20_000), ...scoped };
       } catch (err) {
         // A FAILING CHECK IS A RESULT, NOT AN ERROR — the lane must read its own red. A refusal above
         // still throws, because that is not a result.
-        const e = err as { status?: number; code?: number | string; stdout?: string | Buffer; stderr?: string | Buffer };
+        const e = err as { status?: number; code?: number | string; killed?: boolean; stdout?: string | Buffer; stderr?: string | Buffer };
         const out = `${String(e.stdout ?? "")}${String(e.stderr ?? "")}`;
         const exitCode = typeof e.status === "number" ? e.status : typeof e.code === "number" ? e.code : 1;
-        return { check: args.check, exitCode, output: out.slice(-20_000) };
+        ledgerRunCheck(ledger, { check: args.check, outcome: "ran", suites, startedAt, exitCode, timedOut: e.killed === true, scopeRule });
+        return { check: args.check, exitCode, output: out.slice(-20_000), ...scoped };
+      } finally {
+        slot?.release();
       }
     }
     case "grep_files": {
@@ -3669,6 +4264,7 @@ export function cashServedModel(named: readonly (string | undefined)[]): { serve
 function openWeightResult(input: {
   model: string;
   effort: string;
+  requestEfforts: readonly CashRequestEffortCount[];
   /** W1-T4650: {@link cashResponseModel} of every response received, in order. */
   servedModels: readonly (string | undefined)[];
   startedAt: number;
@@ -3718,11 +4314,13 @@ function openWeightResult(input: {
     stderr: error ?? "",
     subtype: error ? "openweight_error" : "success",
     isError: error !== undefined,
+    exit: { kind: "unobserved" },
     apiError: error !== undefined,
     permissionDenials: [],
     childEnvKeys: [],
     model: input.model,
     effort: input.effort,
+    requestEfforts: [...input.requestEfforts],
     tokens: { input: input.promptTokens, output: input.completionTokens, cacheRead: input.cacheReadTokens ?? 0, cacheCreation: input.cacheCreationTokens ?? 0 },
     modelUsage: {},
     ...cashServedModel(input.servedModels),
@@ -3752,11 +4350,10 @@ function foundryClaudeEndpoint(env: NodeJS.ProcessEnv, label: string): string {
   return new URL("v1/messages", `${url.toString().replace(/\/$/, "")}/`).toString();
 }
 
-/** Cache-read USD per million, per Foundry Claude deployment. Opus's is 0.05x its input rate;
- *  Sonnet's is the more conservative 0.1x, so an unmeasured ratio can only over-charge. */
+/** Published cache-read USD per million for legacy flat-rate Foundry Claude deployments. */
 const FOUNDRY_CLAUDE_CACHE_READ_USD_PER_MILLION: Readonly<Record<string, number>> = {
   "claude-opus-5-5": 0.2,
-  "claude-sonnet-5-5": 0.2,
+  "claude-sonnet-5-5": 0.1,
 };
 
 function foundryClaudeUsageUsd(deployment: string, usage: {
@@ -3764,11 +4361,13 @@ function foundryClaudeUsageUsd(deployment: string, usage: {
   cache_read_input_tokens?: number; cache_creation_input_tokens?: number;
 }): number {
   const price = openWeightPriceFor(deployment);
+  const inputTokens = usage.input_tokens + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
+  const rate = price.longContext && inputTokens > price.longContext.thresholdInputTokens ? price.longContext : price;
   // Price cache writes at the dearer 1h rate so a later cache_control cannot undercount.
-  return (usage.input_tokens * price.inputUsdPerMillion +
-    (usage.cache_read_input_tokens ?? 0) * (FOUNDRY_CLAUDE_CACHE_READ_USD_PER_MILLION[deployment] ?? price.inputUsdPerMillion) +
-    (usage.cache_creation_input_tokens ?? 0) * (price.reservationInputUsdPerMillion ?? price.inputUsdPerMillion) +
-    usage.output_tokens * price.outputUsdPerMillion) / 1_000_000;
+  return (usage.input_tokens * rate.inputUsdPerMillion +
+    (usage.cache_read_input_tokens ?? 0) * (rate.cachedInputUsdPerMillion ?? FOUNDRY_CLAUDE_CACHE_READ_USD_PER_MILLION[deployment] ?? rate.inputUsdPerMillion) +
+    (usage.cache_creation_input_tokens ?? 0) * (rate.reservationInputUsdPerMillion ?? rate.inputUsdPerMillion) +
+    usage.output_tokens * rate.outputUsdPerMillion) / 1_000_000;
 }
 
 function validFoundryTokenCount(value: unknown): value is number {
@@ -3780,7 +4379,9 @@ export async function spawnFoundryClaudeWorker(
   config: Config,
   selection: Pick<OpenWeightModelSelection, "model" | "effort">,
 ): Promise<OpenWeightWorkerResult> {
-  const label = selection.model === "claude-sonnet-5-5" ? "Sonnet" : "Opus";
+  const label = selection.model === "claude-haiku-5-5" ? "Haiku" : selection.model === "claude-sonnet-5-5" ? "Sonnet" : "Opus";
+  const toolLineage = createWorkerToolLineage({ provider: "cash-claude", root: config.root, runId: args.runId, taskId: args.taskId });
+  let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
   const clock = args.clock ?? systemClock;
   const startedAt = clock.now();
   let turns = 0;
@@ -3794,10 +4395,11 @@ export async function spawnFoundryClaudeWorker(
   let text = "";
   let sessionId = "";
   const servedModels: Array<string | undefined> = [];
+  const requestEfforts: CashRequestEffortCount[] = [];
   let pending: { requestId: string; reservedUsd: number } | undefined;
   const requestPrefix = `${args.runId ?? args.taskId ?? "foundry-claude"}-${startedAt}-${randomUUID()}`;
   try {
-    if (!isFoundryClaudeDeployment(selection.model) || args.cashSqueezed !== true) {
+    if (!isFoundryClaudeDeployment(selection.model) || (selection.model !== "claude-haiku-5-5" && args.cashSqueezed !== true)) {
       throw new Error(`cash ${label} requires an actual blocked-subscription squeeze`);
     }
     if (args.capabilityGrant) {
@@ -3831,7 +4433,7 @@ export async function spawnFoundryClaudeWorker(
       const requestId = `${requestPrefix}-${turns}`;
       const reservation = reserveOpenWeightBudget(config, {
         requestId, deployment: selection.model, requestBodyBytes: Buffer.byteLength(body, "utf8"),
-        atIso: clock.iso(), squeezed: true,
+        atIso: clock.iso(), squeezed: args.cashSqueezed === true,
       });
       budgetReservedUsd += reservation.reservedUsd;
       pending = { requestId, reservedUsd: reservation.reservedUsd };
@@ -3840,6 +4442,7 @@ export async function spawnFoundryClaudeWorker(
       const deadline = setTimeout(() => abort.abort(), timeoutMs);
       let response: Response;
       try {
+        recordCashRequestEffort(requestEfforts, body, "foundry-messages");
         response = await (args.fetchImpl ?? fetch)(endpoint, {
           method: "POST",
           headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
@@ -3851,7 +4454,8 @@ export async function spawnFoundryClaudeWorker(
       if (response.status === 404) throw new OpenWeightDeploymentNotFoundError(selection.model);
       if (!response.ok) throw new Error(`cash ${label} request failed with HTTP ${response.status}`);
       const payload = await response.json() as {
-        id?: unknown; model?: unknown; stop_reason?: unknown; content?: Array<Record<string, unknown>>;
+        id?: unknown; model?: unknown; stop_reason?: unknown; stop_details?: { category?: unknown } | null;
+        content?: Array<Record<string, unknown>>;
         usage?: { input_tokens?: unknown; output_tokens?: unknown; cache_read_input_tokens?: unknown; cache_creation_input_tokens?: unknown };
       };
       sessionId = typeof payload.id === "string" ? payload.id : sessionId;
@@ -3882,14 +4486,21 @@ export async function spawnFoundryClaudeWorker(
       pending = undefined;
       if (!Array.isArray(payload.content)) throw new Error(`cash ${label} response has no content blocks`);
       if (payload.stop_reason === "max_tokens") throw new OpenWeightTruncatedReplyError("max_tokens", completionTokens);
-      if (payload.stop_reason === "refusal") throw new Error(`cash ${label} refused the request`);
+      if (payload.stop_reason === "refusal") {
+        // `stop_details.category` names the safeguard that fired; `explanation` is display-only prose and is never copied.
+        const category = payload.stop_details?.category;
+        throw new Error(`cash ${label} refused the request${typeof category === "string" && category ? ` (category: ${category})` : ""}`);
+      }
       text = payload.content.filter((block) => block.type === "text" && typeof block.text === "string")
         .map((block) => block.text as string).join("\n");
       const calls = payload.content.filter((block) => block.type === "tool_use");
+      for (const call of calls) observeWorkerToolLineage(toolLineage, { type: "tool_use", turnId: requestId, id: call.id, name: call.name });
       if (calls.length === 0) {
+        lineageEnd = "stream-ended";
         if (payload.stop_reason !== "end_turn") throw new Error(`cash ${label} ended without a complete turn (${String(payload.stop_reason)})`);
+        if (!text.trim()) throw new Error(`cash ${label} ended with no visible text`);
         return reconcileBoundedProviderAttempt(openWeightResult({
-          model: selection.model, effort: selection.effort, servedModels, startedAt, clock, text, sessionId, turns,
+          model: selection.model, effort: selection.effort, requestEfforts, servedModels, startedAt, clock, text, sessionId, turns,
           promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens,
           actualCostUsd: spentUsd, budgetReservedUsd, budgetSettledUsd,
         }), args.externalEffect);
@@ -3905,11 +4516,14 @@ export async function spawnFoundryClaudeWorker(
         }
         let result: unknown;
         try {
-          result = await executeOpenWeightTool(call.name, call.input as Record<string, unknown>, args.cwd, checkEnv, args.workerHome, args.runCheck);
+          result = await executeOpenWeightTool(call.name, call.input as Record<string, unknown>, args.cwd, checkEnv, args.workerHome, args.runCheck,
+            { config, runId: args.runId, taskId: args.taskId, clock });
         } catch (error) {
+          observeWorkerToolLineage(toolLineage, { type: "tool_result", turnId: requestId, tool_use_id: call.id, is_error: true });
           // A failed tool invalidates this chain; never turn its error into success.
           throw new Error(`cash ${label} tool ${call.name} failed: ${error instanceof Error ? error.message : String(error)}`);
         }
+        observeWorkerToolLineage(toolLineage, { type: "tool_result", turnId: requestId, tool_use_id: call.id, is_error: false });
         results.push({ type: "tool_result", tool_use_id: call.id, content: JSON.stringify(result) });
       }
       messages.push({ role: "user", content: results });
@@ -3923,13 +4537,15 @@ export async function spawnFoundryClaudeWorker(
       budgetSettledUsd += billed;
     }
     return reconcileBoundedProviderAttempt(openWeightResult({
-      model: selection.model, effort: selection.effort, servedModels, startedAt, clock, text, sessionId, turns,
+      model: selection.model, effort: selection.effort, requestEfforts, servedModels, startedAt, clock, text, sessionId, turns,
       promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens,
       actualCostUsd: spentUsd, budgetReservedUsd, budgetSettledUsd,
       budgetRefused: error instanceof OpenWeightAllowanceExhaustedError,
       ...(error instanceof OpenWeightDeploymentNotFoundError ? { deploymentAbsent: selection.model } : {}),
       error: error instanceof Error ? error.message : String(error),
     }), args.externalEffect);
+  } finally {
+    toolLineage.finish(lineageEnd);
   }
 }
 
@@ -3955,6 +4571,9 @@ export async function spawnOpenWeightWorker(
   selection: Pick<OpenWeightModelSelection, "model" | "effort">,
 ): Promise<OpenWeightWorkerResult> {
   if (isFoundryClaudeDeployment(selection.model)) return spawnFoundryClaudeWorker(args, config, selection);
+  const toolLineage = createWorkerToolLineage({ provider: selection.model === "gpt-6.1-sol" ? "cash-responses" : "cash-chat",
+    root: config.root, runId: args.runId, taskId: args.taskId });
+  let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
   const clock = args.clock ?? systemClock;
   const startedAt = clock.now();
   let promptTokens = 0;
@@ -3966,6 +4585,7 @@ export async function spawnOpenWeightWorker(
   let sessionId = "";
   let text = "";
   const servedModels: Array<string | undefined> = [];
+  const requestEfforts: CashRequestEffortCount[] = [];
   let budgetReservedUsd = 0;
   let budgetSettledUsd = 0;
   // W1-T3666: the reservation the CURRENT turn is still carrying, cleared the instant its own
@@ -4061,6 +4681,7 @@ export async function spawnOpenWeightWorker(
       const deadline = setTimeout(() => abort.abort(), requestTimeoutMs);
       let response: Response;
       try {
+        recordCashRequestEffort(requestEfforts, body, usesResponses ? "responses" : "chat-completions");
         response = await (args.fetchImpl ?? fetch)(openWeightEndpoint(config, selection.model), {
           method: "POST",
           headers: { "content-type": "application/json", "api-key": key },
@@ -4118,6 +4739,7 @@ export async function spawnOpenWeightWorker(
         throw new OpenWeightTruncatedReplyError(String(payload.choices?.[0]?.finish_reason), turnCompletionTokens);
       }
       const calls = Array.isArray(message.tool_calls) ? message.tool_calls as OpenWeightToolCall[] : [];
+      for (const call of calls) observeWorkerToolLineage(toolLineage, { type: "tool_use", turnId: requestId, id: call.id, name: call.function?.name });
       // UNFENCED ONLY WHEN A STRUCTURED REPLY WAS ASKED FOR. A prose lane may legitimately contain a
       // fenced code block as part of its answer, and unwrapping that would corrupt it; a lane that
       // requested `responseFormat` asked for a document, so a fence around the whole reply is a
@@ -4126,8 +4748,9 @@ export async function spawnOpenWeightWorker(
         text = args.responseFormat === undefined ? message.content : openWeightUnfence(message.content);
       }
       if (calls.length === 0) {
+        lineageEnd = "stream-ended";
         return reconcileBoundedProviderAttempt(
-          openWeightResult({ model: selection.model, effort: selection.effort, servedModels, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens, ...(usesResponses ? { actualCostUsd: budgetSettledUsd } : {}), budgetReservedUsd, budgetSettledUsd, webSearchAttempted, webSearchAccepted, webSearchRefused, webSearchUsd }),
+          openWeightResult({ model: selection.model, effort: selection.effort, requestEfforts, servedModels, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens, ...(usesResponses ? { actualCostUsd: budgetSettledUsd } : {}), budgetReservedUsd, budgetSettledUsd, webSearchAttempted, webSearchAccepted, webSearchRefused, webSearchUsd }),
           args.externalEffect,
         );
       }
@@ -4140,6 +4763,7 @@ export async function spawnOpenWeightWorker(
           throw new Error("openweight response requested an undeclared tool");
         }
         let content: string;
+        let toolFailed = false;
         try {
           // `web_search` is the one declared tool this process does not execute: the daemon brokers
           // it against a different API, with its own credential, and returns a document only when
@@ -4173,11 +4797,15 @@ export async function spawnOpenWeightWorker(
                 checkEnv,
                 args.workerHome,
                 args.runCheck,
+                { config, runId: args.runId, taskId: args.taskId, clock },
               ));
         } catch (error) {
+          toolFailed = true;
+          observeWorkerToolLineage(toolLineage, { type: "tool_result", turnId: requestId, tool_use_id: id, is_error: true });
           if (usesResponses) throw new Error(`cash Sol 6.1 tool ${name} failed: ${error instanceof Error ? error.message : String(error)}`);
           content = JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
         }
+        if (!toolFailed) observeWorkerToolLineage(toolLineage, { type: "tool_result", turnId: requestId, tool_use_id: id, is_error: false });
         responses?.toolOutput(id, content);
         messages.push({ role: "tool", tool_call_id: id, content });
       }
@@ -4212,6 +4840,7 @@ export async function spawnOpenWeightWorker(
       openWeightResult({
         model: selection.model,
         effort: selection.effort,
+        requestEfforts,
         servedModels,
         startedAt,
         clock,
@@ -4236,6 +4865,8 @@ export async function spawnOpenWeightWorker(
       }),
       args.externalEffect,
     );
+  } finally {
+    toolLineage.finish(lineageEnd);
   }
 }
 
@@ -4307,6 +4938,14 @@ async function brokerCashWebSearch(input: {
   return { text: result.text, sources: result.citations };
 }
 
+/** W1-T6027: Node's `exit` event hands a child `(code, signal)`, exactly one non-null. The signal is kept by name; an event
+ * carrying neither is `unobserved`, never exit 0. */
+function codexWorkerExit(code: number | null, signal: NodeJS.Signals | null | undefined): WorkerExit {
+  if (signal) return { kind: "signal", signal };
+  if (typeof code === "number") return { kind: "exit", code };
+  return { kind: "unobserved" };
+}
+
 async function spawnCodexWorkerInPrivateTemp(
   args: CodexSpawnArgs,
   config: Config,
@@ -4315,7 +4954,10 @@ async function spawnCodexWorkerInPrivateTemp(
 ): Promise<CodexWorkerResult> {
   const bin = resolveCodexBin(config);
   const startedAt = Date.now();
-  const stdout = new CodexJsonlAccumulator(startedAt);
+  const toolLineage = createWorkerToolLineage({ provider: "codex", root: config.root, runId: args.runId, taskId: args.taskId });
+  let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
+  const stdout = new CodexJsonlAccumulator(startedAt, join(privateTmpDir, "stdout-pending.jsonl"), raw => observeWorkerToolLineage(toolLineage, raw));
+  const stdoutDecoder = new StringDecoder("utf8");
   let stdoutBytes = 0;
   let stderrBytes = 0;
   let stderr = "";
@@ -4361,8 +5003,8 @@ async function spawnCodexWorkerInPrivateTemp(
     stdin: NodeJS.WritableStream;
     stdout: NodeJS.ReadableStream;
   };
-  const exitPromise = new Promise<number | null>((resolve, reject) => {
-    process.once("exit", (code: number | null) => resolve(code));
+  const exitPromise = new Promise<WorkerExit>((resolve, reject) => {
+    process.once("exit", (code: number | null, signal?: NodeJS.Signals | null) => resolve(codexWorkerExit(code, signal)));
     process.once("error", reject);
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -4377,45 +5019,57 @@ async function spawnCodexWorkerInPrivateTemp(
   };
   process.stdout.on("data", (chunk: Buffer) => {
     if (outputLimit || timedOut) return;
-    const text = chunk.toString("utf8");
-    stdoutBytes += Buffer.byteLength(text, "utf8");
+    const text = stdoutDecoder.write(chunk);
+    stdoutBytes += chunk.length;
     if (stdoutBytes > CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES) {
       exceedOutputBudget("stdout", CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES, stdoutBytes);
       return;
     }
     const observedAt = Date.now();
     stdout.push(text, observedAt);
-    const retained = stdout.retainedBytes();
-    if (retained > CODEX_WORKER_STDOUT_MAX_BYTES) {
-      exceedOutputBudget("stdout", CODEX_WORKER_STDOUT_MAX_BYTES, retained);
-      return;
-    }
     if (/\"type\":\"agent_message\"/.test(text)) args.streamObserver?.({ kind: "working", tsMs: observedAt });
     else args.streamObserver?.({ kind: "message", tsMs: observedAt });
     armClockBound();
   });
   armClockBound();
-  const prompt = CODEX_DOCTRINE_PRELUDE + args.prompt;
+  const harnessCommits = codexHarnessCommits(args);
+  const prompt = CODEX_DOCTRINE_PRELUDE + (harnessCommits ? CODEX_HARNESS_COMMITS_PART : "") + args.prompt;
   process.stdin.write(`${prompt}\n`);
   process.stdin.end();
   try {
-    const exitCode = await withWorkerGroupTeardown(pidRef, () => exitPromise, teardownOnce);
+    const exit = await withWorkerGroupTeardown(pidRef, () => exitPromise, teardownOnce);
     if (outputLimit) throw outputLimit;
     if (timedOut) throw new Error(`Codex worker exceeded the ${args.clockBound?.boundMs}ms clock bound`);
+    stdout.push(stdoutDecoder.end());
     const parsed = stdout.finish();
+    lineageEnd = exit.kind === "exit" && exit.code === 0 && !parsed.isError ? "stream-ended" : "interrupted";
+    if (parsed.outputTruncation && args.runId) appendLedger(ledgerPathFor(config), {
+      run_id: args.runId,
+      task_id: args.taskId ?? "unattributed",
+      step: "worker.output_truncated",
+      output_truncation: parsed.outputTruncation,
+    });
+    // A signal is an error whatever the stream parsed, so is an end with no code: only an observed exit 0 is clean.
+    const exitCode = exit.kind === "exit" ? exit.code : null;
     const isError = parsed.isError || exitCode !== 0;
     const model = selection?.model ?? config.workerProviders?.codexModel ?? "codex-default";
+    const notionalCostUsd = parsed.tokenUsageState === "observed" ? codexNotionalCostUsd(model, parsed.tokens) : undefined;
+    const harnessCommit = harnessCommits && !isError ? commitCodexWriterEdits(args.cwd, parsed.text) : undefined;
     return {
+      ...(harnessCommit === undefined ? {} : { harnessCommit }),
       sessionId: parsed.sessionId || args.resumeSessionId || "",
       costUsd: 0,
+      ...(notionalCostUsd === undefined ? {} : { notionalCostUsd }),
       numTurns: parsed.numTurns,
       // Codex exec 0.152.0 exposes no max-turn flag; never ledger the Claude cap as enforced.
       maxTurns: undefined,
       text: parsed.text,
       blocks: parsed.blocks,
+      ...(parsed.outputTruncation ? { outputTruncation: parsed.outputTruncation } : {}),
       stderr,
       subtype: isError ? (parsed.isError ? parsed.subtype : `error_exit_${exitCode}`) : "success",
       isError,
+      exit,
       apiError: parsed.errors.some((error) => /rate limit|server|network/i.test(error)),
       ...(parsed.usageRefusal ? { usageRefusal: parsed.usageRefusal } : {}),
       permissionDenials: parsed.errors.filter((error) => /permission|sandbox|denied/i.test(error)),
@@ -4425,6 +5079,7 @@ async function spawnCodexWorkerInPrivateTemp(
       model,
       effort: selection?.effort ?? args.effort ?? "default",
       tokens: parsed.tokens,
+      tokenUsageState: parsed.tokenUsageState,
       modelUsage: {},
       servedModel: null,
       servedModelReason: CODEX_SERVED_MODEL_REASON,
@@ -4435,6 +5090,7 @@ async function spawnCodexWorkerInPrivateTemp(
       workerDurationMs: Date.now() - startedAt,
     };
   } finally {
+    toolLineage.finish(lineageEnd);
     if (timer) clearTimeout(timer);
   }
 }

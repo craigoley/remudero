@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import type { Config } from "../src/lib/config.js";
+import { ghJsonAsync } from "../src/lib/github-transport.js";
 import type { Plan } from "../src/lib/plan.js";
 import { renderFixPrompt } from "../src/lib/prompt-render.js";
 import type { PlanCriteriaAtHeadResult } from "../src/lib/review.js";
@@ -27,7 +28,7 @@ import {
   fixRungWantsHeadContract,
   type BuildSweepEffectsDeps,
 } from "../src/lib/sweep.js";
-import { commitWorkerEdits, fixRungScopeStandDownReason } from "../src/run-task.js";
+import { commitWorkerEdits, fixRungScopeStandDownReason } from "./helpers/run-task-test.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
 const ID = "W1-T4051";
@@ -110,7 +111,7 @@ async function dispatch(opts: {
       spawnWallClockBoundMsOverride: 1,
       reclaimWorkerImpl: () => {},
       disarmImpl: () => undefined,
-      readJsonImpl: async () => ({}),
+      readJsonImpl: async (args: string[]) => args[0] === "pr" ? ghJsonAsync(args) : {},
       updatePrBodyImpl: async () => {},
       registeredWorktreeOwnerImpl: () => undefined,
       registeredOwnerRecovery: { capture: () => undefined, remove: () => undefined },

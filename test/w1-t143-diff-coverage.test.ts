@@ -19,7 +19,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -27,6 +27,7 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 import { daemonCommand, depReviewCommand, main } from "../src/run-task.js";
 import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
+import { GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
 
 /** A throwaway HOME + `config.json` pointing `config.root` at a fresh temp dir — the
  *  SAME shape test/daemon-observability.test.ts and test/serve-command-boot.test.ts
@@ -113,7 +114,7 @@ async function withPushRecorded<T>(fn: (pushes: () => string[]) => Promise<T>): 
   writeFileSync(log, "");
   const binDir = fakeBin("git", `#!/bin/sh
 case " $* " in *" push "*) echo "$*" >> "${log}"; exit 0;; esac
-exec "${realGit}" "$@"
+exec "${realGit}" -c user.name="${GIT_REPO_FIXTURE_IDENTITY.name}" -c user.email="${GIT_REPO_FIXTURE_IDENTITY.email}" "$@"
 `);
   const oldPath = process.env.PATH;
   process.env.PATH = `${binDir}:${oldPath}`;
@@ -141,17 +142,57 @@ test("main(): `rmd stop` with nothing running is a warned no-op (ledgers fleet.s
   }
 });
 
-test("main(): `rmd pause` writes the PAUSE flag + ledgers fleet.pause, exits 0", async (t) => {
+/** W1-T7727: a registry declaring `core` at `root`, so `rmd pause`/`resume` resolve their target the way the CLI does. */
+function withInstanceRegistry<T>(root: string, fn: () => Promise<T>): Promise<T> {
+  // These are positive pause/resume fixtures: their declared instance must already be reachable.
+  mkdirSync(root, { recursive: true });
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t143-registry-"));
+  const path = join(dir, "daemon-instances.yaml");
+  writeFileSync(path, `instances:\n  core:\n    repo: remudero\n    github_repo: fixture/remudero\n    state_dir: ${root}\n`);
+  const old = process.env.RMD_INSTANCE_REGISTRY;
+  process.env.RMD_INSTANCE_REGISTRY = path;
+  return fn().finally(() => {
+    if (old === undefined) delete process.env.RMD_INSTANCE_REGISTRY;
+    else process.env.RMD_INSTANCE_REGISTRY = old;
+    rmSync(dir, { recursive: true, force: true });
+  });
+}
+
+test("main(): `rmd pause` writes the instance's PAUSE flag + ledgers fleet.pause, pushes nothing, exits 0", async (t) => {
   const { home, root } = instance("rmd-t143-pause-");
   const oldHome = process.env.HOME;
   process.env.HOME = home;
   try {
+    await withInstanceRegistry(root, () =>
+      withPushRecorded(async (pushes) => {
+        const code = await callMain(t, ["node", "run-task.js", "pause"]);
+        assert.equal(code, 0);
+        assert.ok(existsSync(join(root, "state", "PAUSE")), "the instance's own flag is written");
+        const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
+        assert.match(ledger, /"step":"fleet\.pause"/);
+        assert.match(ledger, /"scope":"instance"/);
+        assert.equal(pushes().length, 0, "an instance pause pushes no fleet-wide hold (W1-T7727)");
+      }),
+    );
+  } finally {
+    process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("main(): `rmd pause --fleet` pushes the fleet-wide hold + ledgers fleet.pause, exits 0", async (t) => {
+  const { home, root } = instance("rmd-t143-pause-fleet-");
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
     await withPushRecorded(async (pushes) => {
-      const code = await callMain(t, ["node", "run-task.js", "pause"]);
+      const code = await callMain(t, ["node", "run-task.js", "pause", "--fleet"]);
       assert.equal(code, 0);
       const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
       assert.match(ledger, /"step":"fleet\.pause"/);
+      assert.match(ledger, /"scope":"fleet"/);
       assert.equal(pushes().length, 1, "the shared-hold push reached the stub, not an origin");
+      assert.match(pushes()[0]!, /[0-9a-f]{40}:refs\/rmd-pause\/hold$/, "the positive pause pushes a real anchor, never a delete source");
       assert.match(pushes()[0]!, /refs\/rmd-pause\/hold$/);
     });
   } finally {
@@ -160,13 +201,33 @@ test("main(): `rmd pause` writes the PAUSE flag + ledgers fleet.pause, exits 0",
   }
 });
 
-test("main(): `rmd resume` clears stop+pause + ledgers fleet.resume, exits 0", async (t) => {
+test("main(): `rmd resume` clears the instance's stop+pause + ledgers fleet.resume, pushes nothing, exits 0", async (t) => {
   const { home, root } = instance("rmd-t143-resume-");
   const oldHome = process.env.HOME;
   process.env.HOME = home;
   try {
+    await withInstanceRegistry(root, () =>
+      withPushRecorded(async (pushes) => {
+        const code = await callMain(t, ["node", "run-task.js", "resume"]);
+        assert.equal(code, 0);
+        const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
+        assert.match(ledger, /"step":"fleet\.resume"/);
+        assert.equal(pushes().length, 0, "an instance resume never deletes the fleet-wide hold (W1-T7727)");
+      }),
+    );
+  } finally {
+    process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("main(): `rmd resume --fleet` deletes the fleet-wide hold + ledgers fleet.resume, exits 0", async (t) => {
+  const { home, root } = instance("rmd-t143-resume-fleet-");
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
     await withPushRecorded(async (pushes) => {
-      const code = await callMain(t, ["node", "run-task.js", "resume"]);
+      const code = await callMain(t, ["node", "run-task.js", "resume", "--fleet"]);
       assert.equal(code, 0);
       const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
       assert.match(ledger, /"step":"fleet\.resume"/);

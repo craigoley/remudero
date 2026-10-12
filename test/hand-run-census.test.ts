@@ -40,12 +40,12 @@ function operatorRow(ts: string, actorPid: number, step: string): HandRunLedgerR
 }
 
 function operatorLine(ts: string, actorPid: number, step: string, extra: Record<string, unknown> = {}): string {
-  return JSON.stringify({ ts, actor: "operator", actor_pid: actorPid, step, run_id: "r", task_id: "t", ...extra });
+  return JSON.stringify({ ts, actor: "operator_human", actor_pid: actorPid, step, run_id: "r", task_id: "t", ...extra });
 }
 
 /** This SUITE ITSELF runs inside a real `rmd` worker subprocess, so `process.env` already
- *  carries `REMUDERO_WORKER_SCOPE` (and friends) — any test asserting the DEFAULT
- *  (real-`process.env`) "operator" outcome must clear them first, or it measures its own
+ *  carries `REMUDERO_WORKER_SCOPE` (and friends) — any test asserting the real-process actor
+ *  must clear them first, or it measures its own
  *  harness instead of the code under test. Restores whatever was there, even if a key was
  *  absent, so this suite never leaks env state to a sibling test file. */
 function withClearedActorEnv<T>(fn: () => T): T {
@@ -65,8 +65,8 @@ function withClearedActorEnv<T>(fn: () => T): T {
 // ── W1-T2697 claim 1: every new ledger row carries an actor derived from process context, and a
 // pre-stamp row reports unknown rather than a guess ─────────────────────────────────────────────
 
-test("deriveLedgerActor: worker marker wins over the daemon marker; neither present is operator", () => {
-  assert.equal(deriveLedgerActor({}), "operator");
+test("deriveLedgerActor: worker marker wins over daemon; no positive operator signal is unknown", () => {
+  assert.equal(deriveLedgerActor({}), "unknown");
   assert.equal(deriveLedgerActor({ REMUDERO_DAEMON_PROCESS: "1" }), "daemon");
   assert.equal(deriveLedgerActor({ [WORKER_SCOPE_ENV]: "rmd-v1-abc" }), "worker");
   // A worker spawned FROM the daemon inherits BOTH markers — worker must win, never daemon.
@@ -75,9 +75,10 @@ test("deriveLedgerActor: worker marker wins over the daemon marker; neither pres
 
 test("markDaemonProcessActor: sets the in-process marker deriveLedgerActor reads back", () => {
   withClearedActorEnv(() => {
-    assert.equal(deriveLedgerActor(), "operator");
+    assert.equal(deriveLedgerActor(), "test", "the active test context outranks process-kind markers");
     markDaemonProcessActor();
-    assert.equal(deriveLedgerActor(), "daemon");
+    assert.equal(process.env.REMUDERO_DAEMON_PROCESS, "1");
+    assert.equal(deriveLedgerActor(), "test");
   });
 });
 
@@ -110,7 +111,7 @@ test("appendLedger: stamps actor (via deriveLedgerActor by default, injectable) 
       appendLedger(path, { run_id: "r2", task_id: "t2", step: "operator.step2" } as LedgerLine);
     });
     const lines2 = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
-    assert.equal(lines2[2].actor, "operator", "no injected actor and no worker/daemon marker set -> operator");
+    assert.equal(lines2[2].actor, "test", "an in-process test write is positively attributed, never guessed to be an operator");
     assert.equal(lines2[2].actor_pid, process.pid);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -124,7 +125,7 @@ test("appendLedger: actor_pid never collides with an unrelated caller-supplied `
     appendLedger(
       path,
       { run_id: "r1", task_id: "t1", step: "fix.spawn_reclaimed", pid: 999999 } as unknown as LedgerLine,
-      { actor: () => "operator" },
+      { actor: () => "operator_human" },
     );
     const [line] = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
     assert.equal(line.pid, 999999, "the caller's own `pid` field (a different process entirely) must survive untouched");
@@ -141,11 +142,12 @@ test("HAND_RUN_CENSUS_PROPOSED_STEP is registered in DECISION_RELEVANT_LEDGER_ST
 // ── W1-T2697 claim 2: the miner reads the ledger union, groups operator rows into sessions, and
 // reports a sequence only when it recurs across the floor of distinct days ─────────────────────
 
-test("parseOperatorLedgerRows: keeps only actor:operator rows with actor_pid/step/ts, skips foreign/malformed lines", () => {
+test("parseOperatorLedgerRows: keeps only explicitly attributed human/AI rows with actor_pid/step/ts", () => {
   const rows = parseOperatorLedgerRows([
     operatorLine("2026-09-01T10:00:00.000Z", 111, "status"),
     JSON.stringify({ ts: "2026-09-01T10:01:00.000Z", actor: "worker", actor_pid: 222, step: "run.start" }),
     JSON.stringify({ ts: "2026-09-01T10:02:00.000Z", actor: "operator", step: "no.pid" }),
+    JSON.stringify({ ts: "2026-09-01T10:03:00.000Z", actor: "operator", actor_pid: 333, step: "legacy-ambiguous" }),
     "not json at all",
     "",
   ]);

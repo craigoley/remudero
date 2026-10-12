@@ -8,7 +8,7 @@ import { partitionCodeqlQualityAlerts, codeqlQualityProposalId } from "./codeql-
 import { ciFrictionOrigin, ciFrictionRoundsFromLedger, priceCiFrictionCauses, readCiFrictionLedgerRecords, readGateFireRateReport } from "./ci-friction-gardener.js";
 import { feedbackEntryPath, listFeedback, type FeedbackEntry } from "./feedback.js";
 import type { GateFireRateReport } from "./gate-fire-rate.js";
-import type { GardenerDeps } from "./gardener.js";
+import { syncGardenWorkspace, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps } from "./gardener.js";
 import { ghJson } from "./github-transport.js";
 import { loadProposalRegistry, updateProposalRegistry, type Proposal } from "./inbox.js";
 import { familyTrackRecord, judgeMachineShard } from "./machine-filing-judge.js";
@@ -59,7 +59,7 @@ export interface OpportunityIntakePorts {
   riskPolicy?: RiskPolicy;
   fileCandidate: (candidate: OpportunityCandidate) => Promise<string | undefined>;
   stageProposal: (candidate: OpportunityCandidate, reasons: string[]) => void;
-  dispose?: () => void;
+  dispose?: () => void | Promise<void>;
 }
 
 export interface OpportunityIntakeResult {
@@ -183,7 +183,7 @@ export async function runOpportunityIntake(ports: OpportunityIntakePorts): Promi
     const prUrl = await ports.fileCandidate(candidate);
     return { ...result, status: prUrl ? "promoted" : "held", candidate, destination: "plan-pr", prUrl };
   } finally {
-    ports.dispose?.();
+    await ports.dispose?.();
   }
 }
 
@@ -191,68 +191,91 @@ export async function runOpportunityIntake(ports: OpportunityIntakePorts): Promi
 export function productionOpportunityIntakePorts(garden: GardenerDeps, deps: Partial<Pick<OpportunityIntakePorts, "readCodeql" | "readFriction" | "riskJudge">> & {
   readPulls?: (repo: string) => unknown;
 } = {}): OpportunityIntakePorts {
-  const clock = garden.clock ?? systemClock;
-  recordMeasurementCadenceFire(join(garden.stateDir, "last-intake-cadence-codeqlQuality.json"), clock.date(), 24 * 60 * 60 * 1000);
-  const ws = garden.openWorkspace();
+  recordIntakeCadence(garden);
+  const ws = syncGardenWorkspace(garden.openWorkspace());
   try {
-    const remote = execFileSync("git", ["-C", ws.root, "remote", "get-url", "origin"], { encoding: "utf8" }).trim();
-    const matched = /github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?$/.exec(remote);
-    if (!matched) throw new Error("opportunity intake requires a GitHub repository identity");
-    const repo = `${matched[1]}/${matched[2]}`;
-    const layout = resolveRepoLayout(ws.root);
-    let records: LedgerRecord[] | undefined;
-    let judge = deps.riskJudge;
-    return {
-      repo, clock, dispose: () => ws.dispose(),
-      standingDebtAnchor: relative(ws.root, layout.masterPlan),
-      readStandingDebt: () => readFileSync(layout.masterPlan, "utf8"),
-      readCodeql: deps.readCodeql ?? (() => readCodeScanningAlerts(matched[1]!, matched[2]!)),
-      readFriction: deps.readFriction ?? (() => {
-        const gateFireRates = readGateFireRateReport(garden.stateDir);
-        if (existsSync(gateFireRatesPath(garden.stateDir)) && !gateFireRates) throw new Error("gate fire-rate report unreadable");
-        return { records: records ??= readCiFrictionLedgerRecords(garden.stateDir), gateFireRates };
-      }),
-      readWork: () => {
-        const pages = deps.readPulls ? deps.readPulls(repo) : ghJson(["api", `repos/${repo}/pulls?state=open&per_page=100`, "--paginate", "--slurp"]);
-        if (!Array.isArray(pages) || pages.some((page) => !Array.isArray(page))) throw new Error("open PR dedupe corpus unreadable");
-        const tasks = loadPlan(layout.planMonolith).tasks;
-        const proposals = loadProposalRegistry(join(garden.stateDir, "inbox-proposals.json"));
-        for (const record of loadProposalRecords(join(layout.planDir, "proposals.d"))) {
-          if (record.status === "open" && record.source) proposals.push({ id: record.source, summary: record.title, evidenceAnchors: [] });
-        }
-        const credited = loadCreditStore(join(garden.stateDir, "merge-credit.json"));
-        const mergedKeys = tasks.filter((task) => credited[task.id] && task.origin).map((task) => `${repo}/${task.origin}`);
-        return { tasks, proposals, mergedKeys, prs: pages.flat().map((pr) => ({ body: String(pr.body ?? "") })), feedback: listFeedback(ws.root) };
-      },
-      riskPolicy: readRiskPolicy(policyPath(ws.root)),
-      riskJudge: (input) => {
-        if (!judge) {
-          const mounts = loadMounts(mountsPath(ws.root));
-          judge = realRiskJudge({ mount: mounts.machine_filing_judge ?? resolveRiskJudgeMount(mounts), cwd: ws.root, settingsFile: join(ws.root, "settings", "worker.json"), log: garden.log });
-        }
-        return judge(input);
-      },
-      stageProposal: (candidate, reasons) => {
-        updateProposalRegistry(join(garden.stateDir, "inbox-proposals.json"), (current) => {
-          if (current.some((entry) => entry.id === opportunityKey(candidate))) return null;
-          return [...current, { id: opportunityKey(candidate), summary: `${candidate.remedy}\nOpportunity-Key: ${opportunityKey(candidate)}\n${JSON.stringify(candidate)}\n${reasons.join("\n")}`, evidenceAnchors: [] }];
-        });
-      },
-      fileCandidate: async (candidate) => {
-        const key = opportunityKey(candidate);
-        const id = `fb-opportunity-${createHash("sha256").update(key).digest("hex").slice(0, 24)}`;
-        const entry: FeedbackEntry = {
-          id, ts: clock.iso(), raw: `Opportunity-Key: ${key}\n${JSON.stringify(candidate)}\nDraft one bounded task through the normal triage and machine-filing judge, with author_class: machine. Preserve origin: ${candidate.key} and the exact Opportunity-Key line on the task. Establish executable acceptance before filing.`,
-          origin: "cli", status: "new", attachments: [], proposal_pr: null, submission_key: key,
-        };
-        const path = feedbackEntryPath(ws.root, id);
-        mkdirSync(dirname(path), { recursive: true });
-        writeFileSync(path, stringify(entry));
-        return ws.land({ paths: [relative(ws.root, path)], title: "chore(plan): route one measured opportunity for governed triage", body: `Route one source-qualified candidate through the existing feedback-to-plan workflow.\n\nOpportunity-Key: ${key}\n\n${JSON.stringify(candidate)}` });
-      },
-    };
+    return opportunityIntakePortsOver(ws, garden, deps);
   } catch (error) {
     ws.dispose();
     throw error;
   }
+}
+
+/** {@link productionOpportunityIntakePorts} over the daemon's async port: the checkout's fetch and
+ *  worktree add are awaited, so the loop keeps ticking while they run (W1-T5740). */
+export async function openOpportunityIntakePorts(garden: GardenerDeps, deps: OpportunityIntakeSources = {}): Promise<OpportunityIntakePorts> {
+  recordIntakeCadence(garden);
+  const ws = await garden.openWorkspace();
+  try {
+    return opportunityIntakePortsOver(ws, garden, deps);
+  } catch (error) {
+    await ws.dispose();
+    throw error;
+  }
+}
+
+type OpportunityIntakeSources = NonNullable<Parameters<typeof productionOpportunityIntakePorts>[1]>;
+
+function recordIntakeCadence(garden: GardenerDeps): void {
+  recordMeasurementCadenceFire(join(garden.stateDir, "last-intake-cadence-codeqlQuality.json"), (garden.clock ?? systemClock).date(), 24 * 60 * 60 * 1000);
+}
+
+function opportunityIntakePortsOver(ws: GardenCheckout | GardenCheckoutAsync, garden: GardenerDeps, deps: OpportunityIntakeSources): OpportunityIntakePorts {
+  const clock = garden.clock ?? systemClock;
+  const remote = execFileSync("git", ["-C", ws.root, "remote", "get-url", "origin"], { encoding: "utf8" }).trim();
+  const matched = /github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?$/.exec(remote);
+  if (!matched) throw new Error("opportunity intake requires a GitHub repository identity");
+  const repo = `${matched[1]}/${matched[2]}`;
+  const layout = resolveRepoLayout(ws.root);
+  let records: LedgerRecord[] | undefined;
+  let judge = deps.riskJudge;
+  return {
+    repo, clock, dispose: () => ws.dispose(),
+    standingDebtAnchor: relative(ws.root, layout.masterPlan),
+    readStandingDebt: () => readFileSync(layout.masterPlan, "utf8"),
+    readCodeql: deps.readCodeql ?? (() => readCodeScanningAlerts(matched[1]!, matched[2]!)),
+    readFriction: deps.readFriction ?? (() => {
+      const gateFireRates = readGateFireRateReport(garden.stateDir);
+      if (existsSync(gateFireRatesPath(garden.stateDir)) && !gateFireRates) throw new Error("gate fire-rate report unreadable");
+      return { records: records ??= readCiFrictionLedgerRecords(garden.stateDir), gateFireRates };
+    }),
+    readWork: () => {
+      const pages = deps.readPulls ? deps.readPulls(repo) : ghJson(["api", `repos/${repo}/pulls?state=open&per_page=100`, "--paginate", "--slurp"]);
+      if (!Array.isArray(pages) || pages.some((page) => !Array.isArray(page))) throw new Error("open PR dedupe corpus unreadable");
+      const tasks = loadPlan(layout.planMonolith).tasks;
+      const proposals = loadProposalRegistry(join(garden.stateDir, "inbox-proposals.json"));
+      for (const record of loadProposalRecords(join(layout.planDir, "proposals.d"))) {
+        if (record.status === "open" && record.source) proposals.push({ id: record.source, summary: record.title, evidenceAnchors: [] });
+      }
+      const credited = loadCreditStore(join(garden.stateDir, "merge-credit.json"));
+      const mergedKeys = tasks.filter((task) => credited[task.id] && task.origin).map((task) => `${repo}/${task.origin}`);
+      return { tasks, proposals, mergedKeys, prs: pages.flat().map((pr) => ({ body: String(pr.body ?? "") })), feedback: listFeedback(ws.root) };
+    },
+    riskPolicy: readRiskPolicy(policyPath(ws.root)),
+    riskJudge: (input) => {
+      if (!judge) {
+        const mounts = loadMounts(mountsPath(ws.root));
+        judge = realRiskJudge({ mount: mounts.machine_filing_judge ?? resolveRiskJudgeMount(mounts), cwd: ws.root, settingsFile: join(ws.root, "settings", "worker.json"), log: garden.log });
+      }
+      return judge(input);
+    },
+    stageProposal: (candidate, reasons) => {
+      updateProposalRegistry(join(garden.stateDir, "inbox-proposals.json"), (current) => {
+        if (current.some((entry) => entry.id === opportunityKey(candidate))) return null;
+        return [...current, { id: opportunityKey(candidate), summary: `${candidate.remedy}\nOpportunity-Key: ${opportunityKey(candidate)}\n${JSON.stringify(candidate)}\n${reasons.join("\n")}`, evidenceAnchors: [] }];
+      });
+    },
+    fileCandidate: async (candidate) => {
+      const key = opportunityKey(candidate);
+      const id = `fb-opportunity-${createHash("sha256").update(key).digest("hex").slice(0, 24)}`;
+      const entry: FeedbackEntry = {
+        id, ts: clock.iso(), raw: `Opportunity-Key: ${key}\n${JSON.stringify(candidate)}\nDraft one bounded task through the normal triage and machine-filing judge, with author_class: machine. Preserve origin: ${candidate.key} and the exact Opportunity-Key line on the task. Establish executable acceptance before filing.`,
+        origin: "cli", status: "new", attachments: [], proposal_pr: null, submission_key: key,
+      };
+      const path = feedbackEntryPath(ws.root, id);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, stringify(entry));
+      return ws.land({ paths: [relative(ws.root, path)], title: "chore(plan): route one measured opportunity for governed triage", body: `Route one source-qualified candidate through the existing feedback-to-plan workflow.\n\nOpportunity-Key: ${key}\n\n${JSON.stringify(candidate)}` });
+    },
+  };
 }

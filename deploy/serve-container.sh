@@ -157,7 +157,8 @@ SERVE_PORT_OVERRIDE="${RMD_SERVE_PORT:-}"
 SERVE_PORT="${SERVE_PORT_OVERRIDE:-4317}"
 SERVE_BIND_HOST="0.0.0.0"
 SERVE_SUPERVISOR="${RMD_SERVE_SUPERVISOR:-on}" # docs/operator-guide.md "Serve supervisor"; off = direct launch
-SERVE_GENS_DIR="${RMD_SERVE_GENS_DIR:-${HOME:-/root}/rmd-serve-gens}"
+SERVE_GENS_DIR_OVERRIDE="${RMD_SERVE_GENS_DIR:-}"
+SERVE_GENS_DIR="${SERVE_GENS_DIR_OVERRIDE:-${HOME:-/root}/rmd-serve-gens}"
 SERVE_GENS_MOUNT_DEST="/home/node/rmd-serve-gens"
 SERVE_SUPERVISOR_ENTRY="/app/src/lib/serve-supervisor-main.ts"
 SERVE_NETWORK_ENV_VALUE="container"
@@ -614,6 +615,7 @@ if [ -z "${INSTANCE_NAME}" ] && [ -r "${INSTANCE_REGISTRY}" ]; then
 fi
 
 RESOURCE_POLICY_SERVE_ARGS=() # W1-T4102: serve's host share; see deploy/resource-policy.sh
+RESOURCE_POLICY_SERVE_HIGH_MIB="" # read back from the cgroup after start; see resource_policy_probe_memory_high
 if [ -f "${SCRIPT_ROOT}/deploy/resource-policy.sh" ]; then
   . "${SCRIPT_ROOT}/deploy/resource-policy.sh"
   resource_policy_serve_args
@@ -622,10 +624,77 @@ else
   echo "serve-container: resource policy NOT applied — ${SCRIPT_ROOT}/deploy/resource-policy.sh is absent"
 fi
 
+SERVE_REPLACE_ADMISSION="${RMD_SERVE_REPLACE_ADMISSION:-}"
+SERVE_REPLACE_HELD_EXIT=75
+ADMIT_MEMINFO_PATH="${RMD_SERVE_ADMIT_MEMINFO_PATH:-/proc/meminfo}"
+ADMIT_VMSTAT_PATH="${RMD_SERVE_ADMIT_VMSTAT_PATH:-/proc/vmstat}"
+ADMIT_PSI_PATH="${RMD_SERVE_ADMIT_PSI_PATH:-/proc/pressure/memory}"
+ADMIT_SAMPLE_S="${RMD_SERVE_ADMIT_SAMPLE_S:-1}"
+
+serve_replace_hold() {
+  echo "serve-container: HELD (${1}) — ${2}. ${CONTAINER_NAME} was left untouched." >&2
+  exit "${SERVE_REPLACE_HELD_EXIT}"
+}
+
+admit_number() { [[ "${1}" =~ ^[0-9]+([.][0-9]+)?$ ]]; }
+
+serve_resident_mib() {
+  docker stats --no-stream --format '{{.MemUsage}}' "${CONTAINER_NAME}" 2>/dev/null | awk '
+    { u = $1; n = u; sub(/[A-Za-z]+$/, "", n); unit = u; sub(/^[0-9.]+/, "", unit)
+      f["B"] = 1/1048576; f["KiB"] = 1/1024; f["kB"] = 1000/1048576; f["MiB"] = 1; f["MB"] = 1000000/1048576
+      f["GiB"] = 1024; f["GB"] = 1000000000/1048576
+      if (n ~ /^[0-9.]+$/ && (unit in f)) { printf "%d\n", n * f[unit]; exit } }'
+}
+
+serve_replace_admission() {
+  local stage="$1"
+  [ "${SERVE_REPLACE_ADMISSION}" = "required" ] || return 0
+  [ "${CONTAINER_EXISTS}" -eq 1 ] || return 0
+  local reserve="${RMD_SERVE_ADMIT_HOST_RESERVE_MIB:-}" swap_max="${RMD_SERVE_ADMIT_SWAPIN_MAX:-}"
+  local some_max="${RMD_SERVE_ADMIT_PSI_SOME_AVG10_MAX:-}" full_max="${RMD_SERVE_ADMIT_PSI_FULL_AVG10_MAX:-}"
+  local candidate="${RMD_SERVE_ADMIT_CANDIDATE_MIB:-}"
+  local t
+  for t in "${reserve}" "${swap_max}" "${some_max}" "${full_max}"; do
+    admit_number "${t}" || serve_replace_hold policy_unread "a host budget threshold is missing or not a number (${stage})"
+  done
+  { admit_number "${candidate}" && [ "${candidate%%.*}" -gt 0 ]; } ||
+    serve_replace_hold peak_unknown "no positive candidate cold-start peak was given (${stage})"
+  local p1 p2 avail some full
+  p1="$(awk '$1 == "pswpin" { print $2 }' "${ADMIT_VMSTAT_PATH}" 2>/dev/null || true)"
+  sleep "${ADMIT_SAMPLE_S}"
+  p2="$(awk '$1 == "pswpin" { print $2 }' "${ADMIT_VMSTAT_PATH}" 2>/dev/null || true)"
+  avail="$(awk '$1 == "MemAvailable:" { printf "%d\n", $2 / 1024 }' "${ADMIT_MEMINFO_PATH}" 2>/dev/null || true)"
+  some="$(awk '$1 == "some" { for (i = 2; i <= NF; i++) if ($i ~ /^avg10=/) { sub(/^avg10=/, "", $i); print $i } }' "${ADMIT_PSI_PATH}" 2>/dev/null || true)"
+  full="$(awk '$1 == "full" { for (i = 2; i <= NF; i++) if ($i ~ /^avg10=/) { sub(/^avg10=/, "", $i); print $i } }' "${ADMIT_PSI_PATH}" 2>/dev/null || true)"
+  admit_number "${p1}" && admit_number "${p2}" || serve_replace_hold pressure_unread "${ADMIT_VMSTAT_PATH} pswpin unreadable (${stage})"
+  admit_number "${avail}" || serve_replace_hold pressure_unread "${ADMIT_MEMINFO_PATH} MemAvailable unreadable (${stage})"
+  admit_number "${some}" && admit_number "${full}" || serve_replace_hold pressure_unread "${ADMIT_PSI_PATH} some/full avg10 unreadable (${stage})"
+  admit_number "${ADMIT_SAMPLE_S}" && awk -v s="${ADMIT_SAMPLE_S}" 'BEGIN { exit !(s > 0) }' ||
+    serve_replace_hold pressure_unread "no swap-in window (${stage})"
+  local rate
+  rate="$(awk -v a="${p1}" -v b="${p2}" -v s="${ADMIT_SAMPLE_S}" 'BEGIN { d = b - a; if (d < 0) d = 0; printf "%.1f\n", d / s }')"
+  awk -v r="${rate}" -v m="${swap_max}" 'BEGIN { exit !(r > m) }' &&
+    serve_replace_hold swap_in "swap-in ${rate} pages/s > ${swap_max} (${stage})"
+  awk -v a="${some}" -v b="${some_max}" -v c="${full}" -v d="${full_max}" 'BEGIN { exit !(a > b || c > d) }' &&
+    serve_replace_hold psi "memory PSI some avg10 ${some} (max ${some_max}), full avg10 ${full} (max ${full_max}) (${stage})"
+  local freed need
+  freed="$(serve_resident_mib || true)"
+  admit_number "${freed}" || freed=0
+  need="$(awk -v r="${reserve}" -v c="${candidate}" -v f="${freed}" 'BEGIN { x = c - f; if (x < 0) x = 0; printf "%d\n", r + x }')"
+  [ "${avail}" -ge "${need}" ] ||
+    serve_replace_hold host_headroom "MemAvailable ${avail} MiB < need ${need} MiB (reserve ${reserve} + candidate ${candidate} - freed ${freed}) (${stage})"
+  echo "serve-container: replace admitted (${stage}) — MemAvailable ${avail} MiB >= need ${need} MiB, swap-in ${rate} pages/s, PSI some ${some} full ${full}"
+}
+
 SCRATCH_ARGS=() # deploy/scratch-mounts.sh: rebuildable I/O on the local NVMe; dark until switched on
 if [ -f "${SCRIPT_ROOT}/deploy/scratch-mounts.sh" ]; then
   . "${SCRIPT_ROOT}/deploy/scratch-mounts.sh"
-  if scratch_plan "${STATE_DIR}" "${CONTAINER_NAME}" && [ "${DRY_RUN}" -ne 1 ]; then scratch_prepare || true; fi
+  if scratch_plan "${STATE_DIR}" "${CONTAINER_NAME}"; then
+    SERVE_SCRATCH_GENS_DIR="${SCRATCH_CONTAINER_TMP%/containers/*/tmp}/serve-gens"
+    if [ -z "${SERVE_GENS_DIR_OVERRIDE}" ] && [ "${SERVE_SUPERVISOR}" = "on" ]; then SCRATCH_DIRS+=("${SERVE_SCRATCH_GENS_DIR}"); fi
+    if [ "${DRY_RUN}" -ne 1 ]; then scratch_prepare || true; fi
+    if [ -z "${SERVE_GENS_DIR_OVERRIDE}" ] && [ "${#SCRATCH_ARGS[@]}" -gt 0 ]; then SERVE_GENS_DIR="${SERVE_SCRATCH_GENS_DIR}"; fi
+  fi
   echo "serve-container: scratch mounts ${SCRATCH_NOTE}"
 fi
 
@@ -682,6 +751,8 @@ if [ "${DRY_RUN}" -eq 1 ]; then
   exit 0
 fi
 
+serve_replace_admission "before the image pull"
+
 if [ ! -d "${SERVE_REPO_DIR}" ]; then
   mkdir -p "${SERVE_REPO_DIR}"
 fi
@@ -691,6 +762,17 @@ if [ ! -w "${SERVE_REPO_DIR}" ]; then
   exit 1
 fi
 
+source "${SCRIPT_ROOT}/deploy/acr-login.sh"
+REGISTRY="${REF%%/*}"
+REGISTRY="${REGISTRY%.azurecr.io}"
+if command -v az >/dev/null 2>&1; then
+  if ! rmd_acr_login "${REGISTRY}"; then
+    echo "serve-container: REFUSING — registry login failed; existing container was left untouched. Run az login on this host." >&2
+    exit 1
+  fi
+else
+  echo "serve-container: az unavailable; checking the host's existing docker login with the preflight pull." >&2
+fi
 echo "serve-container: preflight docker pull ${REF}"
 if ! docker pull "${REF}" >/dev/null 2>&1; then
   echo "serve-container: REFUSING — target image ${REF} could not be pulled; existing container was left untouched." >&2
@@ -708,6 +790,7 @@ if [ "${SERVE_SUPERVISOR}" = "on" ]; then
 fi
 
 if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
+  serve_replace_admission "before docker stop"
   echo "serve-container: docker stop ${CONTAINER_NAME}"
   docker stop "${CONTAINER_NAME}" >/dev/null
   echo "serve-container: docker rm ${CONTAINER_NAME}"
@@ -727,6 +810,9 @@ RUNNING="$(docker inspect --format '{{.State.Running}}' "${CONTAINER_NAME}" 2>/d
 if [ "${RUNNING}" != "true" ]; then
   echo "serve-container: FAILED — ${CONTAINER_NAME} is not running." >&2
   FAIL=1
+fi
+if [ "${RUNNING}" = "true" ] && [ -n "${RESOURCE_POLICY_SERVE_HIGH_MIB}" ]; then
+  resource_policy_probe_memory_high "${CONTAINER_NAME}" "${RESOURCE_POLICY_SERVE_HIGH_MIB}" || true
 fi
 
 ON_NET="$(docker inspect --format "{{if index .NetworkSettings.Networks \"${NETWORK}\"}}yes{{end}}" "${CONTAINER_NAME}" 2>/dev/null || true)"

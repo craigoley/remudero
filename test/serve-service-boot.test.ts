@@ -16,7 +16,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,6 +24,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { killProcessGroup } from "../src/lib/worker-containment.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { waitForServeBanner } from "./helpers/serve-boot-banner.js";
 
 const repoRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 
@@ -35,8 +36,6 @@ async function freePort(): Promise<number> {
   await new Promise<void>((resolve) => probe.close(() => resolve()));
   return port;
 }
-
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 test("serve's startup banner is readable in a redirected log BEFORE the process exits", async (t) => {
   const home = mkdtempSync(join(tmpdir(), "rmd-serveboot-"));
@@ -93,23 +92,10 @@ test("serve's startup banner is readable in a redirected log BEFORE the process 
     killProcessGroup(child.pid!);
   });
 
-  let banner = "";
-  const deadline = Date.now() + 45_000;
-  while (Date.now() < deadline) {
-    if (existsSync(logPath)) {
-      const text = readFileSync(logPath, "utf8");
-      if (text.includes("listening on")) {
-        banner = text;
-        break;
-      }
-    }
-    if (child.exitCode !== null) {
-      assert.fail(`serve exited (${child.exitCode}) before printing its banner. Log:\n${readFileSync(logPath, "utf8")}`);
-    }
-    await sleep(200);
-  }
+  // W1-T6031: the wait's bound is declared, so a boot still running at 120s (148s was the worst
+  // measured on a loaded host) fails as WALL-CLOCK DEPENDENT; an early exit still fails at once.
+  const banner = await waitForServeBanner(logPath, child, 120_000);
 
-  assert.notEqual(banner, "", "the banner never appeared in the redirected log within 45s");
   assert.equal(child.exitCode, null, "…and it appeared while serve was STILL RUNNING — the whole point");
   assert.match(banner, new RegExp(`listening on http://127\\.0\\.0\\.1:${port}`));
   assert.doesNotMatch(banner, /write token: [0-9a-f]{64}/, "the write token is never echoed to a log (R-5)");

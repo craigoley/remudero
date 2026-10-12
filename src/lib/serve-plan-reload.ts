@@ -7,6 +7,7 @@
  * restart diff was taken against and installs it with one assignment.
  */
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { isMainThread, parentPort, threadId, Worker, workerData } from "node:worker_threads";
 import { systemClock, type Clock } from "./clock.js";
 import { mergePlanBlobsQuarantiningDuplicates, readBlobsAtRef, type Plan, type QuarantinedTask } from "./plan.js";
@@ -34,7 +35,26 @@ export function touchesReloadablePlan(changedPaths: readonly string[] | undefine
 /** BACKSTOP: fires only on a hung git; it bounds one reload attempt. */
 export const PLAN_RELOAD_TIMEOUT_MS = 30_000;
 
-export type PlanRead = { plan: Plan; quarantined: QuarantinedTask[]; gitMs?: number; parseMs?: number; threadId?: number };
+/** The plan blobs one read took from git, UTF-8 in ONE SharedArrayBuffer (W1-T5894): posting it to a thread shares the
+ *  bytes instead of cloning ~19 MB per receiver, so serve's threads parse the commit main read and never run git. */
+export type PlanText = { buffer: SharedArrayBuffer; labels: string[]; ends: number[] };
+
+export type PlanRead = { plan: Plan; quarantined: QuarantinedTask[]; gitMs?: number; parseMs?: number; threadId?: number; text?: PlanText };
+
+export function packPlanBlobs(blobs: ReadonlyArray<{ label: string; text: string }>): PlanText {
+  const ends: number[] = [];
+  let total = 0;
+  for (const blob of blobs) ends.push((total += Buffer.byteLength(blob.text, "utf8")));
+  const buffer = new SharedArrayBuffer(total);
+  const bytes = Buffer.from(buffer);
+  blobs.forEach((blob, i) => bytes.write(blob.text, i === 0 ? 0 : ends[i - 1]!, "utf8"));
+  return { buffer, labels: blobs.map((blob) => blob.label), ends };
+}
+
+export function unpackPlanBlobs(text: PlanText): Array<{ label: string; text: string }> {
+  const bytes = Buffer.from(text.buffer);
+  return text.labels.map((label, i) => ({ label, text: bytes.toString("utf8", i === 0 ? 0 : text.ends[i - 1]!, text.ends[i]!) }));
+}
 
 const PLAN_RELOAD_WORKER_KIND = "remudero-serve-plan-reload" as const;
 
@@ -58,7 +78,7 @@ export async function readServePlanAtRef(repoDir: string, ref: string, clock: Cl
   const blobs = await readServePlanBlobs(repoDir, ref);
   const parsedAt = clock.now();
   const read = mergePlanBlobsQuarantiningDuplicates(blobs);
-  return { ...read, gitMs: parsedAt - startedAt, parseMs: clock.now() - parsedAt, threadId };
+  return { ...read, gitMs: parsedAt - startedAt, parseMs: clock.now() - parsedAt, threadId, text: packPlanBlobs(blobs) };
 }
 
 async function readServePlanBlobs(repoDir: string, ref: string): Promise<Array<{ label: string; text: string }>> {
@@ -112,7 +132,7 @@ export function readServePlanOffLoop(repoDir: string, ref: string, workerUrl: UR
   return new Promise((resolve, reject) => {
     let worker: Worker;
     try {
-      worker = new Worker(workerUrl, { workerData: { kind: PLAN_RELOAD_WORKER_KIND, repoDir, ref }, execArgv: process.execArgv });
+      worker = new Worker(workerUrl, { workerData: { kind: PLAN_RELOAD_WORKER_KIND, repoDir, ref } });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       reject(workerFailure(reason));
@@ -139,6 +159,78 @@ async function readServePlanPreferringWorker(repoDir: string, ref: string, optio
   }
 }
 
+/**
+ * W1-T5639 — the qualified outcome of reading the plan, carried beside the plan itself so a consumer never infers source
+ * health from a task count. `loaded` is a successful read (an intentionally empty plan included); `unavailable` is an
+ * initial read that has not yet succeeded, and the plan bound beside it is a placeholder, never evidence; `stale` is a
+ * dated last-known-good plan whose latest refresh failed. `generation` counts adopted plans and moves only on a successful
+ * read, so a failed refresh can never certify a newer one. `identity` names what was read: a short commit/file reference,
+ * or a SHA-256 digest of the complete file metadata identity when that identity would grow with the number of shards.
+ */
+export type PlanSourceOutcome =
+  | { state: "loaded"; generation: number; identity: string; observedAt: string }
+  | { state: "unavailable"; generation: number; failure: PlanSourceFailure }
+  | { state: "stale"; generation: number; identity: string; observedAt: string; failure: PlanSourceFailure };
+
+export interface PlanSourceFailure {
+  reason: string;
+  failedAt: string;
+}
+
+/** What serve's board holds: the plan, and the qualified outcome of the read that produced it. */
+export interface PlanSourceHolder {
+  plan: Plan;
+  planSource?: PlanSourceOutcome;
+}
+
+/** BACKSTOP: the longest failure reason a response carries; a reader needs the cause, not an unbounded error text. */
+export const PLAN_SOURCE_REASON_MAX = 240;
+
+/** PRIMARY CONTROL: bound response/log metadata, not plan size. Short references remain readable; large identities are hashed in full. */
+export const PLAN_SOURCE_IDENTITY_MAX_BYTES = 1_024;
+
+const boundedReason = (reason: unknown): string => String((reason as Error)?.message ?? reason).slice(0, PLAN_SOURCE_REASON_MAX);
+
+/** The outcome of a plan read that succeeded: the next generation, dated by the clock that read it. */
+export function planSourceLoaded(prior: PlanSourceOutcome | undefined, identity: string, clock: Clock = systemClock): Extract<PlanSourceOutcome, { state: "loaded" }> {
+  const boundedIdentity = Buffer.byteLength(identity, "utf8") <= PLAN_SOURCE_IDENTITY_MAX_BYTES
+    ? identity : `sha256:${createHash("sha256").update(identity, "utf8").digest("hex")}`;
+  return { state: "loaded", generation: (prior?.generation ?? 0) + 1, identity: boundedIdentity, observedAt: clock.iso() };
+}
+
+/** The outcome of a failed read: a prior good plan stays, dated and named stale; with none, the source is unavailable. */
+export function planSourceFailed(prior: PlanSourceOutcome | undefined, reason: unknown, clock: Clock = systemClock): PlanSourceOutcome {
+  const failure = { reason: boundedReason(reason), failedAt: clock.iso() };
+  if (prior === undefined || prior.state === "unavailable") return { state: "unavailable", generation: prior?.generation ?? 0, failure };
+  return { state: "stale", generation: prior.generation, identity: prior.identity, observedAt: prior.observedAt, failure };
+}
+
+/**
+ * Install a plan the serve process itself read from its working files, and the outcome that qualifies it, in one pair of
+ * assignments with no await between them. Used when the initial read failed and the board's own projection thread has
+ * since read the same files: serve must follow it rather than stay bound to the placeholder. Returns whether it adopted.
+ */
+export function adoptPlanSource(
+  board: PlanSourceHolder,
+  read: () => { plan: Plan; identity: string },
+  options: { clock?: Clock; log?: (step: string, extra?: Record<string, unknown>) => void } = {},
+): boolean {
+  if (board.planSource?.state !== "unavailable") return false;
+  const log = options.log ?? (() => {});
+  let loaded: { plan: Plan; identity: string };
+  try {
+    loaded = read();
+  } catch (err) {
+    // deliberate: the failure is recorded on the outcome itself, which every plan-derived reader reports.
+    board.planSource = planSourceFailed(board.planSource, err, options.clock);
+    return false;
+  }
+  board.plan = loaded.plan;
+  board.planSource = planSourceLoaded(board.planSource, loaded.identity, options.clock);
+  log("serve.plan_source_adopted", { generation: board.planSource.generation, identity: board.planSource.identity, tasks: loaded.plan.tasks.length });
+  return true;
+}
+
 /** Seams for a hermetic test. */
 export interface ServePlanReloadOptions {
   read?: (repoDir: string, ref: string) => Promise<PlanRead>;
@@ -156,7 +248,7 @@ export interface ServePlanReloadOptions {
  * check and never turns it into a restart, because a restarted serve would read the same bad plan.
  */
 export async function reloadServePlan(
-  board: { plan: Plan },
+  board: PlanSourceHolder,
   repoDir: string,
   ref: string,
   options: ServePlanReloadOptions = {},
@@ -169,12 +261,15 @@ export async function reloadServePlan(
     read = await (options.read ?? ((dir, at) => readServePlanPreferringWorker(dir, at, options)))(repoDir, ref);
   } catch (err) {
     log("serve.plan_reload_failed", { ref, reason: err instanceof Error ? err.message : String(err) });
+    // Only a board that carries an outcome is qualified; one that does not keeps the plan it always had.
+    if (board.planSource !== undefined) board.planSource = planSourceFailed(board.planSource, err, clock);
     return false;
   }
   if (read.quarantined.length > 0) {
     log("serve.plan_quarantined", { ref, ids: read.quarantined.map((q) => q.id), files: read.quarantined.flatMap((q) => q.files) });
   }
   board.plan = read.plan;
+  if (board.planSource !== undefined) board.planSource = planSourceLoaded(board.planSource, `ref:${repoDir}@${ref}`, clock);
   options.onReloaded?.(ref, read);
   log("serve.plan_reloaded", { ref, tasks: read.plan.tasks.length, elapsedMs: clock.now() - startedAt, gitMs: read.gitMs, parseMs: read.parseMs });
   return true;

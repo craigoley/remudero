@@ -143,6 +143,81 @@ function riskJudgment(row: Row): { model: string; pass: boolean } | { excluded: 
   return model === undefined ? { excluded: "judge-model-unrecorded" } : { model, pass: row.verdict === "low" };
 }
 
+type ReviewHead = { at: number; head: string };
+
+/** One LLM judgment as {@link finishJudgeVerdicts} reads it: a review knows its head; a risk decision
+ *  reaches one only when every review of its run has been folded. */
+type JudgeCandidate =
+  | { kind: "review"; ref: string; judgeModel: string; head?: string; prUrl?: string; pass: boolean }
+  | { kind: "risk"; judgeModel: string; pass: boolean; runId?: string; at: number; ts: string; runText: string; prUrl?: string };
+
+/** The joins and judgments {@link finishJudgeVerdicts} reads, kept per assignment, head and judgment rather than per row. */
+export interface JudgeVerdictFold {
+  models: Map<string, string>;
+  headAuthors: Map<string, string>;
+  reviewHeadsByRun: Map<string, ReviewHead[]>;
+  candidates: JudgeCandidate[];
+  excluded: Record<string, number>;
+}
+
+export function emptyJudgeVerdictFold(): JudgeVerdictFold {
+  return { models: new Map(), headAuthors: new Map(), reviewHeadsByRun: new Map(), candidates: [], excluded: {} };
+}
+
+export function foldJudgeVerdictRow(fold: JudgeVerdictFold, row: Row): void {
+  const raw = record(row.worker_assignment);
+  const id = str(raw?.id);
+  const model = str(record(raw?.selected)?.model);
+  if (row.step === "worker.assignment" && id && model && !fold.models.has(id)) fold.models.set(id, model);
+  const head = str(row.head_sha);
+  if ((row.step === "implement.done" || row.step === "pr.opened") && head) {
+    const value = str(row.head_assignment) ?? "unrecorded";
+    if (!fold.headAuthors.has(head) || (assignmentIdOf(value) && !assignmentIdOf(fold.headAuthors.get(head)))) fold.headAuthors.set(head, value);
+  }
+  const runId = str(row.run_id);
+  if (row.step === "review.posted" && head && runId) fold.reviewHeadsByRun.set(runId, [...(fold.reviewHeadsByRun.get(runId) ?? []), { at: timeOf(row), head }]);
+  if (row.step !== "review.posted" && row.step !== "risk_judge.decision") return;
+  const kind: JudgeKind = row.step === "review.posted" ? "review" : "risk";
+  const judgment = kind === "review" ? reviewJudgment(row) : riskJudgment(row);
+  if ("excluded" in judgment) {
+    bump(fold.excluded, judgment.excluded);
+    return;
+  }
+  const prUrl = str(row.pr_url);
+  fold.candidates.push(kind === "review"
+    ? { kind, ref: verdictRef(kind, judgment.model, head, row), judgeModel: judgment.model, ...(head ? { head } : {}), ...(prUrl ? { prUrl } : {}), pass: judgment.pass }
+    : { kind, judgeModel: judgment.model, pass: judgment.pass, ...(runId ? { runId } : {}), at: timeOf(row),
+      ts: String(row.ts ?? ""), runText: String(row.run_id ?? ""), ...(prUrl ? { prUrl } : {}) });
+}
+
+/** -Infinity, an unparseable time, is not JSON: it travels as null. */
+const atToJson = (at: number): number | null => (at === -Infinity ? null : at);
+const atFromJson = (at: unknown): number => (typeof at === "number" ? at : -Infinity);
+
+/** A fold as JSON: every map as its entries, in insertion order. */
+export function judgeVerdictFoldToJson(fold: JudgeVerdictFold): Row {
+  return {
+    models: [...fold.models],
+    headAuthors: [...fold.headAuthors],
+    reviewHeadsByRun: [...fold.reviewHeadsByRun].map(([run, heads]) => [run, heads.map((entry) => ({ at: atToJson(entry.at), head: entry.head }))]),
+    candidates: fold.candidates.map((candidate) => (candidate.kind === "risk" ? { ...candidate, at: atToJson(candidate.at) } : candidate)),
+    excluded: { ...fold.excluded },
+  };
+}
+
+export function judgeVerdictFoldFromJson(json: Row): JudgeVerdictFold {
+  const entries = <V>(value: unknown): Array<[string, V]> => (Array.isArray(value) ? value as Array<[string, V]> : []);
+  return {
+    models: new Map(entries<string>(json.models)),
+    headAuthors: new Map(entries<string>(json.headAuthors)),
+    reviewHeadsByRun: new Map(entries<Array<{ at: unknown; head: string }>>(json.reviewHeadsByRun)
+      .map(([run, heads]) => [run, heads.map((entry) => ({ at: atFromJson(entry.at), head: entry.head }))])),
+    candidates: (Array.isArray(json.candidates) ? json.candidates as JudgeCandidate[] : [])
+      .map((candidate) => (candidate.kind === "risk" ? { ...candidate, at: atFromJson(candidate.at) } : candidate)),
+    excluded: { ...(record(json.excluded) as Record<string, number> | undefined) },
+  };
+}
+
 /** Every LLM judge verdict in `rows`, joined to its author model. A row that is not an LLM
  *  judgment is counted under `excluded`; a verdict whose author cannot be joined is KEPT under the
  *  `unattributed` author stratum and its reason counted — never dropped. */
@@ -151,24 +226,17 @@ export function extractJudgeVerdicts(rows: ReadonlyArray<Row>): {
   excluded: Record<string, number>;
   authorUnattributed: Record<string, number>;
 } {
-  const models = new Map<string, string>();
-  const headAuthors = new Map<string, string>();
-  const reviewHeadsByRun = new Map<string, Array<{ at: number; head: string }>>();
-  for (const row of rows) {
-    const raw = record(row.worker_assignment);
-    const id = str(raw?.id);
-    const model = str(record(raw?.selected)?.model);
-    if (row.step === "worker.assignment" && id && model && !models.has(id)) models.set(id, model);
-    const head = str(row.head_sha);
-    if ((row.step === "implement.done" || row.step === "pr.opened") && head) {
-      const value = str(row.head_assignment) ?? "unrecorded";
-      if (!headAuthors.has(head) || (assignmentIdOf(value) && !assignmentIdOf(headAuthors.get(head)))) headAuthors.set(head, value);
-    }
-    const runId = str(row.run_id);
-    if (row.step === "review.posted" && head && runId) reviewHeadsByRun.set(runId, [...(reviewHeadsByRun.get(runId) ?? []), { at: timeOf(row), head }]);
-  }
+  const fold = emptyJudgeVerdictFold();
+  for (const row of rows) foldJudgeVerdictRow(fold, row);
+  return finishJudgeVerdicts(fold);
+}
 
-  const excluded: Record<string, number> = {};
+export function finishJudgeVerdicts(fold: JudgeVerdictFold): {
+  verdicts: JudgeVerdict[];
+  excluded: Record<string, number>;
+  authorUnattributed: Record<string, number>;
+} {
+  const { models, headAuthors, reviewHeadsByRun } = fold;
   const authorUnattributed: Record<string, number> = {};
   const authorOf = (head: string | undefined): string => {
     const value = head === undefined ? undefined : headAuthors.get(head);
@@ -180,33 +248,25 @@ export function extractJudgeVerdicts(rows: ReadonlyArray<Row>): {
     bump(authorUnattributed, reason);
     return "unattributed";
   };
-  const headOfRisk = (row: Row): string | undefined => {
-    const at = timeOf(row);
-    let best: { at: number; head: string } | undefined;
-    for (const entry of reviewHeadsByRun.get(str(row.run_id) ?? "") ?? []) if (entry.at <= at && (best === undefined || entry.at >= best.at)) best = entry;
+  const headOfRisk = (runId: string | undefined, at: number): string | undefined => {
+    let best: ReviewHead | undefined;
+    for (const entry of reviewHeadsByRun.get(runId ?? "") ?? []) if (entry.at <= at && (best === undefined || entry.at >= best.at)) best = entry;
     return best?.head;
   };
 
   const verdicts: JudgeVerdict[] = [];
   const seen = new Set<string>();
-  for (const row of rows) {
-    if (row.step !== "review.posted" && row.step !== "risk_judge.decision") continue;
-    const kind: JudgeKind = row.step === "review.posted" ? "review" : "risk";
-    const judgment = kind === "review" ? reviewJudgment(row) : riskJudgment(row);
-    if ("excluded" in judgment) {
-      bump(excluded, judgment.excluded);
-      continue;
-    }
-    const head = kind === "review" ? str(row.head_sha) : headOfRisk(row);
-    const ref = verdictRef(kind, judgment.model, head, row);
+  for (const candidate of fold.candidates) {
+    const head = candidate.kind === "review" ? candidate.head : headOfRisk(candidate.runId, candidate.at);
+    const ref = candidate.kind === "review" ? candidate.ref : verdictRef("risk", candidate.judgeModel, head, { ts: candidate.ts, run_id: candidate.runText });
     if (seen.has(ref)) continue;
     seen.add(ref);
     verdicts.push({
-      ref, kind, judgeModel: judgment.model, authorModel: authorOf(head),
-      headSha: head ?? null, prUrl: str(row.pr_url) ?? null, pass: judgment.pass,
+      ref, kind: candidate.kind, judgeModel: candidate.judgeModel, authorModel: authorOf(head),
+      headSha: head ?? null, prUrl: candidate.prUrl ?? null, pass: candidate.pass,
     });
   }
-  return { verdicts, excluded, authorUnattributed };
+  return { verdicts, excluded: { ...fold.excluded }, authorUnattributed };
 }
 
 const judgeIdOf = (verdict: Pick<JudgeVerdict, "kind" | "judgeModel">): string => `${verdict.kind}:${verdict.judgeModel}`;
@@ -591,8 +651,14 @@ function betweenJudgeAgreement(verdicts: readonly JudgeVerdict[], minPaired: num
  * verdict, then score every judge x author stratum, every judge, and every judge pair.
  */
 export function deriveJudgeCalibration(rows: ReadonlyArray<Row>, options: JudgeCalibrationOptions): JudgeCalibration {
+  const fold = emptyJudgeVerdictFold();
+  for (const row of rows) foldJudgeVerdictRow(fold, row);
+  return finishJudgeCalibration(fold, options);
+}
+
+export function finishJudgeCalibration(fold: JudgeVerdictFold, options: JudgeCalibrationOptions): JudgeCalibration {
   const method = methodOf(options);
-  const { verdicts, excluded, authorUnattributed } = extractJudgeVerdicts(rows);
+  const { verdicts, excluded, authorUnattributed } = finishJudgeVerdicts(fold);
   const labelsUnavailable = "unavailable" in options.labels ? options.labels.unavailable : undefined;
   const labelRows = "labels" in options.labels ? options.labels.labels : [];
   const latest = new Map<string, JudgeLabel>();

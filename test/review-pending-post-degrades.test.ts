@@ -17,11 +17,10 @@ import type { WorkerResult } from "../src/lib/worker.js";
  * unreachable — `postReviewStatusGuarded` absorbs a failed POST and returns `{posted:false}`
  * rather than throwing — which is true of the post and NOT of everything around it.
  *
- * `postReviewPending`'s FIRST statement is `readLedgerLines(opts.ledgerPath)`, which guards
- * `existsSync` and wraps `JSON.parse` but not `readFileSync`. A ledger path that EXISTS and
- * cannot be read therefore throws out of `postReviewPending` before the guarded post is reached
- * — no network, no injected poster, and no seam: `ledgerPath` is already a parameter `runReview`
- * takes from every caller.
+ * `postReviewPending` reads the live `ledger.ndjson` via `readLedgerUnionRecordsSync`. A live
+ * ledger path that EXISTS and cannot be read therefore throws out of `postReviewPending`
+ * before the guarded post is reached. No injected poster or reader is needed: `ledgerPath`
+ * is already a parameter `runReview` takes from every caller.
  *
  * Both directions are pinned here. The healthy control matters as much as the failure: without
  * it, an arm that fired unconditionally would pass the first assertion just as well.
@@ -32,7 +31,7 @@ import type { WorkerResult } from "../src/lib/worker.js";
 const HEAD_SHA = "deadbeefcafe01";
 const PR_URL = "https://github.com/acme/remudero/pull/1995";
 
-/** The `gh` the review path shells out to: a REST head-sha read and a diff, nothing else. */
+/** The `gh` shim answers the review's REST reads, guarded status posts and diff fetch. */
 function stubGh(binDir: string): void {
   writeFileSync(
     join(binDir, "gh"),
@@ -40,6 +39,7 @@ function stubGh(binDir: string): void {
 case "$1 $2" in
   "api "*)
     case "$*" in
+      *commits/*/status*) echo '{"statuses":[]}' ;;
       *pulls/*) echo '{"number":1,"html_url":"${PR_URL}","updated_at":"t","body":"","head":{"ref":"b","sha":"${HEAD_SHA}"}}' ;;
       *) echo '{}' ;;
     esac ;;
@@ -99,12 +99,12 @@ async function stepsFor(ledgerPath: string): Promise<Array<{ step: string; extra
 }
 
 test("W1-T913: a pending post that THROWS is ledgered with its cause", async () => {
-  // A DIRECTORY at the ledger path: `existsSync` is true, so `readLedgerLines` proceeds to
+  // A DIRECTORY at the live ledger path: the union reader proceeds to
   // `readFileSync` and gets EISDIR. This is the cheapest real instance of the class the arm's
   // own comment names — a read failure inside the pending post, distinct from the POST failure
   // that `postReviewStatusGuarded` already absorbs into `{posted:false}` without throwing.
   const root = mkdtempSync(join(tmpdir(), "rmd-pending-degrade-ledger-"));
-  const unreadable = join(root, "ledger-is-a-directory");
+  const unreadable = join(root, "ledger.ndjson");
   mkdirSync(unreadable);
   try {
     const steps = await stepsFor(unreadable);

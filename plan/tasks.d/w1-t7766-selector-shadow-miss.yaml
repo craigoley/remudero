@@ -1,0 +1,29 @@
+- id: W1-T7766
+  title: "REPAIR THE SELECTOR EDGE INTO test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 2.5
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts"
+  files: [src/lib/affected-suites.ts, test/the-affected-suite-selector-runs-in-shadow.test.ts]
+  note: "W1-T4439 first observed a narrow miss on coverage run 38063468054 for PR #10671 at 4a28d43b8deea19ac8eca8762fd69f15149a09ad: src/lib/in-tree-budget.ts, src/lib/plan-pr-emitter.ts, test/a-starved-plan-pr-preflight-leg-times-out-and-is-asked-again.test.ts -> test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again. Add a test in test/the-affected-suite-selector-runs-in-shadow.test.ts that selects test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts for each edge: diff-coverage blocks an edge no test exercises."
+  acceptance:
+    - claim: "the narrow selector includes test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts when this edge is exercised"
+      proof: "grep: test/a-capped-pr-exhausts-repair-before-it-reaches-a-human\\.test\\.ts in src/lib/affected-suites.ts"
+    - claim: "a regression test selects test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts for each recorded edge"
+      proof: "grep: test/a-capped-pr-exhausts-repair-before-it-reaches-a-human\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.93
+    reasons:
+      - "The description and declared files show a narrow change. It adds one test path to the affected-suite selector in src/lib/affected-suites.ts and adds a matching regression test. Neither file is secrets, auth, deploy, merge-policy or review-policy territory."
+      - "The acceptance criteria are grep-verifiable, so the result can be checked from what is shown. Nothing in the description suggests deletion, an irreversible action, or an operator-only decision."
+      - "The gates state is clean. The family track record is 16 merged and 0 declined, with a Beta mean of 0.94. The change follows the same pattern as earlier work from that family. No bounded view of the actual change was supplied, so this verdict rests on the description and files list alone."
+    judged_at: "2026-10-10T19:18:37.154Z"
+    pin: "fbacc3024e4c05f8628b29806c01fbcc369ef1340ca166c1d24d13d259f4d208"

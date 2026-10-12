@@ -1,0 +1,20 @@
+diff --git a/learnings/ci.yaml b/learnings/ci.yaml
+index 1111111..2222222 100644
+--- a/learnings/ci.yaml
++++ b/learnings/ci.yaml
+@@ -168,0 +169,14 @@
++- id: claims-gate-lane
++  subsystem: ci
++  lifecycle: active
++  files: ["plan/claims.yaml", "src/**", "scripts/**", ".github/**"]
++  fact: >-
++    Before opening a PR that changes code, scripts, or CI configuration covered by assertions in
++    plan/claims.yaml, run `npm run --silent claims` on the proposed tree and repair each failing
++    assertion or update its claim only when the system behavior intentionally changed. This
++    checks the same assertions the CI claims gate executes before spending a hosted CI cycle.
++  evidence: >-
++    The claims job runs `npm run --silent claims`, which executes every assertion in
++    plan/claims.yaml; 26 pull requests in the window recorded as ci-learning:8684:claims were
++    repaired after the claims gate refused them.
++  src: "ci-learning:8684:claims"
++  cited: "2026-10-08"

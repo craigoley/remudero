@@ -1,0 +1,80 @@
+- id: W1-T7762
+  title: "A NEW CLASS OF RED GETS A FRESH FIX-PROGRESS JUDGMENT, NOT THE LAST ONE'S LABEL — on 2026-10-10 PR #10671 kept the label `fix round 4 — judge: change-approach`, ruled at 16:55Z on census-precheck-refused comment-load-ratchet reds, on unrelated coverage-shard and diff-coverage reds at 17:26, 17:47 and 18:12Z"
+  repo: remudero
+  depends_on: [W1-T7757]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — which red a fix-progress verdict applies to; it decides the label and the round a judged PR takes
+  band_meaning: span
+  origin: "operator session 2026-10-10: main-red investigation, operator asked for flow improvements"
+  plan_refs: [W1-T7096, W1-T5966]
+  files: [src/lib/fix-progress-judge.ts, src/lib/sweep.ts, test/a-new-red-class-gets-a-fresh-fix-progress-judgment.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-10 on PR #10671. The fix-progress judge ruled `change-approach` at 16:55Z. That ruling
+    came during a run of comment-load-ratchet reds that census-precheck had refused. The PR's later reds were a
+    different class: coverage-shard 3/8, 4/8 and 7/8, then coverage-ratchet diff-coverage, at 17:26, 17:47 and
+    18:12Z. Every later sweep disposition still carried "fix round 4 — judge: change-approach". So the label, and
+    the approach text a change-approach verdict carries into the next round, described a red the PR no longer had.
+
+    READ on origin/main 688f222c6.
+    - WHERE THE LABEL ATTACHES. `lastProgressJudgementFor` (src/lib/sweep.ts:10550) returns the newest
+      `fix.progress_judged` row for the PR. It matches on `pr_number` alone: no head and no red class. runSweep sets
+      it on every open PR as `lastProgressJudgement` (sweep.ts:13763-13766). `fixRoundLabel` (sweep.ts:10564) renders
+      it as `fix round N — judge: <verdict>` (sweep.ts:10568). The disposition reasons append that label at
+      sweep.ts:9300, :9303, :9349 and :9352.
+    - WHERE THE VERDICT IS KEYED. src/lib/fix-progress-judge.ts keys nothing by red class.
+      - `FixProgressInput` (fix-progress-judge.ts:45) carries `currentRed` (:50), a flat list of check names.
+      - `buildFixProgressInput` (fix-progress-judge.ts:132) folds every fix round of the task or PR (filter at
+        :145) into one history, whatever red each round was dispatched against.
+      - The only key a verdict carries is sweep.ts:15898's `inputKey`, a sha256 of that whole input, written at
+        one of the judging sites (:15911). The ceiling site at sweep.ts:13822 writes no `input_key` at all.
+      - No `fix.progress_judged` row names the red it was ruled on, so no reader can tell a stale ruling from a
+        current one.
+    - The production judge's prompt (`productionFixProgressJudge`, sweep.ts:1803) is told about no red class, so it
+      cannot decide whether earlier rounds apply to the current red.
+
+    SERIALIZED: depends on W1-T7757 because both edit src/lib/sweep.ts. W1-T7760 depends on this one for the same
+    file. Parallel agents editing one file broke main (#10349 and #10353 were each green and together reddened main,
+    2026-10-09).
+  design: |
+    1. NAME THE RED CLASS. A pure `fixRedClass(currentRed)` in fix-progress-judge.ts maps a red set to its class:
+       - the sorted set of failing gate names, with shard indices folded (`ci-shard (3/8)` and `ci-shard (7/8)` are
+         one class);
+       - the failing sub-gate kept where the red names one (census-precheck vs diff-coverage under
+         coverage-ratchet).
+       The builder reuses an existing classifier where one fits. `FixProgressInput` gains `redClass`, and each
+       `FixProgressRound` gains the class of its `redBefore`.
+    2. EVERY VERDICT ROW NAMES ITS CLASS. Every `fix.progress_judged` writer in sweep.ts records `red_class`: the
+       ceiling site (:13822), refused-twice (:15152), re-arm (:15397) and the fixable path (:15908).
+    3. A STALE VERDICT IS NEVER THE LABEL. `lastProgressJudgementFor` takes the PR's current red class and returns
+       only a verdict ruled on that class. When the newest verdict's class differs, or a legacy row has none, the
+       label reads "fix round N — awaiting a fresh judgment (red changed from <old> to <new>)". The old verdict is
+       never shown.
+    4. A NEW CLASS IS JUDGED AFRESH. When the newest verdict was ruled on a different class, a judgment is due on
+       that PR's next fix decision, whether or not the round count reached the former ceiling. A
+       `change-approach` approach text ruled on another class is not carried into the next round's prompt.
+    5. THE JUDGE DECIDES WHETHER EARLIER ROUNDS APPLY. The input carries `redClass`, each round's class, and a
+       signal counting rounds dispatched against a different class. `productionFixProgressJudge`'s prompt says that
+       rounds against a different class are context, not failed attempts at this red, and asks the judge to rule
+       whether they still apply. The rounds stay in the input; the judge decides, not a filter.
+  acceptance:
+    - claim: "a PR whose current red class differs from the class its newest verdict was ruled on never shows that verdict's label"
+      proof: 'grep: test("W1-T7762: a red class differing from the ruled one never shows the stale judge label" in test/a-new-red-class-gets-a-fresh-fix-progress-judgment.test.ts'
+    - claim: "a red class differing from the ruled one makes a fresh judgment due on the next fix decision, below the former ceiling too"
+      proof: 'grep: test("W1-T7762: a new red class gets a fresh judgment, never the stale verdict" in test/a-new-red-class-gets-a-fresh-fix-progress-judgment.test.ts'
+    - claim: "every fix.progress_judged row names the red class it was ruled on"
+      proof: 'grep: test("W1-T7762: every fix\.progress_judged row names its red class" in test/a-new-red-class-gets-a-fresh-fix-progress-judgment.test.ts'
+    - claim: "the judge input names the current red class and each round's class, and folds shard indices into one class"
+      proof: 'grep: test("W1-T7762: the judge input names the red class and each round class, with shard indices folded" in test/a-new-red-class-gets-a-fresh-fix-progress-judgment.test.ts'
+    - claim: "a change-approach approach ruled on another class is not carried into the next round"
+      proof: 'grep: test("W1-T7762: a change-approach ruled on another red class is not carried into the next round" in test/a-new-red-class-gets-a-fresh-fix-progress-judgment.test.ts'
+  falsifier: |
+    Keep `lastProgressJudgementFor` matching on `pr_number` alone: replay #10671's rows (change-approach ruled on a
+    comment-load-ratchet census-precheck red, then a coverage-shard red) and the first test sees
+    `judge: change-approach` in the disposition reason. Judge only at the former ceiling: the second test sees no
+    judgment for the new class. Leave the ceiling-site row without `red_class`: the third test fails.

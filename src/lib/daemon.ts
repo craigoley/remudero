@@ -16,24 +16,28 @@
 
 import type { AutoTriageDecision } from "./auto-triage.js";
 import { startPlainBackfill, type PlainBackfillDeps } from "./inbox-plain.js";
-import { startFleetLane, triageFleetLane, type FleetLaneDeps } from "./fleet-lane.js";
+import { startFleetLane, triageFleetLaneAsync, type FleetLaneDeps } from "./fleet-lane.js";
 import type { Escalation } from "./escalate.js";
 import { governorIncidentFromLedgerRow, governorTiersFromLedger, sreGovernorVerdict, SRE_GOVERNOR_STEP, type SreGovernorControls, type SreGovernorIncident, type SreGovernorVerdict } from "./sre-governor.js";
-import { sreLaneOffPath } from "./sre-lane.js";
+import { runSreLanePass, sreLaneOffPath, type SreLaneInput } from "./sre-lane.js";
 import { daemonSreGovernorEnforcer, receiptFromLedgerRow, type SreGovernorEnforcer, type SreRunbookReceipt } from "./sre-runbooks.js";
-import type { GardenerDeps } from "./gardener.js";
-import { startKnowledgeGardener, type GardenWorkspace } from "./knowledge-gardener.js";
+import { startGarden, type GardenerDeps, type PrState } from "./gardener.js";
+import { knowledgeGardenSpec, type GardenWorkspace } from "./knowledge-gardener.js";
 import { startInboxResponder, type InboxResponderDeps } from "./inbox-responder.js";
 import { startLivenessPulse } from "./liveness-pulse.js";
+
+
 import type {
   CiLearningCadenceRunResult,
+  MeasurementCadenceChildRunner,
   MeasurementCadenceDecision,
   MeasurementCadenceRunResult,
   WipeTestCadenceDecision,
   WipeTestCadenceRunResult,
 } from "./measurement-cadence.js";
 import { buildMeasurementCadenceRow } from "./measurement-cadence.js";
-import { runOpportunityIntake, productionOpportunityIntakePorts, type OpportunityIntakePorts } from "./opportunity-intake.js";
+import { runOpportunityIntake, openOpportunityIntakePorts, type OpportunityIntakePorts } from "./opportunity-intake.js";
+import { reconcileOpportunityOutcomesAsync, openOpportunityOutcomePorts, type OpportunityOutcomePorts } from "./opportunity-outcomes.js";
 import type { BoardReviewCadenceDecision, BoardReviewReport } from "./board-review.js";
 import type { DigestCadenceRunResult } from "./digest.js";
 import type { LedgerCompactionDecision, LedgerCompactionOutcome } from "./ledger-compaction-rung.js";
@@ -41,15 +45,16 @@ import type { BenchmarkCohortPassResult } from "./benchmark-cohort.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
-import { decideFreshnessRestart, FRESHNESS_DECISION_STEP, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
+import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DEPLOY_RESTART_SCORE_THRESHOLD, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, INSTALL_INPUTS_RELEASE, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import {
   nextRunnable,
   runnableCandidates,
   laneDispatchBudget,
+  wipDeferredAdmissionFields,
+  type QueueAdmissionReading,
   type MergedSet,
   type NextRunnableOpts,
-  runBranchTaskIds,
   parsePushedRunRefs,
   stillBlockedByPushedRunBranch,
   logPlanOnlyRunBranchException,
@@ -72,7 +77,7 @@ import {
   type ObservedScopeByTask,
 } from "./dispatch-overlap.js";
 import { DEPLOY_IDLE_DEFER_CEILING_MS } from "./deployer.js";
-import { evaluatePauseTier, type PauseTier, type PauseTierInput } from "./fleet-control.js";
+import { evaluatePauseTier, isRecyclePauseDetail, type PauseTier, type PauseTierInput } from "./fleet-control.js";
 import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 // Type-only, so no runtime edge is added to daemon-health.ts, which already imports a value from
@@ -101,7 +106,7 @@ import {
 } from "./sweep.js";
 // VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
-import { checkDispatchGovernors, type DispatchGovernorVerdict, type QuietHoursHoldResult } from "./dispatch-governor.js";
+import { checkDispatchGovernors, governorDeferPayload, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
 import { assertRunnable, releasedTaskIds, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { resolveReleasedIds } from "./drain.js";
 import type { StatusProjection } from "./status.js";
@@ -124,6 +129,7 @@ import type { GithubPostureFinding } from "./github-posture.js";
 import { clockFromDateFn, clockFromIsoFn, type Clock } from "../lib/clock.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
+import { createDaemonMemoryGovernor, type DaemonMemoryGovernor } from "./daemon-memory-policy.js";
 import {
   IDLE_LANE_SUMMARY_WINDOW_MS,
   accountIdleLaneMinutes,
@@ -141,10 +147,34 @@ type HarnessCommitRefusalResult = RunResult & {
   harnessCommitRefusalReason?: string;
 };
 
+/** Await the daemon's merge-rate read before handing the SRE lane its synchronous input. */
+export function startDaemonSreLane(
+  input: (mergedLastDay: number) => SreLaneInput,
+  mergedLastDay: () => Promise<number>,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): (intervalMs: number) => { stop: () => void; settled: () => Promise<void> } {
+  return (intervalMs) => {
+    let inFlight: Promise<void> | undefined;
+    const tick = () => {
+      if (inFlight) return;
+      inFlight = Promise.resolve().then(mergedLastDay)
+        .then((rate) => runSreLanePass(input(rate)))
+        .then(() => undefined)
+        .catch((error: unknown) => log("sre_lane.failed", { error: String((error as Error)?.message ?? error) }))
+        .finally(() => { inFlight = undefined; });
+    };
+    tick();
+    const timer = setInterval(tick, intervalMs);
+    timer.unref?.();
+    return { stop: () => clearInterval(timer), settled: async () => inFlight };
+  };
+}
+
 /** Reason the scheduler loop returned. Every terminal state is one of these. `headroom_exhausted` and `paused` are
  * deliberately absent: both are awaiting-states whose exit the supervisor would relaunch straight back into, so both
  * idle in process instead (W1-T197; 2026-07-22). `stale` has the opposite polarity — it is a request to exit, because
  * a supervisor restart is the only way a long-running daemon gets off the code it loaded at boot (W1-T126). */
+
 export type DaemonStopReason = "stopped" | "blocked" | "max_reached" | "error" | "stale" | "heap_pressure" | "idle_starved";
 
 /** Default idle-poll pace: check back once a minute while nothing is runnable. The literal stays
@@ -182,6 +212,86 @@ export const DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000;
  *  this interval is itself a route into a concurrent pass that the wall-clock bound does not cover,
  *  so {@link SweepLiveness} excludes the duplicate (W1-T2582). Forensics: docs/forensics/daemon.md. */
 export const DEFAULT_SWEEP_RETRIGGER_INTERVAL_MS = 20 * 60_000;
+
+/** BACKSTOP: no-history fallback (W1-T5761); measured run lengths govern later phases (W1-T7697). */
+export const DISPATCH_PHASE_REFILL_BOUND_MS = 20 * 60_000;
+
+/** Pair starts and verdicts by run id; missing, torn or non-positive measurements contribute nothing. */
+export function dispatchRunHistory(rawLines: readonly string[]): { totalMs: number; samples: number } {
+  const starts = new Map<string, number>();
+  let totalMs = 0;
+  let samples = 0;
+  for (const raw of rawLines) {
+    let row: Record<string, unknown>;
+    try { row = JSON.parse(raw); } catch (error) { /* a torn ledger row supplies no measurement */ continue; }
+    if (!row || typeof row.run_id !== "string" || typeof row.ts !== "string") continue;
+    const at = Date.parse(row.ts);
+    if (!Number.isFinite(at)) continue;
+    if (row.step === "run.start") starts.set(row.run_id, at);
+    if (row.step !== "verdict") continue;
+    const start = starts.get(row.run_id);
+    starts.delete(row.run_id);
+    if (start === undefined || at <= start) continue;
+    totalMs += at - start;
+    samples++;
+  }
+  return { totalMs, samples };
+}
+
+/** The step a pre-PR handoff writes beside its verdict, and the daemon re-writes for a receipt the live ledger
+ *  holds only as a verdict row: verdicts keep the newest 200, so a parked checkpoint aged out of resumption. */
+export const HANDOFF_RECEIPT_STEP = "run.freshness_handoff";
+
+/** A pre-PR handoff's exact pushed head is resumable; any later verdict replaces that receipt, except a failed
+ *  restore, which consumed nothing (W1-T7806). A `run.freshness_handoff` row is a receipt too (W1-T7747). */
+export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<string, { branch: string; headSha: string }> {
+  const pending = new Map<string, { branch: string; headSha: string }>();
+  for (const raw of rawLines) {
+    let row: Record<string, unknown>;
+    try { row = JSON.parse(raw); } catch (error) { /* malformed rows establish no ownership */ continue; }
+    if (!row || typeof row.task_id !== "string") continue;
+    const receipt = row.step === HANDOFF_RECEIPT_STEP ? row.waiting_on !== "pr" && row.waiting_on !== "ci"
+      : row.step === "verdict" && row.verdict === "handed_off" && row.reason === "freshness_yield" && !row.pr_url;
+    if (row.step !== "verdict" && !receipt) continue;
+    if (row.verdict === "no_pr" && row.reason === "restart_checkpoint_restore_failed") continue;
+    pending.delete(row.task_id);
+    if (receipt && typeof row.branch === "string" && row.branch.startsWith(`run-${row.task_id}-`) &&
+        /^run-.+-[0-9]+$/.test(row.branch) && typeof row.head_sha === "string" && /^[a-f0-9]{40}$/.test(row.head_sha)) {
+      pending.set(row.task_id, { branch: row.branch, headSha: row.head_sha });
+    }
+  }
+  return pending;
+}
+
+/** The pending receipts whose only live record is a verdict row — what the daemon re-writes at boot. */
+export function handoffReceiptsToCarry(rawLines: readonly string[]): Array<[string, { branch: string; headSha: string }]> {
+  const recorded = new Set<string>();
+  for (const raw of rawLines) {
+    if (!raw.includes(HANDOFF_RECEIPT_STEP)) continue;
+    try {
+      const row = JSON.parse(raw) as Record<string, unknown>;
+      if (row?.step === HANDOFF_RECEIPT_STEP) recorded.add(`${String(row.task_id)}|${String(row.branch)}|${String(row.head_sha)}`);
+    } catch (error) { /* a torn row records nothing */ continue; }
+  }
+  return [...pendingWorkerBoundaryHandoffs(rawLines)].filter(([taskId, r]) => !recorded.has(`${taskId}|${r.branch}|${r.headSha}`));
+}
+
+/** A decided restart waits for every in-flight lane, silently: 2026-10-10 it waited 60+ min with no row. Name the
+ *  wait at once, then at doubling intervals (1, 2, 4, 8… polls), so a long wait stays visible without a row a poll. */
+function freshnessRestartWaitReportDue(waitedMs: number, reported: number, pollIntervalMs: number): boolean {
+  return reported === 0 || waitedMs >= pollIntervalMs * 2 ** reported;
+}
+
+/** W1-T5720 — BACKSTOP: the longest tick 1's cadences and the garden fan-out wait, from boot, for the
+ *  first full pass. That pass's own 559 s bound normally opens the gate first, so this fires never. */
+export const BOOT_CADENCE_GATE_BOUND_MS = 10 * 60_000;
+
+/** W1-T5720: the tick-1 rungs the boot gate holds, by their deps key, each ledgered when deferred. */
+const BOOT_GATED_CADENCES = [
+  "sweepOrphans", "sweepFeedbackLanding", "checkGithubPosture", "checkMeasurementCadence", "checkDigestCadence",
+  "checkLedgerCompaction", "checkBenchmarkCohort", "checkCiLearningCadence", "checkBoardReview", "checkIntakeRungs",
+  "checkRetroTrigger", "checkWipeTestCadence", "checkAutoTriage",
+] as const satisfies ReadonlyArray<keyof DaemonDeps>;
 
 /** The exit code a freshness self-restart uses, distinct from a crash's 1 (W1-T490). 75 is
  *  `EX_TEMPFAIL` from sysexits(3), which is what a stale stop is: nothing is wrong, the process
@@ -437,6 +547,42 @@ export function priorStaleReviewerRecurrenceState(rawLedgerLines: readonly strin
     }
   }
   return requestedForSha === undefined ? undefined : { codeSha: requestedForSha, streak: 1, restartRequested: true };
+}
+
+/** W1-T5476 — the terminal verdicts `postReviewStatusGuarded` withheld for stale reviewer code at or after
+ *  `sinceMs`, read through `DaemonDeps.readLedgerLines`: review subprocesses write the refusals, so the ledger
+ *  is the only place this process sees them. A torn line is counted, and a failed read is its own outcome.
+ *  W1-T5530 DECISION: a refusal whose freshness is "unreadable" is counted apart and adds NO restart pressure.
+ *  All 12 distinct ones in the live ledger (09-20..09-30) were `git fetch origin failed`: ref-lock races on the
+ *  shared .git, or a reflog it could not append to. A restart fixes neither, so `unreadable` stays off the bound. */
+export function withheldReviewsSince(
+  readLedgerLines: () => readonly string[],
+  sinceMs: number,
+): { kind: "counted"; withheld: number; unreadable: number; unparseable: number } | { kind: "unreadable"; error: string } {
+  let rawLedgerLines: readonly string[];
+  try {
+    rawLedgerLines = readLedgerLines();
+  } catch (error) {
+    return { kind: "unreadable", error: String((error as Error)?.message ?? error) };
+  }
+  let withheld = 0;
+  let unreadable = 0;
+  let unparseable = 0;
+  for (const raw of rawLedgerLines) {
+    if (!raw.includes('"review.post_refused"')) continue;
+    let row: Record<string, unknown>;
+    try {
+      row = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      // A torn refusal line is counted, so the decision row names it instead of reading it as none.
+      unparseable++;
+      continue;
+    }
+    if (row.step !== "review.post_refused" || !(typeof row.ts === "string" && Date.parse(row.ts) >= sinceMs)) continue;
+    if (row.reviewer_code_freshness === "stale") withheld++;
+    else if (row.reviewer_code_freshness === "unreadable") unreadable++;
+  }
+  return { kind: "counted", withheld, unreadable, unparseable };
 }
 
 /** W1-T5344 — the first park after one task's delivery failure. Policy (design): long enough that
@@ -713,6 +859,8 @@ export interface DaemonOpts {
    *  Distinct from the bound above, which limits how long any one pass may run; this limits how
    *  often a new one may start. Never consulted by the once-per-iteration call (W1-T1272). */
   sweepRetriggerIntervalMs?: number;
+  /** W1-T5720: the boot gate's bound in real ms (default {@link BOOT_CADENCE_GATE_BOUND_MS}). */
+  bootCadenceGateBoundMs?: number;
 }
 
 /** A non-stale freshness verdict must name the decision arm that produced it. `unassessed` deliberately retains the
@@ -721,7 +869,8 @@ export interface DaemonOpts {
  * supplies it (W1-T3756). */
 export type DaemonFreshnessNotStale =
   | { arm: "unassessed"; serviceStatus: "guarded" | "degraded"; detail?: string }
-  | { arm: "dirty"; oldSha?: string; newSha?: string }
+  | { arm: "dirty"; oldSha?: string; newSha?: string; behind?: boolean; dirty_paths?: readonly string[];
+      changes?: readonly DeployWorthChange[] }
   | { arm: "up_to_date" }
   | { arm: "immaterial"; oldSha: string; newSha: string };
 
@@ -731,7 +880,43 @@ export type DaemonFreshnessNotStale =
  * dependency tree never survives into the relaunched process (W1-T151). */
 export type DaemonFreshness =
   | { stale: false; notStale?: DaemonFreshnessNotStale }
-  | { stale: true; oldSha: string; newSha: string; installNeeded?: boolean; changes?: readonly DeployWorthChange[] };
+  | { stale: true; oldSha: string; newSha: string; installNeeded?: boolean; changes?: readonly DeployWorthChange[];
+      /** The tree was behind before this reading could say so (a live edit held it, live-edit-ladder.ts). */
+      staleSinceMs?: number };
+
+/** W1-T5282 — the real wiring's reading is awaited, its `git fetch` off the loop; a sync reading stays sync. */
+/** W1-T5723: start, adopt, restart or discard the cadence child; only its settle is detached. */
+function startMeasurementCadenceChild(
+  runner: MeasurementCadenceChildRunner,
+  fire: boolean,
+  reason: string | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): void {
+  let outcome: ReturnType<MeasurementCadenceChildRunner["start"]>;
+  try {
+    outcome = runner.start({ fire });
+  } catch (e) {
+    log("measurement_cadence.run_failed", { error: String((e as Error)?.message ?? e), flow: "child" });
+    return;
+  }
+  if (outcome.kind === "none") return;
+  log("measurement_cadence.child", {
+    outcome: outcome.kind, run_id: outcome.runId, pid: outcome.pid, attempt: outcome.attempt, reason,
+    previous_run_id: outcome.previous?.runId, previous_pid: outcome.previous?.pid,
+    previous_rule: outcome.previous?.rule, previous_detail: outcome.previous?.detail,
+  });
+  if (!outcome.settled) return;
+  detachSweepAction(
+    outcome.settled
+      .then((result) => log("measurement_cadence.ran", buildMeasurementCadenceRow(result)))
+      .catch((e) => log("measurement_cadence.run_failed", { error: String((e as Error)?.message ?? e), run_id: outcome.runId })),
+    { actionKind: "measurement-cadence", taskId: "DAEMON" },
+  );
+}
+
+function isPendingFreshness(read: DaemonFreshness | Promise<DaemonFreshness> | undefined): read is Promise<DaemonFreshness> {
+  return read instanceof Promise;
+}
 
 /** W1-T3618 — a sweep pass's OWN report of a freshness discovery {@link DaemonDeps.checkFreshness}
  *  cannot see: reviewer-code freshness is read inside the sweep's review path, once per pass and
@@ -829,6 +1014,7 @@ export type ReviewAdmissionGate = (() => boolean) & {
 };
 
 export interface DaemonDeps {
+  repositoryMaintenance?: (context: { activeLanes: number; disk: "healthy" | "low" | "unknown"; queueBusy: boolean }) => Promise<void>;
   /** Only a supervised dedicated daemon may exit into the shell's 30-minute zero-token probe. */
   idleStarvedSupervised?: boolean;
   /** Complete, readable target-repo PR board count; undefined or throw means unknown, never empty. */
@@ -845,6 +1031,15 @@ export interface DaemonDeps {
   reloadPlan?: () => Plan | null;
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
   refreshMerged: (plan?: Plan) => MergedSet;
+  refreshMergedAsync?: (plan?: Plan) => Promise<MergedSet>;
+  readLoopTelemetry?: (() => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number;
+    sync_spawn_top?: unknown[] }) & { peek?: () => unknown };
+  /** W1-T6782: flat, payload-free memory fields (`sampleDaemonMemory`, daemon-memory-telemetry.ts)
+   *  spread into the existing `daemon.alive` row. A throw is carried as `mem_telemetry`, never lost.
+   *  W1-T7092: `afterRow` starts the worker-thread heap read once the row is written; the tick never
+   *  awaits it, and the NEXT row's fields carry what it found. */
+  readMemoryTelemetry?: (() => Record<string, unknown>) & { afterRow?: () => void };
+  lastStepBeforeBlock?: () => string | undefined;
   /** Rebind daemon-owned sweep/projection closures when the live plan reloads. */
   onPlanReload?: (plan: Plan) => void;
   /** The in-flight guard: the open PR number for a task, re-derived from the same projection `refreshMerged` just
@@ -871,10 +1066,10 @@ export interface DaemonDeps {
    *  number of times with no new owned PR since. Re-derived from the ledger each call, so it persists
    *  across restarts, unlike this loop's in-memory flip below (P29(ii)). */
   isCircuitTripped?: (taskId: string) => boolean;
-  /** Raw pushed-run-branch listing, read once per tick and parsed by `runBranchTaskIds`. Injected
-   *  for the same reason it is on `DrainDeps`: this module reads its world through deps, and the
-   *  raw-output shape makes one sweep per tick the only form that type checks (W1-T916). */
-  readPushedRunBranches?: () => string;
+  /** Raw pushed-run-branch listing, read at the tick's start and again by each lane refill (W1-T5805),
+   *  parsed by `runBranchTaskIds`. Injected for the same reason it is on `DrainDeps`: this module reads
+   *  its world through deps (W1-T916). A promised read is awaited; a throw or rejection is ledgered. */
+  readPushedRunBranches?: () => string | Promise<string>;
   /** Same contract as `DrainDeps.readOrphanRunBranchEvidence`: read once per tick, absent releases nothing. */
   readOrphanRunBranchEvidence?: () => OrphanRunBranchEvidence | undefined;
   /** The same {@link ObservedScopeByTask} `DrainDeps.observedByTask` takes, threaded to both the
@@ -917,6 +1112,10 @@ export interface DaemonDeps {
    *  `/proc/meminfo` reading per call. Consulted only through `checkDispatchGovernors`, so it holds
    *  NEW dispatch per lane and a throw fails OPEN there. Never consulted from the sweep. Optional. */
   checkMemoryGovernor?: () => MemoryGovernorResult | undefined;
+  /** W1-T7720: the streak tracker the unreadable memory probe / reservation store report to, and the
+   *  store read itself. Both are consulted only through `checkDispatchGovernors`. Optional. */
+  memoryReadTracker?: MemoryReadTracker;
+  readMemoryStoreFailure?: () => string | undefined;
   /** Quiet-hours preference: a defined return defers NEW dispatch only. Routed through the dispatch
    *  governor, never through `checkPause`, so sweep/drainage paths keep running and an unreadable
    *  read fails open in `checkDispatchGovernors` (W1-T2655). */
@@ -926,6 +1125,11 @@ export interface DaemonDeps {
   isIndeterminate?: (taskId: string) => boolean;
   /** True when status.ts derives a durable independent-failure block from the ledger. */
   isIndependentFailureBlocked?: NextRunnableOpts["isIndependentFailureBlocked"];
+  categorizedRefusalRejoinFor?: (taskId: string) => {
+    sourceRunId: string; refusedContractRevision: string; contractRevision: string; receiptRecorded: boolean;
+  } | undefined;
+  /** W1-T6358: renews the breaker gate's ledger snapshot; forwarded into tick selection and every lane refill. */
+  beginSelectionPass?: NextRunnableOpts["beginSelectionPass"];
   /** W1-T3959: bounded durable terminal-refusal records, read once per selection pass by the
    * composition root. Missing/unreadable state returns an empty map and therefore fails open. */
   readTerminalPreDispatchRefusalRevisions?: () => ReadonlyMap<string, string>;
@@ -937,6 +1141,9 @@ export interface DaemonDeps {
    *  builds for `checkQueueGovernor`, never a second read path. Consulted only at two or more lanes.
    *  Optional — omitted, a wide batch is bounded by `laneCount` alone (W1-T343). */
   openPrCount?: () => number;
+  /** The reading behind `checkQueueGovernor`'s most recent ADMISSION; present, it sizes the lane budget
+   *  in place of `wipLimit`/`openPrCount` — see `LaneBudgetInput.queueAdmission` (drain.ts). */
+  readQueueAdmission?: () => QueueAdmissionReading | undefined;
   /** Read current /usage; `undefined` ⇒ unavailable (headroom check is skipped). */
   /** May return a promise. Widened rather than made async, so every existing synchronous supplier —
    *  the CLI probe and all 60 test fakes — keeps working byte for byte. The contract-supported SDK
@@ -994,6 +1201,9 @@ export interface DaemonDeps {
    *  a tree held by uncommitted work. Same zero-arg, best-effort contract as the sweep above.
    *  Optional — omitted, this tick performs no artifact sweep. */
   sweepReclaimableArtifacts?: () => void;
+  /** W1-T7093: update this instance's shared host-memory reservation tree on every heartbeat.
+   *  Bookkeeping only; a failure is logged and never delays or gates work. */
+  sweepHostMemoryReservations?: () => void;
   /** Called on an idle tick whose census names at least one recoverable-class blocker — see
    *  {@link StarvationCensus}. Fires at most once per episode, and dispatch is already idle by then, so
    *  the hook is a pure notification. The real command wires an escalation with its own cross-boot
@@ -1018,6 +1228,9 @@ export interface DaemonDeps {
   /** W1-T3335 — V8 heap accounting, injectable so the pressure arm is testable without allocating
    *  gigabytes. Defaults to {@link v8HeapStatistics}. */
   heapStatistics?: () => { used_heap_size: number; heap_size_limit: number };
+  /** The memory governor (daemon-memory-policy.ts): RSS plus swap as a share of the container's budget,
+   *  read once per tick. Defaults to one on the default policy and the real /proc and cgroup readings. */
+  memoryGovernor?: DaemonMemoryGovernor;
   /** Fleet control: a defined return means a graceful PAUSE, a drain-and-hold. Checked between
    *  iterations only, after the current dispatch has resolved, so in-flight work always runs to full
    *  completion before a pause is honoured (W1-T11). */
@@ -1029,8 +1242,9 @@ export interface DaemonDeps {
   onPauseNeedsHuman?: (info: { holdId: string; owner: PauseHoldOwner; expiresAt: string | null }) => void | Promise<void>;
   workerAdmissionHold?: () => FleetControlHold | undefined;
   /** Reads freshness between iterations and on the dispatch ticker's cadence. A restart-worthy advance
-   *  closes admission; admitted lanes settle before the existing drain and stale exit (W1-T5308). */
-  checkFreshness?: () => DaemonFreshness;
+   *  closes admission; admitted lanes settle before the existing drain and stale exit (W1-T5308). A
+   *  promise is awaited at the tick's own boundaries; a lane's sync refill reads the latest settled one (W1-T5282). */
+  checkFreshness?: () => DaemonFreshness | Promise<DaemonFreshness>;
   /** Consulted only when freshness reports an install is needed. Runs before the loop stops for
    *  restart, never after, so the relaunched process inherits a dependency tree matching `newSha`.
    *  This module stays pure; the real command wires the install (W1-T151). */
@@ -1054,7 +1268,7 @@ export interface DaemonDeps {
    *  on its own timer beside the main loop. Absent in tests that do not exercise it. */
   plainBackfill?: PlainBackfillDeps;
   /** W1-T4089: files and folds the fleet's own findings, on its own timer beside the main loop. */
-  fleetLane?: FleetLaneDeps;
+  fleetLane?: FleetLaneDeps<number | Promise<number>>;
   /** W1-T4390: the SRE governor's second enforcer, evaluated every tick over the SRE instance's
    *  ledger ({@link stepSreGovernor}). Absent, it reads `fleetLane`'s state root — TRAP: the
    *  registry (W1-T4227) names no instance `state_dir` yet, and the SRE lane runs on this daemon's
@@ -1062,7 +1276,7 @@ export interface DaemonDeps {
   sreGovernor?: SreGovernorEnforcer;
   /** W1-T4095: the knowledge gardener — scores, prunes and consolidates the knowledge base on its own
    *  timer beside the main loop, and lands its changes as one reviewed PR per pass. */
-  knowledgeGardener?: GardenerDeps<GardenWorkspace>;
+  knowledgeGardener?: GardenerDeps<GardenWorkspace, PrState | Promise<PrState>>;
   /** W1-T4110/W1-T4941: registered gardens, including the backlog gardener, start off the loop
    * through `rmd garden run <name>` on independent timers. */
   gardens?: ReadonlyArray<(intervalMs: number) => { stop: () => void }>;
@@ -1120,6 +1334,9 @@ export interface DaemonDeps {
    *  itself. The write path is default-off: the default cadence runs every verb report-only, and
    *  never files a task or mints an id (Law 5). Best-effort (W1-T1259). */
   runMeasurementCadence?: () => Promise<MeasurementCadenceRunResult>;
+  /** W1-T5723: when present the cadence runs as a child process instead of `runMeasurementCadence`,
+   *  and a boot adopts a live child rather than starting another. */
+  measurementCadenceChild?: MeasurementCadenceChildRunner;
   /** The digest's own cadence rung. Its own policy row on its own marker file, separate from the measurement row so
    * the two can never drag each other, while reusing the same pure decision function. Optional (W1-T2277). */
   checkDigestCadence?: () => MeasurementCadenceDecision;
@@ -1140,6 +1357,7 @@ export interface DaemonDeps {
    *  perspective; run-task.ts owns markers, policy, GitHub, filesystem and worker effects. */
   checkIntakeRungs?: () => readonly IntakeRungDecision[];
   opportunityIntake?: OpportunityIntakePorts;
+  opportunityOutcomes?: OpportunityOutcomePorts;
   /** Run one enabled intake rung selected by {@link checkIntakeRungs}. */
   runIntakeRung?: (decision: Extract<IntakeRungDecision, { fire: true }>) => Promise<IntakeRungRunResult> | IntakeRungRunResult;
   /** The board-review rung, wired. Its unit is the whole open board rather than one PR, and it has its own policy row
@@ -1147,6 +1365,9 @@ export interface DaemonDeps {
    * #2952 merged 385 tested lines and the rung never fired once, because nothing called it. It also carries retired
    * proposal ids, reconciled on every call (W1-T2304, W1-T2464). */
   checkBoardReview?: () => BoardReviewCadenceDecision & { retiredProposalIds?: string[] };
+  /** W1-T5481: awaited before {@link checkBoardReview}, so the open-board read it decides over is
+   *  done off the loop. MEASURED 2026-10-03: that read, synchronous, held the loop 30-98 s per tick. */
+  prefetchBoardReview?: () => Promise<void>;
   /** Runs one board-review tick. Read-only by construction: it writes one report artifact and drafts
    *  registry proposals, and nothing else — it does not push, merge, mint or file, and Rule 15
    *  stands. Best-effort, and a fired review never gates dispatch or changes a verdict. */
@@ -1172,7 +1393,7 @@ export interface DaemonDeps {
   /** Evaluate the retro cadence trigger this tick. Fires on merges-since-marker or days-since-marker, whichever
    * crosses first (policy data). An undefined return means there is nothing safe to evaluate — a corrupt marker, a
    * degraded read — and the loop only acts on an explicit fire. Optional (W1-T160). */
-  checkRetroTrigger?: () => RetroTriggerDecision | undefined;
+  checkRetroTrigger?: () => RetroTriggerDecision | undefined | Promise<RetroTriggerDecision | undefined>;
   /** Run the automated retro once the trigger fires. The real wiring threads the fired decision's
    *  merge count into the retro command, so the integrity gate can compare it against the real
    *  gather's credited count and abort loudly on a mismatch. Best-effort (W1-T160). */
@@ -1184,7 +1405,7 @@ export interface DaemonDeps {
     deferralPending: boolean;
     dispatchCount: number;
     laneBudget: number;
-  }) => AutoTriageDecision;
+  }) => AutoTriageDecision | Promise<AutoTriageDecision>;
   /** impl-DJ: run ONE triage for the decided entry. Awaited under the light-sweep ticker. */
   runAutoTriage?: (feedbackId: string) => Promise<void>;
   /** The auto-triage rung's own in-flight guard, symmetric with `isOpenPr` but keyed on feedback id. Why: a feedback
@@ -1195,6 +1416,8 @@ export interface DaemonDeps {
    *  `readLiveState`'s contract, so a merged-or-closed-but-cached PR can never park a feedback entry
    *  forever. An unreadable result fails open, same as the task lane (W1-T300). */
   readFeedbackLiveState?: (feedbackId: string, prNumber: number) => string | undefined;
+  /** The entry's `status:` on origin/main, read only once its triage PR reads MERGED; `undefined` fails open (#10265). */
+  readFeedbackStatusOnMain?: (feedbackId: string) => string | undefined;
   /** The restricted light-sweep ticker. Dispatch is unbounded and the full reconciler only runs between
    *  iterations, so a PR that went green-but-review-absent sat invisible for the dispatch's whole
    *  remaining duration — #707 swept at 13:12 and never swept the new head again (W1-T254). Trap: the
@@ -1202,6 +1425,11 @@ export interface DaemonDeps {
    *  lane must stay single-threaded and never runs from here. Forensics: docs/forensics/daemon.md.
    *  W1-T4053: only a freshness drain passes a {@link LightPassScope}; every other caller passes nothing. */
   sweepLight?: (scope?: LightPassScope) => Promise<void> | void;
+  /** W1-T7734 — eligible review demand the last passes left waiting, and the light-pass interval derived
+   *  from observed review duration and head churn. Memory only, never a ledger read. `undefined` or
+   *  `eligible <= 0` is no demand: the idle branch sleeps as it always has. A `cadenceMs` that is
+   *  `undefined` (nothing observed yet) leaves the idle sleep a single poll interval. */
+  readIdleReviewDemand?: () => { eligible: number; cadenceMs?: number; medianReviewMs?: number; pushesPerPrHour?: number } | undefined;
   /** Called exactly once, when a block classifies as a genuine blocker — one or more tasks
    *  transitively depend on the blocked task. The real command escalates naming the dependents.
    *  Optional: omitted, a genuine blocker still halts the loop, it just opens no issue (W1-T46). */
@@ -1275,6 +1503,72 @@ function transientGhDispatchFailure(err: unknown): { detail: string } | undefine
  * too. Matching the two named endpoints keeps a WRITE failure (create, merge, comment) on today's
  * fatal path unchanged, per design (iii).
  */
+/** W1-T5805: the run-branch facts one selection pass decides on. The tick's start reads them and so does
+ *  each lane refill: a branch pushed mid-phase (#9210, 02:16Z) was invisible to a refill at 02:43Z. */
+interface RunBranchState {
+  ids: ReadonlySet<string> | undefined;
+  refs: readonly PushedRunRef[];
+  orphanEvidence: OrphanRunBranchEvidence | undefined;
+}
+
+/** The epoch-ms suffix of a `run-<id>-<epochMs>` branch; NaN (never older) when it has none. */
+function runBranchEpoch(branch: string): number {
+  const match = /-([0-9]+)$/.exec(branch);
+  return match ? Number(match[1]) : Number.NaN;
+}
+
+function runBranchStateFrom(raw: string | undefined, orphanEvidence: OrphanRunBranchEvidence | undefined,
+  resumable: ReadonlyMap<string, { branch: string; headSha: string }> = new Map()): RunBranchState {
+  if (raw === undefined) return { ids: undefined, refs: [], orphanEvidence };
+  const refs = parsePushedRunRefs(raw).filter((ref) => {
+    const checkpoint = resumable.get(ref.taskId);
+    if (checkpoint === undefined) return true;
+    if (checkpoint.branch === ref.ref) return checkpoint.headSha !== ref.sha;
+    // W1-T7837: a run started after this branch was pushed, so the branch was restored or released then; the
+    // newer checkpoint carries the work. Left blocking, it held a resumable task as run-branch-already-pushed.
+    return !(runBranchEpoch(ref.ref) < runBranchEpoch(checkpoint.branch));
+  });
+  return { ids: new Set(refs.map((ref) => ref.taskId)), refs, orphanEvidence };
+}
+
+/** Calls the reader, awaiting only a promised read, so a sync reader keeps a refill synchronous. */
+function readRunBranchListing(
+  read: (() => string | Promise<string>) | undefined,
+  onFailure: (error: unknown) => string | undefined,
+): string | undefined | Promise<string | undefined> {
+  let raw: string | Promise<string> | undefined;
+  try {
+    raw = read?.();
+  } catch (error) {
+    return onFailure(error); // the caller's `onFailure` ledgers the failure and names the fallback
+  }
+  return raw instanceof Promise ? raw.catch((error: unknown) => /* ledgered, as above */ onFailure(error)) : raw;
+}
+
+/** The two options a pass's run-branch read decides; none when no reader was wired. */
+function runBranchDispatchOpts(
+  { ids, refs, orphanEvidence }: RunBranchState,
+  receipts: readonly PlanOnlyRunBranchReceipt[],
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Pick<NextRunnableOpts, "hasPushedRunBranch" | "onSkipRunBranch"> {
+  if (!ids) return {};
+  return {
+    // W1-T4002: `stillBlockedByPushedRunBranch` is the SAME predicate drain.ts's own
+    // selection loops apply — see that function's doc. Before returning, name every
+    // OTHERWISE-blocking ref this pass's receipts released, so the collision an operator
+    // sees is explicit rather than a silent non-block.
+    hasPushedRunBranch: (id: string) => {
+      const refsForTask = refs.filter((r) => r.taskId === id);
+      const stillBlocked = stillBlockedByPushedRunBranch(id, ids, undefined, refs, receipts, orphanEvidence);
+      if (!stillBlocked && refsForTask.length > 0) logPlanOnlyRunBranchException(log, id, refsForTask, receipts, orphanEvidence);
+      return stillBlocked;
+    },
+    // Rides the existing skip row with its own reason: no new step, and deliberately not the stood-down
+    // row, which has three emitters and no reader.
+    onSkipRunBranch: (t: Task) => log("dispatch.skipped", { task: t.id, reason: "run-branch-already-pushed" }),
+  };
+}
+
 /** W1-T5083: a rejection the settle loop treats as lane-local (it logs and the pass continues). */
 function refillLaneLocalRejection(err: unknown): boolean {
   if (transientGhDispatchFailure(err) !== undefined || isSpawnInfraBlocked(err)) return false;
@@ -1313,6 +1607,65 @@ interface InterphaseReviewClock {
    * consumed an event edge that the ordinary full-sweep gate still needs to reconcile, and how
    * many passes it admitted. */
   stop(): Promise<{ eventWakeSeen: boolean; passes: number }>;
+  /** W1-T5803: an event wake the caller's own sleep consumed, handed on so this clock passes for it. */
+  handWake(): void;
+  /** Passes admitted so far, read without stopping the clock. */
+  passCount(): number;
+}
+
+/** The memory half of `daemon.alive` (W1-T6782). A throwing sampler must never cost the heartbeat
+ *  the watchdog and doctor read, so its error rides the row instead of escaping the tick. */
+function readMemoryTelemetrySafely(deps: Pick<DaemonDeps, "readMemoryTelemetry">): Record<string, unknown> {
+  if (!deps.readMemoryTelemetry) return {};
+  try {
+    return deps.readMemoryTelemetry();
+  } catch (e) {
+    return { mem_telemetry: `error:${String((e as Error)?.message ?? e).slice(0, 160)}` };
+  }
+}
+
+/** W1-T7126: when each sampler last rode a row, keyed by the sampler itself, so the main loop's
+ *  `daemon.tick` and every in-flight ticker's `daemon.alive` share one reading with no new parameter. */
+const memorySampledAtMs = new WeakMap<object, number>();
+
+/** W1-T7126: the `daemon.alive` memory sample, stamped so a tick within one poll interval defers to it. */
+function aliveMemorySample(deps: Pick<DaemonDeps, "readMemoryTelemetry">, nowMs: number): Record<string, unknown> {
+  if (!deps.readMemoryTelemetry) return {};
+  memorySampledAtMs.set(deps.readMemoryTelemetry, nowMs);
+  return { ...readMemoryTelemetrySafely(deps), mem_sample_via: "alive" };
+}
+
+/** W1-T7126: an idle daemon writes `daemon.tick` and never `daemon.alive`, so the tick carries the same
+ *  sample, but only when no row has carried one within `pollIntervalMs`. The reference starts at boot, so
+ *  a dispatch's first heartbeat stays the first row to start the thread heap read (W1-T7092). Nothing
+ *  here sleeps, schedules or wakes: a loop that does not iterate leaves a visible gap. */
+function tickMemorySample(
+  deps: Pick<DaemonDeps, "readMemoryTelemetry">, nowMs: number, pollIntervalMs: number, taken: { sampled: boolean },
+): Record<string, unknown> {
+  taken.sampled = false;
+  if (!deps.readMemoryTelemetry) return {};
+  const lastMs = memorySampledAtMs.get(deps.readMemoryTelemetry);
+  if (lastMs === undefined) {
+    memorySampledAtMs.set(deps.readMemoryTelemetry, nowMs);
+    return {};
+  }
+  if (nowMs - lastMs < pollIntervalMs) return {};
+  memorySampledAtMs.set(deps.readMemoryTelemetry, nowMs);
+  taken.sampled = true;
+  return { ...readMemoryTelemetrySafely(deps), mem_sample_via: "tick" };
+}
+
+/** W1-T7092: start the thread heap read only AFTER `daemon.alive` is written, never awaited. */
+function startMemoryReadAfterRow(deps: Pick<DaemonDeps, "readMemoryTelemetry">, log: (step: string, extra?: Record<string, unknown>) => void): void {
+  try {
+    deps.readMemoryTelemetry?.afterRow?.();
+  } catch (e) {
+    log("daemon.memory_read_failed", { error: String((e as Error)?.message ?? e).slice(0, 160) });
+  }
+}
+
+function peekSyncSpawnTop(deps: Pick<DaemonDeps, "readLoopTelemetry">): unknown {
+  try { return deps.readLoopTelemetry?.peek?.(); } catch { return undefined; /* Reason: observability only. */ }
 }
 
 /**
@@ -1336,7 +1689,9 @@ interface InterphaseReviewClock {
  * Swallows everything: observability must never be able to take down the loop it observes.
  */
 export function reportLoopLag(
-  sample: { phase: string; dueAtMs: number; observedAtMs: number; intervalMs: number },
+  sample: { phase: string; dueAtMs: number; observedAtMs: number; intervalMs: number; lastStepBeforeBlock?: string;
+    /** W1-T5718: the longest synchronous spawn of the window this lag closes, read without closing it. */
+    syncSpawnTop?: unknown },
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): void {
   try {
@@ -1347,6 +1702,8 @@ export function reportLoopLag(
       lag_ms: Math.round(lagMs),
       interval_ms: sample.intervalMs,
       missed_ticks: Math.floor(lagMs / sample.intervalMs),
+      last_step_before_block: sample.lastStepBeforeBlock,
+      ...(sample.syncSpawnTop === undefined ? {} : { sync_spawn_top: sample.syncSpawnTop }),
     });
   } catch {
     // Reason: a throwing logger must cost the reading, never the tick.
@@ -1395,7 +1752,8 @@ export function startInterphaseReviewClock(
           const clockDueAtMs = interphaseClock.now() + quantumMs;
           const result = await wait(quantumMs);
           reportLoopLag(
-            { phase, dueAtMs: clockDueAtMs, observedAtMs: interphaseClock.now(), intervalMs: quantumMs },
+            { phase, dueAtMs: clockDueAtMs, observedAtMs: interphaseClock.now(), intervalMs: quantumMs,
+              lastStepBeforeBlock: deps.lastStepBeforeBlock?.(), syncSpawnTop: peekSyncSpawnTop(deps) },
             log,
           );
           if (result === "wake") {
@@ -1419,7 +1777,7 @@ export function startInterphaseReviewClock(
           const halt = deps.checkStop?.() ?? (scope === "pause" ? undefined : deps.checkPause?.());
           if (halt) continue;
 
-          const reviewOnly = scope !== undefined || activePasses.size > 0;
+          const reviewOnly = scope !== undefined || activePasses.size > 0 || inFlightReviewCount() > 0;
           const trigger = eventWakePending ? "github-event" : "interval";
           eventWakePending = false;
           elapsedMs = 0;
@@ -1447,6 +1805,11 @@ export function startInterphaseReviewClock(
       if (activePasses.size > 0) await Promise.all(activePasses);
       return { eventWakeSeen, passes };
     },
+    handWake: () => {
+      eventWakeSeen = true;
+      eventWakePending = true;
+    },
+    passCount: () => passes,
   };
 }
 
@@ -1635,7 +1998,7 @@ interface InFlightTickerOwner {
   headroomSampler?: { lastSampleMs: number; clock: Clock; policy: HeadroomPolicy; enforced: boolean };
   /** Read per tick, so a dispatch taking over a background sweep's runner also takes its retrigger (W1-T4998). */
   sweepRetrigger?: SweepRetrigger;
-  onTick?: () => void;
+  onTick?: () => void | Promise<void>;
   /** W1-T4998: a background sweep still holding the runner a dispatch took over. Whichever of the two
    *  stops first leaves it to the other, so a pass that outlives the dispatch keeps its heartbeat. */
   sweepHold?: Pick<InFlightTickerOwner, "generation" | "headroomSampler" | "sweepRetrigger">;
@@ -1760,15 +2123,21 @@ function startInFlightTicker(
           // clock, so an event arriving then remains pending for one later accepted pass (W1-T2568).
           const tickDueAtMs = daemonClock.now() + pollIntervalMs;
           const waitResult = await (owner.sweepRetrigger ? (deps.sleepUntilSweepWake ?? deps.sleep) : deps.sleep)(pollIntervalMs);
+          const lastStepBeforeBlock = deps.lastStepBeforeBlock?.();
           reportLoopLag(
-            { phase: owner.phase, dueAtMs: tickDueAtMs, observedAtMs: daemonClock.now(), intervalMs: pollIntervalMs },
+            { phase: owner.phase, dueAtMs: tickDueAtMs, observedAtMs: daemonClock.now(), intervalMs: pollIntervalMs, lastStepBeforeBlock,
+              syncSpawnTop: peekSyncSpawnTop(deps) },
             log,
           );
           if (waitResult === "wake") eventWakePending = true;
           if (!owner.active) break;
           if (owner.onTick) await new Promise<void>((resolve) => setImmediate(resolve));
           if (!owner.active) break;
-          owner.onTick?.();
+          const ticked = owner.onTick?.();
+          if (ticked) {
+            await ticked;
+            if (!owner.active) break;
+          }
           // The acknowledgement gap (W1-T1065 part iv). The pause row is written only inside the branch that acts
           // on a hold, so a hold created mid-drain was invisible: no row distinguished "seen, draining to
           // completion" from "not seen at all", and the operator escalated to a container stop. A re-check here
@@ -1780,6 +2149,8 @@ function startInFlightTicker(
           const diskHeadroom = deps.readDiskHeadroom?.();
           if (diskHeadroom?.verdict === "OK") diskHeadroomLatch.escalated = false;
           log("daemon.alive", {
+            ...deps.readLoopTelemetry?.(),
+            ...aliveMemorySample(deps, daemonClock.now()),
             phase: owner.phase,
             poll_interval_ms: pollIntervalMs,
             // W1-T2744: bounded cardinality on the existing heartbeat, never a promise-poll row.
@@ -1788,6 +2159,17 @@ function startInFlightTicker(
             ...(holdSeen !== undefined ? { pause_seen: holdSeen } : {}),
             ...(diskHeadroom?.freeBytes !== undefined ? { disk_free_bytes: diskHeadroom.freeBytes } : {}),
           });
+          startMemoryReadAfterRow(deps, log);
+          // W1-T7093: the reservation tree must be refreshed by the real recurring heartbeat,
+          // not merely by worker start/release calls. Best-effort, after the liveness row so a
+          // slow or failed ledger walk cannot erase this tick's heartbeat.
+          if (deps.sweepHostMemoryReservations) {
+            try {
+              deps.sweepHostMemoryReservations();
+            } catch (e) {
+              log("daemon.host_memory_reservation_sweep.error", { error: String((e as Error)?.message ?? e) });
+            }
+          }
           // W1-T3378: a `review-PR*` worktree a SIGKILL stranded is never revisited by anything
           // in-process (materializeReviewWorktree/withMaterializedWorktree's teardown are both
           // `finally`-only), so this out-of-process sweep is what actually reclaims it. Best-
@@ -1888,7 +2270,7 @@ function startInFlightTicker(
           }
           // W1-T4191: the light pass can admit fix and review workers, so an operator PAUSE withholds the
           // ORDINARY pass while the batch drains. Withheld, never aborted: work already in flight finishes.
-          // STOP is read only under PAUSE: it ends the daemon on its own, and fixtures bound this loop with it.
+          // The main loop owns STOP; this clock must keep serving an already admitted retro until it settles.
           const lightHalt = deps.checkPause?.();
           if (lightHalt) {
             // W1-T5343: a pause stops new work, never the judging of finished work (W1-T4429 design iii), and
@@ -1941,7 +2323,7 @@ function startInFlightTicker(
  *  `runDaemon` into every call site — never a fresh object per call, which would make each phase
  *  re-derive "elapsed since last pass" from its own private zero (W1-T1272). */
 interface SweepRetrigger {
-  onDispatchTick?: () => void;
+  onDispatchTick?: () => void | Promise<void>;
   /** W1-T5343: the dispatch phase's live lane count, set per dispatch like `onDispatchTick` and read only there. */
   lanesInFlight?: () => number;
   /** Mirrors `DaemonOpts.sweepWallClockBoundMs` — the SAME bound the top-of-iteration call uses. */
@@ -1990,6 +2372,9 @@ async function runGatedSweep(
   // The shared liveness flag. Optional and trailing, so every existing caller behaves exactly as
   // before, which is what keeps the W1-T1044 bound tests meaningful (W1-T2582).
   liveness?: SweepLiveness,
+  // W1-T5804: a pass run BECAUSE of a recycle PAUSE holds worker admission on the live STOP/PAUSE
+  // read even where `deps.workerAdmissionHold` is unwired, so it can never start a fix worker.
+  recyclePause?: true,
 ): Promise<SweepCycleOutcome | undefined> {
   // Decline, do not duplicate. Checked before the ticker starts, so a declined pass costs nothing at
   // all. This one gate closes both routes into a concurrent pass, because all three call sites pass
@@ -2012,7 +2397,7 @@ async function runGatedSweep(
     const continueReviewAdmissions = (() =>
       reviewAdmissionsOpen && deps.checkStop?.() === undefined && deps.checkPause?.() === undefined) as ReviewAdmissionGate;
     const workerAdmissionHold = (): string | undefined => {
-      const hold = deps.workerAdmissionHold?.();
+      const hold = deps.workerAdmissionHold?.() ?? (recyclePause ? resolveFleetControlHold(deps) : undefined);
       if (!hold) return undefined;
       const reason = `fleet ${hold.control} hold: ${hold.detail}`;
       log("daemon.admission_held", { surface: "full-sweep", control: hold.control, detail: hold.detail, reason });
@@ -2420,20 +2805,41 @@ export function startPrActionPump(
   };
 }
 
+/** The newest triage PR this ledger saw opened for `feedbackId` (#10265); the guard's live read decides if it is still open. */
+export function triagePrOpenedInLedger(lines: readonly string[] | undefined, feedbackId: string): number | undefined {
+  const owned = `"task_id":"TRIAGE-${feedbackId}"`;
+  for (let at = (lines?.length ?? 0) - 1; at >= 0; at -= 1) {
+    const line = lines![at]!;
+    if (!line.includes(owned) || !line.includes('"step":"pr.opened"')) continue;
+    const number = /"pr_url":"[^"]*\/pull\/(\d+)"/.exec(line)?.[1];
+    if (number !== undefined) return Number(number);
+  }
+  return undefined;
+}
+
 /** W1-T4416: a lane pool. Each task runs on its own lane; a lane that settles while a sibling is still
  *  in flight may take `refill`'s next task, appended to `tasks`. Resolves, never rejects, once every lane
- *  settles, with outcomes indexed like `tasks`. The first wave is invoked synchronously, as the batch was. */
+ *  settles, with outcomes indexed like `tasks`. The first wave is invoked synchronously, as the batch was.
+ *  W1-T5805: a promised refill holds its lane busy until it answers; a rejected one ends that lane. */
 export function runLanePool<T extends { id: string }, R>(
   tasks: T[],
   run: (id: string) => Promise<R>,
-  refill: (lane: number, finished: T, outcome: PromiseSettledResult<R>) => T | undefined,
+  refill: (lane: number, finished: T, outcome: PromiseSettledResult<R>) => T | undefined | Promise<T | undefined>,
   // W1-T5343: a live view of the count, read by the phase ticker. Optional and trailing.
   lanes: { inFlight: number } = { inFlight: 0 },
 ): Promise<PromiseSettledResult<R>[]> {
   const settled: PromiseSettledResult<R>[] = [];
   const firstWave = tasks.map((t) => run(t.id));
+  let refilling = 0;
   return new Promise((resolve) => {
     if (tasks.length === 0) resolve(settled);
+    const take = (lane: number, next: T | undefined): void => {
+      if (next) {
+        tasks.push(next);
+        start(tasks.length - 1, lane, (async () => run(next.id))());
+      }
+      if (lanes.inFlight + refilling === 0) resolve(settled);
+    };
     const start = (i: number, lane: number, p: Promise<R>): void => {
       lanes.inFlight++;
       p.then(
@@ -2442,12 +2848,13 @@ export function runLanePool<T extends { id: string }, R>(
       ).then((outcome) => {
         settled[i] = outcome;
         lanes.inFlight--;
-        const next = lanes.inFlight > 0 ? refill(lane, tasks[i], outcome) : undefined;
-        if (next) {
-          tasks.push(next);
-          start(tasks.length - 1, lane, (async () => run(next.id))());
-        }
-        if (lanes.inFlight === 0) resolve(settled);
+        const next = lanes.inFlight + refilling > 0 ? refill(lane, tasks[i], outcome) : undefined;
+        if (!(next instanceof Promise)) return take(lane, next);
+        refilling++;
+        void next.catch(() => /* a failed refill ends only its own lane, as a held one does */ undefined).then((t) => {
+          refilling--;
+          take(lane, t);
+        });
       });
     };
     firstWave.forEach((p, i) => start(i, i, p));
@@ -2472,9 +2879,20 @@ export async function runDaemon(
   // measured 12.5 min on 2026-09-30). `backgroundSweep` is the outstanding `runGatedSweep` call, cleared
   // the moment it returns; each completed pass is queued once and consumed, in order, by the next tick.
   let backgroundSweep: Promise<void> | undefined;
+  let repositoryMaintenanceTimer: ReturnType<typeof setInterval> | undefined;
+  let dueRungsTimer: ReturnType<typeof setInterval> | undefined;
+  let dueRungsStopped = false;
+  let repositoryMaintenanceStopped = false;
+  let repositoryMaintenanceQueueBusy = false;
+  let repositoryMaintenanceLaneCount = () => 0;
   // W1-T4945 — this lifetime's freshness pressure, and when it first read stale; see `decideFreshness`.
   let freshnessPressure: DeployRestartPressureState = { total: 0, scoredShas: [] };
   let staleSinceMs: number | undefined;
+  let lastAdvanceSha: string | undefined;
+  let lastAdvanceAtMs: number | undefined;
+  let advancesCoalesced = 0;
+  let freshnessHeld = false;
+  const dirtyBlockedShas = new Set<string>();
   const completedSweeps: Array<{ outcome: SweepCycleOutcome | undefined; durationMs: number }> = [];
   let latestSweepOutcome: SweepCycleOutcome | undefined;
   let staleReviewerAction: StaleReviewerRecurrenceAction = { kind: "silent" };
@@ -2491,6 +2909,7 @@ export async function runDaemon(
         const pass = started.then((outcome) => {
           completedSweeps.push({ outcome, durationMs: Math.max(0, daemonClock.now() - startedAtMs) });
           if (backgroundSweep === pass) backgroundSweep = undefined;
+          openBootGate("first_pass");
         });
         backgroundSweep = pass;
       },
@@ -2527,6 +2946,16 @@ export async function runDaemon(
       idleLaneAccount = rollIdleLaneWindow(idleLaneAccount, atMs);
     }
   };
+  // W1-T4939: every exit (operator stop, freshness restart, error, max) passes through `summary`, and the
+  // daemon restarts on merges long before most hourly windows close, so the open window is written out as a
+  // partial row rather than lost with the process. A window with no idle minute writes nothing: a restart
+  // must not add a row of zeros to the ledger. The account is rolled, so a second call cannot double-count.
+  const flushIdleLaneWindow = (): void => {
+    const atMs = idleLaneClock.now();
+    const row = summarizeIdleLaneAccount(idleLaneAccount, atMs);
+    idleLaneAccount = rollIdleLaneWindow(idleLaneAccount, atMs);
+    if (row.idle_minutes > 0) emitLog("lane.idle_summary", { ...row, partial: true });
+  };
   // Shared by both governor call sites below, so the two cannot silently drift into different field
   // names for the same verdict (W1-T342).
   const logDispatchGovernorDefer = (verdict: DispatchGovernorVerdict, tick: number): void => {
@@ -2549,6 +2978,9 @@ export async function runDaemon(
         tier: verdict.result.tier,
         trailing_merged_count: verdict.result.trailingMergedCount,
         trailing_opened_count: verdict.result.trailingOpenedCount,
+        base_wip_limit: verdict.result.baseWipLimit ?? verdict.result.wipLimit,
+        stuck_owned_count: verdict.result.stuckOwnedCount ?? 0,
+        headroom_fraction: verdict.result.headroomFraction ?? null,
         poll_interval_ms: pollIntervalMs,
       });
     } else if (verdict.kind === "memory") {
@@ -2561,6 +2993,8 @@ export async function runDaemon(
         memory_floor_mib: verdict.result.floorMib,
         poll_interval_ms: pollIntervalMs,
       });
+    } else if (verdict.kind === "memory_unreadable") {
+      log("daemon.memory_unreadable", { tick, ...governorDeferPayload(verdict), poll_interval_ms: pollIntervalMs });
     } else if (verdict.kind === "quiet_hours") {
       log("daemon.quiet_hours", {
         tick,
@@ -2586,6 +3020,7 @@ export async function runDaemon(
   let dailyCostCeilingUsd: number | undefined;
   let costUsd = 0;
   let ticks = 0;
+  const memoryGovernor = deps.memoryGovernor ?? createDaemonMemoryGovernor({});
   // W1-T2965 — cycles this LIFETIME has entered past both operator holds and the freshness read.
   // Not `ticks`: those are incremented on many completion paths, and the deferral below must be
   // bounded by the loop's own control flow. Incremented BELOW the freshness read, so paused
@@ -2690,6 +3125,11 @@ export async function runDaemon(
   // survives the very process replacement it caused (design v); updated once per tick below from
   // that tick's own `sweepCycleOutcome.reviewerCodeStale` reading.
   const bootLedgerLines = deps.readLedgerLines?.() ?? [];
+  const runLengths = dispatchRunHistory(bootLedgerLines);
+  const resumableHandoffs = pendingWorkerBoundaryHandoffs(bootLedgerLines);
+  for (const [taskId, receipt] of handoffReceiptsToCarry(bootLedgerLines)) {
+    log(HANDOFF_RECEIPT_STEP, { task_id: taskId, branch: receipt.branch, head_sha: receipt.headSha, carried: true });
+  }
   let staleReviewerRecurrence: StaleReviewerRecurrenceState | undefined = priorStaleReviewerRecurrenceState(bootLedgerLines);
   // W1-T5344: per-task delivery-failure parks, rebuilt from the ledger so a restart does not reset
   // them; consulted by the dispatch filter's independent-failure hold below.
@@ -2743,30 +3183,88 @@ export async function runDaemon(
   const plainBackfill = deps.plainBackfill ? startPlainBackfill(deps.plainBackfill, pollIntervalMs, log) : undefined;
   // W1-T4089: the fleet's own findings, filed at the pace the fleet merges work.
   const fleetLaneDeps = deps.fleetLane;
-  const fleetLane = fleetLaneDeps ? startFleetLane(() => triageFleetLane(fleetLaneDeps), pollIntervalMs, log) : undefined;
+  const fleetLane = fleetLaneDeps ? startFleetLane(() => triageFleetLaneAsync(fleetLaneDeps), pollIntervalMs, log) : undefined;
   // W1-T4088: the same pattern — an operator's reply is answered within a poll interval.
   const inboxResponder = deps.inboxResponder ? startInboxResponder(deps.inboxResponder, pollIntervalMs, log) : undefined;
   const gardenerRef: { stop: () => void } = { stop: () => {} };
-  const summary = (stopReason: DaemonStopReason, stopDetail?: string): DaemonSummary => {
+  // W1-T5803 — ONE pause review clock spans consecutive paused ticks, so its interval accrues across
+  // them. A per-tick clock restarted its interval every tick and stop() won the race: live 2026-10-05,
+  // 33 paused ticks ran one pass. Stopped by the first unpaused tick, and by `summary` on every exit.
+  const pauseReview: { clock?: InterphaseReviewClock; reported: number } = { reported: 0 };
+  const reportPauseReviewPasses = (passes: number): void => {
+    if (passes > pauseReview.reported) log("daemon.pause.review_passes", { tick: ticks, passes: passes - pauseReview.reported });
+    pauseReview.reported = passes;
+  };
+  const stopPauseReviewClock = async (): Promise<void> => {
+    const clock = pauseReview.clock;
+    if (!clock) return;
+    pauseReview.clock = undefined;
+    reportPauseReviewPasses((await clock.stop()).passes);
+    pauseReview.reported = 0;
+  };
+  const summary = async (stopReason: DaemonStopReason, stopDetail?: string): Promise<DaemonSummary> => {
+    repositoryMaintenanceStopped = true;
+    dueRungsStopped = true;
+    if (dueRungsTimer) clearInterval(dueRungsTimer);
+    if (repositoryMaintenanceTimer) clearInterval(repositoryMaintenanceTimer);
+    if (pauseReview.clock) await stopPauseReviewClock();
     prActionPumpRef.stop();
     plainBackfill?.stop();
     fleetLane?.stop();
     inboxResponder?.stop();
+    clearTimeout(bootGateTimer);
+    bootGateTrigger ??= "exited";
     gardenerRef.stop();
     livenessPulse?.stop();
+    if (stopReason === "stopped") {
+      if (backgroundSweep) await backgroundSweep;
+      const abandonedReviews = await drainInFlightReviews({ boundMs: sweepWallClockBoundMs });
+      if (abandonedReviews > 0) log("daemon.stop_drain.completed", {
+        abandoned_in_flight_reviews: abandonedReviews, bound_ms: sweepWallClockBoundMs,
+      });
+    }
+    flushIdleLaneWindow();
     const s: DaemonSummary = { attempted, merged, stopReason, stopDetail, costUsd, ticks };
     log("daemon.summary", { ...s });
     return s;
   };
-  if (deps.livenessPulse) livenessPulse = startLivenessPulse(pollIntervalMs, idleLaneClock, log, (sample) => reportLoopLag(sample, log));
+  if (deps.livenessPulse) livenessPulse = startLivenessPulse(pollIntervalMs, idleLaneClock, log,
+    (sample) => reportLoopLag({ ...sample, lastStepBeforeBlock: deps.lastStepBeforeBlock?.(),
+      syncSpawnTop: peekSyncSpawnTop(deps) }, log));
   const prActionPump = startPrActionPump(deps, pollIntervalMs, log);
   prActionPumpRef.stop = prActionPump.stop;
   prActionPumpRef.isBusy = prActionPump.isBusy;
+  // W1-T5720 — THE BOOT GATE. Tick 1 runs a light pass at once, then holds its cadences until the first full
+  // pass returns or the BACKSTOP passes (10-05: first `sweep.pass` 6.7-15.8 min after `daemon.boot`). It holds
+  // only what is wired: with nothing to defer, tick 1's admission keeps W1-T4998's no-wait contract.
+  const bootGateBoundMs = opts.bootCadenceGateBoundMs ?? BOOT_CADENCE_GATE_BOUND_MS;
+  const bootGateStartedAtMs = daemonClock.now();
+  const bootGateHolds = deps.sweep !== undefined && ((deps.gardens?.length ?? 0) > 0 || BOOT_GATED_CADENCES.some((k) => deps[k]));
+  let bootGateTrigger: string | undefined = bootGateHolds ? undefined : "nothing_to_defer";
+  let releaseBootGate = (): void => {};
+  const bootGateOpened = new Promise<void>((resolve) => (releaseBootGate = resolve));
+  const deferredGardens = bootGateHolds ? (deps.gardens ?? []) : [];
+  const deferBootCadence = (cadence: string): void =>
+    log("daemon.boot_gate.deferred", { cadence, reason: "first full pass has not settled", bound_ms: bootGateBoundMs });
   const gardens = [
-    ...(deps.knowledgeGardener ? [startKnowledgeGardener(deps.knowledgeGardener, pollIntervalMs)] : []),
-    ...(deps.gardens ?? []).map((start) => start(pollIntervalMs)),
+    ...(deps.knowledgeGardener ? [startGarden(knowledgeGardenSpec({ ...deps.knowledgeGardener, prState: undefined }), deps.knowledgeGardener, pollIntervalMs)] : []),
+    ...(bootGateHolds ? [] : (deps.gardens ?? [])).map((start) => start(pollIntervalMs)),
   ];
   gardenerRef.stop = () => gardens.forEach((g) => g.stop());
+  if (deferredGardens.length > 0) deferBootCadence("gardens");
+  const openBootGate = (trigger: string): void => {
+    if (bootGateTrigger !== undefined) return;
+    bootGateTrigger = trigger;
+    clearTimeout(bootGateTimer);
+    log("daemon.boot_gate.opened", {
+      trigger, waited_ms: Math.max(0, daemonClock.now() - bootGateStartedAtMs), bound_ms: bootGateBoundMs,
+      pass_in_flight: sweepLiveness.inFlight,
+    });
+    gardens.push(...deferredGardens.map((start) => start(pollIntervalMs)));
+    releaseBootGate();
+  };
+  // Unref'd: while the gate is closed the first pass's own bound timer keeps the process alive.
+  const bootGateTimer = bootGateHolds ? setTimeout(() => openBootGate("backstop"), bootGateBoundMs).unref() : undefined;
 
   // W1-T3756 — an ordinary false result used to erase the distinction between a current daemon and
   // one that could not inspect itself. Log the adapter's four decision arms at the consumer, where
@@ -2775,38 +3273,163 @@ export async function runDaemon(
   const logNotStaleFreshness = (freshness: DaemonFreshness | undefined): void => {
     if (!freshness || freshness.stale || !freshness.notStale) return;
     const outcome = freshness.notStale;
+    let pressureEvidence: Record<string, unknown> = {};
+    if (outcome.arm === "dirty" && outcome.behind && outcome.newSha) {
+      const nowMs = daemonClock.now();
+      observeFreshnessAdvance(outcome.newSha, nowMs);
+      const { decision, withheldEvidence } = scoreFreshness(outcome.changes, nowMs);
+      pressureEvidence = { behind: true, stale_since_ms: staleSinceMs, weight: decision.weight,
+        age_pressure: decision.agePressure, pressure: decision.pressure, ...withheldEvidence };
+      if (decision.pressure >= DEPLOY_RESTART_SCORE_THRESHOLD.value && !dirtyBlockedShas.has(outcome.newSha)) {
+        dirtyBlockedShas.add(outcome.newSha);
+        log("daemon.freshness_blocked_dirty", { old_sha: outcome.oldSha, new_sha: outcome.newSha,
+          dirty_paths: outcome.dirty_paths, ...pressureEvidence });
+      }
+    }
     log("daemon.freshness_not_stale", {
       arm: outcome.arm,
       ...(outcome.arm === "unassessed" ? { service_status: outcome.serviceStatus } : {}),
       ...(outcome.arm === "unassessed" && outcome.detail ? { detail: outcome.detail } : {}),
       ...(outcome.arm === "dirty" && outcome.oldSha ? { old_sha: outcome.oldSha } : {}),
       ...(outcome.arm === "dirty" && outcome.newSha ? { new_sha: outcome.newSha } : {}),
+      ...(outcome.arm === "dirty" && outcome.dirty_paths ? { dirty_paths: outcome.dirty_paths } : {}),
+      ...pressureEvidence,
       ...(outcome.arm === "immaterial" ? { old_sha: outcome.oldSha, new_sha: outcome.newSha } : {}),
     });
   };
 
-  // W1-T4945 — WHEN, not WHETHER: an idle daemon restarts at once, a busy one only once change plus
-  // staleness pressure justifies the drain (deploy-judge's `decideFreshnessRestart`). Busy means a full
-  // pass, a detached action or a review is still in flight — exactly what the drain below would wait on.
-  const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, siblingInFlight = false): "restart" | "defer" => {
-    const nowMs = daemonClock.now();
-    staleSinceMs ??= nowMs;
+  // W1-T6093: remember observations at both the first-cycle guard and the shared decision boundary.
+  const observeFreshnessAdvance = (newSha: string, nowMs: number, heldSinceMs?: number): void => {
+    staleSinceMs = Math.min(staleSinceMs ?? nowMs, heldSinceMs ?? nowMs);
+    if (newSha !== lastAdvanceSha) {
+      lastAdvanceSha = newSha;
+      lastAdvanceAtMs = nowMs;
+      advancesCoalesced++;
+    }
+  };
+
+  const scoreFreshness = (changes: readonly DeployWorthChange[] | undefined, nowMs: number, siblingInFlight = false) => {
+    const staleAtMs = staleSinceMs!;
     const busy =
       siblingInFlight ||
       backgroundSweep !== undefined || sweepLiveness.inFlight || detachedSweepActionCount() > 0 || inFlightReviewCount() > 0;
-    const decision = decideFreshnessRestart({ changes: freshness.changes, busy, staleSinceMs, nowMs, state: freshnessPressure });
+    // W1-T5476: a review withheld for stale reviewer code is the lag itself stalling the review lane. An
+    // unreadable ledger is named on the row and leaves the count absent: unknown, never a zero.
+    const withheld = deps.readLedgerLines ? withheldReviewsSince(deps.readLedgerLines, staleAtMs) : undefined;
+    const withheldReviews = withheld?.kind === "counted" ? withheld.withheld : undefined;
+    const withheldEvidence =
+      withheld === undefined
+        ? {}
+        : withheld.kind === "unreadable"
+          ? { withheld_reviews_error: withheld.error }
+          : {
+              withheld_reviews: withheld.withheld,
+              // W1-T5530: reported, never weighed — see withheldReviewsSince's decision.
+              withheld_unreadable: withheld.unreadable,
+              ...(withheld.unparseable > 0 ? { withheld_reviews_unparseable: withheld.unparseable } : {}),
+            };
+    const decision = decideFreshnessRestart({ changes, busy, staleSinceMs: staleAtMs, nowMs, state: freshnessPressure, withheldReviews });
     freshnessPressure = decision.state;
+    return { decision, busy, withheldEvidence };
+  };
+
+  // W1-T4945/W1-T6093: score the advance, then coalesce change-driven restarts within bounded staleness.
+  const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, siblingInFlight = false): "restart" | "defer" => {
+    const nowMs = daemonClock.now();
+    observeFreshnessAdvance(freshness.newSha, nowMs, freshness.staleSinceMs);
+    const staleAtMs = staleSinceMs!;
+    const { decision, busy, withheldEvidence } = scoreFreshness(freshness.changes, nowMs, siblingInFlight);
+    const coalesced = coalesceFreshnessRestart({
+      decision, newSha: freshness.newSha, lastAdvanceAtMs: lastAdvanceAtMs!,
+      staleSinceMs: staleAtMs, nowMs, window: FRESHNESS_COALESCE_WINDOW_MS, installInputsChanged: changesInstallInputs(freshness.changes),
+    });
+    const action = coalesced.action === "hold" ? "defer" : coalesced.action;
+    const released = ["window_quiet", "upper_age", INSTALL_INPUTS_RELEASE].includes(coalesced.reason);
+    if (coalesced.action === "hold" || freshnessHeld || released) {
+      log("daemon.freshness_coalesced", {
+        action: coalesced.action,
+        new_sha: freshness.newSha,
+        held_ms: Math.max(0, nowMs - staleAtMs),
+        advances_coalesced: advancesCoalesced,
+        window_ms: FRESHNESS_COALESCE_WINDOW_MS.value,
+        window_reason: FRESHNESS_COALESCE_WINDOW_MS.reason,
+        window_ends_at_ms: coalesced.windowEndsAtMs,
+        reason: coalesced.reason,
+      });
+    }
+    freshnessHeld = coalesced.action === "hold";
     log(FRESHNESS_DECISION_STEP, {
-      action: decision.action,
+      action,
       busy,
       weight: decision.weight,
       age_pressure: decision.agePressure,
       pressure: decision.pressure,
-      reason: decision.reason,
+      reason: coalesced.action === "hold" || released ? coalesced.reason : decision.reason,
       old_sha: freshness.oldSha,
       new_sha: freshness.newSha,
+      ...withheldEvidence,
     });
-    return decision.action;
+    return action;
+  };
+
+  // The drain every restart takes before it returns: live fix workers and in-flight reviews finish (bounded),
+  // best-effort cadences and CI waits are released to be re-derived after restart. Shared by the freshness exit
+  // and the memory-pressure exit so neither restart can kill work the other would have waited for.
+  const drainBeforeRestart = async (stepPrefix: "daemon.freshness_drain" | "daemon.memory_drain"): Promise<void> => {
+    const detachedAtFreshness = detachedSweepActionCount();
+    // A light pass's review sat in no registry the drain waited on, so the exit killed it mid-judgement.
+    const reviewsAtFreshness = inFlightReviewCount();
+    if (detachedAtFreshness > 0 || reviewsAtFreshness > 0) {
+      const drainStartedAtMs = daemonClock.now();
+      log(`${stepPrefix}.started`, {
+        detached_sweep_actions: detachedAtFreshness,
+        in_flight_reviews: reviewsAtFreshness,
+      });
+      // W1-T4053 — REVIEWS KEEP FLOWING THROUGH THE DRAIN. With the clock stopped, 42 drains in three days
+      // held 327 minutes with no review admitted. A review-only clock runs BESIDE the drain, never inside it
+      // (W1-T2744), and its stop awaits a pass already posting, exactly as the drain awaits a detached fix.
+      // Only a detached action earns that clock: a drain for reviews alone admits nothing new.
+      const drainReviewClock =
+        detachedAtFreshness > 0 ? startInterphaseReviewClock(deps, pollIntervalMs, log, "drain") : undefined;
+      let abandoned: Awaited<ReturnType<typeof drainDetachedSweepActions>>;
+      let abandonedReviews: number;
+      let reviewPasses = 0;
+      try {
+        [abandoned, abandonedReviews] = await Promise.all([
+          drainDetachedSweepActions({
+            boundMs: sweepWallClockBoundMs,
+            freshness: true,
+            onRelease: (action) => log("daemon.detached_action_released", {
+              action_kind: action.actionKind, task_id: action.taskId,
+              age_ms: action.ageMs, phase: action.phase, reason: action.reason,
+            }),
+          }),
+          drainInFlightReviews({ boundMs: sweepWallClockBoundMs }),
+        ]);
+      } finally {
+        reviewPasses = drainReviewClock ? (await drainReviewClock.stop()).passes : 0;
+      }
+      if (drainReviewClock) abandonedReviews = await drainInFlightReviews({
+        boundMs: Math.max(0, sweepWallClockBoundMs - Math.max(0, daemonClock.now() - drainStartedAtMs)),
+      });
+      for (const action of abandoned) {
+        log("daemon.detached_action_abandoned", {
+          action_kind: action.actionKind,
+          task_id: action.taskId,
+          age_ms: action.ageMs,
+          bound_ms: sweepWallClockBoundMs,
+        });
+      }
+      log(`${stepPrefix}.completed`, {
+        detached_sweep_actions: detachedAtFreshness,
+        remaining_detached_sweep_actions: detachedSweepActionCount(),
+        abandoned_detached_sweep_actions: abandoned.length,
+        in_flight_reviews: reviewsAtFreshness,
+        abandoned_in_flight_reviews: abandonedReviews,
+        review_passes: reviewPasses,
+        duration_ms: Math.max(0, daemonClock.now() - drainStartedAtMs),
+      });
+    }
   };
 
   // One stale-exit path for both freshness boundaries. Both must preserve the same install, bounded pass, named
@@ -2828,54 +3451,9 @@ export async function runDaemon(
       sweepRetriggerState.lastRunAtMs = daemonClock.now();
       await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
     }
-    // A freshness restart is the process-lifetime boundary the detached-action registry was built for.
-    // The final pass above may have admitted a fix and detached only its long CI wait; returning before
-    // that settles lets the entrypoint replace this process and kill a useful worker. The caller stops
-    // its interphase clock before the final pass, so nothing races in behind it (W1-T2865).
-    const detachedAtFreshness = detachedSweepActionCount();
-    // A light pass's review sat in no registry the drain waited on, so the exit killed it mid-judgement.
-    const reviewsAtFreshness = inFlightReviewCount();
-    if (detachedAtFreshness > 0 || reviewsAtFreshness > 0) {
-      const drainStartedAtMs = daemonClock.now();
-      log("daemon.freshness_drain.started", {
-        detached_sweep_actions: detachedAtFreshness,
-        in_flight_reviews: reviewsAtFreshness,
-      });
-      // W1-T4053 — REVIEWS KEEP FLOWING THROUGH THE DRAIN. With the clock stopped, 42 drains in three days
-      // held 327 minutes with no review admitted. A review-only clock runs BESIDE the drain, never inside it
-      // (W1-T2744), and its stop awaits a pass already posting, exactly as the drain awaits a detached fix.
-      // Only a detached action earns that clock: a drain for reviews alone admits nothing new.
-      const drainReviewClock =
-        detachedAtFreshness > 0 ? startInterphaseReviewClock(deps, pollIntervalMs, log, "drain") : undefined;
-      let abandoned: Awaited<ReturnType<typeof drainDetachedSweepActions>>;
-      let abandonedReviews: number;
-      let reviewPasses = 0;
-      try {
-        [abandoned, abandonedReviews] = await Promise.all([
-          drainDetachedSweepActions({ boundMs: sweepWallClockBoundMs }),
-          drainInFlightReviews({ boundMs: sweepWallClockBoundMs }),
-        ]);
-      } finally {
-        reviewPasses = drainReviewClock ? (await drainReviewClock.stop()).passes : 0;
-      }
-      for (const action of abandoned) {
-        log("daemon.detached_action_abandoned", {
-          action_kind: action.actionKind,
-          task_id: action.taskId,
-          age_ms: action.ageMs,
-          bound_ms: sweepWallClockBoundMs,
-        });
-      }
-      log("daemon.freshness_drain.completed", {
-        detached_sweep_actions: detachedAtFreshness,
-        remaining_detached_sweep_actions: detachedSweepActionCount(),
-        abandoned_detached_sweep_actions: abandoned.length,
-        in_flight_reviews: reviewsAtFreshness,
-        abandoned_in_flight_reviews: abandonedReviews,
-        review_passes: reviewPasses,
-        duration_ms: Math.max(0, daemonClock.now() - drainStartedAtMs),
-      });
-    }
+    // W1-T5721: protect live fix workers; cadences and CI waits are re-derived after restart.
+    // The caller stops its interphase clock before the final pass (W1-T2865).
+    await drainBeforeRestart("daemon.freshness_drain");
     const detail =
       `origin/main advanced ${freshness.oldSha.slice(0, 7)}..${freshness.newSha.slice(0, 7)} ` +
       `past this process's boot sha`;
@@ -2905,7 +3483,7 @@ export async function runDaemon(
       let creditVisible = false;
       let refreshError: string | undefined;
       try {
-        creditVisible = deps.refreshMerged(planForBatch)(task.id);
+        creditVisible = (deps.refreshMergedAsync ? await deps.refreshMergedAsync(planForBatch) : deps.refreshMerged(planForBatch))(task.id);
       } catch (error) {
         refreshError = String((error as Error)?.message ?? error);
         log("daemon.merge_credit_refresh_failed", { task: task.id, error: refreshError });
@@ -3138,15 +3716,437 @@ export async function runDaemon(
     }
   };
 
+  let repositoryMaintenancePending = false;
+  const repositoryMaintenanceTick = (): void => {
+    if (!deps.repositoryMaintenance || repositoryMaintenancePending) return;
+    repositoryMaintenancePending = true;
+    // Give admission its turn before even the count-objects survey starts.
+    const work = new Promise<void>((resolve) => setImmediate(resolve)).then(() => {
+      if (repositoryMaintenanceStopped) return;
+      return deps.repositoryMaintenance!({ queueBusy: repositoryMaintenanceQueueBusy,
+        activeLanes: inFlightReviewCount() + detachedSweepActionCount() + repositoryMaintenanceLaneCount() +
+          (backgroundSweep !== undefined || sweepLiveness.inFlight ? 1 : 0),
+        disk: "unknown",
+      });
+    }).catch((error) => {
+      log("repository_maintenance.fail", { reason: String(error), outcome: "fail" });
+    }).finally(() => { repositoryMaintenancePending = false; });
+    void work;
+  };
+  const scheduleRepositoryMaintenance = (queueBusy: boolean, lanes = () => 0): void => {
+    repositoryMaintenanceQueueBusy = queueBusy;
+    repositoryMaintenanceLaneCount = lanes;
+    if (!deps.repositoryMaintenance || repositoryMaintenanceTimer) return;
+    repositoryMaintenanceTick();
+    repositoryMaintenanceTimer = setInterval(repositoryMaintenanceTick, pollIntervalMs);
+  };
+
+  // W1-T7690: an independent timer prevents due rungs waiting behind dispatch (18+ minutes observed 2026-10-10).
+  // The outer call order stays intact; timer and cycle share one single-flight slot per rung.
+  let ledgerCompactionDecision: LedgerCompactionDecision | undefined;
+  type RungSteps<R> = Generator<unknown, R, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  /** Yielded promises preserve outer-cycle await timing; the independent timer drives the same steps. */
+  const driveRungSteps = async <R>(steps: RungSteps<R>): Promise<R> => {
+    let value: unknown;
+    let error: unknown;
+    let threw = false;
+    for (;;) {
+      const step = threw ? steps.throw(error) : steps.next(value);
+      if (step.done) return step.value;
+      try {
+        value = await step.value;
+        threw = false;
+      } catch (e) {
+        log("daemon.due_rungs.step_rejected", { error: String((e as Error)?.message ?? e) });
+        error = e;
+        threw = true;
+      }
+    }
+  };
+  /** One rung's single-flight slot. `begin` is the outer cycle's claim; `start` is the timer's. */
+  const rungFlight = <R>(steps: () => RungSteps<R>, idle: R) => {
+    let current: Promise<R> | undefined;
+    return {
+      steps,
+      joined: (): Promise<R> | undefined => current,
+      begin: (): ((result?: R) => void) => {
+        let done!: (result: R) => void;
+        const slot = new Promise<R>((resolve) => { done = resolve; });
+        current = slot;
+        return (result = idle) => { if (current === slot) current = undefined; done(result); };
+      },
+      start: (): Promise<R> => {
+        if (current) return current;
+        const run = driveRungSteps(steps());
+        current = run;
+        const clear = (): void => { if (current === run) current = undefined; };
+        run.then(clear, clear);
+        return run;
+      },
+    };
+  };
+  const readOnlyRungs = rungFlight(function* (): RungSteps<void> {
+    // Measurement is once-per-iteration, policy-bounded, and best-effort; it never gates dispatch (W1-T1259).
+    if (deps.checkMeasurementCadence) {
+      let decision: MeasurementCadenceDecision | undefined;
+      try {
+        decision = deps.checkMeasurementCadence();
+      } catch (e) {
+        log("measurement_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      const cadenceChild = deps.measurementCadenceChild;
+      if (cadenceChild && !detachedActionInFlight("measurement-cadence") && (decision?.fire || cadenceChild.pending())) {
+        startMeasurementCadenceChild(cadenceChild, decision?.fire === true, decision?.reason, log);
+      } else if (decision?.fire) {
+        // W1-T4034: detach this best-effort result so review admission keeps running; an 8m38s leg
+        // once stalled a 21.5m iteration. Match the guarded `ci-learning` pattern below.
+        if ((deps.runMeasurementCadence || cadenceChild) && detachedActionInFlight("measurement-cadence")) {
+          log("measurement_cadence.already_detached", {
+            reason: decision.reason,
+            refusal: "measurement-cadence action already in flight",
+            flow: "the cadence runs detached so the sweep keeps its turn",
+          });
+        } else {
+          log("measurement_cadence.fired", { reason: decision.reason });
+          if (deps.runMeasurementCadence) {
+            try {
+              const work = deps.runMeasurementCadence();
+              detachSweepAction(
+                work
+                  .then((result) => {
+                    // Derive the row from result keys; hand-enumeration dropped three fields (W1-T2502).
+                    log("measurement_cadence.ran", buildMeasurementCadenceRow(result));
+                  })
+                  .catch((e) => {
+                    log("measurement_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
+                  }),
+                { actionKind: "measurement-cadence", taskId: "DAEMON" },
+              );
+              log("measurement_cadence.detached", {
+                reason: decision.reason,
+                flow: "the cadence runs detached so the sweep keeps its turn",
+              });
+            } catch (e) {
+              // A SYNCHRONOUS throw from the hook itself, before any promise exists to detach.
+              log("measurement_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
+            }
+          }
+        }
+      } else if (decision) {
+        log("measurement_cadence.skipped", { reason: decision.reason });
+      }
+    }
+
+    // Digest cadence has its own policy row and marker (W1-T2277).
+    if (deps.checkDigestCadence) {
+      let digestDecision: MeasurementCadenceDecision | undefined;
+      try {
+        digestDecision = deps.checkDigestCadence();
+      } catch (e) {
+        log("digest_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      if (digestDecision?.fire) {
+        log("digest_cadence.fired", { reason: digestDecision.reason });
+        if (deps.runDigestCadence) {
+          try {
+            const result = (yield deps.runDigestCadence()) as Awaited<ReturnType<NonNullable<typeof deps.runDigestCadence>>>;
+            log("digest_cadence.ran", { channel: result.channelName, delivered: result.delivered });
+          } catch (e) {
+            log("digest_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
+          }
+        }
+      } else if (digestDecision) {
+        log("digest_cadence.skipped", { reason: digestDecision.reason });
+      }
+    }
+
+    // W1-T3368: bounded, best-effort corpus-pressure repair; sizing is in `ledger-compaction-rung.ts`.
+    // Preserve the reason from the firing decision; never re-derive it here.
+    ledgerCompactionDecision = undefined;
+    if (deps.checkLedgerCompaction) {
+      try {
+        ledgerCompactionDecision = deps.checkLedgerCompaction();
+      } catch (e) {
+        log("ledger_compaction.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      if (ledgerCompactionDecision?.fire) {
+        log("ledger_compaction.fired", { reason: ledgerCompactionDecision.reason });
+        if (deps.runLedgerCompaction) {
+          try {
+            const outcome = (yield deps.runLedgerCompaction()) as Awaited<ReturnType<NonNullable<typeof deps.runLedgerCompaction>>>;
+            if (outcome === undefined) {
+              // No eligible archive is a result, not a failure; keep it distinct from a broken run.
+              log("ledger_compaction.nothing_eligible", { reason: ledgerCompactionDecision.reason });
+            } else {
+              log("ledger_compaction.ran", {
+                reason: ledgerCompactionDecision.reason,
+                source_count: outcome.sourceCount,
+                rows_written: outcome.rowsWritten,
+                duplicates_collapsed: outcome.duplicatesCollapsed,
+                archive_name: outcome.archiveName,
+              });
+            }
+          } catch (e) {
+            log("ledger_compaction.run_failed", {
+              reason: ledgerCompactionDecision.reason,
+              error: String((e as Error)?.message ?? e),
+            });
+          }
+        }
+      } else if (ledgerCompactionDecision) {
+        log("ledger_compaction.skipped", { reason: ledgerCompactionDecision.reason });
+      }
+    }
+
+    if (deps.checkBenchmarkCohort) {
+      let due = false;
+      try { due = deps.checkBenchmarkCohort(); }
+      catch (e) { log("benchmark_cohort.check_failed", { error: String((e as Error)?.message ?? e) }); }
+      if (due && deps.runBenchmarkCohortPass) {
+        if (detachedActionInFlight("benchmark-cohort")) {
+          log("benchmark_cohort.already_detached");
+        } else {
+          try {
+            const work = deps.runBenchmarkCohortPass();
+            detachSweepAction(work.then((result) => {
+              log("benchmark_cohort.ran", {
+                state: result.state,
+                scanned_sources: result.scannedSources,
+                pending_sources: result.pendingSources,
+                tail_pending_bytes: result.tailPendingBytes ?? 0,
+                reason: result.snapshot.reason,
+                source_bytes: result.snapshot.pressure.sourceBytes,
+                checkpoint_bytes: result.checkpointBytes,
+                dimension_cardinality: result.snapshot.pressure.dimensionCardinality,
+                rebuilt_partitions: result.snapshot.pressure.rebuiltPartitions,
+              });
+            }).catch((e) => {
+              log("benchmark_cohort.run_failed", { error: String((e as Error)?.message ?? e) });
+            }), { actionKind: "benchmark-cohort", taskId: "DAEMON" });
+            log("benchmark_cohort.detached");
+          } catch (e) {
+            log("benchmark_cohort.run_failed", { error: String((e as Error)?.message ?? e) });
+          }
+        }
+      }
+    }
+
+    // W1-T3997: detached CI learning cannot block reconciliation; its registry bounds abandonment.
+    if (deps.checkCiLearningCadence) {
+      let ciLearningDecision: MeasurementCadenceDecision | undefined;
+      try {
+        ciLearningDecision = deps.checkCiLearningCadence();
+      } catch (e) {
+        log("ci_learning_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      if (ciLearningDecision?.fire) {
+        if (deps.runCiLearningCadence && detachedActionInFlight("ci-learning")) {
+          log("ci_learning_cadence.already_detached", {
+            reason: ciLearningDecision.reason,
+            refusal: "ci-learning action already in flight",
+          });
+        } else {
+          log("ci_learning_cadence.fired", { reason: ciLearningDecision.reason });
+          if (deps.runCiLearningCadence) {
+            const reason = ciLearningDecision.reason;
+            try {
+              const work = deps.runCiLearningCadence();
+              detachSweepAction(
+                work
+                  .then((result) => {
+                    // The UNREADABLE count rides the row: a partial window must never read as a clean one (P48).
+                    log("ci_learning_cadence.ran", {
+                      status: result.status,
+                      window_complete: result.windowComplete ?? true,
+                      unreadable_prs: result.unreadablePrCount ?? 0,
+                      drafts: result.draftCount,
+                      excluded: result.excludedCount,
+                      unreadable: result.unreadableCount,
+                      filed: result.filedCount,
+                      skipped: result.skippedCount,
+                      refused: result.refusedCount,
+                      lesson_recurrences: result.lessonRecurrences,
+                    });
+                  })
+                  .catch((e) => {
+                    log("ci_learning_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
+                  }),
+                { actionKind: "ci-learning", taskId: "DAEMON" },
+              );
+              log("ci_learning_cadence.detached", { reason });
+            } catch (e) {
+              // Preserve best-effort behavior if an injected runner throws before returning a promise.
+              log("ci_learning_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
+            }
+          }
+        }
+      } else if (ciLearningDecision) {
+        log("ci_learning_cadence.skipped", { reason: ciLearningDecision.reason });
+      }
+    }
+
+    // Board review has its own policy row/marker; log fires and skips because board-review.ts has no log hook
+    // (W1-T2304). Retired IDs accompany either outcome (W1-T2464); see docs/forensics/daemon.md.
+    if (deps.checkBoardReview) {
+      let boardDecision: (BoardReviewCadenceDecision & { retiredProposalIds?: string[] }) | undefined;
+      try {
+        yield deps.prefetchBoardReview?.();
+        boardDecision = deps.checkBoardReview();
+      } catch (e) {
+        log("board_review.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      if (boardDecision?.fire) {
+        log("board_review.fired", { reason: boardDecision.reason, retiredProposalIds: boardDecision.retiredProposalIds ?? [] });
+        if (deps.runBoardReview) {
+          try {
+            const report = (yield deps.runBoardReview()) as Awaited<ReturnType<NonNullable<typeof deps.runBoardReview>>>;
+            log("board_review.ran", {
+              oldestOpenAgeHours: report.oldestOpenAgeHours,
+              redCount: report.redCount,
+              unhandledEscalationCount: report.unhandledEscalationCount,
+              itemsConsidered: report.itemsConsidered,
+              proposals: report.proposalIds.length,
+              proposalIds: report.proposalIds,
+              retired: (boardDecision.retiredProposalIds ?? []).length,
+              retiredProposalIds: boardDecision.retiredProposalIds ?? [],
+            });
+          } catch (e) {
+            log("board_review.run_failed", { error: String((e as Error)?.message ?? e) });
+          }
+        }
+      } else if (boardDecision) {
+        log("board_review.skipped", { reason: boardDecision.reason, retiredProposalIds: boardDecision.retiredProposalIds ?? [] });
+      }
+    }
+  }, undefined);
+  /** Resolves true when a fleet-control hold says the tick must not go on (the old `continue`). */
+  const intakeRungs = rungFlight(function* (): RungSteps<boolean> {
+    // Intake rungs can poll, write, draft, or dispatch; gate them behind tick-wide spending governors.
+    // Best-effort failures cost one ledger row, then the tick continues.
+    if (deps.checkIntakeRungs) {
+      let decisions: readonly IntakeRungDecision[] | undefined;
+      try {
+        decisions = deps.checkIntakeRungs();
+      } catch (e) {
+        log("intake_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      for (const decision of decisions ?? []) {
+        if (decision.fire) {
+          const hold = holdWorkerAdmission("intake");
+          if (hold) {
+            log("intake_cadence.held", { rung: decision.rung, reason: hold.reason });
+            return true;
+          }
+          log("intake_cadence.fired", { rung: decision.rung, reason: decision.reason });
+          if (decision.rung === "codeqlQuality" && (deps.opportunityOutcomes || deps.knowledgeGardener)) {
+            try {
+              const outcomePorts = deps.opportunityOutcomes ?? ((yield openOpportunityOutcomePorts({ ...deps.knowledgeGardener!, prState: undefined })) as Awaited<ReturnType<typeof openOpportunityOutcomePorts>>);
+              const outcomes = (yield reconcileOpportunityOutcomesAsync(outcomePorts)) as Awaited<ReturnType<typeof reconcileOpportunityOutcomesAsync>>;
+              log("opportunity_outcomes.reconciled", { outcomes });
+            } catch (error) {
+              log("opportunity_outcomes.failed", { reason: String(error) });
+            }
+          }
+          if (decision.rung === "codeqlQuality" && (deps.opportunityIntake || deps.knowledgeGardener)) {
+            try {
+              const intakePorts = deps.opportunityIntake ?? ((yield openOpportunityIntakePorts({ ...deps.knowledgeGardener!, prState: undefined })) as Awaited<ReturnType<typeof openOpportunityIntakePorts>>);
+              const result = (yield runOpportunityIntake(intakePorts)) as Awaited<ReturnType<typeof runOpportunityIntake>>;
+              log("opportunity_intake.ran", { ...result, rung: decision.rung });
+            } catch (error) {
+              log("opportunity_intake.failed", { reason: String(error) });
+            }
+          } else if (deps.runIntakeRung) {
+            try {
+              log("intake_cadence.ran", (yield deps.runIntakeRung(decision)) as Awaited<ReturnType<NonNullable<typeof deps.runIntakeRung>>>);
+            } catch (e) {
+              log("intake_cadence.run_failed", { rung: decision.rung, error: String((e as Error)?.message ?? e) });
+            }
+          }
+        } else {
+          log("intake_cadence.skipped", { rung: decision.rung, reason: decision.reason });
+        }
+      }
+    }
+    return false;
+  }, false);
+  const wipeTestRung = rungFlight(function* (): RungSteps<boolean> {
+    // Wipe-test is policy-gated and spends like retro/auto-triage; its own marker prevents sibling throttling.
+    // The pair core records measurements; this rung records fired/skipped/refused clock evidence (W1-T2659).
+    if (deps.checkWipeTestCadence) {
+      let decision: WipeTestCadenceDecision | undefined;
+      try {
+        decision = deps.checkWipeTestCadence();
+      } catch (e) {
+        log("wipetest.cadence.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      if (decision?.fire) {
+        const hold = holdWorkerAdmission("wipe-test");
+        if (hold) {
+          log("wipetest.cadence.held", { reason: hold.reason, seq: decision.seq, subject: decision.subject.id });
+          return true;
+        }
+        log("wipetest.cadence.fired", {
+          reason: decision.reason,
+          seq: decision.seq,
+          subject: decision.subject.id,
+          selected_shards: decision.subject.selectedShards ?? [],
+          factor: decision.factor,
+        });
+        if (deps.runWipeTestCadence) {
+          try {
+            const result = (yield deps.runWipeTestCadence(decision)) as Awaited<ReturnType<NonNullable<typeof deps.runWipeTestCadence>>>;
+            if (result.status === "refused") {
+              log("wipetest.cadence.refused", {
+                reason: result.reason ?? "wipe-test cadence refused",
+                seq: result.seq,
+                subject: result.subject.id,
+                factor: result.factor,
+              });
+            }
+          } catch (e) {
+            log("wipetest.cadence.refused", {
+              reason: String((e as Error)?.message ?? e),
+              seq: decision.seq,
+              subject: decision.subject.id,
+              factor: decision.factor,
+            });
+          }
+        }
+      } else if (decision) {
+        log("wipetest.cadence.skipped", { reason: decision.reason });
+      }
+    }
+    return false;
+  }, false);
+  // Timer starts spending rungs only after this cycle passes headroom, cost, and WIP governors.
+  let spendGatesOpen = false;
+  const dueRungsTick = (): void => {
+    if (dueRungsStopped) return;
+    const looks: Promise<unknown>[] = [readOnlyRungs.start()];
+    if (spendGatesOpen) looks.push(intakeRungs.start(), wipeTestRung.start());
+    void Promise.all(looks).catch((e) => {
+      log("daemon.due_rungs.failed", { error: String((e as Error)?.message ?? e) });
+    });
+  };
+  const startDueRungsTimer = (): void => {
+    if (dueRungsTimer || dueRungsStopped) return;
+    dueRungsTimer = setInterval(dueRungsTick, Math.max(1, pollIntervalMs));
+    dueRungsTimer.unref();
+  };
+
+  const tickMemory = { sampled: false };
   for (;;) {
     // The liveness tick: the one row this loop writes unconditionally, every iteration, on every path below.
     // Every other daemon-prefixed step is either boot-time and one-shot, or confined to the three windows the
     // in-flight ticker runs in. Measured: the prefix went silent for 102.5 minutes on 2026-08-23 while the
     // daemon stayed alive, and the freshness judges read a false FAIL. Placed as literally the first statement
-    // of the loop body so no branch below can skip it (W1-T1274).
-    log("daemon.tick", { poll_interval_ms: pollIntervalMs });
+    // of the loop body so no branch below can skip it (W1-T1274). W1-T7126: it carries the memory sample when
+    // no row has within one poll interval; a throwing sampler rides it as mem_telemetry, never escapes it.
+    log("daemon.tick", { poll_interval_ms: pollIntervalMs, ...tickMemorySample(deps, daemonClock.now(), pollIntervalMs, tickMemory) });
+    if (tickMemory.sampled) startMemoryReadAfterRow(deps, log);
     const tickStartedAtMs = daemonClock.now();
     idleLaneTickCause = undefined;
+    spendGatesOpen = false;
 
     if (opts.max !== undefined && attempted.length >= opts.max) {
       return summary("max_reached", `${opts.max} task(s)`);
@@ -3187,15 +4187,36 @@ export async function runDaemon(
     //
     // IT DOES NOT FIX THE LEAK and must not be read as fixing it. The growth is still there and
     // still unexplained; this only stops it costing a crash and 120 seconds each time.
+    //
+    // 2026-10-10: the V8 fraction never fired (75% of 8.4 GB of one isolate, at 4.5 GB RSS + 3 GB swap).
+    // The governor (daemon-memory-policy.ts) judges RSS+swap against the cgroup budget: tighten first,
+    // restart only past the tightest factor. The V8 fraction stays as the backstop with no budget.
+    const memoryStep = memoryGovernor.step();
+    if (memoryStep.changed) {
+      log("daemon.memory_pressure", {
+        tier: memoryStep.tier,
+        previous_tier: memoryStep.previousTier,
+        share: memoryStep.share,
+        heap_growing_percent: memoryStep.heapGrowingPercent,
+        rss_bytes: memoryStep.reading.rss_bytes,
+        swap_bytes: memoryStep.reading.swap_bytes,
+        budget_bytes: memoryStep.reading.budget_bytes,
+        budget_source: memoryStep.reading.budget_source,
+      });
+    }
     const heapStats = deps.heapStatistics?.() ?? v8HeapStatistics();
-    const heapPressure = heapPressureDetail(heapStats);
+    const heapPressure = memoryStep.tier === "restart" ? memoryStep.detail : heapPressureDetail(heapStats);
     if (heapPressure !== undefined) {
       log("daemon.heap_pressure_exit", {
+        basis: memoryStep.tier === "restart" ? "cgroup_share" : "v8_limit",
         used_heap_size: heapStats.used_heap_size,
         heap_size_limit: heapStats.heap_size_limit,
         threshold: HEAP_PRESSURE_RESTART_FRACTION,
+        ...(memoryStep.tier === "restart" ? { share: memoryStep.share, budget_bytes: memoryStep.reading.budget_bytes } : {}),
         ticks,
       });
+      // The same bounded drain a freshness restart takes: live fix workers and reviews finish first.
+      await drainBeforeRestart("daemon.memory_drain");
       return summary("heap_pressure", heapPressure);
     }
 
@@ -3238,6 +4259,19 @@ export async function runDaemon(
         { lane: "daemon", gate: "pause", condition: { detail: paused }, heartbeatMs: GATE_OBSERVATION_HEARTBEAT_MS, clock: daemonClock },
         log,
       );
+      // W1-T5804: a recycle's own PAUSE holds only worker-spawning work. Dispatch stays withheld (this
+      // branch `continue`s) and the full pass runs on its normal cadence with review and fix admission
+      // closed by the PAUSE, so a reviewed green PR is still armed and merged while the recycle waits
+      // on in-flight workers. Every other PAUSE reason keeps its full meaning: no pass at all.
+      if (isRecyclePauseDetail(paused)) {
+        log("daemon.admission_held", { surface: "dispatch", control: "PAUSE", detail: paused, reason: `fleet PAUSE hold: ${paused}` });
+        if (deps.sweep && !backgroundSweep) {
+          sweepRetriggerState.lastRunAtMs = daemonClock.now();
+          sweepRetrigger.slot.adopt(
+            runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness, true),
+          );
+        }
+      }
       // W1-T4429 (ii): govern a structured hold's tier; (iii): reviews keep flowing beside the sleep.
       const pauseHold = deps.checkPauseHold?.();
       if (pauseHold) {
@@ -3245,19 +4279,26 @@ export async function runDaemon(
         pauseHoldGovernorStates.set(pauseHold.holdId, holdState);
         await stepPauseHoldGovernor(pauseHold, holdState, deps, log);
       }
-      const pauseReviewClock = startInterphaseReviewClock(deps, pollIntervalMs, log, "pause");
+      const pauseReviewClock = (pauseReview.clock ??= startInterphaseReviewClock(deps, pollIntervalMs, log, "pause"));
+      let slept: Awaited<ReturnType<typeof sleepUntilSweepWake>>;
       try {
-        await sleepUntilSweepWake(pollIntervalMs);
-      } finally {
-        const { passes } = await pauseReviewClock.stop();
-        if (passes > 0) log("daemon.pause.review_passes", { tick: ticks, passes });
+        slept = await sleepUntilSweepWake(pollIntervalMs);
+      } catch (e) {
+        await stopPauseReviewClock();
+        throw e;
       }
+      // W1-T5803: `wake()` resolves only its FIRST waiter, often this sleep — hand the event to the clock.
+      if (slept === "wake") pauseReviewClock.handWake();
+      reportPauseReviewPasses(pauseReviewClock.passCount());
       continue;
     }
+    // Guarded, never a bare await: an unpaused tick must not gain a microtask turn (W1-T343 lanes).
+    if (pauseReview.clock) await stopPauseReviewClock();
     // Self-freshness, checked directly after both operator holds and before headroom and dispatch, so
     // origin/main advancing past this process's boot sha is noticed on the very next tick where the
     // daemon is neither stopped nor paused. Never interrupts in-flight work (W1-T126, W1-T936).
-    const freshness = deps.checkFreshness?.();
+    const freshnessRead = deps.checkFreshness?.();
+    const freshness = isPendingFreshness(freshnessRead) ? await freshnessRead : freshnessRead;
     logNotStaleFreshness(freshness);
     if (freshness?.stale) {
       // FORWARD PROGRESS OUTRANKS FRESHNESS FOR THE FIRST CYCLE, AND ONLY THE FIRST (W1-T2965).
@@ -3271,7 +4312,7 @@ export async function runDaemon(
       // (W1-T312, W1-T380, W1-T382). One-shot: the three-clocks guard (W1-T126) fires at the next
       // tick boundary, and the operator holds above still outrank it (W1-T936).
       if (cyclesEntered === 0) {
-        staleSinceMs ??= daemonClock.now();
+        observeFreshnessAdvance(freshness.newSha, daemonClock.now(), freshness.staleSinceMs);
         log("daemon.freshness_deferred", {
           old_sha: freshness.oldSha,
           new_sha: freshness.newSha,
@@ -3291,7 +4332,7 @@ export async function runDaemon(
       if (drain) log("console.drain_consumed", { origin: drain.origin });
     }
 
-    const isMerged = deps.refreshMerged(planForBatch);
+    const isMerged = deps.refreshMergedAsync ? await deps.refreshMergedAsync(planForBatch) : deps.refreshMerged(planForBatch);
     for (const taskId of pendingMergedCredit) {
       if (!isMerged(taskId)) continue;
       pendingMergedCredit.delete(taskId);
@@ -3319,6 +4360,16 @@ export async function runDaemon(
       parkedBlockers.delete(taskId);
       log("daemon.block.rearmed", { task: taskId, pr_url: park.prUrl, reason });
     }
+
+    // Admit the restricted boot review BEFORE a phase ticker can wake during the scheduler turns below.
+    // Start, don't await: a slow review must not serialize the background full sweep behind it.
+    const bootReviewPass = bootGateTrigger === undefined ? (async () => {
+      try {
+        await deps.sweepLight?.({ reviewOnly: true });
+      } catch (e) {
+        log("daemon.sweep_light.failed", { phase: "boot", error: String((e as Error)?.message ?? e) });
+      }
+    })() : undefined;
 
     // The level-triggered PR-pipeline reconciler, once per iteration: re-derive every open PR's disposition
     // and take its gated action, alongside dispatch rather than instead of it (W1-T77, ratifies P22).
@@ -3428,6 +4479,58 @@ export async function runDaemon(
       }
     };
 
+    // W1-T7734 — THE IDLE SLEEP IS NOT BLIND WHILE A POST-REVIEW PR WAITS. The clock above stops before this
+    // sleep (it would overlap the passes below), so the sleep itself runs the light pass, at a cadence
+    // derived from observed review duration and head churn rather than once per poll interval.
+    // The final chunk ends the sleep, because the next tick's full pass is the pass that follows it.
+    const sleepIdleWithReviewDemand = async (): Promise<void> => {
+      let demand: ReturnType<NonNullable<DaemonDeps["readIdleReviewDemand"]>>;
+      try {
+        demand = deps.sweepLight ? deps.readIdleReviewDemand?.() : undefined;
+      } catch (e) {
+        log("daemon.idle_light_pass.demand_unreadable", { error: String((e as Error)?.message ?? e) });
+        demand = undefined;
+      }
+      if (!demand || !(demand.eligible > 0) || demand.cadenceMs === undefined || !(demand.cadenceMs < pollIntervalMs)) {
+        await sleepUntilSweepWake(pollIntervalMs);
+        return;
+      }
+      let remainingMs = pollIntervalMs;
+      let passes = 0;
+      let cadenceMs: number = demand.cadenceMs;
+      while (remainingMs > 0) {
+        const chunkMs = Math.min(cadenceMs, remainingMs);
+        const slept = await sleepUntilSweepWake(chunkMs);
+        remainingMs -= chunkMs;
+        if (slept === "wake" || remainingMs <= 0) return;
+        if (deps.checkStop?.() || deps.checkPause?.()) return;
+        passes += 1;
+        log("daemon.idle_light_pass", {
+          eligible: demand.eligible, cadence_ms: cadenceMs, median_review_ms: demand.medianReviewMs,
+          pushes_per_pr_hour: demand.pushesPerPrHour, poll_interval_ms: pollIntervalMs, pass: passes,
+        });
+        try {
+          await deps.sweepLight!({ reviewOnly: true });
+        } catch (e) {
+          log("daemon.sweep_light.failed", { phase: "idle", error: String((e as Error)?.message ?? e) });
+        }
+        const next = deps.readIdleReviewDemand?.();
+        if (!next || !(next.eligible > 0)) {
+          // The demand cleared: nothing waits any more, so the rest of the sleep is the ordinary one.
+          await sleepUntilSweepWake(remainingMs);
+          return;
+        }
+        demand = next;
+        cadenceMs = next.cadenceMs ?? cadenceMs;
+      }
+    };
+
+    if (bootGateTrigger === undefined) {
+      await bootReviewPass;
+      for (const cadence of BOOT_GATED_CADENCES) if (deps[cadence]) deferBootCadence(cadence);
+      await bootGateOpened;
+    }
+    startDueRungsTimer();
     const cadencesStartedAtMs = daemonClock.now();
     // Orphan sweep, on the same once-per-iteration cadence as the reconciler above; boot already runs it
     // once. Best-effort: a process-listing hiccup costs one logged tick (W1-T117 part ii).
@@ -3470,252 +4573,26 @@ export async function runDaemon(
       }
     }
 
-    // Measurement cadence: "is this system getting better". Same once-per-iteration cadence; the check's
-    // own policy-data bound throttles the actual run, so most ticks decide not to fire at no cost.
-    // Best-effort, and a fired run never gates dispatch, fails a check or changes a verdict (W1-T1259).
-    if (deps.checkMeasurementCadence) {
-      let decision: MeasurementCadenceDecision | undefined;
-      try {
-        decision = deps.checkMeasurementCadence();
-      } catch (e) {
-        log("measurement_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
-      }
-      if (decision?.fire) {
-        // W1-T4034: the cadence runs detached so the sweep keeps its turn. Review admission happens
-        // only inside a sweep pass and a sweep pass only happens once per daemon iteration, so an
-        // inline await here cost the review lane this cadence's whole duration — measured
-        // 2026-09-22, its verify-human leg alone ran 8m38s inside a 21.5-minute iteration in which
-        // no sweep ran and two already-green PRs waited 42 and 29 minutes for a 21-second review.
-        // Nothing downstream reads the result (best-effort by contract, W1-T1259), so the await
-        // bought the loop nothing. Same shape as `ci-learning` below, guard included.
-        if (deps.runMeasurementCadence && detachedActionInFlight("measurement-cadence")) {
-          log("measurement_cadence.already_detached", {
-            reason: decision.reason,
-            refusal: "measurement-cadence action already in flight",
-            flow: "the cadence runs detached so the sweep keeps its turn",
-          });
-        } else {
-          log("measurement_cadence.fired", { reason: decision.reason });
-          if (deps.runMeasurementCadence) {
-            try {
-              const work = deps.runMeasurementCadence();
-              detachSweepAction(
-                work
-                  .then((result) => {
-                    // The row is DERIVED from the result's own keys rather than hand-enumerated here, because a
-                    // hand-enumerated row silently drops every member added after it — which is how three fields reached
-                    // zero occurrences in this file (W1-T2502).
-                    log("measurement_cadence.ran", buildMeasurementCadenceRow(result));
-                  })
-                  .catch((e) => {
-                    log("measurement_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
-                  }),
-                { actionKind: "measurement-cadence", taskId: "DAEMON" },
-              );
-              log("measurement_cadence.detached", {
-                reason: decision.reason,
-                flow: "the cadence runs detached so the sweep keeps its turn",
-              });
-            } catch (e) {
-              // A SYNCHRONOUS throw from the hook itself, before any promise exists to detach.
-              log("measurement_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
-            }
+    {
+      const running = readOnlyRungs.joined();
+      if (running) await running;
+      else {
+        const release = readOnlyRungs.begin();
+        let outcome: Awaited<ReturnType<typeof readOnlyRungs.start>> | undefined;
+        try {
+          const steps = readOnlyRungs.steps();
+          let value: unknown;
+          let error: unknown;
+          let threw = false;
+          for (;;) {
+            const step = threw ? steps.throw(error) : steps.next(value);
+            if (step.done) { outcome = step.value; break; }
+            try { value = await step.value; threw = false; } catch (e) { log("daemon.due_rungs.step_rejected", { error: String((e as Error)?.message ?? e) }); error = e; threw = true; }
           }
+        } finally {
+          release(outcome);
         }
-      } else if (decision) {
-        log("measurement_cadence.skipped", { reason: decision.reason });
-      }
-    }
-
-    // Digest cadence, separate from the measurement block above: its own policy row, its own marker
-    // file, the same tick discipline and the same best-effort contract (W1-T2277).
-    if (deps.checkDigestCadence) {
-      let digestDecision: MeasurementCadenceDecision | undefined;
-      try {
-        digestDecision = deps.checkDigestCadence();
-      } catch (e) {
-        log("digest_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
-      }
-      if (digestDecision?.fire) {
-        log("digest_cadence.fired", { reason: digestDecision.reason });
-        if (deps.runDigestCadence) {
-          try {
-            const result = await deps.runDigestCadence();
-            log("digest_cadence.ran", { channel: result.channelName, delivered: result.delivered });
-          } catch (e) {
-            log("digest_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
-          }
-        }
-      } else if (digestDecision) {
-        log("digest_cadence.skipped", { reason: digestDecision.reason });
-      }
-    }
-
-    // W1-T3368 — THE SELF-HEALING RUNG. Same tick discipline and best-effort contract as the two
-    // cadences above, but different in kind: it REMOVES a condition rather than reporting one. One
-    // bounded pass on CORPUS PRESSURE; the incident and sizing are in `ledger-compaction-rung.ts`.
-    //
-    // THE REASON IS CARRIED FROM THE DECISION THAT PRODUCED THE OUTCOME, never re-derived here.
-    let ledgerCompactionDecision: LedgerCompactionDecision | undefined;
-    if (deps.checkLedgerCompaction) {
-      try {
-        ledgerCompactionDecision = deps.checkLedgerCompaction();
-      } catch (e) {
-        log("ledger_compaction.check_failed", { error: String((e as Error)?.message ?? e) });
-      }
-      if (ledgerCompactionDecision?.fire) {
-        log("ledger_compaction.fired", { reason: ledgerCompactionDecision.reason });
-        if (deps.runLedgerCompaction) {
-          try {
-            const outcome = await deps.runLedgerCompaction();
-            if (outcome === undefined) {
-              // A pass that found nothing eligible is a RESULT, not a failure: the corpus is over the
-              // bound but every archive is inside the age floor. Saying so keeps "nothing to merge"
-              // distinguishable from "the run broke", which an absent row would not.
-              log("ledger_compaction.nothing_eligible", { reason: ledgerCompactionDecision.reason });
-            } else {
-              log("ledger_compaction.ran", {
-                reason: ledgerCompactionDecision.reason,
-                source_count: outcome.sourceCount,
-                rows_written: outcome.rowsWritten,
-                duplicates_collapsed: outcome.duplicatesCollapsed,
-                archive_name: outcome.archiveName,
-              });
-            }
-          } catch (e) {
-            log("ledger_compaction.run_failed", {
-              reason: ledgerCompactionDecision.reason,
-              error: String((e as Error)?.message ?? e),
-            });
-          }
-        }
-      } else if (ledgerCompactionDecision) {
-        log("ledger_compaction.skipped", { reason: ledgerCompactionDecision.reason });
-      }
-    }
-
-    if (deps.checkBenchmarkCohort) {
-      let due = false;
-      try { due = deps.checkBenchmarkCohort(); }
-      catch (e) { log("benchmark_cohort.check_failed", { error: String((e as Error)?.message ?? e) }); }
-      if (due && deps.runBenchmarkCohortPass) {
-        if (detachedActionInFlight("benchmark-cohort")) {
-          log("benchmark_cohort.already_detached");
-        } else {
-          try {
-            const work = deps.runBenchmarkCohortPass();
-            detachSweepAction(work.then((result) => {
-              log("benchmark_cohort.ran", {
-                state: result.state,
-                scanned_sources: result.scannedSources,
-                pending_sources: result.pendingSources,
-                tail_pending_bytes: result.tailPendingBytes ?? 0,
-                reason: result.snapshot.reason,
-                source_bytes: result.snapshot.pressure.sourceBytes,
-                checkpoint_bytes: result.checkpointBytes,
-                dimension_cardinality: result.snapshot.pressure.dimensionCardinality,
-                rebuilt_partitions: result.snapshot.pressure.rebuiltPartitions,
-              });
-            }).catch((e) => {
-              log("benchmark_cohort.run_failed", { error: String((e as Error)?.message ?? e) });
-            }), { actionKind: "benchmark-cohort", taskId: "DAEMON" });
-            log("benchmark_cohort.detached");
-          } catch (e) {
-            log("benchmark_cohort.run_failed", { error: String((e as Error)?.message ?? e) });
-          }
-        }
-      }
-    }
-
-    // W1-T3997: CI learning is detached so it cannot block queue reconciliation; its registry
-    // records bounded abandonment and releases the cadence fire on unreadable corpus.
-    if (deps.checkCiLearningCadence) {
-      let ciLearningDecision: MeasurementCadenceDecision | undefined;
-      try {
-        ciLearningDecision = deps.checkCiLearningCadence();
-      } catch (e) {
-        log("ci_learning_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
-      }
-      if (ciLearningDecision?.fire) {
-        if (deps.runCiLearningCadence && detachedActionInFlight("ci-learning")) {
-          log("ci_learning_cadence.already_detached", {
-            reason: ciLearningDecision.reason,
-            refusal: "ci-learning action already in flight",
-          });
-        } else {
-          log("ci_learning_cadence.fired", { reason: ciLearningDecision.reason });
-          if (deps.runCiLearningCadence) {
-            const reason = ciLearningDecision.reason;
-            try {
-              const work = deps.runCiLearningCadence();
-              detachSweepAction(
-                work
-                  .then((result) => {
-                    // The UNREADABLE count rides the row: a partial window must never read as a clean one (P48).
-                    log("ci_learning_cadence.ran", {
-                      status: result.status,
-                      window_complete: result.windowComplete ?? true,
-                      unreadable_prs: result.unreadablePrCount ?? 0,
-                      drafts: result.draftCount,
-                      excluded: result.excludedCount,
-                      unreadable: result.unreadableCount,
-                      filed: result.filedCount,
-                      skipped: result.skippedCount,
-                      refused: result.refusedCount,
-                      lesson_recurrences: result.lessonRecurrences,
-                    });
-                  })
-                  .catch((e) => {
-                    log("ci_learning_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
-                  }),
-                { actionKind: "ci-learning", taskId: "DAEMON" },
-              );
-              log("ci_learning_cadence.detached", { reason });
-            } catch (e) {
-              // Keep the cadence rung best-effort even for a legacy/injected runner that throws
-              // before it can return its promise. Production reaches its first await at the corpus read.
-              log("ci_learning_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
-            }
-          }
-        }
-      } else if (ciLearningDecision) {
-        log("ci_learning_cadence.skipped", { reason: ciLearningDecision.reason });
-      }
-    }
-
-    // Board review: the rung whose unit is the whole open board. Same shape and best-effort contract as the
-    // two cadences above, on its own policy row and marker file. The ledger rows below are part of the fix:
-    // board-review.ts has no log hook of its own, so before this block a fire wrote no row at all
-    // (W1-T2304). Retired ids are logged on BOTH branches, because reconciliation is tied to the check, not
-    // to the fire (W1-T2464). Forensics: docs/forensics/daemon.md.
-    if (deps.checkBoardReview) {
-      let boardDecision: (BoardReviewCadenceDecision & { retiredProposalIds?: string[] }) | undefined;
-      try {
-        boardDecision = deps.checkBoardReview();
-      } catch (e) {
-        log("board_review.check_failed", { error: String((e as Error)?.message ?? e) });
-      }
-      if (boardDecision?.fire) {
-        log("board_review.fired", { reason: boardDecision.reason, retiredProposalIds: boardDecision.retiredProposalIds ?? [] });
-        if (deps.runBoardReview) {
-          try {
-            const report = await deps.runBoardReview();
-            log("board_review.ran", {
-              oldestOpenAgeHours: report.oldestOpenAgeHours,
-              redCount: report.redCount,
-              unhandledEscalationCount: report.unhandledEscalationCount,
-              itemsConsidered: report.itemsConsidered,
-              proposals: report.proposalIds.length,
-              proposalIds: report.proposalIds,
-              retired: (boardDecision.retiredProposalIds ?? []).length,
-              retiredProposalIds: boardDecision.retiredProposalIds ?? [],
-            });
-          } catch (e) {
-            log("board_review.run_failed", { error: String((e as Error)?.message ?? e) });
-          }
-        }
-      } else if (boardDecision) {
-        log("board_review.skipped", { reason: boardDecision.reason, retiredProposalIds: boardDecision.retiredProposalIds ?? [] });
+        outcome;
       }
     }
     const msInCadences = Math.max(0, daemonClock.now() - cadencesStartedAtMs);
@@ -3926,6 +4803,9 @@ export async function runDaemon(
     // tick-wide gate, not the per-dispatch gate a multi-lane batch needs — see the second consultation
     // immediately before the dispatch below (W1-T342). Forensics: docs/forensics/daemon.md.
     const tickGovernor = checkDispatchGovernors(deps, dailyCostCeilingUsd);
+    // The reading behind that admission sizes this tick's lanes, so the budget cannot refuse what the
+    // governor's adaptive bound just admitted (2026-10-10: admitted at 14, sized to 0 against 10).
+    const tickQueueAdmission = deps.readQueueAdmission?.();
     if (tickGovernor) {
       logTickPhases();
       ticks++;
@@ -3935,44 +4815,31 @@ export async function runDaemon(
       continue;
     }
 
-    // Intake cadence: one scheduler over the hand-run repository intake verbs. These rungs can
-    // poll GitHub, write feedback, draft proposals or dispatch workers, so they sit behind the
-    // same tick-wide governors as retro/auto-triage/wipe-test instead of the read-only cadence
-    // block above. Best-effort: a failed rung costs one ledger row and the tick continues.
-    if (deps.checkIntakeRungs) {
-      let decisions: readonly IntakeRungDecision[] | undefined;
-      try {
-        decisions = deps.checkIntakeRungs();
-      } catch (e) {
-        log("intake_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
-      }
-      for (const decision of decisions ?? []) {
-        if (decision.fire) {
-          const hold = holdWorkerAdmission("intake");
-          if (hold) {
-            log("intake_cadence.held", { rung: decision.rung, reason: hold.reason });
-            continue;
+    spendGatesOpen = true;
+    let intakeHeld = false;
+    {
+      const running = intakeRungs.joined();
+      if (running) intakeHeld = await running;
+      else {
+        const release = intakeRungs.begin();
+        let outcome: Awaited<ReturnType<typeof intakeRungs.start>> | undefined;
+        try {
+          const steps = intakeRungs.steps();
+          let value: unknown;
+          let error: unknown;
+          let threw = false;
+          for (;;) {
+            const step = threw ? steps.throw(error) : steps.next(value);
+            if (step.done) { outcome = step.value; break; }
+            try { value = await step.value; threw = false; } catch (e) { log("daemon.due_rungs.step_rejected", { error: String((e as Error)?.message ?? e) }); error = e; threw = true; }
           }
-          log("intake_cadence.fired", { rung: decision.rung, reason: decision.reason });
-          if (decision.rung === "codeqlQuality" && (deps.opportunityIntake || deps.knowledgeGardener)) {
-            try {
-              const result = await runOpportunityIntake(deps.opportunityIntake ?? productionOpportunityIntakePorts(deps.knowledgeGardener!));
-              log("opportunity_intake.ran", { ...result, rung: decision.rung });
-            } catch (error) {
-              log("opportunity_intake.failed", { reason: String(error) });
-            }
-          } else if (deps.runIntakeRung) {
-            try {
-              log("intake_cadence.ran", await deps.runIntakeRung(decision));
-            } catch (e) {
-              log("intake_cadence.run_failed", { rung: decision.rung, error: String((e as Error)?.message ?? e) });
-            }
-          }
-        } else {
-          log("intake_cadence.skipped", { rung: decision.rung, reason: decision.reason });
+        } finally {
+          release(outcome);
         }
+        intakeHeld = outcome;
       }
     }
+    if (intakeHeld) continue;
 
     // Retro cadence trigger, evaluated once per tick after headroom — an automated retro spawns a real run,
     // the same class of spend headroom exists to gate — and before the dispatch pick. There is deliberately
@@ -3983,7 +4850,7 @@ export async function runDaemon(
     } else if (deps.checkRetroTrigger) {
       let decision: RetroTriggerDecision | undefined;
       try {
-        decision = deps.checkRetroTrigger();
+        decision = await deps.checkRetroTrigger();
       } catch (e) {
         log("daemon.retro_trigger.check_failed", { error: String((e as Error)?.message ?? e) });
       }
@@ -4046,54 +4913,30 @@ export async function runDaemon(
       }
     }
 
-    // Wipe-test cadence: a policy-gated falsifier pulse. It spends like retro/auto-triage, so it
-    // sits after the tick-wide dispatch governors; it has its own marker, so no sibling cadence can
-    // throttle it. The pair core writes `wipetest.pair` on measurement; this block writes the rung's
-    // fired/skipped/refused clock evidence (W1-T2659).
-    if (deps.checkWipeTestCadence) {
-      let decision: WipeTestCadenceDecision | undefined;
-      try {
-        decision = deps.checkWipeTestCadence();
-      } catch (e) {
-        log("wipetest.cadence.check_failed", { error: String((e as Error)?.message ?? e) });
-      }
-      if (decision?.fire) {
-        const hold = holdWorkerAdmission("wipe-test");
-        if (hold) {
-          log("wipetest.cadence.held", { reason: hold.reason, seq: decision.seq, subject: decision.subject.id });
-          continue;
-        }
-        log("wipetest.cadence.fired", {
-          reason: decision.reason,
-          seq: decision.seq,
-          subject: decision.subject.id,
-          selected_shards: decision.subject.selectedShards ?? [],
-          factor: decision.factor,
-        });
-        if (deps.runWipeTestCadence) {
-          try {
-            const result = await deps.runWipeTestCadence(decision);
-            if (result.status === "refused") {
-              log("wipetest.cadence.refused", {
-                reason: result.reason ?? "wipe-test cadence refused",
-                seq: result.seq,
-                subject: result.subject.id,
-                factor: result.factor,
-              });
-            }
-          } catch (e) {
-            log("wipetest.cadence.refused", {
-              reason: String((e as Error)?.message ?? e),
-              seq: decision.seq,
-              subject: decision.subject.id,
-              factor: decision.factor,
-            });
+    let wipeTestHeld = false;
+    {
+      const running = wipeTestRung.joined();
+      if (running) wipeTestHeld = await running;
+      else {
+        const release = wipeTestRung.begin();
+        let outcome: Awaited<ReturnType<typeof wipeTestRung.start>> | undefined;
+        try {
+          const steps = wipeTestRung.steps();
+          let value: unknown;
+          let error: unknown;
+          let threw = false;
+          for (;;) {
+            const step = threw ? steps.throw(error) : steps.next(value);
+            if (step.done) { outcome = step.value; break; }
+            try { value = await step.value; threw = false; } catch (e) { log("daemon.due_rungs.step_rejected", { error: String((e as Error)?.message ?? e) }); error = e; threw = true; }
           }
+        } finally {
+          release(outcome);
         }
-      } else if (decision) {
-        log("wipetest.cadence.skipped", { reason: decision.reason });
+        wipeTestHeld = outcome;
       }
     }
+    if (wipeTestHeld) continue;
 
     // Console "run" kick: a queued-row Run dispatches that task by id this cycle, ahead of the ordinary
     // ordering but still through the normal gate. A kicked id that is unknown, already merged, or refused
@@ -4142,16 +4985,22 @@ export async function runDaemon(
     // it is collected here per tick and the census below can name it alongside the other buckets.
     const circuitBrokenThisTick: string[] = [];
     // One branch sweep per tick, resolved before the options object so the closure below is a
-    // set-membership test rather than a round trip per candidate (W1-T916).
-      const pushedRunBranchesRaw = deps.readPushedRunBranches?.();
-      const pushedRunBranches = pushedRunBranchesRaw !== undefined ? runBranchTaskIds(pushedRunBranchesRaw) : undefined;
-      const pushedRunRefs: readonly PushedRunRef[] = pushedRunBranchesRaw !== undefined ? parsePushedRunRefs(pushedRunBranchesRaw) : [];
+    // set-membership test rather than a round trip per candidate (W1-T916). A failed read refuses
+    // nothing, the direction a guard on whether work starts at all must fail.
+      const readRunBranchesFor = (site: "tick" | "lane-refill", fallback: string | undefined) =>
+        readRunBranchListing(deps.readPushedRunBranches, (error) => {
+          log("dispatch.run_branch_read_failed", { site, error: String((error as Error)?.message ?? error) });
+          return fallback;
+        });
+      const tickRunBranchRead = readRunBranchesFor("tick", undefined);
+      const tickRunBranchListing = tickRunBranchRead instanceof Promise ? await tickRunBranchRead : tickRunBranchRead;
       // W1-T4002 — the most recent completed full sweep already proved these (W1-T4998); see
       // `SweepCycleOutcome.planOnlyRunBranchReceipts`'s doc for why no second GitHub read happens.
       const planOnlyReceiptsThisTick: readonly PlanOnlyRunBranchReceipt[] = sweepCycleOutcome?.planOnlyRunBranchReceipts ?? [];
-      const orphanEvidenceThisTick: OrphanRunBranchEvidence | undefined = deps.readOrphanRunBranchEvidence?.();
+      const runBranchStateThisTick = runBranchStateFrom(tickRunBranchListing, deps.readOrphanRunBranchEvidence?.(), resumableHandoffs);
       const dispatchOpts: NextRunnableOpts = {
       dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
+      beginSelectionPass: deps.beginSelectionPass,
       isOpenPr: deps.isOpenPr,
       // A parked blocker is excluded before the open-PR check, so the existing idle census names it
       // as `continued-this-pass`. Its descendants remain excluded independently by `unmet-deps`.
@@ -4182,33 +5031,7 @@ export async function runDaemon(
       observedByTask: deps.observedByTask,
       // The argument W1-T534 declared and nothing supplied — see `DrainDeps` for why the reader is
       // injected and the parse hoisted (W1-T916).
-      ...(pushedRunBranches
-        ? {
-            // W1-T4002: `stillBlockedByPushedRunBranch` is the SAME predicate drain.ts's own
-            // selection loops apply — see that function's doc. Before returning, name every
-            // OTHERWISE-blocking ref this tick's receipts released, so the collision an operator
-            // sees is explicit rather than a silent non-block.
-            hasPushedRunBranch: (id: string) => {
-              const refsForTask = pushedRunRefs.filter((r) => r.taskId === id);
-              const stillBlocked = stillBlockedByPushedRunBranch(
-                id,
-                pushedRunBranches,
-                undefined,
-                pushedRunRefs,
-                planOnlyReceiptsThisTick,
-                orphanEvidenceThisTick,
-              );
-              if (!stillBlocked && refsForTask.length > 0) {
-                logPlanOnlyRunBranchException(log, id, refsForTask, planOnlyReceiptsThisTick, orphanEvidenceThisTick);
-              }
-              return stillBlocked;
-            },
-            // Rides the existing skip row with its own reason: no new step, and deliberately not the stood-down
-            // row, which has three emitters and no reader.
-            onSkipRunBranch: (t: Task) =>
-              log("dispatch.skipped", { task: t.id, reason: "run-branch-already-pushed" }),
-          }
-        : {}),
+      ...runBranchDispatchOpts(runBranchStateThisTick, planOnlyReceiptsThisTick, log),
       onFiltered: idleReasons.onFiltered,
       // In-flight: a legible skip on console and ledger; the daemon keeps polling rather than treating an
       // open PR as a block (W1-T80).
@@ -4268,6 +5091,7 @@ export async function runDaemon(
       },
       onLifetimePressure: (t) => lifetimePressureTasks.set(t.id, t),
       isIndependentFailureBlocked: (taskId) => {
+        if (deps.categorizedRefusalRejoinFor?.(taskId)) independentFailureBlocksThisRun.delete(taskId);
         const environmentalAt = environmentalBlocksThisRun.get(taskId);
         const heldInProcess =
           independentFailureBlocksThisRun.has(taskId) ||
@@ -4297,7 +5121,7 @@ export async function runDaemon(
       const budget =
         laneCount <= 1
           ? laneCount
-          : laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.() });
+          : laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: tickQueueAdmission });
       if (laneCount >= 2 && budget <= 0) {
         // Mirrors `runDrainLanes`' own WIP-deferred row: runnable work may exist, held back by the governor
         // rather than absent, which is distinct from an ordinary idle tick. Never reached at one lane.
@@ -4305,6 +5129,7 @@ export async function runDaemon(
           lane_count: laneCount,
           wip_limit: opts.wipLimit ?? null,
           observed_open_count: deps.openPrCount?.() ?? null,
+          ...wipDeferredAdmissionFields(tickQueueAdmission),
         });
       }
       const candidates = runnableCandidates(planForBatch, isMerged, budget, dispatchOpts);
@@ -4326,7 +5151,7 @@ export async function runDaemon(
     if (deps.checkAutoTriage) {
       let decision: AutoTriageDecision | undefined;
       try {
-        decision = deps.checkAutoTriage({
+        decision = await deps.checkAutoTriage({
             deferralPending: deferredPairings > 0,
             dispatchCount: dispatchSet.length,
             laneBudget,
@@ -4338,13 +5163,20 @@ export async function runDaemon(
         // In-flight guard: the same shape as the task lane's pair above, keyed on feedback id. The decision
         // only knows the entry's own status and cannot see an already-open PR carrying this id's provenance,
         // so that read happens here, right before the fire it would otherwise duplicate (W1-T300).
-        const openPrNumber = deps.isFeedbackOpenPr?.(decision.feedbackId);
+        // #10265: that read is a once-per-boot snapshot, blind to a triage PR opened since; this boot's `pr.opened` row is not.
+        const openPrNumber = deps.isFeedbackOpenPr?.(decision.feedbackId) ??
+          triagePrOpenedInLedger(deps.readLedgerLines?.(), decision.feedbackId);
         let inFlight = openPrNumber !== undefined;
+        let inFlightReason = "an open triage PR already carries this feedback id's provenance";
         if (inFlight && openPrNumber !== undefined) {
           // The confirming-read discipline, applied verbatim: a cached open can be stale, so a fresh read
           // stands the guard down rather than parking the entry forever on yesterday's snapshot (W1-T177).
           const liveState = deps.readFeedbackLiveState?.(decision.feedbackId, openPrNumber);
-          if (liveState !== undefined && liveState !== "OPEN") {
+          // #10265: a MERGED triage already moved the entry on main; this checkout is just behind.
+          const mainStatus = liveState === "MERGED" ? deps.readFeedbackStatusOnMain?.(decision.feedbackId) : undefined;
+          if (mainStatus !== undefined && mainStatus !== "new") {
+            inFlightReason = `its triage PR merged and origin/main holds the entry at status: ${mainStatus} — this checkout is behind`;
+          } else if (liveState !== undefined && liveState !== "OPEN") {
             inFlight = false;
             log("auto_triage.stood_down", {
               feedback: decision.feedbackId,
@@ -4360,7 +5192,7 @@ export async function runDaemon(
           log("auto_triage.skipped_inflight", {
             feedback: decision.feedbackId,
             pr_number: openPrNumber,
-            reason: "an open triage PR already carries this feedback id's provenance",
+            reason: inFlightReason,
           });
         } else {
           const hold = holdWorkerAdmission("auto-triage");
@@ -4414,6 +5246,7 @@ export async function runDaemon(
     }
 
     if (dispatchSet.length === 0) {
+      scheduleRepositoryMaintenance(false);
       // Unlike drain.ts, where nothing runnable is a terminal stop, the daemon is persistent: new work can
       // land later, so it paces itself with the injected clock and keeps polling.
       await flushLifetimePressure();
@@ -4530,7 +5363,7 @@ export async function runDaemon(
         }
       }
       if (await stopInterphaseReviewClock()) continue;
-      await sleepUntilSweepWake(pollIntervalMs);
+      await sleepIdleWithReviewDemand();
       continue;
     }
 
@@ -4611,7 +5444,9 @@ export async function runDaemon(
     // never took it), which makes this branch's own `dispatchSet.length === 0` conjunct always
     // false. `reviewerCodeStale` is still computed here because `refetchedFreshness` (and the
     // `daemon.freshness_deferred` log below, which IS reached) reads it.
-    const selfFreshness = deps.checkFreshness?.();
+    const selfFreshnessRead = deps.checkFreshness?.();
+    const freshnessReadsAsync = isPendingFreshness(selfFreshnessRead);
+    const selfFreshness = isPendingFreshness(selfFreshnessRead) ? await selfFreshnessRead : selfFreshnessRead;
     logNotStaleFreshness(selfFreshness);
     const reviewerCodeStale = tickStaleReviewerAction.kind === "restart" ? sweepCycleOutcome?.reviewerCodeStale : undefined;
     const refetchedFreshness: DaemonFreshness | undefined =
@@ -4703,13 +5538,47 @@ export async function runDaemon(
     // Concurrent dispatch: settle-all, never fail-fast, so a sibling lane's rejection can never abort another lane
     // in flight, and every lane's outcome is recorded before this tick decides anything (W1-T343). W1-T4416: a lane
     // that frees while a sibling runs refills from a FRESH read through the same gates; one lane never refills.
+    const dispatchPhaseStartedAtMs = daemonClock.now();
+    // Freeze the estimate for this phase: its own slow run cannot inflate its comparison population.
+    const refillBoundMs = runLengths.samples > 0 ? runLengths.totalMs / runLengths.samples : DISPATCH_PHASE_REFILL_BOUND_MS;
+    const measuredRefillBound = runLengths.samples > 0;
+    log("dispatch.refill_bound", { bound_ms: refillBoundMs, samples: runLengths.samples,
+      source: measuredRefillBound ? "observed_runs" : "no_history_fallback" });
     const snapshots = admitted.map(() => ({ plan: planForBatch, isMerged }));
     const passIds = new Set(admitted.map((t) => t.id));
     const inFlightTasks = new Set<Task>(admitted);
     let refillClosed: string | undefined;
     let inFlightFreshness: Extract<DaemonFreshness, { stale: true }> | undefined;
-    const refillLane = (lane: number, finished: Task, outcome: PromiseSettledResult<RunResult>): Task | undefined => {
+    const restartWait = { decidedAtMs: 0, reported: 0 };
+    const laneStartedAtMs = new Map(admitted.map((t) => [t.id, dispatchPhaseStartedAtMs]));
+    const restartSlowLanes = new Set<string>();
+    const slowLane = (t: Task): boolean => measuredRefillBound && daemonClock.now() - laneStartedAtMs.get(t.id)! > refillBoundMs;
+    const restartStillWaitingOnSlowLane = (): boolean => [...inFlightTasks].some((t) => restartSlowLanes.has(t.id));
+    // Re-read at every decision, never latched: a refilled sibling can outlive the measured length AFTER a lane freed.
+    const phaseBoundHolds = (): boolean => !inFlightFreshness && daemonClock.now() - dispatchPhaseStartedAtMs > refillBoundMs &&
+      ![...inFlightTasks].some(slowLane);
+    const latchRestart = (freshness: Extract<DaemonFreshness, { stale: true }>): void => {
+      if (!inFlightFreshness) {
+        restartWait.decidedAtMs = daemonClock.now();
+        // Only the cohort that already delayed the restart grants refill; new runs cannot renew it.
+        for (const t of inFlightTasks) if (slowLane(t)) restartSlowLanes.add(t.id);
+      }
+      inFlightFreshness ??= freshness;
+    };
+    // W1-T5282: a lane's refill is synchronous and cannot await a fetch, so with an awaited reader it reads the
+    // latest reading settled since this tick began: the admission read above, then each dispatch tick's.
+    let settledFreshness = selfFreshness;
+    // 2026-10-10 19:38: both freed lanes were held for good while the lane that later held the phase was 5 min old.
+    // A measured bound parks such a lane instead; a dispatch tick or a sibling's finish re-decides it.
+    const parkedLanes: Array<{ lane: number; finished: Task; wake: (next: Promise<Task | undefined>) => void }> = [];
+    const wakeParkedLanes = (): void => {
+      if (inFlightTasks.size > 0 && !refillClosed && phaseBoundHolds()) return;
+      // Deferred, so a throwing decision ends only its own lane (runLanePool), never strands a later parked one.
+      for (const { lane, finished, wake } of parkedLanes.splice(0)) wake(Promise.resolve().then(() => decideRefill(lane, finished)));
+    };
+    const refillLane = (lane: number, finished: Task, outcome: PromiseSettledResult<RunResult>): Task | undefined | Promise<Task | undefined> => {
       inFlightTasks.delete(finished);
+      restartSlowLanes.delete(finished.id);
       if (outcome.status === "rejected") {
         // W1-T5083: a lane-local rejection (the settle loop logs it and the pass continues) never closes refill.
         if (!(outcome.reason instanceof TaskAdmissionError) && !refillLaneLocalRejection(outcome.reason)) refillClosed ??= "a lane rejected";
@@ -4717,68 +5586,181 @@ export async function runDaemon(
       // W1-T4662: `handed_off` (a healthy freshness yield) deliberately does NOT match here — only
       // a genuine, repeated `blocked_transient` API failure closes this lane's refill.
       else if (outcome.value.verdict === "blocked_transient") refillClosed ??= "blocked_transient";
-      const governed = refillClosed ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
+      const decision = decideRefill(lane, finished);
+      wakeParkedLanes();
+      return decision;
+    };
+    const decideRefill = (lane: number, finished: Task): Task | undefined | Promise<Task | undefined> => {
+      const phaseAgeMs = daemonClock.now() - dispatchPhaseStartedAtMs;
+      if (inFlightFreshness && !restartStillWaitingOnSlowLane()) refillClosed ??= "stale code";
+      const phaseBound = !refillClosed && phaseBoundHolds() ? "phase bound" : undefined;
+      // With no history no sibling can ever read slow, so parking could only end as a hold: hold now (W1-T5761).
+      if (phaseBound && measuredRefillBound && inFlightTasks.size > 0) {
+        log("dispatch.lane_parked", { lane, finished_task: finished.id, reason: phaseBound, phase_age_ms: phaseAgeMs,
+          refill_bound_ms: refillBoundMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
+        return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, wake }));
+      }
+      const governed = refillClosed || phaseBound ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
       const stopped = deps.checkStop?.();
       const paused = deps.checkPause?.();
       // W1-T5083: the same restart decision the top of tick asks; a sibling in flight makes it busy.
-      const freshness = refillClosed ? undefined : deps.checkFreshness?.();
+      const freshness = refillClosed || phaseBound ? undefined : freshnessReadsAsync ? settledFreshness : (deps.checkFreshness?.() as DaemonFreshness | undefined);
+      if (!freshnessReadsAsync) logNotStaleFreshness(freshness);
       const freshnessAction = freshness?.stale ? decideFreshness(freshness, true) : undefined;
+      // W1-T6274: a restart decided here holds every later refill this phase and ends it in the freshness stop.
+      if (freshnessAction === "restart" && freshness?.stale) {
+        latchRestart(freshness);
+        if (!restartStillWaitingOnSlowLane()) refillClosed ??= "stale code";
+      }
       let reason =
         refillClosed ??
+        phaseBound ??
         (opts.max !== undefined && attempted.length >= opts.max ? "max reached" : undefined) ??
         holdWorkerAdmission("lane-refill")?.reason ??
         (stopped ? `stop: ${stopped}` : undefined) ??
         (paused ? `pause: ${paused}` : undefined) ??
-        (freshnessAction === "restart" ? "stale code" : undefined) ??
         (governed ? `governor: ${governed.kind}` : undefined);
-      let next: Task | undefined;
-      if (reason === undefined) {
-        try {
-          reloadPlanBinding();
-          const snapshot = { plan, isMerged: deps.refreshMerged(plan) };
-          const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.() });
+      // W1-T5805: the refill decides on its OWN branch read, never the tick's: a branch pushed since the
+      // tick began must refuse its task here. A failed read decides on the tick-start reading instead.
+      const chooseRefill = (runBranchListing: string | undefined): Task | undefined | Promise<Task | undefined> => {
+        let next: Task | undefined;
+        let nextSnapshot: { plan: Plan; isMerged: MergedSet } | undefined;
+        const decide = (snapshot: { plan: Plan; isMerged: MergedSet }): void => {
+          const budget = laneDispatchBudget({
+            laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: deps.readQueueAdmission?.(),
+          });
+          const runBranchState = runBranchStateFrom(runBranchListing, deps.readOrphanRunBranchEvidence?.(), resumableHandoffs);
           const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? laneCount : 0, {
             ...dispatchOpts,
+            ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log),
             dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
             excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...pendingMergedCredit, ...passIds]),
           });
           const fits = partitionByFileOverlap([...inFlightTasks, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
           next = fits.dispatch.find((t) => !inFlightTasks.has(t));
-          if (next) snapshots.push(snapshot);
-        } catch (e) {
+          if (next) nextSnapshot = snapshot;
+        };
+        const readFailed = (e: unknown): void => {
           reason = `refill read failed: ${String((e as Error)?.message ?? e)}`;
+        };
+        const conclude = (): Task | undefined => {
+          // W1-T6274: the reads above are awaited; a restart, stop or pause decided meanwhile still holds the lane.
+          if (next) {
+            const latched = refillClosed ?? (inFlightFreshness && !restartStillWaitingOnSlowLane() ? "stale code" : undefined) ??
+              (deps.checkStop?.() ? "stop" : undefined) ?? (deps.checkPause?.() ? "pause" : undefined);
+            if (latched !== undefined) {
+              reason = `${latched} (decided while the refill read was in flight)`;
+              next = undefined;
+            }
+          }
+          if (!next) {
+            log("dispatch.lane_refill_held", {
+              lane,
+              finished_task: finished.id,
+              reason: reason ?? "no disjoint runnable task within the lane budget",
+              ...(reason === "phase bound" ? { phase_age_ms: phaseAgeMs, ...(measuredRefillBound ? { refill_bound_ms: refillBoundMs } : {}) } : {}),
+              ...(freshnessAction ? { freshness_action: freshnessAction } : {}),
+            });
+            return undefined;
+          }
+          snapshots.push(nextSnapshot!);
+          passIds.add(next.id);
+          inFlightTasks.add(next);
+          laneStartedAtMs.set(next.id, daemonClock.now());
+          log("dispatch.lane_refilled", { lane, finished_task: finished.id, next_task: next.id,
+            ...(inFlightFreshness ? { restart_pending: true, waiting_on: [...restartSlowLanes] } : {}) });
+          log("daemon.iteration", { task: next.id, attempted: attempted.length + 1, max: opts.max ?? null });
+          attempted.push(next.id);
+          return next;
+        };
+        if (reason === undefined) {
+          try {
+            reloadPlanBinding();
+            const refillPlan = plan;
+            // W1-T5846: with the async port wired the merged set is read through it, never `refreshMerged`, whose
+            // stale-generation fallback (W1-T5762) is a synchronous live read on the event loop. Only a deps
+            // object that supplies no async port keeps the synchronous read, and its refill stays synchronous.
+            if (deps.refreshMergedAsync) {
+              return deps.refreshMergedAsync(refillPlan).then(
+                (isMerged) => {
+                  try { decide({ plan: refillPlan, isMerged }); } catch (e) { /* the failure is carried as the held reason */ readFailed(e); }
+                  return conclude();
+                },
+                (e) => { readFailed(e); return conclude(); },
+              );
+            }
+            decide({ plan: refillPlan, isMerged: deps.refreshMerged(refillPlan) });
+          } catch (e) {
+            // the failure is carried as the held reason, logged by `dispatch.lane_refill_held`
+            readFailed(e);
+          }
         }
-      }
-      if (!next) {
-        log("dispatch.lane_refill_held", {
-          lane,
-          finished_task: finished.id,
-          reason: reason ?? "no disjoint runnable task within the lane budget",
-          ...(freshnessAction ? { freshness_action: freshnessAction } : {}),
-        });
-        return undefined;
-      }
-      passIds.add(next.id);
-      inFlightTasks.add(next);
-      log("dispatch.lane_refilled", { lane, finished_task: finished.id, next_task: next.id });
-      log("daemon.iteration", { task: next.id, attempted: attempted.length + 1, max: opts.max ?? null });
-      attempted.push(next.id);
-      return next;
+        return conclude();
+      };
+      const runBranchRead = reason === undefined ? readRunBranchesFor("lane-refill", tickRunBranchListing) : undefined;
+      return runBranchRead instanceof Promise ? runBranchRead.then(chooseRefill) : chooseRefill(runBranchRead);
     };
-    const onDispatchTick = deps.checkFreshness ? () => {
-      if (inFlightFreshness || inFlightTasks.size === 0 || deps.checkPause?.()) return;
-      const freshness = deps.checkFreshness!();
+    const actOnDispatchFreshness = (freshness: DaemonFreshness): void => {
+      settledFreshness = freshness;
       logNotStaleFreshness(freshness);
       if (freshness.stale && decideFreshness(freshness, true) === "restart") {
-        inFlightFreshness = freshness;
-        refillClosed = "stale code";
+        latchRestart(freshness);
+        if (!restartStillWaitingOnSlowLane()) refillClosed ??= "stale code";
       }
+      wakeParkedLanes();
+    };
+    // The restart runs once every lane below settles; until then each due tick names the lanes it waits on.
+    const reportRestartWait = (decided: Extract<DaemonFreshness, { stale: true }>): void => {
+      const nowMs = daemonClock.now();
+      const waitedMs = Math.max(0, nowMs - restartWait.decidedAtMs);
+      if (!freshnessRestartWaitReportDue(waitedMs, restartWait.reported, pollIntervalMs)) return;
+      restartWait.reported++;
+      log("daemon.freshness_restart_waiting", {
+        waiting_on: "in_flight_lanes",
+        waited_ms: waitedMs,
+        lanes: [...inFlightTasks].map((t) => ({ task: t.id, age_ms: Math.max(0, nowMs - (laneStartedAtMs.get(t.id) ?? nowMs)) })),
+        refill_held: refillClosed ?? null,
+        report: restartWait.reported,
+        old_sha: decided.oldSha,
+        new_sha: decided.newSha,
+      });
+    };
+    const onDispatchTick = deps.checkFreshness ? (): void | Promise<void> => {
+      wakeParkedLanes();
+      if (inFlightFreshness && inFlightTasks.size > 0) return reportRestartWait(inFlightFreshness);
+      if (inFlightFreshness || inFlightTasks.size === 0 || deps.checkPause?.()) return;
+      const read = deps.checkFreshness!();
+      if (!isPendingFreshness(read)) return actOnDispatchFreshness(read);
+      // The pool can settle while the fetch is in flight; a reading for a finished dispatch is the next tick's.
+      return read.then((freshness) => {
+        if (!inFlightFreshness && inFlightTasks.size > 0) actOnDispatchFreshness(freshness);
+      });
     } : undefined;
     sweepRetrigger.onDispatchTick = onDispatchTick;
     const lanes = { inFlight: 0 };
     sweepRetrigger.lanesInFlight = () => lanes.inFlight;
     const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch, sweepRetrigger, headroomSampler).stop;
-    const settled = await runLanePool(admitted, (id) => deps.runOne(id), refillLane, lanes);
+    const admittedWork = runLanePool(admitted, (id) => {
+      const rejoin = deps.categorizedRefusalRejoinFor?.(id);
+      if (rejoin && !rejoin.receiptRecorded) log("dispatch.harness_commit_retry", {
+        task_id: id,
+        original_run_id: rejoin.sourceRunId,
+        original_verdict: "no_pr",
+        original_refusal: "categorized_worker_refusal",
+        refused_contract_revision: rejoin.refusedContractRevision,
+        contract_revision: rejoin.contractRevision,
+        reason: "categorized refusal contract changed",
+      });
+      const startedAtMs = daemonClock.now();
+      return deps.runOne(id).then((outcome) => {
+        const length = daemonClock.now() - startedAtMs;
+        if (length > 0) { runLengths.totalMs += length; runLengths.samples++; }
+        return outcome;
+      });
+    }, refillLane, lanes);
+    scheduleRepositoryMaintenance(true, () => lanes.inFlight);
+    const settled = await admittedWork;
+    repositoryMaintenanceQueueBusy = false;
     // The settled counterpart to the concurrent-set row. Emitted BEFORE the ticker stop and the
     // classification loop, because that loop's fatal path returns and the stop is itself awaited work that
     // could throw, so anything later would be lost in exactly the failure cases this row reports.

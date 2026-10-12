@@ -9,8 +9,8 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { Plan } from "../src/lib/plan.js";
 // W1-T5349's own symbols are read through the namespace, so this file still LOADS at a base
 // that lacks them and fails per test instead of at import.
-import * as sweep from "../src/lib/sweep.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type CiFailure, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import * as sweep from "./helpers/sweep-test.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type CiFailure, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 
 // W1-T5349 — a red machine-lane plan-only PR used to get only W1-T4351's `refused-escalate`, an issue
 // per head that nobody answered. The rung repairs the three mechanical signatures from the failing
@@ -629,10 +629,9 @@ test("W1-T5349: the default reservation mints from the worktree's plan and reser
     assert.match(id, /^W1-T\d+$/);
     assert.ok(Number(id.slice(4)) >= 13, `minted above the plan's ceiling: ${id}`);
     assert.ok(argv.length > 0, "the reservation went through git");
-    // The default runner really shells out.
-    const r = sweep.planRepairGitRun(root)(["--version"]);
-    assert.equal(r.status, 0);
-    assert.match(r.stdout, /git version/);
+    // W1-T6133: the default runner goes through the leaf, which refuses a tree with no .git entry before
+    // git runs; test/sweep-and-worker-git-calls-into-a-pr-head-tree-go-through-the-leaf.test.ts drives it for real.
+    assert.throws(() => sweep.planRepairGitRun(root)(["--version"]), { name: "WorktreePointerRefusedError" });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -432,6 +432,10 @@ test("W1-T4948: failed sweep cleans only its own temp root", () => withClockSand
 test("W1-T4948: real shifted sweep cannot reap a sibling sentinel", () => withClockSandbox((sandbox) => {
   const sibling = join(sandbox, "rmd-sibling-sentinel");
   mkdirSync(sibling);
+  // W1-T6035: the preload moves fs stat times with Date, so a dir made now reads fresh at any shift.
+  // Both dirs are aged past the sweep's 24 h bound on the REAL clock, so only TMPDIR spares the sibling.
+  const aged = new Date(Date.now() - 2 * 86_400_000);
+  utimesSync(sibling, aged, aged);
   const tmpModule = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "lib", "tmp.ts")).href;
   const shiftModule = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "clock-shift.mjs");
   let privateRoot = "";
@@ -440,6 +444,7 @@ test("W1-T4948: real shifted sweep cannot reap a sibling sentinel", () => withCl
     privateRoot = opts.env.TMPDIR;
     const victim = join(privateRoot, "rmd-private-victim");
     mkdirSync(victim);
+    utimesSync(victim, aged, aged);
     const code = `import { sweepStaleTempDirs } from ${JSON.stringify(tmpModule)}; sweepStaleTempDirs();`;
     execFileSync(file, ["--import", "tsx", "--import", shiftModule, "--input-type=module", "-e", code], {
       cwd: opts.cwd, env: opts.env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],

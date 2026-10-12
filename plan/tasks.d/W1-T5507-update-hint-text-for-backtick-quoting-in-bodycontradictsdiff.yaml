@@ -1,0 +1,24 @@
+- id: W1-T5507
+  title: Update hint text for backtick quoting in bodyContradictsDiff
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=1571f5b32d2395f9
+  attempts: 0
+  files:
+    - src/lib/review.ts
+  acceptance:
+    - claim: "The FAIL message hint in bodyContradictsDiff now correctly describes that only fenced blocks, blockquotes, or HTML comments suppress the match for arm (b)"
+      proof: "grep: blockquotes, or HTML comments in src/lib/review.ts"
+  origin: architect
+  rationale: |
+    From the 2026-09-16 follow-up on PR-5737 (DAEMON-1789548928143), ratified via rmd approve:
+    the boilerplate hint `(backtick a mention to quote it)` in `bodyContradictsDiff`'s FAIL message
+    (src/lib/review.ts) is imprecise for arm (b). That arm never calls `isInsideInlineQuote`, so a
+    single backtick around "no code" does NOT suppress the match; only a fenced block, a blockquote
+    or an HTML comment does, via `stripQuotedRegions`. Tighten the hint text (or wire
+    `isInsideInlineQuote` into arm (b)) so the advice matches the mechanism.

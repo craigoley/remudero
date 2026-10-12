@@ -29,7 +29,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
-import type { RunResult } from "../src/run-task.js";
+import type { RunResult } from "../src/lib/run-result.js";
 import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import { deriveLastPoll } from "../src/lib/daemon-health.js";
 

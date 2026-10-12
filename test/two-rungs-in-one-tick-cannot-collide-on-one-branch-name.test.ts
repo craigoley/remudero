@@ -165,7 +165,7 @@ test("acceptance (3): a task lane's run-<taskId>-<epochMs> branch shape is uncha
   assert.equal(taskIdFromRunBranch(branch), taskId, "taskIdFromRunBranch must still recover the exact taskId");
 });
 
-test("acceptance (4): a worktree add that still fails is ledgered under worktree.add_failed (naming the branch and carrying real error text), not lost to git's own stderr, and is rethrown", () => {
+test("acceptance (4): a worktree add that still fails is ledgered under worktree.add_failed (naming the branch and carrying real error text), not lost to git's own stderr, and is rethrown", async () => {
   const root = tmp("rmd-two-rungs-reported-");
   try {
     const clone = join(root, "clone");
@@ -183,7 +183,7 @@ test("acceptance (4): a worktree add that still fails is ledgered under worktree
     const log: Array<{ step: string; extra?: Record<string, unknown> }> = [];
     const logger = (step: string, extra?: Record<string, unknown>) => log.push({ step, extra });
 
-    assert.throws(() => addLaneWorktree(clone, worktreesRoot, runId, logger));
+    await assert.rejects(() => addLaneWorktree(clone, worktreesRoot, runId, logger));
     const failure = log.find((l) => l.step === "worktree.add_failed");
     assert.ok(failure, "the failure must be ledgered under its own step, not silently dropped");
     assert.equal(failure?.extra?.branch, branch);
@@ -194,7 +194,7 @@ test("acceptance (4): a worktree add that still fails is ledgered under worktree
   }
 });
 
-test("addLaneWorktree acceptance (1): the common, single-attempt case cuts a real worktree on the expected run-<runId> branch and logs no failure", () => {
+test("addLaneWorktree acceptance (1): the common, single-attempt case cuts a real worktree on the expected run-<runId> branch and logs no failure", async () => {
   const root = tmp("rmd-two-rungs-plain-");
   try {
     const clone = join(root, "clone");
@@ -204,7 +204,7 @@ test("addLaneWorktree acceptance (1): the common, single-attempt case cuts a rea
     const log: Array<{ step: string; extra?: Record<string, unknown> }> = [];
     const logger = (step: string, extra?: Record<string, unknown>) => log.push({ step, extra });
 
-    const { branch, worktreePath } = addLaneWorktree(clone, worktreesRoot, runId, logger);
+    const { branch, worktreePath } = await addLaneWorktree(clone, worktreesRoot, runId, logger);
     assert.equal(branch, `run-${runId}`);
     assert.equal(worktreePath, join(worktreesRoot, branch));
     assert.ok(!log.some((l) => l.step === "worktree.add_failed"), "the success path must not ledger a failure");
@@ -213,7 +213,7 @@ test("addLaneWorktree acceptance (1): the common, single-attempt case cuts a rea
   }
 });
 
-test("addLaneWorktree acceptance: two rungs of the SAME lane in one process, minted in the SAME frozen millisecond, both get their OWN worktree — the exact scenario the daemon log observed", () => {
+test("addLaneWorktree acceptance: two rungs of the SAME lane in one process, minted in the SAME frozen millisecond, both get their OWN worktree — the exact scenario the daemon log observed", async () => {
   const root = tmp("rmd-two-rungs-samelane-");
   try {
     const clone = join(root, "clone");
@@ -222,16 +222,14 @@ test("addLaneWorktree acceptance: two rungs of the SAME lane in one process, min
     const log: Array<{ step: string; extra?: Record<string, unknown> }> = [];
     const logger = (step: string, extra?: Record<string, unknown>) => log.push({ step, extra });
 
-    withFrozenClock(1788127440289, () => {
-      const runId1 = `RETRO-${nextLaneEpochMs()}`;
-      const runId2 = `RETRO-${nextLaneEpochMs()}`;
-      assert.notEqual(runId1, runId2);
+    // Both ids are minted inside the frozen millisecond; the adds (now awaited) run after it.
+    const [runId1, runId2] = withFrozenClock(1788127440289, () => [`RETRO-${nextLaneEpochMs()}`, `RETRO-${nextLaneEpochMs()}`]);
+    assert.notEqual(runId1, runId2);
 
-      const first = addLaneWorktree(clone, worktreesRoot, runId1, logger);
-      const second = addLaneWorktree(clone, worktreesRoot, runId2, logger);
-      assert.notEqual(first.branch, second.branch, "two RETRO rungs in one tick must get distinct branches");
-      assert.ok(!log.some((l) => l.step === "worktree.add_failed"), "neither rung should fail — this is the whole point of the fix");
-    });
+    const first = await addLaneWorktree(clone, worktreesRoot, runId1, logger);
+    const second = await addLaneWorktree(clone, worktreesRoot, runId2, logger);
+    assert.notEqual(first.branch, second.branch, "two RETRO rungs in one tick must get distinct branches");
+    assert.ok(!log.some((l) => l.step === "worktree.add_failed"), "neither rung should fail — this is the whole point of the fix");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

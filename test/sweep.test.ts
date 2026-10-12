@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { DEFAULT_ESTIMATE_MIB } from "../src/lib/host-memory-ledger.js";
 import { LiveWriteBlockedError, withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { classifyUpdateBranchFailure, reviewAttemptsForInput, updateBranchViaGh } from "../src/run-task.js";
+import { classifyUpdateBranchFailure, reviewAttemptsForInput, updateBranchViaGh } from "./helpers/run-task-test.js";
 import { test } from "node:test";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -52,7 +53,7 @@ import {
   type SupersessionVerdict,
   recordableRatchetRepairFor,
   recordableRatchetScripts,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { REVIEW_ENGINE_REVISION, reviewInputDigest, reviewLedgerReasons, type CriterionVerdict, type ReviewVerdict } from "../src/lib/review.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
@@ -183,6 +184,19 @@ function strikesExhaustedPr(): OpenPrView {
     priorStrikes: 2, // == default cap
     unmetCriteria: [criterion({ claim: "still unmet" })],
     reviewSummary: "still failing after 2 strikes",
+  });
+}
+
+function ambiguousReviewPr(over: Partial<OpenPrView> = {}): OpenPrView {
+  return pr({
+    prNumber: 14,
+    prUrl: "url/14",
+    taskId: "W1-AMBIGUOUS",
+    reviewState: "failure",
+    checksState: "green",
+    unmetCriteria: [],
+    reviewSummary: "review failed without actionable criteria",
+    ...over,
   });
 }
 
@@ -690,10 +704,10 @@ test("W1-T932: concept coexistence is off by default", () => {
   assert.notEqual(withVerdict.disposition, "stale", "a unique verdict spares the PR without any flag");
 });
 
-test("deriveDisposition: failing review with strikes exhausted -> blocked-ambiguous", () => {
+test("deriveDisposition: reaching the former strike ceiling routes to progress judgment", () => {
   const r = deriveDisposition(strikesExhaustedPr(), DEFAULT_SWEEP_POLICY, NOW);
-  assert.equal(r.disposition, "blocked-ambiguous");
-  assert.match(r.reason, /exhausted/);
+  assert.equal(r.disposition, "blocked-fixable");
+  assert.match(r.reason, /progress judgment due/);
 });
 
 test("deriveDisposition: failing review with NO actionable criteria -> blocked-ambiguous (contradictory)", () => {
@@ -1202,11 +1216,11 @@ test("deriveDisposition: the #161/#170 fixture — ci=red, review skipped (none)
   assert.match(r.reason, /checks red/);
 });
 
-test("deriveDisposition: the #170 fixture — blocked_ci with strikes EXHAUSTED -> blocked-ambiguous (the question rung), never mergeable, never a fourth fix", () => {
+test("deriveDisposition: the #170 fixture — blocked_ci at the former ceiling stays fixable for progress judgment", () => {
   const r = deriveDisposition(blockedCiExhaustedPr(), DEFAULT_SWEEP_POLICY, NOW);
   assert.notEqual(r.disposition, "mergeable");
-  assert.equal(r.disposition, "blocked-ambiguous");
-  assert.match(r.reason, /exhausted/);
+  assert.equal(r.disposition, "blocked-fixable");
+  assert.match(r.reason, /progress judgment due/);
 });
 
 test("deriveDisposition: mergeable requires POSITIVE ci=green AND review=success — {ci green, review success} -> mergeable", () => {
@@ -1348,6 +1362,8 @@ test("W1-T196 acceptance 2 — the stand-down is TRACED, never silent: it re-led
 });
 
 test("W1-T196 acceptance 3 — a DELIBERATELY-unattributed filing PR is distinguished from BROKEN attribution: without the POSITIVE isPlanFiling signal, an unresolved task id still escalates unchanged (a real defect stays surfaced)", async () => {
+  // Ruling 2026-10-09 (W1-T7096): the progress judge (here the helper's fixture judge) rules the former
+  // ceiling a loop; that verdict enters main's strikes-exhausted route unchanged, so main's assertions stand.
   // Same shape as unattributableFilingPr, minus the emitter's positive filing
   // signal — the shape of an IMPLEMENTING PR whose trailer went missing/malformed.
   const brokenAttributionPr = unattributableFilingPr({ isPlanFiling: undefined });
@@ -1368,6 +1384,8 @@ test("W1-T196 acceptance 3 — a DELIBERATELY-unattributed filing PR is distingu
 });
 
 test("W1-T196 acceptance 4 — an attributable PR with a genuine block still escalates exactly as before this task", async () => {
+  // Ruling 2026-10-09 (W1-T7096): the progress judge (here the helper's fixture judge) rules the former
+  // ceiling a loop; that verdict enters main's strikes-exhausted route unchanged, so main's assertions stand.
   const deps = fakeDeps();
   const summary = await runSweep([strikesExhaustedPr()], deps);
   assert.equal(summary.byDisposition["blocked-ambiguous"], 1);
@@ -1384,11 +1402,11 @@ test("W1-T196 acceptance 4 — an attributable PR with a genuine block still esc
 test("W1-T514: a new head re-earns its own escalation", async () => {
   const shared = ledgerPath();
   const first = fakeDeps({ ledgerPath: shared });
-  await runSweep([strikesExhaustedPr()], first);
+  await runSweep([ambiguousReviewPr()], first);
   assert.equal(first.escalated.length, 1, "escalates on the first head");
 
   // The SAME PR, re-dispositioned blocked-ambiguous at a DIFFERENT head sha.
-  const secondHead: OpenPrView = { ...strikesExhaustedPr(), headSha: "cccc333" };
+  const secondHead: OpenPrView = { ...ambiguousReviewPr(), headSha: "cccc333" };
   const second = fakeDeps({ ledgerPath: shared });
   await runSweep([secondHead], second);
   assert.equal(
@@ -1401,12 +1419,12 @@ test("W1-T514: a new head re-earns its own escalation", async () => {
 test("W1-T514: the same head still escalates only once", async () => {
   const shared = ledgerPath();
   const first = fakeDeps({ ledgerPath: shared });
-  await runSweep([strikesExhaustedPr()], first);
+  await runSweep([ambiguousReviewPr()], first);
   assert.equal(first.escalated.length, 1, "escalates on the first pass");
 
   // The SAME PR at the SAME head, re-dispositioned blocked-ambiguous again.
   const second = fakeDeps({ ledgerPath: shared });
-  await runSweep([strikesExhaustedPr()], second);
+  await runSweep([ambiguousReviewPr()], second);
   assert.equal(
     second.escalated.length,
     0,
@@ -1416,11 +1434,11 @@ test("W1-T514: the same head still escalates only once", async () => {
 
 test("W1-T514: the escalation carries the head it was raised against", async () => {
   const deps = fakeDeps();
-  await runSweep([strikesExhaustedPr()], deps);
+  await runSweep([ambiguousReviewPr()], deps);
   assert.equal(deps.escalated.length, 1);
   assert.equal(
     deps.escalated[0].pr.headSha,
-    strikesExhaustedPr().headSha,
+    ambiguousReviewPr().headSha,
     "the PR passed to escalate() carries its head sha — the real wiring (run-task.ts) reads " +
       "exactly this field into escalate()'s own headSha dedup dimension (W1-T195)",
   );
@@ -1520,6 +1538,8 @@ test("W1-T100 acceptance 1 — the #170 fixture (ci red, review none, zero strik
 });
 
 test("W1-T100 acceptance 2 — a strike-exhausted ci-red PR routes to the question rung — the ladder, not a loop: zero new spawns", async () => {
+  // Ruling 2026-10-09 (W1-T7096): the progress judge (here the helper's fixture judge) rules the former
+  // ceiling a loop; that verdict enters main's strikes-exhausted route unchanged, so main's assertions stand.
   const deps = fakeDeps();
   const seeded = blockedCiExhaustedPr();
 
@@ -1589,15 +1609,20 @@ test("W1-T138 — deriveDisposition: checks-red beats a failing review's reason 
   assert.doesNotMatch(r.reason, /no review posted yet/, "misleading once a review verdict genuinely exists");
 });
 
-test("W1-T138 — a checks-red PR with strikes exhausted still escalates (the shared ladder honors the broadened predicate too), regardless of the review verdict beside it", async () => {
-  const deps = fakeDeps();
+test("W1-T138 — a checks-red PR at its former ceiling escalates only when the progress judge says so", async () => {
+  const deps = fakeDeps({
+    fixProgressJudge: async () => ({ verdict: "escalate", loop: "unchanged red checks", reason: "another round is not justified" }),
+  });
   const exhausted: OpenPrView = { ...checksRedReviewFailingPr(), prNumber: 999, priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap };
 
   const summary = await runSweep([exhausted], deps);
 
+  // Ruling 2026-10-09 (W1-T7096): the progress judge rules the former ceiling a loop; that verdict enters
+  // main's strikes-exhausted (blocked-ambiguous) route unchanged, so the escalation and its dedup stand.
   assert.equal(summary.byDisposition["blocked-ambiguous"], 1);
-  assert.equal(deps.fixed.length, 0, "exhausted — never a further fix dispatch");
+  assert.equal(deps.fixed.length, 0, "the judge explicitly declines another fix dispatch");
   assert.equal(deps.escalated.length, 1);
+  assert.match(deps.escalated[0]?.reason ?? "", /unchanged red checks/);
 });
 
 // ── W1-T106 (the #170 DIRTY strand): CONFLICTED is a disposition — the sweep
@@ -1677,6 +1702,8 @@ test("runSweep acceptance 3 — an rmd-owned deletion conflict dispatches one bo
 // ── ACCEPTANCE 1: the P22 golden, verbatim ────────────────────────────────────
 
 test("acceptance 1 — the P22 golden: {mergeable, blocked-fixable(2 criteria), superseded-orphan, strikes-exhausted} -> exactly {one arm, ONE fix carrying BOTH criteria, one close, one escalation}; none-count == 0", async () => {
+  // Ruling 2026-10-09 (W1-T7096): the progress judge (here the helper's fixture judge) rules the former
+  // ceiling a loop; that verdict enters main's strikes-exhausted route unchanged, so main's assertions stand.
   const deps = fakeDeps();
   const seeded = [mergeablePr(), blockedFixablePr(), supersededOrphanPr(), strikesExhaustedPr()];
 
@@ -1755,6 +1782,7 @@ test("acceptance 2 — a NEW push (changed head sha) legitimately re-earns a fix
 
   // Same head sha, one strike now recorded -> deduped (no re-dispatch).
   const deps2 = fakeDeps({ ledgerPath: shared, runId: "SWEEP-2" });
+  deps2.fixProgressJudge = async () => ({ verdict: "continue", reason: "this explicit fixture permits another round" });
   await runSweep([blockedFixablePr()], deps2);
   assert.equal(deps2.fixed.length, 0, "unchanged head sha ⇒ no re-dispatch");
 
@@ -1806,7 +1834,7 @@ test("W1-T1110 acceptance 2 — a fix dispatch that ENDED without moving the hea
   appendLedger(shared, { run_id: "SWEEP-1", task_id: "W1-B", step: "fix.dispatch", strike: 1, strike_cap: 2 });
   appendLedger(shared, { run_id: "SWEEP-1", task_id: "W1-B", step: "fix.ci_not_green", strike: 1, ci: "red" });
 
-  const deps2 = fakeDeps({ ledgerPath: shared, runId: "SWEEP-2" });
+  const deps2 = fakeDeps({ ledgerPath: shared, runId: "SWEEP-2", fixProgressJudge: async () => ({ verdict: "continue", reason: "the ended round permits a fresh attempt" }) });
   await runSweep([blockedFixablePr()], deps2);
   assert.equal(
     deps2.fixed.length,
@@ -1824,7 +1852,7 @@ test("W1-T1110 acceptance 2b — a fix dispatch that ENDED via a real (still-fai
   appendLedger(shared, { run_id: "SWEEP-1", task_id: "W1-B", step: "fix.dispatch", strike: 1, strike_cap: 2 });
   appendLedger(shared, { run_id: "SWEEP-1", task_id: "W1-B", step: "fix.review", strike: 1, state: "failure", unmet: 1 });
 
-  const deps2 = fakeDeps({ ledgerPath: shared, runId: "SWEEP-2" });
+  const deps2 = fakeDeps({ ledgerPath: shared, runId: "SWEEP-2", fixProgressJudge: async () => ({ verdict: "continue", reason: "the ended round permits a fresh attempt" }) });
   await runSweep([blockedFixablePr()], deps2);
   assert.equal(deps2.fixed.length, 1, "a still-failing review is a conclusion too — the dedup re-arms");
 });
@@ -1854,6 +1882,8 @@ test("W1-T1110 acceptance 3 — a fix dispatch that DID resolve (landed a workin
 });
 
 test("W1-T1110 acceptance 4 — the strike ceiling and its escalation at the cap are unchanged by the dedup re-arm", async () => {
+  // Ruling 2026-10-09 (W1-T7096): the progress judge (here the helper's fixture judge) rules the former
+  // ceiling a loop; that verdict enters main's strikes-exhausted route unchanged, so main's assertions stand.
   const deps = fakeDeps();
   const summary = await runSweep([strikesExhaustedPr()], deps);
   assert.equal(summary.actions[0].disposition, "blocked-ambiguous", "exhaustion still routes off the disposition rule, not the dedup");
@@ -1974,6 +2004,8 @@ test("W1-T1210: clearing the gate dispatches nothing by itself", async () => {
 });
 
 test("W1-T1210: the strike ceiling is unchanged by the clearing path", async () => {
+  // Ruling 2026-10-09 (W1-T7096): the progress judge (here the helper's fixture judge) rules the former
+  // ceiling a loop; that verdict enters main's strikes-exhausted route unchanged, so main's assertions stand.
   // strikesExhaustedPr never reaches the blocked-fixable/conflicted dedup arm this task touches
   // (its disposition is blocked-ambiguous, routed purely off `priorStrikes` — see
   // DISPOSITION_RULES) — the SAME regression lock W1-T1110's own acceptance 4 already
@@ -2065,13 +2097,15 @@ test("acceptance 3 — policy is data, not code branches: tightening the stale-d
   assert.equal(deriveDisposition(p, tighter, NOW).disposition, "stale");
 });
 
-test("acceptance 3 — the strike cap also lives in the policy table (lowering it flips fixable -> ambiguous)", () => {
+test("acceptance 3 — the former strike cap routes a fixable PR to progress judgment", () => {
   const p = blockedFixablePr();
   p.priorStrikes = 1;
-  // cap 2 (default): strikes left -> fixable.
+  // cap 2 (default): the ordinary fix route remains fixable.
   assert.equal(deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-fixable");
-  // cap 1 (tightened data): exhausted -> ambiguous.
-  assert.equal(deriveDisposition(p, { ...DEFAULT_SWEEP_POLICY, strikeCap: 1 }, NOW).disposition, "blocked-ambiguous");
+  // cap 1 (tightened data): the same PR is still fixable; the judge decides whether to continue.
+  const atFormerCeiling = deriveDisposition(p, { ...DEFAULT_SWEEP_POLICY, strikeCap: 1 }, NOW);
+  assert.equal(atFormerCeiling.disposition, "blocked-fixable");
+  assert.match(atFormerCeiling.reason, /progress judgment due/);
 });
 
 // ── ACCEPTANCE 4: the daemon poll and rmd sweep share ONE implementation ──────
@@ -2493,11 +2527,11 @@ test("renderClarificationQuestion acceptance — a failing-check escalation rend
     ],
   };
   const r = deriveDisposition(seeded, DEFAULT_SWEEP_POLICY, NOW);
-  assert.equal(r.disposition, "blocked-ambiguous");
-  // The ledgered/summary reason itself names the check + sha now, not just the rendered question.
-  assert.match(r.reason, /commitlint/);
-  assert.match(r.reason, /0e63429/);
-  const q = renderClarificationQuestion(seeded, r.reason, seeded.strikeHistory ?? []);
+  assert.equal(r.disposition, "blocked-fixable");
+  // The progress judge's escalation reason can carry the observed check identity; this pure
+  // renderer test supplies that observed evidence directly rather than relying on the old cap row.
+  const reason = "fix progress loop: commitlint remains red at 0e63429 outside this PR's range";
+  const q = renderClarificationQuestion(seeded, reason, seeded.strikeHistory ?? []);
   assert.equal(q.observedState, "FAILING");
   assert.match(q.question, /commitlint/, "names the check");
   assert.match(q.question, /0e63429/, "names the sha — NOT the PR's own head 'bbbb222'");
@@ -2565,7 +2599,7 @@ test("REGRESSION LOCK: the fixture clock and RECENT stay within staleDays, so no
 
 test("REGRESSION LOCK: the SAME fixture judged against a clock past staleDays becomes stale — the exact mechanism that reddened main", () => {
   const aged = NOW + (DEFAULT_SWEEP_POLICY.staleDays + 1) * 86_400_000;
-  assert.equal(deriveDisposition(strikesExhaustedPr(), DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-ambiguous");
+  assert.equal(deriveDisposition(strikesExhaustedPr(), DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-fixable");
   assert.equal(
     deriveDisposition(strikesExhaustedPr(), DEFAULT_SWEEP_POLICY, aged).disposition,
     "stale",
@@ -2580,28 +2614,26 @@ test("strikeCapForAnswer: resetStrikeCounterOnAnswer=true (default) grants a FRE
   assert.equal(strikeCapForAnswer(5, { resetStrikeCounterOnAnswer: true }), 5);
 });
 
-test("deriveDisposition: an operator's answer RE-ARMS a strikes-exhausted PR to blocked-fixable — the answer's own strike allowance overrides exhaustion", () => {
+test("deriveDisposition: an operator answer is preserved when the progress judge is due", () => {
   const answered: OpenPrView = { ...strikesExhaustedPr(), pendingAnswer: { constraint: "use approach X" } };
-  // Un-answered, this fixture is strikes-exhausted -> blocked-ambiguous (baseline).
-  assert.equal(deriveDisposition(strikesExhaustedPr(), DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-ambiguous");
+  // Unanswered, the former cap routes this fixable PR to the progress judge.
+  assert.equal(deriveDisposition(strikesExhaustedPr(), DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-fixable");
+  assert.match(deriveDisposition(strikesExhaustedPr(), DEFAULT_SWEEP_POLICY, NOW).reason, /progress judgment due/);
   // Answered, with the default reset policy (a FRESH strikeCap), it re-arms.
   const result = deriveDisposition(answered, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(result.disposition, "blocked-fixable");
   assert.match(result.reason, /operator answered/);
 });
 
-test("deriveDisposition: an operator's answer ALSO re-arms a strikes-exhausted blocked_ci PR (W1-T100) — the ANSWERED row was generalized alongside the exhaustion/fixable rows, one ladder for both shapes", () => {
+test("deriveDisposition: an operator's answer is retained for a blocked_ci PR at the former ceiling", () => {
   const answered: OpenPrView = { ...blockedCiExhaustedPr(), pendingAnswer: { constraint: "pin the dependency version" } };
-  // Un-answered, this fixture is strikes-exhausted -> blocked-ambiguous (baseline).
-  assert.equal(deriveDisposition(blockedCiExhaustedPr(), DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-ambiguous");
-  // Answered, with the default reset policy (a FRESH strikeCap), it re-arms — the
-  // SAME row that re-arms a review-failure PR, never a second, un-generalized path.
+  assert.equal(deriveDisposition(blockedCiExhaustedPr(), DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-fixable");
   const result = deriveDisposition(answered, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(result.disposition, "blocked-fixable");
   assert.match(result.reason, /operator answered/);
 });
 
-test("deriveDisposition: resetStrikeCounterOnAnswer=false grants exactly ONE extra strike beyond the original cap — a PR that has ALSO exhausted that one extra strike still escalates rather than looping forever", () => {
+test("deriveDisposition: resetStrikeCounterOnAnswer=false still routes a later exhausted answer to the progress judge", () => {
   const policy: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, clarify: { resetStrikeCounterOnAnswer: false } };
   // strikeCap is 2; a bounded extra strike raises the cumulative ceiling to 3
   // (policy.strikeCap + strikeCapForAnswer(2, {reset:false}) === 2 + 1).
@@ -2609,15 +2641,16 @@ test("deriveDisposition: resetStrikeCounterOnAnswer=false grants exactly ONE ext
   // priorStrikes (2) IS below the ceiling (3) -> the one bounded extra strike is granted.
   assert.equal(deriveDisposition(justAnswered, policy, NOW).disposition, "blocked-fixable");
 
-  // The extra strike was ALSO spent (ledger now shows 3 dispatches) and the PR
-  // is STILL failing with a (new, unconsumed) pendingAnswer -> the ceiling (3)
-  // is no longer above priorStrikes (3) -> escalates again rather than granting
-  // a THIRD attempt off the same answer.
+  // The extra strike was also spent, but the former ceiling is no longer an automatic escalation.
   const stillFailing: OpenPrView = { ...justAnswered, priorStrikes: 3 };
-  assert.equal(deriveDisposition(stillFailing, policy, NOW).disposition, "blocked-ambiguous");
+  const result = deriveDisposition(stillFailing, policy, NOW);
+  assert.equal(result.disposition, "blocked-fixable");
+  assert.match(result.reason, /operator answered the clarification question/);
 });
 
 test("runSweep: a BLOCKED-AMBIGUOUS PR ledgers its clarification question EVERY sweep, even once escalate() is deduped — an unanswered question stays visible, nothing else is ever dispatched", async () => {
+  // Ruling 2026-10-09 (W1-T7096): the progress judge rules the former ceiling a loop; that verdict enters
+  // main's strikes-exhausted (blocked-ambiguous) route unchanged, so the escalation and its dedup stand.
   const shared = ledgerPath();
   const first = fakeDeps({ ledgerPath: shared });
   const summary1 = await runSweep([strikesExhaustedPr()], first);
@@ -3492,15 +3525,18 @@ test("runSweep: no postReview dep wired -> ledgered stand-down, no crash, no esc
 //    stall without also re-asserting the now-superseded "every eligible PR reviews every pass"
 //    behavior.
 
-test("runSweepLightPass: fires runSweep once PER open PR, CONCURRENTLY — a slow action for one PR never blocks another PR's own action from completing (the #707-adjacent stall this closes)", async () => {
+test("runSweepLightPass: fires runSweep once PER open PR, CONCURRENTLY — a slow action for one PR never blocks another PR's own action from completing (the #707-adjacent stall this closes) [controlled healthy pressure]", async () => {
   const lp = ledgerPath();
   let releaseSlow: (() => void) | undefined;
   const slowGate = new Promise<void>((resolve) => {
     releaseSlow = resolve;
   });
   const order: number[] = [];
+  let pressureReads = 0;
   const deps = fakeDeps({
     ledgerPath: lp,
+    readFixPressure: () => { pressureReads++; return { availableMib: DEFAULT_SWEEP_POLICY.memoryFloorMib + 2 * DEFAULT_ESTIMATE_MIB.fix, floorMib: DEFAULT_SWEEP_POLICY.memoryFloorMib }; },
+    fixProgressJudge: async () => ({ verdict: "continue", reason: "this light-pass fixture explicitly permits the repair" }),
     postReview: async (p) => {
       await slowGate; // the ONE admitted PR's "review" never resolves until released
       order.push(p.prNumber);
@@ -3521,13 +3557,14 @@ test("runSweepLightPass: fires runSweep once PER open PR, CONCURRENTLY — a slo
   // let alone recorded here — until PR 584's gate released; runSweepLightPass reaches it anyway.
   await new Promise((resolve) => setImmediate(resolve));
   try {
+    assert.ok(pressureReads > 0, "the concurrent repair consumes its explicit healthy pressure input");
     assert.deepEqual(order, [11], "the fast PR's fix dispatch completed while the slow PR's review was still in flight");
   } finally {
     // Always release, even if the assertion above throws — an unreleased gate would leave this
     // PR's review key claimed in the module-level mutex for the rest of THIS file's test run.
     releaseSlow?.();
+    await pending;
   }
-  await pending;
   assert.deepEqual(order, [11, 584], "the slow PR's review still completes once released");
 });
 
@@ -3909,9 +3946,9 @@ test("runSweep: a 3-PR fixture where the MIDDLE PR's escalate throws -> sweep.ac
       escalated.push(p.prNumber);
     },
   });
-  const first = strikesExhaustedPr(); // prNumber 13 -> blocked-ambiguous
-  const middle = { ...strikesExhaustedPr(), prNumber: 2, prUrl: "url/2", taskId: "W1-MID", headSha: "cccc333" };
-  const last = { ...strikesExhaustedPr(), prNumber: 3, prUrl: "url/3", taskId: "W1-LAST", headSha: "dddd444" };
+  const first = ambiguousReviewPr({ prNumber: 13, taskId: "W1-FIRST" });
+  const middle = ambiguousReviewPr({ prNumber: 2, prUrl: "url/2", taskId: "W1-MID", headSha: "cccc333" });
+  const last = ambiguousReviewPr({ prNumber: 3, prUrl: "url/3", taskId: "W1-LAST", headSha: "dddd444" });
 
   const summary = await runSweep([first, middle, last], deps, DEFAULT_SWEEP_POLICY);
 
@@ -3960,7 +3997,7 @@ test("runSweep: the canonical 2026-07-17 crash fixture — a single ambiguous PR
     },
   });
 
-  const summary = await runSweep([strikesExhaustedPr()], deps, DEFAULT_SWEEP_POLICY);
+  const summary = await runSweep([ambiguousReviewPr()], deps, DEFAULT_SWEEP_POLICY);
 
   assert.equal(summary.actionsFailed, 0, "no throw escaped runSweep — nothing counted as failed");
   assert.equal(summary.actionsTaken, 1, "the degraded-but-delivered escalation still counts as acted");
@@ -4227,10 +4264,12 @@ test("a stalled pull request is reported on the ledger, and a quiet pass writes 
 // W1-T520 detects the armed-and-behind set and only reports it (above). This selects AT MOST ONE
 // from that set — oldest head first — and, when `deps.updateBranch` is wired, asks GitHub to
 // update it. See `selectUpdateBranchTarget`'s own doc (lib/sweep.ts) for the full design.
+// Action candidates here have completed checks; pending-check deferral has separate controls.
 
 test("W1-T528: one pull request is updated per pass and it is the oldest head", async () => {
   const older = pr({
     prNumber: 501,
+    checksState: "green",
     prUrl: "url/501",
     taskId: "W1-A",
     autoMergeArmed: true,
@@ -4240,6 +4279,7 @@ test("W1-T528: one pull request is updated per pass and it is the oldest head", 
   });
   const younger = pr({
     prNumber: 502,
+    checksState: "green",
     prUrl: "url/502",
     taskId: "W1-B",
     autoMergeArmed: true,
@@ -4279,6 +4319,7 @@ test("W1-T528: one pull request is updated per pass and it is the oldest head", 
 test("W1-T528: a draft pull request is never updated", async () => {
   const draftOldest = pr({
     prNumber: 511,
+    checksState: "green",
     prUrl: "url/511",
     taskId: "W1-C",
     autoMergeArmed: true,
@@ -4289,6 +4330,7 @@ test("W1-T528: a draft pull request is never updated", async () => {
   });
   const notDraft = pr({
     prNumber: 512,
+    checksState: "green",
     prUrl: "url/512",
     taskId: "W1-D",
     autoMergeArmed: true,
@@ -4324,6 +4366,7 @@ test("W1-T528: a draft pull request is never updated", async () => {
 test("W1-T528: an in-flight run branch is skipped rather than raced", async () => {
   const inFlight = pr({
     prNumber: 521,
+    checksState: "green",
     prUrl: "url/521",
     taskId: "W1-T900",
     autoMergeArmed: true,
@@ -4334,6 +4377,7 @@ test("W1-T528: an in-flight run branch is skipped rather than raced", async () =
   });
   const settled = pr({
     prNumber: 522,
+    checksState: "green",
     prUrl: "url/522",
     taskId: "W1-E",
     autoMergeArmed: true,
@@ -4375,6 +4419,7 @@ test("W1-T528: an in-flight run branch is skipped rather than raced", async () =
 test("W1-T528: a conflicting update is reported and skipped", async () => {
   const target = pr({
     prNumber: 531,
+    checksState: "green",
     prUrl: "url/531",
     taskId: "W1-F",
     autoMergeArmed: true,
@@ -4517,10 +4562,11 @@ test("W1-T528: a failing update-branch is classified from its own stderr, never 
 });
 
 test("W1-T528: the failure classifier separates a conflict from an ordinary error", () => {
-  for (const s of ["merge conflict", "branch has diverged", "divergent histories", "HTTP 422"]) {
+  for (const s of ["merge conflict", "branch has diverged", "divergent histories"]) {
     assert.equal(classifyUpdateBranchFailure(s), "conflict", `"${s}" names a conflict`);
   }
-  for (const s of ["gh: command not found", "HTTP 500", "network unreachable", ""]) {
+  // W1-T5933: a bare 422 names no conflict — GitHub also answers 422 for a moved head.
+  for (const s of ["gh: command not found", "HTTP 500", "HTTP 422", "network unreachable", ""]) {
     assert.equal(classifyUpdateBranchFailure(s), "error", `"${s}" is an ordinary error`);
   }
 });
@@ -4815,7 +4861,7 @@ test("W1-T2345: an ALREADY-escalated blocked-ambiguous PR still trips the repeat
   // block has sat for `repeatDispositionBound` more passes, rather than staying silent forever
   // just because the disposition-specific dedup already fired once.
   const shared = ledgerPath();
-  const target = strikesExhaustedPr();
+  const target = pendingStormPr(90);
 
   const t = tripLog();
 
@@ -5024,11 +5070,12 @@ test("W1-T2998 (falsifier): the executor DECLINING costs the PR nothing but a pa
   assert.equal(deps.steps.filter((l) => l.step === "sweep.ratchet_repair_declined").length, 1, "and the decline is visible rather than silent");
 });
 
-test("W1-T2998 (falsifier): DISABLED is the shipped default — no repair is taken, and the reason says so", async () => {
+test("W1-T2998 (falsifier): a DISABLED policy takes no repair, and the reason says so", async () => {
+  // The shipped row is ON since the operator ruling of 2026-10-10; the disabled arm is pinned explicitly.
   const repaired: number[] = [];
   const deps = ratchetDeps({ repairRecordableRatchet: (p2) => { repaired.push(p2.prNumber); return true; } });
-  await runSweep([ratchetRedPr(["comment-load-ratchet"])], deps, DEFAULT_SWEEP_POLICY);
-  assert.deepEqual(repaired, [], "the shipped default must not write to a branch unattended");
+  await runSweep([ratchetRedPr(["comment-load-ratchet"])], deps, { ...DEFAULT_SWEEP_POLICY, recordableRatchetRepairEnabled: false });
+  assert.deepEqual(repaired, [], "a disabled policy must not write to a branch unattended");
   assert.equal(deps.fixed.length, 1);
   const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
   assert.match(String(disposed[0].reason), /RECORDABLE ratchet/);

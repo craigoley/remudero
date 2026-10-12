@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildFixRungDispatchArgs, runFixRung } from "../src/run-task.js";
+import { buildFixRungDispatchArgs, runFixRung } from "./helpers/run-task-test.js";
 import { deriveFixMode, FIX_MODE_RULES, renderFixPrompt } from "../src/lib/prompt-render.js";
 import {
   cappedProofDiscriminationFromLedger,
@@ -16,7 +16,7 @@ import {
   type OpenPrView,
   type ProofDiscriminationEvidence,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway } from "../src/lib/escalate.js";

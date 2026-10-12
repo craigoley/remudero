@@ -69,14 +69,14 @@ function writeStaleConfigLock(repoDir: string, ageMs = DEFAULT_CONFIG_LOCK_GRACE
   return p;
 }
 
-test("W1-T1129 (criterion 1): createFixRungWorktree (the fix rung's worktree+branch call) writes no upstream-tracking config", () => {
+test("W1-T1129 (criterion 1): createFixRungWorktree (the fix rung's worktree+branch call) writes no upstream-tracking config", async () => {
   const root = tmp("rmd-fix-rung-no-track-");
   const clone = join(root, "clone");
   try {
     seedClone(clone);
     pushNewBranch(clone, "run-probe-branch");
     const worktreePath = join(root, "wt");
-    createFixRungWorktree(clone, worktreePath, "run-probe-branch");
+    await createFixRungWorktree(clone, worktreePath, "run-probe-branch");
 
     // `git config --get` on an unset key exits non-zero — assert.throws IS the assertion
     // that no branch.run-probe-branch.remote entry was ever written.
@@ -99,14 +99,14 @@ test("W1-T1129 (criterion 1): createFixRungWorktree (the fix rung's worktree+bra
   }
 });
 
-test("W1-T1129 (criterion 1, direct): neither branch.<name>.remote nor .merge is present after createFixRungWorktree", () => {
+test("W1-T1129 (criterion 1, direct): neither branch.<name>.remote nor .merge is present after createFixRungWorktree", async () => {
   const root = tmp("rmd-fix-rung-no-track-direct-");
   const clone = join(root, "clone");
   try {
     seedClone(clone);
     pushNewBranch(clone, "run-probe-branch-2");
     const worktreePath = join(root, "wt");
-    createFixRungWorktree(clone, worktreePath, "run-probe-branch-2");
+    await createFixRungWorktree(clone, worktreePath, "run-probe-branch-2");
 
     const configText = execFileSync("git", ["-C", worktreePath, "config", "--list"], { encoding: "utf8" });
     assert.ok(
@@ -122,7 +122,7 @@ test("W1-T1129 (criterion 1, direct): neither branch.<name>.remote nor .merge is
   }
 });
 
-test("W1-T1129 (criterion 2): the run branch still lands at the same commit origin/<branch> is at", () => {
+test("W1-T1129 (criterion 2): the run branch still lands at the same commit origin/<branch> is at", async () => {
   const root = tmp("rmd-fix-rung-same-commit-");
   const clone = join(root, "clone");
   try {
@@ -136,7 +136,7 @@ test("W1-T1129 (criterion 2): the run branch still lands at the same commit orig
     const expectedSha = execFileSync("git", ["-C", clone, "rev-parse", "fix-target"], { encoding: "utf8" }).trim();
 
     const worktreePath = join(root, "wt");
-    createFixRungWorktree(clone, worktreePath, "fix-target");
+    await createFixRungWorktree(clone, worktreePath, "fix-target");
 
     const actualSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     assert.equal(actualSha, expectedSha, "--no-track changes only the tracking config, never the checked-out commit");
@@ -145,14 +145,14 @@ test("W1-T1129 (criterion 2): the run branch still lands at the same commit orig
   }
 });
 
-test("W1-T1129 (criterion 3): the run branch is a NAMED local branch, still pushable — --no-track is not --detach", () => {
+test("W1-T1129 (criterion 3): the run branch is a NAMED local branch, still pushable — --no-track is not --detach", async () => {
   const root = tmp("rmd-fix-rung-pushable-");
   const clone = join(root, "clone");
   try {
     seedClone(clone);
     pushNewBranch(clone, "run-pushable-probe");
     const worktreePath = join(root, "wt");
-    createFixRungWorktree(clone, worktreePath, "run-pushable-probe");
+    await createFixRungWorktree(clone, worktreePath, "run-pushable-probe");
 
     // A detached HEAD has no symbolic ref to resolve; a named branch does — proves this is
     // a real local branch, not the review lane's detached shape (rationale (7): the fix rung

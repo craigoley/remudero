@@ -57,8 +57,9 @@ test("it runs EVERY absolute ceiling, so one breach cannot hide behind another's
   }
   assert.match(
     script,
-    /comment-load-signal -- --base HEAD\^/,
-    "comment-load must compare the push against the previous main commit, not origin/main at HEAD",
+    /comment-load-signal -- --base HEAD\^ --strict/,
+    "comment-load's added-block half reads the push's own diff, and --strict (W1-T5623) keeps HEAD^ " +
+      "from excusing a ceiling crossing whose own push run was superseded",
   );
   assert.doesNotMatch(script, /source-size-ratchet/, "the PR-relative source-size signal is not an absolute main ceiling");
 });

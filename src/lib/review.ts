@@ -3,21 +3,25 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import { createHash } from "node:crypto";
 import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
-import { hostname } from "node:os";
+import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { appendLedger } from "./ledger.js";
 import { systemClock, type Clock } from "./clock.js";
-import { prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
+import { combinedStatusRestArgs, prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
 // W1-T2895: review.ts imports "src/lib/plan-scope" through the leaf module below.
 import { isInPlanScope } from "./plan-scope.js";
-import { loadPlanAtRef, readBlobsAtRef, visibleCriteria, type AcceptanceCriterion, type GitBlobRunner, type TaskRisk } from "./plan.js";
+import { loadPlanAtRef, readBlobsAtRef, readBlobsAtRefAsync, visibleCriteria, type AcceptanceCriterion, type GitBlobRunner, type TaskRisk } from "./plan.js";
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
+import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { killAfterGrace } from "./git-fetch-retry.js";
 import { playwrightCacheRoot } from "./worker-home.js";
+import { makeTempDir } from "./tmp.js";
+import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency, type BinaryProbe, type HostLoad } from "./test-slot.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import {
   COMPANION_PATH_CLASSES,
@@ -26,14 +30,17 @@ import {
   isCompanionPath,
 } from "./companion-paths.js";
 import {
+  gitReservationRunnerAsync,
   parsePrefixedTaskId,
   readReservationAnchors,
-  reservationHolderBranch,
+  readReservationAnchorsAsync,
   taskIdCollisions,
   type ReservationAnchorRead,
   type TaskIdCollision,
   type TaskIdDeclaration,
 } from "./task-id-reservation.js";
+// @ts-expect-error The shared plain .mjs helper ships under src/ so source-only runtimes can load it.
+import { adjudicateReservationChain, parseReservationHolderLine, parseReservationHolderFields } from "./reservation-chain.mjs";
 
 /** The JUDGE (MASTER-PLAN §12 rule 4 / rule 3B; W1-T1C) — the second half of the merge contract. Standing rule 4:
  * green checks are NOT evidence, so after `ci` goes green a fresh-context REVIEW worker (never the implementer's
@@ -146,6 +153,28 @@ export function reviewContractDigest(input: ReviewContractDigestInput): string {
   return `contract-v1:${createHash("sha256").update(encoded, "utf8").digest("hex")}`;
 }
 
+/** W1-T5714 — the sweep-side producer of an untasked PR's review contract. `runReview` records an
+ * untasked PR's contract from its body under `PR-<n>`: a deterministic review omits risk and
+ * budget, a semantic one carries the untasked defaults. Recompute both from the current body and
+ * keep the semantic form only when it equals the recorded digest, so an unchanged contract reuses. */
+export function bodyReviewContractDigest(input: {
+  reviewLedgerKey: string;
+  body: string;
+  unfiled: boolean;
+  recordedDigest?: string;
+  semanticRisk: TaskRisk;
+  semanticBudgetUsd: number;
+}): string | undefined {
+  const acceptance = parseAcceptanceBlock(input.body);
+  if (acceptance.length === 0) return undefined;
+  const deterministic = reviewContractDigest({ taskId: input.reviewLedgerKey, acceptance });
+  if (!input.unfiled) return deterministic;
+  const semantic = reviewContractDigest({
+    taskId: input.reviewLedgerKey, acceptance, risk: input.semanticRisk, budgetUsd: input.semanticBudgetUsd,
+  });
+  return semantic === input.recordedDigest ? semantic : deterministic;
+}
+
 export interface ReviewEvaluatorProvenance {
   provider: string | null;
   requestedModel: string | null;
@@ -173,7 +202,7 @@ export function lastReviewDecisionTerminal(
 ): ReviewDecisionTerminal | undefined {
   let terminal: ReviewDecisionTerminal | undefined;
   for (const line of lines) {
-    if (line.step !== "review.posted" || line.task_id !== taskId || line.pr_url !== prUrl || line.review_decision_digest !== digest) continue;
+    if (line.step !== "review.posted" || !reviewRowNamesPr(line, taskId, prUrl) || line.review_decision_digest !== digest) continue;
     const verdict = line.decision_verdict as ReviewVerdict | undefined;
     if (!verdict || (verdict.state !== "success" && verdict.state !== "failure") || !Array.isArray(verdict.criteria)) continue;
     terminal = {
@@ -249,6 +278,7 @@ export async function claimReviewDecision(opts: {
  * `dialect-parse-error` an authoring error; `prose-no-match` zero candidates on a prose body (W1-T161/#349);
  * `exec-error` threw or timed out; `runner-absent` names an unavailable checkout-local tool; `runtime-broken` the only
  * `not ok` names the FILE ITSELF (W1-T1077); `incomplete-run` results then no `# duration_ms` summary (W1-T2740);
+ * `cwd-missing` the proof's checkout was deleted before the child could start (W1-T7822);
  * `no-exec-context` no PR-head checkout; `forward-reference` absent at head but declared by this diff's own shard — see {@link
  * shardDeclaredFilesInDiff} — or, on a filing head, any target the diff does not change ({@link FILING_FORWARD_ADVISORY}). */
 export type ProofSkipReason =
@@ -260,6 +290,7 @@ export type ProofSkipReason =
   | "cannot-load"
   | "incomplete-run"
   | "runner-absent"
+  | "cwd-missing"
   | "no-exec-context"
   | "forward-reference"
   | "proof-form";
@@ -373,6 +404,9 @@ export interface CriterionVerdict {
   proof_exec: ProofExecOutcome;
   /** The bounded runner diagnostic when `proof_exec` is `cannot_evaluate`. */
   loadError?: string;
+  /** The reviewer sandbox's own output for an `executed_fail` proof ({@link proofFailureExcerpt}): command, exit
+   *  status and output tail. #10555's fix rounds saw only `reason` and could not reproduce a reviewer-only red. */
+  proofFailureOutput?: string;
   /** See {@link ProofSkipReason}. Absent when the proof executed. */
   proof_skip?: ProofSkipReason;
   /** `met` as computed by the mechanical floor, BEFORE any semantic downgrade (W1-T178). Optional so the
@@ -412,6 +446,9 @@ export interface ReviewEvidence {
   headRefName?: string;
   /** The reservation read that keyed this decision, so the judge never races a second remote read. */
   reservationOwnership?: TaskIdOwnershipFinding[];
+  /** origin/main's task-id declarations, read AWAITED by runReview ({@link reviewTaskIdEvidenceAsync}); present, the
+   *  judge's collision check uses it instead of a second, synchronous `ls-tree` + `cat-file --batch`. */
+  baseTaskIdDeclarations?: TaskIdDeclaration[];
   /** The implementation worker's full report. Kept distinct from the PR body: body integrity
    * remains authoritative for prose/diff checks while this optional channel supplies only the
    * strict `REFUSED:` grammar. */
@@ -502,6 +539,9 @@ export interface ReviewVerdict {
   state: ReviewState;
   /** A proof runner could not load files even after its bounded refresh and retry. */
   cannotEvaluate?: boolean;
+  /** W1-T6124: present when this review started a proof child WITHOUT the bwrap sandbox, naming why ({@link
+   *  ProofSandboxStatus}). It rides `review.posted`'s `decision_verdict`, so a degraded review is on the record. */
+  proofSandboxDegraded?: string;
   criteria: CriterionVerdict[];
   /** True when the diff adds tests that assert nothing (a global fail signal). */
   testTheater: boolean;
@@ -793,6 +833,8 @@ export interface WhitelistedProof {
   diffTestFiles?: readonly string[];
   /** Bounded diagnostic from a runner whose test files failed to load. */
   loadError?: string;
+  /** The default executor's bounded excerpt of a run it graded `"fail"` — {@link proofFailureExcerpt}. */
+  failureOutput?: string;
 }
 
 const TEST_PATH_RE = /\btest\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?\b/;
@@ -951,6 +993,12 @@ function isMalformedDialectProof(proof: string): boolean {
   const dialectSource = matchesDialectPrefix(trimmed) ? trimmed : stripCodeSpan(trimmed);
   if (DIALECT_DEMO_RE.test(dialectSource)) return false;
   return DIALECT_GREP_RE.test(dialectSource) || DIALECT_TEST_RE.test(dialectSource);
+}
+
+/** The executable proof a claim-less `unit test:`/`grep:` bullet already is (code span unwrapped), or `""`. */
+function bareDialectProof(item: string): string {
+  const dialectSource = matchesDialectPrefix(item) ? item : stripCodeSpan(item);
+  return DIALECT_GREP_RE.test(dialectSource) || DIALECT_TEST_RE.test(dialectSource) ? dialectSource : "";
 }
 
 /** Sentence-level punctuation a bare test-name title would not carry: comma, colon, semicolon, parenthetical aside,
@@ -1286,7 +1334,7 @@ function parseTestTarget(body: string, target?: SuiteRegistryTarget): Whiteliste
     return {
       kind: "test",
       command: "node",
-      args: ["--test", "--import", "tsx", "--import", TMP_HYGIENE_IMPORT, trimmed],
+      args: ["--test", "--test-reporter=tap", "--import", "tsx", "--import", TMP_HYGIENE_IMPORT, trimmed],
       label: trimmed,
     };
   }
@@ -1309,6 +1357,7 @@ function parseTestTarget(body: string, target?: SuiteRegistryTarget): Whiteliste
       command: "node",
       args: [
         "--test",
+        "--test-reporter=tap",
         "--import",
         "tsx",
         "--import",
@@ -1480,7 +1529,7 @@ export function parseWhitelistedProof(proof: string, target?: SuiteRegistryTarge
     return {
       kind: "test",
       command: "node",
-      args: ["--test", "--import", "tsx", "--import", TMP_HYGIENE_IMPORT, path],
+      args: ["--test", "--test-reporter=tap", "--import", "tsx", "--import", TMP_HYGIENE_IMPORT, path],
       label: path,
     };
   }
@@ -1502,7 +1551,10 @@ export function parseWhitelistedProof(proof: string, target?: SuiteRegistryTarge
 export type ProofResult = "pass" | "fail" | "no-match" | "cannot-load";
 export type ProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => "pass" | "fail" | "no-match";
 export class ProofCannotLoadError extends RmdError {
-  constructor(readonly loadError: string) {
+  constructor(
+    readonly loadError: string,
+    readonly loadOutput?: string,
+  ) {
     super("usage", GENERIC_EXIT_CODE, `proof test files could not load after a toolchain refresh: ${loadError}`, { loadError });
   }
 }
@@ -1522,7 +1574,7 @@ export interface ProofExecutionDeps {
 // CONSUMERS), floored at load by policy.ts's `numberField`, so a retune is a reviewed plan PR rather than a code edit
 // and `loadDefaultPolicy` self-locates the file. Drift against a source literal is structurally unreachable, so
 // test/policy.test.ts drops its drift assertion. TRAP: 30s truncated a name-filtered whole-suite run (W1-T112 round 4).
-function defaultProofTimeoutMs(): number {
+export function defaultProofTimeoutMs(): number {
   return loadDefaultPolicy().values.proofTimeoutMs;
 }
 const npmCiPrimed = new Set<string>();
@@ -1554,6 +1606,8 @@ export const PROOF_ENV_ALLOWLIST = [
   "GIT_CONFIG_KEY_0",
   "GIT_CONFIG_VALUE_0",
   "GIT_TERMINAL_PROMPT",
+  // W1-T6124: the browser cache's location, set by {@link proofChildEnv} so a throwaway HOME still finds Chromium.
+  "PLAYWRIGHT_BROWSERS_PATH",
 ] as const;
 
 /** The `GIT_CONFIG_*` keys {@link buildProofEnv} only ever forwards TOGETHER (W1-T1096). This allowlist names index 0
@@ -1579,14 +1633,458 @@ export function buildProofEnv(parent: NodeJS.ProcessEnv = process.env): NodeJS.P
   return child;
 }
 
+// ── W1-T6124: A REVIEW PROOF RUNS SANDBOXED, WITHOUT THE DAEMON'S CREDENTIALS ─────────────────────────────────────
+// A proof is the PR's OWN test code, run by design. W1-T499's allowlist kept GH_TOKEN out of its env, but the child
+// still ran as the daemon's uid with the daemon's HOME: it could write ~/.gitconfig (where deploy/entrypoint.sh keeps
+// the GH_TOKEN credential helper every later daemon git call honours), write the daemon's checkout and state, and read
+// the GitHub App key at GH_APP_PRIVATE_KEY_PATH. Two layers now: EVERY platform gets a throwaway HOME plus the env
+// allowlist; Linux additionally runs the child under bubblewrap in the shape of worker-provider.ts
+// `openWeightCheckSandboxArgv` (deploy/Dockerfile REQ 8 ships it) — new user/net/pid/ipc namespaces, only the checkout,
+// its git and node_modules link targets and a small runtime mounted. NETWORK: none is granted; a grep over test/ found
+// no proof that needs it, and loopback still works inside the namespace for tests that start a local server.
+
+/** The Linux runner a proof child starts under (W1-T6124). */
+export const PROOF_SANDBOX_BINARY = "bwrap";
+
+/** Host runtime roots bound read-only into a proof sandbox, the same set the open-weight check sandbox binds. */
+const PROOF_SANDBOX_RUNTIME_ROOTS = ["/usr", "/lib", "/lib64", "/bin", "/usr/local"] as const;
+
+/** The /etc entries a test runtime reads (user lookup, localhost, linker cache, TLS roots) — never /etc wholesale. */
+const PROOF_SANDBOX_ETC = [
+  "/etc/passwd",
+  "/etc/group",
+  "/etc/hosts",
+  "/etc/nsswitch.conf",
+  "/etc/localtime",
+  "/etc/ld.so.cache",
+  "/etc/ssl",
+  "/etc/ca-certificates",
+  "/etc/alternatives",
+  "/etc/fonts",
+] as const;
+
+/** How this process runs proof children: under bwrap, or UNSANDBOXED with the named reason — the reason is what
+ *  {@link ReviewVerdict.proofSandboxDegraded} records, so a degraded review is never silently read as a sandboxed one. */
+export type ProofSandboxStatus = { mode: "bwrap"; binary: string } | { mode: "unsandboxed"; reason: string };
+
+/** A sandbox that could not start for THIS proof. {@link judgeCriterion} grades it `not_executable`, never a pass and
+ *  never `executed_fail`: the proof's code was not run, so nothing was learned about the criterion. */
+export class ProofSandboxUnavailableError extends RmdError {
+  constructor(readonly sandboxReason: string) {
+    super("usage", GENERIC_EXIT_CODE, `proof sandbox could not start: ${sandboxReason}`, { sandboxReason });
+  }
+}
+
+/** The proof's working directory no longer exists (W1-T7822) — a reclaimed review worktree, say. Node raises ENOENT for a
+ *  missing cwd exactly as for a missing binary, so it is named BEFORE any spawn: {@link spawnFailureText} would call it
+ *  a missing sandbox. {@link judgeCriterion} grades it `not_executable` / `cwd-missing`, never a pass. */
+export class ProofCwdMissingError extends RmdError {
+  constructor(readonly missingCwd: string) {
+    super("usage", GENERIC_EXIT_CODE, `proof cwd no longer exists: ${missingCwd}`, { missingCwd });
+  }
+}
+
+let proofSandboxMemo: ProofSandboxStatus | undefined;
+let unsandboxedProofSpawns = 0;
+
+/** Test-only: pin (or with no argument, forget) the process's sandbox status. Production probes once. */
+export function setProofSandboxForTests(status?: ProofSandboxStatus): void {
+  proofSandboxMemo = status;
+}
+
+/** A spawn failure's first useful line, bounded for a ledger row. */
+function spawnFailureText(error: unknown): string {
+  const err = error as NodeJS.ErrnoException & { stderr?: string | Buffer | null };
+  if (err.code === "ENOENT") return `${PROOF_SANDBOX_BINARY} is not installed`;
+  const stderr = typeof err.stderr === "string" ? err.stderr : (err.stderr?.toString("utf8") ?? "");
+  const line = stderr.split("\n").find((l) => l.trim() !== "") ?? String(err.message ?? error);
+  return line.trim().slice(0, 160);
+}
+
+/** Decide, once per process, whether proof children can run under bwrap. Off Linux there is no bwrap and the review
+ *  still runs (an operator's darwin review must not be refused), recorded as degraded. On Linux the probe starts the
+ *  REAL sandbox argv around node itself, so a pass also proves the runtime is visible inside it. */
+export function probeProofSandbox(
+  platform: NodeJS.Platform = process.platform,
+  exec: typeof execFileSync = execFileSync,
+): ProofSandboxStatus {
+  if (platform !== "linux") {
+    return {
+      mode: "unsandboxed",
+      reason: `bwrap is Linux-only; this ${platform} host ran the proof with a throwaway HOME and the env allowlist only`,
+    };
+  }
+  const dir = makeTempDir("proof-sandbox-probe");
+  try {
+    exec(PROOF_SANDBOX_BINARY, [...proofSandboxArgv({ cwd: dir, home: dir }), process.execPath, "-e", ""], {
+      cwd: dir,
+      env: buildProofEnv(),
+      stdio: ["ignore", "ignore", "pipe"],
+      timeout: 10_000,
+      killSignal: "SIGKILL",
+      encoding: "utf8",
+    });
+    return { mode: "bwrap", binary: PROOF_SANDBOX_BINARY };
+  } catch (error) {
+    return {
+      mode: "unsandboxed",
+      reason: `bwrap cannot start on this Linux host (${spawnFailureText(error)}); ran with a throwaway HOME and the env allowlist only`,
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** The process's memoised {@link probeProofSandbox} answer. */
+export function proofSandboxStatus(): ProofSandboxStatus {
+  proofSandboxMemo ??= probeProofSandbox();
+  return proofSandboxMemo;
+}
+
+/** A path's real location, or `undefined` when nothing is there to mount or mask. */
+function realpathIfPresent(path: string): string | undefined {
+  try {
+    return realpathSync(path);
+  } catch (error) {
+    return undefined; // absent: there is nothing at this path for a bind to expose
+  }
+}
+
+function isWithin(path: string, root: string): boolean {
+  return path === root || path.startsWith(root.endsWith(pathSep) ? root : `${root}${pathSep}`);
+}
+
+/** The git directories a checkout's own `git` calls need: a worktree's private gitdir and the shared common dir it
+ *  names. Read by OPENING `.git` once (EISDIR means an ordinary clone), never by a stat-then-read pair. */
+export function proofCheckoutGitDirs(cwd: string): { common?: string; worktree?: string } {
+  const dotGit = join(cwd, ".git");
+  let text: string;
+  try {
+    text = readFileSync(dotGit, "utf8");
+  } catch (error) {
+    // EISDIR: an ordinary clone, whose .git sits inside the bound checkout. Anything else: no git dir to bind.
+    return (error as NodeJS.ErrnoException).code === "EISDIR" ? { common: dotGit } : {};
+  }
+  const gitdir = /^gitdir:\s*(.+?)\s*$/m.exec(text)?.[1];
+  if (gitdir === undefined) return {};
+  const worktree = resolve(cwd, gitdir);
+  let common = worktree;
+  try {
+    common = resolve(worktree, readFileSync(join(worktree, "commondir"), "utf8").trim());
+  } catch (error) {
+    // No commondir file: a gitdir that is its own common dir. Any other read failure is the same answer.
+  }
+  return existsSync(worktree) ? { common, worktree } : {};
+}
+
+/** Where a checkout's `node_modules` really lives when it is a link to a shared install, plus every top-level package
+ *  link out of that install (npm workspaces link `node_modules/@scope/pkg` to the install's own `packages/`). */
+export function proofLinkedModuleRoots(cwd: string): string[] {
+  let target: string;
+  try {
+    target = realpathSync(join(cwd, "node_modules"));
+  } catch (error) {
+    // No node_modules (or a dangling link): nothing outside the checkout to mount.
+    return [];
+  }
+  const checkout = realpathSync(cwd);
+  const roots = isWithin(target, checkout) ? [] : [target];
+  const scan = (dir: string, depth: number): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (depth === 0 && entry.isDirectory() && entry.name.startsWith("@")) scan(path, 1);
+      if (!entry.isSymbolicLink()) continue;
+      let real: string;
+      try {
+        real = realpathSync(path);
+      } catch (error) {
+        continue; // a dangling package link resolves to nothing the sandbox could mount
+      }
+      if (!isWithin(real, target) && !isWithin(real, checkout)) roots.push(real);
+    }
+  };
+  scan(target, 0);
+  return roots;
+}
+
+export interface ProofSandboxArgvInput {
+  cwd: string;
+  home: string;
+  env?: NodeJS.ProcessEnv;
+  execPath?: string;
+}
+
+/** An origin url with every credential-bearing part removed: a URL's userinfo, query and fragment, or an scp-like
+ *  remote's `user@`. `undefined` when it cannot be read as either shape — the caller then writes no remote at all. */
+export function credentialFreeOriginUrl(url: string): string | undefined {
+  if (url === "" || /[\r\n]/.test(url)) return undefined;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return undefined; // a scheme-shaped url WHATWG cannot parse: no remote, rather than a guess at its userinfo
+    }
+    parsed.username = "";
+    parsed.password = "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  }
+  return url.replace(/^[^@/:]+@(?=[^/:]+:)/, ""); // scp-like `user@host:path`, or a local path left as it is
+}
+
+function gitQuotedValue(raw: string): string | undefined {
+  const value = raw.trimStart();
+  if (!value.startsWith('"')) {
+    let end = value.length;
+    for (let i = 0; i < value.length; i++) {
+      if ((value[i] === "#" || value[i] === ";") && (i === 0 || /\s/.test(value[i - 1]!))) { end = i; break; }
+    }
+    return value.slice(0, end).trimEnd();
+  }
+  let out = "";
+  for (let i = 1; i < value.length; i++) {
+    const ch = value[i]!;
+    if (ch === '"') return /^[\s]*(?:[#;].*)?$/.test(value.slice(i + 1)) ? out : undefined;
+    if (ch !== "\\") { out += ch; continue; }
+    const escaped = value[++i];
+    if (escaped === undefined) return undefined;
+    if (escaped === "n") out += "\n";
+    else if (escaped === "t") out += "\t";
+    else if (escaped === "b") out += "\b";
+    else if (escaped === "\\" || escaped === '"') out += escaped;
+    else return undefined;
+  }
+  return undefined;
+}
+
+function originUrlFromGitConfig(text: string): string | undefined {
+  const lines = text.replace(/\\\r?\n[ \t]*/g, "").split(/\r?\n/);
+  let inOrigin = false;
+  const values: string[] = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#") || line.startsWith(";")) continue;
+    // Keep the quoted subsection alternatives disjoint: a backslash belongs only to `\\.`.
+    // Letting `[^\"]` also consume `\\` makes malformed long sections exponentially backtrack.
+    const section = /^\[\s*([A-Za-z][A-Za-z0-9-]*)(?:\s+(?:"((?:[^"\\]|\\.)*)"|([A-Za-z0-9.-]+)))?\s*\]$/.exec(line);
+    const dotted = /^\[\s*([A-Za-z][A-Za-z0-9-]*)\.([A-Za-z0-9.-]+)\s*\]$/.exec(line);
+    if (line.startsWith("[") && !section && !dotted) return undefined;
+    if (section || dotted) {
+      const name = (section?.[1] ?? dotted?.[1] ?? "").toLowerCase();
+      const subsection = section?.[2]?.replace(/\\([\\"])/g, "$1") ?? section?.[3] ?? dotted?.[2] ?? "";
+      inOrigin = name === "remote" && subsection === "origin";
+      continue;
+    }
+    if (!inOrigin) continue;
+    const entry = /^([A-Za-z][A-Za-z0-9-]*)\s*(?:=\s*(.*))?$/.exec(line);
+    if (entry?.[1]?.toLowerCase() !== "url") continue;
+    const value = gitQuotedValue(entry[2] ?? "");
+    if (value === undefined) return undefined;
+    values.push(value);
+  }
+  return values.length === 1 ? values[0] : undefined;
+}
+
+/** The masked git config a proof sandbox binds over the shared one: `[remote "origin"] url = …` with
+ *  {@link credentialFreeOriginUrl}'s url, and nothing else — or EMPTY when the shared config names no usable origin.
+ *  Read with `--file` and no `--includes`, so an included file never contributes. */
+export function proofMaskedGitConfig(sharedConfig: string): string {
+  let config: string;
+  try {
+    config = readFileSync(sharedConfig, "utf8");
+  } catch {
+    return ""; // unreadable config: the proof sees no remote, as before this mask
+  }
+  const raw = originUrlFromGitConfig(config);
+  if (raw === undefined) return "";
+  const url = credentialFreeOriginUrl(raw);
+  if (url === undefined) return "";
+  return `[remote "origin"]\n\turl = "${url.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"\n`;
+}
+
+/** Bubblewrap arguments, ending in `--`, for one proof child. Writable: the checkout, its throwaway HOME and its
+ *  worktree gitdir. Read-only: the runtime, the git common dir (its `config`, which can carry a token-bearing remote,
+ *  masked by a file carrying only its credential-free origin url), the node_modules link targets and the browser
+ *  cache. NOT mounted: the daemon's HOME, its checkout and state, and the App key — masked by /dev/null too if some
+ *  bind happens to contain it. */
+export function proofSandboxArgv(input: ProofSandboxArgvInput): string[] {
+  const env = input.env ?? process.env;
+  const cwd = realpathSync(input.cwd);
+  const home = realpathSync(input.home);
+  if (cwd === "/" || home === "/") throw new ProofSandboxUnavailableError("refusing / as a writable sandbox bind");
+  const runtime: string[] = PROOF_SANDBOX_RUNTIME_ROOTS.filter((p) => existsSync(p));
+  const binds: { path: string; writable: boolean }[] = [];
+  const nodePrefix = dirname(dirname(realpathSync(input.execPath ?? process.execPath)));
+  if (!runtime.some((root) => isWithin(nodePrefix, root))) binds.push({ path: nodePrefix, writable: false });
+  for (const path of PROOF_SANDBOX_ETC) if (existsSync(path)) binds.push({ path, writable: false });
+  const browsers = realpathIfPresent(playwrightCacheRoot(env, "linux", env.HOME ?? home));
+  if (browsers !== undefined) binds.push({ path: browsers, writable: false });
+  for (const path of proofLinkedModuleRoots(cwd)) binds.push({ path, writable: false });
+  const found = proofCheckoutGitDirs(cwd);
+  const git = {
+    common: found.common === undefined ? undefined : realpathSync(found.common),
+    worktree: found.worktree === undefined ? undefined : realpathSync(found.worktree),
+  };
+  if (git.common !== undefined && !isWithin(git.common, cwd)) binds.push({ path: git.common, writable: false });
+  if (git.worktree !== undefined && !isWithin(git.worktree, cwd)) binds.push({ path: git.worktree, writable: true });
+  binds.push({ path: cwd, writable: true });
+  if (home !== cwd) binds.push({ path: home, writable: true });
+  // Shallower first, so a deeper bind (the worktree gitdir inside its common dir) lands on top of its parent.
+  binds.sort((a, b) => a.path.split(pathSep).length - b.path.split(pathSep).length);
+  // bwrap mounts binds nodev, so a /dev/null bound over a file reads as EACCES: right for the App key, fatal
+  // for git, which refuses an unreadable config. The config is masked by a file in the throwaway HOME that carries
+  // ONLY the origin url with its credentials stripped ({@link proofMaskedGitConfig}): a proof that reads this repo's
+  // owner/repo (resolveOwnerRepo) resolves it as it does in CI's checkout, and no token or other key crosses.
+  const masks: { from: string; path: string }[] = [];
+  if (git.common !== undefined && existsSync(join(git.common, "config"))) {
+    const masked = join(home, ".rmd-masked-git-config");
+    try {
+      writeFileSync(masked, proofMaskedGitConfig(join(git.common, "config")), { mode: 0o444, flag: "wx" });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; // this HOME's earlier argv already made it
+    }
+    masks.push({ from: masked, path: join(git.common, "config") });
+  }
+  const key = env.GH_APP_PRIVATE_KEY_PATH ? realpathIfPresent(env.GH_APP_PRIVATE_KEY_PATH) : undefined;
+  if (key !== undefined && binds.some((b) => isWithin(key, b.path))) masks.push({ from: "/dev/null", path: key });
+  const dirs = new Set<string>();
+  for (const { path } of binds) {
+    for (let current = dirname(path); current !== dirname(current); current = dirname(current)) dirs.add(current);
+  }
+  const createDirs = [...dirs].sort((a, b) => a.split(pathSep).length - b.split(pathSep).length);
+  return [
+    "--die-with-parent",
+    "--new-session",
+    "--unshare-user",
+    "--unshare-net",
+    "--unshare-pid",
+    "--unshare-ipc",
+    ...runtime.flatMap((path) => ["--ro-bind", path, path]),
+    "--proc", "/proc",
+    "--dev", "/dev",
+    "--tmpfs", "/tmp",
+    ...createDirs.flatMap((path) => ["--dir", path]),
+    ...binds.flatMap(({ path, writable }) => [writable ? "--bind" : "--ro-bind", path, path]),
+    ...masks.flatMap(({ from, path }) => ["--ro-bind", from, path]),
+    "--chdir", cwd,
+    "--",
+  ];
+}
+
+/** The proof child's env: {@link buildProofEnv}'s allowlist with HOME replaced by a throwaway one, and the browser
+ *  cache pinned to where the reviewer installed it (that path used to be derived from the real HOME). */
+export function proofChildEnv(home: string, parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return {
+    ...buildProofEnv(parent),
+    HOME: home,
+    PLAYWRIGHT_BROWSERS_PATH: playwrightCacheRoot(parent, process.platform, parent.HOME ?? homedir()),
+  };
+}
+
+interface PreparedProofChild {
+  file: string;
+  args: string[];
+  env: NodeJS.ProcessEnv;
+  /** The sandbox argv around node itself, run first: a sandbox that cannot start must not read as the proof's exit. */
+  startCheck?: { file: string; args: string[] };
+  cleanup: () => void;
+}
+
+/** One proof child's argv and env, with its throwaway HOME made (`rmd-proof-home-*`) and the cleanup that removes it. */
+function prepareProofChild(command: string, args: readonly string[], cwd: string): PreparedProofChild {
+  if (!existsSync(cwd)) throw new ProofCwdMissingError(cwd);
+  const child = proofChildCommand(command, args);
+  const home = makeTempDir("proof-home");
+  const cleanup = () => rmSync(home, { recursive: true, force: true });
+  const env = proofChildEnv(home);
+  const status = proofSandboxStatus();
+  if (status.mode !== "bwrap") {
+    unsandboxedProofSpawns += 1;
+    return { ...child, env, cleanup };
+  }
+  try {
+    const sandbox = proofSandboxArgv({ cwd, home });
+    return {
+      file: status.binary,
+      args: [...sandbox, child.file, ...child.args],
+      env,
+      startCheck: { file: status.binary, args: [...sandbox, process.execPath, "-e", ""] },
+      cleanup,
+    };
+  } catch (error) {
+    cleanup();
+    if (error instanceof ProofSandboxUnavailableError || error instanceof ProofCwdMissingError) throw error;
+    // W1-T7822: a cwd that vanished after the check above still raises ENOENT from realpath — name it, not the sandbox.
+    if (!existsSync(cwd)) throw new ProofCwdMissingError(cwd);
+    throw new ProofSandboxUnavailableError(spawnFailureText(error));
+  }
+}
+
+function startCheckSync(child: PreparedProofChild, cwd: string): void {
+  if (!existsSync(cwd)) throw new ProofCwdMissingError(cwd);
+  try {
+    execFileSync(child.startCheck!.file, child.startCheck!.args, {
+      cwd,
+      env: { ...child.env, NODE_V8_COVERAGE: undefined },
+      stdio: ["ignore", "ignore", "pipe"],
+      timeout: 10_000,
+      killSignal: "SIGKILL",
+      encoding: "utf8",
+    });
+  } catch (error) {
+    throw new ProofSandboxUnavailableError(spawnFailureText(error));
+  }
+}
+
+async function startCheckAsync(child: PreparedProofChild, cwd: string): Promise<void> {
+  if (!existsSync(cwd)) throw new ProofCwdMissingError(cwd);
+  try {
+    await execFileAsync(child.startCheck!.file, child.startCheck!.args, {
+      cwd,
+      env: { ...child.env, NODE_V8_COVERAGE: undefined },
+      timeout: 10_000,
+      killSignal: "SIGKILL",
+    });
+  } catch (error) {
+    throw new ProofSandboxUnavailableError(spawnFailureText(error));
+  }
+}
+
 /** Production {@link ProofSpawner}: no shell, stdout captured, hard timeout, and a DECLARED env ({@link buildProofEnv})
  *  rather than an implicit inherit of `process.env` (W1-T499), which once let a proof inherit the orchestrator's whole
  *  environment. Exported (W1-T387) so `checkProofCommand` can wrap it for diagnostics, never for the verdict. TRAP:
  *  `NODE_V8_COVERAGE: undefined` closes a side channel the allowlist cannot, Node force-injecting that var regardless. */
-export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs) =>
-  execFileSync(command, args as string[], {
+/** A `node --test` proof's child, re-spelled to start niced with an explicit `--test-concurrency` (test-slot.ts); every
+ *  other proof (grep, vitest) runs as given. NO HOST-WIDE SLOT, deliberately: a proof is one file (or a narrowed
+ *  name-filtered set), the review it gates is what the slot exists to protect, and a proof waiting behind a 40-minute
+ *  coverage run would be the starvation, not its cure. Bounded to one slot's share, so it never outruns a slotted run. */
+export function proofChildCommand(
+  command: string,
+  args: readonly string[],
+  load: HostLoad = readHostLoad(),
+  exists?: BinaryProbe,
+): { file: string; args: string[] } {
+  if (!args.includes("--test")) return { file: command, args: [...args] };
+  const concurrency = testRunConcurrency(load, defaultTestSlots(load.cores));
+  return lowPriorityCommand(command, testRunArgv(args, concurrency), exists);
+}
+
+export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs) => {
+  const child = prepareProofChild(command, args, cwd);
+  try {
+    if (child.startCheck) startCheckSync(child, cwd);
+    return spawnPreparedProofSync(child, cwd, timeoutMs);
+  } finally {
+    child.cleanup();
+  }
+};
+
+function spawnPreparedProofSync(child: PreparedProofChild, cwd: string, timeoutMs: number): string {
+  return execFileSync(child.file, child.args, {
     cwd,
-    env: { ...buildProofEnv(), NODE_V8_COVERAGE: undefined },
+    env: { ...child.env, NODE_V8_COVERAGE: undefined },
     stdio: ["ignore", "pipe", "ignore"],
     timeout: timeoutMs,
     // W1-T3266: SIGKILL, NOT THE SIGTERM DEFAULT, AND THE DIFFERENCE IS A SIX-HOUR OUTAGE. The
@@ -1600,6 +2098,7 @@ export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs)
     killSignal: "SIGKILL",
     encoding: "utf8",
   });
+}
 
 /** Match execFileSync's error shape so the shared proof classifier sees identical outcomes. */
 function execFileAsync(
@@ -1625,13 +2124,20 @@ function execFileAsync(
 export type AsyncProofSpawner = (command: string, args: readonly string[], cwd: string, timeoutMs: number) => Promise<string>;
 export type AsyncProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => Promise<ReturnType<ProofExecutor>>;
 
-export const defaultAsyncProofSpawner: AsyncProofSpawner = (command, args, cwd, timeoutMs) =>
-  execFileAsync(command, args, {
-    cwd,
-    env: { ...buildProofEnv(), NODE_V8_COVERAGE: undefined },
-    timeout: timeoutMs,
-    killSignal: "SIGKILL",
-  });
+export const defaultAsyncProofSpawner: AsyncProofSpawner = async (command, args, cwd, timeoutMs) => {
+  const child = prepareProofChild(command, args, cwd);
+  try {
+    if (child.startCheck) await startCheckAsync(child, cwd);
+    return await execFileAsync(child.file, child.args, {
+      cwd,
+      env: { ...child.env, NODE_V8_COVERAGE: undefined },
+      timeout: timeoutMs,
+      killSignal: "SIGKILL",
+    });
+  } finally {
+    child.cleanup();
+  }
+};
 
 /** W1-T4587: checkouts the reviewer itself created for proof execution (the PR head and base
  *  worktrees). {@link ensureDeps} may replace a partial node_modules only in one of these. */
@@ -1641,6 +2147,19 @@ const reviewerOwnedCheckouts = new Set<string>();
 const failedProofToolchainInstalls = new Set<string>();
 export function registerReviewerCheckout(path: string): void {
   reviewerOwnedCheckouts.add(resolve(path));
+}
+
+/** W1-T6124: how a PR checkout is installed. `--ignore-scripts` because npm ci otherwise runs the PR's OWN root
+ *  lifecycle scripts (preinstall/install/postinstall/prepare); this repo's package.json and workspaces declare none,
+ *  and esbuild/@swc/core (the only dependencies with install scripts) resolve their platform binary from an optional
+ *  dependency without them — measured: `npm ci --ignore-scripts` then `node --import tsx` runs. */
+export const PROOF_INSTALL_ARGS: readonly string[] = ["ci", "--ignore-scripts", "--no-audit", "--no-fund"];
+
+/** The install's env: {@link buildProofEnv}'s allowlist, so no GH_TOKEN, GH_APP_* or other credential reaches npm or
+ *  an `${VAR}` a PR's own .npmrc interpolates. HOME stays the daemon's so npm's cache keeps a fresh install inside its
+ *  120s bound; with scripts off, npm itself is the only code that runs. */
+export function proofInstallEnv(parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return buildProofEnv(parent);
 }
 
 /** `npm ci` a fresh checkout ONCE before its first test proof, since fresh worktrees have no node_modules.
@@ -1683,7 +2202,7 @@ export function ensureDeps(
   try {
     // W1-T3266: same untrappable bound as the proof spawner above — a wedged install must not
     // outlive its timeout and hold the reviewer the way a wedged proof did.
-    exec("npm", ["ci"], { cwd, stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
+    exec("npm", PROOF_INSTALL_ARGS, { cwd, env: proofInstallEnv(), stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
   } catch {
     /* best-effort priming; see doc comment above */
   }
@@ -1709,7 +2228,7 @@ export async function ensureDepsAsync(cwd: string, requiredRunnerPath?: string):
   }
   if (requiredRunnerPath === undefined ? existsSync(nodeModules) : runnerIsPresent()) return true;
   if (existsSync(nodeModules) && !reviewerOwnedCheckouts.has(resolve(cwd))) return runnerIsPresent();
-  const install = execFileAsync("npm", ["ci"], { cwd, timeout: 120_000, killSignal: "SIGKILL" }).then(
+  const install = execFileAsync("npm", PROOF_INSTALL_ARGS, { cwd, env: proofInstallEnv(), timeout: 120_000, killSignal: "SIGKILL" }).then(
     () => undefined,
     () => undefined, // Best effort; the runner check below decides availability.
   );
@@ -2483,10 +3002,16 @@ export function execWhitelistedProof(
     assertGrepTargetsInsideCheckout(args, cwd);
     assertGrepTargetIsFile(args, cwd); // R-12: same placement, same reason — a refusal, not an outcome
   }
+  delete whitelisted.failureOutput;
+  const recordFailure = (status: number, stdout: string, stderr = ""): "fail" => {
+    whitelisted.failureOutput = proofFailureExcerpt(whitelisted.command, args, status, stdout, stderr);
+    return "fail";
+  };
   try {
     const stdout = spawn(whitelisted.command, args, cwd, timeoutMs);
     if (whitelisted.nameFiltered) {
       const outcome = vitestNameFiltered ? vitestNameFilteredOutcome(stdout) : nameFilteredOutcome(stdout);
+      if (outcome === "fail") return recordFailure(0, stdout);
       if (outcome === "cannot-load" && !deps.loadRetried) {
         recordLoadError(whitelisted, stdout);
         (deps.refreshToolchain ?? refreshProofToolchain)(cwd);
@@ -2494,7 +3019,7 @@ export function execWhitelistedProof(
       }
       if (outcome === "cannot-load") {
         recordLoadError(whitelisted, stdout);
-        throw new ProofCannotLoadError(whitelisted.loadError!);
+        throw new ProofCannotLoadError(whitelisted.loadError!, stdout);
       }
       return outcome;
     }
@@ -2506,7 +3031,7 @@ export function execWhitelistedProof(
     const dialectPath = dialectGrepTargetPath(whitelisted);
     if (whitelisted.kind === "grep" && dialectPath !== undefined && dialectGrepSelfLineFilteringApplies(dialectPath)) {
       whitelisted.matchedLines = dialectGrepMatchedLinesExcludingSelfLine(whitelisted.args[2]!, dialectPath, stdout);
-      return whitelisted.matchedLines.length > 0 ? "pass" : "fail";
+      return whitelisted.matchedLines.length > 0 ? "pass" : recordFailure(0, stdout);
     }
     if (whitelisted.kind === "grep" && dialectPath !== undefined) {
       whitelisted.matchedLines = dialectGrepOutputLines(stdout);
@@ -2533,9 +3058,9 @@ export function execWhitelistedProof(
       }
       if (outcome === "cannot-load") {
         recordLoadError(whitelisted, `${stdout}\n${stderr}`);
-        throw new ProofCannotLoadError(whitelisted.loadError!);
+        throw new ProofCannotLoadError(whitelisted.loadError!, `${stdout}\n${stderr}`);
       }
-      return outcome;
+      return outcome === "fail" ? recordFailure(err.status, stdout, stderr) : outcome;
     }
     // grep exit 2 means it could not even LOOK — a renamed or missing target, a read error — distinct from exit 1's
     // "looked, found nothing" (W1-T219, recon R-13(iv)). Only the latter is evidence of absence.
@@ -2555,10 +3080,34 @@ export function execWhitelistedProof(
       const completedResults = pureTestIncompleteRunResultCount(stdout);
       if (completedResults !== undefined) throw new PureProofIncompleteRunError(completedResults);
       const wrapperName = pureTestNeverExecutedWrapperName(stdout);
-      if (wrapperName !== undefined) throw new PureProofNeverExecutedError(wrapperName);
+      if (wrapperName !== undefined) throw new PureProofNeverExecutedError(wrapperName, stdout);
     }
-    return "fail"; // a single-file/grep proof's own nonzero exit is a genuine fail
+    // a single-file/grep proof's own nonzero exit is a genuine fail
+    return recordFailure(err.status, outputText(err.stdout), outputText(err.stderr));
   }
+}
+
+function outputText(value: string | Buffer | null | undefined): string {
+  return typeof value === "string" ? value : (value?.toString("utf8") ?? "");
+}
+
+/** Lines and characters a {@link proofFailureExcerpt} keeps: the tail, where node's `not ok` and summary sit. */
+export const PROOF_FAILURE_EXCERPT_LINES = 40;
+export const PROOF_FAILURE_EXCERPT_CHARS = 3000;
+
+/** A failed proof's bounded, reproducible record: the argv, the exit status, and the last
+ *  {@link PROOF_FAILURE_EXCERPT_LINES} lines of stdout then stderr. It rides the verdict into the
+ *  `review.posted` row and the reviewer-unmet fix prompt, so a fix worker sees what the reviewer saw. */
+export function proofFailureExcerpt(command: string, args: readonly string[], status: number, stdout: string, stderr = ""): string {
+  const argv = [command, ...args].join(" ");
+  const lines = [stdout, stderr].join("\n").split("\n").map((line) => line.trimEnd()).filter((line) => line !== "");
+  const tail = lines.slice(-PROOF_FAILURE_EXCERPT_LINES).join("\n");
+  const kept = tail.length > PROOF_FAILURE_EXCERPT_CHARS ? `…${tail.slice(-PROOF_FAILURE_EXCERPT_CHARS)}` : tail;
+  return [
+    `$ ${argv.length > 400 ? `${argv.slice(0, 400)}…` : argv}`,
+    `exit ${status}`,
+    kept === "" ? "(no output)" : kept,
+  ].join("\n");
 }
 
 /** Run the review's external work asynchronously, then use the existing verdict classifier. */
@@ -2627,7 +3176,10 @@ export async function execWhitelistedProofAsync(
  *  run never reached a verdict about the criterion. {@link judgeCriterion} recognises it by `instanceof` and records
  *  `proof_skip: "runtime-broken"` plus the wrapper name: design (iv)'s "record the discriminator, not the stream". */
 class PureProofNeverExecutedError extends Error {
-  constructor(readonly wrapperName: string) {
+  constructor(
+    readonly wrapperName: string,
+    readonly loadOutput?: string,
+  ) {
     super(
       `pure-path proof's file (${wrapperName}) never reached a real subtest — only its own TAP ` +
         "wrapper reported `not ok`, meaning the file failed to load/run as a whole (a broken " +
@@ -2984,6 +3536,8 @@ function classifyBaseProofOutcome(
   baseUnreadablePaths?: ReadonlySet<string>,
   baseIsCheckout?: boolean,
   addedTestFiles?: ReadonlySet<string>,
+  headCwd?: string,
+  onMissingExport?: (note: string) => void,
 ): "stale" | "discriminates" | "base_unknown" | "base_unreadable" {
   const target = grepProofTargetPath(whitelisted);
   if (target !== undefined && baseUnreadablePaths?.has(target)) return "base_unreadable";
@@ -3004,8 +3558,16 @@ function classifyBaseProofOutcome(
     // subtest — THROWS out of `exec` and is caught below as `base_unknown`.
     const outcome = exec(whitelisted, baseCwd);
     return outcome === "pass" ? "stale" : "discriminates";
-  } catch {
-    return "base_unknown";
+  } catch (e) {
+    // A base that cannot LINK a named export the head supplies is a miss, not an environment gap.
+    const loadOutput = (e as { loadOutput?: unknown }).loadOutput;
+    const note =
+      whitelisted.kind === "test" && headCwd !== undefined && typeof loadOutput === "string"
+        ? baseLacksPrAddedExports(loadOutput, baseCwd, headCwd)
+        : undefined;
+    if (note === undefined) return "base_unknown";
+    onMissingExport?.(note);
+    return "discriminates";
   }
 }
 
@@ -3190,6 +3752,7 @@ export function judgeCriterion(
   // the report keyword-claimed it (kills W1-T51). `exec_error` degrades to the keyword floor: never a silent hard-fail.
   let proofExec: ProofExecOutcome = "not_executable";
   let loadError: string | undefined;
+  let proofFailureOutput: string | undefined;
   // W1-DH: WHY a criterion did not execute. `proof_exec: "not_executable"` alone conflates a proof that never PARSED
   // with one that parsed and named nothing, and a CAPPED 0/N looked identical either way.
   let proofSkip: ProofSkipReason | undefined;
@@ -3260,9 +3823,12 @@ export function judgeCriterion(
             } else {
               // W1-T273 (grep) / W1-T362 (extended to `unit test:`): re-run the SAME whitelisted check against the PR's
               // merge-base — one execution answers both "is this stale" and, if not, why not.
+              let missingExportNote: string | undefined;
               const baseOutcome =
                 execCtx.baseCwd !== undefined
-                  ? classifyBaseProofOutcome(whitelisted, exec, execCtx.baseCwd, execCtx.baseUnreadablePaths, execCtx.baseIsCheckout, execCtx.addedTestFiles)
+                  ? classifyBaseProofOutcome(whitelisted, exec, execCtx.baseCwd, execCtx.baseUnreadablePaths, execCtx.baseIsCheckout, execCtx.addedTestFiles, execCtx.cwd, (note) => {
+                      missingExportNote = note;
+                    })
                   : undefined;
               if (baseOutcome === "base_unreadable") {
                 // The base tree exists and siblings were checked against it, but THIS proof's base blob never arrived,
@@ -3304,7 +3870,9 @@ export function judgeCriterion(
                 reason = `proof executed and PASSED on the PR head (${whitelisted.kind}: ${whitelisted.label})`;
                 // W1-T362: record the base-run outcome on the verdict for a `unit test:` proof specifically (grep's
                 // reason text stays byte-identical to its shipped W1-T273 shape).
-                if (whitelisted.kind === "test" && baseOutcome === "discriminates") {
+                if (whitelisted.kind === "test" && baseOutcome === "discriminates" && missingExportNote !== undefined) {
+                  reason += ` — NOTE: re-run against the PR's merge-base, which could not load it: ${missingExportNote}`;
+                } else if (whitelisted.kind === "test" && baseOutcome === "discriminates") {
                   reason +=
                     ` — NOTE: also re-run against the PR's merge-base and did NOT pass there ` +
                     `(absent, no-match, or a genuine failure); the proof discriminates, executed_pass stands`;
@@ -3375,6 +3943,7 @@ export function judgeCriterion(
             proofExec = "executed_fail";
             met = false;
             reason = `proof executed and FAILED on the PR head (${whitelisted.kind}: ${whitelisted.label}) — overrides any keyword coverage`;
+            proofFailureOutput = whitelisted.failureOutput;
           }
         } catch (e) {
           if (e instanceof ProofCannotLoadError) {
@@ -3383,6 +3952,18 @@ export function judgeCriterion(
             loadError = e.loadError;
             met = false;
             reason = `proof cannot-evaluate: test files failed to load after one toolchain refresh (${e.loadError})`;
+          } else if (e instanceof ProofCwdMissingError) {
+            // W1-T7822: the checkout was deleted under the proof; the sandbox is not the problem.
+            proofExec = "not_executable";
+            proofSkip = "cwd-missing";
+            reason = `${reason} — NOTE: ${e.message}; not executed, keyword floor applied`;
+          } else if (e instanceof ProofSandboxUnavailableError) {
+            // W1-T6124: the proof's code never ran, so this is a host gap, not an outcome — and never a pass.
+            proofExec = "not_executable";
+            proofSkip = "runner-absent";
+            reason =
+              `${reason} — NOTE: the proof sandbox could not start (${e.sandboxReason}); ` +
+              "not executed, keyword floor applied";
           } else if (e instanceof ProofRunnerUnavailableError) {
             proofExec = "not_executable";
             proofSkip = "runner-absent";
@@ -3462,7 +4043,10 @@ export function judgeCriterion(
     }
   }
 
-  return { ...base, met, reason, proof_exec: proofExec, proof_skip: proofSkip, ...(loadError ? { loadError } : {}), floorMet, holdout: !!criterion.holdout };
+  return {
+    ...base, met, reason, proof_exec: proofExec, proof_skip: proofSkip, ...(loadError ? { loadError } : {}),
+    ...(proofExec === "executed_fail" && proofFailureOutput ? { proofFailureOutput } : {}), floorMet, holdout: !!criterion.holdout,
+  };
 }
 
 /** The slice of {@link Task} the merged-claim audit needs — just enough to name a finding without importing all of
@@ -3823,62 +4407,18 @@ export function stripQuotedRegions(report: string): { scan: string; fenceUnbalan
   // the false control "This PR is plan-only."; #4577 had to OMIT its block to be reviewed. Blanked for
   // CLAIM SCANNING ONLY — `parseAcceptanceBlock` and the author-time checks still read it unchanged.
   const acceptance = acceptanceBlockRegion(report);
-  let inFence = false;
-  let inHtmlComment = false;
+  const state: MarkdownLineState = { inHtmlComment: false };
   const scan = report
     .split("\n")
     .map((line, index) => {
-      // A fence owns everything inside it, including comment-looking examples. Conversely, an HTML comment owns
-      // every fence marker inside the comment. The ordering is load-bearing: #4867's hidden repair note must not
-      // become a claim, and a hidden ``` must not leave the rest of the rendered body looking fenced to this scan.
-      if (inFence) {
-        if (/^\s*```/.test(line)) inFence = false;
-        return " ".repeat(line.length);
-      }
-      if (!inHtmlComment && /^\s*```/.test(line)) {
-        inFence = true;
-        return " ".repeat(line.length);
-      }
-
-      let cursor = 0;
-      let commentStripped = "";
-      while (cursor < line.length) {
-        if (inHtmlComment) {
-          const close = line.indexOf("-->", cursor);
-          if (close < 0) {
-            commentStripped += " ".repeat(line.length - cursor);
-            cursor = line.length;
-          } else {
-            commentStripped += " ".repeat(close + 3 - cursor);
-            cursor = close + 3;
-            inHtmlComment = false;
-          }
-          continue;
-        }
-        const open = line.indexOf("<!--", cursor);
-        if (open < 0) {
-          commentStripped += line.slice(cursor);
-          cursor = line.length;
-        } else {
-          commentStripped += line.slice(cursor, open) + " ".repeat(4);
-          cursor = open + 4;
-          inHtmlComment = true;
-        }
-      }
-
-      // A comment may close before a real fence on the same line. Test the stripped line so a marker still inside
-      // the comment can never toggle the state.
-      if (/^\s*```/.test(commentStripped)) {
-        inFence = true;
-        return " ".repeat(line.length);
-      }
-      if (/^\s*>/.test(commentStripped)) return " ".repeat(line.length);
-      // AFTER the fence arms, never before: a fence opened inside the block must still toggle.
+      const classified = classifyMarkdownLine(line, state);
+      if (classified.insideFence || /^\s*>/.test(classified.scan)) return " ".repeat(line.length);
+      // Walk fences even inside Acceptance, so an opener there still owns subsequent lines.
       if (acceptance && index > acceptance.headerLine && index < acceptance.endLine) return " ".repeat(line.length);
-      return commentStripped;
+      return classified.scan;
     })
     .join("\n");
-  return { scan, fenceUnbalancedAtEof: inFence };
+  return { scan, fenceUnbalancedAtEof: state.fence !== undefined };
 }
 
 /** Does an enumeration TOKEN correspond to a member of `diffFiles` (W1-T2224)? Replaces a shape guess with a contract
@@ -4400,6 +4940,7 @@ export function judgeReview(
   // byte-identical to pre-W1-T65. W1-T2743: ONE memo per judgeReview call. Built here rather than inside
   // judgeCriterion so that function stays byte-compatible for its audit callers, which must keep spawning per call.
   const proofMemo = evidence.headCheckoutDir ? memoizeProofExecutor(evidence.execProof ?? execWhitelistedProof) : undefined;
+  const unsandboxedBefore = unsandboxedProofSpawns;
   const execCtx: ProofExecContext | undefined = evidence.headCheckoutDir
     ? {
         cwd: evidence.headCheckoutDir,
@@ -4437,9 +4978,10 @@ export function judgeReview(
 
   const idDecls = taskIdDeclarationsInDiff(evidence.diff);
   const baseIdDecls =
-    idDecls.added.length > 0 && evidence.headCheckoutDir
+    evidence.baseTaskIdDeclarations ??
+    (idDecls.added.length > 0 && evidence.headCheckoutDir
       ? taskIdDeclarationsAtRef(evidence.headCheckoutDir, "origin/main") // the TIP: #1699 merged after #1695 branched
-      : [];
+      : []);
   const idCollisions = baseIdDecls.length > 0 ? taskIdCollisions(idDecls.added, baseIdDecls, idDecls.removed) : [];
   const idOwnership =
     evidence.reservationOwnership ?? (idDecls.added.length > 0 && evidence.headCheckoutDir && evidence.headRefName
@@ -4611,6 +5153,7 @@ export function judgeReview(
   return {
     state,
     cannotEvaluate,
+    ...proofSandboxRecord(unsandboxedBefore),
     criteria: verdicts,
     testTheater,
     summary,
@@ -4649,14 +5192,22 @@ export function judgeReview(
   };
 }
 
+/** W1-T6124: the verdict's degraded-sandbox record when a proof child started unsandboxed since `before`. */
+function proofSandboxRecord(before: number): Pick<ReviewVerdict, "proofSandboxDegraded"> {
+  if (unsandboxedProofSpawns === before) return {};
+  const status = proofSandboxStatus();
+  return status.mode === "unsandboxed" ? { proofSandboxDegraded: status.reason } : {};
+}
+
 /** Resolve each requested head/base observation without blocking, then fold with the same judge. */
 export async function judgeReviewAsync(
   criteria: AcceptanceCriterion[],
   evidence: ReviewEvidence,
 ): Promise<ReviewVerdict> {
   if (!evidence.headCheckoutDir) return judgeReview(criteria, evidence);
+  const unsandboxedBefore = unsandboxedProofSpawns;
   type Observation =
-    | { outcome: ReturnType<ProofExecutor>; matchedLines?: string[]; loadError?: string }
+    | { outcome: ReturnType<ProofExecutor>; matchedLines?: string[]; loadError?: string; failureOutput?: string }
     | { error: unknown };
   const observed = new Map<string, Observation>();
   const keyOf = (w: WhitelistedProof, cwd: string) => JSON.stringify([cwd, w.command, [...w.args]]);
@@ -4673,17 +5224,20 @@ export async function judgeReviewAsync(
         if ("error" in prior) throw prior.error;
         whitelisted.matchedLines = prior.matchedLines;
         whitelisted.loadError = prior.loadError;
+        whitelisted.failureOutput = prior.failureOutput;
         return prior.outcome;
       }
       pending.set(key, { whitelisted, cwd });
       throw new Error("async proof observation pending");
     };
     const verdict = judgeReview(criteria, { ...evidence, execProof: replay });
-    if (pending.size === 0) return verdict;
+    if (pending.size === 0) return { ...verdict, ...proofSandboxRecord(unsandboxedBefore) };
     for (const [key, { whitelisted, cwd }] of pending) {
       try {
         const outcome = await asyncExec(whitelisted, cwd);
-        observed.set(key, { outcome, matchedLines: whitelisted.matchedLines, loadError: whitelisted.loadError });
+        observed.set(key, {
+          outcome, matchedLines: whitelisted.matchedLines, loadError: whitelisted.loadError, failureOutput: whitelisted.failureOutput,
+        });
       } catch (error) {
         // Preserve this exact proof error for the next deterministic verdict fold.
         observed.set(key, { error });
@@ -4800,15 +5354,39 @@ export interface VerdictStabilityResult {
   suppressed: boolean;
 }
 
+/** W1-T5839 — what `taskIdFromRunBranch` recovers from every `run-unfiled-<epochMs>` head: a branch-shape SENTINEL that
+ *  every ad-hoc PR shares, never a task (W1-T3535), so it owns neither supersession nor a review verdict. */
+export const UNFILED_RUN_SENTINEL = "unfiled";
+
+/** W1-T5839 — THE KEY A PR's REVIEW ROWS ARE WRITTEN UNDER: the resolved task id, else `PR-<n>` — and the sentinel is
+ *  "else" too. `resolveReviewTaskId` answers `unfiled` or `undefined` for ONE run-unfiled PR depending on that pass's
+ *  plan-filing classification, so keying its answer directly let the review lane write `unfiled` while the sweep read
+ *  `PR-9305`: 16 success re-reviews of one plan PR in 31 minutes (2026-10-05), and every `unfiled` PR shared one
+ *  last-row-wins verdict slot. A trailer or `run-<taskId>-<ms>` id passes through unchanged. */
+export function reviewLedgerKeyFor(taskId: string | undefined, prNumber: number): string {
+  return taskId === undefined || taskId === UNFILED_RUN_SENTINEL ? `PR-${prNumber}` : taskId;
+}
+
+/** W1-T5839 — DOES THIS LEDGER ROW BELONG TO THIS PR? A row naming a `pr_url` belongs to exactly that PR, whatever
+ *  `task_id` it was stamped with: the url is the identity, a task key is a label two PRs (or two classifications of
+ *  one PR) can disagree on. Only a legacy row with no `pr_url` falls back to the key, as W1-T5813's
+ *  `armLedgerLinesForPr` keeps it. This is also the transition: rows already written as `unfiled` carry their url. */
+export function reviewRowNamesPr(line: Record<string, unknown>, key: string | undefined, prUrl: string): boolean {
+  return typeof line.pr_url === "string" ? line.pr_url === prUrl : key !== undefined && line.task_id === key;
+}
+
 /** Recover the most recent `review.posted` verdict for `taskId` from ledger lines, last one wins — the same scanning
- * idiom `unmetFromLedger` (run-task.ts) and every other precedence helper here already use. No new storage. */
+ * idiom `unmetFromLedger` (run-task.ts) and every other precedence helper here already use. No new storage. W1-T5839:
+ * given `prUrl`, a row is matched by {@link reviewRowNamesPr} instead, so another PR's newer row never wins. */
 export function priorReviewVerdictFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
+  prUrl?: string,
 ): PriorReviewVerdict | undefined {
   let prior: PriorReviewVerdict | undefined;
   for (const line of lines) {
-    if (line.step !== "review.posted" || line.task_id !== taskId) continue;
+    if (line.step !== "review.posted") continue;
+    if (prUrl === undefined ? line.task_id !== taskId : !reviewRowNamesPr(line, taskId, prUrl)) continue;
     if (typeof line.head_sha !== "string") continue;
     if (line.state !== "success" && line.state !== "failure") continue;
     // `capped`/`plan_only` are read back from the SAME line that carried `state`, never recomputed: the arming path
@@ -5376,10 +5954,12 @@ export function cappedOverrideFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
   headSha: string,
+  prUrl?: string,
 ): CappedOverride | undefined {
   let found: CappedOverride | undefined;
   for (const line of lines) {
-    if (line.step !== "automerge.capped_override_granted" || line.task_id !== taskId) continue;
+    if (line.step !== "automerge.capped_override_granted") continue;
+    if (prUrl === undefined ? line.task_id !== taskId : !reviewRowNamesPr(line, taskId, prUrl)) continue;
     if (typeof line.by !== "string" || typeof line.reason !== "string") continue;
     if (typeof line.head_sha !== "string" || line.head_sha !== headSha) continue;
     found = { by: line.by, reason: line.reason, headSha: line.head_sha };
@@ -5396,6 +5976,63 @@ export interface AutomergeHold {
   by: string;
   /** Why — mirroring {@link CappedOverride.reason}. */
   reason: string;
+  /** W1-T7721 — the evidence the WRITER gathered about who really ran the command (never typed by the caller).
+   *  Absent on rows older than the field, which every surface reads as "actor unrecorded". */
+  actor?: MergeHoldActor;
+}
+
+/** W1-T7721 — verifiable provenance of a merge-hold write, gathered by the writer beside the free-text `by`. */
+export interface MergeHoldActor {
+  /** `agent` when an agent/session marker was present or the process ran inside a container; else `human`. */
+  kind: "human" | "agent";
+  os_user: string;
+  host: string;
+  /** Container id when the writer ran inside one. */
+  container_id?: string;
+  /** Agent/session identity when one was present in the environment. */
+  session?: string;
+  /** Names of the agent/session env markers found (CLAUDECODE, REMUDERO_RUN_ID, ...). */
+  agent_markers: string[];
+  tty: { stdin: boolean; stdout: boolean };
+  /** Parent process names, nearest first. */
+  parents: string[];
+}
+
+function readMergeHoldActor(raw: unknown): MergeHoldActor | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const a = raw as Record<string, unknown>;
+  if ((a.kind !== "human" && a.kind !== "agent") || typeof a.os_user !== "string" || typeof a.host !== "string") {
+    return undefined;
+  }
+  const tty = (a.tty ?? {}) as Record<string, unknown>;
+  return {
+    kind: a.kind,
+    os_user: a.os_user,
+    host: a.host,
+    ...(typeof a.container_id === "string" ? { container_id: a.container_id } : {}),
+    ...(typeof a.session === "string" ? { session: a.session } : {}),
+    agent_markers: Array.isArray(a.agent_markers) ? a.agent_markers.filter((m): m is string => typeof m === "string") : [],
+    tty: { stdin: tty.stdin === true, stdout: tty.stdout === true },
+    parents: Array.isArray(a.parents) ? a.parents.filter((m): m is string => typeof m === "string") : [],
+  };
+}
+
+/** W1-T7721 — true when the recorded actor contradicts the claimed `by`: an agent wrote a row naming something
+ *  other than its own `agent:<session>` identity. An unrecorded actor is not a mismatch, merely unknown. */
+export function holdClaimMismatch(hold: Pick<AutomergeHold, "by" | "actor">): boolean {
+  return hold.actor !== undefined && hold.actor.kind === "agent" && !/^agent:\S+/.test(hold.by);
+}
+
+/** W1-T7721 — who set a hold, for every surface that names it. Never the bare claimed name when an actor exists. */
+export function describeHoldSetter(hold: Pick<AutomergeHold, "by" | "actor">): string {
+  const actor = hold.actor;
+  if (!actor) return `${hold.by} (actor unrecorded)`;
+  const where = actor.container_id ? `${actor.host} (container ${actor.container_id})` : actor.host;
+  if (actor.kind === "agent") {
+    const who = `agent session ${actor.session ?? "unidentified"} as ${actor.os_user} on ${where}`;
+    return holdClaimMismatch(hold) ? `${hold.by} (claimed); written by ${who}` : `${hold.by} (${who})`;
+  }
+  return `${hold.by} (human ${actor.os_user} on ${where})`;
 }
 
 /** Recover the current auto-merge hold for `prNumber`, last one wins, over the WHOLE ledger rather than a sha-bound
@@ -5420,7 +6057,8 @@ export function automergeHoldFromLedger(
     if (!scopedToThisPr) continue;
     if (line.step === "automerge.hold_engaged" && isConfirmedHumanAuthority(line)) {
       if (typeof line.by === "string" && typeof line.reason === "string" && line.by && line.reason) {
-        held = { by: line.by, reason: line.reason };
+        const actor = readMergeHoldActor(line.hold_actor);
+        held = { by: line.by, reason: line.reason, ...(actor ? { actor } : {}) };
       }
       continue;
     }
@@ -5593,11 +6231,13 @@ export function postedArmFactsFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string | undefined,
   headSha: string | undefined,
+  prUrl?: string,
 ): PostedArmFacts | undefined {
   if (!taskId || !headSha) return undefined;
   let facts: PostedArmFacts | undefined;
   for (const line of lines) {
-    if (line.step !== "review.posted" || line.task_id !== taskId) continue;
+    if (line.step !== "review.posted") continue;
+    if (prUrl === undefined ? line.task_id !== taskId : !reviewRowNamesPr(line, taskId, prUrl)) continue;
     if (typeof line.head_sha !== "string" || line.head_sha !== headSha) continue;
     if (typeof line.capped !== "boolean") continue;
     // `plan_only` absent ⇒ false ⇒ a capped legacy verdict refuses. See (b) above.
@@ -5799,7 +6439,7 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
     `REVIEW_VERDICT lines (below) and the ORCHESTRATOR will post the`,
     `authoritative status on sha ${input.headSha} after folding them in.`,
     ``,
-    `End with a REPORT: the per-criterion verdicts and your reasoning for each.`,
+    `End with a REPORT: one line per criterion naming what you ran and observed.`,
   ].join("\n");
 }
 
@@ -5909,6 +6549,86 @@ export const ACCEPTANCE_HEADER_RE = /^\s*#{0,6}\s*\**\s*acceptance(\s+criteria)?
  *  ACCEPTANCE_HEADER_RE}. Exported for the same reason {@link ACCEPTANCE_HEADER_RE} is (W1-T2762). */
 export const ACCEPTANCE_BULLET_RE = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/;
 
+/** A CommonMark fence opener — three or more backticks (whose info string holds no backtick) or tildes. Exported so a
+ *  fixture can drive both of its arms by name (the negative-reachability ratchet). */
+export const FENCE_OPEN_RE = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
+
+export interface MarkdownLineState {
+  inHtmlComment: boolean;
+  fence?: string;
+}
+
+/** Walk one line, mutating ownership state and blanking hidden text without moving UTF-16 offsets.
+ * An active fence owns comment syntax; otherwise comments own their fence markers. */
+export function classifyMarkdownLine(
+  line: string,
+  state: MarkdownLineState,
+): { scan: string; insideFence: boolean } {
+  if (state.fence !== undefined) {
+    const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line.replace(/\r$/, ""));
+    if (close && close[1][0] === state.fence[0] && close[1].length >= state.fence.length) {
+      state.fence = undefined;
+    }
+    return { scan: " ".repeat(line.length), insideFence: true };
+  }
+
+  let cursor = 0;
+  let scan = "";
+  let visible = "";
+  while (cursor < line.length) {
+    if (state.inHtmlComment) {
+      const close = line.indexOf("-->", cursor);
+      const end = close < 0 ? line.length : close + 3;
+      scan += " ".repeat(end - cursor);
+      cursor = end;
+      if (close >= 0) state.inHtmlComment = false;
+    } else {
+      // A fence may follow a comment close on this line; its info string owns comment syntax too.
+      const fenceOpen = /^ *$/.test(visible)
+        ? FENCE_OPEN_RE.exec((visible + line.slice(cursor)).replace(/\r$/, ""))
+        : null;
+      if (fenceOpen) {
+        state.fence = fenceOpen[1];
+        return { scan: " ".repeat(line.length), insideFence: true };
+      }
+      const open = line.indexOf("<!--", cursor);
+      const end = open < 0 ? line.length : open;
+      const text = line.slice(cursor, end);
+      scan += text;
+      visible += text;
+      cursor = end;
+      if (open >= 0) {
+        scan += " ".repeat(4);
+        cursor += 4;
+        state.inHtmlComment = true;
+      }
+    }
+  }
+  return { scan, insideFence: false };
+}
+
+function acceptanceHeaderLocation(lines: readonly string[]): { headerLine: number; headerInsideFence: boolean } {
+  const state: MarkdownLineState = { inHtmlComment: false };
+  let headerInsideFence = false;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].replace(/\r$/, "");
+    const classified = classifyMarkdownLine(line, state);
+    if (classified.insideFence) {
+      if (ACCEPTANCE_HEADER_RE.test(line)) headerInsideFence = true;
+      if (state.fence === undefined) headerInsideFence = false;
+    } else if (ACCEPTANCE_HEADER_RE.test(classified.scan)) {
+      return { headerLine: index, headerInsideFence: false };
+    }
+  }
+  return { headerLine: -1, headerInsideFence };
+}
+
+/** First Acceptance header outside comments and matching CommonMark fences, or -1.
+ * Shared by the parser, block region and repair emitter (W1-T5621). */
+export function acceptanceHeaderLine(lines: readonly string[]): number {
+  return acceptanceHeaderLocation(lines).headerLine;
+}
+
 /** THE LINE SPAN of a body's Acceptance block: from the header to the first line that is neither a bullet, an
  *  indented continuation, nor a tolerated leading blank — the boundary {@link acceptanceBlockDiagnostics} has always
  *  walked, EXPORTED so {@link stripQuotedRegions} shares it rather than keeping a second copy (W1-T3142).
@@ -5916,15 +6636,12 @@ export const ACCEPTANCE_BULLET_RE = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/;
  *  body byte-for-byte unchanged by the claim scan. */
 export function acceptanceBlockRegion(body: string): { headerLine: number; endLine: number; bulletsWritten: number } | undefined {
   const lines = (body ?? "").split("\n");
-  let headerLine = -1;
+  const headerLine = acceptanceHeaderLine(lines);
+  if (headerLine < 0) return undefined;
   let bulletsWritten = 0;
-  let index = 0;
+  let index = headerLine + 1;
   for (; index < lines.length; index += 1) {
     const line = lines[index].replace(/\r$/, "");
-    if (headerLine < 0) {
-      if (ACCEPTANCE_HEADER_RE.test(line)) headerLine = index;
-      continue;
-    }
     if (ACCEPTANCE_BULLET_RE.test(line)) {
       bulletsWritten += 1;
       continue;
@@ -5934,7 +6651,7 @@ export function acceptanceBlockRegion(body: string): { headerLine: number; endLi
     if (line.trim() === "" && bulletsWritten === 0) continue;
     break;
   }
-  return headerLine < 0 ? undefined : { headerLine, endLine: index, bulletsWritten };
+  return { headerLine, endLine: index, bulletsWritten };
 }
 
 
@@ -5977,25 +6694,23 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
    *  written BEFORE that split. An indented `proof:` continuation below such a bullet proves the split was a false
    *  positive — the proof lives on that line, so the pipe belonged to the claim — and restores this. */
   const unsplitLabelledClaims: (string | undefined)[] = [];
-  let inBlock = false;
-  for (const raw of lines) {
+  // Header: "Acceptance:", "**Acceptance:**", "## Acceptance", "Acceptance criteria:" — never one inside a fence.
+  const headerLine = acceptanceHeaderLine(lines);
+  if (headerLine < 0) return criteria;
+  for (const raw of lines.slice(headerLine + 1)) {
     const line = raw.replace(/\r$/, "");
-    // Header: "Acceptance:", "**Acceptance:**", "## Acceptance", "Acceptance criteria:".
-    if (!inBlock) {
-      if (ACCEPTANCE_HEADER_RE.test(line)) {
-        inBlock = true;
-      }
-      continue;
-    }
     const bullet = line.match(ACCEPTANCE_BULLET_RE);
     if (bullet) {
       const item = bullet[1].trim();
       const sep = acceptanceSeparator(item);
       let claim = (sep ? item.slice(0, sep.index) : item).trim();
-      const proof = sep ? item.slice(sep.index + sep.width).trim() : "";
+      let proof = sep ? item.slice(sep.index + sep.width).trim() : "";
       // "- claim: <text>" form: strip the label and any surrounding quotes.
       const claimLabel = claim.match(/^claim\s*:\s*(.*)$/i);
       if (claimLabel) claim = stripQuotes(claimLabel[1].trim());
+      // A bare `- unit test: <title>` / `- grep: <p> in <f>` bullet names its proof and omits only the claim, so it is
+      // its own claim. Read as an empty proof it was "repaired" with a base-passing grep (#10404, #10413).
+      else if (!sep) proof = bareDialectProof(claim);
       if (!claim) continue;
       criteria.push({ claim, proof });
       const whole = claimLabel && proof ? item.match(/^claim\s*:\s*(.*)$/i) : null;
@@ -6034,6 +6749,8 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
 export interface AcceptanceBlockDiagnostics {
   /** Was an Acceptance HEADER found at all? False ⇒ the parser resolves nothing and review fails closed. */
   headerFound: boolean;
+  /** The only visible header candidates belong to a fence still open at EOF. */
+  headerInsideFence: boolean;
   /** Criterion BULLETS the author wrote under that header, counted with the parser's own bullet regex. */
   bulletsWritten: number;
   /** Criteria {@link parseAcceptanceBlock} actually resolved. */
@@ -6065,6 +6782,7 @@ export function acceptanceBlockDiagnostics(body: string): AcceptanceBlockDiagnos
   const headerFound = region !== undefined;
   return {
     headerFound,
+    headerInsideFence: acceptanceHeaderLocation((body ?? "").split("\n")).headerInsideFence,
     bulletsWritten,
     criteriaParsed: parsed.length,
     emptyProofs,
@@ -6631,17 +7349,85 @@ export function taskIdDeclarationsAtRef(
   let files: string[];
   let texts: string[];
   try {
-    files = runGit(["ls-tree", "-r", "--name-only", ref, "plan/"]).split("\n").filter((f) => SHARD_PATH_RE.test(f));
+    files = planShardPathsIn(runGit(DECLARATIONS_LISTING_ARGS(ref)));
     texts = readBlobsAtRef(runGit, ref, files);
   } catch {
     return []; // an unreadable ref declares NOTHING: a missed collision, never a fabricated one
   }
+  return declarationsInShards(files, texts);
+}
+
+/** {@link taskIdDeclarationsAtRef} through awaited, bounded git: the same listing, batch and parse. A git that
+ *  FAILS declares nothing, exactly as the sync read; one killed at its bound REJECTS with {@link ReviewGitTimeout}. */
+export async function taskIdDeclarationsAtRefAsync(
+  repoDir: string,
+  ref: string,
+  runGit: AsyncGitBlobRunner = gitBlobRunnerAsync(repoDir),
+): Promise<TaskIdDeclaration[]> {
+  let files: string[];
+  let texts: string[];
+  try {
+    files = planShardPathsIn(await runGit(DECLARATIONS_LISTING_ARGS(ref)));
+    texts = await readBlobsAtRefAsync(runGit, ref, files);
+  } catch (error) {
+    if (error instanceof ReviewGitTimeout) throw error; // a hung git is named, never read as an empty base
+    return []; // an unreadable ref declares NOTHING: a missed collision, never a fabricated one
+  }
+  return declarationsInShards(files, texts);
+}
+
+const DECLARATIONS_LISTING_ARGS = (ref: string): string[] => ["ls-tree", "-r", "--name-only", ref, "plan/"];
+
+function planShardPathsIn(listing: string): string[] {
+  return listing.split("\n").filter((f) => SHARD_PATH_RE.test(f));
+}
+
+function declarationsInShards(files: readonly string[], texts: readonly string[]): TaskIdDeclaration[] {
   return files.flatMap((file, i) =>
     texts[i].split("\n").flatMap((l) => {
       const m = l.match(TASK_ID_LINE_RE);
       return m ? [{ id: m[1], file }] : [];
     }),
   );
+}
+
+/** An awaited {@link GitBlobRunner}: resolves stdout, rejects on any failure. */
+export type AsyncGitBlobRunner = (args: string[], stdin?: string) => Promise<string>;
+
+/** BACKSTOP per git call on the review's base reads (ls-tree, cat-file --batch, show). MEASURED 2026-09-05: one
+ *  batch over 1,079 shards took 208 ms, so this fires only on a hung git, never on a slow healthy one. */
+export const REVIEW_BASE_READ_GIT_TIMEOUT_MS = 120_000;
+
+/** A review base read killed at its bound. Named, so the evidence reads `unknown` and never an empty base. */
+export class ReviewGitTimeout extends RmdError {
+  constructor(message: string) {
+    super("git", GENERIC_EXIT_CODE, message);
+    this.name = "ReviewGitTimeout";
+  }
+}
+
+/** The real {@link AsyncGitBlobRunner}: `git -C <repoDir>` off the event loop, `stdin` piped, killed at its bound
+ *  (SIGTERM, then SIGKILL after grace) and rejecting with {@link ReviewGitTimeout}, which names the bound. */
+export function gitBlobRunnerAsync(repoDir: string, opts: { timeoutMs?: number; graceMs?: number; gitBin?: string } = {}): AsyncGitBlobRunner {
+  const timeoutMs = opts.timeoutMs ?? REVIEW_BASE_READ_GIT_TIMEOUT_MS;
+  return (args, stdin) =>
+    new Promise((resolve, reject) => {
+      let timedOut = false;
+      const child = execFile(opts.gitBin ?? "git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }, (err, stdout, stderr) => {
+        clearTimeout(timer);
+        if (!err) return resolve(stdout);
+        if (timedOut) return reject(new ReviewGitTimeout(`git ${args[0]} timed out after ${timeoutMs}ms and was killed`));
+        reject(new Error(`git ${args[0]} failed: ${stderr.trim() || err.message}`));
+      });
+      // A git that exits before reading stdin makes the write EPIPE; its exit status above is the outcome.
+      child.stdin?.on("error", () => undefined);
+      child.stdin?.end(stdin ?? "");
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        killAfterGrace(child, opts.graceMs);
+      }, timeoutMs);
+    });
 }
 
 /** W1-T4414: an added id whose reservation does not name this PR's head as its holder. */
@@ -6653,12 +7439,36 @@ export type TaskIdOwnershipFinding =
 /** Base-committed, so a PR can never exempt its own ids: `[{ "id": ..., "reason": ... }]`, reasonless rows ignored. */
 export const TASK_ID_RESERVATION_BASELINE = "plan/task-id-reservation-baseline.json";
 
+const BASELINE_SHOW_ARGS = ["show", `origin/main:${TASK_ID_RESERVATION_BASELINE}`];
+
 function reservationBaselineIds(repoDir: string): Set<string> {
+  let text: string;
+  try {
+    text = execFileSync("git", ["-C", repoDir, ...BASELINE_SHOW_ARGS], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return new Set(); // no baseline exempts nothing — the strict direction
+  }
+  return baselineIdsIn(text);
+}
+
+/** {@link reservationBaselineIds} through awaited, bounded git; killed at its bound it REJECTS with {@link ReviewGitTimeout}. */
+async function reservationBaselineIdsAsync(runGit: AsyncGitBlobRunner): Promise<Set<string>> {
+  let text: string;
+  try {
+    text = await runGit(BASELINE_SHOW_ARGS);
+  } catch (error) {
+    if (error instanceof ReviewGitTimeout) throw error; // a hung git is named, never read as "no baseline"
+    return new Set(); // no baseline exempts nothing — the strict direction
+  }
+  return baselineIdsIn(text);
+}
+
+function baselineIdsIn(text: string): Set<string> {
   let rows: unknown;
   try {
-    rows = JSON.parse(execFileSync("git", ["-C", repoDir, "show", `origin/main:${TASK_ID_RESERVATION_BASELINE}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }));
+    rows = JSON.parse(text);
   } catch {
-    return new Set(); // no baseline (or an unparseable one) exempts nothing — the strict direction
+    return new Set(); // an unparseable baseline exempts nothing — the strict direction
   }
   const ok = (r: unknown): r is { id: string; reason: string } =>
     typeof (r as { id?: unknown })?.id === "string" && typeof (r as { reason?: unknown }).reason === "string" && (r as { reason: string }).reason.trim() !== "";
@@ -6675,6 +7485,37 @@ function recordsHandoff(diff: string, file: string, holder: string, head: string
   });
 }
 
+/** The ids `added` files that neither the base declares nor the baseline exempts, each with its file. */
+function filedTaskIds(added: readonly TaskIdDeclaration[], baseDecls: readonly TaskIdDeclaration[], baselineIds: ReadonlySet<string>): Map<string, string> {
+  const exempt = new Set([...baseDecls.map((d) => d.id), ...baselineIds]);
+  const filed = new Map<string, string>();
+  for (const d of added) if (!exempt.has(d.id) && parsePrefixedTaskId(d.id) && !filed.has(d.id)) filed.set(d.id, d.file);
+  return filed;
+}
+
+function judgeTaskIdOwnership(
+  diff: string,
+  filed: ReadonlyMap<string, string>,
+  reads: ReadonlyMap<string, ReservationAnchorRead>,
+  headRef: string,
+): TaskIdOwnershipFinding[] {
+  const findings: TaskIdOwnershipFinding[] = [];
+  for (const [id, file] of filed) {
+    const r = reads.get(id) ?? { status: "unknown", reason: "no read" };
+    if (r.status === "absent") findings.push({ id, file, kind: "unreserved" });
+    else if (r.status === "unknown") findings.push({ id, file, kind: "unknown", reason: r.reason });
+    else {
+      const record = adjudicateReservationChain((r.chain ?? [r.message]).map((message) => ({
+        holder: parseReservationHolderLine(message), fields: parseReservationHolderFields(message),
+      })));
+      const holder = record.holder.status === "known" ? record.holder.branch : "unknown";
+      const lostRace = record.takeover?.winner === "original" && record.takeover.reclaimer.branch === headRef;
+      if (holder !== headRef && (lostRace || !recordsHandoff(diff, file, holder, headRef))) findings.push({ id, file, kind: "foreign", holder });
+    }
+  }
+  return findings;
+}
+
 /** Every id this diff ADDS to plan/ that the base does not declare, judged against refs/rmd-id/<id> on
  *  `repoDir`'s origin: absent, or held by a branch other than `headRef`, fails; unreadable is UNKNOWN. */
 export function taskIdOwnershipFindings(
@@ -6689,21 +7530,39 @@ export function taskIdOwnershipFindings(
       return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? String(r.error ?? "") };
     }),
 ): TaskIdOwnershipFinding[] {
-  const exempt = new Set([...baseDecls.map((d) => d.id), ...reservationBaselineIds(repoDir)]);
-  const filed = new Map<string, string>();
-  for (const d of added) if (!exempt.has(d.id) && parsePrefixedTaskId(d.id) && !filed.has(d.id)) filed.set(d.id, d.file);
-  const reads = read([...filed.keys()]);
-  const findings: TaskIdOwnershipFinding[] = [];
-  for (const [id, file] of filed) {
-    const r = reads.get(id) ?? { status: "unknown", reason: "no read" };
-    if (r.status === "absent") findings.push({ id, file, kind: "unreserved" });
-    else if (r.status === "unknown") findings.push({ id, file, kind: "unknown", reason: r.reason });
-    else {
-      const holder = reservationHolderBranch(r.message) ?? "unknown";
-      if (holder !== headRef && !recordsHandoff(diff, file, holder, headRef)) findings.push({ id, file, kind: "foreign", holder });
-    }
-  }
-  return findings;
+  const filed = filedTaskIds(added, baseDecls, reservationBaselineIds(repoDir));
+  return judgeTaskIdOwnership(diff, filed, read([...filed.keys()]), headRef);
+}
+
+/** {@link taskIdOwnershipFindings} with an AWAITED, bounded anchor read; a timeout reads `unknown`. */
+export async function taskIdOwnershipFindingsAsync(
+  diff: string,
+  added: readonly TaskIdDeclaration[],
+  baseDecls: readonly TaskIdDeclaration[],
+  headRef: string,
+  repoDir: string,
+  read: (ids: string[]) => Map<string, ReservationAnchorRead> | Promise<Map<string, ReservationAnchorRead>> = (ids) =>
+    readReservationAnchorsAsync(ids, gitReservationRunnerAsync(repoDir)),
+  runGit: AsyncGitBlobRunner = gitBlobRunnerAsync(repoDir),
+): Promise<TaskIdOwnershipFinding[]> {
+  const filed = filedTaskIds(added, baseDecls, await reservationBaselineIdsAsync(runGit));
+  return judgeTaskIdOwnership(diff, filed, await read([...filed.keys()]), headRef);
+}
+
+type OwnershipEvidenceInputs =
+  | { done: true; findings: TaskIdOwnershipFinding[] | undefined }
+  | { done: false; added: TaskIdDeclaration[]; headRefName: string; headCheckoutDir: string };
+
+/** Every prefixed id `added` declares, each read `unknown` for `reason`. */
+function unknownOwnership(added: readonly TaskIdDeclaration[], reason: string): TaskIdOwnershipFinding[] {
+  const filed = new Map(added.filter((declaration) => parsePrefixedTaskId(declaration.id)).map((declaration) => [declaration.id, declaration.file]));
+  return [...filed].map(([id, file]) => ({ id, file, kind: "unknown", reason }));
+}
+
+function ownershipEvidenceInputs(added: TaskIdDeclaration[], headRefName: string | undefined, headCheckoutDir: string | undefined): OwnershipEvidenceInputs {
+  if (added.length === 0) return { done: true, findings: undefined };
+  if (!headRefName || !headCheckoutDir) return { done: true, findings: unknownOwnership(added, !headRefName ? "head-ref-unavailable" : "head-checkout-unavailable") };
+  return { done: false, added, headRefName, headCheckoutDir };
 }
 
 /** Snapshot the external reservation before decision replay, then reuse this exact read in the judge. */
@@ -6713,14 +7572,60 @@ export function reviewReservationOwnershipEvidence(
   headCheckoutDir: string | undefined,
   read?: Parameters<typeof taskIdOwnershipFindings>[5],
 ): TaskIdOwnershipFinding[] | undefined {
+  const i = ownershipEvidenceInputs(taskIdDeclarationsInDiff(diff).added, headRefName, headCheckoutDir);
+  return i.done ? i.findings : taskIdOwnershipFindings(diff, i.added, taskIdDeclarationsAtRef(i.headCheckoutDir, "origin/main"), i.headRefName, i.headCheckoutDir, read);
+}
+
+/** {@link reviewReservationOwnershipEvidence}, awaited: the ownership half of {@link reviewTaskIdEvidenceAsync}. */
+export async function reviewReservationOwnershipEvidenceAsync(
+  diff: string,
+  headRefName: string | undefined,
+  headCheckoutDir: string | undefined,
+  read?: Parameters<typeof taskIdOwnershipFindingsAsync>[5],
+  runGit?: AsyncGitBlobRunner,
+): Promise<TaskIdOwnershipFinding[] | undefined> {
+  return (await reviewTaskIdEvidenceAsync(diff, headRefName, headCheckoutDir, read, runGit)).ownership;
+}
+
+/** What runReview hands the judge: the reservation ownership snapshot, and origin/main's declarations the judge's
+ *  collision check would otherwise re-read synchronously (`undefined` exactly when the judge would not read them). */
+export interface ReviewTaskIdEvidence {
+  ownership: TaskIdOwnershipFinding[] | undefined;
+  baseDeclarations: TaskIdDeclaration[] | undefined;
+}
+
+/**
+ * The daemon's runReview takes this one: every git read of the task-id evidence awaited and bounded — the base
+ * declarations (ls-tree + cat-file --batch), the reservation baseline (show) and the anchors (ls-remote, fetch, log).
+ * Before this, only the anchor read was awaited (#9644): both base reads ran execFileSync and the judge re-read the
+ * declarations. A base read killed at its bound reads every filed id `unknown`, NAMING the timeout, and the judge
+ * sees an empty base, as on any unreadable ref — never a fabricated collision.
+ */
+export async function reviewTaskIdEvidenceAsync(
+  diff: string,
+  headRefName: string | undefined,
+  headCheckoutDir: string | undefined,
+  read?: Parameters<typeof taskIdOwnershipFindingsAsync>[5],
+  runGit: AsyncGitBlobRunner = gitBlobRunnerAsync(headCheckoutDir ?? "."),
+): Promise<ReviewTaskIdEvidence> {
   const added = taskIdDeclarationsInDiff(diff).added;
-  if (added.length === 0) return undefined;
-  if (!headRefName || !headCheckoutDir) {
-    const filed = new Map(added.filter((declaration) => parsePrefixedTaskId(declaration.id)).map((declaration) => [declaration.id, declaration.file]));
-    return [...filed].map(([id, file]) => ({ id, file, kind: "unknown", reason: !headRefName ? "head-ref-unavailable" : "head-checkout-unavailable" }));
+  const i = ownershipEvidenceInputs(added, headRefName, headCheckoutDir);
+  // The judge reads the base exactly when ids are added and a checkout exists; no checkout is always `done` above.
+  if (added.length === 0 || !headCheckoutDir) return { ownership: i.done ? i.findings : undefined, baseDeclarations: undefined };
+  let base: TaskIdDeclaration[];
+  try {
+    base = await taskIdDeclarationsAtRefAsync(headCheckoutDir, "origin/main", runGit);
+  } catch (error) {
+    if (!(error instanceof ReviewGitTimeout)) throw error;
+    return { ownership: unknownOwnership(added, `base-unreadable: ${error.message}`), baseDeclarations: [] };
   }
-  const base = taskIdDeclarationsAtRef(headCheckoutDir, "origin/main");
-  return taskIdOwnershipFindings(diff, added, base, headRefName, headCheckoutDir, read);
+  if (i.done) return { ownership: i.findings, baseDeclarations: base };
+  try {
+    return { ownership: await taskIdOwnershipFindingsAsync(diff, i.added, base, i.headRefName, i.headCheckoutDir, read, runGit), baseDeclarations: base };
+  } catch (error) {
+    if (!(error instanceof ReviewGitTimeout)) throw error;
+    return { ownership: unknownOwnership(added, `baseline-unreadable: ${error.message}`), baseDeclarations: base };
+  }
 }
 
 // ── Item 1: ONE CONCERN per PR ─────────────────────────────────────────────
@@ -7069,6 +7974,9 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // W1-T2428: the fast lane's diff classifier. It decides which suites the `ci` and `coverage-ratchet` jobs RUN, so a
   // diff touching it changes what those gates measure.
   "^scripts/diff-class\\.mjs$",
+  "^scripts/ci-shard-admission\\.mjs$",
+  // 2026-10-10: the flake screen fails ci-shard 1 when a test file the PR adds fails one rerun.
+  "^scripts/flake-screen\\.mjs$",
   "^scripts/expiring-fixture-census\\.mjs$",
   "^scripts/baseline-monotonic-check\\.mjs$", // W1-T2906: refuses a baseline-score regression against origin/main
   "^scripts/gate-monotonic-check\\.mjs$", // W1-T3519: refuses a REQUIRED gate demoted against origin/main
@@ -7109,6 +8017,10 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
     "The gate is the rule and is tracked on INSTRUMENT_SURFACE above; this file is what it measures, " +
     "the same shape as openapi/daemon.yaml directly above.",
   "plan/claims.yaml": "claim DATA the claims gate validates, not the checker's rule logic",
+  "scripts/node-pin-follows-the-image.mjs":
+    "W1-T6064's Dependabot sync: it rewrites .nvmrc to the Node version a /deploy image bump already chose and " +
+    "pushes that onto the bump's own branch. It grades nothing and gates nothing; the exact-pin rule it satisfies is " +
+    "measured by the tests that read .nvmrc against deploy/Dockerfile, and those stay the instrument.",
   "scripts/select-affected-suites.mjs":
     "W1-T4404's affected-suite selector in SHADOW: it prints what it WOULD run and exits 0 whatever it finds, after the " +
     "full suite has run, so no edit to it can change what a CI gate measures. Promote it to INSTRUMENT_SURFACE when " +
@@ -7120,8 +8032,21 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
   "scripts/test-tier-manifest.json":
     "the per-test-file duration ledger (W1-T2904) — DATA scripts/test-tier-manifest.mjs's --check reads, " +
     "not the rule logic itself, same shape as openapi/daemon.yaml above",
+  "scripts/test-tier-coverage-manifest.json":
+    "the coverage lane's instrumented per-file duration ledger (W1-T5923) — DATA the coverage shard split " +
+    "weighs, not rule logic, same shape as scripts/test-tier-manifest.json above",
   // ── verified non-instrument: ops/dev tooling with no CI-gate role ──
   "scripts/check.mjs": "local dev convenience (`npm run check`), never invoked by any CI workflow",
+  "scripts/typecheck.mjs":
+    "local dev/worker convenience (`npm run typecheck`, and `npm run check`'s tsc), never invoked by any CI workflow — " +
+    "CI's ci job runs its own `npx tsc -p tsconfig.json --noEmit`, so no edit to this wrapper changes what a gate measures",
+  "scripts/test-run.mjs":
+    "local dev/worker convenience (`npm test`), never invoked by any CI workflow — CI runs `npm run test:ci` — and it " +
+    "only sets --test-concurrency on the caller's own node --test argv and returns node's exit code, so it cannot turn a red suite green",
+  "scripts/test-duration-reporter.mjs":
+    "VERIFIED NON-INSTRUMENT (W1-T5923) — a node --test reporter that only writes per-file durations; the " +
+    "coverage shard names it to record instrumented timings for the shard split, never reads them back, and " +
+    "it cannot turn a failing suite green. Its numbers reach the split only through a reviewed ledger.",
   "scripts/diff-coverage-local.mjs":
     "VERIFIED NON-INSTRUMENT (W1-T4084) — a local convenience exposed only as the " +
     "`diff-coverage:local` package.json script; no workflow `run:` step invokes it. It RESTATES NO " +
@@ -8477,6 +9402,13 @@ export function inverseScopeAdvisorySection(advisories: readonly UnwiredAdvisory
 
 // ── reviewer_outcome (W1-T63/P10-a — the reviewer stops walling silently) ──
 
+export function reviewerRerunDecision(
+  first: { exit?: Parameters<typeof reviewerOutcome>[0]["exit"] },
+  priorSignal?: string,
+): "rerun" | "accept" {
+  return first.exit?.kind === "signal" && priorSignal === undefined ? "rerun" : "accept";
+}
+
 /** The observable OUTCOME of the fresh advisory reviewer spawn, surfaced on the `review.posted` ledger line and the
  *  console summary. `judgeReview`'s binding verdict is unaffected either way (Standing rules 2/4/12); this is purely a
  *  LEGIBILITY signal (P10-a). TRAP: a floor-only PASS — the LLM reviewer walling `error_max_turns`, or never being
@@ -8488,6 +9420,7 @@ export function reviewerOutcome(opts: {
   /** The reviewer WorkerResult.subtype, when a spawn actually ran to a terminal
    * state ("success" | "error_max_turns" | …). */
   subtype?: string;
+  exit?: { kind: "signal"; signal: string } | { kind: "exit"; code: number } | { kind: "unobserved" };
   /** true when the spawn itself THREW (e.g. before yielding any result) —
    * distinct from a subtype, since there is none to report. */
   spawnError?: boolean;
@@ -8502,6 +9435,7 @@ export function reviewerOutcome(opts: {
   if (opts.planOnlySkip) return "not_attempted_plan_only";
   if (!opts.attempted) return "not_attempted";
   if (opts.spawnError) return "spawn_error";
+  if (opts.exit?.kind === "signal") return "signal_terminated";
   return opts.subtype ?? "unknown";
 }
 
@@ -8663,8 +9597,7 @@ function lastPostedReviewStatusForInput(
   for (const line of lines) {
     if (
       line.step !== "review.posted" ||
-      line.task_id !== taskId ||
-      line.pr_url !== prUrl ||
+      !reviewRowNamesPr(line, taskId, prUrl) ||
       line.head_sha !== headSha ||
       line.review_input_digest !== inputDigest
     ) {
@@ -8711,11 +9644,13 @@ function pendingReviewStatusRecord(line: Record<string, unknown>): PendingReview
 export function lastPendingReviewStatusFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string | undefined,
+  prUrl?: string,
 ): PendingReviewStatusRecord | undefined {
   if (!taskId) return undefined;
   let prior: PendingReviewStatusRecord | undefined;
   for (const line of lines) {
-    if (line.step !== "review.pending_posted" || line.task_id !== taskId) continue;
+    if (line.step !== "review.pending_posted") continue;
+    if (prUrl === undefined ? line.task_id !== taskId : !reviewRowNamesPr(line, taskId, prUrl)) continue;
     prior = pendingReviewStatusRecord(line) ?? prior;
   }
   return prior;
@@ -9449,11 +10384,15 @@ export interface PostReviewPendingOpts {
   reviewInputDigest?: string;
   reviewEngineRevision?: string;
   fetchLifecycle: () => PrLifecycleState;
+  /** Combined commit-status reader; the default observes claims from every host. */
+  fetchStatus?: GhApiFetcher;
   /** Injected raw poster (tests) — forwarded to {@link postReviewStatusGuarded} unchanged. */
   post?: PostReviewStatusGuardedOpts["post"];
   lockOpts?: AcquireReviewStatusLockOpts;
   /** Injectable only so the durable owner record is deterministic in tests. */
   ownerIdentity?: { pid: number; startedAt: string };
+  /** Only proof of death overrides a readable young claim's TTL (W1-T8088). */
+  assessPendingOwner?: (record: PendingReviewStatusRecord) => PendingReviewOwnerAssessment;
   /** The wall clock the TTL is measured against. Defaults to {@link systemClock}, so production
    *  reads real time and nothing is handed a frozen instant it did not ask for — this is a CLOCK,
    *  not the fixed `now` field the comment below rules out. Present so the TTL boundary is
@@ -9470,18 +10409,29 @@ export interface PostReviewPendingResult {
 /** THE ONE PENDING-POST ENTRY POINT (design (a)/(d)): every detector — `runReview`'s own start, `reviewCommand`'s own
  * start, and transitively the sweep's post-review dispatch — calls this ONCE, at DETECTION, before the worktree, proof
  * and reviewer-spawn work a review's latency is spent on. It goes through {@link postReviewStatusGuarded}, so the
- * W1-T135 retry, the W1-T228 lifecycle refusal and the W1-T203 reviewer identity all apply. TWO REFUSALS, BOTH DECIDED
- * HERE before touching the lock or network. (1) NEVER REGRESS A TERMINAL VERDICT FOR THE SAME REVIEW INPUT TO PENDING:
+ * W1-T135 retry, the W1-T228 lifecycle refusal and the W1-T203 reviewer identity all apply. A fresh lifecycle read
+ * precedes local deduplication; the shared commit status also guards against claims from other hosts.
+ * (1) NEVER REGRESS A TERMINAL VERDICT FOR THE SAME REVIEW INPUT TO PENDING:
  * {@link decideReviewStatusPost}'s precedence only refuses `executed -> no_evidence`, and a pending attempt is always
  * `no_evidence`, so a prior `no_evidence` TERMINAL verdict for this head would sail through; a changed body is a fresh
  * input and may post again. (2) IDEMPOTENT PER INPUT, BUT ONLY INSIDE {@link REVIEW_LOCK_TTL_MS} (W1-T3647): a
  * `review.pending_posted` line for this exact head+body digest is a no-op while its own `ts` reads younger than the
- * TTL, OR while its age cannot be read at all — an unreadable clock FAILS TOWARD HOLDING, never toward reclaim, since
- * the alternative is two reviewers judging the same head. Only a READABLE age at or past the TTL reclaims: this call
+ * TTL unless its owner is proven dead (W1-T8088). An unreadable clock FAILS TOWARD HOLDING, never toward reclaim, since
+ * the alternative is two reviewers judging the same head. A READABLE age at or past the TTL also reclaims: this call
  * posts itself as the new holder and names the run it took over from, rather than deferring forever to a claim its
  * own owning run may already be dead. The posted status carries the posting `run_id`, which is what sweep.ts's
  * `OpenPrView.reviewPendingSince` producer derives its staleness clock from. */
 export async function postReviewPending(opts: PostReviewPendingOpts): Promise<PostReviewPendingResult> {
+  const lifecycle = opts.fetchLifecycle();
+  if (lifecycle.merged || lifecycle.closed) {
+    const closed = lifecycle.merged ? "merged" : "closed";
+    const reason = `pr_${closed}`;
+    appendLedger(opts.ledgerPath, {
+      run_id: opts.runId, task_id: opts.taskId, step: "review.skipped_closed_lifecycle",
+      head_sha: opts.sha, pr_url: opts.prUrl, reason,
+    });
+    return { posted: false, lifecycle: closed, reason: `PR is already ${closed}` };
+  }
   const lines = readLiveLedgerRecords(opts.ledgerPath);
   const hasInputIdentity = opts.prUrl !== undefined && opts.reviewInputDigest !== undefined;
   const priorTerminal = hasInputIdentity
@@ -9512,17 +10462,20 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       break;
     }
   }
-  // W1-T3647: a same-sha claim is a no-op ONLY while it is inside the TTL. Age is read off the
-  // claim's OWN ledger `ts` (`priorPending.postedAt`) against the wall clock right now — never a
-  // fixed field on the OPTS, so nothing here can be handed a stale "now" by a caller.
+  // W1-T3647/W1-T8088: read the claim's own ledger `ts` against the current clock. A young
+  // claim holds unless its owner is proven dead; an unreadable age always holds.
   let takenOverFrom: PendingReviewStatusRecord | undefined;
+  let ownerProvenDead = false;
+  const assessOwner = opts.assessPendingOwner ??
+    ((record: PendingReviewStatusRecord) => assessPendingReviewOwner(record, { isPidAlive: defaultIsPidAlive }));
   if (priorPending && priorPending.headSha === opts.sha) {
     const claimedAtMs = Date.parse(priorPending.postedAt);
     const ageMs = Number.isNaN(claimedAtMs) ? undefined : (opts.clock ?? systemClock).now() - claimedAtMs;
     // FAIL TOWARD HOLDING (design (c)): an age this process cannot read (missing/garbled `ts`) is
     // treated exactly like a FRESH, live claim — never like a stale one — because the alternative
     // is two reviewers judging the same head and posting conflicting verdicts.
-    if (ageMs === undefined || ageMs < REVIEW_LOCK_TTL_MS) {
+    ownerProvenDead = ageMs !== undefined && ageMs < REVIEW_LOCK_TTL_MS && assessOwner(priorPending) === "dead";
+    if (ageMs === undefined || (ageMs < REVIEW_LOCK_TTL_MS && !ownerProvenDead)) {
       return {
         posted: false,
         reason:
@@ -9535,8 +10488,44 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     // rather than silently overwriting it.
     takenOverFrom = priorPending;
   }
+  try {
+    const raw = (opts.fetchStatus ?? ghJson)(combinedStatusRestArgs(opts.owner, opts.repo, opts.sha)) as {
+      statuses?: Array<{ context?: string; state?: string; description?: string; created_at?: string }>;
+    } | null;
+    if (!raw || !Array.isArray(raw.statuses) || raw.statuses.some(status => !status || typeof status.context !== "string")) {
+      throw new Error("combined commit status has no readable statuses array");
+    }
+    const status = raw.statuses.find(status => status.context === REVIEW_CONTEXT);
+    if (status && !["pending", "success", "failure", "error"].includes(status.state ?? "")) {
+      throw new Error("unrecognized remudero-review state");
+    }
+    if (status?.state === "pending") {
+      const foreignRun = /owned by run ([^\s)]+)\)/.exec(status.description ?? "")?.[1];
+      if (!foreignRun) throw new Error("pending remudero-review owner is unreadable");
+      if (foreignRun !== opts.runId) {
+        const claimedAtMs = Date.parse(status.created_at ?? "");
+        const ageMs = (opts.clock ?? systemClock).now() - claimedAtMs;
+        const foreignLine = lines.findLast(line => line.step === "review.pending_posted" &&
+          line.run_id === foreignRun && line.head_sha === opts.sha);
+        const foreignPending = foreignLine && pendingReviewStatusRecord(foreignLine);
+        ownerProvenDead = Number.isFinite(ageMs) && ageMs < REVIEW_LOCK_TTL_MS &&
+          foreignPending !== undefined && assessOwner(foreignPending) === "dead";
+        if (!Number.isFinite(ageMs) || (ageMs < REVIEW_LOCK_TTL_MS && !ownerProvenDead)) {
+          return {
+            posted: false,
+            reason: `remudero-review is already pending (owned by run ${foreignRun}) — host-independent claim; no-op`,
+          };
+        }
+        takenOverFrom = { headSha: opts.sha, runId: foreignRun, postedAt: status.created_at! };
+      }
+    }
+  } catch (error) {
+    return { posted: false, reason: `holding review: shared remudero-review status unreadable — ${String(error)}` };
+  }
   const description = (
-    takenOverFrom
+    takenOverFrom && ownerProvenDead
+      ? `pending (owned by run ${opts.runId}) — took over run ${takenOverFrom.runId}: owner proven dead`
+      : takenOverFrom
       ? `remudero-review: review in progress (owned by run ${opts.runId}) — took over a stale claim ` +
         `(>= ${Math.round(REVIEW_LOCK_TTL_MS / 60_000)}m old) from run ${takenOverFrom.runId} (W1-T3647)`
       : `remudero-review: review in progress (owned by run ${opts.runId})`

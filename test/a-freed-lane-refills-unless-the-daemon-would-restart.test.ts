@@ -12,6 +12,7 @@ import { setImmediate as drainMicrotasks } from "node:timers/promises";
 import { test } from "node:test";
 import { loadPlan } from "../src/lib/plan.js";
 import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
+import { FRESHNESS_COALESCE_WINDOW_MS } from "../src/lib/deploy-judge.js";
 import type { RunResult } from "../src/run-task.js";
 
 function threeDisjointPlan() {
@@ -53,6 +54,8 @@ function harness(staleFiles: string[] | undefined) {
   const bothStarted = deferred<void>();
   let aSettled = false;
   let stale = false;
+  let nowMs = Date.now();
+  const sleeps: Array<ReturnType<typeof deferred<void>>> = [];
   const startedWhileARan: string[] = [];
   const runOne = (id: string): Promise<RunResult> => {
     started.push(id);
@@ -67,7 +70,12 @@ function harness(staleFiles: string[] | undefined) {
       refreshMerged: () => () => false,
       log: (step: string, extra?: Record<string, unknown>) => steps.push({ step, extra }),
       runOne,
-      sleep: async () => {},
+      now: () => new Date(nowMs),
+      sleep: () => {
+        const sleep = deferred<void>();
+        sleeps.push(sleep);
+        return sleep.promise;
+      },
       checkFreshness: () => (stale && staleFiles ? staleWith(staleFiles) : { stale: false }),
     } as unknown as DaemonDeps,
     { max: 3, laneCount: 2 },
@@ -82,6 +90,13 @@ function harness(staleFiles: string[] | undefined) {
     goStale: () => {
       stale = true;
     },
+    tick: async () => {
+      await drainMicrotasks();
+      sleeps.shift()?.resolve();
+      await drainMicrotasks();
+      await drainMicrotasks();
+    },
+    advanceClock: (ms: number) => { nowMs += ms; },
     settleA: () => {
       aSettled = true;
       release.A.resolve(okResult("A"));
@@ -107,18 +122,44 @@ test("W1-T5083: a deferred low-weight advance does not hold a freed lane", async
   await h.run.catch(() => undefined);
 });
 
-test("W1-T5083: an advance that would restart the daemon still holds the freed lane", async () => {
+test("W1-T5083: an advance that would restart the daemon still holds the freed lane after the quiet window", async () => {
   const h = harness(["src/lib/daemon.ts"]);
   await h.bothStarted.promise;
-  h.goStale(); // a change to the daemon's own loop: restart-worthy even while busy
+  h.goStale();
+  await h.tick();
+  const coalesced = h.steps.find((l) => l.step === "daemon.freshness_coalesced");
+  assert.equal(coalesced?.extra?.action, "hold");
+  assert.equal(coalesced?.extra?.held_ms, 0);
+  assert.equal(h.steps.some((l) => l.step === "daemon.freshness_decision" && l.extra?.action === "restart"), false);
+  h.advanceClock(FRESHNESS_COALESCE_WINDOW_MS.value);
   h.release.B.resolve(okResult("B"));
   await drainMicrotasks();
   assert.deepEqual(h.startedWhileARan, ["B"], "nothing admitted onto B's freed lane");
   const held = h.steps.find((l) => l.step === "dispatch.lane_refill_held");
   assert.equal(held?.extra?.reason, "stale code");
   assert.equal(held?.extra?.freshness_action, "restart");
+  const released = h.steps.filter((l) => l.step === "daemon.freshness_coalesced").at(-1);
+  assert.equal(released?.extra?.reason, "window_quiet");
+  assert.equal(released?.extra?.held_ms, FRESHNESS_COALESCE_WINDOW_MS.value);
   h.settleA();
-  await h.run.catch(() => undefined);
+  assert.equal((await h.run).stopReason, "stale");
+});
+
+test("W1-T5083: a coalesced self-path advance refills a freed lane during the hold", async () => {
+  const h = harness(["src/lib/daemon.ts"]);
+  await h.bothStarted.promise;
+  h.goStale();
+  await h.tick();
+  h.advanceClock(FRESHNESS_COALESCE_WINDOW_MS.value - 1);
+  h.release.B.resolve(okResult("B"));
+  await drainMicrotasks();
+  assert.deepEqual(h.startedWhileARan, ["B", "C"]);
+  const held = h.steps.filter((l) => l.step === "daemon.freshness_coalesced").at(-1);
+  assert.equal(held?.extra?.action, "hold");
+  assert.equal(held?.extra?.held_ms, FRESHNESS_COALESCE_WINDOW_MS.value - 1);
+  assert.equal(h.steps.some((l) => l.step === "daemon.freshness_decision" && l.extra?.action === "restart"), false);
+  h.settleA();
+  assert.equal((await h.run).stopReason, "max_reached");
 });
 
 test("W1-T5083: one rejected sibling does not close refill for the rest of the pass", async () => {

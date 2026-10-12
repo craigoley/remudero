@@ -10,7 +10,7 @@
   risk: medium
   origin: "operator session 90be18e2, 2026-10-02: #8684 #8713 #8779 each needed a hand fix and a plan amendment"
   files: [src/run-task.ts, test/a-worker-may-add-the-test-its-proof-names.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-02, three times in one day: W1-T1289 (#8684), W1-T4271 (#8713) and W1-T4015 (#8779) each

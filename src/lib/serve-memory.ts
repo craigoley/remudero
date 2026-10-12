@@ -19,7 +19,15 @@
  * A relief repeated on consecutive samples escalates ONCE through the incident path's own
  * `incident.event` shape ({@link invariantFindingLedgerLine}), re-armed only when headroom recovers.
  *
- * FALSIFIER: test/serve-names-and-relieves-its-memory-pressure.test.ts.
+ * W1-T5355: the first 50 rows named 2.6 MB of a 3-4 GB rss. Each worker thread this thread spawned
+ * is a heap of its own ({@link readWorkerHeaps}), and the row's `unattributed_bytes` is what is
+ * left; sustained low headroom with nothing to relieve fires incident-invariants.ts's own rule.
+ * W1-T5480: a thread that spawns threads of its own answers for their heaps over its port
+ * ({@link askNestedThreadHeaps}, {@link answerThreadHeaps}): the read-model worker's four.
+ *
+ * FALSIFIERS: test/serve-names-and-relieves-its-memory-pressure.test.ts,
+ * test/serve-memory-names-where-rss-lives.test.ts,
+ * test/serve-memory-sizes-the-threads-the-read-model-worker-spawns.test.ts.
  */
 
 import { readFileSync } from "node:fs";
@@ -30,23 +38,21 @@ import { normalizedReadUrl } from "./console-snapshot-cache.js";
 import type { ConsoleSnapshotStore } from "./console-snapshot-store.js";
 import { FEEDBACK_VIEW_NAME } from "./feedback-view.js";
 import { INBOX_VIEW_NAME } from "./inbox-view.js";
-import { invariantFindingLedgerLine } from "./incident-invariants.js";
+import {
+  invariantFindingLedgerLine, LEGACY_RELIEF_HEADROOM, SERVE_MEMORY_RELIEVED_STEP, SERVE_MEMORY_SAMPLE_MS, SERVE_MEMORY_STEP,
+} from "./incident-invariants.js";
 import type { LedgerLine } from "./ledger.js";
 import { NOW_VIEW_NAME } from "./now-view.js";
 import { cgroupFreeMemory } from "./serve-supervisor.js";
 import type { RouteHandler } from "./service.js";
 import type { EffectiveViewMode } from "./views.js";
 
-export const SERVE_MEMORY_STEP = "serve.memory";
-export const SERVE_MEMORY_RELIEVED_STEP = "serve.memory_relieved";
+export { LEGACY_RELIEF_HEADROOM, SERVE_MEMORY_RELIEVED_STEP, SERVE_MEMORY_SAMPLE_MS, SERVE_MEMORY_STEP };
 export const SERVE_MEMORY_SAMPLE_FAILED_STEP = "serve.memory_sample_failed";
 export const SERVE_MEMORY_ESCALATION_FAILED_STEP = "serve.memory_escalation_failed";
 /** The `incident.event` name a repeated relief files under. */
 export const SERVE_MEMORY_RELIEF_RULE_ID = "serve-memory-relief";
-/** "Every few minutes": often enough to see a climb to the limit, rare enough that sizing every holder costs nothing. */
-export const SERVE_MEMORY_SAMPLE_MS = 3 * 60_000;
-/** Fractions of the container's own limit, so the same line holds at 2 GiB or 8 GiB. */
-export const LEGACY_RELIEF_HEADROOM = 0.25;
+/** A fraction of the container's own limit, like {@link LEGACY_RELIEF_HEADROOM}. */
 export const REFRESHABLE_RELIEF_HEADROOM = 0.1;
 /** Relieved on this many consecutive samples is "repeated", and escalates once. */
 export const SERVE_MEMORY_ESCALATE_AFTER = 2;
@@ -126,7 +132,7 @@ export interface MemoryHolderSize {
  */
 export interface MemoryHolder {
   name: string;
-  kind: "legacy-cache" | "refreshable" | "view-bodies" | "measured";
+  kind: "legacy-cache" | "refreshable" | "view-bodies" | "measured" | "worker-heap";
   view?: string;
   size(): MemoryHolderSize;
   drop?(): void;
@@ -257,28 +263,48 @@ export interface HolderReading extends MemoryHolderSize {
   error?: string;
 }
 
+
+/**
+ * W1-T5480: the worker-thread heap reads live in worker-heaps.ts, a leaf the read-model worker can
+ * import without pulling serve's modules into a cycle; re-exported here for serve and its tests.
+ */
+export {
+  answerThreadHeaps, askNestedThreadHeaps, readWorkerHeaps, spawnSite, THREAD_HEAPS_ANSWER, THREAD_HEAPS_REQUEST, trackWorkerThreads,
+  WORKER_HEAP_PREFIX, WORKER_HEAP_TIMEOUT_MS, WORKER_THREADS_CHANNEL, workerThreads,
+  type ThreadHeapsAnswer, type TrackedWorker, type WorkerHeapReading, type WorkerThread,
+} from "./worker-heaps.js";
+
 /** The `serve.memory` row's fields. A null limit/free/headroom means the cgroup was unreadable. */
 export interface ServeMemorySample {
   rss_bytes: number;
   heap_used_bytes: number;
+  heap_total_bytes: number;
   external_bytes: number;
   array_buffers_bytes: number;
   limit_bytes: number | null;
   free_bytes: number | null;
   headroom: number | null;
   holders: HolderReading[];
+  /** rss less the main heap, its external memory and every sized worker heap: what no reading names. */
+  unattributed_bytes: number;
 }
 
-/** Sample this process's memory and every holder's size. A holder that throws is named with its error, never dropped from the row. */
+/**
+ * Sample this process's memory and every holder's size. A holder that throws is named with its error,
+ * never dropped from the row. `workerHeaps` ({@link readWorkerHeaps}) join the holders.
+ */
 export function sampleServeMemory(
   holders: readonly MemoryHolder[],
-  opts: { usage?: () => NodeJS.MemoryUsage; headroom?: () => CgroupHeadroom | undefined } = {},
+  opts: { usage?: () => NodeJS.MemoryUsage; headroom?: () => CgroupHeadroom | undefined; workerHeaps?: readonly HolderReading[] } = {},
 ): ServeMemorySample {
   const usage = (opts.usage ?? process.memoryUsage)();
   const headroom = (opts.headroom ?? readCgroupHeadroom)();
+  const workerHeaps = opts.workerHeaps ?? [];
+  const workerBytes = workerHeaps.reduce((sum, reading) => sum + reading.bytes, 0);
   return {
     rss_bytes: usage.rss,
     heap_used_bytes: usage.heapUsed,
+    heap_total_bytes: usage.heapTotal,
     external_bytes: usage.external,
     array_buffers_bytes: usage.arrayBuffers,
     limit_bytes: headroom?.limitBytes ?? null,
@@ -291,7 +317,8 @@ export function sampleServeMemory(
       } catch (e) {
         return { ...named, entries: 0, bytes: 0, error: String((e as Error)?.message ?? e) };
       }
-    }),
+    }).concat(workerHeaps),
+    unattributed_bytes: usage.rss - usage.heapTotal - usage.external - workerBytes,
   };
 }
 
@@ -355,7 +382,8 @@ export function relieveServeMemory(
 /** What {@link startServeMemoryMonitor} needs: the holders, how to sample them, and where rows go. */
 export interface ServeMemoryMonitorOptions {
   holders: () => readonly MemoryHolder[];
-  sample: (holders: readonly MemoryHolder[]) => ServeMemorySample;
+  /** May be async: serve's awaits its worker heap reads before it sizes the rest. */
+  sample: (holders: readonly MemoryHolder[]) => ServeMemorySample | Promise<ServeMemorySample>;
   modeOf?: (view: string) => EffectiveViewMode | undefined;
   log?: (step: string, extra: Record<string, unknown>) => void;
   /** Appends the escalation's `incident.event` row to the ledger the incident path reads. */
@@ -394,13 +422,19 @@ export function startServeMemoryMonitor(opts: ServeMemoryMonitorOptions): () => 
 
   const tick = (): void => {
     const holders = opts.holders();
-    let sample: ServeMemorySample;
+    let sampled: ServeMemorySample | Promise<ServeMemorySample>;
     try {
-      sample = opts.sample(holders);
+      sampled = opts.sample(holders);
     } catch (e) {
       log(SERVE_MEMORY_SAMPLE_FAILED_STEP, { reason: String((e as Error)?.message ?? e) });
       return;
     }
+    if (sampled instanceof Promise) {
+      void sampled.then((sample) => afterSample(sample, holders)).catch((e) => log(SERVE_MEMORY_SAMPLE_FAILED_STEP, { reason: String((e as Error)?.message ?? e) }));
+    } else afterSample(sampled, holders);
+  };
+
+  const afterSample = (sample: ServeMemorySample, holders: readonly MemoryHolder[]): void => {
     log(SERVE_MEMORY_STEP, { ...sample });
     const reliefs = relieveServeMemory(sample, holders, opts.modeOf ?? (() => undefined));
     for (const relief of reliefs) log(SERVE_MEMORY_RELIEVED_STEP, { ...relief });

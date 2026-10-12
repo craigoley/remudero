@@ -22,11 +22,12 @@ import type { BoardRow } from "./board.js";
 import { ESCALATION_OPTION_ROUTES } from "./escalate.js";
 import { ESCALATION_DISPOSITIONS } from "./escalation-precision.js";
 import type { FeedbackEntry } from "./feedback.js";
+import { feedbackHasAnswer, feedbackQuestionContext } from "./human-gate.js";
 import type { WriteTier } from "./service.js";
 
 /** BACKSTOP: decisions carried per instance, bounding the body; the rest are counted in `decisionsMore`. */
 export const NOW_DECISIONS_CAP = 50;
-/** A prompt is cut at this many characters; the full text is in the task or feedback entry. */
+/** Non-feedback prompts are cut at this many characters; feedback retains its full source context. */
 export const NOW_DECISION_PROMPT_CHARS = 2_048;
 const TITLE_CHARS = 120;
 const CLOSED_STATUSES: ReadonlySet<string> = new Set(["merged", "done"]);
@@ -72,10 +73,10 @@ function bounded(text: string): string {
 
 /** Each `grilling` feedback entry, answered by a reply that advances it to `answered`. */
 export function grillDecisions(instance: string, entries: readonly FeedbackEntry[]): NowDecision[] {
-  return entries.filter((e) => e.status === "grilling" && typeof e.id === "string").map((e) => {
+  return entries.filter((e) => e.status === "grilling" && typeof e.id === "string" && !feedbackHasAnswer(e, entries)).map((e) => {
     const raw = typeof e.raw === "string" ? e.raw : "";
     return {
-      id: `grill:${e.id}`, kind: "grill", instance, title: firstLine(raw, TITLE_CHARS) || e.id, prompt: bounded(raw), ...(typeof e.ts === "string" ? { askedAt: e.ts } : {}),
+      id: `grill:${e.id}`, kind: "grill", instance, title: firstLine(raw, TITLE_CHARS) || e.id, prompt: feedbackQuestionContext(e), ...(typeof e.ts === "string" ? { askedAt: e.ts } : {}),
       answer: { method: "POST", path: "/v1/feedback", tier: FEEDBACK_ANSWER_TIER, fields: { replyTo: e.id }, input: "text" },
     };
   });

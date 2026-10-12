@@ -1,0 +1,48 @@
+- id: W1-T6024
+  title: "A PR RED ON MAIN'S FAILING TESTS IS BASE-RED WHATEVER ITS CHECK IS CALLED — on 2026-10-06 #9566 and #9567 failed only `coverage-ratchet`, on the two tests that were red on main, and were sent to ci-log fix rounds (strike 1/2) at 13:30Z and 13:41Z: the check-name classifier saw no match, a `reproduced` base probe was forgotten when the next probe was `unrunnable`, and a later `clear` probe earned no refresh because no reproduction was recorded at that head"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — the base-red verdict for a red PR, decided by failing test identity rather than check name
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: main red 11:35-13:37; base-red classification audit of #9550/#9551/#9552/#9555/#9566/#9567"
+  plan_refs: [W1-T4351, W1-T5349, W1-T2671, W1-T2789, W1-T6023]
+  files: [src/lib/sweep.ts, src/lib/base-reproduction.ts, test/a-pr-red-on-mains-failing-tests-is-base-red-whatever-its-check-is-called.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 (ledger + origin/main a6a28515). main's push run fails under `ci`/`ci-shard (n/8)`;
+    a PR fails the same tests under `coverage-shard (n/8)`, `coverage-ratchet` and `ci-gate`.
+    `decideBaseRed` (src/lib/sweep.ts) matches check NAMES: its "absent from main's latest run" arm did
+    stand down #9550 (12:07:03Z) and #9551/#9552/#9555 (12:32:39Z) on `coverage-shard (n/8)`
+    (`sweep.base_red.stood_down`), but it returns `own` whenever main reads `undetermined` (each new
+    main head reads undetermined for 6-8 min: 11:30, 11:36, 11:44, 11:56Z rows) or when the PR's only red
+    name is one main's census records as passing. #9567 (fb0933e9, red_checks [coverage-ratchet]):
+    `sweep.base_reproduction` 13:20:19Z verdict reproduced at main 58e9fc08 (both failing test files fail
+    on main); 13:30:18Z verdict unrunnable at 49a4c8ed (`git worktree add` failed); 13:30:20Z disposed
+    own-red "ci-log fix, strike 1/2"; 13:33:13Z `sweep.fix.dispatch_failed`. #9566 (4863a55d): 13:30:12Z
+    unrunnable; 13:41:44Z clear at a6a28515; 13:41:48Z own-red ci-log fix strike 1/2, because the
+    clear-then-refresh arm requires a prior `reproduced` row at that head. No `sweep.base_red.refresh`
+    was written for any of the six PRs; all six were refreshed by hand (cao825 13:47:28-13:48:11Z;
+    the operator session ~13:38Z). `decidePlanRepair`'s `names.every(...failingChecks...)` arm applies only
+    to machine-lane plan heads and decided none of these. LIMIT: main.health.observed and most
+    sweep.disposed rows between 12:08Z and 13:40Z are absent from the ledger corpus, so the exact
+    mainLatestRun each 13:30/13:41 decision read is not observed.
+  design: |
+    (1) A red PR whose failing test files (`baseReproductionFiles` of its CI failures) are non-empty and
+    all among the test files main is known to fail — a `reproduced` probe at any main sha since main was
+    last observed green on a concluded run of its own head — is base red, whatever its check names:
+    wait while main is red or undetermined, and take the one W1-T4351 refresh once main is green.
+    (2) An `unrunnable` or `partial` probe does not erase an earlier `reproduced` verdict for the same
+    (PR, head) while main has not been observed green; it is recorded and the PR keeps waiting.
+    (3) A `clear` probe after main went green earns the refresh when (1) held at that head.
+  acceptance:
+    - claim: "a PR failing only coverage-ratchet on two test files a probe reproduced on main is held as base red while main is red or undetermined, stays held after a later unrunnable probe, and gets one branch refresh and no fix strike once main is green; a PR failing a test main passes is own red"
+      proof: "unit test: test/a-pr-red-on-mains-failing-tests-is-base-red-whatever-its-check-is-called.test.ts"
+  falsifier: |
+    Let the latest probe verdict alone decide: the unrunnable probe after the reproduced one routes
+    the #9567 fixture to a ci-log fix and the test fails.

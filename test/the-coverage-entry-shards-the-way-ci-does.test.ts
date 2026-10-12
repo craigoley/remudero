@@ -7,7 +7,9 @@ import { fileURLToPath } from "node:url";
 
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import { CI_COVERAGE_SHARD_COUNT, coverageGateLockDir, coverageScratchDir, coverageShardConcurrency, runCiParity, testWithCoverageLeaf } from "../src/lib/ci-parity.js";
+import { unwrapLowPriority } from "../src/lib/test-slot.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { finishJudgedRun } from "./helpers/judged-pool-run.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PINNED_BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -21,7 +23,7 @@ interface Call {
 function selectorShardNumber(args: readonly string[]): number | undefined {
   if (!args.some((arg) => arg.endsWith("scripts/test-tier-manifest.mjs")) || !args.includes("--select-all")) return undefined;
   const shard = args[args.indexOf("--shard") + 1];
-  const match = shard?.match(/^(\d+)\/4$/);
+  const match = shard?.match(/^(\d+)\/8$/);
   return match ? Number(match[1]) : undefined;
 }
 
@@ -39,7 +41,7 @@ function coverageFixtureRoot(): string {
   return root;
 }
 
-function coverageSpawn(repoRoot: string, options: { emptySelectionShard?: number; missingArtifactShard?: number; missingSummaryShard?: number; missingCompactShard?: number; vanishingCompactShard?: number } = {}) {
+function coverageSpawn(repoRoot: string, options: { emptySelectionShard?: number; missingArtifactShard?: number; missingSummaryShard?: number; missingCompactShard?: number; vanishingCompactShard?: number; cutShortShard?: number } = {}) {
   const calls: Call[] = [];
   const spawn: PreflightSpawn = (file, args, opts) => {
     calls.push({ file, args, opts });
@@ -58,6 +60,8 @@ function coverageSpawn(repoRoot: string, options: { emptySelectionShard?: number
         rmSync(rawDir, { recursive: true, force: true });
       }
       const stdout = shard === options.missingSummaryShard ? "ok 1 - shard without totals\n" : "# tests 1\n# pass 1\n# fail 0\n";
+      // A finished shard leaves the judge's tally (scripts/pure-test-pool.mjs); a cut-short one does not.
+      if (shard !== options.cutShortShard) finishJudgedRun(args, opts);
       return { status: 0, stdout, stderr: "" };
     }
     if (args.some((a) => a.endsWith("coverage-merge-ratchet.mjs"))) {
@@ -97,7 +101,7 @@ function coverageSpawn(repoRoot: string, options: { emptySelectionShard?: number
   };
 }
 
-test("coverage entry runs CI's four shard selectors, then merges the shard raw coverage into the lcov consumed by both gates", () => {
+test("coverage entry runs CI's eight shard selectors, then merges the shard raw coverage into the lcov consumed by both gates", () => {
   const fixtureRoot = coverageFixtureRoot();
   const { calls, spawn, cleanup } = coverageSpawn(fixtureRoot);
   try {
@@ -106,7 +110,7 @@ test("coverage entry runs CI's four shard selectors, then merges the shard raw c
     const selectorCalls = calls.filter((c) => selectorShardNumber(c.args) !== undefined);
     assert.deepEqual(
       selectorCalls.map((c) => c.args[c.args.indexOf("--shard") + 1]).sort(),
-      ["1/4", "2/4", "3/4", "4/4"],
+      ["1/8", "2/8", "3/8", "4/8", "5/8", "6/8", "7/8", "8/8"],
     );
     const shardCalls = calls.filter((c) => shardNumber(c.args) !== undefined);
     assert.deepEqual(shardCalls.map((c) => c.args.find((a) => a.startsWith("test/coverage-shard-"))).sort(), [
@@ -114,9 +118,13 @@ test("coverage entry runs CI's four shard selectors, then merges the shard raw c
       "test/coverage-shard-2.test.ts",
       "test/coverage-shard-3.test.ts",
       "test/coverage-shard-4.test.ts",
+      "test/coverage-shard-5.test.ts",
+      "test/coverage-shard-6.test.ts",
+      "test/coverage-shard-7.test.ts",
+      "test/coverage-shard-8.test.ts",
     ]);
     for (const call of shardCalls) {
-      assert.equal(call.file, process.execPath, "each coverage shard shells node directly, as ci.yml does");
+      assert.equal(unwrapLowPriority(call.file, call.args).file, process.execPath, "each coverage shard shells node (under nice), as ci.yml does");
       assert.equal(call.args.includes(join(REPO_ROOT, "scripts", "test-with-retry.mjs")), false, "coverage shards do not use ci's retry wrapper");
       assert.equal(call.args.some((arg) => arg.startsWith("--test-shard=")), false, "coverage shards receive duration-balanced file lists, not Node's opaque shard assignment");
       assert.ok(call.opts?.env?.NODE_V8_COVERAGE?.includes("raw-shards/shard-"), "each shard writes raw coverage to its own artifact directory");
@@ -127,13 +135,19 @@ test("coverage entry runs CI's four shard selectors, then merges the shard raw c
     const merge = calls[mergeIndex]!;
     assert.equal(merge.args[0], "--expose-internals");
     assert.deepEqual(merge.args.slice(2, 4), ["--output", join(fixtureRoot, "coverage", "lcov.info")]);
-    assert.equal(merge.args.slice(4).length, CI_COVERAGE_SHARD_COUNT, "all four compact shard directories must be merge inputs");
+    assert.deepEqual(
+      merge.args.slice(4),
+      Array.from({ length: 8 }, (_, index) => join(coverageScratchDir(fixtureRoot), "raw-shards", `shard-${index + 1}`, "compact")),
+      "all eight compact shard directories must be merge inputs",
+    );
 
     const ratchetIndex = calls.findIndex((c) => c.args.some((a) => a.endsWith("coverage-ratchet.mjs")));
     const diffIndex = calls.findIndex((c) => c.args.some((a) => a.endsWith("diff-coverage.mjs")));
     assert.ok(ratchetIndex > mergeIndex, "coverage-ratchet must consume the merged lcov, not a per-shard lcov");
     assert.ok(diffIndex > mergeIndex, "diff-coverage must consume the merged lcov, not a per-shard lcov");
-    assert.ok(result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage")?.ok);
+    const coverage = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage")!;
+    assert.ok(coverage.ok);
+    assert.match(coverage.detail, /8 shard\(s\)/);
   } finally {
     cleanup();
     rmSync(fixtureRoot, { recursive: true, force: true });
@@ -169,13 +183,13 @@ test("nested parity cannot erase an outer run's raw coverage shards", () => {
 
 test("coverage entry refuses a partial shard artifact set before merge or coverage gates can report a number", () => {
   const fixtureRoot = coverageFixtureRoot();
-  const { calls, spawn, cleanup } = coverageSpawn(fixtureRoot, { missingArtifactShard: 3 });
+  const { calls, spawn, cleanup } = coverageSpawn(fixtureRoot, { missingArtifactShard: 8 });
   try {
     const result = runCiParity(fixtureRoot, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
     const coverage = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage")!;
 
     assert.equal(coverage.ok, false);
-    assert.match(coverage.detail, /expected raw V8 coverage for shard 3/);
+    assert.match(coverage.detail, /expected raw V8 coverage for shard 8/);
     assert.equal(calls.some((c) => c.args.includes("--output")), false);
     assert.equal(calls.some((c) => c.args.some((a) => a.endsWith("coverage-ratchet.mjs"))), false);
     assert.equal(calls.some((c) => c.args.some((a) => a.endsWith("diff-coverage.mjs"))), false);
@@ -187,14 +201,14 @@ test("coverage entry refuses a partial shard artifact set before merge or covera
 
 test("coverage entry refuses an empty duration-balanced selector before spawning an argument-less coverage run", () => {
   const fixtureRoot = coverageFixtureRoot();
-  const { calls, spawn, cleanup } = coverageSpawn(fixtureRoot, { emptySelectionShard: 3 });
+  const { calls, spawn, cleanup } = coverageSpawn(fixtureRoot, { emptySelectionShard: 8 });
   try {
     const result = runCiParity(fixtureRoot, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
     const coverage = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage")!;
 
     assert.equal(coverage.ok, false);
-    assert.match(coverage.detail, /shard 3\/4 duration-balanced test selection returned no files/);
-    assert.equal(calls.some((c) => shardNumber(c.args) === 3), false);
+    assert.match(coverage.detail, /shard 8\/8 duration-balanced test selection returned no files/);
+    assert.equal(calls.some((c) => shardNumber(c.args) === 8), false);
   } finally {
     cleanup();
     rmSync(fixtureRoot, { recursive: true, force: true });
@@ -203,13 +217,13 @@ test("coverage entry refuses an empty duration-balanced selector before spawning
 
 test("coverage entry refuses a shard with no # tests summary as unverified", () => {
   const fixtureRoot = coverageFixtureRoot();
-  const { calls, spawn, cleanup } = coverageSpawn(fixtureRoot, { missingSummaryShard: 2 });
+  const { calls, spawn, cleanup } = coverageSpawn(fixtureRoot, { missingSummaryShard: 8 });
   try {
     const result = runCiParity(fixtureRoot, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
     const coverage = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage")!;
 
     assert.equal(coverage.ok, false);
-    assert.match(coverage.detail, /shard 2\/4 produced no # tests summary/);
+    assert.match(coverage.detail, /shard 8\/8 produced no # tests summary/);
     assert.equal(calls.some((c) => c.args.includes("--output")), false);
   } finally {
     cleanup();
@@ -217,9 +231,30 @@ test("coverage entry refuses a shard with no # tests summary as unverified", () 
   }
 });
 
-test("coverage shard scheduling is CPU-bounded while the shard count stays CI's four", () => {
-  assert.equal(CI_COVERAGE_SHARD_COUNT, 4);
-  assert.equal(coverageShardConcurrency(8), 4);
+test("coverage entry refuses a shard whose file process exited 0 before its own summary", () => {
+  const fixtureRoot = coverageFixtureRoot();
+  // Shard 5 exits 0 and prints a whole `# tests` summary, as node does when a file's own child ends
+  // part-way — but its file never reached its own summary, so the judge's tally never names it.
+  const { calls, spawn, cleanup } = coverageSpawn(fixtureRoot, { cutShortShard: 5 });
+  try {
+    const result = runCiParity(fixtureRoot, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
+    const coverage = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage")!;
+
+    assert.equal(coverage.ok, false);
+    assert.match(coverage.detail, /COVERAGE SHARD 5\/8 RUN INCOMPLETE — its exit 0 is counted as FAILED/);
+    assert.match(coverage.detail, /UNREPORTED FILE test\/coverage-shard-5\.test\.ts/);
+    assert.equal(calls.some((c) => shardNumber(c.args) === 6), false, "no later shard runs");
+    assert.equal(calls.some((c) => c.args.includes("--output")), false, "nothing is merged");
+  } finally {
+    cleanup();
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("coverage shard scheduling is CPU-bounded while the shard count stays CI's eight", () => {
+  assert.equal(CI_COVERAGE_SHARD_COUNT, 8);
+  assert.equal(coverageShardConcurrency(16), 8);
+  assert.equal(coverageShardConcurrency(8), 8);
   assert.equal(coverageShardConcurrency(4), 4);
   assert.equal(coverageShardConcurrency(2), 2);
   assert.equal(coverageShardConcurrency(1), 1);
@@ -281,11 +316,11 @@ test("a fake nested parity fixture keeps the outer coverage lock while using its
 
 test("W1-T4951: missing compact shard refuses the merged coverage gate", () => {
   const root = coverageFixtureRoot();
-  const { calls, spawn, cleanup } = coverageSpawn(root, { missingCompactShard: 3 });
+  const { calls, spawn, cleanup } = coverageSpawn(root, { missingCompactShard: 8 });
   try {
     const result = testWithCoverageLeaf(root, spawn, join(root, "coverage", "lcov.info"), () => Number.MAX_SAFE_INTEGER);
     assert.equal(result.ok, false);
-    assert.match(result.detail, /expected compact V8 coverage for shard 3/);
+    assert.match(result.detail, /expected compact V8 coverage for shard 8/);
     assert.equal(calls.some((call) => call.args.includes("--output")), false);
   } finally {
     cleanup();

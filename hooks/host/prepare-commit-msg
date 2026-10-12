@@ -1,0 +1,8 @@
+#!/bin/sh
+# hooks/host/prepare-commit-msg — W1-T6106. The ONLY hook a host git call into a worker worktree
+# runs (src/lib/worktree-git.ts HOST_HOOKS_DIR): the harness's own copy, never the worktree's
+# tracked hooks/. It names the assignment that wrote the commit (W1-T4614) and delegates nothing.
+id=$(git config --get remudero.assignment) || exit 0
+grep -q '^Remudero-Assignment:' "$1" && exit 0
+grep -Eq '^[[:space:]]*[^#[:space:]]' "$1" || exit 0
+exec git interpret-trailers --in-place --trailer "Remudero-Assignment: $id" "$1"

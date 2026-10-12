@@ -93,7 +93,7 @@ test("W1-T4396: a source pull request still leaves the slow tier to coverage-rat
   const pr = runJob("pull_request", "SOURCE");
   assert.deepEqual(pr.outputs, { class: "SOURCE", established: "false" });
   assert.equal(
-    pr.calls.replace(/^node --import tsx scripts\/diff-class\.mjs .*\n/m, "").trim(),
+    pr.calls.replace(/^node scripts\/diff-class\.mjs .*\n/m, "").trim(),
     "npm run --silent test:tier:check -- --base origin/main",
   );
   assert.match(pr.out, /W1-T3207: coverage-ratchet owns/);

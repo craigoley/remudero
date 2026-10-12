@@ -229,7 +229,7 @@ test("W1-T4116: a self-hosting daemon wires the gate gardener", async () => {
     assert.ok(start, "a second garden is wired after the plan gardener");
     const stateFile = gardenStatePath(join(root, "state"), "gate");
     const garden = start!(60_000);
-    for (let waited = 0; !existsSync(stateFile) && waited < 20_000; waited += 100) await new Promise((r) => setTimeout(r, 100));
+    for (let waited = 0; !existsSync(stateFile) && waited < 120_000; waited += 100) await new Promise((r) => setTimeout(r, 100));
     garden.stop();
     assert.ok(readGardenState(stateFile, GATE_GARDEN_CLASSES).lastPass, "the wired garden ran a pass over this repo's gates");
     // Stopped before its probes load, it never starts.

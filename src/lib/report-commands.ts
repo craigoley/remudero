@@ -23,6 +23,7 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { hostname as osHostname } from "node:os";
 import { dirname, join } from "node:path";
 import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
 import {
@@ -113,6 +114,7 @@ import { extractTaskTrailerId } from "./review.js";
 import { mapRestPr, singlePrRestArgs, type RestPullRow } from "./open-prs-rest.js";
 import { createGhCallPacer, ghExecFile, ghJson, GH_RATE_LIMIT_BUCKET_UNKNOWN } from "./github-transport.js";
 import { worktreesDir, readWorktreeBase } from "./worker.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { systemClock } from "./clock.js";
 import { buildTaskCaseFile, readTaskCaseLedger, readTaskCaseLedgers, type CaseLedgerRead, type CasePrRead, type CasePrSnapshot, type TaskCaseFile } from "./task-case-file.js";
@@ -372,6 +374,108 @@ export function liveInflightRuns(
   return out;
 }
 
+/** A running container as docker reports it: the id to `exec` into and the hostname a lock records. */
+export interface RunningContainer {
+  id: string;
+  hostname: string;
+}
+
+/** W1-T6261: a lock whose holder this process cannot judge — named, never counted as dead. */
+export interface UnverifiableLock {
+  taskId: string;
+  host: string;
+}
+
+export interface JudgedInflightLocks {
+  live: LiveInflightRun[];
+  unverifiable: UnverifiableLock[];
+}
+
+export interface InflightLockProbes {
+  /** This process's hostname. Defaults to `os.hostname()`. */
+  hostname?: () => string;
+  /** Host-namespace pid probe, for locks written by THIS host. */
+  isPidAlive?: (pid: number) => boolean;
+  /** Running containers (`docker ps` + `docker inspect`), or undefined when docker cannot be read. */
+  listContainers?: () => RunningContainer[] | undefined;
+  /** `/proc/<pid>` inside the container: true/false when answered, undefined when it could not be asked. */
+  pidAliveInContainer?: (containerId: string, pid: number) => boolean | undefined;
+}
+
+function dockerOut(args: string[], runExecFileSync: typeof execFileSync = execFileSync): string {
+  return runExecFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000 });
+}
+
+/** The same probe deploy/recycle-container.sh uses (W1-T3611): running containers and their hostnames. */
+export function defaultListContainers(runExecFileSync: typeof execFileSync = execFileSync): RunningContainer[] | undefined {
+  try {
+    const ids = dockerOut(["ps", "-q"], runExecFileSync).split("\n").map((l) => l.trim()).filter(Boolean);
+    if (ids.length === 0) return [];
+    const rows = dockerOut(["inspect", "-f", "{{.Id}} {{.Config.Hostname}}", ...ids], runExecFileSync);
+    return rows
+      .split("\n")
+      .map((l) => l.trim().split(/\s+/))
+      .filter((p) => p.length === 2 && p[0] !== "" && p[1] !== "")
+      .map(([id, hostname]) => ({ id, hostname }));
+  } catch {
+    // docker absent, not permitted, or timed out: the container table is NOT OBSERVED, which the
+    // caller reports as unverifiable — never as an empty table that would read every lock as dead.
+    return undefined;
+  }
+}
+
+export function defaultPidAliveInContainer(
+  containerId: string,
+  pid: number,
+  runExecFileSync: typeof execFileSync = execFileSync,
+): boolean | undefined {
+  try {
+    dockerOut(["exec", containerId, "sh", "-c", `[ -e /proc/${Math.trunc(pid)} ]`], runExecFileSync);
+    return true;
+  } catch (e) {
+    // `[ -e ]` answers through its exit code: 1 is a real "no such pid in that namespace". Any other
+    // status (docker's own 125/126/127, a timeout kill with no status) means the question was not answered.
+    return (e as { status?: number | null }).status === 1 ? false : undefined;
+  }
+}
+
+/**
+ * W1-T6261 — judge each inflight lock in the PID NAMESPACE that wrote it. A lock whose `host` is this
+ * process's hostname is judged by pid as always; one whose `host` names a RUNNING container is judged by
+ * `/proc/<pid>` inside that container; any other host is `unverifiable`, never dead: doctor reports,
+ * W1-T978 owns reclamation, and a false "stale" invites deleting a live run's lock. A lock that cannot be
+ * parsed is in neither set, so the caller still counts it as having no live holder.
+ */
+export function judgeInflightLocks(inflightDir: string, probes: InflightLockProbes = {}): JudgedInflightLocks {
+  const live: LiveInflightRun[] = [];
+  const unverifiable: UnverifiableLock[] = [];
+  if (!existsSync(inflightDir)) return { live, unverifiable };
+  const myHost = (probes.hostname ?? osHostname)();
+  const isPidAlive = probes.isPidAlive ?? defaultIsPidAlive;
+  let containers: RunningContainer[] | undefined;
+  let containersRead = false;
+  for (const entry of readdirSync(inflightDir)) {
+    if (!entry.endsWith(".lock")) continue;
+    const taskId = entry.slice(0, -".lock".length);
+    const info = readInflightLock(inflightDir, taskId);
+    if (!info) continue;
+    const run: LiveInflightRun = { taskId, runId: info.run_id, pid: info.pid };
+    if (info.host === myHost) {
+      if (isPidAlive(info.pid)) live.push(run);
+      continue;
+    }
+    if (!containersRead) {
+      containers = (probes.listContainers ?? defaultListContainers)();
+      containersRead = true;
+    }
+    const ctr = containers?.find((c) => c.hostname === info.host);
+    const alive = ctr ? (probes.pidAliveInContainer ?? defaultPidAliveInContainer)(ctr.id, info.pid) : undefined;
+    if (alive === true) live.push(run);
+    else if (alive === undefined) unverifiable.push({ taskId, host: info.host });
+  }
+  return { live, unverifiable };
+}
+
 /**
  * AN ABSENT DIR IS ZERO LOCKS; AN UNREADABLE ONE IS NOT. A fleet that has never dispatched has no
  * inflight dir and is genuinely healthy, but a permissions fault HIDES locks, and answering "none"
@@ -459,7 +563,7 @@ export function readCheckoutDepth(cwd: string): { shallow: boolean; commitCount:
 
 function defaultReadWorktreeHead(worktreePath: string): string | undefined {
   try {
-    return execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktreePath, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
   } catch {
     // W1-T2627: `undefined` is the ABSENT reading, not a swallowed failure. A worktree can
     // legitimately have no resolvable HEAD — freshly added and not yet checked out, or its
@@ -473,7 +577,7 @@ function defaultReadWorktreeHead(worktreePath: string): string | undefined {
 
 function defaultIsWorktreeBaseAncestor(worktreePath: string, base: string, head: string): boolean | undefined {
   try {
-    execFileSync("git", ["merge-base", "--is-ancestor", base, head], { cwd: worktreePath, stdio: ["ignore", "pipe", "pipe"] });
+    hostWorktreeGit(worktreePath, ["merge-base", "--is-ancestor", base, head]);
     return true;
   } catch (e) {
     // W1-T2627: `git merge-base --is-ancestor` ANSWERS THROUGH ITS EXIT CODE, so a throw here is
@@ -496,6 +600,8 @@ export interface DoctorDeps extends ReportRepoContext {
   readLedgerLines?: (path: string) => Array<Record<string, unknown>>;
   loadPlan?: () => Plan | undefined;
   liveInflightRuns?: (dir: string) => LiveInflightRun[];
+  /** W1-T6261 — per-namespace lock judgement. Used when `liveInflightRuns` is not injected. */
+  judgeInflightLocks?: (dir: string) => JudgedInflightLocks;
   readWorktreeBase?: (worktreePath: string) => string | null;
   readWorktreeHead?: (worktreePath: string) => string | undefined;
   isWorktreeBaseAncestor?: (worktreePath: string, base: string, head: string) => boolean | undefined;
@@ -578,11 +684,17 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
   // `liveInflightRuns` returns ONLY runs whose pid is alive, so divergence is the difference
   // between the lock FILES on disk and that live set — a lock with no live pid is a run that died
   // without releasing. Both halves are injectable so the arm is testable without real pids.
-  const live = (deps.liveInflightRuns ?? liveInflightRuns)(inflightDir);
+  // W1-T6261: a lock written inside a container is judged in THAT container's pid namespace; a lock
+  // whose holder cannot be asked is `unverifiable`, which is neither live nor dead.
+  const judged: JudgedInflightLocks = deps.liveInflightRuns
+    ? { live: deps.liveInflightRuns(inflightDir), unverifiable: [] }
+    : (deps.judgeInflightLocks ?? ((d) => judgeInflightLocks(d)))(inflightDir);
+  const live = judged.live;
   const lockRead = (deps.readLockFiles ?? readLockFilesFrom)(inflightDir);
   const lockFiles = lockRead.locks;
   const liveIds = new Set(live.map((r) => r.taskId));
-  const dead = lockFiles.filter((f) => !liveIds.has(f));
+  const unverifiableIds = new Set(judged.unverifiable.map((u) => u.taskId));
+  const dead = lockFiles.filter((f) => !liveIds.has(f) && !unverifiableIds.has(f));
 
   const worktreeBases: WorktreeBaseRow[] = live.map((r) => {
     const branch = `run-${r.runId}`;
@@ -644,8 +756,14 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
     },
   });
 
-  if (rest.includes("--json")) out(JSON.stringify({ worst: report.worst, checks: report.checks }, null, 2));
-  else out(report.text);
+  const unverifiableLines = judged.unverifiable.map((u) => `${u.taskId}: unverifiable here (host ${u.host})`);
+  if (rest.includes("--json")) {
+    out(JSON.stringify({ worst: report.worst, checks: report.checks }, null, 2));
+    for (const l of unverifiableLines) err(l);
+  } else {
+    out(report.text);
+    for (const l of unverifiableLines) out(l);
+  }
   return report.exitCode;
 }
 

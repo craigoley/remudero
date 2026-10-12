@@ -35,6 +35,8 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { isAbsolute, join } from "node:path";
 import { stopDetail } from "./fleet-control.js";
 import { appendLedger } from "./ledger.js";
+import { createHash } from "node:crypto";
+import { fixedClock } from "./clock.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import {
   DEPLOY_RESTART_PRESSURE_STEP,
@@ -98,6 +100,7 @@ export interface TriggerInputs {
   /** W1-T4267: expected-versus-live Docker limits read by the watchdog tick. Undefined is
    *  UNKNOWN (an unreadable inspect or policy), never drift. */
   resourcePolicyDrift?: ResourcePolicyDrift[];
+  mountPlanDrift?: MountPlanDrift[]; // W1-T6110: scratch binds read by the tick; undefined is UNKNOWN
   /** Is the image built for the newest image-input commit published? `undefined` is UNKNOWN,
    *  which never recycles automatically — a recycle before the build lands would pull the old one. */
   imagePublished?: boolean;
@@ -112,10 +115,15 @@ export interface TriggerInputs {
 }
 
 export interface ResourcePolicyDrift {
-  field: "Memory" | "MemorySwap" | "CpuShares" | "MemoryReservation";
+  /** MemoryHigh is cgroup memory.high in bytes, carried as the HostConfig annotation
+   *  {@link MEMORY_HIGH_ANNOTATION} (Docker has no memory.high flag; see deploy/resource-policy.sh). */
+  field: "Memory" | "MemorySwap" | "CpuShares" | "MemoryReservation" | "MemoryHigh";
   expected: number;
   actual: number;
 }
+
+/** The OCI annotation runc's systemd driver turns into the scope's MemoryHigh (cgroup memory.high). */
+export const MEMORY_HIGH_ANNOTATION = "org.systemd.property.MemoryHigh";
 
 const POLICY_FIELD_BY_FLAG = {
   memory: "Memory",
@@ -124,14 +132,29 @@ const POLICY_FIELD_BY_FLAG = {
   "memory-reservation": "MemoryReservation",
 } as const;
 
+/** The line readResourcePolicyDrift adds after the docker flags when deploy/memory-high-tuner.sh has
+ *  learned a memory.high for the container: the policy's own value in bytes, the tuner's floor. */
+export const LEARNED_MEMORY_HIGH_FLOOR = "learned-memory-high-floor=";
+
 /** W1-T4267: the policy's `docker run` flags (one per line) against `docker inspect`'s HostConfig
  *  JSON. A flag the policy omits expects Docker's own 0; unparseable JSON or a non-numeric field is
- *  UNKNOWN (`undefined`), never drift. */
+ *  UNKNOWN (`undefined`), never drift.
+ *
+ *  memory.high is the one limit with a second owner. Once deploy/memory-high-tuner.sh has learned a
+ *  value (a {@link LEARNED_MEMORY_HIGH_FLOOR} line), it sets the live memory.high at runtime and the
+ *  annotation is only the value the container STARTED from. Any annotation at or above the policy's
+ *  floor is then current: comparing it with the learned value would recycle the container back to
+ *  policy after every tuner step, the two fighting forever. Below the floor (or absent) is still drift. */
 export function resourcePolicyDriftFrom(expectedArgs: string, hostConfigJson: string): ResourcePolicyDrift[] | undefined {
-  const expected: Record<ResourcePolicyDrift["field"], number> = { Memory: 0, MemorySwap: 0, CpuShares: 0, MemoryReservation: 0 };
+  const expected: Record<ResourcePolicyDrift["field"], number> = { Memory: 0, MemorySwap: 0, CpuShares: 0, MemoryReservation: 0, MemoryHigh: 0 };
+  const highArg = `--annotation=${MEMORY_HIGH_ANNOTATION}=uint64 `;
+  let learnedFloor: number | undefined;
   for (const arg of expectedArgs.split("\n")) {
     const m = /^--(memory|memory-swap|cpu-shares|memory-reservation)=(\d+)(m?)$/.exec(arg.trim());
     if (m) expected[POLICY_FIELD_BY_FLAG[m[1] as keyof typeof POLICY_FIELD_BY_FLAG]] = Number(m[2]) * (m[3] ? 1024 * 1024 : 1);
+    if (arg.trim().startsWith(highArg) && /^\d+$/.test(arg.trim().slice(highArg.length))) expected.MemoryHigh = Number(arg.trim().slice(highArg.length));
+    const floor = arg.trim().startsWith(LEARNED_MEMORY_HIGH_FLOOR) ? arg.trim().slice(LEARNED_MEMORY_HIGH_FLOOR.length) : "";
+    if (/^\d+$/.test(floor) && Number(floor) > 0) learnedFloor = Number(floor);
   }
   let hostConfig: Record<string, unknown>;
   try {
@@ -145,7 +168,116 @@ export function resourcePolicyDriftFrom(expectedArgs: string, hostConfigJson: st
     if (typeof actual !== "number") return undefined;
     if (actual !== expected[field]) drift.push({ field, expected: expected[field], actual });
   }
+  // memory.high: Docker reports no annotations as null (a container created before the budget) —
+  // that is a real 0, drift against a policy that sets one. A value in another shape is UNKNOWN.
+  const annotations = hostConfig?.Annotations;
+  if (annotations !== undefined && annotations !== null && typeof annotations !== "object") return undefined;
+  const raw = (annotations as Record<string, unknown> | null | undefined)?.[MEMORY_HIGH_ANNOTATION];
+  let actualHigh = 0;
+  if (raw !== undefined) {
+    const m = typeof raw === "string" ? /^uint64 (\d+)$/.exec(raw) : null;
+    if (!m) return undefined;
+    actualHigh = Number(m[1]);
+  }
+  const learnedCurrent = learnedFloor !== undefined && expected.MemoryHigh > 0 && actualHigh >= Math.min(learnedFloor, expected.MemoryHigh);
+  if (actualHigh !== expected.MemoryHigh && !learnedCurrent) drift.push({ field: "MemoryHigh", expected: expected.MemoryHigh, actual: actualHigh });
   return drift;
+}
+
+/** W1-T4267: evaluate `role`'s policy through the sourced deploy/resource-policy.sh the launchers
+ *  apply, and compare it with `container`'s live HostConfig. Any failure is UNKNOWN (`undefined`). */
+export function readResourcePolicyDrift(
+  exec: (cmd: string, args: string[]) => string,
+  installPath: string,
+  role: "serve" | "build",
+  container: string,
+  stateRoot?: string, // config.root: where the tuner records a learned memory.high (state/memory-high-tuned-*.json)
+): ResourcePolicyDrift[] | undefined {
+  try {
+    const expectedArgs = exec("bash", [
+      "-c",
+      'STATE_DIR="$4"; source "$1" || exit 2; if [ "$2" = serve ]; then resource_policy_serve_args; a=("${RESOURCE_POLICY_SERVE_ARGS[@]}"); ' +
+        'else resource_policy_build_args "$3"; a=("${RESOURCE_POLICY_BUILD_ARGS[@]}"); fi; printf "%s\\n" "${a[@]}"; ' +
+        `if [ -n "\${RP_HIGH_LEARNED:-}" ] && [ -n "\${RP_HIGH_POLICY:-}" ]; then printf '${LEARNED_MEMORY_HIGH_FLOOR}%s\\n' "$((RP_HIGH_POLICY * 1024 * 1024))"; fi`,
+      "resource-policy",
+      join(installPath, "deploy", "resource-policy.sh"),
+      role,
+      container, // the build policy is THIS container's share of the host budget, not a shared ceiling
+      stateRoot ?? "",
+    ]);
+    return resourcePolicyDriftFrom(expectedArgs, exec("docker", ["inspect", container, "--format", "{{json .HostConfig}}"]));
+  } catch {
+    return undefined; // no policy file, no bash, or no such container — never a recycle trigger
+  }
+}
+
+export interface MountPlanDrift {
+  target: string; // a bind's container path, or `env <NAME>`
+  expected: string;
+  actual: string | undefined; // undefined: the container has no such bind or variable
+}
+
+export function mountPlanDriftFrom(planText: string, inspectJson: string): MountPlanDrift[] | undefined {
+  const binds: [string, string][] = [];
+  const env: [string, string][] = [];
+  for (const line of planText.split("\n")) {
+    const [kind, a, b] = line.split("\t");
+    if (kind === "bind" && a && b) binds.push([a, b]);
+    if (kind === "env" && a?.includes("=")) env.push([a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)]);
+  }
+  if (binds.length === 0) return undefined; // W1-T6110: only what the plan names is compared
+  let live: { Mounts?: unknown; Env?: unknown };
+  try {
+    live = JSON.parse(inspectJson) as { Mounts?: unknown; Env?: unknown };
+  } catch {
+    return undefined; // not an inspect at all — UNKNOWN, the same no-storm rule as a failed inspect
+  }
+  if (live === null || typeof live !== "object") return undefined;
+  if (!Array.isArray(live.Mounts) || !(Array.isArray(live.Env) || live.Env === null)) return undefined;
+  const mounts = live.Mounts as { Source?: unknown; Destination?: unknown; RW?: unknown }[];
+  const vars = (live.Env ?? []) as unknown[];
+  const drift: MountPlanDrift[] = [];
+  for (const [source, destination] of binds) {
+    const m = mounts.find((x) => x?.Destination === destination);
+    const actual = m === undefined ? undefined : `${String(m.Source)}${m.RW === false ? " (read-only)" : ""}`;
+    if (actual !== source) drift.push({ target: destination, expected: source, actual });
+  }
+  for (const [name, value] of env) {
+    const entry = vars.find((v): v is string => typeof v === "string" && v.startsWith(`${name}=`));
+    const actual = entry?.slice(name.length + 1);
+    if (actual !== value) drift.push({ target: `env ${name}`, expected: value, actual });
+  }
+  return drift;
+}
+
+export function readMountPlanDrift(
+  exec: (cmd: string, args: string[]) => string,
+  installPath: string,
+  stateDir: string,
+  container: string,
+): MountPlanDrift[] | undefined {
+  try {
+    const plan = exec("bash", [
+      "-c",
+      'source "$1" || exit 2; scratch_plan "$2" "$3" || exit 3; ' + // off is UNKNOWN, never "remove binds"
+        'for d in "${SCRATCH_DIRS[@]}"; do [ "$d" = "$(scratch_test_slot_dir)" ] && continue; p="$d"; ' +
+        'while [ ! -e "$p" ]; do p="$(dirname "$p")"; done; { [ -d "$p" ] && [ -w "$p" ]; } || exit 4; done; ' +
+        "printf '%s\\n' \"$SCRATCH_BINDS\" | while IFS=\"$(printf '\\t')\" read -r s t; do " +
+        "[ -n \"$s\" ] && printf 'bind\\t%s\\t%s\\n' \"$s\" \"$t\"; done; " +
+        'i=0; while [ "$i" -lt "${#SCRATCH_ARGS[@]}" ]; do [ "${SCRATCH_ARGS[$i]}" = -e ] && ' +
+        "printf 'env\\t%s\\n' \"${SCRATCH_ARGS[$((i + 1))]}\"; i=$((i + 2)); done; exit 0",
+      "scratch-mounts",
+      join(installPath, "deploy", "scratch-mounts.sh"),
+      stateDir,
+      container,
+    ]);
+    return mountPlanDriftFrom(
+      plan,
+      exec("docker", ["inspect", container, "--format", '{"Mounts":{{json .Mounts}},"Env":{{json .Config.Env}}}']),
+    );
+  } catch {
+    return undefined; // no plan file, scratch off or unusable, no bash, or no such container
+  }
 }
 
 /** An automatic image recycle does not follow a recorded deploy failure sooner than this. */
@@ -166,6 +298,9 @@ export interface Decision {
    *  prose — so a caller (the ledger row, a future status row) can render it as a standing
    *  blocker naming both shas without re-parsing text. */
   blocker?: StaleRunningDaemonBlocker;
+  /** W1-T6249 — set ONLY on the tick's AUTOMATIC recycles (a published image, or create-time drift),
+   *  as data so runDeployCycle can hand a busy one to a self-draining backend without parsing text. */
+  recycle?: "image" | "create-drift";
 }
 
 /** W1-T3694's own blocker shape — see {@link Decision.blocker}. */
@@ -459,6 +594,64 @@ export function playwrightCoreVersionCommitsBehind(
   return playwrightCoreVersionChanged(oldLockfile, newLockfile) ? 1 : 0;
 }
 
+/** W1-T5367 — the npm-lockfile key acr-build.yml's image guard reads (W1-T5018) for the worker
+ *  SDK the image's `/app` install bakes, so the guard and this drift check name the same field. */
+const WORKER_SDK_LOCKFILE_KEY = "node_modules/@anthropic-ai/claude-agent-sdk";
+
+/**
+ * W1-T5367 — the worker SDK's resolved pin out of a `package-lock.json`'s TEXT, as the workflow
+ * guard serialises it: `JSON.stringify([version, integrity])`. THREE outcomes, because a removed
+ * entry is a change and an unreadable file is not: the pin string when the entry is present,
+ * `null` when the lockfile parses but carries no such entry, and `undefined` when it does not
+ * parse (UNKNOWN). Never throws.
+ */
+export function extractWorkerSdkPin(lockfileText: string): string | null | undefined {
+  try {
+    const parsed = JSON.parse(lockfileText) as { packages?: Record<string, { version?: string; integrity?: string }> };
+    const entry = parsed.packages?.[WORKER_SDK_LOCKFILE_KEY];
+    return entry ? JSON.stringify([entry.version, entry.integrity]) : null;
+  } catch {
+    return undefined; // not parseable JSON — UNKNOWN, never a false "entry removed"
+  }
+}
+
+/**
+ * W1-T5367 — true IFF the worker SDK's version+integrity differs between two `package-lock.json`
+ * texts, counting an added or removed entry as a change exactly as acr-build.yml's guard does. An
+ * unparseable or missing side answers false: the same fail-closed rule as
+ * {@link playwrightCoreVersionChanged}.
+ */
+export function workerSdkChanged(oldLockfileText: string | undefined, newLockfileText: string | undefined): boolean {
+  const oldPin = oldLockfileText === undefined ? undefined : extractWorkerSdkPin(oldLockfileText);
+  const newPin = newLockfileText === undefined ? undefined : extractWorkerSdkPin(newLockfileText);
+  if (oldPin === undefined || newPin === undefined) return false;
+  return oldPin !== newPin;
+}
+
+/**
+ * W1-T5367 — how many worker-SDK pin commits the image is behind, the sibling of
+ * {@link playwrightCoreVersionCommitsBehind}: 1 when the pin at the image's build sha differs
+ * from `origin/main`'s, 0 for unrelated lockfile churn, and UNKNOWN (undefined) when either side
+ * cannot be read or parsed — never coerced to zero.
+ */
+export function workerSdkCommitsBehind(
+  imageBuildSha: string | undefined,
+  runGit: (args: readonly string[]) => string,
+): number | undefined {
+  const sha = imageBuildSha?.trim();
+  if (!sha) return undefined;
+  let oldPin: string | null | undefined;
+  let newPin: string | null | undefined;
+  try {
+    oldPin = extractWorkerSdkPin(runGit(["show", `${sha}:${ROOT_LOCKFILE_PATH}`]));
+    newPin = extractWorkerSdkPin(runGit(["show", `origin/main:${ROOT_LOCKFILE_PATH}`]));
+  } catch {
+    return undefined; // an unknown sha, a shallow clone, no git — UNKNOWN, never zero
+  }
+  if (oldPin === undefined || newPin === undefined) return undefined; // unparseable — UNKNOWN
+  return oldPin !== newPin ? 1 : 0;
+}
+
 /**
  * W1-T4061 — the newest `origin/main` commit that actually MOVED the pinned playwright-core
  * version, walking {@link ROOT_LOCKFILE_PATH}'s own history newest-first rather than reading the
@@ -469,6 +662,34 @@ export function playwrightCoreVersionCommitsBehind(
  */
 export function newestPlaywrightVersionChangeSha(
   runGit: (args: readonly string[]) => string,
+): string | undefined {
+  return newestLockfileChangeSha(runGit, (before, after) =>
+    before === undefined ? extractPlaywrightCoreVersion(after) !== undefined : playwrightCoreVersionChanged(before, after),
+  );
+}
+
+/**
+ * W1-T5367 — the newest `origin/main` commit that moved EITHER lockfile image input acr-build.yml's
+ * guard builds on: the playwright-core pin (W1-T4061) or the worker SDK's version+integrity
+ * (W1-T5018). The generalised sibling of {@link newestPlaywrightVersionChangeSha}, so the sha
+ * `newestBakedSha` names is the sha that workflow tagged when an SDK-only bump built an image.
+ */
+export function newestLockfileImageInputSha(
+  runGit: (args: readonly string[]) => string,
+): string | undefined {
+  return newestLockfileChangeSha(runGit, (before, after) =>
+    before === undefined
+      ? extractPlaywrightCoreVersion(after) !== undefined || typeof extractWorkerSdkPin(after) === "string"
+      : playwrightCoreVersionChanged(before, after) || workerSdkChanged(before, after),
+  );
+}
+
+/** The newest-first walk over {@link ROOT_LOCKFILE_PATH}'s history both readings above share:
+ *  returns the first commit whose (parent, own) lockfile pair `moved` accepts. `before` is
+ *  undefined for the commit that first added the file. */
+function newestLockfileChangeSha(
+  runGit: (args: readonly string[]) => string,
+  moved: (before: string | undefined, after: string) => boolean,
 ): string | undefined {
   let touchingShas: string[];
   try {
@@ -492,8 +713,7 @@ export function newestPlaywrightVersionChangeSha(
     } catch {
       before = undefined; // the commit that first added the file
     }
-    const addedWithVersion = before === undefined && extractPlaywrightCoreVersion(after) !== undefined;
-    if (addedWithVersion || playwrightCoreVersionChanged(before, after)) return sha;
+    if (moved(before, after)) return sha;
   }
   return undefined;
 }
@@ -569,19 +789,29 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
   if (i.daemonAlive === false && !stopUnknownOrSet) {
     return { deploy: true, reason: "daemon is not running and no STOP is set — restarting it" };
   }
-  if (i.imageDriftOnly === true && resourcePolicyDrift.length > 0) {
-    const details = resourcePolicyDrift
-      .map(({ field, expected, actual }) => `${field} expected=${expected} actual=${actual}`)
-      .join(", ");
+  const createDrift = [ // W1-T4267 limits and W1-T6110 binds apply only at create: one path, same holds
+    {
+      noun: "resource policy drift",
+      recycle: "automatic resource-policy recycle",
+      details: resourcePolicyDrift.map(({ field, expected, actual }) => `${field} expected=${expected} actual=${actual}`),
+    },
+    {
+      noun: "mount plan drift",
+      recycle: "automatic mount-plan recycle",
+      details: (i.mountPlanDrift ?? []).map(({ target, expected, actual }) => `${target} expected=${expected} actual=${actual ?? "absent"}`),
+    },
+  ].filter((d) => d.details.length > 0);
+  if (i.imageDriftOnly === true && createDrift.length > 0) {
+    const what = createDrift.map((d) => `${d.noun} (${d.details.join(", ")})`).join("; ");
     if (stopUnknownOrSet) {
-      return { deploy: false, reason: `resource policy drift (${details}), but STOP is set or unknown — no automatic recycle` };
+      return { deploy: false, reason: `${what}, but STOP is set or unknown — no automatic recycle` };
     }
     const recentFailure = i.lastFailedAtMs !== undefined && i.nowMs !== undefined &&
       i.nowMs - i.lastFailedAtMs < IMAGE_RECYCLE_FAILURE_BACKOFF_MS;
     if (recentFailure) {
-      return { deploy: false, reason: `resource policy drift (${details}); a deploy failed under an hour ago — the automatic recycle backs off` };
+      return { deploy: false, reason: `${what}; a deploy failed under an hour ago — the automatic recycle backs off` };
     }
-    return { deploy: true, reason: `automatic resource-policy recycle: ${details}` };
+    return { deploy: true, reason: createDrift.map((d) => `${d.recycle}: ${d.details.join(", ")}`).join("; "), recycle: "create-drift" };
   }
   if (!restartReasons && !imageStale) {
     // W1-T3694: the tick computed `runningStale` and is deliberately ignoring it (W1-T3245) —
@@ -617,7 +847,13 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
       satisfied: i.daemonAlive === true ? true : undefined,
     };
   }
-  if (i.markerPresent) return { deploy: true, reason: `operator marker present + ${why}` };
+  // W1-T6282 — A PUBLISHED IMAGE PENDING ON THE TICK IS AN IMAGE RECYCLE on every path that deploys it,
+  // not only the default fleet's: core runs DEPLOY_AUTO, so its 2026-10-07T21:17:25Z decision carried no
+  // `recycle` and runDeployCycle idle-gated it on boot-settling instead of handing it to the drain.
+  const pendingImage = i.imageDriftOnly === true && imageStale && i.imagePublished === true
+    ? ({ recycle: "image" } as const)
+    : {};
+  if (i.markerPresent) return { deploy: true, reason: `operator marker present + ${why}`, ...pendingImage };
   // IMAGE DRIFT RECYCLES ITSELF (operator ruling 2026-09-22: restarts that big changes need happen
   // automatically). Mounted source already goes live through the daemon's own freshness restart, so
   // the human gate below was holding back only the rarest and most necessary recycle. Still
@@ -633,7 +869,7 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
       return { deploy: false, reason: `${why}; a deploy failed under an hour ago — the automatic image recycle backs off` };
     }
     if (i.imagePublished === true) {
-      return { deploy: true, reason: `automatic image recycle: ${why}, and ${image} is published` };
+      return { deploy: true, reason: `automatic image recycle: ${why}, and ${image} is published`, recycle: "image" };
     }
     return {
       deploy: false,
@@ -664,7 +900,7 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
       reason: `auto: ${why}, but the new image is ${i.imagePublished === false ? "not published yet" : "of unknown publication"} — waiting for the build`,
     };
   }
-  if (i.autoMode) return { deploy: true, reason: `auto mode + ${why}` };
+  if (i.autoMode) return { deploy: true, reason: `auto mode + ${why}`, ...pendingImage };
   return { deploy: false, reason: `${why} but no operator marker (human-gated; run rmd deploy)` };
 }
 
@@ -680,6 +916,8 @@ export interface IdleProbe {
    *  a probe that cannot see the daemon must not report it quiet. Optional — absent means every
    *  read succeeded, so an existing {@link IdleProbe} literal is unaffected. */
   unreadable?: readonly string[];
+  /** W1-T5764 — booted recently, no `sweep.pass` since. Optional: absent means not settling. */
+  bootSettling?: boolean;
 }
 
 /**
@@ -692,7 +930,56 @@ export function daemonIsIdle(p: IdleProbe): boolean {
   // unreadable signal can never wedge the fleet — the alternative, an in-place restart, costs a
   // SIGKILLed worker.
   if (p.unreadable !== undefined && p.unreadable.length > 0) return false;
+  if (p.bootSettling === true) return false;
   return p.workers === 0 && p.inflightLocks === 0 && p.worktreeLocks === 0;
+}
+
+/** Why {@link daemonIsIdle} reads the probe busy (`boot-settling` among them); empty ⇔ idle. */
+export function idleBlockers(p: IdleProbe): string[] {
+  const out: string[] = [];
+  if (p.unreadable !== undefined && p.unreadable.length > 0) out.push("unreadable");
+  if (p.bootSettling === true) out.push("boot-settling");
+  if (p.workers !== 0) out.push("workers");
+  if (p.inflightLocks !== 0) out.push("inflight-locks");
+  if (p.worktreeLocks !== 0) out.push("worktree-locks");
+  return out;
+}
+
+/** W1-T5764 — BACKSTOP on how long a sweep-less boot counts as settling (first sweep: median ~8 min). */
+export const BOOT_SETTLING_BACKSTOP_MS = 15 * 60_000;
+
+/** Latest `daemon.boot` younger than `backstopMs` with no `sweep.pass` after it. No boot or no ledger
+ *  is not settling; any other read failure is `unreadable`, never a quiet "not settling". */
+export function readBootSettling(
+  ledgerPath: string,
+  nowMs: number,
+  backstopMs: number = BOOT_SETTLING_BACKSTOP_MS,
+): { settling: boolean; unreadable: boolean } {
+  let text: string;
+  try {
+    text = readFileSync(ledgerPath, "utf8");
+  } catch (err) {
+    return { settling: false, unreadable: !lockReadFailureMeansZero(err) };
+  }
+  let bootMs: number | undefined;
+  let swept = false;
+  for (const line of text.split("\n")) {
+    const isBoot = line.includes('"step":"daemon.boot"');
+    if (!isBoot && !line.includes('"step":"sweep.pass"')) continue;
+    const ts = /"ts":"([^"]+)"/.exec(line)?.[1];
+    const ms = ts === undefined ? NaN : Date.parse(ts);
+    if (!Number.isFinite(ms)) continue;
+    if (isBoot) {
+      if (bootMs === undefined || ms >= bootMs) {
+        bootMs = ms;
+        swept = false;
+      }
+    } else if (bootMs !== undefined && ms >= bootMs) {
+      swept = true;
+    }
+  }
+  if (bootMs === undefined || swept) return { settling: false, unreadable: false };
+  return { settling: nowMs - bootMs < backstopMs, unreadable: false };
 }
 
 /** Does this `pgrep` failure mean a TRUE zero (exit 1, no processes matched) rather than a read
@@ -700,6 +987,25 @@ export function daemonIsIdle(p: IdleProbe): boolean {
  *  (2 = syntax, 3 = fatal)? Those must never be counted as zero workers. */
 export function pgrepFailureMeansZero(e: unknown): boolean {
   return typeof e === "object" && e !== null && (e as { status?: unknown }).status === 1;
+}
+
+/** The worker command lines probeIdle counts — host `pgrep -f` and the container read alike. */
+const WORKER_PROCESS_PATTERN = "claude --output-format|codex exec";
+
+/** W1-T6260 — workers in ONE container's `docker top <c> -eo pid,ppid,args` table, each counted
+ *  once: a match whose parent also matches (codex's musl binary under its node wrapper) is the
+ *  same worker. `undefined` when no process row was read — a running container always has one. */
+export function countContainerWorkers(top: string): number | undefined {
+  const rows = top
+    .split("\n")
+    .slice(1)
+    .map((line) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line))
+    .filter((m): m is RegExpExecArray => m !== null);
+  if (rows.length === 0) return undefined;
+  const re = new RegExp(WORKER_PROCESS_PATTERN);
+  const matched = rows.filter((m) => re.test(m[3]));
+  const pids = new Set(matched.map((m) => m[1]));
+  return matched.filter((m) => !pids.has(m[2])).length;
 }
 
 /** Does this `readdirSync` failure mean the directory genuinely holds no locks? ENOENT does — a
@@ -771,6 +1077,9 @@ export interface RestartBackend {
    *  suppresses it, or falls back to a different backend or a bare `docker restart`
    *  (design (iii)). */
   restart: () => void;
+  /** W1-T6249 — the backend PAUSES dispatch and waits (bounded) for in-flight work itself, refusing
+   *  if it outlasts that wait. A busy automatic recycle is handed to it rather than idle-gated. */
+  drainsItself?: boolean;
 }
 
 /** The outcome of probing a set of {@link RestartBackend}s: which one (if any) is usable, and
@@ -858,11 +1167,23 @@ export function treeFfSafe(i: TreeFfInputs): TreeFfResult {
   return { ok, conflicting, discardable };
 }
 
+/** A boot's progress rows in write order: paths (before plan sync), boot_held (PAUSE), boot. */
+export const BOOT_PROGRESS_STEPS = ["daemon.paths", "daemon.boot_held", "daemon.boot"] as const;
+export type BootProgressStep = (typeof BOOT_PROGRESS_STEPS)[number];
+
+/** BACKSTOP (W1-T5722): once a boot is OBSERVED in progress — a `daemon.paths` or
+ *  `daemon.boot_held` row after the restart — the wait for `daemon.boot` extends to at least this.
+ *  A 45 s window declared 8 of 15 kickstarts `unhealthy_rollback` at ~46 s, at least 3 of them on
+ *  images that then booted (one boot held ~75 s). No progress row at all still fails at 45 s. */
+export const BOOT_IN_PROGRESS_WINDOW_MS = 180_000;
+
 export interface HealthInputs {
   /** A `daemon.boot` heartbeat was observed AFTER the kickstart instant. */
   bootObserved: boolean;
   /** Distinct non-zero daemon exits seen in the window (KeepAlive restart-storm). */
   crashCount: number;
+  /** Boot-progress rows seen after the kickstart, for the verdict row. Omitted ⇒ none seen. */
+  rowsSeen?: BootProgressStep[];
 }
 
 export interface HealthOpts {
@@ -891,6 +1212,26 @@ export function countLedgerBootsAfter(ledgerPath: string, sinceMs: number): numb
     /* no ledger yet — 0 boots observed */
   }
   return n;
+}
+
+/** Scan for boot-progress rows ({@link BOOT_PROGRESS_STEPS}) timestamped strictly after `sinceMs`:
+ *  the `daemon.boot` count (as {@link countLedgerBootsAfter}) and which of the three steps appeared
+ *  at all. Matches the `step` field exactly, so `daemon.boot_held` is never read as a boot. */
+export function readBootProgressAfter(ledgerPath: string, sinceMs: number): { boots: number; seen: BootProgressStep[] } {
+  let boots = 0;
+  const seen = new Set<BootProgressStep>();
+  try {
+    for (const line of readFileSync(ledgerPath, "utf8").split("\n")) {
+      const step = /"step":"(daemon\.(?:paths|boot_held|boot))"/.exec(line)?.[1] as BootProgressStep | undefined;
+      const ts = step ? /"ts":"([^"]+)"/.exec(line)?.[1] : undefined;
+      if (!step || !ts || !(Date.parse(ts) > sinceMs)) continue;
+      seen.add(step);
+      if (step === "daemon.boot") boots++;
+    }
+  } catch {
+    /* no ledger yet — nothing observed, the same reading as countLedgerBootsAfter */
+  }
+  return { boots, seen: BOOT_PROGRESS_STEPS.filter((s) => seen.has(s)) };
 }
 
 /** The `head_sha` on the MOST RECENT `daemon.boot` line — the sha the running daemon loaded at
@@ -960,6 +1301,12 @@ const FETCH_LOCK_RETRY_PAUSE_MS = 250;
 
 // ── The orchestrated cycle (all side effects injected) ─────────────────────────
 
+/** W1-T8311: the serve launcher held its replace on a named admission refusal; nothing was changed. */
+export interface ServeReplaceHold {
+  held: string;
+  detail: string;
+}
+
 export interface DeployDeps {
   log: (step: string, data?: Record<string, unknown>) => void;
   now: () => number;
@@ -991,6 +1338,23 @@ export interface DeployDeps {
   imageBakedCommitsBehind?: () => number | undefined;
   /** W1-T4267: compare policy arguments with Docker HostConfig. Undefined means UNKNOWN. */
   resourcePolicyDrift?: () => ResourcePolicyDrift[] | undefined;
+  mountPlanDrift?: () => MountPlanDrift[] | undefined; // W1-T6110; undefined means UNKNOWN
+  // ── SERVE POLICY CONVERGENCE (serve-policy-convergence.ts) ── wired for the primary instance only.
+  /** remudero-serve's live HostConfig against the serve role's policy; undefined is UNKNOWN. */
+  servePolicyDrift?: () => ResourcePolicyDrift[] | undefined;
+  /** Is a PAUSE marker set? Omitted or undefined reads as set. */
+  pausePresent?: () => boolean | undefined;
+  /** Has the supervisor an unfinished handoff (ledger)? undefined reads as in progress. */
+  serveHandoffInProgress?: () => boolean | undefined;
+  /** Is remudero-serve running and not restarting? */
+  serveHealthy?: () => boolean | undefined;
+  /** `deploy/serve-container.sh --replace`; throws when the launcher refuses or fails. W1-T8311: a fresh host
+   *  pressure refusal before the launcher's first destructive step RETURNS a {@link ServeReplaceHold}: the old
+   *  console is untouched, so it is a hold, never a failure. */
+  replaceServe?: () => void | ServeReplaceHold;
+  servePolicyLastFailedAtMs?: () => number | undefined;
+  recordServePolicyFailure?: (message: string, atMs: number) => void;
+  clearServePolicyFailure?: () => void;
   /** The newest origin/main commit touching {@link IMAGE_BAKED_PATHS}. */
   newestBakedSha?: () => string | undefined;
   /** Is an image CONTAINING that commit published (W1-T4809: tagged with it, or built from a
@@ -1047,7 +1411,24 @@ export interface DeployDeps {
   /** Retract the recorded failure (state/DEPLOY_FAILED + DEPLOY_LAST_FAILED) once a deploy is VERIFIED
    *  healthy. Without it nothing ever unlinked the latch: core, console and site each carried a failure
    *  days older than their newest `deploy.ok` (measured 2026-09-29). Optional for fake-dep callers. */
-  clearFailure?: () => void;
+  clearFailure?: (observedCurrentHead?: string) => void;
+
+  // ── PERSISTING REFUSAL (W1-T6062) ── a backend that refuses every recycle used to leave only
+  // state/DEPLOY_FAILED and an hourly `deploy.restart_refused` row (site and console, 2026-10-04 to
+  // 10-06). All OPTIONAL: an omitting caller keeps today's single marker and row, nothing more.
+  /** The streak of consecutive same-reason refusals, persisted because each cycle is a fresh process. */
+  refusalStreak?: () => RefusalStreak | undefined;
+  /** Store the streak, or clear it with `undefined`; false reports a failed removal. */
+  setRefusalStreak?: (streak: RefusalStreak | undefined) => void | boolean;
+  /** Open (or update) the one needs-human issue for this instance and reason; returns its url. */
+  escalateRefusal?: (refusal: PersistingRefusal) => string | undefined;
+  /** Close that issue once a recycle is VERIFIED healthy. */
+  closeRefusalIssue?: (url: string, comment: string) => void;
+  /** A verified recycle ended a streak whose issue url this host never learned (it was spooled for
+   *  the daemon to post): drop the spooled escalation, or spool the close of the one it opened. */
+  withdrawRefusal?: (refusal: { instance: string; key: string }, comment: string) => void;
+  /** The daemon instance this deployer serves, for naming the escalation. */
+  refusalInstance?: () => string | undefined;
 
   // ── DEFERRAL CEILING (W1-T341) ── each cycle is a fresh launchd one-shot with no in-memory
   // continuity, so the idle-gate wait needs its own persisted clock. All three OPTIONAL: an
@@ -1105,6 +1486,151 @@ export interface DeployResult {
    *  (the ledger row, `rmd deploy-run`'s own stdout) can render the standing state without
    *  re-parsing `reason`'s prose. */
   blocker?: StaleRunningDaemonBlocker;
+}
+
+// ── A RECYCLE THAT KEEPS REFUSING IS ESCALATED (W1-T6062) ──────────────────────────────────────
+// Tiered, never one threshold: the first refusal keeps today's marker and `deploy.restart_refused`
+// row; a refusal recurring across consecutive backoff windows (same instance, same reason) logs
+// `deploy.refusal_persisting`; once it has persisted REFUSAL_ESCALATE_AT windows it opens ONE
+// needs-human issue per instance and reason and updates it while it persists. A VERIFIED recycle
+// closes it. FALSIFIER: test/a-recycle-that-keeps-refusing-is-escalated.test.ts.
+
+/** Consecutive refused windows at which the refusal is logged as persisting. */
+export const REFUSAL_PERSISTING_AT = 2;
+/** Consecutive refused windows at which the one needs-human issue is opened. */
+export const REFUSAL_ESCALATE_AT = 3;
+
+/** The run of consecutive same-reason refusals for one instance. */
+export interface RefusalStreak {
+  /** Digest of the normalised refusal reason — the "same reason" key. */
+  key: string;
+  count: number;
+  firstAtMs: number;
+  lastAtMs: number;
+  /** The issue opened for this streak, once it has been. */
+  issueUrl?: string;
+  failedHead?: string;
+}
+
+/** What the escalation path is told about a persisting refusal. */
+export interface PersistingRefusal {
+  instance: string;
+  key: string;
+  count: number;
+  firstAtIso: string;
+  lastAtIso: string;
+  /** Baked-path commits the running image predates; `undefined` = could not tell. */
+  lagCommits: number | undefined;
+  /** The refusal's own message, verbatim. */
+  message: string;
+  /** The refusal's own remedy line. */
+  remedy: string;
+  toHead: string;
+  backend: string;
+}
+
+/** Stable key for "the same refusal": digits and whitespace are normalised so a changing worker
+ *  count or timestamp inside the message does not read as a different reason. */
+export function refusalReasonKey(message: string): string {
+  const reason = message.split(/\r?\n/).filter((line) => !/^\s*smoke-output\|/.test(line)).join("\n");
+  const norm = reason.replace(/\d+/g, "#").replace(/\s+/g, " ").trim().toLowerCase();
+  return createHash("sha256").update(norm).digest("hex").slice(0, 10);
+}
+
+/** The refusal's own remedy: a line it labels as one, else its last non-empty line. */
+export function refusalRemedyLine(message: string): string {
+  const lines = message.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith("smoke-output|"));
+  const labelled = lines.find((l) => /^(remedy|fix|to fix|next|hint|run|re-?run|declared)\b/i.test(l));
+  return labelled ?? lines[lines.length - 1] ?? "(the refusal carried no message)";
+}
+
+/** Record ONE refused recycle: count it, log it as persisting once it recurs, and escalate once it
+ *  has persisted long enough. Never throws — an escalation fault must not break the cycle. */
+function recordRefusal(deps: DeployDeps, refusal: { toHead: string; backend: string; message: string }): void {
+  if (!deps.setRefusalStreak) return;
+  const nowMs = deps.now();
+  const key = refusalReasonKey(refusal.message);
+  const prior = deps.refusalStreak?.();
+  const streak: RefusalStreak =
+    prior && prior.key === key
+      ? { ...prior, count: prior.count + 1, lastAtMs: nowMs }
+      : { key, count: 1, firstAtMs: nowMs, lastAtMs: nowMs };
+  streak.failedHead = refusal.toHead;
+  const instance = deps.refusalInstance?.() ?? "default";
+  const lagCommits = deps.imageBakedCommitsBehind?.();
+  if (streak.count >= REFUSAL_PERSISTING_AT) {
+    deps.log("deploy.refusal_persisting", {
+      instance,
+      count: streak.count,
+      reason_key: key,
+      baked_commits_behind: lagCommits ?? null,
+      first_refused_at: fixedClock(streak.firstAtMs).iso(),
+      to: short(refusal.toHead),
+    });
+  }
+  if (streak.count >= REFUSAL_ESCALATE_AT && deps.escalateRefusal) {
+    try {
+      const url = deps.escalateRefusal({
+        instance,
+        key,
+        count: streak.count,
+        firstAtIso: fixedClock(streak.firstAtMs).iso(),
+        lastAtIso: fixedClock(streak.lastAtMs).iso(),
+        lagCommits,
+        message: refusal.message,
+        remedy: refusalRemedyLine(refusal.message),
+        toHead: refusal.toHead,
+        backend: refusal.backend,
+      });
+      if (url) streak.issueUrl = url;
+      deps.log("deploy.refusal_escalated", { instance, count: streak.count, issue: url ?? null });
+    } catch (err) {
+      deps.log("deploy.refusal_escalation_failed", {
+        instance,
+        count: streak.count,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  try {
+    deps.setRefusalStreak(streak);
+  } catch (err) {
+    deps.log("deploy.refusal_streak_unwritable", { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+/** A verified healthy daemon ends the streak: close the issue it opened and forget the count. */
+function retractRefusal(deps: DeployDeps, toHead: string, failedHead?: string): void {
+  const prior = deps.refusalStreak?.();
+  if (!prior) return;
+  const instance = deps.refusalInstance?.() ?? "default";
+  let closed = false;
+  const closing = `The daemon ${instance} at ${short(toHead)} was verified healthy after ${prior.count} refused window(s) — closing.`;
+  if (prior.issueUrl && deps.closeRefusalIssue) {
+    try {
+      deps.closeRefusalIssue(prior.issueUrl, closing);
+      closed = true;
+    } catch (err) {
+      deps.log("deploy.refusal_close_failed", {
+        instance,
+        issue: prior.issueUrl,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  } else if (!prior.issueUrl && deps.withdrawRefusal) {
+    try {
+      deps.withdrawRefusal({ instance, key: prior.key }, closing);
+    } catch (err) {
+      deps.log("deploy.refusal_withdraw_failed", { instance, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  if (!deps.setRefusalStreak || deps.setRefusalStreak(undefined) === false) return;
+  deps.log("deploy.failure_retracted", {
+    marker: "DEPLOY_REFUSAL_STREAK",
+    failed_head: prior.failedHead ?? failedHead ?? null,
+    observed_current_head: toHead,
+  });
+  deps.log("deploy.refusal_cleared", { instance, count: prior.count, issue: prior.issueUrl ?? null, issue_closed: closed });
 }
 
 /**
@@ -1220,6 +1746,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   }
   const imageBakedCommitsBehind = deps.imageBakedCommitsBehind?.();
   const resourcePolicyDrift = opts.imageDriftOnly === true ? deps.resourcePolicyDrift?.() : undefined;
+  const mountPlanDrift = opts.imageDriftOnly === true ? deps.mountPlanDrift?.() : undefined;
   const imageDrift = opts.imageDriftOnly === true && (imageBakedCommitsBehind ?? 0) > 0;
   const newestBakedSha = imageDrift ? deps.newestBakedSha?.() : undefined;
   const imagePublished = newestBakedSha ? deps.imagePublished?.(newestBakedSha) : undefined;
@@ -1237,6 +1764,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
       });
     }
   }
+  const stopPresent = deps.stopPresent?.();
   const decision = decideDeployTrigger({
     markerPresent: markerWasPresent,
     autoMode,
@@ -1246,13 +1774,14 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     lastFailedHead,
     lastFailedKind: deps.lastFailedKind?.(),
     daemonAlive: deps.daemonAlive?.(),
-    stopPresent: deps.stopPresent?.(),
+    stopPresent,
     runningHead,
     // PRODUCER AND CONSUMER TOGETHER. A field the decision reads and nothing supplies is the
     // #1066 shape this repo has paid for eleven times; `imageBuildSha` omitted yields `undefined`
     // here, which reads UNKNOWN and changes nothing.
     imageBakedCommitsBehind,
     resourcePolicyDrift,
+    mountPlanDrift,
     imageDriftOnly: opts.imageDriftOnly,
     ...(newestBakedSha ? { newestBakedSha, imagePublished } : {}),
     imageRecycleManual: deps.imageRecycleManual?.(),
@@ -1271,6 +1800,10 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
         ? "consumed"
         : "retained";
     if (request === "consumed") deps.clearMarker();
+    if (decision.satisfied === true && sameCommit(fromHead, origin) && stopPresent === false) {
+      deps.clearFailure?.(fromHead);
+      retractRefusal(deps, fromHead, lastFailedHead);
+    }
     // W1-T3694: the blocker rides the SAME skip row as `reason` — a stale-running daemon is
     // legible off this one line, naming both shas, rather than requiring a second read.
     deps.log("deploy.skip", {
@@ -1304,6 +1837,30 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     deps.log("deploy.discarded_identical", { paths: tree.discardable, count: tree.discardable.length });
   }
 
+  // THE RESTART SEAM (W1-T3200): probed CAPABILITIES decide which backend restarts the daemon,
+  // never a hard-coded platform string — a host with launchctl uses it, a host with only the
+  // container scripts uses those, and either can be the sole backend a caller registers. Omitted
+  // ⇒ a single fallback wrapping `kickstart` below, unconditionally "available" — today's
+  // launchctl-only behaviour, unchanged (Rule 25: this supplies a second implementation of the
+  // existing seam, not a rewrite of every caller).
+  const restartBackends: readonly RestartBackend[] = deps.restartBackends?.() ?? [
+    {
+      name: "kickstart",
+      probe: () => true,
+      describe: () => "the injected kickstart() dependency",
+      restart: deps.kickstart,
+    },
+  ];
+
+  // W1-T6249 — A BUSY AUTOMATIC RECYCLE IS HANDED TO A BACKEND THAT DRAINS ITSELF. recycle-container.sh
+  // pauses dispatch, then waits (bounded) for in-flight work and refuses past it; this gate only hopes
+  // for a gap, which on 2026-10-07 never came. Mount-side restarts and kickstart keep the gate below.
+  const drainBackend = decision.recycle !== undefined ? selectRestartBackend(restartBackends).backend : undefined;
+  const drainHandoff = drainBackend?.drainsItself === true;
+  const handOff = (phase: string, fields: Record<string, unknown>): void => {
+    deps.log("deploy.drain_handoff", { phase, recycle: decision.recycle, backend: drainBackend?.name, ...fields });
+  };
+
   // Idle gate, WITH A DEFERRAL CEILING (W1-T341): the pull is safe anytime, but hold if a task
   // is in flight — unless the deferral has outlasted `ceilingMs`, in which case proceed anyway
   // rather than defer indefinitely (see evaluateIdleGate).
@@ -1318,8 +1875,12 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     inflight_locks: probe1.inflightLocks,
     worktree_locks: probe1.worktreeLocks,
     unreadable: probe1.unreadable,
+    boot_settling: probe1.bootSettling === true,
+    blockers: idleBlockers(probe1),
   };
-  if (!gate1.proceed) {
+  if (!gate1.proceed && drainHandoff) {
+    handOff("pre-pull", gate1Fields);
+  } else if (!gate1.proceed) {
     if (deferredSince1 === undefined) deps.setDeferredSince?.(nowMs1); // start the clock, once
     deps.log("deploy.not_idle", { phase: "pre-pull", ...gate1Fields });
     return { deployed: false, reason: "not-idle (task in flight) — retry next interval", fromHead };
@@ -1348,8 +1909,12 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     inflight_locks: probe2.inflightLocks,
     worktree_locks: probe2.worktreeLocks,
     unreadable: probe2.unreadable,
+    boot_settling: probe2.bootSettling === true,
+    blockers: idleBlockers(probe2),
   };
-  if (!gate2.proceed) {
+  if (!gate2.proceed && drainHandoff) {
+    handOff("pre-kickstart", gate2Fields);
+  } else if (!gate2.proceed) {
     if (deferredSince2 === undefined) deps.setDeferredSince?.(nowMs2); // start the clock, once
     deps.log("deploy.not_idle", {
       phase: "pre-kickstart",
@@ -1361,21 +1926,6 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   if (gate2.forced) {
     deps.log("deploy.idle_ceiling_forced", { phase: "pre-kickstart", ...gate2Fields });
   }
-
-  // THE RESTART SEAM (W1-T3200): probed CAPABILITIES decide which backend restarts the daemon,
-  // never a hard-coded platform string — a host with launchctl uses it, a host with only the
-  // container scripts uses those, and either can be the sole backend a caller registers. Omitted
-  // ⇒ a single fallback wrapping `kickstart` below, unconditionally "available" — today's
-  // launchctl-only behaviour, unchanged (Rule 25: this supplies a second implementation of the
-  // existing seam, not a rewrite of every caller).
-  const restartBackends: readonly RestartBackend[] = deps.restartBackends?.() ?? [
-    {
-      name: "kickstart",
-      probe: () => true,
-      describe: () => "the injected kickstart() dependency",
-      restart: deps.kickstart,
-    },
-  ];
 
   // W1-T380: a deferral episode ends ONLY on a cycle that actually restarts, so this branch
   // keeps the persisted clock INTACT — clearing it here once let a forced dry-run reset the
@@ -1421,15 +1971,20 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     const message = err instanceof Error ? err.message : String(err);
     deps.log("deploy.restart_refused", { to: short(toHead), backend: selection.backend.name, message });
     deps.alert(`deploy of ${toHead} was pulled but ${selection.backend.name} refused the restart: ${message}`, toHead, "restart-refused");
+    recordRefusal(deps, { toHead, backend: selection.backend.name, message });
     return { deployed: false, reason: `restart-refused: ${message}`, fromHead, toHead, pulledPendingRestart: true };
   }
   deps.log("deploy.kickstart", { to: short(toHead), backend: selection.backend.name });
 
-  const health = assessBootHealth(deps.waitBootHealth(kickstartAt), opts.health);
+  const healthInputs = deps.waitBootHealth(kickstartAt);
+  const health = assessBootHealth(healthInputs, opts.health);
+  // W1-T5722: the verdict row names which boot-progress rows the window saw.
+  const observedRows = healthInputs.rowsSeen ?? [];
   if (health.healthy) {
     deps.clearMarker();
-    deps.clearFailure?.();
-    deps.log("deploy.ok", { to: short(toHead), reason: health.reason });
+    deps.clearFailure?.(toHead);
+    retractRefusal(deps, toHead, lastFailedHead);
+    deps.log("deploy.ok", { to: short(toHead), reason: health.reason, observed_rows: observedRows });
     deps.setRestartPressureState?.(
       resetDeployRestartPressure(deps.restartPressureState?.() ?? { total: 0, scoredShas: [] }, deps.now()),
     );
@@ -1460,6 +2015,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     failed: short(toHead),
     reason: health.reason,
     rolling_back_to: short(rollbackTo),
+    observed_rows: observedRows,
     // Distinguishes a rollback aimed by observed evidence from one that fell back to the install's
     // own head — the latter is the shape that silently did nothing, so it must be legible in the
     // ledger rather than inferred from two shas happening to match.
@@ -1510,6 +2066,11 @@ export function deployRestartPressurePath(stateRoot: string): string {
   return join(stateRoot, "state", "DEPLOY_RESTART_PRESSURE");
 }
 
+/** W1-T6062: the persisted run of consecutive same-reason refused recycles. */
+export function deployRefusalStreakPath(stateRoot: string): string {
+  return join(stateRoot, "state", "DEPLOY_REFUSAL_STREAK");
+}
+
 /** `rmd deploy` — request a deploy at the next idle gap. */
 export function requestDeploy(stateRoot: string, reason: string | undefined): void {
   const p = deployMarkerPath(stateRoot);
@@ -1535,7 +2096,8 @@ export interface RealDeployOpts {
   /** OPTIONAL since impl-EP — omitted ⇒ {@link buildDeployLogger} against `ledgerPath`, which writes
    *  to BOTH stdout and the ledger. Supplied only by tests that want to observe the calls. */
   log?: (step: string, data?: Record<string, unknown>) => void;
-  /** Health window: total ms to watch the daemon after kickstart (default 45s). */
+  /** Health window: total ms to watch the daemon after kickstart (default 45s; a boot observed in
+   *  progress extends it to at least {@link BOOT_IN_PROGRESS_WINDOW_MS}, W1-T5722). */
   healthWindowMs?: number;
   /** Poll pace within the window (default 3s). */
   healthPollMs?: number;
@@ -1546,6 +2108,14 @@ export interface RealDeployOpts {
    *  against each declared `state_dir` ({@link instanceForStateRoot}); still undefined ⇒ the script
    *  is invoked exactly as before this field existed, and refuses exactly as it does today. */
   instance?: string;
+  /** W1-T6062 — open or update the one needs-human issue for a persisting refusal; returns its url.
+   *  INJECTED, because importing escalate.ts here closes ten import cycles. OMITTED ⇒ the streak is
+   *  still counted and logged, but no issue is opened. */
+  escalateRefusal?: (refusal: PersistingRefusal) => string | undefined;
+  /** W1-T6062 — close that issue with a citation once a recycle is verified healthy. */
+  closeRefusalIssue?: (url: string, comment: string) => void;
+  /** Withdraw a spooled refusal escalation once a recycle is verified healthy. */
+  withdrawRefusal?: (refusal: { instance: string; key: string }, comment: string) => void;
   /** Injected subprocess runner (tests fake it; default = execFileSync, utf8, RAW — callers
    *  trim, since `git status --porcelain`'s leading status column is significant). Throws on
    *  a non-zero exit, like execFileSync — callers catch where that is expected (e.g. `pgrep`
@@ -1640,6 +2210,7 @@ export function githubSlugOf(remoteUrl: string): string | undefined {
 
 export function realDeployDeps(o: RealDeployOpts): DeployDeps {
   const ledgerPath = deployLedgerPath(o.stateRoot);
+  const clock = (): number => Date.now();
   const exec = o.execFile ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: "utf8" }).toString());
   const git = (args: string[]): string => exec("git", ["-C", o.installPath, ...args]);
   const sleep = o.sleep ?? ((ms: number) => exec("sleep", [String(Math.ceil(ms / 1000))]));
@@ -1668,7 +2239,6 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     }
   };
 
-  const countBootsAfter = (sinceMs: number): number => countLedgerBootsAfter(ledgerPath, sinceMs);
 
   // ── THE RESTART SEAM'S TWO REAL BACKENDS (W1-T3200) ── selected by PROBED capability, never by
   // `process.platform`: a host with launchctl uses it (today's only path, macOS); a host with only
@@ -1727,6 +2297,8 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     })();
   const recycleContainerBackend: RestartBackend = {
     name: "recycle-container",
+    // Section 5 of the script: PAUSE, then a bounded wait for in-flight workers, refusing past it.
+    drainsItself: true,
     // Usable only when the SCRIPT is on this checkout AND a docker client is on PATH — everything
     // past that is the script's own authority (design (iii)): a daemon it cannot reach, a failed
     // pull, an image-id mismatch all surface as ITS OWN refusal (a thrown, non-zero exit), never
@@ -1756,7 +2328,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
 
   return {
     log,
-    now: () => Date.now(),
+    now: clock,
     fetch: () => {
       fetchWithRefLockRetry();
     },
@@ -1832,28 +2404,23 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       // in the root lockfile (never in IMAGE_BAKED_PATHS). UNKNOWN only when BOTH readings are:
       // one known signal must never be swallowed by the other going unreadable.
       const playwright = playwrightCoreVersionCommitsBehind(sha, (args) => git([...args]));
-      if (baked === undefined && playwright === undefined) return undefined;
-      return (baked ?? 0) + (playwright ?? 0);
+      // W1-T5367 — and so is a worker SDK move (acr-build.yml builds on it since W1-T5018).
+      const workerSdk = workerSdkCommitsBehind(sha, (args) => git([...args]));
+      if (baked === undefined && playwright === undefined && workerSdk === undefined) return undefined;
+      return (baked ?? 0) + (playwright ?? 0) + (workerSdk ?? 0);
     },
-    resourcePolicyDrift: () => {
+    resourcePolicyDrift: () =>
       // W1-T4267: the launcher names the container and role it owns; the policy is evaluated by the
       // SAME sourced shell file recycle-container.sh applies. Either side unreadable ⇒ UNKNOWN.
-      const container = process.env.RMD_RESOURCE_POLICY_CONTAINER || imageShaContainer;
-      const role = process.env.RMD_RESOURCE_POLICY_ROLE === "serve" ? "serve" : "build";
-      try {
-        const expectedArgs = exec("bash", [
-          "-c",
-          'source "$1" || exit 2; if [ "$2" = serve ]; then resource_policy_serve_args; a=("${RESOURCE_POLICY_SERVE_ARGS[@]}"); ' +
-            'else resource_policy_build_args; a=("${RESOURCE_POLICY_BUILD_ARGS[@]}"); fi; printf "%s\\n" "${a[@]}"',
-          "resource-policy",
-          join(o.installPath, "deploy", "resource-policy.sh"),
-          role,
-        ]);
-        return resourcePolicyDriftFrom(expectedArgs, exec("docker", ["inspect", container, "--format", "{{json .HostConfig}}"]));
-      } catch {
-        return undefined; // no policy file, no bash, or no such container — never a recycle trigger
-      }
-    },
+      readResourcePolicyDrift(
+        exec,
+        o.installPath,
+        process.env.RMD_RESOURCE_POLICY_ROLE === "serve" ? "serve" : "build",
+        process.env.RMD_RESOURCE_POLICY_CONTAINER || imageShaContainer,
+        o.stateRoot, // a learned memory.high (deploy/memory-high-tuner.sh) is current, not drift
+      ),
+    mountPlanDrift: () => // the launcher's own scratch_plan, from the checkout the recycle launches with
+      readMountPlanDrift(exec, o.installPath, o.stateRoot, process.env.RMD_RESOURCE_POLICY_CONTAINER || imageShaContainer),
     newestBakedSha: () => {
       let newestBaked: string | undefined;
       try {
@@ -1865,7 +2432,8 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       // newest commit that touched the root lockfile (an unrelated bump landing after it would
       // otherwise misname itself as "the" image input, and imagePublished would look up a tag
       // acr-build.yml's own guard never created for that commit).
-      const newestPlaywright = newestPlaywrightVersionChangeSha((args) => git([...args]));
+      // W1-T5367 — or the worker SDK pin, whichever lockfile image input moved last.
+      const newestPlaywright = newestLockfileImageInputSha((args) => git([...args]));
       if (!newestPlaywright) return newestBaked;
       if (!newestBaked) return newestPlaywright;
       try {
@@ -2027,11 +2595,26 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       // is precisely what {@link daemonIsIdle} calls quiet.
       const unreadable: string[] = [];
       let workers = 0;
-      try {
-        workers = exec("pgrep", ["-f", "claude --output-format|codex exec"]).split("\n").filter(Boolean).length;
-      } catch (err) {
-        if (!pgrepFailureMeansZero(err)) unreadable.push("workers");
-        workers = 0; // pgrep exits 1 when there are no matches
+      // W1-T6260: deploy-run runs ON THE HOST, so pgrep sees every instance's workers; the
+      // launcher's named container scopes the count to this instance. Unnamed ⇒ single-instance.
+      const container = process.env.RMD_RESOURCE_POLICY_CONTAINER;
+      if (container) {
+        let counted: number | undefined;
+        try {
+          counted = countContainerWorkers(exec("docker", ["top", container, "-eo", "pid,ppid,args"]));
+        } catch {
+          // Deliberate: container down or docker unreachable is UNKNOWN (unreadable below), never zero.
+          counted = undefined;
+        }
+        if (counted === undefined) unreadable.push("workers");
+        workers = counted ?? 0;
+      } else {
+        try {
+          workers = exec("pgrep", ["-f", WORKER_PROCESS_PATTERN]).split("\n").filter(Boolean).length;
+        } catch (err) {
+          if (!pgrepFailureMeansZero(err)) unreadable.push("workers");
+          workers = 0; // pgrep exits 1 when there are no matches
+        }
       }
       const countLocks = (dir: string, signal: string): number => {
         try {
@@ -2041,11 +2624,17 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
           return 0;
         }
       };
+      const inflightLocks = countLocks(join(o.stateRoot, "state", "inflight"), "inflightLocks");
+      const worktreeLocks = countLocks(join(o.stateRoot, "worktrees"), "worktreeLocks");
+      // Key set only when true, so the probe's shape is unchanged otherwise.
+      const boot = readBootSettling(ledgerPath, clock());
+      if (boot.unreadable) unreadable.push("bootSettling");
       return {
         workers,
-        inflightLocks: countLocks(join(o.stateRoot, "state", "inflight"), "inflightLocks"),
-        worktreeLocks: countLocks(join(o.stateRoot, "worktrees"), "worktreeLocks"),
+        inflightLocks,
+        worktreeLocks,
         unreadable,
+        ...(boot.settling ? { bootSettling: true } : {}),
       };
     },
     kickstartConsole: () => {
@@ -2105,14 +2694,18 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     waitBootHealth: (sinceMs) => {
       let waited = 0;
       let boots = 0;
-      while (waited < windowMs) {
+      let seen: BootProgressStep[] = [];
+      // W1-T5722: a boot in progress with no boot yet earns the backstop; else the ordinary window.
+      const limit = (): number =>
+        boots === 0 && seen.length > 0 ? Math.max(windowMs, BOOT_IN_PROGRESS_WINDOW_MS) : windowMs;
+      while (waited < limit()) {
         sleep(pollMs);
         waited += pollMs;
-        boots = countBootsAfter(sinceMs);
+        ({ boots, seen } = readBootProgressAfter(ledgerPath, sinceMs));
         // Keep watching for the whole window to catch a restart-storm; a single boot
         // that stays is confirmed only once the window has elapsed with boots === 1.
       }
-      return { bootObserved: boots >= 1, crashCount: Math.max(0, boots - 1) };
+      return { bootObserved: boots >= 1, crashCount: Math.max(0, boots - 1), rowsSeen: seen };
     },
     alert: (message, failedHead, kind) => {
       // `kind` is persisted so the NEXT poll's skip line can state the real cause. Without it the
@@ -2131,12 +2724,57 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
         /* already gone */
       }
     },
-    clearFailure: () => {
-      for (const path of [deployFailedAlertPath(o.stateRoot), deployLastFailedPath(o.stateRoot)]) {
+    refusalInstance: () => recycleInstance,
+    refusalStreak: () => {
+      try {
+        const parsed = JSON.parse(readFileSync(deployRefusalStreakPath(o.stateRoot), "utf8")) as Partial<RefusalStreak>;
+        if (typeof parsed.key !== "string" || typeof parsed.count !== "number") return undefined;
+        return parsed as RefusalStreak;
+      } catch {
+        return undefined; // absent or unreadable reads as no streak — the count restarts, never invents one
+      }
+    },
+    setRefusalStreak: (streak) => {
+      if (streak === undefined) {
         try {
+          unlinkSync(deployRefusalStreakPath(o.stateRoot));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+            log("deploy.failure_retraction_failed", { marker: "DEPLOY_REFUSAL_STREAK", error: String(error) });
+            return false;
+          }
+        }
+        return;
+      }
+      writeAtomic(deployRefusalStreakPath(o.stateRoot), JSON.stringify(streak, null, 2));
+    },
+    ...(o.escalateRefusal ? { escalateRefusal: o.escalateRefusal } : {}),
+    ...(o.closeRefusalIssue ? { closeRefusalIssue: o.closeRefusalIssue } : {}),
+    ...(o.withdrawRefusal ? { withdrawRefusal: o.withdrawRefusal } : {}),
+    clearFailure: (observedCurrentHead) => {
+      for (const [marker, path] of [
+        ["DEPLOY_FAILED", deployFailedAlertPath(o.stateRoot)],
+        ["DEPLOY_LAST_FAILED", deployLastFailedPath(o.stateRoot)],
+      ] as const) {
+        try {
+          const raw = observedCurrentHead === undefined ? undefined : readFileSync(path, "utf8");
+          let failedHead = raw?.trim();
+          if (marker === "DEPLOY_FAILED" && raw !== undefined) {
+            try {
+              failedHead = (JSON.parse(raw) as { failedHead?: string } | null)?.failedHead;
+            } catch (error) {
+              log("deploy.failure_marker_unreadable", { marker, error: String(error) });
+              failedHead = undefined;
+            }
+          }
           unlinkSync(path);
-        } catch {
-          /* already gone */
+          if (observedCurrentHead !== undefined) {
+            log("deploy.failure_retracted", { marker, failed_head: failedHead ?? null, observed_current_head: observedCurrentHead });
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+            log("deploy.failure_retraction_failed", { marker, error: String(error) });
+          }
         }
       }
     },

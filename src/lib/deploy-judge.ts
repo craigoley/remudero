@@ -1,3 +1,4 @@
+import { BAKED_RUNTIME_SOURCE_PATHS } from "./baked-runtime-inputs.js";
 import { isInPlanScope } from "./plan-scope.js";
 
 export type DeployImpactScore = 0 | 1 | 3 | 9 | 18;
@@ -13,6 +14,7 @@ export const IMAGE_BAKED_PATHS: readonly string[] = [
   "deploy/package.json",
   "deploy/package-lock.json",
   "deploy/codex-requirements.toml",
+  ...BAKED_RUNTIME_SOURCE_PATHS,
 ];
 
 function touchesImage(change: DeployWorthChange): boolean {
@@ -335,7 +337,9 @@ export function replayDeployRestartFrequency(scores: readonly number[], threshol
  * advance touching one changes what the RUNNING daemon does next, so it is worth a drain even while busy.
  */
 export const DAEMON_SELF_PATH_PREFIXES: readonly string[] = [
+  "src/run-task.ts",
   "src/lib/daemon",
+  "src/lib/sweep",
   "src/lib/drain",
   "src/lib/dispatch-",
   "src/lib/ledger",
@@ -349,11 +353,21 @@ export const DAEMON_SELF_PATH_PREFIXES: readonly string[] = [
 export const FRESHNESS_DECISION_STEP = "daemon.freshness_decision";
 
 /** Freshness weight on deploy-judge's own scale: the daemon's own code is full weight, all else as deployed. */
+/** W1-T6273: a conventional-commit scope naming the daemon's own machinery, e.g. `perf(daemon): …`. */
+export const DAEMON_SELF_COMMIT_SCOPE = /^[a-z]+\((?:daemon|drain|dispatch|sweep)\)!?:/i;
+
 export function freshnessAdvanceWorth(change: DeployWorthChange): DeployWorthVerdict {
   if (change.files.some((file) => DAEMON_SELF_PATH_PREFIXES.some((prefix) => file.startsWith(prefix)))) {
     return {
       score: 18,
       reason: "the daemon's own loop, dispatch, drain or ledger code changed",
+      source: "deterministic",
+    };
+  }
+  if (change.subject !== undefined && DAEMON_SELF_COMMIT_SCOPE.test(change.subject)) {
+    return {
+      score: 18,
+      reason: "the commit is scoped to the daemon's own machinery",
       source: "deterministic",
     };
   }
@@ -363,6 +377,7 @@ export function freshnessAdvanceWorth(change: DeployWorthChange): DeployWorthVer
 export interface FreshnessDecision {
   action: "restart" | "defer";
   reason: string;
+  restartTrigger?: "change" | "idle" | "age" | "withheld_reviews" | "unreadable";
   /** Change pressure: the summed freshness weight of every advance scored this lifetime. */
   weight: number;
   /** Staleness pressure: grows linearly from the first stale reading, reaching the threshold at the horizon. */
@@ -386,6 +401,9 @@ export function decideFreshnessRestart(input: {
   state: DeployRestartPressureState;
   threshold?: RecordedDeployRestartThreshold;
   ageHorizonMs?: number;
+  /** W1-T5476 — terminal verdicts the reviewer withheld for stale reviewer code since the stale reading.
+   *  Above 0 the review lane is stalled on exactly this lag, so it adds a full threshold of pressure. */
+  withheldReviews?: number;
 }): FreshnessDecision {
   const threshold = input.threshold ?? DEPLOY_RESTART_SCORE_THRESHOLD;
   const horizonMs = input.ageHorizonMs ?? DEPLOY_RESTART_RATE_CEILING_MS;
@@ -397,14 +415,34 @@ export function decideFreshnessRestart(input: {
   });
   const weight = input.changes === undefined ? Math.max(scored.total, threshold.value) : scored.total;
   const agePressure = Math.floor((threshold.value * Math.max(0, input.nowMs - input.staleSinceMs)) / horizonMs);
-  const pressure = weight + agePressure;
+  const withheld = input.withheldReviews ?? 0;
+  const withheldPressure = withheld > 0 ? threshold.value : 0;
+  const pressure = weight + agePressure + withheldPressure;
   const state = { total: weight, scoredShas: scored.state.scoredShas };
+  const restartTrigger = input.changes === undefined ? "unreadable"
+    : withheldPressure > 0 ? "withheld_reviews"
+    : weight >= threshold.value ? "change"
+    : !input.busy ? "idle" : "age";
   if (!input.busy) {
-    return { action: "restart", reason: "idle: nothing in flight, so the restart costs only a boot", weight, agePressure, pressure, state };
+    return { action: "restart", restartTrigger, reason: "idle: nothing in flight, so the restart costs only a boot", weight, agePressure, pressure, state };
+  }
+  if (withheldPressure > 0) {
+    return {
+      action: "restart",
+      restartTrigger,
+      reason:
+        `busy, but ${withheld} review(s) withheld for stale reviewer code: pressure ${pressure} ` +
+        `(change ${weight} + staleness ${agePressure} + withheld ${withheldPressure}) >= ${threshold.value}: drain and restart`,
+      weight,
+      agePressure,
+      pressure,
+      state,
+    };
   }
   if (pressure >= threshold.value) {
     return {
       action: "restart",
+      restartTrigger,
       reason: `busy, but pressure ${pressure} (change ${weight} + staleness ${agePressure}) >= ${threshold.value}: drain and restart`,
       weight,
       agePressure,
@@ -420,4 +458,53 @@ export function decideFreshnessRestart(input: {
     pressure,
     state,
   };
+}
+
+/** PRIMARY CONTROL: W1-T6093's quiet window opens on an advance and re-arms on each new SHA. */
+export const FRESHNESS_COALESCE_WINDOW_MS: RecordedDeployRestartThreshold = {
+  value: 10 * 60_000,
+  reason: "All eight measured follow-on daemon boots on 2026-10-06 came 1–10 minutes after the previous boot.",
+};
+
+/**
+ * 2026-10-10: a package.json or package-lock.json advance leaves the install root every implement worktree links behind
+ * main, so W1-T4193 refuses every implement dispatch until the restart reinstalls it: nine runs at 18:08-18:17Z while
+ * the window held #10700's restart to 18:21Z. Such an advance is never held for a quiet window.
+ */
+export const INSTALL_INPUTS_RELEASE = "install_inputs_changed";
+export function changesInstallInputs(changes: readonly DeployWorthChange[] | undefined): boolean {
+  return (changes ?? []).some((change) => change.files.some((file) => file === "package.json" || file === "package-lock.json"));
+}
+
+export function coalesceFreshnessRestart(input: {
+  decision: FreshnessDecision;
+  newSha: string;
+  lastAdvanceAtMs: number;
+  staleSinceMs: number;
+  nowMs: number;
+  window: RecordedDeployRestartThreshold;
+  threshold?: RecordedDeployRestartThreshold;
+  ageHorizonMs?: number;
+  installInputsChanged?: boolean;
+}): { action: "restart" | "hold" | "defer"; reason: string; heldMs?: number; windowEndsAtMs?: number } {
+  const { decision } = input;
+  if (decision.action === "defer") return decision;
+  const windowEndsAtMs = input.lastAdvanceAtMs + input.window.value;
+  if (decision.restartTrigger !== "change") {
+    const reason = decision.restartTrigger === "unreadable" ? "unreadable_advance"
+      : decision.restartTrigger === "withheld_reviews" ? "withheld_reviews" : decision.reason;
+    return { action: "restart", reason, heldMs: 0, windowEndsAtMs };
+  }
+  const heldMs = Math.max(0, input.nowMs - input.staleSinceMs);
+  if (input.installInputsChanged) return { action: "restart", reason: INSTALL_INPUTS_RELEASE, heldMs, windowEndsAtMs };
+  const threshold = input.threshold ?? DEPLOY_RESTART_SCORE_THRESHOLD;
+  const horizonMs = input.ageHorizonMs ?? DEPLOY_RESTART_RATE_CEILING_MS;
+  const agePressure = Math.floor((threshold.value * heldMs) / horizonMs);
+  if (agePressure >= threshold.value / 2) {
+    return { action: "restart", reason: "upper_age", heldMs, windowEndsAtMs };
+  }
+  if (input.nowMs >= windowEndsAtMs) {
+    return { action: "restart", reason: "window_quiet", heldMs, windowEndsAtMs };
+  }
+  return { action: "hold", reason: `coalescing ${input.newSha}: waiting for a quiet advance window`, heldMs, windowEndsAtMs };
 }

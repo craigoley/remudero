@@ -22,7 +22,7 @@ import {
 } from "../src/lib/review.js";
 import { type GhApiFetcher } from "../src/lib/open-prs-rest.js";
 import { ghLiveStateByNumber } from "../src/run-task.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { readLedgerLines } from "../src/lib/status.js";
 
 /**

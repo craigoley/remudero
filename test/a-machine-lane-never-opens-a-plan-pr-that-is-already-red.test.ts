@@ -22,6 +22,12 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import * as emitter from "../src/lib/plan-pr-emitter.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gardenCheckout } from "../src/run-task.js";
+import * as feedback from "../src/lib/feedback.js";
+import { buildProposalDecisionRoute, buildSubmitFeedbackRoute } from "../src/lib/panel-graph.js";
+import { buildPanelSkillRunRoutes } from "../src/lib/panel-skill-run.js";
+import { skillsDir } from "../src/lib/skill.js";
+import { createService } from "../src/lib/service.js";
+import type { AddressInfo } from "node:net";
 import { gitRepo } from "./helpers/git-repo.js";
 // @ts-expect-error -- test executes the untyped executable module directly.
 import { classifyUnreadableOpenPrSurface } from "../scripts/task-id-existence-check.mjs";
@@ -558,4 +564,116 @@ test("a clean feedback landing still pushes and opens its PR", () => {
   assert.equal(r.pushed, true);
   assert.deepEqual(f.heads(), [LANDING_BRANCH, "main"]);
   assert.equal(calls.filter((c) => c[1] === "create").length, 1);
+});
+
+// ── the console's synchronous request-path routes queue for the daemon sweep (W1-T5460, W1-T5525) ──
+
+/** A clone whose origin/main holds one feedback entry at `status`, plus the panel deps a console route needs. */
+function requestPathFixture(kind: string, status: "proposed" | "grilling") {
+  const f = originWith({ "README.md": "seed\n" }, kind);
+  const entry = feedback.captureFeedback(f.clone.dir, { raw: "a proposal", origin: "ui" });
+  feedback.setFeedbackStatus(f.clone.dir, entry.id, status, { proposalPr: "https://github.com/o/r/pull/7" });
+  f.clone.git("add", "-A");
+  f.clone.git("commit", "-q", "-m", "chore: a feedback entry");
+  f.clone.git("push", "-q", "origin", "HEAD:main");
+  const ledgerDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w5348-request-ledger-`));
+  const ledgerPath = join(ledgerDir, "ledger.ndjson");
+  const counter = { preflights: 0 };
+  const { gh, calls } = fakeGh();
+  const panel = {
+    root: f.clone.dir,
+    inboxRoot: f.clone.dir,
+    planPath: join(f.clone.dir, "plan", "tasks.yaml"),
+    ledgerPath,
+    github: { prView: () => null },
+    statusGithub: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
+    ratify: { approve: () => undefined, reframe: () => undefined },
+    feedbackLand: { gh, planPrPreflight: () => (counter.preflights++, { ok: true, failures: [], unreadable: [] }) },
+  };
+  const skipRows = () =>
+    readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>).filter((r) => r.step === "plan_pr.preflight_skipped");
+  return { f, entry, panel, counter, calls, skipRows, cleanup: () => rmSync(ledgerDir, { recursive: true, force: true }) };
+}
+
+async function postRoute(routes: Parameters<typeof createService>[0]["routes"], path: string, body: unknown): Promise<void> {
+  const server = createService({ tokens: { read: "r-token", write: "w-token" }, routes });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}${path}`, {
+        method: "POST",
+        headers: { authorization: "Bearer w-token", "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+    assert.equal(res.status, 200, await res.text());
+  } finally {
+    server.close();
+  }
+}
+
+test("the console's POST /v1/feedback/decision queues for the daemon sweep instead of landing with the preflight skipped", async () => {
+  // W1-T5460 superseded this route's request-path skip: the decision now waits for the sweep's preflight.
+  const fx = requestPathFixture("w5348-decision-route", "proposed");
+  const stateRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w5348-decision-state-`));
+  await postRoute([buildProposalDecisionRoute({ ...fx.panel, inboxRoot: stateRoot })], "/v1/feedback/decision", { id: fx.entry.id, decision: "accept" });
+  assert.equal(fx.counter.preflights, 0, "the request path never runs the preflight checks");
+  assert.deepEqual(fx.f.heads(), ["main"], "the request path pushes nothing");
+  assert.deepEqual(fx.skipRows(), [], "no landing ran on the request path, so none was skipped");
+  assert.deepEqual(landing.queuedFeedbackLandings(stateRoot), [`plan/feedback/${fx.entry.id}.yaml`]);
+  rmSync(stateRoot, { recursive: true, force: true });
+  fx.cleanup();
+});
+
+test("the console's POST /v1/feedback replyTo answer queues its capture and its answered flip for the daemon sweep", async () => {
+  // W1-T5525 superseded this route's request-path skip: both records wait for the sweep's preflight.
+  const fx = requestPathFixture("w5348-submit-route", "grilling");
+  const stateRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w5348-submit-state-`));
+  await postRoute([buildSubmitFeedbackRoute({ ...fx.panel, inboxRoot: stateRoot })], "/v1/feedback", { text: "the answer", replyTo: fx.entry.id });
+  assert.equal(fx.counter.preflights, 0, "the request path never runs the preflight checks");
+  assert.deepEqual(fx.f.heads(), ["main"], "the request path pushes nothing");
+  assert.deepEqual(fx.skipRows(), [], "no landing ran on the request path, so none was skipped");
+  const queued = landing.queuedFeedbackLandings(stateRoot);
+  assert.equal(queued.length, 2, "the captured answer and the answered flip are both staged");
+  assert.ok(queued.includes(`plan/feedback/${fx.entry.id}.yaml`), JSON.stringify(queued));
+  rmSync(stateRoot, { recursive: true, force: true });
+  fx.cleanup();
+});
+
+test("the console's POST /v1/skills/run Refine queues its grill for the daemon sweep instead of landing it", async () => {
+  const fx = requestPathFixture("w5348-skill-run-route", "proposed");
+  const stateRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w5348-skill-state-`));
+  mkdirSync(skillsDir(fx.f.clone.dir), { recursive: true });
+  writeFileSync(join(skillsDir(fx.f.clone.dir), "plan.yaml"), "tools:\n  - Read\npermission_profile: implement\noutput_contract: a PR\ngrounding_sources:\n  - plan/tasks.yaml\ngate: ci\ntier: G-17\n");
+  const task = { id: "W9-T1", title: "Example task", repo: "remudero", depends_on: [], type: "implement", verify: "auto", risk: "medium", status: "queued", attempts: 0, origin: "architect", acceptance: [{ claim: "does it", proof: "unit test: does it" }] };
+  writeFileSync(fx.panel.planPath, JSON.stringify([task]));
+  await postRoute(buildPanelSkillRunRoutes({ ...fx.panel, inboxRoot: stateRoot }), "/v1/skills/run", { skill: "plan", mode: "clarify", taskId: "W9-T1" });
+  assert.equal(fx.counter.preflights, 0, "the Refine request never runs the preflight checks");
+  assert.deepEqual(fx.f.heads(), ["main"], "the request path pushes nothing");
+  assert.deepEqual(fx.skipRows(), [], "no landing ran on the request path, so none was skipped");
+  assert.equal(landing.queuedFeedbackLandings(stateRoot).length, 1, "the grill is staged for the sweep");
+  rmSync(stateRoot, { recursive: true, force: true });
+  fx.cleanup();
+});
+
+test("the daemon's feedback-landing sweep and a direct status write both run the preflight", () => {
+  const f = originWith({ "README.md": "seed\n" }, "w5348-daemon-sweep");
+  mkdirSync(join(f.clone.dir, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(f.clone.dir, "plan", "feedback", "fb-new.yaml"), "id: fb-new\nstatus: new\nraw: fresh\n");
+  const rows: LogRow[] = [];
+  let preflights = 0;
+  const { gh } = fakeGh();
+  const planPrPreflight = (sha: string, pr: { title: string; body: string }) => (preflights++, planPrPreflightAtCommit(f.clone.dir, sha, pr, offlineChecks));
+  const r = withLiveWritesAllowed(() =>
+    landing.sweepFeedbackLanding(f.clone.dir, { gh, planPrPreflight, log: (step, extra) => rows.push({ step, extra }) }),
+  );
+  assert.equal(r.landed, true, JSON.stringify(r));
+  assert.equal(preflights, 1, "the daemon lane keeps the preflight");
+  assert.equal(rows.some((row) => row.step === "plan_pr.preflight_skipped"), false);
+
+  const status = withLiveWritesAllowed(() =>
+    landing.landFeedbackStatusContent(f.clone.dir, "plan/feedback/fb-other.yaml", "id: fb-other\nstatus: grilling\nraw: other\n", { gh, planPrPreflight }),
+  );
+  assert.equal(status.landed, true, JSON.stringify(status));
+  assert.equal(preflights, 2, "no caller opts out of the preflight");
 });

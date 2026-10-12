@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { hostWorktreeGit } from "./worktree-git.js";
 import { realArmDeps, type ArmDeps } from "./arm-auto-merge.js";
 import { realDeployDeps, type DeployDeps, type RealDeployOpts } from "./deployer.js";
 import { realSharedPauseGitDeps, type SharedPauseGitDeps } from "./fleet-control.js";
@@ -49,8 +50,8 @@ function realReviewWorktree(exec: ReviewGitExec = execFileSync): ReviewWorktreeD
     addWorktree: (repoDir, worktreePath, revision) => {
       exec("git", ["-C", repoDir, "worktree", "add", "--detach", worktreePath, revision], { stdio: "pipe" });
     },
-    revParseHead: (worktreePath) =>
-      exec("git", ["-C", worktreePath, "rev-parse", "HEAD"], { stdio: "pipe" }).toString().trim(),
+    // W1-T6122: the tree is the PR head's, so its read is the leaf's (the seam keeps fetch/add).
+    revParseHead: (worktreePath) => hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim(),
   };
 }
 

@@ -3,10 +3,11 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
-  priority: 2.5
+  verify: human
   risk: high
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # selector-shadow attribution audit 2026-10-06: withdrawn — flake_history — the suite's retry recovered it in coverage runs inside the 3-day window (W1-T4715, W1-T4731, W1-T4749, W1-T4783, withdrawn 09-29 as retry-recovered), and this filing predates the success-concluded-shard rule; unattributed under #9730.
   attempts: 0
   author_class: machine
   origin: "selector-shadow:3f1b01eeed56a21416b21c3eb1de6697b7f42b9c:narrow:test/serve-browser-teardown.test.ts"

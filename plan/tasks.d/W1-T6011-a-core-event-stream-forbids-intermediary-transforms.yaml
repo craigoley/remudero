@@ -1,0 +1,33 @@
+- id: W1-T6011
+  title: "A CORE EVENT STREAM FORBIDS INTERMEDIARY TRANSFORMS — service.ts's openSse (every core SSE route, /v1/status/stream among them) answers `cache-control: no-cache` only, so a proxy or CDN between serve and the console may compress or buffer the stream; view-events.ts's /v1/views/events already sends `no-cache, no-transform` and `x-accel-buffering: no`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 1.00
+  risk: low  # Rule 19: one concern — the response headers of the shared core SSE opener
+  band_meaning: blast-radius
+  origin: "2026-10-06 core-console architecture plan backlog E1 (Phase 2 review: core openSse omits no-transform)"
+  plan_refs: [W1-T4906]
+  files: [src/lib/service.ts, test/a-core-event-stream-forbids-intermediary-transforms.test.ts]
+  status: queued
+  priority: 4
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 at origin/main a6a285150: src/lib/service.ts openSse writes
+    {"content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive"} and nothing
+    else, while src/lib/view-events.ts (the Phase 2 /v1/views/events stream) writes
+    "cache-control": "no-cache, no-transform" plus "x-accel-buffering": "no". The two core stream openers
+    disagree, and the older one leaves an intermediary free to gzip and buffer an event stream (the console
+    reaches core through Cloudflare and a Vercel relay). Scope-time checks: no plan record, run- branch or open
+    PR head names openSse or no-transform.
+  design: |
+    openSse sends the same stream headers view-events.ts sends: `cache-control: no-cache, no-transform` and
+    `x-accel-buffering: no`. Prefer one shared header constant both openers use, so they cannot drift again.
+  acceptance:
+    - claim: "every core SSE route opened through service.ts answers cache-control no-cache, no-transform and x-accel-buffering no, the same headers as /v1/views/events"
+      proof: "unit test: test/a-core-event-stream-forbids-intermediary-transforms.test.ts"
+  falsifier: |
+    Leave openSse's headers as they are: the test opens a core SSE route and reads `no-cache` without
+    `no-transform`, and fails.

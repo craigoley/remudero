@@ -91,8 +91,10 @@ test("W1-T3508 open-time fallback: the rendered body passes the production autho
   assert.equal(result.ok, true, result.message);
 });
 
-test("W1-T3508 fallback proof target: both fallbacks retain the single-line grep proof for acceptanceAuthorTimeCheck", () => {
+test("W1-T3508 fallback proof target: with no derivable diff anchor both fallbacks keep the single-line grep proof for acceptanceAuthorTimeCheck", () => {
   const dir = fixture();
+  // W1-T4263: this commit adds only the one-character line `x`, too short to anchor a proof, so the static grep is
+  // still the last resort at both sites.
   commit(dir, "feat(x): a subject", "no Acceptance block in this commit message");
   const repaired = acceptanceGateBodyRepair("no Acceptance block in this live PR body");
   assert.ok(repaired, "the no-header fixture must take the fallback path");
@@ -103,6 +105,20 @@ test("W1-T3508 fallback proof target: both fallbacks retain the single-line grep
       "both renderers must carry the same executable, single-line proof",
     );
   }
+});
+
+test("W1-T4263: a branch with a real addition opens with a proof grepping that addition, not acceptanceAuthorTimeCheck", () => {
+  const dir = fixture();
+  writeFileSync(join(dir, "notes.md"), "a line this branch adds to the notes\n");
+  git(dir, "add", "-A");
+  git(dir, "commit", "-q", "-m", "feat(x): a subject\n\nno Acceptance block in this commit message");
+  const body = bodyOf(dir);
+  assert.deepEqual(
+    parseAcceptanceBlock(body).map((c) => c.proof),
+    ["grep: a line this branch adds to the notes in notes.md"],
+    "the open-time fallback is anchored on the branch's own diff",
+  );
+  assert.doesNotMatch(body, /acceptanceAuthorTimeCheck/, "a proof main already satisfies can never discriminate");
 });
 
 test("the auto-authored block says WHEN it was authored, and does not borrow the fix rung's story", () => {

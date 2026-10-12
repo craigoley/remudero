@@ -41,10 +41,11 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
 // ── acceptance 1: the fast mode runs the curated npm-script gates and reports each ──────────
 // step's own pass/fail ───────────────────────────────────────────────────────────────────────
 
-test("FAST_GATE_STEPS: the curated list names thirteen fast gates, including W1-T4433's tree-derived rule runner, plus the seven measured census entries", () => {
+test("FAST_GATE_STEPS: the curated list names fourteen fast gates, including W1-T4433's tree-derived rule runner and W1-T6435's census-precheck, plus the seven measured census entries", () => {
   const scripts = FAST_GATE_STEPS.map((s) => s.script).sort();
   assert.deepEqual(scripts, [
     "api-client:check",
+    "census-precheck",
     "census:authority",
     "census:bound-kind",
     "census:catch-erasure",
@@ -81,7 +82,7 @@ test("runPreflightFast: runs each curated npm gate and the tree-derived rule-che
 
   assert.equal(calls.length, FAST_GATE_STEPS.length, "exactly one spawn per curated step, no extras");
   for (const { script, runner } of FAST_GATE_STEPS) {
-    if (runner === "rule-checks") continue;
+    if (runner === "rule-checks" || runner === "census-precheck") continue;
     const call = calls.find((c) => c.file === "npm" && c.args.join(" ") === `run --silent ${script}`);
     assert.ok(call, `expected an \`npm run --silent ${script}\` call`);
   }

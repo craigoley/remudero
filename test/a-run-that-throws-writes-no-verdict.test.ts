@@ -102,6 +102,9 @@ function buildFixture(opts: { refusingHook?: boolean } = {}): { root: string; pl
     writeFileSync(hook, ["#!/bin/sh", "if grep -q ' refs/heads/run-'; then", ...lines, "  exit 1", "fi", "exit 0", ""].join("\n"));
     chmodSync(hook, 0o755);
   }
+  // W1-T6106: the host push runs the HARNESS's pre-push, never the lane's tracked copy; this seed's hooks/ plays the harness.
+  if (opts.refusingHook) process.env.RMD_HARNESS_HOOKS_DIR = join(seed.dir, "hooks");
+  else delete process.env.RMD_HARNESS_HOOKS_DIR;
   seed.git("add", "-A");
   seed.git("commit", "-q", "-m", "seed");
   seed.git("push", "-q", "origin", "main");

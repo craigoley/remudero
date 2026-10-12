@@ -12,7 +12,7 @@
   origin: "2026-10-02 operator approved the human-gate implementation follow-ups"
   plan_refs: [W1-T5021, W1-T3186]
   files: [src/lib/human-gate.ts, src/lib/now-view.ts, src/lib/nav-badge-view.ts, src/lib/needs-you-view.ts, src/lib/serve.ts, test/human-gate-surface-counts.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at 009a9111cf38344f6ee79c96f8fd18219a0b3688: the approved design

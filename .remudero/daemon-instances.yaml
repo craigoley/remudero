@@ -27,6 +27,19 @@
 # no-instance refusal. The registry being absent keeps the legacy default byte-for-byte, so an
 # older checkout is unaffected.
 #
+# W1-T4863 — EACH INSTANCE OWNS ITS `claude_dir`; THE CREDENTIAL HAS ONE OWNER. D-11 rules nothing
+# mutable shared between cells, and three daemons writing one ~/.claude put their transcripts,
+# settings and token refreshes in a single directory. `claude_dir` is now distinct per instance:
+# the `primary: true` instance (core) keeps `/home/craigoleyagent/.claude` and is the ONE refresher
+# of the subscription credential; `install-host-units.sh --instance <name>` mounts that owner's
+# `.credentials.json` READ-ONLY into every other instance's own directory. `.codex` and
+# `.config/remudero-container` stay shared (provider config, not per-run state). The host
+# directories `.claude-site` and `.claude-console` must exist (owned by the service user) before
+# the next `--install`. NOT measured on the host from this checkout: what each instance writes.
+# W1-T6061 (2026-10-06) PUTS SITE AND CONSOLE BACK ON THE OWNER'S claude_dir: recycle-container.sh
+# never learned the owner's read-only credential mount, the host never created the two directories,
+# and every site and console recycle refused for two days. The split returns with W1-T6095.
+#
 # W1-T4227 — THE FLEET'S ONE REGISTRY (Account → Project → Repository → Instance). Each instance
 # also names its `project` (absent means project "default", a standalone repo) and its
 # `github_repo` (owner/name); `rmd serve` reads them through `parseInstanceRegistry`

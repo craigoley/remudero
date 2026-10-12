@@ -84,16 +84,40 @@ test("W1-T4076: a tracked change still refuses", () => {
   });
 });
 
-test("W1-T4076: a long refusal raises one alert", () => {
+/** `rmd` as the launcher runs it: `live-edits` records its argv and answers as the ladder would. */
+function ladderStub(w: World, restore: boolean): string {
+  const calls = join(w.root, "ladder-calls");
+  mkdirSync(join(w.root, "remudero", "bin"), { recursive: true });
+  const answer = restore
+    ? `git -C ${JSON.stringify(w.checkout)} checkout -- . && echo '{"tier":3,"restored":true}'`
+    : `echo '{"tier":1,"restored":false}'`;
+  writeFileSync(join(w.root, "remudero", "bin", "rmd"), `#!/usr/bin/env bash\nif [ "$1" = live-edits ]; then printf '%s\\n' "$*" >> ${JSON.stringify(calls)}; ${answer}; fi\nexit 0\n`);
+  chmodSync(join(w.root, "remudero", "bin", "rmd"), 0o755);
+  return calls;
+}
+
+test("2026-10-11: a refused convergence asks the live-edit ladder for the install checkout, not a six-hour stderr line", () => {
   withWorld((w) => {
+    const calls = ladderStub(w, false);
     writeFileSync(join(w.checkout, "tracked.txt"), "edited\n");
-    const first = tick(w, "1000000000");
-    assert.doesNotMatch(first.stderr, /ALERT/, "the initial refusal starts the timer without alerting");
-    const later = tick(w, "1000021600");
-    assert.match(later.stderr, /ALERT.*6 hours/);
-    assert.match(later.stderr, /tracked\.txt/, "the alert identifies the refusing path");
-    const repeated = tick(w, "1000040000");
-    assert.doesNotMatch(repeated.stderr, /ALERT/, "the same continuous refusal raises only one alert");
+    const result = tick(w, "1000021600");
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /tracked changes/);
+    assert.match(readFileSync(calls, "utf8"), new RegExp(`^live-edits --tree install-checkout --checkout ${w.checkout} --state-root ${w.root}/state --json$`, "m"));
+    assert.doesNotMatch(result.stderr, /ALERT/, "the fixed six-hour alert is gone; the ladder escalates through the daemon");
+    assert.equal(existsSync(w.calls), false, "an unrestored tracked edit never reaches the installer");
+  });
+});
+
+test("2026-10-11: once the live-edit ladder restores the install checkout, the same tick converges", () => {
+  withWorld((w) => {
+    ladderStub(w, true);
+    writeFileSync(join(w.checkout, "tracked.txt"), "edited\n");
+    const result = tick(w);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /live-edit ladder restored the tracked edits from a confirmed copy; converging/);
+    assert.equal(readFileSync(w.calls, "utf8"), "\n", "the restored checkout reaches the installer's check");
+    assert.equal(existsSync(join(w.root, "state", "units-converge-refused-since")), false, "the refusal stamp is cleared");
   });
 });
 
@@ -110,10 +134,7 @@ test("W1-T4076: a refusal with no state directory yet neither leaks nor loses th
     const first = tick(w, "1000000000");
     assert.equal(first.status, 0, first.stderr);
     assert.doesNotMatch(first.stderr, /No such file or directory/, "the refusal path must not leak a shell redirection error");
-    assert.ok(existsSync(join(w.root, "state", "units-converge-refused-since")), "and the stamp the alert is measured from must actually be written");
+    assert.ok(existsSync(join(w.root, "state", "units-converge-refused-since")), "and the refusal stamp must actually be written");
 
-    // The stamp being real is what makes the alert reachable at all from a bare state root.
-    const later = tick(w, "1000021600");
-    assert.match(later.stderr, /ALERT.*6 hours/, "so a long refusal still alerts when the directory had to be created");
   });
 });

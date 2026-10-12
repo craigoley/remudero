@@ -24,6 +24,7 @@ import {
 import {
   readFiledCiLessons,
   summarizeCiLessonRecurrences,
+  readCiLessonExposure,
 } from "../src/lib/ci-lesson-recurrence.js";
 
 const pair = (pr: number, gate: string) => ({ pr, gate, state: "repaired" as const, redSha: "a", repairFiles: [] });
@@ -32,6 +33,110 @@ const seen = (pr: number, gate: string) => ({ pr, gate });
 const corpus = (pairs = [pair(1, "g"), pair(2, "g")], fullyObservedGatePrs = pairs.map((p) => seen(p.pr, p.gate))) => ({
   pairs,
   fullyObservedGatePrs,
+});
+
+const exposureWindow = { windowStart: "2026-10-01T12:00:00Z", asOf: "2026-10-02T12:00:00Z", complete: true, prsScanned: 3 };
+const exposureSummary = (input: ReturnType<typeof corpus>, lessons = [lesson("g", 2)], ceiling = 3, complete = true) => {
+  const result = summarizeCiLessonRecurrences(judgeCiLessonEfficacy(input, lessons), ceiling, { ...exposureWindow, complete });
+  assert.equal(result.status, "observed");
+  if (result.status !== "observed") throw new Error("missing summary");
+  return result.exposure;
+};
+
+test("lesson exposure preserves a gate-specific PR denominator and observed recurrence rate", () => {
+  const input = corpus([pair(9, "g"), pair(9, "g")], [seen(9, "g"), seen(11, "g"), seen(11, "g"), seen(12, "other")]);
+  const result = exposureSummary(input);
+  assert.equal(result.status, "observed");
+  assert.deepEqual(result.lessons[0], { findingId: "ci-learning:1:g", gate: "g", watermarkPr: 2,
+    exposedPrs: [9, 11], recurredPrs: [9], exposureCount: 2, recurrenceCount: 1, omittedPrCount: 0 });
+  assert.equal(result.observedRecurrenceRate, 0.5);
+  assert.equal(result.retention, "uncertified");
+  assert.deepEqual(readCiLessonExposure(result, exposureWindow.asOf, true), result);
+});
+
+test("partial lesson history retains a definite recurrence but cannot certify a rate or held lesson", () => {
+  const result = exposureSummary(corpus([pair(9, "g")], []), undefined, 3, false);
+  assert.equal(result.status, "partial");
+  assert.deepEqual(result.lessons[0].exposedPrs, [9]);
+  assert.deepEqual(result.lessons[0].recurredPrs, [9]);
+  assert.equal(result.observedRecurrenceRate, null);
+  assert.equal("heldCount" in result, false);
+  assert.deepEqual(readCiLessonExposure(result, exposureWindow.asOf, true), result);
+  const unrelated = exposureSummary(corpus([], [seen(12, "other")]));
+  if (unrelated.status === "unavailable") throw new Error("missing exposure");
+  assert.equal(unrelated.exposureCount, 0);
+  assert.equal(unrelated.observedRecurrenceRate, null);
+  const green = exposureSummary(corpus([], [seen(12, "g")]));
+  if (green.status === "unavailable") throw new Error("missing exposure");
+  assert.equal(green.observedRecurrenceRate, 0);
+});
+
+test("omitted lesson or PR identities make the bounded exposure partial without erasing named receipts", () => {
+  const result = exposureSummary(corpus([pair(9, "g"), pair(11, "g"), pair(12, "g")]), undefined, 2);
+  if (result.status === "unavailable") throw new Error("missing exposure");
+  assert.equal(result.status, "partial");
+  assert.deepEqual(result.lessons[0].exposedPrs, [11, 12]);
+  assert.equal(result.lessons[0].omittedPrCount, 1);
+  assert.equal(result.observedRecurrenceRate, null);
+  const omitted = exposureSummary(corpus([], [seen(9, "g"), seen(10, "a")]), [lesson("g", 2), lesson("a", 2)], 1);
+  if (omitted.status === "unavailable") throw new Error("missing exposure");
+  assert.equal(omitted.omittedLessonCount, 1);
+  assert.equal(omitted.status, "partial");
+  assert.equal(omitted.observedRecurrenceRate, null);
+});
+
+test("repeated lesson snapshots preserve the newest watermark and count each lesson gate PR once", () => {
+  const input = corpus([pair(9, "g")], [seen(9, "g"), seen(11, "g")]);
+  const result = exposureSummary(input, [lesson("g", 2), lesson("g", 3), lesson("g", 2), lesson("g", 3)]);
+  if (result.status === "unavailable") throw new Error("missing exposure");
+  assert.equal(result.lessons.length, 1);
+  assert.equal(result.lessons[0].watermarkPr, 3);
+  assert.equal(result.exposureCount, 2);
+  assert.equal(result.recurrenceCount, 1);
+  // Equal latest PRs exercise deterministic identity ordering without merging distinct gates.
+  const tied = exposureSummary(corpus([], [seen(11, "b"), seen(11, "a")]), [lesson("b", 1), lesson("a", 1)]);
+  if (tied.status === "unavailable") throw new Error("missing exposure");
+  assert.deepEqual(tied.lessons.map(row => row.gate), ["a", "b"]);
+});
+
+test("legacy, future, duplicate, and forged exposure records stay unavailable instead of inventing rates", () => {
+  const valid = exposureSummary(corpus([pair(9, "g")], [seen(11, "g")]));
+  if (valid.status === "unavailable") throw new Error("missing exposure");
+  assert.deepEqual(readCiLessonExposure(undefined, exposureWindow.asOf, true), { status: "unavailable", reason: "producer-exposure-missing" });
+  assert.deepEqual(readCiLessonExposure({ status: "unavailable", reason: "observation-window-missing" }, exposureWindow.asOf, true),
+    { status: "unavailable", reason: "observation-window-missing" });
+  const invalid = [
+    {}, { ...valid, status: "held" }, { ...valid, basis: "pr" }, { ...valid, retention: "complete" },
+    { ...valid, window: null }, { ...valid, lessons: null }, { ...valid, lessons: Array(101).fill(valid.lessons[0]) },
+    { ...valid, window: { ...valid.window, asOf: "2026-10-03T12:00:00Z" } },
+    { ...valid, window: { ...valid.window, windowStart: "invalid" } },
+    { ...valid, window: { ...valid.window, windowStart: "2026-10-03T12:00:00Z" } },
+    { ...valid, window: { ...valid.window, prsScanned: -1 } },
+    { ...valid, window: { ...valid.window, complete: "true" } },
+    { ...valid, omittedLessonCount: -1 }, { ...valid, lessons: [null] },
+    { ...valid, lessons: [valid.lessons[0], valid.lessons[0]] },
+    { ...valid, exposureCount: 99 }, { ...valid, recurrenceCount: 99 }, { ...valid, observedRecurrenceRate: 0 },
+    { ...valid, status: "partial" },
+    ...[ { findingId: "" }, { gate: "" }, { watermarkPr: 0 }, { omittedPrCount: -1 },
+      { exposedPrs: null }, { recurredPrs: null }, { exposedPrs: [9, 9] }, { exposedPrs: [2] },
+      { recurredPrs: [99] }, { recurredPrs: [9, 9] }, { exposureCount: 99 }, { recurrenceCount: 99 },
+    ].map(change => ({ ...valid, lessons: [{ ...valid.lessons[0], ...change }] })),
+  ];
+  for (const value of invalid) assert.equal(readCiLessonExposure(value, exposureWindow.asOf, true).status, "unavailable");
+  const unreadable = readCiLessonExposure(valid, exposureWindow.asOf, false);
+  assert.equal(unreadable.status, "partial");
+  assert.equal(unreadable.observedRecurrenceRate, null);
+  assert.equal(unreadable.exposureCount, 2);
+});
+
+test("exposure refuses invalid observation bounds and keeps old recurrence callers explicitly unmeasured", () => {
+  const efficacy = judgeCiLessonEfficacy(corpus(), [lesson("g", 2)]);
+  const legacy = summarizeCiLessonRecurrences(efficacy, 3);
+  if (legacy.status !== "observed") throw new Error("missing summary");
+  assert.deepEqual(legacy.exposure, { status: "unavailable", reason: "observation-window-missing" });
+  for (const ceiling of [0, 101, 1.5]) assert.throws(() => summarizeCiLessonRecurrences(efficacy, ceiling, exposureWindow), /ceiling/);
+  for (const change of [{ windowStart: "bad" }, { asOf: "bad" }, { windowStart: "2026-10-03T12:00:00Z" }, { prsScanned: -1 }])
+    assert.throws(() => summarizeCiLessonRecurrences(efficacy, 3, { ...exposureWindow, ...change }), /window/);
 });
 const pr = (number: number, commits: CorpusPr["commits"]): CorpusPr => ({ number, commits });
 const run = (name: string, conclusion: string) => ({

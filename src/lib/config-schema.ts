@@ -43,8 +43,10 @@ export interface ModelApproval {
 }
 
 export interface Config {
+  contributorAdmission?: import("./contributor-admission.js").AdmissionSettings;
   claudeBin: string;
   root: string;
+  diskArtifactScanRoots?: string[];
   installRoot?: string;
   zdotdir?: string;
   workerShell?: string;
@@ -57,6 +59,8 @@ export interface Config {
   accessTeamDomain?: string;
   accessAudience?: string;
   notifyRecipient?: string;
+  /** Human GitHub principals authorized to answer escalations; absent preserves personal-owner behavior. */
+  operatorGithubLogins?: string[];
   overflow?: "none" | "api_key";
   /** the cash (Azure) spend ceiling for one UTC day. A PLAIN NUMBER is the whole cap, as
    *  before. A PAIR raises it only on a day the subscriptions are tapped out:
@@ -273,8 +277,30 @@ const workerProvidersShape: ValueSchema = {
 };
 
 export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
+  configField("contributorAdmission", "AdmissionSettings", true, undefined, "config.json", "Opt-in shadow contributor evaluation; no enforcement or production identity defaults.", {
+    kind: "object", fields: [
+      configField("mode", '"shadow"', false, undefined, "config.json", "Observation only.", { kind: "enum", values: ["shadow"] }),
+      configField("disposition", '"shadow"', true, undefined, "config.json", "Opt-in durable shadow disposition; no remote writes.", { kind: "enum", values: ["shadow"] }),
+      configField("repositoryId", "number", false, undefined, "config.json", "Authenticated target repository id.", numberShape),
+      configField("policy", "AdmissionPolicy", false, undefined, "config.json", "Explicit numeric identity policy.", { kind: "object", fields: [
+        configField("version", "string", false, undefined, "config.json", "Policy revision.", stringShape),
+        configField("ownerIds", "number[]", false, undefined, "config.json", "Owner user ids.", { kind: "array", element: numberShape }),
+        configField("organizationIds", "number[]", false, undefined, "config.json", "Admitted organization ids, not operator grants.", { kind: "array", element: numberShape }),
+        configField("maxEvidenceAgeMs", "number", false, undefined, "config.json", "Evidence freshness ceiling.", numberShape),
+        configField("services", "ServiceGrant[]", false, undefined, "config.json", "Action-scoped bot ids.", { kind: "array", element: { kind: "object", fields: [
+          configField("id", "number", false, undefined, "config.json", "Bot id.", numberShape),
+          configField("actions", "AdmissionAction[]", false, undefined, "config.json", "Scoped actions.", { kind: "array", element: { kind: "enum", values: ["review", "repair", "auto-merge", "feedback", "disposition"] } }),
+        ] } }),
+      ] }),
+      configField("organizations", "OrganizationNamespace[]", false, undefined, "config.json", "REST namespaces verified against numeric organization ids.", { kind: "array", element: { kind: "object", fields: [
+        configField("id", "number", false, undefined, "config.json", "Organization id.", numberShape),
+        configField("login", "string", false, undefined, "config.json", "REST organization namespace, never authority alone.", stringShape),
+      ] } }),
+    ],
+  }),
   configField("claudeBin", "string", false, undefined, "config.json", "Absolute path to the real Claude CLI binary.", stringShape),
   configField("root", "string", false, undefined, "config.json", "Workspace root.", stringShape),
+  configField("diskArtifactScanRoots", "string[]", true, "<root>/..", "config.json", "Artifact scan roots, each checked for its own filesystem's free space.", stringArrayShape),
   configField("installRoot", "string", true, "<root>/daemon-install", "config.json", "Daemon git checkout root.", stringShape),
   configField("zdotdir", "string", true, "<root>/../.config/remudero/zdotdir", "config.json", "Worker shell ZDOTDIR.", stringShape),
   configField("workerShell", "string", true, "/bin/bash", "config.json", "Worker Bash-tool shell.", stringShape),
@@ -297,6 +323,7 @@ export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
   configField("accessTeamDomain", "string", true, undefined, "config.json", "Cloudflare Access team domain.", stringShape),
   configField("accessAudience", "string", true, undefined, "config.json", "Cloudflare Access audience tag.", stringShape),
   configField("notifyRecipient", "string", true, "craigoley@gmail.com", "config.json", "Escalation notification recipient.", stringShape),
+  configField("operatorGithubLogins", "string[]", true, undefined, "config.json", "Human GitHub logins allowed to answer escalations; absent preserves repository-owner behavior.", stringArrayShape),
   configField("overflow", '"none" | "api_key"', true, "none", "config.json", "Metered overflow billing mode.", {
     kind: "enum",
     values: ["none", "api_key"],
@@ -365,32 +392,51 @@ export interface EnvRegistryEntry {
 
 export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("REMUDERO_CLAUDE_BIN", "Overrides the Claude binary path for worker spawn tests and diagnostics.", ["src/lib/worker.ts"]),
+  envEntry("REMUDERO_DAEMON_PID", "The daemon main process's pid, inherited by its children so they can read the daemon's memory growth.", ["src/lib/ledger.ts", "src/lib/host-memory-shadow.ts"]),
   envEntry("REMUDERO_DAEMON_PROCESS", "Marks this process as the daemon actor for ledger attribution.", ["src/lib/ledger.ts"]),
   envEntry("REMUDERO_DAILY_COST_CEILING_SHARE_USD", "Sets this instance's share of the daily cost ceiling.", ["src/lib/policy.ts", "src/run-task.ts"]),
   envEntry("REMUDERO_INSTANCE_LABEL", "Labels the instance associated with a configured daily cost ceiling share.", ["src/lib/policy.ts"]),
+  envEntry("REMUDERO_PROCESS_ACTOR", "Identifies daemon, service, or host automation processes for ledger attribution and replay containment.", ["src/lib/ledger.ts", "src/lib/replay-harness.ts"]),
   envEntry("REMUDERO_REVIEWER_LOGIN", "Names the reviewer identity trusted for review ownership checks.", ["src/lib/review.ts"]),
   envEntry("REMUDERO_REVIEWER_TOKEN", "Supplies the reviewer token used for review-side GitHub calls.", ["src/lib/review.ts"]),
   envEntry("REMUDERO_RUN_ID", "Carries run attribution into worker process trees.", ["src/lib/worker-containment.ts", "src/lib/ledger.ts"]),
+  envEntry("REMUDERO_SESSION_ID", "Identifies the session owning a fleet pause request.", ["src/lib/fleet-control.ts"]),
   envEntry("REMUDERO_TASK_ID", "Carries task attribution into worker process trees.", ["src/lib/worker-containment.ts"]),
   envEntry("REMUDERO_WORKER_SCOPE", "Carries worker scope attribution into process trees.", ["src/lib/worker-containment.ts", "src/lib/ledger.ts"]),
   envEntry("RMD_ACCOUNT_FILE_PATH", "Points serve account-usage reads at the operator's account file copy.", ["src/lib/serve.ts"]),
   envEntry("RMD_ALLOW_LIVE_SPAWN", "Opt-in guard for live worker spawn boundaries.", ["src/lib/spawn-guard.ts"]),
   envEntry("RMD_ALLOW_LIVE_WRITES", "Opt-in guard for live write boundaries under tests.", ["src/lib/live-write-guard.ts", "src/run-task.ts"]),
+  envEntry("RMD_SCRATCH_ROOT", "The host scratch root; the local coverage gate puts its scratch there, ahead of a TMPDIR on another volume, when it has the 20 GiB reserve; default /mnt/scratch when it is a mount.", ["src/lib/ci-parity.ts"]),
+  envEntry("RMD_TEST_SLOT_PARENT", "Internal live parent test-slot claim for nested static descendants; directory, nonce, PID, kernel start and ancestry are verified before borrowing admission.", ["src/lib/test-slot.ts"]),
+  envEntry("RMD_TEST_SLOT_DIR", "The directory holding the host-wide test-run slots, shared by every container and the host; default /mnt/scratch/rmd/test-slots on the host, else /tmp/rmd-test-slots.", ["src/lib/test-slot.ts"]),
+  envEntry("RMD_TEST_SLOTS", "How many test-suite runs may hold a host-wide slot at once; default one per four cores.", ["src/lib/test-slot.ts"]),
   envEntry("RMD_TEST_LIVE_DENY_ROOT", "Test-only operator root that ledger writes must never reach; propagated to children.", ["src/lib/live-write-guard.ts", "src/lib/env.ts"]),
   envEntry("RMD_AUTOMATED_RETRO_DECISION", "Carries an automated retro decision into retro subprocess handling.", ["src/lib/retro-subprocess.ts", "src/run-task.ts"]),
   envEntry("RMD_CASH_WEB_SEARCH_API_KEY", "Supplies the daemon's own credential for brokered cash-worker web search; never copied into a worker environment.", ["src/lib/cash-web-bridge.ts"]),
+  envEntry("RMD_CENSUS_SNAPSHOT", "Names the harness git snapshot a fix round's census precheck reads instead of running git (W1-T7182).", ["src/run-task.ts", "src/lib/prompt-render.ts"]),
   envEntry("RMD_FOUNDRY_CLAUDE_API_KEY", "Daemon-only key for the bounded Foundry Opus cash adapter.", ["src/lib/worker-provider.ts"]),
   envEntry("RMD_FOUNDRY_CLAUDE_ENDPOINT", "HTTPS Foundry /anthropic base URL for the bounded Opus cash adapter.", ["src/lib/worker-provider.ts"]),
   envEntry("RMD_FRESHNESS_RESTART_MAX", "Deploy entrypoint knob documented by the containment restart discipline.", ["src/lib/containment.ts"]),
+  envEntry("RMD_GH_CACHE_HOME", "Overrides the cache root for shared GitHub reads and cadence state.", ["src/lib/config.ts", "src/lib/github-transport.ts"]),
   envEntry("RMD_GH_READ_BURST", "Overrides the GitHub read burst this process grants inside the shared cadence floor.", ["src/lib/github-transport.ts"]),
   envEntry("RMD_GH_SHARED_READ_GAP_MS", "Overrides the short cross-process gap between shared GitHub reads; not a second cadence budget window.", ["src/lib/github-transport.ts"]),
+  envEntry("RMD_GH_TRANSPORT_FLOOR", "Selects advisory pacing or enforced refusal for the GitHub transport cadence floor.", ["src/lib/github-transport.ts"]),
   envEntry("RMD_GITHUB_WEBHOOK_SECRET_FILE", "Names the file holding the GitHub webhook secret.", ["src/lib/github-event-wake.ts", "src/lib/serve.ts"]),
+  envEntry("RMD_HARNESS_HOOKS_DIR", "Replaces the harness's own hooks/ dir whose pre-push the host push leaf runs; daemon environment, never worker input.", ["src/lib/worktree-git.ts"]),
   envEntry("RMD_HEADROOM_ENABLED", "Overrides the headroom governor on or off for this process.", ["src/lib/config.ts"]),
+  envEntry("RMD_IDLE_STARVED_SUPERVISED", "Enables supervised idle-starvation handling for a daemon targeting another repository without an explicit plan.", ["src/run-task.ts"]),
+  envEntry("RMD_INSTANCE_REGISTRY", "Path to the daemon instance registry that rmd pause/resume resolve their target instance through (W1-T7727); defaults to the checkout's own registry (daemonInstanceRegistryPath through the repo layout); the deploy shell readers honor the same name.", ["src/run-task.ts"]),
   envEntry("RMD_MAIL_COMMAND", "Overrides the mail command used for notification delivery.", ["src/lib/notify.ts"]),
+  envEntry("RMD_MEASUREMENT_CADENCE_CHILD_CONFIG", "Carries the daemon's Config as JSON to the measurement-cadence child so it measures the daemon's root, never $HOME's.", ["src/lib/measurement-cadence.ts"]),
   envEntry("RMD_OPENWEIGHT_API_KEY", "Supplies the Azure API key to the daemon-local open-weight adapter; it is never copied into a worker environment.", ["src/lib/worker-provider.ts"]),
   envEntry("RMD_OPERATOR_IDENTITY_PATH", "Names the read-only mounted file holding serve's operator identity when config.json has none.", ["src/lib/operator-identity-file.ts"]),
+  envEntry("RMD_OPERATOR_MCP_URL", "Selects the existing control-server origin used by the operator MCP bridge.", ["src/lib/operator-mcp.ts"]),
+  envEntry("RMD_PREPUSH_GATES", "Disarms hooks/pre-push only when exactly \"0\"; the one daemon variable the host push gate's allowlisted env keeps.", ["src/lib/git-push.ts"]),
+  envEntry("RMD_PROVIDER_AUTH_PROFILES", "Supplies the server-side JSON catalog of provider authentication profiles.", ["src/lib/provider-auth-sessions.ts"]),
   envEntry("RMD_READ_MODEL_DB_DIR", "Maps one state dir to the directory holding its read-model DB files as <stateDir>:<dir>; set by deploy/scratch-mounts.sh.", ["src/lib/read-model-db.ts"]),
   envEntry("RMD_RESTART_THROTTLE_S", "Documents restart throttling excluded from proof environments.", ["src/lib/review.ts"]),
+  envEntry("RMD_RESOURCE_POLICY_CONTAINER", "Selects the container checked for deployed resource policy and mount drift.", ["src/lib/deployer.ts"]),
+  envEntry("RMD_RESOURCE_POLICY_ROLE", "Selects the serve or build resource policy for deployment checks.", ["src/lib/deployer.ts"]),
   envEntry("RMD_SELF_SYNC_DONE", "Guards CLI self-sync re-exec loops.", ["src/lib/self-sync.ts", "src/lib/commit-message.ts", "src/run-task.ts"]),
   envEntry("RMD_SERVE_HOST", "Overrides operator console bind hosts.", ["src/lib/serve.ts", "src/lib/launchd.ts", "src/run-task.ts"]),
   envEntry("RMD_SERVE_GENS_DIR", "Names the directory holding the serve supervisor's two generation slots and its handoff.off switch.", ["src/lib/serve-supervisor-main.ts"]),
@@ -400,6 +446,9 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_SERVE_NETWORK", "Declares container-network context for serve wildcard binds.", ["src/lib/serve.ts"]),
   envEntry("RMD_SERVE_READY_SOCKET", "Names the private unix socket a supervised standby serve answers readiness on.", ["src/lib/serve-generation.ts"]),
   envEntry("RMD_SERVE_ROLE", "Set to standby by the serve supervisor so serve warms and waits for promotion before binding its port.", ["src/lib/serve-generation.ts"]),
+  envEntry("RMD_SRE_LANE", "Opts a daemon instance into running the SRE lane.", ["src/run-task.ts"]),
+  envEntry("RMD_TASK_PRECONDITION_READ", "Set to 1 on a task precondition read subprocess so a nested precondition check refuses as recursive-read instead of spawning again.", ["src/lib/plan.ts"]),
+  envEntry("RMD_WORKER_EGRESS", "Selects the worker egress mode when the spawn arguments do not specify one.", ["src/lib/worker.ts"]),
   envEntry("RMD_WORKER_HOME_DIR", "Maps one config root to the directory holding its worker homes as <root>:<dir>; set by deploy/scratch-mounts.sh.", ["src/lib/config.ts"]),
 ];
 

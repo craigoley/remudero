@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: found by scripts/mount-headroom-sweep.mjs"
   plan_refs: [W1-T4100, W1-T4923]
   files: [src/lib/ledger.ts, test/the-ledger-flags-a-row-stamped-in-the-future.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

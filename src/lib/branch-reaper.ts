@@ -25,6 +25,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isLandingRef } from "./feedback-landing.js";
 import type { Clock } from "./clock.js";
+import { runStepsSync, step, type Steps } from "./git-push.js";
+
+export type BranchReapExec = (cmd: string, args: string[]) => string | Promise<string>;
 
 /**
  * The declared guard list (W1-T447) — branches the fleet must never delete, DECLARED so the
@@ -70,7 +73,11 @@ export function isDeclaredBranchGuard(name: string, declaredGuards: readonly str
 
 /** Every remote branch name, newest-agnostic — `git ls-remote --heads`, parsed. */
 export function remoteBranchNames(exec: (cmd: string, args: string[]) => string): string[] {
-  return exec("git", ["ls-remote", "--heads", "origin"])
+  return runStepsSync(remoteBranchNamesSteps(exec));
+}
+
+export function* remoteBranchNamesSteps(exec: BranchReapExec): Steps<string[]> {
+  return (yield* step(() => exec("git", ["ls-remote", "--heads", "origin"])))
     .split("\n")
     .map((l) => l.split("refs/heads/")[1])
     .filter((n): n is string => Boolean(n && n.trim()))
@@ -329,9 +336,13 @@ export function parseRemoteBranchTips(raw: string): Map<string, RemoteBranchTip>
  *  namespace resolves to an EMPTY map — every name reads "no local tip", the same conservative
  *  reading a single ref's own resolve failure already produced. */
 export function readRemoteBranchTips(exec: (cmd: string, args: string[]) => string): Map<string, RemoteBranchTip> {
+  return runStepsSync(readRemoteBranchTipsSteps(exec));
+}
+
+export function* readRemoteBranchTipsSteps(exec: BranchReapExec): Steps<Map<string, RemoteBranchTip>> {
   let raw: string;
   try {
-    raw = exec("git", ["for-each-ref", `--format=${REMOTE_BRANCH_TIP_FORMAT}`, "refs/remotes/origin"]);
+    raw = yield* step(() => exec("git", ["for-each-ref", `--format=${REMOTE_BRANCH_TIP_FORMAT}`, "refs/remotes/origin"]));
   } catch {
     return new Map(); // an unreadable local ref namespace — every name reads "no local tip"
   }
@@ -345,9 +356,13 @@ export function readRemoteBranchTips(exec: (cmd: string, args: string[]) => stri
  *  and therefore all-false — merged set: that collapse is the exact §6 defect W1-T2246 fixed for
  *  the per-branch read, and a batched read must not reintroduce it. */
 export function readTipInMainMembership(exec: (cmd: string, args: string[]) => string): Set<string> | undefined {
+  return runStepsSync(readTipInMainMembershipSteps(exec));
+}
+
+export function* readTipInMainMembershipSteps(exec: BranchReapExec): Steps<Set<string> | undefined> {
   let raw: string;
   try {
-    raw = exec("git", ["for-each-ref", "--format=%(refname:short)", "--merged=origin/main", "refs/remotes/origin"]);
+    raw = yield* step(() => exec("git", ["for-each-ref", "--format=%(refname:short)", "--merged=origin/main", "refs/remotes/origin"]));
   } catch {
     return undefined; // the ancestry read itself failed (e.g. an unresolvable origin/main) —
     // "cannot determine", never an empty (and therefore all-false) merged set
@@ -392,6 +407,15 @@ export function readNamedInSource(
   root?: string,
   onFailure?: (why: string) => void,
 ): Set<string> {
+  return runStepsSync(readNamedInSourceSteps(exec, names, root, onFailure));
+}
+
+export function* readNamedInSourceSteps(
+  exec: BranchReapExec,
+  names: readonly string[],
+  root?: string,
+  onFailure?: (why: string) => void,
+): Steps<Set<string>> {
   const found = new Set<string>();
   if (names.length === 0) return found;
   const roots = ["src/", "scripts/", "deploy/", ".github/"].filter((p) => root === undefined || existsSync(join(root, p)));
@@ -401,9 +425,9 @@ export function readNamedInSource(
   args.push("--", ...roots);
   let raw: string;
   try {
-    raw = exec("git", args);
+    raw = yield* step(() => exec("git", args));
   } catch (err) {
-    if ((err as { status?: unknown }).status === 1) return found; // git grep exits 1 on no match anywhere — a real "nothing named", not a failure
+    if (((err as { status?: unknown }).status ?? (err as { code?: unknown }).code) === 1) return found; // sync status and async code both identify git grep's no-match exit
     onFailure?.(String((err as Error)?.message ?? err));
     return new Set(names);
   }
@@ -619,6 +643,14 @@ export function pruneDeletableBranches(
   exec: (cmd: string, args: string[]) => string,
   opts: { readonly chunkSize?: number } = {},
 ): BranchPruneOutcome {
+  return runStepsSync(pruneDeletableBranchesSteps(manifest, exec, opts));
+}
+
+export function* pruneDeletableBranchesSteps(
+  manifest: readonly BranchManifestEntry[],
+  exec: BranchReapExec,
+  opts: { readonly chunkSize?: number } = {},
+): Steps<BranchPruneOutcome> {
   const chunkSize = Math.max(1, opts.chunkSize ?? 25);
   const deleted: string[] = [];
   const skipped: { name: string; reason: string }[] = [];
@@ -636,7 +668,7 @@ export function pruneDeletableBranches(
   for (let i = 0; i < deletable.length; i += chunkSize) {
     const chunk = deletable.slice(i, i + chunkSize);
     try {
-      exec("git", ["push", "origin", "--delete", ...chunk.map((e) => e.name)]);
+      yield* step(() => exec("git", ["push", "origin", "--delete", ...chunk.map((e) => e.name)]));
       for (const e of chunk) deleted.push(e.name);
     } catch (err) {
       // The whole chunk survives: git applies a rejected push atomically per invocation, so naming

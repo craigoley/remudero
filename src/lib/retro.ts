@@ -3,8 +3,9 @@
  *  into a plan-only PR: generation deterministic here, publication with the gate and the human. */
 
 import { fixDispatchCountsAttributed } from "./workflow-mining.js";
-import { execFileSync } from "node:child_process";
-import { ghExec } from "./github-transport.js";
+import { hostWorktreeGit } from "./worktree-git.js";
+import { ghExec, ghTextAsync, type GhAsyncExecutor } from "./github-transport.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 // Import the DEFAULT export so a test's `t.mock.method` can intercept the marker's reads and
 // writes: named `node:fs` bindings are non-configurable and mocking one throws (W1-T207).
 import fsMarker from "node:fs";
@@ -22,7 +23,8 @@ import {
   type PlanCoherenceFinding,
   type PlanCoherenceShardEntry,
 } from "./plan-coherence.js";
-import type { Task } from "./plan.js";
+import { parseTasksFromYaml, type Task, type SymptomQuery } from "./plan.js";
+import { systemClock } from "./clock.js";
 import { findExportDefinition, isExportReachable } from "./reachability.js";
 import { REPLAY_RESULT_STEP } from "./replay.js";
 import { utcWeekWindowMs } from "./time-window.js";
@@ -30,7 +32,8 @@ import { DEFAULT_TASK_CLASS } from "./task-class.js";
 import { lintTask, type LintOpts, type LintViolation } from "./task-linter.js";
 import type { QuestionEntry } from "./worker.js";
 import { renderSkillDraft, renderSkillDrafts, type SkillDraft } from "./skill-workshop.js";
-import { openLedgerUnion } from "./ledger-union.js";
+import { notionalSpendUsd } from "./spend-rows.js";
+import { openLedgerUnion, readLedgerUnionRawLinesSync, realLedgerFs, type LedgerGrepFsDeps } from "./ledger-union.js";
 import { closureByClass, guardFireCounts, renderClosureByClass, renderGuardFireCounts, type ClassClosure, type GuardFireCount } from "./retro-closure.js";
 
 /** One parsed ledger line (superset of ledger.ts LedgerLine, as read back). */
@@ -163,6 +166,10 @@ export async function readRetroLedgerNdjson(
   // occurrence takes ownership instead of an old copy being evicted later while the newer one was
   // already forgotten.
   const retained = new Map<string, number>();
+  // Keep one live insertion-order cursor. Restarting entries() for every eviction repeatedly
+  // walks deleted slots on a long stream. Never advance an empty map: a completed iterator would
+  // not observe later insertions. Duplicate delete+set remains a move to the newest position.
+  const oldestRows = retained.entries();
   let bytes = 0;
   let droppedRows = 0;
   let droppedBytes = 0;
@@ -187,7 +194,7 @@ export async function readRetroLedgerNdjson(
     // order, so survivors are newest. One oversized row still survives by itself: an empty map
     // ends the loop, then takes the row, with no spin.
     while (retained.size > 0 && (bytes + cost > maxBytes || retained.size >= maxRows)) {
-      const oldest = retained.entries().next().value as [string, number];
+      const oldest = oldestRows.next().value as [string, number];
       retained.delete(oldest[0]);
       bytes -= oldest[1];
       droppedRows += 1;
@@ -281,6 +288,9 @@ export interface RunSummary {
   startTs: string;
   verdict: string;
   costUsd: number;
+  /** W1-T5526: `none` when no verdict line and no worker row priced the run — its 0 is unknown, not free.
+   *  W1-T5664: also `none` when a codex verdict or worker row carries no notional price. */
+  costSource?: "none";
   numTurns: number;
   prUrl?: string;
   /** The ledger-claimed PR url a `correction.provenance` line overrode; `prUrl` above is always
@@ -310,6 +320,7 @@ export interface RunSummary {
   verdictSource?: "ledger-credit";
   observedVerdict?: string;
   creditTs?: string;
+  mergeTs?: string;
   creditMatch?: "pr_url" | "task_id";
   /** W1-T4711: its verdict row {@link isNeverWorkedVerdict} — a run, but no sample of its class. */
   neverWorked?: true;
@@ -392,7 +403,22 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
     const outputTokens = lines
       .filter((l) => l.step && DONE_STEPS.has(l.step))
       .reduce((s, l) => s + outputTokensOf(l), 0);
-    const costLine = verdictLine ?? lines.find((l) => typeof l.cost_usd === "number");
+    // W1-T5526: with no verdict line, the worker's own DONE_STEPS rows price the run — never a probe,
+    // cost.anomaly, risk_judge or budget.warning row, which came first on every live settled run.
+    // W1-T5664: a codex row's cash is 0 by construction, so it is priced at its notional; an
+    // unpriced codex row leaves the run unknown (`costSource: "none"`), never a free run.
+    const workerCostRows = lines.filter(
+      (l) => l.step && DONE_STEPS.has(l.step) &&
+        (l.provider === "codex" || typeof l.cost_usd === "number" || typeof l.total_cost_usd === "number"),
+    );
+    const workerCosts = workerCostRows.map((l) => (l.provider === "codex" ? notionalSpendUsd(l) : costOf(l)));
+    const price = verdictLine
+      ? verdictLine.provider === "codex" ? notionalSpendUsd(verdictLine)
+        : typeof verdictLine.cost_usd === "number" ? verdictLine.cost_usd : 0
+      : workerCostRows.length > 0 && workerCosts.every((c) => c !== undefined)
+        ? workerCosts.reduce((s: number, c) => s + (c ?? 0), 0)
+        : undefined;
+    const costUsd = price ?? 0;
     const prLine =
       lines.find((l) => l.step === "pr.opened") ?? verdictLine ?? lines.find((l) => l.pr_url);
     const claimedPrUrl = typeof prLine?.pr_url === "string" ? prLine.pr_url : undefined;
@@ -401,13 +427,16 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
     const prUrl = correctedUrl ?? claimedPrUrl;
     const observedVerdict = String(verdictLine?.verdict ?? "incomplete");
     const credit = ledgerCreditFor(credits, observedVerdict, prUrl, taskId);
+    const mergeTs = credit?.row.ts ?? (observedVerdict === "merged" ? verdictLine?.ts : undefined);
     runs.push({
       runId,
       taskId,
       type: String(start.type ?? "unknown"),
       startTs: String(start.ts ?? ""),
       verdict: credit ? "merged" : observedVerdict,
-      costUsd: typeof costLine?.cost_usd === "number" ? costLine.cost_usd : 0,
+      ...(typeof mergeTs === "string" ? { mergeTs } : {}),
+      costUsd,
+      ...(price === undefined ? { costSource: "none" as const } : {}),
       numTurns,
       outputTokens,
       prUrl,
@@ -674,8 +703,19 @@ export const GITHUB_THROTTLE_REFUSAL_RE = /rate limit|secondary rate|abuse detec
  *       `source: github` on a census built from three refused fetches. W1-T3132.
  */
 export function probeGithubThrottle(run: ThrottleProbeRun = defaultThrottleProbeRun): string | undefined {
-  // (1) the primary buckets, unchanged in behaviour.
-  const buckets = run(["api", "rate_limit", "--jq", ".rate.remaining"]);
+  return throttleFromBuckets(run(THROTTLE_BUCKETS_ARGS)) ?? throttleFromLiveCall(run(THROTTLE_LIVE_ARGS));
+}
+
+/** {@link probeGithubThrottle} through awaited, bounded `gh`: the same two calls, in order, judged the same way. */
+export async function probeGithubThrottleAsync(run: ThrottleProbeRunAsync = throttleProbeRunAsync()): Promise<string | undefined> {
+  return throttleFromBuckets(await run(THROTTLE_BUCKETS_ARGS)) ?? throttleFromLiveCall(await run(THROTTLE_LIVE_ARGS));
+}
+
+const THROTTLE_BUCKETS_ARGS = ["api", "rate_limit", "--jq", ".rate.remaining"];
+const THROTTLE_LIVE_ARGS = ["api", "user", "--jq", ".login"];
+
+/** (1) the primary buckets: a failed read or an exhausted bucket names the throttle; otherwise undefined. */
+function throttleFromBuckets(buckets: ReturnType<ThrottleProbeRun>): string | undefined {
   if (!buckets.ok) {
     return `gh rate_limit probe failed: ${buckets.stderr || "unknown error"}`;
   }
@@ -683,14 +723,38 @@ export function probeGithubThrottle(run: ThrottleProbeRun = defaultThrottleProbe
   if (Number.isFinite(remaining) && remaining <= 0) {
     return "GitHub API rate limit exhausted (0 remaining)";
   }
-  // (2) the call the buckets cannot speak for. ONLY a refusal that NAMES rate limiting counts: a
-  // 404, a network drop or a permissions error is a different condition and keeps whatever handling
-  // it has, rather than being relabelled a throttle.
-  const live = run(["api", "user", "--jq", ".login"]);
+  return undefined;
+}
+
+/** (2) the call the buckets cannot speak for. ONLY a refusal that NAMES rate limiting counts: a 404, a network drop
+ *  or a permissions error is a different condition and keeps whatever handling it has, rather than being relabelled
+ *  a throttle. */
+function throttleFromLiveCall(live: ReturnType<ThrottleProbeRun>): string | undefined {
   if (!live.ok && GITHUB_THROTTLE_REFUSAL_RE.test(live.stderr)) {
     return `GitHub is refusing calls as rate-limited while /rate_limit still reports quota (secondary limit): ${live.stderr.slice(0, 200)}`;
   }
   return undefined;
+}
+
+/** {@link ThrottleProbeRun}, awaited. */
+export type ThrottleProbeRunAsync = (args: readonly string[]) => Promise<ReturnType<ThrottleProbeRun>>;
+
+/** BACKSTOP per probe call: the sync probe's own default `gh` bound, so it fires only on a hung `gh`. */
+export const GITHUB_THROTTLE_PROBE_TIMEOUT_MS = 60_000;
+
+/** The real {@link ThrottleProbeRunAsync}: `gh` off the event loop through {@link ghTextAsync} (paced, SIGTERM then
+ *  SIGKILL past its bound). A call killed at its bound fails NAMING the timeout, so the probe reads it as unavailable. */
+export function throttleProbeRunAsync(opts: { timeoutMs?: number; execAsync?: GhAsyncExecutor } = {}): ThrottleProbeRunAsync {
+  const timeoutMs = opts.timeoutMs ?? GITHUB_THROTTLE_PROBE_TIMEOUT_MS;
+  return async (args) => {
+    try {
+      return { ok: true, stdout: await ghTextAsync([...args], { timeout: timeoutMs }, opts.execAsync), stderr: "" };
+    } catch (e) {
+      const err = e as { killed?: boolean; stderr?: string; message?: string };
+      if (err.killed) return { ok: false, stdout: "", stderr: `gh ${args.slice(0, 2).join(" ")} timed out after ${timeoutMs}ms and was killed` };
+      return { ok: false, stdout: "", stderr: String(err.stderr ?? err.message ?? "").trim() };
+    }
+  };
 }
 
 /** One credited SHIPPED entry — either a ledger-native merge or a GitHub-discovered gate-side merge. */
@@ -701,6 +765,7 @@ export interface ShippedRecord {
   costUsd: number;
   numTurns: number;
   source: "ledger" | "github";
+  mergeTs?: string;
   /** Present ONLY for a GitHub-discovered or ledger-credited merge whose run did NOT observe verdict=merged. */
   annotation?: string;
 }
@@ -709,7 +774,7 @@ export interface ShippedRecord {
  *  branch for the P9 ownership assert — run-task.ts's `PrHeadGateway` shape at the READ side. */
 export interface ShippedGithub {
   /** Find a MERGED PR whose body contains `Remudero-Task: <taskId>`. null if none. */
-  findMergedByTrailer(taskId: string): { number: number; url: string } | null;
+  findMergedByTrailer(taskId: string): { number: number; url: string; mergedAt?: string } | null;
   /** The PR's head branch name, or undefined if it cannot be resolved. */
   headRefName(prUrl: string): string | undefined;
   /** DEGRADE LOUDLY (W1-T132): a known-throttled or erroring gateway returns a reason NAMING it,
@@ -728,24 +793,53 @@ export interface ShippedResult {
   discrepancies: string[];
 }
 
-/** UNION ledger-merged runs with GitHub-derived merged, `Remudero-Task`-trailered PRs, scoped to
- *  runs started strictly after `sinceTs` (W1-T51). A ledger-ABSENT merge is credited with source
- *  "github" and annotated `gate-side merge; run ended <verdict>`.
- *
- *  P9 OWNERSHIP ASSERT: before crediting ANY merge, the PR's `headRefName` must equal the claiming
- *  run's OWN branch ({@link ownBranchOf}). A stale or foreign trailer is REJECTED and named in
- *  `discrepancies` — never silently dropped, never silently trusted. `runs` already carries the
- *  correction override, so the assert checks the truth. Why: docs/forensics/retro.md. */
+/** UNION ledger and GitHub merges by merge time, regardless of run start (W1-T5113).
+ *  P9 ownership still requires the credited PR's head to match the run's own branch.
+ *  Missing merge times are named, never replaced with a run start to scope a credit. */
 export function shippedSince(
   runs: RunSummary[],
   sinceTs: string | undefined,
   github: ShippedGithub,
 ): ShippedResult {
-  const scoped = sinceTs ? runs.filter((r) => r.startTs > sinceTs) : runs;
   const shipped: ShippedRecord[] = [];
   const discrepancies: string[] = [];
+  const sinceMs = sinceTs ? Date.parse(sinceTs) : undefined;
+  // W1-T5649: CANDIDATES ARE SELECTED LOCALLY, BEFORE ANY GATEWAY CALL. Every gateway call below can
+  // spawn `gh` on the daemon's event loop, so the work is bounded by candidates, never by history.
+  // The trailer dates are read lazily, once, off the local `git log`.
+  let trailerMergeAt: Map<string, { ms: number; iso: string }> | undefined;
+  const trailerMergeOf = (taskId: string): { ms: number; iso: string } | undefined => {
+    if (trailerMergeAt === undefined) {
+      trailerMergeAt = new Map();
+      let commits: GitLogCommit[] = [];
+      try {
+        commits = github.mergedCommits?.() ?? [];
+      } catch (error) {
+        const reason = `merged-commit read failed — only runs started after the marker are candidates: ${String(error)}`;
+        discrepancies.push(reason);
+      }
+      for (const c of commits) {
+        const id = RETRO_TRAILER_RE.exec(c.message)?.[1];
+        const ms = Date.parse(c.date);
+        if (id && Number.isFinite(ms) && ms > (trailerMergeAt.get(id)?.ms ?? -Infinity)) trailerMergeAt.set(id, { ms, iso: c.date });
+      }
+    }
+    return trailerMergeAt.get(taskId);
+  };
+  const isCandidate = (r: RunSummary): boolean => {
+    if (sinceMs === undefined || !Number.isFinite(sinceMs)) return true;
+    if (r.verdict === "merged") {
+      const ts = r.mergeTs ?? r.creditTs;
+      // An unknown merge time stays a candidate so it is NAMED below rather than dropped silently.
+      return ts === undefined || !Number.isFinite(Date.parse(ts)) || Date.parse(ts) > sinceMs;
+    }
+    if (r.startTs > (sinceTs as string)) return true;
+    const merged = trailerMergeOf(r.taskId);
+    return merged !== undefined && merged.ms > sinceMs;
+  };
 
-  for (const r of scoped) {
+  for (const r of runs) {
+    if (!isCandidate(r)) continue;
     const ownBranch = ownBranchOf(r.runId);
     if (r.verdict === "merged") {
       if (!r.prUrl) {
@@ -760,6 +854,12 @@ export function shippedSince(
         );
         continue;
       }
+      const mergeTs = r.mergeTs ?? r.creditTs;
+      if (sinceTs && (mergeTs === undefined || !Number.isFinite(Date.parse(mergeTs)))) {
+        discrepancies.push(`${r.taskId} (${r.runId}): ledger merge time is unknown — cannot credit this window`);
+        continue;
+      }
+      if (sinceTs && !(Date.parse(mergeTs!) > Date.parse(sinceTs))) continue;
       shipped.push({
         taskId: r.taskId,
         runId: r.runId,
@@ -767,6 +867,7 @@ export function shippedSince(
         costUsd: r.costUsd,
         numTurns: r.numTurns,
         source: "ledger",
+        ...(mergeTs !== undefined ? { mergeTs } : {}),
         ...(r.verdictSource === "ledger-credit" ? { annotation: ledgerCreditAnnotation(r) } : {}),
       });
     } else {
@@ -780,6 +881,14 @@ export function shippedSince(
         );
         continue;
       }
+      // The merge time is the gateway's own `mergedAt` or the local trailer commit's date, never a
+      // per-PR `gh pr view` spawn (W1-T5649).
+      const mergeTs = pr.mergedAt ?? (sinceTs ? trailerMergeOf(r.taskId)?.iso : undefined);
+      if (sinceTs && (mergeTs === undefined || !Number.isFinite(Date.parse(mergeTs)))) {
+        discrepancies.push(`${r.taskId} (${r.runId}): merge time is unknown for ${pr.url} — cannot credit this window`);
+        continue;
+      }
+      if (sinceTs && !(Date.parse(mergeTs!) > Date.parse(sinceTs))) continue;
       shipped.push({
         taskId: r.taskId,
         runId: r.runId,
@@ -787,6 +896,7 @@ export function shippedSince(
         costUsd: r.costUsd,
         numTurns: r.numTurns,
         source: "github",
+        ...(mergeTs !== undefined ? { mergeTs } : {}),
         annotation: `gate-side merge; run ended ${r.verdict}`,
       });
       discrepancies.push(
@@ -799,12 +909,40 @@ export function shippedSince(
   return { shipped, discrepancies };
 }
 
+/** A gateway read {@link shippedSinceAsync} must await before {@link shippedSince} can answer: thrown by an awaitable
+ *  gateway in place of a blocking read. `load` performs it; the walk then re-runs over the loaded answers. */
+export class ShippedReadPending extends RmdError {
+  constructor(readonly load: () => Promise<void>) {
+    super("github", GENERIC_EXIT_CODE, "a shipped-since gateway read is pending");
+  }
+}
+
+/** An awaited shipped-since read killed at its bound. NAMED, never success-shaped: the trigger declines with it. */
+export class ShippedReadTimeoutError extends RmdError {
+  constructor(message: string) {
+    super("github", GENERIC_EXIT_CODE, message);
+  }
+}
+
+/** {@link shippedSince}, awaited: the ONE body, re-run after each {@link ShippedReadPending} load until the gateway
+ *  answers from memory. A gateway that never throws one (every sync fixture) is walked exactly once. */
+export async function shippedSinceAsync(runs: RunSummary[], sinceTs: string | undefined, github: ShippedGithub): Promise<ShippedResult> {
+  for (;;) {
+    try {
+      return shippedSince(runs, sinceTs, github);
+    } catch (error) {
+      if (!(error instanceof ShippedReadPending)) throw error;
+      await error.load();
+    }
+  }
+}
+
 function ledgerCreditAnnotation(r: RunSummary): string {
   return `ledger-credited gate-side merge (verdictSource=ledger-credit, matched by ${r.creditMatch ?? "pr_url"}); run observed ${r.observedVerdict ?? "unknown"}`;
 }
 
 export function ledgerCreditDiscrepancies(runs: RunSummary[], sinceTs: string | undefined): string[] {
-  const scoped = sinceTs ? runs.filter((r) => r.startTs > sinceTs) : runs;
+  const scoped = sinceTs ? runs.filter((r) => r.creditTs !== undefined && Date.parse(r.creditTs) > Date.parse(sinceTs)) : runs;
   return scoped
     .filter((r) => r.verdictSource === "ledger-credit")
     .map((r) => {
@@ -814,11 +952,13 @@ export function ledgerCreditDiscrepancies(runs: RunSummary[], sinceTs: string | 
     });
 }
 
-/** The ledger-only fallback when no gateway is wired: `mergedSince` crediting, no unverified claim. */
-function ledgerOnlyShipped(merged: RunSummary[]): ShippedRecord[] {
-  return merged
-    .filter((r): r is RunSummary & { prUrl: string } => typeof r.prUrl === "string")
-    .map((r) => ({ taskId: r.taskId, runId: r.runId, prUrl: r.prUrl, costUsd: r.costUsd, numTurns: r.numTurns, source: "ledger" as const }));
+/** The ledger-only fallback credits merges by merge time, with no GitHub ownership claim. */
+function ledgerOnlyShipped(runs: RunSummary[], sinceTs?: string): ShippedRecord[] {
+  return runs
+    .filter((r): r is RunSummary & { prUrl: string } => r.verdict === "merged" && typeof r.prUrl === "string" &&
+      (!sinceTs || (r.mergeTs !== undefined && Date.parse(r.mergeTs) > Date.parse(sinceTs))))
+    .map((r) => ({ taskId: r.taskId, runId: r.runId, prUrl: r.prUrl, costUsd: r.costUsd, numTurns: r.numTurns, source: "ledger" as const,
+      ...(r.mergeTs !== undefined ? { mergeTs: r.mergeTs } : {}) }));
 }
 
 // ── W1-T2288: the retro TRIGGER's merges beyond shippedSince's reach ─────────
@@ -926,6 +1066,9 @@ export interface LaneSpend {
   /** Sum of each row's `cost_usd`, falling back to `total_cost_usd` — {@link gatherRuns}'s own
    *  precedence. NOTIONAL, API-equivalent price on a subscription install, never billed spend. */
   costUsd: number;
+  /** W1-T5629: codex rows with no notional price (no `notional_cost_usd`), so `costUsd` omits them rather than
+   *  reading them as $0. Absent when every row was priced. */
+  unpricedRows?: number;
   /** The most recent `ts` this lane's rows carried; absent only when the lane logged none. */
   newestTs?: string;
   models: LaneModelShare[];
@@ -1018,8 +1161,17 @@ export function runModelIndex(records: LedgerRecord[]): Map<string, string> {
 function laneSpendOf(lane: string, step: string, rows: LedgerRecord[], byRun: ReadonlyMap<string, string>): LaneSpend {
   const models = new Map<string, { rows: number; viaRun: number }>();
   let newestTs: string | undefined;
+  let costUsd = 0;
+  let unpricedRows = 0;
   for (const r of rows) {
-    const own = ownModelOf(r);
+    // W1-T5629: a codex row's `cost_usd` is a hard 0 and its `model` the requested alias; its price is its notional,
+    // and the model that ran is its `routed_model`.
+    const codex = r.provider === "codex";
+    const cost = codex ? notionalSpendUsd(r) : costOf(r);
+    if (cost === undefined) unpricedRows += 1;
+    else costUsd += cost;
+    const routed = codex && typeof r.routed_model === "string" && r.routed_model.length > 0 ? r.routed_model : undefined;
+    const own = routed ?? ownModelOf(r);
     const joined = own === undefined && typeof r.run_id === "string" ? byRun.get(r.run_id) : undefined;
     const model = own ?? joined ?? UNATTRIBUTED_MODEL;
     const cell = models.get(model) ?? { rows: 0, viaRun: 0 };
@@ -1032,7 +1184,8 @@ function laneSpendOf(lane: string, step: string, rows: LedgerRecord[], byRun: Re
     lane,
     step,
     rows: rows.length,
-    costUsd: round(rows.reduce((s, r) => s + costOf(r), 0)),
+    costUsd: round(costUsd),
+    ...(unpricedRows > 0 ? { unpricedRows } : {}),
     ...(newestTs !== undefined ? { newestTs } : {}),
     models: [...models.entries()]
       .map(([model, c]) => ({ model, rows: c.rows, ...(c.viaRun > 0 ? { viaRun: c.viaRun } : {}) }))
@@ -1108,7 +1261,8 @@ function laneSpendRow(l: LaneSpend): string {
   const models = l.models.length
     ? l.models.map((m) => `${m.model}×${m.rows}${m.viaRun ? ` (${m.viaRun} via run join)` : ""}`).join(", ")
     : "(no rows)";
-  return `| ${l.lane} (\`${l.step}\`) | ${l.rows} | $${l.costUsd.toFixed(2)} | ${l.newestTs ?? "(none)"} | ${models} |`;
+  const unpriced = l.unpricedRows ? ` (+${l.unpricedRows} unpriced)` : "";
+  return `| ${l.lane} (\`${l.step}\`) | ${l.rows} | $${l.costUsd.toFixed(2)}${unpriced} | ${l.newestTs ?? "(none)"} | ${models} |`;
 }
 
 /** Render the lane table — Architect lanes first, in the SAME row shape, so the share is legible. */
@@ -1803,7 +1957,7 @@ export function buildGather(opts: {
   const merged = mergedSince(runs, opts.sinceTs);
   const union = opts.github
     ? shippedSince(runs, opts.sinceTs, opts.github)
-    : { shipped: ledgerOnlyShipped(merged), discrepancies: [] as string[] };
+    : { shipped: ledgerOnlyShipped(runs, opts.sinceTs), discrepancies: [] as string[] };
   const shipped = union.shipped;
   const discrepancies = [...union.discrepancies, ...ledgerCreditDiscrepancies(runs, opts.sinceTs)];
   // Checked ONCE, after the union runs so a healthy union still gets full credit: a reason here
@@ -1817,6 +1971,21 @@ export function buildGather(opts: {
   // matching candidate in the gather would be a procedure the gather never actually observed.
   const proceduralCandidates = mineProceduralCandidates(merged, records);
   const failedReviewFeedback = failedReviewFeedbackForRuns(scoped, records);
+  const followups = mineFollowups(followupRecords, opts.openTitles ?? []);
+  const planCoherence = planCoherenceRung(
+    opts.planCoherence?.monolith ?? { path: "plan/tasks.yaml", text: "" },
+    opts.planCoherence?.shards ?? { ok: false,
+      reason: "buildGather's opts.planCoherence was not supplied (no caller has wired plan/tasks.yaml + plan/tasks.d/ reads in yet)" },
+  );
+  if (planCoherence.kind !== "unexamined" && opts.planCoherence?.shards.ok && opts.github) {
+    const blobs = [opts.planCoherence.monolith, ...opts.planCoherence.shards.entries];
+    const tasks = blobs.flatMap(({ path, text }) => {
+      const raw = parseYaml(text) as unknown[];
+      return parseTasksFromYaml(JSON.stringify(raw.filter((entry) => entry !== null &&
+        typeof entry === "object" && "symptom_query" in entry)), path);
+    });
+    if (tasks.length > 0) followups.fixRemeasurement = { tasks, github: opts.github, now: opts.now ?? systemClock.now() };
+  }
   return {
     sinceTs: opts.sinceTs,
     totalRuns: scoped.length,
@@ -1856,7 +2025,7 @@ export function buildGather(opts: {
     taskDefectCounts: taskDefectCounts(scoped, mapping, mergeState),
     // The FULL ledger, never `scoped`: a followup must survive past the marker window, and
     // W1-T1013 makes "full" the archive ∪ live union, because rotation truncates the live file.
-    followups: mineFollowups(followupRecords, opts.openTitles ?? []),
+    followups,
     // FULL `records`: a LIFETIME figure truncated to one cycle is not a lifetime figure (D-10).
     mutationGateLifetime: mutationGateLifetime(records),
     // `opts.sinceTs`-scoped, unlike `mutationGateLifetime`: W1-T165 asks for a per-cycle figure.
@@ -1865,14 +2034,8 @@ export function buildGather(opts: {
     architectLaneShare: architectLaneShare(records),
     // UNCONDITIONAL, never gated on `opts.planCoherence`. The `{ ok: false, reason }` default
     // renders `unexamined` with a stated reason, never a silent omission or a bare zero (P48).
-    planCoherence: planCoherenceRung(
-      opts.planCoherence?.monolith ?? { path: "plan/tasks.yaml", text: "" },
-      opts.planCoherence?.shards ?? {
-        ok: false,
-        reason: "buildGather's opts.planCoherence was not supplied (no caller has wired plan/tasks.yaml + plan/tasks.d/ reads in yet)",
-      },
-    ),
-    closureByClass: closureByClass(scoped, shipped, opts.openTaskClasses ?? [], opts.sinceTs),
+    planCoherence,
+    closureByClass: closureByClass(runs, shipped, opts.openTaskClasses ?? [], opts.sinceTs),
     guardFireCounts: guardFireCounts(scoped, mapping, opts.sinceTs, { fallbackRows: GUARD_REASON_FALLBACK_ROWS, priorZeroStreak: opts.priorGuardZeroStreak }),
   };
 }
@@ -2685,6 +2848,101 @@ export interface FollowupHarvest {
   candidates: FollowupCandidate[];
   deduped: FollowupCandidate[];
   harvestLines: LedgerLine[];
+  fixRemeasurement?: { tasks: Task[]; github: ShippedGithub; now: number };
+}
+
+// Equal windows around merge compare event counts; 1–7 days is the task's observation window.
+const FIX_REMEASURE_DAY_MS = 86_400_000;
+
+function readFixCorpus(stateDir: string, query: SymptomQuery, from: number, merged: number, now: number,
+  deps: Parameters<typeof recordFollowupHarvest>[1]): { rows: Array<{ row: LedgerRecord; matched: boolean }>; reason?: string } {
+  const fs = deps.symptomFs ?? realLedgerFs;
+  const problems = new Set<string>();
+  const pattern = new RegExp(query.pattern);
+  let horizon = false, afterControl = false, retainedRows = 0, bytes = 0;
+  const read = readLedgerUnionRawLinesSync(stateDir, {
+    since: msToIso(from), requireArchives: true, refuseIncomplete: true,
+    keep: (line) => {
+      let row: LedgerRecord;
+      try { row = JSON.parse(line) as LedgerRecord; }
+      catch (error) {
+        const reason = `malformed-row: ${String(error)}`;
+        problems.add(reason);
+        return false;
+      }
+      const ts = typeof row?.ts === "string" ? Date.parse(row.ts) : Number.NaN;
+      if (!Number.isFinite(ts) || ts > now) { problems.add("invalid-or-future-timestamp"); return false; }
+      if (ts <= from) horizon = true;
+      if (ts >= merged) afterControl = true;
+      if (ts < from || (row.step !== "fix.remeasured" && !pattern.test(line))) return false;
+      bytes += Buffer.byteLength(line);
+      retainedRows++;
+      // PRIMARY CONTROL: a broad symptom query cannot retain more than the retro's existing budgets.
+      if (retainedRows > (deps.maxFixRows ?? RETRO_LEDGER_MAX_ROWS) || bytes > (deps.maxFixBytes ?? RETRO_LEDGER_MAX_BYTES)) {
+        problems.add("retention-budget"); return false;
+      }
+      return true;
+    },
+  }, { ...fs, readFileSync: (path) => {
+    try { return fs.readFileSync(path); }
+    catch (error) { problems.add(`unreadable-ledger: ${String(error)}`); throw error; }
+  } });
+  if (!read.ok || !read.liveFileRead || read.unclassified.length > 0) problems.add("incomplete-ledger-corpus");
+  if (!horizon || !afterControl) problems.add("window-positive-control-missing");
+  return { rows: read.rawLines.map((line) => ({ row: JSON.parse(line) as LedgerRecord, matched: pattern.test(line) })),
+    ...(problems.size > 0 ? { reason: [...problems].sort().join("; ") } : {}) };
+}
+
+function remeasureFixes(harvest: FollowupHarvest, deps: Parameters<typeof recordFollowupHarvest>[1]): void {
+  const context = harvest.fixRemeasurement;
+  if (context === undefined) return;
+  const write = deps.writeLedger ?? appendLedger;
+  const report = deps.reportFix ?? ((message: string) => console.log(message));
+  for (const task of context.tasks) {
+    const query = task.symptom_query;
+    if (query === undefined) continue;
+    try {
+      const unavailable = context.github.unavailable?.();
+      if (unavailable !== undefined) throw new Error(unavailable);
+      const pr = context.github.findMergedByTrailer(task.id);
+      if (pr === null) continue;
+      const raw = deps.readMergedPr ? deps.readMergedPr(pr.url) : JSON.parse(ghExec([
+        "pr", "view", pr.url, "--json", "state,mergedAt,body,headRefName",
+      ], { encoding: "utf8" }));
+      const receipt = raw as { state?: string; mergedAt?: string; body?: string; headRefName?: string } | null;
+      if (receipt?.state !== "MERGED" || typeof receipt.mergedAt !== "string" ||
+        !(receipt.body?.split("\n").some((line) => line.trim() === `Remudero-Task: ${task.id}`) ||
+          receipt.headRefName?.startsWith(`run-${task.id}-`))) throw new Error("PR merge identity is not confirmed");
+      // expiring-fixture: exempt -- merge fixtures age against the injected retro clock, fixed in tests.
+      const merged = Date.parse(receipt.mergedAt);
+      if (!Number.isFinite(merged)) throw new Error("PR merge timestamp is invalid");
+      const age = context.now - merged;
+      if (age < FIX_REMEASURE_DAY_MS || age > 7 * FIX_REMEASURE_DAY_MS) continue;
+      const key = JSON.stringify([task.repo, task.id, pr.url, receipt.mergedAt, query]);
+      const corpus = readFixCorpus(dirname(deps.ledgerPath), query, merged - age, merged, context.now, deps);
+      if (corpus.reason !== undefined) throw new Error(corpus.reason);
+      if (corpus.rows.some(({ row }) => row.step === "fix.remeasured" && row.key === key)) continue;
+      let before = 0, after = 0;
+      for (const { row, matched } of corpus.rows) {
+        if (row.step === "fix.remeasured" || row.step === "fix.unmeasured" || !matched) continue;
+        if (Date.parse(row.ts!) < merged) before++; else after++;
+      }
+      const moved = query.direction === "decrease" ? after < before : after > before;
+      const observation: LedgerLine = { run_id: `RETRO-${context.now}`, task_id: task.id, step: "fix.remeasured",
+        task: task.id, repo: task.repo, before, after, moved, key, pr_url: pr.url, merged_at: receipt.mergedAt,
+        ts: msToIso(context.now), symptom_query: query, window_ms: age };
+      write(deps.ledgerPath, observation);
+      const text = `${task.id}: symptom ${before} -> ${after} (${query.direction}); ${moved ? "worked" : "unmoved"}`;
+      report(`[retro] ${text}`);
+      if (!moved) harvest.candidates.push({ entryId: `fix:${key}`, type: "task", taskId: task.id,
+        runId: observation.run_id, prUrl: pr.url, text: `Investigate another remedy for ${text}` });
+    } catch (error) {
+      const reason = String((error as Error)?.message ?? error);
+      write(deps.ledgerPath, { run_id: `RETRO-${context.now}`, task_id: task.id, task: task.id,
+        step: "fix.unmeasured", reason, ts: msToIso(context.now) });
+      report(`[retro] ${task.id}: symptom unmeasured (${reason})`);
+    }
+  }
 }
 
 /** Significant words only (>=3 chars), so "a"/"is"/"to" noise cannot inflate overlap. */
@@ -2840,9 +3098,16 @@ export function mineFollowups(records: LedgerRecord[], openTitles: string[] = []
 
 /** Append every {@link FollowupHarvest.harvestLines} entry so a later {@link mineFollowups} pass
  *  mints neither the candidate nor the dedup match again. Invoked ONLY on a real retro. */
-export function recordFollowupHarvest(harvest: FollowupHarvest, deps: LedgerWriterDeps): void {
+export function recordFollowupHarvest(harvest: FollowupHarvest, deps: LedgerWriterDeps & {
+  readMergedPr?: (url: string) => unknown;
+  reportFix?: (message: string) => void;
+  symptomFs?: LedgerGrepFsDeps;
+  maxFixRows?: number;
+  maxFixBytes?: number;
+}): void {
   const writeLedger = deps.writeLedger ?? appendLedger;
   for (const line of harvest.harvestLines) writeLedger(deps.ledgerPath, line);
+  remeasureFixes(harvest, deps);
 }
 
 /** Render the follow-up harvest — every line a CANDIDATE citing its origin verbatim, never an
@@ -3933,7 +4198,7 @@ function defaultFreshShardTextReader(worktreePath: string): (relPath: string) =>
     if (!fetchAttempted) {
       fetchAttempted = true;
       try {
-        execFileSync("git", ["-C", worktreePath, "fetch", "--quiet", "origin", "main"], { stdio: "pipe" });
+        hostWorktreeGit(worktreePath, ["fetch", "--quiet", "origin", "main"]);
         fetchOk = true;
       } catch {
         fetchOk = false;
@@ -3941,7 +4206,7 @@ function defaultFreshShardTextReader(worktreePath: string): (relPath: string) =>
     }
     if (!fetchOk) return undefined;
     try {
-      return execFileSync("git", ["-C", worktreePath, "show", `origin/main:${relPath}`], { encoding: "utf8" });
+      return hostWorktreeGit(worktreePath, ["show", `origin/main:${relPath}`]);
     } catch {
       return undefined; // e.g. a brand-new shard not yet on origin/main
     }
@@ -4032,18 +4297,16 @@ export function stampCitationsAndCommit(opts: {
     }
   }
   if (touchedRelPaths.length === 0) return { committed: false, stampedIds: [...stampedIds], refused };
-  execFileSync("git", ["-C", opts.worktreePath, "add", ...touchedRelPaths]);
+  // W1-T6122: the Architect worker wrote this worktree, so every git call below is the leaf's.
+  hostWorktreeGit(opts.worktreePath, ["add", ...touchedRelPaths]);
   try {
-    execFileSync("git", ["-C", opts.worktreePath, "diff", "--cached", "--quiet"]);
+    hostWorktreeGit(opts.worktreePath, ["diff", "--cached", "--quiet"]);
     // exit 0 ⇒ nothing staged ⇒ content is unchanged from HEAD; nothing to commit.
     return { committed: false, stampedIds: [...stampedIds], refused };
   } catch {
     // non-zero ⇒ staged changes exist ⇒ commit them as their own, clearly-labeled commit.
-    execFileSync("git", ["-C", opts.worktreePath, "commit", "-m", opts.commitMessage ?? CITATION_STAMP_COMMIT_MESSAGE]);
-    const diff = execFileSync("git", ["-C", opts.worktreePath, "show", "--stat=200", "-p", "HEAD"], {
-      encoding: "utf8",
-      maxBuffer: 1 << 24,
-    });
+    hostWorktreeGit(opts.worktreePath, ["commit", "-m", opts.commitMessage ?? CITATION_STAMP_COMMIT_MESSAGE]);
+    const diff = hostWorktreeGit(opts.worktreePath, ["show", "--stat=200", "-p", "HEAD"], { maxBuffer: 1 << 24 });
     return { committed: true, stampedIds: [...stampedIds], refused, diff };
   }
 }

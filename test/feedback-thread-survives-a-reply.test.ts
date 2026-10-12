@@ -11,6 +11,7 @@ import { buildPanelGraphRoutes, buildSubmitFeedbackRoute, type PanelGraphDeps, t
 import { captureFeedback, listFeedback, readFeedbackEntry, setFeedbackStatus, type FeedbackEntry } from "../src/lib/feedback.js";
 import type { TraceGithub, TracePrView } from "../src/lib/trace.js";
 import type { GitHub } from "../src/lib/status.js";
+import { landQueuedFeedback } from "./helpers/land-queued-feedback.js";
 
 // ── W1-T2278: a reply is a new item, and the link back to what it answers must be a durable ────
 // field, not only prose inside the reply's own text ─────────────────────────────────────────
@@ -133,7 +134,8 @@ test("a reply carries reply_to as a field, and the answered entry carries answer
   assert.equal(target.status, "answered");
   assert.notEqual(target.status, "grilling");
 
-  // A thread is enumerable end to end via listFeedback too -- no bespoke reader needed.
+  // A thread is enumerable end to end via listFeedback too, once the sweep lands the reply (W1-T5628).
+  landQueuedFeedback(root, root);
   const all = listFeedback(root);
   const reply = all.find((e) => e.id === replyId)!;
   const question = all.find((e) => e.id === parked.id)!;
@@ -160,6 +162,7 @@ test("a second replyTo at an already-answered entry is refused, naming 'answered
   });
 
   // The second attempt must not have filed anything or re-parented the target.
+  landQueuedFeedback(root, root);
   const target = readFeedbackEntry(root, parked.id);
   const all = listFeedback(root);
   const answers = all.filter((e) => e.reply_to === parked.id);

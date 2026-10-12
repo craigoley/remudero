@@ -1,9 +1,8 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { resolve } from "node:path";
-// Type-only: erased at runtime, so daemon.ts stays a one-way dependency and keeps its
-// filesystem-free purity even though this module shells out to git.
-import type { DaemonFreshness } from "./daemon.js";
+import { fileURLToPath } from "node:url";
 // Why: a deliberate runtime (not type-only) import. treeFfSafe is deployer.ts's own dirty-vs-
 // incoming predicate, reused here rather than re-derived, at the accepted cost of widening this
 // module's (and so the whole CLI's) startup import graph. Falsifier: a second intersection of
@@ -45,13 +44,31 @@ export const SELF_SYNC_GUARD_ENV = "RMD_SELF_SYNC_DONE";
  * hand-rolled double that could drift from real git's behavior.
  */
 export { fetchOriginRetryingRefLock, type GitRunner } from "./git-fetch-retry.js";
-import { fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, type AsyncGitRunner, type GitRunner } from "./git-fetch-retry.js";
+import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, killAfterGrace, type AsyncGitRunner, type GitRunner } from "./git-fetch-retry.js";
+import { systemClock, type Clock } from "./clock.js";
+import { isTestRunner } from "./live-write-guard.js";
 
-function asyncGit(repoDir: string, options: { maxBuffer?: number } = {}): AsyncGitRunner {
-  return (args) =>
+/** The real {@link AsyncGitRunner}: `git -C <repoDir>` off the loop, killed (SIGTERM, then SIGKILL
+ *  after grace) when its bound aborts. Exported for the retro trigger merged-commits read. */
+export function asyncGit(repoDir: string, options: { maxBuffer?: number } = {}): AsyncGitRunner {
+  return (args, signal, env) =>
     new Promise((resolve, reject) => {
-      execFile("git", ["-C", repoDir, ...args], { encoding: "utf8", ...options }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+      const child = execFile("git", ["-C", repoDir, ...args], { encoding: "utf8", ...options, signal, env }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+      signal?.addEventListener("abort", () => killAfterGrace(child), { once: true });
     });
+}
+
+const inFlightFreshnessFetches = new Map<string, Promise<void>>();
+
+function fetchFreshnessMain(repoDir: string, deps: SelfSyncDeps, options: { maxBuffer?: number } = {}): Promise<void> {
+  const fetchMain = () => fetchOriginRetryingRefLockAsync(deps.gitAsync ?? asyncGit(repoDir, options), undefined, undefined, deps.fetchTimeoutMs, "main");
+  if (deps.gitAsync) return fetchMain();
+  const key = resolve(repoDir);
+  const existing = inFlightFreshnessFetches.get(key);
+  if (existing) return existing;
+  const flight = fetchMain().finally(() => { inFlightFreshnessFetches.delete(key); });
+  inFlightFreshnessFetches.set(key, flight);
+  return flight;
 }
 
 export interface SelfSyncDeps {
@@ -69,6 +86,9 @@ export interface SelfSyncDeps {
   reexec?: () => void;
   ignoreReentrancyGuard?: boolean;
   gitAsync?: AsyncGitRunner;
+  fetchTimeoutMs?: number; // W1-T5282: the awaited fetch's bound; defaults to `GATEWAY_FETCH_TIMEOUT_MS`
+  recentFetchFallback?: boolean; // W1-T6033: the reviewer opts in; the daemon's per-tick read would only wait twice
+  clock?: Clock; // W1-T6033: the clock a recent-fetch ref's age is read against; defaults to `systemClock`
   /**
    * W1-T486: one ledger-shaped line per distinct refusal reason per process, no-op by default.
    * Carries `reason` and the two shas already in `warn()`'s message, plus a dirty-path `count`
@@ -121,6 +141,13 @@ function alreadySelfSynced(env: NodeJS.ProcessEnv | Record<string, string | unde
   return env[SELF_SYNC_GUARD_ENV] === "1" || process.env[SELF_SYNC_GUARD_ENV] === "1";
 }
 
+const OWN_CHECKOUT = fileURLToPath(new URL("../../", import.meta.url));
+const canonicalPath = (path: string): string => (existsSync(path) ? realpathSync(path) : resolve(path));
+
+export function testRunnerOnItsOwnCheckout(repoDir: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  return isTestRunner(env) && canonicalPath(repoDir) === canonicalPath(OWN_CHECKOUT);
+}
+
 /**
  * The W1-T79 entry-point freshness check. Compares local HEAD to `origin/main` in `repoDir`
  * and reacts per the contract in the module doc above; read-only except on `"synced"` (a real
@@ -145,6 +172,9 @@ export function checkCliFreshness(
     // without this guard every CI invocation would exit 1 on its own normal PR checkout.
     return { status: "guarded" };
   }
+  if (deps.git === undefined && testRunnerOnItsOwnCheckout(repoDir)) {
+    return { status: "guarded" };
+  }
 
   const git: GitRunner =
     deps.git ?? ((args) => execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8" }));
@@ -154,9 +184,8 @@ export function checkCliFreshness(
   const log = deps.log ?? (() => {});
 
   try {
-    // Same call shape as W1-T60's syncPlanFromOrigin: `git fetch --quiet origin` only ever
-    // moves remote-tracking refs, never the working tree or local branches.
-    fetchOriginRetryingRefLock(git);
+    // The freshness refspec updates only origin/main, never the working tree or local branches.
+    fetchOriginRetryingRefLock(git, undefined, undefined, "main");
   } catch (err) {
     return { status: "degraded", reason: `git fetch origin failed in ${repoDir}: ${String(err)}` };
   }
@@ -409,6 +438,7 @@ export type ServiceFreshness =
   | {
       status: "assessed";
       dirty: boolean;
+      dirty_paths?: string[];
       // What the advance touched; `undefined` means unreadable, which reads as material (W1-T2964).
       behind: {
         oldSha: string;
@@ -418,7 +448,9 @@ export type ServiceFreshness =
         changes?: AdvanceCommit[];
         logUnreadable?: string;
       } | null;
-    };
+    } & RecentFetchMark;
+
+export type RecentFetchMark = { source?: "recent-fetch"; refAgeMs?: number }; // W1-T6033: set only when a recent ref stood in
 
 export interface AdvanceCommit {
   sha: string;
@@ -477,14 +509,14 @@ export function checkServiceFreshness(
 
   const git = serviceGit(repoDir, deps);
   try {
-    fetchOriginRetryingRefLock(git);
+    fetchOriginRetryingRefLock(git, undefined, undefined, "main");
   } catch (err) {
     return { status: "degraded", reason: `git fetch origin failed in ${repoDir}: ${String(err)}` };
   }
   return assessFetchedService(repoDir, git);
 }
 
-/** The same check with the network fetch awaited: a sync one stalled the daemon loop 49 s (E36). */
+/** The same check with fetch and local assessment awaited: a sync fetch stalled the loop 49 s (E36). */
 export async function checkServiceFreshnessAsync(
   repoDir: string,
   env: NodeJS.ProcessEnv | Record<string, string | undefined>,
@@ -492,16 +524,103 @@ export async function checkServiceFreshnessAsync(
 ): Promise<ServiceFreshness> {
   if (!deps.ignoreReentrancyGuard && alreadySelfSynced(env)) return { status: "guarded" };
   if (isCiEnv(env)) return { status: "guarded" };
+  const fetchMain = () => fetchFreshnessMain(repoDir, deps);
   try {
-    await fetchOriginRetryingRefLockAsync(deps.gitAsync ?? asyncGit(repoDir));
+    await fetchMain();
   } catch (err) {
-    return { status: "degraded", reason: `git fetch origin failed in ${repoDir}: ${String(err)}` };
+    const reason = `git fetch origin failed in ${repoDir}: ${String(err)}`;
+    if (!deps.recentFetchFallback || !isStalledHandshake(err)) return { status: "degraded", reason };
+    return retryStalledHandshake(repoDir, deps, fetchMain, reason);
   }
-  return assessFetchedService(repoDir, serviceGit(repoDir, deps));
+  return assessFetchedServiceAsync(repoDir, serviceGitAsync(repoDir, deps));
+}
+
+const DAEMON_POLL_INTERVAL_MS = 60_000;
+/** W1-T6033 BACKSTOP: the oldest origin/main update that may stand in for two stalled fetches. Derived from the
+ *  daemon's freshness cadence: a healthy view is at most one poll interval (DEFAULT_POLL_INTERVAL_MS, inlined to keep
+ *  the baked closure; the test pins parity) plus one fetch bound old, and this check has spent two more bounds. */
+export const RECENT_FETCH_MAX_AGE_MS = DAEMON_POLL_INTERVAL_MS + 3 * GATEWAY_FETCH_TIMEOUT_MS;
+
+function isStalledHandshake(error: unknown): boolean {
+  const message = String(error);
+  return / exceeded its \d+ms bound /.test(message) && /last trace2 region: fetch\/remote_refs;|still running: [^;]*remote-https/.test(message);
+}
+
+async function retryStalledHandshake(repoDir: string, deps: SelfSyncDeps, fetchMain: () => Promise<void>, reason: string): Promise<ServiceFreshness> {
+  const git = serviceGitAsync(repoDir, deps);
+  try {
+    await fetchMain();
+    return await assessFetchedServiceAsync(repoDir, git);
+  } catch (retryErr) {
+    const failed = `${reason}; retried once: ${String(retryErr)}`;
+    let updated: RegExpExecArray | null;
+    try {
+      updated = /@\{(\d+)\}$/.exec((await git(["reflog", "show", "-n1", "--date=unix", "--format=%gd", "refs/remotes/origin/main"])).trim());
+    } catch (error) {
+      return { status: "degraded", reason: `${failed}; could not read origin/main's reflog: ${String(error)}` };
+    }
+    if (!updated) return { status: "degraded", reason: `${failed}; origin/main has no reflog entry` };
+    const refAgeMs = (deps.clock ?? systemClock).now() - Number(updated[1]) * 1000;
+    if (refAgeMs < 0 || refAgeMs > RECENT_FETCH_MAX_AGE_MS) {
+      return { status: "degraded", reason: `${failed}; origin/main was last updated ${refAgeMs} ms ago, outside ${RECENT_FETCH_MAX_AGE_MS} ms` };
+    }
+    const assessed = await assessFetchedServiceAsync(repoDir, git);
+    return assessed.status === "assessed" ? { ...assessed, source: "recent-fetch", refAgeMs } : assessed;
+  }
 }
 
 function serviceGit(repoDir: string, deps: SelfSyncDeps): GitRunner {
   return deps.git ?? ((args) => execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8" }));
+}
+
+function serviceGitAsync(repoDir: string, deps: SelfSyncDeps): AsyncGitRunner {
+  const localOverride = deps.git;
+  return localOverride ? async (args) => localOverride(args) : asyncGit(repoDir);
+}
+
+async function assessFetchedServiceAsync(repoDir: string, git: AsyncGitRunner): Promise<ServiceFreshness> {
+  let headSha: string;
+  let originSha: string;
+  try {
+    headSha = (await git(["rev-parse", "HEAD"])).trim();
+    originSha = (await git(["rev-parse", "origin/main"])).trim();
+  } catch (err) {
+    return { status: "degraded", reason: `could not resolve HEAD/origin/main in ${repoDir}: ${String(err)}` };
+  }
+  const dirty_paths = (await git(["status", "--porcelain", "-uno"])).split("\n").filter(Boolean).map((line) => line.slice(3));
+  const dirty = dirty_paths.length > 0;
+  if (headSha === originSha) return { status: "assessed", dirty, ...(dirty ? { dirty_paths } : {}), behind: null };
+  let changedPaths: string[] | undefined;
+  let diffUnreadable: string | undefined;
+  try {
+    changedPaths = (await git(["diff", "--name-only", `${headSha}..${originSha}`]))
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+  } catch (err) {
+    const unreadable = err instanceof Error ? err.message : String(err);
+    diffUnreadable = unreadable;
+  }
+  let changes: AdvanceCommit[] | undefined;
+  let logUnreadable: string | undefined;
+  try {
+    changes = parseAdvanceCommits(await git(["log", "--format=%x1e%H%x1f%s", "--name-only", `${headSha}..${originSha}`]));
+  } catch (err) {
+    const unreadable = err instanceof Error ? err.message : String(err);
+    logUnreadable = unreadable;
+  }
+  return {
+    status: "assessed",
+    dirty,
+    ...(dirty ? { dirty_paths } : {}),
+    behind: {
+      oldSha: headSha,
+      newSha: originSha,
+      changedPaths,
+      diffUnreadable,
+      ...(changes ? { changes } : { logUnreadable }),
+    },
+  };
 }
 
 function assessFetchedService(repoDir: string, git: GitRunner): ServiceFreshness {
@@ -519,8 +638,9 @@ function assessFetchedService(repoDir: string, git: GitRunner): ServiceFreshness
   // intersecting against the incoming diff, as `checkCliFreshness` above does for a different
   // reason, W1-T446) can only ever PERMIT a restart the entrypoint can complete, never one it
   // would refuse. Why: docs/forensics/self-sync.md#checkservicefreshness-the--uno-alignment.
-  const dirty = git(["status", "--porcelain", "-uno"]).trim().length > 0;
-  if (headSha === originSha) return { status: "assessed", dirty, behind: null };
+  const dirty_paths = git(["status", "--porcelain", "-uno"]).split("\n").filter(Boolean).map((line) => line.slice(3));
+  const dirty = dirty_paths.length > 0;
+  if (headSha === originSha) return { status: "assessed", dirty, ...(dirty ? { dirty_paths } : {}), behind: null };
   // WHAT the advance touched, not merely THAT it happened (W1-T2964): `undefined` when unreadable,
   // which `advanceIsMaterial` treats as material, so a degraded read never suppresses a restart.
   let changedPaths: string[] | undefined;
@@ -548,6 +668,7 @@ function assessFetchedService(repoDir: string, git: GitRunner): ServiceFreshness
   return {
     status: "assessed",
     dirty,
+    ...(dirty ? { dirty_paths } : {}),
     behind: {
       oldSha: headSha,
       newSha: originSha,
@@ -559,45 +680,49 @@ function assessFetchedService(repoDir: string, git: GitRunner): ServiceFreshness
 }
 
 /**
- * {@link ServiceFreshness} → {@link DaemonFreshness}: the adapter behind `DaemonDeps.checkFreshness`.
+ * The service freshness adapter behind `DaemonDeps.checkFreshness`.
  * Not {@link checkCliFreshness}, which cannot answer this on a container — it refuses a detached
  * HEAD (how the daemon boots) with no sha pair, and it mutates, which a daemon must never do.
  *
- * Every non-`assessed` status maps to `{ stale: false }`: "I could not tell" is never a restart
- * trigger. A dirty tree is also never stale — entrypoint.sh refuses to sync one, so a restarted
- * container would come back on the same sha and loop (the relaunch storm `DaemonStopReason`'s doc
- * forbids). `installNeeded` stays unset: `serviceFreshnessGate` already installs on every boot.
+ * Unassessed and dirty trees never trigger a restart: entrypoint.sh refuses to sync dirty trees.
+ * A material dirty advance still reports behind evidence, so its age counts when it becomes clean.
+ * `installNeeded` stays unset: `serviceFreshnessGate` already installs on every boot.
  * Why: docs/forensics/self-sync.md#daemonfreshnessfromservice.
  */
-export function daemonFreshnessFromService(svc: ServiceFreshness): DaemonFreshness {
-  if (svc.status === "guarded") return { stale: false, notStale: { arm: "unassessed", serviceStatus: "guarded" } };
+export function daemonFreshnessFromService(svc: ServiceFreshness) {
+  if (svc.status === "guarded") return { stale: false, notStale: { arm: "unassessed", serviceStatus: "guarded" } } as const;
   if (svc.status === "degraded") {
-    return { stale: false, notStale: { arm: "unassessed", serviceStatus: "degraded", detail: svc.reason } };
+    return { stale: false, notStale: { arm: "unassessed", serviceStatus: "degraded", detail: svc.reason } } as const;
   }
   if (svc.dirty) {
     return {
       stale: false,
       notStale: {
         arm: "dirty",
+        behind: svc.behind !== null && advanceIsMaterial(svc.behind.changedPaths),
+        // PRIMARY CONTROL: match the live-edit ladder's 20-path ledger display bound.
+        ...(svc.dirty_paths ? { dirty_paths: svc.dirty_paths.slice(0, 20) } : {}),
         ...(svc.behind ? { oldSha: svc.behind.oldSha, newSha: svc.behind.newSha } : {}),
+        ...(svc.behind?.changes ? { changes: svc.behind.changes } : {}),
       },
-    };
+    } as const;
   }
-  if (!svc.behind) return { stale: false, notStale: { arm: "up_to_date" } };
+  if (!svc.behind) return { stale: false, notStale: { arm: "up_to_date" } } as const;
   // An advance that cannot change this process's module graph is no reason to replace it (W1-T2964).
   if (!advanceIsMaterial(svc.behind.changedPaths)) {
     return {
       stale: false,
       notStale: { arm: "immaterial", oldSha: svc.behind.oldSha, newSha: svc.behind.newSha },
-    };
+    } as const;
   }
   const { oldSha, newSha, changes } = svc.behind;
-  return { stale: true, oldSha, newSha, ...(changes ? { changes } : {}) };
+  const stale = { stale: true, oldSha, newSha, ...(changes ? { changes } : {}) } as const;
+  return stale as typeof stale & { installNeeded?: boolean };
 }
 
 export type ReviewerCodeFreshness =
-  | { status: "fresh"; codeSha: string; originMainSha: string; advance: "none" | "immaterial" }
-  | { status: "stale"; codeSha: string; originMainSha: string; changedPaths?: string[]; diffUnreadable?: string }
+  | ({ status: "fresh"; codeSha: string; originMainSha: string; advance: "none" | "immaterial" } & RecentFetchMark)
+  | ({ status: "stale"; codeSha: string; originMainSha: string; changedPaths?: string[]; diffUnreadable?: string } & RecentFetchMark)
   | { status: "unreadable"; reason: string };
 
 export interface ReviewerCodeFreshnessOptions {
@@ -609,6 +734,31 @@ export interface ReviewerCodeFreshnessOptions {
 }
 
 const REVIEWER_GIT_MAX_BUFFER = 256 * 1024 * 1024; // run-task.ts > 1 MiB
+
+export const REVIEWER_FRESHNESS_PROBE_TIMEOUT_MS = 5_000; // BACKSTOP: a hung re-probe must release the sweep
+
+export async function probeReviewerCodeFreshnessAsync(
+  loadedCodeSha: string | undefined,
+  deps: ReviewerCodeFreshnessOptions & { repoDir?: string; timeoutMs?: number } = {},
+): Promise<ReviewerCodeFreshness> {
+  if (!loadedCodeSha) return { status: "unreadable", reason: "loaded reviewer code sha is unavailable" };
+  if (!/^[a-f0-9]{40,64}$/i.test(loadedCodeSha)) {
+    return { status: "unreadable", reason: "loaded reviewer code sha is malformed" };
+  }
+  const repoDir = deps.repoDir ?? fileURLToPath(new URL("../../", import.meta.url));
+  let remote: string;
+  try {
+    remote = await boundGitCall(deps.gitAsync ?? asyncGit(repoDir),
+      ["ls-remote", "origin", "refs/heads/main"], deps.timeoutMs ?? REVIEWER_FRESHNESS_PROBE_TIMEOUT_MS);
+  } catch (error) {
+    return { status: "unreadable", reason: `reviewer freshness ls-remote failed: ${String(error)}` };
+  }
+  const match = /^([a-f0-9]{40,64})\trefs\/heads\/main$/i.exec(remote.trim());
+  if (!match) return { status: "unreadable", reason: "ls-remote returned no unambiguous main ref" };
+  const originMainSha = match[1];
+  if (loadedCodeSha === originMainSha) return { status: "fresh", codeSha: loadedCodeSha, originMainSha, advance: "none" };
+  return reviewerMainAdvance(reviewerGit(repoDir, deps), loadedCodeSha, originMainSha);
+}
 
 function reviewerGit(repoDir: string, deps: ReviewerCodeFreshnessOptions): GitRunner {
   const options = { encoding: "utf8", stdio: "pipe", maxBuffer: REVIEWER_GIT_MAX_BUFFER } as const;
@@ -651,7 +801,7 @@ function reviewerMainAdvance(
 function checkGuardedReviewerCodeFreshness(repoDir: string, deps: ReviewerCodeFreshnessOptions): ReviewerCodeFreshness {
   const git = reviewerGit(repoDir, deps);
   try {
-    fetchOriginRetryingRefLock(git);
+    fetchOriginRetryingRefLock(git, undefined, undefined, "main");
   } catch (error) {
     return { status: "unreadable", reason: `git fetch origin failed in ${repoDir}: ${String(error)}` };
   }
@@ -660,7 +810,7 @@ function checkGuardedReviewerCodeFreshness(repoDir: string, deps: ReviewerCodeFr
 
 async function checkGuardedReviewerCodeFreshnessAsync(repoDir: string, deps: ReviewerCodeFreshnessOptions): Promise<ReviewerCodeFreshness> {
   try {
-    await fetchOriginRetryingRefLockAsync(deps.gitAsync ?? asyncGit(repoDir, { maxBuffer: REVIEWER_GIT_MAX_BUFFER }));
+    await fetchFreshnessMain(repoDir, deps, { maxBuffer: REVIEWER_GIT_MAX_BUFFER });
   } catch (error) {
     return { status: "unreadable", reason: `git fetch origin failed in ${repoDir}: ${String(error)}` };
   }
@@ -691,6 +841,7 @@ function guardedReviewerAfterFetch(repoDir: string, git: GitRunner): ReviewerCod
 export const REVIEW_MATERIAL_ADVANCE_PATHS = [
   // the verdict itself: rubric, keyword floor, proof parsing and execution
   "src/lib/review.ts",
+  "src/lib/reviewer-worktree-lease.ts",
   // runReview's call path; a reviewer only counts the hunks REVIEW_PATH_SYMBOLS_IN_RUN_TASK reaches
   "src/run-task.ts",
   // criteria come from the plan; a loader change can change what is judged
@@ -927,6 +1078,7 @@ export async function checkReviewerCodeFreshnessAsync(
 ): Promise<ReviewerCodeFreshness> {
   const service = await (deps.checkServiceFreshnessAsync ?? checkServiceFreshnessAsync)(repoDir, env, {
     ...(deps.gitAsync ? { gitAsync: deps.gitAsync } : {}),
+    recentFetchFallback: true,
   });
   return reviewerFreshnessFromService(service, repoDir, env, deps, () => checkGuardedReviewerCodeFreshnessAsync(repoDir, deps));
 }
@@ -944,6 +1096,15 @@ function reviewerFreshnessFromService<G extends ReviewerCodeFreshness | Promise<
   }
   if (service.status === "guarded") return guarded();
 
+  const reading = assessedReviewerFreshness(service, repoDir, deps);
+  return service.source && reading.status !== "unreadable" ? { ...reading, source: service.source, refAgeMs: service.refAgeMs } : reading;
+}
+
+function assessedReviewerFreshness(
+  service: Extract<ServiceFreshness, { status: "assessed" }>,
+  repoDir: string,
+  deps: ReviewerCodeFreshnessOptions,
+): ReviewerCodeFreshness {
   if (service.behind) {
     const { oldSha, newSha, changedPaths, diffUnreadable } = service.behind;
     return reviewerMainAdvance(reviewerGit(repoDir, deps), oldSha, newSha, changedPaths, diffUnreadable);

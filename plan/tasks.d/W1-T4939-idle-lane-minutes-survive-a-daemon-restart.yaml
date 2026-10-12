@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-idle-persist-1790782524000 -> plan-idle-persist-1790782524000"
   plan_refs: [W1-T4837]
   files: [src/lib/daemon.ts, src/lib/ledger.ts, src/lib/status-board.ts, test/idle-lane-minutes-survive-a-daemon-restart.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-30: W1-T4837 (idle-lane accounting) runs in the daemon tree, but `rmd ledger-grep lane.idle_summary`

@@ -5,71 +5,105 @@
  */
 import { readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { BroadcastChannel, isMainThread, threadId } from "node:worker_threads";
-import { loadPlan, loadPlanQuarantiningDuplicates, type Plan, type QuarantinedTask } from "./plan.js";
-import { readServePlanAtRef } from "./serve-plan-reload.js";
+import { BroadcastChannel, isMainThread, threadId, workerData } from "node:worker_threads";
+import { systemClock } from "./clock.js";
+import { loadPlan, loadPlanQuarantiningDuplicates, mergePlanBlobsQuarantiningDuplicates, PlanBlobCache, type Plan, type QuarantinedTask } from "./plan.js";
+import { unpackPlanBlobs, type PlanText } from "./serve-plan-reload.js";
 
 type PlanLoad = { plan: Plan; quarantined: QuarantinedTask[] };
 
 /** The commit serve's main thread loaded a plan path from (E43): a generation's working tree never moves, so its
  *  workers follow this instead of their file identity, and answer exactly what the main thread answers. */
 export type PlanPin = { path: string; repoDir: string; ref: string };
+/** W1-T5894: a pin carries the blobs main read at its ref and main's one gitMs, so a thread parses and never runs git. */
+type PinPost = { pin: PlanPin; text?: PlanText; gitMs?: number };
 type PinMessage =
-  | { type: "pin"; pin: PlanPin }
+  | ({ type: "pin" } & PinPost)
   | { type: "ask" }
-  | { type: "adopted"; pin: PlanPin; threadId: number; tasks: number; gitMs?: number; parseMs?: number }
+  | { type: "adopted"; pin: PlanPin; threadId: number; threadRole: string; tasks: number; gitMs?: number; parseMs?: number; parsedBlobs: number; reusedBlobs: number }
   | { type: "adopt_failed"; pin: PlanPin; threadId: number; reason: string };
 type PinLog = (step: string, extra?: Record<string, unknown>) => void;
 
 export const PLAN_PIN_ADOPTED_STEP = "serve.plan_pin_adopted";
 export const PLAN_PIN_ADOPT_FAILED_STEP = "serve.plan_pin_adopt_failed";
 
-const held = new Map<string, { identity: string; load: PlanLoad; pinned?: true }>();
-const published = new Map<string, PlanPin>();
+const held = new Map<string, { identity: string; load: PlanLoad; pinned?: true; ref?: string }>();
+const pending = new Map<string, PinPost>();
+const published = new Map<string, PinPost>();
+const blobCaches = new Map<string, PlanBlobCache>();
 let pinLog: PinLog | undefined;
-let adopting: Promise<void> = Promise.resolve();
 const pinIdentity = (pin: PlanPin): string => `ref:${pin.repoDir}@${pin.ref}`;
 const channel = new BroadcastChannel("remudero-thread-plan-pin");
 channel.unref();
 const post = (message: PinMessage): void => channel.postMessage(message);
+const data = workerData as { kind?: string; lane?: string } | undefined;
+const threadRole = isMainThread ? "main" : data?.kind === "remudero-read-model-views"
+  ? data.lane === "heavy" ? "heavy" : "views"
+  : new Map([
+    ["remudero-read-model", "projector"],
+    ["remudero-read-model-slow-lane", "slow-lane"],
+    ["remudero-console-projection", "console"],
+    ["remudero-board-projection", "board"],
+  ]).get(data?.kind ?? "") ?? "other";
 
-function adopt(pin: PlanPin): Promise<void> {
-  adopting = adopting.then(async () => {
-    const identity = pinIdentity(pin);
-    if (held.get(pin.path)?.identity === identity) return;
-    try {
-      const read = await readServePlanAtRef(pin.repoDir, pin.ref);
-      held.set(pin.path, { identity, load: { plan: read.plan, quarantined: read.quarantined }, pinned: true });
-      post({ type: "adopted", pin, threadId, tasks: read.plan.tasks.length, gitMs: read.gitMs, parseMs: read.parseMs });
-    } catch (err) {
-      post({ type: "adopt_failed", pin, threadId, reason: err instanceof Error ? err.message : String(err) });
-    }
-  });
-  return adopting;
+/** W1-T6278: retain shared text until a reader asks; unread pins supersede without parsing. */
+function receiveThreadPlan(message: PinPost): void {
+  if (held.get(message.pin.path)?.identity === pinIdentity(message.pin)) return;
+  pending.set(message.pin.path, message);
+  held.delete(message.pin.path);
+}
+
+/** What a thread does with a pin: parse the blobs it carries and hold that plan. A pin without blobs, or blobs that do
+ *  not parse, post `adopt_failed` and leave the thread on its previous plan. Exported so the main thread can cover it. */
+export function adoptThreadPlan({ pin, text, gitMs }: PinPost): void {
+  const identity = pinIdentity(pin);
+  if (held.get(pin.path)?.identity === identity) return;
+  try {
+    if (!text) throw new Error(`the pin for ${pin.ref} carried no plan text, and a thread never reads git`);
+    const startedAt = systemClock.now();
+    const cache = blobCaches.get(pin.path) ?? new PlanBlobCache();
+    const read = mergePlanBlobsQuarantiningDuplicates(unpackPlanBlobs(text), cache);
+    blobCaches.set(pin.path, cache);
+    pending.delete(pin.path);
+    held.set(pin.path, { identity, load: { plan: read.plan, quarantined: read.quarantined }, pinned: true, ref: pin.ref });
+    post({ type: "adopted", pin, threadId, threadRole, tasks: read.plan.tasks.length, gitMs, parseMs: systemClock.now() - startedAt, parsedBlobs: cache.parsedBlobs, reusedBlobs: cache.reusedBlobs });
+  } catch (err) {
+    post({ type: "adopt_failed", pin, threadId, reason: err instanceof Error ? err.message : String(err) });
+  }
 }
 
 channel.onmessage = (event: unknown): void => {
   const message = (event as { data: PinMessage }).data;
-  if (message.type === "pin") void adopt(message.pin);
-  else if (message.type === "ask") for (const pin of published.values()) post({ type: "pin", pin });
-  else if (message.type === "adopted") pinLog?.(PLAN_PIN_ADOPTED_STEP, { ...message.pin, threadId: message.threadId, tasks: message.tasks, gitMs: message.gitMs, parseMs: message.parseMs });
+  if (message.type === "pin") receiveThreadPlan(message);
+  else if (message.type === "ask") for (const pinned of published.values()) post({ type: "pin", ...pinned });
+  else if (message.type === "adopted") pinLog?.(PLAN_PIN_ADOPTED_STEP, { ...message.pin, threadId: message.threadId, threadRole: message.threadRole, tasks: message.tasks, gitMs: message.gitMs, parseMs: message.parseMs, parsedBlobs: message.parsedBlobs, reusedBlobs: message.reusedBlobs });
   else pinLog?.(PLAN_PIN_ADOPT_FAILED_STEP, { ...message.pin, threadId: message.threadId, reason: message.reason });
 };
 if (!isMainThread) post({ type: "ask" });
 
-/** The main thread installs the plan it just loaded at `pin` and tells every thread to load that same commit;
- *  `log` receives one row per thread that adopts it, or fails to. */
-export function publishThreadPlan(pin: PlanPin, load: PlanLoad, log?: PinLog): void {
-  held.set(pin.path, { identity: pinIdentity(pin), load: { plan: load.plan, quarantined: load.quarantined }, pinned: true });
-  published.set(pin.path, pin);
+/** The main thread installs the plan it just loaded at `pin` and hands every thread the blobs it read there (W1-T5894):
+ *  one SharedArrayBuffer, so N threads share one copy and run no git. `log` receives one row per thread that adopts
+ *  it, or fails to. */
+export function publishThreadPlan(pin: PlanPin, load: PlanLoad & { text?: PlanText; gitMs?: number }, log?: PinLog): void {
+  pending.delete(pin.path);
+  held.set(pin.path, { identity: pinIdentity(pin), load: { plan: load.plan, quarantined: load.quarantined }, pinned: true, ref: pin.ref });
+  const pinned: PinPost = { pin, text: load.text, gitMs: load.gitMs };
+  published.set(pin.path, pinned);
   if (log) pinLog = log;
-  post({ type: "pin", pin });
+  post({ type: "pin", ...pinned });
 }
 
 /** The pinned commit a path answers from in this thread, or "" while it follows its files. Fold it into a change key. */
 export function threadPlanPin(path: string): string {
+  const next = pending.get(path);
+  if (next) return pinIdentity(next.pin);
   const hit = held.get(path);
   return hit?.pinned ? hit.identity : "";
+}
+/** The commit a path's plan is pinned to in this thread, or undefined while it follows its files: what the plan
+ *  served here is as new as, so its freshness is judged from this ref and not the generation's unmoving HEAD. */
+export function threadPlanPinnedRef(path: string): string | undefined {
+  return pending.get(path)?.pin.ref ?? held.get(path)?.ref;
 }
 let parse: (path: string) => PlanLoad = (path) => loadPlanQuarantiningDuplicates(path);
 
@@ -98,6 +132,11 @@ export function planFilesIdentity(path: string): string {
 
 /** What `loadPlanQuarantiningDuplicates(path)` answers, parsed once per identity. Read-only to every caller. */
 export function threadPlanLoad(path: string): PlanLoad {
+  const next = pending.get(path);
+  if (next) {
+    pending.delete(path);
+    adoptThreadPlan(next);
+  }
   const hit = held.get(path);
   if (hit?.pinned) return hit.load;
   const identity = planFilesIdentity(path);
@@ -129,6 +168,8 @@ export function swapThreadPlanParser(next: (path: string) => PlanLoad): (path: s
   const prior = parse;
   parse = next;
   held.clear();
+  pending.clear();
   published.clear();
+  blobCaches.clear();
   return prior;
 }

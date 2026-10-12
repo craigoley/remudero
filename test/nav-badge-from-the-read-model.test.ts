@@ -36,7 +36,7 @@ import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
 import { READ_MODEL_DB_DIR_ENV } from "../src/lib/read-model-db.js";
 import { makeTempDir } from "../src/lib/tmp.js";
-import { unreadySources } from "../src/lib/view-shadow.js";
+import { createViewShadow, legacyViewSampler, unreadySources, type ShadowEvidence, type ShadowRequest } from "../src/lib/view-shadow.js";
 import { buildReadModelViewRoutes, renderView, type ViewBody, type ViewSource } from "../src/lib/views.js";
 
 // P1-07: the nav badge materialized by the read-model worker must be the Phase 0 (#8042) answer,
@@ -132,6 +132,9 @@ async function fixture(t: TestCtx, opts: { inbox?: boolean } = {}): Promise<Fixt
   const corpus = panelCorpus();
   writeRotations(stateDir, corpus.core.archive, corpus.core.live);
   writeRotations(consoleDir, corpus.console.archive, corpus.console.live);
+  // W1-T5896: a view with no switch is not built; shadow builds the worker's badge while serve still answers legacy.
+  mkdirSync(join(stateDir, "read-model"), { recursive: true });
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "shadow" } }));
   if (opts.inbox !== false) {
     writeFileSync(join(stateDir, "inbox-classified.json"), JSON.stringify({ generatedAt: iso(30_000), states: { "ruling:a": "ready", "ruling:b": "not_ready", "ruling:c": "declined", "adoption:x": "ready", "adoption:y": "drafting" } }));
   }
@@ -389,6 +392,9 @@ test("a cold nav-badge fold takes one chunk per step and builds the body an unch
   const max = Number(db.prepare("SELECT max(seq) AS m FROM fact").get()?.m);
   assert.ok(max > 2, "the fixture's fact store spans several chunks");
   const instances = [{ state: { instance: "core", generation: 1, lease: "held" as const, failures: 0, newestTs: null, tickedAt: NOW }, db }];
+  // W1-T5051: the worker's tick committed its fold; a view over that store resumes from it and takes no step.
+  assert.equal(createNavBadgeReadModelView(ledgerSource, 2).prepare({ instances }, () => assert.fail("a committed fold resumes caught up")), true);
+  db.exec("DELETE FROM agent_fold");
   const chunked = createNavBadgeReadModelView(ledgerSource, 2);
   let steps = 0;
   let calls = 0;
@@ -407,4 +413,50 @@ test("a cold nav-badge fold takes one chunk per step and builds the body an unch
   assert.equal((body[1].data as NavBadgeData).agent.count, 1, "the decision folded in a later chunk hides the accepted proposal");
   assert.deepEqual(body, createNavBadgeReadModelView(ledgerSource).materialize({ now: NOW, instances }));
   assert.equal(chunked.prepare({ instances }, () => assert.fail("a caught-up fold takes no step")), true);
+});
+
+// 2026-10-04T23:43:58Z: one nav-badge sample on all four keys read inbox.needsYou legacy 16 vs view 15, classified
+// real, and auto mode demoted the view. The worker's body counted the classification it last read; legacy read
+// inbox-classified.json again after the inbox classifier had rewritten it, so the two sides counted two snapshots.
+const NO_EVIDENCE: ShadowEvidence = { legacyAsOfMs: null, viewAsOfMs: null, named: new Set(), namedBeforeHorizon: new Set(), namedInGap: new Set(), rowsInGap: 0, duplicateIds: new Set(), duplicateRows: 0 };
+
+/** One sampled request as serve's main thread renders legacy, compared in the worker against `body`. */
+function compareSample(f: Fixture, body: ReadModelBodyEntry["body"], key = "") {
+  const posted: ShadowRequest[] = [];
+  const legacy = navBadgeView({ scopes: () => f.scopes, inboxRoot: f.inboxRoot, clock: CLOCK });
+  legacyViewSampler({ legacy: [legacy], clock: CLOCK, defer: (run) => run(), post: (request) => posted.push(request) })("nav-badge", key, new URLSearchParams(key));
+  assert.ok(posted[0]?.legacy, "legacy rendered the sample");
+  const logged: Array<Record<string, unknown>> = [];
+  const shadow = createViewShadow({ clock: CLOCK, log: (_step, extra) => void logged.push(extra), evidence: () => NO_EVIDENCE });
+  const compared = shadow.compare({ view: "nav-badge", key, requests: 1, legacy: posted[0].legacy, body: { data: body.data, asOf: body.asOf, sources: body.sources } });
+  return { compared, readiness: shadow.readiness()[0]!, logged };
+}
+
+test("a nav-badge inbox diff from a classification rewritten after the worker read it is timing, not real", async (t) => {
+  const f = await fixture(t);
+  createNavBadgeSourcePublisher({ stateDir: f.stateDir, inboxStateDir: join(f.inboxRoot, "state"), scopes: () => f.scopes })();
+  const bodies = tickBodies(f);
+  assert.deepEqual(data(bodies.get("")).inbox, { ready: 1, needsYou: 2, fleet: 2 }, "the worker counted the first snapshot");
+  // The inbox classifier's next pass retires ruling:b and rewrites the snapshot before serve renders legacy.
+  writeFileSync(join(f.stateDir, "inbox-classified.json"), JSON.stringify({ generatedAt: iso(5_000), states: { "ruling:a": "ready", "ruling:c": "declined", "adoption:x": "ready", "adoption:y": "drafting" } }));
+  assert.deepEqual(legacyData(f).inbox, { ready: 1, needsYou: 1, fleet: 2 }, "legacy reads the rewritten snapshot");
+  for (const key of ["", "instances=core"]) {
+    const { compared, readiness, logged } = compareSample(f, bodies.get(key)!.body, key);
+    assert.equal(compared.skipped, undefined, `key ${JSON.stringify(key)} is compared, not skipped`);
+    assert.deepEqual(compared.diffs.map((d) => [d.path, d.classification]), [["inbox.needsYou", "timing"]], `key ${JSON.stringify(key)}`);
+    assert.match(compared.diffs[0]!.reason, new RegExp(`legacy read inbox-classification as of ${iso(5_000)}, the body as of ${iso(30_000)}`));
+    assert.deepEqual([readiness.samples, readiness.diffs.real, readiness.streakSamples], [1, 0, 1], "the sample keeps the readiness streak");
+    assert.deepEqual(logged, [], "no view.shadow_diff row for an explained diff");
+  }
+});
+
+test("a nav-badge inbox diff over the same classification snapshot stays real", async (t) => {
+  const f = await fixture(t);
+  createNavBadgeSourcePublisher({ stateDir: f.stateDir, inboxStateDir: join(f.inboxRoot, "state"), scopes: () => f.scopes })();
+  const body = tickBodies(f).get("")!.body;
+  const miscounted = { ...body, data: { ...(body.data as NavBadgeData), inbox: { ...(body.data as NavBadgeData).inbox, needsYou: 3 } } };
+  const { compared, readiness, logged } = compareSample(f, miscounted);
+  assert.deepEqual(compared.diffs.map((d) => [d.path, d.classification]), [["inbox.needsYou", "real"]], "both sides read one snapshot, so nothing explains the count");
+  assert.equal(readiness.diffs.real, 1);
+  assert.deepEqual(logged[0]?.paired, { inbox: { source: "inbox-classification", asOf: iso(30_000) } }, "the diff row names the snapshot both sides read");
 });

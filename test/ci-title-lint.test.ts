@@ -24,18 +24,21 @@ import { parse as parseYaml } from "yaml";
 // extracting the job's actual run script from ci.yml and executing it against a stubbed `gh`
 // binary for three scenarios -- a corrected/live title, an empty read, and a non-conventional
 // title -- to prove the distinction is real, not just described.
+//
+// W1-T5695: ci.yml's copy of this step is gone; pr-title-lint.yml's identical step is the sole
+// `commitlint` producer, so these pins read that workflow instead.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 
 function loadCommitlintStep() {
-  const ciYmlText = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
-  const doc = parseYaml(ciYmlText);
+  const workflowText = readFileSync(join(REPO_ROOT, ".github", "workflows", "pr-title-lint.yml"), "utf8");
+  const doc = parseYaml(workflowText);
   const job = doc.jobs.commitlint;
-  assert.ok(job, "ci.yml must declare a commitlint job");
+  assert.ok(job, "pr-title-lint.yml must declare a commitlint job");
   const step = job.steps.find((s: any) => typeof s.name === "string" && /commitlint/i.test(s.name) && s.run);
   assert.ok(step, "commitlint job must have a step running commitlint");
-  return { job, step, ciYmlText };
+  return { doc, job, step, workflowText };
 }
 
 // ── Static wiring: the live read replaces the stale event-payload snapshot ──
@@ -55,9 +58,9 @@ test("commitlint CI wiring: the title is read live via `gh pr view --json title`
 });
 
 test("commitlint CI wiring: the job grants pull-requests: read so `gh pr view` can authenticate", () => {
-  const { job } = loadCommitlintStep();
+  const { doc, job } = loadCommitlintStep();
   assert.equal(
-    job.permissions?.["pull-requests"],
+    job.permissions?.["pull-requests"] ?? doc.permissions?.["pull-requests"],
     "read",
     "the commitlint job needs pull-requests: read for `gh pr view` to succeed against a private-by-default GITHUB_TOKEN",
   );

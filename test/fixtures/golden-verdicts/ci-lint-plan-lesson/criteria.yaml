@@ -1,0 +1,2 @@
+- claim: the lint-plan gate lesson is present in a matched task-authoring learning
+  proof: "grep: ci-learning:8684:lint-plan in learnings/ci.yaml"

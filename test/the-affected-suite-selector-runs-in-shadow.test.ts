@@ -7,7 +7,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { gitRepo } from "./helpers/git-repo.js";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -19,10 +19,12 @@ import {
   affectedSelectionOrFull,
   changedSymbols,
   fullRunTrigger,
+  READ_MAP_FORMAT,
   readAffectedSuitesInput,
   selectAffectedSuites,
   shadowRecord,
   type AffectedSuitesInput,
+  type ReadMapInput,
 } from "../src/lib/affected-suites.js";
 import { affectedSuitesStep } from "../src/lib/ci-parity.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -78,6 +80,204 @@ test("W1-T4404: the selector includes callers and path-reading suites of a chang
   assert.ok(real.suites.length > 100, "a module every suite's tmp helper imports reaches many suites");
 });
 
+test("W1-T4940: the declared-sender census is selected for each source-reading edge", () => {
+  const suite = "test/every-message-names-one-declared-sender.test.ts";
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  for (const changed of ["src/lib/inbox-bakeoff.ts", "src/run-task.ts", "src/new-producer.ts"]) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [] });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+    assert.ok(selection.narrow?.includes(suite), `${changed} must select ${suite} in the narrow candidate`);
+    assert.ok(selection.reasons.includes(`${suite}: reads a changed file by path`), changed);
+    assert.deepEqual(selection.recentOnly, { floor: [], narrow: [] });
+    assert.deepEqual(shadowRecord(selection, [suite]).failures, [
+      { file: suite, floor: "selected", narrow: "selected" },
+    ]);
+  }
+  for (const changed of [
+    "docs/cli-reference.md",
+    "test/help-renders-a-summary-not-a-paragraph.test.ts",
+    "test/the-inbox-draft-lead-is-chosen-by-a-bake-off.test.ts",
+    "scripts/tool.mjs",
+    "src/not-typescript.js",
+  ]) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [] });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(!selection.suites.includes(suite), `${changed} is outside the census population`);
+    assert.ok(!selection.narrow?.includes(suite), changed);
+  }
+  const absent = selectAffectedSuites(["src/lib/inbox-bakeoff.ts"], {
+    files: new Map(Object.entries(TREE)), pathReaders: [], symbolSuites: [],
+  });
+  assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
+  assert.ok(!absent.narrow?.includes(suite), "the narrow candidate also excludes an absent suite");
+});
+
+test("the claims-check suite is selected for each recorded plan-validation edge", () => {
+  const claimsCheck = "test/claims-check.test.ts";
+  const files = new Map([...Object.entries(TREE), [claimsCheck, ""]]);
+  for (const changed of [
+    "src/lib/plan.ts",
+    "src/run-task.ts",
+    "test/one-bad-plan-shard-never-takes-the-daemon-down.test.ts",
+  ]) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [] });
+    assert.ok(selection.suites.includes(claimsCheck), `${changed} must select ${claimsCheck}`);
+    assert.ok(selection.reasons.includes(`${claimsCheck}: reads a changed file by path`), changed);
+  }
+});
+
+test("the run-task git-leaf suite is selected for each recorded edge", () => {
+  const suite = "test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts";
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  for (const changed of [
+    "src/run-task.ts",
+    "test/check-proof-grep-cause.test.ts",
+    "test/check-proof-warns-when-its-target-differs-from-head.test.ts",
+  ]) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [] });
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite}`);
+  }
+});
+
+test("W1-T6924: the now-view rederivation suite is selected for each recorded miss edge", () => {
+  const suite = "test/now-view-rederives-only-dirtied-tasks.test.ts";
+  const edges = [
+    "src/lib/read-model-db.ts",
+    "test/read-model-readers-never-contend-with-the-writer.test.ts",
+  ];
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  const readMap: ReadMapInput = {
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} },
+    drift: { distance: 0, changedSinceMap: [] },
+  };
+  for (const changed of edges) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+    assert.ok(selection.narrow?.includes(suite), `${changed} must select ${suite} in the narrow candidate`);
+    assert.ok(selection.reasons.includes(`${suite}: reads a changed file by path`), changed);
+  }
+  const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [], readMap });
+  assert.ok(!unrelated.suites.includes(suite), "an unrelated source change must not select the suite");
+  const absent = selectAffectedSuites([edges[0]!], {
+    files: new Map(Object.entries(TREE)), pathReaders: [], symbolSuites: [], readMap,
+  });
+  assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
+});
+
+test("W1-T7212: the prompt-render suite is selected for each recorded miss edge", () => {
+  const suite = "test/prompt-render.test.ts";
+  const edges = [
+    "src/lib/prompt-render.ts",
+    "src/run-task.ts",
+    "test/the-prerequisite-split-contract-has-no-optional-seam.test.ts",
+  ];
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  const readMap: ReadMapInput = {
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} },
+    drift: { distance: 0, changedSinceMap: [] },
+  };
+  for (const changed of edges) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+    assert.ok(selection.reasons.includes(`${suite}: reads a changed file by path`), changed);
+  }
+  const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [], readMap });
+  assert.ok(!unrelated.suites.includes(suite), "an unrelated source change must not select the suite");
+  const absent = selectAffectedSuites([edges[0]!], {
+    files: new Map(Object.entries(TREE)), pathReaders: [], symbolSuites: [], readMap,
+  });
+  assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
+});
+
+test("W1-T7475: the red-branch strike suite is selected for each recorded miss edge", () => {
+  const suite = "test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts";
+  const edges = ["src/lib/sweep.ts", "test/the-sweep-reads-a-glossed-diff-coverage-line.test.ts"];
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  const readMap: ReadMapInput = {
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} },
+    drift: { distance: 0, changedSinceMap: [] },
+  };
+  for (const changed of edges) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+  }
+  const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [], readMap });
+  assert.ok(!unrelated.suites.includes(suite), "an unrelated source change must not select the suite");
+});
+
+test("W1-T4894: the wall-clock bound suite is selected for each recorded miss edge", () => {
+  const suite = "test/a-wall-clock-bound-declares-itself.test.ts";
+  const edges = [
+    "src/lib/board.ts",
+    "src/lib/github-transport.ts",
+    "src/lib/serve.ts",
+    "src/lib/status.ts",
+    "test/board-github-off-loop.test.ts",
+  ];
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  const readMap: ReadMapInput = {
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} },
+    drift: { distance: 0, changedSinceMap: [] },
+  };
+  for (const changed of edges) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+  }
+  const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [], readMap });
+  assert.ok(!unrelated.suites.includes(suite), "an unrelated source change must not select the suite");
+});
+
+test("W1-T7763: the refusal-amendment suite is selected for each recorded miss edge", () => {
+  const suite = "test/a-worker-refusal-becomes-a-plan-amendment.test.ts";
+  const edges = [
+    "src/lib/in-tree-budget.ts",
+    "src/lib/plan-pr-emitter.ts",
+    "test/a-starved-plan-pr-preflight-leg-times-out-and-is-asked-again.test.ts",
+  ];
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  const readMap: ReadMapInput = {
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} },
+    drift: { distance: 0, changedSinceMap: [] },
+  };
+  for (const changed of edges) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+  }
+  const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [], readMap });
+  assert.ok(!unrelated.suites.includes(suite), "an unrelated source change must not select the suite");
+});
+
+test("W1-T6751: the precheck census is selected for each recorded miss edge", () => {
+  const census = "test/every-ci-census-is-asked-before-the-push.test.ts";
+  const edges = [
+    "scripts/affected-reach-baseline.json",
+    "src/lib/affected-suites.ts",
+    "test/the-affected-suite-reach-ratchet.test.ts",
+  ];
+  const files = new Map([...Object.entries(TREE), [census, ""]]);
+  const readMap: ReadMapInput = {
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} },
+    drift: { distance: 0, changedSinceMap: [] },
+  };
+  for (const changed of edges) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(census), `${changed} must select ${census} in the floor`);
+    assert.ok(selection.narrow?.includes(census), `${changed} must select ${census} in the narrow candidate`);
+  }
+  const absent = selectAffectedSuites([edges[1]!], {
+    files: new Map(Object.entries(TREE)), pathReaders: [], symbolSuites: [], readMap,
+  });
+  assert.ok(!absent.suites.includes(census), "a suite absent from the tree cannot be selected");
+  assert.ok(!absent.narrow?.includes(census), "the narrow candidate also excludes an absent suite");
+});
+
 test("W1-T4404: a config or lockfile change selects the full suite", () => {
   for (const file of ["package.json", "package-lock.json", "tsconfig.json", ".github/workflows/ci.yml", "test/helpers/git-repo.ts", "test/fixtures/x.json", ".nvmrc"]) {
     const sel = select(["src/a.ts", file]);
@@ -101,8 +301,7 @@ test("W1-T4404: a config or lockfile change selects the full suite", () => {
   for (const f of ["src/a.ts", "src/b.ts"]) writeFileSync(join(repo.dir, f), TREE[f]!);
   repo.git("add", "src");
   repo.git("commit", "-qm", "fixture");
-  symlinkSync(join(REPO_ROOT, "scripts"), join(repo.dir, "scripts"));
-  symlinkSync(join(REPO_ROOT, "node_modules"), join(repo.dir, "node_modules"));
+  mkdirSync(join(repo.dir, "test")); // the HARNESS's listings read this tree's test/ as data
   rmSync(join(repo.dir, "src/a.ts"));
   assert.deepEqual([...readAffectedSuitesInput(repo.dir, ["src/b.ts"]).files.keys()], ["src/b.ts"]);
   rmSync(join(repo.dir, "src/b.ts"));

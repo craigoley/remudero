@@ -124,7 +124,7 @@ npm ci                       # a fresh worktree has no node_modules
 
 `rmd preflight --ci-parity` (`src/lib/ci-parity.ts`) is the one command to run before a first
 push: its `ci` entry runs `npm run test:ci`, the same full-suite command CI runs, so a green run is
-the real signal. The pieces are also available on their own — `npm run typecheck` (`tsc --noEmit`;
+the real signal. The pieces are also available on their own — `npm run typecheck` (`tsc --noEmit`, incremental per worktree and slotted when cold;
 `npm run build` emits `dist/`), `npm run depcruise`, and `npm run check -- test/<file>.test.ts`
 for one file plus a typecheck. The full suite needs a host with the pinned Chromium build and a
 non-root uid; inside an agent container it cannot pass honestly — see

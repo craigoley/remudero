@@ -13,10 +13,33 @@ raw: "Triage feedback#fb-1789349833277-20ca42 committed its proposal and
   drop remote claim ownership while the PR is genuinely awaiting CI."
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/9765
+summary:
+  headline: Prevent triage handoff lock wedge on process death
+  what_happened: "Process died after creating PR #5494 but before releasing
+    state/triage.lock. The PR and branch persisted remotely while the lock
+    remained wedged, requiring manual recovery and exposing a critical
+    crash-safety gap."
+  decision: "Implement atomic handoff: persist claim-release state before or
+    atomically with remote PR creation, add automatic recovery for stale locks
+    from missing PIDs, and add tests for process interruption immediately
+    post-PR creation."
+  options:
+    - label: Persist state before PR creation
+      consequence: Lock-release writes locally first, then creates PR; prevents wedge
+        and makes operation idempotent; simpler but changes current execution
+        order.
+    - label: Add stale-lock detection and auto-release
+      consequence: Background daemon finds missing PIDs and releases locked state;
+        enables self-healing recovery; doesn't prevent crash window but speeds
+        manual intervention.
+    - label: "Implement full solution: state + recovery + tests"
+      consequence: Combine state persistence, auto-recovery fallback, and
+        crash-scenario tests; maximally robust and verifiable; requires
+        coordinated implementation of three components.
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

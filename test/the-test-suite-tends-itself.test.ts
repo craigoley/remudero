@@ -346,18 +346,23 @@ test("the newest successful main run's CI proposal is fed to the gardener and ad
       if (artifact === "absent") throw Object.assign(new Error("Command failed: gh run download"), { stderr: "no artifact matches any of the names or patterns provided" });
       if (artifact === "unreachable") throw Object.assign(new Error("Command failed: gh run download"), { stderr: "HTTP 502" });
       const dir = args[args.indexOf("--dir") + 1]!;
+      const name = args[args.indexOf("--name") + 1]!;
+      assert.ok(["test-tier-manifest-proposal", "test-tier-coverage-manifest-proposal"].includes(name));
       mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, "test-tier-manifest.next.json"), artifact === "broken" ? '{"files":{}}' : proposal);
+      writeFileSync(join(dir, name.replace("-proposal", ".next.json")), artifact === "broken" ? '{"files":{}}' : proposal);
       return "";
     },
   };
-  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "fresh", runId: 7 });
+  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "fresh", runId: 7, coverage: { status: "fresh", runId: 7 } });
   assert.match(listCalls[0]![1]!, /ci\.yml\/runs\?event=push&branch=main/);
   assert.deepEqual(downloads[0]!.slice(0, 6), ["run", "download", "7", "--repo", "acme/remudero", "--name"]);
   assert.equal(readFileSync(testManifestProposalPath(stateDir), "utf8"), proposal);
+  assert.equal(readFileSync(testManifestProposalPath(stateDir, "test-tier-coverage-manifest-proposal"), "utf8"), proposal);
+  assert.deepEqual(downloads.map((args) => args[args.indexOf("--name") + 1]), ["test-tier-manifest-proposal", "test-tier-coverage-manifest-proposal"]);
   assert.equal(existsSync(join(stateDir, "test-tier-manifest-proposal.download")), false, "the download directory is removed");
-  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "unchanged", runId: 7 });
-  assert.equal(downloads.length, 1, "an unchanged main run is never downloaded twice");
+  assert.equal(existsSync(join(stateDir, "test-tier-coverage-manifest-proposal.download")), false, "the coverage download directory is removed");
+  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "unchanged", runId: 7, coverage: { status: "unchanged", runId: 7 } });
+  assert.equal(downloads.length, 2, "each ledger downloads an unchanged main run only once");
 
   const landed: Landed[] = [];
   off(root, "retier-flaker", "shrink-baseline");
@@ -367,12 +372,12 @@ test("the newest successful main run's CI proposal is fed to the gardener and ad
 
   runs = [{ id: 10, status: "completed", conclusion: "success" }];
   artifact = "absent";
-  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "absent", reason: "run 10 published no proposal", runId: 10 });
-  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "unchanged", runId: 10 },
+  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "absent", reason: "run 10 published no proposal", runId: 10, coverage: { status: "absent", reason: "run 10 published no proposal", runId: 10 } });
+  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "unchanged", runId: 10, coverage: { status: "unchanged", runId: 10 } },
     "the proposal already held stays; the artifact-less run is not asked again");
-  assert.equal(downloads.length, 2);
+  assert.equal(downloads.length, 4);
   rmSync(testManifestProposalPath(stateDir));
-  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "absent", reason: "run 10 published no proposal", runId: 10 });
+  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "absent", reason: "run 10 published no proposal", runId: 10, coverage: { status: "unchanged", runId: 10 } });
 
   runs = [{ id: 11, status: "completed", conclusion: "success" }];
   artifact = "unreachable";
@@ -380,7 +385,7 @@ test("the newest successful main run's CI proposal is fed to the gardener and ad
   artifact = "broken";
   await assert.rejects(refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), /not a \{thresholdMs, files\} manifest/);
   runs = [{ id: 12, status: "completed", conclusion: "cancelled" }];
-  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "absent", reason: "no successful main run among the newest ten" });
+  assert.deepEqual(await refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), { status: "absent", reason: "no successful main run among the newest ten", coverage: { status: "absent", reason: "no successful main run among the newest ten" } });
   runs = { message: "Bad credentials" };
   await assert.rejects(refreshTestManifestProposalAsync("acme", "remudero", stateDir, io), /no main-run list/);
 });

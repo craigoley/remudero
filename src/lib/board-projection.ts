@@ -32,6 +32,7 @@ import {
   defaultCreditOverridePath,
   defaultCreditStorePath,
   loadCreditStore,
+  noteLedgerGeneration,
   projectPlan,
   type CreditStore,
   type DeriveDeps,
@@ -45,6 +46,12 @@ export const BOARD_PROJECTION_VERSION = 1;
 export const BOARD_CLOCK_REDERIVE_MS = 30_000;
 export const BOARD_ORACLE_INTERVAL_MS = 10 * 60_000;
 export const BOARD_DERIVE_DEBOUNCE_MS = 500;
+/** W1-T6014: fact rows one `update` ingests at most. A cold store ingests across calls, each not deriving until the tail. */
+export const BOARD_INGEST_CHUNK_ROWS = 5_000;
+/** PRIMARY CONTROL (W1-T6467): the longest string value a projection's table shares; a longer one stays as parsed. */
+export const BOARD_INTERN_MAX_CHARS = 96;
+/** ...and the ms one `update`'s ingest runs for at most, so a slow disk ends a chunk early. */
+export const BOARD_INGEST_CHUNK_MS = 250;
 /** A drift found again this soon after a self-heal is a projection bug, not a blip: it escalates (as #8075's oracle). */
 export const BOARD_ORACLE_RECURRENCE_MS = 24 * 60 * 60_000;
 /** Steps some task's derivation reads across the whole ledger, whatever task they name. */
@@ -143,6 +150,30 @@ export interface BoardProjectionOptions {
   instance?: string;
   /** The oracle's last tier; without it a drift is healed and logged but never escalated. */
   escalation?: EscalateDeps;
+  /** Fact rows one `update` ingests at most; {@link BOARD_INGEST_CHUNK_ROWS} when omitted. */
+  ingestChunkRows?: number;
+  /** The ms one `update`'s ingest runs for at most; {@link BOARD_INGEST_CHUNK_MS} when omitted. */
+  ingestChunkMs?: number;
+  /** False: rows keep their parsed strings (the arm an equality check compares the shared one against). */
+  internStrings?: boolean;
+}
+
+/**
+ * W1-T6467: replaces each TOP-LEVEL primitive string value of a freshly parsed row, at most
+ * {@link BOARD_INTERN_MAX_CHARS} long, with the equal string `table` already holds (the first one seen), so a
+ * projection keeps one copy of each repeated step name, task id or url instead of one per row. A value is only
+ * ever replaced by one equal to it; objects, arrays, numbers, booleans, null and longer strings are left as
+ * parsed, no object is shared, and key order does not change (an existing key is reassigned in place).
+ */
+export function internRowStrings(row: Row, table: Map<string, string>): Row {
+  for (const key of Object.keys(row)) {
+    const value = row[key];
+    if (typeof value !== "string" || value.length > BOARD_INTERN_MAX_CHARS) continue;
+    const held = table.get(value);
+    if (held === undefined) table.set(value, value);
+    else row[key] = held;
+  }
+  return row;
 }
 
 /** `agree`; `transient` (gone on the recheck); `healed`; `escalated` (survived the heal, or recurred within 24 h). */
@@ -158,8 +189,10 @@ export interface BoardOracleResult {
 }
 
 export interface BoardUpdate {
-  /** False when nothing moved, or the debounce deferred the derive. */
+  /** False when nothing moved, the debounce deferred the derive, or the ingest has not reached the store's tail. */
   derived: boolean;
+  /** False while a cold ingest is between chunks: call `update` again to resume it. */
+  caughtUp: boolean;
   deferred: boolean;
   newRows: number;
   /** Plan tasks re-derived this update, sorted; every other plan task was reused. */
@@ -177,6 +210,8 @@ export interface BoardProjection {
   creditRead(): { credit: CreditStore; overrides: string };
   /** The fact rows the board derives from, in ledger order. */
   rows(): ReadonlyArray<Row>;
+  /** Distinct string values this projection's own table holds (W1-T6467); 0 before any ingest. */
+  internedStrings(): number;
   /** Derives with no reuse, diffs it against the held board, and heals every mismatch. */
   oracle(): BoardOracleResult;
 }
@@ -205,9 +240,13 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   const readOverrides = opts.readCreditOverrideFile ?? (() => readTextOr(defaultCreditOverridePath(opts.ledgerPath), ""));
   const gateway = (): GitHub => opts.currentGithub?.() ?? opts.github;
   const githubGeneration = opts.githubGeneration ?? (() => githubGenerationOf(gateway()));
+  const chunkRows = opts.ingestChunkRows ?? BOARD_INGEST_CHUNK_ROWS;
+  const chunkMs = opts.ingestChunkMs ?? BOARD_INGEST_CHUNK_MS;
+  // W1-T6467: this projection's own table, dropped with it; each views worker isolate builds its own.
+  const strings = opts.internStrings === false ? undefined : new Map<string, string>();
   db.exec(BOARD_PROJECTION_DDL);
   const sql = {
-    facts: db.prepare("SELECT seq, ts, ts_ms, step, body FROM fact WHERE seq > ? ORDER BY seq"),
+    facts: db.prepare("SELECT seq, ts, ts_ms, step, body FROM fact WHERE seq > ? ORDER BY seq LIMIT ?"),
     upsert: db.prepare(`INSERT INTO task_projection(task_id, stamp, json) VALUES(?, ?, ?)
       ON CONFLICT(task_id) DO UPDATE SET stamp = excluded.stamp, json = excluded.json`),
     remove: db.prepare("DELETE FROM task_projection WHERE task_id = ?"),
@@ -216,7 +255,15 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   const sentinel: Row = {};
   const rows: Row[] = [sentinel];
   const rowTsMs: number[] = [Number.NEGATIVE_INFINITY];
+  // W1-T6253: every in-place change to `rows` (or the sentinel's ts) is a new generation, so an index held for the
+  // old contents is never served for the new ones.
+  let rowsGeneration = 0;
+  const touched = (): void => noteLedgerGeneration(rows, ++rowsGeneration);
+  touched();
   let lastSeq = 0;
+  /** A first load spanning chunks: its rows are appended in seq order and sorted once, at the tail, as a one-call load. */
+  let bulkOpen = false;
+  let bulkOutOfOrder = false;
   let crossCount = 0;
   let crossSeq = 0;
   const taskCount = new Map<string, number>();
@@ -257,6 +304,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     if (at > 0) {
       rows.splice(at, 1);
       rowTsMs.splice(at, 1);
+      touched();
     }
   }
 
@@ -266,6 +314,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     while (rowTsMs[at - 1]! > tsMs) at--;
     rows.splice(at, 0, row);
     rowTsMs.splice(at, 0, tsMs);
+    touched();
     standing.set(key, { row, tsMs });
     latestTsMs = Math.max(latestTsMs, tsMs);
   }
@@ -309,27 +358,37 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     return moved;
   }
 
-  function ingest(): number {
+  function ingest(limit: number, deadline = Number.POSITIVE_INFINITY): { fresh: number; caughtUp: boolean } {
     let fresh = 0;
-    let outOfOrder = false;
+    let cut = false;
     // The first load is sorted once; afterwards a live row a few ms early walks back a step or two.
-    const bulk = lastSeq === 0;
-    for (const r of sql.facts.iterate(lastSeq)) {
+    const bulk = lastSeq === 0 || bulkOpen;
+    let outOfOrder = bulk && bulkOutOfOrder;
+    for (const r of sql.facts.iterate(lastSeq, Number.isFinite(limit) ? limit : -1)) {
+      if (fresh > 0 && clock.now() >= deadline) {
+        cut = true;
+        break;
+      }
       const seq = Number(r.seq);
       lastSeq = seq;
       const tsMs = Number(r.ts_ms);
       fresh++;
       if (BOARD_UNREAD_STEPS.has(String(r.step))) {
-        if (tsMs > latestTsMs) sentinel.ts = String(r.ts);
+        if (tsMs > latestTsMs) {
+          sentinel.ts = String(r.ts);
+          touched();
+        }
         latestTsMs = Math.max(latestTsMs, tsMs);
         continue;
       }
-      const row = JSON.parse(String(r.body)) as Row;
+      const parsed = JSON.parse(String(r.body)) as Row;
+      const row = strings ? internRowStrings(parsed, strings) : parsed;
       let at = rows.length;
       if (bulk) outOfOrder ||= tsMs < rowTsMs[at - 1]!;
       else while (rowTsMs[at - 1]! > tsMs) at--;
       rows.splice(at, 0, row);
       rowTsMs.splice(at, 0, tsMs);
+      touched();
       latestTsMs = Math.max(latestTsMs, tsMs);
       const dirt = boardDirtForRow(row, rules);
       if (dirt.all) {
@@ -350,15 +409,22 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
         if ((activityRows.get(key)?.tsMs ?? Number.POSITIVE_INFINITY) <= tsMs) dropActivity(key);
       }
     }
+    const caughtUp = !cut && fresh < limit;
+    [bulkOpen, bulkOutOfOrder] = [bulk && !caughtUp, !caughtUp && outOfOrder];
+    if (!caughtUp) {
+      pending = true;
+      return { fresh, caughtUp };
+    }
     // Ledger order is time order, so a row is placed by its ts, not by when the projector read it.
     if (outOfOrder) {
       const order = rows.map((_, i) => i).sort((a, b) => rowTsMs[a]! - rowTsMs[b]!);
       const [sortedRows, sortedTs] = [order.map((i) => rows[i]!), order.map((i) => rowTsMs[i]!)];
       sortedRows.forEach((row, i) => { rows[i] = row; rowTsMs[i] = sortedTs[i]!; });
+      touched();
     }
     const workers = ingestWorkers();
     if (ingestActivity() || workers || fresh > 0) pending = true;
-    return fresh;
+    return { fresh, caughtUp };
   }
 
   function hashTask(task: Task): string {
@@ -483,7 +549,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   return {
     update(options = {}): BoardUpdate {
       const startedAt = clock.now();
-      const newRows = ingest();
+      const { fresh: newRows, caughtUp } = ingest(chunkRows, startedAt + chunkMs);
+      if (!caughtUp) return { derived: false, deferred: false, caughtUp, newRows, rederived: [], reused: 0, full: false, elapsedMs: clock.now() - startedAt };
       const now = clock.now();
       const oracleDue = lastOracleAt === undefined ? false : now - lastOracleAt >= BOARD_ORACLE_INTERVAL_MS;
       // The oracle runs right after a clock re-derive, so it never reports what the next 30 s tick would fix.
@@ -492,7 +559,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       const stamps = new Map<string, string>();
       for (const task of plan.tasks) stamps.set(task.id, stampOf(task.id, task));
       const moved = plan.tasks.some((t) => held.get(t.id)?.stamp !== stamps.get(t.id)) || held.size === 0;
-      const idle: BoardUpdate = { derived: false, deferred: false, newRows, rederived: [], reused: plan.tasks.length, full: false, elapsedMs: 0 };
+      const idle: BoardUpdate = { derived: false, caughtUp, deferred: false, newRows, rederived: [], reused: plan.tasks.length, full: false, elapsedMs: 0 };
       if (!options.force && !moved && !pending && !clockDue && !oracleDue) return idle;
       if (!options.force && lastDeriveAt !== undefined && now - lastDeriveAt < BOARD_DERIVE_DEBOUNCE_MS) return { ...idle, deferred: true };
       // The ledger clock: a lone run.start inside the liveness bound can turn orphan as soon as any newer row lands.
@@ -526,7 +593,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       if (clockDue) lastClockAt = now;
       lastOracleAt ??= now;
       const result: BoardUpdate = {
-        derived: true, deferred: false, newRows, rederived: rederived.sort(), reused: plan.tasks.length - rederived.length,
+        derived: true, caughtUp, deferred: false, newRows, rederived: rederived.sort(), reused: plan.tasks.length - rederived.length,
         full: rederived.length === plan.tasks.length, elapsedMs: 0,
       };
       if (oracleDue) result.oracle = oracleWith(plan, credit, overrides, stampOf);
@@ -535,9 +602,10 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     },
     projections: () => new Map([...held].map(([id, h]) => [id, h.projection])),
     rows: () => rows,
+    internedStrings: () => strings?.size ?? 0,
     creditRead: () => lastCredit,
     oracle(): BoardOracleResult {
-      ingest();
+      ingest(Number.POSITIVE_INFINITY);
       const { plan, credit, overrides, stampOf } = inputs();
       return oracleWith(plan, credit, overrides, stampOf);
     },

@@ -69,7 +69,7 @@ test("uniqueRunBranch acceptance (5/6): a branch left over from an earlier attem
   }
 });
 
-test("createDaemonLaneWorktree acceptance (1,2,3,5): cuts a SECOND worktree in one process from the SAME runId — different branch, both created, run id unchanged on both run.locks", () => {
+test("createDaemonLaneWorktree acceptance (1,2,3,5): cuts a SECOND worktree in one process from the SAME runId — different branch, both created, run id unchanged on both run.locks", async () => {
   const root = tmp("rmd-daemon-lane-second-");
   try {
     const clone = join(root, "clone");
@@ -82,14 +82,14 @@ test("createDaemonLaneWorktree acceptance (1,2,3,5): cuts a SECOND worktree in o
     // FIRST daemon-lane worktree of this boot — left ON DISK, not torn down, so the second
     // call below faces the worst case: the branch is not merely a dangling ref, a real
     // worktree still has it checked out.
-    const first = createDaemonLaneWorktree(clone, worktreesRoot, runId, logger);
+    const first = await createDaemonLaneWorktree(clone, worktreesRoot, runId, logger);
     assert.equal(first.branch, "run-DAEMON-1788100523733", "the FIRST attempt gets the plain name, unchanged from before this task");
     assert.ok(existsSync(first.worktreePath));
 
     // SECOND daemon-lane worktree of the SAME boot, SAME runId — this is exactly what
     // `buildInboxDraftHook`'s next poll does. Before the fix this threw
     // `fatal: a branch named 'run-DAEMON-1788100523733' already exists`.
-    const second = createDaemonLaneWorktree(clone, worktreesRoot, runId, logger);
+    const second = await createDaemonLaneWorktree(clone, worktreesRoot, runId, logger);
     assert.ok(existsSync(second.worktreePath), "the second worktree must actually be CREATED, not fail");
     assert.notEqual(second.branch, first.branch, "two daemon-lane worktrees in one process must get different branch names");
 
@@ -109,7 +109,7 @@ test("createDaemonLaneWorktree acceptance (1,2,3,5): cuts a SECOND worktree in o
   }
 });
 
-test("createDaemonLaneWorktree acceptance (4): a branch left over from a REAPED (already torn down) worktree does not block a fresh attempt with the same runId", () => {
+test("createDaemonLaneWorktree acceptance (4): a branch left over from a REAPED (already torn down) worktree does not block a fresh attempt with the same runId", async () => {
   const root = tmp("rmd-daemon-lane-reaped-");
   try {
     const clone = join(root, "clone");
@@ -119,12 +119,12 @@ test("createDaemonLaneWorktree acceptance (4): a branch left over from a REAPED 
     const logger = (step: string, extra?: Record<string, unknown>) => log.push({ step, extra });
     const runId = "DAEMON-3";
 
-    const first = createDaemonLaneWorktree(clone, worktreesRoot, runId, logger);
+    const first = await createDaemonLaneWorktree(clone, worktreesRoot, runId, logger);
     // Reap it the normal way — `worktreeRemove` deletes the worktree but (ordinary git)
     // leaves the branch behind, exactly the residue a crash-reap or a clean finish both leave.
     worktreeRemove(clone, first.worktreePath);
 
-    const second = createDaemonLaneWorktree(clone, worktreesRoot, runId, logger);
+    const second = await createDaemonLaneWorktree(clone, worktreesRoot, runId, logger);
     assert.ok(existsSync(second.worktreePath), "a fresh attempt must succeed despite the leftover branch");
     worktreeRemove(clone, second.worktreePath);
   } finally {
@@ -147,7 +147,7 @@ test("acceptance (6): worktreeAdd itself is UNCHANGED — a genuine two-lane col
   }
 });
 
-test("acceptance (7): a failed worktree add is REPORTED (ledgered `worktree.add_failed` naming the branch), not swallowed as bare git noise, and is rethrown", () => {
+test("acceptance (7): a failed worktree add is REPORTED (ledgered `worktree.add_failed` naming the branch), not swallowed as bare git noise, and is rethrown", async () => {
   const root = tmp("rmd-daemon-lane-reported-");
   try {
     const clone = join(root, "clone");
@@ -165,7 +165,7 @@ test("acceptance (7): a failed worktree add is REPORTED (ledgered `worktree.add_
     const log: Array<{ step: string; extra?: Record<string, unknown> }> = [];
     const logger = (step: string, extra?: Record<string, unknown>) => log.push({ step, extra });
 
-    assert.throws(() => createDaemonLaneWorktree(clone, worktreesRoot, runId, logger));
+    await assert.rejects(() => createDaemonLaneWorktree(clone, worktreesRoot, runId, logger));
     const failure = log.find((l) => l.step === "worktree.add_failed");
     assert.ok(failure, "the failure must be ledgered under its own step, not silently dropped");
     assert.equal(failure?.extra?.branch, "run-DAEMON-4");

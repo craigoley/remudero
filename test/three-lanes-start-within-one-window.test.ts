@@ -102,7 +102,7 @@ test("THE WIRING: the daemon's runOne hands every lane the memoised factory", ()
   // runTask must CONSULT it, and `opts.github` must still win so no existing test caller changes.
   assert.match(
     src,
-    /const github = opts\.github \?\? opts\.githubFor\?\.\(owner, task\.repo\) \?\? buildBatchedGithub\(owner, task\.repo\);/,
+    /const github = opts\.github \?\? opts\.githubFor\?\.\(owner, task\.repo\) \?\? createDaemonGatewayFactory\(config\.root, log\)\(owner, task\.repo\);/,
     "runTask must prefer opts.github, then githubFor, then a fresh gateway",
   );
 });
@@ -111,7 +111,7 @@ test("the fallback is unchanged: absent githubFor, runTask still builds its own 
   const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "run-task.ts"), "utf8");
   assert.match(
     src,
-    /\?\? buildBatchedGithub\(owner, task\.repo\);/,
+    /\?\? createDaemonGatewayFactory\(config\.root, log\)\(owner, task\.repo\);/,
     "a caller supplying neither seam must behave exactly as it did before this task",
   );
 });

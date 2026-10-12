@@ -11,7 +11,7 @@
   band_meaning: span
   origin: "operator-approved Orca comparison, 2026-09-30"
   files: [src/lib/status-board.ts, src/lib/dispatch-claim.ts, test/dispatch-claim-age.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at c94c2bf49: a claim anchor carries mintedAtMs, but the board prints no age and cross-host

@@ -68,6 +68,8 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import type { Policy } from "./policy.js";
 import type { LedgerUnionResult } from "./ledger-grep.js";
+import { classifyContribution, feedbackSubjectBinding, type FeedbackAdmissionContext, type FeedbackAdmissionSubject } from "./contributor-admission.js";
+import { systemClock } from "./clock.js";
 
 /** What decides whether a row's write fires. Closed vocabulary — design note (i). */
 export type AuthorityGateKind = "policy" | "ledger-verdict" | "operator-verb" | "sweep-rung" | "always";
@@ -398,6 +400,20 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
       "NOT wrapped by live-write-guard.ts's assertLiveWriteAllowed — the table names this gap rather than closing it " +
       "(design note v: no gate moves in this task). postReviewStatusGuarded is the only call path run-task.ts uses (its own doc).",
   },
+  // ── src/lib/ci-escalation-judge.ts ───────────────────────────────────────────────────────
+  {
+    id: "post-ci-judge-status",
+    action: "POST the always-success `remudero/ci-judge` commit status carrying suites a judge ADDS to a PR's CI selection",
+    module: "src/lib/ci-escalation-judge.ts",
+    symbol: "judgeCiEscalation -> productionCiJudgePorts(...).post",
+    boundary: "gh-status-post",
+    gate: "sweep-rung",
+    ledgerSteps: ["ci_judge.judged"],
+    verb: "rmd daemon (after each sweep)",
+    note:
+      "W1-T4407: off while state/CI_JUDGE_OFF exists; one post per PR head. Its state is always success, so it never " +
+      "gates a merge, and its content can only widen what CI runs. NOT wrapped by assertLiveWriteAllowed.",
+  },
   {
     id: "post-review-pr-comment",
     action: "submit a PR review with review evidence",
@@ -457,6 +473,18 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
     verb: "rmd pause / rmd resume",
     note: "The one write in this table an operator issues directly, not the drain loop — a durable, explicit halt.",
   },
+  // ── src/lib/recovery-refs.ts ─────────────────────────────────────────────────────────────
+  {
+    id: "recovery-ref-push",
+    action: "publish a host's preserved `refs/rmd-recovery/*` commits to origin create-only, and delete one whose record was escalated, restored and landed on main",
+    module: "src/lib/recovery-refs.ts",
+    symbol: "publishRecoveryRefs / applyRecoveryRetention",
+    boundary: "git-push",
+    gate: "sweep-rung",
+    ledgerSteps: ["recovery_refs.published", "recovery_refs.conflict", "recovery_refs.publish_failed", "recovery_refs.pruned"],
+    verb: "rmd daemon (the live-edit ladder pass beside the freshness read)",
+    note: "Create-only (an empty --force-with-lease): a ref origin already holds at another commit is never moved. Each push passes assertClaimRefPushAllowedAsync.",
+  },
   // ── src/lib/task-id-reservation.ts ───────────────────────────────────────────────────────
   {
     id: "task-id-reservation-ref-push",
@@ -484,6 +512,20 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
       "classifier, active-head reread and SHA-preserving chunk pruner. The full-sweep cadence is " +
       "throttled by a branch-set fingerprint and six-hour bound; the light in-flight pass cannot reach it.",
   },
+  // ── src/lib/machine-filing-judge.ts ──────────────────────────────────────────────────────
+  {
+    id: "machine-judge-withdraw-stale-pr",
+    action: "close the machine-filing judge's own open plan PR once origin/main has invalidated a ruling pin it lands",
+    module: "src/lib/machine-filing-judge.ts",
+    symbol: "runMachineFilingJudge (pending-PR stale-pin withdrawal)",
+    boundary: "gh-pr-close",
+    gate: "always",
+    ledgerSteps: ["machine_judge.withdrawn"],
+    verb: "rmd daemon (machine-judge garden, `rmd garden run machine-judge`)",
+    note:
+      "W1-T5317: fires only on a judge PR the judge itself opened and still holds as pending, and only when a record's " +
+      "pin on origin/main no longer matches the ruled or source pin; the records are judged again, never declined.",
+  },
   // ── src/lib/onboard/synthesize.ts ────────────────────────────────────────────────────────
   {
     id: "onboard-pr",
@@ -510,6 +552,31 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
       "W1-T4386: fires only after its precheck holds, at most once per PR head sha, and only on a live governor " +
       "verdict — the daemon holds every runbook in shadow until W1-T4390's governor lands.",
   },
+  // ── src/lib/head-rehome.ts ───────────────────────────────────────────────────────────────
+  {
+    id: "head-rehome-open-replacement-pr",
+    action: "create a conforming run-<task>-<epoch> branch ref at the same head sha and open a replacement PR from it",
+    module: "src/lib/head-rehome.ts",
+    symbol: "createHeadRehomePorts(...).openReplacement",
+    boundary: "gh-pr-create",
+    gate: "sweep-rung",
+    ledgerSteps: ["pr.rehome.started", "pr.rehomed", "pr.rehome.refused"],
+    verb: "rmd drain (sweep head-identity re-home rung)",
+    note:
+      "W1-T7448: fires only when head-identity-gate is the PR's sole red; refuses when other reds are present, " +
+      "reuses an already-opened replacement, and creates the branch ref at the original head sha (no new content).",
+  },
+  {
+    id: "head-rehome-close-original-pr",
+    action: "comment on and close the original non-conforming PR once its replacement exists",
+    module: "src/lib/head-rehome.ts",
+    symbol: "createHeadRehomePorts(...).closeOriginal",
+    boundary: "gh-pr-close",
+    gate: "sweep-rung",
+    ledgerSteps: ["pr.rehomed"],
+    verb: "rmd drain (sweep head-identity re-home rung)",
+    note: "W1-T7448: runs only after the replacement PR is confirmed; the original's head sha is verified unchanged first.",
+  },
   // ── src/lib/panel-actions.ts ─────────────────────────────────────────────────────────────
   {
     id: "issue-close-panel-action",
@@ -532,6 +599,65 @@ export function authorityTableIds(): string[] {
 /** Every distinct `module` value the table documents — the ratchet's join key. */
 export function authorityTableModules(): Set<string> {
   return new Set(AUTHORITY_TABLE.map((r) => r.module));
+}
+
+// ── W1-T7754: what a feedback entry's lineage may authorize ─────────────────────────────────
+
+/**
+ * The rows above are outward writes. Turning a feedback entry into a task or ruling with no
+ * operator present (the auto-triage rung) is an authority too, and a machine risk judgment of
+ * the TEXT does not prove the INPUT was admitted. So the entry's recorded lineage is read first.
+ * Unknown or external lineage is evidence for owner attention: the entry stays in the inbox and
+ * the operator's hand route (`rmd triage <id>`) still serves it. It never supplies autonomous
+ * authority. A trusted summarizer that relayed the item is not its contributor; only the
+ * `contribution` the capture recorded counts.
+ *
+ * Legacy entries reconcile one at a time. Only an origin naming an outside contribution surface
+ * (`issue`, `issue#<n>`, `comment#...`) with no recorded contribution is unresolved. Operator
+ * capture (`cli`/`ui`) and the fleet's own sensors (`alert#`, `repair#`, `incident#`, ...) stay
+ * usable exactly as before, so historical trusted feedback is never quarantined wholesale.
+ */
+export interface FeedbackLineageAuthority {
+  autonomous: boolean;
+  basis: "admitted-contribution" | "legacy-internal" | "external-contribution" | "unresolved-origin";
+  reason: string;
+}
+
+const OUTSIDE_FEEDBACK_ORIGIN = /^(issue|comment)(#|$)/;
+
+/** PURE. Reads a parsed `plan/feedback/<id>.yaml` record; never trusts a shape it did not check. */
+export function feedbackLineageAuthority(entry: unknown, context: FeedbackAdmissionContext = {}): FeedbackLineageAuthority {
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    return { autonomous: false, basis: "unresolved-origin", reason: "unreadable-entry" };
+  }
+  const record = entry as Record<string, unknown>;
+  const contribution = record.contribution;
+  if (contribution !== undefined && contribution !== null) {
+    const unresolved = (reason: string): FeedbackLineageAuthority => ({ autonomous: false, basis: "unresolved-origin", reason });
+    if (context.mode !== "shadow" || !context.policy) return unresolved("no-admission-policy");
+    const subject = typeof contribution === "object" && !Array.isArray(contribution)
+      ? (contribution as Record<string, unknown>).subject as FeedbackAdmissionSubject | undefined : undefined;
+    if (!subject || typeof subject !== "object" || !context.currentSubject) return unresolved("origin-recheck-unavailable");
+    try {
+      if (feedbackSubjectBinding(subject) !== feedbackSubjectBinding(context.currentSubject)) return unresolved("source-revision-changed");
+    } catch { return { autonomous: false, basis: "unresolved-origin", reason: "lineage-unreadable" }; }
+    const decided = classifyContribution(context.currentSubject, "feedback", context.policy, context.memberships ?? [], context.nowMs ?? systemClock.now());
+    return { autonomous: decided.outcome === "trusted", reason: decided.reason,
+      basis: decided.outcome === "trusted" ? "admitted-contribution" : decided.outcome === "confirmed-external" ? "external-contribution" : "unresolved-origin" };
+  }
+  const origin = typeof record.origin === "string" ? record.origin : "";
+  if (OUTSIDE_FEEDBACK_ORIGIN.test(origin)) return { autonomous: false, basis: "unresolved-origin", reason: "legacy-origin-unresolved" };
+  return { autonomous: true, basis: "legacy-internal", reason: origin ? `legacy-${origin.split("#")[0]}` : "legacy-unlabelled" };
+}
+
+/** Observation only. An absent policy or failed observer cannot change existing effects. */
+export function observeFeedbackAdmission(entry: unknown, context: FeedbackAdmissionContext | undefined, action: string): void {
+  if (context?.mode !== "shadow" || !context.policy) return;
+  const authority = feedbackLineageAuthority(entry, context);
+  try {
+    context.record?.("feedback_admission.shadow", { mode: "shadow", action, would_deny: !authority.autonomous,
+      basis: authority.basis, reason: authority.reason, policy_version: context.policy.version });
+  } catch { /* Diagnostic failure is not effect authority or a global trusted-flow hold. */ }
 }
 
 function getPolicyValue(policy: Policy | undefined, path: string): unknown {

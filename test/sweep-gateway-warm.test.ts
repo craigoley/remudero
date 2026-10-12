@@ -194,9 +194,8 @@ test("the ledger records the mode flip the request count implies — `full` then
       .map((l) => [l.half, l.mode] as [unknown, unknown]);
     // W1-T2323: one row PER HALF now, each naming which half it is — so "one cold walk, then
     // deltas forever" is asserted on the closed half, which is the half the sentence was ever
-    // about. The open half is a complete read of a small set every time and reports `full` every
-    // time, which is what it has always actually done; before the split it merely borrowed the
-    // closed half's label.
+    // about. The open half still performs a full read each pass; unchanged telemetry now emits
+    // only its first row, with every fetch counted in the periodic rollup (W1-T4480).
     assert.deepEqual(
       modes.filter(([half]) => half === "closed").map(([, mode]) => mode),
       ["full", "delta"],
@@ -204,8 +203,8 @@ test("the ledger records the mode flip the request count implies — `full` then
     );
     assert.deepEqual(
       modes.filter(([half]) => half === "open").map(([, mode]) => mode),
-      ["full", "full"],
-      `the open half is a complete read every pass, and says so: ${JSON.stringify(modes)}`,
+      ["full"],
+      `the repeated open/full heartbeat is suppressed: ${JSON.stringify(modes)}`,
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -330,7 +329,9 @@ test("both deriving rungs share that ONE gateway — warming one while the other
   const hookStart = src.indexOf("export function buildSweepHook(");
   const body = src.slice(hookStart, src.indexOf("\n}\n", hookStart));
   assert.match(body, /buildCreditCandidates\(owner, repo, plan, ledgerPath, log, boardGithub\)/, "the credit-backfill rung takes the warm gateway");
-  assert.match(body, /sweepEscalationReconcile\(owner, repo, plan, ledgerPath, runId, log, \{ github: boardGithub \}\)/, "and so does the escalation reconciler");
+  // W1-T4075 threads the tick-read generation through the same options object; the invariant is
+  // that `github` is the warm gateway, not that it is the object's only key.
+  assert.match(body, /sweepEscalationReconcile\(owner, repo, plan, ledgerPath, runId, log, \{ github: boardGithub[,}]/, "and so does the escalation reconciler");
 });
 
 test("`rmd sweep` — a one-shot CLI pass with no second poll — still builds its own gateway, so the default path is unchanged", () => {

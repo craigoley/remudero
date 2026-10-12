@@ -46,6 +46,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
+import { makeTempDir } from "../src/lib/tmp.js";
+
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /**
@@ -490,20 +492,69 @@ test("the Codex version check passes the pinned CLI value", () => {
 });
 
 test("the Dockerfile installs and executes the declared Claude and Codex pins in one layer", () => {
-  // Dependabot owns the deploy lockfile; this assertion keeps the baked ARGs from drifting.
   const dockerfile = readFileSync(join(REPO_ROOT, "deploy", "Dockerfile"), "utf8");
-  const lockfile = JSON.parse(readFileSync(join(REPO_ROOT, "deploy", "package-lock.json"), "utf8")) as {
-    packages?: Record<string, { version?: string }>;
-  };
-  const claudeVersion = lockfile.packages?.["node_modules/@anthropic-ai/claude-code"]?.version;
-  const codexVersion = lockfile.packages?.["node_modules/@openai/codex"]?.version;
-  assert.ok(claudeVersion, "deploy lockfile must declare the Claude package version");
-  assert.ok(codexVersion, "deploy lockfile must declare the Codex package version");
-  const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&");
-  assert.match(dockerfile, new RegExp(`ARG CLAUDE_CODE_VERSION=${escapeRegExp(claudeVersion)}`));
-  assert.match(dockerfile, new RegExp(`ARG CODEX_VERSION=${escapeRegExp(codexVersion)}`));
   assert.match(dockerfile, /COPY --chown=root:root deploy\/package\.json deploy\/package-lock\.json \/opt\/remudero-image-clis\//);
   assert.match(dockerfile, /npm ci --prefix \/opt\/remudero-image-clis[\s\S]*?ln -s \/opt\/remudero-image-clis\/node_modules\/\.bin\/codex \/usr\/local\/bin\/codex[\s\S]*?codex --version/);
+});
+
+const CLI_PACKAGES = ["@anthropic-ai/claude-code", "@openai/codex"] as const;
+
+/** The image layer's pin check, lifted verbatim out of deploy/Dockerfile and pointed at `dir`. */
+function runDockerfilePinCheck(dir: string): { status: number | null; out: string } {
+  const dockerfile = readFileSync(join(REPO_ROOT, "deploy", "Dockerfile"), "utf8");
+  const loop = /^ {4}for pkg in @anthropic-ai\/claude-code @openai\/codex; do[\s\S]*?^ {4}done;/m.exec(dockerfile)?.[0];
+  assert.ok(loop, "deploy/Dockerfile must check the CLI pins against deploy/package.json in the install layer");
+  const r = spawnSync("sh", ["-c", `set -eu\n${loop.replaceAll("/opt/remudero-image-clis", dir).replace(/done;$/, "done")}`], { encoding: "utf8" });
+  return { status: r.status, out: (r.stdout ?? "") + (r.stderr ?? "") };
+}
+
+test("deploy/package.json is the image CLIs' one declaration, so a dependabot bump needs no Dockerfile edit", () => {
+  // #9768: the Dockerfile kept its own ARG copy of both versions, which no bump ever updated.
+  const dockerfile = readFileSync(join(REPO_ROOT, "deploy", "Dockerfile"), "utf8");
+  const manifest = JSON.parse(readFileSync(join(REPO_ROOT, "deploy", "package.json"), "utf8")) as { dependencies: Record<string, string> };
+  const lock = JSON.parse(readFileSync(join(REPO_ROOT, "deploy", "package-lock.json"), "utf8")) as { packages: Record<string, { version?: string }> };
+  for (const pkg of CLI_PACKAGES) {
+    const pin = manifest.dependencies[pkg];
+    assert.match(pin, /^\d+\.\d+\.\d+$/, `${pkg} is pinned exactly`);
+    assert.equal(lock.packages[`node_modules/${pkg}`]?.version, pin, `${pkg}'s lock installs the declared pin`);
+    assert.equal(dockerfile.includes(pin), false, `deploy/Dockerfile carries no second copy of ${pkg} ${pin}`);
+  }
+  assert.doesNotMatch(dockerfile, /^\s*ARG\s+(CLAUDE_CODE_VERSION|CODEX_VERSION)\b/m, "no version ARG for a bump to leave stale");
+
+  const dir = makeTempDir("verify-image-pins");
+  const write = (pins: Record<string, string>, locked: Record<string, string>) => {
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ dependencies: pins }));
+    writeFileSync(join(dir, "package-lock.json"), JSON.stringify({ packages: Object.fromEntries(Object.entries(locked).map(([k, v]) => [`node_modules/${k}`, { version: v }])) }));
+  };
+  const bumped = { "@anthropic-ai/claude-code": "9.9.9", "@openai/codex": "8.8.8" };
+  write(bumped, bumped);
+  assert.equal(runDockerfilePinCheck(dir).status, 0, "a bump that moves the manifest and its lock together builds");
+  write({ ...bumped, "@openai/codex": "^8.8.8" }, bumped);
+  const range = runDockerfilePinCheck(dir);
+  assert.notEqual(range.status, 0, "a range is refused");
+  assert.match(range.out, /must pin @openai\/codex exactly/);
+  write(bumped, { ...bumped, "@anthropic-ai/claude-code": "9.9.8" });
+  const drift = runDockerfilePinCheck(dir);
+  assert.notEqual(drift.status, 0, "a lock that disagrees with the manifest is refused");
+  assert.match(drift.out, /pins @anthropic-ai\/claude-code 9\.9\.9 but its lock installs 9\.9\.8/);
+});
+
+test("deploy/verify-image.sh reads the expected CLI versions from deploy/package.json", () => {
+  const script = readFileSync(join(REPO_ROOT, "deploy", "verify-image.sh"), "utf8");
+  const fn = /^declared_pin\(\) \{[\s\S]*?^\}/m.exec(script)?.[0];
+  assert.ok(fn, "verify-image.sh must read the declared pins through declared_pin");
+  const dir = makeTempDir("verify-image-declared");
+  const read = (pins: Record<string, string>) => {
+    writeFileSync(join(dir, "package.json"), `${JSON.stringify({ dependencies: pins }, null, 2)}\n`);
+    const r = spawnSync("sh", ["-c", `dirname() { printf '%s' "${dir}"; }\n${fn}\nprintf '%s|%s' "$(declared_pin "@anthropic-ai\\/claude-code")" "$(declared_pin "@openai\\/codex")"`], { encoding: "utf8" });
+    return r.stdout;
+  };
+  assert.equal(read({ "@anthropic-ai/claude-code": "9.9.9", "@openai/codex": "8.8.8" }), "9.9.9|8.8.8");
+  assert.equal(read({ "@anthropic-ai/claude-code": "^9.9.9", "@openai/codex": "8.8.8" }), "|8.8.8", "a range is no expectation: the probe reports UNKNOWN");
+  const real = JSON.parse(readFileSync(join(REPO_ROOT, "deploy", "package.json"), "utf8")) as { dependencies: Record<string, string> };
+  writeFileSync(join(dir, "package.json"), readFileSync(join(REPO_ROOT, "deploy", "package.json"), "utf8"));
+  const r = spawnSync("sh", ["-c", `dirname() { printf '%s' "${dir}"; }\n${fn}\nprintf '%s|%s' "$(declared_pin "@anthropic-ai\\/claude-code")" "$(declared_pin "@openai\\/codex")"`], { encoding: "utf8" });
+  assert.equal(r.stdout, `${real.dependencies["@anthropic-ai/claude-code"]}|${real.dependencies["@openai/codex"]}`, "the shipped manifest reads back exactly");
 });
 
 test("the Dockerfile installs Playwright from the copied root lockfile", () => {

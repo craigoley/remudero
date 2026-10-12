@@ -146,10 +146,10 @@ test("W1-T4944: shifted clock cannot write the live-root stand-in", () => {
   const ledgerUrl = new URL("../src/lib/ledger.ts", import.meta.url).href;
   const clockUrl = new URL("../scripts/clock-shift.mjs", import.meta.url).href;
   const code = `
-    import { statSync } from "node:fs";
     import { appendLedger } from ${JSON.stringify(ledgerUrl)};
     appendLedger(${JSON.stringify(fixturePath)}, { run_id: "clock", task_id: "TEST", step: "fixture-write" });
-    if (Date.now() - statSync(${JSON.stringify(fixturePath)}).mtimeMs < 399 * 86_400_000) throw new Error("clock was not shifted");
+    // W1-T6035: the preload moves fs stat times too, so the real clock is read from performance.timeOrigin.
+    if (Date.now() - (performance.timeOrigin + performance.now()) < 399 * 86_400_000) throw new Error("clock was not shifted");
     console.log("shift-active");
     appendLedger(${JSON.stringify(livePath)}, { run_id: "clock", task_id: "TEST", step: "should-not-write" });
   `;

@@ -50,7 +50,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { realRiskJudge, riskJudgeSpendCollector, runRiskJudge, type RiskJudgeInput } from "../src/lib/risk-judge.js";
-import { laneRunStartFields, runFixRung, runTask } from "../src/run-task.js";
+import { laneRunStartFields, runFixRung, runTask } from "./helpers/run-task-test.js";
 import { buildDigest } from "../src/lib/digest.js";
 import { groupSpendByAccount } from "../src/lib/ledger.js";
 import { liveRunSpend } from "../src/lib/status-stream-publisher.js";
@@ -214,7 +214,7 @@ test("W1-T2383 (rank 1): a caller that wires NO collector ledgers the row byte-i
     },
   );
   const row = rows.find((r) => r.step === "risk_judge.decision")!;
-  assert.deepEqual(Object.keys(row).sort(), ["action", "confidence", "reason", "reasons", "step", "verdict"]);
+  assert.deepEqual(Object.keys(row).sort(), ["action", "confidence", "evidence_tier", "reason", "reasons", "step", "verdict"]);
 });
 
 // ══ RANK 2 — the fix rung records the cap it ran under ═════════════════════════════════════════
@@ -314,8 +314,9 @@ test("W1-T2383 (Q3): the digest's cost total is step-gated on `verdict`, so a pr
 
 test("W1-T2383 (Q3): the board's shared spend fold counts cost_usd and num_turns, not max_turns", () => {
   const board = readFileSync(new URL("../src/lib/board.ts", import.meta.url), "utf8");
-  assert.match(board, /import \{[^}]*liveRunSpend[^}]*\} from "\.\/status-stream-publisher\.js"/);
-  assert.match(board, /liveRunSpend\(lines, p\.taskId\)/);
+  // The board folds every running task in one pass (liveRunSpendByTask); liveRunSpend is that same fold for one task.
+  assert.match(board, /import \{[^}]*liveRunSpendByTask[^}]*\} from "\.\/status-stream-publisher\.js"/);
+  assert.match(board, /liveRunSpendByTask\(lines, /);
   assert.deepEqual(liveRunSpend([
     { task_id: "W1-A", step: "run.start" },
     { task_id: "W1-A", step: "implement.done", cost_usd: 1.25, num_turns: 2, max_turns: 99 },

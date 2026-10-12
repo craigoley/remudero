@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: follow-up to W1-T5348 (#8795)"
   plan_refs: [W1-T5348, W1-T3390, W1-T4351]
   files: [src/lib/sweep.ts, test/the-sweeps-own-plan-prs-run-the-filer-preflight.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -17,7 +17,7 @@ import { dirname, join } from "node:path";
 // message-only rewrite that changed nothing but the gate's verdict) while leaving the artifact
 // that actually lands on main -- the PR title -- completely unchecked.
 //
-// This suite proves the relocation two ways: (1) reading .github/workflows/ci.yml to show the
+// This suite proves the relocation two ways: (1) reading .github/workflows/pr-title-lint.yml to show the
 // `commitlint` job now feeds the PR title, not a git commit range, into the same commitlint CLI
 // + config that test/commitlint-config.test.ts already proves is ACTIVE; and (2) driving that
 // real CLI against fixture titles/commit messages to prove the accept/reject behavior actually
@@ -35,13 +35,13 @@ function lint(message: string) {
   );
 }
 
+// W1-T5695: ci.yml's copy of the title lint is gone; pr-title-lint.yml's `commitlint` job (its
+// only job) is the sole producer of the `commitlint` check, so the wiring pins read it.
 async function commitlintJobBody(): Promise<string> {
-  const ciYml = await readFile(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
-  const jobStart = ciYml.indexOf("\n  commitlint:");
-  assert.notEqual(jobStart, -1, "ci.yml must declare a commitlint job");
-  const nextJobStart = ciYml.indexOf("\n  leak-grep:", jobStart);
-  assert.notEqual(nextJobStart, -1, "commitlint job body must be findable in ci.yml (bounded by the next job)");
-  return ciYml.slice(jobStart, nextJobStart);
+  const workflow = await readFile(join(REPO_ROOT, ".github", "workflows", "pr-title-lint.yml"), "utf8");
+  const jobStart = workflow.indexOf("\n  commitlint:");
+  assert.notEqual(jobStart, -1, "pr-title-lint.yml must declare a commitlint job");
+  return workflow.slice(jobStart);
 }
 
 // ── CI wiring: the linted object is now the PR title, not the branch-commit range ──
@@ -101,6 +101,45 @@ test("commitlint CI wiring: the commitlint step itself reads no base..head commi
   );
 });
 
+function squashMergeCalls(src: string): string[] {
+  // W1-T7753 shares the real synchronous CLI port through a const binding. Derive its name
+  // from that binding, never assume an arbitrary runGh identifier is the gh transport.
+  const aliases = [...src.matchAll(/\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*ghExec\s*;/g)]
+    .map((match) => match[1]);
+  const transports = ["ghExec", "ghTextAsync", ...aliases]
+    .map((name) => name.replace(/[$.*+?^{}()|[\]\\]/g, "\\$&"))
+    .join("|");
+  const matcher = new RegExp(
+    '(?:execFileSync\\("gh",\\s*|(?<![\\w$])(?:' + transports +
+      ')\\(\\s*)\\[[^\\]]*"--squash"[^\\]]*\\]',
+    "g",
+  );
+  return src.match(matcher) ?? [];
+}
+
+test("W1-T7753: squash-title guard recognizes only bound CLI aliases", () => {
+  assert.equal(squashMergeCalls('const runGh = ghExec; runGh(["pr", "merge", prUrl, "--squash"]);').length, 1);
+  assert.equal(squashMergeCalls('const $runGh = ghExec; $runGh(["pr", "merge", prUrl, "--squash"]);').length, 1);
+  assert.equal(squashMergeCalls('runGh(["pr", "merge", prUrl, "--squash"]);').length, 0);
+  assert.equal(squashMergeCalls('const runGh = ghJson; runGh(["pr", "merge", prUrl, "--squash"]);').length, 0);
+});
+
+test("W1-T7753: bound and direct squash transports retain subject-override detection", () => {
+  for (const transport of [
+    'const runGh = ghExec; runGh(',
+    'ghExec(',
+    'ghTextAsync(',
+    'execFileSync("gh", ',
+  ]) {
+    const safe = squashMergeCalls(transport + '["pr", "merge", prUrl, "--squash"]);');
+    assert.equal(safe.length, 1);
+    assert.doesNotMatch(safe[0], /--subject/);
+    const override = squashMergeCalls(transport + '["pr", "merge", prUrl, "--squash", "--subject", "unlinted"]);');
+    assert.equal(override.length, 1);
+    assert.match(override[0], /--subject/);
+  }
+});
+
 test("commitlint CI wiring: no gh pr merge --squash call site overrides --subject away from the PR title", async () => {
   const workerTs = await readFile(join(REPO_ROOT, "src", "lib", "worker.ts"), "utf8");
   // W1-T2887 relocated the auto-merge arm cluster, and the `gh pr merge --squash` call went with
@@ -112,7 +151,7 @@ test("commitlint CI wiring: no gh pr merge --squash call site overrides --subjec
     ["src/lib/arm-auto-merge.ts", armAutoMergeTs],
     ["src/lib/worker.ts", workerTs],
   ] as const) {
-    const squashCalls = src.match(/(?:execFileSync\("gh",\s*|ghExec\(\s*)\[[^\]]*"--squash"[^\]]*\]/g) ?? [];
+    const squashCalls = squashMergeCalls(src);
     assert.ok(squashCalls.length > 0, `${name} must call gh pr merge --squash somewhere`);
     for (const call of squashCalls) {
       assert.doesNotMatch(

@@ -1,0 +1,34 @@
+diff --git a/learnings/ci.yaml b/learnings/ci.yaml
+index 1111111..2222222 100644
+--- a/learnings/ci.yaml
++++ b/learnings/ci.yaml
+@@ -334,0 +335,29 @@
++- id: remudero-review-refusals-repaired-by-hand
++  subsystem: ci
++  lifecycle: active
++  files:
++    - "plan/tasks.d/**"
++    - "src/run-task.ts"
++    - "src/lib/policy.ts"
++    - "src/lib/affected-suites.ts"
++    - "src/lib/dep-review.ts"
++    - "test/**"
++    - "learnings/ci.yaml"
++  fact: >-
++    The remudero-review gate refused eight pull requests in one window (#9717, #9819, #9824, #9834,
++    #9838, #9918, #9971, #9979), and each was repaired after the refusal. Before pushing, a worker
++    on a change that touches plan/ runs `npm run --silent rule15-precheck`, and if it adds or edits
++    a claim or proof in a plan task file or shard it lifts that shard into a plan-only PR rather than
++    filing it beside its implementation. A worker on a change that touches src/run-task.ts,
++    src/lib/policy.ts, src/lib/dep-review.ts, or a new test/ file runs `rmd census-membership` and
++    the suites it names. Those are the precheck and census steps that a fix or implementation lane
++    skips before its first push.
++  evidence: >-
++    The remudero-review gate refused eight pull requests recorded as ci-learning:9717:remudero-review
++    (9717, 9819, 9824, 9834, 9838, 9918, 9971, 9979), and each was repaired. The repairs touched the
++    plan/tasks.d shard tree, the run-task and affected-suite selector lane, and census-covered test
++    files. Recon did not establish each PR's individual refusal reason or verify the live GitHub
++    state of those PRs, so this entry names the shared surface and the pre-push steps, not a
++    verified per-PR cause.
++  src: "ci-learning:9717:remudero-review"
++  cited: "2026-10-08"

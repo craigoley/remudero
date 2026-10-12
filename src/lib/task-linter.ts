@@ -29,6 +29,7 @@ import {
   type DuplicateCorpusEntry,
 } from "./knowledge-dedup.js";
 import { classifyGrepZeroHit } from "./grep-zero-cause.js";
+import { RULE_SUITE_NAME_RE } from "./ci-parity.js";
 
 /** Deterministic task linter (MASTER-PLAN §5C Layer A).
  *  A PURE function over a loaded {@link Task}/{@link Plan}: no LLM, no I/O, no side effects. Every
@@ -91,6 +92,8 @@ export type LintCheck =
   | "deferred-follow-up"
   | "proof-base-discrimination"
   | "proof-unit-test-base-wrapper"
+  | "proof-test-only-discrimination"
+  | "new-shard-rule-suite"
   | "shard-shape";
 export type LintSeverity = "block" | "warn";
 
@@ -196,6 +199,28 @@ export function isDataArtifact(
   return classes.some((c) => c.pathPattern.test(path) && c.extPattern.test(path));
 }
 
+export function proofTargetPaths(task: Task): string[] {
+  const out: string[] = [];
+  for (const c of task.acceptance ?? []) {
+    const proof = (c.proof ?? "").trim();
+    const grep = /^grep: .+ in (\S+)$/.exec(proof)?.[1];
+    const unit = /^unit test: (\S+\/\S+\.[A-Za-z0-9]+)$/.exec(proof)?.[1];
+    for (const p of [grep, unit]) if (p !== undefined) out.push(p);
+  }
+  return out;
+}
+
+/** Criteria text with each declared or proof-target path blanked (plain or escaped): the files: tally counts that file. */
+export function sizedCriteriaText(task: Task): string {
+  let text = (task.acceptance ?? []).map((c) => `${c.claim ?? ""} ${c.proof ?? ""}`).join("\n");
+  const paths = [...new Set([...(task.files ?? []), ...proofTargetPaths(task)])].filter((p) => p.includes("/"));
+  for (const path of paths.sort((a, b) => b.length - a.length)) {
+    const source = [...path].map((ch) => (/[A-Za-z0-9_-]/.test(ch) ? ch : `\\\\?${ch.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}`)).join("");
+    text = text.replace(new RegExp(source, "g"), " ");
+  }
+  return text;
+}
+
 /** The distinct subsystems/concerns a task spans. `ownFalsifierSlug` is this task's own shard
  *  filename slug, the fact {@link LintOpts.duplicateSlug} carries: a `test/` path whose {@link
  *  moduleIdFromPath} equals it is the task's own falsifier and is discounted, and any other is
@@ -227,7 +252,7 @@ export function subsystemsOf(
   // A task declaring ONLY companions (a test-only change) still counts them — otherwise it would
   // score zero concerns and pass sizing vacuously, which is a worse answer than the one being fixed.
   if (ids.size === 0) for (const id of companions) ids.add(id);
-  const text = (task.acceptance ?? []).map((c) => `${c.claim ?? ""} ${c.proof ?? ""}`).join("\n");
+  const text = sizedCriteriaText(task);
   for (const entry of SUBSYSTEM_LEXICON) {
     if (entry.pattern.test(text)) ids.add(entry.tag);
   }
@@ -292,9 +317,9 @@ export function sizingViolation(task: Task, opts: LintOpts = {}): LintViolation 
         `retired (withdrawn) shard ${task.id} will never be built — sizing observation downgraded to warn`,
     };
   }
-  // The same slug `duplicateTitleViolations` reads, never re-derived — this module reads no disk.
-  // Blank or absent ⇒ undefined, keeping the W1-T2543 discount for callers with no slug (W1-T2525).
-  const ownFalsifierSlug = opts.duplicateSlug?.trim().toLowerCase() || undefined;
+  // Unscoped callers carry the shard path rather than duplicate-check options; derive it purely.
+  const ownFalsifierSlug = opts.duplicateSlug?.trim().toLowerCase() ||
+    (task.sourcePath ? shardSlugFromPath(task.sourcePath)?.text.toLowerCase() : undefined);
   if (task.risk !== "high") {
     const subsystems = subsystemsOf(task, undefined, undefined, ownFalsifierSlug);
     if (subsystems.size < 2) return undefined;
@@ -1804,6 +1829,77 @@ export function proofUnitTestBaseWrapperViolations(task: Task, opts: LintOpts = 
     });
   });
   return violations;
+}
+
+// ── PROOF-TEST-ONLY-DISCRIMINATION (W1-T5662 — a task that changes only test/ cannot fail at base) ──
+// `buildBaseProofDir` (run-task.ts, W1-T3098) copies the diff's ADDED `test/**` files into the
+// merge-base checkout so a `unit test:` proof can run there at all. A task whose `files:` are all
+// under `test/` changes no src, so every `unit test:` proof passes at BOTH trees, grades
+// `executed_stale`, and discriminates nothing. Hit twice in one week: W1-T5527 (#9103) and W1-T5622
+// (#9120) each needed a plan amendment — a `grep:` criterion on the new test file — before the build
+// could go green. WARN across the plan; promoted to BLOCK on a new or changed shard through
+// PLAN_ONLY_NEW_TASK_DIAGNOSTIC_CHECKS. The exits are a `grep:` proof (which misses at base because
+// the file is absent there) or `kind: guard` on the criteria that deliberately preserve behaviour.
+
+/** W1-T5662 — a `verify: auto` task whose every non-`plan/` `files:` entry is under `test/` and
+ *  whose every judged criterion (not `kind: guard`, no `satisfied_by`) is a `unit test:` proof,
+ *  with no `grep:` proof among them. WARN; see the section comment above for the promotion. */
+export function proofTestOnlyDiscriminationViolations(task: Task): LintViolation[] {
+  if (task.verify !== "auto") return [];
+  const declared = (task.files ?? []).filter((f) => !f.startsWith("plan/"));
+  if (declared.length === 0 || !declared.every((f) => f.startsWith("test/"))) return [];
+  const judged = (task.acceptance ?? []).filter(
+    (c) => !c.satisfied_by && (c as { kind?: unknown }).kind !== "guard",
+  );
+  const kinds = judged.map((c) => parseWhitelistedProof(c.proof ?? "")?.kind);
+  if (kinds.length === 0 || kinds.some((k) => k !== "test")) return []; // a grep (or unparsed) proof is another check's concern
+  return [
+    {
+      check: "proof-test-only-discrimination",
+      severity: "warn",
+      message:
+        `task ${task.id} declares only test/ files (${declared.join(", ")}) and every judged criterion is a ` +
+        "`unit test:` proof, so it discriminates nothing: buildBaseProofDir copies the diff's added test " +
+        "files into the merge-base checkout, the proof passes on BOTH trees, grades executed_stale, and " +
+        "the build cannot go green without a plan amendment (W1-T5527 #9103, W1-T5622 #9120). Add a " +
+        "`grep:` criterion on a line the new test file introduces, which misses at base, and mark the " +
+        "census/preservation criterion `kind: guard`.",
+    },
+  ];
+}
+
+export function newShardRuleSuiteViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const isNew = opts.riskTransition
+    ? opts.riskTransition.baseTask === undefined
+    : opts.postMergeAmendment !== undefined &&
+      opts.postMergeAmendment.baseTask === undefined &&
+      opts.baseAcceptance !== undefined;
+  if (!isNew) return [];
+  const proofs = (task.acceptance ?? []).map((c) => c.proof ?? "").filter((p) => /^\s*`?unit test:/i.test(p));
+  const named = [...(task.files ?? []), ...proofs.flatMap((p) => p.match(/test\/[^\s"'`,;()]+\.test\.ts/g) ?? [])];
+  const paths = [...new Set(named)].filter(
+    (p) => /^test\/.+\.test\.ts$/.test(p) && RULE_SUITE_NAME_RE.test(p.slice("test/".length)) && !opts.pathExistsAtBase?.(p),
+  );
+  const prose = [task.rationale, task.note, task.prompt, (task as Task & { design?: string }).design].join("\n");
+  if (paths.length === 0 || /@not-a-rule-suite[ \t]*:[ \t]*\S/.test(prose)) return [];
+  const parityRow = (p: string): boolean =>
+    (task.files ?? []).includes("scripts/census-precheck.mjs") &&
+    [...prose.matchAll(/PRECHECK_PARITY/g)].some((m) =>
+      prose.slice(Math.max(0, m.index! - 300), m.index! + 300).includes(p.slice(p.lastIndexOf("/") + 1)),
+    );
+  const refused = paths.filter((p) => !parityRow(p));
+  if (refused.length === 0) return [];
+  return [
+    {
+      check: "new-shard-rule-suite",
+      severity: "block",
+      message:
+        `new shard ${task.id} names ${refused.join(", ")}, which listRuleSuites reads as a CI rule suite ` +
+        "(census/ratchet/baseline in the name) and every-ci-census-is-asked-before-the-push refuses with no " +
+        "parity row — rename the slug, declare `@not-a-rule-suite: <reason>` in the design, or list " +
+        "scripts/census-precheck.mjs in files and name the test's basename beside PRECHECK_PARITY",
+    },
+  ];
 }
 
 function exactUnitTestTargetPath(proof: string): string | undefined {
@@ -3363,6 +3459,7 @@ export const PLAN_ONLY_NEW_TASK_DIAGNOSTIC_CHECKS: ReadonlySet<LintCheck> = new 
   "proof-scope",
   "shard-shape",
   "proof-grep-already-true",
+  "proof-test-only-discrimination",
 ]);
 
 /** W1-T4700 (#7608): verify in the enum, a known repo, criteria unless human. WARN; promoted above when introduced. */
@@ -3502,8 +3599,8 @@ export interface LintOpts {
    *  The check is WARN-only regardless of it, and has no severity override. */
   duplicateTitleCutoff?: number;
   /** THIS task's own shard filename slug, for {@link duplicateTitleViolations} to score instead of
-   *  the title; the linter reads no disk and `Task` carries no path, so the caller supplies it.
-   *  Absent or blank ⇒ the title is scored. ALSO consumed by {@link sizingViolation}. */
+   *  the title; supplied by the caller without reading disk.
+   *  Absent or blank ⇒ the title is scored. {@link sizingViolation} falls back to the task path. */
   duplicateSlug?: string;
   /** Shingle width for {@link duplicateTitleViolations}. The live caller passes {@link
    *  DUPLICATE_SLUG_SHINGLE_K}; absent ⇒ {@link DEFAULT_SHINGLE_K}. */
@@ -3578,8 +3675,10 @@ const BUILD_VERIFICATION_CHECKS = new Set<LintCheck>([
   "proof-scope",
   "proof-self-path",
   "proof-name-resolution",
+  "proof-unit-test-unresolvable",
   "proof-base-discrimination",
   "proof-unit-test-base-wrapper",
+  "proof-test-only-discrimination",
   "shared-proof",
   "unbound-criterion",
 ]);
@@ -3642,6 +3741,8 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofBaseDiscriminationViolations(task, opts));
   violations.push(...proofGrepAlreadyTrueViolations(task, opts));
   violations.push(...proofUnitTestBaseWrapperViolations(task, opts));
+  violations.push(...proofTestOnlyDiscriminationViolations(task));
+  violations.push(...newShardRuleSuiteViolations(task, opts));
   violations.push(...postMergeAmendmentViolations(task, opts));
   violations.push(...blockedDispositionViolations(task, opts));
   violations.push(...blockedRecordUnruledViolations(task));
