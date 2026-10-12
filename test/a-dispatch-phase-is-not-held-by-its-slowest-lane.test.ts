@@ -267,6 +267,7 @@ function phase(durationMs: number, extraDeps: Partial<DaemonDeps> = {}, opts: No
   let isStale = false;
   let cleaning = false;
   const merged = new Set<string>();
+  const boundaries = new Map<string, () => unknown>();
   const run = runDaemon(loadPlan(path), {
     now: () => new Date(nowMs),
     readLedgerLines: () => history(durationMs),
@@ -274,12 +275,18 @@ function phase(durationMs: number, extraDeps: Partial<DaemonDeps> = {}, opts: No
     checkFreshness: () => isStale ? stale : { stale: false },
     checkStop: () => cleaning ? "cleanup" : undefined,
     log: (step, extra) => rows.push({ step, extra }),
-    runOne: (id) => { started.push({ id, age: nowMs - start }); return releases.get(id)!.promise; },
+    runOne: (id, options) => {
+      started.push({ id, age: nowMs - start });
+      if (options) boundaries.set(id, options.restartAtWorkerBoundary);
+      return releases.get(id)!.promise;
+    },
     sleep: () => { const sleep = deferred<void>(); sleeps.push(sleep); return sleep.promise; },
     ...extraDeps,
   } as DaemonDeps, { laneCount: 3, max: 10, ...opts });
   return {
     run, started, rows,
+    /** W1-T7806: the run reaches a worker boundary and reads the daemon's restart latch. */
+    boundary: (id: string) => boundaries.get(id)?.(),
     settle: async (id: string, ageMinutes: number) => {
       nowMs = start + ageMinutes * minute;
       merged.add(id);
@@ -464,10 +471,16 @@ test("a restart decided while lanes are parked drains them", async () => {
     await h.tick(20);
     assert.equal(h.rows.some(({ step, extra }) => step === "daemon.freshness_decision" && extra?.action === "restart"), true);
     await flush();
+    // W1-T7806: F was in flight at the latch and has reached no boundary, so the woken lanes refill on the old code.
+    assert.deepEqual(h.rows.filter(({ step }) => step === "dispatch.lane_refilled").slice(-2)
+      .map(({ extra }) => [extra?.finished_task, extra?.waiting_on]), [["D", ["F"]], ["E", ["F"]]]);
+    assert.equal(h.boundary("F"), stale, "F reaches a boundary: every holdout can now yield");
+    await h.settle("G", 21);
+    await h.settle("H", 22);
     const held = h.rows.filter(({ step }) => step === "dispatch.lane_refill_held");
-    assert.deepEqual(held.map(({ extra }) => [extra?.finished_task, extra?.reason]).sort(), [["D", "stale code"], ["E", "stale code"]]);
+    assert.deepEqual(held.map(({ extra }) => [extra?.finished_task, extra?.reason]).sort(), [["G", "stale code"], ["H", "stale code"]]);
     await h.tick(30);
-    assert.equal(h.started.length, 6, "F outliving the mean after the latch cannot renew refill");
+    assert.equal(h.started.length, 8, "F outliving the mean after the latch cannot renew refill");
     await h.settle("F", 31);
     assert.equal((await h.run).stopReason, "stale");
   } finally { await h.cleanup(); }

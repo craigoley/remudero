@@ -17373,6 +17373,8 @@ async function runTask(
      *  spawning a real sandboxed worker. Default: the real spawn-backed executor. */
     containmentExec?: ProbeExecutor;
     externalWaitFreshness?: ExternalWaitFreshness;
+    /** W1-T7806: the daemon's latched restart, read at each worker boundary; reading it releases this lane's hold
+     *  on refill. A set latch yields the run even when its own `externalWaitFreshness` read would not. Daemon only. */
     restartAtWorkerBoundary?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
     externalWaitRecycle?: () => string | undefined;
     /** W1-T5345: hand the PR to the sweep at the first CI poll ({@link PollDeps.handOffAtPrOpen}). Daemon only. */
@@ -19723,7 +19725,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     let impl!: WorkerResult;
     // W1-T7697: retain disk work before releasing a lane; a failed checkpoint is never a handoff.
     const yieldAtWorkerBoundary = async (waitingOn: string): Promise<RunResult | undefined> => {
-      const freshness = opts.restartAtWorkerBoundary ? opts.restartAtWorkerBoundary() : await opts.externalWaitFreshness?.();
+      const freshness = opts.restartAtWorkerBoundary?.() ?? await opts.externalWaitFreshness?.();
       const recycle = freshness ? undefined : opts.externalWaitRecycle?.();
       if (!freshness && !recycle) return undefined;
       try {

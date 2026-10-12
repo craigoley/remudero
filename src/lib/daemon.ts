@@ -1135,7 +1135,8 @@ export interface DaemonDeps {
   readTerminalPreDispatchRefusalRevisions?: () => ReadonlyMap<string, string>;
   /** Called once per task excluded because its own read is indeterminate. */
   onIndeterminate?: (task: Task) => void;
-  /** Run ONE task through the existing run-task path (default = runTask). */
+  /** Run ONE task through the existing run-task path (default = runTask). W1-T7806: `restartAtWorkerBoundary` is
+   *  the dispatch phase's restart latch, read by the run at each worker boundary. */
   runOne: (taskId: string, options?: {
     restartAtWorkerBoundary: () => Extract<DaemonFreshness, { stale: true }> | undefined;
   }) => Promise<RunResult>;
@@ -5757,6 +5758,7 @@ export async function runDaemon(
         reason: "categorized refusal contract changed",
       });
       const startedAtMs = daemonClock.now();
+      // W1-T7806: a run at a boundary reads the latch; a holdout reading it can yield, so it no longer holds refill.
       return deps.runOne(id, { restartAtWorkerBoundary: () => {
         if (!inFlightFreshness) return undefined;
         restartHoldouts.delete(id);

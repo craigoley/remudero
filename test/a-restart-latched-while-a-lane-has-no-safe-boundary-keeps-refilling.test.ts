@@ -4,7 +4,7 @@ import os, { tmpdir } from "node:os";
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { setImmediate as flush } from "node:timers/promises";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { runDaemon, type DaemonDeps, type DaemonFreshness } from "../src/lib/daemon.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
@@ -131,56 +131,63 @@ function worker(text: string): WorkerResult {
     tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false };
 }
 
+/** Drives the REAL runTask for task D through its first implement worker to the first worker boundary. */
+async function boundaryRun(t: TestContext, restartAtWorkerBoundary: BoundaryOptions["restartAtWorkerBoundary"] | undefined,
+  ownRead: () => Extract<DaemonFreshness, { stale: true }> | undefined) {
+  const root = mkdtempSync(join(tmpdir(), "rmd-t7806-boundary-"));
+  const origin = gitRepo({ bare: true });
+  const seed = gitRepo();
+  seed.addRemote("origin", origin.dir);
+  seed.git("push", "origin", "main");
+  mkdirSync(join(root, "repos"), { recursive: true });
+  const repo = gitRepo({ cloneFrom: origin.dir });
+  repo.git("config", "user.name", "fixture");
+  repo.git("config", "user.email", "fixture@remudero.invalid");
+  renameSync(repo.dir, join(root, "repos", "remudero"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, "- id: D\n  title: boundary fixture\n  repo: remudero\n  type: implement\n  verify: auto\n  risk: medium\n  origin: test\n  status: queued\n  files: [src/D.ts]\n");
+  const githubStub = ghShim([{ when: "pr create", stdout: "https://github.com/acme/remudero/pull/1" }]);
+  const priorPath = process.env.PATH;
+  process.env.PATH = `${githubStub.dir}:${priorPath}`;
+  t.after(() => { process.env.PATH = priorPath; });
+  let calls = 0;
+  let gates = 0;
+  const options: NonNullable<Parameters<typeof runTask>[1]> & Partial<BoundaryOptions> = {
+    config: { claudeBin: "/bin/true", root, installRoot: process.cwd(), workerProviders: { harnessCommitsImplement: true } },
+    skipGitSync: true, planPath,
+    github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
+    claimReserver: { mintAnchor: () => "boundary-anchor", attempt: () => "created", holder: () => undefined, drop: () => true },
+    containmentExec: async (token) => ({ transcript: `touch ../${token}: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
+    isolationExec: async () => ({ transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -", aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0 }),
+    restartAtWorkerBoundary,
+    externalWaitFreshness: ownRead,
+    spawn: async (args) => {
+      if (++calls === 1) return worker("RECON REPORT\nOBSERVED: fixture\n");
+      mkdirSync(join(args.cwd, "src"), { recursive: true });
+      writeFileSync(join(args.cwd, "src/D.ts"), "export const value = 42;\n");
+      return worker("REPORT\nCOMMIT_MESSAGE: fix(test): retain boundary work\n");
+    },
+    preopenGate: async () => { gates++; return { kind: "fail", failedSteps: ["fixture"], durationMs: 1 }; },
+  };
+  const outcome = await withLiveWritesAllowed(() => runTask("D", options));
+  const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  return { outcome, calls, gates, rows };
+}
+
 test("W1-T7806: a refill admitted under the latch yields at its first boundary", async (t) => {
   const h = phase(true, {}, 3);
   try {
     await latch(h);
     await h.settle("B", 6);
-    const root = mkdtempSync(join(tmpdir(), "rmd-t7806-boundary-"));
-    const origin = gitRepo({ bare: true });
-    const seed = gitRepo();
-    seed.addRemote("origin", origin.dir);
-    seed.git("push", "origin", "main");
-    mkdirSync(join(root, "repos"), { recursive: true });
-    const repo = gitRepo({ cloneFrom: origin.dir });
-    repo.git("config", "user.name", "fixture");
-    repo.git("config", "user.email", "fixture@remudero.invalid");
-    renameSync(repo.dir, join(root, "repos", "remudero"));
-    const planPath = join(root, "tasks.yaml");
-    writeFileSync(planPath, "- id: D\n  title: boundary fixture\n  repo: remudero\n  type: implement\n  verify: auto\n  risk: medium\n  origin: test\n  status: queued\n  files: [src/D.ts]\n");
-    const githubStub = ghShim([{ when: "pr create", stdout: "https://github.com/acme/remudero/pull/1" }]);
-    const priorPath = process.env.PATH;
-    process.env.PATH = `${githubStub.dir}:${priorPath}`;
-    t.after(() => { process.env.PATH = priorPath; });
-    let calls = 0;
-    let gates = 0;
-    let independentReads = 0;
-    const options: NonNullable<Parameters<typeof runTask>[1]> & Partial<BoundaryOptions> = {
-      config: { claudeBin: "/bin/true", root, installRoot: process.cwd(), workerProviders: { harnessCommitsImplement: true } },
-      skipGitSync: true, planPath,
-      github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
-      claimReserver: { mintAnchor: () => "boundary-anchor", attempt: () => "created", holder: () => undefined, drop: () => true },
-      containmentExec: async (token) => ({ transcript: `touch ../${token}: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
-      isolationExec: async () => ({ transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -", aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0 }),
-      restartAtWorkerBoundary: h.boundaries.get("D")?.restartAtWorkerBoundary,
-      externalWaitFreshness: () => { independentReads++; return undefined; },
-      spawn: async (args) => {
-        if (++calls === 1) return worker("RECON REPORT\nOBSERVED: fixture\n");
-        mkdirSync(join(args.cwd, "src"), { recursive: true });
-        writeFileSync(join(args.cwd, "src/D.ts"), "export const value = 42;\n");
-        return worker("REPORT\nCOMMIT_MESSAGE: fix(test): retain boundary work\n");
-      },
-      preopenGate: async () => { gates++; return { kind: "fail", failedSteps: ["fixture"], durationMs: 1 }; },
-    };
-    assert.equal(typeof options.restartAtWorkerBoundary, "function");
-    const outcome = await withLiveWritesAllowed(() => runTask("D", options));
+    const latchRead = h.boundaries.get("D")?.restartAtWorkerBoundary;
+    assert.equal(typeof latchRead, "function");
+    // The run's own read reports fresh: only the daemon's latch can yield this boundary.
+    const { outcome, calls, gates, rows } = await boundaryRun(t, latchRead, () => undefined);
     assert.equal(outcome.verdict, "handed_off");
     assert.equal(outcome.prUrl, undefined);
     assert.equal(calls, 2);
     assert.equal(gates, 0, "the first worker boundary yields before the preopen gate");
-    assert.equal(independentReads, 0, "the boundary uses the latch, even when the independent reader would say fresh");
-    const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
     assert.equal(rows.find(({ step }) => step === "run.freshness_handoff")?.new_sha, stale.newSha);
     assert.equal(rows.find(({ step }) => step === "verdict")?.reason, "freshness_yield");
     assert.equal(h.boundary("A"), stale);
@@ -189,6 +196,15 @@ test("W1-T7806: a refill admitted under the latch yields at its first boundary",
     await h.settle("D", 7);
     assert.equal(h.started.length, count, "the refill cannot renew the hold");
   } finally { await h.cleanup(); }
+});
+
+// W1-T7806 adds the latch to the boundary read; replacing the run's own read is W1-T8198's separate decision.
+test("W1-T7806: a clear latch leaves the run's own freshness read at the boundary", async (t) => {
+  const ownStale = { ...stale, newSha: "c".repeat(40) };
+  const { outcome, gates, rows } = await boundaryRun(t, () => undefined, () => ownStale);
+  assert.equal(outcome.verdict, "handed_off");
+  assert.equal(gates, 0);
+  assert.equal(rows.find(({ step }) => step === "run.freshness_handoff")?.new_sha, ownStale.newSha);
 });
 
 test("W1-T7806: refill closes as stale code once every holdout can yield", async () => {
@@ -214,7 +230,7 @@ test("W1-T7806: refill closes as stale code once every holdout can yield", async
   } finally { await h.cleanup(); }
 });
 
-test("test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts", async () => {
+test("W1-T7806: a holdout that settles stops holding refill", async () => {
   const h = phase();
   try {
     await latch(h);
