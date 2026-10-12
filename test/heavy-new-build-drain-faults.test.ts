@@ -42,6 +42,20 @@ function observe<T>(work: Promise<T>) {
   );
   return { outcome, ended: () => ended };
 }
+
+test("parallel drain continued-result reporter refusal preserves later genuine sibling credit", async () => {
+  const reason = new Error("continued sink refused");
+  const summary = await runDrain(fixturePlan(["A", "B"]), drainDeps({
+    runOne: async (id) => id === "A" ? { ...ok(id), merged: false, verdict: "no_pr" } : ok(id),
+    log: (step) => { if (step === "drain.continued") throw reason; },
+  }), { laneCount: 2, max: 2 });
+  assert.equal(summary.stopReason, "error");
+  assert.equal(summary.error, reason);
+  assert.deepEqual(summary.attempted, ["A", "B"]);
+  assert.deepEqual(summary.continued, [{ taskId: "A", verdict: "no_pr", prUrl: undefined }]);
+  assert.deepEqual(summary.merged, ["B"]);
+  assert.equal(summary.costUsd, 1);
+});
 type Row = { step: string; fields: Record<string, unknown> };
 
 // The promises stay genuinely in flight across a full turn after the real logger throws. No

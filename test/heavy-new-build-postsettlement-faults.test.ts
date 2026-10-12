@@ -122,6 +122,25 @@ test("post-settlement no-fault control preserves ordinary accounting and max", a
   assert.equal(summary.reportingFaults, undefined);
 });
 
+test("post-settlement idle-window reporter refusal preserves all settled worker accounting", { timeout: 3_000 }, async (t) => {
+  let now = 0, samples = 0;
+  const outcome = await runDaemon(planFixture(t), depsFixture(t, {
+    now: () => new Date(now),
+    runOne: async (id) => { await yieldTurn(); now = 3_600_001; return result(id); },
+    log: (step, fields) => {
+      if (step === "lane.idle_summary" && fields?.partial !== true) {
+        samples++; throw new Error("idle-window sink refused");
+      }
+    },
+  }), { laneCount: 2, max: 2, pollIntervalMs: 10 }).then((summary) => ({ summary }), (error: unknown) => ({ error }));
+  assert.equal(samples, 1, "positive control: the post-settlement window actually emitted");
+  assert.ok("summary" in outcome, "idle reporting cannot discard completed sibling accounting");
+  assert.equal(outcome.summary.stopReason, "error");
+  assert.match(outcome.summary.stopDetail ?? "", /dispatch.sample_idle_lane: idle-window sink refused/);
+  assert.deepEqual(outcome.summary.merged, ["A", "B"]);
+  assert.equal(outcome.summary.costUsd, 1);
+});
+
 test("summary sink refusal is explicit error assurance, not a delivered success receipt", async (t) => {
   const summary = await runDaemon(planFixture(t), depsFixture(t, {
     log: (step) => { if (step === "daemon.summary") throw new Error("summary not delivered"); },
