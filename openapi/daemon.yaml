@@ -8185,6 +8185,16 @@ components:
               type: string
               description: The repo registry's refusal code; GET /v1/registry answers 503 with it.
 
+    InboxSender:
+      type: object
+      description: >
+        W1-T8825: who sent an inbox item - the producer id (a machine-judge item's filer family, else the
+        proposal id's kind) and its fixed display name (src/lib/inbox-owner.ts). Never a proposal id.
+      required: [kind, name]
+      properties:
+        kind: {type: string}
+        name: {type: string}
+
     InboxViewItem:
       type: object
       description: >
@@ -8192,6 +8202,17 @@ components:
         unchanged. A `needsYou` item adds the `lane` it sits in; a `fleet` item is InboxFleetItem.
       required: [proposalId]
       properties:
+        from:
+          $ref: "#/components/schemas/InboxSender"
+        receivedAt:
+          type: [string, "null"]
+          description: When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists.
+        lastActivityAt:
+          type: [string, "null"]
+          description: The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt).
+        groupKey:
+          type: string
+          description: The key a console groups a sender's items into one thread by (equal to from.kind).
         proposalId: {type: string}
         summary: {type: string}
         plain:
@@ -9808,6 +9829,17 @@ components:
         - plain
         - draftedTasks
       properties:
+        from:
+          $ref: "#/components/schemas/InboxSender"
+        receivedAt:
+          type: [string, "null"]
+          description: When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists.
+        lastActivityAt:
+          type: [string, "null"]
+          description: The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt).
+        groupKey:
+          type: string
+          description: The key a console groups a sender's items into one thread by (equal to from.kind).
         classification:
           type: string
           enum: [ASK, RECORD]
@@ -9838,6 +9870,17 @@ components:
         - plain
         - spawnedAt
       properties:
+        from:
+          $ref: "#/components/schemas/InboxSender"
+        receivedAt:
+          type: [string, "null"]
+          description: When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists.
+        lastActivityAt:
+          type: [string, "null"]
+          description: The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt).
+        groupKey:
+          type: string
+          description: The key a console groups a sender's items into one thread by (equal to from.kind).
         classification:
           type: string
           enum: [ASK, RECORD]
@@ -9863,6 +9906,17 @@ components:
         - plain
         - reasons
       properties:
+        from:
+          $ref: "#/components/schemas/InboxSender"
+        receivedAt:
+          type: [string, "null"]
+          description: When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists.
+        lastActivityAt:
+          type: [string, "null"]
+          description: The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt).
+        groupKey:
+          type: string
+          description: The key a console groups a sender's items into one thread by (equal to from.kind).
         classification:
           type: string
           enum: [ASK, RECORD]
@@ -9911,6 +9965,17 @@ components:
         - plain
         - reason
       properties:
+        from:
+          $ref: "#/components/schemas/InboxSender"
+        receivedAt:
+          type: [string, "null"]
+          description: When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists.
+        lastActivityAt:
+          type: [string, "null"]
+          description: The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt).
+        groupKey:
+          type: string
+          description: The key a console groups a sender's items into one thread by (equal to from.kind).
         classification:
           type: string
           enum: [ASK, RECORD]
@@ -9964,6 +10029,17 @@ components:
         - plain
         - lane
       properties:
+        from:
+          $ref: "#/components/schemas/InboxSender"
+        receivedAt:
+          type: [string, "null"]
+          description: When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists.
+        lastActivityAt:
+          type: [string, "null"]
+          description: The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt).
+        groupKey:
+          type: string
+          description: The key a console groups a sender's items into one thread by (equal to from.kind).
         proposalId:
           type: string
         summary:
