@@ -1,0 +1,114 @@
+- id: W1-T8759
+  title: "A QUEUED TASK WHOSE GREP PROOF ALREADY PASSES AT ORIGIN/MAIN IS NOT BUILT — the dispatcher never asks whether a filed proof still misses at the base it will build from, so W1-T8533 took three builds (2026-10-12 14:34Z, 15:15Z, 16:35Z) after #11049 made one of its proofs pass on main, and each was refused at PR open as executed_stale; check the grep proofs before dispatch and route a stale one to the pre-dispatch repair path with a named row"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a queued task is not built while a filed grep proof already passes at its base; a false finding refuses dispatch of a buildable task
+  band_meaning: blast-radius
+  origin: "operator direction 2026-10-12 (\"continue with follow-ups, fix at the root\"); found while amending W1-T8533"
+  plan_refs: [W1-T8533, W1-T3657, W1-T4904, W1-T4921, W1-T2835, W1-T273, W1-T362, W1-T1070, W1-T4818]
+  files:
+    - src/lib/proof-base-stale.ts
+    - src/run-task.ts
+    - test/a-queued-task-whose-proof-already-passes-at-base-is-not-built.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main 639ed54a8. Symbols, not lines.
+    THE CASE. W1-T8533 was filed in #11089 (7ad208f57, 2026-10-12T13:31:40Z) with the proof
+    `grep: "refresh\.clearance" in src/lib/ledger.ts`. #11049 (5ec079f75, 14:05:49Z) and #11097 (939dee0ad, 14:32:42Z)
+    each added `"refresh.clearance"` to `DECISION_RELEVANT_LEDGER_STEPS` for their own reasons. From then on the proof
+    matched at every merge base, and `rmd check-proof --base origin/main` reports it `executed_stale` (exit 5). The fleet
+    still built the task three times: run-W1-T8533-1791815680124 (14:34:40Z), -1791818151153 (15:15:51Z) and
+    -1791822945025 (16:35:45Z). All three branches are on origin. The newest was refused at PR open with
+    `openPullRequestChecked: W1-T8533 proof did not pass against merge base (grep: "refresh\.clearance" in
+    src/lib/ledger.ts) … executed_stale`. A worker may not edit its own task's proof (Rule 15), so no build could have
+    passed it. Only a plan amendment could, and it was filed by hand.
+    WHAT EXISTS, AND WHY NONE OF IT RUNS BEFORE A BUILD:
+      - Filing time: `proofGrepAlreadyTrueViolations` (src/lib/task-linter.ts, W1-T4904) warns when a grep proof
+        already matches. It judges only criteria the filing diff adds or changes (`criteriaAdded`,
+        `criteriaProofChanged` against `baseAcceptance`), so a proof that main satisfies after filing is never judged
+        again. It is a warning, and it needs `readGrepProofFile` and `baseAcceptance`, which only `lint-plan --base`
+        supplies.
+      - Pre-dispatch: the §5C guard in `runTask` calls `assertLintClean(task, { proofResolvability: "warn" })` with no
+        `readGrepProofFile` and no `baseAcceptance`, so `proofGrepAlreadyTrueViolations` returns nothing there.
+        W1-T2835 kept its "file exists at base" check off this call site on purpose, because that check is a heuristic
+        and a queued task's proof may name a test its own PR will add. A grep that already matches at origin/main is not
+        a heuristic: it is the result review uses (`preexistingProofHits`, W1-T273) to grade the proof stale.
+      - Pre-push: `runPreflightProofs` and scripts/proof-resolve-precheck.mjs call `certainStaleProofs`
+        (src/lib/proof-base-stale.ts, W1-T4921). That runs after the build.
+      - PR open: `openPullRequestChecked` (src/lib/pr-open.ts) refuses a stale proof as `stale-proof`, and
+        `recordRefusedPrOpen` raises a BLOCKED escalation, or `pr.open_satisfied_by_main` for a test-only build. That
+        also runs after the build, and it did not stop the second and third builds.
+      - Review: `executed_stale` (W1-T273, W1-T362) runs after the PR opens.
+    THE REPAIR PATH ALREADY EXISTS. A pre-dispatch lint refusal goes to `repairRefusedTask` (src/lib/dispatch-repair.ts,
+    W1-T3657). The first refusal writes one `dispatch.repair.dispatched` row. A second refusal with the same verdict text
+    raises one BLOCKED escalation whose option is `restructure-task`, and later identical refusals are held. A changed
+    verdict counts as progress. That is the plan-repair route a stale proof needs, so this task adds a check, not a lane.
+    NOT MEASURED: how many other queued tasks carry a grep proof main already satisfies. The design's row makes that
+    countable.
+  design: |
+    1. THE PREDICATE, IN src/lib/proof-base-stale.ts. Export `staleAtDispatchBase(criteria, repoDir, baseRev, deps)`,
+       returning `{ stale: StaleProofRow[]; unknown: string[] }`. Use the same criteria as `certainStaleProofs`:
+       `visibleCriteria`, skipping `satisfied_by`, `kind: guard` and any proof `isDialectGrepProof` rejects. Do not run the
+       proof at a head: no build has run yet, and the tree the build starts from is the base. Put each target in a tree at
+       `baseRev` with `materialiseBaseGrepTree` and classify it with `preexistingProofHits`, as `certainStaleProofs` does.
+       Share that base half with `certainStaleProofs` so the two cannot disagree, and do not change what
+       `certainStaleProofs` returns. A target in `unreadable` or `needsCheckout` goes in `unknown`, never in `stale`.
+       `unit test:` proofs are not run, because a test run at the base is not cheap; review's W1-T362 arm still covers
+       them. Also export `PROOF_STALE_AT_DISPATCH_STEP`, written on one line as
+       `export const PROOF_STALE_AT_DISPATCH_STEP = "dispatch.proof_stale_at_base";`.
+    2. THE CALL, IN `runTask`'s §5C PRE-DISPATCH GUARD (src/run-task.ts). Inside the same `try`, after
+       `assertLintClean(task, preDispatchLint)`, resolve `origin/main` to a sha in the managed checkout
+       (`join(config.root, "repos", task.repo)`, the repo `worktreeAddAsync` later cuts the worktree from at
+       `origin/main`) and call `staleAtDispatchBase(task.acceptance ?? [], repoDir, sha)`.
+         - Any stale row: log `PROOF_STALE_AT_DISPATCH_STEP` with `task_id`, `base_sha`, `proofs` (claim, proof, why) and
+           `unknown`, then throw `new TaskLintError(taskId, violations)`, one violation per stale proof with check
+           `proof-stale-at-dispatch-base` and severity `block`. The message names the proof and its target path and says
+           to amend the shard. It does NOT name the base sha. The W1-T3657 verdict text must stay the same while main moves,
+           so the second refusal escalates and later ones are held, rather than reading as progress.
+         - The existing catch arm then does what it does for every lint refusal: `lint.blocked`, `repairRefusedTask` and
+           the `blocked_illformed` verdict. No lock is taken, no worktree is made and no worker is spawned.
+         - A sha or tree that cannot be read: log the same step with `outcome: "unreadable"` and dispatch as today. An
+           environment gap never refuses a task.
+         - No stale row: dispatch as today, with no row.
+       An amendment that replaces the proof clears the finding on the next dispatch.
+    3. UNCHANGED: `openPullRequestChecked`'s stale-proof refusal and escalation, which still catches a proof main
+       satisfies between this check and the PR open; review's `executed_stale`; filing-time `proof-grep-already-true`;
+       `certainStaleProofs`'s results; and every other lint check's severity at this call site. Nothing here uses a timer,
+       a count or a cap: the check runs once per dispatch attempt and asks the reviewer's own question.
+    4. TESTS. Use `gitRepo()` with a local git identity, a temp state dir, and no network or live ledger. Name the fixture
+       helpers neutrally, which the fixture-copy census requires. The fixture repo has a shard whose grep proof matches at
+       `origin/main`, a second that misses, a `kind: guard` criterion that matches, and a target whose read is made to
+       fail. Drive the guard through `runTask` the way test/task-linter-wiring.test.ts does, with every seam faked except
+       the predicate.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-queued-task-whose-proof-already-passes-at-base-is-not-built.test.ts"
+    - claim: "a grep proof that already matches at origin/main refuses dispatch with a named row and spawns no worker"
+      proof: 'grep: test("W1-T8759: a grep proof that already matches at origin/main refuses dispatch with a named row" in test/a-queued-task-whose-proof-already-passes-at-base-is-not-built.test.ts'
+    - claim: "a proof that misses at base, a guard criterion and an unreadable target never refuse dispatch"
+      proof: 'grep: test("W1-T8759: a missing proof, a guard and an unreadable target never refuse dispatch" in test/a-queued-task-whose-proof-already-passes-at-base-is-not-built.test.ts'
+    - claim: "the same stale proof on a later main escalates once and is then held, and an amended proof dispatches"
+      proof: 'grep: test("W1-T8759: a stale proof escalates once as main moves, and an amended proof dispatches" in test/a-queued-task-whose-proof-already-passes-at-base-is-not-built.test.ts'
+    - claim: "the dispatch-base check and the pre-push check agree on every grep proof they both judge"
+      proof: 'grep: test("W1-T8759: the dispatch check and certainStaleProofs agree on the base side" in test/a-queued-task-whose-proof-already-passes-at-base-is-not-built.test.ts'
+    - claim: "the pre-dispatch stale-proof row has a named step"
+      proof: 'grep: "dispatch\.proof_stale_at_base" in src/lib/proof-base-stale.ts'
+    - claim: "the pre-dispatch guard calls the check"
+      proof: 'grep: staleAtDispatchBase( in src/run-task.ts'
+  falsifier: |
+    Remove the `staleAtDispatchBase` call from the §5C guard, and the first test sees a worker spawn on a task whose proof
+    matches at origin/main, as W1-T8533's three builds did. Put the base sha in the violation message, and the third test
+    sees a new repair dispatch each time main moves instead of one escalation. Treat an unreadable target as a match, and
+    the second test sees a refusal with no evidence. Let the dispatch check skip `kind: guard` differently from
+    `certainStaleProofs`, and the agreement test names the criterion they disagree on.
+  note: |
+    EFFECT, measured after merge from the core ledger with no numeric pass mark: count `dispatch.proof_stale_at_base`
+    rows by task, and `pr.open_refused` rows with `refusal_class: "stale-proof"`. Healthy shape: a stale-proof PR-open
+    refusal happens only when main satisfied the proof after the dispatch-time check, and no task is built twice
+    against the same stale proof.
