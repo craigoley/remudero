@@ -205,7 +205,7 @@
   "src/lib/routing-objective.ts": 68,
   "src/lib/routing-prior.ts": 99,
   "src/lib/runbook-coverage.ts": 48,
-  "src/lib/self-sync.ts": 218,
+  "src/lib/self-sync.ts": 250,
   "src/lib/serve.ts": 1500,
   "src/lib/service.ts": 338,
   "src/lib/skill.ts": 125,

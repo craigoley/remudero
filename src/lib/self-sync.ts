@@ -1074,16 +1074,13 @@ export function checkReviewerCodeFreshness(
   );
 }
 
-/** W1-T7850 — an unreadable reading in a directory that no longer exists is a HOST GAP (the same `cwd-missing`
- *  naming W1-T7822 gave a vanished proof cwd), not an unprovable source: nothing was wrong with the code, the
- *  reviewer checkout was reclaimed under the read. Judged AFTER the read, and only for a reader that ran its OWN
- *  git there; every other unreadable reading is unchanged. */
+/** W1-T7850: an unreadable read in a directory that is gone is a host gap (`cwd-missing`, as W1-T7822), not an
+ *  unprovable source. Applies only to a reader that ran its OWN git there; an injected one reads no directory. */
 function nameVanishedCheckout(
   reading: ReviewerCodeFreshness,
   repoDir: string,
   deps: ReviewerCodeFreshnessOptions,
 ): ReviewerCodeFreshness {
-  // An injected git runner or head reader (a fake `/repo`) reads no directory, so a missing one proves nothing.
   if (deps.git !== undefined || deps.gitAsync !== undefined || deps.resolveHeadSha !== undefined) return reading;
   if (reading.status !== "unreadable" || reading.hostGap !== undefined || existsSync(repoDir)) return reading;
   return { status: "unreadable", reason: `reviewer checkout no longer exists: ${repoDir}`, hostGap: "cwd-missing" };
