@@ -1,0 +1,120 @@
+- id: W1-T8621
+  title: "EVERY STEP A LIVE-LEDGER DECISION READS IS RETAINED THROUGH ROTATION, AND ONE CENSUS PROVES IT FOR STEPS READ THROUGH CONSTANTS — the stall detector and the CodeQL arm gate read worker.state, worker.stalled and three code_scanning.* steps through constants from the live file, rotation archives all five, and neither rotation census can see them"
+  repo: remudero
+  depends_on: [W1-T8533]  # in flight on run-W1-T8533-1791815680124, which edits the same DECISION_RELEVANT_LEDGER_STEPS lines (adds sweep.base_fixed.refresh, drops the duplicate refresh.clearance)
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the rotation's retained set covers every live-file decision read; it spans the retained set in src/lib/ledger.ts and the census tests that derive it
+  band_meaning: blast-radius
+  origin: "operator approval 2026-10-12 (\"Go ahead with the filing\")"
+  plan_refs: [W1-T209, W1-T5935, W1-T5958, W1-T5966, W1-T8533, W1-T942, W1-T943, W1-T5633, W1-T7533, W1-T2723]
+  files:
+    - src/lib/ledger.ts
+    - test/ledger-rotation.test.ts
+    - test/a-spent-check-requeue-survives-ledger-rotation.test.ts
+    - test/every-live-ledger-decision-step-survives-rotation.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main 32360d06a. Symbols, not lines.
+    HOW ROTATION LOSES A ROW. `rotateLedger` (src/lib/ledger.ts) moves every row whose step is not in
+    `DECISION_RELEVANT_LEDGER_STEPS` (or the model-attribution, health and render sets) into an archive. Archives are
+    never deleted, so a reader that goes through the union (`resolveLedgerUnion`, `readLedgerUnionRecordsSync`) still
+    sees the row. A reader that goes through the live file only (`readLedgerLines` in src/lib/status.ts, or a
+    `readLedger` dep bound to it) does not see it after the next rotation.
+    WHY THE TWO CENSUSES MISS IT.
+      - test/ledger-rotation.test.ts, "derived from consumers, not hardcoded": `equalityRead` and `caseLiteral` match
+        only QUOTED literals after `.step ===`/`!==` or `case`, over a fixed `consumerFiles` list of eight files. A read
+        through a constant is invisible to it.
+      - test/a-spent-check-requeue-survives-ledger-rotation.test.ts, `unretainedFoldReads` (W1-T5935/W1-T5958):
+        resolves constants, but only inside `function <name>FromLedger(` bodies.
+    MEASURED with a scratch scan of the same eight files, constants resolved by name the way `unretainedFoldReads`
+    resolves them: ten unretained steps read through a constant. Checked one by one:
+      - DECISION-RELEVANT, live read:
+        - `code_scanning.judged_false_positive`, `code_scanning.judged_fix`, `code_scanning.fix_dispatch`
+          (`CODE_SCANNING_*_STEP`, src/lib/sweep.ts). `codeScanningGateForHead` decides the arm from `armLines =
+          readLedger(deps.ledgerPath)` in `runSweep`'s mergeable arm; `codeScanningHeadSettled` (called in run-task.ts
+          with `readLedgerLines(ledgerPath)`) decides whether to read the head's alerts again. After a rotation, a
+          false-positive ruling or a fix ruling is gone and the head is judged again (a paid judge, a second comment),
+          and a dispatched fix no longer holds the arm.
+        - `worker.state` (`WORKER_STATE_LEDGER_STEP`) and `worker.stalled` (`WORKER_STALLED_LEDGER_STEP`, run-task.ts).
+          `findStalledWorkers` reads both from `readLedgerLines(ledgerPath)` in `runWorkerStallDetectorRung`. A run with
+          no `worker.state` row is skipped (`lastStateTs === undefined`), so one rotation after a worker goes quiet, the
+          detector stops seeing it: a quiet worker writes no new transition, and that is the case W1-T943 exists for.
+          With `worker.stalled` gone and `worker.state` kept, the same quiet episode is reported again.
+          `WORKER_STATE_LEDGER_STEP`'s doc says it was left out "until one of those lands and reads it back"; W1-T943
+          landed and reads it. Its other readers are fine as they are: quiet-worker-watchdog.ts reads it through
+          `readLedgerUnionRecordsSync`, and status.ts uses it for display.
+      - NOT DECISION-RELEVANT, dropped:
+        - `dispatch.independent_block_released` (`INDEPENDENT_BLOCK_RELEASED_STEP`, src/lib/status.ts). The W1-T7533
+          latch reader collects it into `releasedRuns`. That set only fills `IndependentBlockRelease.receiptRecorded`,
+          and nothing in src reads `independentBlockRelease.receiptRecorded`. Nothing in src writes the step either;
+          only test/a-failed-run-latch-re-offers-when-its-evidence-changes.test.ts does. Retaining it would change no
+          decision. (That missing writer is a separate gap, reported apart from this task.)
+        - `sweep.fix.uncreditable_head`, `sweep.fix.uncreditable_head_escalated` (sweep.ts): `terminalUncreditableHeads`
+          reads them through `resolveLedgerUnion`, archive plus live, so rotation cannot hide them (W1-T2723).
+        - `read_model.run_worker` (`WORKER_ACTIVITY_STAND_IN_STEP`, status.ts): a stand-in row that
+          board-projection.ts builds for display. It is never written to the ledger.
+        - `sweep.base_fixed.refresh`: W1-T8533 retains it.
+    THE WIDER POPULATION. The same scan over all of src (`.step ===`/`!==` reads, literal or constant) finds 317
+    distinct steps. 160 are not retained, and 151 of those are not in `RENDER_RELEVANT_LEDGER_STEPS` either. Most are
+    display reads or union reads, like the four dropped above. So a census over every reader cannot simply demand
+    retention. It needs a reasoned exemption for each read it does not retain.
+    THE DUPLICATE. `"refresh.clearance"` appears twice in the `DECISION_RELEVANT_LEDGER_STEPS` literal on main. #11097
+    (939dee0ad) and #11049 (5ec079f75) each added it, both citing `refusedRefreshClearancesFromLedger`. A `Set` drops
+    the repeat silently, so no test sees it. W1-T8533's in-flight branch already removes one copy. Nothing stops a
+    third.
+  design: |
+    1. RETAIN THE FIVE. Add `worker.state`, `worker.stalled`, `code_scanning.judged_false_positive`,
+       `code_scanning.judged_fix` and `code_scanning.fix_dispatch` to `DECISION_RELEVANT_LEDGER_STEPS`. Each entry gets
+       a comment naming its reader, as the set's doc requires. Correct `WORKER_STATE_LEDGER_STEP`'s "Deliberately NOT
+       added" doc. `worker.state` is written once per transition for every run, and the per-step bound keeps only the
+       newest rows. If a long-quiet run's newest row can fall outside that bound, keep the newest `worker.state` row per
+       live `run_id`, the way PASS 3 keeps one `sweep.disposed` row per `pr@head`. Use a keyed bound, not a bigger count.
+    2. ONE CENSUS. In test/every-live-ledger-decision-step-survives-rotation.test.ts, scan every .ts file under src,
+       whatever its functions are called. Resolve each `.step ===`/`!==`, `case` in a switch on a step, and bare
+       `step ===` read to its step string, both from literals and from string constants (local, exported or
+       imported; resolved by name across src). Report every resolved step that `DECISION_RELEVANT_LEDGER_STEPS` does
+       not hold, unless a shrink-only, classified ratchet names it. Each ratchet entry has a step, its reader
+       (`<file>:<function>`), a class (`display`, `union`, `no_writer`, `transient`) and a reason. The census
+       machine-checks each `union` entry: the named reader, or its file, really calls a union reader. An entry the scan
+       no longer finds fails as stale. The existing literal census's `verifiedDisplayOnly` steps move into the ratchet
+       as `display`. The fold census and the "derived from consumers" census are replaced by this one. Their
+       rotation-survival tests stay.
+    3. CONTROLS, NAMED. Positive: with `code_scanning.judged_false_positive` taken out of the retained set, the census
+       names it at `lib/sweep.ts:codeScanningGateForHead` through `CODE_SCANNING_FALSE_POSITIVE_STEP`. Neither old census
+       can see that read: it goes through a constant, in a function not named *FromLedger. Also assert that the scan
+       read the src tree and resolved more than one constant read. Negative: a synthetic source whose read resolves to a
+       retained step, and one whose unretained read sits under a `union` entry with a real union call, are not named.
+       The same synthetic `union` entry without the union call is named.
+    4. NO DUPLICATE ENTRY. A test reads the `DECISION_RELEVANT_LEDGER_STEPS` literal's source text in src/lib/ledger.ts
+       and refuses a step string that appears twice. Its negative control is a synthetic literal holding a duplicate,
+       which it names. Drop the duplicate `refresh.clearance` if W1-T8533 has not already.
+    5. Unchanged: the per-step cap, the render, health and model-attribution sets, archive handling, and every reader.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/every-live-ledger-decision-step-survives-rotation.test.ts"
+    - claim: "the census resolves constant and literal step reads in every src file and names an unretained one, with a named positive control"
+      proof: 'grep: test("W1-T8621: the census names a live decision step read through a constant that rotation does not retain" in test/every-live-ledger-decision-step-survives-rotation.test.ts'
+    - claim: "a classified exemption is honoured only when its class holds, and a stale exemption fails"
+      proof: 'grep: test("W1-T8621: an exemption is honoured only when its class holds and a stale one fails" in test/every-live-ledger-decision-step-survives-rotation.test.ts'
+    - claim: "a step listed twice in the retained set literal is refused"
+      proof: 'grep: test("W1-T8621: a step listed twice in DECISION_RELEVANT_LEDGER_STEPS is refused" in test/every-live-ledger-decision-step-survives-rotation.test.ts'
+    - claim: "a quiet worker is still reported by the stall detector after a rotation, and only once per episode"
+      proof: 'grep: test("W1-T8621: the stall detector still sees a quiet worker after a rotation" in test/every-live-ledger-decision-step-survives-rotation.test.ts'
+    - claim: "a code-scanning ruling survives a rotation and the head is not judged again"
+      proof: 'grep: test("W1-T8621: a code-scanning ruling survives a rotation and the head is not judged again" in test/every-live-ledger-decision-step-survives-rotation.test.ts'
+    - claim: "the stall-dedup step is in the retained set with its reader named"
+      proof: 'grep: "worker\.stalled", // in src/lib/ledger.ts'
+  falsifier: |
+    Remove `code_scanning.judged_false_positive` from the retained set, and the census names it at
+    codeScanningGateForHead, and the code-scanning rotation test judges the head a second time. Remove `worker.state`,
+    and the stall-detector test finds no candidate after rotation. Restore the old literal-only regex, and the positive
+    control reads nothing. Add a second `"refresh.clearance"` line, and the duplicate test names it.
+  note: |
+    EFFECT, measured after merge from the core ledger with no fixed pass mark: count `worker.stalled` rows per quiet
+    episode, and `code_scanning.judged_*` rows per PR@head. Healthy shape: one each, whether or not a rotation fell
+    inside the episode or between the ruling and the arm.

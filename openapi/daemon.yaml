@@ -7417,6 +7417,55 @@ components:
         value: {type: [number, "null"]}
         notCollectedReason: {type: string}
 
+    GardenerSpend:
+      type: object
+      description: >
+        Optional cached gardener cost evidence (W1-T8484), scoped to the current daemon generation.
+        Only exact parent passes admit canonical producer receipts. A priced subtotal is distinct
+        from a complete total; absent correlation, prices or retained-corpus coverage stay unknown.
+        Host and fleet gardeners contribute no repository cost.
+      required: [version, state, reason, observedAt, materializedAt, totalUsd, pricedSubtotalUsd, counts, window, coverage, gardens]
+      properties:
+        version: {type: string, enum: [gardener-spend-v1]}
+        state: {type: string, enum: [not_collected, partial, complete]}
+        reason:
+          type: string
+          enum: [missing_registry, invalid_registry, over_budget, missing_materialization, scope_mismatch, correlation_not_available, ledger_unavailable, incomplete_evidence, priced_receipts]
+        observedAt: {type: [string, "null"], format: date-time}
+        materializedAt: {type: [string, "null"], format: date-time}
+        totalUsd: {type: [number, "null"], minimum: 0}
+        pricedSubtotalUsd: {type: [number, "null"], minimum: 0}
+        counts:
+          type: object
+          required: [priced, unpriced, unlinked]
+          properties:
+            priced: {type: [integer, "null"], minimum: 0}
+            unpriced: {type: [integer, "null"], minimum: 0}
+            unlinked: {type: [integer, "null"], minimum: 0}
+        window:
+          type: [object, "null"]
+          required: [from, through]
+          properties:
+            from: {type: string, format: date-time}
+            through: {type: string, format: date-time}
+        coverage:
+          type: object
+          required: [retainedCorpus, truncated]
+          properties:
+            retainedCorpus: {type: string, enum: [not_collected, partial, complete]}
+            truncated: {type: [boolean, "null"]}
+        gardens:
+          type: array
+          maxItems: 32
+          items:
+            type: object
+            required: [name, enabled, scope, totalUsd, pricedSubtotalUsd]
+            properties:
+              name: {type: string, maxLength: 64}
+              enabled: {type: boolean}
+              scope: {type: string, enum: [repository, host, fleet]}
+              totalUsd: {type: [number, "null"], minimum: 0}
+              pricedSubtotalUsd: {type: [number, "null"], minimum: 0}
     AnalyticsView:
       type: object
       description: >
@@ -7491,6 +7540,8 @@ components:
                     type: array
                     items:
                       $ref: "#/components/schemas/AnalyticsViewMetric"
+                  gardenerSpend:
+                    $ref: "#/components/schemas/GardenerSpend"
                   reason: {type: string}
                   details:
                     $ref: "#/components/schemas/AnalyticsStoredDetails"
