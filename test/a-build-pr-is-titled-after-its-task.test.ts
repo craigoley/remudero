@@ -3,7 +3,6 @@
 // as "chore: tests and census repairs" (#10785), W1-T6085 as "chore: yield at worker" (#10834), and W1-T8047 as
 // "chore: merge main into the restored checkpoint" (#10936), the harness's own restore merge.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -11,8 +10,6 @@ import { checkCommitMessage } from "../src/lib/commit-message.js";
 import { isWipSubject, prTitleForTask, prTitleFromBranchCommits } from "../src/lib/unfinished-checkpoint.js";
 import { branchPrTitle, restoreBoundaryCheckpoint } from "./helpers/run-task-test.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
-
-const RUN_TASK = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
 
 const T7807 = {
   id: "W1-T7807",
@@ -48,12 +45,11 @@ test("W1-T7952: a checkpoint-only branch is titled after its task", () => {
   assert.doesNotMatch(title ?? "", /^chore/, "a stripped checkpoint's `chore` type is never used");
   assert.doesNotMatch(title ?? "", /wip/i);
 
-  // The harness half: the open site reads the real branch and passes the task.
+  // The harness half: the open site reads the real branch and passes the task (its call site is pinned by
+  // test/pr-create-rest-transport.test.ts's census of the four PR-create argv sites).
   const repo = runBranch([`wip: yield at worker\n\n${YIELD_BODY}`]);
   assert.equal(branchPrTitle(repo.dir), "chore: yield at worker", "without the task, the checkpoint's words (the defect)");
   assert.equal(branchPrTitle(repo.dir, T6264), "feat: every view's builds are counted, not only its slow ones (W1-T6264)");
-  assert.match(RUN_TASK, /ghPrCreateFillCommandAsync\(worktreePath, owner, task\.repo, branch, branchPrTitle\(worktreePath, task\)/,
-    "runTask's one build-PR open site titles the PR from its task");
 });
 
 test("W1-T7952: the #10785 and #10834 branches get their tasks titles", () => {
