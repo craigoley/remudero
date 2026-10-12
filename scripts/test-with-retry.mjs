@@ -476,11 +476,32 @@ function rebuildCoverage(rawDir, args) {
   }
 }
 
+// W1-T8585: the run's OWN summary is the TAP summary block after the LAST `# tests` line. A nested
+// `node --test` prints a bare summary of its own earlier. Only summary lines are read, so interleaved
+// spec lines do not split the block; a label missing or repeated in it means no summary (null).
+const SUMMARY_LINE = /^# (tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) (\d+(?:\.\d+)?)$/;
+
+function finalSummary(output) {
+  const lines = output.split(/\r?\n/).map((line) => line.trimEnd().match(SUMMARY_LINE)).filter(Boolean);
+  const start = lines.findLastIndex(([, label]) => label === "tests");
+  if (start < 0) return null;
+  const counts = {};
+  for (const [, label, value] of lines.slice(start)) {
+    if (label in counts) return null;
+    counts[label] = Number(value);
+  }
+  return ["tests", "pass", "fail", "cancelled"].every((label) => label in counts) ? counts : null;
+}
+
+function finalSummaryAllPass(output) {
+  const counts = finalSummary(output);
+  return counts !== null && counts.tests > 0 && counts.tests === counts.pass && counts.fail === 0 && counts.cancelled === 0;
+}
+
 function emptyCoverageFailure(cmd, args, output) {
-  const count = (label) => Number(output.match(new RegExp(`^# ${label} (\\d+)$`, "m"))?.[1]);
   return isNodeCommand(cmd) && args.includes("--test") && args.includes("--experimental-test-coverage") &&
     /ERR_OPERATION_FAILED[^\n]*(?:coverage file is empty:|failed to parse coverage file )/.test(output) &&
-    count("tests") > 0 && count("tests") === count("pass") && count("fail") === 0 && count("cancelled") === 0;
+    finalSummaryAllPass(output);
 }
 
 // A child killed mid-write leaves a truncated report; it moves beside rawDir as evidence, never deleted.
@@ -529,7 +550,8 @@ async function recoverEmptyCoverage(treeBefore, first, cmd, args, rawDir) {
     console.log(line);
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, line + "\n");
   }
-  return reportTrackedTreeDirt(treeBefore, code === 0 ? 0 : first.code);
+  // W1-T8585: the rebuild repairs coverage only; a run whose own summary is not all-pass keeps its code.
+  return reportTrackedTreeDirt(treeBefore, code === 0 && finalSummaryAllPass(first.output) ? 0 : first.code || 1);
 }
 
 export async function main(argv) {
@@ -579,7 +601,9 @@ export async function main(argv) {
     return reportTrackedTreeDirt(treeBefore, first.code);
   }
 
-  if (coverageFirstPass && emptyCoverageFailure(cmd, args, first.output)) return recoverEmptyCoverage(treeBefore, first, cmd, args, rawCoverageDir);
+  // W1-T8585: a run that names a failing test or file is never recovered by dropping coverage.
+  const namedFailure = firstNames.length > 0 || failedFiles.length > 0;
+  if (coverageFirstPass && !namedFailure && emptyCoverageFailure(cmd, args, first.output)) return recoverEmptyCoverage(treeBefore, first, cmd, args, rawCoverageDir);
   if (coverageFirstPass) return coverageRetry(treeBefore, first.code, coverageRetryInvocation(cmd, args, failedFiles), failedFiles, firstNames);
 
   const retry = retryInvocationForFailedFiles(cmd, args, failedFiles);
