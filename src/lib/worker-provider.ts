@@ -4,6 +4,7 @@ import { CashResponsesConversation } from "./cash-responses.js";
 import { randomUUID } from "node:crypto";
 import { execFile as execFileChild, execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { constants as fsConstants, accessSync, appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -3706,15 +3707,44 @@ export function openWeightCheckSandboxArgv(
 /** The only production route for `RunCheck`: no fallback can execute an unchecked process. */
 const execFileAsync = promisify(execFileChild);
 
+interface CheckJudge {
+  inlineJudgedArgs(): string[];
+  judgedNodeTestArgs(args: readonly string[], judgedArgs: readonly string[]): string[];
+  splitInlineTally(stdout: string): { output: string; tallyText: string };
+  testFilesInArgv(args: readonly string[], cwd: string): string[];
+  judgeRun(files: readonly string[], opts: { status: number; pool: boolean; root: string; tallyText: string }): { complete: boolean; status: number };
+  describeJudgedRun(role: string, verdict: { complete: boolean }, opts: { prefix: string }): string;
+}
+// The judge comes from the ORCHESTRATOR's checkout (this module's), never the worktree the check runs in.
+const loadCheckJudge = (): CheckJudge => createRequire(import.meta.url)("../../scripts/pure-test-pool.mjs") as CheckJudge;
+
+/** W1-T8380: a `node --test` check whose exit 0 left a file short of its own summary (a real `process.exit(0)`) is thrown
+ *  as a red run: nonzero `status`, the judge's line in its output. The sandboxed child sees only the worktree, so the
+ *  judge's tally reporter rides the argv as a `data:` URL and its stdout line is taken back off. */
 export async function runOpenWeightCheck(input: OpenWeightCheckInput): Promise<string> {
-  const { stdout } = await execFileAsync(OPENWEIGHT_CHECK_SANDBOX, openWeightCheckSandboxArgv(input), {
-    cwd: realpathSync(input.cwd),
-    env: input.env,
-    encoding: "utf8",
-    timeout: OPENWEIGHT_CHECK_TIMEOUT_MS,
-    maxBuffer: 8 * 1024 * 1024,
-  });
-  return stdout;
+  const judge = input.argv.includes("--test") ? loadCheckJudge() : undefined;
+  const argv = judge ? judge.judgedNodeTestArgs(input.argv, judge.inlineJudgedArgs()) : input.argv;
+  const cwd = realpathSync(input.cwd);
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync(OPENWEIGHT_CHECK_SANDBOX, openWeightCheckSandboxArgv({ ...input, argv }), {
+      cwd,
+      env: input.env,
+      encoding: "utf8",
+      timeout: OPENWEIGHT_CHECK_TIMEOUT_MS,
+      maxBuffer: 8 * 1024 * 1024,
+    }));
+  } catch (err) {
+    const e = err as { stdout?: unknown };
+    if (judge && typeof e.stdout === "string") e.stdout = judge.splitInlineTally(e.stdout).output;
+    throw err;
+  }
+  if (!judge) return stdout;
+  const { output, tallyText } = judge.splitInlineTally(stdout);
+  const verdict = judge.judgeRun(judge.testFilesInArgv(input.argv, cwd), { status: 0, pool: false, root: cwd, tallyText });
+  if (verdict.complete) return output;
+  const line = judge.describeJudgedRun("unit_test", verdict, { prefix: "test-judge" });
+  throw Object.assign(new Error(line), { status: verdict.status, stdout: `${output}\n${line}\n`, stderr: "" });
 }
 
 /** Raised INSTEAD of executing an unlisted check, before any process spawns. */
