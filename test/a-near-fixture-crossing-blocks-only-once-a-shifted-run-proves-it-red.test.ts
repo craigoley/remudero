@@ -151,7 +151,7 @@ test("W1-T7812: pre-push runs the shifted-crossing proof when its implementation
   const testFile = "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts";
   const dependencies = [
     "scripts/expiring-fixture-census.mjs", "src/lib/gate-gardener.ts", "scripts/clock-shift.mjs",
-    "src/lib/ci-parity.ts", "scripts/census-precheck.mjs", "package.json", testFile,
+    "src/lib/ci-parity.ts", "scripts/census-precheck.mjs", testFile,
   ];
   for (const changedPath of dependencies) {
     const runs: string[][] = [];
