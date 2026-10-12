@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as gardener from "../src/lib/gate-gardener.js";
+// @ts-ignore the executable .mjs module has no declaration file.
 import * as precheck from "../scripts/census-precheck.mjs";
 import { makeTempDir } from "../src/lib/tmp.js";
 
