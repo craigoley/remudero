@@ -9,13 +9,13 @@
   risk: high  # Rule 19: one concern — an alert-fix PR body carries executable proofs; it spans the shared proof grammar (src/lib/proof-grammar.ts) and the alert-fix prompt and dispatcher (src/run-task.ts)
   band_meaning: span
   origin: "operator approval 2026-10-12 (\"Go ahead with the filing\")"
-  plan_refs: [W1-T8572, W1-T90, W1-T952, W1-T2544, W1-T5446, W1-T362]
+  plan_refs: [W1-T8572, W1-T90, W1-T952, W1-T2544, W1-T5446, W1-T362, W1-T65]
   files:
     - src/lib/proof-grammar.ts
     - src/run-task.ts
     - test/an-alert-fix-pr-carries-proofs-the-reviewer-can-execute.test.ts
   status: queued
-  priority: 2
+  priority: 1  # raised 2026-10-12: W1-T8572 (priority 1) depends_on this task (amended in #11120) for the PR-body grammar and the inert-proof count
   attempts: 0
   rationale: |
     READ on origin/main 32360d06a. Symbols, not lines.
@@ -34,8 +34,19 @@
     only when `!check.ok`. `acceptanceAuthorTimeCheck` returns `ok: true` for a block whose proofs have no dialect: it
     counts them (`inert`) and adds a note to `message`, because W1-T2544 made that signal advisory on the required
     acceptance-author-gate. So today a prose-proof alert-fix body ledgers nothing.
-    SIBLING, NOT THIS TASK. W1-T8572's design 3 relies on the same `deps.checkAcceptance` result for the main-repair
-    no-test-file case, so it has the same gap. Reported separately.
+    SIBLING, NOT THIS TASK. W1-T8572's design 3 relied on the same `deps.checkAcceptance` result for the main-repair
+    no-test-file case, so it had the same gap. #11120 amends W1-T8572 to depend on this task, use its grammar and reuse
+    its inert-proof count.
+    AMENDMENT 2026-10-12, READ on origin/main 8139a0d18. Probed with `node --import tsx` on ea41dc50e:
+      - THE TRAILER ARM. Called with no `expectedTaskId` and no `trailerResolves`, as `checkAlertFixAcceptance` calls
+        it, `acceptanceAuthorTimeCheck` returns `ok: true` ("criteria resolve from plan/tasks.yaml") for any body with a
+        `Remudero-Task:` line, before it reads the block. Every alert-fix body ends with one, from the prompt and from
+        `ensureTaskTrailer`. So today's check never looks at an alert-fix body's proofs at all, and its `inert` count is
+        never reached.
+      - THE LEGACY BARE-PATH MATCH. `parseWhitelistedProof("test/a-spent-check-requeue-survives-ledger-rotation.test.ts
+        passes")` returns a test proof through its W1-T65 legacy shape (`TEST_PATH_RE`), reached when a proof has no
+        dialect label. So `parseWhitelistedProof(...) === null` alone does not catch prose that names a test path, which
+        is the shape #11096 carried.
     NOT MEASURED: how often the alert-fix lane opens a PR. #8881 records one that failed commitlint after it opened. No
     open `alert-fix-*` head exists on origin as of 2026-10-12 15:19Z.
   design: |
@@ -52,12 +63,16 @@
     2. THE PROMPT USES IT. `alertFixPrompt` spreads that constant where it now asks for the bare bullet shape.
        Everything else in the prompt stays as it is: the commit contract, the title rule, `origin: alert#<id>` and the
        last-line `Remudero-Task:` trailer.
-    3. THE DISPATCHER CALLS AN INERT PROOF A DEFECT. After the open, `dispatchAlertFixRun` ledgers
-       `alert-fix.acceptance_defect` with `defect: "inert-proofs"` and the count when any proof in the opened body has no
-       runnable dialect. That is the same `parseWhitelistedProof(...) === null` count `acceptanceAuthorTimeCheck` takes.
-       `acceptanceAuthorTimeCheck`'s `ok` semantics, and the required gate it backs, do not change. Its existing
-       defects are ledgered as they are now. If W1-T8572 has landed a lane-side inert-proof check by then, reuse it
-       rather than writing a second.
+    3. THE DISPATCHER CALLS AN INERT PROOF A DEFECT (amended 2026-10-12, see the AMENDMENT paragraph). After the open,
+       `dispatchAlertFixRun` parses the opened body's block itself with `parseAcceptanceBlock`. It does not take the
+       proofs from `deps.checkAcceptance`, whose trailer arm returns before the block is read. A proof is inert when
+       `!isDialectPrefixed(p) || isDemonstrationProof(p) || parseWhitelistedProof(p) === null`, the prefix test
+       `src/lib/plan-proposals.ts` already uses for a falsifier. `parseWhitelistedProof(...) === null` alone is not
+       enough: its legacy bare-path match accepts prose that names a test path. When any proof is inert, the dispatcher
+       ledgers `alert-fix.acceptance_defect` with `defect: "inert-proofs"`, the count and the inert proof texts.
+       Write the count as one exported pure helper. W1-T8572 depends on this task and reuses it for the main-repair
+       lane rather than writing a second. `acceptanceAuthorTimeCheck`'s `ok` semantics, and the required gate it backs,
+       do not change. Its existing defects are ledgered as they are now.
     4. Unchanged: which alerts the lane acts on (plan/alert-policy.yaml), the worktree, spawn and teardown, and every
        other lane's prompt.
   acceptance:
@@ -67,6 +82,10 @@
       proof: 'grep: test("W1-T8625: the alert-fix prompt carries a proof grammar whose examples all execute" in test/an-alert-fix-pr-carries-proofs-the-reviewer-can-execute.test.ts'
     - claim: "an opened alert-fix body whose proofs have no dialect is ledgered as an inert-proofs defect"
       proof: 'grep: test("W1-T8625: an alert-fix body with a prose proof is ledgered as a defect" in test/an-alert-fix-pr-carries-proofs-the-reviewer-can-execute.test.ts'
+    - claim: "a prose proof that names a test path, which parseWhitelistedProof accepts through its legacy bare-path match, is still counted as inert"
+      proof: 'grep: test("W1-T8625: a prose proof naming a test path is still an inert proof" in test/an-alert-fix-pr-carries-proofs-the-reviewer-can-execute.test.ts'
+    - claim: "an alert-fix body with a Remudero-Task trailer and a prose proof is still ledgered, though acceptanceAuthorTimeCheck returns ok at its trailer arm"
+      proof: 'grep: test("W1-T8625: a trailered alert-fix body with a prose proof is still ledgered" in test/an-alert-fix-pr-carries-proofs-the-reviewer-can-execute.test.ts'
     - claim: "a body whose proofs all execute ledgers no defect"
       proof: 'grep: test("W1-T8625: an alert-fix body whose proofs all execute ledgers no defect" in test/an-alert-fix-pr-carries-proofs-the-reviewer-can-execute.test.ts'
     - claim: "the inert-proofs defect is written by the alert-fix dispatcher"
@@ -74,7 +93,10 @@
   falsifier: |
     Restore the old bare bullet line in alertFixPrompt, and the prompt test finds no dialect in the prompt text. Remove
     the inert-proof count from dispatchAlertFixRun, and a body of `- the alert is fixed | the build passes` ledgers no
-    defect. Break one example proof in the new grammar, and the example-parse test fails.
+    defect. Count inert proofs with `parseWhitelistedProof(...) === null` alone, and a body of
+    `- the alert is fixed | test/x.test.ts passes` ledgers no defect. Take the proofs from `deps.checkAcceptance`'s
+    result instead of parsing the body, and the same body with a `Remudero-Task:` line ledgers no defect. Break one
+    example proof in the new grammar, and the example-parse test fails.
   note: |
     EFFECT, measured after merge from the core ledger with no fixed pass mark: per `alert-fix.pr_opened` PR, whether
     proof-discrimination passed on the first head, and the count of `alert-fix.acceptance_defect` rows with

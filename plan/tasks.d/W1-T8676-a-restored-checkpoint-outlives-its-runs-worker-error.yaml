@@ -1,0 +1,138 @@
+- id: W1-T8676
+  title: "A CHECKPOINT A RUN RESTORED OUTLIVES THAT RUN'S WORKER ERROR, AND A WORKER-ERROR LATCH RE-OFFERS ON PROVIDER EVIDENCE — W1-T8502's resume restored run-W1-T8502-1791807256528 at 12:45Z and ended failed error_codex at 13:17Z; that verdict consumed the receipt, so from 14:34Z every pass refused the P1 as run-branch-already-pushed (16 rows through 16:35Z) although its latch had released and the lifetime judge had ruled automate"
+  repo: remudero
+  depends_on: [W1-T8503]  # same fold (pendingWorkerBoundaryHandoffs) and restore (restoreBoundaryCheckpoint); W1-T8503 adds the consuming implement.checkpoint_dropped row this task's kept row sits beside. W1-T8535 (queued, depends on W1-T8503) edits the same fold; overlap packing serializes them
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a worker error never strands its task; it spans the receipt fold and its per-pass refresh (daemon.ts), the kept row's writer (run-task.ts), the latch (status.ts) and the retained set (ledger.ts)
+  band_meaning: span
+  origin: "operator approval 2026-10-12 (\"Go with all\"): diagnose why W1-T8502 (P1) was not re-dispatched and file the defect"
+  plan_refs: [W1-T8502, W1-T8503, W1-T8535, W1-T7533, W1-T7837, W1-T7806, W1-T7747, W1-T534, W1-T4025, W1-T5805, W1-T8621, W1-T147, W1-T298]
+  files: [src/lib/daemon.ts, src/lib/status.ts, src/run-task.ts, src/lib/ledger.ts, test/a-restored-checkpoint-outlives-its-runs-worker-error.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-12 in the core daemon's ledger on host remudero (~/rmd-state2/state). The read was niced and
+    deduplicated: 533 rows name W1-T8502 across the live file and the 7 rotations from 10:40Z to 16:26Z (11:59Z to
+    16:59Z). Control: the 54 rotations of 10-10 to 10-12T0x hold run.start rows but no W1-T8502 row, so the task's
+    whole life is in that window.
+      - 12:14:25Z run W1-T8502-1791807256528 starts. At 12:25:01Z it hands off: `run.freshness_handoff` and
+        `verdict handed_off reason freshness_yield`, branch run-W1-T8502-1791807256528, head 9b542262d.
+      - 12:44:59Z run W1-T8502-1791809077557 starts after a container recycle. At 12:45:38Z
+        `implement.checkpoint_restored` names source_branch run-W1-T8502-1791807256528, source_head_sha 9b542262d.
+      - 13:17:56Z `verdict failed stage implement.continued subtype error_codex` (exit 0, see W1-T8677 filed beside
+        this one). Its worktree was removed. It pushed no branch of its own.
+      - 13:22:55Z `dispatch.blocked_independent verdict failed`.
+      - 14:34:00Z to 16:35:31Z: 16 `dispatch.skipped reason run-branch-already-pushed` rows, each beside a
+        `dispatch.lifetime_pressure` row, from three daemon processes. No run.start since.
+      - 15:02:59Z `verify_human.judged judge_decision automate` ("dependencies are merged and the failure is a worker
+        error"), observed_state `W1-T8502:adaptive-lifetime=1:...`.
+    `git ls-remote` at 17:05Z: run-W1-T8502-1791807256528 at 9b542262d, no refs/rmd-dispatch/W1-T8502. The branch
+    reap's state file lists that branch under noPrHeadShas at the same sha, and its `branch_reap.dry_run` rows hold it
+    as `no_pr_ever`. W1-T8514 (P1) depends on W1-T8502, so it waits too.
+    WHAT HOLDS IT, READ on origin/main 7b649b481 (symbols, not lines):
+      - `isDispatchEligible` (src/lib/drain.ts) checks the independent-failure latch BEFORE the pushed-run-branch
+        guard. Every refusal was `run-branch-already-pushed`, so the latch had already let the task through:
+        `independentFailureLatch` (src/lib/status.ts, W1-T7533) released it on main_moved once its back-off ran. The
+        dispatch circuit breaker never tripped (2 run.starts, no `dispatch.circuit_broken` row).
+      - The guard is `stillBlockedByPushedRunBranch` (drain.ts), fed by `runBranchStateFrom` (src/lib/daemon.ts).
+        That filter excuses a branch only while `resumableHandoffs` holds a receipt for it (W1-T7837).
+      - `pendingWorkerBoundaryHandoffs` (daemon.ts) lets "any later verdict" replace a receipt. Run 1791809077557's
+        failed verdict therefore consumed the receipt its own restore had just used. The source branch stayed on origin,
+        stopped being a checkpoint, and became a duplicate-build guard.
+      - The only release left is `orphanRunBranchReleased` (drain.ts), after `ORPHAN_RUN_BRANCH_GRACE_MS`. That is 24 h
+        from the branch name's epoch, about 2026-10-13T12:14Z. The fix should not rest on a fixed timer.
+      - `resumableHandoffs` is computed ONCE, from the boot ledger. A receipt written or consumed mid-process is
+        invisible to this filter until the next boot.
+    THE JUDGE'S `automate` SHOULD NOT RELEASE THIS BLOCK, and this task does not make it. `routeAdaptiveLifetimePressure`
+    (src/run-task.ts) asks whether BUILDING the task needs the operator. It passes no `release` hook to
+    `routeVerifyHumanBacklog`, so `applyAutomateVerdict` stages an inbox proposal, as designed. The judge is shown
+    attempt counts and terminal verdicts, never the guard that refuses the task. W1-T4025 made that count a sensor on
+    purpose. A model's answer about operator need is not evidence that a guarded branch is stale. The evidence is the
+    receipt and the restore, and this task makes them release the guard.
+    That proposal then failed to file: at 15:10:20Z `approve.error` for verify-human-automate:W1-T8502 refused with
+    "[sizing] risk:high with no band_meaning declared". That is a separate defect, reported alongside this filing and
+    not fixed here.
+    THE LATCH HALF. `independentFailureLatch` re-offers a `failed`/`no_pr` latch on main_moved or contract_revised, and
+    only after `INDEPENDENT_BLOCK_BASE_BACKOFF_MS` doubled per consecutive latch. For a worker error (a verdict from
+    `workerErrorVerdict`, src/run-task.ts) the task did nothing wrong. The evidence that clears it is that the provider
+    serves a clean end again, and the ledger already records that on every worker result row. Also,
+    `INDEPENDENT_BLOCK_RELEASED_STEP` is read by the latch but written by nothing in src/. The release this projection
+    computes leaves no row.
+    W1-T147 (the overnight chaos drill) and W1-T298 (queue starvation escalates) share src/run-task.ts, src/lib/daemon.ts
+    and src/lib/ledger.ts with this task only because those files are large and shared. W1-T147 injects faults, and W1-T298
+    escalates an empty queue. Neither touches the receipt fold, the run-branch guard or the latch.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and on all 290 origin heads for checkpoint_kept,
+    checkpoint_restored, pendingWorkerBoundaryHandoffs, run-branch-already-pushed, error_codex and W1-T8502. Control:
+    main reads 71 hits, and no head reads more than main. W1-T8503 covers a receipt whose branch is GONE. W1-T8535 covers
+    a receipt whose branch MOVED. W1-T7837 covers a newer checkpoint. None covers a receipt consumed by the failure of
+    the run that restored it.
+  design: |
+    No fixed count or timer. Each release names the ledger row that earned it.
+    1. A RESTORED CHECKPOINT OUTLIVES ITS RUN'S WORKER ERROR. When a run that logged `implement.checkpoint_restored`
+       (source_branch S, source_head_sha H) ends through `workerErrorVerdict` with verdict `failed`, and has pushed no run
+       branch of its own, run-task writes ONE `implement.checkpoint_kept` row right after that verdict:
+       {task_id, run_id, source_branch S, head_sha H, failed_stage, failed_subtype}. A budget breach (`blocked_budget`)
+       writes none. `pendingWorkerBoundaryHandoffs` reads that row as a receipt for (S, H), so it re-pends exactly what
+       the verdict consumed. Every other verdict consumes the receipt as today, including no_pr and a run that pushed
+       its own branch (that branch is the newer checkpoint, W1-T7837). A task whose restored checkpoint keeps failing
+       is bounded by the existing dispatch circuit breaker and the lifetime judge. This task adds no bound of its own.
+    2. THE GUARD READS THE CURRENT RECEIPTS. When a dispatched run settles, the daemon refreshes that task's entry in
+       `resumableHandoffs`, by the same `pendingWorkerBoundaryHandoffs` fold over that task's rows. The next pass's
+       `runBranchStateFrom` then sees a receipt that was written or consumed mid-process. Do not re-read the whole
+       ledger on each pass. A kept receipt whose branch tip equals H then does not block (W1-T7837's existing rule), and
+       the next dispatch restores H through `restoreBoundaryCheckpoint`.
+    3. A WORKER-ERROR LATCH RE-OFFERS ON PROVIDER EVIDENCE. In `independentFailureLatch`, a `failed` latch whose run's
+       verdict came from `workerErrorVerdict` (reason "worker error at ..." or "worker ended by signal ...") releases on
+       the first LATER worker result row (`recon.done`, `implement.done`, `implement.continued` or a fix round's
+       result, for any task) with the same `provider` and `subtype: success`. The release has evidence
+       `provider_recovered` and no back-off. A task-caused `failed`/`no_pr` latch keeps W1-T7533's rule unchanged. In
+       daemon.ts, the in-process `independentFailureBlocksThisRun` hold defers to this latch for a worker-error block,
+       so a live process cannot outlast the ledger's release.
+    4. EVERY RELEASE LEAVES ITS ROW. The daemon's selection pass writes `INDEPENDENT_BLOCK_RELEASED_STEP` once per
+       blocking run, for every release `independentFailureLatch` projects (`provider_recovered`, and W1-T7533's
+       `main_moved` and `contract_revised`). The row names blocking_run_id, the evidence and its row's ts.
+       `receiptRecorded` stops a repeat.
+    5. RETAIN THE KEPT ROW. Add `"implement.checkpoint_kept"` to `DECISION_RELEVANT_LEDGER_STEPS` (src/lib/ledger.ts),
+       with a comment naming `pendingWorkerBoundaryHandoffs` as its reader. If it rotated out while the receipt it
+       re-pends stayed, the receipt would read consumed again.
+    Tests go in a new file, test/a-restored-checkpoint-outlives-its-runs-worker-error.test.ts, with `test(` titles
+    verbatim as in the proofs below. Drive `pendingWorkerBoundaryHandoffs`, `runBranchStateFrom` through the daemon's
+    selection with an injected run-branch listing, and `independentFailureLatch` with ledger fixtures shaped like the
+    W1-T8502 rows above. Use a real gitRepo() fixture with a bare origin for the restore case, with a local git identity
+    and neutral helper names.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-restored-checkpoint-outlives-its-runs-worker-error.test.ts"
+    - claim: "a restored checkpoint stays pending after its run ends failed through workerErrorVerdict"
+      proof: 'grep: test("W1-T8676: a restored checkpoint stays pending after its run fails with a worker error" in test/a-restored-checkpoint-outlives-its-runs-worker-error.test.ts'
+    - claim: "any other verdict, or a run that pushed its own branch, still consumes the receipt"
+      proof: 'grep: test("W1-T8676: any other verdict still consumes the receipt" in test/a-restored-checkpoint-outlives-its-runs-worker-error.test.ts'
+    - claim: "the next selection pass in the same process does not refuse the kept checkpoint's branch as run-branch-already-pushed, and the next dispatch restores it"
+      proof: 'grep: test("W1-T8676: a kept checkpoint branch is not refused on the next pass" in test/a-restored-checkpoint-outlives-its-runs-worker-error.test.ts'
+    - claim: "a worker-error latch releases on a later clean result from the same provider, with no back-off"
+      proof: 'grep: test("W1-T8676: a worker-error latch re-offers once the provider serves a clean end" in test/a-restored-checkpoint-outlives-its-runs-worker-error.test.ts'
+    - claim: "a task-caused failed latch keeps W1-T7533's back-off"
+      proof: 'grep: test("W1-T8676: a task-caused latch keeps its back-off" in test/a-restored-checkpoint-outlives-its-runs-worker-error.test.ts'
+    - claim: "each projected latch release is ledgered once"
+      proof: 'grep: test("W1-T8676: each latch release is ledgered once" in test/a-restored-checkpoint-outlives-its-runs-worker-error.test.ts'
+    - claim: "the kept row is written by run-task"
+      proof: 'grep: implement\.checkpoint_kept in src/run-task.ts'
+    - claim: "the kept row is retained through rotation"
+      proof: 'grep: "implement\.checkpoint_kept" in src/lib/ledger.ts'
+  falsifier: |
+    Leave the fold's "any later verdict replaces" rule alone, and the first test reads the receipt consumed after a
+    worker-error verdict, as W1-T8502's was at 13:17:56Z. Keep a receipt through a no_pr verdict, and the second test
+    fails. Compute `resumableHandoffs` only at boot, and the third test sees run-branch-already-pushed on the next pass.
+    Gate the provider release on INDEPENDENT_BLOCK_BASE_BACKOFF_MS, and the fourth test stays latched. Apply it to a
+    task-caused failure, and the fifth test re-offers too early. Leave the release unwritten, and the sixth test reads
+    no `dispatch.independent_block_released` row.
+  note: |
+    EFFECT, measured after merge from the core ledger with no numeric pass mark. Count `dispatch.skipped reason
+    run-branch-already-pushed` rows whose branch is the source_branch of an `implement.checkpoint_restored` row. Healthy
+    shape: none past the restoring run's own verdict. Count `implement.checkpoint_kept` rows followed by an
+    `implement.checkpoint_restored` of the same head, and time from each worker-error `dispatch.blocked_independent` to
+    its `dispatch.independent_block_released` with evidence provider_recovered.

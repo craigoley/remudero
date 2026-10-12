@@ -1,7 +1,7 @@
 - id: W1-T8572
   title: "A MAIN-REPAIR PR CARRIES AN ACCEPTANCE BLOCK THE DISPATCHER WRITES — on 2026-10-12 the red-main fix worker followed mainRepairFixPrompt's `- <claim> | <proof>` instruction, wrote proofs like \"test/x.test.ts passes\" with no `unit test:`/`grep:` prefix, and proof-discrimination failed the repair PR #11096 that would have turned main green"
   repo: remudero
-  depends_on: []
+  depends_on: [W1-T8625]  # design 3a imports the PR-body proof grammar W1-T8625 adds to src/lib/proof-grammar.ts; both edit src/run-task.ts
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern — the red-main lane's PR bodies carry machine-checkable proofs the harness writes; it spans the fix prompt, the fix dispatch and the revert body, all in run-task.ts
   band_meaning: blast-radius
   origin: "operator standing direction 2026-10-12: fix reds at the root; red main from #11085, deadlocked repair #11096"
-  plan_refs: [W1-T6403, W1-T952, W1-T72, W1-T4082, W1-T5490]
+  plan_refs: [W1-T6403, W1-T952, W1-T72, W1-T4082, W1-T5490, W1-T8625, W1-T2544]
   files:
     - src/run-task.ts
     - test/a-main-repair-pr-carries-a-dispatcher-written-acceptance-block.test.ts
@@ -60,6 +60,18 @@
     (earliest 10-10T12:27Z, newest today). The two PRs: #10712 (main-repair-de219e4fdb3e, 10-10) was armed on a full PASS
     and has no stand-down row. #11096 is this incident: proof-discrimination red, stood down as base-red. So 1 of the 2
     repair PRs failed proof-discrimination. The sample is small, so it shows the defect is live. It does not give a rate.
+    AMENDMENT 2026-10-12, READ on origin/main ea41dc50e. The filed design 3 gave the no-test-file worker
+    `ACCEPTANCE_PROOF_GRAMMAR` and trusted `deps.checkAcceptance` on the opened PR. Both are wrong:
+      - `ACCEPTANCE_PROOF_GRAMMAR` is written for filing, and its own doc and `RETRO_ACCEPTANCE_BLOCK_GRAMMAR`'s doc say
+        not to reuse it outside filing. W1-T8625 (filed in #11116) adds a PR-body sibling. Design 3 now uses that, so
+        this task depends on W1-T8625.
+      - `checkAcceptance` is `acceptanceAuthorTimeCheck` (W1-T952). Probed with `node --import tsx` on ea41dc50e: the
+        body `Acceptance:` / `- x | the build passes` returns `ok: true` with only an advisory inert note (W1-T2544).
+        The same body plus `Remudero-Task: main-repair-97e3f9136d82` returns `ok: true` at the trailer arm, "criteria
+        resolve from plan/tasks.yaml", before the block is read. Every main-repair body carries that trailer. So the
+        fallback would pass exactly the inert-proof body that deadlocked #11096.
+      - `parseWhitelistedProof("test/a-spent-check-requeue-survives-ledger-rotation.test.ts passes")` returns a test
+        proof through its legacy shape. So "no runnable dialect" must be read from the prefix, not from a null parse.
   design: |
     1. ONE PURE RENDERER. Add `mainRepairAcceptanceCriteria(request)` in run-task.ts. It returns one criterion per
        `request.testFiles` entry, `{ claim: "<path> passes again on the repaired head", proof: "unit test: <path>" }`, and
@@ -71,10 +83,32 @@
        to put its prose only where the placeholder is. The prompt stops asking the worker for an `Acceptance:` block.
        Opening the PR over REST from the dispatcher, as `openMainRepairRevertPr` does, is an equal choice. Either way
        the opening payload carries the block.
-    3. NO PARSED TEST FILE. When `request.testFiles` is empty, nothing executable is known up front. Then the prompt
-       gives the worker `ACCEPTANCE_PROOF_GRAMMAR` and asks for one `unit test:` or `grep:` proof per check it repairs.
-       After the open, the dispatcher runs `deps.checkAcceptance` on the PR, as `dispatchAlertFixRun` does today. The
-       main-repair dispatch never calls it now. A defect lands a `main-repair.acceptance_defect` row naming it.
+    3. NO PARSED TEST FILE (amended 2026-10-12, see the AMENDMENT paragraph in the rationale). When `request.testFiles`
+       is empty, nothing executable is known up front.
+       a. THE GRAMMAR. The prompt gives the worker the PR-body proof grammar W1-T8625 adds to src/lib/proof-grammar.ts,
+          under whatever name it lands, and asks for one `unit test:` or `grep:` proof per check it repairs. It never
+          gives `ACCEPTANCE_PROOF_GRAMMAR`: that text is framed for FILING ("its test does not exist yet", whole-file
+          `unit test:` by default, YAML `proof: "..."` lines), and `RETRO_ACCEPTANCE_BLOCK_GRAMMAR`'s doc says not to
+          reuse it outside filing. This task imports the constant and does not edit proof-grammar.ts.
+       b. CHECKED BEFORE THE OPEN. The worker writes its bullets into the body file and pushes. It does not open the PR.
+          The dispatcher reads the bullets with `parseAcceptanceBlock` and opens the PR over REST, as
+          `openMainRepairRevertPr` does, so the body it checked is the body the opening payload carries.
+       c. AN UNDIALECTED PROOF IS A DEFECT, NEVER ACCEPTED. A proof is inert unless it opens with `unit test:` or `grep:`
+          and parses: `!isDialectPrefixed(p) || isDemonstrationProof(p) || parseWhitelistedProof(p) === null`, the
+          predicate `src/lib/plan-proposals.ts` already uses for a falsifier. `parseWhitelistedProof === null` alone is
+          too weak: its legacy shape parses prose that names a test path ("test/x.test.ts passes"). Do not rely on
+          `deps.checkAcceptance` for this. `acceptanceAuthorTimeCheck` returns `ok: true` with inert proofs (W1-T2544,
+          advisory), and before that it returns `ok: true` at its trailer arm for any `Remudero-Task:` line, without
+          reading the block. Both probed on ea41dc50e. If W1-T8625 has landed an inert-proof count with this predicate,
+          reuse it.
+       d. LEDGER, THEN REWRITE OR REFUSE. Any inert proof lands one `main-repair.acceptance_defect` row with
+          `defect: "inert-proofs"`, the count, the inert proof texts and a `resolution`. Rewrite when it can: drop the
+          inert bullets and add one `grep:` proof of a line the pushed fix ADDS, chosen from that branch's diff against
+          origin/main the way design 4 chooses a revert line, and checked with the predicate above. Then open the PR with
+          the rewritten body (`resolution: "rewritten"`). With no usable added line, refuse: open no PR
+          (`resolution: "refused"`) and return undefined, the same result as a `main-repair.no_pr` run, so the lane's
+          fix-then-revert path continues.
+       e. A body whose proofs all execute is opened as written, and no defect row is ledgered.
     4. THE REVERT BODY. `mainRepairRevertBody` takes the failing test files the fix request had. Its criterion becomes
        `unit test: <path>` for each one. With none, it falls back to one `grep:` proof of a line the revert's own diff
        removes from main and restores at the parent, chosen by the dispatcher from that diff. It never uses `ci:`.
@@ -87,8 +121,14 @@
       proof: 'grep: test("W1-T8572: a main-repair body passes check-acceptance and every proof has a dialect" in test/a-main-repair-pr-carries-a-dispatcher-written-acceptance-block.test.ts'
     - claim: "the fix worker is spawned with a body file that already holds the acceptance block, and the prompt no longer asks it for one"
       proof: 'grep: test("W1-T8572: the fix worker opens its PR with the dispatcher-written body" in test/a-main-repair-pr-carries-a-dispatcher-written-acceptance-block.test.ts'
-    - claim: "with no parsed test file, the prompt carries the proof grammar and the opened PR is checked, with a defect ledgered"
-      proof: 'grep: test("W1-T8572: with no parsed test file the opened body is checked and a defect is ledgered" in test/a-main-repair-pr-carries-a-dispatcher-written-acceptance-block.test.ts'
+    - claim: "with no parsed test file, the prompt carries W1-T8625's PR-body proof grammar and not the filing grammar"
+      proof: 'grep: test("W1-T8572: with no parsed test file the prompt carries the PR-body proof grammar" in test/a-main-repair-pr-carries-a-dispatcher-written-acceptance-block.test.ts'
+    - claim: "with no parsed test file, a worker body whose proofs lack a dialect prefix is ledgered as inert-proofs and never opened as written, even with a Remudero-Task trailer"
+      proof: 'grep: test("W1-T8572: an undialected no-test-file body is ledgered and never opened as written" in test/a-main-repair-pr-carries-a-dispatcher-written-acceptance-block.test.ts'
+    - claim: "a prose proof that names a test path, which parseWhitelistedProof accepts through its legacy shape, is still an inert proof"
+      proof: 'grep: test("W1-T8572: a prose proof naming a test path is still an inert proof" in test/a-main-repair-pr-carries-a-dispatcher-written-acceptance-block.test.ts'
+    - claim: "a no-test-file body whose proofs all execute is opened as written with no defect row"
+      proof: 'grep: test("W1-T8572: a no-test-file body whose proofs all execute opens with no defect row" in test/a-main-repair-pr-carries-a-dispatcher-written-acceptance-block.test.ts'
     - claim: "the revert body carries no ci: proof, only unit test: or grep: proofs"
       proof: 'grep: test("W1-T8572: the revert body proves the revert with executable proofs" in test/a-main-repair-pr-carries-a-dispatcher-written-acceptance-block.test.ts'
     - claim: "the renderer exists in run-task.ts"
@@ -97,7 +137,10 @@
     Build #11096's request (testFiles: [test/a-spent-check-requeue-survives-ledger-rotation.test.ts]) and render its body.
     Restore the old prompt-only path, and the body has no block the dispatcher wrote: `acceptanceAuthorTimeCheck` refuses
     it, or a proof has no dialect. Restore `ci:` in `mainRepairRevertBody`, and the revert test reads a proof with no
-    `unit test:`/`grep:` prefix. Remove the `deps.checkAcceptance` call, and the no-test-file case writes no defect row.
+    `unit test:`/`grep:` prefix. Accept the worker's no-test-file body whenever `acceptanceAuthorTimeCheck` returns ok
+    (the filed design), and a body of `- main is green | test/x.test.ts passes` plus a `Remudero-Task:` trailer opens as
+    written with no `inert-proofs` row. Hand the prompt `ACCEPTANCE_PROOF_GRAMMAR`, and the grammar test finds the filing
+    text ("You are FILING work") in the prompt.
   note: |
     EFFECT, measured after merge from the core ledger with no fixed pass mark: per `main-repair.pr_opened` PR, whether
     proof-discrimination and acceptance-author-gate passed on the first head. Healthy shape: no repair PR red on either
