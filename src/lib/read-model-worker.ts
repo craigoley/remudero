@@ -253,6 +253,7 @@ export interface ReadModelLaneMove {
   dueAt: number;
   costMs?: number;
   coldCostMs?: number;
+  restoredCost?: boolean;
 }
 
 export interface ReadModelViewContext {
@@ -467,6 +468,7 @@ export interface ReadModelTickerOptions {
   viewsOnly?: boolean;
   readers?: ReadModelViewReaders;
   lane?: "fast" | "heavy";
+  restoreCosts?: boolean;
 }
 
 export interface IntegrityRequest {
@@ -696,6 +698,10 @@ interface ViewUnit {
   cold?: boolean;
   coldCostMs?: number;
   slot?: Slot;
+  costSeeded?: boolean;
+  restoredColdCost?: boolean;
+  storedCost?: string;
+  storedCostIno?: string;
   /** What its last build call took (absent until one ran); `startedAt` is the first call of a bounded build in flight. */
   costMs?: number;
   /** Not rebuilt before this: its last cost divided by {@link READ_MODEL_VIEW_SHARE}, times `stretch`. */
@@ -1100,6 +1106,50 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       .run(entry.view, entry.key, entry.version, entry.generation, entry.etag, JSON.stringify(entry.body)));
   }
 
+  const costKey = (unit: ViewUnit): string => `view_cost:${JSON.stringify([unit.view.name, unit.slot?.instance.name ?? null])}`;
+  function seedUnitCosts(): void {
+    const home = slots[0]?.db;
+    if (!home || opts.restoreCosts === false) return;
+    for (const unit of units) {
+      if (unit.costSeeded || unit.costMs !== undefined) continue;
+      unit.costSeeded = true;
+      try {
+        const raw = home.meta(costKey(unit));
+        if (raw === undefined) continue;
+        const saved = JSON.parse(raw) as { version?: number; holder?: string; costMs?: number; coldCostMs?: number; heavy?: boolean } | null;
+        if (!saved || saved.version !== 1 || typeof saved.holder !== "string" || saved.holder === holder || typeof saved.costMs !== "number" || !Number.isFinite(saved.costMs) || saved.costMs < 0 ||
+          (saved.coldCostMs !== undefined && (typeof saved.coldCostMs !== "number" || !Number.isFinite(saved.coldCostMs) || saved.coldCostMs < 0))) continue;
+        unit.costMs = saved.costMs;
+        unit.coldCostMs = saved.coldCostMs;
+        unit.restoredColdCost = true;
+        unit.heavy = Math.max(saved.costMs, saved.coldCostMs ?? 0) > soloMs;
+        unit.storedCost = raw;
+        unit.storedCostIno = slots[0]?.ino;
+        if (opts.lane === "fast" && unit.heavy) opts.post({ type: "view_lane", view: unit.view.name,
+          ...(unit.slot ? { instance: unit.slot.instance.name } : {}), heavy: true, dueAt: unit.dueAt,
+          costMs: unit.costMs, restoredCost: true, ...(unit.coldCostMs === undefined ? {} : { coldCostMs: unit.coldCostMs }) });
+      } catch (error) {
+        log("read_model.view_cost_read_failed", { view: unit.view.name, ...(unit.slot ? { instance: unit.slot.instance.name } : {}), error: (error as Error).message });
+      }
+    }
+  }
+
+  function persistUnitCost(unit: ViewUnit, laneCostMs: number): void {
+    const home = slots[0];
+    if (switches.projector !== "on" || home?.db === undefined || home.lease === undefined) return;
+    const value = JSON.stringify({ version: 1, holder, costMs: unit.costMs, heavy: laneCostMs > soloMs,
+      ...(unit.coldCostMs === undefined ? {} : { coldCostMs: unit.coldCostMs }) });
+    if (value === unit.storedCost && home.ino === unit.storedCostIno) return;
+    try {
+      const db = home.db;
+      withWriteTransaction(db, home.lease, () => db.prepare("INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v").run(costKey(unit), value));
+      unit.storedCost = value;
+      unit.storedCostIno = home.ino;
+    } catch (error) {
+      log("read_model.view_cost_write_failed", { view: unit.view.name, ...(unit.slot ? { instance: unit.slot.instance.name } : {}), error: (error as Error).message });
+    }
+  }
+
   function viewShadow(): ViewShadow | undefined {
     const home = slots[0];
     if (home?.db === undefined || home.lease === undefined) return undefined;
@@ -1264,10 +1314,12 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     viewBuilds.set(unit, counts);
     const peakMs = (unit.peakMs = Math.max(unit.peakMs ?? 0, unit.costMs));
     if (unit.cold && succeeded) {
-      unit.coldCostMs = Math.max(unit.coldCostMs ?? 0, peakMs);
+      unit.coldCostMs = unit.restoredColdCost ? peakMs : Math.max(unit.coldCostMs ?? 0, peakMs);
+      unit.restoredColdCost = undefined;
       unit.cold = undefined;
     }
     const laneCostMs = Math.max(peakMs, unit.coldCostMs ?? 0);
+    if (succeeded) persistUnitCost(unit, laneCostMs);
     unit.dueAt = ready ? paced(unit, finished) : finished;
     if (ready) {
       unit.startedAt = undefined;
@@ -1347,6 +1399,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
    */
   function materialize(now: number, tickStart: number, only?: ViewUnit): void {
     if (units.length === 0) return;
+    seedUnitCosts();
     sweepDemand();
     const home = slots[0]?.db;
     const shadow = home ? storedShadowReadiness(viewShadowPath(opts.stateDir), home, now) : undefined;
@@ -1416,6 +1469,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
           }
         }
       }
+      seedUnitCosts();
       postState(now);
     },
     tick(): void {
@@ -1513,6 +1567,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     lane(move: ReadModelLaneMove): void {
       for (const unit of units) {
         if (move.view !== undefined && (unit.view.name !== move.view || unit.slot?.instance.name !== move.instance)) continue;
+        unit.costSeeded = true;
+        unit.restoredColdCost = move.restoredCost === true;
         Object.assign(unit, { heavy: move.heavy, dueAt: move.dueAt, coldCostMs: move.coldCostMs }, move.costMs === undefined ? {} : { costMs: move.costMs });
         letGo(unit);
       }
@@ -1568,6 +1624,7 @@ export interface ReadModelViewsData {
   inboxRoot?: string;
   lane?: "fast" | "heavy";
   host?: HostViewConfig;
+  restoreCosts?: boolean;
   modelApprovalConfig?: HostModelApprovalConfig;
 }
 
@@ -1640,7 +1697,7 @@ export function runReadModelViewWorker(
     if (stopped) return;
     const demand = createDemandBook({ clock });
     ticker = createReadModelTicker({
-      stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off", demand, ...(data.lane ? { lane: data.lane } : {}),
+      stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off", demand, ...(data.lane ? { lane: data.lane } : {}), ...(data.restoreCosts === false ? { restoreCosts: false } : {}),
       views: [...readModelLaneViews(data, clock, log, demand), ...extra],
     });
     ticker.start();
@@ -1720,8 +1777,8 @@ export function threadViews(opts: {
     survivor.worker.postMessage(reset);
     opts.log("read_model.view_lane_reclaimed", { lane: survivor.name, from: lane.name, count, reason });
   };
-  const spawnLane = (lane: Lane): void => {
-    const data: ReadModelViewsData = { ...opts.data, kind: READ_MODEL_VIEWS_KIND, lane: lane.name };
+  const spawnLane = (lane: Lane, restoreCosts = true): void => {
+    const data: ReadModelViewsData = { ...opts.data, kind: READ_MODEL_VIEWS_KIND, lane: lane.name, restoreCosts };
     const spawned = lane === fast ? spawnViews(opts.workerUrl ?? new URL(import.meta.url), data) : spawnHeavyViews(opts.workerUrl ?? new URL(import.meta.url), data);
     lane.worker = spawned;
     lane.building = undefined;
@@ -1755,7 +1812,7 @@ export function threadViews(opts: {
       lane.respawn = setTimeout(() => {
         lane.respawn = undefined;
         if (closed) return;
-        spawnLane(lane);
+        spawnLane(lane, false);
         reclaim(lane, "respawn");
       }, delayMs);
       lane.respawn.unref();
