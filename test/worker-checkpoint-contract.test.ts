@@ -8,9 +8,9 @@ import type { Task } from "../src/lib/plan.js";
 
 // W1-T502: a run's only copy of hours of work is dirty files in a reapable worktree until the
 // terminal commit. This suite drives the REAL render functions (never a re-typed copy of their
-// text) and asserts: (1) the implement contract now teaches an event-based `wip:` checkpoint
-// cadence with a structured `[remudero-context]` body, (2) the commit-message guidance states the
-// title-only truth ci.yml enforces rather than the stale "every commit" claim, (3) a multi-commit
+// text) and asserts: (1) the implement contract teaches conventional unfinished checkpoints
+// with a structured `[remudero-context]` body, (2) hosted title checks and local range checks
+// are distinguished without a history waiver, (3) a multi-commit
 // run branch is told to pass an explicit conventional PR title instead of letting `--fill` derive
 // one, and (4) recon — which never touches this diff — stays asymmetric: it renders neither.
 
@@ -38,7 +38,7 @@ test("the implement output contract instructs event-based checkpoint commits", (
     /after each meaningful unit of work/i,
     "the contract must tie checkpoints to EVENTS (a green test, a decision, an abandoned approach), not a fixed cadence",
   );
-  assert.match(contract, /`wip: <what>`/, "the contract must name the exact checkpoint subject prefix");
+  assert.match(contract, /`chore\(checkpoint\): <what>`/, "the contract must name the exact checkpoint subject prefix");
   assert.match(
     contract,
     /\[remudero-context\]/,
@@ -80,23 +80,15 @@ test("grep: remudero-context in src/lib/compaction.ts", () => {
   assert.match(src, /remudero-context/);
 });
 
-// ── acceptance 2: the commitlint guidance states the title-only truth, not the stale claim ──
+// ── acceptance 2: hosted title scope does not waive local range checks ──
 
 test("the commit message contract states the title-only commitlint scope", () => {
   const text = commitMessageContractLines().join("\n");
-  assert.match(text, /lints ONLY the PR TITLE/, "must state the corrected, narrower scope");
-  assert.doesNotMatch(
-    text,
-    /lints EVERY commit on the PR/,
-    "must NOT carry the stale claim that made checkpoint commits look merge-blocking",
-  );
+  assert.match(text, /HOSTED.*PR TITLE/, "must distinguish the hosted check");
+  assert.match(text, /LOCAL.*commitlint.*emitter-checks.*every commit in the range/, "local range validation is not title-only");
   assert.match(text, /squash-merges\s+every PR/i, "must state WHY: squash-merge means branch commits never reach main");
-  assert.match(text, /`wip:` checkpoint commits/, "must name checkpoint commits explicitly by their subject prefix");
-  assert.match(
-    text,
-    /never block a merge/i,
-    "must connect the corrected scope back to checkpoint commits: they never block a merge",
-  );
+  assert.match(text, /`chore\(checkpoint\):`/, "must name the conventional unfinished marker");
+  assert.doesNotMatch(text, /never block a merge/i, "legacy history is not declared exempt");
 });
 
 test("the commit message contract's rules still apply — now to the PR title and the run's final commit", () => {
