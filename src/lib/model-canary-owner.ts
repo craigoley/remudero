@@ -5,6 +5,7 @@ import { chmodSync, existsSync, realpathSync, lstatSync, statSync } from "node:f
 import { dirname, join, resolve } from "node:path";
 import type { CanarySlot, CanarySchedulePorts } from "./model-canary-schedule.js";
 import { retentionSlotTurnBound, retentionTerminalMatches } from "./model-canary-retention-schedule.js";
+import { contextSlotCallBound, contextTerminalMatches } from "./model-canary-context-schedule.js";
 
 type Outcome = Parameters<CanarySchedulePorts["terminal"]>[1];
 const MAX_SLOTS = 100_000;
@@ -17,9 +18,11 @@ function binding(slot: CanarySlot): string {
     || !["api", "subscription"].includes(slot.pin.billing) || ![null, "A", "B"].includes(slot.aaLabel))
     throw new Error("canary-owner-slot-invalid");
   retentionSlotTurnBound(slot);
+  contextSlotCallBound(slot);
   const ordinary = [slot.caseId, slot.pin.model, slot.pin.route, slot.pin.effort,
     slot.pin.suiteHash, slot.pin.billing, slot.aaLabel];
-  return JSON.stringify(slot.retention === undefined ? ordinary : [...ordinary, slot.retention]);
+  return JSON.stringify(slot.context !== undefined ? [...ordinary, slot.context]
+    : slot.retention === undefined ? ordinary : [...ordinary, slot.retention]);
 }
 
 /** The directory is an existing private operations directory shared by every runner on this host.
@@ -74,8 +77,9 @@ export class CanarySlotOwner {
     if (run.caseId !== slot.caseId || run.suiteHash !== slot.pin.suiteHash || run.model !== slot.pin.model
       || run.route !== slot.pin.route || run.effort !== slot.pin.effort
       || (outcome.state === "unavailable" ? run.verified !== null : typeof run.verified !== "boolean")
-      || run.attempts.length > retentionSlotTurnBound(slot) || run.attempts.some(a => a.billing !== slot.pin.billing)
-      || !retentionTerminalMatches(slot, run, outcome.state))
+      || run.attempts.length > Math.min(retentionSlotTurnBound(slot), contextSlotCallBound(slot))
+      || run.attempts.some(a => a.billing !== slot.pin.billing)
+      || !retentionTerminalMatches(slot, run, outcome.state) || !contextTerminalMatches(slot, run, outcome.state))
       throw new Error("canary-owner-terminal-identity-invalid");
     // Retain result/usage and the held-out grade, never an arbitrary transport Error or credential.
     const receipt = JSON.stringify({ slot, run, grade: outcome.grade, state: outcome.state, reason: outcome.reason });
