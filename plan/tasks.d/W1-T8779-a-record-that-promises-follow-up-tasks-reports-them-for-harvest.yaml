@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator session 2026-10-12: W1-T7729 (#11136) merged without its ADR's follow-ups; filed by hand as W1-T8775..W1-T8778"
   plan_refs: [W1-T7729, W1-T105, W1-T2456]
-  files: [src/lib/promised-follow-ups.ts, src/lib/review.ts, test/a-record-that-promises-follow-up-tasks-reports-them-for-harvest.test.ts]
+  files: [src/lib/promised-follow-ups.ts, src/lib/review.ts, src/lib/worker.ts, src/run-task.ts, test/a-record-that-promises-follow-up-tasks-reports-them-for-harvest.test.ts, test/review-engine-revision-rearm.test.ts]
   status: queued
   priority: 2
   attempts: 0
@@ -33,6 +33,14 @@
        origin/main cites the task in plan_refs and names it. Everything else is unreported.
     3. judgeReview adds one unmet synthetic criterion, "promised follow-ups reported for harvest", naming each
        unreported bullet, so the PR cannot pass until they are reported; a PR that promises none is unaffected.
+    4. The same typed Follow-ups parser must serve worker harvesting and this guard; put the lean parser in the new
+       module and have worker.ts delegate, never import worker.ts into review's narrower dependency graph. Only
+       research:, task: and action: entries in the actual section count, not a PR body's prose or a heading alone.
+    5. runReview reads promise sources at the exact head and plan records at one pinned origin/main, awaited and
+       bounded, before claiming a review decision. Carry that same observation into the judge and decision digest;
+       a later filing must invalidate an earlier missing-promise decision, not replay it forever. Unreadable evidence
+       is UNKNOWN, never an empty promise list. Rearm both review identities with a policy revision and cover the
+       existing review-engine revision fixture. No extra model calls, live harvest writes or auto-filing here.
   acceptance:
     - claim: "a PR whose ADR lists follow-up tasks fails review while any listed follow-up is missing from the report's Follow-ups section"
       proof: 'grep: test("W1-T8779: an ADR follow-up missing from the report blocks the review" in test/a-record-that-promises-follow-up-tasks-reports-them-for-harvest.test.ts'
