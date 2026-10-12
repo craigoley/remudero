@@ -723,7 +723,7 @@ export function daemonFreshnessFromService(svc: ServiceFreshness) {
 export type ReviewerCodeFreshness =
   | ({ status: "fresh"; codeSha: string; originMainSha: string; advance: "none" | "immaterial" } & RecentFetchMark)
   | ({ status: "stale"; codeSha: string; originMainSha: string; changedPaths?: string[]; diffUnreadable?: string } & RecentFetchMark)
-  | { status: "unreadable"; reason: string };
+  | { status: "unreadable"; reason: string; hostGap?: "cwd-missing" };
 
 export interface ReviewerCodeFreshnessOptions {
   checkServiceFreshness?: typeof checkServiceFreshness;
@@ -1068,7 +1068,25 @@ export function checkReviewerCodeFreshness(
   deps: ReviewerCodeFreshnessOptions = {},
 ): ReviewerCodeFreshness {
   const service = (deps.checkServiceFreshness ?? checkServiceFreshness)(repoDir, env);
-  return reviewerFreshnessFromService(service, repoDir, env, deps, () => checkGuardedReviewerCodeFreshness(repoDir, deps));
+  return nameVanishedCheckout(
+    reviewerFreshnessFromService(service, repoDir, env, deps, () => checkGuardedReviewerCodeFreshness(repoDir, deps)),
+    repoDir, deps,
+  );
+}
+
+/** W1-T7850 — an unreadable reading in a directory that no longer exists is a HOST GAP (the same `cwd-missing`
+ *  naming W1-T7822 gave a vanished proof cwd), not an unprovable source: nothing was wrong with the code, the
+ *  reviewer checkout was reclaimed under the read. Judged AFTER the read, and only for a reader that ran its OWN
+ *  git there; every other unreadable reading is unchanged. */
+function nameVanishedCheckout(
+  reading: ReviewerCodeFreshness,
+  repoDir: string,
+  deps: ReviewerCodeFreshnessOptions,
+): ReviewerCodeFreshness {
+  // An injected git runner or head reader (a fake `/repo`) reads no directory, so a missing one proves nothing.
+  if (deps.git !== undefined || deps.gitAsync !== undefined || deps.resolveHeadSha !== undefined) return reading;
+  if (reading.status !== "unreadable" || reading.hostGap !== undefined || existsSync(repoDir)) return reading;
+  return { status: "unreadable", reason: `reviewer checkout no longer exists: ${repoDir}`, hostGap: "cwd-missing" };
 }
 
 export async function checkReviewerCodeFreshnessAsync(
@@ -1080,7 +1098,10 @@ export async function checkReviewerCodeFreshnessAsync(
     ...(deps.gitAsync ? { gitAsync: deps.gitAsync } : {}),
     recentFetchFallback: true,
   });
-  return reviewerFreshnessFromService(service, repoDir, env, deps, () => checkGuardedReviewerCodeFreshnessAsync(repoDir, deps));
+  return nameVanishedCheckout(
+    await reviewerFreshnessFromService(service, repoDir, env, deps, () => checkGuardedReviewerCodeFreshnessAsync(repoDir, deps)),
+    repoDir, deps,
+  );
 }
 
 function reviewerFreshnessFromService<G extends ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>>(
