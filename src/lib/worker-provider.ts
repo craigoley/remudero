@@ -4,6 +4,7 @@ import { CashResponsesConversation } from "./cash-responses.js";
 import { randomUUID } from "node:crypto";
 import { execFile as execFileChild, execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { constants as fsConstants, accessSync, appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -3706,15 +3707,51 @@ export function openWeightCheckSandboxArgv(
 /** The only production route for `RunCheck`: no fallback can execute an unchecked process. */
 const execFileAsync = promisify(execFileChild);
 
+/** The slice of scripts/pure-test-pool.mjs (the test judge) a `node --test` check uses. A plain .mjs, so no types. */
+interface CheckJudge {
+  inlineJudgedArgs(): string[];
+  judgedNodeTestArgs(args: readonly string[], judgedArgs: readonly string[]): string[];
+  splitInlineTally(stdout: string): { output: string; tallyText: string };
+  testFilesInArgv(args: readonly string[], cwd: string): string[];
+  judgeRun(files: readonly string[], opts: { status: number; pool: boolean; root: string; tallyText: string }): { complete: boolean; status: number };
+  describeJudgedRun(role: string, verdict: { complete: boolean }, opts: { prefix: string }): string;
+}
+// From the ORCHESTRATOR's own checkout (this module's), never the worktree the check runs in; loaded when a check runs.
+const loadCheckJudge = (): CheckJudge => createRequire(import.meta.url)("../../scripts/pure-test-pool.mjs") as CheckJudge;
+
+/**
+ * W1-T8380: A `unit_test` RUN IS JUDGED BY ITS PER-FILE SUMMARIES, as #10894/#10918/#11000 judge CI's, pre-push's and the
+ * review's. A suite whose own child exits 0 part-way (a real `process.exit(0)`) loses the rest of its tests and node
+ * still exits 0 — which told the lane its tests were green. The sandboxed child sees only the worktree, so the judge's
+ * tally reporter rides the argv as a `data:` URL and writes one line to stdout, taken back off here. An exit 0 whose
+ * files did not all reach their own summary (no tally line included) is thrown as a failed check — a nonzero `status`
+ * and the judge's `UNREPORTED FILE` line in its output — exactly the shape a red run rejects with. A nonzero exit keeps
+ * its own reading; every other check is unjudged.
+ */
 export async function runOpenWeightCheck(input: OpenWeightCheckInput): Promise<string> {
-  const { stdout } = await execFileAsync(OPENWEIGHT_CHECK_SANDBOX, openWeightCheckSandboxArgv(input), {
-    cwd: realpathSync(input.cwd),
-    env: input.env,
-    encoding: "utf8",
-    timeout: OPENWEIGHT_CHECK_TIMEOUT_MS,
-    maxBuffer: 8 * 1024 * 1024,
-  });
-  return stdout;
+  const judge = input.argv.includes("--test") ? loadCheckJudge() : undefined;
+  const argv = judge ? judge.judgedNodeTestArgs(input.argv, judge.inlineJudgedArgs()) : input.argv;
+  const cwd = realpathSync(input.cwd);
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync(OPENWEIGHT_CHECK_SANDBOX, openWeightCheckSandboxArgv({ ...input, argv }), {
+      cwd,
+      env: input.env,
+      encoding: "utf8",
+      timeout: OPENWEIGHT_CHECK_TIMEOUT_MS,
+      maxBuffer: 8 * 1024 * 1024,
+    }));
+  } catch (err) {
+    const e = err as { stdout?: unknown };
+    if (judge && typeof e.stdout === "string") e.stdout = judge.splitInlineTally(e.stdout).output;
+    throw err;
+  }
+  if (!judge) return stdout;
+  const { output, tallyText } = judge.splitInlineTally(stdout);
+  const verdict = judge.judgeRun(judge.testFilesInArgv(input.argv, cwd), { status: 0, pool: false, root: cwd, tallyText });
+  if (verdict.complete) return output;
+  const line = judge.describeJudgedRun("unit_test", verdict, { prefix: "test-judge" });
+  throw Object.assign(new Error(line), { status: verdict.status, stdout: `${output}\n${line}\n`, stderr: "" });
 }
 
 /** Raised INSTEAD of executing an unlisted check, before any process spawns. */
