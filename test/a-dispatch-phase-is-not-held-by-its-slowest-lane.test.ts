@@ -113,6 +113,16 @@ async function boundaryRun(t: TestContext, boundary: "preopen_gate" | "checkpoin
   const outcome = await withLiveWritesAllowed(() => runTask(id, options));
   const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
+  if (failure === "scope") {
+    // W1-T8008: an undeclared path no longer refuses the restart checkpoint — the work is kept, pushed and
+    // named on the handoff, and scope is judged where the PR opens (scope_guard), never by losing the work.
+    assert.equal(outcome.verdict, "handed_off");
+    const scopeHandoff = rows.find((row) => row.step === "run.freshness_handoff");
+    assert.deepEqual(scopeHandoff?.undeclared_paths, ["src/outside.ts"]);
+    assert.equal(rows.find((row) => row.step === "verdict")?.reason, "freshness_yield");
+    assert.equal(origin.git("show", `${branch}:src/outside.ts`), "out of scope");
+    return;
+  }
   if (failure) {
     assert.equal(outcome.verdict, "no_pr");
     assert.equal(calls, 2, "a checkpoint failure cannot start a repair worker");
@@ -205,7 +215,7 @@ test("a fresh run restores the pushed boundary checkpoint before its implement w
   await boundaryRun(t, "checkpoint", false, true);
 });
 
-test("a checkpoint outside the declared scope records failure and retains its work", async (t) => {
+test("a checkpoint outside the declared scope keeps its undeclared work and names it on the handoff", async (t) => {
   await boundaryRun(t, "checkpoint", false, false, "scope");
 });
 
