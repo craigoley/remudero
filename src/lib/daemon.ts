@@ -972,6 +972,8 @@ export interface DaemonSummary {
   costUsd: number;
   /** Count of idle polls (no runnable task, so the loop slept and re-checked). */
   ticks: number;
+  /** Reporting failures after settlement; not proof that a ledger receipt was delivered. */
+  reportingFaults?: Array<{ phase: string; detail: string }>;
 }
 
 /** Injectable dependencies — the real command wires GitHub/run-task/usage/locks. */
@@ -3066,6 +3068,23 @@ export async function runDaemon(
     },
   };
   const emitLog = deps.log ?? (() => {});
+  type SettlementReporting = {
+    report: typeof emitLog;
+    faults: Array<{ phase: string; reason: unknown }>;
+  };
+  const reportingFaultDetail = (reason: unknown): string => {
+    if (reason === null) return "null";
+    if (typeof reason !== "object" && typeof reason !== "function") return String(reason);
+    try {
+      // Do not invoke a thrown object's message getter or custom string conversion.
+      const message = Object.getOwnPropertyDescriptor(reason, "message");
+      return message && "value" in message && typeof message.value === "string"
+        ? message.value : "[non-string reporting failure]";
+    } catch {
+      // The original reason stays in the named reporting-fault channel; detail is explicitly unknown.
+      return "[uninspectable reporting failure]";
+    }
+  };
   // W1-T4837: idle build-lane minute accounting. The daemon's own log stream is observed rather than a flag
   // threaded through every decline, so a hold written by any layer names the cause of the tick it lands in.
   const idleLaneClock = clockFromDateFn(deps.now);
@@ -3073,10 +3092,21 @@ export async function runDaemon(
   let idleLaneTickCause: IdleLaneCause | undefined;
   let idleLaneDispatchable = 0;
   let livenessPulse: ReturnType<typeof startLivenessPulse> | undefined;
-  const log: typeof emitLog = (step, fields) => {
+  const noteLog: typeof emitLog = (step, fields) => {
     idleLaneTickCause = idleLaneCauseForStep(step, fields) ?? idleLaneTickCause;
     livenessPulse?.note(step);
+  };
+  const log: typeof emitLog = (step, fields) => {
+    noteLog(step, fields);
     emitLog(step, fields);
+  };
+  const createSettlementReporting = (): SettlementReporting => {
+    const faults: SettlementReporting["faults"] = [];
+    return { faults, report: (step, fields) => {
+      noteLog(step, fields);
+      try { emitLog(step, fields); }
+      catch (reason) { faults.push({ phase: `report.${step}`, reason: reason }); }
+    } };
   };
   // One sample per tick outcome: what the lanes are doing and why they are not doing more. `dispatchable`
   // is refreshed only on ticks that ran selection; a tick that never reached selection (a pause) reuses the
@@ -3100,11 +3130,11 @@ export async function runDaemon(
   // daemon restarts on merges long before most hourly windows close, so the open window is written out as a
   // partial row rather than lost with the process. A window with no idle minute writes nothing: a restart
   // must not add a row of zeros to the ledger. The account is rolled, so a second call cannot double-count.
-  const flushIdleLaneWindow = (): void => {
+  const flushIdleLaneWindow = (report: typeof emitLog = emitLog): void => {
     const atMs = idleLaneClock.now();
     const row = summarizeIdleLaneAccount(idleLaneAccount, atMs);
     idleLaneAccount = rollIdleLaneWindow(idleLaneAccount, atMs);
-    if (row.idle_minutes > 0) emitLog("lane.idle_summary", { ...row, partial: true });
+    if (row.idle_minutes > 0) report("lane.idle_summary", { ...row, partial: true });
   };
   // Shared by both governor call sites below, so the two cannot silently drift into different field
   // names for the same verdict (W1-T342).
@@ -3230,14 +3260,14 @@ export async function runDaemon(
   // no judge/proposal failure can change eligibility or hold a healthy sibling lane.
   const lifetimePressureTasks = new Map<string, Task>();
   const lifetimePressureObserved = new Set<string>();
-  const flushLifetimePressure = async (): Promise<void> => {
+  const flushLifetimePressure = async (report: typeof emitLog = log): Promise<void> => {
     if (lifetimePressureTasks.size === 0 || deps.onLifetimePressure === undefined) return;
     const tasks = [...lifetimePressureTasks.values()];
     lifetimePressureTasks.clear();
     try {
       await deps.onLifetimePressure(tasks);
     } catch (error) {
-      log("dispatch.lifetime_pressure.failed", {
+      report("dispatch.lifetime_pressure.failed", {
         tasks: tasks.map((task) => task.id),
         error: String((error as Error)?.message ?? error),
       });
@@ -3341,41 +3371,60 @@ export async function runDaemon(
   // them. A per-tick clock restarted its interval every tick and stop() won the race: live 2026-10-05,
   // 33 paused ticks ran one pass. Stopped by the first unpaused tick, and by `summary` on every exit.
   const pauseReview: { clock?: InterphaseReviewClock; reported: number } = { reported: 0 };
-  const reportPauseReviewPasses = (passes: number): void => {
-    if (passes > pauseReview.reported) log("daemon.pause.review_passes", { tick: ticks, passes: passes - pauseReview.reported });
+  const reportPauseReviewPasses = (passes: number, report: typeof emitLog = log): void => {
+    if (passes > pauseReview.reported) report("daemon.pause.review_passes", { tick: ticks, passes: passes - pauseReview.reported });
     pauseReview.reported = passes;
   };
-  const stopPauseReviewClock = async (): Promise<void> => {
+  const stopPauseReviewClock = async (report: typeof emitLog = log): Promise<void> => {
     const clock = pauseReview.clock;
     if (!clock) return;
     pauseReview.clock = undefined;
-    reportPauseReviewPasses((await clock.stop()).passes);
+    reportPauseReviewPasses((await clock.stop()).passes, report);
     pauseReview.reported = 0;
   };
-  const summary = async (stopReason: DaemonStopReason, stopDetail?: string): Promise<DaemonSummary> => {
+  let ownedServicesClosed = false;
+  const closeOwnedServices = async (report: typeof emitLog = log): Promise<void> => {
+    if (ownedServicesClosed) return;
+    ownedServicesClosed = true;
     repositoryMaintenanceStopped = true;
     dueRungsStopped = true;
     if (dueRungsTimer) clearInterval(dueRungsTimer);
     if (repositoryMaintenanceTimer) clearInterval(repositoryMaintenanceTimer);
-    if (pauseReview.clock) await stopPauseReviewClock();
-    prActionPumpRef.stop();
-    plainBackfill?.stop();
-    fleetLane?.stop();
-    inboxResponder?.stop();
     clearTimeout(bootGateTimer);
     bootGateTrigger ??= "exited";
-    gardenerRef.stop();
-    livenessPulse?.stop();
+    const failures: unknown[] = [];
+    try { if (pauseReview.clock) await stopPauseReviewClock(report); }
+    catch (reason) { /* Retained in the cleanup AggregateError, after every other stop is attempted. */ failures.push(reason); }
+    for (const stop of [
+      () => prActionPumpRef.stop(), () => plainBackfill?.stop(), () => fleetLane?.stop(),
+      () => inboxResponder?.stop(), () => gardenerRef.stop(), () => livenessPulse?.stop(),
+    ]) {
+      try { stop(); }
+      catch (reason) { /* Retained in the cleanup AggregateError, never converted into successful closure. */ failures.push(reason); }
+    }
+    // Attempt every owned cleanup once; semantic cleanup failures remain caller-visible.
+    if (failures.length) throw new AggregateError(failures, "owned daemon cleanup failed");
+  };
+  const summary = async (stopReason: DaemonStopReason, stopDetail?: string, reporting: SettlementReporting = createSettlementReporting()): Promise<DaemonSummary> => {
+    const report = reporting.report;
+    await closeOwnedServices(report);
     if (stopReason === "stopped") {
       if (backgroundSweep) await backgroundSweep;
       const abandonedReviews = await drainInFlightReviews({ boundMs: sweepWallClockBoundMs });
-      if (abandonedReviews > 0) log("daemon.stop_drain.completed", {
+      if (abandonedReviews > 0) report("daemon.stop_drain.completed", {
         abandoned_in_flight_reviews: abandonedReviews, bound_ms: sweepWallClockBoundMs,
       });
     }
-    flushIdleLaneWindow();
+    flushIdleLaneWindow(report);
     const s: DaemonSummary = { attempted, merged, stopReason, stopDetail, costUsd, ticks };
-    log("daemon.summary", { ...s });
+    report("daemon.summary", { ...s });
+    if (reporting.faults.length) {
+      s.reportingFaults = reporting.faults.map(({ phase, reason }) => ({ phase, detail: reportingFaultDetail(reason) }));
+      // A hard operator STOP must stay a clean stop, not invite a supervisor restart.
+      // Its separate reportingFaults still explicitly refuse delivered-report assurance.
+      if (stopReason !== "stopped") s.stopReason = "error";
+      s.stopDetail = [stopDetail, ...s.reportingFaults.map(({ phase, detail }) => `${phase}: ${detail}`)].filter(Boolean).join("; ");
+    }
     return s;
   };
   if (deps.livenessPulse) livenessPulse = startLivenessPulse(pollIntervalMs, idleLaneClock, log,
@@ -3400,7 +3449,14 @@ export async function runDaemon(
     ...(deps.knowledgeGardener ? [startGarden(knowledgeGardenSpec({ ...deps.knowledgeGardener, prState: undefined }), deps.knowledgeGardener, pollIntervalMs)] : []),
     ...(bootGateHolds ? [] : (deps.gardens ?? [])).map((start) => start(pollIntervalMs)),
   ];
-  gardenerRef.stop = () => gardens.forEach((g) => g.stop());
+  gardenerRef.stop = () => {
+    const failures: unknown[] = [];
+    for (const garden of gardens) {
+      try { garden.stop(); }
+      catch (reason) { /* Every garden still gets its stop; all failures propagate in the AggregateError. */ failures.push(reason); }
+    }
+    if (failures.length) throw new AggregateError(failures, "owned garden cleanup failed");
+  };
   if (deferredGardens.length > 0) deferBootCadence("gardens");
   const openBootGate = (trigger: string): void => {
     if (bootGateTrigger !== undefined) return;
@@ -3626,6 +3682,7 @@ export async function runDaemon(
     task: Task,
     result: RunResult,
     isMerged: MergedSet,
+    report: typeof emitLog = log,
   ): Promise<
     | { kind: "merged" }
     | { kind: "continue" }
@@ -3641,7 +3698,7 @@ export async function runDaemon(
         creditVisible = (deps.refreshMergedAsync ? await deps.refreshMergedAsync(planForBatch) : deps.refreshMerged(planForBatch))(task.id);
       } catch (error) {
         refreshError = String((error as Error)?.message ?? error);
-        log("daemon.merge_credit_refresh_failed", { task: task.id, error: refreshError });
+        report("daemon.merge_credit_refresh_failed", { task: task.id, error: refreshError });
       }
       if (creditVisible) {
         pendingMergedCredit.delete(task.id);
@@ -3657,12 +3714,12 @@ export async function runDaemon(
         rawRows = deps.readLedgerLines?.() ?? [];
       } catch (error) {
         evidenceError = String((error as Error)?.message ?? error);
-        log("daemon.merge_credit_evidence_failed", { task: task.id, error: evidenceError });
+        report("daemon.merge_credit_evidence_failed", { task: task.id, error: evidenceError });
       }
       const rows = rawRows.flatMap((raw) => {
         try { return [JSON.parse(raw) as Record<string, unknown>]; }
         catch (error) {
-          log("daemon.merge_credit_evidence_invalid", { task: task.id, error: String((error as Error)?.message ?? error) });
+          report("daemon.merge_credit_evidence_invalid", { task: task.id, error: String((error as Error)?.message ?? error) });
           return [];
         }
       });
@@ -3674,7 +3731,7 @@ export async function runDaemon(
       const merge = owner && rows.findLast((row) => row.step === "pr.merged" && row.run_id === owner.run_id);
       const refusedAt = typeof refusal?.ts === "string" ? Date.parse(refusal.ts) : NaN;
       const mergedAt = typeof merge?.ts === "string" ? Date.parse(merge.ts) : NaN;
-      log("daemon.merge_credit_correction", {
+      report("daemon.merge_credit_correction", {
         task: task.id,
         run_id: result.runId,
         pr_url: prUrl ?? null,
@@ -3705,7 +3762,7 @@ export async function runDaemon(
 
       if (disposition.kind === "awaiting_merge") {
         blockRetryStates.delete(task.id);
-        log("daemon.block.awaiting_merge", {
+        report("daemon.block.awaiting_merge", {
           task: task.id,
           verdict: result.verdict,
           pr_url: result.prUrl,
@@ -3716,7 +3773,7 @@ export async function runDaemon(
         // Transient: no strike. Selection naturally retries the same task next tick, since it is still
         // unmerged and its deps are unchanged, so no separate re-dispatch mechanism is needed.
         blockRetryStates.set(task.id, disposition.state);
-        log("daemon.block.transient_retry", {
+        report("daemon.block.transient_retry", {
           task: task.id,
           verdict: result.verdict,
           transient_retries: disposition.state.transientRetries,
@@ -3729,7 +3786,7 @@ export async function runDaemon(
         // this module uses, never a separate unbounded loop — exhausting the bound falls through to a
         // genuine blocker on a later tick rather than fix-looping forever (W1-T174, W1-T168).
         blockRetryStates.set(task.id, disposition.state);
-        log("daemon.block.fixable_dispatch", {
+        report("daemon.block.fixable_dispatch", {
           task: task.id,
           verdict: result.verdict,
           dependents: disposition.dependents,
@@ -3751,7 +3808,7 @@ export async function runDaemon(
           // releases, even though nothing about the task itself failed. So: no ledger write, no
           // entry in `independentFailureBlocksThisRun`, and the tick simply continues — the live
           // lock, not a ledger row, remains the actual exclusion until its owner finishes.
-          log("daemon.block.inflight_contention", {
+          report("daemon.block.inflight_contention", {
             task: task.id,
             verdict: result.verdict,
             run_id: result.runId,
@@ -3760,7 +3817,7 @@ export async function runDaemon(
         }
         if (result.verdict === "blocked_illformed") {
           illformedAdmissionBlocksThisRun.set(task.id, JSON.stringify(task));
-          log("daemon.block.illformed_admission", {
+          report("daemon.block.illformed_admission", {
             task: task.id,
             verdict: result.verdict,
             run_id: result.runId,
@@ -3775,7 +3832,7 @@ export async function runDaemon(
         const environmental = !harnessCommitRefused && isEnvironmentalBlock(result.verdict, undefined);
         if (environmental) environmentalBlocksThisRun.set(task.id, daemonClock.now());
         else if (!harnessCommitRefused) independentFailureBlocksThisRun.add(task.id);
-        log("dispatch.blocked_independent", {
+        report("dispatch.blocked_independent", {
           task_id: task.id,
           task: task.id,
           verdict: result.verdict,
@@ -3791,7 +3848,7 @@ export async function runDaemon(
             : {}),
         });
         if (harnessCommitRefused) {
-          log("dispatch.harness_commit_retry", {
+          report("dispatch.harness_commit_retry", {
             task_id: task.id,
             task: task.id,
             original_run_id: result.runId,
@@ -3800,7 +3857,7 @@ export async function runDaemon(
             harness_commit_refused: true,
           });
         }
-        log("daemon.block.independent_failure", {
+        report("daemon.block.independent_failure", {
           task: task.id,
           verdict: result.verdict,
           pr_url: result.prUrl,
@@ -3812,7 +3869,7 @@ export async function runDaemon(
       // the gap" is absolute. Escalate once, then let the caller park this task while its unmerged state
       // continues to dependency-gate every descendant. Reached by a genuine blocker, by a fixable one whose
       // strike bound is exhausted, and by a fixable one with no fix rung wired (W1-T174, W1-T3122).
-      log("daemon.blocked", {
+      report("daemon.blocked", {
         task: task.id,
         verdict: result.verdict,
         pr_url: result.prUrl,
@@ -6024,8 +6081,10 @@ export async function runDaemon(
       repositoryMaintenanceQueueBusy = false;
       await stopTicker();
     }
+    const reporting = createSettlementReporting();
+    try {
     const settled = poolOutcome.settled;
-    await flushLifetimePressure();
+    await flushLifetimePressure(reporting.report);
     restartInterphaseReviewClock();
     if (admitted.length === 0 && newBuildHeld && poolOutcome.fault === undefined && phaseFaults.length === 0) {
       // Persistent hold is an in-process, paced NEW-build deferral, never a failure/STOP.
@@ -6051,12 +6110,12 @@ export async function runDaemon(
     let dispatchTransportSeenThisTick = false;
     const toProcess: Array<{ task: Task; result: RunResult; snapshot: (typeof snapshots)[number] }> = [];
     const classifyRejection = async (t: Task, err: unknown, phase?: NonNullable<typeof poolOutcome.fault>["phase"]): Promise<{ taskId: string; message: string } | undefined> => {
-        // Its own classification logging/escalation may still throw; this is not a blanket log guard.
+        // Only reporting throws are contained; the original classification still governs.
         if (err instanceof TaskAdmissionError) {
           invalidatedAdmissionsThisRun.add(t.id);
           const rawReason = String(err.message).replace(/[\r\n\t]+/g, " ");
           const reason = rawReason.length <= 240 ? rawReason : `${rawReason.slice(0, 239)}…`;
-          log("daemon.admission_stood_down", { task: t.id, reason });
+          reporting.report("daemon.admission_stood_down", { task: t.id, reason });
           return;
         }
         const transientTransport = transientGhDispatchFailure(err);
@@ -6087,7 +6146,7 @@ export async function runDaemon(
           const backoffMs = laneDeliveryBackoffMs(consecutive);
           const parkedUntilMs = daemonClock.now() + backoffMs;
           laneDeliveryParks.set(t.id, { consecutive, parkedUntilMs, revision });
-          log("daemon.lane_failed", {
+          reporting.report("daemon.lane_failed", {
             task: t.id,
             class: delivery.failureClass,
             error: delivery.firstLine,
@@ -6105,12 +6164,12 @@ export async function runDaemon(
           return { taskId: t.id, message: phase ? `${phase}: ${message}` : message };
         }
         if (ghRead !== undefined) {
-          log("daemon.gh_read_failed", { task: t.id, error: ghRead.detail });
+          reporting.report("daemon.gh_read_failed", { task: t.id, error: ghRead.detail });
           return;
         }
         if (transientTransport !== undefined) {
           dispatchTransportSeenThisTick = true;
-          log("daemon.dispatch_transport_deferred", {
+          reporting.report("daemon.dispatch_transport_deferred", {
             task: t.id,
             consecutive: consecutiveDispatchTransportFailures + 1,
             error: transientTransport.detail,
@@ -6123,13 +6182,13 @@ export async function runDaemon(
         // lane, so a batch where two lanes hit the same outage backs off like one bad tick (W1-T113 part iii).
         spawnInfraSeenThisTick = true;
         const reason = (err as Error).message;
-        log("daemon.spawn_infra_blocked", { task: t.id, reason, consecutive: consecutiveSpawnInfraFailures + 1 });
+        reporting.report("daemon.spawn_infra_blocked", { task: t.id, reason, consecutive: consecutiveSpawnInfraFailures + 1 });
         if (!toolchainEscalated.has(reason)) {
           toolchainEscalated.add(reason);
           try {
             await deps.onSpawnInfraBlocked?.({ task: t, reason });
           } catch (escErr) {
-            log("daemon.escalation.failed", { task: t.id, error: String((escErr as Error)?.message ?? escErr) });
+            reporting.report("daemon.escalation.failed", { task: t.id, error: String((escErr as Error)?.message ?? escErr) });
           }
         }
     };
@@ -6155,9 +6214,9 @@ export async function runDaemon(
       fatalError ??= failure;
     }
 
-    if (fatalError && poolOutcome.fault === undefined && phaseFaults.length === 0) {
+    if (fatalError && poolOutcome.fault === undefined && phaseFaults.length === 0 && reporting.faults.length === 0) {
       await stopInterphaseReviewClock();
-      return summary("error", `${fatalError.taskId}: ${fatalError.message}`);
+      return summary("error", `${fatalError.taskId}: ${fatalError.message}`, reporting);
     }
 
     // A successful lane — including one returning a non-spawn-infra blocked verdict — clears the backoff
@@ -6180,13 +6239,13 @@ export async function runDaemon(
       const apiWindowDisposition = reasonAboutApiWindow(apiWindowHoldState, task.id, result.verdict, pollIntervalMs, maxApiWindowHoldMs);
       apiWindowHoldState = apiWindowDisposition.state;
       apiWindowHoldMs = apiWindowDisposition.holdMs;
-      const outcome = await processDispatchResult(snapshot.plan, task, result, snapshot.isMerged);
+      const outcome = await processDispatchResult(snapshot.plan, task, result, snapshot.isMerged, reporting.report);
       if (outcome.kind === "genuine_blocker") {
         if (deps.isOpenPr === undefined || deps.isCreditIndeterminate === undefined) {
           blockedDetail ??= outcome.detail;
         } else {
           parkedBlockers.set(task.id, { prUrl: result.prUrl, dependents: outcome.dependents });
-          log("daemon.block.parked", {
+          reporting.report("daemon.block.parked", {
             task: task.id,
             verdict: result.verdict,
             pr_url: result.prUrl,
@@ -6196,7 +6255,7 @@ export async function runDaemon(
         }
       }
     }
-    if (fatalError || phaseFaults.length > 0) {
+    if (fatalError || phaseFaults.length > 0 || reporting.faults.length > 0) {
       // A pool fault closes starts, but genuine workers still earn their result/cost/merge credit.
       // Preserve original classification/detail; named logging faults remain separate secondary facts.
       const detail = [
@@ -6204,11 +6263,11 @@ export async function runDaemon(
         ...phaseFaults.map(({ phase, reason }) => `${phase}: ${String((reason as Error)?.message ?? reason)}`),
       ].join("; ");
       await stopInterphaseReviewClock();
-      return summary("error", detail);
+      return summary("error", detail, reporting);
     }
     if (blockedDetail !== undefined) {
       await stopInterphaseReviewClock();
-      return summary("blocked", blockedDetail);
+      return summary("blocked", blockedDetail, reporting);
     }
 
     if (inFlightFreshness && !deps.checkStop?.() && !deps.checkPause?.()) {
@@ -6263,6 +6322,16 @@ export async function runDaemon(
     }
 
     await stopInterphaseReviewClock();
+    } catch (reason) {
+      // Semantic failures still propagate after independently attempting both owned finalizers.
+      const cleanupFaults: unknown[] = [];
+      try { await stopInterphaseReviewClock(); }
+      catch (cleanupReason) { /* Caller receives the original failure plus this named cleanup failure. */ cleanupFaults.push(cleanupReason); }
+      try { await closeOwnedServices(reporting.report); }
+      catch (cleanupReason) { /* Caller receives the original failure plus this named cleanup failure. */ cleanupFaults.push(cleanupReason); }
+      if (cleanupFaults.length) throw new AggregateError([reason, ...cleanupFaults], "post-settlement reconciliation and cleanup failed");
+      throw reason;
+    }
   }
 }
 
