@@ -43,9 +43,16 @@ export interface InboxRefresh {
 function persistedContent(classified: ClassifiedInbox, stores: InboxStores): PersistedInboxContent {
   const ledgerRows = classified.ledgerLines.filter((row) => row.step === "fleet_lane.decided" || (row.step === "ratify.approved" && row.released === "verify-human"));
   const projection = [...classified.projection];
+  const taskIds = new Set(classified.proposals.flatMap((proposal) => /^verify-human:(W\d+-T[A-Za-z0-9]+)$/.exec(proposal.id)?.slice(1) ?? []));
+  const attentionEvidence = classified.attentionEvidence && {
+    ...classified.attentionEvidence,
+    releases: classified.attentionEvidence.releases.filter(([id]) => taskIds.has(id)),
+    judges: classified.attentionEvidence.judges.filter(([id]) => taskIds.has(id)),
+  };
   return {
     ...inboxClassificationEvidence(classified), proposals: classified.proposals, classifications: classified.classifications, ledgerRows,
     mergedTaskIds: projection.filter(([, p]) => p.merged).map(([id]) => id), projectionIndeterminate: projection.some(([, p]) => p.indeterminate === true),
+    ...(attentionEvidence ? { attentionEvidence } : {}),
     stores,
   };
 }

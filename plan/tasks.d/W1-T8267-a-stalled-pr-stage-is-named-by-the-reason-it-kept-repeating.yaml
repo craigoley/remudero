@@ -1,0 +1,67 @@
+- id: W1-T8267
+  title: "A STALLED PR STAGE IS NAMED BY THE REASON IT KEPT REPEATING, AND A STAGE NO LANE OWNS IS STALLED AT ONCE — on 2026-10-11 pr.stuck diagnosed 11 of 11 stalls as \"duplicate build\" or \"unknown signature\" while #10783 was disposed \"owner proven dead — re-running\" 85 times, and ownerless #10842/#10829 never reached pr.stuck at all"
+  repo: remudero
+  depends_on: [W1-T8167]  # shares runSweep's stalled-stage report (src/lib/sweep.ts) with W1-T8167
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — what a stalled PR stage reports and when an ownerless stage counts as stalled
+  band_meaning: span
+  origin: "operator rulings 2026-10-09 (never leave stuck PRs) + 2026-10-11 detection research: review-owner loops, light-pass deferral loops and ownerless plan PRs were found by a person"
+  plan_refs: [W1-T5900, W1-T6405, W1-T8167, W1-T8088, W1-T8086, W1-T7959, W1-T4385]
+  files: [src/lib/sweep.ts, test/a-stalled-pr-stage-is-named-by-the-reason-it-kept-repeating.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    MEASURED, core ledger union 2026-10-10T20:00Z..2026-10-11T19:38Z, read-only:
+      - `pr.stuck` stages (distinct PR, blocker, since): #10741 awaiting-review "duplicate build"; #10783
+        awaiting-review "duplicate build" (twice); #10785, #10793 and #10787 own-red "unknown signature"; #10787 and
+        #10829 conflict "unknown signature"; #10848 awaiting-review "unknown signature"; #10864 own-red "duplicate
+        build"; #10921 awaiting-review "duplicate build". That is 11 stages, and none names what the sweep kept saying.
+      - What the sweep kept saying, from `sweep.disposed` reasons on those PRs: #10783 "remudero-review owner proven
+        dead — re-running" 85 times from 01:56:56 to 04:11:30 (pr.stuck 02:26:50; a person noticed 03:16 and
+        diagnosed 03:4x); #10848 the same reason 10 times from 13:10:44 to 13:49:52; #10765 "deferred to full sweep
+        (light pass)" 348 times over 14.6 h; #10787 the same 307 times over 9.8 h; #10866 15 times before a person
+        fixed it by hand.
+      - Ownerless blockers: #10842 plan-proof-unrunnable with blocker_owner NONE from 11:30:12 (another session
+        pushed a fix at 11:37); #10904 the same from 15:54:07; #10829 escalated/NONE 55 times from 11:09:39 to 12:30
+        (hand conflict fix at 12:5x).
+    READ on origin/main 25067fc89, src/lib/sweep.ts `reportStuckStage`:
+      - DEFAULT_SWEEP_POLICY.stageBackstops (:5814) has entries for awaiting-arm, conflict, own-red and
+        awaiting-review only. A blocker whose owner is NONE never reaches the bound check, although no lane will
+        ever move it.
+      - The diagnosis (:14081) is assembled from base reproduction, fixed-on-main, review loop, failed merge and
+        duplicate build. The stage's own repeated disposition reason is not read.
+      - A stall is reported only as a per-PR needs-human escalation. A signature recurring across PRs (owner-dead
+        on #10741, #10783, #10848, #10862) reaches no root-cause path.
+    Root fixes are filed: W1-T8088 (dead owner takeover), W1-T8086 (light-pass fix), W1-T7959 (scope amendment
+    lints) and W1-T7954/W1-T7821 (escalations). This task makes the next class visible without a person.
+  design: |
+    The existing per-blocker backstops are unchanged, and W1-T8167 owns when they may fire.
+    1. NAMED BY ITS REPEAT. The diagnosis adds the stage's dominant `sweep.disposed` reason signature since
+       blocker_since, normalised (PR numbers, shas, counts and durations stripped), with its repeat count, for
+       example `repeat: "remudero-review owner proven dead — re-running" x85`. "unknown signature" remains only when
+       the stage has no repeated reason.
+    2. OWNERLESS IS STALLED AT ONCE. A blocker whose `blocker_owner` is NONE is reported on its first disposition.
+       No lane will move it, so waiting has no information value. This is structural, not a tuned minute count.
+       Its stage row carries `owner: none`.
+    3. ONE INCIDENT PER SIGNATURE. Each new `pr.stuck` also appends one `incident.event` (kind `flow`, name
+       `pr-stage-stall:<blocker>:<signature>`, fingerprint kind plus name, subject `pr=`). The SRE lane then files
+       one root-cause incident when the same signature stalls several PRs, alongside the per-PR escalation the stage
+       already makes.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Drive runSweep with the #10783
+    disposition history and an ownerless plan-proof-unrunnable PR.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-stalled-pr-stage-is-named-by-the-reason-it-kept-repeating.test.ts"
+    - claim: "a stalled stage names its dominant repeated disposition reason and count"
+      proof: 'grep: test("W1-T8267: a stalled stage names the reason it kept repeating" in test/a-stalled-pr-stage-is-named-by-the-reason-it-kept-repeating.test.ts'
+    - claim: "a blocker no lane owns is reported on its first disposition"
+      proof: 'grep: test("W1-T8267: an ownerless blocker is stalled at once" in test/a-stalled-pr-stage-is-named-by-the-reason-it-kept-repeating.test.ts'
+    - claim: "two PRs stalled on one signature share one incident fingerprint"
+      proof: 'grep: test("W1-T8267: one signature across PRs is one incident fingerprint" in test/a-stalled-pr-stage-is-named-by-the-reason-it-kept-repeating.test.ts'
+  falsifier: |
+    Keep the diagnosis as on main. The #10783 replay then reads "duplicate build" or "unknown signature" with no
+    repeat. The ownerless PR never produces `pr.stuck`, because stageBackstops has no entry for its blocker.

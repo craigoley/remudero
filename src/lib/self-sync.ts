@@ -841,6 +841,7 @@ function guardedReviewerAfterFetch(repoDir: string, git: GitRunner): ReviewerCod
 export const REVIEW_MATERIAL_ADVANCE_PATHS = [
   // the verdict itself: rubric, keyword floor, proof parsing and execution
   "src/lib/review.ts",
+  "src/lib/reviewer-worktree-lease.ts",
   // runReview's call path; a reviewer only counts the hunks REVIEW_PATH_SYMBOLS_IN_RUN_TASK reaches
   "src/run-task.ts",
   // criteria come from the plan; a loader change can change what is judged

@@ -1,0 +1,64 @@
+- id: W1-T8238
+  title: "IDLE CAPACITY BEHIND A HOLD IS AN INCIDENT — on 2026-10-11 core lanes sat empty with work queued behind a serve-restoration pause (four windows), a 52-minute recycle drain and repeated restart latches, and a person found each one by reading the ledger; detect idle lane-slots beyond the cause's own history and name the hold"
+  repo: remudero
+  depends_on: [W1-T8236, W1-T8235]  # registers in src/lib/sre-lane.ts's detector list (W1-T8236); reads lane.idle_changed (W1-T8235)
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — when idle lane capacity is an incident, and what the incident names
+  band_meaning: span
+  origin: "operator request 2026-10-11 (detect, then route): idle-capacity detector"
+  plan_refs: [W1-T4837, W1-T4939, W1-T4384, W1-T7697, W1-T8139, W1-T8198, W1-T8233]
+  files: [src/lib/idle-capacity-detector.ts, src/lib/sre-lane.ts, test/idle-capacity-behind-a-hold-is-an-incident.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    WHEN THE SIGNAL EXISTED vs WHEN A PERSON NOTICED, 2026-10-11 (core ledger union, read-only):
+      - Serve-restoration pause 1: `fleet.pause` at 01:17:50Z (reason "maintenance: supervised serve restoration
+        window (core only)", session "operator-serve-restoration-20261011", actor "unknown"). Noticed 01:46Z. About 43
+        idle lane-minutes before the 01:48:20 resume.
+      - Pause 4: 11:46:29Z (session "...-supervised-v4"), about 88 idle lane-minutes until 12:29:30. Pause 5: 12:44:08Z,
+        released at 12:46:51 by an operator session that was polling the PAUSE flag every 60 s. That poll was a
+        detector built by hand.
+      - Recycle drain: refill held "fleet PAUSE hold: ... container recycle" from 16:16:08Z. No implement `run.start`
+        after 16:13. Noticed 17:0xZ. The recycle refused at 17:08:02 (`deploy.restart_refused`), about 92 idle
+        lane-minutes.
+      - Restart and recycle latches: 880 idle lane-minutes across 17 boots (restart-churn analysis). It was found only
+        by a deliberate measurement at 19:5xZ.
+    No `incident.event` row named any of these. W1-T8233 restores serve's dispatch-stall page for "nothing at
+    all is building". This task covers the larger and earlier case: some lanes empty, behind a named hold, longer
+    than that hold normally lasts.
+  design: |
+    Operator rulings: no fixed threshold. A hold's normal length is learned from the hold itself.
+    1. MEASURE. From W1-T8235's `lane.idle_changed` rows, integrate idle lane-slot minutes per cause and per hold over
+       the detector's window. The window is the idle summary window. The short window is 1/12 of it.
+    2. BOUND = THE CAUSE'S OWN HISTORY. Use `ownHistoryBound` (W1-T8236) over the same cause's per-window slot-minutes
+       from `lane.idle_summary.slot_minutes_by_cause`. A recycle drain that normally costs a few slot-minutes fires
+       at 50. A cause with no history yet (the first operator pause of its kind) is judged against the all-cause
+       idle population, never a free pass.
+    3. NAME THE HOLD. The finding is `idle-capacity:<cause>` with subjects `instance=`, `hold=` (the PAUSE reason or
+       refill-held reason), `setter=` (session id or pid as recorded) and `since=`, plus measured slot-minutes, the
+       bound and dispatchable count. It names the hold and never guesses a fix. W1-T8245 judges whether a pause is
+       foreign.
+    4. REGISTER in the SRE lane's detector list, SRE_LANE_DETECTORS in sre-lane.ts. Its inputs (`lane.idle_changed`, `lane.idle_summary`) join the census.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Replay the 2026-10-11 rows: the
+    16:16-17:08 drain, the 11:46-12:29 pause, and an 18:09-18:15 recycle that took 6 minutes against a history of
+    short recycles.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/idle-capacity-behind-a-hold-is-an-incident.test.ts"
+    - claim: "the 52-minute recycle drain replay fires and names the recycle hold"
+      proof: 'grep: test("W1-T8238: the recycle-drain replay fires and names its hold" in test/idle-capacity-behind-a-hold-is-an-incident.test.ts'
+    - claim: "the serve-restoration pause replay fires and names its setter session"
+      proof: 'grep: test("W1-T8238: the operator-pause replay fires and names its setter" in test/idle-capacity-behind-a-hold-is-an-incident.test.ts'
+    - claim: "a recycle no longer than its own history is silent"
+      proof: 'grep: test("W1-T8238: a recycle within its own history is silent" in test/idle-capacity-behind-a-hold-is-an-incident.test.ts'
+    - claim: "a cause with no history is judged against the all-cause idle population"
+      proof: 'grep: test("W1-T8238: a first-seen cause is judged against all idle history" in test/idle-capacity-behind-a-hold-is-an-incident.test.ts'
+    - claim: "the detector is registered"
+      proof: 'grep: idleCapacityDetector( in src/lib/sre-lane.ts'
+  falsifier: |
+    Register nothing, or bound by a fixed minute count. The drain replay then reads no finding, or the 6-minute
+    recycle fires as well. Drop the all-cause fallback and the first operator pause of its kind is silent.

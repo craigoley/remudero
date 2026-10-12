@@ -1187,6 +1187,49 @@ components:
         actionId: { type: string }
         detail: { type: string }
 
+    AssistantActionDiscovery:
+      type: object
+      description: >
+        The verified actor's own admitted actions on this exact target that lack a verified
+        completion receipt. Read-only evidence, never permission to retry. Only a cursor-less,
+        complete answer with verifiedEmpty true certifies that nothing is pending; partial and
+        unavailable answers never do.
+      required: [contract, source, observedAt, completeness, limitations, pending, continuation, verifiedEmpty]
+      properties:
+        contract: { type: string, enum: [assistant-action-discovery-v1] }
+        source:
+          type: object
+          required: [instance, repository, bootSha]
+          properties:
+            instance: { type: string }
+            repository: { type: [string, "null"] }
+            bootSha: { type: string }
+        observedAt: { type: string, format: date-time }
+        completeness: { type: string, enum: [complete, partial, unavailable] }
+        limitations:
+          type: array
+          items:
+            type: string
+            enum: [legacy_claims_without_identity, unreadable_entries, oversized_entries, unsupported_entries,
+              unverifiable_entries, corpus_changed, corpus_over_listing_bound, file_budget, byte_budget,
+              time_budget, page_size, store_unavailable]
+        pending:
+          type: array
+          items:
+            type: object
+            required: [actionId, action, instance, repository, submittedAt, status]
+            properties:
+              actionId: { type: string }
+              action: { type: string, enum: [pause, resume, stop] }
+              instance: { type: string }
+              repository: { type: [string, "null"] }
+              submittedAt: { type: string, format: date-time }
+              status: { type: string, enum: [claimed_unknown, receipt_unverified] }
+        continuation:
+          type: [string, "null"]
+          description: Opaque, bound to the verified actor and exact target; discloses no store path.
+        verifiedEmpty: { type: boolean }
+
     AnswerQuestionRequest:
       type: object
       description: >
@@ -6497,6 +6540,82 @@ components:
           enum: [not_collected]
         spend:
           type: "null"
+        opportunityEvidence:
+          $ref: "#/components/schemas/GardenerOpportunityEvidence"
+
+    GardenerOpportunityEvidence:
+      description: >
+        Independent saved opportunity registry, not the registered off-loop gardener inventory.
+        All counts are stored classifications, not newly verified PR/deployment/benefit evidence.
+        No cost or causal improvement claim is made. Missing, mixed, invalid or oversized
+        registries are unavailable, not zero. Empty arrays have no reconciliation timestamp.
+      oneOf:
+        - $ref: "#/components/schemas/GardenerOpportunityReport"
+        - $ref: "#/components/schemas/GardenerOpportunityUnavailable"
+
+    GardenerOpportunityReport:
+      type: object
+      required: [version, repository, readAt, coverage, countSemantics, state, total, counts, oldestReconciledAt, latestReconciledAt]
+      properties:
+        version:
+          type: integer
+          enum: [1]
+        repository:
+          type: string
+        readAt:
+          type: string
+          format: date-time
+        coverage:
+          type: string
+          enum: [saved-opportunity-registry]
+        countSemantics:
+          type: string
+          enum: [reported_states_not_verified_outcomes]
+        state:
+          type: string
+          enum: [reported]
+        total:
+          type: integer
+          minimum: 0
+          maximum: 512
+        counts:
+          type: object
+          required: [pending, filed, merged, deployed, measured-helped, measured-hurt, expired, unavailable]
+          additionalProperties:
+            type: integer
+            minimum: 0
+            maximum: 512
+        oldestReconciledAt:
+          type: [string, "null"]
+          format: date-time
+        latestReconciledAt:
+          type: [string, "null"]
+          format: date-time
+
+    GardenerOpportunityUnavailable:
+      type: object
+      required: [version, repository, readAt, coverage, countSemantics, state, reason]
+      properties:
+        version:
+          type: integer
+          enum: [1]
+        repository:
+          type: [string, "null"]
+        readAt:
+          type: string
+          format: date-time
+        coverage:
+          type: string
+          enum: [saved-opportunity-registry]
+        countSemantics:
+          type: string
+          enum: [reported_states_not_verified_outcomes]
+        state:
+          type: string
+          enum: [unavailable]
+        reason:
+          type: string
+          enum: [scope_unavailable, not_collected, unreadable, malformed, oversized, repository_mismatch, clock_skew, corpus_changed]
 
     GardenersUnavailable:
       type: object
@@ -7325,6 +7444,8 @@ components:
           type: object
           required: [overview, coverage, instances]
           properties:
+            modelApprovals:
+              $ref: "#/components/schemas/HostModelApprovalsEvidence"
             overview:
               type: array
               description: >
@@ -7373,6 +7494,45 @@ components:
                   reason: {type: string}
                   details:
                     $ref: "#/components/schemas/AnalyticsStoredDetails"
+
+    HostModelApprovalsEvidence:
+      description: >
+        Bounded immutable capture of the serving host's loaded model-approval configuration.
+        capturedAt is the startup observation, not an analytics refresh, permission grant or worker
+        adoption receipt. Expiry is retained for a separate console read-time evaluation. Absent on
+        older producers; a missing or rejected corpus is never a measured empty approval list.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [version, scope, sourceKind, capturedAt, state, approvals]
+          properties:
+            version: {type: string, enum: [host-model-approvals-v1]}
+            scope: {type: string, enum: [serving-host]}
+            sourceKind: {type: string, enum: [loaded-config]}
+            capturedAt: {type: string, format: date-time, maxLength: 40}
+            state: {type: string, enum: [reported]}
+            approvals:
+              type: array
+              maxItems: 100
+              items:
+                type: object
+                additionalProperties: false
+                required: [model, approvedBy, approvedAt]
+                properties:
+                  model: {type: string, minLength: 1, maxLength: 160}
+                  approvedBy: {type: string, minLength: 1, maxLength: 160}
+                  approvedAt: {type: string, format: date-time, maxLength: 40}
+                  expiresAt: {type: string, format: date-time, maxLength: 40}
+        - type: object
+          additionalProperties: false
+          required: [version, scope, sourceKind, capturedAt, state, reason]
+          properties:
+            version: {type: string, enum: [host-model-approvals-v1]}
+            scope: {type: string, enum: [serving-host]}
+            sourceKind: {type: string, enum: [loaded-config]}
+            capturedAt: {type: [string, "null"], format: date-time, maxLength: 40}
+            state: {type: string, enum: [unavailable]}
+            reason: {type: string, enum: [invalid_source, over_budget, clock_skew]}
 
     AnalyticsStoredDetails:
       description: >
@@ -11964,6 +12124,42 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/AssistantControlLookup" }
 
+  /v1/control/assistant-action/discovery:
+    get:
+      summary: Discover the verified operator's interrupted core assistant actions without resubmitting them.
+      description: >
+        Requires a verified operator session; the actor is never read from a parameter or header.
+        Returns only that actor's own claims on this exact target that lack a verified completion
+        receipt. Never prepares, retries or dispatches an action.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100 }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string, maxLength: 512 }
+      responses:
+        "200":
+          description: Discovery answer; check completeness and continuation before trusting an empty list.
+          headers:
+            Cache-Control:
+              schema: { type: string, enum: ["private, no-store"] }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantActionDiscovery" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503":
+          description: The claim store is unavailable; nothing is certified.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantActionDiscovery" }
+
   /v1/questions/answer:
     post:
       summary: Answer a QUESTION-contract entry (MASTER-PLAN §2), attributed to the panel's bearer.
@@ -12702,6 +12898,43 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AssistantControlLookup" }
+
+  /v1/i/{instance}/control/assistant-action/discovery:
+    get:
+      summary: Discover the verified operator's interrupted actions for this instance without resubmitting them.
+      description: Requires a verified operator session; scoped to this instance's repository and the verified actor.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: instance
+          in: path
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100 }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string, maxLength: 512 }
+      responses:
+        "200":
+          description: Discovery answer; check completeness and continuation before trusting an empty list.
+          headers:
+            Cache-Control:
+              schema: { type: string, enum: ["private, no-store"] }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantActionDiscovery" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503":
+          description: The claim store is unavailable; nothing is certified.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantActionDiscovery" }
 
   /v1/i/{instance}/operator-agent/ask:
     post:
@@ -15726,6 +15959,8 @@ paths:
         /v1/i/{instance}/gardeners reads that instance's state and verifies repository identity.
         Missing telemetry is 503 not_collected, never an empty or healthy inventory. No ledger
         scan, GitHub query, model invocation, or control mutation occurs during this read.
+        Optional opportunityEvidence reads only the independent persisted opportunity registry
+        with a 512 KiB/512-row bound and its own reconciliation timestamps and limitations.
       security:
         - bearerRead: []
       responses:

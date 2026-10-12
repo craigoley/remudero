@@ -113,6 +113,16 @@ async function boundaryRun(t: TestContext, boundary: "preopen_gate" | "checkpoin
   const outcome = await withLiveWritesAllowed(() => runTask(id, options));
   const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
+  if (failure === "scope") {
+    // W1-T8008: an undeclared path no longer refuses the restart checkpoint — the work is kept, pushed and
+    // named on the handoff, and scope is judged where the PR opens (scope_guard), never by losing the work.
+    assert.equal(outcome.verdict, "handed_off");
+    const scopeHandoff = rows.find((row) => row.step === "run.freshness_handoff");
+    assert.deepEqual(scopeHandoff?.undeclared_paths, ["src/outside.ts"]);
+    assert.equal(rows.find((row) => row.step === "verdict")?.reason, "freshness_yield");
+    assert.equal(origin.git("show", `${branch}:src/outside.ts`), "out of scope");
+    return;
+  }
   if (failure) {
     assert.equal(outcome.verdict, "no_pr");
     assert.equal(calls, 2, "a checkpoint failure cannot start a repair worker");
@@ -205,7 +215,7 @@ test("a fresh run restores the pushed boundary checkpoint before its implement w
   await boundaryRun(t, "checkpoint", false, true);
 });
 
-test("a checkpoint outside the declared scope records failure and retains its work", async (t) => {
+test("a checkpoint outside the declared scope keeps its undeclared work and names it on the handoff", async (t) => {
   await boundaryRun(t, "checkpoint", false, false, "scope");
 });
 
@@ -267,6 +277,7 @@ function phase(durationMs: number, extraDeps: Partial<DaemonDeps> = {}, opts: No
   let isStale = false;
   let cleaning = false;
   const merged = new Set<string>();
+  const boundaries = new Map<string, () => unknown>();
   const run = runDaemon(loadPlan(path), {
     now: () => new Date(nowMs),
     readLedgerLines: () => history(durationMs),
@@ -274,12 +285,18 @@ function phase(durationMs: number, extraDeps: Partial<DaemonDeps> = {}, opts: No
     checkFreshness: () => isStale ? stale : { stale: false },
     checkStop: () => cleaning ? "cleanup" : undefined,
     log: (step, extra) => rows.push({ step, extra }),
-    runOne: (id) => { started.push({ id, age: nowMs - start }); return releases.get(id)!.promise; },
+    runOne: (id, options) => {
+      started.push({ id, age: nowMs - start });
+      if (options) boundaries.set(id, options.restartAtWorkerBoundary);
+      return releases.get(id)!.promise;
+    },
     sleep: () => { const sleep = deferred<void>(); sleeps.push(sleep); return sleep.promise; },
     ...extraDeps,
   } as DaemonDeps, { laneCount: 3, max: 10, ...opts });
   return {
     run, started, rows,
+    /** W1-T7806: the run reaches a worker boundary and reads the daemon's restart latch. */
+    boundary: (id: string) => boundaries.get(id)?.(),
     settle: async (id: string, ageMinutes: number) => {
       nowMs = start + ageMinutes * minute;
       merged.add(id);
@@ -464,10 +481,16 @@ test("a restart decided while lanes are parked drains them", async () => {
     await h.tick(20);
     assert.equal(h.rows.some(({ step, extra }) => step === "daemon.freshness_decision" && extra?.action === "restart"), true);
     await flush();
+    // W1-T7806: F was in flight at the latch and has reached no boundary, so the woken lanes refill on the old code.
+    assert.deepEqual(h.rows.filter(({ step }) => step === "dispatch.lane_refilled").slice(-2)
+      .map(({ extra }) => [extra?.finished_task, extra?.waiting_on]), [["D", ["F"]], ["E", ["F"]]]);
+    assert.equal(h.boundary("F"), stale, "F reaches a boundary: every holdout can now yield");
+    await h.settle("G", 21);
+    await h.settle("H", 22);
     const held = h.rows.filter(({ step }) => step === "dispatch.lane_refill_held");
-    assert.deepEqual(held.map(({ extra }) => [extra?.finished_task, extra?.reason]).sort(), [["D", "stale code"], ["E", "stale code"]]);
+    assert.deepEqual(held.map(({ extra }) => [extra?.finished_task, extra?.reason]).sort(), [["G", "stale code"], ["H", "stale code"]]);
     await h.tick(30);
-    assert.equal(h.started.length, 6, "F outliving the mean after the latch cannot renew refill");
+    assert.equal(h.started.length, 8, "F outliving the mean after the latch cannot renew refill");
     await h.settle("F", 31);
     assert.equal((await h.run).stopReason, "stale");
   } finally { await h.cleanup(); }
@@ -526,4 +549,26 @@ test("a parked checkpoint's receipt outlives its verdict row's rotation", async 
     await flush();
     assert.equal(again.rows.filter(({ step }) => step === "run.freshness_handoff").length, 0, "a recorded receipt is not re-written");
   } finally { await again.cleanup(); }
+});
+
+// 2026-10-12 09:00:45: W1-T8000 freed lane 2 and one container-short WIP reading (measured_bound 0) held it with
+// `governor: queue`. The reading was never re-taken, so the lane sat empty while W1-T7812 and W1-T7735 ran on.
+test("a lane a governor holds parks and refills once a later dispatch tick's reading admits", async () => {
+  let governed = false;
+  const h = phase(60 * minute, { checkQueueGovernor: () => governed ? ({ observedOpenCount: 3, wipLimit: 13 } as never) : undefined });
+  try {
+    await flush();
+    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C"]);
+    governed = true;
+    await h.settle("B", 2);
+    await h.tick(3);
+    await h.tick(4);
+    assert.equal(h.started.length, 3, "the governor still defers");
+    assert.deepEqual(h.rows.filter(({ step, extra }) => step === "dispatch.lane_parked" && extra?.reason === "governor: queue")
+      .map(({ extra }) => [extra?.finished_task, extra?.waiting_on]), [["B", ["A", "C"]]], "one row per park, not per tick");
+    governed = false;
+    await h.tick(5);
+    assert.deepEqual(h.started.slice(3), [{ id: "D", age: 5 * minute }]);
+    assert.equal(h.rows.some(({ step, extra }) => step === "dispatch.lane_refill_held" && String(extra?.reason).startsWith("governor")), false);
+  } finally { await h.cleanup(); }
 });

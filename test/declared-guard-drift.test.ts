@@ -184,7 +184,7 @@ test("the named-but-undeclared alarm keeps reporting exactly what it reports tod
     if (args[0] === "for-each-ref") return args.includes("--merged=origin/main") ? "origin/main\n" : remoteNames.map((name) => `origin/${name}\t${shaFor(name)}\t1`).join("\n");
     if (args[0] === "merge-base") throw new Error("not an ancestor");
     if (args[0] === "rev-parse") return "deadbeef\n";
-    if (args[0] === "grep" && args.includes("-F")) return "src/lib/somewhere.ts:1:some-infra-branch\n";
+    if (args[0] === "grep" && (args.includes("-F") || args.includes("-P"))) return "src/lib/somewhere.ts:1:some-infra-branch\n";
     if (args[0] === "grep" && args.includes("-o")) {
       return DECLARED_BRANCH_GUARDS.map((n) => `src/run-task.ts:1:${n}`).join("\n");
     }

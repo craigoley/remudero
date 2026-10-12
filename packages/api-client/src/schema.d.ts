@@ -505,6 +505,29 @@ export interface components {
       actionId: string;
       detail?: string;
     };
+    /** The verified actor's own admitted actions on this exact target that lack a verified completion receipt. Read-only evidence, never permission to retry. Only a cursor-less, complete answer with verifiedEmpty true certifies that nothing is pending; partial and unavailable answers never do. */
+    AssistantActionDiscovery: {
+      contract: "assistant-action-discovery-v1";
+      source: {
+        instance: string;
+        repository: string | null;
+        bootSha: string;
+      };
+      observedAt: string;
+      completeness: "complete" | "partial" | "unavailable";
+      limitations: ("legacy_claims_without_identity" | "unreadable_entries" | "oversized_entries" | "unsupported_entries" | "unverifiable_entries" | "corpus_changed" | "corpus_over_listing_bound" | "file_budget" | "byte_budget" | "time_budget" | "page_size" | "store_unavailable")[];
+      pending: ({
+        actionId: string;
+        action: "pause" | "resume" | "stop";
+        instance: string;
+        repository: string | null;
+        submittedAt: string;
+        status: "claimed_unknown" | "receipt_unverified";
+      })[];
+      /** Opaque, bound to the verified actor and exact target; discloses no store path. */
+      continuation: string | null;
+      verifiedEmpty: boolean;
+    };
     /** POST /v1/questions/answer's body -- an operator's answer to a QUESTION-contract entry (worker.ts's plan/questions.ndjson), addressed by the task it was raised on (v0 routing has no path params, src/lib/service.ts). */
     AnswerQuestionRequest: {
       taskId: string;
@@ -2501,6 +2524,30 @@ export interface components {
       counterWindow: "daemon-run";
       outcomeAssessment: "not_collected";
       spend: null;
+      opportunityEvidence?: GardenerOpportunityEvidence;
+    };
+    /** Independent saved opportunity registry, not the registered off-loop gardener inventory. All counts are stored classifications, not newly verified PR/deployment/benefit evidence. No cost or causal improvement claim is made. Missing, mixed, invalid or oversized registries are unavailable, not zero. Empty arrays have no reconciliation timestamp. */
+    GardenerOpportunityEvidence: (GardenerOpportunityReport) | (GardenerOpportunityUnavailable);
+    GardenerOpportunityReport: {
+      version: 1;
+      repository: string;
+      readAt: string;
+      coverage: "saved-opportunity-registry";
+      countSemantics: "reported_states_not_verified_outcomes";
+      state: "reported";
+      total: number;
+      counts: Record<string, number>;
+      oldestReconciledAt: string | null;
+      latestReconciledAt: string | null;
+    };
+    GardenerOpportunityUnavailable: {
+      version: 1;
+      repository: string | null;
+      readAt: string;
+      coverage: "saved-opportunity-registry";
+      countSemantics: "reported_states_not_verified_outcomes";
+      state: "unavailable";
+      reason: "scope_unavailable" | "not_collected" | "unreadable" | "malformed" | "oversized" | "repository_mismatch" | "clock_skew" | "corpus_changed";
     };
     GardenersUnavailable: {
       error: "gardeners_unavailable";
@@ -2870,6 +2917,7 @@ export interface components {
       stale: boolean;
       sources: (ViewSource)[];
       data: {
+        modelApprovals?: HostModelApprovalsEvidence;
         /** The counted instances' metrics merged, in catalog order. Sums are summed, `cache.reuse` is the ratio of the summed token terms, and `duration.p50.ms` the median of every instance's runs together; nothing is averaged. `instances` is how many instances had a value. */
         overview: ({
           key: "runs.completed" | "tokens.total" | "cache.reuse" | "cost.modeled.usd" | "duration.p50.ms" | "queue.pending";
@@ -2895,6 +2943,27 @@ export interface components {
         })[];
       };
     };
+    /** Bounded immutable capture of the serving host's loaded model-approval configuration. capturedAt is the startup observation, not an analytics refresh, permission grant or worker adoption receipt. Expiry is retained for a separate console read-time evaluation. Absent on older producers; a missing or rejected corpus is never a measured empty approval list. */
+    HostModelApprovalsEvidence: ({
+      version: "host-model-approvals-v1";
+      scope: "serving-host";
+      sourceKind: "loaded-config";
+      capturedAt: string;
+      state: "reported";
+      approvals: ({
+        model: string;
+        approvedBy: string;
+        approvedAt: string;
+        expiresAt?: string;
+      })[];
+    }) | ({
+      version: "host-model-approvals-v1";
+      scope: "serving-host";
+      sourceKind: "loaded-config";
+      capturedAt: string | null;
+      state: "unavailable";
+      reason: "invalid_source" | "over_budget" | "clock_skew";
+    });
     /** Additive analytics-details-v1 transport over matching committed signals and usage rows. Reported is not a freshness verdict; read analytics:<instance> for freshness. Consumers validate the carried projection schemas. Missing/mixed snapshots, unreadable or unsupported bodies and response-budget refusals stay explicitly unavailable, not empty healthy defaults. */
     AnalyticsStoredDetails: ({
       version: "analytics-details-v1";
@@ -4883,6 +4952,17 @@ export interface paths {
         };
     };
   };
+  "/v1/control/assistant-action/discovery": {
+    get: {
+      responses: {
+          "200": AssistantActionDiscovery;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "503": AssistantActionDiscovery;
+        };
+    };
+  };
   "/v1/questions/answer": {
     post: {
       responses: {
@@ -5111,6 +5191,17 @@ export interface paths {
           "404": AssistantControlLookup;
           "409": AssistantControlLookup;
           "503": AssistantControlLookup;
+        };
+    };
+  };
+  "/v1/i/{instance}/control/assistant-action/discovery": {
+    get: {
+      responses: {
+          "200": AssistantActionDiscovery;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "503": AssistantActionDiscovery;
         };
     };
   };

@@ -257,7 +257,7 @@ test("calibration reports eligibility and per-stage missingness by arm", async (
   assert.equal(result.receipt.state, "withheld");
   assert.equal(result.nextGap?.kind, "untriggered-eligible-tasks");
   assert.ok(result.nextGap?.machineRepairable, "the next gap is machine-repairable");
-  assert.equal(result.followUp?.state, "filed");
+  assert.equal(result.followUp?.state, "recorded");
 
   // The frozen population survives a later plan change, and the same gap is not filed twice.
   const later = await runBenchmarkAaReadiness(input(stateDir, calls, { loadPlanTasks: () => planTasks(), dispatcherFor: () => dispatcher(calls), maxPairs: 1 }));
@@ -265,10 +265,10 @@ test("calibration reports eligibility and per-stage missingness by arm", async (
   assert.equal(later.population?.denominator, TASKS.length);
   assert.equal(later.missingness?.untriggered.count, 0);
   assert.equal(later.nextGap?.kind, "stage-missing");
-  assert.equal(later.followUp?.state, "filed");
+  assert.equal(later.followUp?.state, "recorded");
   const rerun = await runBenchmarkAaReadiness(input(stateDir, calls, { loadPlanTasks: () => planTasks(), dispatcherFor: () => dispatcher(calls) }));
   assert.equal(rerun.run.dispatchedPairs, 0);
-  assert.equal(rerun.followUp?.state, "already-filed", "a gap already filed is not filed again");
+  assert.equal(rerun.followUp?.state, "already-recorded", "a gap already recorded is not recorded again");
   assert.equal(readFileSync(join(stateDir, READINESS_FOLLOW_UPS_FILE), "utf8").trim().split("\n").length, 2);
   assert.notEqual(rerun.state, "receipt-emitted", "a small sample with lost evidence is never a receipt");
 });
@@ -384,7 +384,7 @@ test("calibration preserves the opened follow-up file when its path is replaced"
   syncBuiltinESMExports();
   try {
     const result = await runBenchmarkAaReadiness(input(stateDir, []));
-    assert.equal(result.followUp?.state, "filed");
+    assert.equal(result.followUp?.state, "recorded");
     assert.equal(replaced, true, "the path was replaced between reading and appending");
     assert.equal(readFileSync(path, "utf8"), "replacement\n", "the replacement file is untouched");
     const rows = readFileSync(moved, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { key: string });

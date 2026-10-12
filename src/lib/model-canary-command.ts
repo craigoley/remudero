@@ -6,9 +6,9 @@ import { canarySuiteDigest, commonCanarySuite, weeklyCanarySuite, MODEL_CANARY_V
 import { projectCanaryRuns, type CanaryRun } from "./model-canary-metrics.js";
 import { renderCanaryReport } from "./model-canary-report.js";
 import { retentionCanaryProtocol } from "./model-canary-retention.js";
+import { rotatingCanarySuite } from "./model-canary-rotation.js";
 
-function boundedInput(input: string): string {
-  const limit = 8 * 1024 * 1024;
+function boundedInput(input: string, limit = 8 * 1024 * 1024): string {
   if (!Number.isInteger(constants.O_NOFOLLOW) || constants.O_NOFOLLOW <= 0
     || !Number.isInteger(constants.O_NONBLOCK) || constants.O_NONBLOCK <= 0)
     throw new Error("canary-input-platform-unsupported");
@@ -45,6 +45,21 @@ function privateOutput(dir: string, name: string, data: string) {
 }
 
 export function canaryCommand(argv: readonly string[]) {
+  if (argv[0] === "prepare-rotation") {
+    const [, outDir, day, keyFile] = argv;
+    if (argv.length !== 4 || !outDir || !day || !keyFile)
+      throw new Error("usage: model-canary-command prepare-rotation <private-out-dir> <day> <private-key-file>");
+    const key = boundedInput(keyFile, 66);
+    const pack = rotatingCanarySuite(day, key.replace(/\r?\n$/, ""));
+    const { cases, ...metadata } = pack;
+    // Private scorer records retain expectations; the separate request manifest never does.
+    privateOutput(outDir, "model-canary-rotation-scorer.json", JSON.stringify(pack, null, 2) + "\n");
+    privateOutput(outDir, "model-canary-rotation-manifest.json", JSON.stringify({ ...metadata,
+      state: "prepared-not-activated", tasks: cases.map(({ expected: _scorerOnly, ...task }) => task),
+      cash: { globalDailyCapUsd: 25, experimentDailyCapUsd: 0, premiumCashEligible: false },
+      requires: ["published-source", "qualified-adapter", "capacity-admission", "shared-owner", "agreed-experiment-budget"] }, null, 2) + "\n");
+    return { state: "prepared-not-activated", suiteHash: pack.suiteHash, cases: cases.length };
+  }
   const [command, outDir, input] = argv;
   if (!outDir || !["prepare", "project"].includes(command ?? "")
     || argv.length !== (command === "prepare" ? 2 : 3))

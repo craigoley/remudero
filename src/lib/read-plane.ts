@@ -12,7 +12,18 @@ export interface SyncSpawnEntry {
   command: string;
   first_arg?: string;
   duration_ms: number;
+  /** The first frame outside the shared spawn leaves: the code that reached the leaf (W1-T7745). */
   caller?: string;
+  /** The shared leaf the spawn went through (`hostWorktreeGit`, `ghExecFile`…), when one was on the stack. */
+  leaf?: string;
+  /** True when no frame outside the leaves was on the stack, so `caller` is the leaf itself. */
+  caller_is_leaf?: true;
+}
+
+/** What one `daemon.loop_lag` row reads about its own interval: the longest spawn and the total sync-spawn time. */
+export interface LagIntervalReading {
+  top: SyncSpawnEntry | undefined;
+  sync_spawn_ms: number;
 }
 
 export interface ReadPlaneSample {
@@ -22,18 +33,43 @@ export interface ReadPlaneSample {
   sync_spawn_top: SyncSpawnEntry[];
 }
 
-/** The sampler is handed to the daemon unbound; `peek` reads the longest call of the open window
- *  WITHOUT closing it, so `daemon.loop_lag` can name it while `daemon.alive` still owns the reset. */
-export type ReadPlaneSampler = (() => ReadPlaneSample) & { peek(): SyncSpawnEntry | undefined };
+/** The sampler is handed to the daemon unbound. Calling it closes the `daemon.alive` window. `takeLagInterval`
+ *  reads and closes a SEPARATE window, one per `consumer` key, so each `daemon.loop_lag` row names only the
+ *  spawns made since that consumer's previous reading and `daemon.alive` keeps its own reset (W1-T7745). */
+export type ReadPlaneSampler = (() => ReadPlaneSample) & { takeLagInterval(consumer?: string): LagIntervalReading };
+
+/** The shared spawn leaves: frames that only forward a spawn for someone else, so none is the caller. Declared
+ *  once here: a module path, or plan.ts's named default runner (`loadPlanAtRef`'s `runGit` arrow). */
+export const SYNC_SPAWN_LEAF_FRAMES: readonly RegExp[] = [
+  /[/\\]worktree-git\.[cm]?[jt]s/,
+  /[/\\]github-transport\.[cm]?[jt]s/,
+  /\bat (?:runGit|loadPlanAtRef) \(.*[/\\]plan\.[cm]?[jt]s/,
+];
 
 export const SYNC_SPAWN_RECORD_MIN_MS = 2000;
 export const SYNC_SPAWN_TOP_N = 3;
 const ARG_MAX_CHARS = 80;
 
-function callerFrame(): string | undefined {
-  const lines = (new Error().stack ?? "").split("\n").slice(1);
-  const frame = lines.find((line) => !/read-plane\.[cm]?[jt]s/.test(line) && !/node:/.test(line));
-  return frame?.trim().slice(0, 200);
+function frameName(line: string): string {
+  const named = /^\s*at (?:async )?(?:new )?([^\s(]+) \(/.exec(line);
+  return (named?.[1] ?? line.trim()).slice(0, 200);
+}
+
+/** The first frame outside read-plane, `node:` and the shared leaves; `leaf` is the OUTERMOST leaf frame, the one
+ *  the caller called. With no frame outside the leaves the caller is that leaf and `callerIsLeaf` says so. */
+export function callerFrame(): { caller?: string; leaf?: string; callerIsLeaf?: true } {
+  const limit = Error.stackTraceLimit;
+  Error.stackTraceLimit = 50;
+  let stack: string;
+  try { stack = new Error().stack ?? ""; } finally { Error.stackTraceLimit = limit; }
+  let leafLine: string | undefined;
+  for (const line of stack.split("\n").slice(1)) {
+    if (/read-plane\.[cm]?[jt]s/.test(line) || /node:/.test(line)) continue;
+    if (SYNC_SPAWN_LEAF_FRAMES.some((leaf) => leaf.test(line))) { leafLine = line; continue; }
+    return { caller: line.trim().slice(0, 200), ...(leafLine === undefined ? {} : { leaf: frameName(leafLine) }) };
+  }
+  return leafLine === undefined ? {}
+    : { caller: leafLine.trim().slice(0, 200), leaf: frameName(leafLine), callerIsLeaf: true };
 }
 
 export function startReadPlaneTelemetry(options: { clock?: Clock } = {}): {
@@ -46,6 +82,10 @@ export function startReadPlaneTelemetry(options: { clock?: Clock } = {}): {
   let syncMs = 0;
   let depth = 0;
   let top: SyncSpawnEntry[] = [];
+  // One window per lag consumer: what was spawned since its last reading, or since the sampler started for
+  // a consumer's first. `sinceStart` is that first reading's window; it is in the set until a consumer claims it.
+  const lagWindows = new Map<string, { ms: number; top: SyncSpawnEntry[] }>();
+  const sinceStart = { ms: 0, top: [] as SyncSpawnEntry[] };
   const names = ["execFileSync", "execSync", "spawnSync"] as const;
   const originals = names.map((name) => childProcess[name]);
   const record = (via: string, args: unknown[], durationMs: number): void => {
@@ -56,9 +96,15 @@ export function startReadPlaneTelemetry(options: { clock?: Clock } = {}): {
       const rest = args[1];
       const first = via === "execSync" || !Array.isArray(rest) || rest.length === 0 ? undefined
         : String(rest[0]).slice(0, ARG_MAX_CHARS);
-      const entry: SyncSpawnEntry = { via, command, duration_ms: Math.round(durationMs), caller: callerFrame() };
+      const { caller, leaf, callerIsLeaf } = callerFrame();
+      const entry: SyncSpawnEntry = { via, command, duration_ms: Math.round(durationMs), caller };
+      if (leaf !== undefined) entry.leaf = leaf;
+      if (callerIsLeaf) entry.caller_is_leaf = true;
       if (first !== undefined) entry.first_arg = first;
-      top = [...top, entry].sort((a, b) => b.duration_ms - a.duration_ms).slice(0, SYNC_SPAWN_TOP_N);
+      const keep = (list: SyncSpawnEntry[]): SyncSpawnEntry[] =>
+        [...list, entry].sort((a, b) => b.duration_ms - a.duration_ms).slice(0, SYNC_SPAWN_TOP_N);
+      top = keep(top);
+      for (const window of [sinceStart, ...lagWindows.values()]) window.top = keep(window.top);
     } catch {
       // Reason: attribution is best effort and must never take down the call it observes.
     }
@@ -73,6 +119,7 @@ export function startReadPlaneTelemetry(options: { clock?: Clock } = {}): {
         if (--depth === 0) {
           const took = now() - began;
           syncMs += took;
+          for (const window of [sinceStart, ...lagWindows.values()]) window.ms += took;
           if (took >= SYNC_SPAWN_RECORD_MIN_MS) record(name, args, took);
         }
       }
@@ -89,7 +136,13 @@ export function startReadPlaneTelemetry(options: { clock?: Clock } = {}): {
     syncMs = 0;
     top = [];
     return out;
-  }, { peek: (): SyncSpawnEntry | undefined => top[0] });
+  }, {
+    takeLagInterval: (consumer = ""): LagIntervalReading => {
+      const window = lagWindows.get(consumer) ?? sinceStart;
+      lagWindows.set(consumer, { ms: 0, top: [] });
+      return { top: window.top[0], sync_spawn_ms: Math.round(window.ms) };
+    },
+  });
   return {
     sample,
     stop() {

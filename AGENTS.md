@@ -46,9 +46,10 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   file's identical line number and returns a FALSE `OK`.**
 - **Derive "which tasks are merged" from merged PRs' `Remudero-Task:` trailer UNIONED with their
   `run-<taskId>-*` branch — never from ledger verdict lines.**
-- **Before building a filed task, check BOTH `git ls-remote --heads origin 'run-<id>-*'` (in flight?)
-  and merged PRs for an exact `^Remudero-Task: <id>$` trailer (shipped?), never commit subjects.**
-- **Sweep the SUBJECT over open PR heads, not only `origin/main` — the id half already does.**
+- **Before building a filed task, check `git ls-remote origin 'refs/rmd-dispatch/<id>' 'refs/heads/run-<id>-*'`
+  (claimed or in flight?) and merged PRs for an exact `^Remudero-Task: <id>$` trailer (shipped?), never commit subjects.**
+- **Before filing, sweep the task's SUBJECT over every open PR head's tree (`git ls-remote --heads
+  origin`), not only `origin/main`, counting per head against main.**
 - **NAME A SESSION BRANCH `run-<taskId>-<epochMs>` WHEN BUILDING A FILED TASK.**
 - **Before believing "task X is next", confirm the frontier with the repo's own selector —
   `runnableCandidates(plan, isMerged, n)` — not the task a brief or retro names**
@@ -90,11 +91,12 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
 - **A ledger line must carry the reason from the DECISION THAT PRODUCED ITS OUTCOME.**
 - **On a zero match, `node --test --test-name-pattern` still emits `ok 1 - <RELATIVE test path>` —
   exclude the wrapper by the RELATIVE path, never the absolute one.**
-- **A fixture shelling git PLUMBING fails on every CI runner and passes on every dev machine, so it
-  reads as flaky when it is deterministic.**
+- **Before calling a git fixture flaky, rerun it with `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null`
+  — CI has no git identity; set one IN THE FIXTURE, never skip it.**
 - **When a gate reads the ledger for a record the SAME function writes, check the WRITE ORDER before
   believing the gate's stated reason.**
-- **`rmd drain --dry-run` is neither side-effect-free nor able to see your branch.**
+- **Prove a dispatch change in-process with `assertLintClean`, never `rmd drain --dry-run` — it writes
+  the LIVE ledger and reads origin/main's plan, not your branch.**
 - **A bound that fires on a HEALTHY condition is this repo's recurring defect — before tuning the
   number, check the population it is meant to separate has ever been observed.**
 - **A ZERO IS NOT A MEASUREMENT until a positive control proves the query saw its corpus — run one on
@@ -105,7 +107,8 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
 - **(b) THE `grep` IN THIS HARNESS IS A ugrep WRAPPER WITH `-I` (ignore-binary) INJECTED, so a file
   holding ONE NUL byte is skipped entirely — no output, exit 1, indistinguishable from real
   absence.**
-- **(c) A GLOB THAT NAMES ONE FILE FORM ANSWERS FROM THE OTHER WITHOUT SAYING SO.**
+- **Control a multi-form glob on COVERAGE (was every form opened?), not on a match — a glob naming
+  one form answers from the other silently.**
 - **(f) THE TWO SIDES OF A COMPARISON MUST COUNT THE SAME UNITS — `ls` COUNTS A DIRECTORY AS ONE
   ENTRY.**
 - **(g) A CHANGE THAT REMOVES AN ACCESS PATH MUST PROVE THE REPLACEMENT FIRST, FROM A NEW SESSION
@@ -114,7 +117,6 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   moved — run it against `origin/main`'s blobs and report the behind-count.**
 - **Beside the `git grep -l <symbol>` caller sweep, run the census suites your diff joins
   (`rmd census-membership`) — they WALK a population and name none of your symbols.**
-- **(k) A RULE 21 protocol run passing `{ baseTask }` ALONE reports THREE INDISTINGUISHABLE ZEROS.**
 - **A `catch` returning a success-shaped literal is a CLAIM: name what it collapses, and where remedies
   differ, return a third value the caller sees.**
 - **A clock-shifted run failing ENOENT on its own fixture is the boot temp sweep, not a time bomb —
