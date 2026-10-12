@@ -211,7 +211,7 @@ test("container history stays capped, and legacy or torn stores fall back to the
   const path = join(root, "state", memory.CONTAINER_PRESSURE_FILE);
   const recent = Array.from({ length: 4500 }, (_, i) => [NOW - 4500 + i, 1, 0]);
   const capped = JSON.stringify({ container: [[NOW - 1000, 2, 0], [NOW - 1000, 1, 2], ...recent] });
-  for (const content of [undefined, "{", JSON.stringify({ swap: [] }), JSON.stringify({ container: "torn" }),
+  for (const content of [undefined, "{", "null", JSON.stringify({ swap: [] }), JSON.stringify({ container: "torn" }),
     capped]) {
     memory.resetShadowMemoryStateForTests();
     if (content === undefined) rmSync(path, { force: true });

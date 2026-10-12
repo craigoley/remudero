@@ -975,7 +975,7 @@ interface PressureStore {
 function readPressureStore(read: ShadowMemoryPorts["readFile"], path: string): PressureStore {
   let parsed: Partial<PressureStore>;
   try {
-    parsed = JSON.parse(read(path)) as Partial<PressureStore>;
+    parsed = (JSON.parse(read(path)) as Partial<PressureStore> | null) ?? {};
   } catch (error) {
     void error; // No store yet, or a torn one: no prior sample and no history, so the rate reads unmeasured.
     return { swap: [], container: [] };
