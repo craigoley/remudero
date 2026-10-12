@@ -138,10 +138,26 @@ test("a merged remedy is measuring, then resolved on a fall, or reopened one run
   assert.equal(reopened.state, "draft");
   assert.equal(reopened.state === "draft" && reopened.rung, 2);
   assert.equal(reopened.state === "draft" && reopened.prior?.effect?.verdict, "debit");
-  // A cause that had already stopped before the merge is resolved by another road.
-  assert.equal(ciFrictionCauseState(KEY, [remedy()], [], MERGE + DAY).state, "resolved");
+  assert.equal(ciFrictionCauseState(KEY, [remedy()], [], MERGE + DAY).state, "measuring");
   // Merged by status but no build merge time yet: wait, measure nothing.
   assert.equal(ciFrictionCauseState(KEY, [remedy({ mergedAt: undefined })], before, MERGE + DAY).state, "in_progress");
+});
+
+test("a remedy without a measured baseline cannot resolve a later recurring cause", () => {
+  const unrelated = rounds(MERGE - DAY, MERGE, 50, 1, "check:ci-log:claims");
+  const later = rounds(MERGE, MERGE + DAY, 50, 1);
+  const state = ciFrictionCauseState(KEY, [remedy()], [...unrelated, ...later], MERGE + DAY);
+  assert.equal(state.state, "measuring");
+  assert.equal(state.state === "measuring" && state.effect.verdict, "unmeasurable");
+  assert.deepEqual(state.state === "measuring" && state.effect.after, { k: 50, n: 50 });
+});
+
+test("absent observation windows keep a merged remedy measuring without refiling or escalating", () => {
+  for (const rows of [[], rounds(MERGE - DAY, MERGE, 50, 1, "check:ci-log:claims")]) {
+    const state = ciFrictionCauseState(KEY, [remedy({ origin: `ci-friction:${KEY}#r2` })], rows, MERGE + DAY);
+    assert.equal(state.state, "measuring");
+    assert.equal(state.state === "measuring" && state.effect.verdict, "unmeasurable");
+  }
 });
 
 test("the second failed rung goes to a person instead of a third task", () => {

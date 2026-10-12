@@ -209,8 +209,6 @@ export function ciFrictionCauseState(
       ? { state: "escalate", key, rung: next, prior: { task: top, effect } }
       : { state: "draft", key, rung: next, prior: { task: top, effect } };
   }
-  // "unmeasurable" (the cause had stopped before the merge) is a resolved cause by another road.
-  if (effect.verdict === "unmeasurable") return { state: "resolved", key, task: top, effect };
   return { state: "measuring", key, task: top, effect };
 }
 
