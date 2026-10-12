@@ -242,6 +242,33 @@ export function closedUnmergedRunBranchTaskIds(closedPrRows: string): ReadonlySe
 }
 
 /** Optional in-flight-skip controls for {@link nextRunnable} (W1-T80). */
+/** W1-T8514: the measurements behind a reservation's release. Every figure is a measured run length. */
+export interface PriorityBackfillEstimates {
+  /** Measured run lengths (ms) of this task's own earlier runs; empty when it has none. */
+  runLengthsMs(taskId: string): readonly number[];
+  /** Measured run lengths (ms) across the fleet. */
+  fleetRunLengthsMs(): readonly number[];
+  /** How long an occupied lane's task has run; undefined for a task that is not in flight yet. */
+  elapsedMs(taskId: string): number | undefined;
+}
+
+/** W1-T8514: one candidate held off the files a waiting higher-priority candidate needs. */
+export interface PriorityDeferral {
+  task: Task;
+  waiting: Task;
+  holders: string[];
+  paths: string[];
+  expectedDurationMs?: number;
+  expectedStartMs?: number;
+}
+
+/** W1-T8514: a reservation lifted so `task` may start despite the waiting candidate. */
+export interface PriorityReservationRelease {
+  task: Task;
+  waiting: Task;
+  reason: "finishes_before_waiting_start" | "holder_outran_history";
+}
+
 export interface NextRunnableOpts extends TaskPreconditionOptions {
   /** W1-T6358: renew the command-owned ledger snapshot before walking any candidates. */
   beginSelectionPass?: () => void;
@@ -354,6 +381,14 @@ export interface NextRunnableOpts extends TaskPreconditionOptions {
    *  which prefers candidates disjoint from them too, and are never returned (matched by id). Absent or
    *  empty, the pack is byte-identical to the pack without it. */
   inFlight?: readonly Task[];
+  /** W1-T8514: measured run lengths for the priority reservation's backfill release. Absent, a reservation
+   *  holds without release. */
+  priorityBackfill?: PriorityBackfillEstimates;
+  /** W1-T8514: fired once per candidate deferred because a strictly higher-priority candidate, skipped for
+   *  overlap, needs its files. */
+  onDeferredForPriority?: (deferral: PriorityDeferral) => void;
+  /** W1-T8514: fired once per reservation lifted by the measured backfill bound. */
+  onPriorityReservationReleased?: (release: PriorityReservationRelease) => void;
   /** Called once per task whose CACHED in-flight snapshot this live re-check overturned — one
    *  PR-level observation, fired for every terminal state whatever the task's eligibility resolves
    *  to (W1-T1035's crediting MERGED read still fires it). The real wiring corrects the ledgered
@@ -730,7 +765,7 @@ function taskPreconditionHolds(task: Task, opts: NextRunnableOpts): boolean {
 export function runnableCandidates(plan: Plan, isMerged: MergedSet, limit: number, opts: NextRunnableOpts = {}): Task[] {
   if (limit <= 0) return [];
   const eligible = dispatchEligibleCandidates(plan, isMerged, opts);
-  const collected = packDisjointFirst(eligible, limit, opts.observedByTask ?? NO_OBSERVED_SCOPE, opts.inFlight ?? []);
+  const collected = packDisjointFirst(eligible, limit, opts.observedByTask ?? NO_OBSERVED_SCOPE, opts.inFlight ?? [], opts);
   // W1-T2397: observe, then dispatch anyway — the same placement `nextRunnable` uses, one level over,
   // so it cannot alter the batch. This is the DAEMON's selector: `runDaemon` calls this one.
   for (const t of collected) observeOpenSibling(t, opts);
@@ -766,17 +801,98 @@ export function runnableCandidateIds(plan: Plan, isMerged: MergedSet, opts: Next
 // Why: the measured 1/1/1 admissions plain truncation produced at lanes 2/3/4 — docs/forensics/drain.md.
 function packDisjointFirst(
   eligible: readonly Task[], limit: number, observedByTask: ObservedScopeByTask, inFlight: readonly Task[],
+  reserve: PriorityReserveOpts = {},
 ): Task[] {
   const collected: Task[] = [];
   const inFlightIds = new Set(inFlight.map((t) => t.id));
   const remaining = eligible.filter((t) => !inFlightIds.has(t.id));
+  const released = new Set<string>();
   while (collected.length < limit && remaining.length > 0) {
-    let pickIndex = remaining.findIndex((candidate) => isDisjointFromEvery([...inFlight, ...collected], candidate, observedByTask));
+    const occupied = [...inFlight, ...collected];
+    // W1-T8514: a candidate skipped for overlap holds its files against STRICTLY lower-priority candidates.
+    const waiting: Task[] = [];
+    let pickIndex = -1;
+    for (let i = 0; i < remaining.length; i++) {
+      const candidate = remaining[i];
+      const held = waiting.find((w) => lowerPriority(candidate, w) && overlapPaths(w, candidate, observedByTask).length > 0);
+      if (held && !released.has(`${candidate.id}|${held.id}`)) {
+        const holders = occupied.filter((h) => !isDisjointFromEvery([h], held, observedByTask));
+        const verdict = backfillVerdict(candidate, holders, reserve.priorityBackfill);
+        if (verdict.release) {
+          released.add(`${candidate.id}|${held.id}`);
+          reserve.onPriorityReservationReleased?.({ task: candidate, waiting: held, reason: verdict.release });
+        } else {
+          reserve.onDeferredForPriority?.({
+            task: candidate, waiting: held, holders: holders.map((h) => h.id),
+            paths: overlapPaths(held, candidate, observedByTask),
+            ...(verdict.durationMs !== undefined ? { expectedDurationMs: verdict.durationMs } : {}),
+            ...(verdict.startMs !== undefined ? { expectedStartMs: verdict.startMs } : {}),
+          });
+          // Out of `remaining` for good: neither a later slot nor the fallback below can place it.
+          remaining.splice(i, 1);
+          i--;
+          continue;
+        }
+      }
+      if (isDisjointFromEvery(occupied, candidate, observedByTask)) { pickIndex = i; break; }
+      waiting.push(candidate);
+    }
+    if (remaining.length === 0) break;
     if (pickIndex === -1) pickIndex = 0; // no disjoint candidate remains — fall back to dispatchOrder position
     collected.push(remaining[pickIndex]);
     remaining.splice(pickIndex, 1);
   }
   return collected;
+}
+
+interface PriorityReserveOpts {
+  priorityBackfill?: PriorityBackfillEstimates;
+  onDeferredForPriority?: (deferral: PriorityDeferral) => void;
+  onPriorityReservationReleased?: (release: PriorityReservationRelease) => void;
+}
+
+/** `compareDispatch`'s priority order: an absent priority is the lowest. Strict. */
+function lowerPriority(candidate: Task, waiting: Task): boolean {
+  return (candidate.priority ?? Number.POSITIVE_INFINITY) > (waiting.priority ?? Number.POSITIVE_INFINITY);
+}
+
+/** The paths on which the two tasks' EFFECTIVE scopes collide, from the real partition. */
+function overlapPaths(a: Task, b: Task, observedByTask: ObservedScopeByTask): string[] {
+  return partitionByFileOverlap([a, b], observedByTask).serialized[0]?.paths ?? [];
+}
+
+const mean = (xs: readonly number[]): number => xs.reduce((sum, x) => sum + x, 0) / xs.length;
+
+/** EASY backfill (W1-T8514): the deferred candidate may start when it is expected to finish STRICTLY before the
+ *  waiting candidate could start anyway. The waiting start is the latest expected remaining run among the
+ *  holders (mean residual life of the measured runs still longer than the holder's elapsed time; a holder not
+ *  yet started has elapsed 0). A holder that has outrun every measured run makes that start unpredictable, so
+ *  the reservation releases. With no measurement the reservation holds: declared priority wins. */
+function backfillVerdict(
+  candidate: Task, holders: readonly Task[], est: PriorityBackfillEstimates | undefined,
+): { release?: PriorityReservationRelease["reason"]; durationMs?: number; startMs?: number } {
+  if (!est || holders.length === 0) return {};
+  const fleet = est.fleetRunLengthsMs();
+  const own = est.runLengthsMs(candidate.id);
+  const durationMs = own.length > 0 ? mean(own) : fleet.length > 0 ? mean(fleet) : undefined;
+  const withDuration = durationMs !== undefined ? { durationMs } : {};
+  let startMs: number | undefined;
+  for (const h of holders) {
+    const hOwn = est.runLengthsMs(h.id);
+    const elapsed = est.elapsedMs(h.id) ?? 0;
+    const longer = (xs: readonly number[]): number[] => xs.filter((x) => x > elapsed);
+    const basis = longer(hOwn).length > 0 ? longer(hOwn) : longer(fleet);
+    if (basis.length === 0) {
+      if (hOwn.length === 0 && fleet.length === 0) return withDuration; // nothing measured: the reservation holds
+      return { release: "holder_outran_history", ...withDuration };
+    }
+    const left = mean(basis) - elapsed;
+    startMs = startMs === undefined ? left : Math.max(startMs, left);
+  }
+  if (durationMs !== undefined && startMs !== undefined && durationMs < startMs) {
+    return { release: "finishes_before_waiting_start", durationMs, startMs };
+  }
+  return { ...withDuration, ...(startMs !== undefined ? { startMs } : {}) };
 }
 
 /** True iff `candidate`'s EFFECTIVE scope (declared `files:` unioned with `observedByTask`, W1-T2286)
