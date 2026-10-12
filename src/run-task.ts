@@ -5273,8 +5273,9 @@ export async function restoreBoundaryCheckpoint(
       return { status: 0, stdout: await git([...args]) };
     } catch (error) {
       // merge-tree exits 1 on a conflict with the tree and the conflicted paths still on stdout.
-      const failed = error as { code?: unknown; stdout?: unknown };
-      return { status: typeof failed.code === "number" ? failed.code : null, stdout: typeof failed.stdout === "string" ? failed.stdout : "" };
+      const failed = error as { code?: unknown; status?: unknown; stdout?: unknown };
+      const status = typeof failed.code === "number" ? failed.code : typeof failed.status === "number" ? failed.status : null;
+      return { status, stdout: typeof failed.stdout === "string" ? failed.stdout : "" };
     }
   } });
   if (probe.verdict !== "clean") {

@@ -15,10 +15,12 @@ const receipt = (headSha = sha) => ({ task_id: taskId, step: "verdict", verdict:
   reason: "freshness_yield", branch, head_sha: headSha });
 const lines = (rows: Record<string, unknown>[]) => rows.map((row) => JSON.stringify(row));
 
-function reap(rows: Record<string, unknown>[], unreadable: boolean | "denied" | "missing" | "unconfigured" = false, prState = "none", prune = true) {
+function reap(rows: Record<string, unknown>[], unreadable: boolean | "denied" | "missing" | "unconfigured" = false, prState = "none", prune = true, creditRows?: Record<string, unknown>[]) {
   const repo = gitRepo();
   const ledgerPath = join(repo.dir, "ledger.ndjson");
+  const creditLedgerPath = join(repo.dir, "credit.ndjson");
   writeFileSync(ledgerPath, lines(rows).join("\n") + "\n");
+  if (creditRows !== undefined) writeFileSync(creditLedgerPath, lines(creditRows).join("\n") + "\n");
   const heads = [branch, "run-W1-T99-2", "finished"];
   const deleted: string[] = [];
   const exec = (cmd: string, args: string[]): string => {
@@ -31,6 +33,7 @@ function reap(rows: Record<string, unknown>[], unreadable: boolean | "denied" | 
     if (args[0] === "grep") throw Object.assign(new Error("no citations"), { status: 1 });
     if (args[0] === "push") { deleted.push(...args.slice(3)); return ""; }
     if (cmd === "gh") {
+      if (args[1]?.includes("?head=")) return "";
       if (args[1]?.includes("state=all")) return prState === "none" ? "" : `${branch}\tclosed\t${prState === "merged"}`;
       if (args[1]?.includes("state=open")) return "";
       return "[]";
@@ -40,7 +43,7 @@ function reap(rows: Record<string, unknown>[], unreadable: boolean | "denied" | 
   try {
     reapBranchesCommand(prune ? ["--prune"] : [], { exec, root: repo.dir, quiet: true, ownerRepo: { owner: "fixture", repo: "fixture" },
       ledgerPath: unreadable === "unconfigured" ? undefined : ledgerPath,
-      creditLedgerPath: unreadable === true ? repo.dir : unreadable === "missing" ? join(repo.dir, "missing.ndjson") : undefined,
+      creditLedgerPath: unreadable === true ? repo.dir : unreadable === "missing" ? join(repo.dir, "missing.ndjson") : creditRows === undefined ? undefined : creditLedgerPath,
       readFile: unreadable === "denied" ? (path) => {
         if (path === ledgerPath) throw Object.assign(new Error("access denied"), { code: "EACCES" });
         return readFileSync(path, "utf8");
@@ -63,10 +66,12 @@ test("W1-T8503: the branch reap keeps a run branch a live handoff receipt names"
 });
 
 test("W1-T8503: an unreadable ledger keeps every run-shaped head", () => {
-  for (const failure of [true, "denied"] as const) {
-    const result = reap([], failure);
-    assert.deepEqual(result.report.kept_handoff_receipt_branches, [branch, "run-W1-T99-2"]);
-    assert.deepEqual(result.deleted, ["finished"]);
+  for (const failure of [true, "denied"] as const) for (const state of ["none", "merged", "closed"]) for (const prune of [false, true]) {
+    const result = reap([], failure, state, prune);
+    const kept = [...result.report.kept_handoff_receipt_branches, ...result.report.kept_reversible_close_branches].sort();
+    assert.deepEqual(kept, [branch, "run-W1-T99-2"].sort());
+    assert.equal(result.report.deletable, 1);
+    assert.deepEqual(result.deleted, prune ? ["finished"] : []);
   }
 });
 
@@ -75,6 +80,21 @@ test("W1-T8503: a missing or unconfigured ledger keeps no receipt branches", () 
     const result = reap([receipt()], missing);
     assert.ok(result.deleted.includes(branch));
     if (missing === "missing") assert.deepEqual(result.report.kept_handoff_receipt_branches, []);
+  }
+});
+
+test("W1-T8503: the receipt keep reads the credit ledger instead of the report sink", () => {
+  for (const prune of [false, true]) {
+    const live = reap([], false, "none", prune, [receipt()]);
+    assert.deepEqual(live.report.kept_handoff_receipt_branches, [branch]);
+    assert.equal(live.report.deletable, 2);
+    assert.equal(live.deleted.includes(branch), false);
+    const consumed = reap([receipt()], false, "none", prune, [receipt(), {
+      task_id: taskId, step: "implement.checkpoint_dropped", source_branch: branch, head_sha: sha,
+    }]);
+    assert.deepEqual(consumed.report.kept_handoff_receipt_branches, []);
+    assert.equal(consumed.report.deletable, 3);
+    assert.equal(consumed.deleted.includes(branch), prune);
   }
 });
 
@@ -109,6 +129,12 @@ test("W1-T8503: a dropped receipt stays consumed after ledger rotation", () => {
     assert.deepEqual(handoffReceiptsToCarry(rotated), []);
     assert.ok(rotated.some((raw) => JSON.parse(raw).step === "implement.checkpoint_dropped"));
     assert.equal(rotated.some((raw) => JSON.parse(raw).step === "worker.output"), false, "the rotation really discarded noise");
+    for (const prune of [false, true]) {
+      const result = reap(rotated.map((raw) => JSON.parse(raw)), false, "none", prune);
+      assert.deepEqual(result.report.kept_handoff_receipt_branches, ["run-W1-T99-2"], "the live receipt still protects its head after rotation");
+      assert.equal(result.report.deletable, 2, "the dropped checkpoint is reapable after rotation");
+      assert.deepEqual(result.deleted, prune ? [branch, "finished"] : [], "the drop releases only its own branch");
+    }
   } finally { repo.cleanup(); }
 });
 
@@ -168,6 +194,29 @@ test("W1-T8503: a gone checkpoint branch with a fetchable head is recreated", as
     assert.deepEqual(calls.filter((args) => args[0] === "push"), [["push",
       `--force-with-lease=refs/heads/${branch}:`, "origin", `${f.headSha}:refs/heads/${branch}`]]);
     assert.deepEqual(f.rows, [{ task_id: taskId, step: "implement.checkpoint_branch_recreated", source_branch: branch, head_sha: f.headSha }]);
+  } finally { f.cleanup(); }
+});
+
+test("W1-T8503: a recreated checkpoint keeps its own base when main conflicts", async () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.repo.dir, "paid-work.txt"), "main's conflicting work\n");
+    f.repo.git("add", "paid-work.txt");
+    f.repo.git("commit", "--quiet", "-m", "fix(other): add conflicting work");
+    f.repo.git("push", "--quiet", "origin", "main");
+    const main = f.repo.git("rev-parse", "HEAD");
+    const restored = await restoreBoundaryCheckpoint({ branch, headSha: f.headSha }, taskId, async (args) => f.repo.git(...args), f.log);
+    assert.equal(restored.base, "checkpoint");
+    if (restored.base !== "checkpoint") assert.fail("the conflicting main cannot be the restored base");
+    assert.equal(restored.sourceBranchAbsent, true);
+    assert.equal(restored.headSha, f.headSha);
+    assert.deepEqual(restored.mainConflicts, ["paid-work.txt"]);
+    assert.equal(f.repo.git("rev-parse", "HEAD"), f.headSha);
+    assert.equal(f.origin.git("rev-parse", "main"), main);
+    assert.equal(f.origin.git("rev-parse", branch), f.headSha);
+    assert.equal(readFileSync(join(f.repo.dir, "paid-work.txt"), "utf8"), "checkpoint work\n");
+    assert.deepEqual(f.rows.map((row) => row.step), ["implement.checkpoint_branch_recreated"]);
+    assert.equal(pendingWorkerBoundaryHandoffs(lines([receipt(f.headSha), ...f.rows])).size, 1);
   } finally { f.cleanup(); }
 });
 
@@ -265,6 +314,26 @@ test("W1-T8503: a delayed checkpoint drop does not consume a newer receipt", () 
   assert.equal(pendingWorkerBoundaryHandoffs(rows).size, 0);
 });
 
+test("W1-T8503: an unreadable fetched head preserves the absent branch receipt", async () => {
+  const f = fixture();
+  try {
+    const main = f.repo.git("rev-parse", "HEAD");
+    const failure = new Error("FETCH_HEAD could not be read");
+    await assert.rejects(restoreBoundaryCheckpoint({ branch, headSha: f.headSha }, taskId, async (args) => {
+      if (args[0] === "rev-parse" && args[1] === "FETCH_HEAD") throw failure;
+      return f.repo.git(...args);
+    }, f.log), (error) => error === failure);
+    assert.equal(f.repo.git("rev-parse", "HEAD"), main);
+    assert.equal(f.repo.git("ls-remote", "origin", `refs/heads/${branch}`), "");
+    assert.deepEqual(f.rows, [], "an unreadable fetched head proves neither a drop nor a recovery");
+    const rows = lines([receipt(f.headSha), {
+      task_id: taskId, step: "verdict", verdict: "no_pr", reason: "restart_checkpoint_restore_failed",
+    }]);
+    assert.deepEqual(pendingWorkerBoundaryHandoffs(rows).get(taskId), { branch, headSha: f.headSha });
+    assert.deepEqual(handoffReceiptsToCarry(rows), [[taskId, { branch, headSha: f.headSha }]]);
+  } finally { f.cleanup(); }
+});
+
 test("W1-T8503: a checkpoint head that moves during fetch is refused", async () => {
   const f = fixture();
   try {
@@ -316,7 +385,7 @@ test("W1-T8503: absent checkpoint recovery reaches recon in the same dispatch", 
       let calls = 0;
       let observed: Record<string, unknown>[] = [];
       const stopped = new Error("fixture reached recon");
-      await assert.rejects(withLiveWritesAllowed(() => runTask(taskId, {
+      const dispatch = () => withLiveWritesAllowed(() => runTask(taskId, {
         config: { claudeBin: "/bin/true", root: root.dir, installRoot: process.cwd() },
         skipGitSync: true, planPath,
         github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
@@ -338,7 +407,8 @@ test("W1-T8503: absent checkpoint recovery reaches recon in the same dispatch", 
           } else assert.equal(workerHead, f.origin.git("rev-parse", "main"));
           throw stopped;
         },
-      })), (error) => error === stopped);
+      }));
+      await assert.rejects(dispatch(), (error) => error === stopped);
       assert.equal(calls, 1, "this dispatch starts a worker after recovering the absent branch");
       assert.equal(observed.some((row) => row.step === "verdict"), false, "recovery does not burn a no_pr dispatch");
       const recovery = observed.filter((row) => row.step === (recoveryMode === "unfetchable" ? "implement.checkpoint_dropped" : "implement.checkpoint_restored"));
@@ -355,6 +425,15 @@ test("W1-T8503: absent checkpoint recovery reaches recon in the same dispatch", 
         assert.equal(recovery[0].head_sha, f.headSha);
         assert.equal(pendingWorkerBoundaryHandoffs(lines(observed)).size, 0);
         assert.deepEqual(handoffReceiptsToCarry(lines(observed)), []);
+        const firstRun = observed.find((row) => row.step === "implement.checkpoint_dropped")?.run_id;
+        await assert.rejects(dispatch(), (error) => error === stopped);
+        assert.equal(calls, 2, "the next dispatch starts a fresh worker after the drop consumed its receipt");
+        assert.equal(observed.filter((row) => row.step === "implement.checkpoint_dropped").length, 1,
+          "the next dispatch does not attempt to drop the same checkpoint again");
+        assert.equal(observed.some((row) => row.step === "implement.checkpoint_restored"), false);
+        assert.equal(observed.some((row) => row.step === "verdict"), false);
+        assert.ok(observed.some((row) => row.run_id !== firstRun && row.task_id === taskId),
+          "the second worker belongs to a new dispatch");
       }
     } finally { root.cleanup(); f.cleanup(); }
   }
