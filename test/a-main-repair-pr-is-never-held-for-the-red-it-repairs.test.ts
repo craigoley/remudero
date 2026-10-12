@@ -91,6 +91,9 @@ test("W1-T8575: a body-scoped red is the PR own while a tree red still waits", (
   for (const name of ["proof-discrimination", "acceptance-author-gate", "commitlint"]) {
     assert.ok(PR_BODY_SCOPED_CHECKS.includes(name), name);
     assert.deepEqual(decideBaseRed(ordinary([name]), main, none), { kind: "own" }, name);
+    // A stand-down row a pre-fix pass already wrote for this head does not keep holding it.
+    const prior = baseRedHistoryFromLedger([{ step: BASE_RED_STOOD_DOWN_STEP, pr_number: 11200, head_sha: HEAD, check_name: name }]);
+    assert.deepEqual(decideBaseRed(ordinary([name]), main, prior), { kind: "own" }, `${name} after a recorded stand-down`);
   }
   // W1-T5490's lint-plan wait is unchanged, alone or beside a body-scoped red.
   assert.deepEqual(decideBaseRed(ordinary(["lint-plan"]), main, none), { kind: "wait", check: "lint-plan" });
