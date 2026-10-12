@@ -612,6 +612,7 @@ export function openLearnedReservation(
   };
   return {
     id: handle.id,
+    get published() { return handle.published; },
     workerClass: input.workerClass,
     estimateMib: estimate.estimateMib,
     estimateSource: estimateSourceOf(estimate),

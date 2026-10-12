@@ -12,7 +12,7 @@
   origin: "operator approval 2026-10-12 (\"go with your recommended follow ups\"): follow-up to #10862 and W1-T8008"
   plan_refs: [W1-T7697, W1-T7807, W1-T8008, W1-T8133, W1-T8139]
   files: [src/run-task.ts, test/a-quiet-worker-checkpoint-push-skips-the-pr-gates.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
