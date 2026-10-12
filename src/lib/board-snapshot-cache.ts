@@ -294,7 +294,8 @@ export function readOpenBoardSnapshot(
   if (parsed.type !== "board-open-snapshot" || parsed.schema !== OPEN_SNAPSHOT_SCHEMA || parsed.repository !== repository) {
     return { ok: false, reason: "open snapshot has another schema or repository" };
   }
-  if (!Array.isArray(parsed.rows) || parsed.rows.length > DEFAULT_MAX_ROWS) return { ok: false, reason: "open snapshot is incomplete or exceeds row bound" };
+  if (!Array.isArray(parsed.rows)) return { ok: false, reason: "open snapshot is incomplete" };
+  if (parsed.rows.length > DEFAULT_MAX_ROWS) return { ok: false, reason: "open snapshot exceeds row bound" };
   const rows = parsed.rows;
   if (typeof parsed.savedAt !== "string" || !rows.every((row) => isOpenDiskRow(row, DEFAULT_MAX_LINE_BYTES))) {
     return { ok: false, reason: "open snapshot holds an invalid row" };
