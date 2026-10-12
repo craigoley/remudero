@@ -624,9 +624,7 @@ else
   echo "serve-container: resource policy NOT applied — ${SCRIPT_ROOT}/deploy/resource-policy.sh is absent"
 fi
 
-# ── 5b. W1-T8311: AN AUTOMATIC REPLACE IS ADMITTED BY FRESH HOST PRESSURE, OR HELD (exit 75) ───
-# serve-policy-convergence.ts sets RMD_SERVE_REPLACE_ADMISSION=required and the host budget's thresholds;
-# an unreadable reading is a named hold. An operator's hand run sets nothing and is not gated.
+# ── 5b. W1-T8311: serve-policy-convergence.ts's replace needs fresh host admission, else HELD (75) ──
 SERVE_REPLACE_ADMISSION="${RMD_SERVE_REPLACE_ADMISSION:-}"
 SERVE_REPLACE_HELD_EXIT=75
 ADMIT_MEMINFO_PATH="${RMD_SERVE_ADMIT_MEMINFO_PATH:-/proc/meminfo}"
@@ -682,7 +680,7 @@ serve_replace_admission() {
     serve_replace_hold psi "memory PSI some avg10 ${some} (max ${some_max}), full avg10 ${full} (max ${full_max}) (${stage})"
   local freed need
   freed="$(serve_resident_mib || true)"
-  admit_number "${freed}" || freed=0 # unreadable: credit nothing, the stricter reading
+  admit_number "${freed}" || freed=0
   need="$(awk -v r="${reserve}" -v c="${candidate}" -v f="${freed}" 'BEGIN { x = c - f; if (x < 0) x = 0; printf "%d\n", r + x }')"
   [ "${avail}" -ge "${need}" ] ||
     serve_replace_hold host_headroom "MemAvailable ${avail} MiB < need ${need} MiB (reserve ${reserve} + candidate ${candidate} - freed ${freed}) (${stage})"
@@ -793,7 +791,7 @@ if [ "${SERVE_SUPERVISOR}" = "on" ]; then
 fi
 
 if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
-  serve_replace_admission "before docker stop" # W1-T8311: fresh again after the pull, before anything is destroyed
+  serve_replace_admission "before docker stop"
   echo "serve-container: docker stop ${CONTAINER_NAME}"
   docker stop "${CONTAINER_NAME}" >/dev/null
   echo "serve-container: docker rm ${CONTAINER_NAME}"
