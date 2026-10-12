@@ -1,0 +1,103 @@
+- id: W1-T8722
+  title: "A LANE-OPENED PR BODY WITH NO ACCEPTANCE BLOCK IS A NAMED DEFECT — acceptanceAuthorTimeCheck returns ok at its Remudero-Task trailer arm before it reads the body, every alert-fix and main-repair body carries a synthetic trailer, and W1-T8625's inert-proof count reads 0 for a body with no block, so the lane ledgers nothing while the required CI gate refuses it"
+  repo: remudero
+  depends_on: [W1-T8625, W1-T8572]  # W1-T8625 (merged in #11140, dc0b55325) adds inertAcceptanceProofs (src/lib/proof-grammar.ts) and the alert-fix body read this reuses; W1-T8572 adds the main-repair no-test-file body check this extends. All three edit dispatchAlertFixRun or dispatchMainRepairFixRun in src/run-task.ts
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — a lane-opened PR body with no Acceptance block is named before CI finds it; it spans the shared PR-body proof helpers (src/lib/proof-grammar.ts) and the alert-fix and main-repair dispatchers (src/run-task.ts)
+  band_meaning: span
+  origin: "operator approval 2026-10-12 (\"continue with follow ups\"); found while amending W1-T8714"
+  plan_refs: [W1-T952, W1-T2297, W1-T2544, W1-T5809, W1-T8625, W1-T8572, W1-T90]
+  files:
+    - src/lib/proof-grammar.ts
+    - src/run-task.ts
+    - test/a-lane-opened-pr-body-with-no-acceptance-block-is-a-named-defect.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main e4fe69049 and on #11140's head aa1a0d944 (run-W1-T8625-1791827884000, W1-T8625). #11140 then
+    merged as dc0b55325. Its src/lib/proof-grammar.ts and src/lib/review.ts are byte-identical to aa1a0d944, and its
+    `checkAlertFixAcceptance` still calls `acceptanceAuthorTimeCheck` with no options. Symbols, not lines.
+    THE TRAILER ARM. `acceptanceAuthorTimeCheck` (src/lib/review.ts, W1-T952) returns `ok: true` ("criteria resolve
+    from plan/tasks.yaml") as soon as `extractTaskTrailerId` finds a trailer, unless the caller passes a
+    `trailerResolves` that answers false (W1-T2297). `checkAlertFixAcceptance` (src/run-task.ts) passes no options.
+    `alertTaskId` (src/lib/ops.ts) mints `alert-<source>-<id>`, and `mainRepairTaskId` mints `main-repair-<sha12>`.
+    Neither is a plan id, and both are stamped as the body's last line. `PR_AUTHORING_PATHS` (review.ts) says the same
+    for alert-fix: the synthetic id never resolves, so the worker's body is the only source review can judge from.
+    PROBED with `node --import tsx` on e4fe69049. Bodies were a prose line, an `origin:` line and the trailer, with no
+    `## Acceptance` or `Acceptance:` block:
+      - `acceptanceAuthorTimeCheck(body)`, the lane's call shape, returns `ok: true` for both `Remudero-Task:
+        alert-ci-123` and `Remudero-Task: main-repair-97e3f9136d82`.
+      - `acceptanceAuthorTimeCheck(body, { trailerResolves: planTrailerResolver(root) })` returns `ok: false, defect:
+        "no-header"` for both. That is the call shape of the required CI gate (`evaluateGate`,
+        scripts/acceptance-author-gate.mjs). So CI already refuses these bodies, and only the lane's own check says ok.
+    PROBED on aa1a0d944, W1-T8625's head. `inertAcceptanceProofs(body)` returns `[]` for the alert-fix body above, so
+    W1-T8625's new `inert-proofs` row is not written. `checkAlertFixAcceptance` still returns ok at the trailer arm.
+    The same body with `- x | the build passes` added under `Acceptance:` counts 1 inert proof. So W1-T8625 closes the
+    prose-proof case and leaves the no-block case silent.
+    MAIN-REPAIR. On e4fe69049, `dispatchMainRepairFixRun` checks no PR body at all. W1-T8572 (queued, priority 1) makes
+    the dispatcher write the block when `request.testFiles` is non-empty. With no test file (its design 3b to 3d) the
+    dispatcher parses the worker's bullets and ledgers `inert-proofs`. A worker body with zero bullets has no inert
+    proof, so it reaches 3e, "a body whose proofs all execute is opened as written".
+    PRECEDENT. W1-T5809 (merged) found the same trailer arm in `prerequisitePrAdmissionRefusal` and refused a trailered
+    prerequisite body there.
+    NOT MEASURED: how often a lane body had no block. Of the two `main-repair.pr_opened` PRs, #10712 and #11096, both
+    carried a block (W1-T8572's measurement). No `alert-fix-*` head is open on origin. The defect is the silence, so the
+    count stays unknown until this row exists.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and on all 315 origin heads for checkAlertFixAcceptance,
+    trailerResolves, inbox.replayed, "no band_meaning declared" and replay beside band_meaning. Control: main reads 14
+    hits, and no head reads more than main. W1-T8625 and W1-T8572 name the trailer arm and count inert proofs only.
+    W1-T5809 covers the prerequisite lane only. W1-T2624, W1-T3149 and W1-T5306 concern the CI gate's resolver.
+  design: |
+    No new bound and no gate change.
+    1. ONE PURE HELPER, BESIDE THE INERT COUNT. Add `acceptanceBlockAbsent(body)` to src/lib/proof-grammar.ts next to
+       `inertAcceptanceProofs`. It is true when `acceptanceBlockDiagnostics(body).headerFound` is false or
+       `parseAcceptanceBlock(body)` returns no criterion. It reads the body itself, never `acceptanceAuthorTimeCheck`'s
+       result, for the same reason `inertAcceptanceProofs` does.
+    2. ALERT-FIX. In `dispatchAlertFixRun`, under the same `deps.readPrBody` guard and the same single body read as
+       W1-T8625's inert-proof count, an absent block ledgers one `alert-fix.acceptance_defect` row with
+       `defect: "absent-block"` and `header_found`. Its message says the required acceptance-author-gate will refuse the
+       body as `no-header`, because the synthetic trailer does not resolve in the plan. An absent block writes no
+       `inert-proofs` row. A failed body read stays the named `alert-fix.acceptance_check_error`.
+    3. MAIN-REPAIR. On W1-T8572's no-test-file path, a worker body with no block ledgers one
+       `main-repair.acceptance_defect` row with `defect: "absent-block"`. It takes the resolution W1-T8572 gives
+       inert proofs: rewritten with a `grep:` proof of a line the pushed fix adds, or refused with no PR opened. With
+       test files the dispatcher writes the block itself, so this arm cannot fire there, and a test pins that. If
+       W1-T8572 already lands an absent-block defect, this step is test-only. Say so in the PR.
+    4. THE GATE KEEPS ITS SEMANTICS. `acceptanceAuthorTimeCheck`, its call in `checkAlertFixAcceptance`, and
+       `evaluateGate` stay as they are. The code does not show a refusal is missing: the required CI gate already
+       refuses this body. The defect is that the lane does not say so.
+       Considered and not done: passing a plan resolver to `checkAlertFixAcceptance`. It would surface `no-header`, but
+       that message reads "no `Remudero-Task:` trailer" on a body that has one. It would also change which row
+       W1-T8625's tests pin.
+    5. Check scripts/comment-load-baseline.json's entry for src/run-task.ts before adding comment lines there. Put the
+       explanation in proof-grammar.ts's doc comment.
+    Tests go in a new file, test/a-lane-opened-pr-body-with-no-acceptance-block-is-a-named-defect.test.ts, with `test(`
+    titles verbatim as in the proofs below. Drive `dispatchAlertFixRun` with fake deps, including `readPrBody`, and
+    W1-T8572's no-test-file main-repair path the same way.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-lane-opened-pr-body-with-no-acceptance-block-is-a-named-defect.test.ts"
+    - claim: "an alert-fix body with a Remudero-Task trailer and no Acceptance block is ledgered as an absent-block defect, though acceptanceAuthorTimeCheck returns ok"
+      proof: 'grep: test("W1-T8722: a trailered alert-fix body with no block is ledgered absent-block" in test/a-lane-opened-pr-body-with-no-acceptance-block-is-a-named-defect.test.ts'
+    - claim: "an Acceptance header with no parseable bullet is also an absent block"
+      proof: 'grep: test("W1-T8722: a header with no bullet is an absent block" in test/a-lane-opened-pr-body-with-no-acceptance-block-is-a-named-defect.test.ts'
+    - claim: "a no-test-file main-repair worker body with no block is ledgered absent-block and never opened as written"
+      proof: 'grep: test("W1-T8722: a main-repair body with no block is ledgered and never opened as written" in test/a-lane-opened-pr-body-with-no-acceptance-block-is-a-named-defect.test.ts'
+    - claim: "a body whose block parses and whose proofs all execute ledgers no absent-block row, and acceptanceAuthorTimeCheck's verdict is unchanged"
+      proof: 'grep: test("W1-T8722: a body with an executable block ledgers no absent-block row" in test/a-lane-opened-pr-body-with-no-acceptance-block-is-a-named-defect.test.ts'
+    - claim: "the absent-block helper sits beside the inert-proof count"
+      proof: "grep: export function acceptanceBlockAbsent( in src/lib/proof-grammar.ts"
+  falsifier: |
+    Take the verdict from `deps.checkAcceptance` instead of parsing the body, and the trailered no-block body ledgers
+    nothing, as it does on aa1a0d944. Make the helper test only `headerFound`, and an `Acceptance:` header with no
+    bullet ledgers nothing. Let W1-T8572's 3e branch take a zero-bullet body, and the main-repair test opens it as
+    written. Change `acceptanceAuthorTimeCheck` to refuse a trailered body, and the unchanged-verdict test fails.
+  note: |
+    EFFECT, measured after merge from the core ledger with no fixed pass mark: the count of `alert-fix.acceptance_defect`
+    and `main-repair.acceptance_defect` rows with `defect: "absent-block"`, beside each such PR's first-head
+    acceptance-author-gate result. Healthy shape: every lane PR red on acceptance-author-gate as `no-header` has a
+    matching absent-block row written before CI reported.
