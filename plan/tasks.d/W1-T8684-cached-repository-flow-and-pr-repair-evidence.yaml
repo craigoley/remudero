@@ -1,0 +1,84 @@
+- id: W1-T8684
+  title: "Cached repository flow distinguishes delivered PRs repair rounds and missing history"
+  repo: remudero
+  depends_on: [W1-T5055]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1.2
+  budget_usd: 45.00
+  risk: high
+  origin: "operator console graph approval 2026-10-12; automated flow and self improvement"
+  plan_refs: [W1-T5904, W1-T7421, W1-T8533, W1-T8667]
+  files: [src/lib/repository-flow.ts, src/lib/open-prs-rest.ts, src/lib/board-snapshot-cache.ts, src/lib/analytics-view.ts, src/lib/read-model-worker.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/repository-flow.test.ts, test/repository-flow-cached-wiring.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    The operator approved per-repository throughput, PR repair load, first-pass success,
+    merge/repair latency, backlog trends and attributable efficiency on app.remudero.com.
+    Current analytics-timeseries.ts measures completed worker runs, not merged PRs. The existing
+    BoardPrRest/mapBoardPr cache retains mergedAt but drops REST created_at, so a creation-to-merge
+    clock cannot be reconstructed honestly from that cache. Existing flow-gardener.ts has stage
+    samples, but flowPrs is a merged-only cohort and cannot prove first-pass success or historical
+    open backlog. Do not revive retired W1-T4008 or deleted factory UI/API-T57. Add the bounded
+    observation contract needed by the graph consumer; reuse cached GitHub and ledger evidence.
+  design: |
+    Define optional repository-flow-v1 inside each repository's existing cached Analytics entry.
+    Use the registry-owned exact repository and existing board open/closed snapshot reader plus
+    the existing off-loop Analytics refresh. Preserve REST creation/merge metadata through the
+    native map and persisted cache without exposing PR bodies, prompts, tokens or credentials.
+    Old snapshots missing creation metadata remain readable and yield unknown latency rather than
+    using updatedAt, ledger write time or discovery time as createdAt. Do not create another
+    GitHub walk, timer, request-time ledger scan, provider call, browser collector or authority.
+
+    Provide bounded 7/30-day UTC daily buckets and explicit scope/population, source-observed and
+    materialized timestamps, window/corpus coverage, units, sample counts, limits and named gaps.
+    Count unique PRs opened/merged by their GitHub event timestamp. Distinct tasks delivered use
+    the repo's trailer UNION structured run-branch implementation-credit machinery, not verdict
+    rows or plan filings. Keep worker attempts and production deployments separate from PRs.
+    Reuse canonical ledger rotation/dedup and repair evidence. A repaired-PR count is unique
+    repository/PR identity; repair rounds are distinct repo/PR/head/round identities. Code repair,
+    flake rerun, infra failure, conflict and unknown reasons remain distinct where observed;
+    a red check alone is not proof a code change was needed. Shared daemon run ids and repeated
+    rounds on another PR cannot cross-attribute a repair. Never treat fix.done FIXED as verified
+    green without complete required-current-head evidence.
+
+    First release throughput, observed repair load and creation-to-merge p50/p90 with contributing
+    counts and still-open age/censoring. Initial-head first-pass evidence, repair-to-green latency,
+    historical backlog snapshots and efficiency remain explicitly not_collected unless their
+    required corpus/join evidence exists; their durable collection is the dependent quality task.
+    Expose bounded evidence references for drill-down using existing scoped PR routes or a
+    schema-declared cached read; counts must not be truncated because link lists are bounded.
+    Genuine overflow/invalid scope refuses only this optional section, preserving ordinary
+    Analytics. Missing or partial history is not a measured zero. Keep internal aggregation and
+    public response budgets explicit; retain compact checkpoints, not arrays of raw historical rows.
+
+    Tests must use the default snapshot/ledger reader and real read-model worker/cache/HTTP path,
+    not only fake input folds. Remove sources after materialization and prove repeated HTTP reads
+    still serve the same bounded result without scans/network. Include duplicate gzip/plain/live
+    rows, late merge receipts, two repos sharing a PR number, a shared daemon run repairing several
+    PRs, missing initial-head evidence, empty complete versus unavailable sources, partial pages,
+    legacy metadata, interrupted repair, stale checkpoints and output/input overflow controls.
+    Register rendered fields in OpenAPI and regenerate the existing API client schema. Do not
+    ship the console consumer before this exact contract is merged AND positively served.
+  acceptance:
+    - claim: "repository throughput counts PR events and delivered tasks once without counting attempts as merges"
+      proof: 'unit test: W1-T8684: repository throughput preserves PR event clocks and unique delivery credit'
+    - claim: "repair load joins exact PR heads and rounds across duplicate rotations without claiming unverified green"
+      proof: 'unit test: W1-T8684: repair load distinguishes unique PRs rounds reasons and unknown recovery'
+    - claim: "latency coverage missing history and legacy source clocks remain explicit"
+      proof: 'unit test: W1-T8684: repository flow preserves latency samples censoring and coverage gaps'
+    - claim: "real worker materializes repository flow and cached reads perform no ledger or GitHub work"
+      proof: 'unit test: W1-T8684: default sources reach cached repository flow without request-time scans'
+    - claim: "scope overflow and optional contract failures preserve independent Analytics"
+      proof: 'unit test: W1-T8684: bounded flow refuses incompatible sources without losing Analytics'
+  falsifier: |
+    Remove creation metadata propagation, exact PR/head/round matching, canonical dedup or default
+    worker wiring separately. Their physical tests must fail on the committed head; restore and
+    require complete TAP plus native author/census and same-tree instrumented diff coverage.
+    A chart fixture is not current production adoption or real outcome proof.
+  note: |
+    Research: https://dora.dev/guides/dora-metrics/ pairs throughput with instability and warns
+    against cross-application comparisons and vanity quotas. PR merges here are not DORA
+    deployment frequency. https://docs.github.com/en/rest/pulls/pulls documents separate creation,
+    update and merge evidence and paginated corpora. Apply those contracts to existing caches.
