@@ -1,0 +1,58 @@
+- id: W1-T8776
+  title: "EVERY WORKTREE AT ONE SOURCE HASH SHARES ONE BUILT BUNDLE — the daemon cuts a fresh worktree for each garden pass, preflight and build, and a fresh worktree has no dist/, so W1-T7729's precompiled entries are current only in the image's /app and never where children actually run"
+  repo: remudero
+  depends_on: [W1-T8775]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-12: docs/adr/0006-precompiled-daemon-child-entries.md's second unfiled follow-up (W1-T7729, #11136)"
+  plan_refs: [W1-T7729, W1-T8775, W1-T5724]
+  files: [scripts/build-child-entries.mjs, src/lib/child-entry-argv.ts, src/lib/child-entry-store.ts, src/run-task.ts, docs/adr/0006-precompiled-daemon-child-entries.md, test/every-worktree-at-one-source-hash-shares-one-built-bundle.test.ts, test/a-daemon-child-entry-is-precompiled.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    ADR 0006 (Consequences): "A fresh worktree has no dist/, so until the shared store below exists, only children whose
+    tree matches a built tree (the image's /app, or a tree that ran the build) benefit." Core's daemon runs from the
+    mounted checkout (/home/node/Remudero/remudero), not /app, and spawns its children into per-pass worktrees, so on
+    2026-10-12 no daemon child could find a current bundle. sourceHash never includes the absolute path, so every
+    worktree holding main's source shares one key: one build per main revision can serve all of them.
+    WHY HARDLINK INTO THE TREE, NOT A ROOT PASSED IN: the ADR's bullet says the tree root should be "passed in rather
+    than taken from the bundle's location". But the recipe leaves bare imports external (`packages: "external"`) and
+    resolves each module's `import.meta.url` relative to the bundle, so a bundle run from a store directory would
+    resolve node_modules and src paths there, not in the spawning tree. Materializing the stored files into
+    `<tree>/dist/child-entries/` (a hardlink on the same filesystem, else a copy) keeps every location-relative
+    resolution exactly as the image build has it, with no recipe change. This task amends the ADR bullet to say so.
+  design: |
+    1. src/lib/child-entry-store.ts: a store under the instance's state root, `<config.root>/child-entries/<sourceHash>/`,
+       holding the bundles and manifest one build produced. `buildIntoStore(treeRoot)` runs buildChildEntries in a
+       CHILD PROCESS (never on the daemon loop) into a temp dir, then renames it into place; a hash already present is
+       a no-op.
+    2. The daemon builds once per main revision: after refreshManagedCheckout's fast-forward (src/run-task.ts) and after
+       its own checkout moves, off the loop, ledgering `child_entry.store_built` (hash, ms, bytes) or
+       `child_entry.store_build_failed` (reason). A failed build changes nothing: children fall back to tsx.
+    3. childEntryArgv (W1-T8775) consults the store when the tree has no current bundle: if
+       `<store>/<sourceHash(tree)>/manifest.json` names the entry, materialize the directory into
+       `<tree>/dist/child-entries/` (hardlink, else copy), then re-check childEntryIsCurrent before using it. Any doubt
+       is tsx. Ledger `child_entry.store_hit` / `child_entry.store_miss` with the reason, so the hit rate is measurable.
+    4. Retention: drop a stored hash once no main revision of the last day and no live worktree uses it; never a fixed
+       count. The host janitor's existing tiers own anything older.
+    5. Amend ADR 0006's store bullet with the hardlink decision and its reason.
+  acceptance:
+    - claim: "a fresh worktree at the same source hash as a stored build gets the stored bundle, and its child argv runs it without tsx"
+      proof: 'grep: test("W1-T8776: a fresh worktree at a stored source hash runs the stored bundle" in test/every-worktree-at-one-source-hash-shares-one-built-bundle.test.ts'
+    - claim: "a worktree whose source differs from every stored build falls back to tsx and records a store miss"
+      proof: 'grep: test("W1-T8776: a worktree with changed source misses the store and runs tsx" in test/every-worktree-at-one-source-hash-shares-one-built-bundle.test.ts'
+    - claim: "a materialized bundle resolves its modules and node_modules inside the worktree it was linked into"
+      proof: 'grep: test("W1-T8776: a materialized bundle resolves its paths inside its own worktree" in test/every-worktree-at-one-source-hash-shares-one-built-bundle.test.ts'
+    - claim: "building into the store a hash it already holds does no work"
+      proof: 'grep: test("W1-T8776: a source hash already stored is not rebuilt" in test/every-worktree-at-one-source-hash-shares-one-built-bundle.test.ts'
+    - claim: "the daemon builds the store once per main revision"
+      proof: "grep: buildIntoStore( in src/run-task.ts"
+  falsifier: |
+    Run the bundle from the store directory instead of materializing it: the third test sees a module path outside the
+    worktree. Skip the re-check after materializing and a half-copied store entry runs: the first test's manifest
+    corruption case fails.
