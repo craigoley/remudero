@@ -1,5 +1,6 @@
 /** Reproducible private daily variants; no model execution or independence claim. */
 import { createHmac } from "node:crypto";
+import { fixedClock } from "./clock.js";
 import { commonCanarySuite, canarySuiteDigest, type CanaryCase } from "./model-canary-suite.js";
 
 export const CANARY_ROTATION_VERSION = "model-canary-rotation-v1" as const;
@@ -7,7 +8,7 @@ export const CANARY_ROTATION_VERSION = "model-canary-rotation-v1" as const;
 /** Every arm receives the same day/key pack. Rotate instance ids, not the task contract. */
 export function rotatingCanarySuite(day: string, privateKey: string) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !Number.isFinite(Date.parse(day + "T00:00:00Z"))
-    || new Date(day + "T00:00:00Z").toISOString().slice(0, 10) !== day)
+    || fixedClock(Date.parse(day + "T00:00:00Z")).iso().slice(0, 10) !== day)
     throw new Error("canary-rotation-day-invalid");
   if (typeof privateKey !== "string" || !/^[a-f0-9]{64}$/.test(privateKey))
     throw new Error("canary-rotation-private-key-invalid");
