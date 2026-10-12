@@ -37,7 +37,7 @@ type LogRow = { step: string; extra?: Record<string, unknown> };
 function hungTree(): GitRepo {
   const repo = gitRepo({ kind: "starved-preflight" });
   repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
-  for (const [rel, body] of Object.entries({ "scripts/lint-plan-precheck.mjs": HANGS_WITH_A_CHILD, "src/run-task.ts": HANGS })) {
+  for (const [rel, body] of Object.entries({ "scripts/lint-plan-precheck.mjs": HANGS_WITH_A_CHILD, "src/check-proof-main.ts": HANGS })) {
     mkdirSync(dirname(join(repo.dir, rel)), { recursive: true });
     writeFileSync(join(repo.dir, rel), body);
   }

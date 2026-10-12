@@ -14880,6 +14880,8 @@ export function proofRepairRoundRefusalInWorktree(input: {
   roundStartSha: string | undefined;
   stageable: readonly string[];
   proofs: readonly string[];
+  /** The tree whose check-proof entry each proof runs through; defaults to this harness. */
+  childRoot?: string;
 }): { reason: string; undeclared: string[] } | undefined {
   const git = (args: string[]): string =>
     hostWorktreeGit(input.worktreePath, args).trim();
@@ -14897,7 +14899,7 @@ export function proofRepairRoundRefusalInWorktree(input: {
     changedFiles,
     proofs: input.proofs,
     checkProofStatus: (proof) =>
-      spawnSync(process.execPath, checkProofChildArgv(proof, mergeBase), {
+      spawnSync(process.execPath, checkProofChildArgv(proof, mergeBase, input.childRoot), {
         cwd: input.worktreePath,
         encoding: "utf8",
         maxBuffer: 16 * 1024 * 1024,
