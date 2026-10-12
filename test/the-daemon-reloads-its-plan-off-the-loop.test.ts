@@ -104,7 +104,7 @@ test("W1-T7743: async plan loading wraps a listed-shard read failure as PlanErro
   const runGit = async (args: string[]): Promise<string> => {
     commands.push(args[0] ?? "");
     if (args[0] === "show") return taskYaml("MONO-1");
-    if (args[0] === "ls-tree") return "plan/tasks.d/SHARD-1.yaml\\n";
+    if (args[0] === "ls-tree") return "plan/tasks.d/SHARD-1.yaml\n";
     if (args[0] === "cat-file") throw new Error("cat-file unavailable");
     throw new Error("unexpected git command " + args[0]);
   };
