@@ -19,7 +19,9 @@
   priority: 1
   attempts: 0
   rationale: |
-    READ on origin/main ab8287511 and on #11085's head 359c50bf2 (run-W1-T8396-1791806888000, open, unmerged). Symbols, not lines.
+    READ on origin/main ab8287511 and on #11085's head 359c50bf2 (run-W1-T8396-1791806888000). Symbols, not lines.
+    #11085 MERGED while this was being filed, as 97e3f9136 at 2026-10-12T13:12:45Z. Its src/lib/base-reproduction.ts is
+    identical to 359c50bf2, and src/lib/ledger.ts at 97e3f9136 still retains neither step below, so the gap is on main now.
     WHAT THE REFRESH DECISIONS READ, AND WHAT IS RETAINED (`DECISION_RELEVANT_LEDGER_STEPS`, src/lib/ledger.ts, checked by
     importing the exported set):
       - `fix.base_refreshed`: retained on main and on the head.
@@ -54,8 +56,8 @@
         between them. After that rotation the first row is not in the live file, so #11085's rule 3 would read "no prior
         refresh" and refresh again.
       - No pr@head took two refreshes. Main's own once-per-head key, `${pr}@${head}`, is therefore not yet hurt: an update
-        makes a new head anyway. The exposure starts when W1-T8396 keys refresh history by PR, so this task depends on it
-        and lands right behind it.
+        makes a new head anyway. The exposure started when W1-T8396 began keying refresh history by PR (merged 13:12:45Z),
+        so it is live now. That is why this task is priority 1.
     RETENTION ALONE IS NOT ENOUGH. Retained steps are still capped at the newest `MAX_RETAINED_LINES_PER_STEP` rows per
     step (pass 4 of `rotateLedger`), and the W1-T244 convergence pass sheds the oldest retained rows when the core is over
     its ceiling. A PR open longer than the span those rows cover loses its history again. The sweep already has the shape
