@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -160,7 +160,10 @@ test("checkpoint no-diff, conflict refusal and failed default pushes retain thei
   for (const quiet of [false, true]) {
     const failed = rig();
     change(failed.work.dir);
-    failed.work.git("remote", "set-url", "--push", "origin", join(failed.work.dir, "missing-local-origin"));
+    const hook = join(failed.origin.dir, "hooks/pre-receive");
+    writeFileSync(hook, "#!/bin/sh\nexit 1\n");
+    chmodSync(hook, 0o755);
+    failed.origin.git("config", "core.hooksPath", join(failed.origin.dir, "hooks"));
     if (quiet) {
       const ended = await withLiveWritesAllowed(() => watchdog(failed.work.dir, "restart")());
       assert.equal(ended.ended, false);
