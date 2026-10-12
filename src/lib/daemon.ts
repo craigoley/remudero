@@ -1033,7 +1033,9 @@ export interface DaemonDeps {
   refreshMerged: (plan?: Plan) => MergedSet;
   refreshMergedAsync?: (plan?: Plan) => Promise<MergedSet>;
   readLoopTelemetry?: (() => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number;
-    sync_spawn_top?: unknown[] }) & { takeLagInterval?: (consumer?: string) => { top: unknown; sync_spawn_ms: number } };
+    sync_spawn_top?: unknown[] }) & { takeLagInterval?: (consumer?: string) => { top: unknown; sync_spawn_ms: number };
+    /** W1-T7746: each tick's lag, the history the loop-stall profiler's bound is a quantile of. */
+    observeLoopLag?: (reading: { lagMs: number; intervalMs: number }, log: (step: string, extra?: Record<string, unknown>) => void) => void };
   /** W1-T6782: flat, payload-free memory fields (`sampleDaemonMemory`, daemon-memory-telemetry.ts)
    *  spread into the existing `daemon.alive` row. A throw is carried as `mem_telemetry`, never lost.
    *  W1-T7092: `afterRow` starts the worker-thread heap read once the row is written; the tick never
@@ -1677,6 +1679,18 @@ function takeSyncSpawn(deps: Pick<DaemonDeps, "readLoopTelemetry">, consumer: st
   } catch { return {}; /* Reason: observability only. */ }
 }
 
+/** W1-T7746: report a tick's lag, and first hand it to the loop-stall profiler, which sets its bound from
+ *  this interval and these lags. A daemon without the sampler reports exactly as before. */
+export function reportTickLag(deps: Pick<DaemonDeps, "readLoopTelemetry">, sample: Parameters<typeof reportLoopLag>[0],
+  log: (step: string, extra?: Record<string, unknown>) => void): void {
+  try {
+    deps.readLoopTelemetry?.observeLoopLag?.({ lagMs: sample.observedAtMs - sample.dueAtMs, intervalMs: sample.intervalMs }, log);
+  } catch (error) {
+    log("daemon.loop_stall_profile_failed", { reason: `observe: ${String((error as Error)?.message ?? error).slice(0, 160)}` });
+  }
+  reportLoopLag(sample, log);
+}
+
 /**
  * W1-T4041 — REPORT A TICK THAT CAME BACK LATE, AND NAME THE PHASE THAT WAS IN FORCE.
  *
@@ -1763,7 +1777,7 @@ export function startInterphaseReviewClock(
         while (active) {
           const clockDueAtMs = interphaseClock.now() + quantumMs;
           const result = await wait(quantumMs);
-          reportLoopLag(
+          reportTickLag(deps,
             { phase, dueAtMs: clockDueAtMs, observedAtMs: interphaseClock.now(), intervalMs: quantumMs,
               lastStepBeforeBlock: deps.lastStepBeforeBlock?.(), ...takeSyncSpawn(deps, "review_clock") },
             log,
@@ -2136,7 +2150,7 @@ function startInFlightTicker(
           const tickDueAtMs = daemonClock.now() + pollIntervalMs;
           const waitResult = await (owner.sweepRetrigger ? (deps.sleepUntilSweepWake ?? deps.sleep) : deps.sleep)(pollIntervalMs);
           const lastStepBeforeBlock = deps.lastStepBeforeBlock?.();
-          reportLoopLag(
+          reportTickLag(deps,
             { phase: owner.phase, dueAtMs: tickDueAtMs, observedAtMs: daemonClock.now(), intervalMs: pollIntervalMs, lastStepBeforeBlock,
               ...takeSyncSpawn(deps, "ticker") },
             log,
@@ -3246,7 +3260,7 @@ export async function runDaemon(
     return s;
   };
   if (deps.livenessPulse) livenessPulse = startLivenessPulse(pollIntervalMs, idleLaneClock, log,
-    (sample) => reportLoopLag({ ...sample, lastStepBeforeBlock: deps.lastStepBeforeBlock?.(),
+    (sample) => reportTickLag(deps, { ...sample, lastStepBeforeBlock: deps.lastStepBeforeBlock?.(),
       ...takeSyncSpawn(deps, "pulse") }, log));
   const prActionPump = startPrActionPump(deps, pollIntervalMs, log);
   prActionPumpRef.stop = prActionPump.stop;
