@@ -53935,7 +53935,7 @@ const REAL_ALERT_FIX_DISPATCH_DEPS: AlertFixDispatchDeps = {
   spawn: ledgeredNonDispatchSpawn("alert-fix"),
   ensureTaskTrailer,
   checkAcceptance: checkAlertFixAcceptance,
-  readPrBody: (prUrl) => readAlertFixPrBody(prUrl),
+  readPrBody: readAlertFixPrBody,
 };
 
 /**
