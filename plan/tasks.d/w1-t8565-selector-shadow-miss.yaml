@@ -1,0 +1,29 @@
+- id: W1-T8565
+  title: "REPAIR THE SELECTOR EDGE INTO test/a-spent-check-requeue-survives-ledger-rotation.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 2.5
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/a-spent-check-requeue-survives-ledger-rotation.test.ts"
+  files: [src/lib/affected-suites.ts, test/the-affected-suite-selector-runs-in-shadow.test.ts]
+  note: "W1-T4439 first observed a floor miss on coverage run 38255534581 for PR #11091 at 50df3684775aef6e726823e3bec274a6037b476b: openapi/daemon.yaml, packages/api-client/src/schema.d.ts, src/lib/analytics-view.ts, src/lib/gardener-spend.ts, src/lib/read-model-worker.ts, test/a-gardener-spend-read-requires-the-exact-parent-pass.test.ts -> test/a-spent-check-requeue-survives-ledger-rotation.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again. Add a test in test/the-affected-suite-selector-runs-in-shadow.test.ts that selects test/a-spent-check-requeue-survives-ledger-rotation.test.ts for each edge: diff-coverage blocks an edge no test exercises."
+  acceptance:
+    - claim: "the floor selector includes test/a-spent-check-requeue-survives-ledger-rotation.test.ts when this edge is exercised"
+      proof: "grep: test/a-spent-check-requeue-survives-ledger-rotation\\.test\\.ts in src/lib/affected-suites.ts"
+    - claim: "a regression test selects test/a-spent-check-requeue-survives-ledger-rotation.test.ts for each recorded edge"
+      proof: "grep: test/a-spent-check-requeue-survives-ledger-rotation\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.93
+    reasons:
+      - "The declared files are limited to src/lib/affected-suites.ts (the test-selector mapping) and one selector regression test. Neither involves secrets, auth, permissions, deploy, merge or review policy, or deletion of data or history."
+      - "The acceptance criteria are grep-verifiable additions: a selector entry for the named test file and a regression test asserting it. This makes the finding checkable from what is shown, and the change is reversible."
+      - "The family \"selector-shadow-miss\" has 18 merged and 0 declined machine tasks (Beta mean 0.95), which shows an established, well-trodden practice. The gates state is clean, and the change asks for no operator-only decision."
+    judged_at: "2026-10-12T14:34:49.673Z"
+    pin: "3ab4bf4c25e5e73f675b7f0df5124f50742e8692fa3ab085c8ea27d4c200fce5"
