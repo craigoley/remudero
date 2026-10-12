@@ -567,6 +567,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "automerge.rearm_exhausted",
   "automerge.stale_rollup_refreshed", // W1-T6404: the once-per-PR refresh bound; forgotten, it loops.
   "automerge.stale_rollup_refresh_exhausted",
+  "automerge.stale_check_rerun", // W1-T8620: the once-per-(head, run id) job re-run; forgotten, it loops.
+  "automerge.merge_refusal_escalated", // W1-T8620: once per (head, refusal text); forgotten, it re-escalates.
   "automerge.risk_override_observed",
   "incident.event", // W1-T4385: sre-lane.ts files once per fingerprint from these two;
   "incident.sampled", // rotated away, a still-burning incident reads as new and is re-filed.
