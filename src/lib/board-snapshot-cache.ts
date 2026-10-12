@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { dirname, join } from "node:path";
 import type { BoardIssueRest, BoardPrRest } from "./open-prs-rest.js";
-import { fixedClock, systemClock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 
 const SNAPSHOT_SCHEMA = 1;
 const DEFAULT_MAX_BYTES = 128 * 1024 * 1024;
@@ -123,8 +123,11 @@ const defaultIo: BoardSnapshotIo = {
   },
 };
 
-function sameVersions<T extends { number: number; updatedAt: string }>(current: ReadonlyMap<number, T> | undefined, rows: readonly T[]): boolean {
-  return current?.size === rows.length && rows.every((row) => current.get(row.number)?.updatedAt === row.updatedAt);
+function sameVersions<T extends { number: number; updatedAt: string; createdAt?: string; mergedAt?: string }>(current: ReadonlyMap<number, T> | undefined, rows: readonly T[]): boolean {
+  return current?.size === rows.length && rows.every((row) => {
+    const held = current.get(row.number);
+    return held?.updatedAt === row.updatedAt && held.createdAt === row.createdAt && held.mergedAt === row.mergedAt;
+  });
 }
 
 class SnapshotRefusal extends Error {
@@ -170,7 +173,9 @@ function isClosedDiskRow(value: unknown, maxStringBytes: number): value is Close
     boundedString(row.headRefOid, maxStringBytes) &&
     boundedString(row.body, maxStringBytes) &&
     boundedString(row.title, maxStringBytes) &&
-    boundedString(row.updatedAt, maxStringBytes)
+    boundedString(row.updatedAt, maxStringBytes) &&
+    (row.createdAt === undefined || boundedString(row.createdAt, maxStringBytes)) &&
+    (row.mergedAt === undefined || boundedString(row.mergedAt, maxStringBytes))
   );
 }
 
@@ -196,6 +201,8 @@ function closedForDisk(row: BoardPrRest): ClosedDiskRow {
     body: row.body,
     title: row.title,
     updatedAt: row.updatedAt,
+    ...(row.createdAt === undefined ? {} : { createdAt: row.createdAt }),
+    ...(row.mergedAt === undefined ? {} : { mergedAt: row.mergedAt }),
   };
 }
 
@@ -272,7 +279,10 @@ export function readOpenBoardSnapshot(
   root: string,
   owner: string,
   repo: string,
-  read: (path: string) => string = (path) => fs.readFileSync(path, "utf8"),
+  read: (path: string) => string = (path) => {
+    if (fs.statSync(path).size > DEFAULT_MAX_BYTES) throw new SnapshotRefusal("oversized");
+    return fs.readFileSync(path, "utf8");
+  },
 ): { ok: true; snapshot: OpenBoardSnapshot } | { ok: false; reason: string } {
   const repository = `${owner}/${repo}`;
   let parsed: Partial<OpenBoardSnapshot> & { type?: unknown; schema?: unknown };
@@ -284,7 +294,8 @@ export function readOpenBoardSnapshot(
   if (parsed.type !== "board-open-snapshot" || parsed.schema !== OPEN_SNAPSHOT_SCHEMA || parsed.repository !== repository) {
     return { ok: false, reason: "open snapshot has another schema or repository" };
   }
-  const rows = Array.isArray(parsed.rows) ? parsed.rows : [];
+  if (!Array.isArray(parsed.rows) || parsed.rows.length > DEFAULT_MAX_ROWS) return { ok: false, reason: "open snapshot is incomplete or exceeds row bound" };
+  const rows = parsed.rows;
   if (typeof parsed.savedAt !== "string" || !rows.every((row) => isOpenDiskRow(row, DEFAULT_MAX_LINE_BYTES))) {
     return { ok: false, reason: "open snapshot holds an invalid row" };
   }
@@ -407,6 +418,7 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
       }
       const loaded: SnapshotState = {
         ...(header.channels.closed.complete ? { closed } : {}),
+        ...(typeof header.channels.closed.observedAt === "string" ? { closedObservedAt: header.channels.closed.observedAt } : {}),
         ...(header.channels.issues.complete ? { issues } : {}),
       };
       log("board_snapshot.loaded", "snapshot", closed.size + issues.size, bytes);
@@ -455,14 +467,15 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
 
     const nextState: SnapshotState =
       channel === "closed"
-        ? { ...state, closed: nextRows as Map<number, BoardPrRest> }
+        ? { ...state, closed: nextRows as Map<number, BoardPrRest>, closedObservedAt: (options.clock ?? systemClock).iso() }
         : { ...state, issues: nextRows as Map<number, BoardIssueRest> };
     const header: SnapshotHeader = {
       type: "board-snapshot",
       schema: SNAPSHOT_SCHEMA,
       repository,
       channels: {
-        closed: { complete: nextState.closed !== undefined, count: nextState.closed?.size ?? 0 },
+        closed: { complete: nextState.closed !== undefined, count: nextState.closed?.size ?? 0,
+          ...(nextState.closedObservedAt === undefined ? {} : { observedAt: nextState.closedObservedAt }) },
         issues: { complete: nextState.issues !== undefined, count: nextState.issues?.size ?? 0 },
       },
     };
@@ -616,6 +629,7 @@ export interface BoardSnapshotCache {
 
 export interface SharedBoardSnapshotRows {
   readonly closed?: ReadonlyMap<number, BoardPrRest>;
+  readonly closedObservedAt?: string;
   readonly issues?: ReadonlyMap<number, BoardIssueRest>;
 }
 
@@ -643,6 +657,7 @@ export function createBoardSnapshotReader(options: SnapshotOptions = {}): (root:
 }
 
 interface SnapshotOptions {
+  clock?: Clock;
   io?: BoardSnapshotIo;
   log?: (event: string, extra?: Record<string, unknown>) => void;
   bounds?: { maxBytes?: number; maxRows?: number; maxLineBytes?: number };
@@ -653,7 +668,7 @@ interface SnapshotHeader {
   schema: number;
   repository: string;
   channels: {
-    closed: { complete: boolean; count: number };
+    closed: { complete: boolean; count: number; observedAt?: string };
     issues: { complete: boolean; count: number };
   };
 }
@@ -674,9 +689,12 @@ interface ClosedDiskRow {
   body: string;
   title: string;
   updatedAt: string;
+  createdAt?: string;
+  mergedAt?: string;
 }
 
 interface SnapshotState {
   closed?: Map<number, BoardPrRest>;
+  closedObservedAt?: string;
   issues?: Map<number, BoardIssueRest>;
 }

@@ -7466,6 +7466,123 @@ components:
               scope: {type: string, enum: [repository, host, fleet]}
               totalUsd: {type: [number, "null"], minimum: 0}
               pricedSubtotalUsd: {type: [number, "null"], minimum: 0}
+    RepositoryFlowBucket:
+      type: object
+      additionalProperties: false
+      required: [date, opened, merged, deliveredTasks, repairedPrs, repairRounds]
+      properties:
+        date: {type: string, pattern: '^\d{4}-\d\d-\d\d$'}
+        opened: {type: [integer, "null"], minimum: 0}
+        merged: {type: [integer, "null"], minimum: 0}
+        deliveredTasks: {type: [integer, "null"], minimum: 0}
+        repairedPrs: {type: [integer, "null"], minimum: 0}
+        repairRounds: {type: [integer, "null"], minimum: 0}
+
+    RepositoryFlow:
+      description: >
+        Optional cached repository-flow-v1. PR events use GitHub clocks and native structured
+        delivery credit, never worker verdicts. Repair counts are observed retained receipts,
+        not verified historical absence or proof of recovery. Null is unknown, not zero.
+        Source observation clocks are independent of materialization; absent on older producers.
+      type: object
+      additionalProperties: false
+      required: [version, scope, repository, state, reason, materializedAt, sources, gaps, notCollected, windows]
+      properties:
+        version: {type: string, enum: [repository-flow-v1]}
+        scope: {type: string, enum: [repository]}
+        repository: {type: string, maxLength: 240}
+        state: {type: string, enum: [reported, partial, not_collected]}
+        reason: {type: [string, "null"], enum: [missing_source, invalid_source, over_budget, null]}
+        materializedAt: {type: string, format: date-time}
+        sources:
+          type: object
+          additionalProperties: false
+          required: [openObservedAt, closedObservedAt, prCorpus, ledgerObservedAt, ledgerCorpus, earliestLedgerAt, latestLedgerAt]
+          properties:
+            openObservedAt: {type: [string, "null"], format: date-time}
+            closedObservedAt: {type: [string, "null"], format: date-time}
+            prCorpus: {type: string, enum: [complete, partial, unavailable]}
+            ledgerObservedAt: {type: [string, "null"], format: date-time}
+            ledgerCorpus: {type: string, enum: [observed, partial, unavailable]}
+            earliestLedgerAt: {type: [string, "null"], format: date-time}
+            latestLedgerAt: {type: [string, "null"], format: date-time}
+        gaps: {type: array, maxItems: 16, items: {type: string, maxLength: 160}}
+        notCollected:
+          type: object
+          additionalProperties: false
+          required: [firstPass, repairLatency, backlog, efficiency]
+          properties:
+            firstPass: {type: string, enum: [initial-head and required-check policy evidence not collected]}
+            repairLatency: {type: string, enum: [required-current-head recovery evidence not collected]}
+            backlog: {type: string, enum: [historical daily backlog observations not collected]}
+            efficiency: {type: string, enum: [delivered-work price and token attribution evidence not collected]}
+        windows:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items:
+            type: object
+            additionalProperties: false
+            required: [days, from, through, buckets, summary, evidence, evidenceTruncated]
+            properties:
+              days: {type: integer, enum: [7, 30]}
+              from: {type: string, format: date-time}
+              through: {type: string, format: date-time}
+              buckets: {type: array, maxItems: 30, items: {$ref: "#/components/schemas/RepositoryFlowBucket"}}
+              summary:
+                type: object
+                additionalProperties: false
+                required: [opened, merged, deliveredTasks, repairedPrs, repairRounds, repairReasons, mergeLatency, openAge]
+                properties:
+                  opened: {type: [integer, "null"], minimum: 0}
+                  merged: {type: [integer, "null"], minimum: 0}
+                  deliveredTasks: {type: [integer, "null"], minimum: 0}
+                  repairedPrs: {type: [integer, "null"], minimum: 0}
+                  repairRounds: {type: [integer, "null"], minimum: 0}
+                  repairReasons:
+                    type: object
+                    additionalProperties: false
+                    required: [code, flake, infrastructure, conflict, unknown]
+                    properties:
+                      code: {type: [integer, "null"], minimum: 0}
+                      flake: {type: [integer, "null"], minimum: 0}
+                      infrastructure: {type: [integer, "null"], minimum: 0}
+                      conflict: {type: [integer, "null"], minimum: 0}
+                      unknown: {type: [integer, "null"], minimum: 0}
+                  mergeLatency:
+                    type: object
+                    additionalProperties: false
+                    required: [unit, samples, p50Ms, p90Ms, missingCreatedAt]
+                    properties:
+                      unit: {type: string, enum: [ms]}
+                      samples: {type: integer, minimum: 0}
+                      p50Ms: {type: [number, "null"], minimum: 0}
+                      p90Ms: {type: [number, "null"], minimum: 0}
+                      missingCreatedAt: {type: integer, minimum: 0}
+                  openAge:
+                    type: object
+                    additionalProperties: false
+                    required: [unit, censored, samples, oldestMs, missingCreatedAt]
+                    properties:
+                      unit: {type: string, enum: [ms]}
+                      censored: {type: boolean, enum: [true]}
+                      samples: {type: integer, minimum: 0}
+                      oldestMs: {type: [number, "null"], minimum: 0}
+                      missingCreatedAt: {type: integer, minimum: 0}
+              evidence:
+                type: array
+                maxItems: 64
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [prNumber, url, kind, at]
+                  properties:
+                    prNumber: {type: integer, minimum: 1}
+                    url: {type: string, maxLength: 320}
+                    kind: {type: string, enum: [opened, merged, repair]}
+                    at: {type: string, format: date-time}
+              evidenceTruncated: {type: boolean}
+
     AnalyticsView:
       type: object
       description: >
@@ -7542,6 +7659,8 @@ components:
                       $ref: "#/components/schemas/AnalyticsViewMetric"
                   gardenerSpend:
                     $ref: "#/components/schemas/GardenerSpend"
+                  repositoryFlow:
+                    $ref: "#/components/schemas/RepositoryFlow"
                   reason: {type: string}
                   details:
                     $ref: "#/components/schemas/AnalyticsStoredDetails"
