@@ -13,6 +13,7 @@ import {
   type IncidentInvariantRow,
 } from "../src/lib/incident-invariants.js";
 import { SRE_RUNBOOK_INCIDENTS } from "../src/lib/sre-runbooks.js";
+import { SRE_LANE_DETECTORS } from "../src/lib/sre-lane.js";
 
 /**
  * W1-T8233 — EVERY INCIDENT RULE READS A STEP SOMETHING WRITES.
@@ -117,6 +118,17 @@ test("W1-T8233: every runbook incident name is emitted or listed as debt", () =>
     if (!names.includes(listed)) problems.push(`${listed}: listed as debt but no runbook answers it`);
   }
   assert.deepEqual(problems, []);
+});
+
+test("W1-T8236: every registered fleet-flow detector input has a writer", () => {
+  for (const detector of SRE_LANE_DETECTORS) {
+    assert.ok(detector.inputs.length > 0, `${detector.id} must declare its inputs`);
+    for (const step of detector.inputs) {
+      const writers = writersOf(step).filter((file) =>
+        !SOURCES.find((source) => source.file === file)!.text.includes("FleetFlowDetector"));
+      assert.ok(writers.length > 0, `${detector.id} reads ${step}, but no independent source writes it`);
+    }
+  }
 });
 
 const NOW_MS = Date.parse("2026-10-11T19:00:00.000Z");
