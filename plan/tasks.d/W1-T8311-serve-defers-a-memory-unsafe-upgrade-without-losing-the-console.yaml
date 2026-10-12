@@ -9,7 +9,7 @@
   risk: high
   band_meaning: blast-radius
   budget_usd: 12.00
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator-approved pressure-safe rollout follow-up, 2026-10-11; production transition remains separately authorized"
   plan_refs: [W1-T6125, W1-T6245, W1-T6401, W1-T7390, W1-T7391, W1-T8230]
