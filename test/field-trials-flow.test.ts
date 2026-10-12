@@ -869,3 +869,28 @@ test("a Codex cash zero never substitutes for a missing trial notional receipt",
   assert.equal(projectFlowRow(rows[0]!, "assignment").provider, "codex");
   assert.equal(projectFlowRow(rows[3]!, "attempt").provider, "codex");
 });
+
+
+test("the sole private flow joins named preventive component execution without certifying whole-fix adoption or release", () => {
+  const e = { state: "observed", version: "ci-remedy-execution-v1", component: "ci-log-named-source-paths", lineageTask: "W1-T5801",
+    invocationId: "11111111-1111-1111-1111-111111111111", processInstanceId: "22222222-2222-2222-2222-222222222222",
+    pid: 123, callerRunId: "private-component-run", at: T(3),
+    identity: { caller: { state: "observed", source: "module-import-git", path: "src/run-task.ts", blob: "b".repeat(40), revision: "a".repeat(40), capturedAt: T(2) },
+      functionSha256: "c".repeat(64), dependencies: { existsSyncSha256: "d".repeat(64), joinSha256: "e".repeat(64), nodeVersion: "v24.21.0" } },
+    inputs: { failingChecks: 1, matchedPaths: 1, reachablePaths: 1, ownership: "compared" }, rawLog: "private-unstructured-log" };
+  const repair = { worker_run_id: "private-component-worker", worker_rung: "fix", repair_round_id: "private-component-round",
+    repair_pr_url: "https://github.com/acme/core/pull/9", prevention_execution: e };
+  const rows = [row("fix.remedy_path_execution", "task-1", "private-component-run", T(3), { prevention_execution: e }),
+    { ...assign("task-1", "private-component-run", "component-assignment", T(4)), ...repair },
+    row("worker.attempt", "task-1", "private-component-run", T(5), { ...repair, selection_assignment_id: "component-assignment", success: true })];
+  const snapshot = buildFieldTrialsFlowSnapshot({ asOf: T(10), sources: [{ label: "core", repo: "acme/core", ledger: flowReadOf(rows) }],
+    github: { version: "field-trials-github-v1", repos: { "acme/core": emptyRepoStore() } } });
+  const actual = snapshot.preventionExecution![0]!.evidence.records[0]!;
+  assert.equal(actual.laterWork.state, "observed"); assert.equal(actual.eligible, true);
+  assert.equal(actual.wholeFixAdoption, "not-certified"); assert.equal(actual.efficacyClaim, "none");
+  assert.equal(snapshot.preventionAdoption![0]!.evidence.state, "unavailable");
+  assert.doesNotMatch(JSON.stringify(snapshot), /private-unstructured-log|rawLog/);
+  const release = buildFieldTrialsRelease(snapshot, CONSENT, "component-private-release-salt");
+  assert.equal(release.state, "candidate");
+  assert.doesNotMatch(JSON.stringify(release), /preventionExecution|private-component|ci-remedy-execution|component-assignment|processInstanceId/);
+});
