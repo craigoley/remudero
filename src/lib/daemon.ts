@@ -5754,6 +5754,9 @@ export async function runDaemon(
     const refillAdmissions = new WeakMap<Task, {
       snapshot: { plan: Plan; isMerged: MergedSet }; finishedTaskId: string;
     }>();
+    // A promised handoff owns only its proposal, never an attempt or active-worker slot.
+    // Other freed lanes must not choose its ID/scope before the pool accepts it.
+    const refillProposals = new Set<Task>();
     let newBuildHeld = false;
     let refillClosed: string | undefined;
     let inFlightFreshness: Extract<DaemonFreshness, { stale: true }> | undefined;
@@ -5854,10 +5857,11 @@ export async function runDaemon(
             ...dispatchOpts,
             ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log),
             dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
-            excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...pendingMergedCredit, ...passIds]),
+            excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...pendingMergedCredit, ...passIds,
+              ...[...refillProposals].map((proposal) => proposal.id)]),
           });
-          const fits = partitionByFileOverlap([...inFlightTasks, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
-          next = fits.dispatch.find((t) => !inFlightTasks.has(t));
+          const fits = partitionByFileOverlap([...inFlightTasks, ...refillProposals, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
+          next = fits.dispatch.find((t) => !inFlightTasks.has(t) && !refillProposals.has(t));
           if (next) nextSnapshot = snapshot;
         };
         const readFailed = (e: unknown): void => {
@@ -5887,6 +5891,7 @@ export async function runDaemon(
           // attempt/snapshot/overlap slot is committed here. Give concurrent decisions distinct keys.
           const candidate = { ...next };
           refillAdmissions.set(candidate, { snapshot: nextSnapshot!, finishedTaskId: finished.id });
+          refillProposals.add(candidate);
           return candidate;
         };
         const decideFromPlan = (): Task | undefined | Promise<Task | undefined> => {
@@ -5962,6 +5967,7 @@ export async function runDaemon(
     const admitAtStart = (task: Task, lane: number, isRefill: boolean): boolean => {
       const refill = isRefill ? refillAdmissions.get(task) : undefined;
       if (isRefill) {
+        refillProposals.delete(task);
         // Concurrent proposals cannot spend the same task, overlap, max or WIP slot at handoff.
         // A throwing reader/logger is a pool fault, not a success-shaped refusal.
         const budget = laneDispatchBudget({
