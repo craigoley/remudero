@@ -41,7 +41,7 @@ const RECYCLE = "PAUSE requested: container recycle (deploy/recycle-container.sh
 const SHA = "d".repeat(40);
 
 /** The watchdog over a worker that is ACTIVE (never quiet), with the recycle reader and checkpoint seams injected. */
-function busyRig(seams: { recycle: () => string | undefined; endRound: (reason: string, trigger?: "recycle") => Promise<EndRoundResult> }) {
+function busyRig(seams: { recycle: () => string | undefined; endRound: (reason: string, trigger?: "recycle" | "restart") => Promise<EndRoundResult> }) {
   const clock = { ms: 0 };
   const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
   let judged = 0;
