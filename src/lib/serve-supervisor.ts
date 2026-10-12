@@ -307,6 +307,7 @@ export function readServeUpgradeThresholds(slotDir: string, read: (path: string)
   try {
     return serveUpgradeThresholdsFromPolicy(read(join(slotDir, "plan", "policy.yaml")));
   } catch (err) {
+    // an unreadable policy is a named hold for the caller, never a default threshold
     return { unread: `plan/policy.yaml: ${errorText(err)}` };
   }
 }
@@ -325,6 +326,7 @@ export async function readHostPressure(ports: { read?: (path: string) => string;
       if (value === undefined) unread.push(`${name}: no such field`);
       return value;
     } catch (err) {
+      // the failure is named in `unread`, which holds the upgrade; undefined is never read as zero
       unread.push(`${name}: ${errorText(err)}`);
       return undefined;
     }
