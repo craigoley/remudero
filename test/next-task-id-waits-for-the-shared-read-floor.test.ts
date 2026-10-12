@@ -13,13 +13,13 @@ import {
 } from "../src/lib/github-transport.js";
 import { HANDLERS } from "../src/run-task.js";
 
-function fixture(t: TestContext, cooldown?: string) {
+function fixture(t: TestContext, cooldown?: string, elapsedMs = 120_000) {
   const dir = mkdtempSync(join(tmpdir(), "rmd-next-id-floor-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const env = { RMD_GH_CACHE_HOME: dir, RMD_GH_TRANSPORT_FLOOR: "wait", RMD_GH_COOLDOWN_S: cooldown };
   const path = ghReadCadenceStampPath(env)!;
   let now = 1_000_000;
-  let last = now - 120_000;
+  let last = now - elapsedMs;
   const events: string[] = [];
   const warnings: string[] = [];
   const sleep = (ms: number) => {
@@ -37,22 +37,27 @@ function fixture(t: TestContext, cooldown?: string) {
 }
 
 test("W1-T7957: a wait-mode read waits out the shared floor before reading", async (t) => {
-  for (const asyncRead of [false, true]) {
-    const f = fixture(t);
+  for (const [asyncRead, elapsedMs] of [
+    [false, 120_000], [false, 120_500], [true, 120_000], [true, 120_500],
+  ] as const) {
+    const f = fixture(t, undefined, elapsedMs);
+    const waitMs = 180_000 - elapsedMs;
+    const admittedAt = 1_000_000 + waitMs;
     await withGhTransportFloorMode("wait", async () => {
       const decision = asyncRead
         ? await applyGhReadCadenceAsync(["api", "repos/o/r/pulls"], f.deps)
         : applyGhReadCadence(["api", "repos/o/r/pulls"], f.deps);
       assert.equal(decision.allow, true);
       f.events.push(`read:${f.now()}`);
-      assert.deepEqual(f.events, ["sleep:60000", "stamp:1060000", "read:1060000"]);
-      assert.equal(f.last(), 1_060_000);
+      assert.deepEqual(f.events, [`sleep:${waitMs}`, `stamp:${admittedAt}`, `read:${admittedAt}`]);
+      assert.equal(f.last(), admittedAt);
       assert.equal(f.warnings.length, 1);
-      assert.match(f.warnings[0], /wait.*60s.*180s/);
+      assert.ok(f.warnings[0].includes(`waiting ${waitMs / 1000}s`));
+      assert.ok(f.warnings[0].includes("180s"));
       assert.ok(f.warnings[0].includes(f.path));
       f.events.length = 0;
       applyGhReadCadence(["api", "repos/o/r/pulls"], f.deps);
-      assert.deepEqual(f.events, ["stamp:1060000"], "the invocation's next read uses its burst");
+      assert.deepEqual(f.events, [`stamp:${admittedAt}`], "the invocation's next read uses its burst");
     }, f.env);
     assert.equal(existsSync(`${f.path}.lock`), false);
   }
@@ -128,6 +133,7 @@ test("W1-T7957: the transport window reads RMD_GH_COOLDOWN_S like the hook", asy
     [undefined, 180, 60_000], ["", 180, 60_000], ["garbage", 180, 60_000],
     ["-1", 180, 60_000], ["1.5", 180, 60_000], [" 0", 180, 60_000],
     ["+0", 180, 60_000], ["240", 240, 120_000], ["0240", 240, 120_000],
+    ["0\n", 180, 60_000], ["240\r\n", 180, 60_000],
     ["0", 0, 0], ["000", 0, 0],
   ] as const) {
     const f = fixture(t, raw);

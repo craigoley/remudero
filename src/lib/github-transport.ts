@@ -1138,11 +1138,13 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     // Read at evaluation, not planning: an async read may wait in the lock queue meanwhile.
     const burstAllowed = !isWrite && !isExempt && (ghReadBurstScope?.remaining ?? 0) > 0;
     const mode = resolveGhTransportFloorMode(env);
+    const nowMs = now();
+    const lastReadMs = readStampMs(stampPath);
     const decision = ghReadCadenceDecision({
       isWrite,
       isExempt,
-      nowMs: now(),
-      lastReadMs: readStampMs(stampPath),
+      nowMs,
+      lastReadMs,
       mode,
       windowS,
     });
@@ -1155,7 +1157,9 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     // (`rate_limit`) and a write never open a burst, so neither can be used to buy one for a loop
     // that would otherwise be refused.
     else if (!isWrite && !isExempt && ghReadBurstScope) ghReadBurstScope.remaining = ghReadBurst(env);
-    floorWaitMs = decision.paced && !burstAllowed && mode === "wait" ? (decision.windowS - (decision.ageS ?? 0)) * 1000 : 0;
+    floorWaitMs = decision.paced && !burstAllowed && mode === "wait"
+      ? Math.max(0, decision.windowS * 1000 - Math.max(0, nowMs - (lastReadMs ?? nowMs)))
+      : 0;
     if (floorWaitMs > 0) {
       const warn = deps.warn ?? ((line: string) => void process.stderr.write(`${line}\n`));
       warn(`gh read cadence (wait, W1-T7957): waiting ${floorWaitMs / 1000}s for the ${decision.windowS}s floor on ${stampPath}`);
