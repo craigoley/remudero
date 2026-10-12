@@ -550,3 +550,25 @@ test("a parked checkpoint's receipt outlives its verdict row's rotation", async 
     assert.equal(again.rows.filter(({ step }) => step === "run.freshness_handoff").length, 0, "a recorded receipt is not re-written");
   } finally { await again.cleanup(); }
 });
+
+// 2026-10-12 09:00:45: W1-T8000 freed lane 2 and one container-short WIP reading (measured_bound 0) held it with
+// `governor: queue`. The reading was never re-taken, so the lane sat empty while W1-T7812 and W1-T7735 ran on.
+test("a lane a governor holds parks and refills once a later dispatch tick's reading admits", async () => {
+  let governed = false;
+  const h = phase(60 * minute, { checkQueueGovernor: () => governed ? ({ observedOpenCount: 3, wipLimit: 13 } as never) : undefined });
+  try {
+    await flush();
+    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C"]);
+    governed = true;
+    await h.settle("B", 2);
+    await h.tick(3);
+    await h.tick(4);
+    assert.equal(h.started.length, 3, "the governor still defers");
+    assert.deepEqual(h.rows.filter(({ step, extra }) => step === "dispatch.lane_parked" && extra?.reason === "governor: queue")
+      .map(({ extra }) => [extra?.finished_task, extra?.waiting_on]), [["B", ["A", "C"]]], "one row per park, not per tick");
+    governed = false;
+    await h.tick(5);
+    assert.deepEqual(h.started.slice(3), [{ id: "D", age: 5 * minute }]);
+    assert.equal(h.rows.some(({ step, extra }) => step === "dispatch.lane_refill_held" && String(extra?.reason).startsWith("governor")), false);
+  } finally { await h.cleanup(); }
+});
