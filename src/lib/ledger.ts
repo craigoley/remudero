@@ -563,6 +563,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "run.start",
   "memory_read.recovered", // W1-T7720: past recovery durations derive the sustained-unreadable bound.
   "sweep.fix.owner_residue_preserved", // W1-T6434: the next fix round reads the preserved patch it names.
+  "refresh.clearance", // W1-T8086: refusedRefreshClearancesFromLedger (lib/base-reproduction.ts) reads refused rows back; rotated away, a refused refresh is re-probed.
   "automerge.rearmed_after_disarm",
   "automerge.rearm_exhausted",
   "automerge.stale_rollup_refreshed", // W1-T6404: the once-per-PR refresh bound; forgotten, it loops.
