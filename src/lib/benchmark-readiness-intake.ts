@@ -12,11 +12,48 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { READINESS_FOLLOW_UPS_FILE, type ReadinessGap } from "./benchmark-aa-readiness.js";
 import type { Clock } from "./clock.js";
-import type { OpportunityCandidate, OpportunityIntakeResult, OpportunityWork } from "./opportunity-intake.js";
+import type { FeedbackEntry } from "./feedback.js";
+import type { Proposal } from "./inbox.js";
+import type { Task } from "./plan.js";
 
-export interface ReadinessGapRecord { ts: string; key: string; trialId: string; gap: ReadinessGap; repo: string }
+/**
+ * The shapes this adapter shares with opportunity-intake.ts, declared structurally HERE: importing them from the
+ * intake would close a ring (the intake calls this adapter), and the cycle ratchet allows none.
+ */
+export interface ReadinessCandidate {
+  source: "benchmark-readiness";
+  repo: string;
+  key: string;
+  observedAt: string;
+  recordedAt?: string;
+  anchor: string;
+  availability: "available";
+  freshness: "fresh";
+  population: { affected: number; denominator: number; unit: string };
+  impact: { value: number; unit: string };
+  remedy: string;
+  authority: "machine" | "operator";
+  related: { task?: string; pr?: string };
+}
+export interface ReadinessWork { proposals: Proposal[]; tasks: Task[]; mergedKeys: string[]; prs: { body: string }[]; feedback: FeedbackEntry[] }
+export interface ReadinessIntakeView {
+  status: "promoted" | "empty" | "unavailable" | "held";
+  candidate?: { key: string };
+  destination?: "plan-pr" | "inbox";
+  prUrl?: string;
+  unavailable: string[];
+  deduped: string[];
+}
+
+/**
+ * Declared HERE, not in benchmark-aa-readiness.ts, so this adapter stays a leaf of the readiness driver: the
+ * driver re-exports both, and importing the driver from here would close a ring through instance-gateway.
+ */
+export const READINESS_FOLLOW_UPS_FILE = "benchmark-aa-readiness.follow-ups.ndjson";
+export interface ReadinessGap { kind: string; machineRepairable: boolean; detail: string }
+
+export interface ReadinessGapRecord{ ts: string; key: string; trialId: string; gap: ReadinessGap; repo: string }
 
 export interface ReadinessGapRead {
   /** Valid records that name the expected repository, first occurrence of each key. */
@@ -84,7 +121,7 @@ export interface ReadinessCandidatePorts { repo: string; clock: Clock; readReadi
  * The opportunity collector's readiness source. A port that is absent contributes nothing; a present port that
  * cannot be trusted contributes `unavailable` text, so an unreadable sidecar never looks like "no gap".
  */
-export function collectBenchmarkReadinessCandidates(ports: ReadinessCandidatePorts): { candidates: OpportunityCandidate[]; unavailable: string[] } {
+export function collectBenchmarkReadinessCandidates(ports: ReadinessCandidatePorts): { candidates: ReadinessCandidate[]; unavailable: string[] } {
   if (!ports.readReadinessGaps) return { candidates: [], unavailable: [] };
   let read: ReadinessGapRead;
   try { read = ports.readReadinessGaps(); }
@@ -93,7 +130,7 @@ export function collectBenchmarkReadinessCandidates(ports: ReadinessCandidatePor
     return { candidates: [], unavailable: [reason] };
   }
   const observedAt = ports.clock.iso();
-  const candidates = read.records.map((record): OpportunityCandidate => ({
+  const candidates = read.records.map((record): ReadinessCandidate => ({
     source: "benchmark-readiness", repo: ports.repo, key: `benchmark-readiness:${record.key}`, observedAt, recordedAt: record.ts,
     anchor: `${READINESS_FOLLOW_UPS_FILE}#${record.key}`, availability: "available", freshness: "fresh",
     population: { affected: 1, denominator: read.records.length, unit: "recorded calibration gaps" },
@@ -120,7 +157,7 @@ export interface ReadinessGapOutcome {
  * Report where a readiness candidate stands. "filed" needs a task id plus the source receipt (the Opportunity-Key the
  * task's origin or text carries); a feedback entry, an open PR or a sidecar line alone is never reported as filed.
  */
-export function readinessGapOutcome(candidate: Pick<OpportunityCandidate, "repo" | "key">, work: OpportunityWork, intake?: OpportunityIntakeResult): ReadinessGapOutcome {
+export function readinessGapOutcome(candidate: { repo: string; key: string }, work: ReadinessWork, intake?: ReadinessIntakeView): ReadinessGapOutcome {
   const key = candidate.key;
   const qualified = `${candidate.repo}/${key}`;
   const marker = `Opportunity-Key: ${qualified}`;

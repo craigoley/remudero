@@ -38,11 +38,12 @@ import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, parseInstanceRegistry } from "./in
 import type { PairedAttemptDispatch, PairedGrader } from "./paired-trial.js";
 import type { AcceptanceCriterion } from "./plan.js";
 import { parseWhitelistedProof } from "./review.js";
+import { READINESS_FOLLOW_UPS_FILE, type ReadinessGap } from "./benchmark-readiness-intake.js";
 
 export const BENCHMARK_AA_READINESS_VERSION = "benchmark-aa-readiness-v1" as const;
 export const READINESS_POPULATION_VERSION = "benchmark-aa-readiness-population-v1" as const;
 export const READINESS_ORDER_METHOD = "sha256(benchmark-aa-readiness-order-v1, allocationReceiptHash, taskId)" as const;
-export const READINESS_FOLLOW_UPS_FILE = "benchmark-aa-readiness.follow-ups.ndjson";
+export { READINESS_FOLLOW_UPS_FILE };
 const REVISION_FIELDS = ["harnessRevision", "promptRevision", "toolRevision", "scorerRevision", "environmentRevision"] as const;
 type RevisionField = typeof REVISION_FIELDS[number];
 
@@ -275,7 +276,7 @@ function cashOf(rows: readonly Row[]) {
     billingUnknownAttempts: of(null).length };
 }
 
-export interface ReadinessGap { kind: string; machineRepairable: boolean; detail: string }
+export type { ReadinessGap };
 
 export interface BenchmarkAaReadinessInput<T extends ReadinessTask = ReadinessTask> {
   /** The local instance's state dir: where a new registration goes and where follow-ups are filed. */
