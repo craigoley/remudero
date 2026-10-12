@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,12 +6,11 @@ import { test, type TestContext } from "node:test";
 import { boundedGardenPassSpawn, childGardenPassSpawn, startGardenOffLoop } from "../src/lib/garden-registry.js";
 import type { GardenerRuntimeEvent } from "../src/lib/gardener-runtime.js";
 import { appendLedger } from "../src/lib/ledger.js";
+import * as origin from "../src/lib/worker-containment.js";
 
 const passId = "a5142db1-3dab-4f50-8f8f-a25cfb8e8db1";
-// The canonical executor copies this test onto merge base. Absence of the new module
-// must become a genuine assertion failure there, not an import/toolchain-unknown verdict.
-const origin = existsSync(new URL("../src/lib/gardener-origin.ts", import.meta.url))
-  ? await import("../src/lib/gardener-origin.js") : undefined;
+// Namespace import lets the canonical executor load this test on the old module:
+// absent carrier exports must fail an assertion, not cause an import-unknown verdict.
 const GARDENER_ORIGIN_ENV = "REMUDERO_GARDENER_ORIGIN";
 const carrier = JSON.stringify({ version: 1, name: "plan", passId });
 const linked = { state: "linked", version: 1, name: "plan", passId };
@@ -26,7 +24,6 @@ async function records(path: string): Promise<Array<Record<string, unknown>>> {
 }
 
 test("gardener origin is a bounded closed correlation carrier and never raw environment data", () => {
-  assert.ok(origin, "the merge base has no gardener correlation carrier");
   assert.equal(origin.GARDENER_ORIGIN_ENV, GARDENER_ORIGIN_ENV);
   const { GARDENER_ORIGIN_MAX_BYTES, gardenerOriginEnv, readGardenerOrigin } = origin;
   assert.equal(gardenerOriginEnv("plan", passId), carrier);

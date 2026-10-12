@@ -35,7 +35,7 @@ import { recordShadowMemoryVerdict } from "./host-memory-shadow.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { randomUUID } from "node:crypto";
 import type { GardenerRuntimeEvent } from "./gardener-runtime.js";
-import { GARDENER_ORIGIN_ENV, gardenerOriginEnv } from "./gardener-origin.js";
+import { GARDENER_ORIGIN_ENV, gardenerOriginEnv } from "./worker-containment.js";
 
 /** The gardens the daemon runs off its loop, in the order its `gardens` list has always wired them. */
 export const REGISTERED_GARDEN_NAMES = [
