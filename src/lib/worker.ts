@@ -93,6 +93,7 @@ import { hashInstallInputs } from "./install-hash.js";
 import { refreshCanonicalSeed } from "./typecheck-buildinfo.js";
 import { systemClock, type Clock } from "./clock.js";
 import { ghExec, ghJson } from "./github-transport.js";
+import type { ClosingReferenceGuardResult } from "./closing-reference-guard.js";
 import { loadLayeredLearnings, loadLearningsCorpus, lookupWorkerRule, type LayeredLearningsHomes } from "./learnings.js";
 // W1-T2896 acceptance grep token for this shared transport import: github-transport"
 export {
@@ -7119,8 +7120,17 @@ export function ghPrView(prUrl: string): { state: string; mergeable: string; url
   };
 }
 
-export function ghPrMergeSquash(prUrl: string): string {
+/** `closingReferences` is required, so no caller can merge without the closing-reference guard that
+ *  attemptArm runs (lib/closing-reference-guard.ts): a failed guard withholds the merge. */
+export function ghPrMergeSquash(prUrl: string, closingReferences: (prUrl: string) => ClosingReferenceGuardResult): string {
   assertLiveWriteAllowed("gh-pr-merge", `merging ${prUrl}`);
+  const guard = closingReferences(prUrl);
+  if (guard.state === "failed") {
+    throw new Error(
+      `merge withheld: ${guard.detail ?? "the closing-reference guard failed"} — merging could close an open pull request ` +
+        `this body names: ${prUrl}`,
+    );
+  }
   // TRAP: NO `--delete-branch`. `gh pr merge --help` documents it as deleting the LOCAL branch too, which needs a resolvable
   // current branch — and a caller running from the daemon's deliberately detached checkout has none, so the call failed "not
   // on any branch" even when the merge landed. The repository carries `delete_branch_on_merge: true`, so the head branch is
