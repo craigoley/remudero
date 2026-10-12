@@ -44,11 +44,16 @@ const schema = z.strictObject({ version: z.literal(REPOSITORY_FLOW_VERSION), sco
   sources: z.strictObject({ openObservedAt: stamp.nullable(), closedObservedAt: stamp.nullable(),
     prCorpus: z.enum(["complete", "partial", "unavailable"]),
     ledgerObservedAt: stamp.nullable(), ledgerCorpus: z.enum(["observed", "partial", "unavailable"]),
-    earliestLedgerAt: stamp.nullable(), latestLedgerAt: stamp.nullable() }),
+    earliestLedgerAt: stamp.nullable(), latestLedgerAt: stamp.nullable(), observedPrs: nullableCount,
+    observedRepairIdentities: nullableCount }),
+  limits: z.strictObject({ prRows: z.literal(MAX_PRS), repairIdentities: z.literal(MAX_REPAIR_IDENTITIES),
+    publicBytes: z.literal(REPOSITORY_FLOW_MAX_BYTES), evidencePerWindow: z.literal(64) }),
   gaps: z.array(z.string().max(160)).max(16),
   notCollected: z.strictObject({ firstPass: z.literal(unknowns.firstPass), repairLatency: z.literal(unknowns.repairLatency),
     backlog: z.literal(unknowns.backlog), efficiency: z.literal(unknowns.efficiency) }),
   windows: z.array(z.strictObject({ days: z.union([z.literal(7), z.literal(30)]), from: stamp, through: stamp,
+    coverage: z.strictObject({ opened: z.enum(["complete", "observed", "unknown"]), merged: z.enum(["complete", "observed", "unknown"]),
+      repairs: z.enum(["observed", "unknown"]), partialCounts: z.literal("observed lower bounds; not complete historical totals") }),
     buckets: z.array(bucketSchema).max(30), summary: summarySchema,
     evidence: z.array(z.strictObject({ prNumber: z.number().int().positive(), url: z.string().max(320),
       kind: z.enum(["opened", "merged", "repair"]), at: stamp })).max(64),
@@ -67,9 +72,12 @@ function empty(repository: string, now: number, reason: RepositoryFlow["reason"]
   const endDay = Math.floor(now / DAY_MS) * DAY_MS;
   return { version: REPOSITORY_FLOW_VERSION, scope: "repository", repository, state: "not_collected", reason,
     materializedAt: through, sources: { openObservedAt: null, closedObservedAt: null, prCorpus: "unavailable",
-      ledgerObservedAt: null, ledgerCorpus: "unavailable", earliestLedgerAt: null, latestLedgerAt: null },
+      ledgerObservedAt: null, ledgerCorpus: "unavailable", earliestLedgerAt: null, latestLedgerAt: null,
+      observedPrs: null, observedRepairIdentities: null },
+    limits: { prRows: MAX_PRS, repairIdentities: MAX_REPAIR_IDENTITIES, publicBytes: REPOSITORY_FLOW_MAX_BYTES, evidencePerWindow: 64 },
     gaps: [], notCollected: { ...unknowns }, windows: [7, 30].map(days => ({ days: days as 7 | 30,
       from: fixedClock(endDay - (days - 1) * DAY_MS).iso(), through,
+      coverage: { opened: "unknown", merged: "unknown", repairs: "unknown", partialCounts: "observed lower bounds; not complete historical totals" },
       buckets: Array.from({ length: days }, (_, i) => ({ date: fixedClock(endDay - (days - 1 - i) * DAY_MS).iso().slice(0, 10),
         opened: null, merged: null, deliveredTasks: null, repairedPrs: null, repairRounds: null })),
       summary: { opened: null, merged: null, deliveredTasks: null, repairedPrs: null, repairRounds: null,
@@ -105,6 +113,7 @@ export async function captureRepositoryFlow(root: string, stateDir: string, repo
   const [owner, repo] = repository.split("/") as [string, string];
   const closed = boardReader(root, owner, repo);
   const open = readOpenBoardSnapshot(root, owner, repo);
+  if (!open.ok && /bound|oversized/.test(open.reason)) return empty(repository, now, "over_budget");
   const openAt = open.ok ? time(open.snapshot.savedAt) : undefined;
   const closedAt = time(closed.closedObservedAt);
   const rows = [...closed.closed?.values() ?? [], ...open.ok ? open.snapshot.rows : []];
@@ -136,6 +145,7 @@ export async function captureRepositoryFlow(root: string, stateDir: string, repo
   result.sources.openObservedAt = openAt === undefined ? null : fixedClock(openAt).iso();
   result.sources.closedObservedAt = closedAt === undefined ? null : fixedClock(closedAt).iso();
   result.sources.prCorpus = prComplete ? "complete" : rows.length ? "partial" : "unavailable";
+  result.sources.observedPrs = closed.closed !== undefined || open.ok ? prs.size : null;
   const gaps = new Set<string>();
   if (!prComplete) gaps.add("open or closed PR snapshot is missing or incomplete");
   if (openAt === undefined || closedAt === undefined) gaps.add("legacy snapshot has no source observation clock");
@@ -162,7 +172,8 @@ export async function captureRepositoryFlow(root: string, stateDir: string, repo
         !/^[a-f0-9]{40,64}$/.test(row.head_sha) || typeof row.round_id !== "string" || !row.round_id.length ||
         row.round_id.length > 160 || !(row.pr_url === `https://github.com/${repository}/pull/${n}` ||
           row.pr_url === undefined && (row.repository === repository || row.repo === repository)) ||
-        row.repository !== undefined && row.repository !== repository || row.repo !== undefined && row.repo !== repository) {
+        row.repository !== undefined && row.repository !== repository ||
+        typeof row.repo === "string" && row.repo.includes("/") && row.repo !== repository) {
         gaps.add("repair rows without exact repository PR head and round were excluded"); return;
       }
       const reason = reasonNames.includes(row.reason_class as typeof reasonNames[number])
@@ -175,7 +186,7 @@ export async function captureRepositoryFlow(root: string, stateDir: string, repo
         gaps.add("conflicting repair identity observations retain unknown classification");
       }
     } });
-  try { for await (const row of stream) { void row; } }
+  try { for await (const row of stream) { void row; if (overflow) break; } }
   catch {
     // The public ledgerCorpus remains partial/unavailable and repair totals cannot claim completeness.
     complete = false;
@@ -185,9 +196,10 @@ export async function captureRepositoryFlow(root: string, stateDir: string, repo
   result.sources.ledgerCorpus = live && complete ? "observed" : live || earliest !== undefined ? "partial" : "unavailable";
   result.sources.earliestLedgerAt = earliest === undefined ? null : fixedClock(earliest).iso();
   result.sources.latestLedgerAt = latest === undefined ? null : fixedClock(latest).iso();
+  result.sources.observedRepairIdentities = repairs.size || live ? repairs.size : null;
   if (!complete || !live) gaps.add("retained ledger corpus is unavailable or partially readable");
   gaps.add("repair counts cover observed retained receipts, not verified full historical absence");
-  if (overflow) gaps.add("repair identity input exceeds bounded exact dedup capacity");
+  if (overflow) return empty(repository, now, "over_budget");
   for (const window of result.windows) {
     const from = Date.parse(window.from);
     const inWindow = (at: number | undefined): at is number => at !== undefined && at >= from && at <= now;
@@ -205,7 +217,7 @@ export async function captureRepositoryFlow(root: string, stateDir: string, repo
       const created = time(p.createdAt), mergedAt = time(p.mergedAt);
       if (created === undefined || created > now) missingOpened = true;
       if (inWindow(created)) { opened.add(p.number); counts.get(fixedClock(created).iso().slice(0, 10))!.opened.add(p.number); add(p.number, "opened", created); }
-      if (p.state === "MERGED" && (mergedAt === undefined || mergedAt > now)) missingMerge = true;
+      if (p.state === "MERGED" && (mergedAt === undefined || mergedAt > now) && (time(p.updatedAt) ?? now) >= from) missingMerge = true;
       if (p.state === "MERGED" && inWindow(mergedAt)) {
         merged.add(p.number); const bucket = counts.get(fixedClock(mergedAt).iso().slice(0, 10))!; bucket.merged.add(p.number);
         for (const task of delivered.get(p.number) ?? []) { tasks.add(task); bucket.tasks.add(task); }
@@ -218,7 +230,7 @@ export async function captureRepositoryFlow(root: string, stateDir: string, repo
     }
     const observed = [...repairs].filter(([, r]) => inWindow(r.at));
     const repairedPrs = new Set(observed.map(([, r]) => r.pr));
-    const repairKnown = live && complete && !overflow && (observed.length > 0 || earliest !== undefined && earliest <= from);
+    const repairKnown = observed.length > 0;
     const reasons = { code: 0, flake: 0, infrastructure: 0, conflict: 0, unknown: 0 };
     for (const [key, r] of observed) {
       const bucket = counts.get(fixedClock(r.at).iso().slice(0, 10))!;
@@ -226,14 +238,18 @@ export async function captureRepositoryFlow(root: string, stateDir: string, repo
     }
     const mergesKnown = prComplete && !missingMerge;
     const openedKnown = prComplete && !missingOpened;
+    const observedCount = (count: number, isComplete: boolean) => isComplete || count > 0 ? count : null;
+    window.coverage = { opened: openedKnown ? "complete" : opened.size ? "observed" : "unknown",
+      merged: mergesKnown ? "complete" : merged.size ? "observed" : "unknown", repairs: repairKnown ? "observed" : "unknown",
+      partialCounts: "observed lower bounds; not complete historical totals" };
     for (const bucket of window.buckets) {
       const count = counts.get(bucket.date)!;
-      Object.assign(bucket, { opened: openedKnown ? count.opened.size : null, merged: mergesKnown ? count.merged.size : null,
-        deliveredTasks: mergesKnown ? count.tasks.size : null, repairedPrs: repairKnown ? count.repairs.size : null,
-        repairRounds: repairKnown ? count.rounds.size : null });
+      Object.assign(bucket, { opened: observedCount(count.opened.size, openedKnown), merged: observedCount(count.merged.size, mergesKnown),
+        deliveredTasks: observedCount(count.tasks.size, mergesKnown), repairedPrs: observedCount(count.repairs.size, false),
+        repairRounds: observedCount(count.rounds.size, false) });
     }
-    Object.assign(window.summary, { opened: openedKnown ? opened.size : null, merged: mergesKnown ? merged.size : null,
-      deliveredTasks: mergesKnown ? tasks.size : null, repairedPrs: repairKnown ? repairedPrs.size : null,
+    Object.assign(window.summary, { opened: observedCount(opened.size, openedKnown), merged: observedCount(merged.size, mergesKnown),
+      deliveredTasks: observedCount(tasks.size, mergesKnown), repairedPrs: repairKnown ? repairedPrs.size : null,
       repairRounds: repairKnown ? observed.length : null,
       repairReasons: repairKnown ? reasons : { code: null, flake: null, infrastructure: null, conflict: null, unknown: null },
       mergeLatency: { unit: "ms", samples: latencies.length, p50Ms: percentile(latencies, .5), p90Ms: percentile(latencies, .9), missingCreatedAt: missingCreation },
@@ -244,5 +260,6 @@ export async function captureRepositoryFlow(root: string, stateDir: string, repo
   result.reason = rows.length || prComplete || repairs.size ? null : "missing_source";
   result.state = result.reason ? "not_collected" : "partial";
   result.gaps = [...gaps];
+  result.materializedAt = clock.iso();
   return publicRepositoryFlow(result, repository, clock.iso());
 }

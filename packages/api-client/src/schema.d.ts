@@ -2962,6 +2962,14 @@ export interface components {
         ledgerCorpus: "observed" | "partial" | "unavailable";
         earliestLedgerAt: string | null;
         latestLedgerAt: string | null;
+        observedPrs: number | null;
+        observedRepairIdentities: number | null;
+      };
+      limits: {
+        prRows: 100000;
+        repairIdentities: 65536;
+        publicBytes: 65536;
+        evidencePerWindow: 64;
       };
       gaps: (string)[];
       notCollected: {
@@ -2974,6 +2982,12 @@ export interface components {
         days: 7 | 30;
         from: string;
         through: string;
+        coverage: {
+          opened: "complete" | "observed" | "unknown";
+          merged: "complete" | "observed" | "unknown";
+          repairs: "observed" | "unknown";
+          partialCounts: "observed lower bounds; not complete historical totals";
+        };
         buckets: (RepositoryFlowBucket)[];
         summary: {
           opened: number | null;

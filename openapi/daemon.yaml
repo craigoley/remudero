@@ -7486,7 +7486,7 @@ components:
         Source observation clocks are independent of materialization; absent on older producers.
       type: object
       additionalProperties: false
-      required: [version, scope, repository, state, reason, materializedAt, sources, gaps, notCollected, windows]
+      required: [version, scope, repository, state, reason, materializedAt, sources, limits, gaps, notCollected, windows]
       properties:
         version: {type: string, enum: [repository-flow-v1]}
         scope: {type: string, enum: [repository]}
@@ -7497,7 +7497,7 @@ components:
         sources:
           type: object
           additionalProperties: false
-          required: [openObservedAt, closedObservedAt, prCorpus, ledgerObservedAt, ledgerCorpus, earliestLedgerAt, latestLedgerAt]
+          required: [openObservedAt, closedObservedAt, prCorpus, ledgerObservedAt, ledgerCorpus, earliestLedgerAt, latestLedgerAt, observedPrs, observedRepairIdentities]
           properties:
             openObservedAt: {type: [string, "null"], format: date-time}
             closedObservedAt: {type: [string, "null"], format: date-time}
@@ -7506,6 +7506,17 @@ components:
             ledgerCorpus: {type: string, enum: [observed, partial, unavailable]}
             earliestLedgerAt: {type: [string, "null"], format: date-time}
             latestLedgerAt: {type: [string, "null"], format: date-time}
+            observedPrs: {type: [integer, "null"], minimum: 0}
+            observedRepairIdentities: {type: [integer, "null"], minimum: 0}
+        limits:
+          type: object
+          additionalProperties: false
+          required: [prRows, repairIdentities, publicBytes, evidencePerWindow]
+          properties:
+            prRows: {type: integer, enum: [100000]}
+            repairIdentities: {type: integer, enum: [65536]}
+            publicBytes: {type: integer, enum: [65536]}
+            evidencePerWindow: {type: integer, enum: [64]}
         gaps: {type: array, maxItems: 16, items: {type: string, maxLength: 160}}
         notCollected:
           type: object
@@ -7523,11 +7534,20 @@ components:
           items:
             type: object
             additionalProperties: false
-            required: [days, from, through, buckets, summary, evidence, evidenceTruncated]
+            required: [days, from, through, coverage, buckets, summary, evidence, evidenceTruncated]
             properties:
               days: {type: integer, enum: [7, 30]}
               from: {type: string, format: date-time}
               through: {type: string, format: date-time}
+              coverage:
+                type: object
+                additionalProperties: false
+                required: [opened, merged, repairs, partialCounts]
+                properties:
+                  opened: {type: string, enum: [complete, observed, unknown]}
+                  merged: {type: string, enum: [complete, observed, unknown]}
+                  repairs: {type: string, enum: [observed, unknown]}
+                  partialCounts: {type: string, enum: ["observed lower bounds; not complete historical totals"]}
               buckets: {type: array, maxItems: 30, items: {$ref: "#/components/schemas/RepositoryFlowBucket"}}
               summary:
                 type: object

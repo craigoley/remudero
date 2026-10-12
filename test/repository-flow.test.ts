@@ -34,17 +34,17 @@ function world(t: {after(fn: () => void): void}, rows: BoardPrRest[] = [pr(1)], 
 test("W1-T8684: repository throughput preserves PR event clocks and unique delivery credit", async t => {
   const { captureRepositoryFlow } = await load();
   const rows = [pr(1), pr(2), pr(3, { headRefName: "codex/plan", body: "names W1-T42 only" }),
-    pr(4, { state: "OPEN", mergedAt: undefined }), pr(5, { mergedAt: iso(now - 40 * day) })];
+    pr(4, { state: "OPEN", mergedAt: undefined }), pr(5, { createdAt: iso(now - 41 * day), mergedAt: iso(now - 40 * day) })];
   const { root, state } = world(t, rows, [{ ts: iso(now), step: "verdict", verdict: "merged", task_id: "W1-T99" }]);
   const result = await captureRepositoryFlow(root, state, repository, fixedClock(now));
   assert.ok(result);
   const window = result.windows[0]!;
   assert.equal(window.days, 7);
   assert.equal(window.summary.merged, 3);
-  assert.equal(window.summary.opened, 5);
+  assert.equal(window.summary.opened, 4);
   assert.equal(window.summary.deliveredTasks, 1);
   assert.equal(window.buckets.at(-1)!.merged, 3);
-  assert.equal(window.buckets.at(-2)!.opened, 5);
+  assert.equal(window.buckets.at(-2)!.opened, 4);
   assert.equal(window.summary.mergeLatency.samples, 3);
   assert.equal(window.summary.mergeLatency.p50Ms, day - 1000);
   const restored = createBoardSnapshotReader()(root, "fixture", "repo").closed!;
@@ -82,6 +82,14 @@ test("W1-T8684: repair load distinguishes unique PRs rounds reasons and unknown 
   assert.deepEqual(summary.repairReasons, { code: 1, flake: 1, infrastructure: 1, conflict: 0, unknown: 0 });
   assert.equal(result.notCollected.repairLatency, "required-current-head recovery evidence not collected");
   assert.ok(result.gaps.includes("repair rows without exact repository PR head and round were excluded"));
+  writeFileSync(join(state, "ledger.ndjson"), replay + JSON.stringify({ ...rows[0], ts: iso(now - 2000), reason_class: "conflict" }) + "\n");
+  const conflicting = (await captureRepositoryFlow(root, state, repository, fixedClock(now)))!;
+  assert.equal(conflicting.windows[0]!.summary.repairRounds, 3);
+  assert.equal(conflicting.windows[0]!.summary.repairReasons.unknown, 1);
+  assert.ok(conflicting.gaps.includes("conflicting repair identity observations retain unknown classification"));
+  const localLabel = world(t, [pr(1)], [{ ...repair(1, "local-label"), repo: "repo" }]);
+  assert.equal((await captureRepositoryFlow(localLabel.root, localLabel.state, repository, fixedClock(now)))!
+    .windows[0]!.summary.repairRounds, 1, "the exact PR URL scopes a legacy local label without guessing a repo from it");
 });
 
 test("W1-T8684: repository flow preserves latency samples censoring and coverage gaps", async t => {
@@ -149,8 +157,28 @@ test("repository flow bounds evidence not counts and preserves incomplete source
     schema: 1, repository, savedAt: iso(now) }));
   assert.equal(readOpenBoardSnapshot(root, "fixture", "repo").ok, false, "missing rows cannot become a complete empty page");
   const partial = (await captureRepositoryFlow(root, state, repository, fixedClock(now)))!;
-  assert.equal(partial.windows[0]!.summary.merged, null);
+  assert.equal(partial.windows[0]!.summary.merged, 1);
+  assert.equal(partial.windows[0]!.coverage.merged, "observed");
+  assert.ok(partial.windows[0]!.buckets.some(b => b.merged === null));
   assert.equal(partial.sources.closedObservedAt, iso(now));
   writeFileSync(boardSnapshotPath(root, "fixture", "repo"), "truncated\n");
   assert.equal((await captureRepositoryFlow(root, state, repository, fixedClock(now)))!.state, "not_collected");
+});
+
+test("repository flow refuses real identity and snapshot input overflow without inventing historical zero", async t => {
+  const { captureRepositoryFlow } = await load();
+  const { root, state } = world(t, []);
+  writeFileSync(join(state, "ledger.ndjson"), Array.from({ length: 65537 }, (_, i) => JSON.stringify({
+    ts: iso(now - 1000), step: "fix.dispatch", pr_number: 1, pr_url: pr(1).url,
+    head_sha: "b".repeat(40), round_id: `round-${i}` })).join("\n") + "\n");
+  const refused = (await captureRepositoryFlow(root, state, repository, fixedClock(now)))!;
+  assert.equal(refused.reason, "over_budget");
+  assert.equal(refused.windows[0]!.summary.repairRounds, null);
+  assert.ok(Buffer.byteLength(JSON.stringify(refused)) < 65536);
+  writeFileSync(join(state, "ledger.ndjson"), JSON.stringify({ ts: iso(now - 29 * day), step: "daemon.tick" }) + "\n");
+  const oldCorpus = (await captureRepositoryFlow(root, state, repository, fixedClock(now)))!;
+  assert.equal(oldCorpus.windows[1]!.summary.repairRounds, null, "an old positive corpus row cannot prove current historical absence");
+  writeFileSync(boardOpenSnapshotPath(root, "fixture", "repo"), JSON.stringify({ type: "board-open-snapshot",
+    schema: 1, repository, savedAt: iso(now), rows: Array(100001).fill({}) }));
+  assert.equal((await captureRepositoryFlow(root, state, repository, fixedClock(now)))!.reason, "over_budget");
 });
