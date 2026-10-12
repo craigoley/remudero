@@ -19,5 +19,7 @@
   origin: feedback#evidence-coverage-daemon-served-model
   plan_refs: ["§7B"]
   files: [src/run-task.ts, src/lib/benchmark-evidence.ts, test/daemon-lane-served-model.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=473ea5520543aa50
   attempts: 0

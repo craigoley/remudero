@@ -941,3 +941,89 @@ test("the supervisor's default seams read cgroup memory, procfs and the kill swi
   await assert.rejects(socketGet(join(gens, "missing.sock"), "/"));
   assert.equal(typeof clusterSpawn, "function");
 });
+
+// W1-T8378: the peak a handoff is priced on is refreshed from the still-active generation before any fork.
+const GIB = 1024 * MIB;
+
+test("unit test: a serve handoff refreshes its peak after promotion before forking", async () => {
+  // Early sample at promotion 1 GiB; the active generation's high-water mark later reaches 4 GiB.
+  let hwm = 1 * GIB;
+  const fleet = fakeFleet();
+  const { supervisor, logs } = decisionSupervisor(fleet, {
+    peakRss: () => hwm,
+    hostPressure: async () => ({ ...AMPLE, memAvailableBytes: 5 * GIB, atMs: Date.now() }),
+    deferMs: 10,
+    sleep: (ms) => (ms >= 10 ? new Promise<void>(() => {}) : Promise.resolve()),
+  });
+  await supervisor.start();
+  hwm = 4 * GIB; // grows after the supervisor's one promotion-time sample
+  await supervisor.requestHandoff();
+  const deferred = logs.find((l) => l.step === "serve.handoff_deferred")?.extra;
+  assert.equal(deferred?.hold, "host_headroom", "1 GiB would fit in 5 GiB over a 2 GiB reserve; the 4 GiB later peak needs 6 GiB");
+  assert.match(String(deferred?.detail), /need 6442450944 B/);
+  assert.equal(fleet.generations.length, 1, "no standby was forked");
+  assert.equal(supervisor.activeSha(), "sha-1", "the old generation is kept");
+  await supervisor.shutdown("test");
+
+  // Positive control: the same early sample with no later growth is admitted, and an ample host promotes normally.
+  const ctlFleet = fakeFleet();
+  const ctl = decisionSupervisor(ctlFleet, {
+    peakRss: () => 1 * GIB,
+    hostPressure: async () => ({ ...AMPLE, memAvailableBytes: 5 * GIB, atMs: Date.now() }),
+  });
+  await ctl.supervisor.start();
+  await ctl.supervisor.requestHandoff();
+  assert.equal(ctl.supervisor.activeSha(), "sha-2", "a peak that fits still hands off");
+  const ample = fakeFleet();
+  let ampleHwm = 1 * GIB;
+  const roomy = decisionSupervisor(ample, { peakRss: () => ampleHwm });
+  await roomy.supervisor.start();
+  ampleHwm = 4 * GIB;
+  await roomy.supervisor.requestHandoff();
+  assert.equal(roomy.supervisor.activeSha(), "sha-2", "a genuinely ample host promotes despite the larger peak");
+  assert.match(String(roomy.logs.find((l) => l.step === "serve.handoff_admitted")?.extra?.peakBasis), /generation 1 high-water mark/);
+});
+
+test("unit test: serve peak evidence keeps its generation and unknown state", async () => {
+  // A later missing, invalid or lower reading never shrinks a known peak, and never fabricates one.
+  let current: number | undefined = 4 * GIB;
+  const fleet = fakeFleet();
+  const { supervisor, logs } = decisionSupervisor(fleet, {
+    peakRss: () => current,
+    hostPressure: async () => ({ ...AMPLE, memAvailableBytes: 5 * GIB, atMs: Date.now() }),
+    deferMs: 10,
+    sleep: (ms) => (ms >= 10 ? new Promise<void>(() => {}) : Promise.resolve()),
+  });
+  await supervisor.start();
+  const deferredRows = (): Array<Record<string, unknown> | undefined> => logs.filter((l) => l.step === "serve.handoff_deferred").map((l) => l.extra);
+  for (const later of [undefined, Number.NaN, -1, 0, 1 * GIB]) {
+    current = later;
+    const before = deferredRows().length;
+    await supervisor.requestHandoff();
+    const row = deferredRows()[before];
+    assert.equal(row?.hold, "host_headroom", `reading ${String(later)} does not shrink the known 4 GiB peak`);
+    assert.match(String(row?.detail), /candidate 4294967296/);
+  }
+  assert.equal(fleet.generations.length, 1, "nothing was forked on a shrunken or fabricated peak");
+  await supervisor.shutdown("test");
+
+  // With no positive reading at all the named unknown hold remains, not a zero-sized candidate.
+  const unknownFleet = fakeFleet();
+  const unknown = decisionSupervisor(unknownFleet, {
+    peakRss: () => Number.NaN, rss: () => undefined, deferMs: 10,
+    sleep: (ms) => (ms >= 10 ? new Promise<void>(() => {}) : Promise.resolve()),
+  });
+  await unknown.supervisor.start();
+  await unknown.supervisor.requestHandoff();
+  const hold = unknown.logs.find((l) => l.step === "serve.handoff_deferred")?.extra;
+  assert.equal(hold?.hold, "peak_unknown");
+  assert.equal(unknownFleet.generations.length, 1);
+  await unknown.supervisor.shutdown("test");
+
+  // The evidence names the generation that produced it.
+  const named = fakeFleet();
+  const rows = decisionSupervisor(named, { peakRss: () => 1 * GIB });
+  await rows.supervisor.start();
+  await rows.supervisor.requestHandoff();
+  assert.match(String(rows.logs.find((l) => l.step === "serve.handoff_admitted")?.extra?.peakBasis), /generation 1 /);
+});

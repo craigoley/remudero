@@ -10,7 +10,7 @@
   origin: "operator ruling 2026-10-09 (a gardener watches the fix bots; operator interventions are the headline signal) + 2026-10-11 detection research: the watcher itself was dark all day"
   plan_refs: [W1-T7421, W1-T7616, W1-T4802, W1-T7650]
   files: [src/lib/fix-lane-gardener.ts, test/the-fix-lane-gardener-survives-an-unreadable-ci-log.test.ts, test/the-fix-lane-gardener-prices-unseamed-catches-and-swapped-reds.test.ts]  # amended 2026-10-11: restart checkpoint refused this path at 22:54:56Z and 23:43:46Z
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

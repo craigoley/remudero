@@ -68,17 +68,20 @@ interface ShiftedSuiteOptions {
   }) => string;
 }
 
+/** The slice of scripts/pure-test-pool.mjs (the test judge) the defuse run uses. A plain .mjs, so no types. */
 interface DefuseJudge {
   prepareJudgedRun(options: { makeDir: () => string }): { args: string[]; env: Record<string, string>; read(): { tallyText: string; markerText: string } };
   judgedNodeTestArgs(args: readonly string[], judgedArgs: readonly string[]): string[];
   judgeRun(files: readonly string[], opts: { status: number; pool: boolean; root: string; tallyText: string; markerText: string }): { complete: boolean; given: number; reported: number; tests: number | null; failed: number | null };
   describeJudgedRun(role: string, verdict: { complete: boolean }, opts: { prefix: string }): string;
 }
+// Loaded from the orchestrator's own checkout when a defuse runs, never at import (sandboxes copy only src/).
 const loadDefuseJudge = (): DefuseJudge => createRequire(import.meta.url)("../../scripts/pure-test-pool.mjs") as DefuseJudge;
 
 export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number, options: ShiftedSuiteOptions & { measure: true }): ShiftedSuiteMeasurement;
 export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number, options?: ShiftedSuiteOptions & { measure?: false }): boolean;
-/** Shared runner: only a complete TAP verdict proves a crossing (W1-T7812). */
+/** Shared runner: measured TAP counts prove a crossing (W1-T7812) only when the named file
+ *  reaches its own summary (W1-T8380). A partial exit 0 reaches no verdict. */
 export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number, {
   execFile = execFileSync,
   measure = false,

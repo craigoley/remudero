@@ -52,6 +52,32 @@ unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_OBJECT_DIRECTORY \
 # worktree, so a loose truthiness test would let a stray value turn the fleet's gates off.
 [ "${RMD_PREPUSH_GATES:-}" = "0" ] && exit 0
 
+# W1-T8000 — A REF DELETION CARRIES NO CONTENT, SO NO CONTENT GATE MAY JUDGE OR REFUSE IT.
+# git hands a pre-push hook one "<local ref> <local sha> <remote ref> <remote sha>" line per ref on stdin; a
+# deletion (`git push origin --delete <branch>`) has local sha all zeros. OBSERVED 2026-10-11: such a push, run
+# from a checkout holding a same-named local branch, ran every gate below against THAT branch and was REFUSED by
+# proof-resolve-precheck. stdin is read ONCE, here, and kept: a push whose every line is a deletion is a NAMED
+# skip (not a pass) and exits 0; in a mixed push the head selection further down skips the deletion lines.
+# An empty stdin (run by hand, or by this repo's tests) is not a deletion and behaves exactly as before.
+zero_sha="0000000000000000000000000000000000000000"
+push_lines="$(cat 2>/dev/null || true)"
+deleted_refs=""
+live_lines=0
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  [ -n "$_local_sha" ] || continue
+  if [ "$_local_sha" = "$zero_sha" ]; then
+    deleted_refs="${deleted_refs:+$deleted_refs }${remote_ref:-?}"
+  else
+    live_lines=$((live_lines + 1))
+  fi
+done <<EOF_PUSH_LINES
+$push_lines
+EOF_PUSH_LINES
+if [ -n "$deleted_refs" ] && [ "$live_lines" -eq 0 ]; then
+  echo "pre-push: deletion-only push of $deleted_refs — no content to gate, every check skipped (a named skip, NOT a pass)" >&2
+  exit 0
+fi
+
 # W1-T6120 — EVERY SCRIPT BELOW RUNS FROM THIS HOOK'S OWN CODE ROOT, never from the tree being pushed.
 # The push leaf runs the HARNESS's copy of this file with the worker worktree as cwd, so a relative
 # `scripts/x.mjs` (or `--import tsx`, or the cwd's tsconfig) would run the code the worker wrote, as the
@@ -301,15 +327,19 @@ fi
 # THE REF IS THE ONE BEING PUSHED, NOT THE CHECKED-OUT BRANCH. git hands pre-push
 # "<local ref> <local sha> <remote ref> <remote sha>" per line on stdin, and the gate judges the
 # REMOTE name: `git push origin HEAD:run-W1-T3618-...` carries a local branch that is not what the
-# PR will show. stdin is unused everywhere else in this hook, so consuming it here costs nothing;
+# PR will show. stdin was read once at the top of the hook (W1-T8000) and is replayed from $push_lines;
 # when it is empty — run by hand, or by this repo's own tests — fall back to the checked-out branch.
 head_ref=""
 head_sha=""
 while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  # W1-T8000: a deletion line names a ref that no longer carries content; never select it as the head.
+  [ "$_local_sha" = "$zero_sha" ] && continue
   case "$remote_ref" in
     refs/heads/*) head_ref="${remote_ref#refs/heads/}"; head_sha="$_local_sha"; break ;;
   esac
-done
+done <<EOF_PUSH_LINES
+$push_lines
+EOF_PUSH_LINES
 if [ -z "$head_ref" ]; then
   head_ref="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 fi
@@ -344,7 +374,6 @@ fi
 # transition — each is named as skipped, never counted as cleared, and never blocks. The ref is the
 # SAME remote ref on both sides, so a ref-shaped identity can never be lost here; what can be is a trailer.
 # Both messages are read exactly as the gate reads one (--first-parent --no-merges).
-zero_sha="0000000000000000000000000000000000000000"
 if has head-identity-gate.mjs tsx && [ -n "$head_ref" ] && [ -n "${_remote_sha:-}" ] \
    && [ "$_remote_sha" != "$zero_sha" ] && [ "${_local_sha:-}" != "$zero_sha" ] && [ "$head_sha" != "HEAD" ]; then
   if git cat-file -e "${_remote_sha}^{commit}" 2>/dev/null; then

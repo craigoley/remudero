@@ -24,7 +24,7 @@ import {
   readDiskFreeBytes,
   type CaptureSurfaceFireRecord,
 } from "./lib/doctor.js";
-import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawn, spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
 import { promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
 import { mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync } from "node:fs/promises";
@@ -222,7 +222,7 @@ import { realThreadDecider, registryThreadItems, type ThreadDecisionContext } fr
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
-import { checkpointRemaining, isWipSubject, judgeCheckpointStop, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
+import { checkpointRemaining, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
 import { PREOPEN_GATE_STEP, renderPreopenGatePrompt, runPreopenGate, type PreopenGateResult } from "./lib/preopen-gate.js";
 import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
@@ -704,7 +704,14 @@ import { runCensusFix, type CensusFixResult } from "./lib/census-fix.js";
 // already share (affectedSuitesStep, lib/ci-parity.ts), reused here so the new scoped-coverage
 // default step can never independently derive a second notion of "which suites reach a changed
 // src module".
-import { affectedSelectionOrFull, readAffectedSuitesInput, selectAffectedSuites, type AffectedSelection, type AffectedSuitesInput } from "./lib/affected-suites.js";
+import {
+  affectedSelectionOrFullAsync,
+  readAffectedSuitesInput,
+  readAffectedSuitesInputAsync,
+  selectAffectedSuites,
+  type AffectedSelection,
+  type AffectedSuitesInput,
+} from "./lib/affected-suites.js";
 // W1-T4797 — the tier manifest's own measured durations bound the pre-push coverage precheck.
 // @ts-expect-error a plain .mjs script with no declaration file, as the satisfied-task census import above.
 import { DEFAULT_MANIFEST_RELATIVE_PATH, DURATION_STALENESS_FACTOR, loadManifest, tierFiles, weightedDurationMs } from "../scripts/test-tier-manifest.mjs";
@@ -1111,6 +1118,7 @@ import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand } from "./lib/ben
 import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportView, runPairedTrial, sealedPairedAttemptDispatcher,
   type PairedTrialInput } from "./lib/paired-trial.js";
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
+import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { auditLedgerUnion, createIncrementalLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
@@ -1225,7 +1233,7 @@ import {
   taskRecordPath,
   readBlobsAtRef,
   mergePlanBlobs,
-  loadPlanAtRef,
+  loadPlanAtRefAsync,
 } from "./lib/plan.js";
 import { exitCodeFor, GENERIC_EXIT_CODE, RmdError } from "./lib/errors.js";
 import { flushThenExit } from "./lib/flush-exit.js";
@@ -1494,6 +1502,7 @@ import {
   reviewLedgerLegibilityFields,
   reviewLedgerReasons,
   resolvePlanCriteriaAtHead,
+  resolvePlanCriteriaAtHeadAsync,
   type PlanCriteriaAtHeadDivergence,
   type PlanCriteriaAtHeadResult,
   parseWhitelistedProof,
@@ -2619,7 +2628,7 @@ export function buildSweepEffects(
     dispatchFixPreflightStandDownImpl: dispatchFixPreflightStandDown,
     ghLiveStateImpl: ghLiveState,
     fixRungTaskForImpl: fixRungTaskFor,
-    resolveTaskContractAtHeadImpl: resolveFixRungTaskContractAtHead,
+    resolveTaskContractAtHeadImpl: resolveFixRungTaskContractAtHeadAsync,
     createFixRungWorktreeImpl: createFixRungWorktreeWithToolchain,
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit,
     runFixRungImpl: (opts) => {
@@ -3385,6 +3394,8 @@ export function watchDispatchSpawn(
     log: (step: string, fields: Record<string, unknown>) => void;
     /** The daemon's recycle-PAUSE reader: a pending recycle ends the round on the checkpoint path. */
     recyclePending?: () => string | undefined;
+    /** W1-T8139: the daemon's restart latch, read in-process (never the fetching freshness read): a latched restart ends the round too. */
+    restartPending?: () => string | undefined;
   },
   seams: {
     runWatchdog?: typeof runQuietWorkerWatchdog;
@@ -3417,25 +3428,30 @@ export function watchDispatchSpawn(
     nudge: (message) => (seams.deliver ?? deliverOperatorAnswerToRunningWorker)(taskId, message, { ledger: (event, fields) => log(event, fields ?? {}) })
       === "delivered" ? "delivered" : "unsupported",
     ...(watch.recyclePending ? { recyclePending: watch.recyclePending } : {}),
+    ...(watch.restartPending ? { restartPending: watch.restartPending } : {}),
     endRound: async (reason, trigger) => {
       if ((spawnArgs.workerClass ?? "implement") !== "implement") return { ended: false, reason: "not an implement worker" };
       const cwd = spawnArgs.cwd;
+      let undeclaredPaths: readonly string[] = [];
       try {
         // The W1-T7697 checkpoint path (yieldAtWorkerBoundary): retain the disk work, push it, then release the lane.
         if ((seams.hasUncommittedChanges ?? worktreeHasUncommittedChanges)(cwd)) {
           const checkpoint = (seams.commit ?? commitWorkerEdits)(cwd, task.files ?? [],
-            `wip: yield at ${trigger === "recycle" ? "container recycle" : "quiet worker"}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume\nfailed: none\n\nRemudero-Task: ${taskId}`,
-            {}, task.acceptance);
-          if (!checkpoint.committed || checkpoint.undeclared.length > 0) {
+            `wip: yield at ${trigger === "recycle" ? "container recycle" : trigger === "restart" ? "daemon restart" : "quiet worker"}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume\nfailed: none\n\nRemudero-Task: ${taskId}`,
+            {}, task.acceptance, { checkpoint: true });
+          // W1-T8008: a checkpoint keeps undeclared work too; only what git forces (markers, unresolved paths) refuses.
+          if (!checkpoint.committed) {
             return { ended: false, reason: `checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}` };
           }
+          undeclaredPaths = checkpoint.undeclared;
         }
         await (seams.push ?? gitPushRunBranchAsync)(cwd);
       } catch (error) {
         return { ended: false, reason: `checkpoint failed: ${String((error as Error)?.message ?? error)}` };
       }
       const checkpointSha = (seams.headSha ?? ((dir: string) => hostWorktreeGit(dir, ["rev-parse", "HEAD"]).trim()))(cwd);
-      state.ended = new QuietRoundEndedError({ checkpointSha, reason, ...(trigger ? { trigger } : {}) });
+      state.ended = new QuietRoundEndedError({ checkpointSha, reason, ...(trigger ? { trigger } : {}),
+        ...(undeclaredPaths.length > 0 ? { undeclaredPaths: [...undeclaredPaths] } : {}) });
       abort.abort();
       return { ended: true, checkpointSha };
     },
@@ -3450,17 +3466,69 @@ export function watchDispatchSpawn(
 /** The rows a round ended mid-stream writes. A recycle's is the W1-T7697 freshness yield taken mid-round: the same
  * `run.freshness_handoff` receipt and `freshness_yield` verdict as `yieldAtWorkerBoundary`, so the next run restores the
  * pushed checkpoint (`pendingWorkerBoundaryHandoffs`) instead of starting over. */
+/** W1-T8008: the exact undeclared paths a restart checkpoint kept (`undeclared_paths`), absent when there are none. */
+export function checkpointUndeclaredFields(undeclared: readonly string[]): { undeclared_paths?: string[] } {
+  return undeclared.length === 0 ? {} : { undeclared_paths: [...undeclared] };
+}
+
+/** W1-T8008: the W1-T7697 restart checkpoint of `yieldAtWorkerBoundary`, as one seamed step: commit EVERY worker change
+ * (declared or not), then push the branch. Resolves to the undeclared paths it kept; throws on what git forces. */
+export async function commitAndPushRestartCheckpoint(
+  worktreePath: string,
+  task: { files?: readonly string[]; acceptance?: readonly AcceptanceCriterion[] },
+  taskId: string,
+  waitingOn: string,
+  seams: { push?: typeof gitPushRunBranchAsync; hasUncommittedChanges?: typeof worktreeHasUncommittedChanges } = {},
+): Promise<{ undeclared: readonly string[] }> {
+  let undeclared: readonly string[] = [];
+  if ((seams.hasUncommittedChanges ?? worktreeHasUncommittedChanges)(worktreePath)) {
+    const checkpoint = commitWorkerEdits(worktreePath, task.files ?? [],
+      `wip: yield at ${waitingOn}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume ${waitingOn}\nfailed: none\n\nRemudero-Task: ${taskId}`,
+      {}, task.acceptance, { checkpoint: true });
+    if (!checkpoint.committed) throw new Error(`restart checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}`);
+    undeclared = checkpoint.undeclared;
+  }
+  await (seams.push ?? gitPushRunBranchAsync)(worktreePath, { prGates: false }); // a checkpoint opens no PR: see worktreePushExecAsync
+  return { undeclared };
+}
+
+/** W1-T8008: the `run.freshness_handoff` and `freshness_yield` verdict fields of a boundary yield, naming the undeclared paths. */
+export function freshnessYieldRows(a: {
+  waitingOn: string; branch: string; headSha: string; undeclared: readonly string[];
+  freshness?: { oldSha: string; newSha: string }; recycle?: string;
+}): Array<{ step: string; fields: Record<string, unknown> }> {
+  const undeclared = checkpointUndeclaredFields(a.undeclared);
+  return [
+    { step: "run.freshness_handoff", fields: { waiting_on: a.waitingOn, branch: a.branch, head_sha: a.headSha,
+      ...(a.freshness ? { old_sha: a.freshness.oldSha, new_sha: a.freshness.newSha } : { trigger: "recycle", detail: a.recycle }), ...undeclared } },
+    { step: "verdict", fields: { verdict: "handed_off", reason: "freshness_yield", waiting_on: a.waitingOn, branch: a.branch, head_sha: a.headSha, ...undeclared } },
+  ];
+}
+
+/** W1-T8139: the daemon's restart latch as the watchdog's pending-yield read: the in-process `restartAtWorkerBoundary`
+ * only (never the fetching `externalWaitFreshness`), named by the sha pair it waits on. Undefined without a daemon. */
+export function restartLatchDetail(
+  latch: (() => Extract<DaemonFreshness, { stale: true }> | undefined) | undefined,
+): (() => string | undefined) | undefined {
+  if (!latch) return undefined;
+  return () => {
+    const freshness = latch();
+    return freshness ? `daemon restart latched: ${freshness.oldSha.slice(0, 9)}..${freshness.newSha.slice(0, 9)}` : undefined;
+  };
+}
+
 export function roundEndedHandoffRows(
   detail: QuietRoundEndedError["detail"],
   branch: string,
 ): Array<{ step: string; fields: Record<string, unknown> }> {
   const headSha = detail.checkpointSha ?? null;
-  if (detail.trigger !== "recycle") {
-    return [{ step: "verdict", fields: { verdict: "handed_off", reason: "quiet_worker_round_ended", branch, head_sha: headSha, detail: detail.reason } }];
+  const undeclared = checkpointUndeclaredFields(detail.undeclaredPaths ?? []);
+  if (detail.trigger !== "recycle" && detail.trigger !== "restart") {
+    return [{ step: "verdict", fields: { verdict: "handed_off", reason: "quiet_worker_round_ended", branch, head_sha: headSha, detail: detail.reason, ...undeclared } }];
   }
   return [
-    { step: "run.freshness_handoff", fields: { waiting_on: "worker_round", branch, head_sha: headSha, trigger: "recycle", detail: detail.reason } },
-    { step: "verdict", fields: { verdict: "handed_off", reason: "freshness_yield", waiting_on: "worker_round", branch, head_sha: headSha, detail: detail.reason } },
+    { step: "run.freshness_handoff", fields: { waiting_on: "worker_round", branch, head_sha: headSha, trigger: detail.trigger, detail: detail.reason, ...undeclared } },
+    { step: "verdict", fields: { verdict: "handed_off", reason: "freshness_yield", waiting_on: "worker_round", branch, head_sha: headSha, detail: detail.reason, ...undeclared } },
   ];
 }
 
@@ -4286,13 +4354,13 @@ export type GitRunnerAsync = (args: string[], stdin?: string) => Promise<string>
  *  bound, which rejects with {@link PlanSyncGitTimeoutError}; any other failure rejects with git's own error. */
 export function planSyncGitRunnerAsync(
   repoDir: string,
-  opts: { timeoutMs?: number; graceMs?: number; gitBin?: string } = {},
+  opts: { timeoutMs?: number; graceMs?: number; gitBin?: string; maxBuffer?: number } = {},
 ): GitRunnerAsync {
   const timeoutMs = opts.timeoutMs ?? PLAN_SYNC_GIT_TIMEOUT_MS;
   return (args, stdin) =>
     new Promise((resolve, reject) => {
       let timedOut = false;
-      const child = execFile(opts.gitBin ?? "git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }, (err, stdout) => {
+      const child = execFile(opts.gitBin ?? "git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: opts.maxBuffer ?? 1 << 26 }, (err, stdout) => {
         clearTimeout(timer);
         if (timedOut) return reject(new PlanSyncGitTimeoutError(args, timeoutMs));
         return err ? reject(err) : resolve(stdout);
@@ -5029,15 +5097,18 @@ export function lastCommitSubject(worktreePath: string): string | undefined {
   }
 }
 
-/** A build PR's title: the branch's newest non-checkpoint subject, never a `wip:` one (#10482). */
-export function branchPrTitle(worktreePath: string): string | undefined {
+/** A build PR's title, never a `wip:` one (#10482). With its filed task it is the task's own title (W1-T7952),
+ *  so a checkpoint-only branch never opens as "chore: yield at worker" and no merge commit (`--no-merges`, so
+ *  the restore merge too, #10936) lends it words or a type; with no task, the newest non-checkpoint subject. */
+export function branchPrTitle(worktreePath: string, task?: { id: string; title?: string }): string | undefined {
   try {
-    const subjects = hostWorktreeGit(worktreePath, ["log", "--format=%s", "origin/main..HEAD"]).split("\n");
-    return prTitleFromBranchCommits(subjects) ?? lastCommitSubject(worktreePath);
+    const subjects = hostWorktreeGit(worktreePath, ["log", "--format=%s", ...(task ? ["--no-merges"] : []), "origin/main..HEAD"]).split("\n");
+    return (task && prTitleForTask(subjects, task)) || (prTitleFromBranchCommits(subjects) ?? lastCommitSubject(worktreePath));
   } catch (e) {
-    // An unreadable range falls back to the tip subject, the pre-#10482 behaviour.
+    // An unreadable range falls back to the tip subject, the pre-#10482 behaviour; a filed task still names its PR.
     void e;
-    return lastCommitSubject(worktreePath);
+    const tip = lastCommitSubject(worktreePath);
+    return (task && prTitleForTask(tip ? [tip] : [], task)) || tip;
   }
 }
 
@@ -5087,7 +5158,7 @@ export async function restoreBoundaryCheckpoint(
       ...(probe.verdict === "unreadable" ? { reason: probe.reason } : {}) };
   }
   const merged = (await git(["commit-tree", probe.tree, "-p", checkpoint.headSha, "-p", mainSha, "-m",
-    `wip: merge main into the restored checkpoint\n\nRemudero-Task: ${taskId}`])).trim();
+    `chore(wip): merge main into the restored checkpoint\n\nRemudero-Task: ${taskId}`])).trim();
   await git(["reset", "--hard", "--quiet", merged]);
   return { base: "main", headSha: merged };
 }
@@ -13284,7 +13355,7 @@ export async function runFixRung(opts: {
         standDownReason: `the fix worker was terminated by a signal (${fixResult.subtype}) before it finished` };
     }
 
-    const censusCheck = checkFixCensusSnapshot(opts.worktreePath, censusSnapshotPath, deps.log);
+    const censusCheck = await checkFixCensusSnapshotAsync(opts.worktreePath, censusSnapshotPath, deps.log);
     const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath, workerHeadReflogBefore);
 
     // W1-T3727: THE HARNESS COMMITS FOR A SHELL-LESS ROUND, here — before `readRoundCommits` decides
@@ -16469,6 +16540,7 @@ interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   claimReserver?: DispatchClaimReserverAsync;
   containmentExec?: ProbeExecutor;
   externalWaitFreshness?: ExternalWaitFreshness;
+  restartAtWorkerBoundary?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
   externalWaitRecycle?: () => string | undefined;
   handOffAtPrOpen?: boolean;
   isolationExec?: IsolationProbeExecutor;
@@ -17372,6 +17444,9 @@ async function runTask(
      *  spawning a real sandboxed worker. Default: the real spawn-backed executor. */
     containmentExec?: ProbeExecutor;
     externalWaitFreshness?: ExternalWaitFreshness;
+    /** W1-T7806: the daemon's latched restart, read at each worker boundary; reading it releases this lane's hold
+     *  on refill. A set latch yields the run even when its own `externalWaitFreshness` read would not. Daemon only. */
+    restartAtWorkerBoundary?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
     externalWaitRecycle?: () => string | undefined;
     /** W1-T5345: hand the PR to the sweep at the first CI poll ({@link PollDeps.handOffAtPrOpen}). Daemon only. */
     handOffAtPrOpen?: boolean;
@@ -17563,6 +17638,7 @@ async function runTask(
     const watchedSpawn = watchDispatchSpawn(rawSpawn, {
       enabled: !opts.spawn, taskId, runId, ledgerPath, fallbackBoundMs: workerStallFallbackMs, spawnArgs: effectiveSpawnArgs, task, log,
       provider: () => selectionAssignment?.selected.provider, recyclePending: opts.externalWaitRecycle,
+      restartPending: restartLatchDetail(opts.restartAtWorkerBoundary),
     });
     return recordBenchmarkWorkerAttempt(() => watchedSpawn({
       ...effectiveSpawnArgs,
@@ -18135,27 +18211,68 @@ export function writeFixCensusSnapshot(
   }
 }
 
+/** A census child's result: `spawnSync`'s own fields, or the same fields from {@link spawnCensusChild}. */
+export type CensusChildResult = Pick<SpawnSyncReturns<string>, "status" | "signal" | "stdout" | "stderr" | "error">;
+/** How a census check runs one child: `spawnSync` on the CLI, an awaited spawn on the daemon's loop (W1-T7744). */
+export type CensusChildRunner<R> = (file: string, args: string[], options: SpawnSyncOptionsWithStringEncoding) => R;
+
 export function checkFixCensusSnapshot(
   root: string,
   path: string | undefined,
   log: (step: string, extra?: Record<string, unknown>) => void,
   run: typeof spawnSync = spawnSync,
 ): { refusal?: CensusPushRefusal; unmeasured?: string } | undefined {
+  return runStepsSync(fixCensusSnapshotSteps(root, path, log, (file, args, options) => run(file, args, options)));
+}
+
+/** W1-T7744 — the census check with both children awaited, for the fix rung and the census-push repair, which the
+ *  daemon runs on its own loop (up to 5.9 s held, 2026-10-10). The same steps as the sync form, so the refusal, the
+ *  unmeasured reading and the 60 s child bounds cannot drift between them. */
+export async function checkFixCensusSnapshotAsync(
+  root: string,
+  path: string | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  run: CensusChildRunner<Promise<CensusChildResult>> = spawnCensusChild,
+): Promise<{ refusal?: CensusPushRefusal; unmeasured?: string } | undefined> {
+  return runStepsAsync(fixCensusSnapshotSteps(root, path, log, run));
+}
+
+/** One census child off the event loop, in `spawnSync`'s result shape: `status` is the exit code (null when killed
+ *  or never started), `signal` the killing signal, `error` a spawn failure or the bound's kill. */
+export function spawnCensusChild(file: string, args: string[], options: SpawnSyncOptionsWithStringEncoding): Promise<CensusChildResult> {
+  return new Promise((resolveChild) => {
+    execFile(file, args, { cwd: options.cwd, env: options.env, encoding: "utf8", timeout: options.timeout, maxBuffer: options.maxBuffer },
+      (error, stdout, stderr) => {
+        const failed = error as (Error & { code?: unknown; signal?: NodeJS.Signals | null }) | null;
+        const status = failed === null ? 0 : typeof failed.code === "number" ? failed.code : null;
+        const signal = failed?.signal ?? null;
+        resolveChild({ status, signal, stdout: String(stdout), stderr: String(stderr),
+          ...(failed !== null && status === null && signal === null ? { error: failed } : {}) } as CensusChildResult);
+      });
+  });
+}
+
+function* fixCensusSnapshotSteps(
+  root: string,
+  path: string | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  run: CensusChildRunner<CensusChildResult | Promise<CensusChildResult>>,
+): Steps<{ refusal?: CensusPushRefusal; unmeasured?: string } | undefined> {
   if (!path) return undefined;
   const env = Object.fromEntries(Object.entries(process.env)
     .filter(([key]) => !/^(?:GIT_|NODE_TEST_CONTEXT$|RMD_SELF_SYNC_DONE$)/.test(key)));
   env[CENSUS_SNAPSHOT_ENV] = path;
   const scriptsRoot = repoRoot;
-  const precheck = run(process.execPath, [join(scriptsRoot, "scripts/census-precheck.mjs"), "--root", root],
-    { cwd: scriptsRoot, env, encoding: "utf8", timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
+  const precheck = yield* step(() => run(process.execPath, [join(scriptsRoot, "scripts/census-precheck.mjs"), "--root", root],
+    { cwd: scriptsRoot, env, encoding: "utf8", timeout: 60_000, maxBuffer: 64 * 1024 * 1024 }));
   const text = `${precheck.stdout ?? ""}${precheck.stderr ?? ""}`;
   let refusal = censusPushRefusal(text);
   let unmeasured = precheck.status === 2 ? text.trim() : undefined;
   if (!refusal) {
     const reach = "test/the-affected-suite-reach-ratchet.test.ts";
-    const result = run(process.execPath, ["--test", "--test-reporter=tap", "--import", "tsx", "--import",
+    const result = yield* step(() => run(process.execPath, ["--test", "--test-reporter=tap", "--import", "tsx", "--import",
       "./test/setup/tmp-hygiene.ts", reach],
-      { cwd: scriptsRoot, env, encoding: "utf8", timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
+      { cwd: scriptsRoot, env, encoding: "utf8", timeout: 60_000, maxBuffer: 64 * 1024 * 1024 }));
     const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
     if (precheck.error || precheck.signal || (precheck.status !== 0 && precheck.status !== 2) || result.error || result.signal ||
         result.status !== 0 || !/^# tests [1-9]\d*$/m.test(output)) {
@@ -18231,8 +18348,8 @@ export type CoverageRunResult = { status: number | null; output: string; timedOu
 
 /** Everything the precheck reads or spawns, so a test can drive each arm without an instrumented suite. */
 export type CoveragePrecheckPorts = {
-  changedFiles?: (wt: string) => string[];
-  select?: (wt: string, changed: string[]) => AffectedSelection;
+  changedFiles?: (wt: string) => string[] | Promise<string[]>;
+  select?: (wt: string, changed: string[]) => AffectedSelection | Promise<AffectedSelection>;
   manifest?: (wt: string) => { thresholdMs: number; files: Record<string, number> };
   run?: (wt: string, suites: string[], timeoutMs: number) => CoverageRunResult | Promise<CoverageRunResult>;
   /** Bounds captured output in the real runner; the default retains spawnSync's 64 MiB ceiling. */
@@ -18246,8 +18363,9 @@ const COVERAGE_UNCOVERED_HEADLINE = /^diff-coverage: (?:BLOCKED -- this diff add
 const COVERAGE_MISSING_SF = /no SF record in the coverage report/;
 const COVERAGE_TEXT_CAP = 4000;
 
-const realCoverageChangedFiles = (wt: string): string[] =>
-  hostWorktreeGit(wt, MERGE_BASE_DIFF_ARGS).split("\n").map((f) => f.trim()).filter(Boolean);
+/** W1-T7744: awaited — the precheck runs inside a build the daemon runs on its own loop. */
+const realCoverageChangedFiles = async (wt: string): Promise<string[]> =>
+  (await hostWorktreeGitAsync(wt, MERGE_BASE_DIFF_ARGS)).split("\n").map((f) => f.trim()).filter(Boolean);
 
 /**
  * W1-T5074: ASYNC on purpose. `runTask` runs inside the daemon process, so a `spawnSync` here froze every
@@ -18358,7 +18476,7 @@ export async function coveragePrecheck(wt: string, ports: CoveragePrecheckPorts 
   const reasonOf = (e: unknown) => String((e as Error)?.message ?? e).slice(0, 300);
   let changed: string[];
   try {
-    changed = (ports.changedFiles ?? realCoverageChangedFiles)(wt);
+    changed = await (ports.changedFiles ?? realCoverageChangedFiles)(wt);
   } catch (e) {
     return { outcome: "unavailable", reason: `changed files unreadable: ${reasonOf(e)}` };
   }
@@ -18368,7 +18486,8 @@ export async function coveragePrecheck(wt: string, ports: CoveragePrecheckPorts 
   let selection: AffectedSelection;
   let manifest: { thresholdMs: number; files: Record<string, number> };
   try {
-    selection = (ports.select ?? ((w, c) => affectedSelectionOrFull(c, () => readAffectedSuitesInput(w, c))))(wt, changed);
+    // W1-T7744: the default selection awaits its git and diff-class listing children (14.9 s held, 2026-10-10).
+    selection = await (ports.select ?? ((w, c) => affectedSelectionOrFullAsync(c, () => readAffectedSuitesInputAsync(w, c))))(wt, changed);
     manifest = (ports.manifest ?? ((w) => loadManifest(join(w, DEFAULT_MANIFEST_RELATIVE_PATH))))(wt);
   } catch (e) {
     return { outcome: "unavailable", reason: `could not derive the affected-suite scope: ${reasonOf(e)}` };
@@ -18540,7 +18659,7 @@ export async function repairCensusRefusedPush(input: {
     );
     if (spawned.kind !== "spawned") return { outcome: "refused", strikes: strike, refusal, reason: `fix worker ${spawned.kind} after ${spawned.elapsedMs}ms` };
     const result = input.account(spawned.result);
-    const censusCheck = checkFixCensusSnapshot(cwd, censusSnapshotPath, log);
+    const censusCheck = await checkFixCensusSnapshotAsync(cwd, censusSnapshotPath, log);
     if (censusCheck?.refusal) {
       refusal = censusCheck.refusal;
       log("census_push.strike", { strike, ...receipt.ledgerFields(result), cost_usd: result.costUsd,
@@ -19721,29 +19840,22 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     let impl!: WorkerResult;
     // W1-T7697: retain disk work before releasing a lane; a failed checkpoint is never a handoff.
     const yieldAtWorkerBoundary = async (waitingOn: string): Promise<RunResult | undefined> => {
-      const freshness = await opts.externalWaitFreshness?.();
+      const freshness = opts.restartAtWorkerBoundary?.() ?? await opts.externalWaitFreshness?.();
       const recycle = freshness ? undefined : opts.externalWaitRecycle?.();
       if (!freshness && !recycle) return undefined;
+      let undeclared: readonly string[] = [];
       try {
-        if (worktreeHasUncommittedChanges(worktreePath)) {
-          const checkpoint = commitWorkerEdits(worktreePath, task.files ?? [],
-            `wip: yield at ${waitingOn}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume ${waitingOn}\nfailed: none\n\nRemudero-Task: ${taskId}`,
-            {}, task.acceptance);
-          if (!checkpoint.committed || checkpoint.undeclared.length > 0) {
-            throw new Error(`restart checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}`);
-          }
-        }
-        await gitPushRunBranchAsync(worktreePath, { prGates: false }); // a checkpoint opens no PR: see worktreePushExecAsync
+        ({ undeclared } = await commitAndPushRestartCheckpoint(worktreePath, task, taskId, waitingOn));
       } catch (error) {
         log("verdict", { verdict: "no_pr", reason: "restart_checkpoint_failed", waiting_on: waitingOn,
           detail: String((error as Error)?.message ?? error), branch, cost_usd: costUsd, ...terminalVerdictFields(impl) });
         return { taskId, runId, merged: false, costUsd, verdict: "no_pr" };
       }
       const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
-      log("run.freshness_handoff", { waiting_on: waitingOn, branch, head_sha: headSha,
-        ...(freshness ? { old_sha: freshness.oldSha, new_sha: freshness.newSha } : { trigger: "recycle", detail: recycle }) });
-      log("verdict", { verdict: "handed_off", reason: "freshness_yield", waiting_on: waitingOn,
-        branch, head_sha: headSha, cost_usd: costUsd, ...terminalVerdictFields(impl) });
+      for (const row of freshnessYieldRows({ waitingOn, branch, headSha, undeclared,
+        ...(freshness ? { freshness: { oldSha: freshness.oldSha, newSha: freshness.newSha } } : { recycle }) })) {
+        log(row.step, row.step === "verdict" ? { ...row.fields, cost_usd: costUsd, ...terminalVerdictFields(impl) } : row.fields);
+      }
       return { taskId, runId, merged: false, costUsd, verdict: "handed_off" };
     };
     const attemptImplement = async (findings?: string): Promise<AttemptOutcome> => {
@@ -20536,8 +20648,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     if (!prUrl) {
       let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
       try {
-        // W1-T6034: the filed proofs run as awaited children, off the daemon loop.
-        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, branchPrTitle(worktreePath), opts.prOpenProofRunner, true);
+        // W1-T6034: the filed proofs run as awaited children, off the daemon loop. W1-T7952: titled after the task.
+        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true);
       } catch (err) {
         if (!(err instanceof PrOpenRefusedError)) throw err;
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
@@ -20822,7 +20934,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // W1-T3557: ALWAYS wired in production — `worktreePath` is this rung's own checkout,
           // the SAME one `headCheckoutDir` above already points at, so no extra fetch is spent
           // resolving the plan at whatever head this round's push just landed.
-          resolveTaskContractAtHead: (prUrlArg, taskIdArg) => resolveFixRungTaskContractAtHead(prUrlArg, taskIdArg, worktreePath),
+          resolveTaskContractAtHead: (prUrlArg, taskIdArg) => resolveFixRungTaskContractAtHeadAsync(prUrlArg, taskIdArg, worktreePath),
           runReview,
           fetchPrBody: fetchPrBodyViaGh,
           // W1-T3506: the SAME worktree this round pushes to, run through the SAME proof
@@ -21373,7 +21485,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       for (const row of roundEndedHandoffRows(err.detail, branch)) {
         log(row.step, row.step === "verdict" ? { ...row.fields, cost_usd: costUsd, ...terminalVerdictFields(null) } : row.fields);
       }
-      say(`verdict: handed_off — ${err.detail.trigger === "recycle" ? "a pending recycle" : "the quiet-worker watchdog"} ended the round (${err.detail.reason})`);
+      say(`verdict: handed_off — ${err.detail.trigger === "recycle" ? "a pending recycle" : err.detail.trigger === "restart" ? "a latched daemon restart" : "the quiet-worker watchdog"} ended the round (${err.detail.reason})`);
       return { taskId, runId, merged: false, costUsd, verdict: "handed_off" };
     }
     // W1-T1045: the clock-bound watchdog (worker.ts) aborted a silent dispatch spawn — NAME it
@@ -22529,6 +22641,26 @@ export function resolveFixRungTaskContractAtHead(
 }
 
 /**
+ * W1-T7743: {@link resolveFixRungTaskContractAtHead} through AWAITED git — the form the daemon's fix rung and the
+ * sweep's fix dispatch wire, because the sync one parks the daemon loop on `execFileSync` for every read. The head sha
+ * read stays `readHeadSha` (injectable); only the plan read at that head is awaited.
+ */
+export async function resolveFixRungTaskContractAtHeadAsync(
+  prUrl: string,
+  taskId: string,
+  repoDir: string,
+  readHeadSha: (prUrl: string) => string = readHeadShaRest,
+): Promise<PlanCriteriaAtHeadResult | undefined> {
+  let headSha: string;
+  try {
+    headSha = readHeadSha(prUrl);
+  } catch {
+    return undefined; // an unreadable HEAD is unreadable regardless of which read failed first
+  }
+  return resolvePlanCriteriaAtHeadAsync(`Remudero-Task: ${taskId}`, repoDir, "plan/tasks.yaml", headSha);
+}
+
+/**
  * A DIVERGENCE between the two independent resolvers that decide whether a trailered PR body gets
  * judged: the CI gate's `declaredPlanTaskIds` (scripts/acceptance-author-gate.mjs, a line scan
  * over `- id:` — deliberately NOT `loadPlan`, so a plan defect elsewhere never red-lights a body
@@ -22862,7 +22994,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // `reportBody` still carries the real PR body unchanged to the fallback and reviewer below.
   if (taskId && !reviewTaskIdFromBody(body)) body = `Remudero-Task: ${taskId}`;
   if (taskId) {
-    const resolved = resolvePlanCriteriaAtHead(body, subjectRepoDir, "plan/tasks.yaml", view.headRefOid);
+    const resolved = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", view.headRefOid);
     criteria = resolved.criteria;
     if (resolved.source) source = resolved.source;
     taskDeclaredFiles = resolved.taskDeclaredFiles;
@@ -35865,27 +35997,52 @@ export function openSiblingObservation(
 const dispatchFilingCache = new Map<string, CostOfDelaySnapshot>();
 const dispatchFallbackKeys = new Map<string, string>();
 
+/** The dispatch filing read's answer: the committed filing dates, or why they could not be read. */
+export type DispatchFilingSnapshot = { kind: "ready"; snapshot: CostOfDelaySnapshot } | { kind: "refused"; reasons: readonly string[] };
+/** What dispatch selection reads the filing snapshot through: {@link dispatchFilingPrefetch} on the daemon and drain. */
+export type DispatchFilingReader = (planPath: string) => DispatchFilingSnapshot;
+
 export function readDispatchFilingSnapshot(
   planPath: string,
   readGit?: (cwd: string, args: string[]) => string,
-): { kind: "ready"; snapshot: CostOfDelaySnapshot } | { kind: "refused"; reasons: readonly string[] } {
+): DispatchFilingSnapshot {
+  const read = readGit ?? ((cwd: string, args: string[]) =>
+    execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", maxBuffer: 1 << 27 }));
+  return runStepsSync(dispatchFilingSnapshotSteps(planPath, read, readGit !== undefined));
+}
+
+/** W1-T7744 — the filing read with every git child awaited (up to 5.1 s held on the daemon loop, 2026-10-10): the
+ *  same steps, cache and `ready`/`refused` answers as the sync form. The default git is the plan checkout's own
+ *  awaited runner with the sync form's 128 MiB output ceiling. */
+export async function readDispatchFilingSnapshotAsync(
+  planPath: string,
+  readGit?: (cwd: string, args: string[]) => Promise<string>,
+): Promise<DispatchFilingSnapshot> {
+  const read = readGit ?? ((cwd: string, args: string[]) => planSyncGitRunnerAsync(cwd, { maxBuffer: 1 << 27 })(args));
+  return runStepsAsync(dispatchFilingSnapshotSteps(planPath, read, readGit !== undefined));
+}
+
+function* dispatchFilingSnapshotSteps(
+  planPath: string,
+  readGit: (cwd: string, args: string[]) => string | Promise<string>,
+  injected: boolean,
+): Steps<DispatchFilingSnapshot> {
   try {
-    const read = readGit ?? ((cwd: string, args: string[]) =>
-      execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", maxBuffer: 1 << 27 }));
+    const read = (cwd: string, args: string[]) => step(() => readGit(cwd, args));
     // macOS exposes /var through /private/var; canonicalize only real filesystem reads so the
     // injected reader seam remains usable with virtual fixture paths.
-    const canonicalPlanPath = readGit ? planPath : realpathSync(planPath);
-    const rootResult = read(dirname(canonicalPlanPath), ["rev-parse", "--show-toplevel"]).trim();
-    const root = readGit ? rootResult : realpathSync(rootResult);
-    if (read(root, ["rev-parse", "--is-shallow-repository"]).trim() !== "false") return { kind: "refused", reasons: ["incomplete-filing-history"] };
+    const canonicalPlanPath = injected ? planPath : realpathSync(planPath);
+    const rootResult = String(yield* read(dirname(canonicalPlanPath), ["rev-parse", "--show-toplevel"])).trim();
+    const root = injected ? rootResult : realpathSync(rootResult);
+    if (String(yield* read(root, ["rev-parse", "--is-shallow-repository"])).trim() !== "false") return { kind: "refused", reasons: ["incomplete-filing-history"] };
     const planDir = relative(root, dirname(canonicalPlanPath)).split(sep).join("/") || ".";
-    const planTreeSha = read(root, ["rev-parse", `HEAD:${planDir}`]).trim();
+    const planTreeSha = String(yield* read(root, ["rev-parse", `HEAD:${planDir}`])).trim();
     if (!/^[a-f0-9]{40,64}$/.test(planTreeSha)) return { kind: "refused", reasons: ["unreadable-plan-tree"] };
     const key = `${root}:${planPath}`;
     const cached = dispatchFilingCache.get(key);
     if (cached?.planTreeSha === planTreeSha) return { kind: "ready", snapshot: cached };
     const relativePlanPath = relative(root, canonicalPlanPath);
-    const history = read(root, ["log", "--first-parent", "--reverse", "--format=filing:%ct", "--no-renames", "-p", "--unified=0", "HEAD", "--", relativePlanPath, `${planDir}/tasks.d`]);
+    const history = String(yield* read(root, ["log", "--first-parent", "--reverse", "--format=filing:%ct", "--no-renames", "-p", "--unified=0", "HEAD", "--", relativePlanPath, `${planDir}/tasks.d`]));
     const filedAtByTaskId = filingDatesFromPlanHistory(history);
     if (filedAtByTaskId.size === 0) return { kind: "refused", reasons: ["missing-filing-history"] };
     const snapshot = Object.freeze({ planTreeSha, filedAtByTaskId });
@@ -35895,6 +36052,44 @@ export function readDispatchFilingSnapshot(
     return { kind: "refused", reasons: [`filing-history-unreadable:${String(error)}`] };
   }
 }
+
+/**
+ * W1-T7744 — dispatch selection's filing reader for the daemon and the drain. Selection itself is synchronous
+ * (`buildDispatchValueContext`), so it reads the newest AWAITED answer per plan path and starts the next awaited
+ * read behind it; `refresh` is awaited once before the loop starts, so the first selection already has its answer.
+ * A plan that moves is seen one selection later, which W1-T7534 already tolerates (an undated task is left unscored).
+ */
+export function prefetchedDispatchFilingReader(
+  read: (planPath: string) => Promise<DispatchFilingSnapshot> = readDispatchFilingSnapshotAsync,
+): DispatchFilingReader & { refresh(planPath: string): Promise<DispatchFilingSnapshot> } {
+  const latest = new Map<string, DispatchFilingSnapshot>();
+  const inFlight = new Map<string, Promise<DispatchFilingSnapshot>>();
+  const refresh = (planPath: string): Promise<DispatchFilingSnapshot> => {
+    const running = inFlight.get(planPath);
+    if (running) return running;
+    // The default read answers every failure as `refused`; an injected one that rejects is answered the same way,
+    // so a failed read never wedges its in-flight slot or escapes `void refresh` as an unhandled rejection.
+    const next = read(planPath).then(
+      (answer) => answer,
+      (error: unknown): DispatchFilingSnapshot => ({ kind: "refused", reasons: [`filing-history-unreadable:${String(error)}`] }),
+    ).then((answer) => {
+      latest.set(planPath, answer);
+      inFlight.delete(planPath);
+      return answer;
+    });
+    inFlight.set(planPath, next);
+    return next;
+  };
+  const reader = (planPath: string): DispatchFilingSnapshot => {
+    const answer = latest.get(planPath);
+    void refresh(planPath);
+    return answer ?? { kind: "refused", reasons: ["filing-history-pending"] };
+  };
+  return Object.assign(reader, { refresh });
+}
+
+/** The process's one prefetched filing reader: the daemon and the drain prime it, dispatch selection reads it. */
+export const dispatchFilingPrefetch = prefetchedDispatchFilingReader();
 
 /** The daemon's dispatch-selection union: a repeated selection over an unchanged ledger reads nothing, and a
  * changed one reads only the live file's new tail and any new rotation (see createIncrementalLedgerUnion). */
@@ -35911,7 +36106,7 @@ export function dispatchValueContextForSelection(
   log: (step: string, extra?: Record<string, unknown>) => void,
   planPath: string,
   readLedger: typeof readLedgerUnionRecordsSync = dispatchSelectionLedgerUnion,
-  readFiling: typeof readDispatchFilingSnapshot = readDispatchFilingSnapshot,
+  readFiling: DispatchFilingReader = dispatchFilingPrefetch,
 ): DispatchValueContext | undefined {
   const union = readLedger(stateDir, {
     step: [...DISPATCH_VALUE_LEDGER_STEPS, "dispatch.cost_of_delay.fallback", "dispatch.cost_of_delay.ready", "dispatch.refused_already_merged"],
@@ -36331,6 +36526,7 @@ async function drainCommand(
   const runDrainFn = deps.runDrain ?? runDrain;
   try {
     if (!deps.runDrain && !stopDetail(config.root)) await prepareSharedPause(config.root, realDeps().sharedPauseGit);
+    await dispatchFilingPrefetch.refresh(planPath); // W1-T7744: the first selection reads an awaited filing snapshot
     const summary = await runDrainFn(
       plan,
       {
@@ -36888,10 +37084,10 @@ export function planReloader(
   allowStale: boolean,
   log: (step: string, extra?: Record<string, unknown>) => void,
   deps: {
-    treeSha?: () => string;
-    load?: (planPath: string) => Plan;
+    treeSha?: () => string | Promise<string>;
+    load?: (planPath: string) => Plan | Promise<Plan>;
   } = {},
-): (() => Plan | null) | undefined {
+): (() => Promise<Plan | null>) | undefined {
   if (!target.isSelf) return undefined;
   // `-C` IS LOAD-BEARING. Without it this ran in the DAEMON PROCESS's working directory, which is
   // not the checkout, so every tick threw `fatal: not a git repository` — caught and ledgered as
@@ -36906,16 +37102,16 @@ export function planReloader(
   const planRepoRoot = dirname(dirname(target.planPath));
   const planRelativePath = relative(planRepoRoot, target.planPath) || "plan/tasks.yaml";
   const repoDirForGit = planRepoRoot;
+  // W1-T7743: AWAITED children, never `execFileSync` — the tick awaits this reload, so a slow git (10.7 s measured)
+  // no longer parks the daemon's event loop.
   const treeSha =
     deps.treeSha ??
-    (() =>
-      execFileSync("git", ["-C", repoDirForGit, "rev-parse", "origin/main:plan"], {
-        encoding: "utf8",
-      }).trim());
-  const load = deps.load ?? (() => loadPlanAtRef(planRepoRoot, planRelativePath, "origin/main"));
+    (async () =>
+      (await execFilePromise("git", ["-C", repoDirForGit, "rev-parse", "origin/main:plan"], { encoding: "utf8" })).stdout.trim());
+  const load = deps.load ?? (() => loadPlanAtRefAsync(planRepoRoot, planRelativePath, "origin/main"));
   let lastSha: string | undefined;
-  return () => {
-    const sha = treeSha();
+  return async () => {
+    const sha = await treeSha();
     if (lastSha === undefined) {
       // First tick: record the boot's sha WITHOUT reloading. The plan we were handed already came
       // from this sha, so reporting a reload here would be a lie and would log a no-op every boot.
@@ -36942,7 +37138,7 @@ export function planReloader(
     // Do not advance the observed sha until the committed ref has parsed successfully. A transient
     // fetch/object/read failure must be retried on the next tick, rather than permanently pinning
     // the daemon to the old plan while claiming it observed the new one.
-    const fresh = load(target.planPath);
+    const fresh = await load(target.planPath);
     lastSha = sha;
     log("daemon.plan_changed", { tree_sha: sha.slice(0, 12), allow_stale: allowStale });
     return fresh;
@@ -36970,12 +37166,12 @@ export function dedicatedTargetPlanReloader(
   target: { isSelf: boolean; planPath: string },
   log: (step: string, extra?: Record<string, unknown>) => void,
   deps: {
-    fetch?: () => void;
-    treeSha?: () => string;
-    resetWorkingTree?: () => void;
-    load?: (planPath: string) => Plan;
+    fetch?: () => unknown;
+    treeSha?: () => string | Promise<string>;
+    resetWorkingTree?: () => unknown;
+    load?: (planPath: string) => Plan | Promise<Plan>;
   } = {},
-): (() => Plan | null) | undefined {
+): (() => Promise<Plan | null>) | undefined {
   // Mirrors `planReloader`'s own early return, inverted: THIS reloader exists only for the arm
   // `planReloader` refuses. Wiring (below) never hands a self target here, but the guard keeps
   // this function correct in isolation, not merely correct-by-caller-discipline.
@@ -36987,13 +37183,13 @@ export function dedicatedTargetPlanReloader(
   // WHILE a worker runs) — an idle dedicated daemon would otherwise never see a merged change.
   const fetch =
     deps.fetch ??
-    (() => execFileSync("git", ["-C", repoDirForGit, "fetch", "--quiet", "origin"], { stdio: "pipe" }));
+    (async () => {
+      await execFilePromise("git", ["-C", repoDirForGit, "fetch", "--quiet", "origin"]);
+    });
   const treeSha =
     deps.treeSha ??
-    (() =>
-      execFileSync("git", ["-C", repoDirForGit, "rev-parse", "origin/main:plan"], {
-        encoding: "utf8",
-      }).trim());
+    (async () =>
+      (await execFilePromise("git", ["-C", repoDirForGit, "rev-parse", "origin/main:plan"], { encoding: "utf8" })).stdout.trim());
   // RESETS THE WORKING TREE, UNLIKE `planReloader`: `load` below is a plain filesystem read, never
   // a `git show <ref>:<path>`, so a fetched ref alone leaves it reading whatever boot's own
   // `git reset --hard origin/main` (the `!target.isSelf` branch above) last checked out. Self gets
@@ -37004,15 +37200,17 @@ export function dedicatedTargetPlanReloader(
   // content forever, which is worse than never reloading: it would look fixed.
   const resetWorkingTree =
     deps.resetWorkingTree ??
-    (() => execFileSync("git", ["-C", repoDirForGit, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" }));
+    (async () => {
+      await execFilePromise("git", ["-C", repoDirForGit, "reset", "--hard", "--quiet", "origin/main"]);
+    });
   const load = deps.load ?? ((pp: string) => loadPlan(pp));
   let lastSha: string | undefined;
-  return () => {
+  return async () => {
     // A failed fetch propagates — caught by `runDaemon`'s own `daemon.plan_reload_failed` wrapper
     // (the SAME generic catch `planReloader`'s own treeSha throw already relies on), never
     // swallowed here. Keeping the plan we already have is the correct degrade either way.
-    fetch();
-    const sha = treeSha();
+    await fetch();
+    const sha = await treeSha();
     if (lastSha === undefined) {
       // First tick: record the boot's sha without reloading — see `planReloader`'s identical
       // comment for why reporting a reload here would be a lie. The working tree already matches
@@ -37023,7 +37221,7 @@ export function dedicatedTargetPlanReloader(
     }
     if (sha === lastSha) return null;
     lastSha = sha;
-    resetWorkingTree();
+    await resetWorkingTree();
     log("daemon.target_plan_changed", { tree_sha: sha.slice(0, 12) });
     return load(target.planPath);
   };
@@ -37042,7 +37240,7 @@ export function resolveReloadPlan(
   target: { isSelf: boolean; planPath: string },
   allowStale: boolean,
   log: (step: string, extra?: Record<string, unknown>) => void,
-): (() => Plan | null) | undefined {
+): (() => Promise<Plan | null>) | undefined {
   return target.isSelf ? planReloader(target, allowStale, log) : dedicatedTargetPlanReloader(target, log);
 }
 
@@ -39559,6 +39757,8 @@ export async function daemonCommand(
   installDaemonFootprint(daemonFootprint);
   try {
     try { await gardenerRuntime.flush(); } catch { log("garden.telemetry_failed", { reason: "runtime-inventory-write-failed" }); }
+    // W1-T7744: the filing read is awaited here, before the loop, and behind each selection after — never on the loop.
+    await dispatchFilingPrefetch.refresh(target.planPath);
     const summary = await runDaemonFn(
       plan,
       {
@@ -39684,7 +39884,7 @@ export async function daemonCommand(
         // opening its PR against the WRONG owner. That partial fix is worse than today's honest
         // self-owner-only behaviour and is exactly what test/owner-dispatch-threading.test.ts
         // refuses.
-        runOne: (taskId) =>
+        runOne: (taskId, runOptions) =>
           runTaskFn(taskId, {
             planPath: target.planPath,
             config,
@@ -39708,6 +39908,7 @@ export async function daemonCommand(
             // existing adapter is material-and-clean only; unassessed, dirty, and degraded
             // readings remain undefined and therefore cannot manufacture a restart.
             externalWaitFreshness: daemonFreshnessReads(effectiveRepoRoot).externalWaitFreshness,
+            restartAtWorkerBoundary: runOptions?.restartAtWorkerBoundary,
             externalWaitRecycle: () => recyclePauseDetail(config.root),
             // W1-T5345: a daemon lane is free once its PR is open — the sweep owns CI wait and review.
             handOffAtPrOpen: true,
@@ -45425,7 +45626,9 @@ export function commitWorkerEdits(
   // exists to prevent, and there is nothing this verb needs that the push verb did not.
   deps: PublishAbandonedFixOwnerAheadDeps = {},
   acceptance: readonly AcceptanceCriterion[] = [],
-  options: { admitTests?: boolean; priorHeadSha?: string; branch?: string } = {},
+  // `checkpoint` (W1-T8008): a restart checkpoint keeps EVERY worker change, declared or not -- the undeclared paths are
+  // staged too and returned in `undeclared` (named, never dropped); scope is judged later, on the ordinary push path.
+  options: { admitTests?: boolean; priorHeadSha?: string; branch?: string; checkpoint?: boolean } = {},
 ): WorkerEditCommit {
   const runGit = deps.runGit ?? ((args: string[]) => hostWorktreeGit(
     repoDir,
@@ -45435,7 +45638,7 @@ export function commitWorkerEdits(
   if (message.trim().length === 0) {
     return { committed: false, undeclared: [], reason: "refusing to commit with an empty message" };
   }
-  if (declaredPaths.length === 0) {
+  if (declaredPaths.length === 0 && !options.checkpoint) {
     return { committed: false, undeclared: [], reason: "the task declares no files, so there is no surface to stage" };
   }
 
@@ -45489,6 +45692,9 @@ export function commitWorkerEdits(
   const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths) ||
     regenerable.includes(path) || proofMatchedTests.includes(path) || admittedTests.includes(path) || admittedRegistrations.includes(path));
   const undeclared = changed.filter((path) => !declared.includes(path));
+  // A checkpoint stages the undeclared paths as well; git itself still forces the refusals below.
+  const staged = options.checkpoint ? changed : declared;
+  const commitMessage = options.checkpoint && undeclared.length > 0 ? withUndeclaredContext(message, undeclared) : message;
   // W1-T5868: a path still UNMERGED outside what this commit stages cannot be committed — `git commit`
   // throws on it, and the guarded tree would carry its conflict stages. A merge of current main can
   // conflict in files the task never declared. REFUSE by name (a strike), before anything is staged.
@@ -45498,13 +45704,13 @@ export function commitWorkerEdits(
     return { committed: false, undeclared, conflictMarkerFiles: unresolvedOutside,
       reason: `${UNRESOLVED_CONFLICT_REFUSAL_PREFIX} ${unresolvedOutside.join(", ")}; nothing was staged` };
   }
-  if (declared.length === 0) {
+  if (staged.length === 0) {
     return { committed: false, undeclared, reason: "every change the worker made is outside its declared files" +
       registrationChanges.filter((change) => change.error).map((change) => `; ${change.path}: ${change.error}`).join("") };
   }
 
   // W1-T5227: BEFORE any add — `git add` marks a conflicted path resolved whatever it holds.
-  const markerFiles = leftoverConflictMarkerPaths(runGit, declared);
+  const markerFiles = leftoverConflictMarkerPaths(runGit, staged);
   if (markerFiles.length > 0) {
     return { committed: false, undeclared, conflictMarkerFiles: markerFiles,
       reason: `${CONFLICT_MARKER_REFUSAL_PREFIX} ${markerFiles.join(", ")}; nothing was staged` };
@@ -45515,25 +45721,25 @@ export function commitWorkerEdits(
   // in the index and is committed as the deletion it already is; a worktree-only ` D` is still added.
   const alreadyStagedDeletion = new Set(status.split("\0").filter((entry) => entry.startsWith("D ") && entry.length > 3)
     .map((entry) => entry.slice(3)).filter((path) => !existsSync(join(repoDir, path))));
-  const withoutStagedDeletions = declared.filter((path) => !alreadyStagedDeletion.has(path));
+  const withoutStagedDeletions = staged.filter((path) => !alreadyStagedDeletion.has(path));
 
   let sha: string;
   if (roundRef === undefined) {
     if (withoutStagedDeletions.length > 0) runGit(["add", "-A", "--", ...withoutStagedDeletions]);
-    runGit(["commit", "-m", message]);
+    runGit(["commit", "-m", commitMessage]);
     sha = runGit(["rev-parse", "HEAD"]).trim();
   } else {
     const mergeHead = mergeHeadPresent(runGit) ? runGit(["rev-parse", "MERGE_HEAD"]).trim() : undefined;
     // Only a merge's index is seeded from the real one, so only there is a staged deletion already in it;
     // an unseeded temporary index starts from the prior head, where `add -A` must still stage the removal.
-    const addable = mergeHead === undefined ? declared : withoutStagedDeletions;
+    const addable = mergeHead === undefined ? staged : withoutStagedDeletions;
     const tree = temporaryIndexTree(repoDir, options.priorHeadSha!, (env) => {
       if (addable.length > 0) hostWorktreeGit(repoDir, ["add", "-A", "--", ...addable], { env });
     }, mergeHead === undefined ? undefined : resolve(repoDir, runGit(["rev-parse", "--git-path", "index"]).trim()));
     if (mergeHead === undefined && tree === runGit(["rev-parse", `${options.priorHeadSha}^{tree}`]).trim()) {
       return { committed: false, undeclared, reason: "the worker changed nothing" };
     }
-    sha = runGit(["commit-tree", tree, "-p", options.priorHeadSha!, ...(mergeHead === undefined ? [] : ["-p", mergeHead]), "-m", message]).trim();
+    sha = runGit(["commit-tree", tree, "-p", options.priorHeadSha!, ...(mergeHead === undefined ? [] : ["-p", mergeHead]), "-m", commitMessage]).trim();
     try {
       runGit(["update-ref", roundRef, sha, options.priorHeadSha!]);
     } catch (error) {
@@ -45555,6 +45761,13 @@ export function commitWorkerEdits(
     ...(admittedTests.length > 0 ? { admittedTests } : {}),
     ...(admittedRegistrations.length > 0 ? { admittedRegistrations } : {}),
   };
+}
+
+/** W1-T8008: name the undeclared paths a checkpoint kept inside the commit's `[remudero-context]` block (before the trailer). */
+function withUndeclaredContext(message: string, undeclared: readonly string[]): string {
+  const line = `undeclared: ${undeclared.join(", ")}`;
+  const at = message.lastIndexOf("\n\nRemudero-Task:");
+  return at < 0 ? `${message}\n${line}` : `${message.slice(0, at)}\n${line}${message.slice(at)}`;
 }
 
 /** Inspect declarations rather than comments or string examples; never execute worker content.
@@ -55684,7 +55897,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "benchmark-aa",
     syntax: "rmd benchmark-aa --trial <manifest.json> [--state-dir <dir>] [--case-files <snapshot.json>] [--out <report.json>] [--no-cohort] [--json] | prospective register --trial <manifest.json> | prospective report --trial-id <id> [--out <report.json>] [--json] | prospective pause --trial-id <id> [--note <text>] | readiness --trial-id <id> [--trial <manifest.json>] [--instance-root <name>=<state-dir>]... [--max-pairs <n>] [--out <receipt.json>] [--json]",
     summary: "Report an A/A integrity trial: two labels, one pinned stack, and no winner.",
-    detail: "W1-T4575: reads a public-fixture or explicitly opted-in trial manifest (benchmark-aa-trial-v1) naming one pinned stack (provider, model, effort, harness, prompt, tool, scorer and environment revisions), a strata revision and its tasks. Each task takes one of two labels by a sha256 draw over the trial and task ids, so a retry or a new run never moves it; non-starters and retries stay in the original arm. Reads the three-form ledger union and, unless --no-cohort, the benchmark-cohort-v1 projection, and reports the sample-ratio test against 50/50 (chi-square and exact binomial), assignment-to-terminal-to-verified-outcome joins, per-arm served-model and resource missingness, fallbacks and crossovers, outcome maturity and censoring, and the observed difference with a 95% interval. API cash estimates, subscription notional cost, invoices and unknown cost stay separate; unknown is never zero. It never declares a winner. It writes one dated private report with a privacy-safe benchmark-aa-receipt-v1 to --out (default <state-dir>/benchmark-aa-v1.<trial>.json); a refresh that cannot read its sources keeps that report and marks it stale. It changes no routing, blocks no dispatch, review or merge, and spends nothing. W1-T4647: `prospective register` records a manifest as a prospective A/A under <state-dir>/benchmark-aa-prospective/<trial>/; when normal dispatch admits one of its tasks, the daemon runs two sealed side attempts through the paired-trial seam, labelled with both labels in a seeded order and both on the manifest's one pinned stack, graded by the task's own proofs, never pushed, reviewed or merged, one pair at a time under the per-attempt cap. It is subscription only: an attempt whose billing resolves to api is refused before spawn and recorded, and cash is reported as zero observed. `prospective report` writes the same benchmark-aa-v1 report and receipt from the trial's own ledger, with each attempt as one unit and its graded outcome in place of the case-file join; `prospective pause` stops new pairs. Nothing is read, logged or spawned without a registered trial, and it never activates, resumes or reads the paid pilot. W1-T5341: `readiness` runs a fresh prospective calibration: it reconciles the trial's registration across every live instance root in the fleet registry (or each --instance-root), refusing an unreadable root or a duplicate trial, derives harness, prompt, tool, scorer and environment pins from this process and refuses any unknown or drifting pin before dispatch, freezes the eligible population once with its denominator and refusals, then runs pending pairs in a seeded order through the same paired seam, never replaying a completed pair. It reports untriggered exclusions, per-arm per-stage missingness, observed cash apart from notional usage (unknown counted, never zero) and source completeness, writes the calibration receipt only when its integrity predicates pass, and otherwise names the next machine-repairable gap and files it once to <state-dir>/benchmark-aa-readiness.follow-ups.ndjson. Subscription only; it holds no dispatch, PR or daemon and never activates the paid pilot.",
+    detail: "W1-T4575: reads a public-fixture or explicitly opted-in trial manifest (benchmark-aa-trial-v1) naming one pinned stack (provider, model, effort, harness, prompt, tool, scorer and environment revisions), a strata revision and its tasks. Each task takes one of two labels by a sha256 draw over the trial and task ids, so a retry or a new run never moves it; non-starters and retries stay in the original arm. Reads the three-form ledger union and, unless --no-cohort, the benchmark-cohort-v1 projection, and reports the sample-ratio test against 50/50 (chi-square and exact binomial), assignment-to-terminal-to-verified-outcome joins, per-arm served-model and resource missingness, fallbacks and crossovers, outcome maturity and censoring, and the observed difference with a 95% interval. API cash estimates, subscription notional cost, invoices and unknown cost stay separate; unknown is never zero. It never declares a winner. It writes one dated private report with a privacy-safe benchmark-aa-receipt-v1 to --out (default <state-dir>/benchmark-aa-v1.<trial>.json); a refresh that cannot read its sources keeps that report and marks it stale. It changes no routing, blocks no dispatch, review or merge, and spends nothing. W1-T4647: `prospective register` records a manifest as a prospective A/A under <state-dir>/benchmark-aa-prospective/<trial>/; when normal dispatch admits one of its tasks, the daemon runs two sealed side attempts through the paired-trial seam, labelled with both labels in a seeded order and both on the manifest's one pinned stack, graded by the task's own proofs, never pushed, reviewed or merged, one pair at a time under the per-attempt cap. It is subscription only: an attempt whose billing resolves to api is refused before spawn and recorded, and cash is reported as zero observed. `prospective report` writes the same benchmark-aa-v1 report and receipt from the trial's own ledger, with each attempt as one unit and its graded outcome in place of the case-file join; `prospective pause` stops new pairs. Nothing is read, logged or spawned without a registered trial, and it never activates, resumes or reads the paid pilot. W1-T5341: `readiness` runs a fresh prospective calibration: it reconciles the trial's registration across every live instance root in the fleet registry (or each --instance-root), refusing an unreadable root or a duplicate trial, derives harness, prompt, tool, scorer and environment pins from this process and refuses any unknown or drifting pin before dispatch, freezes the eligible population once with its denominator and refusals, then runs pending pairs in a seeded order through the same paired seam, never replaying a completed pair. It reports untriggered exclusions, per-arm per-stage missingness, observed cash apart from notional usage (unknown counted, never zero) and source completeness, writes the calibration receipt only when its integrity predicates pass, and otherwise names the next machine-repairable gap and records it once (recording is not filing: a task exists only after the opportunity intake's governed triage files it) to <state-dir>/benchmark-aa-readiness.follow-ups.ndjson. Subscription only; it holds no dispatch, PR or daemon and never activates the paid pilot.",
   },
   {
     name: "benchmark-paid-pilot",
@@ -56572,7 +56785,7 @@ export function installUnhandledRejectionGuard(deps: UnhandledRejectionGuardDeps
  *  dispatcher on the per-attempt cap, the fleet registry's instance roots, and pins derived from this process. */
 export function benchmarkAaReadinessRuntime(stateDir: string, workerAbandonMs?: number) {
   const config = loadConfig();
-  return { config,
+  return { config, repo: githubRepoSlugOfCheckout(repoRoot),
     runtimePins: () => deriveRuntimePins({ harnessRevision: workerBoundaryStack.harnessRevision, installRoot: resolveInstallRoot(config) }),
     loadPlanTasks: () => loadPlan(join(repoRoot, "plan", "tasks.yaml")).tasks,
     dispatcherFor: (task: Task) => sealedPairedAttemptDispatcher({ task, config, repoDir: join(config.root, "repos", task.repo),
