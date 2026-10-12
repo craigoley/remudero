@@ -19984,7 +19984,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     let impl!: WorkerResult;
     // W1-T7697: retain disk work before releasing a lane; a failed checkpoint is never a handoff.
     const yieldAtWorkerBoundary = async (waitingOn: string): Promise<RunResult | undefined> => {
-      const freshness = opts.restartAtWorkerBoundary?.() ?? await opts.externalWaitFreshness?.();
+      const freshness = await (opts.restartAtWorkerBoundary ?? opts.externalWaitFreshness)?.();
       const recycle = freshness ? undefined : opts.externalWaitRecycle?.();
       if (!freshness && !recycle) return undefined;
       let undeclared: readonly string[] = [];
@@ -20892,7 +20892,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       : undefined;
     if (handoffDeclined) log("run.handoff_declined", { trigger: "pr_open", reason: handoffDeclined, pr_url: prUrl });
     const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra), 6, {
-      externalWaitFreshness: opts.externalWaitFreshness,
+      externalWaitFreshness: opts.restartAtWorkerBoundary ?? opts.externalWaitFreshness,
       externalWaitRecycle: opts.externalWaitRecycle,
       handOffAtPrOpen: opts.handOffAtPrOpen === true && handoffDeclined === undefined,
     });

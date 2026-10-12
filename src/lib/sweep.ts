@@ -8267,6 +8267,7 @@ export function baseRedHistoryFromLedger(lines: readonly Record<string, unknown>
   stoodDown: Map<string, string>;
   refreshed: Set<string>;
   reproducedBeforeGreen: Set<string>;
+  mainRepairPrUrls: Set<string>;
 } {
   const stoodDown = new Map<string, string>();
   const refreshed = new Set<string>();
@@ -8280,8 +8281,26 @@ export function baseRedHistoryFromLedger(lines: readonly Record<string, unknown>
     if (line.step === BASE_RED_REFRESH_STEP || line.step === BASE_FIXED_REFRESH_STEP) refreshed.add(key);
     if (line.step === "sweep.base_reproduction" && line.verdict === "reproduced") reproduced.add(key);
   }
-  return { stoodDown, refreshed, reproducedBeforeGreen };
+  return { stoodDown, refreshed, reproducedBeforeGreen, mainRepairPrUrls: mainRepairPrUrlsFromLedger(lines) };
 }
+
+function mainRepairPrUrlsFromLedger(lines: readonly Record<string, unknown>[]): Set<string> {
+  return new Set(lines.flatMap((line) => (line.step === "main.repair.fix_opened" && typeof line.pr_url === "string" ? [line.pr_url] : [])));
+}
+
+/** W1-T8575 — main's own repair: a `main-repair-<sha12>` task (fix, revert and ratchet-record PRs
+ *  alike) or a PR a `main.repair.fix_opened` row names. Its red is never main's to wait out. */
+export function isMainRepairPr(pr: Pick<OpenPrView, "taskId" | "prUrl">, ledgerLines: readonly Record<string, unknown>[]): boolean {
+  return isMainRepairPrIn(pr, mainRepairPrUrlsFromLedger(ledgerLines));
+}
+
+function isMainRepairPrIn(pr: Pick<OpenPrView, "taskId" | "prUrl">, repairPrUrls: ReadonlySet<string>): boolean {
+  return pr.taskId?.startsWith("main-repair-") === true || repairPrUrls.has(pr.prUrl);
+}
+
+/** W1-T8575 — required checks that judge only the PR's own body, title or proofs (each re-runs on
+ *  `edited`). Main's red cannot reach them, so absence from main's run never makes them base red. */
+export const PR_BODY_SCOPED_CHECKS: readonly string[] = ["proof-discrimination", "acceptance-author-gate", "commitlint"];
 
 export type BaseRedDecision = { kind: "own" } | { kind: "wait" | "refresh"; check: string };
 
@@ -8294,11 +8313,13 @@ export function decideBaseRed(
   history: ReturnType<typeof baseRedHistoryFromLedger>,
 ): BaseRedDecision {
   if (!isBlockedCi(pr)) return { kind: "own" };
+  // W1-T8575: the PR that repairs main is never held until main is green.
+  if (isMainRepairPrIn(pr, history.mainRepairPrUrls)) return { kind: "own" };
   const names = (pr.ciFailures ?? []).map((failure) => failure.name);
   if (main?.state === "red" && main.observedChecks !== undefined) {
     // A known passing check is this diff's red, even beside an inherited failure.
     if (names.some((name) => main.observedChecks!.includes(name) && !main.failingChecks.includes(name))) return { kind: "own" };
-    const absent = names.find((name) => !main.observedChecks!.includes(name));
+    const absent = names.find((name) => !main.observedChecks!.includes(name) && !PR_BODY_SCOPED_CHECKS.includes(name));
     if (absent !== undefined) return { kind: "wait", check: absent };
   }
   const shared = main?.state === "red" ? names.find((name) => main.failingChecks.includes(name)) : undefined;
@@ -8306,7 +8327,7 @@ export function decideBaseRed(
   const key = `${pr.prNumber}@${pr.headSha}`;
   const recorded = history.stoodDown.get(key);
   if (history.refreshed.has(key)) return { kind: "own" };
-  if (recorded !== undefined && names.includes(recorded)) return { kind: main?.state === "green" ? "refresh" : "wait", check: recorded };
+  if (recorded !== undefined && names.includes(recorded) && !PR_BODY_SCOPED_CHECKS.includes(recorded)) return { kind: main?.state === "green" ? "refresh" : "wait", check: recorded };
   // W1-T6024: a head whose failing tests a probe reproduced on main is main's red, whatever its check is called.
   const named = names[0];
   return main?.state === "green" && named !== undefined && history.reproducedBeforeGreen.has(key) ? { kind: "refresh", check: named } : { kind: "own" };
