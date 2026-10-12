@@ -194,6 +194,24 @@ test("native retention save failure holds the real claim across process owner re
   } finally { restarted.close(); }
 }));
 
+test("native retention terminal writes belong to the claiming SQLite owner and preserve the full binding", async () => fixture(async dir => {
+  const first = new CanarySlotOwner(dir), second = new CanarySlotOwner(dir), p = plan(), h = harness(first, 25);
+  let terminal: Parameters<CanarySchedulePorts["terminal"]>[1] | undefined;
+  h.ports.terminal = async (_slot, outcome) => { terminal = structuredClone(outcome); };
+  try {
+    await executeRetentionCanarySchedule(p, h.ports); assert.ok(terminal);
+    assert.equal(second.claim(p.slots[0]!), "already-owned-or-terminal");
+    assert.throws(() => second.terminal(p.slots[0]!, terminal!), /terminal-not-owned/);
+    assert.equal(stored(dir).length, 0); first.terminal(p.slots[0]!, terminal);
+    const db = new DatabaseSync(join(dir, "model-canary-slots.sqlite"));
+    try {
+      const row = db.prepare("SELECT binding FROM canary_slots_v1 WHERE id=?").get(p.slots[0]!.id)!;
+      assert.deepEqual(JSON.parse(String(row.binding)).at(-1), p.slots[0]!.retention);
+    } finally { db.close(); }
+    assert.deepEqual(stored(dir)[0]!.run, h.saved[0]);
+  } finally { first.close(); second.close(); }
+}));
+
 test("native retention schedule refuses changed plan protocol pins and population before any ownership", async () => {
   const p = plan(); assert.deepEqual(p, plan());
   const noCalls: CanarySchedulePorts = { eligibility: async () => { throw new Error("must-not-reach-eligibility"); },
