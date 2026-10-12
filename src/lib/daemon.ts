@@ -4226,7 +4226,7 @@ export async function runDaemon(
     // landing on origin/main and the daemon next booting is 106 minutes (impl-FZ). Position is the safety argument:
     // after the stop check, so a halted fleet does no I/O, and before any dispatch decision reads the plan. A throw
     // is caught and ledgered, never fatal. Forensics: docs/forensics/daemon.md.
-    await reloadPlanBinding();
+    if (deps.reloadPlan) await reloadPlanBinding();
     // One snapshot per admission (W1-T340, W1-T4416; MASTER-PLAN §4B). The plan binding is mutable and reassigned by the
     // reload above, so code closing over the NAME reads whatever the most recent reload produced. That is invisible
     // at one lane and stops being invisible the moment a batch holds more than one: a lane's later reasoning would be
