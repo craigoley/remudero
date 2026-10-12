@@ -70,6 +70,8 @@
       proof: 'unit test: W1-T8684: repository flow preserves latency samples censoring and coverage gaps'
     - claim: "real worker materializes repository flow and cached reads perform no ledger or GitHub work"
       proof: 'unit test: W1-T8684: default sources reach cached repository flow without request-time scans'
+    - claim: "the production off-loop worker calls the repository flow collector"
+      proof: 'grep: captureRepositoryFlow( in src/lib/read-model-worker.ts'
     - claim: "scope overflow and optional contract failures preserve independent Analytics"
       proof: 'unit test: W1-T8684: bounded flow refuses incompatible sources without losing Analytics'
   falsifier: |

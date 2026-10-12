@@ -77,6 +77,10 @@
       proof: 'unit test: W1-T8707: delivered PR efficiency refuses incompatible cost cohorts'
     - claim: "default evidence collection reaches bounded cached graphs and failures preserve independent sections"
       proof: 'unit test: W1-T8707: default quality collection survives restore and named source failure'
+    - claim: "the production worker consumes the repository flow collector"
+      proof: 'grep: captureRepositoryFlow( in src/lib/read-model-worker.ts'
+    - claim: "the existing production sweep records durable repository flow history"
+      proof: 'grep: recordRepositoryFlowHistory( in src/lib/sweep.ts'
   falsifier: |
     Remove initial-head identity or page coverage, change fix.done into recovery evidence, renew
     missing backlog days to zero, attribute a shared run to its last PR, or omit atomic writer/
