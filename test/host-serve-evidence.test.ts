@@ -235,6 +235,38 @@ test("unit test: host serve evidence fences stop by current generation", () => {
   }
 });
 
+test("unit test: a reader failure is named once and reads as unknown, never thrown", () => {
+  const { opts, cleanup } = scratch();
+  resetHostServeDiagnosticsForTests();
+  try {
+    publish(opts, 4242, NOW - 60 * MIN, "serve-steady");
+
+    // A file that cannot be read is named, counted corrupt, and widens to unknown (never to stopped).
+    const events: Array<Record<string, unknown>> = [];
+    const unreadableFile = readHostServeEvidence({
+      ...opts,
+      read: () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); },
+      log: (e) => events.push(e),
+    });
+    assert.equal(unreadableFile.state === "unknown" && unreadableFile.cause, "corrupt");
+    assert.deepEqual(events, [{ event: "serve.host_evidence_error", op: "read", reason: "EACCES" }]);
+
+    // A failure outside the per-file guard (here the clock) is caught, named, and read as unreadable.
+    const outer: Array<Record<string, unknown>> = [];
+    const broken = readHostServeEvidence({
+      ...opts,
+      clock: { ...fixedClock(NOW), now: () => { throw new Error("clock exploded"); } },
+      log: (e) => outer.push(e),
+    });
+    assert.equal(broken.state, "unknown");
+    assert.equal(broken.state === "unknown" && broken.cause, "unreadable");
+    assert.equal(broken.basis, "clock exploded");
+    assert.deepEqual(outer, [{ event: "serve.host_evidence_error", op: "read", reason: "clock exploded" }]);
+  } finally {
+    cleanup();
+  }
+});
+
 test("a publisher failure is named once and never thrown", () => {
   const { opts, cleanup } = scratch();
   resetHostServeDiagnosticsForTests();
