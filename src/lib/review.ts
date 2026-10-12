@@ -4782,10 +4782,9 @@ export async function observePromisedFollowUps(args: {
   if (paths.length === 0 && args.task.sourcePath === undefined) return empty;
   if (!args.headCheckoutDir) return { state: "unknown", reason: "promise source requires the exact PR-head checkout" };
   const deadline = performance.now() + 45_000;
-  const runGit = async (argv: string[], stdin?: string): Promise<string> => {
+  const runGit = async (argv: string[]): Promise<string> => {
     if (performance.now() >= deadline) throw new Error("promise source read deadline expired");
-    if (args.runGit) return await args.runGit(argv, stdin);
-    if (stdin !== undefined) throw new Error("promise observer requires bounded object reads, not a stdin batch");
+    if (args.runGit) return await args.runGit(argv);
     return await hostWorktreeGitAsync(args.headCheckoutDir!, argv, {
       maxBuffer: 16 << 20, timeout: Math.max(1, Math.min(15_000, Math.floor(deadline - performance.now()))),
       env: { GIT_TERMINAL_PROMPT: "0" },
