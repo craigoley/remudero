@@ -2,6 +2,7 @@
   title: "A RESTART LATCHED WHILE A LANE HAS NO SAFE BOUNDARY IDLES EVERY FREED LANE"
   repo: remudero
   depends_on: []
+  dispatch_hold: true  # operator 2026-10-12: held for a session build — restart churn keeps interrupting it; release after the session PR merges or if the session hands it back
   type: implement
   verify: auto
   principles: {tdd: strict}

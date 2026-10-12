@@ -2,6 +2,7 @@
   title: "A RESTART CHECKPOINT NEVER LOSES WORK OVER UNDECLARED FILES — the W1-T7697 checkpoint commits only paths under task.files and then refuses the whole yield when the worker touched any other path, so W1-T7808 (10-10 22:26Z) and W1-T7837 (10-11 04:51Z) ended no_pr restart_checkpoint_failed and nothing was pushed"
   repo: remudero
   depends_on: []
+  dispatch_hold: true  # operator 2026-10-12: held for a session build — restart churn keeps interrupting it; release after the session PR merges or if the session hands it back
   type: implement
   verify: auto
   principles: {tdd: strict}
