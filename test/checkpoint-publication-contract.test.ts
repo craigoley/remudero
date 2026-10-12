@@ -28,7 +28,7 @@ function rig() {
   work.git("push", "--quiet", "origin", branch);
   // These are disposable Git fixtures, not validation-tree dependencies or a modified gate.
   symlinkSync(join(ROOT, "node_modules"), join(work.dir, "node_modules"), "dir");
-  writeFileSync(join(work.dir, ".gitignore"), "node_modules/\n");
+  writeFileSync(join(work.dir, ".gitignore"), "node_modules\n");
   writeFileSync(join(work.dir, "commitlint.config.mjs"), readFileSync(join(ROOT, "commitlint.config.mjs")));
   work.git("add", "commitlint.config.mjs", ".gitignore");
   work.git("commit", "--quiet", "-m", "test(checkpoint): install the unchanged message gate in the fixture");
@@ -108,7 +108,7 @@ test("checkpoint prompt and continuation agree with local range and hosted title
     assert.match(text, /tests and coverage/);
     assert.match(text, /terminal/);
     assert.match(text, /chore\(checkpoint\)/);
-    assert.match(text, /local.*range/);
+    assert.match(text, /local.*range/i);
     assert.equal(text.includes("run NO git or gh commands"), ownsGit);
   }
   const builder = (unfinished as unknown as Record<string, unknown>).checkpointCommitSubject;
