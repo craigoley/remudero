@@ -208,9 +208,9 @@ export function stepsWrittenWithAPrice(sources: ReadonlyMap<string, string>): Ma
   for (const [file, text] of sources) {
     // These exact adapters forward to the same ledger sink. Do not treat arbitrary
     // business/report methods elsewhere as ledger writes or drop their old exemptions.
-    const adapters = file === "src/lib/daemon.ts" ? "|report|reporting\\.report"
-      : file === "src/lib/drain.ts" ? "|settledLog" : "";
-    const logCall = new RegExp(`\\b(?:log\\w*${adapters})\\(\\s*(?:(["'])(${STEP_NAME})\\1|(${CONST_NAME}))\\s*,`, "g");
+    const adapters = file === "src/lib/daemon.ts" ? "|(?<![\\w$.])(?:report|reporting\\.report)"
+      : file === "src/lib/drain.ts" ? "|(?<![\\w$.])settledLog" : "";
+    const logCall = new RegExp(`(?:\\blog\\w*${adapters})\\(\\s*(?:(["'])(${STEP_NAME})\\1|(${CONST_NAME}))\\s*,`, "g");
     for (const m of text.matchAll(logCall)) {
       if (PRICED.test(balanced(text, text.indexOf("(", m.index)))) add(resolve(m[2], m[3]), file);
     }
@@ -332,7 +332,7 @@ test("the census reads each write idiom and ignores an unpriced or total-only ro
 
 test("the priced-step census sees owned settlement adapters but not unrelated reporters", () => {
   const found = stepsWrittenWithAPrice(new Map([
-    ["src/lib/daemon.ts", `report("daemon.blocked", { pr_url: url }); reporting.report("daemon.block.parked", { pr_url: url });`],
+    ["src/lib/daemon.ts", `report("daemon.blocked", { pr_url: url }); reporting.report("daemon.block.parked", { pr_url: url }); other.report("business.not.ledger", { cost_usd: 1 }); other.reporting.report("nested.not.ledger", { pr_url: url });`],
     ["src/lib/drain.ts", `settledLog("drain.continued", { pr_url: url }); settledLog("drain.blocked", { reason: "unpriced" });`],
     ["src/lib/unrelated.ts", `report("not.a.ledger", { cost_usd: 1 }); reporting.report("also.not.a.ledger", { pr_url: url });`],
   ]));

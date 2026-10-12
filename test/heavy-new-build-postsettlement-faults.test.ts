@@ -141,6 +141,24 @@ test("post-settlement idle-window reporter refusal preserves all settled worker 
   assert.equal(outcome.summary.costUsd, 1);
 });
 
+test("post-settlement delivery-failure reporting cannot erase a completed sibling", async (t) => {
+  let reports = 0;
+  const summary = await runDaemon(planFixture(t), depsFixture(t, {
+    runOne: async (id) => {
+      if (id === "A") throw new Error("Command failed: git push origin fixture-branch");
+      return result(id);
+    },
+    log: (step) => {
+      if (step === "daemon.lane_failed") { reports++; throw new Error("delivery sink refused"); }
+    },
+  }), { laneCount: 2, max: 2, pollIntervalMs: 10 });
+  assert.equal(reports, 1, "positive control: the real delivery classifier reported its outcome");
+  assert.deepEqual(summary.attempted, ["A", "B"]);
+  assert.deepEqual(summary.merged, ["B"]);
+  assert.equal(summary.costUsd, 0.75);
+  assertReportingFault(summary, "daemon.lane_failed", "delivery sink refused");
+});
+
 test("summary sink refusal is explicit error assurance, not a delivered success receipt", async (t) => {
   const summary = await runDaemon(planFixture(t), depsFixture(t, {
     log: (step) => { if (step === "daemon.summary") throw new Error("summary not delivered"); },
