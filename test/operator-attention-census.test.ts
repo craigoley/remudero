@@ -71,6 +71,49 @@ test("W1-T4742: why-me evidence names the task and source fact", () => {
   assert.ok(row?.sourceFacts.some((fact) => fact.source === "judge" && fact.detail.includes("needs_operator")));
 });
 
+test("machine-judge attention includes exact task context without approving its verification proposal", () => {
+  const result = buildAttentionCensus(input({
+    views: [view("machine-judge:W1-T5418", "decision")],
+    classifications: [{ proposalId: "machine-judge:W1-T5418", state: "ready", reasons: [] }],
+    taskFacts: new Map([["W1-T5418", { verify: "auto", repo: "remudero", title: "A bounded verification task", risk: "high" }]]),
+    judgeByTask: new Map([["W1-T5418", { decision: "automate", reason: "Existing evidence supports bounded engineering preparation." }]]),
+    releasedTaskIds: new Set(["W1-T5418"]),
+    releaseReceipts: new Map([["W1-T5418", "A past verify-human release, not approval of this proposal"]]),
+  }));
+  const row = result.items[0]!;
+  assert.equal(row.taskId, "W1-T5418");
+  assert.ok(row.sourceFacts.some(f => f.source === "plan" && f.detail.includes("A bounded verification task")));
+  assert.ok(row.sourceFacts.some(f => f.source === "judge" && f.detail.includes("not a proposal ruling")));
+  assert.match(row.whyMe, /references W1-T5418/);
+  assert.doesNotMatch(row.whyMe, /W1-T5418 requires an operator decision/);
+  assert.equal(row.attention, "decision", "context cannot approve or retire the proposal");
+  assert.equal(result.counts.decision, 1);
+  assert.equal(result.discrepancy, undefined, "a task release is not release of its separate proposal");
+  assert.ok(!row.sourceFacts.some(f => f.source === "ledger"));
+});
+
+test("an unresolved structural proposal task reference keeps attention evidence partial", () => {
+  const result = buildAttentionCensus(input({
+    views: [view("machine-judge:W1-T5418", "decision")],
+    classifications: [{ proposalId: "machine-judge:W1-T5418", state: "ready", reasons: [] }],
+    taskFacts: new Map(),
+  }));
+  assert.equal(result.items[0]?.taskId, "W1-T5418");
+  assert.equal(result.state, "partial");
+  assert.equal(result.verifiedCounts.decision, 0);
+  assert.equal(result.counts.decision, 1);
+});
+
+test("proposal context does not infer task identity from an unrelated producer or free text", () => {
+  const result = buildAttentionCensus(input({
+    views: [view("unrelated:W1-T5418", "decision")],
+    classifications: [{ proposalId: "unrelated:W1-T5418", state: "ready", reasons: [] }],
+    taskFacts: new Map([["W1-T5418", { verify: "auto", repo: "remudero", title: "Must not be joined by suffix" }]]),
+  }));
+  assert.equal(result.items[0]?.taskId, undefined);
+  assert.ok(!result.items[0]?.sourceFacts.some(f => f.source === "plan"));
+});
+
 test("a held security drill explains why a machine release did not settle the ask", () => {
   const result = buildAttentionCensus(input({
     taskFacts: new Map([["W1-T216", { verify: "human", repo: "remudero", title: "Controlled drill", dispatchHold: true, risk: "high" }]]),
