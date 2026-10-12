@@ -1,0 +1,19 @@
+- id: W1-T8445
+  title: "THE mutation-ratchet GATE REFUSED 2 PULL REQUESTS IN THIS WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-learning:10954:mutation-ratchet"
+  ci_learning_prs: [10954, 10988]
+  files:
+    - learnings/ci.yaml
+  acceptance:
+    - claim: "the lane that trips the mutation-ratchet gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
+      proof: "grep: ci-learning:10954:mutation-ratchet in learnings/ci.yaml"
+  note: "Filed by the ci-learning rung from ci-learning:10954:mutation-ratchet. The mutation-ratchet gate went red on #10954 and was repaired; the repair touched scripts/comment-load-baseline.json, src/lib/classify.ts, src/lib/sweep.ts, test/the-daemon-reloads-its-plan-off-the-loop.test.ts. Recommended action: unclear. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
