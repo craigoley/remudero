@@ -32,7 +32,7 @@ import { assertLedgerPathNotLive } from "./live-write-guard.js";
 import { rotationStampIso } from "./ledger-union.js";
 import { PLAN_ONLY_REVIEW_MARKER_STEP, planOnlyReviewMarkers, PR_TERMINAL_STEP, pruneCarriedRows } from "./ledger-carry.js";
 import { resolveProducerIdentity, type ProducerIdentity } from "./producer-identity.js";
-import { WORKER_SCOPE_ENV } from "./worker-containment.js";
+import { WORKER_SCOPE_ENV, readGardenerOrigin } from "./worker-containment.js";
 
 /** Append-only NDJSON ledger (MASTER-PLAN §9). One JSON object per line, keyed by task id; `ts` and
  *  `host` are stamped at write time. Every worker and brain-plane call spreads the same telemetry
@@ -273,6 +273,7 @@ export function appendLedger(
     host: (opts.identity ?? hostname)(),
     actor_pid: process.pid,
     ...line,
+    gardener_origin: readGardenerOrigin(),
     actor,
   };
   const buf = Buffer.from(JSON.stringify(record) + "\n", "utf8");
