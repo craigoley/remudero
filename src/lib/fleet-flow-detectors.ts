@@ -112,7 +112,7 @@ async function recentRows(input: FleetFlowInput, longMs: number): Promise<readon
       inWindow(rows, fresh.since, fresh.now).filter((row) => matchesInput(row.step, inputs)), { pattern });
     fresh.read = async () => {
       const result = await readLedgerUnionRecordsMemoized(input.stateDir, memo, {
-        since: new Date(fresh.since).toISOString(), rotationWindowMs: longMs,
+        since: fixedClock(fresh.since).iso(), rotationWindowMs: longMs,
         step: inputs.every((step) => !step.includes("*")) ? inputs : undefined,
         pattern,
         refuseIncomplete: true,
