@@ -241,7 +241,6 @@ export function closedUnmergedRunBranchTaskIds(closedPrRows: string): ReadonlySe
   return ids;
 }
 
-/** Optional in-flight-skip controls for {@link nextRunnable} (W1-T80). */
 /** W1-T8514: the measurements behind a reservation's release. Every figure is a measured run length. */
 export interface PriorityBackfillEstimates {
   /** Measured run lengths (ms) of this task's own earlier runs; empty when it has none. */
@@ -269,6 +268,7 @@ export interface PriorityReservationRelease {
   reason: "finishes_before_waiting_start" | "holder_outran_history";
 }
 
+/** Optional in-flight-skip controls for {@link nextRunnable} (W1-T80). */
 export interface NextRunnableOpts extends TaskPreconditionOptions {
   /** W1-T6358: renew the command-owned ledger snapshot before walking any candidates. */
   beginSelectionPass?: () => void;
@@ -814,7 +814,10 @@ function packDisjointFirst(
     let pickIndex = -1;
     for (let i = 0; i < remaining.length; i++) {
       const candidate = remaining[i];
-      const held = waiting.find((w) => lowerPriority(candidate, w) && overlapPaths(w, candidate, observedByTask).length > 0);
+      // Only a candidate that could START now is deferred: one an occupied lane or collected pick already blocks
+      // cannot take the file, so it stays in the pack for the partition to serialize (W1-T8502's row).
+      const startable = isDisjointFromEvery(occupied, candidate, observedByTask);
+      const held = startable ? waiting.find((w) => lowerPriority(candidate, w) && overlapPaths(w, candidate, observedByTask).length > 0) : undefined;
       if (held && !released.has(`${candidate.id}|${held.id}`)) {
         const holders = occupied.filter((h) => !isDisjointFromEvery([h], held, observedByTask));
         const verdict = backfillVerdict(candidate, holders, reserve.priorityBackfill);
