@@ -274,7 +274,7 @@
     "test/a-fresh-tree-review-keeps-the-sweeps-review-options.test.ts": 1,
     "test/a-freshness-drain-keeps-reviewing.test.ts": 6000,
     "test/a-freshness-drain-waits-only-for-work-the-restart-would-lose.test.ts": 26,
-    "test/a-freshness-fetch-asks-only-for-main-and-names-where-it-stalled.test.ts": 450,
+    "test/a-freshness-fetch-asks-only-for-main-and-names-where-it-stalled.test.ts": 5000,
     "test/a-freshness-restart-lets-a-running-review-finish.test.ts": 23,
     "test/a-freshness-yield-is-a-handoff-not-a-transient-failure.test.ts": 7100,
     "test/a-full-doctrine-budget-routes-a-rule-it-cannot-hold.test.ts": 370,
