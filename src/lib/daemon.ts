@@ -5595,6 +5595,7 @@ export async function runDaemon(
     // 2026-10-10 19:38: both freed lanes were held for good while the lane that later held the phase was 5 min old.
     // A measured bound parks such a lane instead; a dispatch tick or a sibling's finish re-decides it.
     const parkedLanes: Array<{ lane: number; finished: Task; wake: (next: Promise<Task | undefined>) => void }> = [];
+    const governorParked = new Map<number, string>();
     const wakeParkedLanes = (): void => {
       if (inFlightTasks.size > 0 && !refillClosed && phaseBoundHolds()) return;
       // Deferred, so a throwing decision ends only its own lane (runLanePool), never strands a later parked one.
@@ -5622,6 +5623,7 @@ export async function runDaemon(
       if (phaseBound && measuredRefillBound && inFlightTasks.size > 0) {
         log("dispatch.lane_parked", { lane, finished_task: finished.id, reason: phaseBound, phase_age_ms: phaseAgeMs,
           refill_bound_ms: refillBoundMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
+        governorParked.delete(lane);
         return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, wake }));
       }
       const governed = refillClosed || phaseBound ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
@@ -5644,6 +5646,15 @@ export async function runDaemon(
         (stopped ? `stop: ${stopped}` : undefined) ??
         (paused ? `pause: ${paused}` : undefined) ??
         (governed ? `governor: ${governed.kind}` : undefined);
+      // 2026-10-12 09:00: one container-short WIP reading held lane 2 for good while two siblings ran on past the hour.
+      // A governor reading is re-taken each tick, so a lane it holds parks; one row per lane and reason, not per tick.
+      if (governed && reason === `governor: ${governed.kind}` && inFlightTasks.size > 0) {
+        if (governorParked.get(lane) !== reason) log("dispatch.lane_parked", { lane, finished_task: finished.id, reason,
+          phase_age_ms: phaseAgeMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
+        governorParked.set(lane, reason);
+        return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, wake }));
+      }
+      governorParked.delete(lane);
       // W1-T5805: the refill decides on its OWN branch read, never the tick's: a branch pushed since the
       // tick began must refuse its task here. A failed read decides on the tick-start reading instead.
       const chooseRefill = (runBranchListing: string | undefined): Task | undefined | Promise<Task | undefined> => {
