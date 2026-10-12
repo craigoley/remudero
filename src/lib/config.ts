@@ -32,6 +32,10 @@ export function resolveHeadroomEnabled(
   return config.headroom?.enabled ?? true;
 }
 
+export function resolveHeavyReadyDirectory(_config: { heavyReadyDirectory?: string }, _env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return undefined;
+}
+
 /**
  * The closed set of worker-provider ids.  Keep runtime validation and the exported union derived
  * from this one value: a new provider must not be accepted by mounts/policy in one path while a
