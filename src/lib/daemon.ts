@@ -5859,8 +5859,13 @@ export async function runDaemon(
             dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
             excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...pendingMergedCredit, ...passIds,
               ...[...refillProposals].map((proposal) => proposal.id)]),
+            // W1-T8502: pack the pool disjoint from the occupied lanes too, so a head they block cannot crowd out the rest.
+            inFlight: [...inFlightTasks, ...refillProposals],
           });
           const fits = partitionByFileOverlap([...inFlightTasks, ...refillProposals, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
+          // The same row the tick path writes, for pool tasks only: an occupied lane's own deferral is not a refill's.
+          const poolIds = new Set(pool.map((t) => t.id));
+          for (const d of fits.serialized) if (poolIds.has(d.task)) log("dispatch.serialized", serializedLedgerPayload(d));
           next = fits.dispatch.find((t) => !inFlightTasks.has(t) && !refillProposals.has(t));
           if (next) nextSnapshot = snapshot;
         };
