@@ -40,3 +40,14 @@ door is not.
 - **Superseded by NNNN** — a later ADR replaced this decision; link forward
   to it. Never delete or silently rewrite an accepted ADR — supersede it, so
   the history of *why* stays intact.
+
+## Index
+
+| ADR | Decision |
+| --- | --- |
+| [0001](0001-typescript-7-native-compiler.md) | Use TypeScript 7's native compiler as the project compiler |
+| [0002](0002-node-version-pin.md) | Pin Node to an exact version, everywhere, no floating tags |
+| [0003](0003-acr-container-deployment.md) | Build and run the daemon as an ACR-built container image |
+| [0004](0004-ci-gate-and-remudero-review-merge-gate.md) | `ci-gate` + `remudero-review` are the only required merge gate |
+| [0005](0005-apache-2.0-never-relicense.md) | Apache-2.0, and the core is never relicensed |
+| [0006](0006-precompiled-daemon-child-entries.md) | Run daemon children from a precompiled, source-keyed bundle, not tsx |

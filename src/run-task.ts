@@ -1546,6 +1546,7 @@ import {
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "./lib/body-repair.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
 import { criterionFieldTampered, filingSelfCreditCheck, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
+import { inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "./lib/proof-grammar.js";
 import { baseLacksPrAddedExports } from "./lib/proof-missing-export.js";
 import { planPrPreflightAtCommitAsync } from "./lib/plan-pr-emitter.js";
 // receipt.js / ledger-replay.js: only receiptCommand/replayCommand read these, and both moved to
@@ -53819,8 +53820,11 @@ export async function opsCommand(
  * normal contract (`Acceptance:`/`Remudero-Task:` trailer, `PR_URL:` REPORT line); this command
  * owns the worktree/spawn/teardown mechanics deterministically, so an LLM can never skip the
  * contract or scope-creep past the one named alert.
+ *
+ * W1-T8625: its Acceptance block is taught by {@link PR_BODY_ACCEPTANCE_GRAMMAR}, the shared PR-body grammar. The bare
+ * "`- <claim> | <proof>` bullets" line it replaced named no dialect, so a worker wrote prose and the reviewer capped it.
  */
-function alertFixPrompt(alert: AlertLaneAlert, taskId: string): string {
+export function alertFixPrompt(alert: AlertLaneAlert, taskId: string): string {
   return [
     "You are a REMUDERO fix worker dispatched by the alert-fix lane (W1-T90, MASTER-PLAN P20, §5D lane 2).",
     "Fix EXACTLY ONE thing: the alert named below. Do not scope-creep into unrelated changes.",
@@ -53844,9 +53848,10 @@ function alertFixPrompt(alert: AlertLaneAlert, taskId: string): string {
     "  title `--fill` derives from the commit or the branch name.",
     ...bodyVsDiffContractLines(),
     "  The PR body MUST include:",
-    "  - an `Acceptance:` block of `- <claim> | <proof>` bullets covering the fix;",
+    "  - an `Acceptance:` block covering the fix, written to the ACCEPTANCE PROOFS rules below;",
     `  - \`origin: alert#${alertOriginId(alert)}\` naming this alert's provenance;`,
     `  - as the LAST body line: \`Remudero-Task: ${taskId}\`.`,
+    ...PR_BODY_ACCEPTANCE_GRAMMAR,
     "- End your REPORT with exactly: PR_URL: <the pull request url>",
   ]
     .filter((l): l is string => l !== undefined)
@@ -53887,6 +53892,19 @@ export interface AlertFixDispatchDeps {
    *  real binding ({@link checkAlertFixAcceptance}) and `PR_AUTHORING_PATHS`'s "alert-fix" row
    *  (lib/review.ts) for why THIS lane, specifically, cannot fall back to a plan-side lookup. */
   checkAcceptance: (prUrl: string) => AcceptanceAuthorTimeResult;
+  /** W1-T8625: the opened PR's body, which the dispatcher parses ITSELF for inert proofs — `checkAcceptance`'s trailer
+   *  arm returns `ok` before it reads the block, and every alert-fix body carries a trailer. Optional so the dispatch
+   *  fakes that predate it keep driving only what they drove; omitted, the inert-proof count does not run (no real
+   *  `gh` default fires under a fake). The real binding is {@link readAlertFixPrBody}. */
+  readPrBody?: (prUrl: string) => string;
+}
+
+/** W1-T8625: the opened PR's body over `gh` — the ONE body read both {@link checkAlertFixAcceptance} and the
+ *  dispatcher's inert-proof count go through. `read` is appended LAST and defaults to the real {@link ghJson}; an
+ *  absent `body` field reads as `""`. */
+export function readAlertFixPrBody(prUrl: string, read: (args: string[]) => unknown = ghJson): string {
+  const view = read(["pr", "view", prUrl, "--json", "body"]) as { body?: string };
+  return view.body ?? "";
 }
 
 /**
@@ -53905,8 +53923,7 @@ export function checkAlertFixAcceptance(
    *  reads the PR body in production — unexecuted. */
   read: (args: string[]) => unknown = ghJson,
 ): AcceptanceAuthorTimeResult {
-  const view = read(["pr", "view", prUrl, "--json", "body"]) as { body?: string };
-  return acceptanceAuthorTimeCheck(view.body ?? "");
+  return acceptanceAuthorTimeCheck(readAlertFixPrBody(prUrl, read));
 }
 
 const REAL_ALERT_FIX_DISPATCH_DEPS: AlertFixDispatchDeps = {
@@ -53918,6 +53935,7 @@ const REAL_ALERT_FIX_DISPATCH_DEPS: AlertFixDispatchDeps = {
   spawn: ledgeredNonDispatchSpawn("alert-fix"),
   ensureTaskTrailer,
   checkAcceptance: checkAlertFixAcceptance,
+  readPrBody: readAlertFixPrBody,
 };
 
 /**
@@ -54002,6 +54020,25 @@ export async function dispatchAlertFixRun(
         }
       } catch (e) {
         log("alert-fix.acceptance_check_error", { pr_url: report.prUrl, error: String((e as Error)?.message ?? e) });
+      }
+      // W1-T8625: THE INERT-PROOF COUNT, on the body itself. `deps.checkAcceptance` returns `ok` at its trailer arm
+      // before it reads the block, and only REPORTS an inert proof when it does read it, so a prose-proof body ledgered
+      // nothing. Separately guarded: a failed body read is a named check error, never a clean body.
+      if (deps.readPrBody) {
+        try {
+          const inert = inertAcceptanceProofs(deps.readPrBody(report.prUrl));
+          if (inert.length > 0) {
+            log("alert-fix.acceptance_defect", {
+              pr_url: report.prUrl,
+              defect: "inert-proofs",
+              inert_count: inert.length,
+              inert_proofs: inert,
+              message: `${inert.length} Acceptance proof(s) carry no executable \`unit test:\`/\`grep:\` dialect — the reviewer will not run them`,
+            });
+          }
+        } catch (e) {
+          log("alert-fix.acceptance_check_error", { pr_url: report.prUrl, check: "inert-proofs", error: String((e as Error)?.message ?? e) });
+        }
       }
     } else {
       log("alert-fix.no_pr", { subtype: worker.subtype });
