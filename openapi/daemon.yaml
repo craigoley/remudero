@@ -7444,6 +7444,8 @@ components:
           type: object
           required: [overview, coverage, instances]
           properties:
+            modelApprovals:
+              $ref: "#/components/schemas/HostModelApprovalsEvidence"
             overview:
               type: array
               description: >
@@ -7492,6 +7494,45 @@ components:
                   reason: {type: string}
                   details:
                     $ref: "#/components/schemas/AnalyticsStoredDetails"
+
+    HostModelApprovalsEvidence:
+      description: >
+        Bounded immutable capture of the serving host's loaded model-approval configuration.
+        capturedAt is the startup observation, not an analytics refresh, permission grant or worker
+        adoption receipt. Expiry is retained for a separate console read-time evaluation. Absent on
+        older producers; a missing or rejected corpus is never a measured empty approval list.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [version, scope, sourceKind, capturedAt, state, approvals]
+          properties:
+            version: {type: string, enum: [host-model-approvals-v1]}
+            scope: {type: string, enum: [serving-host]}
+            sourceKind: {type: string, enum: [loaded-config]}
+            capturedAt: {type: string, format: date-time, maxLength: 40}
+            state: {type: string, enum: [reported]}
+            approvals:
+              type: array
+              maxItems: 100
+              items:
+                type: object
+                additionalProperties: false
+                required: [model, approvedBy, approvedAt]
+                properties:
+                  model: {type: string, minLength: 1, maxLength: 160}
+                  approvedBy: {type: string, minLength: 1, maxLength: 160}
+                  approvedAt: {type: string, format: date-time, maxLength: 40}
+                  expiresAt: {type: string, format: date-time, maxLength: 40}
+        - type: object
+          additionalProperties: false
+          required: [version, scope, sourceKind, capturedAt, state, reason]
+          properties:
+            version: {type: string, enum: [host-model-approvals-v1]}
+            scope: {type: string, enum: [serving-host]}
+            sourceKind: {type: string, enum: [loaded-config]}
+            capturedAt: {type: [string, "null"], format: date-time, maxLength: 40}
+            state: {type: string, enum: [unavailable]}
+            reason: {type: string, enum: [invalid_source, over_budget, clock_skew]}
 
     AnalyticsStoredDetails:
       description: >
