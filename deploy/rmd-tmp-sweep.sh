@@ -9,9 +9,10 @@ if [ ! -x "$CLEANUP_SCRIPT" ]; then
   exit 2
 fi
 
-export IDLE_MINUTES="${IDLE_MINUTES:-360}"
+# No IDLE_MINUTES default here: the janitor tiers its window on disk pressure (never under six
+# hours). An IDLE_MINUTES already in the environment still pins it.
 export RMD_CLEANUP_ONLY_TMP=1
-export RMD_CLEANUP_TMP_ROOTS="${RMD_CLEANUP_TMP_ROOTS:-/tmp:/home/craigoleyagent/rmd-state2/tmp:/mnt/rmd/tmp:/mnt/scratch/tmp}"
+export RMD_CLEANUP_TMP_ROOTS="${RMD_CLEANUP_TMP_ROOTS:-/tmp:/home/craigoleyagent/rmd-state2/tmp:/mnt/rmd/tmp:/mnt/scratch/tmp:/mnt/scratch/rmd-work-tmp}"
 export RMD_CLEANUP_TMP_GLOBS="${RMD_CLEANUP_TMP_GLOBS:-rmd-* node-coverage-*}"
 # Scratch roots are NOT exported here: the janitor defaults them to /mnt/scratch only for a root
 # pass, so running this wrapper as a user cannot opt a blind (non-root lsof) pass into them.

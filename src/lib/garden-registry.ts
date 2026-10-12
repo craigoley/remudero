@@ -20,7 +20,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { gardenLedgerBucket, type GardenerDeps } from "./gardener.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { runFlakeIncidentGardener } from "./flake-incident-gardener.js";
-import { FLOW_GARDENER_FAILED_STEP, flowCiReader, flowPassDue, runFlowGardener } from "./flow-gardener.js";
+import { FLOW_GARDENER_FAILED_STEP, flowCiReader, flowPassDue, runFlowGardener, type AdmissionFlowInput } from "./flow-gardener.js";
 import { HOST_RESOURCE_MIN_INTERVAL_MS } from "./host-resource-gardener.js";
 import { OVERSEER_MIN_INTERVAL_MS } from "./gardener-overseer.js";
 import { SCOUT_MIN_INTERVAL_MS } from "./scout-gardener.js";
@@ -528,12 +528,13 @@ export function selectorShadowGardenPass(
 
 /** W1-T5904: one daily flow pass as the daemon builds it — the ledger union, GitHub's CI timings through
  *  `io` (absent: the gh transport) and the shared filing path. Its due probe skips a reported day. */
+export interface FlowGardenIo extends Pick<SelectorShadowGhReads, "readJson"> { admission?: AdmissionFlowInput }
 export function flowGardenPass(
-  d: GardenerDeps, owner: string, repo: string, mintTaskId: (filingBranch: string) => string, io: Pick<SelectorShadowGhReads, "readJson"> = {},
+  d: GardenerDeps, owner: string, repo: string, mintTaskId: (filingBranch: string) => string, io: FlowGardenIo = {},
 ): (() => Promise<void>) & { due: () => boolean } {
   const pass = async (): Promise<void> => {
     try {
-      await runFlowGardener(d, { mintTaskId, readCi: flowCiReader(owner, repo, io.readJson) });
+      await runFlowGardener(d, { mintTaskId, readCi: flowCiReader(owner, repo, io.readJson), admission: io.admission });
     } catch (e) {
       d.log(FLOW_GARDENER_FAILED_STEP, { error: String((e as Error)?.message ?? e) });
     }

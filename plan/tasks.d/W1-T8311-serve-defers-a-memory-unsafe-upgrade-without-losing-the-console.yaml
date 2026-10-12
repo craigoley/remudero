@@ -1,0 +1,65 @@
+- id: W1-T8311
+  title: "SERVE DEFERS A MEMORY-UNSAFE UPGRADE WITHOUT LOSING THE CONSOLE — a third supervisor shortage exits the healthy generation, while container convergence can stop serve without a fresh pressure admission"
+  repo: remudero
+  depends_on: [W1-T6125, W1-T6245]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 12.00
+  status: queued
+  attempts: 0
+  origin: "operator-approved pressure-safe rollout follow-up, 2026-10-11; production transition remains separately authorized"
+  plan_refs: [W1-T6125, W1-T6245, W1-T6401, W1-T7390, W1-T7391, W1-T8230]
+  files: [src/lib/serve-supervisor.ts, src/lib/serve-policy-convergence.ts, src/lib/deployer.ts, deploy/serve-container.sh, test/serve-supervisor.test.ts, test/a-changed-serve-policy-reaches-the-running-console.test.ts]
+  rationale: |
+    OBSERVED at immutable main 090a37063f02546151e92f3cd974c605ebfc6006:
+    serve-supervisor's memory deferral calls legacyExit("memory") after three refusals.
+    The policy-convergence path invokes the replace launcher, whose replacement stops and
+    removes the old container. Its existing pause/stop/health/handoff checks do not make
+    a fresh host PSI/swap/overlap-budget admission. An audit-only agent hold is not binding;
+    DEPLOY_IMAGE_MANUAL is not a serve hold and handoff.off requests the legacy exit.
+    The read-only 22:57:12-42Z sample had all five containers running, no OOM flags,
+    minimum available 4,146,167,808 B, PSI full avg60 maximum 2.53%, and swap-in in all
+    six intervals. This proves pressure, not that this fallback executed or caused it.
+    Complete guarded main/open-head/file/credit scope at 23:08:52Z found no uncredited
+    transition owner. W6125 and W6245 are merged foundations; W8230 is the distinct
+    worker/garden atomic-grant concern. PR10910 is a merged stale-code test-seam fix,
+    not this production transition. Existing source and every earlier receipt stay intact.
+  design: |
+    One concern: a planned serve upgrade's admission refusal must preserve the currently
+    healthy console, rather than turning memory pressure into downtime or another cold boot.
+    Reuse existing supervisor, host-pressure readers, resource policy, handoff lifecycle,
+    readiness and retry contracts. Do not create a parallel scheduler or global fleet pause.
+    Check fresh host availability, swap-in, PSI and the real overlap/cold-start requirement
+    before an automatic candidate fork or destructive container replacement. Unknown, stale,
+    unreadable and unavailable measurements are named holds, never zero pressure or fits.
+    Price OS reserve, active lifetime and concurrent work without double-counting RSS/swap.
+    Do not claim late-boot underestimation until the measurement's generation and coverage
+    positively establish it. A missing peak is unknown, not a zero-sized candidate.
+    Repeated memory refusals keep a positively healthy active generation answering; remove
+    the pressure-only legacy-exit escape. Reuse bounded existing retries and supersede an
+    obsolete candidate with the latest target; never hold a lock while waiting or spawning.
+    At the container path, re-check admission before its first destructive action. A refusal
+    leaves the old container, image, mounts, credentials and route identity unchanged.
+    Keep explicit operator stop, genuine crash recovery, readiness failure and rollback
+    behavior distinct. If the old generation is not healthy, never report it as preserved.
+    No threshold, memory/CPU limit, concurrency, enforcement mode or credential changes.
+    No live pause/restart/replacement is acceptance. Publication and the first adoption of
+    this guard need an explicit safe transition plan; an agent audit row is not permission.
+  acceptance:
+    - claim: "repeated pressure refusals leave a healthy active generation answering with zero standby forks or legacy exits; a later positively admitted candidate still completes the normal readiness and drain path"
+      proof: "unit test: a memory-deferred serve upgrade keeps the healthy console answering"
+    - claim: "automatic policy/image replacement checks fresh admission before any stop or removal, preserves the old container on named refusal, and replaces normally only under a positive admitted control"
+      proof: "unit test: serve convergence cannot stop the console before pressure admission"
+    - claim: "missing stale unreadable pressure and uncovered peak evidence remain named holds, while explicit stop, real crash, readiness failure and rollback retain their existing distinct outcomes"
+      proof: "unit test: serve upgrade admission preserves unknowns and genuine recovery paths"
+  falsifier: |
+    Restore the third-refusal legacyExit: the first control fails. Move the admission check
+    after stop/removal or omit it: the second control fails. Treat an unreadable/stale sample
+    or unknown candidate peak as zero: the third control fails. Execute the actual default
+    process/launcher seams with contained harmless fixtures as well as injected unit ports.
+    All restored controls must pass on the committed head; hosted CI and live adoption are
+    separate. Do not raise a ratchet, add a bypass, or count a stopped console as a saving.

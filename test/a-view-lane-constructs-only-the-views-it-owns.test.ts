@@ -10,7 +10,7 @@ import { createDemandBook } from "../src/lib/view-demand.js";
 const proof = "test/a-view-lane-constructs-only-the-views-it-owns.test.ts";
 
 /** A lane's ticker over two instances, its views counted as each factory makes one. */
-function laneFixture(t: { after(run: () => void): void }, lane: "fast" | "heavy", costs: Record<string, number> = {}) {
+function laneFixture(t: { after(run: () => void): void }, lane: "fast" | "heavy", costs: Record<string, number | ((builds: number) => number)> = {}, prepare?: () => boolean) {
   const dir = makeTempDir("lane-owned-views");
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   mkdirSync(join(dir, "read-model"));
@@ -26,9 +26,11 @@ function laneFixture(t: { after(run: () => void): void }, lane: "fast" | "heavy"
       const owner = made.push({ name, memo }) - 1;
       const view: ReadModelView = {
         name, version: 1, ...(perInstance ? { perInstance: true } : {}),
+        ...(prepare ? { prepare: () => prepare() } : {}),
         materialize: (ctx) => ctx.instances.map(({ state }) => {
           memo.set(state.instance, (memo.get(state.instance) ?? 0) + 1);
-          ms += costs[`${name}@${state.instance}`] ?? 1;
+          const cost = costs[`${name}@${state.instance}`] ?? 1;
+          ms += typeof cost === "function" ? cost(memo.get(state.instance)!) : cost;
           return { key: `instance=${state.instance}`, data: { instance: state.instance, builds: memo.get(state.instance) }, sources: [] };
         }),
         legacy: (key) => {
@@ -128,4 +130,73 @@ test(`${proof}: every lane factory declares what its view is, in the order the l
     const view = spec.create();
     assert.deepEqual([view.name, view.perInstance, view.demand, view.snapshotSourced], [spec.name, spec.perInstance, spec.demand, spec.snapshotSourced], spec.name);
   }
+});
+
+test(`${proof}: a cache-cold factory stays heavy after its warm build instead of discarding and rebuilding its cache`, (t) => {
+  const costs = { "per@core": (builds: number) => builds === 1 ? 2000 : 10 };
+  const fast = laneFixture(t, "fast", costs);
+  // This thread may already have warm shared inputs; the source lane's recreation cost still matters.
+  const heavy = laneFixture(t, "heavy", { "per@core": 10 });
+  fast.ticker.start();
+  heavy.ticker.start();
+  fast.ticker.buildNow("per");
+  const initial = fast.posted.find((msg) => msg.type === "view_lane" && msg.instance === "core");
+  assert.ok(initial && initial.type === "view_lane" && initial.heavy);
+  heavy.ticker.lane(initial);
+  for (let i = 0; i < 6; i++) {
+    heavy.advance(10_000);
+    heavy.ticker.tick();
+  }
+  assert.equal(heavy.count("per"), 1, "six warm builds reuse one factory instead of rebuilding it on the other lane");
+  assert.equal(heavy.made[0]!.memo.get("core"), 6, "the heavy lane continues publishing the owned unit");
+  assert.equal(heavy.posted.filter((msg) => msg.type === "view_lane").length, 0,
+    "a warm build cannot classify the cost of recreating this factory on the fast lane");
+  assert.deepEqual(fast.held(), { lane: "fast", count: 0, units: [] }, "the source still drops its old view; no duplicate cache is kept");
+  heavy.ticker.lane({ heavy: false, dueAt: 0 });
+  assert.deepEqual(heavy.held(), { lane: "heavy", count: 0, units: [] }, "normal reclaim still releases the former owner's cache");
+});
+
+test(`${proof}: a cheap factory can return to fast after a warm-only overrun and each instance is classified independently`, (t) => {
+  const costs = { "per@core": (builds: number) => builds === 2 ? 2000 : 10 };
+  const fast = laneFixture(t, "fast", costs);
+  fast.ticker.start();
+  fast.ticker.buildNow("per");
+  fast.advance(10_000);
+  fast.ticker.buildNow("per");
+  const moved = fast.posted.find((msg) => msg.type === "view_lane" && msg.instance === "core");
+  assert.ok(moved && moved.type === "view_lane" && moved.heavy);
+  const heavy = laneFixture(t, "heavy", costs);
+  heavy.ticker.start();
+  heavy.ticker.lane(moved);
+  heavy.advance(20_000);
+  heavy.ticker.tick();
+  const back = heavy.posted.find((msg) => msg.type === "view_lane");
+  assert.ok(back && back.type === "view_lane" && !back.heavy && back.instance === "core",
+    "a temporary warm overrun does not permanently pin a cheap-to-recreate factory to heavy");
+  assert.equal(fast.made.find((v) => v.name === "per" && v.memo.has("site"))?.memo.get("site"), 2,
+    "the other instance remains owned and warm on fast");
+});
+
+test(`${proof}: the cold classification includes bounded preparation before the first published body`, (t) => {
+  let ready = false;
+  let prepareCost = 2000;
+  const fast = laneFixture(t, "fast", { "per@core": 10 }, () => {
+    fast.advance(prepareCost);
+    return ready;
+  });
+  fast.ticker.start();
+  fast.ticker.buildNow("per");
+  assert.equal(fast.posted.filter((msg) => msg.type === "view_lane").length, 0, "unfinished preparation cannot move a unit");
+  ready = true;
+  prepareCost = 10;
+  fast.ticker.buildNow("per");
+  const moved = fast.posted.find((msg) => msg.type === "view_lane" && msg.instance === "core");
+  assert.ok(moved && moved.type === "view_lane" && moved.coldCostMs! >= 2000,
+    "the first successful body carries the earlier preparation's peak, not only its cheap final slice");
+  const heavy = laneFixture(t, "heavy", { "per@core": 10 });
+  heavy.ticker.start();
+  heavy.ticker.lane(moved);
+  heavy.advance(20_000);
+  heavy.ticker.tick();
+  assert.equal(heavy.posted.filter((msg) => msg.type === "view_lane").length, 0, "the warm peer retains the cold preparation classification");
 });

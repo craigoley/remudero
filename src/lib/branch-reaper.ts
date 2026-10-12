@@ -391,15 +391,10 @@ export function tipInMainFor(
 }
 
 /**
- * `namedInSource` for EVERY branch from one `git grep -F` read over every name at once, never one
- * call per branch. `-F` (fixed strings) with one `-e <name>` per branch preserves the exact
- * per-branch semantics a `-l -F -- <name>` call had — an unanchored literal SUBSTRING match, not a
- * word-boundary one — including the case the per-branch read could also produce: a name that only
- * appears INSIDE a longer name's match (`foo` inside `foobar`). Git's multi-pattern match is
- * leftmost-LONGEST (POSIX, confirmed for both `-F -e/-e` and `-E` alternation), so a hit's own
- * matched text can be the LONGER neighbor rather than the shorter name itself; testing
- * `hit.name.includes(queriedName)` rather than exact equality recovers that shorter name without a
- * second read, because the longer match trivially contains it as a substring.
+ * `namedInSource` for EVERY branch from one `git grep` over every name at once ({@link
+ * namedInSourcePatterns}), keeping the per-branch `-l -F -- <name>` semantics: an unanchored
+ * SUBSTRING match. The match is leftmost-LONGEST, so a hit can be a longer neighbor (`foobar` for
+ * `foo`); `hit.name.includes(queriedName)` recovers the shorter name without a second read.
  */
 export function readNamedInSource(
   exec: (cmd: string, args: string[]) => string,
@@ -420,22 +415,53 @@ export function* readNamedInSourceSteps(
   if (names.length === 0) return found;
   const roots = ["src/", "scripts/", "deploy/", ".github/"].filter((p) => root === undefined || existsSync(join(root, p)));
   if (roots.length === 0) return found;
-  const args = ["grep", "-n", "-o", "-F"];
-  for (const name of names) args.push("-e", name);
-  args.push("--", ...roots);
-  let raw: string;
-  try {
-    raw = yield* step(() => exec("git", args));
-  } catch (err) {
-    if (((err as { status?: unknown }).status ?? (err as { code?: unknown }).code) === 1) return found; // sync status and async code both identify git grep's no-match exit
-    onFailure?.(String((err as Error)?.message ?? err));
-    return new Set(names);
+  const fixed = ["grep", "-n", "-o", "-F", ...names.flatMap((name) => ["-e", name]), "--", ...roots];
+  const queue = names.every((name) => /^[\x21-\x7e]+$/.test(name))
+    ? namedInSourcePatterns(names).map((pattern) => ["grep", "-n", "-o", "-P", "-e", pattern, "--", ...roots])
+    : [fixed];
+  let raw = "";
+  while (queue.length > 0) {
+    const args = queue.shift()!;
+    try {
+      raw += `${yield* step(() => exec("git", args))}\n`;
+    } catch (err) {
+      if (((err as { status?: unknown }).status ?? (err as { code?: unknown }).code) === 1) continue; // sync status and async code both identify git grep's no-match exit
+      const why = String((err as Error)?.message ?? err);
+      if (args !== fixed && /perl|pcre/i.test(why)) {
+        queue.splice(0, queue.length, fixed); // a git built without PCRE: the -F scan finds the same names
+        raw = "";
+        continue;
+      }
+      onFailure?.(why);
+      return new Set(names);
+    }
   }
   const hits = parseBranchCitationHits(raw);
-  for (const name of names) {
-    if (hits.some((hit) => hit.name.includes(name))) found.add(name);
+  return new Set(names.filter((name) => hits.some((hit) => hit.name.includes(name))));
+}
+
+/**
+ * `-F` with one `-e` per name costs git a pass per pattern per line (224 names: 12 s, 2026-10-12).
+ * One `-P` alternation, longest name first, gives the same leftmost-longest hits in 0.2 s. A list
+ * over one argv string's 128 KiB limit splits, which can only report more names, never fewer.
+ */
+export function namedInSourcePatterns(names: readonly string[]): string[] {
+  const sorted = [...new Set(names)].sort((a, b) => b.length - a.length || (a < b ? -1 : a > b ? 1 : 0));
+  const patterns: string[] = [];
+  let current: string[] = [];
+  let length = 0;
+  for (const name of sorted) {
+    const escaped = name.replace(/[^A-Za-z0-9_]/g, "\\$&");
+    if (current.length > 0 && length + escaped.length + 1 > 64 * 1024) {
+      patterns.push(current.join("|"));
+      current = [];
+      length = 0;
+    }
+    current.push(escaped);
+    length += escaped.length + 1;
   }
-  return found;
+  if (current.length > 0) patterns.push(current.join("|"));
+  return patterns;
 }
 
 /**

@@ -93,6 +93,7 @@ import { hashInstallInputs } from "./install-hash.js";
 import { refreshCanonicalSeed } from "./typecheck-buildinfo.js";
 import { systemClock, type Clock } from "./clock.js";
 import { ghExec, ghJson } from "./github-transport.js";
+import type { ClosingReferenceGuardResult } from "./closing-reference-guard.js";
 import { loadLayeredLearnings, loadLearningsCorpus, lookupWorkerRule, type LayeredLearningsHomes } from "./learnings.js";
 // W1-T2896 acceptance grep token for this shared transport import: github-transport"
 export {
@@ -127,6 +128,8 @@ import {
   type WorkerKeychainSummary,
 } from "./worker-home.js";
 import { awaitMemoryAdmission, type AdmissionPorts } from "./host-memory-admission.js";
+import { feedbackLineagePayload, feedbackLineageSnapshot } from "./contributor-admission.js";
+import { envelope as feedbackLineageEnvelope } from "./untrusted-envelope.js";
 import { openLearnedReservation, type LearnedReservation, type LearnedReservationOptions } from "./host-memory-learning.js";
 import type { HostMemoryLedgerOptions, MemoryReservationHandle, WorkerClass } from "./host-memory-ledger.js";
 import { recordShadowMemoryVerdict } from "./host-memory-shadow.js";
@@ -193,6 +196,7 @@ import {
   GITDIR_RECORD_PREFIX,
   HOST_GIT_CONFIG,
   hostWorktreeGit,
+  hostWorktreeGitAsync,
   originUrlAtCut,
   pinnedConfigValue,
   pinWorktreeGit,
@@ -1236,6 +1240,9 @@ export interface SpawnWorkerArgs {
    * not have fired when the catch runs, so a holder is read too early exactly when the spawn failed fastest. Wired here but
    * destined for run-task.ts's ledger, which worker.ts cannot reach. Omitted swallows the error as before (W1-T442). */
   onSpawnError?: (err: NodeJS.ErrnoException) => void;
+  /** Receives the worker's bound ROOT pid the moment the SDK spawns it — the same pid `pidRef` tears down. The quiet-worker
+   * watchdog reads the process tree under it (W1-T7807). Must not throw. Omitted leaves behaviour byte-identical. */
+  onWorkerPid?: (pid: number) => void;
   /** Injectable seam: override the SDK's own `query()` entry point. Omitted means the real SDK `query`, a live `claude`
    * subprocess. Tests inject a fake async iterable so the process-group teardown wiring is exercised end to end, on both
    * paths, with no real binary (W1-T117). */
@@ -2297,6 +2304,20 @@ function sonnetRefusedBeforeTransport(result: WorkerResult): boolean {
     (result.budgetReservedUsd ?? 0) === 0;
 }
 
+/** W1-T7807: wrap a contained spawn so the spawned process's pid is reported to `onWorkerPid` — the root of the process tree
+ * the quiet-worker watchdog reads. With no reporter the spawn is returned untouched. */
+export function withWorkerPidReport<A extends unknown[], R extends { pid: number }>(
+  spawnBase: (...spawnArgs: A) => R,
+  onWorkerPid: ((pid: number) => void) | undefined,
+): (...spawnArgs: A) => R {
+  if (!onWorkerPid) return spawnBase;
+  return (...spawnArgs) => {
+    const spawned = spawnBase(...spawnArgs);
+    onWorkerPid(spawned.pid);
+    return spawned;
+  };
+}
+
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   // The ENFORCE mode of the host memory budget: under the shipped "shadow" mode this returns at once and changes
   // nothing; under "enforce" (an operator ruling in plan/policy.yaml) it waits, tiered and in priority order, while the
@@ -3015,7 +3036,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // group never outlives its own teardown. That closure also owns stderr piping, because a custom spawn gets none from the
     // SDK (W1-T117).
     const pidRef: { pid?: number } = {};
-    const spawnContained = boundContainment.spawn ?? spawnDetachedGroup;
+    const spawnContainedBase = boundContainment.spawn ?? spawnDetachedGroup;
+    const spawnContained: typeof spawnContainedBase = withWorkerPidReport(spawnContainedBase, args.onWorkerPid);
     const teardownContained = args.containment?.teardown ?? ((pgid: number) => void teardownProcessGroup(pgid));
 
     // TRAP (SDK 0.3.209): passing BOTH a `settings` file path and the `sandbox` option throws "Cannot use both …". The
@@ -4236,6 +4258,7 @@ export interface QuestionAnswerEntry {
   /** Non-reversible id of the bearer token that submitted the answer — never the raw token (see lib/panel-actions.ts's
    * `bearerTokenId`). */
   origin: string;
+  contribution?: unknown;
 }
 
 /** Append an operator's ANSWER to the same store `appendQuestion` writes to; the panel's write action is the only caller
@@ -4297,15 +4320,18 @@ export function deliverOperatorAnswerToRunningWorker(
   answerText: string,
   opts: {
     ledger?: (event: string, extra?: Record<string, unknown>) => void;
+    contributions?: readonly unknown[];
     onSteerSettled?: () => void; // TEST-ONLY: fires once the streamInput call above settles, so a test can await that instead of guessing a tick count.
   } = {},
 ): OperatorAnswerDeliveryOutcome {
   const handle = runningWorkers.get(taskId);
   if (!handle) return "no-running-worker";
   const ledger = opts.ledger ?? ((message, extra) => console.error(message, extra));
+  const contributions = feedbackLineageSnapshot(opts.contributions ?? []);
   const sdkMessage: SDKUserMessage = {
     type: "user",
-    message: { role: "user", content: answerText },
+    message: { role: "user", content: contributions.length
+      ? feedbackLineageEnvelope(feedbackLineagePayload(answerText, contributions), "feedback-entry") : answerText },
     parent_tool_use_id: null,
     priority: "next",
   };
@@ -5712,9 +5738,9 @@ export function worktreeRemove(repoDir: string, worktreePath: string): void {
   // deletes it. The Claude CLI leaves `/private/tmp/claude-<uid>/<slug>/` behind on a non-graceful exit and nothing else
   // reaps it. Best-effort, guarded, never throws.
   reapWorkerScratch(worktreePath);
-  execFileSync("git", ["-C", repoDir, "worktree", "remove", "--force", worktreePath], {
-    stdio: "inherit",
-  });
+  // Through the hardened leaf: the managed checkout is pinned, so an inherited GIT_DIR / GIT_WORK_TREE / GIT_CONFIG_*
+  // cannot point the removal at another repository, and its own config is vetted first.
+  hostWorktreeGit(repoDir, ["worktree", "remove", "--force", worktreePath], { stdio: "inherit-stdout" });
   removeWorktreeBase(worktreePath); // the sibling base record dies with its worktree
   // Accumulation control, orchestrator-side so it survives a killed worker: reap STALE ORPHAN scratch under the same
   // claude-<uid> root, the fixtures a SIGKILL'd `npm test` leaves behind, which the boot sweep over os.tmpdir() never scans.
@@ -5725,7 +5751,7 @@ export function worktreeRemove(repoDir: string, worktreePath: string): void {
 
 export async function worktreeRemoveAsync(repoDir: string, worktreePath: string): Promise<void> {
   reapWorkerScratch(worktreePath);
-  await worktreeGit(["-C", repoDir, "worktree", "remove", "--force", worktreePath], true);
+  await hostWorktreeGitAsync(repoDir, ["worktree", "remove", "--force", worktreePath], { stdio: "inherit-stdout" });
   removeWorktreeBase(worktreePath);
   sweepStaleWorkerScratch({ maxAgeMs: DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS });
 }
@@ -6115,9 +6141,7 @@ export function pruneStaleRuns(
           }
         }
         try {
-          execFileSync("git", ["-C", repoDir, "worktree", "remove", "--force", registered.path], {
-            stdio: "pipe",
-          });
+          hostWorktreeGit(repoDir, ["worktree", "remove", "--force", registered.path]);
           removeRunLock(registered.path); // clear the dead sibling lock so it can't linger
           removeWorktreeBase(registered.path); // the sibling base record dies with its worktree too
           removedWorktrees.push(registered.path);
@@ -6462,9 +6486,9 @@ function executeWorktreeRemoval(
   initializing: boolean,
 ): void {
   if (plan.kind === "git-remove") {
-    execFileSync("git", ["-C", plan.repoDir, "worktree", "remove", "--force", ...(initializing ? ["--force"] : []), entryPath], {
-      stdio: "pipe",
-    });
+    // The parent is pinned through the hardened leaf: an inherited GIT_DIR cannot redirect the removal, and a parent whose
+    // config holds a key the harness never writes is refused (removal-failed) rather than run.
+    hostWorktreeGit(plan.repoDir, ["worktree", "remove", "--force", ...(initializing ? ["--force"] : []), entryPath]);
     return;
   }
   fs.rmSync(entryPath, { recursive: true, force: true });
@@ -7096,7 +7120,16 @@ export function ghPrView(prUrl: string): { state: string; mergeable: string; url
   };
 }
 
-export function ghPrMergeSquash(prUrl: string): string {
+/** `closingReferences` is required, so no caller can merge without the closing-reference guard that
+ *  attemptArm runs (lib/closing-reference-guard.ts): a failed guard withholds the merge. */
+export function ghPrMergeSquash(prUrl: string, closingReferences: (prUrl: string) => ClosingReferenceGuardResult): string {
+  const guard = closingReferences(prUrl);
+  if (guard.state === "failed") {
+    throw new Error(
+      `merge withheld: ${guard.detail ?? "the closing-reference guard failed"} — merging could close an open pull request ` +
+        `this body names: ${prUrl}`,
+    );
+  }
   assertLiveWriteAllowed("gh-pr-merge", `merging ${prUrl}`);
   // TRAP: NO `--delete-branch`. `gh pr merge --help` documents it as deleting the LOCAL branch too, which needs a resolvable
   // current branch — and a caller running from the daemon's deliberately detached checkout has none, so the call failed "not

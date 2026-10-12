@@ -1301,6 +1301,12 @@ const FETCH_LOCK_RETRY_PAUSE_MS = 250;
 
 // ── The orchestrated cycle (all side effects injected) ─────────────────────────
 
+/** W1-T8311: the serve launcher held its replace on a named admission refusal; nothing was changed. */
+export interface ServeReplaceHold {
+  held: string;
+  detail: string;
+}
+
 export interface DeployDeps {
   log: (step: string, data?: Record<string, unknown>) => void;
   now: () => number;
@@ -1342,8 +1348,10 @@ export interface DeployDeps {
   serveHandoffInProgress?: () => boolean | undefined;
   /** Is remudero-serve running and not restarting? */
   serveHealthy?: () => boolean | undefined;
-  /** `deploy/serve-container.sh --replace`; throws when the launcher refuses or fails. */
-  replaceServe?: () => void;
+  /** `deploy/serve-container.sh --replace`; throws when the launcher refuses or fails. W1-T8311: a fresh host
+   *  pressure refusal before the launcher's first destructive step RETURNS a {@link ServeReplaceHold}: the old
+   *  console is untouched, so it is a hold, never a failure. */
+  replaceServe?: () => void | ServeReplaceHold;
   servePolicyLastFailedAtMs?: () => number | undefined;
   recordServePolicyFailure?: (message: string, atMs: number) => void;
   clearServePolicyFailure?: () => void;
@@ -1416,6 +1424,9 @@ export interface DeployDeps {
   escalateRefusal?: (refusal: PersistingRefusal) => string | undefined;
   /** Close that issue once a recycle is VERIFIED healthy. */
   closeRefusalIssue?: (url: string, comment: string) => void;
+  /** A verified recycle ended a streak whose issue url this host never learned (it was spooled for
+   *  the daemon to post): drop the spooled escalation, or spool the close of the one it opened. */
+  withdrawRefusal?: (refusal: { instance: string; key: string }, comment: string) => void;
   /** The daemon instance this deployer serves, for naming the escalation. */
   refusalInstance?: () => string | undefined;
 
@@ -1594,12 +1605,10 @@ function retractRefusal(deps: DeployDeps, toHead: string, failedHead?: string): 
   if (!prior) return;
   const instance = deps.refusalInstance?.() ?? "default";
   let closed = false;
+  const closing = `The daemon ${instance} at ${short(toHead)} was verified healthy after ${prior.count} refused window(s) — closing.`;
   if (prior.issueUrl && deps.closeRefusalIssue) {
     try {
-      deps.closeRefusalIssue(
-        prior.issueUrl,
-        `The daemon ${instance} at ${short(toHead)} was verified healthy after ${prior.count} refused window(s) — closing.`,
-      );
+      deps.closeRefusalIssue(prior.issueUrl, closing);
       closed = true;
     } catch (err) {
       deps.log("deploy.refusal_close_failed", {
@@ -1607,6 +1616,12 @@ function retractRefusal(deps: DeployDeps, toHead: string, failedHead?: string): 
         issue: prior.issueUrl,
         error: err instanceof Error ? err.message : String(err),
       });
+    }
+  } else if (!prior.issueUrl && deps.withdrawRefusal) {
+    try {
+      deps.withdrawRefusal({ instance, key: prior.key }, closing);
+    } catch (err) {
+      deps.log("deploy.refusal_withdraw_failed", { instance, error: err instanceof Error ? err.message : String(err) });
     }
   }
   if (!deps.setRefusalStreak || deps.setRefusalStreak(undefined) === false) return;
@@ -2099,6 +2114,8 @@ export interface RealDeployOpts {
   escalateRefusal?: (refusal: PersistingRefusal) => string | undefined;
   /** W1-T6062 — close that issue with a citation once a recycle is verified healthy. */
   closeRefusalIssue?: (url: string, comment: string) => void;
+  /** Withdraw a spooled refusal escalation once a recycle is verified healthy. */
+  withdrawRefusal?: (refusal: { instance: string; key: string }, comment: string) => void;
   /** Injected subprocess runner (tests fake it; default = execFileSync, utf8, RAW — callers
    *  trim, since `git status --porcelain`'s leading status column is significant). Throws on
    *  a non-zero exit, like execFileSync — callers catch where that is expected (e.g. `pgrep`
@@ -2733,6 +2750,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     },
     ...(o.escalateRefusal ? { escalateRefusal: o.escalateRefusal } : {}),
     ...(o.closeRefusalIssue ? { closeRefusalIssue: o.closeRefusalIssue } : {}),
+    ...(o.withdrawRefusal ? { withdrawRefusal: o.withdrawRefusal } : {}),
     clearFailure: (observedCurrentHead) => {
       for (const [marker, path] of [
         ["DEPLOY_FAILED", deployFailedAlertPath(o.stateRoot)],

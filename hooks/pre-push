@@ -127,7 +127,7 @@ if has ci-control-plane-precheck.mjs tsx; then
         return at("/src/lib/git-push.ts").then((p) => {
           const run = p.createPrePushSandboxRunner(process.cwd());
           if (m.affectedCapabilitySnapshot(files)) {
-            try { runCapabilitySnapshot = run(process.execPath, ["--import", "tsx", "scripts/generate-capability-snapshot.mjs", "--check"]); }
+            try { const snapshotResult = run(process.execPath, ["--import", "tsx", "scripts/generate-capability-snapshot.mjs", "--check"]); runCapabilitySnapshot = () => snapshotResult; }
             catch (e) {
               console.error("pre-push: ci-control-plane-precheck — " + e.message + ": skipped, NOT passed (CI runs it)");
               process.exit(4);

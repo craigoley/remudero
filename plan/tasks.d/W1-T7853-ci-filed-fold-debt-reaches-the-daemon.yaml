@@ -1,0 +1,83 @@
+- id: W1-T7853
+  title: "FOLD DEBT FILED IN CI REACHES THE DAEMON — the CLAUDE.md budget ratchet writes `plan/feedback/fold-debt-CLAUDE-md-<bytes>.yaml` into a CI runner's throwaway checkout on the PR lane and on main's push lane, and nothing uploads or reads it, so routed fold debt never reaches the inbox; carry it the way the mutation verdict already travels"
+  repo: remudero
+  depends_on: [W1-T7841, W1-T7848]  # W1-T7841 decides which runs file; W1-T7848 shares src/lib/sweep.ts
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — fold debt a CI run files is carried to the daemon's feedback inbox
+  band_meaning: span
+  origin: "operator approval 2026-10-11: file the recommended follow-ups (W1-T7841's separate observation: CI-filed fold debt never reaches the daemon)"
+  plan_refs: [W1-T7841, W1-T3320, W1-T2927, W1-T3068, W1-T243, W1-T4399]
+  files: [.github/workflows/ci.yml, src/lib/fold-debt-pull.ts, src/lib/sweep.ts, test/ci-filed-fold-debt-reaches-the-daemon.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main e3256acda (2026-10-11).
+    WHERE CI FILES FOLD DEBT. `fileFoldDebt` (scripts/claude-md-budget-ratchet.mjs:59) writes
+    plan/feedback/fold-debt-<file>-<bytes>.yaml in the cwd when a run routes (:316). Two CI runs do that:
+      - On the PR lane and the merge-group lane, the light-gates job (key `commitlint`, gated at
+        .github/workflows/ci.yml:1039) runs the ratchet as its `claude-md-budget-ratchet` step (ci.yml:1095-1102).
+        That is the net-byte routing of a branch that grows CLAUDE.md.
+      - On main's push lane, `ci` shard 1 runs it as a main ceiling gate (W1-T3068, ci.yml:425-440). On main the
+        merge base is HEAD, so this files only cap debt that main itself carries.
+    Both write into the runner's throwaway checkout. Nothing under .github/ uploads or reads plan/feedback: a grep for
+    "plan/feedback" over .github/ reads 0, with ci.yml's own claude-md-budget-ratchet lines as the positive control.
+    The daemon's inbox is plan/feedback on origin/main. Triage reads it there (src/lib/auto-triage.ts:824), and a
+    daemon-side capture reaches it only through `landFeedback` (src/lib/feedback-landing.ts:1193, W1-T243). So
+    fold debt filed in CI is never seen.
+    THE CHANNEL THAT ALREADY EXISTS. W1-T2927 had the same defect for the mutation verdict and fixed it on the route
+    the operator chose on 2026-09-30 (MASTER-PLAN D-10):
+      - the job uploads the file as an artifact (`mutation-verdict-ledger`, ci.yml:2064-2070);
+      - src/lib/mutation-verdict-pull.ts lists artifacts by name, reads each zip and dedupes on run ids recorded in
+        the ledger (:21-37, :144);
+      - the sweep pulls through its paced read seams once per full pass (sweep.ts:4284-4300 and :14251-14260).
+    This task reuses that channel and adds no new transport. A daemon-side capture into the checkout followed by
+    `landFeedback` is also established: coverage-improvement passes its checkout root straight to `captureFeedback`
+    (src/lib/coverage-improvement.ts:569).
+    RELATION TO W1-T7841. W1-T7841 (queued) makes only a recording run file. The CI gate step stays one
+    (GITHUB_ACTIONS true and NODE_TEST_CONTEXT unset), and every local or test run stops writing. This task carries
+    what those recording runs file, so it depends on W1-T7841.
+  design: |
+    1. UPLOAD WHAT CI FILED. In ci.yml, after the light-gates `claude-md-budget-ratchet` step and after `ci` shard 1's
+       main ceiling gates, add an `actions/upload-artifact` step (the same pinned action as ci.yml:2065). It uploads
+       plan/feedback/fold-debt-*.yaml with `if-no-files-found: ignore`, as artifact `claude-md-fold-debt` from
+       light-gates and `claude-md-fold-debt-main` from the push lane. Both run `if: always()`. A run that filed
+       nothing uploads nothing. No job key and no check name changes, so src/lib/ci-parity.ts needs no edit
+       (the W1-T5695 note at ci.yml:1017-1022).
+    2. PULL IT LIKE THE MUTATION VERDICT. A new src/lib/fold-debt-pull.ts exports `pullFoldDebtEntries`. It lists
+       both artifact names, reads each zip and returns the fold-debt entries. It uses the same seams: list and zip
+       REST args, a zip reader, and a ledger dedup on the artifact's workflow run id. It shares
+       mutation-verdict-pull.ts's zip reader rather than copying it. An entry is accepted only if its name matches `fold-debt-<file>-<bytes>.yaml` and it parses as a
+       plan/feedback entry. Anything else is ledgered as refused, never written.
+    3. ONLY MAIN'S DEBT LANDS. A `claude-md-fold-debt-main` entry is main's by construction. A `claude-md-fold-debt`
+       entry is held until the pull request its workflow run was built for has merged, read through the sweep's
+       paced seam. A PR that closed unmerged drops its entry with a row. An open PR's entry stays listed and is
+       re-read on a later pass.
+    4. LAND IT. The sweep calls `pullFoldDebtEntries` on full passes beside `pullMutationVerdicts`, then writes each
+       accepted entry into its checkout's plan/feedback with exclusive create. An existing entry is already filed, which is the same idempotence
+       `fileFoldDebt` keeps. It then calls `landFeedback` on that root. Ledger `sweep.fold_debt_pull.ingested`
+       (run_id, artifact_id, entry ids) and `sweep.fold_debt_pull.error` (phase and error). A failed list ingests
+       nothing and is never guessed past.
+    Tests go in the new file test/ci-filed-fold-debt-reaches-the-daemon.test.ts, with `test(` titles exactly as in the
+    proofs below. The existing mutation-verdict-pull and claude-md-budget-ratchet suites must stay green.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/ci-filed-fold-debt-reaches-the-daemon.test.ts"
+    - claim: "both CI runs that can file fold debt upload plan/feedback/fold-debt-*.yaml as an artifact"
+      proof: 'grep: test("W1-T7853: both CI runs that file fold debt upload it as an artifact" in test/ci-filed-fold-debt-reaches-the-daemon.test.ts'
+    - claim: "the sweep calls the fold-debt pull"
+      proof: 'grep: pullFoldDebtEntries( in src/lib/sweep.ts'
+    - claim: "a pulled fold-debt entry from main's push lane is written into the checkout and landed"
+      proof: 'grep: test("W1-T7853: a push-lane fold-debt artifact is written and landed" in test/ci-filed-fold-debt-reaches-the-daemon.test.ts'
+    - claim: "a PR-lane entry lands only after its pull request merged, and a closed unmerged one is dropped"
+      proof: 'grep: test("W1-T7853: a PR-lane fold-debt entry waits for its merge" in test/ci-filed-fold-debt-reaches-the-daemon.test.ts'
+    - claim: "an artifact run already ingested is not pulled again, and an entry already on disk is not duplicated"
+      proof: 'grep: test("W1-T7853: an ingested run and an existing entry are not filed twice" in test/ci-filed-fold-debt-reaches-the-daemon.test.ts'
+  falsifier: |
+    Leave ci.yml without the upload steps. The workflow test then finds no step uploading plan/feedback/fold-debt-*.yaml
+    and fails. Drop the merge check, and a PR-lane entry from an unmerged fixture PR is written, so the third test
+    fails. Drop the run-id dedup, and the second pass over the same artifact list writes or lands again, so the
+    fourth test fails.

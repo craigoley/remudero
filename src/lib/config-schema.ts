@@ -43,6 +43,7 @@ export interface ModelApproval {
 }
 
 export interface Config {
+  contributorAdmission?: import("./contributor-admission.js").AdmissionSettings;
   claudeBin: string;
   root: string;
   diskArtifactScanRoots?: string[];
@@ -276,6 +277,27 @@ const workerProvidersShape: ValueSchema = {
 };
 
 export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
+  configField("contributorAdmission", "AdmissionSettings", true, undefined, "config.json", "Opt-in shadow contributor evaluation; no enforcement or production identity defaults.", {
+    kind: "object", fields: [
+      configField("mode", '"shadow"', false, undefined, "config.json", "Observation only.", { kind: "enum", values: ["shadow"] }),
+      configField("disposition", '"shadow"', true, undefined, "config.json", "Opt-in durable shadow disposition; no remote writes.", { kind: "enum", values: ["shadow"] }),
+      configField("repositoryId", "number", false, undefined, "config.json", "Authenticated target repository id.", numberShape),
+      configField("policy", "AdmissionPolicy", false, undefined, "config.json", "Explicit numeric identity policy.", { kind: "object", fields: [
+        configField("version", "string", false, undefined, "config.json", "Policy revision.", stringShape),
+        configField("ownerIds", "number[]", false, undefined, "config.json", "Owner user ids.", { kind: "array", element: numberShape }),
+        configField("organizationIds", "number[]", false, undefined, "config.json", "Admitted organization ids, not operator grants.", { kind: "array", element: numberShape }),
+        configField("maxEvidenceAgeMs", "number", false, undefined, "config.json", "Evidence freshness ceiling.", numberShape),
+        configField("services", "ServiceGrant[]", false, undefined, "config.json", "Action-scoped bot ids.", { kind: "array", element: { kind: "object", fields: [
+          configField("id", "number", false, undefined, "config.json", "Bot id.", numberShape),
+          configField("actions", "AdmissionAction[]", false, undefined, "config.json", "Scoped actions.", { kind: "array", element: { kind: "enum", values: ["review", "repair", "auto-merge", "feedback", "disposition"] } }),
+        ] } }),
+      ] }),
+      configField("organizations", "OrganizationNamespace[]", false, undefined, "config.json", "REST namespaces verified against numeric organization ids.", { kind: "array", element: { kind: "object", fields: [
+        configField("id", "number", false, undefined, "config.json", "Organization id.", numberShape),
+        configField("login", "string", false, undefined, "config.json", "REST organization namespace, never authority alone.", stringShape),
+      ] } }),
+    ],
+  }),
   configField("claudeBin", "string", false, undefined, "config.json", "Absolute path to the real Claude CLI binary.", stringShape),
   configField("root", "string", false, undefined, "config.json", "Workspace root.", stringShape),
   configField("diskArtifactScanRoots", "string[]", true, "<root>/..", "config.json", "Artifact scan roots, each checked for its own filesystem's free space.", stringArrayShape),
@@ -403,6 +425,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_HARNESS_HOOKS_DIR", "Replaces the harness's own hooks/ dir whose pre-push the host push leaf runs; daemon environment, never worker input.", ["src/lib/worktree-git.ts"]),
   envEntry("RMD_HEADROOM_ENABLED", "Overrides the headroom governor on or off for this process.", ["src/lib/config.ts"]),
   envEntry("RMD_IDLE_STARVED_SUPERVISED", "Enables supervised idle-starvation handling for a daemon targeting another repository without an explicit plan.", ["src/run-task.ts"]),
+  envEntry("RMD_INSTANCE_REGISTRY", "Path to the daemon instance registry that rmd pause/resume resolve their target instance through (W1-T7727); defaults to the checkout's own registry (daemonInstanceRegistryPath through the repo layout); the deploy shell readers honor the same name.", ["src/run-task.ts"]),
   envEntry("RMD_MAIL_COMMAND", "Overrides the mail command used for notification delivery.", ["src/lib/notify.ts"]),
   envEntry("RMD_MEASUREMENT_CADENCE_CHILD_CONFIG", "Carries the daemon's Config as JSON to the measurement-cadence child so it measures the daemon's root, never $HOME's.", ["src/lib/measurement-cadence.ts"]),
   envEntry("RMD_OPENWEIGHT_API_KEY", "Supplies the Azure API key to the daemon-local open-weight adapter; it is never copied into a worker environment.", ["src/lib/worker-provider.ts"]),

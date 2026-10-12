@@ -499,3 +499,46 @@
     shared refusal reason, so this entry names the shared pre-push steps, not a verified per-PR cause.
   src: "ci-learning:6058:ci-gate"
   cited: "2026-10-09"
+
+- id: head-identity-gate-pre-push-identity
+  subsystem: ci
+  lifecycle: active
+  files: ["scripts/head-identity-gate.mjs", "hooks/pre-push", "src/run-task.ts", "test/**", "plan/tasks.d/**"]
+  fact: >-
+    Before the first push of a branch, give its head an identity the head-identity gate accepts: a
+    run-shaped ref (`run-<taskId>-<epochMs>` for a filed task, `run-unfiled-<epochMs>` for unfiled
+    work), or an anchored `Remudero-Task: <id>` trailer on the head commit. A branch shaped
+    codex/ or claude/ is refused at push, and the gate names the rename, which only works while the
+    branch is still free. Once a pull request is open its head ref cannot be renamed, so the repair
+    is a new head commit carrying the trailer (`git commit --allow-empty`), never an amend or a new PR.
+  evidence: >-
+    The head-identity gate refused pull requests #10671 and #10760 in one window, and each was
+    repaired after the refusal. The gate's refusal text (scripts/head-identity-gate.mjs) names both
+    run-branch forms and the trailer route, and it refuses at push before a pull request exists. The
+    root cause of each refusal was not read from the PR diffs or the gate's logs, so this entry names
+    the identity step a fix lane must take before pushing, not a verified per-PR cause.
+  src: "ci-learning:10671:head-identity-gate"
+  cited: "2026-10-11"
+
+- id: coverage-session-blanking-env-form
+  subsystem: ci
+  lifecycle: active
+  files:
+    - "test/**/*.ts"
+    - "test/setup/**"
+    - "src/lib/tmp.ts"
+    - "scripts/coverage-session-blanking-check.mjs"
+  fact: >-
+    The coverage-session-blanking gate refused 4 pull requests in one window, and each was repaired after
+    the refusal. In a test that spawns a nested `node --test` runner or a child that strips NODE_TEST_CONTEXT,
+    blank NODE_V8_COVERAGE with `env.NODE_V8_COVERAGE = undefined` or `env.NODE_V8_COVERAGE = ""` (or the same
+    as an inline object-literal property). Never use `delete env.NODE_V8_COVERAGE`: node re-injects the variable
+    into every child, so the delete is a no-op and the gate reports it as a defect. Before pushing, run
+    `node scripts/coverage-session-blanking-check.mjs` over your own change.
+  evidence: >-
+    The refusals are recorded as ci-learning:10516:coverage-session-blanking (PRs 10516, 10779 (listed twice),
+    10815). Recon did not fetch each PR's failure log or diff, so this entry names the gate's accepted forms and
+    the pre-push check, not a verified per-PR trigger. Whether src/lib/tmp.ts and test/setup/tmp-hygiene.ts were
+    causal or incidental repairs is not established.
+  src: "ci-learning:10516:coverage-session-blanking"
+  cited: "2026-10-11"

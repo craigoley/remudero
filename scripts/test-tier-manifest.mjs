@@ -44,6 +44,7 @@
 import { readFileSync, writeFileSync, readdirSync, mkdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { POOL_ISOLATION_FLAG, runShardWithPool, spawnJudgedRun } from "./pure-test-pool.mjs";
 import { dirname, isAbsolute, join, posix, relative, resolve, sep, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -62,6 +63,25 @@ export const DEFAULT_CI_SHARD_COUNT = 8;
  *  (both recorded in the shipped manifest) and well above the sub-second common case, so an
  *  ordinary file stays fast and only genuinely long-running files move tiers. */
 export const DEFAULT_SLOW_THRESHOLD_MS = 5000;
+
+/**
+ * A HUNG FAST-TIER TEST FAILS BY NAME instead of holding its ci-shard to the job's 35-minute cancel.
+ *
+ * A fast-tier FILE is one whose whole recorded run is under the tier threshold, so one test inside it
+ * running this many times that threshold is stuck, not slow (the longest top-level test across six
+ * 2026-10-11 ci-shard logs, ~17,600 results, was 5.4 s). It is a backstop, not a tuning knob: it scales
+ * with `thresholdMs`, a test that sets its own `timeout` keeps it, and `--test-force-exit` beside it
+ * lets the process end once every test has a result, so a handle a timed-out test leaked cannot keep a
+ * finished run alive. Neither can fire while the event loop is blocked synchronously.
+ */
+export const FAST_TIER_TEST_TIMEOUT_FACTOR = 24;
+
+/** The node flags that bound a fast-tier run: a per-test timeout derived from the tier threshold,
+ *  and an exit once every test has finished. */
+export function fastTierHangBoundArgs(manifest) {
+  const thresholdMs = Number.isFinite(manifest?.thresholdMs) && manifest.thresholdMs > 0 ? manifest.thresholdMs : DEFAULT_SLOW_THRESHOLD_MS;
+  return [`--test-timeout=${thresholdMs * FAST_TIER_TEST_TIMEOUT_FACTOR}`, "--test-force-exit"];
+}
 
 /** A materially different observation is worth naming before it is applied to the next proposal.
  * Two is intentionally a factor, not an absolute-ms tolerance: the ledger ranges from sub-ms
@@ -303,21 +323,89 @@ export function packFilesByMakespan(testFiles, manifest, shardCount, workers = C
   return shards.map((shard) => shard.files);
 }
 
+/** W1-T7810 — how many RAW instrumented observations each file's history keeps. Equal to the test
+ *  gardener's `DURATION_WINDOW_RUNS`, so the adopter's window and the fold's history are one window. */
+export const DURATION_HISTORY_RUNS = 7;
+
+/** W1-T7810 — how many robust standard deviations (of the measured noise) an observation may lie
+ *  from its file's own history median before it is refused. The width it multiplies is measured,
+ *  never chosen: the file's own spread, floored by the fleet-wide noise band. */
+export const OUTLIER_SIGMAS = 3;
+
+const medianOf = (xs) => {
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = s.length >> 1;
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+};
+
+/** W1-T7810 — the robust spread (1.4826 x MAD) of the log of `values`; undefined below three. */
+export function logSpread(values) {
+  if (values.length < 3) return undefined;
+  const logs = values.map(Math.log);
+  const m = medianOf(logs);
+  return 1.4826 * medianOf(logs.map((l) => Math.abs(l - m)));
+}
+
+/** W1-T7810 — the fleet-wide noise band: the median, over every file with at least three raw
+ *  observations, of that file's robust log spread. Zero when no file has that many yet. */
+export function fleetNoiseBandLog(history) {
+  const spreads = [];
+  for (const values of Object.values(history ?? {})) {
+    const spread = Array.isArray(values) ? logSpread(values) : undefined;
+    if (spread !== undefined) spreads.push(spread);
+  }
+  return spreads.length > 0 ? medianOf(spreads) : 0;
+}
+
+/** W1-T7810 — judge one observation against the file's OWN recent raw history. It is an outlier when
+ *  |log(obs) - median(log history)| exceeds {@link OUTLIER_SIGMAS} x the history's robust spread,
+ *  that spread floored by `bandLog` (and standing in for it below three observations). With no
+ *  history, or no measured width at all, there is nothing to contradict it and it is admitted. */
+export function judgeObservation(history, observed, bandLog) {
+  if (history.length === 0) return { outlier: false };
+  const center = medianOf(history.map(Math.log));
+  const width = Math.max(logSpread(history) ?? 0, bandLog);
+  const boundLog = OUTLIER_SIGMAS * width;
+  const outlier = boundLog > 0 && Math.abs(Math.log(observed) - center) > boundLog;
+  return { outlier, medianMs: Math.round(Math.exp(center)), bandLog: width, boundLog };
+}
+
 /** W1-T4071 — fold one run's observations into the instrumented ledger as an EWMA: a stale entry
  *  moves toward what was measured whether that is higher or lower, a zero or non-finite reading
- *  never moves (or seeds) anything, and a row naming no file in `knownFiles` is dropped. */
-export function foldDurationsEwma(manifest, measured, { alpha = DURATION_EWMA_ALPHA, knownFiles } = {}) {
+ *  never moves (or seeds) anything, and a row naming no file in `knownFiles` is dropped.
+ *
+ *  W1-T7810 — an observation is folded only when the file's own raw history does not contradict it.
+ *  The last {@link DURATION_HISTORY_RUNS} RAW observations per file ride along in `history` (from
+ *  `opts.history`, else `manifest.history`); a refused observation is still appended to that
+ *  history, so a sustained shift is folded once it has become the median, and it is listed under
+ *  `outliers` with the median and band it was judged against. */
+export function foldDurationsEwma(manifest, measured, { alpha = DURATION_EWMA_ALPHA, knownFiles, history } = {}) {
   if (!(alpha > 0 && alpha <= 1)) throw new RangeError("EWMA alpha must be in (0, 1]");
   const known = knownFiles ? new Set(knownFiles) : undefined;
   const files = {};
   for (const [file, duration] of Object.entries(manifest.files ?? {})) if (!known || known.has(file)) files[file] = duration;
+  const prior = {};
+  for (const [file, values] of Object.entries(history ?? manifest.history ?? {})) {
+    if (known && !known.has(file)) continue;
+    if (Array.isArray(values)) prior[file] = values.filter((v) => typeof v === "number" && Number.isFinite(v) && v > 0);
+  }
+  const bandLog = fleetNoiseBandLog(prior);
+  const nextHistory = { ...prior };
+  const outliers = {};
   for (const [file, observed] of Object.entries(measured)) {
     if (!(typeof observed === "number" && Number.isFinite(observed) && observed > 0)) continue;
     if (known && !known.has(file)) continue;
-    const prior = files[file];
-    files[file] = typeof prior === "number" && prior > 0 ? Math.round(prior + alpha * (observed - prior)) : Math.ceil(observed);
+    const own = prior[file] ?? [];
+    nextHistory[file] = [...own, observed].slice(-DURATION_HISTORY_RUNS);
+    const verdict = judgeObservation(own, observed, bandLog);
+    if (verdict.outlier) {
+      outliers[file] = { observedMs: observed, medianMs: verdict.medianMs, bandLog: verdict.bandLog, boundLog: verdict.boundLog };
+      continue;
+    }
+    const before = files[file];
+    files[file] = typeof before === "number" && before > 0 ? Math.round(before + alpha * (observed - before)) : Math.ceil(observed);
   }
-  return { thresholdMs: manifest.thresholdMs, files };
+  return { thresholdMs: manifest.thresholdMs, files, history: nextHistory, outliers };
 }
 
 /** W1-T4071 — the instrumented ledger the shards weigh: the CI snapshot at `snapshotPath` when it
@@ -340,6 +428,11 @@ export function loadInstrumentedLedger(committedPath, snapshotPath) {
       throw new Error("not a { files: { path: ms } } ledger");
     }
     const manifest = { thresholdMs: typeof parsed.thresholdMs === "number" ? parsed.thresholdMs : DEFAULT_SLOW_THRESHOLD_MS, files };
+    // W1-T7810: the raw per-file history the previous fold carried, when it is well formed.
+    const rawHistory = parsed.history;
+    if (rawHistory && typeof rawHistory === "object" && !Array.isArray(rawHistory)) {
+      manifest.history = Object.fromEntries(Object.entries(rawHistory).filter(([, v]) => Array.isArray(v)));
+    }
     return { manifest, source: "snapshot", digest: createHash("sha256").update(raw).digest("hex").slice(0, 16) };
   } catch (error) {
     return { ...committed(), warning: `snapshot ${snapshotPath} is unusable (${error.message}); weighing the committed ledger` };
@@ -595,8 +688,12 @@ export function proposalIsMaterial(committed, proposed, shardCount = DEFAULT_CI_
 /** Writes `manifest` to `path` as stable, sorted-key JSON — a deterministic diff on every
  *  recording pass, never a hash-order-dependent one. */
 export function writeManifest(path, manifest) {
-  const sortedFiles = Object.fromEntries(Object.entries(manifest.files).sort(([a], [b]) => a.localeCompare(b)));
-  writeFileSync(path, `${JSON.stringify({ thresholdMs: manifest.thresholdMs, files: sortedFiles }, null, 2)}\n`);
+  const sorted = (rows) => Object.fromEntries(Object.entries(rows).sort(([a], [b]) => a.localeCompare(b)));
+  const out = { thresholdMs: manifest.thresholdMs, files: sorted(manifest.files) };
+  // W1-T7810: the fold's raw per-file history and refused outliers ride in the proposal artifact.
+  if (manifest.history && Object.keys(manifest.history).length > 0) out.history = sorted(manifest.history);
+  if (manifest.outliers && Object.keys(manifest.outliers).length > 0) out.outliers = sorted(manifest.outliers);
+  writeFileSync(path, `${JSON.stringify(out, null, 2)}\n`);
 }
 
 function gitLines(spawn, cwd, args) {
@@ -703,21 +800,32 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
   const manifest = loadManifest(manifestPath);
   const testFiles = listTestFiles(root);
 
-  const spawnTestFiles = (files) => {
+  // W1-T6085: `pool` appends --experimental-test-isolation=none so the files share ONE process;
+  // `quiet` is a leak-locating re-run whose output and durations nobody wants. A role other than
+  // "rest" writes its durations beside the main file (shard-1.pool.json), because the reporter
+  // rewrites its destination and two children would otherwise erase each other's evidence.
+  const spawnTestFiles = (files, { pool = false, quiet = false, role = "rest", bounded = false } = {}) => {
     // TAP on stdout always: test-with-retry parses this output, and Node 24 no longer defaults a
     // piped run to TAP. Reporters pair with destinations in order, so the duration reporter follows.
     const testArgs = ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--test-reporter=tap", "--test-reporter-destination=stdout"];
+    if (pool) testArgs.push(POOL_ISOLATION_FLAG);
+    if (bounded) testArgs.push(...fastTierHangBoundArgs(manifest));
     const durationOutputRaw = env.RMD_TEST_DURATION_OUTPUT;
-    if (durationOutputRaw) {
-      const durationOutput = resolve(root, durationOutputRaw);
+    if (durationOutputRaw && !quiet) {
+      const resolved = resolve(root, durationOutputRaw);
+      const durationOutput = role === "rest" ? resolved : resolved.replace(/(\.[^./\\]*)?$/, (ext) => `.${role}${ext}`);
       mkdirSync(dirname(durationOutput), { recursive: true });
       testArgs.push(
         `--test-reporter=${resolve(root, "scripts/test-duration-reporter.mjs")}`,
         `--test-reporter-destination=${durationOutput}`,
       );
     }
-    const result = spawn(process.execPath, [...testArgs, ...files], { cwd: root, stdio: "inherit" });
-    return result.status ?? (result.signal ? 1 : 0);
+    // EVERY run passes only with a complete summary from every file it was given: exit 0 alone let a
+    // test's real process.exit(0) end shard 1's pool 92 files in and read green, and an isolated
+    // file whose own child exits 0 part-way is reported `ok` — the rest, the slow tier and the
+    // plan-reading candidates are judged the same way as the pool ladder.
+    const prefix = role === "rest" ? "test-tier-manifest" : "pure-test-pool";
+    return spawnJudgedRun(files, { spawn, cwd: root, args: testArgs, pool, quiet, role, prefix });
   };
 
   if (argv.includes("--record-evidence")) {
@@ -984,7 +1092,11 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
       console.log(`test-tier-manifest: no ${runTier}-tier test files recorded yet — nothing to run.`);
       return 0;
     }
-    return spawnTestFiles(files);
+    // W1-T6085: only the fast tier shares processes; a slow file keeps its own child.
+    if (runTier === "fast" && env.RMD_TEST_POOL !== "0") {
+      return runShardWithPool(files, { fast, root, run: (subset, opts) => spawnTestFiles(subset, { ...opts, bounded: true }) }).status;
+    }
+    return spawnTestFiles(files, { bounded: runTier === "fast" });
   }
 
   const { fast, slow } = tierFiles(testFiles, manifest);

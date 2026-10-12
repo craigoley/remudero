@@ -36,12 +36,13 @@ import { resolveTestSlotDir, testSlotProcessFacts } from "./test-slot.js";
  * What a reservation holds memory for. The first four are worker trees `spawnWorker` starts; "advisory" is a worker that
  * only reads and judges (a lane that builds or tests nothing); "garden", "check-proof" and "push-gate" are the daemon's
  * own heavy children, reserved since the 2026-10-10 census found them unreserved (about 1 GB, 250-290 MB and a sandboxed
- * gate run each).
+ * gate run each). "test" is a `node --test` runner found INSIDE another reservation's tree (a worker's `npm test` or a
+ * hand-typed run): reserved on its own so the budget sees the spike when the run starts (host-memory-learning.ts).
  */
 export type WorkerClass =
-  | "review" | "fix" | "implement" | "unclassified" | "advisory" | "garden" | "check-proof" | "push-gate";
+  | "review" | "fix" | "implement" | "unclassified" | "advisory" | "garden" | "check-proof" | "push-gate" | "test";
 export const WORKER_CLASSES: readonly WorkerClass[] = [
-  "review", "fix", "implement", "unclassified", "advisory", "garden", "check-proof", "push-gate",
+  "review", "fix", "implement", "unclassified", "advisory", "garden", "check-proof", "push-gate", "test",
 ];
 
 /** A process identity: pid AND its kernel start time. `start: "unknown"` means it was alive but unreadable. */
@@ -126,7 +127,8 @@ export const UNVERIFIED_AFTER_MS = 10 * 60_000;
 /**
  * Unmeasured per-class estimates (MiB): the cold-start PRIORS a learned estimate starts from (host-memory-learning.ts).
  * OBSERVED 2026-10-09: worker children 0.5-4.6 GB per instance. OBSERVED 2026-10-10 (core census): a review tree about
- * 1 GB, a garden child about 1 GB, check-proof 250-290 MB.
+ * 1 GB, a garden child about 1 GB, check-proof 250-290 MB, and one worker's `node --test` tree 2.8 GB (7-8 file children
+ * at 300-570 MB each).
  */
 export const DEFAULT_ESTIMATE_MIB: Readonly<Record<WorkerClass, number>> = {
   review: 1_024,
@@ -137,6 +139,7 @@ export const DEFAULT_ESTIMATE_MIB: Readonly<Record<WorkerClass, number>> = {
   garden: 1_024,
   "check-proof": 512,
   "push-gate": 1_024,
+  test: 2_048,
 };
 
 export interface OpenReservationInput {
@@ -826,4 +829,15 @@ export function readMemoryLedger(deps: HostMemoryLedgerOptions = {}): HostMemory
     recordError(deps, "read", error);
     return undefined;
   }
+}
+
+/**
+ * W1-T7720: why the reservation store could not be READ, or `undefined` when it could. A missing,
+ * reset or present store is a reading; only `state: "unreadable"` — or a read that returned nothing at
+ * all (`readMemoryLedger` records a diagnostic and yields `undefined`) — is a read FAILURE. Pure.
+ */
+export function memoryStoreReadFailure(reading: HostMemoryReading | undefined): string | undefined {
+  if (reading === undefined) return "reservation store read returned no reading";
+  if (reading.state !== "unreadable") return undefined;
+  return reading.reason ?? "reservation store unreadable";
 }

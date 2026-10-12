@@ -1274,6 +1274,52 @@ if [ -f "$BACKUP_RECEIPT" ]; then
   esac
 fi
 
+SPOOL_DIR="${RMD_ROOT}/state/escalation-spool"
+SPOOL_PENDING=0
+SPOOL_OLDEST_TS=""
+SPOOL_OLDEST_EPOCH=""
+SPOOL_MIN_LAST_EPOCH=""
+SPOOL_LINES=""
+spool_field() { grep -o "\"$1\":\"[^\"]*\"" "$2" 2>/dev/null | head -n 1 | sed "s/^\"$1\":\"//; s/\"\$//"; }
+for spool_entry in "$SPOOL_DIR"/*.json; do
+  [ -f "$spool_entry" ] || continue
+  SPOOL_PENDING=$((SPOOL_PENDING + 1))
+  spool_first="$(spool_field firstAt "$spool_entry")"
+  spool_first_epoch="$(epoch_of "$spool_first")"
+  spool_last_epoch="$(epoch_of "$(spool_field lastAt "$spool_entry")")"
+  if [ -n "$spool_first_epoch" ] && { [ -z "$SPOOL_OLDEST_EPOCH" ] || [ "$spool_first_epoch" -lt "$SPOOL_OLDEST_EPOCH" ]; }; then
+    SPOOL_OLDEST_EPOCH="$spool_first_epoch"
+    SPOOL_OLDEST_TS="$spool_first"
+  fi
+  if [ -n "$spool_last_epoch" ] && { [ -z "$SPOOL_MIN_LAST_EPOCH" ] || [ "$spool_last_epoch" -lt "$SPOOL_MIN_LAST_EPOCH" ]; }; then
+    SPOOL_MIN_LAST_EPOCH="$spool_last_epoch"
+  fi
+  SPOOL_LINES="${SPOOL_LINES}
+escalation_spool_entry=${spool_first:-unknown} $(spool_field headline "$spool_entry")"
+done
+SPOOL_DRAIN_TS="$(head -n 1 "${SPOOL_DIR}/.drain-pass" 2>/dev/null)"
+SPOOL_DRAIN_EPOCH="$(epoch_of "$SPOOL_DRAIN_TS")"
+if [ "$SPOOL_PENDING" -eq 0 ]; then
+  SPOOL_VERDICT=ok
+elif [ -n "$SPOOL_DRAIN_EPOCH" ] && [ -n "$SPOOL_MIN_LAST_EPOCH" ] && [ "$SPOOL_DRAIN_EPOCH" -ge "$SPOOL_MIN_LAST_EPOCH" ]; then
+  SPOOL_VERDICT="UNDELIVERED — ${SPOOL_PENDING} host-side escalation(s) pending; the daemon's drain pass at ${SPOOL_DRAIN_TS} ran after they were spooled and could not post them"
+elif [ -n "$PREV_EPOCH" ] && [ -n "$SPOOL_OLDEST_EPOCH" ] && [ "$SPOOL_OLDEST_EPOCH" -le "$PREV_EPOCH" ] &&
+     { [ -z "$SPOOL_DRAIN_EPOCH" ] || [ "$SPOOL_DRAIN_EPOCH" -lt "$SPOOL_OLDEST_EPOCH" ]; }; then
+  SPOOL_VERDICT="UNDELIVERED — ${SPOOL_PENDING} host-side escalation(s) pending since ${SPOOL_OLDEST_TS}, already pending at the previous beat; no daemon drain pass since (last: ${SPOOL_DRAIN_TS:-never})"
+else
+  SPOOL_VERDICT="pending — ${SPOOL_PENDING} host-side escalation(s) spooled since the previous beat; the daemon drains on its next tick"
+fi
+
+CRASH_LOOP_FILE="${RMD_ROOT}/state/DAEMON_CRASH_LOOP"
+CRASH_LOOP_LINE="$(head -n 1 "$CRASH_LOOP_FILE" 2>/dev/null | tr -d '\r')"
+if [ -n "$CRASH_LOOP_LINE" ]; then
+  CRASH_LOOP_VERDICT="CRASH_LOOP — ${CRASH_LOOP_LINE}"
+elif [ -e "$CRASH_LOOP_FILE" ]; then
+  CRASH_LOOP_VERDICT="CRASH_LOOP — the launcher's state/DAEMON_CRASH_LOOP marker is present but empty or unreadable"
+else
+  CRASH_LOOP_VERDICT=ok
+fi
+
 # ── the payload ───────────────────────────────────────────────────────────────────────────────
 # `key=value`, one per line: greppable, phone-readable, and parseable by the watcher with no jq.
 PAYLOAD="$(cat <<EOF
@@ -1341,6 +1387,14 @@ backup_ts=${BACKUP_TS}
 backup_offhost=${BACKUP_OFFHOST}
 EOF
 )"
+
+PAYLOAD="${PAYLOAD}
+escalation_spool_verdict=${SPOOL_VERDICT}
+escalation_spool_pending=${SPOOL_PENDING}
+escalation_spool_drain_ts=${SPOOL_DRAIN_TS:-none}${SPOOL_LINES}"
+
+PAYLOAD="${PAYLOAD}
+crash_loop_verdict=${CRASH_LOOP_VERDICT}"
 
 # Same absent-never-zero shape as RESTART_COUNT/IMAGE_BUILD_SHA below: `supervisor_source` (in the
 # heredoc above) is always present as the diagnosis, and `supervisor_last_age_s` is appended ONLY

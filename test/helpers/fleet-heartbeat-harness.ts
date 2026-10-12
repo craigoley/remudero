@@ -75,6 +75,10 @@ export interface BeatOpts {
   tsx?: boolean;
   /** Seed a previous-beat state file so `since_prev_beat_s` is computable. Default true. */
   prevBeat?: boolean;
+  /** The previous beat's timestamp, when `prevBeat` is seeded. Default 2020-01-01T00:00:00Z. */
+  prevBeatTs?: string;
+  /** Files written under `<root>/state/`, keyed by their path relative to it. */
+  stateFiles?: Record<string, string>;
   env?: Record<string, string>;
   /** A `date` to put on PATH ahead of the real one, for the BSD-branch tests. */
   dateStub?: string;
@@ -146,7 +150,11 @@ export function runBeat(opts: BeatOpts = {}): Beat {
     );
   }
   if (opts.prevBeat !== false) {
-    writeFileSync(join(root, "state", "heartbeat-last.txt"), "2020-01-01T00:00:00Z\n");
+    writeFileSync(join(root, "state", "heartbeat-last.txt"), `${opts.prevBeatTs ?? "2020-01-01T00:00:00Z"}\n`);
+  }
+  for (const [rel, body] of Object.entries(opts.stateFiles ?? {})) {
+    mkdirSync(dirname(join(root, "state", rel)), { recursive: true });
+    writeFileSync(join(root, "state", rel), body);
   }
 
   writeFileSync(join(binDir, "git"), gitStub(), { mode: 0o755 });

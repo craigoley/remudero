@@ -20,7 +20,7 @@ import { setLedgerMemoRetentionContext } from "./ledger-union.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { AGENT_VIEW_NAME, createAgentView } from "./agent-view.js";
-import { ANALYTICS_VIEW_NAME, createAnalyticsView } from "./analytics-view.js";
+import { ANALYTICS_VIEW_NAME, createAnalyticsView, type HostModelApprovalConfig } from "./analytics-view.js";
 import { createGithubKeepWarm, type GithubKeepWarm } from "./github-refresh-pacer.js";
 import { ghIssueGateway, tryEscalate, type EscalateDeps, type Escalation, type IssueGateway } from "./escalate.js";
 import { createHostView, HOST_VIEW_NAME, hostViewConfig, type HostViewConfig } from "./host-view.js";
@@ -252,6 +252,7 @@ export interface ReadModelLaneMove {
   heavy: boolean;
   dueAt: number;
   costMs?: number;
+  coldCostMs?: number;
 }
 
 export interface ReadModelViewContext {
@@ -692,6 +693,8 @@ export interface ReadModelTicker {
 interface ViewUnit {
   view: ReadModelView | ReadModelViewFactory;
   made?: ReadModelView;
+  cold?: boolean;
+  coldCostMs?: number;
   slot?: Slot;
   /** What its last build call took (absent until one ran); `startedAt` is the first call of a bounded build in flight. */
   costMs?: number;
@@ -1187,6 +1190,24 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   const unswitched = new Map<string, { builds: number; ms: number }>();
+  const viewBuilds = new Map<ViewUnit, { calls: number; builds: number; ms: number; maxMs: number }>();
+  let viewBuildsFrom = clock.now();
+  function reportViewBuilds(): void {
+    const now = clock.now();
+    if (now - viewBuildsFrom < 10 * 60_000) return;
+    for (const [unit, tally] of viewBuilds) {
+      if (tally.calls === 0 && tally.ms === 0) continue;
+      log("read_model.view_builds", {
+        view: unit.view.name,
+        ...(unit.slot ? { instance: unit.slot.instance.name } : {}),
+        thread: viewsOnly ? "views" : "projector",
+        ...(opts.lane ? { lane: opts.lane } : {}),
+        ...tally, window: [viewBuildsFrom, now],
+      });
+    }
+    viewBuilds.clear();
+    viewBuildsFrom = now;
+  }
   /** When serve last answered a read of each view; a view never read counts from this ticker's start. */
   const readAt = new Map<string, number>();
   const pacedFrom = clock.now();
@@ -1214,15 +1235,19 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     let ready = true;
     let succeeded = false;
     let yielded = 0;
+    let calls = 0;
     const scoped = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
     const buildStartedMs = (unit.startedAt ??= started);
     let live: ReadModelView | undefined;
     try {
       live = viewOf(unit);
       ready = live.prepare?.(scoped, stepsUntil(started + allowanceMs)) ?? true;
-      for (const { key, data, sources } of ready ? live.materialize(scoped) : []) {
-        yielded++;
-        publish(view.name, live.version, key, data, sources, generation, buildStartedMs);
+      if (ready) {
+        calls++;
+        for (const { key, data, sources } of live.materialize(scoped)) {
+          yielded++;
+          publish(view.name, live.version, key, data, sources, generation, buildStartedMs);
+        }
       }
       succeeded = ready && yielded > 0;
     } catch (error) {
@@ -1231,15 +1256,27 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const finished = clock.now();
     if (succeeded) unit.lastBuiltAt = finished;
     unit.costMs = finished - started;
+    const counts = viewBuilds.get(unit) ?? { calls: 0, builds: 0, ms: 0, maxMs: 0 };
+    counts.calls += calls;
+    counts.builds += yielded > 0 ? 1 : 0;
+    counts.ms += unit.costMs;
+    counts.maxMs = Math.max(counts.maxMs, unit.costMs);
+    viewBuilds.set(unit, counts);
     const peakMs = (unit.peakMs = Math.max(unit.peakMs ?? 0, unit.costMs));
+    if (unit.cold && succeeded) {
+      unit.coldCostMs = Math.max(unit.coldCostMs ?? 0, peakMs);
+      unit.cold = undefined;
+    }
+    const laneCostMs = Math.max(peakMs, unit.coldCostMs ?? 0);
     unit.dueAt = ready ? paced(unit, finished) : finished;
     if (ready) {
       unit.startedAt = undefined;
       unit.peakMs = undefined;
     }
-    if (opts.lane && ready && yielded > 0 && peakMs > soloMs !== (opts.lane === "heavy")) {
+    if (opts.lane && ready && yielded > 0 && laneCostMs > soloMs !== (opts.lane === "heavy")) {
       unit.heavy = opts.lane === "fast";
-      opts.post({ type: "view_lane", ...named, heavy: unit.heavy, dueAt: unit.dueAt, costMs: peakMs });
+      opts.post({ type: "view_lane", ...named, heavy: unit.heavy, dueAt: unit.dueAt, costMs: peakMs,
+        ...(unit.coldCostMs === undefined ? {} : { coldCostMs: unit.coldCostMs }) });
       letGo(unit);
       reportHeld(true);
     }
@@ -1269,11 +1306,13 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     if (made.name !== spec.name || !!made.perInstance !== !!spec.perInstance || !!made.demand !== !!spec.demand || !!made.snapshotSourced !== !!spec.snapshotSourced) {
       throw new ReadModelViewFactoryMismatch(spec.name);
     }
+    unit.cold = true;
     return (unit.made = made);
   }
   function letGo(unit: ViewUnit): void {
     if (!unit.made || owns(unit)) return;
     unit.made = undefined;
+    unit.cold = undefined;
     unit.startedAt = undefined;
     unit.peakMs = undefined;
   }
@@ -1353,6 +1392,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   const postState = (now: number): void => {
+    reportViewBuilds();
     if (clocksMoved || movedReadings.size > 0) {
       clocksMoved = false;
       const bodies = [...movedReadings].map((id) => readings.get(id)!.body);
@@ -1473,7 +1513,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     lane(move: ReadModelLaneMove): void {
       for (const unit of units) {
         if (move.view !== undefined && (unit.view.name !== move.view || unit.slot?.instance.name !== move.instance)) continue;
-        Object.assign(unit, { heavy: move.heavy, dueAt: move.dueAt }, move.costMs === undefined ? {} : { costMs: move.costMs });
+        Object.assign(unit, { heavy: move.heavy, dueAt: move.dueAt, coldCostMs: move.coldCostMs }, move.costMs === undefined ? {} : { costMs: move.costMs });
         letGo(unit);
       }
       reportHeld(true);
@@ -1528,6 +1568,7 @@ export interface ReadModelViewsData {
   inboxRoot?: string;
   lane?: "fast" | "heavy";
   host?: HostViewConfig;
+  modelApprovalConfig?: HostModelApprovalConfig;
 }
 
 /** What the projector thread tells its view thread. */
@@ -1609,7 +1650,7 @@ export function runReadModelViewWorker(
 }
 
 export function readModelLaneViews(
-  data: Pick<ReadModelViewsData, "instances" | "registry" | "inboxRoot" | "host">,
+  data: Pick<ReadModelViewsData, "instances" | "registry" | "inboxRoot" | "host" | "modelApprovalConfig">,
   clock: Clock,
   log: (step: string, extra: Record<string, unknown>) => void,
   demand: DemandBook,
@@ -1618,7 +1659,7 @@ export function readModelLaneViews(
   return [
     { name: NAV_BADGE_VIEW_NAME, create: () => createNavBadgeReadModelView(ledgerSource) },
     { name: "repositories", create: () => createRepositoriesReadModelView(ledgerSource) },
-    { name: ANALYTICS_VIEW_NAME, snapshotSourced: true, create: () => createAnalyticsView() },
+    { name: ANALYTICS_VIEW_NAME, snapshotSourced: true, create: () => createAnalyticsView({ modelApprovalConfig: data.modelApprovalConfig }) },
     readModelStatusView,
     { name: NOW_VIEW_NAME, perInstance: true, readPaced: true, create: () => createNowView({ instances, ledgerSource, clock, log }) },
     { name: INSTANCES_VIEW_NAME, create: () => createInstancesView({ instances, ...data.registry, ledgerSource }) },
@@ -1771,6 +1812,7 @@ export interface ReadModelWorkerData {
   /** The slow lane's units (read-model-slow-lane.ts); absent, no slow lane runs. */
   slowLane?: SlowLaneConfig;
   viewsModule?: string;
+  modelApprovalConfig?: HostModelApprovalConfig;
 }
 
 function hostOf(slowLane: SlowLaneConfig | undefined): { host?: HostViewConfig } {
@@ -1795,7 +1837,7 @@ export function runReadModelWorker(
   setLedgerMemoRetentionContext({ thread: "projector", log, instances: data.instances });
   const holder = randomUUID();
   const views = threadViews({
-    data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}), ...hostOf(data.slowLane) },
+    data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}), ...hostOf(data.slowLane), ...(data.modelApprovalConfig ? { modelApprovalConfig: data.modelApprovalConfig } : {}) },
     relay: (m) => port.postMessage(m), log, clock,
   });
   const post = (m: ReadModelWorkerMessage): void => {
@@ -1806,7 +1848,7 @@ export function runReadModelWorker(
     }
     port.postMessage(m);
   };
-  const slowLaneConfig = data.slowLane && { ...data.slowLane, analytics: data.slowLane.analytics ?? { instances: data.instances.map((i) => ({ name: i.name, stateDir: i.ledgerDir })) } };
+  const slowLaneConfig = data.slowLane && { ...data.slowLane, analytics: data.slowLane.analytics ?? { instances: data.instances.map((i) => ({ name: i.name, stateDir: i.ledgerDir, repository: i.repo })) } };
   if (slowLaneConfig) slowLane = threadSlowLane({ config: slowLaneConfig, log, onBodies: (built) => views.accept(built), onSnapshot: (write) => views.snapshot(write) });
   const oracleRunner = threadOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), log });
   const ticker = createReadModelTicker({
@@ -1953,6 +1995,7 @@ export interface ReadModelWorkerOptions {
   /** What the silent-worker watchdog measures against. */
   clock?: Clock;
   slowLane?: SlowLaneConfig;
+  modelApprovalConfig?: HostModelApprovalConfig;
   /** A module URL whose default export lists views the view thread builds beside the built-in ones. */
   viewsModule?: string;
   /** Sees each worker message after the handle has applied it. */
@@ -2172,6 +2215,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}),
       ...(opts.slowLane ? { slowLane: opts.slowLane } : {}),
       ...(opts.viewsModule ? { viewsModule: opts.viewsModule } : {}),
+      ...(opts.modelApprovalConfig ? { modelApprovalConfig: opts.modelApprovalConfig } : {}),
     };
     // SHARE_ENV, as on every long-lived thread here: escalations need serve's refreshed GH_TOKEN (#9156).
     const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, env: SHARE_ENV });

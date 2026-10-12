@@ -405,9 +405,41 @@ deploy_code_clean() {
     return 1
   fi
   if [ -n "$edits" ]; then
+    # 2026-10-11 -- A TRACKED EDIT DEFERRED THIS FOR FIVE HOURS, SILENTLY. Tracked edits now climb the
+    # live-edit ladder (src/lib/live-edit-ladder.ts), asked once per tick: preserved at once, escalated
+    # by the daemon at its own restart pressure, restored to HEAD at twice it from a confirmed copy only.
+    if [ "${LIVE_EDITS_ASKED:-0}" != 1 ] && printf '%s\n' "$edits" | awk 'NF && substr($0, 1, 2) != "??" { t = 1 } END { exit !t }'; then
+      LIVE_EDITS_ASKED=1
+      if live_edits_ladder daemon-checkout "$code" &&
+         edits="$(GIT_OPTIONAL_LOCKS=0 git -C "$code" status --porcelain --untracked-files=all 2>/dev/null)" &&
+         [ -z "$(printf '%s\n' "$edits" | awk 'index($0, "?? plan/feedback/") != 1 && NF')" ]; then
+        echo "rmd-relaunch: deploy code -- live edits restored from a confirmed copy; proceeding."
+        return 0
+      fi
+    fi
     echo "rmd-relaunch: deploy code -- local edits; deferring without discarding them." >&2
     return 1
   fi
+}
+
+# One rung of the ladder for one live tree, through the same CLI the progress verdict uses. Returns 0
+# only when it restored that tree; prints its one-line verdict either way.
+live_edits_ladder() {
+  local tree="$1" dir="$2" rmd="$STATE_DIR/remudero/bin/rmd" out line tmo=()
+  if [ ! -x "$rmd" ]; then
+    echo "rmd-relaunch: live edits -- $rmd missing; the ${tree} defers unrecorded." >&2
+    return 1
+  fi
+  command -v timeout >/dev/null 2>&1 && tmo=(timeout 120)
+  if ! out="$(cd "$STATE_DIR/remudero" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" live-edits \
+      --tree "$tree" --checkout "$dir" --state-root "$STATE_DIR/state" --json 2>/dev/null)"; then
+    echo "rmd-relaunch: live edits -- the ladder for the ${tree} failed; deferring." >&2
+    return 1
+  fi
+  line="$(printf '%s\n' "$out" | grep -E '^\{' | tail -n 1 || true)"
+  echo "rmd-relaunch: live edits -- ${tree}: ${line:-no verdict}"
+  case "$line" in *'"restored":true'*) return 0 ;; esac
+  return 1
 }
 
 refresh_deploy_code() {
@@ -417,12 +449,16 @@ refresh_deploy_code() {
   deploy_code_clean || return 1
   if ! git -C "$code" fetch --quiet origin main 2>/dev/null; then
     echo "rmd-relaunch: deploy code -- fetch failed; deferring." >&2
+    host_alert_raise deploy-code-fetch-failed "daemon checkout $code: git fetch origin main failed"
     return 1
   fi
+  host_alert_clear deploy-code-fetch-failed
   if ! git -C "$code" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
     echo "rmd-relaunch: deploy code -- checkout diverged or ancestry unreadable; deferring." >&2
+    host_alert_raise deploy-code-diverged "daemon checkout $code: HEAD is not an ancestor of origin/main (diverged, or ancestry unreadable)"
     return 1
   fi
+  host_alert_clear deploy-code-diverged
   if ! install_head="$(git -C "$CHECKOUT" rev-parse HEAD 2>/dev/null)" || [ -z "$install_head" ] ||
      ! git -C "$code" merge-base --is-ancestor "$install_head" origin/main 2>/dev/null; then
     echo "rmd-relaunch: deploy code -- install checkout ancestry unreadable or ahead of origin/main; deferring." >&2
@@ -680,6 +716,7 @@ hold_revive_on_verdict() {
     printf '%s\n' "$now" > "$WATCHDOG_HOLD" 2>/dev/null || true
     printf '%s\n' "$line" >> "$REVIVAL_LOG" 2>/dev/null || true
     printf '%s\n' "$line" > "$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true
+    host_alert_raise crash-loop "$line"
     echo "rmd-relaunch: CRASH LOOP -- not reviving into the same input ($now). It revives when origin/main or the image changes; rm $WATCHDOG_HOLD to revive anyway." >&2
     return 0
   fi
@@ -812,6 +849,45 @@ trap edge_heal_on_exit EXIT
 EDGE_HEAL
 }
 
+# 2026-10-11 -- THE WATCHDOG'S OWN ALARMS REACH THE ESCALATION SPOOL. The crash-loop marker had no
+# reader, and each refusal below was one journal line per tick. Each now also asks `rmd host-alert`
+# (src/lib/launcher-host-alerts.ts): it counts a refusal per consecutive tick, spools a needs-human
+# escalation once it persists (the deployer's REFUSAL_ESCALATE_AT), and withdraws or closes it when
+# the step next succeeds. A clear spawns rmd only while that condition has an open run, so a healthy
+# tick spawns nothing. Never fatal: the journal line stays, and the heartbeat reads the marker itself.
+render_host_alerts() {
+  cat <<'HOST_ALERTS'
+host_alert() {
+  local condition="$1" rmd="$STATE_DIR/remudero/bin/rmd" out tmo=()
+  shift
+  [ -x "$rmd" ] || return 0
+  command -v timeout >/dev/null 2>&1 && tmo=(timeout 120)
+  if out="$(cd "$STATE_DIR/remudero" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" host-alert --state-root "$STATE_DIR/state" \
+      --instance "${HOST_ALERT_INSTANCE:-}" --condition "$condition" "$@" --json 2>/dev/null)"; then
+    echo "rmd-relaunch: host alert -- $(printf '%s\n' "$out" | grep -E '^\{' | tail -n 1)"
+  else
+    echo "rmd-relaunch: host alert -- rmd host-alert ${condition} failed; the journal line stands." >&2
+  fi
+  return 0
+}
+
+host_alert_raise() { host_alert "$1" --raise "$2"; }
+
+host_alert_clear() {
+  [ -e "$STATE_DIR/state/launcher-alerts/${HOST_ALERT_INSTANCE:-}.$1.json" ] || return 0
+  host_alert "$1" --clear
+}
+
+host_alert_last_line() { printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | tail -n 1 || true; }
+
+crash_loop_live() {
+  local sig
+  sig="$(crash_loop_signature "$REVIVAL_LOG")"
+  [ -n "$sig" ] && [ "${sig%% *}" -ge "$CRASH_LOOP_RUN" ] 2>/dev/null
+}
+HOST_ALERTS
+}
+
 render_launcher() {
   cat <<EOF
 #!/usr/bin/env bash
@@ -835,6 +911,7 @@ CHECKOUT=${STATE_DIR}/daemon-install
 UNITS_HEAP_MB=${MAX_OLD_SPACE_MB}
 INSTANCE_NAME=${INSTANCE_NAME:-}
 INSTANCE_REGISTRY=${REGISTRY_FILE:-}
+HOST_ALERT_INSTANCE=${CONTAINER_NAME}
 BOOT=0
 [ "\${1:-}" = "--boot" ] && BOOT=1
 
@@ -910,6 +987,8 @@ fi
 
 $(render_edge_heal)
 
+$(render_host_alerts)
+
 # W1-T3269 — CONVERGE THIS HOST'S OWN UNITS, THE THIRD QUESTION THIS TICK ALREADY ASKS.
 #
 # The installer had NO automatic caller -- referenced only by its own test, the operator guide and a
@@ -938,15 +1017,15 @@ converge_host_units() {
       date -u +%s > "\$refusal_since" 2>/dev/null || true
       rm -f "\$refusal_alerted" 2>/dev/null || true
     fi
-    refused_at=\$(cat "\$refusal_since" 2>/dev/null || echo "")
-    now=\$(date -u +%s 2>/dev/null || echo "")
-    case "\$refused_at:\$now" in *[!0-9:]*) : ;; *)
-      if [ -n "\$refused_at" ] && [ -n "\$now" ] && [ "\$((now - refused_at))" -ge 21600 ] && [ ! -e "\$refusal_alerted" ]; then
-        echo "rmd-relaunch: ALERT host unit convergence has been refused for at least 6 hours; tracked paths: \$tracked_changes" >&2
-        : > "\$refusal_alerted" 2>/dev/null || true
-      fi
-    ;; esac
-    return 0
+    # 2026-10-11 -- THE STAMP RAISED NOTHING: it fed one stderr line at a fixed six hours, into a journal
+    # nobody reads, and the five-hour incident ended before it. The install checkout now climbs the same
+    # live-edit ladder as the daemon's tree (live_edits_ladder): preserved at once, escalated by the
+    # daemon, and restored to HEAD only from a confirmed copy -- after which this converge proceeds.
+    if ! live_edits_ladder install-checkout "\$CHECKOUT" ||
+       [ -n "\$(git -C "\$CHECKOUT" status --porcelain --untracked-files=no 2>/dev/null || echo unreadable)" ]; then
+      return 0
+    fi
+    echo "rmd-relaunch: units -- the live-edit ladder restored the tracked edits from a confirmed copy; converging."
   fi
   rm -f "\$refusal_since" "\$refusal_alerted" 2>/dev/null || true
 
@@ -956,8 +1035,10 @@ converge_host_units() {
   branch=\$(git -C "\$CHECKOUT" symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
   if [ "\$branch" != "main" ]; then
     echo "rmd-relaunch: units -- checkout is unreadable or not on branch main (branch='\${branch:-none}'); not converging." >&2
+    host_alert_raise units-not-on-main "install checkout \$CHECKOUT is unreadable or not on branch main (branch='\${branch:-none}')"
     return 0
   fi
+  host_alert_clear units-not-on-main
 
   # W1-T3583 -- ADVANCE THE ALREADY-TRUSTED CHECKOUT WITHOUT A DAEMON RESTART. runDeployCycle's own
   # fast-forward (deployer.ts's pullFf) runs only behind its restart-pressure decision, so a clean,
@@ -972,8 +1053,10 @@ converge_host_units() {
   if git -C "\$CHECKOUT" fetch --quiet origin main 2>/dev/null; then
     if ! git -C "\$CHECKOUT" merge --ff-only --quiet origin/main 2>/dev/null; then
       echo "rmd-relaunch: units -- checkout DIVERGED from origin/main (fast-forward refused); not converging." >&2
+      host_alert_raise units-diverged "install checkout \$CHECKOUT DIVERGED from origin/main (fast-forward refused)"
       return 0
     fi
+    host_alert_clear units-diverged
   fi
 
   # CHECK BEFORE INSTALL, ALWAYS. The steady state is a silent no-op, which is what makes a converge
@@ -1067,8 +1150,13 @@ fi
 if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   # W1-T3268 -- THE FLAG'S ONLY PATH BACK. The arm that cleared DAEMON_CRASH_LOOP sat on the
   # revival path below, after this very return, so a host that recovered stopped reviving and never
-  # reached it. This is the one place the script observes the daemon HEALTHY.
-  rm -f "\$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true
+  # reached it. This is the one place the script observes the daemon HEALTHY. 2026-10-11: running is
+  # not recovered while the revival log still holds a live run (a slow loop is running between
+  # deaths); the flag clears once crash_loop_signature lapses, and so does its spooled escalation.
+  if [ -e "\$STATE_DIR/state/DAEMON_CRASH_LOOP" ] && ! crash_loop_live; then
+    rm -f "\$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true
+    host_alert_clear crash-loop
+  fi
   # 2026-10-09 -- A SELF-TUNING memory.high. deploy/memory-high-tuner.sh grows this container's
   # memory.high while it is throttled and refaulting its page cache with host headroom, and gives it
   # back under host pressure, never below the policy. BEFORE the unchanged-tick exit: memory pressure
@@ -1106,6 +1194,7 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
       RMD_RESOURCE_POLICY_CONTAINER='${CONTAINER_NAME}' RMD_RESOURCE_POLICY_ROLE=build \\
       "\$STATE_DIR/remudero/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR")"; then
       printf '%s\\n' "\$watchdog_deploy_out"
+      host_alert_clear deploy-run-problem
       # Exit zero also means deferred: cache only the supervisor's confirmed up-to-date result.
       case "\$watchdog_deploy_out" in *'### rmd deploy-run — no-op: up-to-date ('*)
         WATCHDOG_INSTALL="\$(git -C "\$CHECKOUT" rev-parse HEAD 2>/dev/null || true)"
@@ -1115,6 +1204,7 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
     else
       printf '%s\\n' "\$watchdog_deploy_out"
       echo "rmd-relaunch: deploy-run reported a problem; the daemon is untouched and the next tick re-asks." >&2
+      host_alert_raise deploy-run-problem "rmd deploy-run --image-drift-only exited non-zero: \$(host_alert_last_line "\$watchdog_deploy_out")"
     fi
   else
     echo "rmd-relaunch: ${CONTAINER_NAME} already running -- nothing to do."
@@ -1160,8 +1250,10 @@ if [ -n "\$CRASH_LOOP_SIG" ] && [ "\$CRASH_LOOP_N" -ge "\$CRASH_LOOP_RUN" ] 2>/d
     >> "\$REVIVAL_LOG" 2>/dev/null || true
   printf '%s %s consecutive revivals from exit %s\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$CRASH_LOOP_N" "\$CRASH_LOOP_EXIT" \\
     > "\$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true
-else
+  host_alert_raise crash-loop "\$(head -n 1 "\$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true)"
+elif [ -e "\$STATE_DIR/state/DAEMON_CRASH_LOOP" ]; then
   rm -f "\$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true
+  host_alert_clear crash-loop
 fi
 
 $(render_cash_boot_secrets)
@@ -1557,7 +1649,11 @@ if [ -n "$CLEANUP_PATH" ]; then
     TMP_SWEEP_CRON_CONTENT="$(printf 'SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n%s\n' "$TMP_SWEEP_CRON_LINE")"
   fi
   CLEANUP_LOG="${RMD_CLEANUP_LOG:-$(dirname "$CLEANUP_PATH")/host-cleanup.log}"
-  CLEANUP_CRON_LINE="${CLEANUP_CRON_SCHEDULE} ${CLEANUP_PATH} >> ${CLEANUP_LOG} 2>&1"
+  # Include the service user's disposable worktree root in the same guarded six-hour janitor.
+  # It is separate from /mnt/scratch/worktrees, and omitting it left stale linked trees in rmd-work
+  # accumulating indefinitely. Keep the roots overrideable for hosts with a different layout.
+  CLEANUP_WORKTREE_ROOTS="${RMD_CLEANUP_WORKTREE_ROOTS-/mnt/scratch/worktrees:/home/${SERVICE_USER}/rmd-work}"
+  CLEANUP_CRON_LINE="${CLEANUP_CRON_SCHEDULE} RMD_CLEANUP_WORKTREE_ROOTS=${CLEANUP_WORKTREE_ROOTS} ${CLEANUP_PATH} >> ${CLEANUP_LOG} 2>&1"
   CRONTAB_CMD="${RMD_CRONTAB_CMD-crontab}"
 
   crontab_read() {

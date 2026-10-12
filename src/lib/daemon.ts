@@ -45,7 +45,7 @@ import type { BenchmarkCohortPassResult } from "./benchmark-cohort.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
-import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, INSTALL_INPUTS_RELEASE, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
+import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DEPLOY_RESTART_SCORE_THRESHOLD, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, INSTALL_INPUTS_RELEASE, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import {
   nextRunnable,
@@ -106,7 +106,7 @@ import {
 } from "./sweep.js";
 // VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
-import { checkDispatchGovernors, type DispatchGovernorVerdict, type QuietHoursHoldResult } from "./dispatch-governor.js";
+import { checkDispatchGovernors, governorDeferPayload, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
 import { assertRunnable, releasedTaskIds, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { resolveReleasedIds } from "./drain.js";
 import type { StatusProjection } from "./status.js";
@@ -238,21 +238,42 @@ export function dispatchRunHistory(rawLines: readonly string[]): { totalMs: numb
   return { totalMs, samples };
 }
 
-/** A pre-PR handoff's exact pushed head is resumable; any later verdict replaces that receipt. */
+/** The step a pre-PR handoff writes beside its verdict, and the daemon re-writes for a receipt the live ledger
+ *  holds only as a verdict row: verdicts keep the newest 200, so a parked checkpoint aged out of resumption. */
+export const HANDOFF_RECEIPT_STEP = "run.freshness_handoff";
+
+/** A pre-PR handoff's exact pushed head is resumable; any later verdict replaces that receipt, except a failed
+ *  restore, which consumed nothing (W1-T7806). A `run.freshness_handoff` row is a receipt too (W1-T7747). */
 export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<string, { branch: string; headSha: string }> {
   const pending = new Map<string, { branch: string; headSha: string }>();
   for (const raw of rawLines) {
     let row: Record<string, unknown>;
     try { row = JSON.parse(raw); } catch (error) { /* malformed rows establish no ownership */ continue; }
-    if (!row || row.step !== "verdict" || typeof row.task_id !== "string") continue;
+    if (!row || typeof row.task_id !== "string") continue;
+    const receipt = row.step === HANDOFF_RECEIPT_STEP ? row.waiting_on !== "pr" && row.waiting_on !== "ci"
+      : row.step === "verdict" && row.verdict === "handed_off" && row.reason === "freshness_yield" && !row.pr_url;
+    if (row.step !== "verdict" && !receipt) continue;
+    if (row.verdict === "no_pr" && row.reason === "restart_checkpoint_restore_failed") continue;
     pending.delete(row.task_id);
-    if (row.verdict === "handed_off" && row.reason === "freshness_yield" && !row.pr_url &&
-        typeof row.branch === "string" && row.branch.startsWith(`run-${row.task_id}-`) &&
+    if (receipt && typeof row.branch === "string" && row.branch.startsWith(`run-${row.task_id}-`) &&
         /^run-.+-[0-9]+$/.test(row.branch) && typeof row.head_sha === "string" && /^[a-f0-9]{40}$/.test(row.head_sha)) {
       pending.set(row.task_id, { branch: row.branch, headSha: row.head_sha });
     }
   }
   return pending;
+}
+
+/** The pending receipts whose only live record is a verdict row — what the daemon re-writes at boot. */
+export function handoffReceiptsToCarry(rawLines: readonly string[]): Array<[string, { branch: string; headSha: string }]> {
+  const recorded = new Set<string>();
+  for (const raw of rawLines) {
+    if (!raw.includes(HANDOFF_RECEIPT_STEP)) continue;
+    try {
+      const row = JSON.parse(raw) as Record<string, unknown>;
+      if (row?.step === HANDOFF_RECEIPT_STEP) recorded.add(`${String(row.task_id)}|${String(row.branch)}|${String(row.head_sha)}`);
+    } catch (error) { /* a torn row records nothing */ continue; }
+  }
+  return [...pendingWorkerBoundaryHandoffs(rawLines)].filter(([taskId, r]) => !recorded.has(`${taskId}|${r.branch}|${r.headSha}`));
 }
 
 /** A decided restart waits for every in-flight lane, silently: 2026-10-10 it waited 60+ min with no row. Name the
@@ -848,7 +869,8 @@ export interface DaemonOpts {
  * supplies it (W1-T3756). */
 export type DaemonFreshnessNotStale =
   | { arm: "unassessed"; serviceStatus: "guarded" | "degraded"; detail?: string }
-  | { arm: "dirty"; oldSha?: string; newSha?: string }
+  | { arm: "dirty"; oldSha?: string; newSha?: string; behind?: boolean; dirty_paths?: readonly string[];
+      changes?: readonly DeployWorthChange[] }
   | { arm: "up_to_date" }
   | { arm: "immaterial"; oldSha: string; newSha: string };
 
@@ -858,7 +880,9 @@ export type DaemonFreshnessNotStale =
  * dependency tree never survives into the relaunched process (W1-T151). */
 export type DaemonFreshness =
   | { stale: false; notStale?: DaemonFreshnessNotStale }
-  | { stale: true; oldSha: string; newSha: string; installNeeded?: boolean; changes?: readonly DeployWorthChange[] };
+  | { stale: true; oldSha: string; newSha: string; installNeeded?: boolean; changes?: readonly DeployWorthChange[];
+      /** The tree was behind before this reading could say so (a live edit held it, live-edit-ladder.ts). */
+      staleSinceMs?: number };
 
 /** W1-T5282 — the real wiring's reading is awaited, its `git fetch` off the loop; a sync reading stays sync. */
 /** W1-T5723: start, adopt, restart or discard the cadence child; only its settle is detached. */
@@ -1004,7 +1028,7 @@ export interface DaemonDeps {
   /** Re-read the plan from the same source the boot used, returning the fresh plan or `null` when
    *  nothing changed; omitted means the plan stays frozen at boot. The dep owns change detection
    *  because the cheap signal is caller-specific: a plan tree sha costs ~8ms, the parse ~60ms (impl-FZ). */
-  reloadPlan?: () => Plan | null;
+  reloadPlan?: () => Plan | null | Promise<Plan | null>;
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
   refreshMerged: (plan?: Plan) => MergedSet;
   refreshMergedAsync?: (plan?: Plan) => Promise<MergedSet>;
@@ -1088,6 +1112,10 @@ export interface DaemonDeps {
    *  `/proc/meminfo` reading per call. Consulted only through `checkDispatchGovernors`, so it holds
    *  NEW dispatch per lane and a throw fails OPEN there. Never consulted from the sweep. Optional. */
   checkMemoryGovernor?: () => MemoryGovernorResult | undefined;
+  /** W1-T7720: the streak tracker the unreadable memory probe / reservation store report to, and the
+   *  store read itself. Both are consulted only through `checkDispatchGovernors`. Optional. */
+  memoryReadTracker?: MemoryReadTracker;
+  readMemoryStoreFailure?: () => string | undefined;
   /** Quiet-hours preference: a defined return defers NEW dispatch only. Routed through the dispatch
    *  governor, never through `checkPause`, so sweep/drainage paths keep running and an unreadable
    *  read fails open in `checkDispatchGovernors` (W1-T2655). */
@@ -1107,8 +1135,11 @@ export interface DaemonDeps {
   readTerminalPreDispatchRefusalRevisions?: () => ReadonlyMap<string, string>;
   /** Called once per task excluded because its own read is indeterminate. */
   onIndeterminate?: (task: Task) => void;
-  /** Run ONE task through the existing run-task path (default = runTask). */
-  runOne: (taskId: string) => Promise<RunResult>;
+  /** Run ONE task through the existing run-task path (default = runTask). W1-T7806: `restartAtWorkerBoundary` is
+   *  the dispatch phase's restart latch, read by the run at each worker boundary. */
+  runOne: (taskId: string, options?: {
+    restartAtWorkerBoundary: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+  }) => Promise<RunResult>;
   /** `laneDispatchBudget`'s other input: the same open-PR-count closure the real wiring already
    *  builds for `checkQueueGovernor`, never a second read path. Consulted only at two or more lanes.
    *  Optional — omitted, a wide batch is bounded by `laneCount` alone (W1-T343). */
@@ -1397,6 +1428,11 @@ export interface DaemonDeps {
    *  lane must stay single-threaded and never runs from here. Forensics: docs/forensics/daemon.md.
    *  W1-T4053: only a freshness drain passes a {@link LightPassScope}; every other caller passes nothing. */
   sweepLight?: (scope?: LightPassScope) => Promise<void> | void;
+  /** W1-T7734 — eligible review demand the last passes left waiting, and the light-pass interval derived
+   *  from observed review duration and head churn. Memory only, never a ledger read. `undefined` or
+   *  `eligible <= 0` is no demand: the idle branch sleeps as it always has. A `cadenceMs` that is
+   *  `undefined` (nothing observed yet) leaves the idle sleep a single poll interval. */
+  readIdleReviewDemand?: () => { eligible: number; cadenceMs?: number; medianReviewMs?: number; pushesPerPrHour?: number } | undefined;
   /** Called exactly once, when a block classifies as a genuine blocker — one or more tasks
    *  transitively depend on the blocked task. The real command escalates naming the dependents.
    *  Optional: omitted, a genuine blocker still halts the loop, it just opens no issue (W1-T46). */
@@ -1478,12 +1514,22 @@ interface RunBranchState {
   orphanEvidence: OrphanRunBranchEvidence | undefined;
 }
 
+/** The epoch-ms suffix of a `run-<id>-<epochMs>` branch; NaN (never older) when it has none. */
+function runBranchEpoch(branch: string): number {
+  const match = /-([0-9]+)$/.exec(branch);
+  return match ? Number(match[1]) : Number.NaN;
+}
+
 function runBranchStateFrom(raw: string | undefined, orphanEvidence: OrphanRunBranchEvidence | undefined,
   resumable: ReadonlyMap<string, { branch: string; headSha: string }> = new Map()): RunBranchState {
   if (raw === undefined) return { ids: undefined, refs: [], orphanEvidence };
   const refs = parsePushedRunRefs(raw).filter((ref) => {
     const checkpoint = resumable.get(ref.taskId);
-    return checkpoint?.branch !== ref.ref || checkpoint.headSha !== ref.sha;
+    if (checkpoint === undefined) return true;
+    if (checkpoint.branch === ref.ref) return checkpoint.headSha !== ref.sha;
+    // W1-T7837: a run started after this branch was pushed, so the branch was restored or released then; the
+    // newer checkpoint carries the work. Left blocking, it held a resumable task as run-branch-already-pushed.
+    return !(runBranchEpoch(ref.ref) < runBranchEpoch(checkpoint.branch));
   });
   return { ids: new Set(refs.map((ref) => ref.taskId)), refs, orphanEvidence };
 }
@@ -2314,6 +2360,8 @@ export interface SweepLiveness {
   /** True while a `deps.sweep()` promise is still executing, INCLUDING after its await was
    *  abandoned by the wall-clock bound. */
   inFlight: boolean;
+  /** W1-T8170: successful completion, including a pass that settled after its wait bound. */
+  lastCompletedAtMs?: number;
 }
 
 async function runGatedSweep(
@@ -2366,7 +2414,10 @@ async function runGatedSweep(
     // `finally` below, which runs when the await ends, is what keeps the flag true through the
     // abandon-to-settle window every observed re-entry landed in. `then(onOk, onErr)` rather than
     // `finally`, so this derived promise can never become an unhandled rejection of its own.
-    if (liveness) void sweepPromise.then(() => { liveness.inFlight = false; }, () => { liveness.inFlight = false; });
+    if (liveness) void sweepPromise.then(() => {
+      liveness.inFlight = false;
+      liveness.lastCompletedAtMs = clockFromDateFn(deps.now).now();
+    }, () => { liveness.inFlight = false; });
     const startedAtMs = Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const bound = new Promise<"abandoned">((resolve) => {
@@ -2849,6 +2900,7 @@ export async function runDaemon(
   let lastAdvanceAtMs: number | undefined;
   let advancesCoalesced = 0;
   let freshnessHeld = false;
+  const dirtyBlockedShas = new Set<string>();
   const completedSweeps: Array<{ outcome: SweepCycleOutcome | undefined; durationMs: number }> = [];
   let latestSweepOutcome: SweepCycleOutcome | undefined;
   let staleReviewerAction: StaleReviewerRecurrenceAction = { kind: "silent" };
@@ -2949,6 +3001,8 @@ export async function runDaemon(
         memory_floor_mib: verdict.result.floorMib,
         poll_interval_ms: pollIntervalMs,
       });
+    } else if (verdict.kind === "memory_unreadable") {
+      log("daemon.memory_unreadable", { tick, ...governorDeferPayload(verdict), poll_interval_ms: pollIntervalMs });
     } else if (verdict.kind === "quiet_hours") {
       log("daemon.quiet_hours", {
         tick,
@@ -3081,6 +3135,9 @@ export async function runDaemon(
   const bootLedgerLines = deps.readLedgerLines?.() ?? [];
   const runLengths = dispatchRunHistory(bootLedgerLines);
   const resumableHandoffs = pendingWorkerBoundaryHandoffs(bootLedgerLines);
+  for (const [taskId, receipt] of handoffReceiptsToCarry(bootLedgerLines)) {
+    log(HANDOFF_RECEIPT_STEP, { task_id: taskId, branch: receipt.branch, head_sha: receipt.headSha, carried: true });
+  }
   let staleReviewerRecurrence: StaleReviewerRecurrenceState | undefined = priorStaleReviewerRecurrenceState(bootLedgerLines);
   // W1-T5344: per-task delivery-failure parks, rebuilt from the ledger so a restart does not reset
   // them; consulted by the dispatch filter's independent-failure hold below.
@@ -3224,19 +3281,34 @@ export async function runDaemon(
   const logNotStaleFreshness = (freshness: DaemonFreshness | undefined): void => {
     if (!freshness || freshness.stale || !freshness.notStale) return;
     const outcome = freshness.notStale;
+    let pressureEvidence: Record<string, unknown> = {};
+    if (outcome.arm === "dirty" && outcome.behind && outcome.newSha) {
+      const nowMs = daemonClock.now();
+      observeFreshnessAdvance(outcome.newSha, nowMs);
+      const { decision, withheldEvidence } = scoreFreshness(outcome.changes, nowMs);
+      pressureEvidence = { behind: true, stale_since_ms: staleSinceMs, weight: decision.weight,
+        age_pressure: decision.agePressure, pressure: decision.pressure, ...withheldEvidence };
+      if (decision.pressure >= DEPLOY_RESTART_SCORE_THRESHOLD.value && !dirtyBlockedShas.has(outcome.newSha)) {
+        dirtyBlockedShas.add(outcome.newSha);
+        log("daemon.freshness_blocked_dirty", { old_sha: outcome.oldSha, new_sha: outcome.newSha,
+          dirty_paths: outcome.dirty_paths, ...pressureEvidence });
+      }
+    }
     log("daemon.freshness_not_stale", {
       arm: outcome.arm,
       ...(outcome.arm === "unassessed" ? { service_status: outcome.serviceStatus } : {}),
       ...(outcome.arm === "unassessed" && outcome.detail ? { detail: outcome.detail } : {}),
       ...(outcome.arm === "dirty" && outcome.oldSha ? { old_sha: outcome.oldSha } : {}),
       ...(outcome.arm === "dirty" && outcome.newSha ? { new_sha: outcome.newSha } : {}),
+      ...(outcome.arm === "dirty" && outcome.dirty_paths ? { dirty_paths: outcome.dirty_paths } : {}),
+      ...pressureEvidence,
       ...(outcome.arm === "immaterial" ? { old_sha: outcome.oldSha, new_sha: outcome.newSha } : {}),
     });
   };
 
   // W1-T6093: remember observations at both the first-cycle guard and the shared decision boundary.
-  const observeFreshnessAdvance = (newSha: string, nowMs: number): void => {
-    staleSinceMs ??= nowMs;
+  const observeFreshnessAdvance = (newSha: string, nowMs: number, heldSinceMs?: number): void => {
+    staleSinceMs = Math.min(staleSinceMs ?? nowMs, heldSinceMs ?? nowMs);
     if (newSha !== lastAdvanceSha) {
       lastAdvanceSha = newSha;
       lastAdvanceAtMs = nowMs;
@@ -3244,10 +3316,7 @@ export async function runDaemon(
     }
   };
 
-  // W1-T4945/W1-T6093: score the advance, then coalesce change-driven restarts within bounded staleness.
-  const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, siblingInFlight = false): "restart" | "defer" => {
-    const nowMs = daemonClock.now();
-    observeFreshnessAdvance(freshness.newSha, nowMs);
+  const scoreFreshness = (changes: readonly DeployWorthChange[] | undefined, nowMs: number, siblingInFlight = false) => {
     const staleAtMs = staleSinceMs!;
     const busy =
       siblingInFlight ||
@@ -3267,8 +3336,17 @@ export async function runDaemon(
               withheld_unreadable: withheld.unreadable,
               ...(withheld.unparseable > 0 ? { withheld_reviews_unparseable: withheld.unparseable } : {}),
             };
-    const decision = decideFreshnessRestart({ changes: freshness.changes, busy, staleSinceMs: staleAtMs, nowMs, state: freshnessPressure, withheldReviews });
+    const decision = decideFreshnessRestart({ changes, busy, staleSinceMs: staleAtMs, nowMs, state: freshnessPressure, withheldReviews });
     freshnessPressure = decision.state;
+    return { decision, busy, withheldEvidence };
+  };
+
+  // W1-T4945/W1-T6093: score the advance, then coalesce change-driven restarts within bounded staleness.
+  const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, siblingInFlight = false): "restart" | "defer" => {
+    const nowMs = daemonClock.now();
+    observeFreshnessAdvance(freshness.newSha, nowMs, freshness.staleSinceMs);
+    const staleAtMs = staleSinceMs!;
+    const { decision, busy, withheldEvidence } = scoreFreshness(freshness.changes, nowMs, siblingInFlight);
     const coalesced = coalesceFreshnessRestart({
       decision, newSha: freshness.newSha, lastAdvanceAtMs: lastAdvanceAtMs!,
       staleSinceMs: staleAtMs, nowMs, window: FRESHNESS_COALESCE_WINDOW_MS, installInputsChanged: changesInstallInputs(freshness.changes),
@@ -3366,17 +3444,22 @@ export async function runDaemon(
   // ledger and stale summary contract; duplicating that sequence would let them drift (W1-T2845).
   const stopForFreshness = async (
     freshness: Extract<DaemonFreshness, { stale: true }>,
+    dispatchLatchAtMs?: number,
   ): Promise<DaemonSummary> => {
     // Install BEFORE the loop stops for restart, never after, so the relaunched process inherits deps
     // matching the new sha rather than the stale tree this process is still running (W1-T151).
     if (freshness.installNeeded) {
       deps.runInstall?.();
     }
-    // Every stale exit reaches the same bounded full-pass gate before returning. The restart is never
-    // suppressed by the pass, and no second implementation is introduced (W1-T1272).
-    // W1-T4998: a background pass still running IS that pass; its call returns within the same bound.
+    // A pass completed during the dispatch latch already reached the full sweep (W1-T8170/W1-T1272).
+    // A running pass is still awaited within its bound; other freshness exits keep their pass.
+    let preExitPass: "skipped_ran_since_latch" | "awaited_in_flight" | "ran" = "ran";
     if (backgroundSweep) {
+      preExitPass = "awaited_in_flight";
       await backgroundSweep;
+    } else if (dispatchLatchAtMs !== undefined && sweepLiveness.lastCompletedAtMs !== undefined &&
+      sweepLiveness.lastCompletedAtMs > dispatchLatchAtMs) {
+      preExitPass = "skipped_ran_since_latch";
     } else if (deps.sweep) {
       sweepRetriggerState.lastRunAtMs = daemonClock.now();
       await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
@@ -3387,7 +3470,7 @@ export async function runDaemon(
     const detail =
       `origin/main advanced ${freshness.oldSha.slice(0, 7)}..${freshness.newSha.slice(0, 7)} ` +
       `past this process's boot sha`;
-    log("daemon_selfrestart_for_freshness", { old_sha: freshness.oldSha, new_sha: freshness.newSha });
+    log("daemon_selfrestart_for_freshness", { old_sha: freshness.oldSha, new_sha: freshness.newSha, pre_exit_pass: preExitPass });
     return summary("stale", detail);
   };
 
@@ -3632,10 +3715,11 @@ export async function runDaemon(
   };
 
   // Shared by the top of tick and a lane refill (W1-T4416).
-  const reloadPlanBinding = (): void => {
+  const reloadPlanBinding = async (): Promise<void> => {
     if (!deps.reloadPlan) return;
     try {
-      const fresh = deps.reloadPlan();
+      // W1-T7743: awaited, so the production reloader's git runs off the loop; a sync fake resolves at once.
+      const fresh = await deps.reloadPlan();
       if (fresh) {
         plan = fresh;
         deps.onPlanReload?.(fresh);
@@ -4155,7 +4239,7 @@ export async function runDaemon(
     // landing on origin/main and the daemon next booting is 106 minutes (impl-FZ). Position is the safety argument:
     // after the stop check, so a halted fleet does no I/O, and before any dispatch decision reads the plan. A throw
     // is caught and ledgered, never fatal. Forensics: docs/forensics/daemon.md.
-    reloadPlanBinding();
+    if (deps.reloadPlan) await reloadPlanBinding();
     // One snapshot per admission (W1-T340, W1-T4416; MASTER-PLAN §4B). The plan binding is mutable and reassigned by the
     // reload above, so code closing over the NAME reads whatever the most recent reload produced. That is invisible
     // at one lane and stops being invisible the moment a batch holds more than one: a lane's later reasoning would be
@@ -4242,7 +4326,7 @@ export async function runDaemon(
       // (W1-T312, W1-T380, W1-T382). One-shot: the three-clocks guard (W1-T126) fires at the next
       // tick boundary, and the operator holds above still outrank it (W1-T936).
       if (cyclesEntered === 0) {
-        observeFreshnessAdvance(freshness.newSha, daemonClock.now());
+        observeFreshnessAdvance(freshness.newSha, daemonClock.now(), freshness.staleSinceMs);
         log("daemon.freshness_deferred", {
           old_sha: freshness.oldSha,
           new_sha: freshness.newSha,
@@ -4406,6 +4490,52 @@ export async function runDaemon(
     const restartInterphaseReviewClock = (): void => {
       if (!interphaseReviewClock && !backgroundSweepOwnsTheTicker()) {
         interphaseReviewClock = startInterphaseReviewClock(deps, pollIntervalMs, log);
+      }
+    };
+
+    // W1-T7734 — THE IDLE SLEEP IS NOT BLIND WHILE A POST-REVIEW PR WAITS. The clock above stops before this
+    // sleep (it would overlap the passes below), so the sleep itself runs the light pass, at a cadence
+    // derived from observed review duration and head churn rather than once per poll interval.
+    // The final chunk ends the sleep, because the next tick's full pass is the pass that follows it.
+    const sleepIdleWithReviewDemand = async (): Promise<void> => {
+      let demand: ReturnType<NonNullable<DaemonDeps["readIdleReviewDemand"]>>;
+      try {
+        demand = deps.sweepLight ? deps.readIdleReviewDemand?.() : undefined;
+      } catch (e) {
+        log("daemon.idle_light_pass.demand_unreadable", { error: String((e as Error)?.message ?? e) });
+        demand = undefined;
+      }
+      if (!demand || !(demand.eligible > 0) || demand.cadenceMs === undefined || !(demand.cadenceMs < pollIntervalMs)) {
+        await sleepUntilSweepWake(pollIntervalMs);
+        return;
+      }
+      let remainingMs = pollIntervalMs;
+      let passes = 0;
+      let cadenceMs: number = demand.cadenceMs;
+      while (remainingMs > 0) {
+        const chunkMs = Math.min(cadenceMs, remainingMs);
+        const slept = await sleepUntilSweepWake(chunkMs);
+        remainingMs -= chunkMs;
+        if (slept === "wake" || remainingMs <= 0) return;
+        if (deps.checkStop?.() || deps.checkPause?.()) return;
+        passes += 1;
+        log("daemon.idle_light_pass", {
+          eligible: demand.eligible, cadence_ms: cadenceMs, median_review_ms: demand.medianReviewMs,
+          pushes_per_pr_hour: demand.pushesPerPrHour, poll_interval_ms: pollIntervalMs, pass: passes,
+        });
+        try {
+          await deps.sweepLight!({ reviewOnly: true });
+        } catch (e) {
+          log("daemon.sweep_light.failed", { phase: "idle", error: String((e as Error)?.message ?? e) });
+        }
+        const next = deps.readIdleReviewDemand?.();
+        if (!next || !(next.eligible > 0)) {
+          // The demand cleared: nothing waits any more, so the rest of the sleep is the ordinary one.
+          await sleepUntilSweepWake(remainingMs);
+          return;
+        }
+        demand = next;
+        cadenceMs = next.cadenceMs ?? cadenceMs;
       }
     };
 
@@ -5247,7 +5377,7 @@ export async function runDaemon(
         }
       }
       if (await stopInterphaseReviewClock()) continue;
-      await sleepUntilSweepWake(pollIntervalMs);
+      await sleepIdleWithReviewDemand();
       continue;
     }
 
@@ -5435,23 +5565,35 @@ export async function runDaemon(
     let inFlightFreshness: Extract<DaemonFreshness, { stale: true }> | undefined;
     const restartWait = { decidedAtMs: 0, reported: 0 };
     const laneStartedAtMs = new Map(admitted.map((t) => [t.id, dispatchPhaseStartedAtMs]));
-    const restartSlowLanes = new Set<string>();
+    const restartHoldouts = new Set<string>();
+    const admittedUnderLatch = new Set<string>();
     const slowLane = (t: Task): boolean => measuredRefillBound && daemonClock.now() - laneStartedAtMs.get(t.id)! > refillBoundMs;
-    const restartStillWaitingOnSlowLane = (): boolean => [...inFlightTasks].some((t) => restartSlowLanes.has(t.id));
+    const restartStillWaitingOnHoldout = (): boolean => restartHoldouts.size > 0;
+    // Re-read at every decision, never latched: a refilled sibling can outlive the measured length AFTER a lane freed.
+    const phaseBoundHolds = (): boolean => !inFlightFreshness && daemonClock.now() - dispatchPhaseStartedAtMs > refillBoundMs &&
+      ![...inFlightTasks].some(slowLane);
     const latchRestart = (freshness: Extract<DaemonFreshness, { stale: true }>): void => {
       if (!inFlightFreshness) {
         restartWait.decidedAtMs = daemonClock.now();
-        // Only the cohort that already delayed the restart grants refill; new runs cannot renew it.
-        for (const t of inFlightTasks) if (slowLane(t)) restartSlowLanes.add(t.id);
+        // Every in-flight run holds refill until a boundary or settlement; refills cannot renew it (W1-T7806).
+        for (const t of inFlightTasks) restartHoldouts.add(t.id);
       }
       inFlightFreshness ??= freshness;
     };
     // W1-T5282: a lane's refill is synchronous and cannot await a fetch, so with an awaited reader it reads the
     // latest reading settled since this tick began: the admission read above, then each dispatch tick's.
     let settledFreshness = selfFreshness;
+    // 2026-10-10 19:38: both freed lanes were held for good while the lane that later held the phase was 5 min old.
+    // A measured bound parks such a lane instead; a dispatch tick or a sibling's finish re-decides it.
+    const parkedLanes: Array<{ lane: number; finished: Task; wake: (next: Promise<Task | undefined>) => void }> = [];
+    const wakeParkedLanes = (): void => {
+      if (inFlightTasks.size > 0 && !refillClosed && phaseBoundHolds()) return;
+      // Deferred, so a throwing decision ends only its own lane (runLanePool), never strands a later parked one.
+      for (const { lane, finished, wake } of parkedLanes.splice(0)) wake(Promise.resolve().then(() => decideRefill(lane, finished)));
+    };
     const refillLane = (lane: number, finished: Task, outcome: PromiseSettledResult<RunResult>): Task | undefined | Promise<Task | undefined> => {
       inFlightTasks.delete(finished);
-      restartSlowLanes.delete(finished.id);
+      restartHoldouts.delete(finished.id);
       if (outcome.status === "rejected") {
         // W1-T5083: a lane-local rejection (the settle loop logs it and the pass continues) never closes refill.
         if (!(outcome.reason instanceof TaskAdmissionError) && !refillLaneLocalRejection(outcome.reason)) refillClosed ??= "a lane rejected";
@@ -5459,22 +5601,35 @@ export async function runDaemon(
       // W1-T4662: `handed_off` (a healthy freshness yield) deliberately does NOT match here — only
       // a genuine, repeated `blocked_transient` API failure closes this lane's refill.
       else if (outcome.value.verdict === "blocked_transient") refillClosed ??= "blocked_transient";
+      const decision = decideRefill(lane, finished);
+      wakeParkedLanes();
+      return decision;
+    };
+    const decideRefill = (lane: number, finished: Task): Task | undefined | Promise<Task | undefined> => {
       const phaseAgeMs = daemonClock.now() - dispatchPhaseStartedAtMs;
-      if (inFlightFreshness && !restartStillWaitingOnSlowLane()) refillClosed ??= "stale code";
-      if (!inFlightFreshness && phaseAgeMs > refillBoundMs && ![...inFlightTasks].some(slowLane)) refillClosed ??= "phase bound";
-      const governed = refillClosed ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
+      if (inFlightFreshness && !restartStillWaitingOnHoldout()) refillClosed ??= "stale code";
+      const phaseBound = !refillClosed && phaseBoundHolds() ? "phase bound" : undefined;
+      // With no history no sibling can ever read slow, so parking could only end as a hold: hold now (W1-T5761).
+      if (phaseBound && measuredRefillBound && inFlightTasks.size > 0) {
+        log("dispatch.lane_parked", { lane, finished_task: finished.id, reason: phaseBound, phase_age_ms: phaseAgeMs,
+          refill_bound_ms: refillBoundMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
+        return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, wake }));
+      }
+      const governed = refillClosed || phaseBound ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
       const stopped = deps.checkStop?.();
       const paused = deps.checkPause?.();
       // W1-T5083: the same restart decision the top of tick asks; a sibling in flight makes it busy.
-      const freshness = refillClosed ? undefined : freshnessReadsAsync ? settledFreshness : (deps.checkFreshness?.() as DaemonFreshness | undefined);
+      const freshness = refillClosed || phaseBound ? undefined : freshnessReadsAsync ? settledFreshness : (deps.checkFreshness?.() as DaemonFreshness | undefined);
+      if (!freshnessReadsAsync) logNotStaleFreshness(freshness);
       const freshnessAction = freshness?.stale ? decideFreshness(freshness, true) : undefined;
-      // W1-T6274: a restart decided here holds every later refill this phase and ends it in the freshness stop.
+      // W1-T6274/W1-T7806: once the latched holdouts drain, every later refill is held for the restart.
       if (freshnessAction === "restart" && freshness?.stale) {
         latchRestart(freshness);
-        if (!restartStillWaitingOnSlowLane()) refillClosed ??= "stale code";
+        if (!restartStillWaitingOnHoldout()) refillClosed ??= "stale code";
       }
       let reason =
         refillClosed ??
+        phaseBound ??
         (opts.max !== undefined && attempted.length >= opts.max ? "max reached" : undefined) ??
         holdWorkerAdmission("lane-refill")?.reason ??
         (stopped ? `stop: ${stopped}` : undefined) ??
@@ -5506,7 +5661,7 @@ export async function runDaemon(
         const conclude = (): Task | undefined => {
           // W1-T6274: the reads above are awaited; a restart, stop or pause decided meanwhile still holds the lane.
           if (next) {
-            const latched = refillClosed ?? (inFlightFreshness && !restartStillWaitingOnSlowLane() ? "stale code" : undefined) ??
+            const latched = refillClosed ?? (inFlightFreshness && !restartStillWaitingOnHoldout() ? "stale code" : undefined) ??
               (deps.checkStop?.() ? "stop" : undefined) ?? (deps.checkPause?.() ? "pause" : undefined);
             if (latched !== undefined) {
               reason = `${latched} (decided while the refill read was in flight)`;
@@ -5526,16 +5681,16 @@ export async function runDaemon(
           snapshots.push(nextSnapshot!);
           passIds.add(next.id);
           inFlightTasks.add(next);
+          if (inFlightFreshness) admittedUnderLatch.add(next.id);
           laneStartedAtMs.set(next.id, daemonClock.now());
           log("dispatch.lane_refilled", { lane, finished_task: finished.id, next_task: next.id,
-            ...(inFlightFreshness ? { restart_pending: true, waiting_on: [...restartSlowLanes] } : {}) });
+            ...(inFlightFreshness ? { restart_pending: true, waiting_on: [...restartHoldouts] } : {}) });
           log("daemon.iteration", { task: next.id, attempted: attempted.length + 1, max: opts.max ?? null });
           attempted.push(next.id);
           return next;
         };
-        if (reason === undefined) {
+        const decideFromPlan = (): Task | undefined | Promise<Task | undefined> => {
           try {
-            reloadPlanBinding();
             const refillPlan = plan;
             // W1-T5846: with the async port wired the merged set is read through it, never `refreshMerged`, whose
             // stale-generation fallback (W1-T5762) is a synchronous live read on the event loop. Only a deps
@@ -5554,8 +5709,11 @@ export async function runDaemon(
             // the failure is carried as the held reason, logged by `dispatch.lane_refill_held`
             readFailed(e);
           }
-        }
-        return conclude();
+          return conclude();
+        };
+        if (reason !== undefined) return conclude();
+        // W1-T7743: the reload is awaited (its git runs off the loop); a deps object with no reloader stays synchronous.
+        return deps.reloadPlan ? reloadPlanBinding().then(decideFromPlan) : decideFromPlan();
       };
       const runBranchRead = reason === undefined ? readRunBranchesFor("lane-refill", tickRunBranchListing) : undefined;
       return runBranchRead instanceof Promise ? runBranchRead.then(chooseRefill) : chooseRefill(runBranchRead);
@@ -5565,8 +5723,9 @@ export async function runDaemon(
       logNotStaleFreshness(freshness);
       if (freshness.stale && decideFreshness(freshness, true) === "restart") {
         latchRestart(freshness);
-        if (!restartStillWaitingOnSlowLane()) refillClosed ??= "stale code";
+        if (!restartStillWaitingOnHoldout()) refillClosed ??= "stale code";
       }
+      wakeParkedLanes();
     };
     // The restart runs once every lane below settles; until then each due tick names the lanes it waits on.
     const reportRestartWait = (decided: Extract<DaemonFreshness, { stale: true }>): void => {
@@ -5577,7 +5736,8 @@ export async function runDaemon(
       log("daemon.freshness_restart_waiting", {
         waiting_on: "in_flight_lanes",
         waited_ms: waitedMs,
-        lanes: [...inFlightTasks].map((t) => ({ task: t.id, age_ms: Math.max(0, nowMs - (laneStartedAtMs.get(t.id) ?? nowMs)) })),
+        lanes: [...inFlightTasks].map((t) => ({ task: t.id, age_ms: Math.max(0, nowMs - (laneStartedAtMs.get(t.id) ?? nowMs)),
+          holdout: restartHoldouts.has(t.id), admitted_under_latch: admittedUnderLatch.has(t.id) })),
         refill_held: refillClosed ?? null,
         report: restartWait.reported,
         old_sha: decided.oldSha,
@@ -5585,6 +5745,7 @@ export async function runDaemon(
       });
     };
     const onDispatchTick = deps.checkFreshness ? (): void | Promise<void> => {
+      wakeParkedLanes();
       if (inFlightFreshness && inFlightTasks.size > 0) return reportRestartWait(inFlightFreshness);
       if (inFlightFreshness || inFlightTasks.size === 0 || deps.checkPause?.()) return;
       const read = deps.checkFreshness!();
@@ -5610,7 +5771,14 @@ export async function runDaemon(
         reason: "categorized refusal contract changed",
       });
       const startedAtMs = daemonClock.now();
-      return deps.runOne(id).then((outcome) => {
+      // W1-T7806: a run at a boundary reads the latch; a holdout reading it can yield, so it no longer holds refill.
+      return deps.runOne(id, { restartAtWorkerBoundary: () => {
+        if (!inFlightFreshness) return undefined;
+        restartHoldouts.delete(id);
+        if (!restartStillWaitingOnHoldout()) refillClosed ??= "stale code";
+        wakeParkedLanes();
+        return inFlightFreshness;
+      } }).then((outcome) => {
         const length = daemonClock.now() - startedAtMs;
         if (length > 0) { runLengths.totalMs += length; runLengths.samples++; }
         return outcome;
@@ -5779,7 +5947,7 @@ export async function runDaemon(
 
     if (inFlightFreshness && !deps.checkStop?.() && !deps.checkPause?.()) {
       await stopInterphaseReviewClock();
-      return stopForFreshness(inFlightFreshness);
+      return stopForFreshness(inFlightFreshness, restartWait.decidedAtMs);
     }
 
     if (apiWindowHoldMs > 0) {

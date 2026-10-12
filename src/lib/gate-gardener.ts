@@ -1,11 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { fixedClock, systemClock } from "./clock.js";
 import { checkoutHeadStamp } from "./checkout-head.js";
-import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec, Outcome } from "./gardener.js";
+import { prepareGardenTaskIds, type GardenTaskIdMinter, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec, type Outcome } from "./gardener.js";
 import { gateFireRatesPath, type GateFireRate, type GateFireRateReport } from "./gate-fire-rate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -45,7 +46,7 @@ export interface GateDefuseSources {
   thresholdDays?: number;
   leadDays?: number;
   openOrigins?: () => string[];
-  mintTaskId?: (branch: string) => string;
+  mintTaskId?: GardenTaskIdMinter;
   admissionViolations?: typeof machineFilingAdmissionViolations;
   execFile?: (command: string, args: string[], options: { cwd: string; encoding: "utf8" }) => string;
   /** Runs one test file with the clock shifted `shiftDays` ahead: true when it passes. Throws when
@@ -59,22 +60,46 @@ export const DEFUSE_VERDICTS_FILE = "gate-gardener-defuse-verdicts.json";
 const DEFUSE_RUN_TIMEOUT_MS = 15 * 60_000;
 type DefuseVerdict = "confirmed" | "shifted_passed" | "control_failed";
 
+/** The slice of scripts/pure-test-pool.mjs (the test judge) the defuse run uses. A plain .mjs, so no types. */
+interface DefuseJudge {
+  prepareJudgedRun(): { args: string[]; env: Record<string, string>; read(): { tallyText: string; markerText: string }; cleanup(): void };
+  judgedNodeTestArgs(args: readonly string[], judgedArgs: readonly string[]): string[];
+  judgeRun(files: readonly string[], opts: { status: number; pool: boolean; root: string; tallyText: string; markerText: string }): { complete: boolean };
+  describeJudgedRun(role: string, verdict: { complete: boolean }, opts: { prefix: string }): string;
+}
+// Loaded from the orchestrator's own checkout when a defuse runs, never at import (sandboxes copy only src/).
+const loadDefuseJudge = (): DefuseJudge => createRequire(import.meta.url)("../../scripts/pure-test-pool.mjs") as DefuseJudge;
+
 /** Run `file` under the repo's own test invocation plus scripts/clock-shift.mjs. A nonzero exit is
- *  a red suite; a run killed or never started has no exit status and is rethrown, never read as red. */
+ *  a red suite; a run killed or never started has no exit status and is rethrown, never read as red.
+ *  W1-T8380: an exit 0 is a pass only when the judge (scripts/pure-test-pool.mjs) heard `file` reach
+ *  its own summary. A file that exits 0 part-way — a real `process.exit(0)` — loses the very test a
+ *  shift was run to break, so that run reaches no verdict and throws with the judge's line. */
 export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number): boolean {
   const env: NodeJS.ProcessEnv = { ...process.env, FK_SHIFT_DAYS: String(shiftDays) };
   delete env.RMD_SELF_SYNC_DONE; // the test setup refuses to load under it (W1-T3069)
   delete env.NODE_TEST_CONTEXT; // inherited from a parent `node --test`, it makes this run report nothing and exit 0
-  const args = ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--import", "./scripts/clock-shift.mjs", file];
+  const judge = loadDefuseJudge();
+  const judged = judge.prepareJudgedRun();
+  const args = judge.judgedNodeTestArgs(
+    ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--import", "./scripts/clock-shift.mjs", file],
+    judged.args,
+  );
   // Niced and bounded (test-slot.ts), but no host-wide slot: one file, and a gardener pass must not queue behind coverage.
   const load = readHostLoad();
   const child = lowPriorityCommand(process.execPath, testRunArgv(args, testRunConcurrency(load, defaultTestSlots(load.cores))));
   try {
-    execFileSync(child.file, child.args, { cwd: repoRoot, env, stdio: "ignore", timeout: DEFUSE_RUN_TIMEOUT_MS });
-    return true;
-  } catch (e) {
-    if (typeof (e as { status?: unknown }).status === "number") return false;
-    throw e;
+    try {
+      execFileSync(child.file, child.args, { cwd: repoRoot, env: { ...env, ...judged.env }, stdio: "ignore", timeout: DEFUSE_RUN_TIMEOUT_MS });
+    } catch (e) {
+      if (typeof (e as { status?: unknown }).status === "number") return false;
+      throw e;
+    }
+    const verdict = judge.judgeRun([file], { status: 0, pool: false, root: repoRoot, ...judged.read() });
+    if (verdict.complete) return true;
+    throw new Error(`the run reaches no verdict: ${judge.describeJudgedRun("defuse", verdict, { prefix: "test-judge" })}`);
+  } finally {
+    judged.cleanup();
   }
 }
 
@@ -222,22 +247,35 @@ export function renderDefuseShard(action: GateGardenAction, taskId: string) {
   });
 }
 
-function applyDefuseActions(ws: GardenCheckout, actions: GateGardenAction[], deps: GardenerDeps, sources: GateDefuseSources) {
-  if (!ws.branch) throw new Error("gate gardener: filing workspace has no branch for task-id reservation");
-  const paths: string[] = [];
-  for (const action of actions) {
-    const draft = renderDefuseShard(action, "NEW-1");
-    if (draft.refused) throw new Error(`gate gardener: defuse shard refused (${draft.refused})`);
-    const plan = loadPlanFromYaml(draft.text, "defuse-admission");
-    const reasons = (sources.admissionViolations ?? machineFilingAdmissionViolations)(plan.tasks[0]!, {
-      plan, releasedIds: new Set(), pathExists: (path) => existsSync(join(deps.repoRoot, path)),
-    });
-    if (reasons.length) throw new Error(`gate gardener: defuse shard refused (machine-filing-admission: ${reasons.join("; ")})`);
-    const args = ["--import", "tsx", join(deps.repoRoot, "src/run-task.ts"), "next-task-id", "--reserve", "--branch", ws.branch];
-    const output = sources.mintTaskId ? undefined : sources.execFile
+function prepareDefuseTaskIds(ws: GardenCheckout, count: number, deps: GardenerDeps, sources: GateDefuseSources, async = false) {
+  if (async && count > 0 && !sources.mintTaskId) throw new Error("gate gardener: async task-id minter is required for defuse filing");
+  return prepareGardenTaskIds(ws, count, sources.mintTaskId ?? ((branch) => {
+    const args = ["--import", "tsx", join(deps.repoRoot, "src/run-task.ts"), "next-task-id", "--reserve", "--branch", branch];
+    const output = sources.execFile
       ? sources.execFile(process.execPath, args, { cwd: deps.repoRoot, encoding: "utf8" })
       : execFileSync(process.execPath, args, { cwd: deps.repoRoot, encoding: "utf8" });
-    const taskId = sources.mintTaskId ? sources.mintTaskId(ws.branch) : /^RESERVED (W1-T\d+) on origin/m.exec(output!)?.[1];
+    const id = /^RESERVED (W1-T\d+) on origin/m.exec(output)?.[1];
+    if (!id) throw new Error("gate gardener: task-id reservation returned no held id");
+    return id;
+  }), async);
+}
+
+function assertDefuseAdmission(action: GateGardenAction, deps: GardenerDeps, sources: GateDefuseSources): void {
+  const draft = renderDefuseShard(action, "NEW-1");
+  if (draft.refused) throw new Error(`gate gardener: defuse shard refused (${draft.refused})`);
+  const plan = loadPlanFromYaml(draft.text, "defuse-admission");
+  const reasons = (sources.admissionViolations ?? machineFilingAdmissionViolations)(plan.tasks[0]!, {
+    plan, releasedIds: new Set(), pathExists: (path) => existsSync(join(deps.repoRoot, path)),
+  });
+  if (reasons.length) throw new Error(`gate gardener: defuse shard refused (machine-filing-admission: ${reasons.join("; ")})`);
+}
+
+function applyDefuseActions(ws: GardenCheckout, actions: GateGardenAction[], deps: GardenerDeps, sources: GateDefuseSources, heldIds?: readonly string[]) {
+  if (!ws.branch) throw new Error("gate gardener: filing workspace has no branch for task-id reservation");
+  const paths: string[] = [];
+  for (const [index, action] of actions.entries()) {
+    assertDefuseAdmission(action, deps, sources);
+    const taskId = heldIds ? heldIds[index] : (prepareDefuseTaskIds(ws, 1, deps, sources) as string[])[0];
     if (!taskId) throw new Error("gate gardener: task-id reservation returned no held id");
     const rendered = renderDefuseShard(action, taskId);
     if (rendered.refused) throw new Error(`gate gardener: defuse shard refused (${rendered.refused})`);
@@ -426,8 +464,13 @@ export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes, sources: 
     metric: (inv) => inv.tally,
     candidates: (inv) => inv.candidates,
     scorecard: (inv, plan) => ({ candidates: inv.candidates.length, tally: inv.tally, proposed: plan.actions.length }),
-    apply: (ws, plan) => {
-      if (plan.acting[0] === "defuse") return applyDefuseActions(ws, plan.actions, deps, sources);
+    prepare: (ws, plan, async) => {
+      const actions = plan.acting[0] === "defuse" ? plan.actions : [];
+      for (const action of actions) assertDefuseAdmission(action, deps, sources);
+      return prepareDefuseTaskIds(ws, actions.length, deps, sources, async);
+    },
+    apply: (ws, plan, _scorecard, heldIds) => {
+      if (plan.acting[0] === "defuse") return applyDefuseActions(ws, plan.actions, deps, sources, heldIds);
       const heading = `## Pass ${clock.iso()}`;
       const paths = applyGateActions(ws.root, plan.actions, heading, probes);
       return { paths, title: `chore(gates): the gate gardener proposes to ${plan.acting[0]} ${plan.actions.length} gate row(s)`, body: prBody(plan.actions, heading) };

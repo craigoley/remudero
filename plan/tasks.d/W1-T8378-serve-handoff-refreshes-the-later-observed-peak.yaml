@@ -1,0 +1,58 @@
+- id: W1-T8378
+  title: "SERVE HANDOFF ADMISSION USES THE LATER OBSERVED PEAK — candidatePeak returns the early promoted sample before consulting the active generation's larger high-water mark"
+  repo: remudero
+  depends_on: [W1-T8311]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  risk: medium
+  band_meaning: blast-radius
+  budget_usd: 6.00
+  status: queued
+  attempts: 0
+  origin: "operator-approved memory follow-through; isolated committed-module control, 2026-10-12"
+  plan_refs: [W1-T8311, W1-T6019, W1-T8230]
+  files: [src/lib/serve-supervisor.ts, test/serve-supervisor.test.ts]
+  rationale: |
+    OBSERVED at main64a54245dc7d9e0dccf036c5b8c9b523828db200, after W8311/#10989:
+    promote samples VmHWM into largestRss once. candidatePeak returns that value whenever
+    positive, before re-reading the still-active generation's peakRss. Actual committed
+    supervisor controls on pinned Node24.21 at02:53:29Z give promotion1GiB, later active
+    VmHWM4GiB, host available5GiB and reserve2GiB. It admits a standby with need3GiB.
+    The positive control that sees4GiB at promotion keeps the old generation with a
+    host_headroom hold (need6GiB), as does the actual judge given the later4GiB peak.
+    These are synthetic process/host inputs, not a production-underestimation or causal
+    swap finding. No real generation was forked or stopped. The raw receipt and probe are
+    pressure-peak-qualification-v1.json and probe-pressure-peak-v1.mts.
+    Complete source/open-head/files/credit scope02:55:35Z finds W8311 already implemented,
+    no other task or open head owns this estimator correction. The filing is a successor,
+    not duplicate W8311 credit and not an invented restart authority.
+  design: |
+    Reuse the supervisor's own active generation identity, procRss/VmHWM ports and admission
+    judge. Before each planned handoff, refresh the observed peak evidence and never prefer
+    a lower early-promotion sample over a larger positively observed later peak. Price
+    overlap once: MemAvailable already excludes the active generation. Do not add RSS and
+    swap, count the active generation twice, or create a global/shared peak table or timer.
+    Keep the measurement generation and observation phase visible in the admission reason;
+    an early/readiness sample is not certified full warm-up or the next build's measured peak.
+    Keep a positively observed conservative high-water mark across that supervisor's later
+    handoffs; a missing or invalid reading contributes no zero and cannot shrink a known peak.
+    If no positive usable peak exists, retain the named peak_unknown hold. Keep fresh pressure,
+    swap-in/PSI/cgroup guards, bounded retry/latest-target supersession, readiness/drain,
+    explicit operator stop and genuine crash/rollback unchanged. Do not alter thresholds,
+    heap/cgroup limits, concurrency, enforcement, credentials or deployment policy. No live
+    restart or replacement is acceptance, and the first baked adoption needs a safe plan.
+  acceptance:
+    - claim: "a later active high-water mark raises the candidate estimate before any fork, refuses the early1GiB/later4GiB/available5GiB/reserve2GiB case, and a genuinely ample control still promotes normally"
+      proof: "unit test: a serve handoff refreshes its peak after promotion before forking"
+    - claim: "missing invalid or lower later readings never shrink positive generation-bound evidence or fabricate a measured peak; unknowns, retries, explicit stop and genuine recovery remain distinct"
+      proof: "unit test: serve peak evidence keeps its generation and unknown state"
+  falsifier: |
+    Restore candidatePeak's unconditional early largestRss return: the first regression
+    fails for an admitted fork, not a title/module absence. Replace a missing later peak
+    with zero or let a lower sample erase known evidence: the second regression fails.
+    Execute controls with the actual committed supervisor lifecycle and existing real
+    harmless generation fixtures, alongside injected pressure ports. Restored head must
+    pass; test titles must discriminate against current main. Local author, hosted CI,
+    image/source adoption and live memory benefit are separate claims.

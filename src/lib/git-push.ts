@@ -14,7 +14,9 @@ import {
   hostWorktreeGit,
   hostWorktreeGitAsync,
   pinnedConfigValue,
+  pinnedConfigValueAsync,
   pinWorktreeGit,
+  type PinnedWorktreeGit,
 } from "./worktree-git.js";
 
 /**
@@ -176,6 +178,7 @@ export function gitPushRunBranch(worktreePath: string, opts: PushRunBranchOpts =
 export interface PushRunBranchAsyncOpts extends Omit<PushRunBranchOpts, "capture" | "exec"> {
   exec?: PushExecAsync;
   capture?: GitCaptureAsync;
+  prGates?: boolean;
 }
 
 /**
@@ -188,7 +191,7 @@ export async function gitPushRunBranchAsync(worktreePath: string, opts: PushRunB
   await runStepsAsync(
     pushRunBranchSteps(worktreePath, opts, {
       capture: opts.capture ?? worktreeGitCaptureAsync(worktreePath),
-      exec: opts.exec ?? worktreePushExecAsync(worktreePath),
+      exec: opts.exec ?? worktreePushExecAsync(worktreePath, { prGates: opts.prGates }),
     }),
   );
 }
@@ -449,9 +452,10 @@ function* prePushGateSteps(
   worktreePath: string,
   pushArgs: string[],
   read: (args: string[]) => string | Promise<string>,
+  readConfig: (pin: PinnedWorktreeGit, key: string) => string | undefined | Promise<string | undefined>,
 ): Steps<PrePushGate | undefined> {
   const pin = pinWorktreeGit(worktreePath);
-  const configured = pinnedConfigValue(pin, "core.hooksPath");
+  const configured = yield* step(() => readConfig(pin, "core.hooksPath"));
   if (configured === undefined || configured === "" || configured === "/dev/null") return undefined;
   const hook = join(harnessHooksDir(), "pre-push");
   if (!existsSync(hook)) return undefined;
@@ -587,7 +591,7 @@ const GATE_MAX_BUFFER = 64 * 1024 * 1024;
 export function worktreePushExec(worktreePath: string): PushExec {
   return (_file, args, opts) => {
     const pushArgs = leafArgs(worktreePath, args);
-    const gate = runStepsSync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGit(worktreePath, a)));
+    const gate = runStepsSync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGit(worktreePath, a), pinnedConfigValue));
     if (gate) {
       const res = withGateHome(gate, (env) => spawnSync(gate.hook, gate.args, {
         cwd: worktreePath, input: gate.input, env, encoding: "utf8", maxBuffer: GATE_MAX_BUFFER,
@@ -604,11 +608,13 @@ export function worktreePushExec(worktreePath: string): PushExec {
   };
 }
 
-/** {@link worktreePushExec} off the event loop. */
-export function worktreePushExecAsync(worktreePath: string): PushExecAsync {
+/** {@link worktreePushExec} off the event loop; `prGates: false` (a restart checkpoint, which opens no PR) skips the PR gate. */
+export function worktreePushExecAsync(worktreePath: string, { prGates = true }: { prGates?: boolean } = {}): PushExecAsync {
   return async (_file, args, opts) => {
     const pushArgs = leafArgs(worktreePath, args);
-    const gate = await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGitAsync(worktreePath, a)));
+    const gate = prGates
+      ? await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGitAsync(worktreePath, a), pinnedConfigValueAsync))
+      : undefined;
     if (gate) {
       try {
         const out = await withGateHome(gate, (env) => new Promise<{ stdout: string; stderr: string }>((resolveGate, reject) => {

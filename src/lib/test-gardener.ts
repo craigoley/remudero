@@ -278,7 +278,8 @@ export function retierFlakerCandidates(stateDir: string, probe: TestManifestProb
 /** The CI proposals the gardener has collected, oldest first, capped at {@link DURATION_WINDOW_RUNS};
  *  `absent` names the runs known to have published none, so neither is downloaded twice. */
 export interface TestProposalHistory {
-  runs: Array<{ runId: number; files: Record<string, number> }>;
+  /** `raw` (W1-T7810) is the proposal's per-file RAW observation history, when the fold carried one. */
+  runs: Array<{ runId: number; files: Record<string, number>; raw?: Record<string, number[]> }>;
   absent: number[];
 }
 
@@ -291,6 +292,28 @@ export function readTestProposalHistory(stateDir: string, prefix = TEST_MANIFEST
   if (text === undefined) return { runs: [], absent: [] };
   const parsed = JSON.parse(text) as Partial<TestProposalHistory>;
   return { runs: parsed.runs ?? [], absent: parsed.absent ?? [] };
+}
+
+/**
+ * W1-T7810 — the observations the adopter settles on. Each CI proposal's `files` is already an EWMA
+ * fold onto the committed value, so a median of those is a median of folded values: one bad run is
+ * halved, never rejected, and a wrong committed row decays by half per adoption. The newest
+ * proposal also carries the RAW per-file observation history (refused outliers included); when that
+ * window is at least as deep as the folded one it is read instead, transposed into one record per
+ * run, so `settleDurationRows` judges the committed value against raw observations. A feed that
+ * carries no raw history (older proposals, a broken snapshot chain) keeps the folded window.
+ */
+export function rawObservationWindow(runs: TestProposalHistory["runs"]): Array<Record<string, number>> {
+  const folded = runs.map((r) => r.files);
+  const raw = [...runs].reverse().find((r) => r.raw !== undefined)?.raw;
+  if (!raw) return folded;
+  const depth = Math.max(0, ...Object.values(raw).map((values) => values.length));
+  if (depth === 0 || depth < folded.length) return folded;
+  const window: Array<Record<string, number>> = Array.from({ length: Math.min(depth, DURATION_WINDOW_RUNS) }, () => ({}));
+  for (const [file, values] of Object.entries(raw)) {
+    values.slice(-DURATION_WINDOW_RUNS).forEach((ms, i) => { window[i]![file] = ms; });
+  }
+  return window;
 }
 
 /** When the manifest last changed on the checkout's own history — an adoption, a retier or a
@@ -316,7 +339,7 @@ export function testGardenInventory(
   for (const ledger of durationLedgers(probe.DEFAULT_MANIFEST_RELATIVE_PATH)) {
     const committed = probe.loadManifest(join(repoRoot, ledger.manifestPath));
     const proposalPath = testManifestProposalPath(stateDir, ledger.statePrefix);
-    const history = readTestProposalHistory(stateDir, ledger.statePrefix).runs.map((r) => r.files);
+    const history = rawObservationWindow(readTestProposalHistory(stateDir, ledger.statePrefix).runs);
     const observations = history.length > 0 ? history : existsSync(proposalPath) ? [probe.loadManifest(proposalPath).files] : [];
     const changedAt = observations.length > 0
       ? opts.manifestChangedAtMs ? opts.manifestChangedAtMs(ledger.manifestPath) : manifestLastCommitMs(repoRoot, ledger.manifestPath)
@@ -430,9 +453,9 @@ async function refreshLedgerProposalAsync(
 ): Promise<LedgerProposalFeed> {
   if (successful.length === 0) return { status: "absent", reason: "no successful main run among the newest ten" };
   const history = readTestProposalHistory(stateDir, ledger.statePrefix);
-  const remember = (runId: number, proposal: { files: Record<string, number> } | undefined) => {
+  const remember = (runId: number, proposal: { files: Record<string, number>; history?: Record<string, number[]> } | undefined) => {
     if (!proposal) history.absent = [...history.absent.filter((id) => successful.includes(id)), runId];
-    else history.runs = [...history.runs, { runId, files: proposal.files }].sort((a, b) => a.runId - b.runId).slice(-DURATION_WINDOW_RUNS);
+    else history.runs = [...history.runs, { runId, files: proposal.files, ...(proposal.history ? { raw: proposal.history } : {}) }].sort((a, b) => a.runId - b.runId).slice(-DURATION_WINDOW_RUNS);
     writeAtomic(testManifestProposalHistoryPath(stateDir, ledger.statePrefix), JSON.stringify(history) + "\n");
   };
   const runId = successful[0]!;
@@ -471,7 +494,7 @@ async function fetchRunProposalAsync(
   runId: number,
   download: (args: string[]) => Promise<string>,
   ledger: DurationLedger,
-): Promise<{ text: string; proposal: { thresholdMs: number; files: Record<string, number> } } | undefined> {
+): Promise<{ text: string; proposal: { thresholdMs: number; files: Record<string, number>; history?: Record<string, number[]> } } | undefined> {
   const dir = join(stateDir, `${ledger.statePrefix}.download`);
   rmSync(dir, { recursive: true, force: true });
   try {
@@ -484,13 +507,17 @@ async function fetchRunProposalAsync(
     return undefined;
   }
   const text = readFileSync(join(dir, ledger.proposalFile), "utf8");
-  const proposal = JSON.parse(text) as { thresholdMs?: unknown; files?: unknown };
+  const proposal = JSON.parse(text) as { thresholdMs?: unknown; files?: unknown; history?: unknown };
   if (typeof proposal.thresholdMs !== "number" || !proposal.files || typeof proposal.files !== "object" ||
       Object.values(proposal.files).some((ms) => typeof ms !== "number")) {
     throw new Error(`test gardener: run ${runId}'s manifest proposal is not a {thresholdMs, files} manifest`);
   }
   rmSync(dir, { recursive: true, force: true });
-  return { text, proposal: proposal as { thresholdMs: number; files: Record<string, number> } };
+  const history = proposal.history;
+  const wellFormed = !!history && typeof history === "object" && !Array.isArray(history) &&
+    Object.values(history).every((v) => Array.isArray(v) && v.every((n) => typeof n === "number" && Number.isFinite(n)));
+  if (!wellFormed) delete proposal.history;
+  return { text, proposal: proposal as { thresholdMs: number; files: Record<string, number>; history?: Record<string, number[]> } };
 }
 
 export const TEST_MANIFEST_PROPOSAL_ARTIFACT = "test-tier-manifest-proposal";

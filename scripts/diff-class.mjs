@@ -231,14 +231,49 @@ export function namedPlanOrDocsPaths(content) {
   return paths;
 }
 
+/** The plan paths that name the whole population rather than one record. */
+const PLAN_POPULATION_PATHS = ["plan", "plan/tasks.d", "plan/tasks.yaml"];
+
+/** Whether `content` loads the whole plan (`loadPlan(` on plan/tasks.yaml) or walks its population. */
+function readsWholePlan(content, paths = namedPlanOrDocsPaths(content)) {
+  const loadsPlan = /\bloadPlan\s*\(/.test(content) && paths.has("plan/tasks.yaml");
+  const walksPlan = enumeratesPopulation(content) && PLAN_POPULATION_PATHS.some((p) => paths.has(p));
+  return loadsPlan || walksPlan;
+}
+
+/** The modules that lint or validate the plan itself — the subject of a plan-integrity suite. */
+const PLAN_INTEGRITY_MODULE = /\bfrom\s+["'][^"']*\/(?:task-linter|plan-coherence|plan-index)(?:\.[a-z]+)?["']/;
+
+/**
+ * W1-T7809 — whether `content` is a plan-integrity suite: it imports the module that lints or validates
+ * the plan AND reads the real plan (loads it or walks its shards), so a changed shard is its subject.
+ * Derived from the suite's own source, never from a hand list. A suite that merely calls `loadPlan(`
+ * (fixtures, a status board) is not one.
+ */
+export function isPlanIntegritySuite(content) {
+  return PLAN_INTEGRITY_MODULE.test(content) && readsWholePlan(content);
+}
+
+/** W1-T7809 — whether `content` reads a changed plan path itself: the file, a path under a named
+ *  record directory, or a shard id. A reader of the whole plan population is NOT one (see
+ *  {@link isPlanIntegritySuite}); that is what made a one-shard filing select hundreds of suites. */
+export function readsChangedShard(content, changedFiles) {
+  const paths = namedPlanOrDocsPaths(content);
+  return changedFiles.some((file) => {
+    for (const path of paths) {
+      if (file === path) return true;
+      if (!PLAN_POPULATION_PATHS.includes(path) && file.startsWith(path + "/")) return true;
+    }
+    const id = /^plan\/tasks\.d\/(W\d+-T\d+)(?:[-.]|$)/.exec(file)?.[1];
+    return Boolean(id && new RegExp(`\\b${id}\\b`).test(content));
+  });
+}
+
 /** Match the changed file, a directory ancestor, a shard id, or a reader of the whole plan. */
 export function readsChangedPlanOrDocs(content, changedFiles) {
   const paths = namedPlanOrDocsPaths(content);
   const planChanged = changedFiles.some(isInPlanScope);
-  const loadsPlan = /\bloadPlan\s*\(/.test(content) && paths.has("plan/tasks.yaml");
-  const walksPlan = enumeratesPopulation(content) &&
-    ["plan", "plan/tasks.d", "plan/tasks.yaml"].some((p) => paths.has(p));
-  if (planChanged && (loadsPlan || walksPlan)) return true;
+  if (planChanged && readsWholePlan(content, paths)) return true;
   return changedFiles.some((file) => {
     for (const path of paths) if (file === path || file.startsWith(path + "/")) return true;
     const id = /^plan\/tasks\.d\/(W\d+-T\d+)(?:[-.]|$)/.exec(file)?.[1];
@@ -264,6 +299,25 @@ export function planReadingSuiteFiles(root = REPO_ROOT, changedFiles = []) {
     }
   }
   return [...out].sort();
+}
+
+/**
+ * W1-T7809 — the suites a PLAN-ONLY author diff reaches: those that read a changed shard by path or id,
+ * and the plan-integrity suites. Not every suite that calls `loadPlan(`: at origin/main that listing was
+ * ~469 suites for one filed shard. CI keeps {@link planReadingSuiteFiles}; only the author lane narrows.
+ */
+export function planOnlySuiteFiles(root = REPO_ROOT, changedFiles = []) {
+  const testDir = join(root, "test");
+  const out = [];
+  for (const entry of readdirSync(testDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".test.ts")) continue;
+    const abs = join(testDir, entry.name);
+    const content = readFileSync(abs, "utf8");
+    if (readsChangedShard(content, changedFiles) || isPlanIntegritySuite(content)) {
+      out.push(relative(root, abs).split(sep).join("/"));
+    }
+  }
+  return out.sort();
 }
 
 // ── W1-T2680: THE SUITES A `git grep <symbol>` SWEEP CANNOT REACH ─────────────────────────────
@@ -306,13 +360,92 @@ export function withoutRelativePathLiterals(content) {
 // Why: docs/forensics/diff-class.md#enumeratespopulation-the-removed-glob-clause.
 export function enumeratesPopulation(content) {
   return (
-    /\bls-files\b/.test(content) ||
-    /\breaddirSync\b|\breaddir\b/.test(content) ||
-    /\bglobSync\b|\bglob\(/.test(content) ||
+    lsFilesWalksRepo(content) ||
+    enumerationCalls(content, /\b(?:readdirSync|readdir|globSync|glob)\s*\(/g).some((arg) => rootIsRepo(arg, content)) ||
     // `git grep` as an argv element enumerates the files it matches: #10092's census
     // (`["grep", "-lF", HELPER, "--", "test/*.test.ts"]`) was invisible to the three arms above.
     /["'`]grep["'`]\s*,/.test(content)
   );
+}
+
+// ── W1-T6092: A CENSUS SUITE WALKS THE REPOSITORY, NOT ANY DIRECTORY ───────────────────────────
+// `readdirSync(mkdtemp-dir)` lists the suite's OWN fixture. Counting it made run-task,
+// live-write-guard-command-sites and recycle-container (~400 s) join every src change's census set.
+// A call counts only when its ROOT is the repository; a root this scan cannot resolve (a helper's
+// parameter, a variable declared elsewhere) still counts — over-listing costs one suite, under-listing
+// is the silent miss this verb exists to end (W1-T4787: walkers through a helper must stay selected).
+
+/** Evidence that a path expression is rooted in the repository. */
+const REPO_ROOT_MARKER = /\bREPO_ROOT\b|\bprocess\.cwd\s*\(|\bimport\.meta\b|\b(?:repoRoot|repoDir|projectRoot)\b/;
+/** Evidence that a path expression is rooted in a scratch/fixture directory. */
+const FIXTURE_ROOT_MARKER = /\bmkdtemp(?:Sync)?\b|\btmpdir\s*\(|\bos\.tmpdir\b|tmp|fixture|scratch|sandbox/i;
+
+/** The first-argument text of every call matching `callRe` (a /g regexp ending at the open paren). */
+function enumerationCalls(content, callRe) {
+  const args = [];
+  for (const m of content.matchAll(callRe)) {
+    let depth = 0;
+    let quote = "";
+    let i = m.index + m[0].length;
+    const start = i;
+    for (; i < content.length; i++) {
+      const c = content[i];
+      if (quote) {
+        if (c === "\\") i++;
+        else if (c === quote) quote = "";
+        continue;
+      }
+      if (c === '"' || c === "'" || c === "`") quote = c;
+      else if (c === "(" || c === "[" || c === "{") depth++;
+      else if (c === ")" || c === "]" || c === "}") {
+        if (depth === 0) break;
+        depth--;
+      } else if (c === "," && depth === 0) break;
+    }
+    args.push(content.slice(start, i));
+  }
+  return args;
+}
+
+/** The initialiser text of every `const|let|var <name> = ...;` declaration of `name` in `content`. */
+function initialisersOf(name, content) {
+  const out = [];
+  const re = new RegExp(`\\b(?:const|let|var)\\s+${name}\\b\\s*(?::[^=\\n]+)?=\\s*`, "g");
+  for (const m of content.matchAll(re)) {
+    const rest = content.slice(m.index + m[0].length);
+    const end = rest.search(/;|\n\s*\n/);
+    out.push(end === -1 ? rest.slice(0, 400) : rest.slice(0, Math.min(end, 400)));
+  }
+  return out;
+}
+
+/** Whether the path expression `expr` resolves to the repository (true) or to a fixture (false). */
+function rootIsRepo(expr, content, depth = 0, seen = new Set()) {
+  if (REPO_ROOT_MARKER.test(expr)) return true;
+  if (FIXTURE_ROOT_MARKER.test(expr)) return false;
+  if (depth < 5) {
+    const names = [...new Set(expr.replace(/["'`](?:\\.|[^"'`\\])*["'`]/g, " ").match(/\b[A-Za-z_$][\w$]*\b/g) ?? [])]
+      .filter((n) => !seen.has(n) && !/^(?:join|resolve|dirname|normalize|relative|path|posix|new|URL|fileURLToPath|String|as|const|let|var)$/.test(n));
+    let resolvedFixture = false;
+    for (const name of names) {
+      const inits = initialisersOf(name, content);
+      if (inits.length === 0) continue;
+      const next = new Set(seen).add(name);
+      if (inits.some((init) => rootIsRepo(init, content, depth + 1, next))) return true;
+      resolvedFixture = true;
+    }
+    if (resolvedFixture) return false;
+  }
+  return true; // unresolved (a literal repo area, a parameter, an import): conservative
+}
+
+/** `git ls-files` counts unless its `cwd` option is a fixture repository. */
+function lsFilesWalksRepo(content) {
+  for (const m of content.matchAll(/\bls-files\b/g)) {
+    const cwd = /\bcwd\s*:\s*([^,}\n]+)/.exec(content.slice(m.index, m.index + 300));
+    if (!cwd || rootIsRepo(cwd[1], content)) return true;
+  }
+  return false;
 }
 
 /**
@@ -460,6 +593,9 @@ export function main(argv) {
       // spend ~39 minutes installing browsers and collecting an unchanged source-coverage graph.
       "coverage-class": { type: "boolean", default: false },
       "list-plan-reading-suites": { type: "boolean", default: false },
+      // W1-T7809: given a plan-only changed-file list, print the suites that read a changed shard plus the
+      // plan-integrity suites — the author lane's narrower reach than --list-plan-reading-suites.
+      "list-plan-only-suites": { type: "boolean", default: false },
       // W1-T4395: prints "files" then the changed test files plus the census suites that walk them, or "full",
       // or nothing (not a test-only diff).
       "test-only-run": { type: "boolean", default: false },
@@ -499,6 +635,19 @@ export function main(argv) {
     } catch (err) {
       console.error(`diff-class: FAILED to enumerate the census suite set — ${err && err.message ? err.message : String(err)}`);
       console.error("diff-class: printing NOTHING — a caller reading zero lines here must fail closed and run the full suite.");
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  if (values["list-plan-only-suites"]) {
+    try {
+      const root = values["plan-reading-root"] ?? REPO_ROOT;
+      for (const path of planOnlySuiteFiles(root, readChangedFilesArg(values["changed-files"]))) console.log(path);
+      process.exitCode = 0;
+    } catch (err) {
+      console.error(`diff-class: FAILED to enumerate the plan-only suite set — ${err && err.message ? err.message : String(err)}`);
+      console.error("diff-class: printing NOTHING — a caller reading zero lines here must fail closed.");
       process.exitCode = 1;
     }
     return;

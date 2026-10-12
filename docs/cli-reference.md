@@ -36,6 +36,8 @@ usage:
   rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...   # Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
   rmd progress-watchdog [--json] [--state-root <dir>]   # Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.
+  rmd live-edits --tree <daemon-checkout|install-checkout> --checkout <dir> --state-root <dir> [--json]   # Preserve, escalate, then restore tracked edits holding a live checkout behind origin/main.
+  rmd host-alert --state-root <dir> --instance <name> --condition <condition> (--raise <message> | --clear) [--json]   # Count, spool or clear one of the host watchdog's own alarms (crash loop, launcher refusals).
   rmd claim <task-id> [--drop]   # Take (or with --drop, drop) the dispatch claim the fleet honours, for a hand-build.
   rmd routing-ab [--json]   # Compare the arms of each live routing experiment (Sol vs Sonnet) from the ledger union.
   rmd impossible-canary --model <id> [--model <id>]... --scaffold <revision> --grader <executable> [--state-dir <dir>] [--json]   # Run sealed impossible-task canaries per model and count cheating events with exact intervals.
@@ -80,8 +82,8 @@ usage:
   rmd fix <pr-number> [--repo <name>]   # Operator verb for the fix rung: dispatch the same rung `rmd sweep` uses.
   rmd wipe-test <task-id> [--factor learnings|recon|rules] [--repo remudero-sandbox] [--allow-non-sandbox]   # P12 A/B harness: run a sandbox task twice, ledger the deltas for one factor.
   rmd stop [--reason <text>]   # Fleet control: one-shot halt of the running drain; auto-clears when it ends.
-  rmd pause [--reason <text>]   # Fleet control: persistent drain-and-hold until `rmd resume`.
-  rmd resume   # Fleet control: clear PAUSE (and any STOP); spawns resume.
+  rmd pause [--instance <name>] [--reason <text>] | rmd pause --fleet [--reason <text>]   # Fleet control: drain-and-hold ONE instance until `rmd resume`; --fleet holds every instance.
+  rmd resume [--instance <name>] | rmd resume --fleet   # Fleet control: clear ONE instance's PAUSE (and any STOP); --fleet clears the fleet-wide hold.
   rmd away [on|off]   # Set/show operator presence; batches escalations into a recap while away.
   rmd correct <task-id> --pr <n> [--reason <text>]   # Sanctioned operator-correction writer: name a task's true merged PR.
   rmd release <task-id> --reason <text>   # Release a halted task's dispatch circuit breaker; dispatchable next tick.
@@ -340,6 +342,26 @@ rmd progress-watchdog [--json] [--state-root <dir>]
 ```
 
 W1-T5687: reads the deduplicated union of every ledger archive and the live ledger and prints one verdict: PROGRESSING, IDLE (no open PRs), STALLED (newest progress row over 15 min old: capture-diagnostics; over 30 min: recycle), CRASH_LOOP (3 or more daemon.paths boots in 15 min that never reached daemon.boot: hold-revive) or UNKNOWN (no rows or no open-PR count; never a silent none). Progress is ONLY a sweep.pass, review.posted or verdict.merged row: daemon.* and runtime.* rows are a pulse, not progress, which is why the 318-minute crash loop of 2026-10-03 read live to every daemon-prefix reader. The open-PR count is the newest sweep.pass row's enumerated field. On capture-diagnostics it writes one bundle (ledger tail, docker ps, the tenant's docker logs --tail, the verdict) under <state>/diagnostics/progress-<ts>/, at most one per 15 min. It recycles nothing; the host launcher acting on recycle / hold-revive is W1-T5688.
+
+### `rmd live-edits`
+
+Preserve, escalate, then restore tracked edits holding a live checkout behind origin/main.
+
+```
+rmd live-edits --tree <daemon-checkout|install-checkout> --checkout <dir> --state-root <dir> [--json]
+```
+
+2026-10-11: one rung of the live-edit ladder (src/lib/live-edit-ladder.ts) for one live checkout. With tracked edits it always writes them to <state-root>/recovery/live-edits/<tree>/ as a patch and to refs/rmd-recovery/live-edits/<host>/<ts>, read back and re-applied before it counts as a copy. Staleness pressure is the daemon's own freshness pressure (decideFreshnessRestart) from the first reading dirty and behind: at the restart threshold the daemon escalates once; at twice it, and only with a confirmed copy of these exact edits, the tracked paths are restored to HEAD so the checkout can fast-forward. Prints one JSON line with --json (restored:true only when the tree is now clean). The host has no GitHub credential, so this verb spools its escalation and restore notice under <state-root>/escalation-spool/ and the daemon posts them. Run by the host watchdog for the daemon checkout and the install checkout.
+
+### `rmd host-alert`
+
+Count, spool or clear one of the host watchdog's own alarms (crash loop, launcher refusals).
+
+```
+rmd host-alert --state-root <dir> --instance <name> --condition <condition> (--raise <message> | --clear) [--json]
+```
+
+2026-10-11: the host watchdog's entry into src/lib/launcher-host-alerts.ts. --raise records one observation of a condition (crash-loop, units-not-on-main, units-diverged, deploy-code-fetch-failed, deploy-code-diverged, deploy-run-problem) under <state-root>/launcher-alerts/. A refusal is counted per consecutive observed tick: at the deployer's REFUSAL_PERSISTING_AT it writes launcher_alert.persisting, at REFUSAL_ESCALATE_AT it spools one needs-human escalation under <state-root>/escalation-spool/ for the daemon to post (the host has no GitHub credential). A crash loop is spooled on its first observation, because the launcher only names one after its own tiering. --clear ends the run when the launcher sees the step succeed: a still-spooled escalation is withdrawn and one the daemon already opened gets a spooled close. Prints one JSON line with --json.
 
 ### `rmd claim`
 
@@ -709,7 +731,7 @@ One local, read-only health check with a meaningful exit code (0/1/2).
 rmd doctor [--json]
 ```
 
-W1-T1047: ONE local, read-only health check with a meaningful exit code (0 OK / 1 any WARN / 2 any FAIL; bad args exit 64, so exit 2 always means a check failed and never a typo). NO NETWORK and NO HEALTHY DAEMON REQUIRED — every check reads the ledger, state/, plan/, /proc or ps, so it answers from a cold ssh session while remudero-serve is down and the API budget is exhausted, which is exactly when the console-side checks are unavailable. Checks: ledger freshness (newest daemon.* row vs two poll intervals), dispatch stall (eligible pool vs THIS host's own observed cadence, reusing deriveQueueHead/deriveDispatchCadence with a LOCALLY-derived merged set), dispatch liveness (consecutive daemon.alive rows stuck in the sweep phase), pause honoured (PAUSE held while dispatch continued — W1-T1065/#2298 files the tick defect, doctor only reports), lock-vs-process divergence, lane-less workers (#2251's 7200s threshold, reused not re-derived), stale git index.lock (report only; W1-T1036 owns reclamation), disk headroom, and memory/swap from /proc/meminfo (never the cgroup limit — this container is unlimited, so memory.max reads `max` and would report unbounded headroom on a host that already froze). EVERY check prints its measured value beside its threshold; one summary line first, short enough for a cron subject. READ-ONLY: --fix is refused by name, because every repair path already has an owner and a second actor mutating state a live daemon depends on is the measured hazard.
+W1-T1047: ONE local, read-only health check with a meaningful exit code (0 OK / 1 any WARN / 2 any FAIL; bad args exit 64, so exit 2 always means a check failed and never a typo). NO NETWORK and NO HEALTHY DAEMON REQUIRED — every check reads the ledger, state/, plan/, /proc or ps, so it answers from a cold ssh session while remudero-serve is down and the API budget is exhausted, which is exactly when the console-side checks are unavailable. Checks: ledger freshness (newest daemon.* row vs two poll intervals), dispatch stall (eligible pool vs THIS host's own observed cadence, reusing deriveQueueHead/deriveDispatchCadence with a LOCALLY-derived merged set), dispatch liveness (consecutive daemon.alive rows stuck in the sweep phase), pause honoured (PAUSE held while dispatch continued — W1-T1065/#2298 files the tick defect, doctor only reports), lock-vs-process divergence, lane-less workers (#2251's 7200s threshold, reused not re-derived), stale git index.lock (report only; W1-T1036 owns reclamation), disk headroom, and memory/swap from /proc/meminfo (the HOST's, never a container's cgroup — the measured freeze was host-wide, and one container's memory.max/memory.high headroom cannot show a host that already froze; the dispatch floor reads the container's own headroom beside it). EVERY check prints its measured value beside its threshold; one summary line first, short enough for a cron subject. READ-ONLY: --fix is refused by name, because every repair path already has an owner and a second actor mutating state a live daemon depends on is the measured hazard.
 
 ### `rmd status`
 
@@ -783,23 +805,23 @@ fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run end
 
 ### `rmd pause`
 
-Fleet control: persistent drain-and-hold until `rmd resume`.
+Fleet control: drain-and-hold ONE instance until `rmd resume`; --fleet holds every instance.
 
 ```
-rmd pause [--reason <text>]
+rmd pause [--instance <name>] [--reason <text>] | rmd pause --fleet [--reason <text>]
 ```
 
-fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.
+fleet control: PERSISTENT drain-and-hold of ONE instance — the one --instance names, else the instance whose registry state_dir is this config.root; an unresolvable target refuses before writing. In-flight completes, no new spawns; survives across runs until `rmd resume`. --fleet is the separate, explicit fleet-wide hold (refs/rmd-pause/hold), cleared only by `rmd resume --fleet`.
 
 ### `rmd resume`
 
-Fleet control: clear PAUSE (and any STOP); spawns resume.
+Fleet control: clear ONE instance's PAUSE (and any STOP); --fleet clears the fleet-wide hold.
 
 ```
-rmd resume
+rmd resume [--instance <name>] | rmd resume --fleet
 ```
 
-fleet control: clear PAUSE (and any STOP); spawns resume
+fleet control: clear the targeted instance's PAUSE (and any STOP), resolved as `rmd pause` resolves it; never deletes the fleet-wide hold, which only `rmd resume --fleet` clears
 
 ### `rmd away`
 

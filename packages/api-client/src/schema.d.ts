@@ -505,6 +505,29 @@ export interface components {
       actionId: string;
       detail?: string;
     };
+    /** The verified actor's own admitted actions on this exact target that lack a verified completion receipt. Read-only evidence, never permission to retry. Only a cursor-less, complete answer with verifiedEmpty true certifies that nothing is pending; partial and unavailable answers never do. */
+    AssistantActionDiscovery: {
+      contract: "assistant-action-discovery-v1";
+      source: {
+        instance: string;
+        repository: string | null;
+        bootSha: string;
+      };
+      observedAt: string;
+      completeness: "complete" | "partial" | "unavailable";
+      limitations: ("legacy_claims_without_identity" | "unreadable_entries" | "oversized_entries" | "unsupported_entries" | "unverifiable_entries" | "corpus_changed" | "corpus_over_listing_bound" | "file_budget" | "byte_budget" | "time_budget" | "page_size" | "store_unavailable")[];
+      pending: ({
+        actionId: string;
+        action: "pause" | "resume" | "stop";
+        instance: string;
+        repository: string | null;
+        submittedAt: string;
+        status: "claimed_unknown" | "receipt_unverified";
+      })[];
+      /** Opaque, bound to the verified actor and exact target; discloses no store path. */
+      continuation: string | null;
+      verifiedEmpty: boolean;
+    };
     /** POST /v1/questions/answer's body -- an operator's answer to a QUESTION-contract entry (worker.ts's plan/questions.ndjson), addressed by the task it was raised on (v0 routing has no path params, src/lib/service.ts). */
     AnswerQuestionRequest: {
       taskId: string;
@@ -2501,6 +2524,30 @@ export interface components {
       counterWindow: "daemon-run";
       outcomeAssessment: "not_collected";
       spend: null;
+      opportunityEvidence?: GardenerOpportunityEvidence;
+    };
+    /** Independent saved opportunity registry, not the registered off-loop gardener inventory. All counts are stored classifications, not newly verified PR/deployment/benefit evidence. No cost or causal improvement claim is made. Missing, mixed, invalid or oversized registries are unavailable, not zero. Empty arrays have no reconciliation timestamp. */
+    GardenerOpportunityEvidence: (GardenerOpportunityReport) | (GardenerOpportunityUnavailable);
+    GardenerOpportunityReport: {
+      version: 1;
+      repository: string;
+      readAt: string;
+      coverage: "saved-opportunity-registry";
+      countSemantics: "reported_states_not_verified_outcomes";
+      state: "reported";
+      total: number;
+      counts: Record<string, number>;
+      oldestReconciledAt: string | null;
+      latestReconciledAt: string | null;
+    };
+    GardenerOpportunityUnavailable: {
+      version: 1;
+      repository: string | null;
+      readAt: string;
+      coverage: "saved-opportunity-registry";
+      countSemantics: "reported_states_not_verified_outcomes";
+      state: "unavailable";
+      reason: "scope_unavailable" | "not_collected" | "unreadable" | "malformed" | "oversized" | "repository_mismatch" | "clock_skew" | "corpus_changed";
     };
     GardenersUnavailable: {
       error: "gardeners_unavailable";
@@ -2870,6 +2917,7 @@ export interface components {
       stale: boolean;
       sources: (ViewSource)[];
       data: {
+        modelApprovals?: HostModelApprovalsEvidence;
         /** The counted instances' metrics merged, in catalog order. Sums are summed, `cache.reuse` is the ratio of the summed token terms, and `duration.p50.ms` the median of every instance's runs together; nothing is averaged. `instances` is how many instances had a value. */
         overview: ({
           key: "runs.completed" | "tokens.total" | "cache.reuse" | "cost.modeled.usd" | "duration.p50.ms" | "queue.pending";
@@ -2887,10 +2935,302 @@ export interface components {
         /** Each instance's own metrics, or a `reason` when it has no snapshot yet. */
         instances: ({
           instanceId: string;
+          /** Registry/config identity captured in the persisted snapshot; absent on older snapshots, never guessed from ledger rows. */
+          repository?: string;
           metrics?: (AnalyticsViewMetric)[];
           reason?: string;
+          details?: AnalyticsStoredDetails;
         })[];
       };
+    };
+    /** Bounded immutable capture of the serving host's loaded model-approval configuration. capturedAt is the startup observation, not an analytics refresh, permission grant or worker adoption receipt. Expiry is retained for a separate console read-time evaluation. Absent on older producers; a missing or rejected corpus is never a measured empty approval list. */
+    HostModelApprovalsEvidence: ({
+      version: "host-model-approvals-v1";
+      scope: "serving-host";
+      sourceKind: "loaded-config";
+      capturedAt: string;
+      state: "reported";
+      approvals: ({
+        model: string;
+        approvedBy: string;
+        approvedAt: string;
+        expiresAt?: string;
+      })[];
+    }) | ({
+      version: "host-model-approvals-v1";
+      scope: "serving-host";
+      sourceKind: "loaded-config";
+      capturedAt: string | null;
+      state: "unavailable";
+      reason: "invalid_source" | "over_budget" | "clock_skew";
+    });
+    /** Additive analytics-details-v1 transport over matching committed signals and usage rows. Reported is not a freshness verdict; read analytics:<instance> for freshness. Consumers validate the carried projection schemas. Missing/mixed snapshots, unreadable or unsupported bodies and response-budget refusals stay explicitly unavailable, not empty healthy defaults. */
+    AnalyticsStoredDetails: ({
+      version: "analytics-details-v1";
+      state: "reported";
+      asOf: string;
+      payloadBytes: number;
+      signals: {
+        version: "console-signals-v1";
+        timeSeries: (AnalyticsStoredSeries)[];
+        spend: {
+          cash: AnalyticsStoredCashSpend;
+        };
+        routingTelemetry: AnalyticsStoredRouting;
+      };
+      /** null means usage was not collected; it is not a fabricated zero-cost reading. */
+      usage: (null) | (AnalyticsStoredUsage);
+    }) | ({
+      version: "analytics-details-v1";
+      state: "unavailable";
+      asOf: string | null;
+      reason: string;
+    });
+    AnalyticsStoredSeries: {
+      id: string;
+      name: string;
+      window: string;
+      bucketWidth: string;
+      aggregation: string;
+      coverage?: "observed" | "not-collected";
+      comment?: string;
+      points: ({
+        t: string;
+        value?: number | null;
+        gap?: boolean;
+        note?: string;
+        unpricedRows?: number;
+      })[];
+    };
+    AnalyticsStoredCashSpend: {
+      state: "observed" | "not-collected";
+      unit: "usd";
+      asOf: string | null;
+      coverage: string;
+      reason?: string;
+      windows: ({
+        name: "7d" | "30d";
+        days: number;
+        fromDay: string;
+        toDay: string;
+        usd: number;
+        rows: number;
+        unpricedRows?: number;
+        complete: boolean;
+        reason?: string;
+      })[];
+    };
+    AnalyticsStoredRouting: {
+      version: "routing-v1";
+      evidenceState: "observed" | "not-collected-in-retained-ledger";
+      assignmentsObserved: number;
+      terminalResultsObserved: number;
+      terminalResultsWithoutAssignment: number;
+      assignmentsWithoutTerminalResult: number;
+      buckets: ({
+        provider: string;
+        assignedModel: string;
+        taskType: string;
+        routingRule: string;
+        assignments: number;
+        terminalResults: number;
+        successes: number;
+        failures: number;
+        totalTokens: number;
+        totalDurationMs: number;
+        totalCostUsd: number;
+        unpricedCostRows?: number;
+        fallbackReasons: ({
+          reason: string;
+          count: number;
+        })[];
+      })[];
+      daily: ({
+        day: string;
+        terminalResults: number;
+        totalTokens: number;
+        totalCostUsd: number;
+        unpricedCostRows?: number;
+      })[];
+      stepUps: {
+        total: number;
+        byStep: ({
+          step: "implement.step_up" | "fix.step_up";
+          count: number;
+        })[];
+        byTargetModel: ({
+          model: string;
+          count: number;
+        })[];
+      };
+      preferenceOutcomes: ({
+        preferredProvider: string;
+        selectedProvider: string;
+        selectedModel: string;
+        outcome: "kept" | "bypassed";
+        reason?: string;
+        count: number;
+      })[];
+    };
+    AnalyticsStoredUsage: {
+      version: "usage-v1" | "usage-v2";
+      asOf: string | null;
+      coverage: {
+        from: string | null;
+        to: string | null;
+        note: string;
+      };
+      subscriptions: ({
+        provider: string;
+        state: "observed" | "stale" | "not-collected";
+        windows: (AnalyticsStoredUsageWindow)[];
+      })[];
+      cash: {
+        unit: "usd";
+        state: "observed" | "not-collected";
+        coverage: string;
+        windows: ({
+          name: "1h" | "24h" | "today-utc" | "7d" | "30d";
+          usd: number;
+          rows: number;
+          unpricedRows?: number;
+          complete: boolean;
+          reason?: string;
+        })[];
+        byModel24h: ({
+          model: string;
+          usd: number;
+          unpricedRows: number;
+        })[];
+        series: ({
+          hour: string;
+          usd: number;
+          rows: number;
+          unpricedRows: number;
+        })[];
+      };
+      routing: {
+        state: "observed" | "not-collected";
+        assignmentsObserved: number;
+        decisionsObserved: number;
+        recent: (AnalyticsStoredUsageAssignment)[];
+        aggregates: {
+          last24h: AnalyticsStoredUsageAggregate;
+          last7d: AnalyticsStoredUsageAggregate;
+        };
+        experiments: (AnalyticsStoredUsageExperiment)[];
+      };
+    };
+    AnalyticsStoredUsageWindow: {
+      name: string;
+      kind: "5h" | "weekly" | "other";
+      durationMs: number | null;
+      usedPercent: number;
+      remainingPercent: number;
+      limitPercent: number | null;
+      resetsAt: string | null;
+      asOf: string;
+      source: "ledger" | "live-status";
+      state: "observed" | "stale";
+      burn: {
+        lastHourPercent: number | null;
+        last24hPercent: number | null;
+        ratePercentPerHour: number | null;
+      };
+      projectedExhaustionAt: string | null;
+      exhaustsBeforeReset: boolean | null;
+      series: ({
+        hour: string;
+        usedPercent: number;
+        maxUsedPercent: number;
+        samples: number;
+      })[];
+    };
+    AnalyticsStoredUsageAssignment: {
+      id: string;
+      ts: string;
+      runId: string | null;
+      taskId: string | null;
+      lane: string | null;
+      requested: {
+        model: string;
+        effort: string;
+      };
+      selected: {
+        provider: string;
+        model: string;
+        effort: string;
+      };
+      rule: string;
+      ruleSource: "decision" | "legacy-mode";
+      capability: string | null;
+      considered: ({
+        provider: string;
+        model?: string;
+        eligible: boolean;
+        selected: boolean;
+        reason?: string;
+      })[];
+      headroomPercent: Record<string, number | null>;
+      reservePercent: number | null;
+      cashWhileSubscriptionHadRoom: boolean;
+      assignmentsInRun: number;
+      markers: Record<string, string>;
+    };
+    AnalyticsStoredUsageAggregate: {
+      windowHours: number;
+      total: number;
+      cashWhileSubscriptionHadRoom: number;
+      byModel: ({
+        provider: string;
+        model: string;
+        count: number;
+        sharePercent: number;
+      })[];
+      byTier: ({
+        tier: string;
+        count: number;
+        sharePercent: number;
+      })[];
+      byRule: ({
+        rule: string;
+        count: number;
+        sharePercent: number;
+      })[];
+      byProvider: ({
+        provider: string;
+        count: number;
+        sharePercent: number;
+      })[];
+      rows: ({
+        provider: string;
+        model: string;
+        tier: string;
+        rule: string;
+        count: number;
+      })[];
+    };
+    AnalyticsStoredUsageExperiment: {
+      trialId?: string;
+      trialArm?: string;
+      reason?: string;
+      reasonFull?: string;
+      reasonState?: "observed" | "not-collected" | "too-large";
+      reasonAsOf?: string;
+      marker: string;
+      value: string;
+      provider: string;
+      model: string;
+      runs: number;
+      assignments: number;
+      terminals: number;
+      successes: number;
+      successRatePercent: number | null;
+      meanAssignmentsPerRun: number;
+      meanDurationMs: number | null;
+      costUsd: number;
+      unpricedTerminals: number;
+      meanCostPerTerminalUsd: number | null;
     };
     /** GET /v1/views/read-model (docs/views.md): the Phase 1 read model's own status, one body per serve, materialized by the read-model worker (src/lib/read-model-worker.ts). Each instance's `ledger:<instance>` source is re-judged at request time, so a stalled projector reads stale. */
     ReadModelStatusView: {
@@ -4612,6 +4952,17 @@ export interface paths {
         };
     };
   };
+  "/v1/control/assistant-action/discovery": {
+    get: {
+      responses: {
+          "200": AssistantActionDiscovery;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "503": AssistantActionDiscovery;
+        };
+    };
+  };
   "/v1/questions/answer": {
     post: {
       responses: {
@@ -4840,6 +5191,17 @@ export interface paths {
           "404": AssistantControlLookup;
           "409": AssistantControlLookup;
           "503": AssistantControlLookup;
+        };
+    };
+  };
+  "/v1/i/{instance}/control/assistant-action/discovery": {
+    get: {
+      responses: {
+          "200": AssistantActionDiscovery;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "503": AssistantActionDiscovery;
         };
     };
   };
