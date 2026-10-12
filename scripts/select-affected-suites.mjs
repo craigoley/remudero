@@ -25,6 +25,7 @@ import {
 import { callerReachableSuites } from "../src/lib/ci-parity.ts";
 import { readImpactArmInput } from "../src/lib/test-impact-map.ts";
 import { defaultPreflightSpawn } from "../src/lib/commit-message.ts";
+import { qualifiedSymbolShadow, qualifiedShadowFailures } from "../src/lib/qualified-symbol-shadow.ts";
 
 /** test-with-retry.mjs's marker before pass two (W1-T4398), naming the files it re-runs. */
 const RETRY_MARK = /^(?:\S+Z )?FLAKE-RETRY-FILES: retrying \d+ failed file\(s\)(?: uninstrumented)? — (.+)$/;
@@ -55,12 +56,14 @@ export function main(argv, { root = REPO_ROOT, summaryPath = process.env.GITHUB_
     "recent-failures": { type: "string" },
     "impact-map": { type: "string" },
     base: { type: "string" },
+    "qualified-symbol-shadow": { type: "boolean" },
   });
   if (!values["changed-files"]) {
     console.error("usage: select-affected-suites.mjs --changed-files <path> [--diff <path>] [--failed-from <log>] [--recent-failures <path>]");
     return 2;
   }
   const changed = lines(values["changed-files"]);
+  let qualified;
   const selection = affectedSelectionOrFull(changed, () => {
     const extra = {};
     if (values["recent-failures"]) extra.recentFailures = lines(values["recent-failures"]);
@@ -72,7 +75,9 @@ export function main(argv, { root = REPO_ROOT, summaryPath = process.env.GITHUB_
       const diffText = values.diff ? readFileSync(values.diff, "utf8") : "";
       extra.impact = readImpactArmInput(root, values["impact-map"], values.base ?? "HEAD^1", diffText);
     }
-    return readAffectedSuitesInput(root, changed, extra);
+    const input = readAffectedSuitesInput(root, changed, extra);
+    if (values["qualified-symbol-shadow"]) qualified = qualifiedSymbolShadow(changed, input, extra.symbolSuites ?? []);
+    return input;
   });
   const log = values["failed-from"] ? readFileSync(values["failed-from"], "utf8") : "";
   const failed = log ? parseFailingTestFiles(log, root) : [];
@@ -90,6 +95,9 @@ export function main(argv, { root = REPO_ROOT, summaryPath = process.env.GITHUB_
   if (record.impactFallback !== undefined) console.log(`  impact arm fell back to the narrow selection: ${record.impactFallback}`);
   if (missed.length > 0) console.log(`  MISSED: ${missed.map((f) => f.file).join(", ")} — the selection would not have run a file that really failed`);
   console.log(`AFFECTED-SUITES-SHADOW: ${JSON.stringify(record)}`);
+  if (values["qualified-symbol-shadow"]) console.log(`QUALIFIED-SYMBOL-SHADOW: ${JSON.stringify(qualified
+    ? { ...qualified, failures: qualifiedShadowFailures(qualified, failed) }
+    : { mode: "shadow", skipsNothing: true, fallback: "the existing selector could not produce a qualified corpus" })}`);
   if (summaryPath) appendFileSync(summaryPath, summary + "\n");
   return 0;
 }

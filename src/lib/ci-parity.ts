@@ -2785,6 +2785,13 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
       "`test/*.test.ts`, the TEST corpus, so it is not a src-population walk. Its gate rides the " +
       "`comment-load-ratchet` job as a step rather than a projected fast-gate census entry",
   ),
+  refusedForPredicate(
+    "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts",
+    "a",
+    "W1-T7812's shifted-run regression. Its `ls-files` responses are injected single-file fixture listings; " +
+      "the real runner executes named tests in private fixture roots, never walks the tracked src/ population. " +
+      "The src/ text the recognizer sees is its imports of gate-gardener.js and tmp.js",
+  ),
   // W1-T2916's suite. The recognizer matches it on `src/` text that is its import of
   // src/lib/settings.js plus prose ("src runtime package uses are dependencies"), but the
   // population it actually enumerates is package.json's own dependency maps read against
