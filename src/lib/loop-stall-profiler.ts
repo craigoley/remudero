@@ -108,8 +108,8 @@ export function topSelfFrames(profiles: readonly CpuProfile[], n = LOOP_STALL_TO
 
 /** THE WATCHDOG, run as an eval worker from this string so it needs no loader in either the tsx or the
  *  built daemon. It reads builtins through `process.getBuiltinModule`: an eval worker inherits
- *  `--input-type=module`, where `require` is undefined. Its timer starts first and keeps the worker alive while an inspector reply waits on the
- *  main thread: a worker with nothing but a pending inspector reply exits with code 0.
+ *  `--input-type=module`, where `require` is undefined. Its timer starts first and keeps the worker alive
+ *  while an inspector reply waits on the main thread: a worker with only a pending reply exits with code 0.
  *  TRAP: the Profiler domain is enabled only at the first stall. A session that ever enabled it resets V8's
  *  process-wide precise coverage to best-effort when it disconnects, so an eager enable would blank the
  *  coverage of every test process that starts a daemon with this telemetry. */
