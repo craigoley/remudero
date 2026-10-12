@@ -2,7 +2,8 @@ import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import { createHash } from "node:crypto";
-import { promisedFollowUps, unreportedFollowUps, type PromisedFollowUp, type FollowUpPlanRecord } from "./promised-follow-ups.js";
+import { promisedFollowUps, unreportedFollowUps, followUpPlanRecords, type PromisedFollowUp, type FollowUpPlanRecord } from "./promised-follow-ups.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { createRequire } from "node:module";
 import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
@@ -4781,41 +4782,47 @@ export async function observePromisedFollowUps(args: {
   if (paths.length === 0 && args.task.sourcePath === undefined) return empty;
   if (!args.headCheckoutDir) return { state: "unknown", reason: "promise source requires the exact PR-head checkout" };
   const deadline = performance.now() + 45_000;
-  let incomplete = false;
   const runGit = async (argv: string[], stdin?: string): Promise<string> => {
-    try {
-      if (performance.now() >= deadline) throw new Error("promise source read deadline expired");
-      if (args.runGit) return await args.runGit(argv, stdin);
-      return await new Promise<string>((resolveRead, reject) => {
-        const child = execFile("git", ["-C", args.headCheckoutDir!, ...argv], {
-          encoding: "utf8", maxBuffer: 16 << 20, timeout: Math.max(1, Math.min(15_000, Math.floor(deadline - performance.now()))),
-          env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-        }, (error, stdout) => error ? reject(error) : resolveRead(stdout));
-        child.stdin?.on("error", () => undefined);
-        child.stdin?.end(stdin ?? "");
-      });
-    } catch (error) { incomplete = true; throw error; }
+    if (performance.now() >= deadline) throw new Error("promise source read deadline expired");
+    if (args.runGit) return await args.runGit(argv, stdin);
+    if (stdin !== undefined) throw new Error("promise observer requires bounded object reads, not a stdin batch");
+    return await hostWorktreeGitAsync(args.headCheckoutDir!, argv, {
+      maxBuffer: 16 << 20, timeout: Math.max(1, Math.min(15_000, Math.floor(deadline - performance.now()))),
+      env: { GIT_TERMINAL_PROMPT: "0" },
+    });
   };
   try {
     if (args.task.sourcePath !== undefined && taskPath === undefined) throw new Error("promise task source path is unavailable");
     const [headSha, baseSha] = (await runGit(["rev-parse", "HEAD", "origin/main"])).trim().split("\n");
     if (headSha !== args.headSha || !/^[a-f0-9]{40}$/.test(baseSha ?? "")) throw new Error("promise source is not the exact head/pinned origin/main");
     const present = paths.length ? (await runGit(["ls-tree", "--name-only", headSha, "--", ...paths])).trim().split("\n").filter(Boolean) : [];
-    const blobs = await readBlobsAtRefAsync(runGit, headSha, present);
+    if (present.length > 256) throw new Error("promise ADR corpus exceeds its bounded read limit");
+    const blobs: string[] = []; for (const path of present) blobs.push(await runGit(["show", `${headSha}:${path}`]));
     const contents = new Map(present.map((path, index) => [path, blobs[index]!]));
     const promised = promisedFollowUps(present, path => contents.get(path)!).map(promise => ({ ...promise, taskId: args.task.id }));
     if (taskPath !== undefined) {
-      const [blob] = await readBlobsAtRefAsync(runGit, baseSha!, [taskPath]);
-      promised.push(...promisedFollowUps([taskPath], () => blob!).filter(promise => promise.taskId === args.task.id));
+      const blob = await runGit(["show", `${baseSha}:${taskPath}`]);
+      promised.push(...promisedFollowUps([taskPath], () => blob).filter(promise => promise.taskId === args.task.id));
     }
     if (promised.length === 0) return empty;
-    const plan = await loadPlanAtRefAsync(args.headCheckoutDir, "plan/tasks.yaml", baseSha!, runGit);
-    if (incomplete) throw new Error("promise plan census was incomplete");
+    const corpus = (await runGit(["ls-tree", "-r", "--name-only", baseSha!, "--", "plan/tasks.yaml", "plan/tasks.d/"])).trim().split("\n").filter(Boolean);
+    let matching = "";
+    if (corpus.length) {
+      try { matching = await runGit(["grep", "-l", "-F", "-e", args.task.id, baseSha!, "--", "plan/tasks.yaml", "plan/tasks.d/"]); }
+      catch (error) { if ((error as { code?: unknown }).code !== 1) throw error; }
+    }
+    const filingPaths = matching.trim().split("\n").filter(Boolean).map(line => {
+      const prefix = `${baseSha}:`;
+      if (!line.startsWith(prefix) || !corpus.includes(line.slice(prefix.length))) throw new Error("promise filing query escaped its pinned corpus");
+      return line.slice(prefix.length);
+    });
+    if (filingPaths.length > 256) throw new Error("promise filing corpus exceeds its bounded read limit");
+    const planRecords: FollowUpPlanRecord[] = [];
+    for (const path of filingPaths) planRecords.push(...followUpPlanRecords(await runGit(["show", `${baseSha}:${path}`])));
     if ((await runGit(["rev-parse", "HEAD"])).trim() !== headSha) throw new Error("promise source head changed during observation");
     const unique = promised.filter((promise, index) => promised.findIndex(p => p.path === promise.path && p.text === promise.text && p.taskId === promise.taskId) === index);
     return { state: "complete", headSha, baseSha, promised: unique,
-      planRecords: plan.tasks.filter(task => unique.some(promise => promise.taskId !== undefined && task.plan_refs?.includes(promise.taskId)))
-        .map(task => ({ id: task.id, title: task.title, plan_refs: task.plan_refs, rationale: task.rationale, prompt: task.prompt })) };
+      planRecords: planRecords.filter(task => unique.some(promise => promise.taskId !== undefined && task.plan_refs?.includes(promise.taskId))) };
   } catch (error) { return { state: "unknown", reason: `promise source unavailable: ${String(error)}` }; }
 }
 

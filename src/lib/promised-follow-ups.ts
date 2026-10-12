@@ -4,6 +4,27 @@ export interface PromisedFollowUp { path: string; text: string; taskId?: string 
 export interface FollowUpPlanRecord { id: string; title: string; plan_refs?: readonly string[]; rationale?: string; prompt?: string }
 export interface HarvestableFollowUp { type: "research" | "task" | "action"; text: string }
 
+function taskRecords(text: string): Array<Record<string, unknown>> {
+  const parsed: unknown = parseYaml(text);
+  const records: unknown = Array.isArray(parsed) ? parsed : (parsed as { tasks?: unknown } | null)?.tasks;
+  if (!Array.isArray(records) || records.some(record => record === null || typeof record !== "object" || Array.isArray(record))) {
+    throw new Error("promise task source is not a task list");
+  }
+  return records as Array<Record<string, unknown>>;
+}
+
+export function followUpPlanRecords(text: string): FollowUpPlanRecord[] {
+  return taskRecords(text).map(record => {
+    if (typeof record.id !== "string" || typeof record.title !== "string" ||
+        (record.plan_refs !== undefined && (!Array.isArray(record.plan_refs) || record.plan_refs.some(ref => typeof ref !== "string")))) {
+      throw new Error("promise filing identity or plan_refs is malformed");
+    }
+    return { id: record.id, title: record.title, plan_refs: record.plan_refs as string[] | undefined,
+      rationale: typeof record.rationale === "string" ? record.rationale : undefined,
+      prompt: typeof record.prompt === "string" ? record.prompt : undefined };
+  });
+}
+
 /** The worker harvest and review guard intentionally share this closed, existing report grammar. */
 export function parseHarvestableFollowUps(text: string): HarvestableFollowUp[] | null {
   const section = text.match(/^[ \t]*##[ \t]*Follow-ups[ \t]*\n([\s\S]*?)(?=\n[ \t]*##[ \t]|(?![\s\S]))/im);
@@ -54,10 +75,7 @@ export function promisedFollowUps(files: readonly string[], readFile: (path: str
     if (/^docs\/adr\/[^/]+\.md$/.test(path)) {
       out.push(...promisedList(readFile(path)).map(text => ({ path, text })));
     } else if (/^plan\/tasks(?:\.yaml|\.d\/[^/]+\.ya?ml)$/.test(path)) {
-      const parsed: unknown = parseYaml(readFile(path));
-      const records: unknown = Array.isArray(parsed) ? parsed : (parsed as { tasks?: unknown } | null)?.tasks;
-      if (!Array.isArray(records)) throw new Error(`promise task source is not a task list: ${path}`);
-      for (const record of records as Array<{ id?: unknown; design?: unknown }>) {
+      for (const record of taskRecords(readFile(path))) {
         if (typeof record.design !== "string") continue;
         if (typeof record.id !== "string") throw new Error(`promise task has no id: ${path}`);
         out.push(...promisedList(record.design).map(text => ({ path, text, taskId: record.id as string })));
