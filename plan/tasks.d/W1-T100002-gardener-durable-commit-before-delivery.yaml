@@ -12,7 +12,7 @@
   origin: "operator gardener follow-up 2026-10-02; post-merge adversarial review of core PR 8655"
   plan_refs: [W1-T4802, W1-T4938, W1-T5073, W1-T4950]
   files: [src/lib/gardener.ts, src/lib/gardener-overseer.ts, test/gardener-overseer.test.ts, test/a-gardener-judges-its-own-actions.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at merged main 8549501c, unchanged PR 8655 head e2228482: two real-boundary tests fail.

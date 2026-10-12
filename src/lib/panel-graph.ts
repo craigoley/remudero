@@ -19,7 +19,7 @@
 import { readPage, readPageRequest, type ReadPageRequest } from "./read-page.js";
 import { adoptionFindingGone, adoptionLatestPath, readAdoptionLatest } from "./measurement-cadence.js";
 import { createHash, randomUUID } from "node:crypto";
-import { systemClock } from "./clock.js";
+import { fixedClock, systemClock } from "./clock.js";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { basename, dirname, join, relative } from "node:path";
@@ -37,6 +37,7 @@ import {
 } from "./plan.js";
 import { loadPlanIndex, type PlanIndex, type PlanIndexEntry } from "./plan-index.js";
 import { threadPlanPin, threadStrictPlan } from "./thread-plan.js";
+import type { PlanSourceOutcome } from "./serve-plan-reload.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import {
   buildLedgerIndex,
@@ -52,7 +53,7 @@ import {
   type LedgerLines,
   type StatusProjection,
 } from "./status.js";
-import { buildDrainPreview, dispatchOrder, runnableCandidateIds, type DrainOpts, type DispatchFilterReason, type MergedSet } from "./drain.js";
+import { buildDrainPreview, dispatchOrder, runnableCandidateIds, workflowPaths, type DrainOpts, type DispatchFilterReason, type MergedSet } from "./drain.js";
 import {
   captureFeedback,
   expandFeedbackDraft,
@@ -69,7 +70,15 @@ import {
   type FeedbackExpansion,
   type FeedbackStatus,
 } from "./feedback.js";
-import type { LandFeedbackOpts } from "./feedback-landing.js";
+import {
+  queueFeedbackRecord,
+  overlayQueuedFeedback,
+  overlayQueuedFeedbackEntries,
+  queuedFeedbackLandings,
+  readQueuedFeedbackRecords,
+  type LandFeedbackOpts,
+  type QueuedFeedbackRecord,
+} from "./feedback-landing.js";
 import {
   feedbackDischargeStateForTasks,
   feedbackOriginTag,
@@ -95,9 +104,11 @@ import { buildActionResultsRoute } from "./action-results.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, rotationStampIso } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
-import { fleetLaneDecisions, readFleetLaneStore, type FleetLaneDecision } from "./fleet-lane.js";
+import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type InboxAttentionEvidence, type PersistedInbox } from "./fleet-lane.js";
 import { inboxOwner } from "./inbox-owner.js";
-import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
+import { projectProposalHumanGates } from "./ask-classification.js";
+import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage, type PlainStore } from "./inbox-plain.js";
+import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
 import {
   listThreadViews,
   buildAttentionCensus,
@@ -109,7 +120,7 @@ import {
 } from "./inbox-responder.js";
 import {
   createInboxThreadListView, readInboxThreadListView, warmInboxThreadListView,
-  type ThreadListClassification, type ThreadListSources,
+  type ThreadListClassification, type ThreadListRefreshSettled, type ThreadListSources,
 } from "./inbox-thread-list-view.js";
 import { appendThreadMessage, appendThreadReplyOnce, inboxThreadIdentity, proposalIdOfThread, readAllThreads, readThread } from "./inbox-thread.js";
 import {
@@ -148,6 +159,7 @@ export interface PanelGraphDeps {
   planPath: string;
   ledgerPath: string;
   readPlanSnapshot?: () => Plan;
+  readPlanSource?: () => PlanSourceOutcome | undefined;
   /** Fault seam for the reply's second durable write; production uses appendPanelLedger. */
   appendInboxReplyAudit?: typeof appendPanelLedger;
   /** Fault seam for the first durable write; a pre-write failure is not a delivered reply. */
@@ -183,20 +195,24 @@ export interface PanelGraphDeps {
   inboxMainSha?: (root: string) => string | undefined;
   /** W1-T4261: one evidence-anchor grep at `ref`; defaults to {@link gitGrepAnchorTrue}. */
   inboxGrepAnchor?: (root: string, ref: string, anchor: EvidenceAnchor) => boolean;
+  /** W1-T5897: serve runs the slow lane that classifies; every inbox read answers from what it persisted, never a pass. */
+  inboxFromSlowLane?: boolean;
 }
 
 // ── GET /v1/feedback — the inbox list ───────────────────────────────────────
 
 /**
- * A reconciled {@link FeedbackEntry} as GET /v1/feedback returns it. `unverified` and
- * `discharged`/`dischargeUndecidable` (W1-T1257) are read-time-only decorations, never written to
- * `plan/feedback/<id>.yaml` — present only when true, layered by {@link decorateFeedbackDischarge}
- * after this reconcile. Both can be true on the same entry at once; neither ever changes `status`.
+ * A reconciled {@link FeedbackEntry} as GET /v1/feedback returns it. `unverified`, `discharged`/
+ * `dischargeUndecidable` (W1-T1257) and `landing`/`landingUnknown` (W1-T5524) are read-time-only, never
+ * written to `plan/feedback/<id>.yaml` — present only when set, layered after this reconcile. Only
+ * `landing` changes `status`: a queued entry reads its queued record's (W1-T5627).
  */
 export type ReconciledFeedbackEntry = FeedbackEntry & {
   unverified?: true;
   discharged?: true;
   dischargeUndecidable?: true;
+  landing?: "queued";
+  landingUnknown?: true;
 };
 
 /**
@@ -273,6 +289,16 @@ export function decorateFeedbackDischargeByTasks(
   });
 }
 
+/** W1-T5524: one queue read per request; a failed read marks every entry `landingUnknown`, never "nothing queued". */
+function decorateFeedbackLanding(entries: ReconciledFeedbackEntry[], deps: PanelGraphDeps): ReconciledFeedbackEntry[] {
+  try {
+    return overlayQueuedFeedbackEntries(entries, deps.inboxRoot) as ReconciledFeedbackEntry[];
+  } catch (error) {
+    deps.logProjection?.("serve.feedback_landing_queue_unreadable", { route: "/v1/feedback", reason: String((error as Error)?.message ?? error) });
+    return entries.map((entry) => ({ ...entry, landingUnknown: true }));
+  }
+}
+
 /** GET /v1/feedback[?status=<status>] — the feedback inbox, read-scoped. */
 export function buildFeedbackInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
   return {
@@ -305,7 +331,8 @@ export function buildFeedbackInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?:
       const { entries: listed, filedTasks } = projected as Extract<FeedbackProjectionOutcome, { ok: true }>;
       // A read writes nothing: the slow lane persists each merged proposal's `accepted` (P4-T07).
       const reconciled = projectReconciledFeedback(listed, deps.statusGithub);
-      const decorated = filedTasks ? decorateFeedbackDischargeByTasks(reconciled, new Map(filedTasks), deps.statusGithub) : reconciled;
+      const discharged = filedTasks ? decorateFeedbackDischargeByTasks(reconciled, new Map(filedTasks), deps.statusGithub) : reconciled;
+      const decorated = deps.feedbackLand ? decorateFeedbackLanding(discharged, deps) : discharged;
       const entries = statusParam ? decorated.filter((e) => e.status === statusParam) : decorated;
       if (!pageRequest) sendJson(res, 200, { entries });
       else {
@@ -370,10 +397,9 @@ function validateSubmitFeedback(body: unknown): { error: string } | SubmitFeedba
   };
 }
 
-/** The 400 refusal for a `replyTo` that cannot be answered, else undefined. Status is read from fetched origin/main,
- *  which feedback landing writes to; the daemon's checkout lags it and is the fallback only when that read fails.
- *  Main still says `grilling` until a reply's landing merges, so an answering entry already in the checkout refuses too. */
-function replyRefusal(root: string, replyTo: string): { refused: string } | undefined {
+/** The 400 refusal for a `replyTo` that cannot be answered, else undefined. Status reads from fetched origin/main, else the
+ *  checkout, else the landing queue; an answering entry in the checkout or queue refuses too, as main lags the reply. */
+function replyRefusal(root: string, replyTo: string, queued: ReadonlyMap<string, QueuedFeedbackRecord>): { refused: string } | undefined {
   let target: FeedbackEntry;
   let source = "origin/main";
   try {
@@ -384,17 +410,33 @@ function replyRefusal(root: string, replyTo: string): { refused: string } | unde
     try {
       target = readFeedbackEntry(root, replyTo);
     } catch {
-      return { refused: `replyTo names no known feedback entry "${replyTo}"` };
+      const queuedTarget = queued.get(feedbackEntryRepoPath(replyTo));
+      if (!queuedTarget) return { refused: `replyTo names no known feedback entry "${replyTo}"` };
+      source = "the landing queue (origin/main unreadable)";
+      target = queuedTarget as unknown as FeedbackEntry;
     }
   }
   if (target.status !== "grilling") {
     return { refused: `feedback#${replyTo} is not parked at grilling (status: ${target.status}, read from ${source}) — nothing to answer` };
   }
-  const answering = listFeedback(root).find((e) => e.reply_to === replyTo);
+  const inCheckout = listFeedback(root).find((e) => e.reply_to === replyTo);
+  const answering = inCheckout ?? ([...queued.values()] as unknown as FeedbackEntry[]).find((e) => e.reply_to === replyTo);
   if (!answering) return undefined;
   return {
-    refused: `feedback#${replyTo} is parked at grilling (status: grilling, read from ${source}) but the checkout already holds feedback#${answering.id} answering it — nothing to answer`,
+    refused: `feedback#${replyTo} is parked at grilling (status: grilling, read from ${source}) but ${inCheckout ? "the checkout" : "the landing queue"} already holds feedback#${answering.id} answering it — nothing to answer`,
   };
+}
+
+/** W1-T5628: the landing queue a dedup, reply or trace reads; unreadable, it answers 503 and returns undefined. */
+function readQueueForCheck(deps: PanelGraphDeps, route: string, res: ServerResponse): Map<string, QueuedFeedbackRecord> | undefined {
+  try {
+    return readQueuedFeedbackRecords(deps.inboxRoot);
+  } catch (error) {
+    const reason = String((error as Error)?.message ?? error);
+    deps.logProjection?.("serve.feedback_landing_queue_unreadable", { route, reason });
+    sendJson(res, 503, { error: "landing_queue_unreadable", detail: `the landing queue could not be read, so nothing is answered blind: ${reason}` });
+    return undefined;
+  }
 }
 
 /**
@@ -413,21 +455,25 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
     // W1-T404: LOW — bookkeeping, trivially reversible (capture-only).
     tier: "low",
     handler: jsonAction(validateSubmitFeedback, (input, req, res) => {
+      const queued = readQueueForCheck(deps, "/v1/feedback", res);
+      if (!queued) return;
       if (input.submissionKey) {
-        const existing = findFeedbackBySubmissionKey(deps.root, input.submissionKey);
+        const existing = findFeedbackBySubmissionKey(deps.root, input.submissionKey, deps.inboxRoot);
         if (existing) {
           sendJson(res, 200, { ok: true, entry: existing });
           return;
         }
       }
       if (input.replyTo !== undefined) {
-        const refusal = replyRefusal(deps.root, input.replyTo);
+        const refusal = replyRefusal(deps.root, input.replyTo, queued);
         if (refusal) {
           sendJson(res, 400, { error: "invalid_request", detail: refusal.refused });
           return;
         }
       }
       const raw = input.replyTo !== undefined ? `[answer to feedback#${input.replyTo}] ${input.text}` : input.text;
+      const origin = bearerTokenId(req);
+      const land = { stateRoot: deps.inboxRoot };
       const entry = captureFeedback(deps.root, {
         raw,
         attachments: input.attachments,
@@ -435,19 +481,28 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
         expansion: input.expansion,
         replyTo: input.replyTo,
         submissionKey: input.submissionKey,
+        land,
       });
-      if (input.replyTo !== undefined) {
-        setFeedbackStatus(deps.root, input.replyTo, "answered", {
-          answeredBy: entry.id,
-          ...(deps.feedbackLand ? { land: deps.feedbackLand } : {}),
-        });
+      let landingError: string | undefined;
+      try {
+        const staged = queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.inboxRoot);
+        const flipped = input.replyTo !== undefined && deps.feedbackLand ? [input.replyTo] : [];
+        if (input.replyTo !== undefined) {
+          setFeedbackStatus(deps.root, input.replyTo, "answered", { answeredBy: entry.id, ...(deps.feedbackLand ? { land } : {}) });
+        }
+        const inQueue = new Set(queuedFeedbackLandings(deps.inboxRoot));
+        const unqueued = [entry.id, ...flipped].map(feedbackEntryRepoPath).filter((rel) => !inQueue.has(rel));
+        if (unqueued.length > 0) landingError = staged.error ?? `not queued: ${unqueued.join(", ")}`;
+      } catch (error) {
+        const reason = String((error as Error)?.message ?? error);
+        landingError = reason;
       }
-      const origin = bearerTokenId(req);
       appendPanelLedger(deps.ledgerPath, "panel.feedback_submitted", entry.id, origin, {
         origin_field: entry.origin,
         reply_to: input.replyTo ?? null,
+        ...(landingError === undefined ? { landing: "queued" } : { landing_error: landingError }),
       });
-      sendJson(res, 200, { ok: true, entry });
+      sendJson(res, 200, { ok: true, entry, ...(landingError === undefined ? { landing: "queued" } : {}) });
     }),
   };
 }
@@ -486,7 +541,9 @@ export function buildPreviewFeedbackRoute(deps: PanelGraphDeps): Route {
     tier: "low",
     handler: jsonAction(validatePreviewFeedback, async (input, _req, res) => {
       if (input.replyTo !== undefined) {
-        const refusal = replyRefusal(deps.root, input.replyTo);
+        const queued = readQueueForCheck(deps, "/v1/feedback/preview", res);
+        if (!queued) return;
+        const refusal = replyRefusal(deps.root, input.replyTo, queued);
         if (refusal) {
           sendJson(res, 400, { error: "invalid_request", detail: refusal.refused });
           return;
@@ -536,16 +593,21 @@ export function buildTraceRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
           try {
             feedbackEntry = readFeedbackEntry(deps.root, feedbackId);
           } catch {
-            // origin names a feedback entry that no longer resolves -- render the chain without
-            // it, same as traceCommand's own "note and continue" behavior.
+            // origin names an entry that no longer resolves: render without it, as traceCommand does.
           }
         }
         chain = traceReverse(task, { plan, ledgerLines, github: deps.github }, feedbackEntry);
       } else {
-        let entry: FeedbackEntry;
+        let entry: FeedbackEntry | undefined;
         try {
           entry = readFeedbackEntry(deps.root, id);
         } catch {
+          // Not in the checkout: a console capture is only queued until it lands (W1-T5628).
+          const queued = readQueueForCheck(deps, "/v1/trace", res);
+          if (!queued) return;
+          entry = queued.get(feedbackEntryRepoPath(id)) as unknown as FeedbackEntry | undefined;
+        }
+        if (!entry) {
           sendJson(res, 404, { error: "not_found", detail: `'${id}' is neither a known task id nor a feedback entry` });
           return;
         }
@@ -573,10 +635,11 @@ function validateProposalDecision(body: unknown): { error: string } | ProposalDe
 }
 
 /**
- * POST /v1/feedback/decision — write-scoped. Accept or reject a `proposed` entry over a proposal
- * PR lib/triage.ts already opened. Only a `proposed` entry can be decided (400 otherwise — this
- * caller has a precondition `setFeedbackStatus` itself does not enforce). Ledgers
- * `panel.proposal_accepted`/`panel.proposal_rejected` with the panel's bearer as `origin`.
+ * POST /v1/feedback/decision — write-scoped. Accept or reject a `proposed` entry over a proposal PR
+ * lib/triage.ts already opened. Only a `proposed` entry can be decided (400 otherwise — a precondition
+ * `setFeedbackStatus` does not enforce). Ledgers `panel.proposal_accepted`/`panel.proposal_rejected`
+ * with the panel's bearer as `origin`. W1-T5460: the flip QUEUES under `inboxRoot` for the landing sweep;
+ * W1-T5627: a queued decision is the entry's status, and an unreadable queue refuses (503).
  */
 export function buildProposalDecisionRoute(deps: PanelGraphDeps): Route {
   return {
@@ -593,6 +656,19 @@ export function buildProposalDecisionRoute(deps: PanelGraphDeps): Route {
         sendJson(res, 404, { error: "not_found", detail: `no feedback entry "${input.id}"` });
         return;
       }
+      if (deps.feedbackLand) {
+        try {
+          entry = overlayQueuedFeedback(entry, readQueuedFeedbackRecords(deps.inboxRoot));
+        } catch (error) {
+          const reason = String((error as Error)?.message ?? error);
+          deps.logProjection?.("serve.feedback_landing_queue_unreadable", { route: "/v1/feedback/decision", reason });
+          sendJson(res, 503, {
+            error: "landing_queue_unreadable",
+            detail: `feedback#${input.id}'s landing queue could not be read, so it is never decided blind: ${reason}`,
+          });
+          return;
+        }
+      }
       if (entry.status !== "proposed") {
         sendJson(res, 400, {
           error: "invalid_request",
@@ -601,17 +677,19 @@ export function buildProposalDecisionRoute(deps: PanelGraphDeps): Route {
         return;
       }
       const status = input.decision === "accept" ? "accepted" : "rejected";
+      const origin = bearerTokenId(req);
       const updated = setFeedbackStatus(
         deps.root,
         input.id,
         status,
-        deps.feedbackLand ? { land: deps.feedbackLand } : {},
+        deps.feedbackLand ? { land: { ...deps.feedbackLand, stateRoot: deps.inboxRoot } } : {},
       );
-      const origin = bearerTokenId(req);
+      const queued = deps.feedbackLand !== undefined && queuedFeedbackLandings(deps.inboxRoot).includes(feedbackEntryRepoPath(input.id));
       appendPanelLedger(deps.ledgerPath, input.decision === "accept" ? "panel.proposal_accepted" : "panel.proposal_rejected", input.id, origin, {
         proposal_pr: updated.proposal_pr,
+        ...(queued ? { landing: "queued" } : {}),
       });
-      sendJson(res, 200, { ok: true, id: input.id, status: updated.status, proposalPr: updated.proposal_pr });
+      sendJson(res, 200, { ok: true, id: input.id, status: updated.status, proposalPr: updated.proposal_pr, ...(queued ? { landing: "queued" } : {}) });
     }),
   };
 }
@@ -631,6 +709,20 @@ function parseMaxParam(url: URL): { max?: number } | { error: string } {
  * travels as a separate read-builder capability, never through the write-route dependency bag. */
 function readPanelPlan(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Plan {
   return readPlanSnapshot?.() ?? loadPlan(deps.planPath);
+}
+
+function withPlanSource<B extends object>(deps: PanelGraphDeps, body: B): B | (B & { planSource: PlanSourceOutcome }) {
+  const planSource = deps.readPlanSource?.();
+  return planSource === undefined ? body : { ...body, planSource };
+}
+
+/** W1-T5639: 503 when `readPlanSource` says the plan was never read; its placeholder would invent counts and decisions. */
+function refusePlanSourceUnavailable(deps: PanelGraphDeps, res: ServerResponse): boolean {
+  const planSource = deps.readPlanSource?.();
+  if (planSource?.state !== "unavailable") return false;
+  res.setHeader("retry-after", "5");
+  sendJson(res, 503, { error: "plan_source_unavailable", detail: `serve has not read the plan yet: ${planSource.failure.reason}`, planSource });
+  return true;
 }
 
 /** `Task` preserves `plan_refs`, so a process-owned plan needs no second shard traversal. */
@@ -760,31 +852,49 @@ export interface FrontierRow {
 
 /**
  * Reason text for a task {@link runnableCandidates} declined via a {@link DispatchFilterReason}.
- * `"already-merged"` and `"verify-not-auto"` both return `undefined` — a done task is
- * `PlanProgress.done`, and a `verify:human` task is permanently parked, already rendered
- * elsewhere. `unmetDependencies` is re-consulted (a pure DAG walk) only to name which id(s).
+ * `"already-merged"`, `"verify-not-auto"` and `"credit-indeterminate"` return `undefined` — done,
+ * permanently parked, or unread (W1-T2675): no row. W1-T5410: every other reason names ITSELF, and
+ * the switch is exhaustive, so a new union arm fails the build here instead of inheriting the
+ * unmet-dependency sentence. `unmetDependencies` is re-consulted (a pure DAG walk) only to name ids.
  */
-function frontierFilterReason(
+export function frontierFilterReason(
   plan: Plan,
   task: Task,
   reason: DispatchFilterReason,
   isMerged: MergedSet,
 ): { kind: FrontierReasonKind; reason: string } | undefined {
-  if (reason === "already-merged") return undefined;
-  if (reason === "verify-not-auto") return undefined;
-  // Skipped, not guessed at (W1-T2675) — the caller's own doc names this Now-tab territory.
-  // Falling through to unmet-deps below would render a false "(none resolved)" sentence.
-  if (reason === "credit-indeterminate") return undefined;
-  if (reason === "blocked") {
-    return { kind: "blocked", reason: task.note ? `blocked — ${task.note}` : `${task.id}'s own status is blocked` };
+  const held = (text: string) => ({ kind: "blocked" as const, reason: text });
+  switch (reason) {
+    case "already-merged":
+    case "verify-not-auto":
+    case "credit-indeterminate":
+      return undefined;
+    case "blocked":
+      return held(task.note ? `blocked — ${task.note}` : `${task.id}'s own status is blocked`);
+    case "retired":
+      return held(`retired (${task.retirement ?? "retired"}) — a retirement record; it will never be built and does not clear on its own`);
+    case "foreign-repo":
+      return held(`targets repo ${task.repo}, not the repo this daemon builds — another daemon's to dispatch`);
+    case "operator-build":
+      return held(`edits ${workflowPaths(task).join(", ")}, which the fleet App cannot push — needs an operator build`);
+    case "held-pre-dispatch-refusal":
+      return held("the same pre-dispatch refusal was already escalated — held until the task contract changes");
+    case "continued-this-pass":
+      return held("continued earlier this drain pass — not re-offered until the next pass");
+    case "run-branch-already-pushed":
+      return held(`a run branch for ${task.id} is already pushed to origin — not re-dispatched while it stands`);
+    case "unmet-deps": {
+      const ids = unmetDependencies(plan, task, (t) => isMerged(t.id));
+      return {
+        kind: "unmet-dependency",
+        reason: `blocked on unmet dependenc${ids.length === 1 ? "y" : "ies"}: ${ids.join(", ") || "(none resolved)"}`,
+      };
+    }
+    default: {
+      const unhandled: never = reason;
+      throw new Error(`frontierFilterReason: unhandled dispatch filter reason ${String(unhandled)}`);
+    }
   }
-  // "unmet-deps"
-  const merged: MergedResolver = (t) => isMerged(t.id);
-  const ids = unmetDependencies(plan, task, merged);
-  return {
-    kind: "unmet-dependency",
-    reason: `blocked on unmet dependenc${ids.length === 1 ? "y" : "ies"}: ${ids.join(", ") || "(none resolved)"}`,
-  };
 }
 
 /** How many frontier rows GET /v1/plan/view renders absent an explicit `?frontier=<n>`. */
@@ -946,50 +1056,48 @@ function activitySummary(row: Record<string, unknown>, taskId?: string): string 
   return taskId ? `${step} (${taskId})` : step;
 }
 
+/** Newest first, a millisecond's rows by their text: a rotation split reorders a tie's reads (2026-10-06 console). */
+function rankedActivityRows(rows: ReadonlyArray<Record<string, unknown>>): Array<{ index: number; ms: number; occurredAt: string; row: Record<string, unknown> }> {
+  const ranked: Array<{ index: number; ms: number; occurredAt: string; row: Record<string, unknown>; text?: string }> = [];
+  rows.forEach((row, index) => {
+    const occurredAt = activityTimestamp(row.ts);
+    if (occurredAt && boundedActivityText(row.step, 120)) ranked.push({ index, ms: Date.parse(occurredAt), occurredAt, row });
+  });
+  const text = (r: (typeof ranked)[number]): string => (r.text ??= JSON.stringify(r.row));
+  return ranked.sort((a, b) => b.ms - a.ms || (text(a) < text(b) ? -1 : text(a) > text(b) ? 1 : 0));
+}
+
 function activityRows(
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
   observedAt: string,
 ): OperatorActivityItem[] {
   const duplicates = new Map<string, number>();
-  return ledgerLines
-    .map((row): OperatorActivityItem | undefined => {
-      const occurredAt = activityTimestamp(row.ts);
-      const taskId = activityTaskId(row);
-      const summary = activitySummary(row, taskId);
-      if (!occurredAt || !summary) return undefined;
-      const key = `${boundedActivityText(row.step, 120) ?? "ledger"}:${taskId ?? "fleet"}:${occurredAt}`;
-      const duplicate = duplicates.get(key) ?? 0;
-      duplicates.set(key, duplicate + 1);
-      return {
-        id: activityId(row, occurredAt, duplicate),
-        kind: "activity" as const,
-        summary,
-        source: `rmd:ledger:${boundedActivityText(row.step, 120) ?? "event"}`,
-        observedAt: occurredAt,
-        freshness: "verified" as const,
-        ...(taskId ? { taskId } : {}),
-        ...(activityRepository(row) ? { repository: activityRepository(row) } : {}),
-      } satisfies OperatorActivityItem;
-    })
-    .filter((item): item is OperatorActivityItem => Boolean(item))
-    .sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt))
-    .slice(0, OPERATOR_ACTIVITY_MAX_ITEMS);
+  return rankedActivityRows(ledgerLines).slice(0, OPERATOR_ACTIVITY_MAX_ITEMS).map(({ row, occurredAt }): OperatorActivityItem => {
+    const taskId = activityTaskId(row);
+    const key = `${boundedActivityText(row.step, 120) ?? "ledger"}:${taskId ?? "fleet"}:${occurredAt}`;
+    const duplicate = duplicates.get(key) ?? 0;
+    duplicates.set(key, duplicate + 1);
+    return {
+      id: activityId(row, occurredAt, duplicate),
+      kind: "activity" as const,
+      summary: activitySummary(row, taskId)!,
+      source: `rmd:ledger:${boundedActivityText(row.step, 120) ?? "event"}`,
+      observedAt: occurredAt,
+      freshness: "verified" as const,
+      ...(taskId ? { taskId } : {}),
+      ...(activityRepository(row) ? { repository: activityRepository(row) } : {}),
+    } satisfies OperatorActivityItem;
+  });
 }
 
 /**
  * One rotation's rows reduced to those that could reach {@link activityRows}' bound: its newest
- * {@link OPERATOR_ACTIVITY_MAX_ITEMS} activities, ties to the earlier row, kept in file order. The union's
- * newest items are the newest of these, and every earlier row sharing an item's duplicate key ranks above
- * that item, so it is kept too and each id's duplicate count is unchanged.
+ * {@link OPERATOR_ACTIVITY_MAX_ITEMS} activities by {@link rankedActivityRows}' rank, kept in file order. The
+ * union's newest items are the newest of these, and every row of an item's duplicate key ranked before it
+ * is kept too, so each id's duplicate count is unchanged.
  */
 export function operatorActivityCandidates(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
-  const ranked: Array<{ index: number; ms: number }> = [];
-  rows.forEach((row, index) => {
-    const at = activityTimestamp(row.ts);
-    if (at && boundedActivityText(row.step, 120)) ranked.push({ index, ms: Date.parse(at) });
-  });
-  ranked.sort((a, b) => b.ms - a.ms || a.index - b.index);
-  return ranked
+  return rankedActivityRows(rows)
     .slice(0, OPERATOR_ACTIVITY_MAX_ITEMS)
     .map((r) => r.index)
     .sort((a, b) => a - b)
@@ -1190,6 +1298,239 @@ export function buildOperatorActivityRoute(deps: PanelGraphDeps, readPlanSnapsho
   };
 }
 
+// ── Product-level incident identity and lifecycle (W1-T3854) ───────────────
+//
+// A follow-up to the activity projection above, not a second feed and not a replacement for the
+// transport-specific dedup arms (cost anomalies, escalations, reviews, proposals) nor for the SRE
+// lane's own filing/fix state machine in incident-lifecycle.ts. It answers one question: which
+// observations are the SAME failure, so the operator reads one card while the ledger keeps every
+// row. Grouping only ever hides duplicate CARDS: every observation stays on its group.
+
+export const INCIDENT_IDENTITY_VERSION = "incident-identity-v1" as const;
+
+export type IncidentLifecycleState = "new" | "active" | "resolved" | "regressed" | "snoozed" | "unmeasurable";
+
+/** The named causal discriminator: the field that says WHY two failures are one. Exactly one value groups. */
+export type IncidentDiscriminator = { name: string; values: ReadonlyArray<string> };
+
+export type IncidentObservation = {
+  /** The evidence row's own id — never rewritten or dropped. */
+  id: string;
+  observedAt: string;
+  instance?: string;
+  repository?: string;
+  failureClass?: string;
+  /** Task or operation scope. */
+  scope?: string;
+  /** Source revision/release the observation was made at. Carried, but NOT part of the key (see below). */
+  release?: string;
+  discriminator?: IncidentDiscriminator;
+  /** Display only: a title is never an identity input. */
+  title?: string;
+};
+
+export type IncidentUngroupableReason =
+  | "discriminator-unavailable"
+  | "discriminator-ambiguous"
+  | "failure-class-unavailable"
+  | "scope-unavailable"
+  | "observed-at-unavailable";
+
+export type IncidentIdentity =
+  | {
+      version: typeof INCIDENT_IDENTITY_VERSION;
+      grouped: true;
+      key: string;
+      parts: { instance: string; failureClass: string; scope: string; discriminator: { name: string; value: string } };
+    }
+  | { version: typeof INCIDENT_IDENTITY_VERSION; grouped: false; key: string; reason: IncidentUngroupableReason };
+
+function incidentField(value: unknown, max = 200): string | undefined {
+  return boundedActivityText(value, max);
+}
+
+/**
+ * The identity of one observation. Derived only from bounded semantic fields — instance/repository,
+ * failure class, scope and the named causal discriminator — never from a title. A missing or ambiguous
+ * input yields an UNGROUPABLE identity keyed on the observation's own id, so it stays a card of its own.
+ *
+ * Release is deliberately not a key part: a resolved incident must be able to regress in a NEWER release,
+ * which a release-keyed identity would instead open as an unrelated incident. It rides on the
+ * observation and on the resolution, where regression reads it.
+ */
+export function incidentIdentity(observation: IncidentObservation): IncidentIdentity {
+  const own = `ungroupable:${observation.id}`;
+  const ungroupable = (reason: IncidentUngroupableReason): IncidentIdentity => ({ version: INCIDENT_IDENTITY_VERSION, grouped: false, key: own, reason });
+  if (activityTimestamp(observation.observedAt) === undefined) return ungroupable("observed-at-unavailable");
+  const failureClass = incidentField(observation.failureClass);
+  if (!failureClass) return ungroupable("failure-class-unavailable");
+  const scope = incidentField(observation.scope, 160);
+  if (!scope) return ungroupable("scope-unavailable");
+  const name = incidentField(observation.discriminator?.name, 80);
+  const values = (observation.discriminator?.values ?? []).map((v) => incidentField(v, 200)).filter((v): v is string => v !== undefined);
+  if (!name || values.length === 0) return ungroupable("discriminator-unavailable");
+  if (new Set(values).size > 1) return ungroupable("discriminator-ambiguous");
+  const instance = incidentField(observation.instance) ?? incidentField(observation.repository) ?? "local";
+  const parts = { instance, failureClass, scope, discriminator: { name, value: values[0]! } };
+  const digest = createHash("sha256").update(JSON.stringify([INCIDENT_IDENTITY_VERSION, instance, failureClass, scope, name, values[0]])).digest("hex").slice(0, 16);
+  return { version: INCIDENT_IDENTITY_VERSION, grouped: true, key: `incident:v1:${digest}`, parts };
+}
+
+/** A ledger row as an incident observation: only a failing row that NAMES its class and cause is groupable. */
+export function incidentObservationFromLedgerRow(row: Record<string, unknown>, index: number): IncidentObservation | undefined {
+  const failureClass = incidentField(row.failure_class);
+  const observedAt = activityTimestamp(row.ts);
+  if (!failureClass || !observedAt) return undefined;
+  const cause = incidentField(row.cause_key);
+  const repository = activityRepository(row);
+  const release = incidentField(row.release) ?? incidentField(row.head_sha);
+  const scope = activityTaskId(row);
+  const step = incidentField(row.step, 120);
+  return {
+    id: incidentField(row.id, 160) ?? incidentField(row.event_id, 160) ?? `ledger:${index}:${step ?? "event"}:${observedAt}`,
+    observedAt,
+    failureClass,
+    ...(repository ? { repository } : {}),
+    ...(scope ? { scope } : {}),
+    ...(release ? { release } : {}),
+    ...(cause ? { discriminator: { name: "cause_key", values: [cause] } } : {}),
+    ...(step ? { title: step } : {}),
+  };
+}
+
+export type IncidentGroup = {
+  identity: IncidentIdentity;
+  key: string;
+  /** EVERY observation of this group, oldest first — grouping never deletes or rewrites evidence. */
+  observations: ReadonlyArray<IncidentObservation>;
+  count: number;
+  firstObservedAt: string;
+  lastObservedAt: string;
+};
+
+/**
+ * Collapse observations into one group per identity. Ungroupable observations each stay a group of one.
+ * Total: the groups' observations are exactly the input, so no card count can lose an evidence row.
+ */
+export function groupIncidentObservations(observations: ReadonlyArray<IncidentObservation>): IncidentGroup[] {
+  const byKey = new Map<string, { identity: IncidentIdentity; rows: IncidentObservation[] }>();
+  observations.forEach((observation, index) => {
+    const identity = incidentIdentity(observation);
+    // An ungroupable id may repeat across rows; the position keeps those cards separate too.
+    const key = identity.grouped ? identity.key : `${identity.key}#${index}`;
+    const entry = byKey.get(key);
+    if (entry) entry.rows.push(observation);
+    else byKey.set(key, { identity, rows: [observation] });
+  });
+  return [...byKey.entries()].map(([key, { identity, rows }]) => {
+    const sorted = rows.slice().sort((a, b) => (Date.parse(a.observedAt) || 0) - (Date.parse(b.observedAt) || 0));
+    return {
+      identity,
+      key,
+      observations: sorted,
+      count: sorted.length,
+      firstObservedAt: sorted[0]!.observedAt,
+      lastObservedAt: sorted[sorted.length - 1]!.observedAt,
+    };
+  });
+}
+
+/** What shipped the fix: a resolution that cites nothing is not honoured. */
+export type IncidentResolutionRef = { kind: "commit" | "pr" | "receipt"; ref: string };
+
+export type IncidentResolution = {
+  cites?: IncidentResolutionRef;
+  resolvedAt: string;
+  release?: string;
+  /** Observations the resolver already saw: replaying one of these never reopens the incident. */
+  coveredObservationIds?: ReadonlyArray<string>;
+};
+
+/** At least one trigger is required; a snooze with none is rejected rather than lasting forever. */
+export type IncidentSnooze = {
+  snoozedAt: string;
+  /** Time trigger: visible again once `now` reaches this instant. */
+  until?: string;
+  /** Free-text condition; the caller's evaluator reports it in `conditionMet`. */
+  condition?: string;
+  conditionMet?: boolean;
+  /** New-activity trigger: an observation newer than `snoozedAt` makes it visible again. */
+  reopenOnNewActivity?: boolean;
+};
+
+export type IncidentLifecycleRecord = {
+  key: string;
+  acknowledgedAt?: string;
+  resolution?: IncidentResolution;
+  snooze?: IncidentSnooze;
+};
+
+export type IncidentProjection = {
+  version: typeof INCIDENT_IDENTITY_VERSION;
+  key: string;
+  state: IncidentLifecycleState;
+  reason: string;
+  /** False only while a valid snooze is holding the card back; the record is preserved either way. */
+  visible: boolean;
+  group: IncidentGroup;
+  /** The observation that reopened a resolved incident, when it regressed. */
+  regressedBy?: string;
+  regressedInRelease?: string;
+};
+
+function incidentMs(value: string | undefined): number | undefined {
+  const iso = activityTimestamp(value);
+  return iso === undefined ? undefined : Date.parse(iso);
+}
+
+/** Project one group's lifecycle state from its observations and the operator's record. Pure; reads `now` once. */
+export function projectIncidentLifecycle(group: IncidentGroup, record: IncidentLifecycleRecord | undefined, now: number): IncidentProjection {
+  const base = (state: IncidentLifecycleState, reason: string, extra: Partial<IncidentProjection> = {}): IncidentProjection =>
+    ({ version: INCIDENT_IDENTITY_VERSION, key: group.key, state, reason, visible: state !== "snoozed", group, ...extra });
+  if (!group.identity.grouped) return base("unmeasurable", `ungroupable: ${group.identity.reason}`);
+  const own = record && record.key === group.key ? record : undefined;
+  const resolution = own?.resolution;
+  if (resolution) {
+    const resolvedMs = incidentMs(resolution.resolvedAt);
+    if (!resolution.cites || !incidentField(resolution.cites.ref)) return base("unmeasurable", "resolution-uncited");
+    if (resolvedMs === undefined) return base("unmeasurable", "resolution-time-unavailable");
+    const covered = new Set(resolution.coveredObservationIds ?? []);
+    const newer = group.observations.find((o) => !covered.has(o.id) && (incidentMs(o.observedAt) ?? -Infinity) > resolvedMs);
+    if (newer) return base("regressed", "newer-event-than-resolution", { regressedBy: newer.id, ...(newer.release ? { regressedInRelease: newer.release } : {}) });
+    return base("resolved", `resolved-by-${resolution.cites.kind}:${resolution.cites.ref}`);
+  }
+  const snooze = own?.snooze;
+  const snoozeMs = incidentMs(snooze?.snoozedAt);
+  const untilMs = incidentMs(snooze?.until);
+  const hasTrigger = snooze !== undefined && (untilMs !== undefined || incidentField(snooze.condition) !== undefined || snooze.reopenOnNewActivity === true);
+  const open = own?.acknowledgedAt !== undefined ? base("active", "acknowledged") : base("new", "no-lifecycle-record");
+  if (snooze === undefined) return open;
+  if (!hasTrigger || snoozeMs === undefined) return { ...open, reason: `${open.reason}; snooze-rejected: ${hasTrigger ? "snoozed-at-unavailable" : "no-trigger"}` };
+  if (untilMs !== undefined && now >= untilMs) return base("active", "snooze-expired");
+  if (snooze.conditionMet === true) return base("active", "snooze-condition-met");
+  if (snooze.reopenOnNewActivity === true && group.observations.some((o) => (incidentMs(o.observedAt) ?? -Infinity) > snoozeMs)) {
+    return base("active", "snooze-new-activity");
+  }
+  return base("snoozed", "snooze-trigger-pending");
+}
+
+/** Ledger rows -> grouped, lifecycle-projected incidents, newest activity first. Ungroupable rows stay visible. */
+export function projectOperatorActivityIncidents(
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  records: ReadonlyArray<IncidentLifecycleRecord>,
+  now: number,
+): IncidentProjection[] {
+  const observations: IncidentObservation[] = [];
+  ledgerLines.forEach((row, index) => {
+    const observation = incidentObservationFromLedgerRow(row, index);
+    if (observation) observations.push(observation);
+  });
+  const byKey = new Map(records.map((r) => [r.key, r] as const));
+  return groupIncidentObservations(observations)
+    .map((group) => projectIncidentLifecycle(group, byKey.get(group.key), now))
+    .sort((a, b) => (Date.parse(b.group.lastObservedAt) || 0) - (Date.parse(a.group.lastObservedAt) || 0));
+}
+
 // ── Per-section filed/merged counts (W1-T376) ──────────────────────────────────────────────
 //
 // plan_refs is polymorphic — a ref is one of five kinds; only the section-shaped ones resolve
@@ -1358,6 +1699,11 @@ export function buildPlanViewRoute(deps: PanelGraphDeps, readPlanSnapshot?: () =
         sendJson(res, 400, { error: "invalid_request", detail: "frontier must be a positive number" });
         return;
       }
+      const planSource = deps.readPlanSource?.();
+      if (planSource?.state === "unavailable") {
+        sendJson(res, 200, { planSource, progress: { unknown: true, unavailableReason: `plan_source_unavailable: ${planSource.failure.reason}` }, sections: [], frontier: [] });
+        return;
+      }
       const plan = readPanelPlan(deps, readPlanSnapshot);
       const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY });
       const isMerged: MergedSet = (id) => projection.get(id)?.merged ?? false;
@@ -1368,7 +1714,7 @@ export function buildPlanViewRoute(deps: PanelGraphDeps, readPlanSnapshot?: () =
       const ledgerLines = readLedgerLines(deps.ledgerPath);
       const frontier = buildPlanFrontier(plan, isMerged, limit, ledgerLines, undefined, (id) =>
         projection.get(id)?.indeterminate === true);
-      sendJson(res, 200, { progress, sections, frontier });
+      sendJson(res, 200, withPlanSource(deps, { progress, sections, frontier }));
     },
   };
 }
@@ -1440,6 +1786,9 @@ export interface InboxNotReadyItem {
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
   plain: PlainInboxMessage;
   reasons: PredicateFailure[];
+  state?: "not_ready" | "deferred_with_trigger";
+  trigger?: InboxClassification["trigger"];
+  resolution?: { method: "POST"; path: "/v1/inbox/reframe"; fields: { proposalId: string } };
 }
 
 /** W1-T4086: one fleet-owned proposal in `GET /v1/inbox`'s `fleet` list, with the lane it sits in. */
@@ -1475,6 +1824,7 @@ export interface ClassifiedInbox {
   classifications: InboxClassification[];
   ledgerLines: LedgerLines;
   projection: Map<string, StatusProjection>;
+  attentionEvidence?: InboxAttentionEvidence;
 }
 
 function statStamp(path: string): string | undefined {
@@ -1516,8 +1866,9 @@ interface InboxClassifyState {
   /** The last ledger read, reused while the ledger's stamp is unchanged. */
   ledger?: { stamp: string | null; lines: LedgerLines; verdictDigest: string };
   last?: { key: string; plan: Plan; planKey?: string; result: ClassifiedInbox; /** Epoch millis the pass that made `result` completed. */ at: number };
+  generation?: object;
   /** A sliced refresh in progress, so a second caller with the same inputs awaits it instead of starting another. */
-  pending?: { key: string; plan: Plan; promise: Promise<ClassifiedInbox> };
+  pending?: { key: string; plan: Plan; generation: object; promise: Promise<ClassifiedInbox> };
 }
 const inboxClassifyStates = new WeakMap<PanelGraphDeps, InboxClassifyState>();
 
@@ -1726,9 +2077,10 @@ export function classifyAllProposalsMemo(deps: PanelGraphDeps, readPlanSnapshot?
   const fp = inboxFingerprint(deps, state, readPlanSnapshot);
   const reused = reusableResult(state, fp);
   if (reused !== undefined) return reused;
+  const generation = state.generation = {};
   const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.archiveReleases);
   const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(pass.classifyOne), ledgerLines: fp.ledgerLines, projection: fp.projection };
-  state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: systemClock.now() };
+  if (state.generation === generation) state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: systemClock.now() };
   return result;
 }
 
@@ -1764,9 +2116,12 @@ export async function classifyAllProposalsSliced(
   const state = inboxClassifyState(deps);
   const retained = await readRetainedHumanReleases(deps);
   const fp = inboxFingerprint(deps, state, readPlanSnapshot, retained.receipts);
+  const attentionEvidence = attentionEvidenceFor(retained, fp.ledgerLines);
   const reused = reusableResult(state, fp);
-  if (reused !== undefined) return reused;
-  if (state.pending !== undefined && state.pending.key === fp.key && state.pending.plan === fp.plan) return state.pending.promise;
+  if (reused !== undefined) return JSON.stringify(reused.attentionEvidence) === JSON.stringify(attentionEvidence)
+    ? reused : { ...reused, attentionEvidence };
+  if (state.pending !== undefined && state.pending.generation === state.generation && state.pending.key === fp.key && state.pending.plan === fp.plan) return state.pending.promise;
+  const generation = state.generation = {};
   const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.archiveReleases);
   const run = async (): Promise<ClassifiedInbox> => {
     const classifications: InboxClassification[] = [];
@@ -1774,22 +2129,35 @@ export async function classifyAllProposalsSliced(
       if (i > 0) await yieldNow();
       for (const proposal of pass.proposals.slice(i, i + INBOX_CLASSIFY_SLICE)) classifications.push(pass.classifyOne(proposal));
     }
-    const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications, ledgerLines: fp.ledgerLines, projection: fp.projection };
-    state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: systemClock.now() };
+    const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications, ledgerLines: fp.ledgerLines, projection: fp.projection, attentionEvidence };
+    if (state.generation === generation) state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: systemClock.now() };
     return result;
   };
   const promise = run().finally(() => {
     if (state.pending?.promise === promise) state.pending = undefined;
   });
-  state.pending = { key: fp.key, plan: fp.plan, promise };
+  state.pending = { key: fp.key, plan: fp.plan, generation, promise };
   return promise;
 }
 
-/** GET /v1/inbox's lanes over one classification pass: what the route answers, and what the inbox view pages (inbox-view.ts). */
-export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "classifications" | "ledgerLines">, inboxRoot: string) {
+export interface InboxStores {
+  fleetDecisions: DecisionStore;
+  plainMessages: PlainStore;
+}
+
+export function readInboxStores(inboxRoot: string, proposals: ReadonlyArray<{ id: string }>): InboxStores {
+  const stateDir = join(inboxRoot, "state");
+  const ids = new Set(proposals.map((p) => p.id));
+  const narrow = <T>(store: Record<string, T>): Record<string, T> => Object.fromEntries(Object.entries(store).filter(([id]) => ids.has(id)));
+  return { fleetDecisions: narrow(fleetLaneStoreForDisplay(stateDir)), plainMessages: narrow(readPlainStore(plainStorePath(stateDir))) };
+}
+
+/** GET /v1/inbox's lanes over one pass and the stores the slow lane persisted with it (none carried: the stores now). */
+export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "classifications" | "ledgerLines"> & { stores?: InboxStores }, inboxRoot: string) {
   const { proposals, classifications, ledgerLines } = classified;
+  const stores = classified.stores ?? readInboxStores(inboxRoot, proposals);
   // W1-T4087: every item carries its plain message — the stored one, or its kind's template.
-  const plainStore = readPlainStore(plainStorePath(join(inboxRoot, "state")));
+  const plainStore = stores.plainMessages;
 
   const ready: InboxReadyItem[] = [];
   const drafting: InboxDraftingItem[] = [];
@@ -1816,22 +2184,31 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
         plain: plainInboxMessage(proposal, plainStore),
         reason: classification.declinedReason ?? "declined by an operator",
       });
-    } else if (classification.state === "not_ready") {
+    } else if (classification.state === "not_ready" || classification.state === "deferred_with_trigger") {
       // W1-T2604 (finding (i)): the failing predicate(s) classifyProposal already named,
       // never a bare "not_ready" — see InboxNotReadyItem's own doc.
-      notReady.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), reasons: classification.reasons });
+      notReady.push({
+        proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), reasons: classification.reasons,
+        state: classification.state, ...(classification.trigger ? { trigger: classification.trigger } : {}),
+        resolution: { method: "POST", path: "/v1/inbox/reframe", fields: { proposalId: proposal.id } },
+      });
     }
   }
   // W1-T4086: split every lane by who must act. `needsYou` holds only the operator's items;
-  // `fleet` holds the fleet's own findings with the lane each sits in. The four top-level
-  // lanes stay unchanged for one release so the console can move over without a break.
+  // `fleet` holds the fleet's own findings with the lane each sits in. The top-level
+  // lanes retain records; only the shared projection selects the operator's asks (W1-T5340).
   const isOperator = (item: { proposalId: string }) => inboxOwner({ id: item.proposalId }) === "operator";
-  const fleetDecisions = fleetLaneDecisions(ledgerLines as never, fleetLaneStoreForDisplay(join(inboxRoot, "state")));
+  const humanGates = projectProposalHumanGates(classifications.filter((c) => byId.has(c.proposalId)));
+  const asks = new Set(humanGates.gates.map((gate) => decodeURIComponent(gate.key.split(":")[2]!)));
+  const isAsk = (item: { proposalId: string }) => asks.has(item.proposalId);
+  const operatorItems = <T extends { proposalId: string }>(items: T[]) => items.filter(isOperator)
+    .map((item) => ({ ...item, classification: isAsk(item) ? "ASK" as const : "RECORD" as const }));
+  const fleetDecisions = fleetLaneDecisions(ledgerLines as never, stores.fleetDecisions);
   const needsYou = {
-    ready: ready.filter(isOperator),
-    drafting: drafting.filter(isOperator),
-    notReady: notReady.filter(isOperator),
-    declined: declined.filter(isOperator),
+    ready: operatorItems(ready),
+    drafting: operatorItems(drafting),
+    notReady: operatorItems(notReady),
+    declined: operatorItems(declined),
   };
   const fleet: InboxFleetItem[] = [
     ...ready.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "ready" as const })),
@@ -1848,9 +2225,12 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
     notReady: notReady.length,
     declined: declined.length,
     fleet: fleet.length,
-    needsYou: { ready: needsYou.ready.length, drafting: needsYou.drafting.length, notReady: needsYou.notReady.length, declined: needsYou.declined.length },
+    needsYou: {
+      ready: needsYou.ready.filter(isAsk).length, drafting: needsYou.drafting.filter(isAsk).length,
+      notReady: needsYou.notReady.filter(isAsk).length, declined: needsYou.declined.filter(isAsk).length,
+    },
   };
-  return { ready, drafting, notReady, declined, needsYou, fleet, counts };
+  return { ready, drafting, notReady, declined, needsYou, fleet, counts, humanGates };
 }
 
 /**
@@ -1869,23 +2249,24 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
     method: "GET",
     path: "/v1/inbox",
     scope: "read",
-    // W1-T4261: async so a recompute yields between slices; the console's cached-read wrapper serves the previous
-    // body meanwhile. An unchanged input set answers from the memo with no recompute at all.
+    // A read writes nothing: the ratified-row prune and the fleet lane's snapshot (W1-T4089) are the slow lane's (inbox-view.ts).
     handler: async (req, res) => {
       const shape = inboxShapeOf(req.url);
       if ("error" in shape) {
         sendJson(res, 400, { error: "invalid_request", detail: shape.error });
         return;
       }
-      const { ready, drafting, notReady, declined, needsYou, fleet, counts } = inboxLanes(await classifyAllProposalsSliced(deps, readPlanSnapshot), deps.inboxRoot);
-      // A read writes nothing: the ratified-row prune and the snapshot the daemon's fleet lane acts
-      // on (W1-T4089) are written by serve's slow lane on a cadence (inbox-view.ts).
+      if (refusePlanSourceUnavailable(deps, res)) return;
+      const read = await inboxRead(deps, readPlanSnapshot);
+      if (!read) return void inboxNotReady(res);
+      const { ready, drafting, notReady, declined, needsYou, fleet, counts } = read.lanes();
       const lanes = { ready, drafting, notReady, declined, fleet };
-      if (shape.section === undefined) sendJson(res, 200, { ready, drafting, notReady, declined, needsYou, fleet, counts });
-      else if (shape.section === "needsYou") sendJson(res, 200, { needsYou, counts });
+      const at = { ...(deps.inboxFromSlowLane && read.classifiedAt !== undefined ? { classifiedAt: read.classifiedAt } : {}), ...withPlanSource(deps, {}) };
+      if (shape.section === undefined) sendJson(res, 200, { ready, drafting, notReady, declined, needsYou, fleet, counts, ...at });
+      else if (shape.section === "needsYou") sendJson(res, 200, { needsYou, counts, ...at });
       else {
         const { items, page } = readPage<{ proposalId: string }>(lanes[shape.section], (item) => item.proposalId, shape.page);
-        sendJson(res, 200, { [shape.section]: items, page: { section: shape.section, ...page }, counts });
+        sendJson(res, 200, { [shape.section]: items, page: { section: shape.section, ...page }, counts, ...at });
       }
     },
   };
@@ -1922,7 +2303,7 @@ const CLASSIFICATION_TO_THREAD_STATE: Partial<Record<string, InboxThreadItem["st
 
 /** Every operator-owned item with its plain message and state, off the SAME classification
  *  `GET /v1/inbox` renders. */
-function operatorThreadItems(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan, classified = classifyAllProposalsMemo(deps, readPlanSnapshot)): InboxThreadItem[] {
+function operatorThreadItems(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan, classified: ThreadListInbox = classifyAllProposalsMemo(deps, readPlanSnapshot)): InboxThreadItem[] {
   const { proposals, classifications } = classified;
   const plainStore = readPlainStore(plainStorePath(join(deps.inboxRoot, "state")));
   const items: InboxThreadItem[] = [];
@@ -1960,17 +2341,35 @@ function humanReleaseReceipt(row: Record<string, unknown>): string {
  * in the classifier fingerprint and must not be scanned a second time on each Inbox read. */
 async function readRetainedHumanReleases(deps: PanelGraphDeps) {
   const ledger = await readLedgerUnionRecordsMemoized(dirname(deps.ledgerPath), attentionLedgerMemo(deps), {
-    step: ["ratify.approved"], readLiveRecords: () => [], refuseIncomplete: true,
+    step: ["ratify.approved", "verify_human.judged"], readLiveRecords: () => [], refuseIncomplete: true,
   });
   const receipts = new Map<string, string>();
+  const judges = new Map<string, { decision: string; reason: string }>();
   if (ledger.ok) {
     for (const row of ledger.rows) {
       if (row.step === "ratify.approved" && row.released === "verify-human" && typeof row.task_id === "string") {
-        receipts.set(row.task_id, humanReleaseReceipt(row));
+        receipts.set(row.task_id, humanReleaseReceipt(row).slice(0, 512));
+      }
+      if (row.step === "verify_human.judged" && typeof row.task_id === "string" && typeof row.judge_decision === "string" && typeof row.judge_reason === "string") {
+        judges.set(row.task_id, { decision: row.judge_decision.slice(0, 64), reason: row.judge_reason.slice(0, 300) });
       }
     }
   }
-  return { receipts };
+  const archiveLedger = ledger.unread.length > 0 || ledger.archiveCount === 0 ? "unavailable" as const : "partial" as const;
+  return { receipts, judges, archiveLedger };
+}
+
+function attentionEvidenceFor(retained: Awaited<ReturnType<typeof readRetainedHumanReleases>>, live: LedgerLines): InboxAttentionEvidence {
+  const releases = new Map(retained.receipts);
+  const judges = new Map(retained.judges);
+  for (const row of live) {
+    if (typeof row.task_id !== "string") continue;
+    if (row.step === "ratify.approved" && row.released === "verify-human") releases.set(row.task_id, humanReleaseReceipt(row).slice(0, 512));
+    if (row.step === "verify_human.judged" && typeof row.judge_decision === "string" && typeof row.judge_reason === "string") {
+      judges.set(row.task_id, { decision: row.judge_decision.slice(0, 64), reason: row.judge_reason.slice(0, 300) });
+    }
+  }
+  return { archiveLedger: retained.archiveLedger, releases: [...releases], judges: [...judges] };
 }
 
 /** GET /v1/inbox/attention-census — read-only, core-scoped, source-qualified. */
@@ -1978,38 +2377,38 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
   return {
     method: "GET", path: "/v1/inbox/attention-census", scope: "read",
     handler: async (_req, res) => {
+      res.setHeader("cache-control", "private, no-store");
+      if (refusePlanSourceUnavailable(deps, res)) return;
       const threads = readThreadsOr500(deps, res);
       if (!threads) return;
-      const classified = await classifyAllProposalsSliced(deps, readPlanSnapshot);
-      const plan = classified.plan;
-      const ledger = await readLedgerUnionRecordsMemoized(dirname(deps.ledgerPath), attentionLedgerMemo(deps), {
-        step: ["ratify.approved", "verify_human.judged"],
-        refuseIncomplete: true,
-      });
-      const releasedTaskIds = new Set<string>();
-      const releaseReceipts = new Map<string, string>();
-      const judgeByTask = new Map<string, { decision: string; reason: string }>();
-      for (const row of classified.ledgerLines) {
-        if (row.step === "ratify.approved" && row.released === "verify-human" && typeof row.task_id === "string") {
-          releasedTaskIds.add(row.task_id);
-          releaseReceipts.set(row.task_id, humanReleaseReceipt(row));
-        }
+      const classified = await inboxRead(deps, readPlanSnapshot);
+      if (!classified) return void inboxNotReady(res);
+      const builtAtMs = systemClock.now();
+      const classifiedAtMs = Date.parse(classified.classifiedAt ?? "");
+      if (!Number.isFinite(classifiedAtMs) || classifiedAtMs > builtAtMs) {
+        sendJson(res, 503, { error: "attention_snapshot_invalid", detail: "The Inbox classification time is missing or ahead of this read; wait for a valid slow-lane classification." });
+        return;
       }
-      for (const row of ledger.rows) {
-        if (typeof row.task_id !== "string") continue;
-        if (row.step === "ratify.approved" && row.released === "verify-human") {
-          releasedTaskIds.add(row.task_id);
-          releaseReceipts.set(row.task_id, humanReleaseReceipt(row));
-        }
-        if (row.step === "verify_human.judged" && typeof row.judge_decision === "string" && typeof row.judge_reason === "string") {
-          judgeByTask.set(row.task_id, { decision: row.judge_decision, reason: row.judge_reason });
-        }
+      if (builtAtMs - classifiedAtMs > INBOX_STALE_AFTER_MS) {
+        sendJson(res, 503, { error: "attention_snapshot_stale", detail: "The slow lane's Inbox classification is stale; a fresh classification is required before reporting current attention counts." });
+        return;
       }
-      const registryStamp = statStamp(classified.registryPath);
-      const registryParse = parseProposalRegistryResult(readFileIfExists(classified.registryPath));
+      const plan = classified.plan();
+      const planSource = deps.readPlanSource?.();
+      const evidence = classified.attentionEvidence;
+      if (!evidence) {
+        res.setHeader("retry-after", "5");
+        sendJson(res, 503, { error: "attention_evidence_pending", detail: "The slow lane has not persisted attention evidence yet; no request-time history scan or empty count is substituted." });
+        return;
+      }
+      const releaseReceipts = new Map(evidence.releases);
+      const releasedTaskIds = new Set(releaseReceipts.keys());
+      const judgeByTask = new Map(evidence.judges);
+      const { registryPath } = inboxInputPaths(deps);
+      const registryStamp = statStamp(registryPath);
+      const registryParse = parseProposalRegistryResult(readFileIfExists(registryPath));
       const liveStamp = statStamp(deps.ledgerPath);
-      const projectionPartial = [...classified.projection.values()].some((value) => value.indeterminate)
-        || classified.classifications.some((value) => value.referentUnverified);
+      const projectionPartial = classified.projectionIndeterminate || classified.classifications.some((value) => value.referentUnverified);
       const sourceState = (stamp: string | undefined) => stamp === undefined || stamp.startsWith("unreadable:") ? "unavailable" as const : "observed" as const;
       const census = buildAttentionCensus({
         views: listThreadViews(operatorThreadItems(deps, readPlanSnapshot, classified), threads,
@@ -2017,16 +2416,18 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
         classifications: classified.classifications,
         taskFacts: new Map(plan.tasks.map((task) => [task.id, { verify: task.verify, repo: task.repo, title: task.title, status: task.status, retirement: task.retirement, dispatchHold: task.dispatch_hold, risk: task.risk }])),
         releasedTaskIds, releaseReceipts, judgeByTask,
-        mergedTaskIds: new Set([...classified.projection].filter(([, value]) => value.merged).map(([id]) => id)),
+        mergedTaskIds: classified.mergedTaskIds,
         sources: {
-          plan: "observed", registry: registryParse.kind === "fault" ? "partial" : sourceState(registryStamp), liveLedger: sourceState(liveStamp),
+          plan: planSource?.state === "stale" ? "partial" : "observed", registry: registryParse.kind === "fault" ? "partial" : sourceState(registryStamp), liveLedger: sourceState(liveStamp),
           // Reading every retained rotation proves positive receipts, never absence before the oldest
           // retained file. Until a durable continuity index exists, history cannot certify a zero.
-          archiveLedger: ledger.unread.length > 0 || ledger.archiveCount === 0 ? "unavailable" : "partial",
+          archiveLedger: evidence.archiveLedger,
           githubProjection: projectionPartial ? "partial" : "observed",
         },
       });
-      sendJson(res, 200, census);
+      const builtAt = fixedClock(builtAtMs).iso();
+      const source = { state: "fresh" as const, classifiedAt: classified.classifiedAt!, builtAt, verifiedAt: builtAt, ageMs: builtAtMs - classifiedAtMs };
+      sendJson(res, 200, { ...census, source, ...(planSource === undefined ? {} : { planSource }) });
     },
   };
 }
@@ -2048,29 +2449,165 @@ function readThreadsOr500(deps: PanelGraphDeps, res: ServerResponse) {
 /** How often a built thread-list view re-warms its classification with no request in flight. */
 const INBOX_THREAD_LIST_WARM_MS = 60_000;
 
-/** The thread list's seams over this deps: the one coalescing classifier, the held classification, and the live stores. */
-function inboxThreadListSources(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): ThreadListSources<ClassifiedInbox> {
-  const stamped = (classified: ClassifiedInbox, fallbackMs: number): ThreadListClassification<ClassifiedInbox> => {
+export interface ThreadListInbox {
+  proposals: readonly Proposal[];
+  classifications: ReadonlyArray<Pick<InboxClassification, "proposalId" | "state">>;
+}
+
+export function inboxClassificationEvidence(classified: Pick<ClassifiedInbox, "projection" | "classifications">): ClassificationEvidence {
+  const partial = [...classified.projection.values()].some((value) => value.indeterminate) || classified.classifications.some((value) => value.referentUnverified);
+  return partial ? { complete: false, incompleteReason: "the GitHub projection or a proposal referent is indeterminate" } : { complete: true };
+}
+
+const slowLaneClassifications = new WeakMap<PanelGraphDeps, { stamp: string; held: ThreadListClassification<ThreadListInbox> | undefined }>();
+
+export function peekSlowLaneClassification(deps: PanelGraphDeps): ThreadListClassification<ThreadListInbox> | undefined {
+  const stat = deps.inboxStatFile ?? statStamp;
+  const stateDir = join(deps.inboxRoot, "state");
+  const { registryPath } = inboxInputPaths(deps);
+  const stamp = JSON.stringify([stat(classificationSnapshotPath(stateDir)) ?? null, stat(registryPath) ?? null]);
+  const memo = slowLaneClassifications.get(deps);
+  if (memo?.stamp === stamp) return memo.held;
+  const held = readSlowLaneClassification(stateDir, registryPath);
+  slowLaneClassifications.set(deps, { stamp, held });
+  return held;
+}
+
+function readSlowLaneClassification(stateDir: string, registryPath: string): ThreadListClassification<ThreadListInbox> | undefined {
+  const snapshot = readClassificationSnapshot(stateDir);
+  const classifiedAtMs = Date.parse(snapshot?.generatedAt ?? "");
+  if (snapshot === undefined || !Number.isFinite(classifiedAtMs)) return undefined;
+  const proposals = parseProposalRegistry(readFileIfExists(registryPath));
+  const classifications = proposals.flatMap((p) => {
+    const state = snapshot.states[p.id];
+    return state === undefined ? [] : [{ proposalId: p.id, state: state as InboxClassification["state"] }];
+  });
+  const complete = snapshot.complete === true;
+  const incompleteReason = complete ? undefined
+    : snapshot.incompleteReason ?? (snapshot.complete === undefined ? "the slow lane's snapshot does not record whether its pass saw every input" : "the slow lane's pass did not see every input");
+  return { classified: { proposals, classifications }, classifiedAtMs, complete, ...(incompleteReason === undefined ? {} : { incompleteReason }) };
+}
+
+interface InboxRead {
+  proposals: Proposal[];
+  classifications: InboxClassification[];
+  ledgerLines: LedgerLines;
+  mergedTaskIds: ReadonlySet<string>;
+  projectionIndeterminate: boolean;
+  plan: () => Plan;
+  lanes: () => ReturnType<typeof inboxLanes>;
+  classifiedAt?: string;
+  attentionEvidence?: InboxAttentionEvidence;
+}
+
+interface SlowLaneInbox extends InboxRead {
+  persisted: PersistedInbox;
+  generatedAt: string;
+  classified: Pick<ClassifiedInbox, "proposals" | "classifications" | "ledgerLines">;
+}
+const slowLaneInboxes = new WeakMap<PanelGraphDeps, { stamp: string | undefined; read: SlowLaneInbox | undefined }>();
+
+/** W1-T5897: what serve's main thread answers every inbox read from, re-read only when its file changes; undefined until one is persisted. */
+export function readSlowLaneInbox(deps: PanelGraphDeps): SlowLaneInbox | undefined {
+  const stateDir = join(deps.inboxRoot, "state");
+  const stamp = (deps.inboxStatFile ?? statStamp)(persistedInboxPath(stateDir));
+  const held = slowLaneInboxes.get(deps);
+  if (held !== undefined && held.stamp === stamp && stamp !== undefined) return held.read;
+  const persisted = stamp === undefined ? undefined : readPersistedInbox(stateDir);
+  const read = persisted && slowLaneInboxOf(deps, persisted);
+  slowLaneInboxes.set(deps, { stamp, read });
+  return read;
+}
+
+function slowLaneInboxOf(deps: PanelGraphDeps, persisted: PersistedInbox): SlowLaneInbox {
+  const ledgerLines = Object.defineProperty([...persisted.ledgerRows], "torn", { value: 0 }) as LedgerLines;
+  const classified = { proposals: persisted.proposals, classifications: persisted.classifications, ledgerLines, ...(persisted.stores ? { stores: persisted.stores } : {}) };
+  let lanes: { key: string; built: ReturnType<typeof inboxLanes> } | undefined;
+  return {
+    ...classified, classified, persisted, generatedAt: persisted.generatedAt, classifiedAt: persisted.generatedAt,
+    attentionEvidence: persisted.attentionEvidence,
+    mergedTaskIds: new Set(persisted.mergedTaskIds), projectionIndeterminate: persisted.projectionIndeterminate,
+    plan: () => deps.readPlanSnapshot?.() ?? loadPlan(deps.planPath),
+    lanes: () => {
+      const stateDir = join(deps.inboxRoot, "state");
+      const key = JSON.stringify([statStamp(plainStorePath(stateDir)) ?? null, statStamp(fleetLaneStorePath(stateDir)) ?? null]);
+      if (lanes?.key !== key) lanes = { key, built: inboxLanes(classified, deps.inboxRoot) };
+      return lanes.built;
+    },
+  };
+}
+
+async function inboxRead(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Promise<InboxRead | undefined> {
+  if (deps.inboxFromSlowLane) return readSlowLaneInbox(deps);
+  const classified = await classifyAllProposalsSliced(deps, readPlanSnapshot);
+  const projection = [...classified.projection.values()];
+  const held = peekClassifiedInboxStamped(deps);
+  return {
+    ...classified, plan: () => classified.plan, lanes: () => inboxLanes(classified, deps.inboxRoot),
+    classifiedAt: fixedClock(held?.classifiedAtMs ?? systemClock.now()).iso(),
+    mergedTaskIds: new Set([...classified.projection].filter(([, value]) => value.merged).map(([id]) => id)), projectionIndeterminate: projection.some((value) => value.indeterminate === true),
+  };
+}
+
+function inboxNotReady(res: ServerResponse): void {
+  res.setHeader("retry-after", "5");
+  sendJson(res, 503, { error: "inbox_not_ready", detail: "serve's slow lane has not persisted an inbox classification yet" });
+}
+
+/** The persisted classification as the thread list's evidence: `classify` lands only one inside its freshness budget (W1-T5269). */
+function slowLaneThreadList(deps: PanelGraphDeps): { classify: () => Promise<ThreadListClassification<ThreadListInbox>>; peek: () => ThreadListClassification<ThreadListInbox> | undefined } {
+  const peek = (): ThreadListClassification<ThreadListInbox> | undefined => {
+    const read = readSlowLaneInbox(deps);
+    if (read === undefined) return undefined;
+    const { complete, incompleteReason } = read.persisted;
+    return { classified: read.classified, classifiedAtMs: Date.parse(read.generatedAt), complete, ...(incompleteReason === undefined ? {} : { incompleteReason }) };
+  };
+  return {
+    peek,
+    classify: async () => {
+      const held = peek();
+      if (held === undefined) throw new Error("serve's slow lane has not persisted an inbox classification yet");
+      if (systemClock.now() - held.classifiedAtMs > INBOX_STALE_AFTER_MS) throw new Error(`the slow lane's classification of ${fixedClock(held.classifiedAtMs).iso()} is past its ${INBOX_STALE_AFTER_MS} ms budget`);
+      return held;
+    },
+  };
+}
+
+/** The thread list's seams: the classifier, and the newer of this serve's and the slow lane's (W1-T5886) held classification. */
+export function inboxThreadListSources(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): ThreadListSources<ThreadListInbox> {
+  const stamped = (classified: ClassifiedInbox, fallbackMs: number): ThreadListClassification<ThreadListInbox> => {
     const held = peekClassifiedInboxStamped(deps);
     // The memo may hand back a ledger-refreshed copy of the held result; the proposals array is the shared identity.
     const classifiedAtMs = held !== undefined && held.result.proposals === classified.proposals ? held.classifiedAtMs : fallbackMs;
-    const partial = [...classified.projection.values()].some((value) => value.indeterminate) || classified.classifications.some((value) => value.referentUnverified);
-    return {
-      classified, classifiedAtMs, complete: !partial,
-      ...(partial ? { incompleteReason: "the GitHub projection or a proposal referent is indeterminate" } : {}),
-    };
+    return { classified, classifiedAtMs, ...inboxClassificationEvidence(classified) };
   };
+  let reportedAtMs: number | undefined;
+  let reportedFailure: string | undefined;
   return {
     now: () => systemClock.now(),
     classify: async () => stamped(await classifyAllProposalsSliced(deps, readPlanSnapshot), systemClock.now()),
+    ...(deps.inboxFromSlowLane ? slowLaneThreadList(deps) : {}),
     peek: () => {
       const held = peekClassifiedInboxStamped(deps);
-      return held === undefined ? undefined : stamped(held.result, held.classifiedAtMs);
+      const own = held === undefined ? undefined : stamped(held.result, held.classifiedAtMs);
+      const slowLane = peekSlowLaneClassification(deps);
+      if (own === undefined) return slowLane;
+      return slowLane !== undefined && slowLane.classifiedAtMs > own.classifiedAtMs ? slowLane : own;
     },
     readThreads: () => readAllThreads({ threadStorePath: inboxThreadStorePath(deps.inboxRoot) }),
     readMarks: () => readReadMarks(readMarksPath(join(deps.inboxRoot, "state"))),
     items: (classified) => operatorThreadItems(deps, readPlanSnapshot, classified),
     inputsKey: () => statStamp(plainStorePath(join(deps.inboxRoot, "state"))) ?? "absent",
+    report: (settled: ThreadListRefreshSettled) => {
+      if (settled.outcome === "failed") {
+        if (settled.error !== reportedFailure) deps.logProjection?.("inbox.thread_list_classification_failed", { error: settled.error, ms: settled.ms });
+        reportedFailure = settled.error;
+      } else if (settled.classifiedAtMs !== reportedAtMs) {
+        reportedAtMs = settled.classifiedAtMs;
+        reportedFailure = undefined;
+        deps.logProjection?.("inbox.thread_list_classified", { ms: settled.ms, classifiedAt: fixedClock(settled.classifiedAtMs).iso() });
+      }
+    },
   };
 }
 
@@ -2097,11 +2634,12 @@ export function buildInboxThreadsRoute(deps: PanelGraphDeps, readPlanSnapshot?: 
         warmArmed = true;
         setInterval(() => void warmInboxThreadListView(view), INBOX_THREAD_LIST_WARM_MS).unref();
       }
+      if (refusePlanSourceUnavailable(deps, res)) return;
       const read = await readInboxThreadListView(view);
       if (read.kind === "ok") {
-        sendJson(res, 200, { threads: read.threads, source: read.source });
+        sendJson(res, 200, withPlanSource(deps, { threads: read.threads, source: read.source }));
       } else if (read.kind === "stale" && new URL(req.url ?? "/", "http://localhost").searchParams.get("qualified") === "1") {
-        sendJson(res, 200, { threads: read.threads, source: read.source });
+        sendJson(res, 200, withPlanSource(deps, { threads: read.threads, source: read.source }));
       } else if (read.kind === "stale") {
         res.setHeader("retry-after", "1");
         sendJson(res, 503, { error: "inbox_threads_stale", detail: "the thread list is being refreshed; its rows are not source-verified", source: read.source });
@@ -2125,7 +2663,9 @@ export function buildInboxThreadRoute(deps: PanelGraphDeps, readPlanSnapshot?: (
     handler: async (req, res) => {
       const threadId = new URL(req.url ?? "/", "http://localhost").searchParams.get("id") ?? "";
       const proposalId = proposalIdOfThread(threadId);
-      const classified = await classifyAllProposalsSliced(deps, readPlanSnapshot);
+      if (refusePlanSourceUnavailable(deps, res)) return;
+      const classified = await inboxRead(deps, readPlanSnapshot);
+      if (!classified) return void inboxNotReady(res);
       const item = proposalId ? operatorThreadItems(deps, readPlanSnapshot, classified).find((i) => i.proposalId === proposalId) : undefined;
       if (!item) {
         sendJson(res, 404, { error: "not_found", detail: `no inbox thread "${threadId}"` });
@@ -2207,7 +2747,8 @@ export function buildInboxThreadReplyRoute(deps: PanelGraphDeps): Route {
       // The detail route and daemon responder both require a current operator-owned item.
       // A syntactically valid but orphaned id must not receive a success receipt for a
       // message the responder will silently have no item to answer.
-      const classified = await classifyAllProposalsSliced(deps);
+      const classified = await inboxRead(deps);
+      if (!classified) return void inboxNotReady(res);
       if (!operatorThreadItems(deps, undefined, classified).some((item) => item.proposalId === proposalId && item.state !== "retired")) {
         sendJson(res, 404, { error: "not_found", detail: "operator inbox thread is unavailable" });
         return;
@@ -2651,6 +3192,6 @@ export function buildPanelWriteRoutes(deps: PanelGraphDeps): Route[] {
 
 /** Every panel graph route, for a caller registering the full set at once (`rmd serve` wiring). */
 export function buildPanelGraphRoutes(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route[] {
-  const bound = readPlanSnapshot ? { ...deps, readPlanSnapshot } : deps;
+  const bound = readPlanSnapshot && deps.readPlanSnapshot !== readPlanSnapshot ? { ...deps, readPlanSnapshot } : deps;
   return [...buildPanelReadRoutes(bound, readPlanSnapshot), ...buildPanelWriteRoutes(bound)];
 }

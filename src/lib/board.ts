@@ -13,6 +13,9 @@
  */
 // Why: the "Option A" narrow-scope decision — docs/forensics/board.md#file-header
 
+import { recentEntryFromLine, RECENT_ACTIVITY_HISTORY_CAP, RECENT_ACTIVITY_VERBS, type RecentActivityEntry } from "./recent-projection.js";
+export { RECENT_ACTIVITY_VERBS } from "./recent-projection.js";
+export type { RecentActivityEntry, RecentActivityVerb } from "./recent-projection.js";
 import type { ServerResponse } from "node:http";
 import type { Plan, Task, TaskRisk } from "./plan.js";
 import { DEFAULT_RISK, TASK_STATUSES } from "./plan.js";
@@ -37,8 +40,11 @@ import { bearerTokenId } from "./panel-actions.js";
 import type { LastSeenStore } from "./last-seen.js";
 import { buildRecapEvents, type RecapEvent } from "./recap.js";
 import { computeGlanceSpend, type GlanceSpend } from "./glance.js";
-import { buildStatusBoard, type BlockedPrBlocker, type MergeHeldRow } from "./status-board.js";
-import { liveRunSpend, subscribeStatusStream } from "./status-stream-publisher.js";
+import { deriveBlockedPrSections, type BlockedPrBlocker, type MergeHeldRow } from "./status-board.js";
+import { liveRunSpendByTask, subscribeStatusStream } from "./status-stream-publisher.js";
+
+// Keep the live consumer's boundary visible to the ledger render-retention census.
+const OPERATOR_ACTION_STEPS = new Set(["console.kick_refused", "console.kick_dispatched"]);
 
 /** Ledger poll pace for the SSE stream — comfortably under the 2s acceptance budget. */
 export const DEFAULT_POLL_MS = 250;
@@ -112,7 +118,7 @@ export interface BoardSnapshot {
   spend: GlanceSpend;
   tasks: BoardRow[];
   /** A PR the sweep reconciler already disposed into a non-progressing class (W1-T1006's sixth
-   *  NEEDS-ME row source), sourced verbatim from status-board.ts's `buildStatusBoard` — see
+   *  NEEDS-ME row source), sourced verbatim from status-board.ts's `deriveBlockedPrSections` — see
    *  {@link deriveBoardStatusSections}. Always an array, never `undefined`. */
   blockedPrs: BlockedPrBlocker[];
   /** The currently-standing operator merge holds (W1-T2719), from status-board.ts's reader. */
@@ -187,37 +193,12 @@ function lastActivityByTask(lines: Array<Record<string, unknown>>): Map<string, 
   return out;
 }
 
-/** The sixth NEEDS-ME row source (W1-T1006): reuses status-board.ts's `buildStatusBoard`
- *  verbatim for the blocked-PR derivation, never a second derivation over the ledger. `plan` is
- *  deliberately omitted so `buildStatusBoard`'s own QUEUE HEAD/INBOX pass never runs a second,
- *  duplicate batch of `github` calls this board doesn't need. `root`/`repoDir` are a deliberately
- *  bogus sentinel, not `""`, so a test run from a real `state/`/`plan/` tree can't accidentally
- *  pick up files for a section this board discards anyway. */
-// Why: the measured double-`prByRef`-call incident this plan-omission fixes —
-// docs/forensics/board.md#deriveboardstatussections
-const BLOCKED_PR_ROOT_SENTINEL = "/nonexistent-rmd-board-root";
-
+/** W1-T6267: share only the blocked-PR and merge-hold readers with the status board. */
 function deriveBoardStatusSections(
   deps: BoardDeps,
   lines: Array<Record<string, unknown>>,
 ): { blockedPrs: BlockedPrBlocker[]; blockedPrsUnverifiedReason?: string; mergeHeld: MergeHeldRow[] } {
-  const model = buildStatusBoard(BLOCKED_PR_ROOT_SENTINEL, deps.ledgerPath, {
-    queryService: () => ({ running: false, pid: null }),
-    repoDir: BLOCKED_PR_ROOT_SENTINEL,
-    readLedger: () => lines,
-    resolveOriginMainSha: () => undefined,
-    github: deps.github,
-    now: deps.now,
-    grepAnchorTrue: () => false,
-    readProposalRegistry: () => [],
-    readDraftCache: () => ({}),
-  });
-  const blockedPrs = model.blockers.rows.filter((r): r is BlockedPrBlocker => r.kind === "blocked_pr");
-  return {
-    blockedPrs,
-    blockedPrsUnverifiedReason: model.blockers.blockedPrsUnverifiedReason,
-    mergeHeld: model.needsMe.mergeHeld,
-  };
+  return deriveBlockedPrSections(lines, deps.github);
 }
 
 const QUEUE_CLASS_ORDER: Record<PrQueueClass, number> = {
@@ -368,15 +349,20 @@ function derivePrQueue(
   const unique = new Map<number, PrRef>();
   for (const pr of index.open ?? []) if (pr.state.toUpperCase() === "OPEN" && !unique.has(pr.number)) unique.set(pr.number, pr);
 
+  // Each open head's newest `sweep.disposed` row, from ONE pass: a scan per open PR was P x L on core's fact store.
+  const disposedAt = new Map<string, Record<string, unknown>>();
+  const wanted = new Set([...unique.values()].flatMap((pr) => (pr.headRefOid ? [`${pr.number}\u0000${pr.headRefOid}`] : [])));
+  if (wanted.size > 0) {
+    for (const line of lines) {
+      if (line.step !== "sweep.disposed" || typeof line.pr_number !== "number" || typeof line.head_sha !== "string") continue;
+      const id = `${line.pr_number}\u0000${line.head_sha}`;
+      if (wanted.has(id)) disposedAt.set(id, line);
+    }
+  }
+
   const rows: PrQueueRow[] = [];
   for (const pr of unique.values()) {
-    let transition: Record<string, unknown> | undefined;
-    if (pr.headRefOid) {
-      for (const line of lines) {
-        if (line.step !== "sweep.disposed" || line.pr_number !== pr.number || line.head_sha !== pr.headRefOid) continue;
-        transition = line;
-      }
-    }
+    const transition = pr.headRefOid ? disposedAt.get(`${pr.number}\u0000${pr.headRefOid}`) : undefined;
     const taskRow = taskByPr.get(pr.number);
     const transitionTask = typeof transition?.task_id === "string" && deps.plan.byId.has(transition.task_id) ? transition.task_id : undefined;
     const taskId = taskRow?.taskId ?? planTaskFromOpenPr(pr, deps.plan) ?? transitionTask;
@@ -436,6 +422,7 @@ export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptio
   const byId = projectPlan(deps.plan, effectiveDeps);
   options.captureProjections?.(byId);
   const lastActivity = lastActivityByTask(lines);
+  const liveSpend = liveRunSpendByTask(lines, [...byId.values()].filter((p) => p.phase).map((p) => p.taskId));
   const tasks: BoardRow[] = [...byId.values()].map((p) => {
     // A task-less escalation's own row (W1-T283) owns no plan Task to join title/risk from.
     // Fall back to its own title (or the bare id) and the default risk band rather than a
@@ -449,7 +436,7 @@ export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptio
     const ts = lastActivity.get(p.taskId)?.ts;
     if (ts) row.lastActivityAt = ts;
     if (p.phase) {
-      const spend = liveRunSpend(lines, p.taskId);
+      const spend = liveSpend.get(p.taskId);
       if (spend?.hasData) {
         row.liveSpendUsd = spend.spendUsd;
         row.liveTurns = spend.turns;
@@ -598,7 +585,7 @@ export function deriveReviewState(
  */
 // Why: the once-a-minute cache-thrash incident this exclusion fixes —
 // docs/forensics/board.md#board_irrelevant_steps
-export const BOARD_IRRELEVANT_STEPS: ReadonlySet<string> = new Set(["daemon.alive", "daemon.pulse", "board_gateway.fetch_bytes"]);
+export const BOARD_IRRELEVANT_STEPS: ReadonlySet<string> = new Set(["daemon.alive", "daemon.pulse", "board_gateway.fetch_bytes", "board_gateway.fetch_ok", "board_snapshot.unchanged", "board_gateway.rollup"]);
 
 /** The `step` of one already-parsed ledger row, or `undefined` when it carries none (a torn
  *  write). A row whose step cannot be read is treated as decision-relevant — unknown stays
@@ -944,75 +931,6 @@ export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore, sour
 // rungs. GitHub only decorates a row that already carries a PR link; a failed decoration marks
 // it `githubUnavailable` and never removes it (see {@link decoratePrTitle}).
 
-export type RecentActivityVerb =
-  | "merged"
-  | "verdict"
-  | "fix"
-  | "escalated"
-  | "spend"
-  | "run-refused"
-  | "run-started"
-  | "worker"
-  | "started"
-  | "review"
-  | "automerge";
-
-/** Every verb the feed can mint, so a `?verb=` filter can refuse a typo instead of answering empty. */
-export const RECENT_ACTIVITY_VERBS: readonly RecentActivityVerb[] = [
-  "merged", "verdict", "fix", "escalated", "spend", "run-refused", "run-started", "worker", "started", "review", "automerge",
-];
-
-/** The steps that record the daemon's resolution of an operator-initiated console action
- *  (W1-T266) — an allowlist, not a removal of the `!task` guard every other pseudo-id line
- *  ({@link computeRecentActivity}) still gets, since that housekeeping traffic would bury the
- *  feed. These two lines carry the real task id in `line.task`, not `line.task_id`. */
-// Why: the 2026-07-31 silent-refusal incident this allowlist fixes —
-// docs/forensics/board.md#operator_action_steps
-const OPERATOR_ACTION_STEPS = new Set(["console.kick_refused", "console.kick_dispatched"]);
-
-/** One RECENT row: a single ledger event, not a task's final state — see this section's header. */
-export interface RecentActivityEntry {
-  taskId: string;
-  /** The originating dispatch identity. Task ids can be dispatched again; this is the join key
-   *  that keeps a worker's selected-run activity separate from older attempts. */
-  runId?: string;
-  /** The plan task's own title, so RECENT names what a row is, not just its id. */
-  title: string;
-  verb: RecentActivityVerb;
-  /** ISO-8601 `ts` of the originating ledger line — the feed's relative-timestamp source. */
-  ts: string;
-  /** The originating step's own outcome label (e.g. a `verdict` string, an escalation `class`). */
-  detail?: string;
-  /** Present wherever the originating ledger line carries `cost_usd`. */
-  costUsd?: number;
-  numTurns?: number;
-  prNumber?: number;
-  prUrl?: string;
-  /** Present for `worker.activity` rows; all are bounded/structured, never raw tool payloads. */
-  eventKind?: "working" | "tool-executing" | "message";
-  eventAt?: string;
-  workerRole?: "recon" | "implementer" | "reviewer" | "fixer" | "triage" | "retro" | "unknown";
-  /** Provider/model values are assignment or stream metadata, not proof of a served model. */
-  provider?: string;
-  requestedModel?: string;
-  servedModel?: string;
-  turnsSoFar?: number;
-  toolName?: string;
-  toolReason?: string;
-  toolStartedAt?: string;
-  toolCompletedAt?: string;
-  toolDurationMs?: number;
-  toolOutcome?: "success" | "error";
-  /** GitHub decoration, never a gate — the PR's title, present only when a read resolved it. */
-  prTitle?: string;
-  /** GitHub decoration attempted and failed for this row's `prUrl` — the row still renders, ledger-only. */
-  githubUnavailable?: true;
-}
-
-/** Bounded rolling history a {@link RecentActivityCache} holds — large enough that `max` (the
- *  feed's visible window) is always a small tail slice of it, never the whole thing. */
-const RECENT_ACTIVITY_HISTORY_CAP = 200;
-
 interface RecentActivityState {
   /** How many ledger lines have already been scanned/classified, so a render never
    *  re-classifies (or re-fetches GitHub for) a line it already minted an entry from. */
@@ -1042,11 +960,6 @@ export function createRecentActivityCache(): RecentActivityCache {
   return { state: { scannedLines: 0, entries: [], prByRun: new Map(), ledgerTail: createLedgerTailCache() } };
 }
 
-function prNumberFromUrl(url: string): number | undefined {
-  const n = Number(url.match(/\/pull\/(\d+)/)?.[1]);
-  return Number.isFinite(n) ? n : undefined;
-}
-
 /** GitHub decoration, never a gate (W1-T184): resolves `prUrl`'s title via the same `prByRef`
  *  every other precedence rung calls. A missing title is silent (the row already renders fine
  *  ledger-only); a gateway reporting `readFailed()` marks the row `githubUnavailable` instead
@@ -1063,123 +976,6 @@ function decoratePrTitle(entry: RecentActivityEntry, deps: BoardDeps): RecentAct
     return entry;
   } catch {
     return { ...entry, githubUnavailable: true };
-  }
-}
-
-/** Longest refusal reason a RECENT row will carry. See {@link boundedReason}. */
-const MAX_REFUSAL_REASON_CHARS = 120;
-
-/** A refusal `reason`, bounded so one row cannot swallow the feed (W1-T266). Truncation is
- *  visible (a trailing ellipsis), never silent — a cut reason must not read as one that was short. */
-// Why: the real console.kick_refused reason this bound was sized against — docs/forensics/board.md#boundedreason
-function boundedReason(reason: unknown): string {
-  if (typeof reason !== "string" || reason === "") return "no reason recorded";
-  return reason.length <= MAX_REFUSAL_REASON_CHARS ? reason : `${reason.slice(0, MAX_REFUSAL_REASON_CHARS)}…`;
-}
-
-/** Metadata values are identifiers, not prose. Bound them so a malformed ledger row cannot
- *  turn the recent feed into an unbounded payload; unlike a reason, an absent identifier stays
- *  absent instead of being replaced by a success-shaped fallback. */
-function boundedRecentTelemetryText(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const text = value.trim();
-  if (!text) return undefined;
-  return text.length <= 160 ? text : `${text.slice(0, 159)}…`;
-}
-
-function recentPrNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
-}
-
-function recentWorkerRole(value: unknown): RecentActivityEntry["workerRole"] {
-  return value === "recon" || value === "implementer" || value === "reviewer" || value === "fixer" || value === "triage" || value === "retro" || value === "unknown"
-    ? value
-    : undefined;
-}
-
-/** The activity feed's own event classification: one ledger line in, at most one
- *  {@link RecentActivityEntry} out. Pure and separate from the stateful scan below, so the
- *  mapping is easy to audit. */
-function classifyLine(
-  line: Record<string, unknown>,
-  taskId: string,
-  title: string,
-  ts: string,
-  prUrl: string | undefined,
-): RecentActivityEntry | undefined {
-  const prNumber = prUrl ? prNumberFromUrl(prUrl) : undefined;
-  const costUsd = typeof line.cost_usd === "number" ? line.cost_usd : undefined;
-  const numTurns = typeof line.num_turns === "number" ? line.num_turns : undefined;
-  switch (line.step) {
-    case "verdict": {
-      const verdict = typeof line.verdict === "string" ? line.verdict : "unknown";
-      return { taskId, title, ts, verb: verdict === "merged" ? "merged" : "verdict", detail: verdict, costUsd, prUrl, prNumber };
-    }
-    // The sweep's merge credit: on the live fleet it is how nearly every merge is recorded, because
-    // the run's own `verdict` row closes as blocked_ci or awaiting review long before GitHub merges.
-    case "verdict.merged":
-      return { taskId, title, ts, verb: "merged", detail: "merged", prUrl, prNumber: prNumber ?? recentPrNumber(line.pr_number) };
-    case "run.start":
-      return { taskId, title, ts, verb: "started", detail: boundedRecentTelemetryText(line.type) ?? boundedRecentTelemetryText(line.lane) ?? "run" };
-    case "review.posted":
-      return { taskId, title, ts, verb: "review", detail: boundedRecentTelemetryText(line.state) ?? "posted", prUrl, prNumber };
-    case "automerge.armed":
-      return { taskId, title, ts, verb: "automerge", detail: "armed", prUrl, prNumber: prNumber ?? recentPrNumber(line.pr_number) };
-    case "fix.dispatch":
-      return { taskId, title, ts, verb: "fix", detail: `dispatched (strike ${String(line.strike ?? "?")})`, prUrl, prNumber };
-    case "fix.done":
-      return { taskId, title, ts, verb: "fix", detail: `done (strike ${String(line.strike ?? "?")})`, costUsd, numTurns, prUrl, prNumber };
-    case "fix.exhausted":
-      return { taskId, title, ts, verb: "fix", detail: `exhausted (${String(line.strikes ?? "?")} strikes)`, prUrl, prNumber };
-    case "escalation.issue_opened":
-      return { taskId, title, ts, verb: "escalated", detail: typeof line.class === "string" ? line.class : undefined, prUrl, prNumber };
-    case "implement.done":
-      return { taskId, title, ts, verb: "spend", costUsd, numTurns, prUrl, prNumber };
-    case "worker.activity": {
-      const workerRole = recentWorkerRole(line.worker_role);
-      const provider = boundedRecentTelemetryText(line.provider);
-      const requestedModel = boundedRecentTelemetryText(line.requested_model);
-      const servedModel = boundedRecentTelemetryText(line.served_model);
-      return {
-        taskId,
-        title,
-        ts,
-        verb: "worker",
-        detail: typeof line.event_kind === "string" ? line.event_kind : "activity",
-        eventKind:
-          line.event_kind === "working" || line.event_kind === "tool-executing" || line.event_kind === "message"
-            ? line.event_kind
-            : undefined,
-        ...(typeof line.event_at === "string" ? { eventAt: line.event_at } : {}),
-        ...(workerRole ? { workerRole } : {}),
-        ...(provider ? { provider } : {}),
-        ...(requestedModel ? { requestedModel } : {}),
-        ...(servedModel ? { servedModel } : {}),
-        ...(typeof line.turns_so_far === "number" && Number.isFinite(line.turns_so_far) && line.turns_so_far >= 0
-          ? { turnsSoFar: line.turns_so_far }
-          : {}),
-        ...(typeof line.tool_name === "string" ? { toolName: line.tool_name } : {}),
-        ...(typeof line.tool_reason === "string" ? { toolReason: line.tool_reason } : {}),
-        ...(typeof line.tool_started_at === "string" ? { toolStartedAt: line.tool_started_at } : {}),
-        ...(typeof line.tool_completed_at === "string" ? { toolCompletedAt: line.tool_completed_at } : {}),
-        ...(typeof line.tool_duration_ms === "number" ? { toolDurationMs: Math.max(0, line.tool_duration_ms) } : {}),
-        ...(line.tool_outcome === "success" || line.tool_outcome === "error" ? { toolOutcome: line.tool_outcome } : {}),
-        prUrl,
-        prNumber,
-      };
-    }
-    // W1-T266 — the daemon's resolution of an operator's Run click. See OPERATOR_ACTION_STEPS.
-    // The `reason` is carried VERBATIM (bar the length bound below) rather than mapped to
-    // friendlier prose: a translation table here would be a second place for the truth to live,
-    // and this codebase has had three false comments cause live operator-visible defects in one
-    // week. The verb label supplies the plain-English framing ("Run refused"); the reason
-    // supplies the fact.
-    case "console.kick_refused":
-      return { taskId, title, ts, verb: "run-refused", detail: boundedReason(line.reason) };
-    case "console.kick_dispatched":
-      return { taskId, title, ts, verb: "run-started", detail: "dispatched from the console" };
-    default:
-      return undefined;
   }
 }
 
@@ -1227,7 +1023,7 @@ export function computeRecentActivity(deps: BoardDeps, cache: RecentActivityCach
     if (!task && !isOperatorAction) continue;
     const ts = typeof line.ts === "string" ? line.ts : new Date().toISOString();
     const prUrl = typeof line.pr_url === "string" ? line.pr_url : runId ? state.prByRun.get(runId) : undefined;
-    const entry = classifyLine(line, taskId, task?.title ?? taskId, ts, prUrl);
+    const entry = recentEntryFromLine(line, taskId, task?.title ?? taskId, ts, prUrl);
     if (!entry) continue;
     // One merge, one row: a run's own `verdict: merged` and the sweep's `verdict.merged` credit
     // both record the same merge, and the console counts merges off this feed. Keep the later

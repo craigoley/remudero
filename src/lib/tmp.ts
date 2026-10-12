@@ -39,6 +39,7 @@
 import fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { systemClock } from "./clock.js";
 
 /** Every temp dir rmd creates is named `rmd-<kind>-<random>` under the OS tmp
  * root — the single shared prefix {@link sweepStaleTempDirs} keys on. */
@@ -83,6 +84,9 @@ export interface TempSweepSummary {
   removed: string[];
   kept: string[];
   oldestKeptAgeMs: number | null;
+  /** W1-T7808: set only when the sweep declined to run. Names why, so a caller logging
+   *  `removed`/`kept` does not mistake a refusal for "nothing stale". Absent on every real sweep. */
+  refused?: string;
 }
 
 export interface TempSweepOpts {
@@ -95,6 +99,8 @@ export interface TempSweepOpts {
   now?: () => number;
   /** Root to scan (tests). Defaults to `os.tmpdir()`. */
   root?: string;
+  /** {@link sweepStaleTempDirsAsync} only: the awaited fs surface (tests). Defaults to `fs.promises`. */
+  fsAsync?: Pick<typeof fs.promises, "readdir" | "stat" | "rm">;
 }
 
 /**
@@ -123,6 +129,27 @@ export function isRmdOwnedTempName(name: string): boolean {
   return name.startsWith(RMD_TMP_PREFIX) || LEGACY_TMP_PREFIXES.some((p) => name.startsWith(p));
 }
 
+/**
+ * W1-T7808 — A TEST PROCESS NEVER SWEEPS THE MACHINE'S REAL TEMP ROOT.
+ *
+ * Every test that boots `daemonCommand` or `main()` reaches `sweepStaleTempDirs()` with no `root`, i.e.
+ * on `tmpdir()`: the operator Mac's or the host's real temp root, holding other sessions' rmd-* dirs.
+ * Under a clock that moves `Date.now` but not the file clock it also ages the test's OWN fixture past
+ * the ceiling and deletes it (#10719). In a process that test/setup/tmp-hygiene.ts has marked as a test
+ * process (an in-process flag on `globalThis`, deliberately NOT an env var, so a spawned child that did
+ * not load the setup is never marked) a sweep that names no root therefore declines; a sweep handed an
+ * explicit `root` is a dir the caller chose and owns, so it runs exactly as in production.
+ *
+ * Returns the refusal text, or `undefined` when the sweep may proceed.
+ */
+export const TEST_PROCESS_MARKER = Symbol.for("rmd.test-process");
+
+function testContextRefusal(opts: TempSweepOpts): string | undefined {
+  if (opts.root !== undefined) return undefined;
+  if ((globalThis as Record<symbol, unknown>)[TEST_PROCESS_MARKER] !== true) return undefined;
+  return "refused: running in a test process with no explicit root, so the sweep would scan the real temp root";
+}
+
 /** Default age ceiling for {@link sweepStaleTempDirs}: 24 hours. */
 export const DEFAULT_TEMP_SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
@@ -142,6 +169,8 @@ export const DEFAULT_TEMP_SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
  * entry never throws or blocks the rest of the sweep.
  */
 export function sweepStaleTempDirs(opts: TempSweepOpts = {}): TempSweepSummary {
+  const refused = testContextRefusal(opts);
+  if (refused !== undefined) return { removed: [], kept: [], oldestKeptAgeMs: null, refused };
   const root = opts.root ?? tmpdir();
   const maxAgeMs = opts.maxAgeMs ?? DEFAULT_TEMP_SWEEP_MAX_AGE_MS;
   const now = opts.now ?? (() => Date.now());
@@ -186,6 +215,56 @@ export function sweepStaleTempDirs(opts: TempSweepOpts = {}): TempSweepSummary {
       removed.push(name);
     } catch {
       noteKept(name, ageMs); // a permissions hiccup on one entry never blocks boot
+    }
+  }
+  return { removed, kept, oldestKeptAgeMs };
+}
+
+/**
+ * {@link sweepStaleTempDirs} OFF THE EVENT LOOP: the same predicate, entry for entry — prefix,
+ * directory-only, age ceiling, per-entry best-effort — with every fs call awaited, so a large tmp
+ * root never holds the daemon loop. Never rejects, exactly as the sync sweep never throws.
+ */
+export async function sweepStaleTempDirsAsync(opts: TempSweepOpts = {}): Promise<TempSweepSummary> {
+  const refused = testContextRefusal(opts);
+  if (refused !== undefined) return { removed: [], kept: [], oldestKeptAgeMs: null, refused };
+  const fsa = opts.fsAsync ?? fs.promises;
+  const root = opts.root ?? tmpdir();
+  const maxAgeMs = opts.maxAgeMs ?? DEFAULT_TEMP_SWEEP_MAX_AGE_MS;
+  const now = opts.now ?? systemClock.now;
+  const removed: string[] = [];
+  const kept: string[] = [];
+  let oldestKeptAgeMs: number | null = null;
+  const noteKept = (name: string, ageMs: number) => {
+    kept.push(name);
+    if (oldestKeptAgeMs === null || ageMs > oldestKeptAgeMs) oldestKeptAgeMs = ageMs;
+  };
+  let entries: string[];
+  try {
+    entries = await fsa.readdir(root);
+  } catch {
+    return { removed, kept, oldestKeptAgeMs }; // unreadable tmp root, as the sync sweep answers
+  }
+  for (const name of entries) {
+    if (!isRmdOwnedTempName(name)) continue;
+    const full = join(root, name);
+    let st: fs.Stats;
+    try {
+      st = await fsa.stat(full);
+    } catch {
+      continue; // vanished between readdir and stat, as the sync sweep skips it
+    }
+    if (!st.isDirectory()) continue;
+    const ageMs = now() - st.mtimeMs;
+    if (ageMs <= maxAgeMs) {
+      noteKept(name, ageMs);
+      continue;
+    }
+    try {
+      await fsa.rm(full, { recursive: true, force: true });
+      removed.push(name);
+    } catch {
+      noteKept(name, ageMs); // a failed removal is kept and aged, as the sync sweep records it
     }
   }
   return { removed, kept, oldestKeptAgeMs };

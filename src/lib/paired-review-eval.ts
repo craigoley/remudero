@@ -31,7 +31,7 @@ export interface BlindedReviewInput {
   requestedModel?: string;
   requestedEffort?: string;
 }
-export interface ReplayFinding { id: string; anchorSupported: boolean; mechanism: string; remedy: string | null }
+export interface ReplayFinding { id: string; anchorSupported: boolean; mechanism: string; remedy: string | null; path?: string; line?: number }
 export interface ReviewerReplayOutput {
   verdict: "fail" | "pass" | "unknown";
   findings: ReplayFinding[] | null;
@@ -180,12 +180,14 @@ export async function runPairedReviewEvaluation(input: PairedReviewEvalInput): P
       if (!output.observedStack || Object.keys(input.stack).some((key) => output.observedStack?.[key as keyof PinnedReviewStack] !== input.stack[key as keyof PinnedReviewStack]))
         missing.push(`${arm}:stack-unpinned`);
       if (output.findings === null) missing.push(`${arm}:finding-extraction-missing`);
+      if (output.verdict === "unknown") missing.push(`${arm}:verdict-unknown`);
       if (!finiteNonnegative(output.costUsd) || !output.billingMode) { missing.push(`${arm}:cost-missing`); costMissingArms++; }
     };
     armMissing("bug", bug);
     armMissing("benign", benign);
     if (bug?.servedModel && benign?.servedModel && bug.servedModel !== benign.servedModel) missing.push("served-model-mismatch");
-    const scoreable = bug && benign && bug.findings !== null && benign.findings !== null;
+    const scoreable = bug && benign && bug.findings !== null && benign.findings !== null
+      && bug.verdict !== "unknown" && benign.verdict !== "unknown";
     const bugDetected = scoreable ? bug.verdict === "fail" : null;
     const benignSpecific = scoreable ? benign.verdict === "pass" : null;
     let diagnosisCredit: boolean | null = null;
@@ -208,7 +210,7 @@ export async function runPairedReviewEvaluation(input: PairedReviewEvalInput): P
     const inputTokens = measure("inputTokens");
     const outputTokens = measure("outputTokens");
     const incomplete = !scoreable || missing.some((reason) => reason.includes(":admission-paused:") || reason.includes(":replay-error:") || reason.endsWith("assignment-missing") ||
-      reason.endsWith("finding-extraction-missing") || reason.endsWith("stack-unpinned") || reason === "served-model-mismatch" ||
+      reason.endsWith("finding-extraction-missing") || reason.endsWith("verdict-unknown") || reason.endsWith("cost-missing") || reason.endsWith("stack-unpinned") || reason === "served-model-mismatch" ||
       reason.startsWith("independent-scorer-"));
     results.push({ caseId: pair.id, sealedManifestDigest: hash(JSON.stringify(pair)), baseSha: pair.baseSha,
       bugHeadSha: pair.bug.headSha, benignHeadSha: pair.benign.headSha, createdAt: pair.createdAt,

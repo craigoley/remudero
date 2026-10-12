@@ -20,6 +20,7 @@ import {
   writeSync,
   renameSync,
 } from "node:fs";
+import { readdir, readFile, rm, stat } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
@@ -28,6 +29,7 @@ import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { parseInflightLockInfo } from "./inflight-lock.js";
 import { DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS, loadDefaultPolicy } from "./policy.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
+import { systemClock } from "./clock.js";
 
 /**
  * The general shell-isolation mechanism (W1-T18, the OSS blocker). Every worker's HOME is redirected
@@ -67,64 +69,115 @@ export const WORKER_HOME_RC_FILES: readonly string[] = [
 /** One path a worker needs mirrored back from the real HOME into the redirected scratch HOME,
  *  symlinked rather than copied so it is always current. */
 export interface WorkerHomeSymlink {
-  /** Path relative to HOME, e.g. `.claude` or `.config/gh`. */
+  /** Path relative to HOME, e.g. `.claude` or `.gitconfig`. */
   relPath: string;
   /** Why this one path is granted back — never a wholesale HOME copy. */
   reason: string;
 }
 
 /** W1-T505: the credential-only sibling of the operator's real `.claude` that a worker's `.claude`
- *  grant prefers. INVARIANT: {@link workerHomePlan} resolves the grant to `<realHome>/.claude-fleet`
- *  when it exists and to the wholesale `.claude` when it does not, so upgrading before the sibling is
- *  populated breaks no host. // Why: docs/forensics/worker-home.md#the-claude-grant. */
+ *  grant prefers when no explicitly provisioned shared child exists. {@link workerHomePlan}
+ *  uses the shared child first, then `<realHome>/.claude-fleet`, then the legacy `.claude`, so
+ *  upgrading before shared authority is provisioned preserves the existing grant. // Why: docs/forensics/worker-home.md#the-claude-grant. */
 export const WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH = ".claude-fleet";
 
 const claudeFleetSeedFsOps = { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, rmSync, chmodSync };
 type ClaudeFleetSeedFsOps = typeof claudeFleetSeedFsOps;
 
-/** Seed the real home's credential-only grant once, before a worker home is planned. The exclusive
- * directory create protects a refreshed token from concurrent spawns; an existing sibling is owned
- * by the worker's token refresh and must never be copied over. */
+/** What {@link seedClaudeFleetCredentials} changed (W1-T6252); `priorVerdict` is `absent` or the replaced reason class. */
+export interface ClaudeCredentialSeedEvent {
+  kind: "provisioned" | "healed";
+  store: string;
+  priorVerdict: string;
+}
+
+/** W1-T6252: provision, and heal, the ONE shared credential store every fleet Claude process resolves.
+ * Inside a container `<realHome>/.claude` is the host's bind mount, so every container creates and then
+ * resolves the SAME `.claude/fleet-auth/claude/.credentials.json`, and the CLI's own refresh lock beside
+ * it serialises renewals. A private `.claude-fleet` fork per container made three refreshing copies of one
+ * OAuth lineage, so any holder's refresh rotated the token out from under the others. An existing fork is
+ * left on disk for recovery and is no longer resolved once the store exists; no new fork is created.
+ * The exclusive directory create makes concurrent containers converge on one winner. A store holding a
+ * usable credential is owned by the CLI's refresh and is never copied over; an unusable one heals from a
+ * usable owner credential instead of refusing every spawn until someone intervenes. */
 export function seedClaudeFleetCredentials(opts: {
   realHome: string;
   fsImpl?: Partial<ClaudeFleetSeedFsOps>;
-}): void {
+  onEvent?: (event: ClaudeCredentialSeedEvent) => void;
+}): "provisioned" | "healed" | "kept" | "skipped" {
   const f = { ...claudeFleetSeedFsOps, ...opts.fsImpl };
-  const targetDir = join(opts.realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
-  if (f.existsSync(targetDir)) return;
-
-  let credential: Buffer;
-  try {
-    credential = f.readFileSync(join(opts.realHome, ".claude", ".credentials.json"));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw error;
+  const store = sharedClaudeCredentialDir(opts.realHome);
+  if (f.existsSync(store)) {
+    const prior = healClaudeCredentialStore(opts.realHome, store, f);
+    if (prior === undefined) return "kept";
+    opts.onEvent?.({ kind: "healed", store, priorVerdict: prior });
+    return "healed";
   }
 
-  // Prepare the private file before publishing the directory, then claim the directory with an
-  // exclusive mkdir. A competing seed gets EEXIST and leaves the winner's token untouched.
-  const stagedFile = join(opts.realHome, `.claude-fleet-seed-${randomUUID()}`);
+  const credential = readOwnerCredential(opts.realHome, f);
+  if (credential === undefined || classifyWorkerCredentialFile(() => credential.toString("utf8")).kind !== "usable") {
+    return "skipped";
+  }
+
+  // Stage the file beside the store (same filesystem, so the rename is atomic), then claim the store
+  // with an exclusive mkdir. A competing provisioner gets EEXIST and leaves the winner's token untouched.
+  const parent = dirname(store);
+  f.mkdirSync(parent, { recursive: true, mode: 0o700 });
+  const stagedFile = join(parent, `.credentials-seed-${randomUUID()}`);
   let createdDir = false;
   let published = false;
   try {
     f.writeFileSync(stagedFile, credential, { mode: 0o600, flag: "wx" });
     f.chmodSync(stagedFile, 0o600);
     try {
-      f.mkdirSync(targetDir, { mode: 0o700 });
+      f.mkdirSync(store, { mode: 0o700 });
       createdDir = true;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return "kept";
       throw error;
     }
-    f.chmodSync(targetDir, 0o700);
-    f.renameSync(stagedFile, join(targetDir, ".credentials.json"));
+    f.chmodSync(store, 0o700);
+    f.renameSync(stagedFile, join(store, ".credentials.json"));
     published = true;
   } finally {
     if (!published) {
       f.rmSync(stagedFile, { force: true });
-      if (createdDir) f.rmSync(targetDir, { recursive: true, force: true });
+      if (createdDir) f.rmSync(store, { recursive: true, force: true });
     }
   }
+  opts.onEvent?.({ kind: "provisioned", store, priorVerdict: "absent" });
+  return "provisioned";
+}
+
+/** The owner's credential bytes, or `undefined` when there is no owner file. Any other read failure throws:
+ *  a permissions problem is not an absence. */
+function readOwnerCredential(realHome: string, f: ClaudeFleetSeedFsOps): Buffer | undefined {
+  try {
+    return f.readFileSync(join(realHome, ".claude", ".credentials.json")) as Buffer;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+/** Replace the store's credential only when it is unusable and the owner's is usable. Returns the replaced
+ *  credential's reason class, or `undefined` when nothing was replaced. The replacement is staged inside
+ *  the store and renamed over it, so a reader sees one file or the other. */
+function healClaudeCredentialStore(realHome: string, store: string, f: ClaudeFleetSeedFsOps): string | undefined {
+  const storeFile = join(store, ".credentials.json");
+  const prior = classifyWorkerCredentialFile(() => f.readFileSync(storeFile, "utf8") as string);
+  if (prior.kind === "usable") return undefined;
+  const owner = readOwnerCredential(realHome, f);
+  if (owner === undefined || classifyWorkerCredentialFile(() => owner.toString("utf8")).kind !== "usable") return undefined;
+  const stagedFile = join(store, `.credentials.json.heal-${randomUUID()}`);
+  try {
+    f.writeFileSync(stagedFile, owner, { mode: 0o600, flag: "wx" });
+    f.chmodSync(stagedFile, 0o600);
+    f.renameSync(stagedFile, storeFile);
+  } finally {
+    f.rmSync(stagedFile, { force: true });
+  }
+  return prior.reasonClass;
 }
 
 /** Where Playwright keeps its browser builds. `PLAYWRIGHT_BROWSERS_PATH` wins when set to a real path, which is how CI
@@ -166,7 +219,6 @@ export const WORKER_HOME_SYMLINKS: readonly WorkerHomeSymlink[] = [
       "(transcripts, history, settings, skills), falling back to today's wholesale grant only when that " +
       "sibling is absent. OAuth may read under HOME — unverified live, see LEARNINGS.md.",
   },
-  { relPath: ".config/gh", reason: "gh CLI auth token, so a worker can open and update its PR" },
   {
     relPath: playwrightCacheRelPath(),
     reason:
@@ -175,7 +227,7 @@ export const WORKER_HOME_SYMLINKS: readonly WorkerHomeSymlink[] = [
       "and every run downloads its own — MEASURED on the container at the great majority of a completed " +
       "worker home. READ-ONLY IN PRACTICE: on a populated cache every browser directory's mtime is its " +
       "INSTALL date and nothing under the tree is modified across repeated launches, so this grant adds " +
-      "no writable path and no bind — it is a symlink inside the worker home, exactly like the four " +
+      "no writable path and no bind — it is a symlink inside the worker home, exactly like the others " +
       "beside it. AN ABSENT CACHE IS A SKIPPED GRANT, inherited from materializeWorkerHome's existing " +
       "contract: a target that does not exist is recorded `absent` and skipped silently, so a host " +
       "that never populated one still materializes a working home and the worker falls back to its own " +
@@ -195,6 +247,12 @@ export const WORKER_HOME_SYMLINKS: readonly WorkerHomeSymlink[] = [
       "macOS login keychain holds the Claude Code OAuth token ('Claude Code-credentials'); the keychain is HOME-relative ($HOME/Library/Keychains/login.keychain-db), so a redirected HOME hides it and Claude Code exits 'Not logged in' at $0 before any turn (W1-T18 spawn deadlock, verified live). ONLY this single DB file is granted — not the whole ~/Library — and securityd still gates per-item access by code identity.",
   },
 ];
+
+/** Slots that USED to be granted and are now refused. `.config/gh` linked the operator's real gh
+ *  config into every worker HOME: a worker could read its hosts.yml and, through the then-unsandboxed
+ *  `gh`, write aliases, `pager` or `http_unix_socket` into the config the operator's own gh reads. A
+ *  container worker authenticates with `GH_TOKEN` and needs no config dir at all. */
+export const REVOKED_WORKER_HOME_GRANTS: readonly string[] = [join(".config", "gh")];
 
 /** PURE plan of what {@link materializeWorkerHome} will do, so the redirection logic is unit-testable
  *  without touching the filesystem. INVARIANT: every `from` is under the redirected `workerHome` and
@@ -265,8 +323,7 @@ export function workerHomePlan(opts: {
   const exists = opts.exists ?? existsSync;
   // W1-T505: the `.claude` grant prefers `<realHome>/.claude-fleet` over the wholesale `.claude`,
   // falling back to it when that sibling is absent.
-  const claudeCredentialDir = join(opts.realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
-  const narrowedClaudeTarget = exists(claudeCredentialDir) ? claudeCredentialDir : join(opts.realHome, CLAUDE_REL);
+  const narrowedClaudeTarget = workerClaudeCredentialDir(opts.realHome, exists);
 
   return {
     workerHome: opts.workerHome,
@@ -513,6 +570,22 @@ export function materializeWorkerHome(opts: {
     }
   }
 
+  // A link in a REVOKED slot is cleared even when an earlier materialization made it, so a reused home
+  // stops reaching the operator's gh config the moment this module stops granting it. A slot that
+  // cannot even be inspected throws: a revocation nobody could confirm is not one.
+  for (const rel of REVOKED_WORKER_HOME_GRANTS) {
+    const slot = join(plan.workerHome, rel);
+    let st: ReturnType<typeof lstatSync>;
+    try {
+      st = lstatSync(slot);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") continue; // nothing can sit in the slot
+      throw e;
+    }
+    if (st.isSymbolicLink()) unlinkSync(slot);
+  }
+
   // W1-T981: bound the CLI's own `.claude.json` backups at the SAME resolved grant target this call
   // just symlinked `.claude` toward, so the sweep tracks W1-T505's narrowing automatically.
   const claudeConfigBackupSweep = sweepClaudeConfigBackups(plan.claudeGrantTarget!);
@@ -522,12 +595,14 @@ export function materializeWorkerHome(opts: {
 
 // ── W1-T170: per-run/per-spawn worker HOMES (the singleton does not survive concurrency) ──
 // INVARIANT: every concurrent worker gets its own home, with its own empty rc files and its own
-// keychain/.claude/.config/gh symlinks. TRAP: two overlapping spawns truncating and symlinking the
+// keychain/.claude/.gitconfig symlinks. TRAP: two overlapping spawns truncating and symlinking the
 // SAME rc files and keychain slot turn #100's deterministic, already-fixed HOME-relative keychain miss
 // into an intermittent one. // Why: docs/forensics/worker-home.md#per-run-worker-homes (W1-T170).
 
 const workerHomeFsOps = { existsSync, rmSync, readdirSync, statSync, readFileSync };
 type WorkerHomeFsOps = typeof workerHomeFsOps;
+const workerHomeFsOpsAsync = { readdir, readFile, rm, stat };
+type WorkerHomeFsOpsAsync = typeof workerHomeFsOpsAsync;
 
 /** W1-T2463: the delimiter between a per-spawn worker home's `runId` component and its per-spawn
  *  uniqueness token. INVARIANT: a dot can never collide with a runId's own characters — every runId in
@@ -604,6 +679,8 @@ export function reapWorkerHome(
 export const DEFAULT_WORKER_HOME_SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export interface WorkerHomeSweepOpts {
+  /** {@link sweepStaleWorkerHomesAsync} only: the awaited fs surface (tests). Defaults to `node:fs/promises`. */
+  fsAsync?: Partial<WorkerHomeFsOpsAsync>;
   /** Reap a worker-home dir older than this, when its run id resolves to nothing — no live lock and
    *  no terminal ledger verdict. Default 24h. */
   maxAgeMs?: number;
@@ -668,6 +745,11 @@ function hasTerminalLedgerVerdict(ledgerPath: string, runId: string, f: WorkerHo
   } catch {
     return false; // absent/unreadable ledger — nothing to find
   }
+  return ledgerTextHasVerdict(raw, runId);
+}
+
+/** The line scan both ledger readers share, so the sync and awaited sweeps cannot drift. */
+function ledgerTextHasVerdict(raw: string, runId: string): boolean {
   for (const rawLine of raw.split("\n")) {
     const line = rawLine.trim();
     if (!line) continue;
@@ -773,6 +855,111 @@ export function sweepStaleWorkerHomes(root: string, opts: WorkerHomeSweepOpts = 
   return { removed, kept };
 }
 
+/** {@link findLiveInflightLockForRun}, awaited: the same KEEP-only signal. */
+async function findLiveInflightLockForRunAsync(inflightDir: string, runId: string, f: WorkerHomeFsOpsAsync): Promise<boolean> {
+  let entries: string[];
+  try {
+    entries = await f.readdir(inflightDir);
+  } catch {
+    return false; // absent/unreadable inflight dir proves nothing, as the sync read answers
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith(".lock")) continue;
+    let raw: string;
+    try {
+      raw = await f.readFile(join(inflightDir, entry), "utf8");
+    } catch {
+      continue; // vanished between readdir and read, as the sync read skips it
+    }
+    if (parseInflightLockInfo(raw)?.run_id === runId) return true;
+  }
+  return false;
+}
+
+/** {@link hasTerminalLedgerVerdict}, awaited, through the same line scan. */
+async function hasTerminalLedgerVerdictAsync(ledgerPath: string, runId: string, f: WorkerHomeFsOpsAsync): Promise<boolean> {
+  let raw: string;
+  try {
+    raw = await f.readFile(ledgerPath, "utf8");
+  } catch {
+    return false; // absent/unreadable ledger has nothing to find, as the sync read answers
+  }
+  return ledgerTextHasVerdict(raw, runId);
+}
+
+/**
+ * {@link sweepStaleWorkerHomes} OFF THE EVENT LOOP: the same W1-T1064 predicate in the same order
+ * (live lock keeps, terminal verdict removes, else the age backstop), the same log rows, with every
+ * fs read and removal awaited. The ledger read alone is a whole-file read per candidate, which the
+ * sync sweep did on the daemon loop. Never rejects.
+ */
+export async function sweepStaleWorkerHomesAsync(root: string, opts: WorkerHomeSweepOpts = {}): Promise<WorkerHomeSweepSummary> {
+  const f = { ...workerHomeFsOpsAsync, ...opts.fsAsync };
+  const now = opts.now ?? systemClock.now;
+  const maxAgeMs = opts.maxAgeMs ?? DEFAULT_WORKER_HOME_SWEEP_MAX_AGE_MS;
+  const log = opts.log;
+  const removed: string[] = [];
+  const kept: string[] = [];
+  const parent = dirname(root);
+  const prefix = `${basename(root)}-`;
+  const stateRoot = opts.stateRoot ?? parent;
+  const inflightDir = opts.inflightDir ?? join(stateRoot, "state", "inflight");
+  const ledgerPath = opts.ledgerPath ?? join(stateRoot, "state", LEDGER_FILENAME);
+  let entries: string[];
+  try {
+    entries = await f.readdir(parent);
+  } catch {
+    return { removed, kept }; // parent unreadable/absent, as the sync sweep answers
+  }
+  const remove = async (name: string, full: string, fields: Record<string, unknown>): Promise<void> => {
+    try {
+      await f.rm(full, { recursive: true, force: true });
+      removed.push(name);
+      log?.("worker_home_reap.removed", { name, ...fields });
+    } catch {
+      kept.push(name); // a failed removal on one entry never blocks the rest
+    }
+  };
+  for (const name of entries) {
+    if (!name.startsWith(prefix)) continue;
+    const full = join(parent, name);
+    let st: Awaited<ReturnType<typeof stat>>;
+    try {
+      st = await f.stat(full);
+    } catch {
+      continue; // vanished between readdir and stat, as the sync sweep skips it
+    }
+    if (!st.isDirectory()) {
+      kept.push(name);
+      continue;
+    }
+    const runId = stripPerSpawnToken(name.slice(prefix.length));
+    if (await findLiveInflightLockForRunAsync(inflightDir, runId, f)) {
+      kept.push(name);
+      continue;
+    }
+    if (await hasTerminalLedgerVerdictAsync(ledgerPath, runId, f)) {
+      await remove(name, full, {
+        run_id: runId,
+        reason: "terminal-verdict",
+        detail: `terminal ledger verdict for run ${runId}, no live inflight lock — removed before the age ceiling`,
+      });
+      continue;
+    }
+    if (now() - st.mtimeMs <= maxAgeMs) {
+      kept.push(name);
+      continue;
+    }
+    await remove(name, full, {
+      run_id: runId,
+      reason: "age-ceiling",
+      detail: `no live lock or ledger verdict for run ${runId}; aged past the ${maxAgeMs}ms ceiling`,
+    });
+  }
+  log?.("worker_home_reap.summary", { removed: removed.length, kept: kept.length });
+  return { removed, kept };
+}
+
 // ── W1-T235: the dedicated worker keychain (WS-7 keychain-unlock gate) ──────
 // TRAP: the login keychain holds the `Claude Code-credentials` OAuth item and locks with the
 // operator's session, so under the pre-T235 symlink a lock killed every headless spawn at $0 before
@@ -795,6 +982,7 @@ export type WorkerKeychainReasonClass =
   | "provision-failed"
   | "credential-file-unreadable"
   | "credential-file-malformed"
+  | "credential-file-empty"
   | "credential-too-short-for-run"
   /** R-3: the keychain PROVISIONING LOCK was still held by a holder judged live after this call
    *  waited out `keychainProvisionLockWaitMs`. Named separately from `provision-failed` on
@@ -973,8 +1161,25 @@ export function classifyCredentialSidecar(
 /** Where the non-darwin credential store lives — the path the CLI documents, and the SAME directory
  *  `WORKER_HOME_SYMLINKS` already grants into every per-run worker HOME (measured at spawn time: the
  *  grant materialises and the file is readable from inside the worker). */
+function sharedClaudeCredentialDir(realHome: string): string {
+  return join(realHome, CLAUDE_REL, "fleet-auth", "claude");
+}
+
+export function workerClaudeCredentialDir(
+  realHome: string,
+  exists: (path: string) => boolean = existsSync,
+): string {
+  // The parent .claude mount is already shared by the fleet containers. This optional private
+  // child shares both the credential and native primary/legacy refresh locks without granting
+  // the operator's surrounding history or App key into a worker HOME.
+  const shared = sharedClaudeCredentialDir(realHome);
+  if (exists(shared)) return shared;
+  const narrowed = join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
+  return exists(narrowed) ? narrowed : join(realHome, CLAUDE_REL);
+}
+
 export function workerCredentialFilePath(realHome: string): string {
-  return join(realHome, ".claude", ".credentials.json");
+  return join(workerClaudeCredentialDir(realHome), ".credentials.json");
 }
 
 /** {@link classifyWorkerCredentialFile}'s verdict. `usable` carries the expiry when the file states
@@ -984,13 +1189,14 @@ export type WorkerCredentialFileVerdict =
   | { kind: "usable"; expiresAtMs?: number }
   | { kind: "unusable"; reasonClass: WorkerKeychainReasonClass; detail: string };
 
-/** PURE (given a reader): classify the non-darwin credential file. Four observations, four answers,
+/** PURE (given a reader): classify the non-darwin credential file. Distinct observations and answers,
  *  none collapsed — the same null/empty discipline `readLedgerLines` and `GitHub.readFailed` keep.
  *  ENOENT is `credential-item-missing`, the SAME class the darwin rung uses because it is the same
  *  fact; any other throw is `credential-file-unreadable`, because a permissions problem is not an
  *  absence; non-JSON bytes are `credential-file-malformed`, as is JSON with no `claudeAiOauth` object.
+ *  An object holding no access or refresh token is `credential-file-empty`.
  *  TRAP: a file was observed holding only an `mcpOAuth` section, which a file-exists check waves
- *  through. Anything else is `usable`; expiry is reported, never refused. */
+ *  through. Credential presence permits native renewal; expiry is reported, never refused. */
 export function classifyWorkerCredentialFile(read: () => string): WorkerCredentialFileVerdict {
   let raw: string;
   try {
@@ -1008,13 +1214,20 @@ export function classifyWorkerCredentialFile(read: () => string): WorkerCredenti
     return { kind: "unusable", reasonClass: "credential-file-malformed", detail: "file is not valid JSON" };
   }
   const oauth = (parsed as { claudeAiOauth?: unknown } | null)?.claudeAiOauth;
-  if (typeof oauth !== "object" || oauth === null) {
+  if (typeof oauth !== "object" || oauth === null || Array.isArray(oauth)) {
     return {
       kind: "unusable",
       reasonClass: "credential-file-malformed",
       detail: "file parses but carries no claudeAiOauth section — it holds no Claude credential",
     };
   }
+  const credential = oauth as { accessToken?: unknown; refreshToken?: unknown };
+  const hasToken = [credential.accessToken, credential.refreshToken]
+    .some((token) => typeof token === "string" && token.trim().length > 0);
+  if (!hasToken) return {
+    kind: "unusable", reasonClass: "credential-file-empty",
+    detail: "claudeAiOauth holds neither an access credential nor a refresh credential",
+  };
   // REUSED, never re-derived: the SAME extractor the darwin sidecar path runs against the keychain
   // secret, which its own doc records as byte-identical in shape to this file.
   return { kind: "usable", expiresAtMs: extractCredentialExpiryMs(raw) };

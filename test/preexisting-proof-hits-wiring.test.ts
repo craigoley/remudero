@@ -75,9 +75,9 @@ function staleViaRealPath(head: string, proof: string): { stale: boolean; built:
   const criteria = [{ proof }];
   // REAL default deps — no injection. W1-T460 split the return into
   // (baseCheckoutDir, baseUnreadablePaths); R-11 added `baseIsCheckout`. Every case below reads
-  // at the base perfectly well, and the base is a real detached worktree at the merge-base.
+  // at the base perfectly well; a grep-only review's base is the real merge-base blobs, no worktree.
   const built = buildBaseProofDir(criteria, head);
-  assert.equal(built.baseIsCheckout, true, "the real default path adds a worktree — no fallback here");
+  assert.equal(built.baseIsGrepTree, true, "the real default path reads the base blobs — no worktree, no fallback here");
   const whitelisted = parseWhitelistedProof(proof);
   assert.ok(whitelisted, `the proof must compile: ${proof}`);
   // Sanity: the proof really does pass on the HEAD, or "stale" would be meaningless.
@@ -141,7 +141,7 @@ test("a proof naming a file the BRANCH CREATES is not flagged — absent is the 
     const r = staleViaRealPath(head, "grep: freshThing in src/brand-new.ts");
     built = r.built;
     assert.equal(r.stale, false, "a created file is never stale");
-    assert.equal(existsSync(join(built.baseCheckoutDir!, "src/brand-new.ts")), false, "the worktree at the base simply lacks the file");
+    assert.equal(existsSync(join(built.baseCheckoutDir!, "src/brand-new.ts")), false, "the base tree simply lacks the file");
   } finally {
     dropBase(head, built);
     rmSync(head, { recursive: true, force: true });

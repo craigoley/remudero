@@ -1,0 +1,14 @@
+violation: none
+rule: >
+  W1-T5574: the lane changing code, scripts, CI configuration, or claims must receive
+  the claims gate remedy, and the cited incident must execute as a proof against the
+  active learning entry.
+verdict:
+  state: success
+  capped: false
+  testTheater: false
+  criteriaTampered: false
+arm: true
+criteria:
+  - met: true
+    proof_exec: executed_pass

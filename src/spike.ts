@@ -5,8 +5,10 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./lib/config.js";
+import { realArmDeps } from "./lib/arm-auto-merge.js";
 import { assertLiveWriteAllowed } from "./lib/live-write-guard.js";
 import { gitPushRunBranch } from "./lib/git-push.js";
+import { hostWorktreeGit } from "./lib/worktree-git.js";
 import { benchmarkNonDispatchSpawn } from "./lib/benchmark-run.js";
 import {
   DENY_FLOOR_FALLBACK_MODE,
@@ -253,9 +255,7 @@ async function main(): Promise<void> {
   let pushPath = "git push (in-sandbox, HTTPS via gh credential helper)";
   let branchOnOrigin = false;
   try {
-    execFileSync("git", ["-C", worktreePath, "ls-remote", "--exit-code", "origin", branch], {
-      stdio: "ignore",
-    });
+    hostWorktreeGit(worktreePath, ["ls-remote", "--exit-code", "origin", branch], { stdio: "ignore" });
     branchOnOrigin = true;
   } catch {
     branchOnOrigin = false;
@@ -294,7 +294,7 @@ async function main(): Promise<void> {
   kv("pr.mergeable.after_poll", view.mergeable);
 
   log("MERGE", "--squash --delete-branch");
-  const mergeOut = ghPrMergeSquash(prUrl);
+  const mergeOut = ghPrMergeSquash(prUrl, (url) => realArmDeps().closingReferences!(url));
   kv("merge.output", mergeOut.trim() || "(ok)");
   const viewAfter = ghPrView(prUrl);
   kv("verdict3.pr_state_after_merge", viewAfter.state);

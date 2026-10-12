@@ -30,11 +30,37 @@ die() { log "$*"; exit 1; }
 # `mkdir -p` first: `git config --global` writes $HOME/.gitconfig and fails outright if HOME does
 # not exist (the same trap recorded further down).
 mkdir -p "${HOME:?HOME must be set — git config --global writes \$HOME/.gitconfig and cannot without it}"
-if git -C / config --get user.email >/dev/null 2>&1 && git -C / config --get user.name >/dev/null 2>&1; then
+# W1-T6160: a complete RMD_GIT_AUTHOR_* pair is the container's declared author, so it is written even
+# over an identity HOME already holds, then read back; a write/read error or mismatch stops the boot.
+# A partial pair or none keeps the configured-identity/default behaviour below.
+if [ -n "${RMD_GIT_AUTHOR_NAME:-}" ] && [ -n "${RMD_GIT_AUTHOR_EMAIL:-}" ]; then
+  git config --global --replace-all user.name "${RMD_GIT_AUTHOR_NAME}" \
+    || die "git identity: FAILED to write user.name to the global config (\$HOME/.gitconfig) — refusing to boot on an unapplied author"
+  git config --global --replace-all user.email "${RMD_GIT_AUTHOR_EMAIL}" \
+    || die "git identity: FAILED to write user.email to the global config (\$HOME/.gitconfig) — refusing to boot on an unapplied author"
+  applied_name="$(git -C / config --global --get user.name 2>/dev/null)" \
+    || die "git identity: FAILED to read user.name back from the global config — refusing to boot on an unverified author"
+  applied_email="$(git -C / config --global --get user.email 2>/dev/null)" \
+    || die "git identity: FAILED to read user.email back from the global config — refusing to boot on an unverified author"
+  if [ "${applied_name}" != "${RMD_GIT_AUTHOR_NAME}" ] || [ "${applied_email}" != "${RMD_GIT_AUTHOR_EMAIL}" ]; then
+    die "git identity: the global config does not hold the RMD_GIT_AUTHOR_* pair after writing it — refusing to boot on a mismatched author"
+  fi
+  log "git identity: ${applied_name} <${applied_email}> (explicit RMD_GIT_AUTHOR_NAME/RMD_GIT_AUTHOR_EMAIL pair, authoritative)"
+elif git -C / config --get user.email >/dev/null 2>&1 && git -C / config --get user.name >/dev/null 2>&1; then
   log "git identity: already configured ($(git -C / config --get user.name) <$(git -C / config --get user.email)>) — left alone"
 else
-  git config --global --replace-all user.name "${RMD_GIT_AUTHOR_NAME:-remudero-worker}"
-  git config --global --replace-all user.email "${RMD_GIT_AUTHOR_EMAIL:-remudero-worker@users.noreply.github.com}"
+  # Under App auth the fallback is the fleet App's bot identity, which GitHub and Vercel map to an account;
+  # remudero-worker maps to none, so Vercel blocked every fleet preview once RMD_GIT_AUTHOR_* went missing
+  # (site #189, console #2030/#2032, 2026-10-08). Same identity as src/lib/feedback-landing.ts.
+  if [ -n "${GH_APP_ID:-}" ]; then
+    default_author_name="remudero-fleet[bot]"
+    default_author_email="318611788+remudero-fleet[bot]@users.noreply.github.com"
+  else
+    default_author_name="remudero-worker"
+    default_author_email="remudero-worker@users.noreply.github.com"
+  fi
+  git config --global --replace-all user.name "${RMD_GIT_AUTHOR_NAME:-$default_author_name}"
+  git config --global --replace-all user.email "${RMD_GIT_AUTHOR_EMAIL:-$default_author_email}"
   # `git -C /` here too, for the reason the guard above uses it: a bare `git config --get` resolves
   # local config, so from inside a repository this would report THAT repo's identity, not the
   # global one just written. Why: docs/forensics/entrypoint.md#git-identity--the-report-vs-write-asymmetry.
@@ -263,15 +289,9 @@ sync_tree() {
     fi
   fi
 
-  # A stuck repo stays stuck, deliberately: `worktree prune` removes the cause, not an existing
-  # `.git/gc.log`, because this script cannot tell a stale log from one a maintenance run is
-  # still writing. It reports the file and leaves clearing it to an operator.
-  # Why: docs/forensics/entrypoint.md#sync_tree--reporting-a-stuck-gclog-rather-than-clearing-it.
+  # Report only: the daemon cadence owns recovery after useful admission.
   if [ -f "$TREE/.git/gc.log" ]; then
-    log "NOTE: $TREE/.git/gc.log exists — git is declining AUTOMATIC cleanup until it is removed."
-    log "  The stale registrations above are pruned, so the cause is gone, but the log is not"
-    log "  cleared here: it belongs to whatever wrote it. To recover, with no lane running:"
-    log "    rm -f $TREE/.git/gc.log && git -C $TREE gc --prune=now"
+    log "NOTE: $TREE/.git/gc.log exists — autonomous daemon maintenance will retry at a quiet boundary."
   fi
 
   # ── The dirty-tree rule is the deployer's, not a new one ──────────────────────────
@@ -586,7 +606,7 @@ idle_starved_wait() {
       probe_mode=pr-board
       if [ "$i" -eq 6 ]; then probe_mode=full; fi
       probe_rc=0
-      bash "$TREE/deploy/idle-starved-probe.sh" "$slug" "$checkout" "$base_sha" "$CONFIG_ROOT/state" "$since" "$marker" "$TREE" "$probe_mode" &
+      bash "$TREE/deploy/idle-starved-probe.sh" "$slug" "$checkout" "$base_sha" "$CONFIG_ROOT/state" "$since" "$marker" "$TREE" "$probe_mode" "$daemon_engine_sha" "$daemon_engine_observer" &
       child_pid=$!
       wait "$child_pid" || probe_rc=$?
       child_pid=""
@@ -618,6 +638,14 @@ while :; do
   if [ "${RMD_IDLE_STARVED_SUPERVISED:-}" = "1" ]; then
     mkdir -p "$CONFIG_ROOT/state" || die "cannot prepare idle_starved state directory"
     date -u +%Y-%m-%dT%H:%M:%S.000Z > "$CONFIG_ROOT/state/idle-starved.marker" || die "cannot prepare idle_starved marker"
+    # Capture before the daemon loads code, not after it exits into quiet mode:
+    # a mounted checkout can advance during that run without refreshing the process.
+    daemon_engine_sha="$(git -C "$TREE" rev-parse --verify HEAD 2>/dev/null)" || daemon_engine_sha=""
+    daemon_engine_observer="$TREE"
+    # Observe the separate host installation; a broken declaration must stay unreadable.
+    if [ -e "$CONFIG_ROOT/daemon-install" ] || [ -L "$CONFIG_ROOT/daemon-install" ]; then
+      daemon_engine_observer="$CONFIG_ROOT/daemon-install"
+    fi
   fi
   "$@" &
   child_pid=$!

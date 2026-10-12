@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { TRIAGE_MAX_NEW_TASKS, triageCommand } from "../src/run-task.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 
 // W1-T1011 (REOPENED BY W1-T2326): THE ORDERING THIS FILE PROVES. `rmd triage` mints a task id
@@ -106,19 +107,23 @@ const SUMMARY_PAYLOAD = {
   ],
 };
 
-/** Standard gh shim: `pr list` empty (so the mint's open-PR source sees nothing), the REST
- *  create (`gh api --method POST repos/.../pulls`, W1-T1202) answers a fixed `html_url`,
- *  `--json headRefName` answers from the bare origin's OWN pushed `run-*` branch (read live
- *  off disk), `pr diff` empty. Identical shape to test/triage.test.ts's W1-T348 shim — this
- *  file drives the same real round-trip, not a shortcut past it. */
+/** The reservation fixture has no hosted CI or merge. Its actual REST reads return the real
+ *  pushed head and a terminal failing check. The production wait refuses that check promptly
+ *  instead of retrying an empty JSON response for two minutes; it never reports success. */
 function writeGhShim(shimDir: string, bare: string): void {
+  const quotedBare = `'${bare.replaceAll("'", "'\\''")}'`;
+  const quotedCalls = `'${join(shimDir, "calls.log").replaceAll("'", "'\\''")}'`;
   writeFileSync(
     join(shimDir, "gh"),
     [
       "#!/bin/sh",
+      `printf '%s\\n' "$*" >> ${quotedCalls}`,
       'case "$*" in',
       '  *"pr list"*) echo "[]" ;;',
       '  *"api --method POST"*) echo \'{"html_url":"https://github.com/craigoley/remudero/pull/999","number":999}\' ;;',
+      `  "api repos/"*"/pulls/999") git -C ${quotedBare} for-each-ref --format='{"number":999,"html_url":"https://github.com/craigoley/remudero/pull/999","state":"open","merged":false,"merged_at":null,"body":"","head":{"ref":"%(refname:short)","sha":"%(objectname)"}}' refs/heads/run-* | tail -1 ;;`,
+      `  "api repos/"*"/commits/"*"/check-runs"*) git -C ${quotedBare} for-each-ref --format='{"total_count":1,"check_runs":[{"name":"ci","status":"completed","conclusion":"failure","head_sha":"%(objectname)"}]}' refs/heads/run-* | tail -1 ;;`,
+      '  "api repos/"*"/commits/"*"/status") echo \'{"statuses":[]}\' ;;',
       `  *"--json headRefName"*) git -C ${bare} for-each-ref --format='{"headRefName":"%(refname:short)"}' refs/heads/run-* | tail -1 ;;`,
       "  *\"--json body\"*) echo '{\"body\":\"\"}' ;;",
       '  *"pr diff"*) echo "" ;;',
@@ -129,6 +134,33 @@ function writeGhShim(shimDir: string, bare: string): void {
     { mode: 0o755 },
   );
 }
+
+test("the reservation timing fixture answers current REST reads with its pushed head and terminal CI refusal", () => {
+  // Exercise the executable shim, including a quoted path; no GitHub read is involved.
+  const bare = makeOrigin("fb-rest-contract");
+  const shimDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}triage-rest-'contract-`));
+  const quotedOrigin = join(shimDir, "origin's.git");
+  try {
+    execFileSync("git", ["clone", "--quiet", "--bare", bare, quotedOrigin], { env: GIT_ENV });
+    const headRef = "run-TRIAGE-rest-contract-1";
+    const headSha = git(quotedOrigin, "rev-parse", "main").trim();
+    git(quotedOrigin, "update-ref", `refs/heads/${headRef}`, headSha);
+    writeGhShim(shimDir, quotedOrigin);
+    const row = JSON.parse(execFileSync(join(shimDir, "gh"), ["api", "repos/craigoley/remudero/pulls/999"], { encoding: "utf8" }));
+    assert.equal(row.state, "open");
+    assert.equal(row.merged, false);
+    assert.equal(row.merged_at, null);
+    assert.equal(row.body, "");
+    assert.deepEqual(row.head, { ref: headRef, sha: headSha });
+    const checks = JSON.parse(execFileSync(join(shimDir, "gh"), ["api", `repos/craigoley/remudero/commits/${headSha}/check-runs?per_page=100`], { encoding: "utf8" }));
+    assert.deepEqual(checks, { total_count: 1, check_runs: [{ name: "ci", status: "completed", conclusion: "failure", head_sha: headSha }] });
+    const status = JSON.parse(execFileSync(join(shimDir, "gh"), ["api", `repos/craigoley/remudero/commits/${headSha}/status`], { encoding: "utf8" }));
+    assert.deepEqual(status, { statuses: [] });
+  } finally {
+    rmSync(bare, { recursive: true, force: true });
+    rmSync(shimDir, { recursive: true, force: true });
+  }
+});
 
 /** Every id currently reserved on `bare`'s remote id-reservation namespace — `[]` when none. */
 function remoteReservedIds(bare: string): string[] {
@@ -336,14 +368,19 @@ test("W1-T2326: an already-decided verdict still takes the remote reservation (W
     process.env.HOME = f.home;
     process.env.PATH = `${f.shimDir}:${savedPath}`;
 
-    await withLiveWritesAllowed(() =>
+    const result = await withLiveWritesAllowed(() =>
       triageCommand([feedbackId], {
         // ALREADY_DECIDED with no files changed ⇒ decideTriage returns `action: "no_task"`,
         // never `"propose"` — but the remote reservation now runs BEFORE decideTriage is even
         // called, so this branch no longer decides whether the block gets burned.
         spawn: async () => fakeWorker("ALREADY_DECIDED: MASTER-PLAN.md §7B already covers this"),
       }),
-    ).catch(() => undefined); // PR-gating steps have no real backend in this fixture
+    );
+    assert.equal(result, 1, "the terminal failing fixture check refuses the PR before review or merge");
+    const calls = readFileSync(join(f.shimDir, "calls.log"), "utf8").split("\n");
+    assert.ok(calls.some((call) => /^api repos\/[^/]+\/[^/]+\/pulls\/999$/.test(call)), "triage read its actual REST pull");
+    assert.ok(calls.some((call) => /\/commits\/[0-9a-f]{40}\/check-runs\?per_page=100$/.test(call)), "triage read checks for the actual pushed head");
+    assert.ok(!calls.some((call) => /pr merge|remudero-review/.test(call)), "a refused check never advances to merge or review");
 
     const reserved = remoteReservedIds(f.bare);
     assert.equal(reserved.length, TRIAGE_MAX_NEW_TASKS, `an already-decided verdict files nothing but still burns the whole reserved block, got ${reserved.join(", ")}`);

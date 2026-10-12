@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: split out of W1-T5408 by Rule 19 sizing"
   plan_refs: ["W1-T5346", "W1-T5408"]
   files: [src/lib/containment.ts, src/lib/isolation.ts, test/containment-and-isolation-comments-match-the-once-per-boot-ruling.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

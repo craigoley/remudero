@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { parse as parseYaml } from "yaml";
 
 import { applyBacklogActions, backlogGardenSpec, backlogInventory, type BacklogSources } from "../src/lib/backlog-gardener.js";
 import { fixedClock } from "../src/lib/clock.js";
@@ -55,10 +56,18 @@ test("W1-T4941: an unprioritized task still valid is proposed a priority with it
   assert.match(f.read(parent.id), /backlog gardener: band=2 evidence=/);
 });
 
+/** A proof the merged commit made true: the gardener withdraws only a task whose own proofs hold on main. */
+const SHIPPED = [{ claim: "the merged change ships it", proof: "grep: shipped in src/a.ts" }];
+function ship(root: string): void {
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, "src", "a.ts"), "export const shipped = true;\n");
+}
+
 test("W1-T4941: an overtaken task is proposed for retirement with cited evidence", (t) => {
-  const item = task("W1-T3", { files: ["src/a.ts", "src/b.ts"] });
+  const item = task("W1-T3", { files: ["src/a.ts", "src/b.ts"], acceptance: SHIPPED });
   const sha = "a".repeat(40);
   const f = fixture(t, [item], { history: [{ sha, at: NOW.toISOString(), subject: "fix(core): done (#123)", files: ["src/a.ts", "src/b.ts"] }] });
+  ship(f.root);
   const inv = backlogInventory(f.sources);
   assert.deepEqual(inv.candidates[0]?.disposition, { kind: "retire", retirement: "withdrawn" });
   assert.match(inv.candidates[0]!.reason, new RegExp(sha));
@@ -67,8 +76,9 @@ test("W1-T4941: an overtaken task is proposed for retirement with cited evidence
 });
 
 test("W1-T4941: a retirement proposal proves its new decision on the shard", (t) => {
-  const item = task("W1-T13", { files: ["src/a.ts", "src/b.ts"] });
+  const item = task("W1-T13", { files: ["src/a.ts", "src/b.ts"], acceptance: SHIPPED });
   const f = fixture(t, [item], { history: [{ sha: "a".repeat(40), at: NOW.toISOString(), subject: "fix(core): done (#123)", files: ["src/a.ts", "src/b.ts"] }] });
+  ship(f.root);
   let body = "";
   const deps = {
     stateDir: f.stateDir, repoRoot: f.root, log: () => {}, seed: 1,
@@ -120,6 +130,69 @@ test("W1-T4941: a quiet day cannot retire an unproven task", (t) => {
   assert.deepEqual(inv.candidates[0]?.disposition, { kind: "band", band: 4 });
   assert.match(inv.candidates[0]!.reason, /task remains valid/);
   assert.equal(inv.candidates[0]!.evidence.symptoms[0]?.earlier, 1);
+});
+
+test("backlog stale actions preserve explicit operator priorities at the write boundary", async (t) => {
+  for (const priority of ["priority: 2.5", "priority: 2", "priority: 2 # operator", "priority:  2", "priority: 2e0", "priority: '2'", "\"priority\": 2", "priority : 2", "priority:"]) {
+    for (const retirement of [false, true]) {
+      await t.test(`${priority}; ${retirement ? "retire" : "place"}`, (t) => {
+        const item = task("W1-T14");
+        const f = fixture(t, [item], { proofs: retirement ? [item.id] : [] });
+        const actions = backlogInventory(f.sources).candidates;
+        assert.equal(actions.length, 1, "positive control: a real action predates the amendment");
+        assert.equal(actions[0]!.disposition.kind, retirement ? "retire" : "band");
+        const amended = f.read(item.id).replace("  status:", `  ${priority}\n  status:`) + "  # risk-ruling pin: operator-owned\n";
+        parseYaml(amended, { uniqueKeys: true });
+        writeFileSync(join(f.root, f.shards.get(item.id)!), amended);
+        assert.deepEqual(applyBacklogActions(f.root, f.shards, actions), []);
+        assert.equal(f.read(item.id), amended, "the priority, status and risk pin remain byte-identical");
+        parseYaml(f.read(item.id), { uniqueKeys: true });
+      });
+    }
+  }
+});
+
+test("backlog stale actions preserve an operator amendment of a gardener-owned band", (t) => {
+  for (const priority of ["2.5", "1", "4 # operator reaffirmed", "4e0"]) {
+    const item = task("W1-T15");
+    const f = fixture(t, [item]);
+    const actions = backlogInventory(f.sources).candidates;
+    assert.deepEqual(applyBacklogActions(f.root, f.shards, actions), [f.shards.get(item.id)]);
+    const amended = f.read(item.id).replace("priority: 4", `priority: ${priority}`);
+    parseYaml(amended, { uniqueKeys: true });
+    writeFileSync(join(f.root, f.shards.get(item.id)!), amended);
+    assert.deepEqual(applyBacklogActions(f.root, f.shards, actions), []);
+    assert.equal(f.read(item.id), amended, "an old marker cannot authorize rewriting another priority representation");
+  }
+});
+
+test("backlog stale actions refuse a shard with duplicate priority keys", (t) => {
+  const item = task("W1-T16");
+  const f = fixture(t, [item]);
+  const actions = backlogInventory(f.sources).candidates;
+  applyBacklogActions(f.root, f.shards, actions);
+  item.priority = 4;
+  f.sources.proofsHolding = () => new Set([item.id]);
+  const retirement = backlogInventory(f.sources).candidates;
+  assert.equal(retirement[0]!.disposition.kind, "retire", "positive control: retirement would change the owned band");
+  const broken = f.read(item.id).replace("  status:", "  priority: 2.5\n  status:");
+  writeFileSync(join(f.root, f.shards.get(item.id)!), broken);
+  assert.deepEqual(applyBacklogActions(f.root, f.shards, retirement), []);
+  assert.equal(f.read(item.id), broken, "invalid current evidence is not rewritten as a placement or retirement");
+});
+
+test("backlog priority guard preserves current proof-backed retirement of a canonical declared priority", (t) => {
+  for (const priority of [1, 2.5]) {
+    const item = task("W1-T17", { priority });
+    const f = fixture(t, [item]);
+    f.sources.satisfiedByMain = () => new Map([[item.id, { branch: "run-W1-T17-fixture", headSha: "a".repeat(40), files: ["test/fixture.test.ts"] }]]);
+    const actions = backlogInventory(f.sources).candidates;
+    assert.equal(actions.length, 1);
+    assert.equal(actions[0]!.disposition.kind, "retire");
+    assert.deepEqual(applyBacklogActions(f.root, f.shards, actions), [f.shards.get(item.id)]);
+    assert.match(f.read(item.id), /retirement: closed/);
+    assert.equal(parseYaml(f.read(item.id), { uniqueKeys: true })[0].priority, undefined);
+  }
 });
 
 test("W1-T4941: an absent symptom without a historical hit stays queued", (t) => {

@@ -1,0 +1,21 @@
+diff --git a/learnings/ci.yaml b/learnings/ci.yaml
+index 1111111..2222222 100644
+--- a/learnings/ci.yaml
++++ b/learnings/ci.yaml
+@@ -157,0 +158,16 @@
++- id: analyze-javascript-typescript-gate-pre-push-steps
++  subsystem: ci
++  lifecycle: active
++  files: [".github/workflows/codeql.yml", ".github/workflows/ci-gate.yml", "plan/tasks.d/**", src/run-task.ts, src/lib/policy.ts, src/lib/dep-review.ts, "test/**"]
++  fact: >-
++    The Analyze (javascript-typescript) gate is the CodeQL job that ci-gate.yml requires. Before the
++    first push, run `npm run --silent rule15-precheck` if the diff touches plan/, and run
++    `rmd census-membership` for the census suites a src or test change can move, then run the suites
++    it names. Do not wait for the hosted gate to find these; it refuses the same way each time.
++  evidence: >-
++    The Analyze (javascript-typescript) gate refused six pull requests (9362, 9379, 9624, 9703, 9704,
++    9712) in one window, and each was repaired after the refusal. The repairs touched plan/tasks.d
++    shards and learnings entries. Recon did not read the six failure logs, so the shared cause is not
++    verified; this entry names the pre-push steps that cover the surfaces those repairs touched.
++  src: "ci-learning:9362:Analyze (javascript-typescript)"
++  cited: "2026-10-08"

@@ -16,7 +16,7 @@ import {
   mutationVerdictArtifactsRestArgs,
 } from "../src/lib/mutation-verdict-pull.js";
 import { MUTATION_GATE_VERDICT_STEP, mutationGateLifetime, parseLedger } from "../src/lib/retro.js";
-import { DEFAULT_SWEEP_POLICY, buildSweepEffects, runSweep } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, buildSweepEffects, runSweep } from "./helpers/sweep-test.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { ghShim } from "./helpers/gh-shim.js";
 

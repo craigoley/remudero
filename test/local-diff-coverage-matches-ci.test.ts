@@ -82,6 +82,9 @@ test("W1-T4084: the local command reads its flags from the CI workflow", () => {
     "--test-reporter-destination=stderr",
     "--test-reporter=lcov",
     "--test-reporter-destination=coverage/lcov.info",
+    // W1-T5923: the coverage lane records its own instrumented per-file durations.
+    "--test-reporter=./scripts/test-duration-reporter.mjs",
+    "--test-reporter-destination=coverage/test-durations.json",
     "--test",
     "--import",
     "tsx",

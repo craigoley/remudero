@@ -3,6 +3,7 @@ import { loadConfig, type WorkerProviderId } from "./config.js";
 import { fixedClock, systemClock } from "./clock.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
 import { routingDrawValue, type RoutingDrawSeed } from "./worker-provider.js";
+import { mergeCashRequestEfforts, summarizeCashRequestEfforts, type CashRequestEffortEvidence } from "./cash-request-effort.js";
 
 /**
  * Live routing experiments (operator ruling 2026-09-24, DECISIONS.md). An assignment joins an
@@ -57,6 +58,13 @@ export const ROUTING_EXPERIMENTS: readonly RoutingExperiment[] = [
     arms: { claude: "sonnet", codex: "sol61" },
     claudeModel: new RegExp(`^${model}$`), codexModel: /^gpt-6\.1-sol$/,
     startedOn: "2026-10-02", revisitOn: "2026-10-02", reviewCadence: "daily" as const, minTasksPerArm: 20,
+  })),
+  ...["low", "medium", "high"].map((effort) => ({
+    id: `haiku55-vs-luna6-${effort}`, capability: "economy", effort,
+    arms: { claude: "haiku55", codex: "luna6" },
+    claudeModel: /^claude-haiku-5-5$/, codexModel: /^gpt-6-luna$/,
+    startedOn: "2026-10-07", revisitOn: "2026-10-07", reviewCadence: "daily" as const,
+    minTasksPerArm: 20,
   })),
 ];
 
@@ -155,6 +163,14 @@ export interface ExperimentArmReport {
   meanNotionalCostUsd: number | null;
   costMissingAssignments: number;
   nonStarterAssignments: number;
+  requestEffortEvidence: ReturnType<typeof summarizeCashRequestEfforts>;
+  receiptCoverage: {
+    assignments: number;
+    terminalAssignments: number;
+    costKnownAssignments: number;
+    servedModelKnownAssignments: number;
+    outcomeKnownAssignments: number;
+  };
 }
 
 export interface ExperimentReport {
@@ -178,6 +194,7 @@ type Row = Record<string, unknown>;
 
 const str = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
 const num = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
+const cost = (value: unknown): number | undefined => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 const mean = (values: number[]): number | null => (values.length === 0 ? null : values.reduce((a, b) => a + b, 0) / values.length);
 
 function median(values: number[]): number | null {
@@ -200,7 +217,7 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
   const armsSeen = new Map<string, Set<string>>();
   const crossed = new Set<string>();
   const assignmentTask = new Map<string, string>();
-  const receipts = new Map<string, { minutes?: number; tokens?: number; cost?: number; billingMode?: "api" | "subscription"; attempted?: true }>();
+  const receipts = new Map<string, { minutes?: number; tokens?: number; cost?: number; notionalCost?: number | null; billingMode?: "api" | "subscription"; attempted?: true; servedModel?: string; success?: boolean; requestEfforts?: CashRequestEffortEvidence }>();
   const excludedAssignments = { genericUnit: 0, changedTreatment: 0, unverifiedTreatment: 0 };
   const merges: Array<{ task: string; ts: string }> = [];
   const fixes: Array<{ task: string; ts: string }> = [];
@@ -249,9 +266,13 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
         ...(step === "worker.attempt" ? { attempted: true as const } : {}),
         ...(duration !== undefined ? { minutes: duration / 60_000 } : {}),
         ...(tokenTotal(row.tokens) !== undefined ? { tokens: tokenTotal(row.tokens) } : {}),
-        ...(num(row.total_cost_usd) !== undefined ? { cost: num(row.total_cost_usd) }
-          : num(row.cost_usd) !== undefined ? { cost: num(row.cost_usd) } : {}),
+        ...(cost(row.total_cost_usd) !== undefined ? { cost: cost(row.total_cost_usd) }
+          : cost(row.cost_usd) !== undefined ? { cost: cost(row.cost_usd) } : {}),
+        ...(Object.hasOwn(row, "notional_cost_usd") ? { notionalCost: cost(row.notional_cost_usd) ?? null } : {}),
         ...(row.billing_mode === "api" || row.billing_mode === "subscription" ? { billingMode: row.billing_mode } : {}),
+        ...(str(row.served_model)?.trim() ? { servedModel: str(row.served_model) } : {}),
+        ...(typeof row.success === "boolean" ? { success: row.success } : {}),
+        ...(Object.hasOwn(row, "request_efforts") ? { requestEfforts: mergeCashRequestEfforts(prior.requestEfforts, row.request_efforts) } : {}),
       });
     }
   }
@@ -265,6 +286,8 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
       .map(([id]) => receipts.get(id));
     const armReceipts = armAssignments
       .filter((receipt): receipt is NonNullable<typeof receipt> => receipt !== undefined);
+    const priced = (receipt: NonNullable<typeof armAssignments[number]>) => receipt.billingMode === "subscription"
+      ? receipt.notionalCost === null ? undefined : receipt.notionalCost ?? receipt.cost : receipt.cost;
     return {
       arm,
       provider,
@@ -275,9 +298,17 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
       medianWorkerMinutes: median(armReceipts.flatMap((receipt) => (receipt.minutes === undefined ? [] : [receipt.minutes]))),
       meanTokens: mean(armReceipts.flatMap((receipt) => (receipt.tokens === undefined ? [] : [receipt.tokens]))),
       meanCashCostUsd: mean(armReceipts.flatMap((receipt) => (receipt.cost === undefined || receipt.billingMode !== "api" ? [] : [receipt.cost]))),
-      meanNotionalCostUsd: mean(armReceipts.flatMap((receipt) => (receipt.cost === undefined || receipt.billingMode !== "subscription" ? [] : [receipt.cost]))),
-      costMissingAssignments: armAssignments.filter((receipt) => receipt?.cost === undefined || receipt.billingMode === undefined).length,
+      meanNotionalCostUsd: mean(armReceipts.flatMap((receipt) => (priced(receipt) === undefined || receipt.billingMode !== "subscription" ? [] : [priced(receipt)!]))),
+      costMissingAssignments: armAssignments.filter((receipt) => receipt === undefined || priced(receipt) === undefined || receipt.billingMode === undefined).length,
       nonStarterAssignments: armAssignments.filter((receipt) => receipt?.attempted !== true).length,
+      requestEffortEvidence: summarizeCashRequestEfforts(armAssignments.map(receipt => receipt?.requestEfforts)),
+      receiptCoverage: {
+        assignments: armAssignments.length,
+        terminalAssignments: armReceipts.length,
+        costKnownAssignments: armReceipts.filter((receipt) => priced(receipt) !== undefined && receipt.billingMode !== undefined).length,
+        servedModelKnownAssignments: armReceipts.filter((receipt) => receipt.servedModel !== undefined).length,
+        outcomeKnownAssignments: armReceipts.filter((receipt) => receipt.success !== undefined).length,
+      },
     };
   });
   return {

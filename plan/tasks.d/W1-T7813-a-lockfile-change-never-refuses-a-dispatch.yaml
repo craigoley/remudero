@@ -1,0 +1,88 @@
+- id: W1-T7813
+  title: "A LOCKFILE CHANGE NEVER REFUSES A DISPATCH — core worktrees borrow node_modules from the daemon's install root, so every merge that changes package.json or package-lock.json refuses every implement dispatch with `worktree.node_modules_refused` until the daemon restarts and reinstalls (6 runs after #10612, 9 after #10700 on 2026-10-10); give each worktree a content-addressed tree keyed by its own base's install-input hash, provisioned off the daemon loop, instead of refusing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high # Rule 19: one concern — which node_modules a same-package worktree links when its lockfile differs from the install root's
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-10: host-ledger read of the 10:10Z and 18:08Z dispatch refusal bursts"
+  plan_refs: [W1-T4193, W1-T4260, W1-T4356, W1-T4380, W1-T4933, W1-T6356]
+  files: [src/lib/worker.ts, src/run-task.ts, test/a-lockfile-change-never-refuses-a-dispatch.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-10 on the core host ledger. Core worker worktrees borrow node_modules from the daemon's install root
+    (/home/node/Remudero/remudero). The managed checkout /mnt/scratch/rmd/rmd-state2/repos/remudero has no node_modules of
+    its own. When a merge changes the root package.json or package-lock.json, every implement dispatch is refused until
+    the daemon restarts and reinstalls its install root:
+      - 10:10–10:17Z: 6 runs refused with `worktree.node_modules_refused`, after #10612 changed the lockfile.
+      - 18:08–18:17Z: 9 runs refused, after #10700 changed it (W1-T7703, W1-T7742, W1-T7747, W1-T4952, W1-T6012,
+        W1-T7734).
+    READ at origin/main 81bb8c305:
+      - src/lib/worker.ts:4510 `assertSamePackageInstallInputs` throws `WorktreeNodeModulesRefusedError` when the
+        worktree's `hashInstallInputs` differs from the install root's. Only the implement lane opts in
+        (`refuseSamePackageLockfileMismatch: true`, src/run-task.ts worktreeAddAsync call), and src/run-task.ts:18936
+        ledgers the refusal and rethrows it as a `blocked_toolchain` deferral (W1-T4193).
+      - W1-T4356's refresh cannot help. `refreshManagedCheckout` (src/run-task.ts:16344) returns `unborrowed` at once for a
+        checkout with no node_modules of its own, which is the core fleet's case.
+      - #10747 (merged 2026-10-10) lets a lockfile advance restart the daemon without waiting for a quiet window. That
+        shrinks the refusal window to the drain time; it does not remove it. Every dispatch in the drain is still refused.
+      - The content-addressed mechanism already exists for satellites. `provisionDependencyTree` (src/lib/worker.ts:4701,
+        W1-T4260) installs `<config.root>/deps/<package>/<hash>/node_modules` into a temp dir and renames it in, and
+        `linkWorktreeNodeModules` links it. It only runs for a CROSS-package worktree. It also installs with a synchronous
+        `execFileSync("npm", ["ci"])` (src/lib/worker.ts:4684) and waits on its lock with `sleepSync`, which freezes the
+        daemon loop (the W1-T4380 defect, still queued).
+    Provisioning the managed checkout in place is not the fix. W1-T4356's live-borrower guard (src/run-task.ts
+    refreshHeldManagedCheckout) refuses to fast-forward a checkout while any worker borrows from it, so an in-place tree
+    would block fast-forwards for as long as workers run.
+  design: |
+    A same-package worktree whose install-input hash differs from the install root's links a hash-keyed tree. It never
+    gets a refusal.
+    1. Borrow by hash. In `finishWorktreeAdd`, when the worktree and its node_modules source name the SAME package and
+       `hashInstallInputs` differs, link `<config.root>/deps/<package>/<worktree hash>/node_modules`, the same layout
+       W1-T4260's satellite trees use. A matching hash links the install root exactly as today, so the common case adds
+       no tree and no install. The worktree always borrows a tree that matches its own base's lockfile.
+    2. Provision off the loop. The install runs as an async child process (no `execFileSync`, no `sleepSync` lock wait),
+       into a temp dir beside the target, verified, then renamed in atomically, as `provisionDependencyTree` already does.
+       Concurrent dispatches for one hash share one install through the existing per-hash lock, awaited asynchronously.
+       A dispatch whose tree is not built yet awaits it. That is a delay, not a refusal, and the daemon loop keeps
+       turning. Start the install out of band as soon as it is known: when the dispatch-time managed-checkout refresh
+       (async since W1-T6356) sees origin/main's install-input hash differ from the install root's, it starts provisioning
+       that hash without waiting for a worktree. If W1-T4380 has merged first, reuse its async install seam rather than
+       adding a second one; the satellite path may move onto the same async path here.
+    3. A failed install is not a lockfile refusal. It ledgers `deps.install_failed` (package, hash, stage, reason) and
+       escalates once per hash through the existing escalation path. That dispatch defers as `blocked_toolchain`, naming
+       the failed install rather than the lockfile. The next dispatch retries the install. No half-built tree is ever
+       linked.
+    4. Reap by liveness, not by count. A tree under `<config.root>/deps/<package>/` is removed when its hash is neither
+       origin/main's nor the install root's, and no registered worktree's node_modules link resolves into it. Ledger
+       `deps.reaped` (package, hash, bytes). Wire it into the existing start-of-run reclaim rung (`logDiskReclaimRung`),
+       so the trees do not pile up on the host disk. No hard count or age cap.
+    5. Ledger every hash-keyed link once on `worktree.node_modules_by_hash` (package, worktree hash, install-root hash,
+       `reused` or `provisioned`, wait_ms). The board can then see the path working where it used to see refusals.
+    Do not touch W1-T4356's in-place managed-checkout refresh or its live-borrower guard. A checkout that has its own
+    node_modules keeps today's path.
+  acceptance:
+    - claim: "a same-package worktree whose lockfile differs from the install root's links a tree keyed by its own hash and is not refused"
+      proof: 'grep: test("W1-T7813: a lockfile change links a hash-keyed tree instead of refusing the dispatch" in test/a-lockfile-change-never-refuses-a-dispatch.test.ts'
+    - claim: "the install runs off the daemon loop and the dispatch awaits it instead of refusing"
+      proof: 'grep: test("W1-T7813: a hash-keyed install never blocks the event loop and the dispatch awaits it" in test/a-lockfile-change-never-refuses-a-dispatch.test.ts'
+    - claim: "a failed install escalates once per hash and never links a half-built tree"
+      proof: 'grep: test("W1-T7813: a failed hash-keyed install escalates once per hash and links no partial tree" in test/a-lockfile-change-never-refuses-a-dispatch.test.ts'
+    - claim: "a tree no live worktree links and no current hash names is reaped, and a linked one is kept"
+      proof: 'grep: test("W1-T7813: the reaper removes an unlinked stale tree and keeps one a live worktree links" in test/a-lockfile-change-never-refuses-a-dispatch.test.ts'
+  falsifier: |
+    Keep the throw at src/lib/worker.ts:4510: the first test gets `WorktreeNodeModulesRefusedError`. Install with
+    `execFileSync` or wait on the lock with `sleepSync`: the second test's event-loop probe sees no tick while the install
+    runs. Rename the temp dir in before the install verifies, or escalate on every dispatch: the third test sees a linked
+    partial tree or a second escalation for one hash. Reap by age alone: the fourth test loses the tree a live worktree
+    links.
+  note: |
+    Scope-time checks 2026-10-10 at origin/main 81bb8c305: no plan record and no open PR covers a same-package hash-keyed
+    tree. W1-T4193 added the refusal. W1-T4260 covers cross-package satellites only. W1-T4356 and W1-T4933 act only on a
+    managed checkout that has its own node_modules. W1-T4380 (queued) moves the satellite install off the loop and
+    touches src/lib/worker.ts too, so build these two in sequence, not in parallel.

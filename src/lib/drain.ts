@@ -11,8 +11,8 @@ import type { RunResult } from "./run-result.js";
 import { headroomExhausted, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
-import { checkDispatchGovernors, governorDeferPayload } from "./dispatch-governor.js";
-import { releasedTaskIds, unmetDependencies, type Plan, type Task } from "./plan.js";
+import { checkDispatchGovernors, consultMemoryReads, governorDeferPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadHold, type MemoryReadTracker } from "./dispatch-governor.js";
+import { releasedTaskIds, unmetDependencies, unmetTaskPrecondition, type Plan, type Task, type TaskPreconditionOptions, type UnmetTaskPrecondition } from "./plan.js";
 import {
   NO_OBSERVED_SCOPE,
   partitionByFileOverlap,
@@ -242,7 +242,10 @@ export function closedUnmergedRunBranchTaskIds(closedPrRows: string): ReadonlySe
 }
 
 /** Optional in-flight-skip controls for {@link nextRunnable} (W1-T80). */
-export interface NextRunnableOpts {
+export interface NextRunnableOpts extends TaskPreconditionOptions {
+  /** W1-T6358: renew the command-owned ledger snapshot before walking any candidates. */
+  beginSelectionPass?: () => void;
+  onPreconditionUnmet?: (task: Task, unmet: UnmetTaskPrecondition) => void;
   /** W1-T3412: already-proved, pure ranking evidence. Omitted means historic priority/scope/id
    * ordering exactly; neither the selector nor {@link compareDispatch} may read history itself. */
   dispatchValueContext?: DispatchValueContext;
@@ -382,33 +385,33 @@ export interface NextRunnableOpts {
   onSkipRunBranch?: (task: Task) => void;
 }
 
-/** The plan's tasks in DISPATCH ORDER (impl-DQ): `priority` first, then declared scope, then a
- *  workstream-aware id order, so file placement no longer sets priority. INVARIANT: determinism is
- *  absolute — the comparator reads only committed content (`priority` and `id`), never file order,
- *  mtime or enumeration order, and the id tiebreak makes it a TOTAL order. Absent `priority` sorts
- *  last. COST: this discards positional signal; `priority:` (W1-T422) succeeds it. */
+/** Dispatch priority first, then measured stride passes (W1-T4064). Without readable evidence,
+ * the historic scope/id order remains deterministic; the comparator performs no reads. */
 // Why: the shard-starvation defect this replaces and what sorting by id costs — docs/forensics/drain.md.
 export function dispatchOrder(tasks: readonly Task[], context?: DispatchValueContext): Task[] {
   return [...tasks].sort((a, b) => compareDispatch(a, b, context));
 }
 
-/** Total order: `priority` ascending first (absent sorts last), then {@link undeclaredScopeLast}
- *  (W1-T476), then {@link idOrdinal}'s workstream-aware order as the deterministic tiebreak. */
+/** Total order: priority, stride, then scope/id. Unscored tasks follow the scored population. */
 export function compareDispatch(a: Task, b: Task, context?: DispatchValueContext): number {
   const pa = a.priority ?? Number.POSITIVE_INFINITY;
   const pb = b.priority ?? Number.POSITIVE_INFINITY;
   if (pa !== pb) return pa - pb;
+  const sa = context?.stridePassByTaskId?.get(a.id);
+  const sb = context?.stridePassByTaskId?.get(b.id);
+  if (context?.stridePassByTaskId && (sa === undefined) !== (sb === undefined)) return sa === undefined ? 1 : -1;
+  if (sa !== undefined && sb !== undefined && sa !== sb) return sa - sb;
   const ua = undeclaredScopeLast(a);
   const ub = undeclaredScopeLast(b);
   if (ua !== ub) return ua - ub;
   // W1-T3412: value is a tie-break only after explicit operator priority and declared scope. A
   // score missing on either side cannot be treated as zero or as evidence that one class is bad.
-  const va = measuredDispatchValue(a, context);
-  const vb = measuredDispatchValue(b, context);
+  const va = context?.costOfDelayFallback ? undefined : measuredDispatchValue(a, context);
+  const vb = context?.costOfDelayFallback ? undefined : measuredDispatchValue(b, context);
   if (va !== undefined && vb !== undefined && va !== vb) return vb - va;
   // The fanout term is meaningful only when a complete calibration produced a context. An empty
   // context is the fail-closed fallback: it preserves the former id order byte for byte.
-  if (context) {
+  if (context && !context.costOfDelayFallback) {
     const fa = context.openDependentFanoutByTaskId.get(a.id) ?? 0;
     const fb = context.openDependentFanoutByTaskId.get(b.id) ?? 0;
     if (fa !== fb) return fb - fa;
@@ -454,6 +457,7 @@ function observeOpenSibling(t: Task, opts: NextRunnableOpts): void {
 }
 
 export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts = {}): Task | undefined {
+  opts.beginSelectionPass?.();
   for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext)) {
     if (!isDispatchEligible(plan, t, isMerged, opts)) continue;
     // W1-T2397: observe, then dispatch anyway. Placed AFTER eligibility said yes and BEFORE the task
@@ -646,6 +650,7 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
     opts.onFiltered?.(t, "unmet-deps");
     return false;
   }
+  if (!taskPreconditionHolds(t, opts)) return false;
   if (opts.isTerminalPreDispatchRefusalHeld?.(t)) {
     opts.onFiltered?.(t, "held-pre-dispatch-refusal");
     return false;
@@ -704,6 +709,14 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
   return true;
 }
 
+function taskPreconditionHolds(task: Task, opts: NextRunnableOpts): boolean {
+  const unmet = unmetTaskPrecondition(task, opts);
+  if (!unmet) return true;
+  opts.onPreconditionUnmet?.(task, unmet);
+  opts.onFiltered?.(task, "blocked");
+  return false;
+}
+
 /** Up to `limit` runnable tasks, packed disjointness-first ({@link packDisjointFirst}, W1-T476) over
  *  {@link dispatchOrder} — the multi-candidate generalization of {@link nextRunnable} for the
  *  concurrent dispatcher (W1-T171/W1-T172). `limit <= 0` yields an empty array. INVARIANT: it applies
@@ -723,6 +736,7 @@ export function runnableCandidates(plan: Plan, isMerged: MergedSet, limit: numbe
 /** The dispatcher's exact eligibility pass, before its disjoint lane packing. A read-only
  *  frontier needs membership for every task, not an N-lane pack of all N candidates. */
 function dispatchEligibleCandidates(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts): Task[] {
+  opts.beginSelectionPass?.();
   const eligible: Task[] = [];
   for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext)) {
     if (isDispatchEligible(plan, t, isMerged, opts)) eligible.push(t);
@@ -786,7 +800,12 @@ export type StopReason =
   | "cost_governor_deferred"
   /** W1-T321 (the W1-T121 23-open-PR incident): the open-PR count is at/over `policy.wipLimit`.
    *  Distinct from `laneDispatchBudget`, which only SIZES a still-open pass rather than stopping it. */
-  | "queue_governor_deferred";
+  | "queue_governor_deferred"
+  /** W1-T5404: host `MemAvailable` is below `policy.memoryFloorMib`. The single-lane loop returns it
+   *  from its pass-level read; {@link runDrainLanes} when the memory gate held every lane (W1-T5482). */
+  | "memory_governor_deferred"
+  /** A quiet-hours hold stopped a single-lane pass or refused every lane at admission (W1-T5657). */
+  | "quiet_hours_deferred";
 
 export interface DrainOpts {
   until?: string;
@@ -1068,12 +1087,14 @@ function nextCurated(
   isMerged: MergedSet,
   opts: NextRunnableOpts,
 ): Task | undefined {
+  opts.beginSelectionPass?.();
   const done = new Set(attempted);
   for (const id of curated) {
     if (done.has(id)) continue;
     if (isMerged(id)) continue;
     const t = plan.byId.get(id);
     if (!t) continue;
+    if (!taskPreconditionHolds(t, opts)) continue;
     // Same indeterminate-read semantics as the natural path (W1-T119): a curation-panel selection
     // is still dispatch, and must not re-run work whose own GitHub read failed.
     if (opts.isIndeterminate?.(id)) {
@@ -1112,6 +1133,74 @@ function nextCurated(
     return t;
   }
   return undefined;
+}
+
+/** W1-T5719 — a live-state reader may be synchronous (CLI callers, tests) or return a promise (the
+ *  daemon's async gh transport). */
+export type LiveStateReader = (taskId: string, prNumber: number) => string | undefined | Promise<string | undefined>;
+
+/** W1-T5719 — BACKSTOP: ceiling on ONE live-state read before the pass treats it as unknown. */
+export const DEFAULT_LIVE_STATE_TIMEOUT_MS = 15_000;
+
+/** W1-T5719 — the outcome of {@link prefetchLiveStates}: a synchronous lookup the (synchronous,
+ *  pure) selectors consult, plus which reads were abandoned for taking too long. */
+export interface PrefetchedLiveStates {
+  read: (taskId: string, prNumber: number) => string | undefined;
+  timedOut: ReadonlySet<string>;
+}
+
+/**
+ * W1-T5719 — read every in-flight candidate's live PR state CONCURRENTLY and OFF THE LOOP, before
+ * the synchronous selectors rank anything. Selection used to call a synchronous reader once per
+ * candidate (about 45 s of the 490 s freeze after the 10-04 19:09 boot); now the reads overlap, each
+ * bounded by `timeoutMs`, and the loop stays responsive while they are in flight.
+ *
+ * INVARIANT: a read that times out, rejects, or throws is `undefined` — EXACTLY what a failed read
+ * was before — and `isDispatchEligible` treats `undefined` as "still in flight, skip it". The failure
+ * mode stays a skip, never a dispatch. Only tasks the plan holds an open PR for, and that are not
+ * already merged, are read — the same population the per-candidate walk could ever have reached.
+ * A synchronous reader still works (its value is simply awaited); it cannot be interrupted, but it
+ * never could be.
+ */
+export async function prefetchLiveStates(
+  plan: Plan,
+  isMerged: MergedSet,
+  isOpenPr: OpenPrCheck | undefined,
+  readLiveState: LiveStateReader,
+  timeoutMs: number = DEFAULT_LIVE_STATE_TIMEOUT_MS,
+): Promise<PrefetchedLiveStates> {
+  const states = new Map<string, string | undefined>();
+  const timedOut = new Set<string>();
+  const pending: Promise<void>[] = [];
+  for (const t of plan.tasks) {
+    const prNumber = isOpenPr?.(t.id);
+    if (prNumber === undefined || isMerged(t.id)) continue;
+    const key = `${t.id}#${prNumber}`;
+    if (states.has(key)) continue;
+    states.set(key, undefined); // unknown until proven otherwise
+    pending.push(
+      (async () => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const deadline = new Promise<"timeout">((resolve) => {
+          timer = setTimeout(() => resolve("timeout"), timeoutMs);
+        });
+        try {
+          const outcome = await Promise.race([
+            Promise.resolve().then(() => readLiveState(t.id, prNumber)),
+            deadline,
+          ]);
+          if (outcome === "timeout") timedOut.add(t.id);
+          else states.set(key, outcome);
+        } catch (e) {
+          void e; // a rejected or throwing read is an UNKNOWN one, as a failed read always was
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      })(),
+    );
+  }
+  await Promise.all(pending);
+  return { read: (taskId, prNumber) => states.get(`${taskId}#${prNumber}`), timedOut };
 }
 
 /** Build the exact command to resume a drain from where it stopped. */
@@ -1189,7 +1278,8 @@ export function renderRundown(lines: RundownLine[]): string {
 }
 
 /** Injectable dependencies — the real command wires GitHub/run-task/usage defaults. */
-export interface DrainDeps {
+export interface DrainDeps extends TaskPreconditionOptions {
+  beginSelectionPass?: NextRunnableOpts["beginSelectionPass"];
   /** W1-T3412: command-built calibration once per pass. Undefined is the safe historic order. */
   buildDispatchValueContext?: (plan: Plan, isMerged: MergedSet) => DispatchValueContext | undefined;
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
@@ -1213,7 +1303,10 @@ export interface DrainDeps {
   onOpenSiblingBuild?: NextRunnableOpts["onOpenSiblingBuild"];
   /** W1-T177: an OPTIONAL fresh, live re-read of one candidate in-flight PR's GitHub state — see
    *  {@link NextRunnableOpts.readLiveState} for the full contract. Optional. */
-  readLiveState?: (taskId: string, prNumber: number) => string | undefined;
+  readLiveState?: LiveStateReader;
+  /** W1-T5719: per-read ceiling for {@link readLiveState}; a read past it is unknown. Default
+   *  {@link DEFAULT_LIVE_STATE_TIMEOUT_MS}. */
+  liveStateTimeoutMs?: number;
   /** W1-T1035: an OPTIONAL fresh re-check of whether a just-observed MERGED PR credits the task it
    *  was opened for — see {@link NextRunnableOpts.isLiveMergeCredited} for the discrimination. */
   isLiveMergeCredited?: (taskId: string, prNumber: number) => boolean;
@@ -1277,9 +1370,16 @@ export interface DrainDeps {
    *  INVARIANT: never consulted from `runSweep` or its deps — drainage must never be gated. Optional. */
   checkQueueGovernor?: () => QueueGovernorResult | undefined;
   /** W1-T5347 (wiring W1-T1038's `memoryGovernorGateFor`): THE HOST MEMORY FLOOR, a fresh
-   *  `/proc/meminfo` reading per call. Consulted only through `checkDispatchGovernors`, so it holds
-   *  NEW dispatch per lane and a throw fails OPEN there. Never consulted from the sweep. Optional. */
+   *  `/proc/meminfo` reading per call. Consulted per lane through `checkDispatchGovernors` and, since
+   *  W1-T5404, once per single-lane pass in `runDrain`; a throw fails OPEN at both. Never consulted
+   *  from the sweep. Optional. */
   checkMemoryGovernor?: () => MemoryGovernorResult | undefined;
+  /** W1-T7720: the unreadable-memory streak tracker and the reservation-store read — see {@link DispatchGovernorDeps}. */
+  memoryReadTracker?: MemoryReadTracker;
+  readMemoryStoreFailure?: () => string | undefined;
+  /** The QUIET-HOURS hold, read per single-lane pass and per lane through `checkDispatchGovernors`.
+   *  A throw fails open in both loops; the single-lane pass logs the error (W1-T5657). */
+  checkQuietHours?: DispatchGovernorDeps["checkQuietHours"];
   /** W1-T119: true when a task's own GitHub read is INDETERMINATE, re-derived from the SAME
    *  projection `refreshMerged` just built — the same freshness contract as `isOpenPr`. Optional. */
   isIndeterminate?: (taskId: string) => boolean;
@@ -1304,6 +1404,9 @@ export interface DrainDeps {
    *  `refreshMerged` read, including PRs not attributable to a task on current main, never a second
    *  GitHub read. Sizes only the multi-lane path alongside `DrainOpts.wipLimit`. */
   openPrCount?: () => number;
+  /** The reading behind `checkQueueGovernor`'s most recent ADMISSION (undefined after a deferral or
+   *  before any consultation). Present, it sizes the lane budget — see `LaneBudgetInput.queueAdmission`. */
+  readQueueAdmission?: () => QueueAdmissionReading | undefined;
 }
 
 /** The drain loop. Deterministic, with no LLM decisions. Each iteration: re-derive status, check
@@ -1495,7 +1598,10 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
 
     // DAILY COST CEILING (W1-T317): a global gate, checked here in the same position as headroom,
     // before `nextRunnable` is called. STOPS the pass outright; drainage never runs through this loop.
-    const costGoverned = deps.checkCostGovernor?.();
+    // W1-T5529: a throw FAILS CLOSED, as the per-lane `unreadable` verdict does — the pass ends.
+    const costRead = readPassGovernor("cost", () => deps.checkCostGovernor?.(), log);
+    if (costRead.kind === "unreadable") return summary(costRead.stopReason, costRead.stopDetail);
+    const costGoverned = costRead.result;
     if (costGoverned) {
       log("drain.cost_governor", {
         observed_day_cost_usd: costGoverned.observedDayCostUsd,
@@ -1508,8 +1614,10 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     }
 
     // QUEUE GOVERNOR / WIP CEILING (W1-T321): a global gate, checked in the same position as the cost
-    // governor. STOPS the pass outright; drainage never runs through this loop.
-    const queueGoverned = deps.checkQueueGovernor?.();
+    // governor. STOPS the pass outright; drainage never runs through this loop. A throw fails closed.
+    const queueRead = readPassGovernor("queue", () => deps.checkQueueGovernor?.(), log);
+    if (queueRead.kind === "unreadable") return summary(queueRead.stopReason, queueRead.stopDetail);
+    const queueGoverned = queueRead.result;
     if (queueGoverned) {
       log("drain.queue_governor", {
         observed_open_count: queueGoverned.observedOpenCount,
@@ -1521,12 +1629,57 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       );
     }
 
+    // HOST MEMORY FLOOR (W1-T5404): ordered after queue as `checkDispatchGovernors` orders it. A
+    // TRANSIENT throw FAILS OPEN, as it does there — logged, then this pass dispatches as if admitted.
+    // W1-T7720: a SUSTAINED unreadable streak (the same tracker the daemon path uses) holds the pass.
+    const memoryRead = consultMemoryReads(deps);
+    if (memoryRead.probeError !== undefined) log("drain.memory_governor.unreadable", { error: memoryRead.probeError });
+    const memoryGoverned: MemoryGovernorResult | undefined = memoryRead.governed;
+    if (memoryGoverned) {
+      log("drain.memory_governor", {
+        observed_available_mib: memoryGoverned.observedAvailableMib,
+        memory_floor_mib: memoryGoverned.floorMib,
+      });
+      return summary(
+        "memory_governor_deferred",
+        `${memoryGoverned.observedAvailableMib} MiB available below the ${memoryGoverned.floorMib} MiB memory floor — new dispatch deferred`,
+      );
+    }
+
+    if (memoryRead.hold) {
+      log("drain.memory_unreadable", governorDeferPayload({ kind: "memory_unreadable", hold: memoryRead.hold }));
+      return summary("memory_governor_deferred", memoryUnreadableDetail(memoryRead.hold, "new dispatch deferred"));
+    }
+
+    let quietHours: ReturnType<NonNullable<DrainDeps["checkQuietHours"]>>;
+    try {
+      quietHours = deps.checkQuietHours?.();
+    } catch (e) {
+      log("drain.quiet_hours.unreadable", { error: e instanceof Error ? e.message : String(e) });
+    }
+    if (quietHours) {
+      log("drain.quiet_hours", governorDeferPayload({ kind: "quiet_hours", result: quietHours }));
+      return summary(
+        "quiet_hours_deferred",
+        `quiet hours hold${quietHours.detail ? `: ${quietHours.detail}` : ""} — new dispatch deferred`,
+      );
+    }
+
     const currentPushedRunBranches = pushedRunBranches;
     const currentClosedUnmergedRunBranches = closedUnmergedRunBranches;
     const currentPushedRunRefs = pushedRunRefs;
     const currentPlanOnlyReceipts = planOnlyReceipts;
     const currentOrphanEvidence = orphanEvidence;
+    // W1-T5719: the candidates' live PR states are read CONCURRENTLY and OFF THE LOOP, each bounded,
+    // BEFORE the synchronous selectors rank anything; a timed-out read is unknown, as a failed one is.
+    const prefetchedLive = deps.readLiveState
+      ? await prefetchLiveStates(plan, isMerged, deps.isOpenPr, deps.readLiveState, deps.liveStateTimeoutMs)
+      : undefined;
     const skipOpts: NextRunnableOpts = {
+      beginSelectionPass: deps.beginSelectionPass,
+      clock: deps.clock,
+      readPrecondition: deps.readPrecondition,
+      onPreconditionUnmet: (task, unmet) => log("dispatch.precondition_unmet", { task: task.id, ...unmet }),
       dispatchValueContext: deps.buildDispatchValueContext?.(plan, isMerged),
       // W1-T3216: the released set, resolved once per pass above — forwarded at BOTH skipOpts
       // sites so the single-lane and multi-lane passes cannot answer the same task differently.
@@ -1575,10 +1728,16 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
       // W1-T177: wrap the injected reader so a FAILED read is LEDGERED here. It still resolves to
       // undefined, so `nextRunnable`'s fail-open contract is unchanged; the failure is just legible.
-      readLiveState: deps.readLiveState
+      readLiveState: prefetchedLive
         ? (taskId, prNumber) => {
-            const state = deps.readLiveState!(taskId, prNumber);
-            if (state === undefined) log("dispatch.live_state_indeterminate", { task: taskId, pr_number: prNumber });
+            const state = prefetchedLive.read(taskId, prNumber);
+            if (state === undefined) {
+              log("dispatch.live_state_indeterminate", {
+                task: taskId,
+                pr_number: prNumber,
+                ...(prefetchedLive.timedOut.has(taskId) ? { timed_out: true } : {}),
+              });
+            }
             return state;
           }
         : undefined,
@@ -1697,7 +1856,15 @@ export interface LaneBudgetInput {
   wipLimit?: number;
   /** The current observed open-PR count — the governor's other input. */
   openPrCount?: number;
+  /** The queue governor's own ADMITTING reading this pass, when the wiring exposes it. Present, it
+   *  sizes the budget instead of the static `wipLimit`/`openPrCount` pair: the governor admits against
+   *  its adaptive bound less stuck PRs (#10510), so the static pair could size an admitted pass to zero
+   *  and idle every lane behind a governor that said yes (measured 2026-10-10 13:38-14:01Z). */
+  queueAdmission?: QueueAdmissionReading;
 }
+
+/** The fields of an admitting {@link QueueGovernorResult} that size a lane pass. */
+export type QueueAdmissionReading = Pick<QueueGovernorResult, "wipLimit" | "observedOpenCount" | "stuckOwnedCount" | "tier" | "baseWipLimit">;
 
 /** THE GOVERNOR IS THE CEILING, NOT A SUGGESTION: how many tasks a pass may dispatch this tick —
  *  `min(laneCount, wipLimit - openPrCount)`, floored at 0. Omitting either governor input leaves it
@@ -1705,9 +1872,93 @@ export interface LaneBudgetInput {
  *  guard here carries. Pure, no I/O, never negative. */
 export function laneDispatchBudget(input: LaneBudgetInput): number {
   const lanes = Math.max(0, input.laneCount);
+  const admitted = input.queueAdmission;
+  if (admitted) {
+    // The `draining` tier admits ONE lane over the bound, never zero (W1-T4465 design (ii)).
+    if (admitted.tier === "draining") return Math.min(lanes, 1);
+    const counted = admitted.observedOpenCount - (admitted.stuckOwnedCount ?? 0);
+    return Math.min(lanes, Math.max(0, admitted.wipLimit - counted));
+  }
   if (input.wipLimit === undefined || input.openPrCount === undefined) return lanes;
   const headroom = Math.max(0, input.wipLimit - input.openPrCount);
   return Math.min(lanes, headroom);
+}
+
+/** The `dispatch.wip_deferred` fields naming WHICH reading sized the pass to zero. Empty without an
+ *  admission, so an un-wired site's row stays byte-identical to before. */
+export function wipDeferredAdmissionFields(admitted: QueueAdmissionReading | undefined): Record<string, unknown> {
+  if (!admitted) return {};
+  return {
+    budget_source: "queue_governor_admission",
+    admitted_wip_limit: admitted.wipLimit,
+    admitted_open_count: admitted.observedOpenCount,
+    stuck_owned_count: admitted.stuckOwnedCount ?? 0,
+    tier: admitted.tier ?? null,
+  };
+}
+
+/** W1-T5529 — one PASS-LEVEL cost or queue reading, in either drain loop. A throw is logged with the
+ *  error and answered `unreadable`, carrying that gate's deferral: the caller ends the pass on it, so
+ *  it fails CLOSED as the per-lane `unreadable` verdict in `checkDispatchGovernors` does — never
+ *  swallowed into "admitted". */
+function readPassGovernor<T>(
+  source: "cost" | "queue",
+  read: () => T | undefined,
+  log: NonNullable<DrainDeps["log"]>,
+): { kind: "read"; result: T | undefined } | { kind: "unreadable"; stopReason: StopReason; stopDetail: string } {
+  try {
+    return { kind: "read", result: read() };
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    log(source === "cost" ? "drain.cost_governor.unreadable" : "drain.queue_governor.unreadable", { error });
+    return {
+      kind: "unreadable",
+      stopReason: source === "cost" ? "cost_governor_deferred" : "queue_governor_deferred",
+      stopDetail: `${source} governor reading unreadable (${error}) — failing closed, new dispatch deferred`,
+    };
+  }
+}
+
+/** W1-T7720 — the stop detail of a SUSTAINED unreadable memory reading: the source, the streak age, and
+ *  the derived bound in force with its basis. */
+function memoryUnreadableDetail(hold: MemoryReadHold, tail: string): string {
+  return `memory ${hold.source} unreadable for ${hold.ageMs} ms, past the ${Math.round(hold.boundMs)} ms sustained bound (${hold.basis}): ${hold.error} — ${tail}`;
+}
+
+/** W1-T5482 — the stop of a lane pass whose EVERY lane `verdict` refused at admission: the gate that
+ *  held, its reading worded as the pass-level checks word it. An unreadable reading is the deferral
+ *  of the gate it came from, with the error kept in the detail. */
+function allLanesHeldStop(verdict: DispatchGovernorVerdict): { stopReason: StopReason; stopDetail: string } {
+  const tail = "every lane deferred by a governor re-checked at dispatch";
+  switch (verdict.kind) {
+    case "cost":
+      return {
+        stopReason: "cost_governor_deferred",
+        stopDetail: `$${verdict.result.observedDayCostUsd.toFixed(2)} spent today at/over the $${verdict.result.ceilingUsd.toFixed(2)} daily ceiling — ${tail}`,
+      };
+    case "queue":
+      return {
+        stopReason: "queue_governor_deferred",
+        stopDetail: `${verdict.result.observedOpenCount} open PRs at/over the ${verdict.result.wipLimit} WIP limit — ${tail}`,
+      };
+    case "memory":
+      return {
+        stopReason: "memory_governor_deferred",
+        stopDetail: `${verdict.result.observedAvailableMib} MiB available below the ${verdict.result.floorMib} MiB memory floor — ${tail}`,
+      };
+    case "memory_unreadable":
+      return { stopReason: "memory_governor_deferred", stopDetail: memoryUnreadableDetail(verdict.hold, tail) };
+    case "quiet_hours":
+      return {
+        stopReason: "quiet_hours_deferred",
+        stopDetail: `quiet hours hold${verdict.result.detail ? `: ${verdict.result.detail}` : ""} — ${tail}`,
+      };
+    case "unreadable":
+      return {
+        stopReason: verdict.source === "cost" ? "cost_governor_deferred" : "queue_governor_deferred",
+        stopDetail: `${verdict.source} governor reading unreadable (${verdict.error}) — failing closed, ${tail}`,
+      };
+  }
 }
 
 /** The concurrent-lane pass loop (W1-T172), entered only via {@link runDrain} when
@@ -1846,7 +2097,9 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     }
 
     // DAILY COST CEILING (W1-T317) — see the single-lane loop's identical branch above.
-    const costGoverned = deps.checkCostGovernor?.();
+    const costRead = readPassGovernor("cost", () => deps.checkCostGovernor?.(), log);
+    if (costRead.kind === "unreadable") return summary(costRead.stopReason, costRead.stopDetail);
+    const costGoverned = costRead.result;
     if (costGoverned) {
       log("drain.cost_governor", {
         observed_day_cost_usd: costGoverned.observedDayCostUsd,
@@ -1860,7 +2113,9 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
 
     // QUEUE GOVERNOR / WIP CEILING (W1-T321) — see the single-lane loop's identical branch. Distinct
     // from `openPrCount`/`laneDispatchBudget` below, which only SIZES this pass; this stops it.
-    const queueGoverned = deps.checkQueueGovernor?.();
+    const queueRead = readPassGovernor("queue", () => deps.checkQueueGovernor?.(), log);
+    if (queueRead.kind === "unreadable") return summary(queueRead.stopReason, queueRead.stopDetail);
+    const queueGoverned = queueRead.result;
     if (queueGoverned) {
       log("drain.queue_governor", {
         observed_open_count: queueGoverned.observedOpenCount,
@@ -1873,13 +2128,15 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     }
 
     const openCount = deps.openPrCount?.();
-    const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: openCount });
+    const queueAdmission = deps.readQueueAdmission?.();
+    const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: openCount, queueAdmission });
     const passSize = Math.min(budget, max - attempted.length);
     if (passSize <= 0) {
       log("dispatch.wip_deferred", {
         lane_count: laneCount,
         wip_limit: opts.wipLimit ?? null,
         observed_open_count: openCount ?? null,
+        ...wipDeferredAdmissionFields(queueAdmission),
       });
       return summary(
         "wip_deferred",
@@ -1892,7 +2149,16 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     const currentPushedRunRefs = pushedRunRefs;
     const currentPlanOnlyReceipts = planOnlyReceipts;
     const currentOrphanEvidence = orphanEvidence;
+    // W1-T5719: the candidates' live PR states are read CONCURRENTLY and OFF THE LOOP, each bounded,
+    // BEFORE the synchronous selectors rank anything; a timed-out read is unknown, as a failed one is.
+    const prefetchedLive = deps.readLiveState
+      ? await prefetchLiveStates(plan, isMerged, deps.isOpenPr, deps.readLiveState, deps.liveStateTimeoutMs)
+      : undefined;
     const skipOpts: NextRunnableOpts = {
+      beginSelectionPass: deps.beginSelectionPass,
+      clock: deps.clock,
+      readPrecondition: deps.readPrecondition,
+      onPreconditionUnmet: (task, unmet) => log("dispatch.precondition_unmet", { task: task.id, ...unmet }),
       dispatchValueContext: deps.buildDispatchValueContext?.(plan, isMerged),
       // W1-T3216: the released set, resolved once per pass above — forwarded at BOTH skipOpts
       // sites so the single-lane and multi-lane passes cannot answer the same task differently.
@@ -1937,10 +2203,16 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
           }
         : {}),
       onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
-      readLiveState: deps.readLiveState
+      readLiveState: prefetchedLive
         ? (taskId, prNumber) => {
-            const state = deps.readLiveState!(taskId, prNumber);
-            if (state === undefined) log("dispatch.live_state_indeterminate", { task: taskId, pr_number: prNumber });
+            const state = prefetchedLive.read(taskId, prNumber);
+            if (state === undefined) {
+              log("dispatch.live_state_indeterminate", {
+                task: taskId,
+                pr_number: prNumber,
+                ...(prefetchedLive.timedOut.has(taskId) ? { timed_out: true } : {}),
+              });
+            }
             return state;
           }
         : undefined,
@@ -2021,9 +2293,11 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     // INVARIANT: a mid-pass refusal must not abort the pass. `break` stops ADMITTING and never
     // touches lanes already admitted — refusing lane 2 is a deferral of lane 2, not a failure of 1.
     const admitted: Task[] = [];
+    let refusal: DispatchGovernorVerdict | undefined;
     for (const t of dispatchSet) {
       const verdict = checkDispatchGovernors(deps, undefined);
       if (verdict) {
+        refusal = verdict;
         // A DISTINCT step from the pass-level `drain.cost_governor`/`drain.queue_governor`: "the pass
         // never started" and "lane 3 of 4 was refused" are different events, and collapsing them hides
         // a partial batch.
@@ -2039,10 +2313,12 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
       admitted.push(t);
     }
     // Every lane refused ⇒ nothing dispatches, and the pass says so rather than reporting
-    // "no_runnable" (there WERE runnable tasks; a governor deferred them).
-    if (admitted.length === 0) {
+    // "no_runnable" (there WERE runnable tasks; a governor deferred them). W1-T5482: it names the
+    // gate that refused — a memory or quiet-hours hold is never reported as a cost deferral.
+    if (admitted.length === 0 && refusal) {
       await flushLifetimePressure();
-      return summary("cost_governor_deferred", "every lane deferred by a governor re-checked at dispatch");
+      const held = allLanesHeldStop(refusal);
+      return summary(held.stopReason, held.stopDetail);
     }
 
     for (const t of admitted) {

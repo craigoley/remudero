@@ -1,0 +1,13 @@
+violation: none
+rule: >
+  W1-T3827: a data edit to a learning shard needs golden verdict evidence, and the
+  ci-gate pre-push remedy must reach the lane through the active matched learning.
+verdict:
+  state: success
+  capped: false
+  testTheater: false
+  criteriaTampered: false
+arm: true
+criteria:
+  - met: true
+    proof_exec: executed_pass

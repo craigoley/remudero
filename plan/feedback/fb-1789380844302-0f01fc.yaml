@@ -19,10 +19,11 @@ raw: "OBSERVED 2026-09-14: W1-T3554 / PR #5505 cannot pass the current
   restore its automated path."
 attachments: []
 origin: cli
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

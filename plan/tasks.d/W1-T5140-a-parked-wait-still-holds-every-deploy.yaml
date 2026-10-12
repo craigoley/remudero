@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-01: E22, measured on the Azure host"
   plan_refs: [W1-T5127, W1-T1211, W1-T3793, W1-T2609, W1-T2598]
   files: [src/run-task.ts, src/lib/sweep.ts, deploy/recycle-container.sh, test/a-parked-wait-never-holds-a-recycle.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-01 ON THE AZURE HOST. deploy/recycle-container.sh engaged PAUSE and waited for

@@ -11,7 +11,7 @@
   band_meaning: span
   origin: "operator session 5da5b764, 2026-10-02: arch-plan E39 (main red from #8687 after #8689)"
   files: [src/lib/machine-filing-judge.ts, test/w1-t5317-the-judge-lands-rulings-whose-pins-main-already-invalidated.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-02: the machine-filing judge (runMachineFilingJudge in src/lib/machine-filing-judge.ts)

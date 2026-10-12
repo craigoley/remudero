@@ -13,7 +13,7 @@
  * on either side is unmeasurable, never a win or a loss for either arm.
  */
 
-import { spawnSync, type execFileSync } from "node:child_process";
+import type { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -34,6 +34,7 @@ import { renderImplementPrompt } from "./prompt-render.js";
 import { ensureDeps, execWhitelistedProof, parseWhitelistedProof, registerReviewerCheckout, type ProofExecutor } from "./review.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { renderWorkerSettings, spawnWorker, worktreeRemove } from "./worker.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 
 export const PAIRED_PILOT_REPORT_VERSION = "benchmark-paired-pilot-v1" as const;
 const PAIRED_ALPHA = 0.05;
@@ -363,10 +364,16 @@ export const SEALED_ATTEMPT_CONTRACT_LINES: readonly string[] = [
   "- End with a REPORT. Write no PR_URL line.",
 ];
 
-/** `git` in `dir`: trimmed stdout, or null on a non-zero exit. Never throws on a refusal. */
+/** `git` in `dir` through the leaf (W1-T6136: `dir` is the attempt tree a worker just ran in): trimmed
+ *  stdout, or null when git ran and exited non-zero. Anything else — the leaf's refusal above all —
+ *  THROWS: read as null it would be "detached, nothing visited", the reading that certifies a seal. */
 function gitProbe(dir: string, args: readonly string[]): string | null {
-  const run = spawnSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-  return run.status === 0 ? run.stdout.trim() : null;
+  try {
+    return hostWorktreeGit(dir, args).trim();
+  } catch (error) {
+    if (typeof (error as { status?: unknown }).status === "number") return null;
+    throw error;
+  }
 }
 
 function gitOut(dir: string, args: readonly string[]): string {

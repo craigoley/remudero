@@ -12,7 +12,7 @@
   plan_refs: [W1-T4073, W1-T4052]
   files: [src/lib/sweep.ts, src/run-task.ts, test/a-synthetic-fix-task-declares-its-pr-surface.test.ts, scripts/test-tier-manifest.json]
   priority: 2
-  status: queued
+  status: merged
   # backlog gardener: band=2 evidence=5db858ce992581ec
   attempts: 0
   rationale: |

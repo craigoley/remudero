@@ -42,6 +42,7 @@ import { appendLedger } from "../src/lib/ledger.js";
 import type { TraceGithub, TracePrView } from "../src/lib/trace.js";
 import type { GitHub } from "../src/lib/status.js";
 import { dailyCostCeilingOverridePath, loadDefaultPolicy, resolveDailyCostCeiling, type Policy } from "../src/lib/policy.js";
+import { landQueuedFeedback } from "./helpers/land-queued-feedback.js";
 import {
   decideTriage,
   diffCitesFeedback,
@@ -386,7 +387,9 @@ test("POST /v1/feedback: captures a plan/feedback/<id>.yaml entry with origin=ui
     entryId = body.entry.id;
   });
 
-  // "lands as plan/feedback/<id>" -- the acceptance criterion's literal proof artifact.
+  // "lands as plan/feedback/<id>" -- the acceptance criterion's literal proof artifact, once the sweep lands it.
+  assert.equal(existsSync(feedbackEntryPath(root, entryId)), false, "the capture is queued, not left in the checkout (W1-T5628)");
+  landQueuedFeedback(root, root);
   assert.ok(existsSync(feedbackEntryPath(root, entryId)));
   const onDisk = readFileSync(feedbackEntryPath(root, entryId), "utf8");
   assert.match(onDisk, /origin: ui/);
@@ -529,7 +532,7 @@ test("W1-T4202: a reply to an entry not at grilling is still refused", async () 
 // DIFFERENT submissionKey must be refused on the answering entry the checkout already holds ─────────────────────
 
 const REPLY_LAG_REFUSAL = (answerId: string): RegExp =>
-  new RegExp(`is parked at grilling \\(status: grilling, read from origin/main\\) but the checkout already holds feedback#${answerId} answering it`);
+  new RegExp(`is parked at grilling \\(status: grilling, read from origin/main\\) but (the checkout|the landing queue) already holds feedback#${answerId} answering it`);
 
 test("a second reply with a different submissionKey is refused while main still says grilling and the checkout says answered", async () => {
   const { root, id } = splitFeedbackRoot("grilling", "grilling");
@@ -550,6 +553,7 @@ test("a second reply with a different submissionKey is refused while main still 
     assert.equal(preview.status, 400);
     assert.match(((await preview.json()) as { detail: string }).detail, REPLY_LAG_REFUSAL(firstId));
 
+    landQueuedFeedback(root, root);
     assert.deepEqual(listFeedback(root).filter((e) => e.reply_to === id).map((e) => e.id), [firstId]);
     assert.equal(readFeedbackEntry(root, id).answered_by, firstId);
   });
@@ -600,6 +604,7 @@ test("POST /v1/feedback: a second submission carrying a submissionKey that alrea
   });
 
   // The literal proof artifact: exactly ONE plan/feedback/<id>.yaml exists, not two.
+  landQueuedFeedback(root, root);
   const files = readdirSync(feedbackDir(root)).filter((f) => f.endsWith(".yaml"));
   assert.equal(files.length, 1, "a repeat carrying the same submissionKey must write no second entry file");
 
@@ -660,6 +665,7 @@ test("POST /v1/feedback: two DELIBERATELY separate submissions carrying identica
     const cBody = (await c.json()) as { entry: FeedbackEntry };
     assert.notEqual(cBody.entry.id, aBody.entry.id);
   });
+  landQueuedFeedback(root, root);
   assert.equal(readdirSync(feedbackDir(root)).filter((f) => f.endsWith(".yaml")).length, 3);
 });
 
@@ -887,6 +893,7 @@ test("END-TO-END: a panel-submitted feedback entry, run through the REAL lib/tri
     assert.equal(submitted.origin, "ui");
   });
   const entry = submitted!;
+  landQueuedFeedback(root, root);
 
   // Step 2 -- THE CAPTURED ENTRY IS A VALID TRIAGE INPUT. lib/triage.ts's REAL prompt builder,
   // fed the SAME entry the panel just captured (no adaptation needed).

@@ -565,9 +565,16 @@ export function computeTypeOnlyRanges(fileText) {
   const lines = fileText.split('\n');
   const ranges = [];
   const OPEN = /^(\s*)(?:export\s+)?(?:declare\s+)?interface\s+\S.*\{\s*$/;
+  const INLINE_INTERFACE = /^\s*(?:export\s+)?(?:declare\s+)?interface\s+[A-Za-z_$][\w$]*/;
   const TYPE_OPEN = /^(\s*)(?:export\s+)?type\s+\S+[^={]*=\s*\{\s*$/;
   const CLOSER = /^(\s*)\}/;
   for (let i = 0; i < lines.length; i++) {
+    if (!OPEN.test(lines[i]) && INLINE_INTERFACE.test(lines[i])
+      && classifyTypeOnlyModule('inline-interface.ts', () => lines[i]).verdict === 'type-only') {
+      ranges.push({ start: i + 1, end: i + 1,
+        reason: 'inline interface -- native TypeScript stripping erases the entire line', kind: 'type-only' });
+      continue;
+    }
     const m = OPEN.exec(lines[i]) ?? TYPE_OPEN.exec(lines[i]);
     if (!m) continue;
     const indent = m[1];

@@ -1,0 +1,49 @@
+- id: W1-T7814
+  title: "A DISPATCH MEMORY OBSERVATION SURVIVES LEDGER COMPACTION — `dispatch_memory_observed` is ledgered on every dispatch consultation but is absent from DECISION_RELEVANT_LEDGER_STEPS, so rotation archives it like telemetry and a memory governor that reads its own history back finds it gone"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — one ledger step joins the retained decision-relevant set
+  band_meaning: span
+  origin: "operator session 2026-10-10: memory-governor follow-up to W1-T5347 and #10730; approved 2026-10-10"
+  plan_refs: [W1-T5347, W1-T244, W1-T7094]
+  files: [src/lib/ledger.ts, src/lib/sweep.ts, test/a-dispatch-memory-observation-survives-ledger-compaction.test.ts]
+  status: merged
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ on origin/main e2288e457.
+    - `logMemoryObservation` (src/lib/sweep.ts:18771) writes `step: "dispatch_memory_observed"`
+      (sweep.ts:18780) on EVERY consultation, admitted readings included (W1-T5347).
+    - `DECISION_RELEVANT_LEDGER_STEPS` (src/lib/ledger.ts:561) is the set rotation never archives. Its only
+      bound is `MAX_RETAINED_LINES_PER_STEP` (200, ledger.ts:1074). The step is not in it, so compaction
+      archives it with telemetry.
+    - The writer's own doc (sweep.ts:18765-18770) says this is deliberate: "NOT registered ... because
+      nothing reads this step back yet — THE READER IS THE OPERATOR". It writes no literal comparison
+      expression, because test/ledger-rotation.test.ts derives the set by scanning that file's text.
+    - A repo-wide grep on origin/main finds no src/ reader of the step today.
+    The operator approved registering it on 2026-10-10, so the memory governor's later reads can find
+    the observation history after compaction. That reverses the comment above, which this task must
+    therefore rewrite rather than leave stating the opposite.
+  design: |
+    1. Add "dispatch_memory_observed" to `DECISION_RELEVANT_LEDGER_STEPS`. Its entry comment names its
+       reader, as every entry must: the memory governor's history read (the dispatch memory floor and its
+       calibration). It also says what losing the step costs: a governor that learns from its own
+       observations would relearn from an empty window after each rotation.
+    2. Rewrite `logMemoryObservation`'s doc so it states the registration and why. Keep the step name out of
+       a literal comparison expression unless a real reader lands, so the derived-from-consumers test in
+       test/ledger-rotation.test.ts stays truthful.
+    3. A test rotates a ledger holding these rows past the rotation threshold. It asserts the rows survive
+       into the live view, bounded by `MAX_RETAINED_LINES_PER_STEP`, while a telemetry row of the same age
+       is archived.
+  acceptance:
+    - claim: "DECISION_RELEVANT_LEDGER_STEPS contains dispatch_memory_observed"
+      proof: 'grep: test("W1-T7814: the decision-relevant step set registers dispatch_memory_observed" in test/a-dispatch-memory-observation-survives-ledger-compaction.test.ts'
+    - claim: "a rotation keeps dispatch_memory_observed rows in the live ledger while archiving a telemetry row of the same age"
+      proof: 'grep: test("W1-T7814: rotation keeps dispatch_memory_observed rows and archives a telemetry row of the same age" in test/a-dispatch-memory-observation-survives-ledger-compaction.test.ts'
+  falsifier: |
+    Leave the step out of `DECISION_RELEVANT_LEDGER_STEPS`. The first test fails, and the rotation in the
+    second archives the memory rows with the telemetry row.

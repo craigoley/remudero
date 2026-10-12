@@ -14,6 +14,13 @@
   files:
     - src/lib/sweep.ts
     - test/ratchet-repair-admission-reads-the-failing-step.test.ts
+  # refusal-amendment (W1-T5117, run W1-T5117-1791436776050, 2026-10-08T05:44:20.745Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
+  #   worker evidence: Both predicates already reject the recorded incident, triggering the task’s close-without-implementation instruction.
+  # refusal-amendment (W1-T5117, run W1-T5117-1791436776050, 2026-10-08T05:44:20.745Z): the worker refused criterion 3 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: The existing bundled-check test explicitly requires generic evidence to admit repair and needs updating outside the declared scope.
+  # refusal-amendment (W1-T5117, run W1-T5117-1791436776050, 2026-10-08T05:44:20.745Z): the worker refused criterion 4 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: The existing policy test explicitly requires an unproven mixed red set to run repair and needs updating outside the declared scope.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   rationale: |

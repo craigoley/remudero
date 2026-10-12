@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -169,6 +169,7 @@ interface RecycleRun {
 }
 
 function runRecycle(opts: { codex: boolean; omitCodexMount?: boolean; scriptPath?: string }): RecycleRun {
+  if (opts.scriptPath) cpSync(join(REPO_ROOT, "deploy", "acr-login.sh"), join(dirname(opts.scriptPath), "acr-login.sh"));
   const binDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}runtime-recycle-bin-`));
   const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}runtime-recycle-state-`));
   const credDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}runtime-recycle-claude-`));

@@ -6,9 +6,6 @@
     "coverage-ratchet#1: if [ \"$CLASS\" != \"SOURCE\" ]; then": {
       "reason": "W1-T2428's fast lane: plan/docs diffs skip coverage work. Always-skip means a SOURCE PR is certified with no coverage measured at all. test/fast-lane-classifier.test.ts asserts the CLASSIFIER's verdicts, never that this step acts on them, so the two are not connected by any test."
     },
-    "coverage-ratchet#1: if [ \"$TEST_EXIT\" -ne 0 ]; then": {
-      "reason": "W1-T3207 made coverage-ratchet the surviving test verdict, and this arm carries a failing suite into the job's exit code. An always-true mutant makes it report a failure that did not happen -- LOUD, not silent, so it is the safe direction -- but the inverse is what matters and no test pins either. Enumerated because the block reaches `exit 0`."
-    },
     "coverage-ratchet-required#1: if [ \"$CLASS\" != \"SOURCE\" ]; then": {
       "reason": "Fast-lane skip on the aggregator, first of four identical occurrences. Same gap as the coverage-ratchet entry above: the classifier is tested, its consumption here is not."
     },
@@ -20,6 +17,39 @@
     },
     "coverage-ratchet-required#4: if [ \"$CLASS\" != \"SOURCE\" ]; then": {
       "reason": "Fourth of the four identical fast-lane skips in this job -- the one guarding the diff-coverage read, so an always-skip here is precisely the vacuous diff-coverage pass this repo already names as its worst class."
+    },
+    "ci#1: if [ \"$CLASS\" = \"SOURCE\" ] && [ \"${GITHUB_EVENT_NAME}\" = \"pull_request\" ] && [ \"$TEST_ONLY_RUN\" != \"full\" ] && [ \"${RMD_AFFECTED_SUITE_LIVE:-0}\" = \"1\" ]; then": {
+      "reason": "Inherited guard first counted by W1-T5829 in unchanged ci.yml at 42758778cff3. This records the expanded variable-linked/case population, not measured mutation coverage; replace this exemption when a behavioral suite distinguishes the forced branch."
+    },
+    "ci#1: if [ \"$(head -n 1 affected-suites-selected.txt 2>/dev/null || true)\" != \"full\" ]; then": {
+      "reason": "Inherited guard first counted by W1-T5829 in unchanged ci.yml at 42758778cff3. This records the expanded variable-linked/case population, not measured mutation coverage; replace this exemption when a behavioral suite distinguishes the forced branch."
+    },
+    "ci#1: if [ \"$CLASS\" != \"SOURCE\" ]; then": {
+      "reason": "Inherited guard first counted by W1-T5829 in unchanged ci.yml at 42758778cff3. This records the expanded variable-linked/case population, not measured mutation coverage; replace this exemption when a behavioral suite distinguishes the forced branch."
+    },
+    "ci#1: if [ \"$CLASS\" = \"TEST_ONLY\" ]; then": {
+      "reason": "Inherited guard first counted by W1-T5829 in unchanged ci.yml at 42758778cff3. This records the expanded variable-linked/case population, not measured mutation coverage; replace this exemption when a behavioral suite distinguishes the forced branch."
+    },
+    "ci#1: if [ -z \"$SUITES\" ]; then": {
+      "reason": "Inherited guard first counted by W1-T5829 in unchanged ci.yml at 42758778cff3. This records the expanded variable-linked/case population, not measured mutation coverage; replace this exemption when a behavioral suite distinguishes the forced branch."
+    },
+    "ci-required#1: case \"$SHARD_RESULT\" in": {
+      "reason": "Inherited guard first counted by W1-T5829 in unchanged ci.yml at 42758778cff3. This records the expanded variable-linked/case population, not measured mutation coverage; replace this exemption when a behavioral suite distinguishes the forced branch."
+    },
+    "test-slow-shard#1: if [ \"$CLASS\" = \"TEST_ONLY\" ]; then": {
+      "reason": "Inherited guard first counted by W1-T5829 in unchanged ci.yml at 42758778cff3. This records the expanded variable-linked/case population, not measured mutation coverage; replace this exemption when a behavioral suite distinguishes the forced branch."
+    },
+    "test-slow-shard#1: if [ \"$(printf '%s\\n' \"$TEST_ONLY_RUN\" | head -n 1)\" = \"files\" ]; then": {
+      "reason": "Inherited guard first counted by W1-T5829 in unchanged ci.yml at 42758778cff3. This records the expanded variable-linked/case population, not measured mutation coverage; replace this exemption when a behavioral suite distinguishes the forced branch."
+    },
+    "test-slow-shard#1: case \"$CLASS\" in": {
+      "reason": "Inherited guard first counted by W1-T5829 in unchanged ci.yml at 42758778cff3. This records the expanded variable-linked/case population, not measured mutation coverage; replace this exemption when a behavioral suite distinguishes the forced branch."
+    },
+    "test-slow#1: case \"$SHARD_RESULT\" in": {
+      "reason": "Inherited guard first counted by W1-T5829 in unchanged ci.yml at 42758778cff3. This records the expanded variable-linked/case population, not measured mutation coverage; replace this exemption when a behavioral suite distinguishes the forced branch."
+    },
+    "coverage-ratchet-required#1: case \"$SHARD_RESULT\" in": {
+      "reason": "Inherited guard first counted by W1-T5829 in unchanged ci.yml at 42758778cff3. This records the expanded variable-linked/case population, not measured mutation coverage; replace this exemption when a behavioral suite distinguishes the forced branch."
     }
   }
 }

@@ -33,6 +33,7 @@ function baseSettings(): Record<string, unknown> {
     sandbox: {
       enabled: true,
       failIfUnavailable: true,
+      allowUnsandboxedCommands: false,
       network: { allowedDomains: [...ALLOWED_NETWORK_DOMAINS] },
     },
   };

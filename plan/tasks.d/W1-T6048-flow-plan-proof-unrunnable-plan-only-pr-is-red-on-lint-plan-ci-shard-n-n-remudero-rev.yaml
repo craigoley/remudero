@@ -1,0 +1,33 @@
+- id: W1-T6048
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — plan-proof-unrunnable:plan-only PR is red on lint-plan, ci-shard (<n>/<n>), remudero-review cost 4.78 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.27
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-blocker:plan-proof-unrunnable:plan-only PR is red on lint-plan, ci-shard (<n>/<n>), remudero-review"
+  files:
+    - src/lib/pr-blocker.ts
+    - test/flow-plan-proof-unrunnable-plan-only-pr-is-red-on-lint-plan-ci-shard-n-n-remudero-rev.test.ts
+  acceptance:
+    - claim: "plan-proof-unrunnable:plan-only PR is red on lint-plan, ci-shard (<n>/<n>), remudero-review is cleared by its owner without manual intervention"
+      proof: "grep: test(\"W1-T6048: flow-plan-proof-unrunnable-plan-only-pr-is-red-on-lint-plan-ci-shard-n-n-remudero-rev clears without a person\" in test/flow-plan-proof-unrunnable-plan-only-pr-is-red-on-lint-plan-ci-shard-n-n-remudero-rev.test.ts"
+  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    plan-proof-unrunnable:plan-only PR is red on lint-plan, ci-shard (<n>/<n>), remudero-review cost 4.78 PR-hours; owner NONE
+    Owner NONE is absent.
+    Source owner: src/lib/pr-blocker.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #9505: 4.94 PR-hours — plan-only PR is red on lint-plan, ci-shard (6/8), remudero-review — the code-fix lane cannot stage outside a plan filing, so no fix is dispatched; the plan violation needs a plan repair
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.6
+    reasons:
+      - "low-confidence verdict (0.60 < 0.7) — on the change's description/files alone, no diff was read — The declared files are limited to src/lib/pr-blocker.ts and one new test file. Nothing in the description or file list shows a touch on secrets, credentials, auth, merge/deploy policy, or data deletion.; on the change's description/files alone, no diff was read — The task is a flow-blocker remedy: it makes a plan-only PR that is red on lint-plan, ci-shard and remudero-review clear without a person. The description does not say how it clears the PR. Changing blocker handling could touch review policy, but nothing stated shows that it does.; on the change's description/files alone, no diff was read — The acceptance criterion is a grep for a named test in the declared test file, so it can be verified from what is shown. The task is verify: auto, and the PR still goes through CI and review.; on the change's description/files alone, no diff was read — The family has no track record (0 merged, 0 declined, Beta mean 0.50), which is neutral. No bounded change view was supplied, so the real change shape cannot be compared with the declared files."
+    judged_at: "2026-10-06T22:29:57.355Z"
+    pin: "d2cd5bfa12eae6e04d7255358ad624939d7ff1c543c7d17eac1e6248f6d1957e"

@@ -16,10 +16,11 @@ raw: "Vercel blocked console PR #12 because the committed email
 attachments:
   - https://vercel.com/docs/deployments/troubleshoot-project-collaboration
 origin: cli
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

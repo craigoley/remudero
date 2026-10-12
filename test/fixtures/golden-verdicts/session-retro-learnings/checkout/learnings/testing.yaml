@@ -1,0 +1,9 @@
+- id: a-proof-must-fail-at-base
+  subsystem: testing
+  lifecycle: active
+  src: PR#8866
+
+- id: title-tests-with-the-plan-proof
+  subsystem: testing
+  lifecycle: active
+  src: PR#8861

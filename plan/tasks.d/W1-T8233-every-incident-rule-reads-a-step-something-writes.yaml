@@ -1,0 +1,72 @@
+- id: W1-T8233
+  title: "THE FLEET-STALL PAGE CAN NEVER FIRE — sre-governor's \"fleet built nothing for hours\" fast burn is the dispatch-stall and no-merges-with-green-queue invariants, which read queue.priority_snapshot, queue.merge_ready and pr.merged; nothing writes the first two and pr.merged had no row in 24 h, so neither rule fired through a 52-minute recycle stall or four core pauses on 2026-10-11"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — every incident rule and runbook is reachable from something the fleet writes
+  band_meaning: span
+  origin: "2026-10-11 detection research: the SRE pipeline has links that no writer feeds"
+  plan_refs: [W1-T4384, W1-T4386, W1-T4390, W1-T5651, W1-T5355]
+  files: [src/lib/incident-invariants.ts, test/incident-invariants.test.ts, test/every-incident-rule-reads-a-step-something-writes.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ on origin/main 25067fc89:
+      - src/lib/incident-invariants.ts:114 `QUEUE_PRIORITY_SNAPSHOT_STEP = "queue.priority_snapshot"` carries its own
+        comment: "Not yet ledgered by any writer in this repo ... simply never fires until something ledgers one".
+        dispatch-stall (RULES, :131) needs a queuedPriority1 count from it, so it can never be bad.
+      - :121-122 no-merges-with-green-queue reads `queue.merge_ready` (no writer in src/) and `pr.merged`. The only
+        `pr.merged` writer is one path in src/run-task.ts (:21338). Merges are ledgered as `verdict.merged`.
+      - src/lib/sre-governor.ts:50 `FLEET_STALL_RULES` is exactly these two rules, and `isFastBurn` pages the operator
+        for an invariant only when it is one of them. So the one operator page for "the fleet built nothing for hours"
+        rests on two rules that cannot fire.
+      - src/lib/sre-runbooks.ts:341 `SRE_RUNBOOK_INCIDENTS` answers the incident names ci-red-unrelated,
+        stale-managed-checkout, stale-container, stale-lock and stale-review. No `incident.event` producer in src/
+        emits any of them (searched every builder of that step: incident-events.ts, incident-invariants.ts,
+        ci-incidents.ts, cost-anomaly.ts, serve-memory.ts), so the four runbooks are unreachable.
+    MEASURED, core ledger union 2026-10-10T20:00Z..2026-10-11T19:38Z: 0 `queue.priority_snapshot`, 0
+    `queue.merge_ready`, 0 `pr.merged`, 240 `verdict.merged`. Through that window core was paused four times for
+    a serve restoration (about 181 idle lane-minutes) and held 52 minutes by a recycle drain (16:16-17:08). Zero
+    `incident.event` rows of kind invariant were written.
+  design: |
+    No new threshold. Both windows stay the rules' own, and the long plus 1/12 short burn shape stays.
+    1. EACH RULE DECLARES ITS INPUTS. `InvariantRule` gains `inputs: readonly string[]`, the ledger steps its `bad`
+       reads. An exported `INCIDENT_RULE_INPUTS` lists them for a census.
+    2. REWIRE THE TWO DEAD RULES to steps the fleet writes today. no-merges-with-green-queue counts merges from
+       `verdict.merged`, and counts green work waiting from `sweep.disposed` rows whose blocker is awaiting-arm
+       (distinct PRs). dispatch-stall is bad when the window has no implement `run.start` while the daemon recorded
+       held or idle dispatchable work. Use a step that is ledgered at least once per short window while the hold
+       lasts, for example `daemon.pause` each tick, `dispatch.lane_refill_held`, or `lane.idle_summary`. Pick from
+       what the replay below shows. sre-governor's FLEET_STALL_RULES is unchanged, so the page now works.
+    3. THE CENSUS (new test file). For every rule input, assert that some src/ file other than
+       incident-invariants.ts writes that step. For every name in SRE_RUNBOOK_INCIDENTS, assert that some producer
+       emits it, or that it is listed in the test's own UNREACHABLE_RUNBOOK_DEBT table with a reason. The census also
+       fails when a listed name gains an emitter, so the debt table can only shrink. Seed the table with today's four
+       runbooks. This task does not wire their emitters. The table is the visible debt.
+    4. REPLAY TEST. Build rows in the 2026-10-11 shape: a recycle hold with `daemon.pause` rows each minute and no
+       implement `run.start` for 52 minutes, and a pause window with `dispatch.lane_refill_held` reason "fleet PAUSE
+       hold". dispatch-stall must fire on the first. no-merges must fire on awaiting-arm dispositions with no
+       `verdict.merged` across its window.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Update
+    test/incident-invariants.test.ts fixtures that synthesize the retired input steps.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/every-incident-rule-reads-a-step-something-writes.test.ts"
+    - claim: "every incident rule input has a writer outside the rule module"
+      proof: 'grep: test("W1-T8233: every incident rule input has a writer" in test/every-incident-rule-reads-a-step-something-writes.test.ts'
+    - claim: "every runbook incident name has an emitter or a listed debt entry, and the debt list only shrinks"
+      proof: 'grep: test("W1-T8233: every runbook incident name is emitted or listed as debt" in test/every-incident-rule-reads-a-step-something-writes.test.ts'
+    - claim: "dispatch-stall fires on the 2026-10-11 recycle-hold replay"
+      proof: 'grep: test("W1-T8233: dispatch-stall fires on the recycle-hold replay" in test/every-incident-rule-reads-a-step-something-writes.test.ts'
+    - claim: "no-merges-with-green-queue fires on awaiting-arm dispositions with no verdict.merged"
+      proof: 'grep: test("W1-T8233: no-merges fires on awaiting-arm with no verdict\.merged" in test/every-incident-rule-reads-a-step-something-writes.test.ts'
+    - claim: "each rule declares the steps it reads"
+      proof: 'grep: INCIDENT_RULE_INPUTS in src/lib/incident-invariants.ts'
+  falsifier: |
+    Leave both rules on their current inputs. The census then names queue.priority_snapshot and queue.merge_ready
+    as inputs with no writer, and both replay tests read no finding, because the rules see no queued-priority count
+    and no merge-ready count in rows the fleet actually writes.

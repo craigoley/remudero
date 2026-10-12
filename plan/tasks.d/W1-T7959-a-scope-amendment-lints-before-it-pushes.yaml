@@ -1,0 +1,73 @@
+- id: W1-T7959
+  title: "A SCOPE AMENDMENT LINTS BEFORE IT PUSHES — requestScopeAmendment appends a worker's path to files: and opens a plan-only PR without running the task linter, so #10842 (W1-T6018 + src/lib/now-view.ts) went up red on Rule 19 sizing and no lane can repair it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: medium  # Rule 19: one concern — the scope-amendment writer lints what it writes
+  origin: "operator session 2026-10-11: #10842 (scope-amendment/W1-T6018-10833) stranded with its implementation PR #10833"
+  plan_refs: [W1-T5534, W1-T6465, W1-T5405, W1-T2503, W1-T6018]
+  files: [src/lib/proof-amendment.ts, test/a-scope-amendment-lints-before-it-pushes.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-11 11:24Z. `requestScopeAmendment` (src/lib/proof-amendment.ts, W1-T5534, W1-T6465)
+    appended "src/lib/now-view.ts" to W1-T6018's files: and opened #10842 on
+    scope-amendment/W1-T6018-10833 for implementation PR #10833. Re-run on that head (d86cbeff) in a
+    scratch worktree, `npm run -s lint-plan:fast` reports
+    `W1-T6018: 1 violation(s) (0 pre-existing on base origin/main …) [sizing] spans 2 distinct
+    subsystems/concerns (now-view, view-shadow) at risk:medium — Rule 19: raise to risk:high or
+    decompose into one task per concern`. That message comes from `sizingViolation` in
+    src/lib/task-linter.ts. The sweep then disposed the PR `plan-proof-unrunnable … the code-fix lane
+    cannot stage outside a plan filing, so no fix is dispatched`. Both the amendment and #10833, which
+    waits on it, are stranded, and no lane can repair either one.
+    READ on origin/main bd10150a: between the shard rewrite and `deps.gitPush`/`deps.createPr`,
+    `requestScopeAmendment` checks only that the YAML parses (`parseDocument(text).errors`). It never
+    calls `lintTask`. W1-T5405 put `planPrPreflight` in front of the sweep's own two plan-PR sites. This
+    writer opens its PR through `ProofAmendmentWritePorts.createPr` and was not covered.
+    Widening files: is exactly the edit that can add a subsystem. So Rule 19 sizing is the violation
+    this writer produces by construction, and its remedy is mechanical: the linter names it as "raise
+    to risk:high". W1-T2503 adds one condition. A task moved to high in a diff must also declare
+    `band_meaning`, otherwise the same check blocks again with "risk:high with no band_meaning
+    declared". An existing `band_meaning` (W1-T6018 already declares blast-radius) already satisfies
+    the check at high.
+    The ledger half already exists. The run-task.ts call sites log `fix.scope_amendment` with
+    `...outcome`, so a new refused reason reaches the ledger with no change outside this file.
+  design: |
+    1. In `requestScopeAmendment`, after the amended text is built and parsed and BEFORE
+       `deps.worktreeAdd`, parse the task out of the amended shard text and out of the observed (base)
+       shard text the way loadPlan does. Run `lintTask` from src/lib/task-linter.ts on both, passing
+       the base task as the `riskTransition` base exactly as lint-plan's diff-scoped run does. A
+       violation is NEW when it blocks on the amended task and has no counterpart (same check and
+       message) on the base task. A violation the base already had does not stop the amendment.
+    2. No new blocking violation: proceed as today.
+    3. The new blocking violations are exactly Rule 19 sizing (`check: "sizing"` from
+       `sizingViolation`) at a risk below high, so the linter's remedy is "raise to risk:high". Rewrite
+       the task's `risk:` scalar to `high` in the same text, editing that line only. Replace a trailing
+       comment that claimed one concern with one that names the subsystems and the amendment PR. Add
+       `band_meaning: span` only when the task declares none, and leave an existing value alone. Then
+       lint again. If anything new still blocks, refuse (step 4). Otherwise commit once, with a commit
+       message and PR body that both say risk was raised to high, why, and which subsystems the
+       linter counted. Add an Acceptance claim for the raise to the rendered block, alongside the
+       `files includes <path>` claims: `grep: ^ *risk: high in <shard>`, built through the same
+       renderer.
+    4. Any other new blocking violation: return `{ kind: "refused", reason: "amended-shard-lint",
+       detail }`. The detail names each new violation's check and message. The worktree is never
+       added, and nothing is written, committed, pushed or opened. The existing `fix.scope_amendment`
+       ledger row records the reason.
+    No numeric bound is added. What triggers the risk raise is the linter's own verdict and its own
+    remedy text, not a count chosen here.
+  acceptance:
+    - claim: "a fixture shard whose scope amendment adds a second subsystem is pushed at risk:high with band_meaning: span, the pushed shard lints clean through lintTask, and the PR body and its Acceptance block both state the risk raise"
+      proof: 'grep: test("W1-T7959: an amendment that crosses two subsystems is raised to risk:high and lints clean" in test/a-scope-amendment-lints-before-it-pushes.test.ts'
+    - claim: "a fixture shard whose scope amendment introduces a different new lint violation is refused amended-shard-lint, and no worktree, commit, push or PR is made"
+      proof: 'grep: test("W1-T7959: an amendment with any other new lint violation is refused with no push" in test/a-scope-amendment-lints-before-it-pushes.test.ts'
+    - claim: "requestScopeAmendment runs the task linter on the amended shard"
+      proof: "grep: lintTask( in src/lib/proof-amendment.ts"
+  falsifier: |
+    Remove the lint step from requestScopeAmendment. The two-subsystem fixture is pushed at risk:medium,
+    and lintTask on the pushed text reports the sizing block. The other-violation fixture reaches the
+    fake gitPush and createPr. Both named tests then fail.

@@ -1,18 +1,23 @@
+import { observeCiRefreshDeferrals } from "../src/lib/ci-refresh-prevention.ts";
 /** Private daily operational review. No paid model calls, GitHub reads or routing writes. */
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
+import { observeReviewFlow, REVIEW_FLOW_STEPS } from "../src/lib/review-flow-observation.ts";
+import { readCiLessonExposure } from "../src/lib/ci-lesson-recurrence.ts";
+import { goalObservationFromRow } from "../src/lib/goals.ts";
 import { fixedClock, systemClock } from "../src/lib/clock.ts";
 import { ledgerRotationEntries, openLedgerUnion } from "../src/lib/ledger-union.ts";
 import { evaluateRoutingExperiment, ROUTING_EXPERIMENTS } from "../src/lib/routing-experiments.ts";
+import { readRoutingQuarantineResolutions, resolveRoutingQuarantineRow } from "../src/lib/routing-quarantine-resolution.ts";
 
 const DAY = 86_400_000;
 const since = ROUTING_EXPERIMENTS.map((item) => item.startedOn).sort()[0];
 
-async function readSource(source, asOf) {
+async function readSource(source, asOf, resolutions) {
   let names;
   try { names = readdirSync(source.stateDir); }
   catch { return { ...source, state: "unavailable", reasons: ["ledger-source-unreadable"], rowsRead: 0, rows: [] }; }
@@ -22,37 +27,52 @@ async function readSource(source, asOf) {
   if (rotations.length + forms.live === 0)
     return { ...source, state: "unavailable", reasons: ["ledger-source-missing"], forms, rowsRead: 0, rows: [] };
   const rows = [];
+  const resolvedRows = new WeakSet();
+  let routingResolvedFutureRows = 0;
   const findings = [];
   let findingsOmitted = 0;
   const finding = (value) => { if (findings.length < 200) findings.push(value); else findingsOmitted++; };
-  let rowsRead = 0, malformedRows = 0, unreadSources = 0, futureRows = 0, newestTs = null;
+  const windowStart = Date.parse(asOf) - DAY;
+  let retainedRowsOmitted = 0;
+  let rowsRead = 0, malformedRows = 0, unreadSources = 0, futureRows = 0, invalidTimestampRows = 0, newestTs = null;
   for await (const row of openLedgerUnion(source.stateDir, {
     since: `${since}T00:00:00Z`,
     onUnreadArchive: () => { unreadSources++; }, onUnreadLive: () => { unreadSources++; },
     onMalformedRow: (item) => { malformedRows++; finding({ kind: item.kind, form: item.form, path: item.path, rowOrdinal: item.rowOrdinal, timestamp: item.timestamp }); },
     onAcceptedRecord: (row, raw) => {
       const timestamp = Date.parse(row.ts);
+      const resolution = resolveRoutingQuarantineRow(resolutions, source.label, row, raw, asOf);
+      if (resolution) resolvedRows.add(row);
       if (!Number.isFinite(timestamp) || timestamp > Date.parse(asOf) + 5 * 60_000) finding({
         kind: Number.isFinite(timestamp) ? "future-timestamp" : "invalid-timestamp", rowHash: createHash("sha256").update(raw).digest("hex"),
         timestamp: typeof row.ts === "string" ? row.ts.slice(0, 80) : null, step: typeof row.step === "string" ? row.step.slice(0, 80) : null,
+        ...(resolution ? { resolutionScope: resolution.scope, resolvedAt: resolution.resolvedAt } : {}),
       });
     },
   })) {
     const time = Date.parse(row.ts);
-    if (!Number.isFinite(time) || time > Date.parse(asOf) + 5 * 60_000) { futureRows++; continue; }
+    if (!Number.isFinite(time)) { invalidTimestampRows++; continue; }
+    if (time > Date.parse(asOf) + 5 * 60_000) { futureRows++; if (resolvedRows.has(row)) routingResolvedFutureRows++; continue; }
     // Normal writes arriving during the scan belong to the next snapshot, not a clock warning.
     if (time > Date.parse(asOf)) continue;
     rowsRead++;
     if (newestTs === null || row.ts > newestTs) newestTs = row.ts;
-    if (["worker.assignment", "verdict.merged", "fix.dispatch"].includes(row.step)
-      || row.selection_assignment_id) rows.push(row);
+    if (["worker.assignment", "verdict.merged", "fix.dispatch"].includes(row.step) || row.selection_assignment_id
+      || time >= windowStart && (REVIEW_FLOW_STEPS.includes(row.step) || row.step === "ci_learning_cadence.ran"
+        || row.step === "ci_learning_cadence.run_failed" || row.step === "sweep.update_branch.pending_guard"
+        || String(row.step).endsWith(".gardener_judged")
+        || String(row.step).endsWith(".gardener_failed") || String(row.step).startsWith("goal."))) {
+      if (rows.length < 100_000) rows.push(row); else retainedRowsOmitted++;
+    }
   }
   const reasons = [];
+  if (retainedRowsOmitted) reasons.push("ledger-retention-row-bound");
   if (unreadSources) reasons.push("ledger-source-unreadable");
   if (malformedRows) reasons.push("ledger-source-malformed");
-  if (futureRows) reasons.push("ledger-source-future-or-invalid-timestamp");
+  if (invalidTimestampRows) reasons.push("ledger-source-invalid-timestamp");
+  if (futureRows) reasons.push("ledger-source-future-dated");
   return { ...source, state: reasons.length ? "observed-partial" : "observed", reasons, forms,
-    rowsRead, malformedRows, unreadSources, futureRows, newestTs, findings, findingsOmitted, rows };
+    rowsRead, retainedRowsOmitted, malformedRows, unreadSources, futureRows, routingResolvedFutureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
 }
 
 function privateWrite(path, value) {
@@ -61,7 +81,8 @@ function privateWrite(path, value) {
   renameSync(temp, path);
 }
 
-export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.iso() }) {
+export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.iso(), quarantineResolutions }) {
+  const resolutions = readRoutingQuarantineResolutions(quarantineResolutions, asOf, sources.map(source => source.label));
   const today = asOf.slice(0, 10);
   const yesterday = fixedClock(Date.parse(`${today}T00:00:00Z`) - DAY).iso().slice(0, 10);
   const scheduled = Date.parse(`${today}T04:17:00Z`);
@@ -82,17 +103,42 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
   }
   const results = [];
   for (const source of sources) {
-    const { rows, ...quality } = await readSource(source, asOf);
+    const { rows, ...quality } = await readSource(source, asOf, resolutions);
+    const trialReasons = quality.reasons.filter(reason => reason !== "ledger-source-future-dated"
+      || quality.futureRows !== quality.routingResolvedFutureRows);
+    const trialSourceQuality = { scope: "routing-trials", rawSourceState: quality.state,
+      state: quality.state === "unavailable" ? "unavailable" : trialReasons.length ? "observed-partial" : "observed",
+      reasons: trialReasons, resolvedIrrelevantFutureRows: quality.routingResolvedFutureRows ?? 0 };
     const reports = ROUTING_EXPERIMENTS.map((experiment) => {
       const report = evaluateRoutingExperiment(rows, experiment, today);
       const prior = previous?.sources.find((item) => item.label === source.label)?.reports?.find((item) => item.id === report.id);
       return { ...report, minTasksPerArm: experiment.minTasksPerArm,
-        reviewState: quality.state !== "observed" ? "source-incomplete" : report.sufficient ? "sample-minimum-met" : "provisional",
-        nextAction: quality.state !== "observed" ? "repair-source-evidence" : report.sufficient ? "review-matched-cohorts" : "collect-more-tasks",
+        sourceQuality: trialSourceQuality,
+        reviewState: trialSourceQuality.state !== "observed" ? "source-incomplete" : report.sufficient ? "sample-minimum-met" : "provisional",
+        nextAction: trialSourceQuality.state !== "observed" ? "repair-source-evidence" : report.sufficient ? "review-matched-cohorts" : "collect-more-tasks",
         changesSincePriorDay: prior ? { assignments: report.assignments - prior.assignments,
           tasks: report.arms.map((arm) => ({ arm: arm.arm, added: arm.tasks - (prior.arms.find((item) => item.arm === arm.arm)?.tasks ?? 0) })) } : null };
     });
-    results.push({ ...quality, reports });
+    const windowStart = fixedClock(Date.parse(asOf) - DAY).iso();
+    const reviewFlow = observeReviewFlow(rows, asOf, windowStart);
+    const learningRows = rows.filter(row => Date.parse(row.ts) >= Date.parse(windowStart));
+    const lastCiLearning = learningRows.filter(row => row.step === "ci_learning_cadence.ran")
+      .sort((a, b) => a.ts.localeCompare(b.ts)).at(-1);
+    const validCount = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+    const selfImprovement = { windowStart, sourceComplete: false, efficacyClaim: "none",
+      ciRefreshDeferrals: observeCiRefreshDeferrals(learningRows, asOf, windowStart),
+      ciLearning: lastCiLearning ? { at: lastCiLearning.ts, status: lastCiLearning.status ?? null,
+        filed: validCount(lastCiLearning.filed), refused: validCount(lastCiLearning.refused),
+        recurredLessons: validCount(lastCiLearning.lesson_recurrences?.recurrenceCount),
+        lessonExposure: readCiLessonExposure(lastCiLearning.lesson_recurrences?.exposure, asOf, quality.state === "observed"),
+        laterExposure: "not-certified-by-this-daily-window" } : null,
+      ciLearningFailures: learningRows.filter(row => row.step === "ci_learning_cadence.run_failed").length,
+      gardenerCredits: learningRows.filter(row => String(row.step).endsWith(".gardener_judged") && row.verdict === "credit").length,
+      gardenerDebits: learningRows.filter(row => String(row.step).endsWith(".gardener_judged") && row.verdict === "debit").length,
+      gardenerFailures: learningRows.filter(row => String(row.step).endsWith(".gardener_failed")).length,
+      goals: learningRows.map(goalObservationFromRow).filter(Boolean).slice(-100).map(row => ({ id: row.goal_id,
+        at: row.ts, outcome: row.step, baseline: row.baseline, measured: row.value, costComplete: row.costComplete })) };
+    results.push({ ...quality, reports, reviewFlow, selfImprovement });
   }
   let sourceRevision = null;
   try { sourceRevision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: fileURLToPath(new URL("..", import.meta.url)), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
@@ -104,8 +150,10 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
     "Operational observations; sample minimum alone does not establish a model winner."];
   for (const source of results) {
     lines.push(`${source.label}: ${source.state}; ${source.rowsRead} rows; ${source.reasons.join(", ") || "no source warnings"}`);
+    lines.push(`  review flow (uncertified retention): ${source.reviewFlow.counts.delivered} delivered exact inputs; ${source.reviewFlow.counts.superseded} superseded; ${source.reviewFlow.counts.unresolvedSourceGap} source gaps; completed-only p95 ${source.reviewFlow.completedOnly.p95Ms ?? "unavailable"} ms; ${source.reviewFlow.semantic.notAttempted} semantic not attempted`);
+    lines.push(`  self improvement: ${source.selfImprovement.gardenerFailures} observed gardener failures; ${source.selfImprovement.gardenerCredits} credits; ${source.selfImprovement.gardenerDebits} debits; ${source.selfImprovement.ciLearning?.recurredLessons ?? "unavailable"} recurring CI lessons; no efficacy claim`);
     for (const report of source.reports) {
-      lines.push(`  ${report.id}: ${report.reviewState}; ${report.arms.map((arm) => `${arm.arm} ${arm.tasks}/${report.minTasksPerArm} tasks, ${arm.merged} merged, ${arm.nonStarterAssignments} no attempt, ${arm.costMissingAssignments} cost missing`).join("; ")}; ${report.crossoverTasks} crossovers; assignment growth since prior day: ${report.changesSincePriorDay?.assignments ?? "unavailable"}; next action: ${report.nextAction}`);
+      lines.push(`  ${report.id}: ${report.reviewState}; ${report.arms.map((arm) => `${arm.arm} ${arm.tasks}/${report.minTasksPerArm} tasks, ${arm.merged} merged, ${arm.nonStarterAssignments} no attempt, ${arm.costMissingAssignments} cost missing, served identity ${arm.receiptCoverage.servedModelKnownAssignments}/${arm.receiptCoverage.assignments}, worker outcome ${arm.receiptCoverage.outcomeKnownAssignments}/${arm.receiptCoverage.assignments}, cash mean ${arm.meanCashCostUsd ?? "unavailable"}, subscription notional mean ${arm.meanNotionalCostUsd ?? "unavailable"}`).join("; ")}; ${report.crossoverTasks} crossovers; assignment growth since prior day: ${report.changesSincePriorDay?.assignments ?? "unavailable"}; next action: ${report.nextAction}`);
     }
   }
   const text = lines.join("\n") + "\n";
@@ -123,7 +171,8 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const { values } = parseArgs({ options: { source: { type: "string", multiple: true }, "out-dir": { type: "string" } } });
+  const { values } = parseArgs({ options: { source: { type: "string", multiple: true }, "out-dir": { type: "string" },
+    "quarantine-resolutions": { type: "string" } } });
   const sources = (values.source ?? []).map((value) => {
     const at = value.indexOf("=");
     const label = value.slice(0, at), stateDir = value.slice(at + 1);
@@ -133,6 +182,30 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (!values["out-dir"] || !isAbsolute(values["out-dir"]) || sources.length < 1 || sources.length > 3
     || new Set(sources.map((source) => source.label)).size !== sources.length)
     throw new Error("usage: private-routing-daily-review.mjs --source label=/state (1..3 unique) --out-dir /private/output");
-  const result = await dailyRoutingReview({ sources, outDir: values["out-dir"] });
+  const resolutionPath = values["quarantine-resolutions"] ?? join(values["out-dir"], "quarantine-resolutions.json");
+  if (!isAbsolute(resolutionPath)) throw new Error("quarantine resolutions require an absolute private path");
+  let quarantineResolutions;
+  let resolutionFd;
+  try {
+    // Validate and read the same opened object; replacing the pathname cannot redirect the read.
+    resolutionFd = openSync(resolutionPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const st = fstatSync(resolutionFd);
+    if (!st.isFile() || (st.mode & 0o777) !== 0o600 || st.size > 64 * 1024)
+      throw new Error("quarantine resolutions require a bounded regular private file");
+    const bytes = Buffer.alloc(64 * 1024 + 1);
+    let length = 0, count;
+    do {
+      count = readSync(resolutionFd, bytes, length, bytes.length - length, null);
+      length += count;
+    } while (count > 0 && length < bytes.length);
+    if (length > 64 * 1024) throw new Error("quarantine resolutions exceed the private input byte bound");
+    quarantineResolutions = JSON.parse(bytes.subarray(0, length).toString("utf8"));
+  } catch (error) {
+    if (values["quarantine-resolutions"] || error.code !== "ENOENT") throw error;
+    // An absent optional manifest preserves the original unqualified source warnings.
+  } finally {
+    if (resolutionFd !== undefined) closeSync(resolutionFd);
+  }
+  const result = await dailyRoutingReview({ sources, outDir: values["out-dir"], quarantineResolutions });
   console.log(result.text.trimEnd());
 }

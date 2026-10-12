@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { BAKED_RUNTIME_SOURCE_PATHS } from "../src/lib/baked-runtime-inputs.js";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { parse as parseYaml } from "yaml";
@@ -50,6 +51,7 @@ test("a push to main that changes an authoritative baked or build-context path s
     "deploy/package.json",
     "deploy/package-lock.json",
     "deploy/codex-requirements.toml",
+    ...BAKED_RUNTIME_SOURCE_PATHS,
     "package-lock.json",
   ]);
 });

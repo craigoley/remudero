@@ -46,7 +46,7 @@ async function reviewThroughGate(
   const runner = buildFreshTreeReviewRunner("/repo", {
     git: () => "",
     addWorktree: () => {},
-    inspectExistingWorktree: over.inspectExistingWorktree ?? (() => "absent"),
+    inspectExistingWorktree: over.inspectExistingWorktree ?? (() => "reusable"),
     prepareWorktree: () => true,
     spawnReview: spawnRmdReviewForFreshTree,
     worktreeRoot: root,

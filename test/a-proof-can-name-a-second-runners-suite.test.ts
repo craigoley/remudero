@@ -35,8 +35,8 @@ test("W1-T3178: a proof naming a test/ path still resolves exactly as it does to
   assert.equal(p!.command, "node");
   assert.deepEqual(
     p!.args,
-    ["--test", "--import", "tsx", "--import", TMP_HYGIENE_IMPORT, "test/deny-floor.test.ts"],
-    "the node --test argv must be byte-identical to what it was before the second root existed",
+    ["--test", "--test-reporter=tap", "--import", "tsx", "--import", TMP_HYGIENE_IMPORT, "test/deny-floor.test.ts"],
+    "the node --test argv must be byte-identical to what it was before the second root existed (plus the TAP reporter W1-T5882 names for Node 24)",
   );
   assert.equal(p!.nameFiltered, undefined, "and it stays a pure-path proof, not a name-filtered one");
 });

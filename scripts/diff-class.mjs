@@ -8,7 +8,8 @@
 // THREE BASE CLASSES: PLAN_ONLY (every file in plan scope), DOCS_ONLY (every file in plan scope or
 // under `docs/`), SOURCE (anything else, including an empty or unreadable list). `classify()`
 // never throws and fails closed to SOURCE, never PLAN_ONLY, on anything undeterminable.
-// `classifyCoverage()` additionally returns TEST_ONLY when every changed path is under `test/`;
+// `classifyCoverage()` additionally returns TEST_ONLY when every changed path is under `test/`, and
+// NO_SRC (W1-T5699) when none is under `src/` or is coverage/toolchain config (`steersCoverage`);
 // it still fails closed to SOURCE for an empty, unreadable, or mixed list.
 //
 // USAGE: `--changed-files <path>` classifies a newline-separated file list (`-` reads stdin);
@@ -49,8 +50,25 @@ export const CLASSES = Object.freeze({
   SOURCE: "SOURCE",
 });
 
-/** The coverage lane's extra, safe-to-skip class. It is deliberately not a base class. */
-export const COVERAGE_CLASSES = Object.freeze({ ...CLASSES, TEST_ONLY: "TEST_ONLY" });
+/** The coverage lane's extra, safe-to-skip classes. They are deliberately not base classes. */
+export const COVERAGE_CLASSES = Object.freeze({ ...CLASSES, TEST_ONLY: "TEST_ONLY", NO_SRC: "NO_SRC" });
+
+/**
+ * W1-T5699 — whether a changed path can move instrumented coverage: a src/ path, or config that
+ * steers the coverage run or its toolchain (package*.json, tsconfig*, .nvmrc, ci.yml, ci-gate.yml,
+ * the coverage gate scripts). A diff carrying one stays SOURCE; a non-string fails closed.
+ */
+export function steersCoverage(path) {
+  return (
+    typeof path !== "string" ||
+    path.startsWith("src/") ||
+    /(?:^|\/)(?:package[^/]*\.json|tsconfig[^/]*)$/.test(path) ||
+    path === ".nvmrc" ||
+    path === ".github/workflows/ci.yml" ||
+    path === ".github/workflows/ci-gate.yml" ||
+    /^scripts\/(?:diff-)?coverage[^/]*$/.test(path)
+  );
+}
 
 /**
  * Whether a repo-relative path counts as "docs" for DOCS_ONLY — the `docs/` prefix only, never a
@@ -149,6 +167,14 @@ export function classifyCoverage(files) {
       reason: `all ${files.length} changed file(s) are under test/ — instrumented source coverage cannot move`,
     };
   }
+  // W1-T5699: no src/ path and no coverage or toolchain config — diff coverage of src/ is empty by
+  // construction. ci-shard and test-slow-shard then run the FULL uninstrumented fast and slow tiers.
+  if (!files.some(steersCoverage)) {
+    return {
+      class: COVERAGE_CLASSES.NO_SRC,
+      reason: `none of the ${files.length} changed file(s) is under src/ or is coverage/toolchain config — the full suite runs uninstrumented`,
+    };
+  }
   return base;
 }
 
@@ -159,11 +185,15 @@ export function classifyCoverage(files) {
  * (helpers, fixtures, setup) can change many suites: run the full suite. Outside test/: `null`, the
  * ordinary classification applies.
  * @param {unknown} files
+ * @param {(changed: string[]) => string[]} [censusSuites] the census suites the changed files join (default: {@link censusSuiteFiles}).
  * @returns {{ mode: "files", files: string[] } | { mode: "full" } | null}
  */
-export function testOnlyRun(files) {
+export function testOnlyRun(files, censusSuites = (changed) => censusSuiteFiles(changed)) {
   if (!Array.isArray(files) || files.length === 0 || !files.every(isTestPath)) return null;
-  return files.every((f) => f.endsWith(".test.ts")) ? { mode: "files", files: [...files] } : { mode: "full" };
+  if (!files.every((f) => f.endsWith(".test.ts"))) return { mode: "full" };
+  // A changed test is DATA to every census that walks test/: #10092 edited one suite, ran only it,
+  // and shrank a population a census it never ran pinned, turning main red. Run those censuses too.
+  return { mode: "files", files: [...new Set([...files, ...censusSuites(files)])] };
 }
 
 /**
@@ -188,27 +218,106 @@ export function namesPlanOrDocsPath(content) {
   );
 }
 
+/** Literal paths and joined segments, retaining directory prefixes in dynamic template paths. */
+export function namedPlanOrDocsPaths(content) {
+  const paths = new Set();
+  const add = (path) => paths.add(path.replace(/^(?:\.\.\/)+/, "").split("${")[0].replace(/\/+$/, ""));
+  for (const m of content.matchAll(/["'`]((?:\.\.\/)*(?:plan\/|docs\/)[^"'`]*|MASTER-PLAN\.md)["'`]/g)) add(m[1]);
+  for (const m of content.matchAll(/\bjoin\(\s*[^,()]+,\s*((?:["'`][^"'`]+["'`]\s*,?\s*)+)/g)) {
+    const segments = [...m[1].matchAll(/["'`]([^"'`]+)["'`]/g)].map((q) => q[1]);
+    const path = segments.join("/").replace(/^(?:\.\.\/)+/, "");
+    if (/^(?:plan|docs)(?:\/|$)/.test(path)) add(path);
+  }
+  return paths;
+}
+
+/** The plan paths that name the whole population rather than one record. */
+const PLAN_POPULATION_PATHS = ["plan", "plan/tasks.d", "plan/tasks.yaml"];
+
+/** Whether `content` loads the whole plan (`loadPlan(` on plan/tasks.yaml) or walks its population. */
+function readsWholePlan(content, paths = namedPlanOrDocsPaths(content)) {
+  const loadsPlan = /\bloadPlan\s*\(/.test(content) && paths.has("plan/tasks.yaml");
+  const walksPlan = enumeratesPopulation(content) && PLAN_POPULATION_PATHS.some((p) => paths.has(p));
+  return loadsPlan || walksPlan;
+}
+
+/** The modules that lint or validate the plan itself — the subject of a plan-integrity suite. */
+const PLAN_INTEGRITY_MODULE = /\bfrom\s+["'][^"']*\/(?:task-linter|plan-coherence|plan-index)(?:\.[a-z]+)?["']/;
+
 /**
- * The plan-reading suite set, enumerated from the tree at run time — never a hand-copied list.
- * Directory-only: `test/helpers`/`test/setup` are shared fixtures, not suites `npm test`'s glob
- * selects either way. Qualifies by `namesPlanOrDocsPath(content)` alone — `hasRepoRootConstant`
- * used to gate this too but was dropped: MEASURED, it excluded six suites that can fail on a
- * plan-only diff, and no other source-shape spelling separated the set either.
+ * W1-T7809 — whether `content` is a plan-integrity suite: it imports the module that lints or validates
+ * the plan AND reads the real plan (loads it or walks its shards), so a changed shard is its subject.
+ * Derived from the suite's own source, never from a hand list. A suite that merely calls `loadPlan(`
+ * (fixtures, a status board) is not one.
+ */
+export function isPlanIntegritySuite(content) {
+  return PLAN_INTEGRITY_MODULE.test(content) && readsWholePlan(content);
+}
+
+/** W1-T7809 — whether `content` reads a changed plan path itself: the file, a path under a named
+ *  record directory, or a shard id. A reader of the whole plan population is NOT one (see
+ *  {@link isPlanIntegritySuite}); that is what made a one-shard filing select hundreds of suites. */
+export function readsChangedShard(content, changedFiles) {
+  const paths = namedPlanOrDocsPaths(content);
+  return changedFiles.some((file) => {
+    for (const path of paths) {
+      if (file === path) return true;
+      if (!PLAN_POPULATION_PATHS.includes(path) && file.startsWith(path + "/")) return true;
+    }
+    const id = /^plan\/tasks\.d\/(W\d+-T\d+)(?:[-.]|$)/.exec(file)?.[1];
+    return Boolean(id && new RegExp(`\\b${id}\\b`).test(content));
+  });
+}
+
+/** Match the changed file, a directory ancestor, a shard id, or a reader of the whole plan. */
+export function readsChangedPlanOrDocs(content, changedFiles) {
+  const paths = namedPlanOrDocsPaths(content);
+  const planChanged = changedFiles.some(isInPlanScope);
+  if (planChanged && readsWholePlan(content, paths)) return true;
+  return changedFiles.some((file) => {
+    for (const path of paths) if (file === path || file.startsWith(path + "/")) return true;
+    const id = /^plan\/tasks\.d\/(W\d+-T\d+)(?:[-.]|$)/.exec(file)?.[1];
+    return Boolean(id && new RegExp(`\\b${id}\\b`).test(content));
+  });
+}
+
+/**
+ * Enumerate readers of changed plan/docs paths, plus the census floor. Without a changed list,
+ * preserve the broad set for older callers and for the CLI's previous-count comparison.
  */
 // Why: docs/forensics/diff-class.md#planreadingsuitefiles.
 export function planReadingSuiteFiles(root = REPO_ROOT, changedFiles = []) {
+  const testDir = join(root, "test");
+  const out = new Set(changedFiles.length > 0 ? censusSuiteFiles(changedFiles, root) : []);
+  for (const entry of readdirSync(testDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".test.ts")) continue;
+    const abs = join(testDir, entry.name);
+    const content = readFileSync(abs, "utf8");
+    if ((changedFiles.length > 0 ? readsChangedPlanOrDocs(content, changedFiles) : namesPlanOrDocsPath(content)) ||
+        readsChangedProse(content, changedFiles)) {
+      out.add(relative(root, abs).split(sep).join("/"));
+    }
+  }
+  return [...out].sort();
+}
+
+/**
+ * W1-T7809 — the suites a PLAN-ONLY author diff reaches: those that read a changed shard by path or id,
+ * and the plan-integrity suites. Not every suite that calls `loadPlan(`: at origin/main that listing was
+ * ~469 suites for one filed shard. CI keeps {@link planReadingSuiteFiles}; only the author lane narrows.
+ */
+export function planOnlySuiteFiles(root = REPO_ROOT, changedFiles = []) {
   const testDir = join(root, "test");
   const out = [];
   for (const entry of readdirSync(testDir, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".test.ts")) continue;
     const abs = join(testDir, entry.name);
     const content = readFileSync(abs, "utf8");
-    if (namesPlanOrDocsPath(content) || readsChangedProse(content, changedFiles)) {
+    if (readsChangedShard(content, changedFiles) || isPlanIntegritySuite(content)) {
       out.push(relative(root, abs).split(sep).join("/"));
     }
   }
-  out.sort();
-  return out;
+  return out.sort();
 }
 
 // ── W1-T2680: THE SUITES A `git grep <symbol>` SWEEP CANNOT REACH ─────────────────────────────
@@ -251,10 +360,92 @@ export function withoutRelativePathLiterals(content) {
 // Why: docs/forensics/diff-class.md#enumeratespopulation-the-removed-glob-clause.
 export function enumeratesPopulation(content) {
   return (
-    /\bls-files\b/.test(content) ||
-    /\breaddirSync\b|\breaddir\b/.test(content) ||
-    /\bglobSync\b|\bglob\(/.test(content)
+    lsFilesWalksRepo(content) ||
+    enumerationCalls(content, /\b(?:readdirSync|readdir|globSync|glob)\s*\(/g).some((arg) => rootIsRepo(arg, content)) ||
+    // `git grep` as an argv element enumerates the files it matches: #10092's census
+    // (`["grep", "-lF", HELPER, "--", "test/*.test.ts"]`) was invisible to the three arms above.
+    /["'`]grep["'`]\s*,/.test(content)
   );
+}
+
+// ── W1-T6092: A CENSUS SUITE WALKS THE REPOSITORY, NOT ANY DIRECTORY ───────────────────────────
+// `readdirSync(mkdtemp-dir)` lists the suite's OWN fixture. Counting it made run-task,
+// live-write-guard-command-sites and recycle-container (~400 s) join every src change's census set.
+// A call counts only when its ROOT is the repository; a root this scan cannot resolve (a helper's
+// parameter, a variable declared elsewhere) still counts — over-listing costs one suite, under-listing
+// is the silent miss this verb exists to end (W1-T4787: walkers through a helper must stay selected).
+
+/** Evidence that a path expression is rooted in the repository. */
+const REPO_ROOT_MARKER = /\bREPO_ROOT\b|\bprocess\.cwd\s*\(|\bimport\.meta\b|\b(?:repoRoot|repoDir|projectRoot)\b/;
+/** Evidence that a path expression is rooted in a scratch/fixture directory. */
+const FIXTURE_ROOT_MARKER = /\bmkdtemp(?:Sync)?\b|\btmpdir\s*\(|\bos\.tmpdir\b|tmp|fixture|scratch|sandbox/i;
+
+/** The first-argument text of every call matching `callRe` (a /g regexp ending at the open paren). */
+function enumerationCalls(content, callRe) {
+  const args = [];
+  for (const m of content.matchAll(callRe)) {
+    let depth = 0;
+    let quote = "";
+    let i = m.index + m[0].length;
+    const start = i;
+    for (; i < content.length; i++) {
+      const c = content[i];
+      if (quote) {
+        if (c === "\\") i++;
+        else if (c === quote) quote = "";
+        continue;
+      }
+      if (c === '"' || c === "'" || c === "`") quote = c;
+      else if (c === "(" || c === "[" || c === "{") depth++;
+      else if (c === ")" || c === "]" || c === "}") {
+        if (depth === 0) break;
+        depth--;
+      } else if (c === "," && depth === 0) break;
+    }
+    args.push(content.slice(start, i));
+  }
+  return args;
+}
+
+/** The initialiser text of every `const|let|var <name> = ...;` declaration of `name` in `content`. */
+function initialisersOf(name, content) {
+  const out = [];
+  const re = new RegExp(`\\b(?:const|let|var)\\s+${name}\\b\\s*(?::[^=\\n]+)?=\\s*`, "g");
+  for (const m of content.matchAll(re)) {
+    const rest = content.slice(m.index + m[0].length);
+    const end = rest.search(/;|\n\s*\n/);
+    out.push(end === -1 ? rest.slice(0, 400) : rest.slice(0, Math.min(end, 400)));
+  }
+  return out;
+}
+
+/** Whether the path expression `expr` resolves to the repository (true) or to a fixture (false). */
+function rootIsRepo(expr, content, depth = 0, seen = new Set()) {
+  if (REPO_ROOT_MARKER.test(expr)) return true;
+  if (FIXTURE_ROOT_MARKER.test(expr)) return false;
+  if (depth < 5) {
+    const names = [...new Set(expr.replace(/["'`](?:\\.|[^"'`\\])*["'`]/g, " ").match(/\b[A-Za-z_$][\w$]*\b/g) ?? [])]
+      .filter((n) => !seen.has(n) && !/^(?:join|resolve|dirname|normalize|relative|path|posix|new|URL|fileURLToPath|String|as|const|let|var)$/.test(n));
+    let resolvedFixture = false;
+    for (const name of names) {
+      const inits = initialisersOf(name, content);
+      if (inits.length === 0) continue;
+      const next = new Set(seen).add(name);
+      if (inits.some((init) => rootIsRepo(init, content, depth + 1, next))) return true;
+      resolvedFixture = true;
+    }
+    if (resolvedFixture) return false;
+  }
+  return true; // unresolved (a literal repo area, a parameter, an import): conservative
+}
+
+/** `git ls-files` counts unless its `cwd` option is a fixture repository. */
+function lsFilesWalksRepo(content) {
+  for (const m of content.matchAll(/\bls-files\b/g)) {
+    const cwd = /\bcwd\s*:\s*([^,}\n]+)/.exec(content.slice(m.index, m.index + 300));
+    if (!cwd || rootIsRepo(cwd[1], content)) return true;
+  }
+  return false;
 }
 
 /**
@@ -402,7 +593,11 @@ export function main(argv) {
       // spend ~39 minutes installing browsers and collecting an unchanged source-coverage graph.
       "coverage-class": { type: "boolean", default: false },
       "list-plan-reading-suites": { type: "boolean", default: false },
-      // W1-T4395: prints "files" then the changed test files, or "full", or nothing (not a test-only diff).
+      // W1-T7809: given a plan-only changed-file list, print the suites that read a changed shard plus the
+      // plan-integrity suites — the author lane's narrower reach than --list-plan-reading-suites.
+      "list-plan-only-suites": { type: "boolean", default: false },
+      // W1-T4395: prints "files" then the changed test files plus the census suites that walk them, or "full",
+      // or nothing (not a test-only diff).
       "test-only-run": { type: "boolean", default: false },
       // W1-T2680: given a changed-file list, print every suite that WALKS a population those files
       // belong to, or READS one of them as text — the suites `git grep -l <symbol>` cannot reach.
@@ -445,12 +640,28 @@ export function main(argv) {
     return;
   }
 
+  if (values["list-plan-only-suites"]) {
+    try {
+      const root = values["plan-reading-root"] ?? REPO_ROOT;
+      for (const path of planOnlySuiteFiles(root, readChangedFilesArg(values["changed-files"]))) console.log(path);
+      process.exitCode = 0;
+    } catch (err) {
+      console.error(`diff-class: FAILED to enumerate the plan-only suite set — ${err && err.message ? err.message : String(err)}`);
+      console.error("diff-class: printing NOTHING — a caller reading zero lines here must fail closed.");
+      process.exitCode = 1;
+    }
+    return;
+  }
+
   if (values["list-plan-reading-suites"]) {
     try {
       const root = values["plan-reading-root"] ?? REPO_ROOT;
-      // W1-T4397: with --changed-files, also the suites that read a changed root-markdown or doctrine file.
+      // The changed list narrows plan/docs readers and adds changed prose readers and censuses.
       const changed = values["changed-files"] ? readChangedFilesArg(values["changed-files"]) : [];
-      for (const path of planReadingSuiteFiles(root, changed)) console.log(path);
+      const suites = planReadingSuiteFiles(root, changed);
+      const previous = changed.length > 0 ? planReadingSuiteFiles(root).length : suites.length;
+      console.error(`diff-class: plan-reading selected_count=${suites.length} previous_count=${previous}`);
+      for (const path of suites) console.log(path);
       process.exitCode = 0;
     } catch (err) {
       console.error(`diff-class: FAILED to enumerate the plan-reading suite set — ${err && err.message ? err.message : String(err)}`);

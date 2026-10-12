@@ -1,0 +1,53 @@
+- id: W1-T8397
+  title: "A QUIET-WORKER CHECKPOINT PUSH STILL RUNS THE PR GATES — the W1-T7807 `endRound` checkpoint calls `gitPushRunBranchAsync(cwd)` with no `{ prGates: false }`, so a census refusal fails the checkpoint and leaves the round's work committed only in the worktree; #10862 skipped the gates only on the restart-yield push"
+  repo: remudero
+  depends_on: [W1-T8008]  # #11017 rewrites the same endRound lines (commitAndPushRestartCheckpoint); build on it, not beside it
+  dispatch_hold: true  # operator 2026-10-12: held for a session build — the end_round checkpoint push runs the PR pre-push gates, so recycle/restart mid-worker yields fail; release after the session PR merges
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium  # Rule 19: one concern — both restart-checkpoint pushes skip the PR gate; PR-time gates unchanged
+  band_meaning: span
+  origin: "operator approval 2026-10-12 (\"go with your recommended follow ups\"): follow-up to #10862 and W1-T8008"
+  plan_refs: [W1-T7697, W1-T7807, W1-T8008, W1-T8133, W1-T8139]
+  files: [src/run-task.ts, test/a-quiet-worker-checkpoint-push-skips-the-pr-gates.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ on origin/main 38470cc40, src/run-task.ts (symbol names, not line numbers):
+      - `watchDispatchSpawn`'s `endRound` (the W1-T7807 quiet-worker and container-recycle round end) commits a
+        "wip: yield at quiet worker" / "wip: yield at container recycle" checkpoint and then calls
+        `await (seams.push ?? gitPushRunBranchAsync)(cwd)`. No options, so `worktreePushExecAsync` runs with its
+        default `prGates = true` and `prePushGateSteps` (the census pre-push gate) judges a checkpoint push.
+        A refusal throws, `endRound` returns `{ ended: false, reason: "checkpoint failed: …" }`, and the round's
+        work stays committed only in the worktree a released lane does not own.
+      - `yieldAtWorkerBoundary` (the W1-T7697 restart yield) already passes `{ prGates: false }` with the
+        comment "a checkpoint opens no PR: see worktreePushExecAsync". #10862 (c542f1ba7) added that option to
+        this one site only. W1-T8008's shard records that five of eight restart_checkpoint_failed rows in its
+        window were this census refusal.
+    OPEN PR #11017 (W1-T8008, head 83aa463a0) moves the yield push into `commitAndPushRestartCheckpoint` and edits
+    `endRound`'s commit, but leaves `endRound`'s push as `(seams.push ?? gitPushRunBranchAsync)(cwd)`. W1-T8008's
+    shard says it "touches neither restore nor the push gate". So nothing owns this gap; this task depends on
+    W1-T8008 because both edit the same `endRound` lines.
+  design: |
+    1. `endRound` pushes its checkpoint with `{ prGates: false }`, exactly as the restart-yield push does. Prefer
+       one shared push helper for both checkpoint sites (W1-T8008's `commitAndPushRestartCheckpoint`, once it has
+       merged), so the two sites cannot drift again.
+    2. Nothing else changes. The PR gate still runs on every push that opens or updates a PR, and the resumed
+       run's ordinary push still meets the census and scope gates.
+    Tests go in the new file test/a-quiet-worker-checkpoint-push-skips-the-pr-gates.test.ts, with `test(` titles
+    exactly as in the proofs below. Drive `watchDispatchSpawn`'s `endRound` through its seams (an injected `push`
+    that records its options), and add one case with a real gitRepo() fixture and a bare origin where a PR gate
+    step would refuse: the checkpoint still reaches the origin branch.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-quiet-worker-checkpoint-push-skips-the-pr-gates.test.ts"
+    - claim: "the quiet-worker endRound checkpoint push passes prGates false"
+      proof: 'grep: test("W1-T8397: the quiet-worker checkpoint push skips the PR gates" in test/a-quiet-worker-checkpoint-push-skips-the-pr-gates.test.ts'
+    - claim: "a checkpoint a PR gate would refuse still reaches the origin branch and the round ends handed off"
+      proof: 'grep: test("W1-T8397: a checkpoint a PR gate would refuse still reaches origin" in test/a-quiet-worker-checkpoint-push-skips-the-pr-gates.test.ts'
+  falsifier: |
+    Leave `endRound`'s push as `gitPushRunBranchAsync(cwd)`. The injected push then records no `prGates: false`
+    and the first test fails; the gate refuses the real push and the second test sees `ended: false`.

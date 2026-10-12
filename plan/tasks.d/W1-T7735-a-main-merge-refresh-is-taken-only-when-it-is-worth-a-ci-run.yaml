@@ -1,0 +1,139 @@
+- id: W1-T7735
+  title: "A MAIN-MERGE REFRESH IS TAKEN ONLY WHEN IT IS WORTH A CI RUN — on 2026-10-10, 37 of 108 head pushes since 09:30Z (34%) were main-merge refreshes, about 600 PR-min of CI re-runs, each voiding the exact-input review (#10339 reviewed 11 times, #10600 8 times), while main's protection is NOT strict and GitHub never needs a refresh to allow a merge"
+  repo: remudero
+  depends_on: [W1-T7214, W1-T7734]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — whether the daemon writes main into a contributor branch; it decides CI spend and review churn board-wide
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-10: throughput study (ledger union 05:53-15:39Z, gh PR timelines), operator asked for flow improvements"
+  plan_refs: [W1-T4351, W1-T7214, W1-T6022, W1-T528, W1-T5921, W1-T2789, W1-T6404, W1-T6405, W1-T5490, W1-T5903, W1-T5939, W1-T7736, W1-T100]
+  files: [src/lib/refresh-value.ts, src/lib/sweep.ts, src/run-task.ts, src/lib/ledger.ts, test/a-main-merge-refresh-is-taken-only-when-it-is-worth-a-ci-run.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-10 (ledger union 05:53-15:39Z; gh commit authors per PR):
+    - 37 of 108 head pushes since 09:30Z (34%) were main-merge refreshes, costing about 600 PR-min of CI
+      re-runs. CI start to green has a median of 16.4 min.
+    - Every refresh mints a new head, so it voids the exact-input review: #10339 was reviewed 11 times
+      and #10600 8 times.
+    - Main's branch protection is NOT strict (`requiresStrictStatusChecks: false`) and requires only
+      `remudero-review` and `ci-gate`. GitHub therefore never needs a refresh to allow a merge.
+      src/run-task.ts:10025 already says so in a comment. No code reads `strict`: the only
+      `required_status_checks` reads take contexts (src/lib/sweep.ts:2429, src/lib/head-rehome.ts:117,
+      src/lib/status.ts:4296).
+
+    THE EXISTING REFRESH PATHS. Read on origin/main faca80c75. Every sweep path ends in
+    `SweepDeps.updateBranch` (doc at sweep.ts:11546, "AT MOST ONCE per pass") →
+    `updateBranchViaGh` (run-task.ts:5417, with an expected-head lease).
+    - W1-T528 general rung. `selectUpdateBranchDecision` (sweep.ts:10130), wired at :17236-17375, picks one
+      target per pass from the union of:
+      - `armedButStalled` — `mergeState === "behind"`, inert under non-strict protection;
+      - `redPrWithStaleGate`;
+      - `openPrsBehindMain` (:9948).
+      The distance threshold is 10 commits (policy :5704-5705). `distanceRefreshCause` (:9860) still
+      refreshes on `distance-unknown`, i.e. when the distance is known but the file facts are not.
+    - W1-T6022/W1-T7214 ready-overlap. `readyRefreshCause` (:9896) refreshes a ready PR 1-10 behind whose
+      files overlap main's delta, `REFRESH_RELEVANT_BASE_PATHS` (:9836), or a test path literal. The light
+      pass runs it once via `runLightPassReadyRefresh` (:17392, wired at run-task.ts:47294). Every other
+      light-pass refresh is blocked by `updateBranch: undefined` (run-task.ts:47339).
+    - W1-T4351 base-red. `decideBaseRed` (sweep.ts:7933) waits while main fails the same check, then
+      refreshes once per `pr@head`. There is ONE slot per pass, `baseRedRefreshPr` (:13846), used at
+      :15951-15981, :16195-16222 (W1-T6405 base-fixed) and :13586-13598 (stalled stage).
+      `tryPlanRepair` (:13907) refreshes outside that slot.
+    - The #10390 main-health rung (`withMainHealthOnLightPass`, src/lib/main-health-rung.ts:1167) refreshes
+      nothing itself. It writes `main.health.observed`, which `decideBaseRed` reads.
+    - Repair-driven refreshes:
+      - W1-T2789 stale-base release (sweep.ts:16676-16757);
+      - W1-T5921 ci-timeout refresh (`applyCiTimeoutRefresh`, :4891);
+      - W1-T6404 stale-rollup refresh (:4472);
+      - the strike-ladder refresh (:14209-14225);
+      - fix-lane W1-T2671 pre-strike refresh (run-task.ts:11777) and W1-T1095 rebase (:10243);
+      - the arm-time behind refresh (src/lib/arm-auto-merge.ts:1138);
+      - the proof-amendment refresh (src/lib/proof-amendment.ts:437). It writes no `branch.update_requested` row.
+    - No path weighs the CI cost, consults strictness, or asks whether the PR's CI is mid-run. The
+      ready-overlap path alone checks file overlap, and only for ready PRs.
+
+    SHARED SURFACE ONLY: W1-T100 (blocked_ci routing to the ci-log fix) also names src/lib/sweep.ts and
+    src/run-task.ts. It never decides a main-merge refresh.
+
+    THE 15:10Z BURST, AN OPEN QUESTION. At about 15:10Z, 16 PRs were refreshed at once under the operator's
+    git identity: 15 merge commits authored "Craig" and one by cao825, in the 15:1x window.
+    - No rmd CLI or board-wide command refreshes many PRs. A sweep found no such command, and every sweep
+      path is capped at one per pass.
+    - Every gateway uses whatever `GH_TOKEN` the process holds, so an rmd run from an operator shell writes
+      as the operator.
+    - The operator says "either rmd or another session did it". The coordinator is tracing it from the
+      ledger.
+    - This task does not assume the answer. It makes a burst impossible from rmd and visible from anywhere:
+      every refresh rmd requests goes through one paced lane and writes a decision row, so the next burst
+      either has rows (rmd) or has none (another session).
+  design: |
+    1. ONE EXPECTED-VALUE DECISION. Add `decideRefresh` (src/lib/refresh-value.ts), a pure function every
+       main-merge refresh path consults BEFORE `updateBranch`. Those paths are:
+       - the W1-T528 general rung (distance, distance-unknown, armed-behind, stale-gate);
+       - the W1-T7214 ready-overlap refresh on both passes;
+       - the W1-T4351 base-red and base-fixed slot;
+       - `tryPlanRepair`'s base-red refresh.
+       It weighs BENEFIT against COST.
+       - Benefit inputs: the overlap between the PR's files and main's delta since the PR's merge base;
+         whether a base-red repair is needed (`decideBaseRed` says `refresh`); whether protection is
+         strict (read once per pass and memoised, so under non-strict protection staleness alone is worth
+         nothing).
+       - Cost: the observed CI duration (median CI start to green from recent rows) × the current CI queue
+         depth.
+       - It returns `refresh`, `skip` or `ask-judge` with its inputs.
+       The repair-driven paths keep their own triggers, since they repair a fault rather than buy
+       freshness: ci-timeout W1-T5921, stale-rollup W1-T6404, stale-base W1-T2789, strike ladder, fix-lane
+       W1-T2671/W1-T1095, arm-time, and proof-amendment. They still write the decision row with
+       `forced_by: <path>`, so the tuning sees their cost.
+    2. AMBIGUOUS OVERLAP GOES TO A JUDGE.
+       - Where file overlap is neither empty nor direct, an LLM judge reads the two deltas and rules
+         `overlap` or `independent`. Examples: `REFRESH_RELEVANT_BASE_PATHS` hits, test path literals,
+         `ready-unknown` and `distance-unknown` truncation.
+       - Reuse the `judgeCiEscalation` shape (src/lib/ci-escalation-judge.ts:238): single-flight, an
+         off-switch, a heads state, and a bounded diff.
+       - A judge failure is a third visible value (`judge-unavailable`), never a silent refresh or skip.
+    3. CI IN FLIGHT. A PR whose required CI is mid-run is not refreshed unless the judge rules `overlap`. A
+       refresh then would cancel or duplicate a run that may land green on a base GitHub accepts.
+    4. PACED, NEVER FANNED OUT.
+       - Board-wide refresh requests are written as REQUESTS and consumed by the daemon's sweep at most one
+         per pass. That covers any future operator command, any rung that selects several PRs, and the
+         light pass. This keeps W1-T528's AT-MOST-ONCE contract.
+       - Requests are ordered by closeness to merge: ready and reviewed first, then green awaiting review,
+         then pending, then red.
+       - No path calls `updateBranch` for more than one PR in a pass. The light pass keeps
+         `updateBranch: undefined` for its per-PR fan-out.
+    5. SELF-TUNING ROW.
+       - Each decision writes `sweep.refresh.decided` with: PR, head, path, decision, overlap files (capped
+         list plus count), strict, ci_in_flight, judge verdict, predicted cost (CI-min) and predicted benefit.
+       - When the PR later merges, conflicts, or reds on main, `sweep.refresh.outcome` joins the decision id
+         with what actually happened. Did a skipped PR merge green without the refresh? Did main go red
+         after it?
+       - The benefit weight is derived from that observed hit rate, with no fixed threshold.
+       - Both steps are added to the rotation-retained list in src/lib/ledger.ts.
+    COMPOSITION. W1-T4351's one slot, W1-T7214's light-pass single target, W1-T5921's per-head spend,
+    W1-T5903's merge-queue skip and W1-T5939's incident hold are unchanged. This task only adds a value
+    test in front of each slot. The main-health rung (#10390) stays the source of `decideBaseRed`'s input.
+    W1-T7736's merge-queue canary is the longer-term replacement for freshness refreshes: if the queue
+    returns, the queue tests the combination and these decisions mostly read `skip`.
+    Depends on W1-T7734 only to serialize edits to src/lib/sweep.ts, which both tasks change.
+  acceptance:
+    - claim: "under non-strict protection a ready PR whose files do not overlap main's delta is not refreshed, and its decision row says why"
+      proof: 'grep: test("W1-T7735: under non-strict protection a ready PR with no overlap with main delta is not refreshed" in test/a-main-merge-refresh-is-taken-only-when-it-is-worth-a-ci-run.test.ts'
+    - claim: "an overlapping ready PR is refreshed once, and its decision row names the overlap"
+      proof: 'grep: test("W1-T7735: an overlapping ready PR is refreshed once and its decision row names the overlap" in test/a-main-merge-refresh-is-taken-only-when-it-is-worth-a-ci-run.test.ts'
+    - claim: "a PR whose CI is in flight is not refreshed unless the judge rules overlap"
+      proof: 'grep: test("W1-T7735: a PR with CI in flight is not refreshed unless the judge rules overlap" in test/a-main-merge-refresh-is-taken-only-when-it-is-worth-a-ci-run.test.ts'
+    - claim: "a board-wide refresh request is paced through the daemon lane one per pass, ordered by closeness to merge, never fanned out at once"
+      proof: 'grep: test("W1-T7735: a board-wide refresh request is paced through the daemon lane, never fanned out at once" in test/a-main-merge-refresh-is-taken-only-when-it-is-worth-a-ci-run.test.ts'
+    - claim: "the sweep consults the refresh-value decision before it presses update-branch"
+      proof: 'grep: decideRefresh( in src/lib/sweep.ts'
+  falsifier: |
+    Leave `openPrsBehindMain`'s distance arm with no value test: the non-overlap test sees `updateBranch` called
+    for a ready PR 12 commits behind with zero overlap. Drop the in-flight check: the CI-in-flight test sees a
+    refresh with the judge ruling `independent`. Let a request batch call `updateBranch` per PR: the pacing test
+    sees more than one update in a single pass.

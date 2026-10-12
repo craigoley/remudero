@@ -60,3 +60,13 @@
     run-shaped branch but did not implement a real-worker smoke. The live
     merge-credit store attributed this plan-only merge to W1-T5017.
   author_class: operator
+- task: W1-T380
+  pr: 1437
+  action: remove-credit
+  reason: >
+    Operator credit ruling, 2026-10-03. PR 1437 ("link W1-T380 to its already-merged fix")
+    changed only this task's shard; it is a plan-only link, not the implementation. Its saved
+    trailer entry predates the W1-T413/W1-T3067 diff refusal and W1-T3996 never re-checks
+    trailer entries, so it outranks the shard's own `pr: 1392`. Removing it lets rung (b)
+    credit #1392 (a1f067c), which changed src/lib/deployer.ts and test/deployer.test.ts.
+  author_class: operator

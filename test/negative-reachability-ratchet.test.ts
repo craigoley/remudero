@@ -74,7 +74,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -133,17 +133,37 @@ function invocationWindows(symbol: string, method: string, testSource: string): 
   const windows: string[] = [];
   let m: RegExpExecArray | null;
   while ((m = invokeRe.exec(testSource))) {
-    let i = m.index + m[0].length;
-    let depth = 1;
-    for (; i < testSource.length && depth > 0; i++) {
-      if (testSource[i] === "(") depth++;
-      else if (testSource[i] === ")") depth--;
-    }
-    const windowStart = Math.max(0, m.index - 120);
-    const windowEnd = Math.min(testSource.length, i + 200);
-    windows.push(testSource.slice(windowStart, windowEnd));
+    windows.push(invocationWindowAt(testSource, m.index, m[0].length));
   }
   return windows;
+}
+
+function invocationWindowAt(testSource: string, start: number, invocationLength: number): string {
+  let i = start + invocationLength;
+  let depth = 1;
+  for (; i < testSource.length && depth > 0; i++) {
+    if (testSource[i] === "(") depth++;
+    else if (testSource[i] === ")") depth--;
+  }
+  return testSource.slice(Math.max(0, start - 120), Math.min(testSource.length, i + 200));
+}
+
+type ReInvocationWindows = Record<"test" | "exec", string[]>;
+type ReInvocationIndex = ReadonlyMap<string, ReInvocationWindows>;
+
+/** Scan the current corpus ONCE for the exact module-scope `_RE` symbol grammar. This is an
+ *  invocation index, not a new detector: the same parenthesis/window heuristic and both outcome
+ *  arms still apply. It is owned by one violation calculation, never cached across file edits. */
+function indexReInvocations(testSource: string): ReInvocationIndex {
+  const invokeRe = /\b([A-Z][A-Z0-9_]*_RE)\.(test|exec)\(/g;
+  const index = new Map<string, ReInvocationWindows>();
+  let m: RegExpExecArray | null;
+  while ((m = invokeRe.exec(testSource))) {
+    const windows = index.get(m[1]) ?? { test: [], exec: [] };
+    windows[m[2] as "test" | "exec"].push(invocationWindowAt(testSource, m.index, m[0].length));
+    index.set(m[1], windows);
+  }
+  return index;
 }
 
 function concatTrackedSource(root: string, files: string[]): string {
@@ -191,11 +211,14 @@ function allReSurfaces(root: string): ReSurface[] {
  *  (drives the unhealthy arm) AND one whose enclosing assertion accepts (design note ii's "distinct
  *  from acceptance") -- either alone, or a bare invocation with no outcome-asserting window at all
  *  (a test that "merely touches the symbol", acceptance criterion 2), satisfies nothing. */
-function reSurfaceExercised(symbol: string, testSource: string): boolean {
+function reSurfaceExercised(symbol: string, testSource: string, index?: ReInvocationIndex): boolean {
   let hasNegative = false;
   let hasPositive = false;
-  for (const method of ["test", "exec"]) {
-    for (const win of invocationWindows(symbol, method, testSource)) {
+  for (const method of ["test", "exec"] as const) {
+    const windows = index === undefined
+      ? invocationWindows(symbol, method, testSource)
+      : index.get(symbol)?.[method] ?? [];
+    for (const win of windows) {
       if (/\bfalse\b|,\s*null\s*\)|===\s*null\b/.test(win)) hasNegative = true;
       // A `.test(...)` positive is `true`; a `.exec(...)` positive is either `!== null` or, more
       // idiomatically in this codebase, a captured-group read straight off the call (`)?.[1]` /
@@ -216,12 +239,17 @@ interface FixturelessViolation {
 /** A file with no row in `baseline` enters at an allowance of zero -- true for a brand-new file
  *  and, since lookup is purely by current path, for a renamed one too (mirrors
  *  catch-erasure-ratchet.test.ts's `bareCatchViolations`). */
-function reFixturelessViolations(root: string, baseline: Record<string, number>): FixturelessViolation[] {
+function reFixturelessViolations(
+  root: string,
+  baseline: Record<string, number>,
+  buildIndex: (testSource: string) => ReInvocationIndex = indexReInvocations,
+): FixturelessViolation[] {
   const testSource = concatTrackedSource(root, trackedFiles(root, TEST_SRC_RE));
+  const index = buildIndex(testSource);
   const byFile = new Map<string, string[]>();
   for (const s of allReSurfaces(root)) {
     if (s.structurallyTotal) continue;
-    if (reSurfaceExercised(s.symbol, testSource)) continue;
+    if (reSurfaceExercised(s.symbol, testSource, index)) continue;
     const arr = byFile.get(s.file) ?? [];
     arr.push(s.symbol);
     byFile.set(s.file, arr);
@@ -480,6 +508,88 @@ test("negative-reachability-ratchet: fixClassSurfaces enumerates DEFAULT_FIX_CLA
 });
 
 // ── wiring: the git-ls-files-driven violation functions, on isolated fixture repos
+
+test("negative-reachability-ratchet: the one-pass invocation index preserves literal boundaries, nested windows and distinct arms", () => {
+  const corpus = [
+    'assert.equal(WIDGET_ID_RE.test("ok"), true);',
+    'assert.equal(WIDGET_ID_RE.test("bad"), false);',
+    'assert.equal(TRAILER_RE.exec("bad"), null);',
+    'assert.equal(TRAILER_RE.exec("ok")?.[1], "ok");',
+    'PARENT_RE.test(CHILD_RE.exec("("));',
+    'LONG_WIDGET_ID_RE.test("not a WIDGET_ID_RE call");',
+    'xWIDGET_ID_RE.exec("no word boundary");',
+    'WIDGET_ID_RE.test ("space is not an invocation");',
+    'WIDGET_ID_RE.matchesFailure("not a regex method");',
+    '$WIDGET_ID_RE.exec("dollar is a non-word boundary");',
+    'UNFINISHED_RE.test(',
+  ].join("\n");
+  const index = indexReInvocations(corpus);
+  for (const symbol of ["WIDGET_ID_RE", "TRAILER_RE", "PARENT_RE", "CHILD_RE", "LONG_WIDGET_ID_RE", "UNFINISHED_RE", "ABSENT_RE"]) {
+    for (const method of ["test", "exec"] as const) {
+      assert.deepEqual(index.get(symbol)?.[method] ?? [], invocationWindows(symbol, method, corpus), `${symbol}.${method}`);
+    }
+    assert.equal(reSurfaceExercised(symbol, corpus, index), reSurfaceExercised(symbol, corpus));
+  }
+  assert.equal(indexReInvocations("").size, 0);
+  assert.equal(index.get("WIDGET_ID_RE")?.test.length, 2);
+  assert.equal(index.get("WIDGET_ID_RE")?.exec.length, 1);
+});
+
+test("negative-reachability-ratchet: every validator uses one real corpus index and a later tracked fixture edit is freshly observed", () => {
+  const dir = initFixtureRepo();
+  try {
+    mkdirSync(join(dir, "src", "lib"), { recursive: true });
+    mkdirSync(join(dir, "test"), { recursive: true });
+    writeFileSync(join(dir, "src", "lib", "indexed.ts"),
+      'export const COVERED_RE = /^c$/;\nexport const UNREACHED_RE = /^u$/;\n');
+    const fixturePath = join(dir, "test", "indexed.test.ts");
+    const covered = 'assert.equal(COVERED_RE.test("c"), true);\nassert.equal(COVERED_RE.test("bad"), false);\n';
+    writeFileSync(fixturePath, covered);
+    commitFixture(dir);
+    const builds: string[] = [];
+    const lookups: string[] = [];
+    class ObservedIndex extends Map<string, ReInvocationWindows> {
+      override get(symbol: string): ReInvocationWindows | undefined {
+        lookups.push(symbol);
+        return super.get(symbol);
+      }
+    }
+    const buildIndex = (source: string): ReInvocationIndex => {
+      builds.push(source);
+      return new ObservedIndex(indexReInvocations(source)); // observe, never fake the native scan
+    };
+    assert.deepEqual(reFixturelessViolations(dir, {}, buildIndex), [
+      { file: "src/lib/indexed.ts", actual: 1, baseline: 0, symbols: ["UNREACHED_RE"] },
+    ]);
+    assert.equal(builds.length, 1);
+    assert.equal(builds[0], covered + "\n");
+    assert.deepEqual(lookups, ["COVERED_RE", "COVERED_RE", "UNREACHED_RE", "UNREACHED_RE"]);
+
+    writeFileSync(fixturePath, covered + '\nassert.equal(UNREACHED_RE.test("u"), true);\nassert.equal(UNREACHED_RE.test("bad"), false);\n');
+    assert.deepEqual(reFixturelessViolations(dir, {}, buildIndex), []);
+    assert.equal(builds.length, 2, "an unchanged Git HEAD does not make an edited tracked fixture reusable");
+    assert.notEqual(builds[1], builds[0]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("negative-reachability-ratchet: an unreadable tracked fixture is refused, never credited as an empty index", () => {
+  const dir = initFixtureRepo();
+  try {
+    mkdirSync(join(dir, "src", "lib"), { recursive: true });
+    mkdirSync(join(dir, "test"), { recursive: true });
+    writeFileSync(join(dir, "src", "lib", "absent.ts"), 'export const ABSENT_RE = /^a$/;\n');
+    const fixture = join(dir, "test", "absent.test.ts");
+    writeFileSync(fixture, 'assert.equal(ABSENT_RE.test("a"), true);\nassert.equal(ABSENT_RE.test("bad"), false);\n');
+    commitFixture(dir);
+    assert.deepEqual(reFixturelessViolations(dir, {}), []);
+    unlinkSync(fixture);
+    assert.throws(() => reFixturelessViolations(dir, {}), { code: "ENOENT" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("negative-reachability-ratchet: a fixture-less surface past its file's baseline fails naming file and surface (acceptance criterion 1)", () => {
   const dir = initFixtureRepo();

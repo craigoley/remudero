@@ -32,7 +32,7 @@ import {
   type OrphanedRun,
 } from "../src/lib/daemon.js";
 import { resolveHeadroomEnabled, type Config } from "../src/lib/config.js";
-import { runSweep, DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
+import { runSweep, DEFAULT_SWEEP_POLICY } from "./helpers/sweep-test.js";
 import { pauseDetail, requestPause, requestStop, resumeFleet, stopDetail } from "../src/lib/fleet-control.js";
 import type { MergedSet, OpenPrCheck } from "../src/lib/drain.js";
 import { deriveStatus, readLedgerLines, type GitHub, type PrRef } from "../src/lib/status.js";

@@ -632,6 +632,12 @@
       "grepHint": "Gate garden log"
     },
     {
+      "path": "docs/heavy-new-build-reservation.md",
+      "title": "Bounded heavy READY reservations, v2",
+      "summary": "This is an opt-in, host-local, single-account reader/producer foundation, not a",
+      "grepHint": "Bounded heavy READY reservations, v2"
+    },
+    {
       "path": "docs/knowledge-garden-log.md",
       "title": "Knowledge garden log",
       "summary": "Each section is one pass of the knowledge gardener (W1-T4095): what it changed and how the knowledge base scored.",
@@ -678,6 +684,12 @@
       "title": "The acceptance-proof dialect",
       "summary": "Every acceptance criterion's `proof:` is EXECUTED by the reviewer against this grammar. This page renders it from the SAME constants the parser (`src/lib/revie…",
       "grepHint": "The acceptance-proof dialect"
+    },
+    {
+      "path": "docs/recon/fact-history-memory.md",
+      "title": "What the fact history costs a now@core instance, and what each reader needs of it (W1-T6369)",
+      "summary": "STATUS: recon only. No `src/` file changes in this task, no production storage change and no cache release.",
+      "grepHint": "What the fact history costs a now@core instance, and what each reader needs of it (W1-T6369)"
     },
     {
       "path": "docs/recon/human-gate-projection.md",
@@ -756,6 +768,12 @@
       "title": "Review-enforced merge gate (W1-T1C + W1-T1D + W1-T24 + W1-T24b)",
       "summary": "`remudero-review` is a REQUIRED status check on `main`, alongside `ci-gate`.",
       "grepHint": "Review-enforced merge gate (W1-T1C + W1-T1D + W1-T24 + W1-T24b)"
+    },
+    {
+      "path": "docs/semgrep-native-ce.md",
+      "title": "Native hash-locked Semgrep Community Edition",
+      "summary": "Scan avoids Docker Hub container initialization with an isolated, fully hash-locked native installation.",
+      "grepHint": "Native hash-locked Semgrep Community Edition"
     },
     {
       "path": "docs/system-diagrams.md",

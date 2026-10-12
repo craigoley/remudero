@@ -13,11 +13,14 @@ import {
   planCommand,
   realArmDeps,
   triageCommand,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js";
 import { ghPrMergeSquash, type WorkerResult } from "../src/lib/worker.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { approveRunBranch } from "../src/lib/inbox.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+
+/** ghPrMergeSquash requires the closing-reference guard; these tests are about the merge call itself. */
+const CLEAN_GUARD = () => ({ state: "clean" as const, defused: [] });
 
 // ── WHY THIS FILE EXISTS ─────────────────────────────────────────────────────────────
 // PR #954's guard call sites inside `triageCommand` and `planCommand` sat after a
@@ -92,6 +95,9 @@ function makeOrigin(feedbackId?: string): string {
   mkdirSync(join(seed, "plan", "feedback"), { recursive: true });
   writeFileSync(join(seed, "plan", "tasks.yaml"), VALID_TASK("W1-T4", "a seed task the plan loader accepts"));
   writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER PLAN\n\nfixture\n");
+  // W1-T5660: the draft floor refuses a files: entry whose directory the worktree lacks.
+  mkdirSync(join(seed, "src", "lib"), { recursive: true });
+  writeFileSync(join(seed, "src", "lib", ".gitkeep"), "");
   if (feedbackId) {
     writeFileSync(
       join(seed, "plan", "feedback", `${feedbackId}.yaml`),
@@ -940,7 +946,7 @@ test("GUARDED SITE approve degraded-mint refusal: the REAL gateway throws before
 // was hardcoded until now; it is injectable here for exactly the reason `reviewRunner` beside
 // it already is. Offline: a bare TMPDIR origin carrying the run branch, a gh shim, and a fake
 // spawn. The push is real and lands in that origin, so the drive is exempted.
-test("GUARDED SITE sweep fix-rung push: dispatchFix drives runFixRung to its best-effort push", async () => {
+test("GUARDED SITE sweep fix-rung push: dispatchFix drives runFixRung to its best-effort push with a complete CI refusal receipt", async () => {
   const TASK = "W1-TSWEEP";
   const branch = `run-${TASK}-1785100000003`;
   const bare = mkdtempSync(join(tmpdir(), "sweepfix-origin-"));
@@ -979,6 +985,9 @@ test("GUARDED SITE sweep fix-rung push: dispatchFix drives runFixRung to its bes
         '  *"--json state"*) echo \'{"state":"OPEN"}\' ;;',
         '  *"--json body"*) echo \'{"body":""}\' ;;',
         '  *"pr diff"*) echo "" ;;',
+        // W1-T4074: an unreadable PR diff now stands the rung down before dispatch, so the shim
+        // answers the changed-file read with the one file the run branch actually touches.
+        '  *"--json files"*) echo \'{"files":[{"path":"work.txt"}]}\' ;;',
         "  *) exit 0 ;;",
         "esac",
         "",
@@ -988,6 +997,7 @@ test("GUARDED SITE sweep fix-rung push: dispatchFix drives runFixRung to its bes
     process.env.PATH = `${shimDir}:${savedPath}`;
 
     let fixSpawns = 0;
+    let ciWaits = 0;
     const steps: string[] = [];
     const effects = buildSweepEffects({
       // W1-T4073: the fixture's head is no real commit; an empty head contract keeps the task as resolved.
@@ -1001,6 +1011,14 @@ test("GUARDED SITE sweep fix-rung push: dispatchFix drives runFixRung to its bes
       log: (step, extra) => { steps.push(`${step} ${JSON.stringify(extra ?? {})}`); },
       policy: undefined,
       reviewRunner: undefined,
+      // CI outcome is downstream of the real push under test. The legacy gh fixture does
+      // not implement REST polling; do not make this push-guard case exercise its 125s
+      // malformed-read retry schedule. Production waits and their own controls stay real.
+      waitForCiGreenImpl: async () => {
+        ciWaits += 1;
+        return { state: "red", sha: git(repoDir, "rev-parse", branch).trim(), failingNames: ["ci"] };
+      },
+      fetchCiFailuresImpl: async () => [{ name: "ci", logTail: "build failed" }],
       spawnImpl: async () => {
         fixSpawns += 1;
         return fakeWorker("REPORT\nfix applied\n");
@@ -1030,6 +1048,9 @@ test("GUARDED SITE sweep fix-rung push: dispatchFix drives runFixRung to its bes
     }
 
     assert.ok(fixSpawns >= 1, `fixSpawns=${fixSpawns} steps=${JSON.stringify(steps)}`);
+    assert.ok(ciWaits >= 1, "the real push must complete before the bounded fixture CI refusal");
+    assert.ok(steps.some((step) => step.startsWith("fix.ci_not_green ")), "the real rung consumed the explicit red CI result");
+    assert.equal(steps.some((step) => step.startsWith("poll.read_retry ")), false, "this fixture must not wait on unreadable synthetic CI responses");
   } finally {
     process.env.PATH = savedPath;
     for (const d of [bare, root, shimDir]) rmSync(d, { recursive: true, force: true });
@@ -1156,7 +1177,7 @@ test("arm merge: the head ref is absent after a merge with no local delete", () 
     );
     process.env.PATH = `${shimDir}:${savedPath}`;
 
-    withLiveWritesAllowed(() => ghPrMergeSquash("https://github.com/acme/sandboxrepo/pull/1052"));
+    withLiveWritesAllowed(() => ghPrMergeSquash("https://github.com/acme/sandboxrepo/pull/1052", CLEAN_GUARD));
 
     const refs = execFileSync("git", ["-C", bare, "for-each-ref", "--format=%(refname:short)"], { encoding: "utf8" });
     assert.equal(
@@ -1313,7 +1334,7 @@ test("arm merge: both immediate call sites drop the local branch delete", () => 
     process.env.PATH = `${shimDir}:${savedPath}`;
 
     withLiveWritesAllowed(() => realArmDeps().mergeDirect("https://github.com/acme/sandboxrepo/pull/1055"));
-    withLiveWritesAllowed(() => ghPrMergeSquash("https://github.com/acme/sandboxrepo/pull/1056"));
+    withLiveWritesAllowed(() => ghPrMergeSquash("https://github.com/acme/sandboxrepo/pull/1056", CLEAN_GUARD));
 
     const lines = readFileSync(logPath, "utf8").trim().split("\n");
     assert.equal(lines.length, 2, `expected exactly two gh invocations, got ${JSON.stringify(lines)}`);

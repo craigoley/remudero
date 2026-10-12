@@ -1,0 +1,37 @@
+- id: W1-T6019
+  title: "A VIEW UNIT'S MEASURED COST SURVIVES A RESTART — the read-model worker creates every view unit with no costMs (read-model-worker.ts `units = views.flatMap(… dueAt: 0 …)`) and never persists what a build cost, so after each serve restart or handoff every heavy unit is scheduled as never-measured once: its first build runs on the fast lane and overshoots the pass before W1-T5885's view_lane moves it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: medium  # Rule 19: one concern — seeding view-unit costs from the last generation
+  band_meaning: blast-radius
+  origin: "2026-10-06 core-console architecture plan backlog E16 (#8178 follow-up: unit costs are not persisted)"
+  plan_refs: [W1-T5885]
+  files: [src/lib/read-model-worker.ts, test/a-view-unit-s-measured-cost-survives-a-restart.test.ts]
+  status: queued
+  priority: 4
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 at origin/main a6a285150: read-model-worker.ts builds
+    `const units = views.flatMap((view): ViewUnit[] => (view.perInstance ? slots.map((slot) => ({ view, slot, dueAt: 0 })) : [{ view, dueAt: 0 }]))`
+    at every worker start; `unit.costMs = finished - started` is set only in memory after a build, and the
+    lane move (`opts.post({ type: "view_lane", … heavy: unit.heavy … })`) happens only after a build has
+    measured the unit. #8178 noted (2026-10-01) that each unit's first build after a restart overshoots once;
+    serve generations hand off several times a day (Phase 3), and `now` per instance (~2.7 s, up to 6.66 s per
+    W1-T5885) and a cold repositories summary (0.9-2.6 s) are the units that overshoot. Scope-time checks:
+    W1-T5885 (merged, #9388) added the heavy lane but not persistence; no plan record, run- branch or open PR head
+    persists unit costs.
+  design: |
+    Persist each unit's last costMs and lane (keyed by view name and instance) behind the projector's lease in
+    the read-model database (or alongside view_body), written when a build finishes, and seed the units from it
+    at worker start, so a unit measured heavy in the last generation starts on the heavy lane and is budgeted by
+    its known cost. An absent or unreadable record leaves today's never-measured behaviour.
+  acceptance:
+    - claim: "a unit measured heavier than a pass before a worker restart is placed on the heavy lane and budgeted by that cost on its first build after the restart, and a store with no recorded costs behaves as today"
+      proof: "unit test: test/a-view-unit-s-measured-cost-survives-a-restart.test.ts"
+  falsifier: |
+    Keep the in-memory-only cost: after the fixture restarts the worker, the heavy unit's first build runs on the
+    fast lane as never-measured and the test fails.

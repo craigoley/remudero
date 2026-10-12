@@ -12,7 +12,7 @@
   origin: "2026-10-02 approved fleet follow-ups; two production probe refusals"
   plan_refs: [W1-T292, W1-T293, W1-T2250, W1-T5005, W1-T5346]
   files: [src/lib/containment.ts, test/containment-native-credential-failure.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at 82665916fa4e48446361c5043dd66a7e19dafc1f, rechecked at the filing

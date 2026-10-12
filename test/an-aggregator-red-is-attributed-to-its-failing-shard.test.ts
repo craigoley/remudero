@@ -13,7 +13,7 @@ import {
   withoutDownstreamGateFailure,
   type CiFailure,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { buildOpenPrViews, fetchCiFailures } from "../src/run-task.js";
 
 // coverage-ratchet is ci.yml's AGGREGATOR over eight coverage shards. When a shard's test fails,
@@ -42,7 +42,7 @@ function board(shardConclusion: string) {
         number: 7816,
         html_url: `https://github.com/${OWNER}/${REPO}/pull/7816`,
         head: { ref: "run-W1-T4700-1", sha: HEAD },
-        updated_at: "2026-09-29T09:00:00Z",
+        updated_at: "2026-09-29T09:00:00Z", // expiring-fixture: exempt -- the sweep runs on this suite's injected now (2026-09-29T09:05Z), never the wall clock; 6/6 pass with Date.now shifted +8d and +30d
         body: "Remudero-Task: W1-T4700",
         auto_merge: null,
         state: "open",

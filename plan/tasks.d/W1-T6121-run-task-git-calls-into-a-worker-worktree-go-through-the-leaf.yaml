@@ -1,0 +1,52 @@
+- id: W1-T6121
+  title: "RUN-TASK'S GIT CALLS INTO A WORKER WORKTREE GO THROUGH THE LEAF — W1-T6106 converted commitWorkerEdits, the push and the trailer amend, but its own census still allows 75 raw `git -C <worktree>` argv in src/run-task.ts, among them runPlanScopedFixRound, commitGeneratorOutputViaGit, buildProofAmendmentGitOps, captureWorktreeSnapshotViaGit, preserveTrackedDirtyPatch and inspectFreshReviewerWorktree, each of which still follows the worktree's `.git` pointer and runs its config"
+  repo: remudero
+  depends_on: [W1-T6106]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — which repository a host git call in run-task.ts may treat as its own
+  band_meaning: span
+  origin: "operator session 2026-10-06: follow-up found while building W1-T6106 (PR #9778); the counts are that PR's own census exceptions"
+  plan_refs: [W1-T6106, W1-T4614, W1-T3224]
+  files: [src/run-task.ts, test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 on the PR #9778 head (bfcd880b4, W1-T6106's build, open at filing).
+    test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts `RAW_SITE_EXCEPTIONS` gives
+    src/run-task.ts `count: 75`: "2 seam argv in pushFixRound … the rest NOT YET CONVERTED". Counting its own
+    `WORKTREE_TARGET` pattern per enclosing top-level function at that head puts the raw argv in, among others:
+    runFixRung 7, triageCommandLocked 6, runTaskBody 5, approveCommand 4, captureRegisteredFixOwnerSnapshot 4,
+    planCommand 3, approveBatchCommand 3, fillDerivedBody 3, buildProofAmendmentGitOps 3, readFixRoundCommitsViaGit 3,
+    readTrackedDirtyOwnerPatch 3, captureWorktreeSnapshotViaGit 3, inspectFreshReviewerWorktree 2, checkoutFixHeadRef 2,
+    missingCommitLinePrompt 2, and one each in runPlanScopedFixRound, preserveTrackedDirtyPatch,
+    resetTrackedDirtyFixOwner, worktreeChangedFiles, worktreeMergeBase, commitsAhead and others. THE 75 IS A FLOOR:
+    commitGeneratorOutputViaGit, named in the exception's reason, spawns `git -C opts.cwd` write-tree/add/commit/
+    read-tree, and `opts.cwd` is not a name `WORKTREE_TARGET` matches, so none of its five argv is counted.
+    Each is a raw `execFileSync("git", ["-C", <worktree>, …])` with the daemon's environment: it follows the
+    worktree's `.git` file and honours that gitdir's code-executing config (core.fsmonitor, diff.external, core.pager),
+    which is exactly what W1-T6106's `hostWorktreeGit` pins and disables. NOT EVERY SITE TARGETS A WORKER TREE: the
+    `*Command` paths (planCommand, approveCommand, approveBatchCommand, triageCommandLocked) may target operator or
+    plan worktrees the harness itself writes, and inspectFreshReviewerWorktree a reviewer checkout of a PR head.
+  design: |
+    (1) Classify every raw git site in src/run-task.ts, whatever its `-C` target is named, by what wrote the tree it addresses: WORKER (a worktree a worker
+    session or model tool wrote to), REVIEWER (a checkout of a PR head, also untrusted bytes), or HARNESS (a tree only
+    the harness writes, before any worker runs). (2) Convert every WORKER and REVIEWER site to `hostWorktreeGit` /
+    `hostWorktreeGitAsync`; a reviewer checkout with no recorded worktree pointer gets the leaf's config overrides
+    even if it cannot get the pin, and the PR says which. (3) The remaining HARNESS sites stay raw, each recorded in
+    the census exception with its class and reason, and the exception count is lowered to exactly that number.
+    (4) No behaviour change beyond the pin: argv, outputs and error shapes stay the same, so callers and their tests
+    need no edits beyond injection seams.
+  acceptance:
+    - claim: "every raw git -C argv left in src/run-task.ts carries a recorded harness-only class and reason, none is in a function that addresses a worker or reviewer worktree, and a fix-round commit and a worktree snapshot read through run-task's own functions on a fixture worktree whose .git pointer names a planted gitdir with a core.fsmonitor marker never write the marker"
+      proof: "unit test: test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts"
+  falsifier: |
+    At the W1-T6106 head, captureWorktreeSnapshotViaGit and runPlanScopedFixRound spawn raw `git -C`: the fixture's
+    planted fsmonitor marker is written and the test fails; the exception for src/run-task.ts names no class.
+  notes: |
+    FIXTURES ONLY: the planted gitdir and its marker command live in a gitRepo() fixture under the test's tmp dir.
+    Split from W1-T6122 by file for Rule 19 sizing: this task is src/run-task.ts alone. Depends on W1-T6106 (#9778,
+    open at filing): the leaf and the census arrive with it; re-count the exceptions at its merged head before building.

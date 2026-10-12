@@ -3585,3 +3585,34 @@ is still the comparison minimum; a daily report or that minimum alone is not a r
 verified completion, causal result or permission to publish. Matched-cohort review and the current
 spend limits remain required. Rollback: remove the daily review step and restore the prior dates;
 retain all dated reports and experiment identities.
+
+## 2026-10-04 — OPERATOR RULING: ratify the $15 paired-attempt cap and the 500-row heartbeat budget
+
+Status: accepted
+
+*Operator-authored direction, given in chat on 2026-10-04 as "go with your recommendations". The
+operator session recorded it; it did not originate it. Both values below were chosen by build agents
+while building their tasks, not by the operator. This entry makes them the operator's.*
+
+- **`PAIRED_ATTEMPT_MAX_BUDGET_USD = 15` STAYS** (`src/lib/paired-trial.ts`, W1-T4638). It is a
+  BACKSTOP on one sealed paired-trial side attempt, below the pilot's cash ceiling, which stays the
+  primary control. Measured over 267 subscription run-task attempts from 2026-09-20 to 2026-10-04
+  that reported a cost: median $0.31, p99 $12.26, max $18.70. Only 2 of them (0.75%) went above $15.
+  The cap clips the rare runaway and leaves the p99 attempt alone.
+- **`MAX_CASE_TELEMETRY_ROWS_PER_STEP = 500` STAYS** (`src/lib/task-case-file.ts`, W1-T4651). The
+  case file's consumers read only heartbeat RECENCY (`CASE_TELEMETRY_STEPS`): the last activity, the
+  latest `worker.state` and the latest `worker.activity` event. A newest-per-step tail of 500 keeps
+  all of that. Overflow is counted, never refused, so the budget cannot fail a task.
+
+**Recorded with the same ruling, from earlier chat:**
+- **Guides and Governance stay behind PORTAL-T33's 404** (remudero-site #160, the
+  `SITE_RAW_DOCUMENTS_ENABLED` flag, closed by default). The operator, 2026-09-28 00:12Z: "proper
+  docs pages eventually, not now". No reopening is planned.
+- **The paid pilot's `--confirm-cash-ceiling-usd` flag stays dropped** (#7527; operator,
+  2026-09-28 00:09Z). `PAID_PILOT_CASH_CEILING_USD = 100` (`src/lib/benchmark-paid-pilot.ts`) is
+  unchanged, and `paidPilotArmAdmission` still enforces it. Nothing here activates the pilot or
+  changes any cash or budget value.
+
+**Rollback:** each value is one constant. Lowering the $15 cap or the 500-row budget is a reviewed
+change to that constant. Reopening Guides or Governance is a reviewed site build with the flag set
+to exactly "true".

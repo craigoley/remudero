@@ -25,12 +25,51 @@
  */
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { beforeEach } from "node:test";
+import { isMainThread } from "node:worker_threads";
 // W1-T4805: FIRST import — process-level containment against live GitHub writes (dead push URLs, a
 // sentinel token, no App key). Every runner invocation already `--import`s this file, so it rides along.
-import { appendGitConfigEnv } from "./no-live-remote.js";
+import { appendGitConfigEnv, DEAD_PUSH_ROOT, GH_CONFIG_DIR_PREFIX, GITHUB_PUSH_PREFIXES,
+  reapDeadOwnerDirs, runsTestFilesInThisProcess, setupDirOwnerTag } from "./no-live-remote.js";
+// #7598: pin TMPDIR to its real path before any fixture builds a temp path (macOS /var -> /private/var).
+import "./canonical-tmpdir.js";
+import { installReadMapFromEnv } from "./read-map.js";
+import { admitTestFile } from "../../src/lib/test-file-admission.js";
+import { TEST_PROCESS_MARKER } from "../../src/lib/tmp.js";
 import { reapableTmpPrefix } from "./reapable-prefix.js";
+import { LIVE_WRITE_SENTINEL_TOKEN } from "../../src/lib/live-write-guard.js";
+import { setTestFileSlotScope } from "../../src/lib/test-slot.js";
+
+if (isMainThread && runsTestFilesInThisProcess()) {
+  const missing: string[] = [];
+  if (process.env.GH_TOKEN !== LIVE_WRITE_SENTINEL_TOKEN) missing.push("GH_TOKEN sentinel");
+  const configDir = process.env.GH_CONFIG_DIR;
+  try {
+    if (!configDir || !basename(configDir).startsWith(`${GH_CONFIG_DIR_PREFIX}${setupDirOwnerTag()}`) ||
+        !fs.lstatSync(configDir, { throwIfNoEntry: false })?.isDirectory() ||
+        dirname(fs.realpathSync(configDir)) !== tmpdir()) {
+      missing.push("GH_CONFIG_DIR owned by this process");
+    }
+  } catch (error) {
+    missing.push(`GH_CONFIG_DIR unreadable: ${String(error)}`);
+  }
+  const count = Number(process.env.GIT_CONFIG_COUNT);
+  const pushPrefixes = new Set<string>();
+  if (Number.isSafeInteger(count) && count > 0) {
+    for (let i = 0; i < count; i += 1) {
+      if (process.env[`GIT_CONFIG_KEY_${i}`] === `url.${DEAD_PUSH_ROOT}.pushInsteadOf`) {
+        pushPrefixes.add(process.env[`GIT_CONFIG_VALUE_${i}`] ?? "");
+      }
+    }
+  }
+  if (!GITHUB_PUSH_PREFIXES.every((prefix) => pushPrefixes.has(prefix))) missing.push("dead push URL config");
+  if (missing.length > 0) throw new Error(`pooled test containment missing: ${missing.join(", ")}`);
+  beforeEach((context) => {
+    if (context.filePath !== undefined) setTestFileSlotScope(context.filePath);
+  });
+}
 
 /**
  * W1-T3069 — REFUSE THE READ-ONLY ESCAPE BEFORE A SINGLE TEST RUNS.
@@ -77,6 +116,18 @@ function refuseSelfSyncEscape(): void {
 
 refuseSelfSyncEscape();
 
+// A hand-typed `node --test <many files>` starts cores − 1 file children whatever memory is left (2.8 GB in one worker's
+// run, 2026-10-10); each waits here, before its test file loads, until the headroom holds it. Off Linux, and in any
+// process that is not a runner's own file child, this returns at once (src/lib/test-file-admission.ts).
+if (isMainThread) {
+  const admission = await admitTestFile();
+  process.on("exit", admission.release);
+}
+
+// W1-T6084: record the non-code files this test file reads, when main's full run asks for it
+// (RMD_READ_MAP_DIR). Unset — every ordinary run — this is one property read and changes nothing.
+installReadMapFromEnv();
+
 // Coverage runs execute each test file in a separate instrumented process. Those fixture reads
 // never leave the test harness, so making every child wait on the production cross-process gap
 // only turns the coverage timeout into a false transport failure. Keep the production default
@@ -115,9 +166,13 @@ if (process.env.NODE_V8_COVERAGE !== undefined) {
  * that shape fails a named test instead of silently reintroducing the race.
  */
 // Appended (W1-T4805) rather than assigned, so the dead-push-URL entries no-live-remote.ts installed
-// before this line survive; the gc entries land after them.
-appendGitConfigEnv("gc.auto", "0");
-appendGitConfigEnv("receive.autogc", "false");
+// before this line survive; the gc entries land after them. A worker thread re-runs this module but
+// already holds the parent's entries, and one spawned with SHARE_ENV would append to the parent's own
+// env (read-model-worker.ts), so only the main thread appends.
+if (isMainThread) {
+  appendGitConfigEnv("gc.auto", "0");
+  appendGitConfigEnv("receive.autogc", "false");
+}
 
 const created: Array<string | Buffer> = [];
 const originalMkdtempSync = fs.mkdtempSync;
@@ -142,6 +197,32 @@ fs.mkdtempSync = ((...args: Parameters<typeof fs.mkdtempSync>) => {
 // monkeypatch to its already-bound named ESM exports — the same trick fs-mocking
 // libraries (e.g. mock-fs) rely on.
 syncBuiltinESMExports();
+
+// W1-T4068: config and state are scratch data even for suites invoking main() in-process.
+process.env.RMD_TEST_LIVE_DENY_ROOT ??= join(process.env.HOME ?? tmpdir(), "Remudero");
+// Keep the installed browser cache reachable after HOME changes, including in spawned children.
+const browserCache = process.platform === "darwin" ? join(homedir(), "Library", "Caches")
+  : process.platform === "win32" ? process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local")
+  : process.env.XDG_CACHE_HOME || join(homedir(), ".cache");
+process.env.PLAYWRIGHT_BROWSERS_PATH ??= join(browserCache, "ms-playwright");
+process.env.NODE_TEST_CONTEXT ??= "test-setup";
+// W1-T7808: mark THIS process (not its children: a globalThis flag is not inherited) as a test process, so
+// src/lib/tmp.ts declines a sweep that would default to the machine's real temp root.
+(globalThis as Record<symbol, unknown>)[TEST_PROCESS_MARKER] = true;
+const TEST_HOME_PREFIX = "rmd-test-home-";
+// A worker thread keeps the parent's test HOME: under SHARE_ENV its own would replace the parent's,
+// and its exit would then delete the HOME the parent still reads.
+if (isMainThread) {
+  reapDeadOwnerDirs(TEST_HOME_PREFIX);
+  const testHome = fs.mkdtempSync(join(tmpdir(), `rmd-test-home-${setupDirOwnerTag()}`));
+  process.env.HOME = testHome;
+  const testConfigDir = join(testHome, ".config", "remudero");
+  fs.mkdirSync(testConfigDir, { recursive: true });
+  fs.writeFileSync(join(testConfigDir, "config.json"), JSON.stringify({
+    claudeBin: process.execPath,
+    root: join(testHome, "Remudero"),
+  }));
+}
 
 /**
  * SHADOW `gh` ON PATH WITH A REFUSING STUB, FOR EVERY TEST PROCESS (W1-T4119).
@@ -210,8 +291,13 @@ export function ghRefusalCount(): number {
   }
 }
 
+/** W1-T5550: the refusal stub's dir prefix. The owning pid follows it in every name, so a later
+ *  test process can remove the dir a SIGKILLed one left (see `reapDeadOwnerDirs`). */
+export const GH_REFUSE_DIR_PREFIX = "rmd-test-gh-refuse-";
+
 function installGhRefusalStub(): void {
-  const dir = fs.mkdtempSync(join(tmpdir(), "rmd-test-gh-refuse-"));
+  reapDeadOwnerDirs(GH_REFUSE_DIR_PREFIX);
+  const dir = fs.mkdtempSync(join(tmpdir(), `rmd-test-gh-refuse-${setupDirOwnerTag()}`));
   const ghPath = join(dir, "gh");
   const refusalsPath = join(dir, "refusals.log");
   fs.writeFileSync(refusalsPath, "");
@@ -236,7 +322,116 @@ function installGhRefusalStub(): void {
   process.env.PATH = `${dir}:${process.env.PATH ?? ""}`;
 }
 
-installGhRefusalStub();
+// W1-T5624: a worker thread re-runs this module through the runner's execArgv, but its env copy
+// already puts the parent's stub first on PATH (and the stub logs to the parent's refusals.log, so the
+// parent's exit check counts a worker's refusal). A dir minted here would outlive `worker.terminate()`.
+if (isMainThread) installGhRefusalStub();
+
+/**
+ * W1-T6108 — A SPAWNED CHILD'S COVERAGE CREDITS THE TEST THAT SPAWNED IT.
+ *
+ * A child inherits NODE_V8_COVERAGE and wrote its report into the same flat directory as every test
+ * process, so the impact map (src/lib/test-impact-map.ts) could credit it to nobody. Here, in a test
+ * process under coverage, the value CHILDREN inherit points at a per-suite directory
+ * `<prefix><owner>-<random>/<repo-relative suite path>/`. The test process's own report is
+ * unaffected: Node fixes a process's coverage directory at startup, and child_process copies
+ * `process.env.NODE_V8_COVERAGE` into a child's env at spawn time (W1-T6108's PR records the proof).
+ *
+ * WHY THE DIRECTORY IS OUTSIDE NODE_V8_COVERAGE: under `--experimental-test-coverage` the runner
+ * hands each test file a temp directory and, at its end, copies that directory's entries FLAT into
+ * the caller's NODE_V8_COVERAGE with `copyFileSync` — one subdirectory aborts the copy and every
+ * report after it is lost (MEASURED on Node 22.22.3: "Could not clean up code coverage ... ENOTSUP").
+ * So at exit the children's reports MOVE back into this process's NODE_V8_COVERAGE, under their
+ * own names, beside a `rmd-v8-children-*.json` record naming the suite; coverage-merge-ratchet's
+ * compaction reads that record. The flat directory therefore holds every report it held before,
+ * and the lcov counts the children exactly as it did.
+ *
+ * Untouched, by design: a child env that BLANKS NODE_V8_COVERAGE (the coverage-session-blanking
+ * census) still blanks it; a process already inside a children directory (a grandchild that loads
+ * this setup) keeps its parent's; a worker thread inherits the redirected value and is credited too.
+ * A SIGKILLed suite skips the move: its children's reports are lost with it, and the next test
+ * process reaps the directory (`reapDeadOwnerDirs`).
+ */
+export const CHILD_COVERAGE_DIR_PREFIX = "rmd-test-v8-children-";
+export const CHILD_COVERAGE_RECORD_FORMAT = "rmd-v8-child-suites-v1";
+const V8_REPORT = /^coverage-\d+-\d{13}-\d+\.json$/;
+const SUITE_PATH = /^test\/.*\.test\.ts$/;
+
+export interface ChildCoverageRedirect {
+  suite: string;
+  /** Where this process's own report goes, and where the children's move to at exit. */
+  coverageDir: string;
+  /** The minted directory, and its per-suite subdirectory children write into. */
+  root: string;
+  childDir: string;
+}
+
+/** Point the NODE_V8_COVERAGE children inherit at a per-suite directory, or return undefined when
+ *  this process is not a test file under coverage (or is already some suite's child). */
+export function redirectChildCoverage(
+  env: NodeJS.ProcessEnv = process.env,
+  opts: { script?: string; cwd?: string; mainThread?: boolean } = {},
+): ChildCoverageRedirect | undefined {
+  const coverageDir = env.NODE_V8_COVERAGE;
+  if (!(opts.mainThread ?? isMainThread) || !coverageDir) return undefined;
+  if (coverageDir.split(/[\\/]/).some((part) => part.startsWith(CHILD_COVERAGE_DIR_PREFIX))) return undefined;
+  const script = opts.script ?? process.argv[1];
+  if (script === undefined) return undefined;
+  const suite = relative(opts.cwd ?? process.cwd(), resolve(script)).split(sep).join("/");
+  if (!SUITE_PATH.test(suite)) return undefined;
+  reapDeadOwnerDirs(CHILD_COVERAGE_DIR_PREFIX);
+  // NOT the wrapped mkdtempSync: the exit sweep must leave the dir, whose suite path becomes a link
+  // for late writers (see flattenChildCoverage); a later test process reaps it (reapDeadOwnerDirs).
+  const root = originalMkdtempSync(join(tmpdir(), `rmd-test-v8-children-${setupDirOwnerTag()}`)) as string;
+  const childDir = join(root, ...suite.split("/"));
+  fs.mkdirSync(childDir, { recursive: true });
+  env.NODE_V8_COVERAGE = childDir;
+  return { suite, coverageDir: resolve(coverageDir), root, childDir };
+}
+
+/** Move the children's reports into `coverageDir` under their own names and record which suite
+ *  spawned them, then leave the suite's directory a LINK to `coverageDir`: a thread that copied the
+ *  redirected value (tsx's module-hooks thread) writes its report after every exit handler, and it
+ *  must land flat, as it did before (MEASURED: without the link, one report per suite was lost).
+ *  Returns the moved names; a report that cannot be moved throws, naming it. */
+export function flattenChildCoverage(redirect: ChildCoverageRedirect, now: () => number = Date.now): string[] {
+  const moved: string[] = [];
+  for (const name of fs.readdirSync(redirect.childDir).filter((n) => V8_REPORT.test(n)).sort()) {
+    const from = join(redirect.childDir, name);
+    const to = join(redirect.coverageDir, name);
+    try {
+      fs.renameSync(from, to);
+    } catch (error) {
+      // Another filesystem: copy, then remove. Any other failure is the caller's to report.
+      if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
+      fs.copyFileSync(from, to);
+      fs.rmSync(from);
+    }
+    moved.push(name);
+  }
+  fs.rmSync(redirect.childDir, { recursive: true, force: true });
+  fs.symlinkSync(redirect.coverageDir, redirect.childDir, "dir");
+  if (moved.length > 0) {
+    const record = join(redirect.coverageDir, `rmd-v8-children-${process.pid}-${now()}.json`);
+    fs.writeFileSync(`${record}.part`, JSON.stringify({ format: CHILD_COVERAGE_RECORD_FORMAT, suite: redirect.suite, reports: moved }));
+    fs.renameSync(`${record}.part`, record);
+  }
+  return moved;
+}
+
+const childCoverage = redirectChildCoverage();
+if (childCoverage !== undefined) {
+  // A thread sharing this env writes its own report after every exit handler: back to the flat dir.
+  process.on("exit", () => {
+    process.env.NODE_V8_COVERAGE = childCoverage.coverageDir;
+    try {
+      flattenChildCoverage(childCoverage);
+    } catch (error) {
+      console.error(`test setup: could not move this suite's child coverage reports into ${childCoverage.coverageDir}: ${(error as Error).message}`);
+      process.exitCode = 1;
+    }
+  });
+}
 
 process.on("exit", () => {
   // W1-T4226: read BEFORE the tmp-dir sweep below removes the stub's own dir (and the log

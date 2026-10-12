@@ -41,6 +41,8 @@ export const CI_FRICTION_ESCALATE_RUNG = 3;
 
 /** One plan task whose `origin:` names a ci-friction cause. */
 export interface CiFrictionRemedyTask {
+  /** Exact changed owning-file blob from a credited source build, never a status flip. */
+  preventionSource?: import("./prevention-source-evidence.js").PreventionSourceRegistration | { state: "unavailable"; reason: string };
   id: string;
   origin: string;
   status: string;
@@ -215,10 +217,20 @@ export function ciFrictionCauseState(
 // ── Locating the owner of a cause ──────────────────────────────────────────────────────────
 
 export interface OwnerSearch {
-  /** Files under `src/` or `scripts/` (never tests, docs or plan) containing `term` literally, each
+  /** Files under `src/` or `scripts/` (never tests, docs or plan) containing `term` literally as a whole token, each
    *  with its hit count. */
   filesContaining: (term: string) => Array<{ file: string; hits: number }>;
   fileExists: (file: string) => boolean;
+  pin?: () => OwnerSearch;
+  workflowOwner?: (family: string) => CiFrictionOwner | undefined;
+  /** The checks `workflowOwner` resolved to no owner because a workflow could not be read or told apart, and why. */
+  workflowGaps?: () => Array<{ family: string; reason: string }>;
+  evidence?: (key: string, details: readonly string[], owner?: CiFrictionOwner) => CiFrictionOwnershipEvidence;
+}
+
+export interface CiFrictionOwnershipEvidence {
+  fingerprint: string;
+  revision: string;
 }
 
 export interface CiFrictionOwner {
@@ -244,7 +256,18 @@ export function ownerSearchTerms(key: string, details: readonly string[]): strin
     }
   } else if (kind === "check") {
     const [first, family] = name.split(":");
-    terms.push(first === "ci-log" && family ? family : first!);
+    const check = first === "ci-log" && family ? family : first!;
+    if (first === "ci-log") {
+      for (const detail of details) {
+        for (const part of detail.split(/ — |; /)) {
+          const signature = /^(.+?): (.+)$/.exec(part);
+          if (!signature) continue;
+          const namedFamily = signature[1]!.replace(/\s*\(\d+\/\d+\)$/, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+          if (namedFamily === check) terms.push(signature[2]!);
+        }
+      }
+    }
+    terms.push(check);
   } else if (kind === "main_merge") {
     terms.push(name);
   }
@@ -269,9 +292,25 @@ export function locateCiFrictionOwner(key: string, details: readonly string[], s
     const file = key.slice("main_merge:".length);
     return search.fileExists(file) ? { files: [file], why: [`${file}: main merged into the PR over a change to it`] } : undefined;
   }
+  const terms = ownerSearchTerms(key, details);
+  const family = key.startsWith("check:") ? terms.at(-1) : undefined;
+  const distinctive = family && key.startsWith("check:ci-log:") ? terms.slice(0, -1) : [];
+  const generic = (term: string) => /^(ci|test|tests|coverage|build|check|checks)$/i.test(term.replace(/\s*\(\d+\/\d+\)\s*$/, "").trim());
+  const signatures = distinctive.filter(term => !generic(term)).map(term => ({ term, files: search.filesContaining(term) })).filter(m => m.files.length > 0);
+  const workflow = signatures.length === 0 && family ? search.workflowOwner?.(family) : undefined;
+  if (workflow) return { ...workflow, ...(testPath ? { failingTest: testPath } : {}) };
+  const matches = signatures.length > 0 ? signatures : terms.filter(term => !generic(term)).map((term) => ({ term, files: search.filesContaining(term) })).filter((m) => m.files.length > 0);
+  // Specificity is relative to this cause's own search, measured in distinct files, not hit volume.
+  const breadth = (m: typeof matches[number]) => new Set(m.files.map((f) => f.file)).size;
+  const narrowest = Math.min(...matches.map(breadth));
+  let specific = matches.filter((m) => breadth(m) === narrowest);
+  // A located signature wins a tie with the check family; an unmatched signature adds no evidence.
+  if (key.startsWith("check:ci-log:") && specific.some((m) => m.term !== terms.at(-1))) {
+    specific = specific.filter((m) => m.term !== terms.at(-1));
+  }
   const scores = new Map<string, { hits: number; term: string }>();
-  for (const term of ownerSearchTerms(key, details)) {
-    for (const { file, hits } of search.filesContaining(term)) {
+  for (const { term, files } of specific) {
+    for (const { file, hits } of files) {
       const prior = scores.get(file);
       if (!prior || hits > prior.hits) scores.set(file, { hits, term });
     }

@@ -163,7 +163,7 @@ export function ifNoneMatchHits(header: string | string[] | undefined, etag: str
     .some((tag) => tag === "*" || tag.replace(/^W\//, "") === opaque);
 }
 
-function writeBufferedResponse(req: IncomingMessage, res: ServerResponse, cached: BufferedRouteResponse, staleness: ConsoleResponseStaleness): void {
+export function writeBufferedResponse(req: IncomingMessage, res: ServerResponse, cached: BufferedRouteResponse, staleness: ConsoleResponseStaleness): void {
   const headers: Record<string, string> = { ...cached.headers, ...stalenessHeaders(staleness), ...(cached.etag ? { etag: cached.etag } : {}) };
   if (cached.status === 200 && ifNoneMatchHits(req.headers?.["if-none-match"], cached.etag)) {
     delete headers["content-type"];

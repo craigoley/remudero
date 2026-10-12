@@ -238,7 +238,8 @@ test("W1-T3360: every acknowledgement names a task and carries measured evidence
   // the sibling test above REFUSES an acknowledgement that covers nothing, so deleting the entry
   // was mandatory and this control had to follow it rather than block it. Still a real control:
   // it is an emptiness guard, not a census of its own, and a set that collapsed would fail here.
-  assert.ok(ACKNOWLEDGED.size >= 10, `expected the measured contradiction set; got ${ACKNOWLEDGED.size}`);
+  // 10 until W1-T5966 retained fix.exhausted and fix.stood_down, retiring both entries the same way.
+  assert.ok(ACKNOWLEDGED.size >= 8, `expected the measured contradiction set; got ${ACKNOWLEDGED.size}`);
   for (const [step, reason] of ACKNOWLEDGED) {
     assert.match(reason, /W1-T\d+/, `${step}: an acknowledgement must name the task that will fix it`);
     assert.match(reason, /union=|MB|rows/, `${step}: an acknowledgement must carry a measured figure`);

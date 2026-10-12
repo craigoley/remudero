@@ -12,7 +12,7 @@
   origin: "2026-10-02 approved benchmark follow-ups; paid pilot already authorized at 100 USD total for seven days"
   plan_refs: [W1-T4647, W1-T4603, W1-T4575]
   files: [src/lib/benchmark-aa-readiness.ts, src/lib/benchmark-aa-prospective.ts, src/run-task.ts, test/benchmark-aa-readiness.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at 5bea7aaf0caaec3f7f8599e990866249a6406d28: prospective registration and

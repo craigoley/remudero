@@ -9,7 +9,7 @@ import { test } from "node:test";
 
 import { gitPushRunBranch, LanePushForeignHeadError, type PushExec, type GitCapture } from "../src/lib/git-push.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { pushFixRound, runFixRung } from "../src/run-task.js";
+import { pushFixRound, runFixRung } from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";
@@ -252,9 +252,9 @@ const FIX_RUNG_MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400
 
 /** Both fix-rung `push:` deps ARE `pushFixRound` (W1-T4693), so this drives the real one, recording each call. */
 function productionShapedPush(pushed: Array<{ wt: string; branch: string; expectedHeadSha?: string }>) {
-  return (wt: string, branch: string, expectedHeadSha?: string): void => {
+  return async (wt: string, branch: string, expectedHeadSha?: string): Promise<void> => {
     pushed.push({ wt, branch, expectedHeadSha });
-    pushFixRound(wt, branch, expectedHeadSha);
+    await pushFixRound(wt, branch, expectedHeadSha);
   };
 }
 
@@ -431,11 +431,11 @@ test("W1-T2610: control — with no rewind, the same wiring pushes normally and 
 test("W1-T2610: both fix-rung push deps pass expectedHeadSha through pushFixRound to gitPushRunBranch (grep-verifiable)", () => {
   const [runTask, sweep] = ["../src/run-task.ts", "../src/lib/sweep.ts"].map((p) => readFileSync(fileURLToPath(new URL(p, import.meta.url)), "utf8"));
   // W1-T4797 adds a coverage precheck to the run loop; its wrapper still delegates to the shared push helper.
-  assert.equal((runTask.match(/^ {10}push: \(wt, br, sha\) => pushFixRoundPrechecked\(/gm) ?? []).length, 1, "runTaskBody's fix rung uses the prechecked push");
+  assert.equal((runTask.match(/^ {10}push: \(wt, br, sha, prior\) => pushFixRoundPrechecked\(.*?, wt, br, sha, \{\}, pushFixRound, prior\),$/gm) ?? []).length, 1, "runTaskBody's fix rung passes the expected head and prior-head lease through the prechecked push");
   const prechecked = runTask.split("export async function pushFixRoundPrechecked(")[1]?.split("export type CensusPushRungOutcome")[0] ?? "";
   assert.match(prechecked, /push: .* = pushFixRound,/, "the precheck defaults to the shared push helper");
-  assert.match(prechecked, /push\(wt, branch, expectedHeadSha\);/, "the precheck preserves the expected head");
+  assert.match(prechecked, /await push\(wt, branch, expectedHeadSha, priorHeadSha\);/, "the precheck preserves the expected head and prior-head lease");
   assert.equal((sweep.match(/^ {12}push: pushFixRound,$/gm) ?? []).length, 1, "the sweep's fix dispatch pushes through pushFixRound");
   assert.match(runTask, /pushFixRoundImpl: pushFixRound,/, "the sweep entrypoint injects the same helper");
-  assert.match(runTask, /gitPushRunBranch\(wt, \{ expectedHeadSha, exec: /, "the helper threads expectedHeadSha to the leaf");
+  assert.match(runTask, /await gitPushRunBranchAsync\(wt, \{ expectedHeadSha, capture, exec: /, "the helper threads expectedHeadSha to the leaf");
 });

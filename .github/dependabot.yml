@@ -43,6 +43,12 @@ updates:
     directory: /deploy
     schedule:
       interval: weekly
+    # A Node major is a coordinated change to .nvmrc, the image and the code (W1-T5882), moved
+    # only by plan. Minor, patch and digest renewals still flow.
+    ignore:
+      - dependency-name: node
+        update-types:
+          - version-update:semver-major
 
   # Keeps the SHA-pinned actions in .github/workflows fresh — Dependabot
   # bumps the pinned SHA and the trailing version comment together.

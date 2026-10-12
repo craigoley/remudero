@@ -36,7 +36,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildSweepEffects } from "../src/run-task.js";
+import { buildSweepEffects } from "./helpers/run-task-test.js";
 import {
   DEFAULT_CLARIFY_POLICY,
   DEFAULT_SWEEP_POLICY,
@@ -143,17 +143,14 @@ test("fixDispatchBudget: the invariant holds across a spread of (priorStrikes, c
 
 // ── (C) DISPOSITION_RULES: every rendered ratio names the ceiling actually in force ──────────
 
-test("deriveDisposition: exhaustion with NO pendingAnswer still renders the base cap — byte-identical regression lock", () => {
+test("deriveDisposition: an unmet review at its former ceiling remains fixable for judgment", () => {
   const exhausted = pr({ priorStrikes: 2, unmetCriteria: [{ claim: "still unmet", met: false, reason: "r", proof_exec: "executed_fail" } as never] });
   const result = deriveDisposition(exhausted, DEFAULT_SWEEP_POLICY, NOW);
-  assert.equal(result.disposition, "blocked-ambiguous");
-  assert.match(result.reason, /fix strikes exhausted \(2\/2\)/);
+  assert.equal(result.disposition, "blocked-fixable");
+  assert.match(result.reason, /progress judgment due after 2 rounds \(former ceiling 2\)/);
 });
 
-test("deriveDisposition: exhaustion with a LIVE pendingAnswer renders the EXTENDED ceiling — the design (iv) 'wrong denominator' reading, fixed", () => {
-  // cap=2, default reset -> extended ceiling 4. isBlockedCi(pr) true so the "answered" row's own
-  // `when` evaluates the SAME extended-ceiling check (it does not require reviewShape when checks
-  // are red) and, at priorStrikes==ceiling, yields to this exhaustion row exactly as intended.
+test("deriveDisposition: a blocked_ci PR at an answered extended ceiling reports that ceiling to judgment", () => {
   const policy: SweepPolicy = DEFAULT_SWEEP_POLICY;
   const answeredExhausted = pr({
     priorStrikes: 4,
@@ -161,12 +158,8 @@ test("deriveDisposition: exhaustion with a LIVE pendingAnswer renders the EXTEND
     pendingAnswer: { constraint: "use approach X" },
   });
   const result = deriveDisposition(answeredExhausted, policy, NOW);
-  assert.equal(result.disposition, "blocked-ambiguous");
-  assert.match(
-    result.reason,
-    /fix strikes exhausted \(4\/4\)/,
-    `an answered PR's legitimate exhaustion must name ITS ceiling (4), never the base cap (2); got: ${result.reason}`,
-  );
+  assert.equal(result.disposition, "blocked-fixable");
+  assert.match(result.reason, /operator answered the clarification question/);
 });
 
 test("deriveDisposition: a blocked-fixable gate-failure reason also renders the ceiling in force, not the bare base cap, when pendingAnswer is live", () => {
@@ -186,18 +179,9 @@ test("deriveDisposition: a blocked-fixable gate-failure reason also renders the 
   assert.match(result.reason, /strike 1\/4/, `expected the extended ceiling (4) as the denominator; got: ${result.reason}`);
 });
 
-// REVIEW FOLLOW-UP (#3256): the ONE ratio-rendering row this task deliberately leaves on the
-// bare `policy.strikeCap` — row 5.5, W1-T1269's `fixRungRepeatsIdenticalFailure` escalation.
-// It is not an oversight and not a latent wrong denominator: the row is UNREACHABLE while a
-// `pendingAnswer` is live, which is the only state in which `fixCeilingInForce` and
-// `policy.strikeCap` can differ at all. `fixRungRepeatsIdenticalFailure` requires a non-empty
-// `unmetCriteria`, so `reviewShape` inside the "answered" row's own `when` is necessarily true
-// whenever row 5.5 could match — and then either `priorStrikes < ceiling` (the answered row
-// claims the PR first, re-dispatching) or `priorStrikes >= ceiling >= strikeCap` (row 4's
-// exhaustion claims it first). Locked here by MEASUREMENT over the spread rather than left as
-// an argument in a comment, so a future reordering of DISPOSITION_RULES that makes row 5.5
-// reachable-while-answered reddens this test instead of silently shipping the wrong ratio.
-test("row 5.5's bare strikeCap denominator is unreachable while an answer is live, so it can never disagree with the ceiling in force", () => {
+// W1-T7096: repeated red criteria and the former ceiling are evidence for the progress judge,
+// never automatic disposition decisions.
+test("an identical unmet set remains fixable for judgment with or without an operator answer", () => {
   const unmet = (claim: string): CriterionVerdict => ({ claim, proof: `unit test: ${claim}`, met: false, reason: "not done", proof_exec: "executed_fail" });
   const repeatShape: Partial<OpenPrView> = {
     reviewState: "failure",
@@ -206,24 +190,18 @@ test("row 5.5's bare strikeCap denominator is unreachable while an answer is liv
     strikeHistory: [{ strike: 1, round: "fresh", unmetCount: 2, unmetClaims: ["A", "B"], ciGreen: true }],
   };
 
-  let reachedWithoutAnswer = 0;
   for (let priorStrikes = 0; priorStrikes <= 6; priorStrikes++) {
     const plain = deriveDisposition(pr({ ...repeatShape, priorStrikes }), DEFAULT_SWEEP_POLICY, NOW);
-    if (/identical unmet criteria/.test(plain.reason)) reachedWithoutAnswer++;
+    assert.equal(plain.disposition, "blocked-fixable");
+    if (priorStrikes >= DEFAULT_SWEEP_POLICY.strikeCap) assert.match(plain.reason, /progress judgment due/);
 
     const answered = deriveDisposition(
       pr({ ...repeatShape, priorStrikes, pendingAnswer: { constraint: "use approach X" } }),
       DEFAULT_SWEEP_POLICY,
       NOW,
     );
-    assert.equal(
-      /identical unmet criteria/.test(answered.reason),
-      false,
-      `row 5.5 became reachable with a live pendingAnswer at priorStrikes=${priorStrikes} — its denominator would now be wrong: ${answered.reason}`,
-    );
+    assert.equal(answered.disposition, "blocked-fixable");
   }
-  // The CONTROL, so the assertion above is not vacuously true against a row nothing ever hits.
-  assert.ok(reachedWithoutAnswer > 0, "row 5.5 must really fire when no answer is live, or this test proves nothing");
 });
 
 // ── (D) structural lock: the dispatch site can never fall through a non-positive budget ──────
@@ -312,15 +290,11 @@ async function driveDispatchFix(prOver: Partial<OpenPrView>, headRefName: string
   return { logs };
 }
 
-test("dispatchFix: priorStrikes AT the ceiling refuses BEFORE touching the head at all — logs sweep.fix.ceiling_exhausted naming the ceiling, spends nothing, never even fetches headRefName", async () => {
-  const { logs } = await driveDispatchFix({ priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap }, "run-W1-TX-1785600000000");
-  const row = logs.find((l) => l.step === "sweep.fix.ceiling_exhausted");
-  assert.ok(row, `expected sweep.fix.ceiling_exhausted; got steps ${JSON.stringify(logs.map((l) => l.step))}`);
-  assert.equal(row.extra?.prior_strikes, DEFAULT_SWEEP_POLICY.strikeCap);
-  assert.equal(row.extra?.ceiling, DEFAULT_SWEEP_POLICY.strikeCap);
-  assert.ok(!logs.some((l) => l.step === "sweep.fix.synthetic_task"), "never reached task resolution");
-  assert.ok(!logs.some((l) => l.step === "sweep.fix.uncreditable_head"), "never reached the head check");
-  assert.ok(!logs.some((l) => l.step === "fix.dispatch"), "no strike was spent — the load-bearing half of the fix");
+test("dispatchFix: the former ceiling no longer rejects a candidate before its head is checked", async () => {
+  const { logs } = await driveDispatchFix({ priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap }, "some-foreign-branch");
+  assert.ok(!logs.some((l) => l.step === "sweep.fix.ceiling_exhausted"), "the former ceiling is not a dispatch gate");
+  assert.ok(logs.some((l) => l.step === "sweep.fix.uncreditable_head"), "the candidate reached the ordinary creditability check");
+  assert.ok(!logs.some((l) => l.step === "fix.dispatch"), "no fix worker is spent on an uncreditable branch");
 });
 
 test("dispatchFix: priorStrikes BELOW the ceiling is NOT wrongly blocked — it proceeds past the budget gate to the next real check", async () => {
@@ -329,7 +303,7 @@ test("dispatchFix: priorStrikes BELOW the ceiling is NOT wrongly blocked — it 
   const { logs } = await driveDispatchFix({ priorStrikes: 0 }, "some-foreign-branch");
   assert.ok(
     !logs.some((l) => l.step === "sweep.fix.ceiling_exhausted"),
-    "a genuine remaining budget must never be refused at the ceiling gate",
+    "the old ceiling is not a dispatch gate for any PR",
   );
   const row = logs.find((l) => l.step === "sweep.fix.uncreditable_head");
   assert.ok(row, `expected the run to reach the head check; got steps ${JSON.stringify(logs.map((l) => l.step))}`);

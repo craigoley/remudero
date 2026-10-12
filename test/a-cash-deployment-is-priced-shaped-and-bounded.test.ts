@@ -65,7 +65,7 @@ test("cash economy and balanced rows retain Luna as the independent squeeze cand
   const cash = mounts.capabilities?.cash;
   assert.ok(cash, "the cash ladder must exist");
   for (const effort of ["low", "medium", "high"] as const) {
-    assert.deepEqual(cash.economy[effort], ["gpt-oss-120b", "gpt-5-nano", "gpt-6-luna", "gpt-5.6-luna"]);
+    assert.deepEqual(cash.economy[effort], ["gpt-oss-120b", "gpt-5-nano", "gpt-6-luna", "gpt-5.6-luna", "claude-haiku-5-5"]);
     assert.deepEqual(cash.balanced[effort], ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna", "gpt-6.1-sol"]);
   }
 });

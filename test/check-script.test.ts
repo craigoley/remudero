@@ -4,22 +4,15 @@
  * `scripts/check.mjs` bundles a scoped test run and `tsc --noEmit` into ONE invocation, so a
  * session cannot run the typecheck before writing its last file and get a stale all-clear.
  *
- * WHAT THIS SUITE COVERS, AND WHAT IT DELIBERATELY DOES NOT.
- *
- * It covers the SAFETY property: the script refuses to run with no target. That matters because
- * `node --test` with no argument walks the whole tree, and the full suite is CI's and
- * `rmd preflight --ci-parity`'s to run, never this scoped verb's (inside an agent container it
- * cannot pass honestly — docs/troubleshooting.md). A regression that made the
- * script default to "everything" would be actively dangerous, so it is pinned here.
- *
- * It does NOT drive the full happy path, because that path runs `tsc` over the whole project — a
- * ~10s cost on every CI run of the suite, to re-prove something the compiler already proves. That
- * behaviour is evidenced in the impl-GC report by manual reproduction instead: `tsx --test` exits 0
- * on a `Date`-for-`number` argument while `npm run check` on the same file exits 1 and names
- * TS2345. Saying so plainly here rather than implying broader coverage than exists.
+ * Empty, separator-only, missing and directory targets must refuse before either child starts.
+ * The real happy path uses a tiny isolated project, so this control never selects the repository's
+ * whole suite or whole-project typecheck. A literal dash-prefixed filename reaches the real Node
+ * child, and missing binaries exercise both default spawn error arms.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -42,12 +35,47 @@ test("check refuses with no target rather than defaulting to the whole suite", (
 });
 
 test("the refusal is the only zero-target behaviour — no argv shape slips past it", () => {
-  // An empty string and a lone `--` are the shapes an npm invocation can produce by accident.
-  for (const argv of [[], [""], ["--"]]) {
-    const r = spawnSync("node", [SCRIPT, ...argv].filter((a) => a !== ""), { cwd: REPO_ROOT, encoding: "utf8" });
-    if (argv.length === 0 || argv[0] === "") {
-      assert.equal(r.status, 2, `argv ${JSON.stringify(argv)} must refuse`);
-    }
+  for (const argv of [[], [""], ["--"], ["--", ""], ["", "--"], ["--", "--"]]) {
+    const r = spawnSync(process.execPath, [SCRIPT, ...argv], {
+      cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, PATH: "/nonexistent" },
+    });
+    assert.equal(r.status, 2, `argv ${JSON.stringify(argv)} must refuse`);
+    assert.match(r.stderr, /no test target given/);
+    assert.equal(r.stdout.trim(), "", "neither the tests nor typecheck may start");
+  }
+});
+
+test("check refuses missing, directory and option-only targets before either child starts", () => {
+  for (const argv of [["test/ghost-check-target.test.ts"], ["test"], ["--test-name-pattern", "only-this"]]) {
+    const r = spawnSync(process.execPath, [SCRIPT, ...argv], {
+      cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, PATH: "/nonexistent" },
+    });
+    assert.equal(r.status, 2, `unverified targets ${JSON.stringify(argv)} must refuse`);
+    assert.match(r.stderr, /every target must name an existing test file/);
+    assert.equal(r.stdout.trim(), "", "no child is attempted before the entire file list is verified");
+  }
+});
+
+test("check with a separator and a real file runs its scoped test and typecheck in an isolated tiny project", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-check-target-"));
+  try {
+    mkdirSync(join(root, "test", "setup"), { recursive: true });
+    symlinkSync(join(REPO_ROOT, "node_modules"), join(root, "node_modules"), "dir");
+    writeFileSync(join(root, "test", "setup", "tmp-hygiene.ts"), "export {};\n");
+    writeFileSync(join(root, "-probe.test.mjs"), "import { test } from 'node:test'; import { writeFileSync } from 'node:fs'; test('the real scoped child runs', () => { writeFileSync('executed', 'one real child'); });\n");
+    writeFileSync(join(root, "tsconfig.json"), JSON.stringify({ compilerOptions: {
+      allowJs: true, skipLibCheck: true, types: [],
+    }, files: ["-probe.test.mjs"] }));
+    const r = spawnSync(process.execPath, [SCRIPT, "--", "-probe.test.mjs"], {
+      cwd: root, encoding: "utf8", timeout: 30_000, env: { ...process.env, NODE_TEST_CONTEXT: undefined },
+    });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /the real scoped child runs/);
+    assert.equal(readFileSync(join(root, "executed"), "utf8"), "one real child");
+    assert.match(r.stdout, /scoped tests\s*: PASS/);
+    assert.match(r.stdout, /typecheck\s*: PASS/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

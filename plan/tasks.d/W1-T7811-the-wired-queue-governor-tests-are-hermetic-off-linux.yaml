@@ -1,0 +1,65 @@
+- id: W1-T7811
+  title: "THE WIRED QUEUE-GOVERNOR TESTS ARE HERMETIC OFF LINUX — five tests fail on a clean origin/main checkout on the operator Mac and pass in CI, because `queueGovernorGateFor` reads the host's /proc/meminfo with no seam, and on macOS the read throws, reports availableMib 0 and defers every dispatch"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the wired queue-governor gate takes its host-pressure reading through an injectable seam
+  band_meaning: span
+  origin: "operator session 2026-10-10: five queue-governor tests red on a clean Mac checkout while CI is green; approved 2026-10-10"
+  plan_refs: [W1-T321, W1-T4465, W1-T7243]
+  files: [src/run-task.ts, test/queue-governor.test.ts, test/the-lane-budget-follows-the-queue-governor-admission.test.ts, test/the-queue-governor-admits-a-draining-queue.test.ts, test/the-wired-queue-governor-tests-are-hermetic-off-linux.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    REPRODUCED 2026-10-10 21:35Z on the operator Mac, in a clean worktree of origin/main e2288e457, with
+    `node --test --import tsx --import ./test/setup/tmp-hygiene.ts` over the three files: 39 tests, 34 pass, 5 FAIL.
+    - test/queue-governor.test.ts, 2 failures: "W1-T321: drainCommand's WIRED checkQueueGovernor reads the
+      REAL open-PR count" and "the wired drain gate ledgers admission above the base limit when its owned PRs
+      are stuck".
+    - test/the-lane-budget-follows-the-queue-governor-admission.test.ts, 1 failure: "the daemon wiring exposes
+      the queue governor's admitting reading".
+    - test/the-queue-governor-admits-a-draining-queue.test.ts, 2 failures: the two W1-T4465 tests that
+      admit by ownership, one through drainCommand's WIRED checkQueueGovernor and one through daemonCommand's.
+    All five failures carry the same reading:
+    `pressure: { availableMib: 0, floorMib: 3072, reason: "host pressure unreadable: Error: ENOENT: no such file or directory, open '/proc/meminfo'" }`,
+    with `deferred: true`, where the test expects admission.
+
+    ATTRIBUTED.
+    - `queueGovernorGateFor` (src/run-task.ts:35031) calls `readFixHostPressure(policy.memoryFloorMib)`
+      directly (run-task.ts:35050). It takes no reader argument.
+    - `readFixHostPressure` (src/lib/sweep.ts:13287) reads /proc/meminfo. On any failure it returns
+      `availableMib: 0` with a reason (sweep.ts:13293), which is below every floor.
+    - drainCommand (run-task.ts:35770) and daemonCommand (run-task.ts:38634) build the gate with no way to
+      replace that read.
+    - CI runs on Linux, where /proc/meminfo exists, so the wired tests see the CI runner's real memory and
+      pass. That is also not hermetic. It just happens to be green.
+    - The read arrived with W1-T7243 (#10551, 2026-10-10).
+
+    NOT IN SCOPE, NOTED: on a host with no /proc/meminfo, the production gate defers ALL new dispatch
+    ("unreadable" reads as "no memory"). The fleet runs on Linux and nothing runs on the Mac, so this is
+    not live. But it collapses two outcomes into one value. It is a separate item, not part of this
+    hermeticity fix.
+  design: |
+    1. `queueGovernorGateFor` takes the host-pressure reader as a parameter, defaulting to today's
+       `readFixHostPressure(policy.memoryFloorMib)`. drainCommand's and daemonCommand's deps carry it
+       through, as they already carry `now`.
+    2. Every WIRED test in the three files injects a fixed healthy reading, so its verdict depends only on
+       the PR counts and ledger it sets up. Each test's assertion is unchanged.
+    3. Simulate the Mac in the test. A new test drives the same wired drain and daemon gates with the
+       default reader's file read replaced by one that throws ENOENT for /proc/meminfo. With the injected
+       reading, both still admit. With no injected reading, the gate defers and names the unreadable reason.
+       That proves the seam is the only thing standing between the tests and the host.
+  acceptance:
+    - claim: "with /proc/meminfo unreadable as on macOS, the wired drain and daemon queue-governor gates still admit when the test injects a healthy pressure reading"
+      proof: 'grep: test("W1-T7811: with /proc/meminfo unreadable the wired gates admit on an injected pressure reading" in test/the-wired-queue-governor-tests-are-hermetic-off-linux.test.ts'
+    - claim: "the same gate with no injected reading defers and names the unreadable reason, so the seam is load-bearing"
+      proof: 'grep: test("W1-T7811: with no injected reading an unreadable /proc/meminfo defers and names its reason" in test/the-wired-queue-governor-tests-are-hermetic-off-linux.test.ts'
+    - claim: "queueGovernorGateFor takes its host-pressure reader as an argument rather than calling readFixHostPressure inline"
+      proof: 'grep: test("W1-T7811: the wired gate reads host pressure only through its injected reader" in test/the-wired-queue-governor-tests-are-hermetic-off-linux.test.ts'
+  falsifier: |
+    Keep the inline `readFixHostPressure(policy.memoryFloorMib)` call: there is no seam to inject, the
+    simulated-ENOENT run defers, and the first test fails exactly as the five do on the Mac today.

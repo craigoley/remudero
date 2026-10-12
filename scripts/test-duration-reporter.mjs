@@ -1,11 +1,15 @@
 #!/usr/bin/env node
-import { relative, sep } from "node:path";
+import { relative, resolve, sep } from "node:path";
 
 /** Node test reporter that records the file-wrapper wall time without double-counting children. */
 export async function* durationReport(source, { cwd = process.cwd() } = {}) {
   const durations = new Map();
   for await (const event of source) {
     if (event?.type !== "test:complete" || event.data?.nesting !== 0) continue;
+    // Imported modules also register top-level tests. Only the runner's physical
+    // file wrapper names its entry path, relative or absolute, on Node 22 and 24.
+    if (typeof event.data?.name !== "string" || typeof event.data?.file !== "string" ||
+      resolve(cwd, event.data.name) !== resolve(cwd, event.data.file)) continue;
     const duration = event.data?.details?.duration_ms;
     if (typeof event.data?.file !== "string" || !Number.isFinite(duration) || duration < 0) continue;
     const path = relative(cwd, event.data.file);

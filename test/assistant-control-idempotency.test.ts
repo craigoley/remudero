@@ -10,6 +10,7 @@ import { test } from "node:test";
 import { once } from "node:events";
 
 import { buildAssistantControlRoute, buildAssistantControlCapabilityRoute, buildAssistantControlReceiptRoute } from "../src/lib/panel-actions.js";
+import type { AssistantActionDiscovery } from "../src/lib/assistant-action-discovery.js";
 import { instanceRouteSet, mountUnderInstance } from "../src/lib/instance-gateway.js";
 import { createService, type Route, type Scope } from "../src/lib/service.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
@@ -58,11 +59,13 @@ function controlRoutes(deps: Parameters<typeof buildAssistantControlRoute>[0]): 
 
 const childServer = `
 import { createService } from "./src/lib/service.ts";
-import { buildAssistantControlRoute } from "./src/lib/panel-actions.ts";
+import { buildAssistantControlRoute, buildAssistantActionDiscoveryRoute } from "./src/lib/panel-actions.ts";
 import { join } from "node:path";
 const root = process.env.RMD_TEST_CONTROL_ROOT;
+const deps = { root, ledgerPath: join(root, "state", "ledger.ndjson"), claimRoot: root, instance: "core",
+  ...(process.env.RMD_TEST_RECEIPT_WRITER === "fails" ? { afterEffect: () => { throw new Error("receipt writer interrupted"); } } : {}) };
 const server = createService({
-  routes: [buildAssistantControlRoute({ root, ledgerPath: join(root, "state", "ledger.ndjson"), claimRoot: root, instance: "core" })],
+  routes: [buildAssistantControlRoute(deps), buildAssistantActionDiscoveryRoute(deps)],
   tokens: { read: "read-token", write: "write-token" }, enforceWriteTiers: true,
   operatorSession: { name: "test-process-operator", grant: () => undefined, authorize: (req) =>
     req.headers["x-verified-operator"] === "yes"
@@ -72,9 +75,9 @@ server.listen(0, "127.0.0.1", () => process.stdout.write(JSON.stringify({ port: 
 process.on("SIGTERM", () => server.close(() => process.exit(0)));
 `;
 
-async function childOn(rootPath: string): Promise<{ child: ChildProcessWithoutNullStreams; base: string }> {
+async function childOn(rootPath: string, env: Record<string, string> = {}): Promise<{ child: ChildProcessWithoutNullStreams; base: string }> {
   const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", childServer], {
-    cwd: process.cwd(), env: { ...process.env, RMD_TEST_CONTROL_ROOT: rootPath }, stdio: "pipe",
+    cwd: process.cwd(), env: { ...process.env, RMD_TEST_CONTROL_ROOT: rootPath, ...env }, stdio: "pipe",
   });
   const port = await new Promise<number>((resolve, reject) => {
     let output = "";
@@ -133,6 +136,38 @@ test("W1-T4763: separate server processes share one atomic admission", async (t)
   ]);
   assert.ok(replies.every((response) => response.status === 200 || response.status === 202));
   assert.equal(rows(ledger(shared)).filter((row) => row.step === "panel.pause_requested").length, 1);
+});
+
+test("replica discovery reads one admitted action and never dispatches a second effect", async (t) => {
+  const shared = root();
+  t.after(() => rmSync(shared, { recursive: true, force: true }));
+  // Both replicas lose the receipt after the effect, so whichever wins admission leaves it pending.
+  const first = await childOn(shared, { RMD_TEST_RECEIPT_WRITER: "fails" });
+  const second = await childOn(shared, { RMD_TEST_RECEIPT_WRITER: "fails" });
+  t.after(async () => { await stopChild(first.child); await stopChild(second.child); });
+  assert.notEqual(first.child.pid, second.child.pid);
+  const input = { actionId: "control-replica-01", instance: "core", action: "pause", reason: "operator review" };
+  const replies = await Promise.all([
+    post(first.base, "/v1/control/assistant-action", input),
+    post(second.base, "/v1/control/assistant-action", input),
+  ]);
+  assert.deepEqual(replies.map((response) => response.status).sort(), [202, 503], "one replica admitted, the other saw its claim");
+  assert.equal(rows(ledger(shared)).filter((row) => row.step === "panel.pause_requested").length, 1);
+  const views: AssistantActionDiscovery[] = [];
+  for (const replica of [first, second, first, second]) {
+    const response = await get(replica.base, "/v1/control/assistant-action/discovery");
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    views.push(await response.json() as AssistantActionDiscovery);
+  }
+  assert.deepEqual(views[0].pending, [{ actionId: input.actionId, action: "pause", instance: "core", repository: null,
+    submittedAt: views[0].pending[0]?.submittedAt, status: "claimed_unknown" }]);
+  assert.equal(views[0].completeness, "complete");
+  for (const view of views) assert.deepEqual(view.pending, views[0].pending, "both replicas read the one admitted claim");
+  const retry = await post(second.base, "/v1/control/assistant-action", input);
+  assert.equal(retry.status, 202);
+  assert.equal(rows(ledger(shared)).filter((row) => row.step === "panel.pause_requested").length, 1,
+    "discovery and an exact retry on either replica never dispatched a second effect");
 });
 
 test("W1-T4763: changed or interrupted action never becomes success", async (t) => {

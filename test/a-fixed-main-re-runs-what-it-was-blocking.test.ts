@@ -10,7 +10,7 @@ import {
   runIsolatedLocalMergeRoute,
 } from "../src/lib/ci-parity.js";
 import { rollupFromRest } from "../src/lib/open-prs-rest.js";
-import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type CiFailure, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type CiFailure, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
 const NOW = Date.parse("2026-09-12T12:00:00Z");

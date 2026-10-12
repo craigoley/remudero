@@ -1,0 +1,76 @@
+- id: W1-T7810
+  title: "THE COVERAGE DURATION ADOPTER REFUSES AN OBSERVATION ITS OWN HISTORY CONTRADICTS — scripts/test-tier-coverage-manifest.json weighs test/retro-marker-atomic.test.ts at 851,971 ms against 20,298 ms in the regular manifest (42x, against a fleet median ratio of 1.57x), and the CI EWMA fold moves a row halfway toward any single run with no outlier guard"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — how one instrumented duration observation is admitted into the coverage ledger
+  band_meaning: span
+  origin: "operator session 2026-10-10: coverage shard 1/8 runs test/retro-marker-atomic.test.ts alone while the others run 415-593 files; approved 2026-10-10"
+  plan_refs: [W1-T4071, W1-T5923, W1-T6174, W1-T6173, W1-T5902]
+  files: [scripts/test-tier-manifest.mjs, src/lib/test-gardener.ts, test/the-coverage-duration-adopter-refuses-an-outlier-its-history-contradicts.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main e2288e457.
+    - scripts/test-tier-coverage-manifest.json:1744 weighs test/retro-marker-atomic.test.ts at 851971 ms.
+      scripts/test-tier-manifest.json:2237 weighs it at 20298 ms. The row was last written by #9740
+      (f40a0de85, 2026-10-06), its only commit touching the value.
+    - Over the 2,400 rows both ledgers measure, the instrumented/uninstrumented ratio has median 1.57,
+      p90 2.02 and p99 4.56. This row is 42x. The two next-heaviest rows are also far out of family:
+      test/preflight-is-freshness-exempt-and-scrubs-the-guard-from-children.test.ts is 154x and
+      test/preflight-summary-containment.test.ts is 198x.
+    - The packer weighs a shard as a makespan over `COVERAGE_SHARD_WORKERS` (scripts/test-tier-manifest.mjs:226,
+      W1-T4071). One 852 s file is therefore a floor no other file can share.
+    - ADOPTER, TWO STAGES:
+      - In CI, ci.yml:631 runs `test-tier-manifest.mjs --ewma 0.5` onto the committed ledger snapshot.
+        `foldDurationsEwma` (scripts/test-tier-manifest.mjs:309) moves each row halfway toward that ONE
+        run's observation (:318), with no check against the row's history.
+      - Then `settleDurationRows` (src/lib/test-gardener.ts, the ADOPT-DURATIONS class #10627 wired to this
+        ledger on 2026-10-10) medians a window of `DURATION_WINDOW_RUNS` such proposals. But each proposal is
+        already an EWMA fold onto the committed value, so the window medians folded values, not raw
+        observations. One bad run is halved, not rejected. A wrong committed row decays by half per adoption
+        at best, and adoption is held to about one a day (`DURATION_ADOPTION_CADENCE_MS`).
+
+    ⚠ THE ROW MAY BE REAL — RE-MEASURE BEFORE CHANGING IT. W1-T6173 (queued, filed 2026-10-07) records this
+    file as measuring 852 s instrumented: 38 sequential retroCommand tests with real runRetro spawns. It
+    proposes splitting the file instead. W1-T5902 (queued) records it at 458.7 s in the tier manifest. One
+    sampled artifact (coverage-duration-shard-1 of a 2026-10-10 PR run) held 443 files and no row for it,
+    which settles nothing. So step 1 is to read the raw `coverage-duration-shard-*` artifacts (retained 7 days)
+    for this file and record the observed values in the PR.
+    - If they agree with 852 s, the row is right. This task then ships the guard only, and W1-T6173's split
+      is the remedy for the shard.
+    - If they contradict it, the guard below corrects the row through the adopter, never by a hand edit.
+    The manifest JSON is left out of `files:` on purpose. W1-T6173 owns edits to it, and a hand-written
+    number is exactly what this task removes.
+  design: |
+    1. HISTORY, NOT ONE RUN. The fold keeps a short per-file history of RAW instrumented observations (the
+       last N runs, N = `DURATION_WINDOW_RUNS`), carried in the proposal artifact beside the folded value.
+    2. OUTLIER JUDGED AGAINST ITS OWN HISTORY. An observation is folded only when it lies within the
+       file's own recent spread: |log(obs) - median(log history)| <= k x 1.4826 x MAD(log history).
+       k comes from the fleet-wide noise band `settleDurationRows` already measures, never a fixed ratio.
+       With fewer than three observations, the fleet band stands in for the file's own spread.
+       A refused observation is kept in the history, so a real, sustained shift is adopted once it becomes
+       the median. It is never folded on its own, and the proposal lists it under `outliers` with the
+       median and band it was judged against.
+    3. A COMMITTED ROW THE HISTORY CONTRADICTS DECAYS TO THE MEDIAN. `settleDurationRows` judges the
+       committed value against the median of the RAW observations, not of EWMA-folded proposals. A row
+       outside the whole raw envelope by more than the band moves to that median in one adoption, so a bad
+       row is not halved once a day.
+  acceptance:
+    - claim: "a single observation far outside a file's recent raw history is not folded, and the proposal lists it as an outlier with the median and band it was judged against"
+      proof: 'grep: test("W1-T7810: one run far outside a file history is listed as an outlier and not folded" in test/the-coverage-duration-adopter-refuses-an-outlier-its-history-contradicts.test.ts'
+    - claim: "a sustained shift is adopted once it becomes the median of the raw history"
+      proof: 'grep: test("W1-T7810: a sustained shift is adopted once it becomes the history median" in test/the-coverage-duration-adopter-refuses-an-outlier-its-history-contradicts.test.ts'
+    - claim: "a committed row that every raw observation contradicts moves to their median in one adoption, not by halving"
+      proof: 'grep: test("W1-T7810: a committed row the raw history contradicts moves to the median in one adoption" in test/the-coverage-duration-adopter-refuses-an-outlier-its-history-contradicts.test.ts'
+    - claim: "the outlier bound scales with the measured noise band, not a fixed ratio"
+      proof: 'grep: test("W1-T7810: the outlier bound follows the measured noise band" in test/the-coverage-duration-adopter-refuses-an-outlier-its-history-contradicts.test.ts'
+  falsifier: |
+    Leave `foldDurationsEwma` folding every positive observation: the first test sees the outlier moved
+    halfway into the row. Leave `settleDurationRows` reading the folded proposals: the third test sees the
+    row halve instead of reaching the median. Replace k with a constant: the fourth test sees the same
+    verdict under two different bands.

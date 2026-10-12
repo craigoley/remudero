@@ -28,6 +28,16 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   tested tree and rerun diff-coverage against that same commit. Confirm the lcov data instruments
   every changed source file before treating a passing diff-coverage result as evidence.
 
+- `ci-friction:check:ci-log:coverage-shard:test-cost-anomaly-test-ts` — a test run in the
+  coverage-shard phase exhibited anomalously high execution time, costing more CI minutes than
+  expected. To fix: identify the specific test file and test case responsible for the cost spike
+  (check the coverage-shard logs and timing report); analyze the test for expensive operations
+  (file I/O, network calls, large fixture setup, or slow assertions); optimize the test by
+  reducing fixture size, parallelizing independent operations where safe (respecting the
+  `node --test` run-one-at-a-time constraint), or breaking the test into smaller focused cases;
+  if the test is inherently expensive but necessary, document the reason in a comment and update
+  the cost baseline. Run `rmd preflight --coverage` to measure the effect locally before pushing.
+
 - `ci-friction:fix_refusal:no-anchored-commit-message-line-in-the-report` — the shell-less
   harness requires the worker's REPORT to end with an anchored `COMMIT_MESSAGE:` line that
   names the commit subject in Conventional Commits format (`type(scope): subject`, lower-case,

@@ -93,11 +93,15 @@ function build2026_07_19Fixture(): Fixture {
  *  a merged but FOREIGN-branch trailer for `foreignTaskId` (must be rejected),
  *  and nothing for anything else (genuinely not shipped). */
 function liveGateway(fx: Fixture): ShippedGithub {
-  const prByTask = new Map(fx.credited.map((c, idx) => [c.taskId, { number: 1000 + idx, url: `https://github.com/o/r/pull/${1000 + idx}` }]));
+  const prByTask = new Map(fx.credited.map((c, idx) => [c.taskId, {
+    number: 1000 + idx,
+    url: `https://github.com/o/r/pull/${1000 + idx}`,
+    mergedAt: "2026-07-19T23:59:00.000Z",
+  }]));
   const prByUrl = new Map([...prByTask.entries()].map(([taskId, pr]) => [pr.url, taskId]));
   return {
     findMergedByTrailer(taskId) {
-      if (taskId === fx.foreignTaskId) return { number: 900, url: "https://github.com/o/r/pull/900" };
+      if (taskId === fx.foreignTaskId) return { number: 900, url: "https://github.com/o/r/pull/900", mergedAt: "2026-07-19T23:59:00.000Z" };
       return prByTask.get(taskId) ?? null;
     },
     headRefName(prUrl) {

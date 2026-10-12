@@ -118,6 +118,18 @@ test("instrument-surface completeness: every gate-rule-like path this tree's own
   );
 });
 
+test("CI shard admission is declared as an instrument, not hidden by an exclusion", () => {
+  const path = "scripts/ci-shard-admission.mjs";
+  assert.ok(deriveInstrumentCandidates(liveTree(REPO_ROOT)).includes(path));
+  assert.equal(INSTRUMENT_SURFACE_EXCLUSIONS[path], undefined);
+  assert.ok(DECLARED_RE.test(path));
+  const withoutAdmission = new RegExp(INSTRUMENT_SURFACE.filter((pattern) => !new RegExp(pattern).test(path)).join("|"));
+  assert.deepEqual(findUnexplainedGaps([path], withoutAdmission, INSTRUMENT_SURFACE_EXCLUSIONS), [path]);
+  const verdict = detectInstrumentEntanglement([path, "src/lib/dispatch-overlap.ts"]);
+  assert.ok(verdict.instrumentPaths.includes(path));
+  assert.equal(verdict.entangled, true);
+});
+
 // ── AN INSTRUMENT PATH UNDER `src/` MUST BE EXPRESSIBLE ──────────────────────────────────────
 //
 // `isProductPath` is unconditionally `src/` and not `test/`, so before the subtraction in

@@ -57,6 +57,14 @@ Node disagree again.
   version bump remains a coordinated change to `.nvmrc`, the tag, and the
   digest, followed by the operator-triggered image rebuild.
 
+**Update 2026-10-05 (W1-T5883):** the pin moved from 22.22.3 to 24.21.0
+(`node:24.21.0-bookworm-slim@sha256:d6aa754f…7b20`). The bump needed code
+changes first (W1-T5882): Node 24's test runner defaults every stream to the
+spec reporter, adds per-process flags to `process.execArgv` that a Worker
+refuses, changed the internal `TestCoverage` constructor, and makes `readline`
+split on U+2028. Those landed while CI still ran 22, so this change is the pin
+alone.
+
 **How to reverse:** reverting to a floating tag is a one-line Dockerfile
 edit, but it reopens exactly the outage this ADR records, silently, since
 nothing else in the pipeline would catch a drift outside the coverage-merge

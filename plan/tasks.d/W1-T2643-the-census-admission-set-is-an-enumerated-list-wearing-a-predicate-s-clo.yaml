@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: high
   budget_usd: 100.00
-  files: [src/lib/ci-parity.ts, package.json, test/the-census-admission-set-is-derived-not-enumerated.test.ts]
+  files: [src/lib/ci-parity.ts, package.json, test/the-gate-admission-population-is-checked-from-one-scan.test.ts]
   origin: architect
   plan_refs: ["W1-T2478", "W1-T2523", "W1-T1266"]
   status: merged
@@ -119,19 +119,25 @@
     must UPDATE against the derived population rather than contradict.
   acceptance:
     - claim: "every census-shaped suite in the tree appears in ONE enumerated population carrying a verdict — admitted, or refused with a measured number or a named failing predicate clause — and no member is absent from it"
-      proof: "unit test: test/the-census-admission-set-is-derived-not-enumerated.test.ts"
+      proof: "unit test: live drift check: every census-shaped file the recognizer discovers in the CURRENT tree"
+      kind: guard
     - claim: "the fifth suite W1-T2478 measured under the bound is accounted for BY NAME — admitted, or refused with its own re-measured milliseconds — and the over-bound sixth is named too, so the population matches its own measurement instead of the shipped table's four"
-      proof: "unit test: test/the-census-admission-set-is-derived-not-enumerated.test.ts"
+      proof: "unit test: is a named population member, REFUSED for cost with a measured number"
+      kind: guard
     - claim: "a refusal for cost carries the measured milliseconds it was refused at, so over-the-bound is a number a later reader can re-derive and re-argue rather than a prose assertion naming no suite"
-      proof: "unit test: test/the-census-admission-set-is-derived-not-enumerated.test.ts"
+      proof: "unit test: the recorded duration in scripts/test-tier-manifest.json is over FAST_GATE_CENSUS_BOUND_MS"
+      kind: guard
     - claim: "the drift guard holds: a census-shaped suite present in the tree and absent from the population FAILS, and a suite the recogniser cannot classify is carried as UNKNOWN rather than silently omitted"
-      proof: "unit test: test/the-census-admission-set-is-derived-not-enumerated.test.ts"
+      proof: "unit test: censusPopulationDrift: a discovered src-filtering caller with no population entry is named in"
+      kind: guard
     - claim: "the fast gate's census steps are the population's ADMITTED projection — a census step with no population member, and a member marked admitted with no step, each FAIL"
-      proof: "unit test: test/the-census-admission-set-is-derived-not-enumerated.test.ts"
+      proof: "unit test: boundMs-bearing entries are EXACTLY CENSUS_ADMITTED_MEMBERS's projection"
+      kind: guard
     - claim: "the enumerated population is a real exported artifact inside the gate's own module, not a comment"
       proof: "grep: CENSUS_POPULATION in src/lib/ci-parity.ts"
     - claim: "regression lock: every step admitted before this task is still admitted, the bound value is unchanged and still stated as a primary control, and the fast gate still never shells the full suite"
-      proof: "unit test: test/the-census-admission-set-is-derived-not-enumerated.test.ts"
+      proof: "unit test: FAST_GATE_CENSUS_BOUND_MS is unchanged at 2000ms, and the census suites admitted so far"
+      kind: guard
   note: |
     PROVENANCE: filed from the follow-up harvest
     `followup:W1-T2478-1788108376050:2026-08-30T16:49:17.177Z:0`, which asked to implement W1-T2478.
