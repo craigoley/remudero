@@ -1,5 +1,5 @@
 - id: W1-T8620
-  title: "A GREEN, ARMED PR THAT GITHUB REFUSES TO MERGE RECORDS WHY, AND A STALE-RED REQUIRED CHECK IS RE-RUN — on 2026-10-12 the main-repair PR #11096 was refused 3 times (14:41, 14:47, 14:56Z) with `automerge.arm_failed` / `automerge.armed_idle_refused` outcome direct-merge-failed and no error text, while GitHub's refusal named a ci-gate run that a newer passing ci-gate run had superseded; W1-T6404's refresh declined each time because mergeability read unknown"
+  title: "A GREEN, ARMED PR THAT GITHUB REFUSES TO MERGE RECORDS WHY, AND A STALE-RED REQUIRED CHECK IS RE-RUN — on 2026-10-12 the main-repair PR #11096 was refused 3 times (14:41, 14:47, 14:56Z) with `automerge.arm_failed` / `automerge.armed_idle_refused` outcome direct-merge-failed and no error text, while GitHub's refusal named ci-gate, whose one run had failed at 14:14Z before the CI run it gates passed at 14:23Z; W1-T6404's refresh declined each time because mergeability read unknown"
   repo: remudero
   depends_on: []  # W1-T7747 (queued, P2) and W1-T7735 (queued, P1, depends on W1-T7214/W1-T7734) also edit src/lib/sweep.ts; W1-T7747 also edits arm-auto-merge.ts. Not serialized: this P1 held the main repair, and the edits are mergeDirectAfterPreflightSteps and the armed-idle refusal branch
   type: implement
@@ -28,9 +28,16 @@
       - At 14:56:52Z a distance-overlap update-branch moved the head to 092038d. That is a separate refresh, not a
         remedy for the refusal, and it re-ran CI and voided the review.
     GitHub's refusal text, `Required status check "ci-gate" is failing. (HTTP 405)`, reached only `deps.say` (the
-    docker log). The brief traced its cause to an older ci-gate run (38259738068, failure at 14:14Z) that still counted
-    although a newer ci-gate run on the same head (38259941644) passed at 14:22Z; a session re-ran the failed run by
-    hand.
+    docker log). That text is from the incident brief. The container that wrote it (5c92360aef39) was replaced at
+    15:13Z, so its log could not be re-read.
+    THE STALE RED, MEASURED (GitHub Actions runs at head f84af4f, read 15:37Z). The brief called 38259941644 a newer
+    ci-gate run. It is not: it is the `CI` workflow (.github/workflows/ci.yml), created 14:01:59Z, success at 14:23:17Z.
+    The ci-gate runs (.github/workflows/ci-gate.yml) at that head are 38258744473 (13:52Z, cancelled) and 38259738068
+    (created 14:00:25Z). The brief puts that run's first attempt at failure, 14:14Z. Its attempt 2, the session's hand
+    re-run, concluded success at 14:59:59Z. So no newer ci-gate run superseded the failure. ci-gate concluded before
+    the CI run it gates had finished, and nothing re-ran it. Every check it gates was then green, and so was the
+    daemon's own latest-run read ("review success, required checks green"). The red was the gate's stale verdict.
+    Because its inputs finished 9 minutes after it concluded, ci-gate's in-run grace re-read (W1-T261) could not clear it.
     WHY THE TEXT IS LOST. `mergeDirectAfterPreflightSteps` (src/lib/arm-auto-merge.ts) catches the REST merge's error as
     `msg2`, says it, and returns `{ outcome: "direct-merge-failed", directMergePreflight: evidence }` with no `error`.
     Both ledger writers already copy `error` when a result carries it: `armAndLogOutcome` (src/lib/sweep.ts) and the
@@ -52,7 +59,7 @@
     and does not reuse that one.
     NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d for direct-merge-failed, stale_rollup, armed_idle_refused and
     `Required status check` (W1-T6404, W1-T5492, W1-T1052 and others, all merged; W1-T7747 moves the merge off the
-    loop; W1-T7735 prices main-merge refreshes). None writes the refusal text or re-runs a superseded job. The
+    loop; W1-T7735 prices main-merge refreshes). None writes the refusal text or re-runs a stale gate job. The
     plan/tasks.d additions on all 281 origin heads (24 files, all read) name none of these.
   design: |
     No fixed count or timer. Each action is spent once per key and the key is the evidence.
@@ -62,16 +69,19 @@
     2. CLASSIFY THE REFUSAL, THEN ACT. Add the pure `classifyMergeRefusal(error, rollup)` to src/lib/sweep.ts. It parses
        the check GitHub names (`Required status check "<name>" is ...`) and reads the head's rollup through
        `classifyRollupSupersession`. Its kinds:
-         - `stale-check`: the named check's newest run on this head is SUCCESS, and a superseded FAILURE or CANCELLED
-           entry of that check remains. Also when the newest run itself is CANCELLED.
+         - `stale-check`, in either of two shapes. SUPERSEDED: the named check's newest run on this head is SUCCESS,
+           and a superseded FAILURE or CANCELLED entry of that check remains (W1-T4908's shape), or the newest run is
+           itself CANCELLED. GATE-OLDER-THAN-INPUTS (#11096): the named check is ci-gate, its newest run on this head
+           failed, that run completed before the newest completion among the checks ci-gate gates (the REQUIRED list
+           `readCiGateRequired` reads), and every one of those checks is green by the daemon's latest-run read.
          - `real-red`: the named check's newest run failed or is still running. The PR is not green, and the next pass's
            ordinary disposition owns it.
          - `transient`: the refusal is rate-limit or transient (`armFailureIsRateLimited`, `armFailureAction`). The next
            pass retries, as today.
          - `other`: anything else, including an unreadable rollup with a check-naming refusal.
-    3. A STALE CHECK IS RE-RUN, NOT RE-MERGED. For `stale-check`, the armed-idle branch re-runs the superseded entry's
-       JOB through `deps.requeueCheck`, ONCE per (head sha, superseded run id). Before the POST it writes
-       `automerge.stale_check_rerun` with check_name, head_sha, the superseded and superseding run ids, job_id and
+    3. A STALE CHECK IS RE-RUN, NOT RE-MERGED. For `stale-check`, the armed-idle branch re-runs the failed entry's JOB
+       (the superseded one, or the stale ci-gate run's) through `deps.requeueCheck`, ONCE per (head sha, run id). Before the POST it writes
+       `automerge.stale_check_rerun` with check_name, head_sha, the shape, the stale run id, the run that outranks it, job_id and
        GitHub's refusal text. A `deferred` answer (W1-T5920) voids the row for the next pass. The step joins
        `DECISION_RELEVANT_LEDGER_STEPS` (src/lib/ledger.ts), because forgetting it loops. While the re-run is in flight
        the rollup reads pending, so the next pass waits and does not retry the merge blind. This branch keys on GitHub's
@@ -81,7 +91,7 @@
        text. W1-T6404's `refreshStaleRollupAfterRefusal` stays for a refusal with no readable text. It runs only after
        this classification declines, so a fresh sha is never the first answer to a stale check.
     5. THE DISPOSED ROW SAYS WHICH. The `sweep.disposed` stand-down reason names the kind and the action, for example
-       `direct-merge-failed: stale-check ci-gate (run 38259738068 superseded by 38259941644) — job re-run`.
+       `direct-merge-failed: stale-check ci-gate (run 38259738068 concluded before its gated CI run 38259941644) — job re-run`.
     6. Unchanged: W1-T1050's landed-merge re-check, the preflight remedies, W1-T1223's cancelled-check requeue and its
        key, W1-T5920's deferral backstop, and the review lane's arm path apart from the added `error`.
     Tests (new file, `test(` titles verbatim as in the proofs below) drive `mergeDirectAfterPreflightSteps` through the
@@ -92,8 +102,10 @@
       proof: "unit test: test/a-refused-green-merge-records-why-and-reruns-a-stale-check.test.ts"
     - claim: "a refused direct merge writes GitHub's refusal text on automerge.arm_failed and automerge.armed_idle_refused"
       proof: 'grep: test("W1-T8620: a refused direct merge records GitHub refusal text on the ledger" in test/a-refused-green-merge-records-why-and-reruns-a-stale-check.test.ts'
-    - claim: "the #11096 shape (ci-gate refusal, newest ci-gate run green, an older failed run on the same head, mergeability unknown) re-runs the superseded job once and never retries the merge blind"
-      proof: 'grep: test("W1-T8620: the 11096 shape re-runs the superseded check job once" in test/a-refused-green-merge-records-why-and-reruns-a-stale-check.test.ts'
+    - claim: "the #11096 shape (ci-gate refusal, ci-gate's one run failed before the CI run it gates passed, every gated check green, mergeability unknown) re-runs the stale ci-gate job once and never retries the merge blind"
+      proof: 'grep: test("W1-T8620: the 11096 shape re-runs the stale ci-gate job once" in test/a-refused-green-merge-records-why-and-reruns-a-stale-check.test.ts'
+    - claim: "a superseded failed run of a required check whose newest run passed is re-run once"
+      proof: 'grep: test("W1-T8620: a superseded failed run is re-run once" in test/a-refused-green-merge-records-why-and-reruns-a-stale-check.test.ts'
     - claim: "a second refusal at the same head and run id escalates with GitHub's text instead of re-running again"
       proof: 'grep: test("W1-T8620: a repeat stale-check refusal at the same run escalates" in test/a-refused-green-merge-records-why-and-reruns-a-stale-check.test.ts'
     - claim: "a refusal whose named check is really failing re-runs nothing, and an unclassified refusal escalates once with its reason"
@@ -103,7 +115,8 @@
   falsifier: |
     Drop `error: msg2` from the `direct-merge-failed` return, and the first test reads no error field on either row.
     Key the re-run on `mergeableState === "blocked"` as W1-T6404 does, and the #11096 fixture (mergeability unknown)
-    re-runs nothing and retries the merge. Drop the (head, run id) key, and the repeat test re-runs a second time.
+    re-runs nothing and retries the merge. Drop the gate-older-than-inputs shape, and the #11096 fixture (no newer
+    ci-gate run) escalates or retries instead of re-running. Drop the (head, run id) key, and the repeat test re-runs a second time.
     Treat every check-naming refusal as stale, and the real-red test re-runs a failing check.
   note: |
     EFFECT, measured after merge with no fixed pass mark: count `automerge.arm_failed` rows with outcome
