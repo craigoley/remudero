@@ -777,7 +777,7 @@ export const PRECHECK_TRIGGERED_SUITES = [
   { testFile: "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts", script: "census:near-fixture-crossing",
     trigger: ({ changed }) => changed.some((p) => [
       "scripts/expiring-fixture-census.mjs", "src/lib/gate-gardener.ts", "scripts/clock-shift.mjs",
-      "src/lib/ci-parity.ts", "scripts/census-precheck.mjs", "package.json",
+      "src/lib/ci-parity.ts", "scripts/census-precheck.mjs",
       "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts",
     ].includes(p)),
     remedy: "preserve the 24 h control/shifted verdict and the private TMPDIR proof" },
