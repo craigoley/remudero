@@ -39,6 +39,8 @@ import { GARDENER_ORIGIN_ENV, gardenerOriginEnv } from "./worker-containment.js"
 
 /** The gardens the daemon runs off its loop, in the order its `gardens` list has always wired them. */
 export const REGISTERED_GARDEN_NAMES = [
+  // W1-T5420: knowledge used to start separately and still ran its whole pass on the daemon loop.
+  "knowledge",
   "plan",
   "gate",
   "test",
