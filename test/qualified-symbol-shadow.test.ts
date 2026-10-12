@@ -5,6 +5,7 @@ import type { AffectedSuitesInput } from "../src/lib/affected-suites.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { gitRepo } from "./helpers/git-repo.js";
+// @ts-expect-error — the CLI is JavaScript and ships no declaration file.
 import { main } from "../scripts/select-affected-suites.mjs";
 
 const files = new Map([
