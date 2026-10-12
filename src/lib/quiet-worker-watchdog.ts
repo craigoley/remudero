@@ -426,7 +426,7 @@ export function productionQuietWorkerJudge(opts: {
  * `handed_off` verdict instead of a generic `run.error`. */
 export class QuietRoundEndedError extends RmdError {
   readonly reasonClass = "quiet_round_ended" as const;
-  constructor(readonly detail: { checkpointSha?: string; reason: string; trigger?: "recycle" }) {
+  constructor(readonly detail: { checkpointSha?: string; reason: string; trigger?: "recycle"; undeclaredPaths?: string[] }) {
     super("quiet_round_ended", 1, `worker round ended ${detail.trigger === "recycle" ? "for a pending container recycle" : "by the quiet-worker watchdog"}: ${detail.reason}`, detail);
     this.name = "QuietRoundEndedError";
   }
