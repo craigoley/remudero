@@ -4,9 +4,11 @@ import { fixedClock } from "./clock.js";
 import { canarySuiteDigest, type CanaryCase } from "./model-canary-suite.js";
 import { executeCanary, type CanaryPin, type CanaryExecutionPorts } from "./model-canary-runner.js";
 import { canaryTrialBlockId, type CanaryTrialBlock } from "./model-canary-metrics.js";
+import type { CanaryRetentionContract } from "./model-canary-retention-schedule.js";
 
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
-export interface CanarySlot { id: string; caseId: string; pin: CanaryPin; aaLabel: "A" | "B" | null }
+export interface CanarySlot { id: string; caseId: string; pin: CanaryPin; aaLabel: "A" | "B" | null;
+  retention?: CanaryRetentionContract }
 
 /** Same case for every arm; seed interleaves arm order instead of batching one model first. */
 export function buildCanarySchedule(day: string, seed: string, cases: readonly CanaryCase[], pins: readonly CanaryPin[], aa = false) {
