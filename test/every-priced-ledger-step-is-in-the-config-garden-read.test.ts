@@ -206,7 +206,11 @@ export function stepsWrittenWithAPrice(sources: ReadonlyMap<string, string>): Ma
   const resolve = (literal: string | undefined, name: string | undefined): Iterable<string> =>
     literal !== undefined ? [literal] : (constants.get(name!) ?? []);
   for (const [file, text] of sources) {
-    const logCall = new RegExp(`\\blog\\w*\\(\\s*(?:(["'])(${STEP_NAME})\\1|(${CONST_NAME}))\\s*,`, "g");
+    // These exact adapters forward to the same ledger sink. Do not treat arbitrary
+    // business/report methods elsewhere as ledger writes or drop their old exemptions.
+    const adapters = file === "src/lib/daemon.ts" ? "|report|reporting\\.report"
+      : file === "src/lib/drain.ts" ? "|settledLog" : "";
+    const logCall = new RegExp(`\\b(?:log\\w*${adapters})\\(\\s*(?:(["'])(${STEP_NAME})\\1|(${CONST_NAME}))\\s*,`, "g");
     for (const m of text.matchAll(logCall)) {
       if (PRICED.test(balanced(text, text.indexOf("(", m.index)))) add(resolve(m[2], m[3]), file);
     }
@@ -324,4 +328,14 @@ test("the census reads each write idiom and ignores an unpriced or total-only ro
   ]));
   assert.deepEqual([...found.keys()].sort(), ["a.appended", "a.literal_log", "b.constant_log", "b.constant_object"]);
   assert.deepEqual([...found.get("b.constant_object")!], ["b.ts"]);
+});
+
+test("the priced-step census sees owned settlement adapters but not unrelated reporters", () => {
+  const found = stepsWrittenWithAPrice(new Map([
+    ["src/lib/daemon.ts", `report("daemon.blocked", { pr_url: url }); reporting.report("daemon.block.parked", { pr_url: url });`],
+    ["src/lib/drain.ts", `settledLog("drain.continued", { pr_url: url }); settledLog("drain.blocked", { reason: "unpriced" });`],
+    ["src/lib/unrelated.ts", `report("not.a.ledger", { cost_usd: 1 }); reporting.report("also.not.a.ledger", { pr_url: url });`],
+  ]));
+  assert.deepEqual([...found.keys()].sort(), ["daemon.block.parked", "daemon.blocked", "drain.continued"]);
+  assert.deepEqual([...found.get("daemon.blocked")!], ["src/lib/daemon.ts"]);
 });
