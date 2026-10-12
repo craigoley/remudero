@@ -236,6 +236,32 @@ test("W1-T8484: missing or over-budget gardener spend preserves Analytics", asyn
       assert.equal(data!.instances[1]!.gardenerSpend!.gardens.length, 1,
         "the per-repository inventory bound must not hide another repository's gardeners");
     } finally { fleet.release(); }
+    const manyDir = join(stateDir, "many-repositories");
+    mkdirSync(join(manyDir, "read-model"), { recursive: true });
+    writeFileSync(join(manyDir, "ledger.ndjson"), "");
+    writeFileSync(readModelSwitchesPath(manyDir), JSON.stringify({ views: { analytics: "serve" } }));
+    const names = Array.from({ length: 20 }, (_, i) => `repo-${i}`);
+    const many = createReadModelTicker({ stateDir: manyDir, instances: names.map(name => ({ name, ledgerDir: manyDir })),
+      views: [createAnalyticsView()], oracle: "off", post: m => {
+        if (m.type === "body" && m.entry.view === "analytics") data = m.entry.body.data as AnalyticsViewData;
+      } });
+    try {
+      many.start(); many.tick();
+      for (const name of names) {
+        const repo = `fixture/${name}`;
+        const snapshot = deriveAnalyticsSnapshot([], new Date().toISOString());
+        const bodies = analyticsSourceBodies(snapshot, repo);
+        const inventory = { ...runtime(), repository: repo,
+          gardens: Array.from({ length: 32 }, (_, i) => ({ ...runtime().gardens[0], name: `garden-${String(i).padStart(2, "0")}-${"x".repeat(48)}` })) };
+        Object.assign(bodies[0]!.body as object, { gardenerSpendSource: { runtime: inventory } });
+        assert.equal(many.acceptSnapshot({ instance: name, ok: true, asOf: snapshot.asOf!, bodies }), true);
+      }
+      many.tick();
+      assert.deepEqual(data!.coverage, { counted: 20, of: 20, missing: [] });
+      const spends = data!.instances.flatMap(i => i.gardenerSpend ? [i.gardenerSpend] : []);
+      assert.ok(spends.some(s => s.reason === "over_budget"), "the fleet byte budget must remain load-bearing");
+      assert.ok(spends.reduce((bytes, s) => bytes + Buffer.byteLength(JSON.stringify(s)), 0) <= 65536);
+    } finally { many.release(); }
   } finally { rmSync(stateDir, { recursive: true, force: true }); }
 });
 
