@@ -4,9 +4,17 @@
   depends_on: []
   type: implement
   verify: auto
-  priority: 2.5
+  priority: 2.5  # kept: it is inside the machine-filing judge's risk_ruling pin, and removing it stales the pin (machine-author-verify)
   risk: low
-  status: queued
+  status: blocked
+  retirement: withdrawn  # a misread, not a selector miss: the red on #11091's coverage run 38255534581 was main's, inherited from #11085; root cause is W1-T8585; operator approval 2026-10-12
+  # Why retired: #11091's own head 50df36847 does not contain #11085 (97e3f9136) and passes
+  # test/a-spent-check-requeue-survives-ledger-rotation.test.ts 3/3; the same head merged with 97e3f9136, as CI's
+  # pull_request merge ref is, fails it 2/3 (the W1-T5935 census, on refresh.clearance). So the changed paths named
+  # in `note` are not missing selector edges. The census was picked and failed honestly; the affected-suite selector
+  # is not live (RMD_AFFECTED_SUITE_LIVE "0", W1-T8585). W1-T8585 holds the real defect: test-with-retry.mjs's
+  # emptyCoverageFailure read a nested run's summary, so #11085's own failing shard went green. The census is green on
+  # main again (32360d06a, 3/3).
   attempts: 0
   author_class: machine
   origin: "selector-shadow-miss:test/a-spent-check-requeue-survives-ledger-rotation.test.ts"
