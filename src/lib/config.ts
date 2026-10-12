@@ -32,8 +32,9 @@ export function resolveHeadroomEnabled(
   return config.headroom?.enabled ?? true;
 }
 
-export function resolveHeavyReadyDirectory(_config: { heavyReadyDirectory?: string }, _env: NodeJS.ProcessEnv = process.env): string | undefined {
-  return undefined;
+/** Startup-only opt-in. The existing explicit env override wins; neither source creates a directory. */
+export function resolveHeavyReadyDirectory(config: Pick<Config, "heavyReadyDirectory">, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return env.RMD_HEAVY_READY_DIR ?? config.heavyReadyDirectory;
 }
 
 /**
