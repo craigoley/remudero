@@ -54,8 +54,9 @@ The parts of the decision:
    daemon and serve parents stay on tsx: they own the read plane, the read
    models and the slow lane.
 2. **The `import.meta.url` modules** (`grep -rln "import\.meta\.url" src`:
-   42 when the task was filed, 45 at this record's base). No module is kept
-   external, so a module added later needs no list entry. An esbuild `onLoad` plugin gives every
+   42 when the task was filed, and the count grows as main does; the grep
+   is the live inventory). No module is kept external, so a module added
+   later needs no list entry. An esbuild `onLoad` plugin gives every
    first-party module a module-scoped constant equal to the URL of **its own
    source file**, resolved relative to the bundle (`new URL("../../src/lib/x.ts",
    <bundle url>)`). `define` binds `import.meta.url` to that constant
@@ -73,11 +74,13 @@ The parts of the decision:
 4. **Worker-thread entries.** Under the bundle, a worker started from a
    module's own URL (`new Worker(new URL(import.meta.url))`, or a `workerUrl`
    parameter defaulting to it) resolves to the module's `.ts` source, as
-   before. At this record's base that covers read-model-worker.ts,
+   before. When this record was written that covered read-model-worker.ts,
    read-model-slow-lane.ts, status.ts, board-worker.ts, ledger-union.ts,
    console-projection-worker.ts, config-gardener.ts and serve-plan-reload.ts;
-   repo-dashboard-route.ts and secret-boundary.ts start workers from a URL
-   their caller passes in (`grep -rln "new Worker(" src`). A bundled process has no
+   repo-dashboard-route.ts, secret-boundary.ts and worker-provider.ts start
+   workers from a URL their caller passes in, and loop-stall-profiler.ts runs
+   an inline `eval` source that needs no loader (`grep -rln "new Worker(" src`
+   is the live inventory). A bundled process has no
    tsx loader, so it cannot start such a worker as-is. The read plane already
    loads `src/run-task.ts` through a tsx-registering eval bootstrap
    (`src/lib/read-plane.ts`), so it is unaffected. Phase one therefore bundles
