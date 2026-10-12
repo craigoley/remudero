@@ -148,6 +148,7 @@ export function strikesToRefund(
 /** The one ledger step every refresh arm writes when it decides whether merging main can clear a red. */
 export const REFRESH_CLEARANCE_STEP = "refresh.clearance";
 export type RefreshArm = "fix-rung" | "base-fixed" | "base-red" | "stalled-stage";
+export type RefreshHistorySource = "live" | "union" | "unreadable";
 /** Which evidence decided: main's delta (`prefilter`), a refresh that already left this red
  *  (`repeat`), the trial-merge probe, or why today's refresh is kept (`partial`, `unrunnable`, `fileless`). */
 export type RefreshEvidence = "prefilter" | "repeat" | "merged-probe" | "partial" | "unrunnable" | "fileless";
@@ -201,10 +202,10 @@ export function mainPathsReachingRed(input: {
 
 /** W1-T8396 — whether merging main may clear this red. Rule 3 first: a refresh that already left the same
  *  red is never repeated until main changes a counted path. Then step 1a, the path pre-filter, and step 1b,
- *  the trial-merge probe. Red on the merged tree refuses; clear refreshes; partial or unrunnable keeps
- *  today's refresh and says why. No count, timer or clock decides anything here. */
+ *  the trial-merge probe. Red on the merged tree refuses; clear refreshes. Partial or unrunnable keeps
+ *  today's refresh only with readable history. No count, timer or clock decides anything here. */
 export async function assessRefreshClearance(
-  input: { failingTestFiles: readonly string[]; reach: { counted: string[]; complete: boolean } | undefined; priorRefresh: boolean },
+  input: { failingTestFiles: readonly string[]; reach: { counted: string[]; complete: boolean } | undefined; priorRefresh: boolean | undefined },
   probeMerge: (() => Promise<BaseProbeResult>) | undefined,
 ): Promise<RefreshClearance> {
   const countedPaths = input.reach?.counted;
@@ -215,13 +216,17 @@ export async function assessRefreshClearance(
       : "a refresh already left this red, and main has changed nothing since that could reach it" };
   }
   if (input.failingTestFiles.length === 0) {
+    if (input.priorRefresh === undefined) return { refresh: false, evidence: "fileless", ...counted,
+      reason: "refresh history is unreadable and the red names no test file to probe" };
     return { refresh: true, evidence: "fileless", ...counted, reason: "the red names no test file to probe; the arm's own path evidence decides" };
   }
   if (input.reach?.complete && input.reach.counted.length === 0) {
     return { refresh: false, evidence: "prefilter", countedPaths: [], reason:
       "main changed no failing test file, no module the failing tests import, and no CI harness path since the head's merge base" };
   }
-  if (probeMerge === undefined) return { refresh: true, evidence: "unrunnable", ...counted, reason: "the trial-merge probe is unwired; keeping today's refresh" };
+  if (probeMerge === undefined) return { refresh: input.priorRefresh !== undefined, evidence: "unrunnable", ...counted,
+    reason: input.priorRefresh === undefined ? "refresh history is unreadable and the trial-merge probe is unwired"
+      : "the trial-merge probe is unwired; keeping today's refresh" };
   // A probe that throws is a setup failure carrying its reason, the same shape main's probe records.
   const probed: BaseProbeResult = await probeMerge().then((result) => result,
     (error: unknown) => baseProbeSetupFailure(input.failingTestFiles, error));
@@ -233,6 +238,8 @@ export async function assessRefreshClearance(
   }
   if (mergedVerdict === "clear") return { refresh: true, evidence: "merged-probe", ...merged, reason: "the failing test files pass on a trial merge with main" };
   const why = probed.setup_error ?? probed.reason;
+  if (input.priorRefresh === undefined) return { refresh: false, evidence: mergedVerdict, ...merged,
+    reason: `refresh history is unreadable and the trial merge is ${mergedVerdict}${why === undefined ? "" : ` (${boundedBaseProbeReason(why)})`}` };
   return { refresh: true, evidence: mergedVerdict, ...merged, reason: mergedVerdict === "partial"
     ? "some failing test files still fail on the trial merge; keeping today's refresh"
     : `the trial merge is unrunnable${why === undefined ? "" : ` (${boundedBaseProbeReason(why)})`}; keeping today's refresh` };
@@ -283,6 +290,7 @@ export function refreshClearanceKey(prNumber: number, headSha: string, mainSha: 
 /** Refusals already decided, with the evidence that decided each, so a later pass re-reads and re-probes nothing. */
 export function refusedRefreshClearancesFromLedger(lines: readonly Row[]): Map<string, RefreshEvidence> {
   return new Map(lines.filter((line) => line.step === REFRESH_CLEARANCE_STEP && line.refresh === false &&
+    !(line.history === "unreadable" && ["partial", "unrunnable", "fileless"].includes(String(line.evidence))) &&
     typeof line.pr_number === "number" && typeof line.head_sha === "string")
     .map((line) => [refreshClearanceKey(line.pr_number as number, line.head_sha as string,
       typeof line.main_sha === "string" ? line.main_sha : undefined, strings(line.test_files)),
@@ -293,10 +301,13 @@ export function refusedRefreshClearancesFromLedger(lines: readonly Row[]): Map<s
 export function refreshClearanceFields(
   head: { arm: RefreshArm; pr_number: number; head_sha: string; main_sha?: string; checks: readonly string[]; test_files: readonly string[] },
   clearance: RefreshClearance,
+  history: RefreshHistorySource = "live",
+  unreadSources: readonly string[] = [],
 ): Row {
   return {
     ...head, checks: [...head.checks], test_files: [...head.test_files], refresh: clearance.refresh, evidence: clearance.evidence,
-    reason: clearance.reason,
+    reason: clearance.reason, history,
+    ...(history === "unreadable" ? { unread_sources: [...unreadSources] } : {}),
     ...(clearance.countedPaths === undefined ? {} : { counted_paths: clearance.countedPaths }),
     ...(clearance.mergedVerdict === undefined ? {} : { merged_verdict: clearance.mergedVerdict, merged_files: clearance.mergedFiles }),
   };
