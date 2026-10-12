@@ -419,8 +419,26 @@ function isJudgeReleasedFlowBlockerRemedy(task: Task): boolean {
   return task.verify === "auto" && task.risk_ruling?.action === "proceed" && isFlowBlockerRemedyShape(task);
 }
 
+/** A gate-gardener defuse draft (W1-T8523): one existing test file, named by the origin's suffix. */
+function isExpiringFixtureDefuseShape(task: Task): boolean {
+  const files = task.files ?? [];
+  const origin = task.origin ?? "";
+  return origin.startsWith("expiring-fixture:") && files.length === 1 && NEW_TEST_FILE.test(files[0]!) &&
+    files[0] === origin.slice("expiring-fixture:".length);
+}
+
+const SCOUT_TEST_FILE = /^test\/scout-[\w.-]+\.test\.ts$/;
+
+/** A scout draft (W1-T8523): the symptom's files, then the NEW test/scout-*.test.ts as the LAST declared file. */
+function isScoutDraftShape(task: Task): boolean {
+  const files = task.files ?? [];
+  return task.origin?.startsWith("scout:") === true && files.length > 0 && SCOUT_TEST_FILE.test(files[files.length - 1]!);
+}
+
 function isParkedMachineProposal(task: Task): boolean {
   if (isFlowBlockerRemedyProposal(task)) return true;
+  if (task.author_class === "machine" && task.verify === "human" && task.status !== "blocked" &&
+      (task.depends_on ?? []).length === 0 && (isExpiringFixtureDefuseShape(task) || isScoutDraftShape(task))) return true;
   if (task.author_class === "machine" && task.verify === "human" && task.status !== "blocked" &&
       (task.depends_on ?? []).length === 0 && (isCiFrictionRemedyProposal(task) || isHotFileRemedyProposal(task))) return true;
   return (
@@ -1364,7 +1382,9 @@ export function machineFilingAdmissionViolations(
     isSelectorShadowStructuralShape(task) || isHotFileRemedyProposal(task);
   // A merge-driver remedy creates the repository's .gitattributes; no other declared non-test file may be new.
   const created = (path: string) => NEW_TEST_FILE.test(path) || (path === ".gitattributes" && isHotFileRemedyProposal(task));
-  const missing = (task.files ?? []).filter((path) => !exists(path) && !existsAtBase(path) && !(newTestAllowed && created(path)));
+  const declared = task.files ?? [];
+  const scoutNew = isScoutDraftShape(task) ? declared[declared.length - 1] : undefined;
+  const missing = declared.filter((path) => !exists(path) && !existsAtBase(path) && !(newTestAllowed && created(path)) && path !== scoutNew);
   if (missing.length > 0) {
     reasons.push(
       `task ${task.id} declares file path(s) that exist in neither the checkout nor the base tree: ` +
