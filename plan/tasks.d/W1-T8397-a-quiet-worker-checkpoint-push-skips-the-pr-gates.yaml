@@ -2,6 +2,7 @@
   title: "A QUIET-WORKER CHECKPOINT PUSH STILL RUNS THE PR GATES — the W1-T7807 `endRound` checkpoint calls `gitPushRunBranchAsync(cwd)` with no `{ prGates: false }`, so a census refusal fails the checkpoint and leaves the round's work committed only in the worktree; #10862 skipped the gates only on the restart-yield push"
   repo: remudero
   depends_on: [W1-T8008]  # #11017 rewrites the same endRound lines (commitAndPushRestartCheckpoint); build on it, not beside it
+  dispatch_hold: true  # operator 2026-10-12: held for a session build — the end_round checkpoint push runs the PR pre-push gates, so recycle/restart mid-worker yields fail; release after the session PR merges
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -12,7 +13,7 @@
   plan_refs: [W1-T7697, W1-T7807, W1-T8008, W1-T8133, W1-T8139]
   files: [src/run-task.ts, test/a-quiet-worker-checkpoint-push-skips-the-pr-gates.test.ts]
   status: queued
-  priority: 2
+  priority: 1
   attempts: 0
   rationale: |
     READ on origin/main 38470cc40, src/run-task.ts (symbol names, not line numbers):
