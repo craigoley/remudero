@@ -243,7 +243,8 @@ export function dispatchRunHistory(rawLines: readonly string[]): { totalMs: numb
 export const HANDOFF_RECEIPT_STEP = "run.freshness_handoff";
 
 /** A pre-PR handoff's exact pushed head is resumable; any later verdict replaces that receipt, except a failed
- *  restore, which consumed nothing (W1-T7806). A `run.freshness_handoff` row is a receipt too (W1-T7747). */
+ *  restore, which consumed nothing (W1-T7806). A matching checkpoint drop consumes the receipt;
+ *  a `run.freshness_handoff` row is a receipt too (W1-T7747). */
 export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<string, { branch: string; headSha: string }> {
   const pending = new Map<string, { branch: string; headSha: string }>();
   for (const raw of rawLines) {

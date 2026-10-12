@@ -5221,7 +5221,7 @@ export type BoundaryCheckpointRestore =
  * When main conflicts, the branch stays on the checkpoint's own base and the run goes on; the conflict
  * reaches the PR, whose merge-conflict repair rounds resolve it. Why: a cherry-pick onto a moved main
  * conflicted and ended W1-T7806 and W1-T7766 `restart_checkpoint_restore_failed`, stranding paid work.
- * Only a remote head that moved since the handoff still refuses — that is someone else's work.
+ * An absent head is recovered or dropped; a moved head still refuses replay of someone else's work.
  */
 export async function restoreBoundaryCheckpoint(
   checkpoint: { branch: string; headSha: string },
@@ -25565,6 +25565,7 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
   if (!prReadFailed) opts.onNoPrHeadCacheUpdate?.(nextNoPrHeadCache(facts, tipShaByName));
 
   const plan = planBranchReap(facts, DECLARED_BRANCH_GUARDS);
+  const readFile = opts.readFile ?? ((p: string) => readFileSync(p, "utf8"));
   const keptReversibleClose = keepReversiblyClosedHeads(plan, () => {
     const sourcePath = opts.creditLedgerPath ?? opts.ledgerPath ?? configuredLedgerPathOrUndefined();
     return sourcePath === undefined ? undefined : readLedgerLines(sourcePath);
@@ -25572,13 +25573,16 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
   let receiptBranches = new Set<string>();
   const receiptLedgerPath = opts.creditLedgerPath ?? opts.ledgerPath;
   try {
-    if (receiptLedgerPath !== undefined && existsSync(receiptLedgerPath)) {
-      const rawLines = readFileSync(receiptLedgerPath, "utf8").split("\n");
+    if (receiptLedgerPath !== undefined) {
+      const rawLines = readFile(receiptLedgerPath).split("\n");
       receiptBranches = new Set([...pendingWorkerBoundaryHandoffs(rawLines).values()].map((receipt) => receipt.branch));
     }
   } catch (error) {
-    receiptBranches = new Set(plan.deletable.filter((name) => /^run-.+-[0-9]+$/.test(name)));
-    printError(`rmd reap-branches: keeping every run-shaped head — the handoff ledger could not be read (${String(error)})`);
+    // Only ENOENT establishes absence; access failures cannot rule out a pending receipt.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      receiptBranches = new Set(plan.deletable.filter((name) => /^run-.+-[0-9]+$/.test(name)));
+      printError(`rmd reap-branches: keeping every run-shaped head — the handoff ledger could not be read (${String(error)})`);
+    }
   }
   const keptHandoffReceipts = plan.deletable.filter((name) => receiptBranches.has(name));
   plan.deletable = plan.deletable.filter((name) => !receiptBranches.has(name));
@@ -25603,7 +25607,6 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
   } catch {
     citationRaw = ""; // git grep exits 1 on no match — a real "nothing cited", not a failure
   }
-  const readFile = opts.readFile ?? ((p: string) => readFileSync(p, "utf8"));
   let declarationBlock: { file: string; start: number; end: number } | undefined;
   try {
     const span = declaredGuardsBlockSpan(readFile(join(checkoutRoot, DECLARED_BRANCH_GUARDS_FILE)));

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { pendingWorkerBoundaryHandoffs, handoffReceiptsToCarry } from "../src/lib/daemon.js";
-import { DECLARED_BRANCH_GUARDS, reapBranchesCommand, restoreBoundaryCheckpoint } from "./helpers/run-task-test.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { DECLARED_BRANCH_GUARDS, reapBranchesCommand, restoreBoundaryCheckpoint, runTask } from "./helpers/run-task-test.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const taskId = "W1-T8503";
@@ -13,7 +14,7 @@ const receipt = (headSha = sha) => ({ task_id: taskId, step: "verdict", verdict:
   reason: "freshness_yield", branch, head_sha: headSha });
 const lines = (rows: Record<string, unknown>[]) => rows.map((row) => JSON.stringify(row));
 
-function reap(rows: Record<string, unknown>[], unreadable = false, prState = "none") {
+function reap(rows: Record<string, unknown>[], unreadable: boolean | "denied" | "missing" | "unconfigured" = false, prState = "none") {
   const repo = gitRepo();
   const ledgerPath = join(repo.dir, "ledger.ndjson");
   writeFileSync(ledgerPath, lines(rows).join("\n") + "\n");
@@ -37,7 +38,12 @@ function reap(rows: Record<string, unknown>[], unreadable = false, prState = "no
   };
   try {
     reapBranchesCommand(["--prune"], { exec, root: repo.dir, quiet: true, ownerRepo: { owner: "fixture", repo: "fixture" },
-      ledgerPath, creditLedgerPath: unreadable ? repo.dir : ledgerPath });
+      ledgerPath: unreadable === "unconfigured" ? undefined : ledgerPath,
+      creditLedgerPath: unreadable === true ? repo.dir : unreadable === "missing" ? join(repo.dir, "missing.ndjson") : undefined,
+      readFile: unreadable === "denied" ? (path) => {
+        if (path === ledgerPath) throw Object.assign(new Error("access denied"), { code: "EACCES" });
+        return readFileSync(path, "utf8");
+      } : undefined });
     const report = readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).map((raw) => JSON.parse(raw))
       .find((row) => row.step === "branch_reap.dry_run");
     return { deleted, report };
@@ -45,8 +51,8 @@ function reap(rows: Record<string, unknown>[], unreadable = false, prState = "no
 }
 
 test("W1-T8503: the branch reap keeps a run branch a live handoff receipt names", () => {
-  for (const state of ["none", "merged", "closed"]) {
-    const result = reap([receipt()], false, state);
+  for (const state of ["none", "merged", "closed"]) for (const step of ["verdict", "run.freshness_handoff"]) {
+    const result = reap([{ ...receipt(), step }], false, state);
     assert.deepEqual(result.report.kept_handoff_receipt_branches, [branch]);
     assert.equal(result.deleted.includes(branch), false);
     assert.ok(result.deleted.includes("run-W1-T99-2"), "unrelated run heads remain reapable");
@@ -55,9 +61,19 @@ test("W1-T8503: the branch reap keeps a run branch a live handoff receipt names"
 });
 
 test("W1-T8503: an unreadable ledger keeps every run-shaped head", () => {
-  const result = reap([], true);
-  assert.deepEqual(result.report.kept_handoff_receipt_branches, [branch, "run-W1-T99-2"]);
-  assert.deepEqual(result.deleted, ["finished"]);
+  for (const failure of [true, "denied"] as const) {
+    const result = reap([], failure);
+    assert.deepEqual(result.report.kept_handoff_receipt_branches, [branch, "run-W1-T99-2"]);
+    assert.deepEqual(result.deleted, ["finished"]);
+  }
+});
+
+test("W1-T8503: a missing or unconfigured ledger keeps no receipt branches", () => {
+  for (const missing of ["missing", "unconfigured"] as const) {
+    const result = reap([receipt()], missing);
+    assert.ok(result.deleted.includes(branch));
+    if (missing === "missing") assert.deepEqual(result.report.kept_handoff_receipt_branches, []);
+  }
 });
 
 test("W1-T8503: a consumed receipt no longer protects its branch", () => {
@@ -160,9 +176,94 @@ test("W1-T8503: a failed ls-remote or a moved head still refuses", async () => {
   const f = fixture();
   try {
     await assert.rejects(restoreBoundaryCheckpoint({ branch, headSha: f.headSha }, taskId, async () => { throw new Error("remote unavailable"); }, f.log), /remote unavailable/);
+    const fetchFailure = Object.assign(new Error("fetch failed"), { stderr: "connection timed out" });
+    await assert.rejects(restoreBoundaryCheckpoint({ branch, headSha: f.headSha }, taskId, async (args) => {
+      if (args[0] === "fetch") throw fetchFailure;
+      return f.repo.git(...args);
+    }, f.log), (error) => error === fetchFailure);
     f.origin.git("update-ref", `refs/heads/${branch}`, f.origin.git("rev-parse", "main"));
     await assert.rejects(restoreBoundaryCheckpoint({ branch, headSha: f.headSha }, taskId, async (args) => f.repo.git(...args), f.log), /remote head moved/);
     assert.deepEqual(f.rows, []);
     assert.equal(pendingWorkerBoundaryHandoffs(lines([receipt(f.headSha), { task_id: taskId, step: "verdict", verdict: "no_pr", reason: "restart_checkpoint_restore_failed" }])).size, 1);
   } finally { f.cleanup(); }
+});
+
+test("W1-T8503: a concurrent branch recreation is never overwritten", async () => {
+  const f = fixture();
+  try {
+    const main = f.origin.git("rev-parse", "main");
+    await assert.rejects(restoreBoundaryCheckpoint({ branch, headSha: f.headSha }, taskId, async (args) => {
+      if (args[0] === "push") f.origin.git("update-ref", `refs/heads/${branch}`, main);
+      return f.repo.git(...args);
+    }, f.log), /stale info/);
+    assert.equal(f.origin.git("rev-parse", branch), main);
+    assert.equal(f.repo.git("rev-parse", "HEAD"), main);
+    assert.deepEqual(f.rows, []);
+    assert.equal(pendingWorkerBoundaryHandoffs(lines([receipt(f.headSha)])).size, 1);
+  } finally { f.cleanup(); }
+});
+
+test("W1-T8503: a mismatched fetched object is dropped without recreating a branch", async () => {
+  const f = fixture();
+  try {
+    const main = f.repo.git("rev-parse", "HEAD");
+    const restored = await restoreBoundaryCheckpoint({ branch, headSha: f.headSha }, taskId, async (args) => {
+      if (args[0] === "rev-parse" && args[1] === "FETCH_HEAD") return main;
+      return f.repo.git(...args);
+    }, f.log);
+    assert.equal(restored.base, "main");
+    assert.equal(restored.dropped, true);
+    assert.equal(f.repo.git("rev-parse", "HEAD"), main);
+    assert.equal(f.repo.git("ls-remote", "origin", `refs/heads/${branch}`), "");
+    assert.equal(f.rows.length, 1);
+    assert.equal(f.rows[0]?.reason, "fetched object does not match the checkpoint head");
+    assert.equal(pendingWorkerBoundaryHandoffs(lines([receipt(f.headSha), ...f.rows])).size, 0);
+  } finally { f.cleanup(); }
+});
+
+test("W1-T8503: absent checkpoint recovery reaches recon in the same dispatch", async () => {
+  for (const inMain of [true, false]) {
+    const f = fixture(inMain);
+    const root = gitRepo();
+    try {
+      if (!inMain) { f.origin.git("reflog", "expire", "--expire=now", "--all"); f.origin.git("gc", "--prune=now"); }
+      mkdirSync(join(root.dir, "repos"));
+      renameSync(f.repo.dir, join(root.dir, "repos", "remudero"));
+      mkdirSync(join(root.dir, "state"));
+      const ledgerPath = join(root.dir, "state", "ledger.ndjson");
+      writeFileSync(ledgerPath, lines([{ ...receipt(f.headSha), step: "run.freshness_handoff" }]).join("\n") + "\n");
+      const planPath = join(root.dir, "tasks.yaml");
+      writeFileSync(planPath, `- id: ${taskId}\n  title: receipt fixture\n  repo: remudero\n  type: implement\n  verify: auto\n  risk: high\n  origin: test\n  status: queued\n  files: [paid-work.txt]\n`);
+      let calls = 0;
+      let observed: Record<string, unknown>[] = [];
+      const stopped = new Error("fixture reached recon");
+      await assert.rejects(withLiveWritesAllowed(() => runTask(taskId, {
+        config: { claudeBin: "/bin/true", root: root.dir, installRoot: process.cwd() },
+        skipGitSync: true, planPath,
+        github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
+        claimReserver: { mintAnchor: () => "receipt-anchor", attempt: () => "created", holder: () => undefined, drop: () => true },
+        containmentExec: async (token) => ({ transcript: `touch ../${token}: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
+        isolationExec: async () => ({ transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -", aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0 }),
+        externalWaitFreshness: () => undefined,
+        spawn: async (args) => {
+          calls++;
+          observed = readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).map((raw) => JSON.parse(raw));
+          assert.equal(f.origin.git("-C", args.cwd, "rev-parse", "HEAD"), f.origin.git("rev-parse", "main"));
+          throw stopped;
+        },
+      })), (error) => error === stopped);
+      assert.equal(calls, 1, "this dispatch starts a worker after recovering the absent branch");
+      assert.equal(observed.some((row) => row.step === "verdict"), false, "recovery does not burn a no_pr dispatch");
+      const recovery = observed.filter((row) => row.step === (inMain ? "implement.checkpoint_restored" : "implement.checkpoint_dropped"));
+      assert.equal(recovery.length, 1);
+      assert.equal(recovery[0].task_id, taskId);
+      assert.equal(recovery[0].source_branch, branch);
+      if (inMain) assert.equal(recovery[0].source_branch_absent, true);
+      else {
+        assert.equal(recovery[0].head_sha, f.headSha);
+        assert.equal(pendingWorkerBoundaryHandoffs(lines(observed)).size, 0);
+        assert.deepEqual(handoffReceiptsToCarry(lines(observed)), []);
+      }
+    } finally { root.cleanup(); f.cleanup(); }
+  }
 });
