@@ -489,3 +489,15 @@ export function pinnedConfigValue(pin: PinnedWorktreeGit, key: string): string |
     throw error;
   }
 }
+
+/** W1-T7744 — {@link pinnedConfigValue} off the event loop: the same read, the same unset answer. */
+export async function pinnedConfigValueAsync(pin: PinnedWorktreeGit, key: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await execFilePromise("git", ["-C", pin.worktree, "config", "--get", key], { encoding: "utf8", env: configReadEnv(pin) });
+    return stdout.trim();
+  } catch (error) {
+    // Exit 1 is git's own "the key is unset" (execFile reports the exit status as `code`); any other failure propagates.
+    if ((error as { code?: unknown }).code === 1) return undefined;
+    throw error;
+  }
+}

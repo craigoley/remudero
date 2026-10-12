@@ -2360,6 +2360,8 @@ export interface SweepLiveness {
   /** True while a `deps.sweep()` promise is still executing, INCLUDING after its await was
    *  abandoned by the wall-clock bound. */
   inFlight: boolean;
+  /** W1-T8170: successful completion, including a pass that settled after its wait bound. */
+  lastCompletedAtMs?: number;
 }
 
 async function runGatedSweep(
@@ -2412,7 +2414,10 @@ async function runGatedSweep(
     // `finally` below, which runs when the await ends, is what keeps the flag true through the
     // abandon-to-settle window every observed re-entry landed in. `then(onOk, onErr)` rather than
     // `finally`, so this derived promise can never become an unhandled rejection of its own.
-    if (liveness) void sweepPromise.then(() => { liveness.inFlight = false; }, () => { liveness.inFlight = false; });
+    if (liveness) void sweepPromise.then(() => {
+      liveness.inFlight = false;
+      liveness.lastCompletedAtMs = clockFromDateFn(deps.now).now();
+    }, () => { liveness.inFlight = false; });
     const startedAtMs = Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const bound = new Promise<"abandoned">((resolve) => {
@@ -3439,17 +3444,22 @@ export async function runDaemon(
   // ledger and stale summary contract; duplicating that sequence would let them drift (W1-T2845).
   const stopForFreshness = async (
     freshness: Extract<DaemonFreshness, { stale: true }>,
+    dispatchLatchAtMs?: number,
   ): Promise<DaemonSummary> => {
     // Install BEFORE the loop stops for restart, never after, so the relaunched process inherits deps
     // matching the new sha rather than the stale tree this process is still running (W1-T151).
     if (freshness.installNeeded) {
       deps.runInstall?.();
     }
-    // Every stale exit reaches the same bounded full-pass gate before returning. The restart is never
-    // suppressed by the pass, and no second implementation is introduced (W1-T1272).
-    // W1-T4998: a background pass still running IS that pass; its call returns within the same bound.
+    // A pass completed during the dispatch latch already reached the full sweep (W1-T8170/W1-T1272).
+    // A running pass is still awaited within its bound; other freshness exits keep their pass.
+    let preExitPass: "skipped_ran_since_latch" | "awaited_in_flight" | "ran" = "ran";
     if (backgroundSweep) {
+      preExitPass = "awaited_in_flight";
       await backgroundSweep;
+    } else if (dispatchLatchAtMs !== undefined && sweepLiveness.lastCompletedAtMs !== undefined &&
+      sweepLiveness.lastCompletedAtMs > dispatchLatchAtMs) {
+      preExitPass = "skipped_ran_since_latch";
     } else if (deps.sweep) {
       sweepRetriggerState.lastRunAtMs = daemonClock.now();
       await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
@@ -3460,7 +3470,7 @@ export async function runDaemon(
     const detail =
       `origin/main advanced ${freshness.oldSha.slice(0, 7)}..${freshness.newSha.slice(0, 7)} ` +
       `past this process's boot sha`;
-    log("daemon_selfrestart_for_freshness", { old_sha: freshness.oldSha, new_sha: freshness.newSha });
+    log("daemon_selfrestart_for_freshness", { old_sha: freshness.oldSha, new_sha: freshness.newSha, pre_exit_pass: preExitPass });
     return summary("stale", detail);
   };
 
@@ -5937,7 +5947,7 @@ export async function runDaemon(
 
     if (inFlightFreshness && !deps.checkStop?.() && !deps.checkPause?.()) {
       await stopInterphaseReviewClock();
-      return stopForFreshness(inFlightFreshness);
+      return stopForFreshness(inFlightFreshness, restartWait.decidedAtMs);
     }
 
     if (apiWindowHoldMs > 0) {

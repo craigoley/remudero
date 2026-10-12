@@ -14,7 +14,9 @@ import {
   hostWorktreeGit,
   hostWorktreeGitAsync,
   pinnedConfigValue,
+  pinnedConfigValueAsync,
   pinWorktreeGit,
+  type PinnedWorktreeGit,
 } from "./worktree-git.js";
 
 /**
@@ -450,9 +452,10 @@ function* prePushGateSteps(
   worktreePath: string,
   pushArgs: string[],
   read: (args: string[]) => string | Promise<string>,
+  readConfig: (pin: PinnedWorktreeGit, key: string) => string | undefined | Promise<string | undefined>,
 ): Steps<PrePushGate | undefined> {
   const pin = pinWorktreeGit(worktreePath);
-  const configured = pinnedConfigValue(pin, "core.hooksPath");
+  const configured = yield* step(() => readConfig(pin, "core.hooksPath"));
   if (configured === undefined || configured === "" || configured === "/dev/null") return undefined;
   const hook = join(harnessHooksDir(), "pre-push");
   if (!existsSync(hook)) return undefined;
@@ -588,7 +591,7 @@ const GATE_MAX_BUFFER = 64 * 1024 * 1024;
 export function worktreePushExec(worktreePath: string): PushExec {
   return (_file, args, opts) => {
     const pushArgs = leafArgs(worktreePath, args);
-    const gate = runStepsSync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGit(worktreePath, a)));
+    const gate = runStepsSync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGit(worktreePath, a), pinnedConfigValue));
     if (gate) {
       const res = withGateHome(gate, (env) => spawnSync(gate.hook, gate.args, {
         cwd: worktreePath, input: gate.input, env, encoding: "utf8", maxBuffer: GATE_MAX_BUFFER,
@@ -609,7 +612,9 @@ export function worktreePushExec(worktreePath: string): PushExec {
 export function worktreePushExecAsync(worktreePath: string, { prGates = true }: { prGates?: boolean } = {}): PushExecAsync {
   return async (_file, args, opts) => {
     const pushArgs = leafArgs(worktreePath, args);
-    const gate = prGates ? await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGitAsync(worktreePath, a))) : undefined;
+    const gate = prGates
+      ? await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGitAsync(worktreePath, a), pinnedConfigValueAsync))
+      : undefined;
     if (gate) {
       try {
         const out = await withGateHome(gate, (env) => new Promise<{ stdout: string; stderr: string }>((resolveGate, reject) => {
