@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { runDaemon } from "../src/lib/daemon.js";
+import type { HeavyBuildHold } from "../src/lib/heavy-build-reservation.js";
 import { runnableCandidates } from "../src/lib/drain.js";
 import { preDispatchContractRevision, terminalPreDispatchRefusalRevisions, writePriorRefusal } from "../src/lib/dispatch-repair.js";
 import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
@@ -100,6 +101,47 @@ test("a corrected categorized worker refusal rejoins dispatch once", async () =>
   const hold = JSON.parse(readFileSync(join(f.state, "dispatch-repair", `${f.old.id}.json`), "utf8"));
   assert.equal(hold.sourceRunId, "retry");
 });
+
+for (const boundary of ["already-held", "hold-after-receipt", "receipt-throws"] as const) {
+  test(`corrected refusal ${boundary} has no phantom start or spent re-offer`, { timeout: 2_000 }, async () => {
+    const f = fixture();
+    let latest = new Map<string, StatusProjection>();
+    let held = boundary === "already-held", stop = false, dispatches = 0, receipts = 0;
+    const hold: HeavyBuildHold = { deferred: true, requestId: "a".repeat(64),
+      readyAtMs: 1, expiresAtMs: 3_600_001, detail: "bounded test hold" };
+    const result = await runDaemon(f.plan(f.corrected), {
+      refreshMerged: () => { latest = f.project(f.corrected); return () => false; },
+      isIndependentFailureBlocked: (id) => latest.get(id)?.independentFailureBlocked === true,
+      categorizedRefusalRejoinFor: (id) => latest.get(id)?.categorizedRefusalRejoin,
+      readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(f.state),
+      checkHeavyNewBuild: () => held ? hold : undefined,
+      checkStop: () => stop ? "test completed" : undefined,
+      runOne: async () => { dispatches++; assert.fail("a held or failed re-offer cannot launch a worker"); },
+      log: (step, fields = {}) => {
+        if (step === "dispatch.harness_commit_retry") {
+          receipts++;
+          if (boundary === "receipt-throws") throw 0;
+          assert.equal(fields.admission_stage, "contract_reoffer");
+          f.append({ step, run_id: "daemon", ...fields });
+          held = true;
+          return;
+        }
+        f.append({ step, run_id: "daemon", ...fields });
+        if (step === "dispatch.new_build_held") stop = true;
+      },
+      sleep: async () => {},
+    }, { max: 1 });
+    assert.equal(result.stopReason, boundary === "receipt-throws" ? "error" : "stopped");
+    if (boundary === "receipt-throws") assert.match(result.stopDetail ?? "", /CONSOLE-T100: admit: 0/);
+    assert.equal(dispatches, 0);
+    assert.equal(receipts, boundary === "already-held" ? 0 : 1);
+    assert.deepEqual(result.attempted, []);
+    assert.deepEqual(result.merged, []);
+    assert.equal(result.costUsd, 0);
+    assert.deepEqual(f.select(f.corrected).map((task) => task.id), [f.old.id],
+      "a re-offer reason is not run.start and never spends the source's retry");
+  });
+}
 
 test("ordinary failures and unverified refusal contracts remain held", () => {
   for (const kind of ["ordinary", "unchanged", "comment-only", "unrelated", "missing-hold", "corrupt-hold",
