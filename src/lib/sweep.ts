@@ -29,6 +29,9 @@ import {
   BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason,
   baseReproductionFiles, ciContradictedProbeFiles, decideBaseReproduction, failingTestFilesFromCiFailures, isMainGreenOnItsOwnHead, mainFailingTestFiles,
   probeCacheFromLedger, probeCacheKey, refundedStrikeKeys, strikesToRefund, type BaseProbeFile, type BaseProbeResult,
+  assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshClearanceKey,
+  refreshedOnSameRed, refreshRecordsFromLedger, refusedRefreshClearancesFromLedger,
+  type ImportClosureRead, type RefreshArm, type RefreshClearance,
 } from "./base-reproduction.js";
 export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
 import { parse as parseYaml } from "yaml";
@@ -1466,6 +1469,9 @@ export interface BuildSweepEffectsDeps {
   productionProgressJudge?: boolean;
   headRehomeImpl?: HeadRehomePorts;
   reproduceFailingTestsOnMainImpl?: SweepDeps["reproduceFailingTestsOnMain"];
+  /** W1-T8396: the failing tests' import closure and the trial-merge probe a refresh arm decides from. */
+  readTestImportClosureImpl?: SweepDeps["readTestImportClosure"];
+  reproduceFailingTestsOnMergeImpl?: SweepDeps["reproduceFailingTestsOnMerge"];
   /** W1-T4415 — marks one draft PR ready for review; the entrypoint adapter supplies the write. */
   readyDraftImpl?: (pr: OpenPrView) => void | Promise<void>;
   owner: string;
@@ -1849,6 +1855,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "readerAgreement",
   "fixProgressJudge", // W1-T7096
   "reproduceFailingTestsOnMain",
+  "readTestImportClosure", // W1-T8396
+  "reproduceFailingTestsOnMerge", // W1-T8396
   "arm",
   "readArmFacts",
   "close",
@@ -1988,6 +1996,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readerAgreement"
   | "fixProgressJudge"
   | "reproduceFailingTestsOnMain"
+  | "readTestImportClosure"
+  | "reproduceFailingTestsOnMerge"
   | "arm"
   | "readArmFacts"
   | "close"
@@ -4160,6 +4170,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // decision runFixRung already uses. This is deliberately not exposed through Serve.
     readRedBaseRefreshFacts: (pr) => redBaseRefreshFactsFromRest(owner, repo, pr.prNumber),
     reproduceFailingTestsOnMain: deps.reproduceFailingTestsOnMainImpl,
+    readTestImportClosure: deps.readTestImportClosureImpl,
+    reproduceFailingTestsOnMerge: deps.reproduceFailingTestsOnMergeImpl,
 
     // W1-T3422/W1-T3577 — reached only after `selectStaleRedRelease` admits the cheap candidate; it shares the daemon REST pacer and has no retry/wait loop.
     readStaleRedWorkflowRuns: (pr) =>
@@ -8237,10 +8249,16 @@ export function fixedOnMainTestFiles(
 
 /** W1-T6405 — the one ledger row of a fixed-on-main refresh, written by the fix rung and the stalled-stage rung alike. */
 export function baseFixedRefreshRow(
-  runId: string, pr: OpenPrView, mainSha: string, testFiles: readonly string[], outcome: string,
+  runId: string, pr: OpenPrView, mainSha: string, testFiles: readonly string[], outcome: string, checks: readonly string[] = [],
 ) {
+  // W1-T8396: `check_names` names the red this refresh was taken on, so no arm repeats it on the head it makes.
   return { run_id: runId, task_id: pr.taskId ?? "SWEEP", step: BASE_FIXED_REFRESH_STEP, pr_number: pr.prNumber,
-    head_sha: pr.headSha, main_sha: mainSha, test_files: [...testFiles], outcome };
+    head_sha: pr.headSha, main_sha: mainSha, test_files: [...testFiles], check_names: [...checks], outcome };
+}
+
+/** W1-T8396 — the checks of a red whose failure names a probeable test file. */
+function testFileChecks(failures: readonly CiFailure[]): string[] {
+  return [...new Set(failures.filter((failure) => baseReproductionFiles([failure]).length > 0).map((failure) => failure.name))];
 }
 
 /** Per `pr@head`: the check a prior pass stood down as a base red, whether its one refresh was
@@ -11727,6 +11745,14 @@ export interface SweepDeps {
   reproduceFailingTestsOnMain?: (
     pr: OpenPrView, files: readonly string[], mainTipSha: string,
   ) => Promise<BaseProbeResult>;
+  /** W1-T8396: what a refresh arm reads before merging main into a red head whose failing test files
+   *  are known — each failing test's import closure, and the failing tests run on a trial merge of the
+   *  head with main's tip. Unwired, the arm keeps today's refresh and its {@link REFRESH_CLEARANCE_STEP}
+   *  row says why. */
+  readTestImportClosure?: ImportClosureRead;
+  reproduceFailingTestsOnMerge?: (
+    pr: OpenPrView, files: readonly string[], mainTipSha: string,
+  ) => Promise<BaseProbeResult>;
   strikeLadder?: StrikeLadderEffects;
   /** Arm GitHub auto-merge; idempotent at the GitHub level. RETURNS ITS OUTCOME: `armAutoMerge` does
    *  not throw, and most outcomes mean it armed NOTHING. The effect used to discard that value while
@@ -14341,11 +14367,17 @@ export async function runSweep(
       if (prior === undefined && !baseRedHistory.refreshed.has(refreshKey) && deps.updateBranch) {
         // This pass's ONE base-red refresh went to another PR: the next pass takes this one.
         if (baseRedRefreshPr !== undefined && baseRedRefreshPr !== pr.prNumber) return;
-        baseRedRefreshPr = pr.prNumber;
-        try { outcome = await deps.updateBranch(pr); }
-        catch (error) { outcome = `error: ${String(error)}`; }
-        appendLine(deps.ledgerPath, baseFixedRefreshRow(deps.runId, pr, mainTipSha, fixedFiles, outcome));
-        baseRedHistory.refreshed.add(refreshKey);
+        // W1-T8396: a fixed-on-main read is evidence only when merging main can clear the red.
+        const checks = testFileChecks(pr.ciFailures ?? []);
+        const clearance = await assessRefresh(pr, "stalled-stage", checks, fixedFiles, mainTipSha);
+        if (clearance.refresh) {
+          baseRedRefreshPr = pr.prNumber;
+          try { outcome = await deps.updateBranch(pr); }
+          catch (error) { outcome = `error: ${String(error)}`; }
+          appendLine(deps.ledgerPath, baseFixedRefreshRow(deps.runId, pr, mainTipSha, fixedFiles, outcome, checks));
+          baseRedHistory.refreshed.add(refreshKey);
+          recordRefresh(pr, checks, fixedFiles, outcome);
+        } else outcome = `refused: ${clearance.evidence}`;
       }
       if (outcome === "updated" || outcome === "head-moved") {
         const row = { pr_number: pr.prNumber, ...fields, diagnosis: "fixed-on-main", bound_minutes: bound.minutes,
@@ -14650,6 +14682,45 @@ export async function runSweep(
     appendLine(deps.ledgerPath, { ...row, step: "sweep.base_reproduction" });
     if (probed.setup_error === undefined) for (const file of files) reproductionCache.set(probeCacheKey(mainSha, file.file), file);
     return row;
+  };
+  // W1-T8396 — every refresh step, keyed by PR and red, and the refusals already decided.
+  const refreshRecords = refreshRecordsFromLedger(ledgerLines);
+  const refusedClearances = refusedRefreshClearancesFromLedger(ledgerLines);
+  /** W1-T8396 — may merging main clear this head's red? Main's delta since the head's merge base, each
+   *  failing test's import closure, the refresh history and a trial merge decide; one row records it.
+   *  A refusal already recorded for this head and main is reused, never re-read or re-probed. */
+  const assessRefresh = async (
+    pr: OpenPrView, arm: RefreshArm, checks: readonly string[], testFiles: readonly string[], mainSha: string,
+  ): Promise<RefreshClearance> => {
+    const memo = refreshClearanceKey(pr.prNumber, pr.headSha, mainSha, testFiles);
+    const decided = refusedClearances.get(memo);
+    if (decided !== undefined) return { refresh: false, evidence: decided, reason: "this head's refusal at this main is already recorded" };
+    let mainChangedFiles: string[] | undefined;
+    try {
+      mainChangedFiles = (await deps.readRedBaseRefreshFacts?.(pr))?.baseChangedFiles;
+    } catch (error) {
+      // An unread delta is no evidence either way: `mainPathsReachingRed` then proves nothing.
+      log("sweep.red_base_refresh.read_error", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
+    }
+    let closure: ReadonlyMap<string, ReadonlySet<string>> | undefined;
+    try {
+      closure = deps.readTestImportClosure ? await deps.readTestImportClosure(pr, testFiles, mainSha) : undefined;
+    } catch (error) {
+      // An unreadable closure is unknown, never empty: the pre-filter cannot refuse on it.
+      log("refresh.clearance.closure_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
+    }
+    const clearance = await assessRefreshClearance({
+      failingTestFiles: testFiles,
+      reach: mainPathsReachingRed({ failingTestFiles: testFiles, mainChangedFiles, closure, isHarnessPath: isCiHarnessPath }),
+      priorRefresh: refreshedOnSameRed(refreshRecords, pr.prNumber, checks, testFiles),
+    }, deps.reproduceFailingTestsOnMerge ? () => deps.reproduceFailingTestsOnMerge!(pr, testFiles, mainSha) : undefined);
+    appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: REFRESH_CLEARANCE_STEP,
+      ...refreshClearanceFields({ arm, pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainSha, checks, test_files: testFiles }, clearance) });
+    if (!clearance.refresh) refusedClearances.set(memo, clearance.evidence);
+    return clearance;
+  };
+  const recordRefresh = (pr: OpenPrView, checks: readonly string[], testFiles: readonly string[], outcome: string) => {
+    if (outcome === "updated") refreshRecords.set(pr.prNumber, [...(refreshRecords.get(pr.prNumber) ?? []), { checks: [...checks], testFiles: [...testFiles] }]);
   };
   let baseRedRefreshPr: number | undefined;
   // W1-T5349 — the plan-repair rung's once-per-head record, folded once per pass.
@@ -17216,17 +17287,24 @@ export async function runSweep(
                 // W1-T6405: main's fix can land BEFORE this head's first probe, so nothing was ever
                 // reproduced — a head BEHIND that main still takes it once before any fix round.
                 const fixedOnMain = !previouslyReproduced && (deps.behindMainByPr?.get(pr.prNumber) ?? 0) > 0;
-                if (verdict === "clear" && (previouslyReproduced || fixedOnMain) && !baseRedHistory.refreshed.has(key)) {
+                const refreshable = verdict === "clear" && (previouslyReproduced || fixedOnMain) && !baseRedHistory.refreshed.has(key);
+                // W1-T8396: a test passing on main is as consistent with "the PR broke it" as with "main
+                // fixed it" — refresh only on evidence the merge can clear it; a refusal is the PR's own red.
+                const refreshChecks = testFileChecks(ciFailuresForFix);
+                const clearance = refreshable && deps.updateBranch && baseRedRefreshPr === undefined
+                  ? await assessRefresh(pr, fixedOnMain ? "base-fixed" : "base-red", refreshChecks, reproductionFiles, mainTipSha) : undefined;
+                if (refreshable && clearance?.refresh !== false) {
                   acted = false;
-                  if (deps.updateBranch && baseRedRefreshPr === undefined) {
+                  if (deps.updateBranch && clearance !== undefined) {
                     baseRedRefreshPr = pr.prNumber;
                     let outcome: string;
                     try { outcome = await deps.updateBranch(pr); }
                     catch (error) { outcome = `error: ${String(error)}`; }
                     appendLine(deps.ledgerPath, fixedOnMain
-                      ? baseFixedRefreshRow(deps.runId, pr, mainTipSha, reproductionFiles, outcome)
-                      : { ...row, step: BASE_RED_REFRESH_STEP, outcome });
+                      ? baseFixedRefreshRow(deps.runId, pr, mainTipSha, reproductionFiles, outcome, refreshChecks)
+                      : { ...row, step: BASE_RED_REFRESH_STEP, outcome, check_names: refreshChecks });
                     baseRedHistory.refreshed.add(key);
+                    recordRefresh(pr, refreshChecks, reproductionFiles, outcome);
                     standDownReason = fixedOnMain
                       ? `failing test file(s) ${reproductionFiles.join(", ")} already fixed on main ${mainTipSha}; branch refresh requested (${outcome}) — no fix dispatched or strike spent`
                       : `base reproduction clear at main ${mainTipSha}; branch refresh requested (${outcome}) — no fix dispatched`;
