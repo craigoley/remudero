@@ -773,6 +773,14 @@ export const PRECHECK_TRIGGERED_SUITES = [
       input.changed.includes("test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts") ||
       addsMatch(input, TEST_TS_SCOPE_RE, (text) => text.split("\n").filter((line) => /\bpreflightCommand\(|["']preflight["']/.test(line))),
     remedy: "inject `spawn` into preflightCommand / `dispatch` into main, or prove the invariant through preflightSummaryTarget" },
+  // W1-T7812: changes to the measured fixture-crossing runner or its proof rerun that proof before push.
+  { testFile: "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts", script: "census:near-fixture-crossing",
+    trigger: ({ changed }) => changed.some((p) => [
+      "scripts/expiring-fixture-census.mjs", "src/lib/gate-gardener.ts", "scripts/clock-shift.mjs",
+      "src/lib/ci-parity.ts", "scripts/census-precheck.mjs", "package.json",
+      "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts",
+    ].includes(p)),
+    remedy: "preserve the 24 h control/shifted verdict and the private TMPDIR proof" },
   // W1-T6106: a host git spawn into a worker worktree must go through src/lib/worktree-git.ts.
   { testFile: "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts", script: "census:host-worktree-git",
     trigger: (input) => gitSpawnTrigger(input),
