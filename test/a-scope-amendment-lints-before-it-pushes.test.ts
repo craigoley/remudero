@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseTasksFromYaml } from "../src/lib/plan.js";
-import { requestScopeAmendment, type ProofAmendmentWritePorts } from "../src/lib/proof-amendment.js";
+import { newAmendedBlockers, requestScopeAmendment, type ProofAmendmentWritePorts } from "../src/lib/proof-amendment.js";
 import { lintTask } from "../src/lib/task-linter.js";
 
 const taskId = "W1-T9001";
@@ -124,6 +124,30 @@ test("W1-T7959: a sizing block that the task's shape cannot repair by a line edi
   assert.equal((outcome as { reason: string }).reason, "amended-shard-lint");
   assert.match((outcome as { detail: string }).detail, /sizing: spans 2 distinct subsystems/);
   assert.equal(calls.worktrees, 0);
+});
+
+test("W1-T7959: an amended shard that no longer parses is a blocking shard-shape violation naming the error", () => {
+  const base = shard({ risk: "medium" });
+  const broken = base.replace("  type: implement", "  type: bogus");
+  const verdict = newAmendedBlockers(base, broken, shardPath, taskId)!;
+  assert.equal(verdict.task, undefined);
+  assert.equal(verdict.blockers.length, 1);
+  assert.equal(verdict.blockers[0]!.check, "shard-shape");
+  assert.equal(verdict.blockers[0]!.severity, "block");
+  assert.match(verdict.blockers[0]!.message, /^the amended shard no longer loads as a plan task: .*invalid type 'bogus'/);
+});
+
+test("W1-T7959: an amended shard that parses but lost the task is blocked without an error suffix", () => {
+  const base = shard({ risk: "medium" });
+  const renamed = base.replace(`- id: ${taskId}`, "- id: W1-T9002");
+  const verdict = newAmendedBlockers(base, renamed, shardPath, taskId)!;
+  assert.equal(verdict.task, undefined);
+  assert.deepEqual(verdict.blockers.map((v) => v.message), ["the amended shard no longer loads as a plan task"]);
+});
+
+test("W1-T7959: a base shard that does not load gives no verdict at all", () => {
+  const base = shard({ risk: "medium" }).replace("  type: implement", "  type: bogus");
+  assert.equal(newAmendedBlockers(base, shard({ risk: "medium" }), shardPath, taskId), undefined);
 });
 
 test("W1-T7959: a task that declares no risk is given one at high beside its id", () => {

@@ -496,7 +496,7 @@ export function addedFilesEntryPattern(path: string, flow: boolean, singleLineFl
  *  message). `undefined` means no verdict: the base shard does not load as a plan, so there is no
  *  baseline to attribute a violation against and the lint stays silent, as it does everywhere a fact
  *  is absent. */
-function newAmendedBlockers(baseText: string, amendedText: string, label: string, taskId: string):
+export function newAmendedBlockers(baseText: string, amendedText: string, label: string, taskId: string):
   { blockers: LintViolation[]; task: Task | undefined } | undefined {
   const load = (text: string): { task?: Task; error?: string } => {
     try { return { task: parseTasksFromYaml(text, label).find((t) => t.id === taskId) }; }
