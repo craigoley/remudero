@@ -111,31 +111,26 @@ test("W1-T8503: a consumed receipt no longer protects its branch", () => {
   assert.deepEqual(failed.report.kept_handoff_receipt_branches, [branch]);
 });
 
-test("W1-T8503: a dropped receipt stays consumed after ledger rotation", () => {
-  const repo = gitRepo();
-  try {
-    const ledgerPath = join(repo.dir, "ledger.ndjson");
-    const rows = [
-      { ...receipt(), step: "run.freshness_handoff" },
-      { task_id: taskId, step: "implement.checkpoint_dropped", source_branch: branch, head_sha: sha, reason: "object unavailable" },
-      { task_id: "W1-T99", step: "run.freshness_handoff", branch: "run-W1-T99-2", head_sha: sha },
-      { task_id: taskId, step: "worker.output", text: "noise".repeat(2_000) },
-    ];
-    writeFileSync(ledgerPath, lines(rows).join("\n") + "\n");
-    assert.deepEqual([...pendingWorkerBoundaryHandoffs(lines(rows)).keys()], ["W1-T99"]);
-    assert.equal(rotateLedger(ledgerPath, { ceilingBytes: 2_000 }).rotated, true);
-    const rotated = readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean);
-    assert.deepEqual([...pendingWorkerBoundaryHandoffs(rotated).keys()], ["W1-T99"], "rotation must not resurrect the dropped checkpoint");
-    assert.deepEqual(handoffReceiptsToCarry(rotated), []);
-    assert.ok(rotated.some((raw) => JSON.parse(raw).step === "implement.checkpoint_dropped"));
-    assert.equal(rotated.some((raw) => JSON.parse(raw).step === "worker.output"), false, "the rotation really discarded noise");
-    for (const prune of [false, true]) {
-      const result = reap(rotated.map((raw) => JSON.parse(raw)), false, "none", prune);
-      assert.deepEqual(result.report.kept_handoff_receipt_branches, ["run-W1-T99-2"], "the live receipt still protects its head after rotation");
-      assert.equal(result.report.deletable, 2, "the dropped checkpoint is reapable after rotation");
-      assert.deepEqual(result.deleted, prune ? [branch, "finished"] : [], "the drop releases only its own branch");
-    }
-  } finally { repo.cleanup(); }
+test("W1-T8503: a checkpoint drop stays consumed after ledger rotation", () => {
+  for (const step of ["verdict", "run.freshness_handoff"]) {
+    const repo = gitRepo();
+    try {
+      const ledgerPath = join(repo.dir, "ledger.ndjson");
+      const rows = [
+        { ...receipt(), step },
+        { task_id: taskId, step: "implement.checkpoint_dropped", source_branch: branch, head_sha: sha, reason: "object unavailable" },
+        { step: "ci.polling", detail: "x".repeat(4096) },
+      ];
+      assert.equal(pendingWorkerBoundaryHandoffs(lines(rows)).size, 0);
+      writeFileSync(ledgerPath, lines(rows).join("\n") + "\n");
+      assert.equal(rotateLedger(ledgerPath, { ceilingBytes: 1024, smoothingWindowMs: 0 }).rotated, true);
+      const rotated = readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean);
+      assert.ok(rotated.some((raw) => JSON.parse(raw).step === step), "rotation really kept the original receipt");
+      assert.ok(rotated.some((raw) => JSON.parse(raw).step === "implement.checkpoint_dropped"), "rotation kept its matching resolution");
+      assert.equal(pendingWorkerBoundaryHandoffs(rotated).size, 0, "rotation must not revive a dropped checkpoint");
+      assert.deepEqual(handoffReceiptsToCarry(rotated), []);
+    } finally { repo.cleanup(); }
+  }
 });
 
 function fixture(inMain = false) {
@@ -161,7 +156,7 @@ function fixture(inMain = false) {
   fresh.git("config", "user.name", "receipt fixture");
   fresh.git("config", "user.email", "receipt@fixture.invalid");
   const rows: Record<string, unknown>[] = [];
-  const log = (step: string, data: Record<string, unknown>) => { rows.push({ task_id: taskId, step, ...data }); };
+  const log = (step: string, data: Record<string, unknown>) => { rows.push({ step, ...data }); };
   return { origin, repo: fresh, headSha, rows, log, cleanup: () => { fresh.cleanup(); repo.cleanup(); origin.cleanup(); } };
 }
 
@@ -314,6 +309,23 @@ test("W1-T8503: a delayed checkpoint drop does not consume a newer receipt", () 
   assert.equal(pendingWorkerBoundaryHandoffs(rows).size, 0);
 });
 
+test("W1-T8503: a delayed drop cannot release a branch with a newer checkpoint head", () => {
+  const newerHead = "b".repeat(40);
+  const rows = [receipt(), { ...receipt(newerHead), step: "run.freshness_handoff" }, {
+    task_id: taskId, step: "implement.checkpoint_dropped", source_branch: branch, head_sha: sha,
+  }];
+  assert.deepEqual(pendingWorkerBoundaryHandoffs(lines(rows)).get(taskId), { branch, headSha: newerHead });
+  const live = reap(rows);
+  assert.deepEqual(live.report.kept_handoff_receipt_branches, [branch]);
+  assert.equal(live.deleted.includes(branch), false, "the old head's resolution cannot release the newer work");
+
+  const consumed = reap([...rows, {
+    task_id: taskId, step: "implement.checkpoint_dropped", source_branch: branch, head_sha: newerHead,
+  }]);
+  assert.deepEqual(consumed.report.kept_handoff_receipt_branches, []);
+  assert.equal(consumed.deleted.includes(branch), true, "the matching resolution makes the branch reapable");
+});
+
 test("W1-T8503: an unreadable fetched head preserves the absent branch receipt", async () => {
   const f = fixture();
   try {
@@ -431,7 +443,10 @@ test("W1-T8503: absent checkpoint recovery reaches recon in the same dispatch", 
         assert.equal(observed.filter((row) => row.step === "implement.checkpoint_dropped").length, 1,
           "the next dispatch does not attempt to drop the same checkpoint again");
         assert.equal(observed.some((row) => row.step === "implement.checkpoint_restored"), false);
-        assert.equal(observed.some((row) => row.step === "verdict"), false);
+        const secondRun = observed.findLast((row) => row.step === "run.start")?.run_id;
+        assert.ok(secondRun && secondRun !== firstRun);
+        assert.equal(observed.some((row) => row.run_id === secondRun && row.step === "verdict"), false,
+          "the second dispatch reaches its worker without a verdict; the first worker error remains history");
         assert.ok(observed.some((row) => row.run_id !== firstRun && row.task_id === taskId),
           "the second worker belongs to a new dispatch");
       }

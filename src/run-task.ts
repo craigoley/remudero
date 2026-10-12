@@ -5245,7 +5245,7 @@ export async function restoreBoundaryCheckpoint(
       // A missing local object or non-ancestor needs the remote fetch before deciding whether work is lost.
     }
     const drop = (reason: string): BoundaryCheckpointRestore => {
-      log("implement.checkpoint_dropped", { source_branch: checkpoint.branch, head_sha: checkpoint.headSha, reason });
+      log("implement.checkpoint_dropped", { task_id: taskId, source_branch: checkpoint.branch, head_sha: checkpoint.headSha, reason });
       return { base: "main", headSha: mainSha, dropped: true, ...absence };
     };
     try {
@@ -5257,7 +5257,7 @@ export async function restoreBoundaryCheckpoint(
     }
     if ((await git(["rev-parse", "FETCH_HEAD"])).trim() !== checkpoint.headSha) return drop("fetched object does not match the checkpoint head");
     await git(["push", `--force-with-lease=refs/heads/${checkpoint.branch}:`, "origin", `${checkpoint.headSha}:refs/heads/${checkpoint.branch}`]);
-    log("implement.checkpoint_branch_recreated", { source_branch: checkpoint.branch, head_sha: checkpoint.headSha });
+    log("implement.checkpoint_branch_recreated", { task_id: taskId, source_branch: checkpoint.branch, head_sha: checkpoint.headSha });
   } else {
     await git(["fetch", "origin", checkpoint.branch]);
   }

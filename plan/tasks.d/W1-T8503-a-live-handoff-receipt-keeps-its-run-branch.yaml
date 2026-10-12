@@ -13,7 +13,6 @@
   files:
     - src/run-task.ts
     - src/lib/daemon.ts
-    - src/lib/ledger.ts
     - test/a-live-handoff-receipt-keeps-its-run-branch.test.ts
   status: queued
   priority: 1
@@ -84,7 +83,6 @@
        row whose branch and head match the pending receipt as replacing it. The receipt stops being pending,
        `handoffReceiptsToCarry` stops re-carrying it, and the next dispatch never sees it. The W1-T7806 rule (a
        failed restore consumes nothing) still holds for transient failures and for a genuinely moved head.
-       Retain the drop row in `DECISION_RELEVANT_LEDGER_STEPS` so ledger rotation cannot resurrect the receipt.
     Tests go in a new file, test/a-live-handoff-receipt-keeps-its-run-branch.test.ts, with `test(` titles
     verbatim as in the proofs below. Use a real gitRepo() fixture with a bare origin for the restore cases: delete
     the source ref and keep or drop its object. Use the reap's injected exec for the keep cases. Give every
