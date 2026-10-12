@@ -1,21 +1,11 @@
 /** One canonical native conversation per durable slot. This does not activate a schedule. */
 import { createHash } from "node:crypto";
 import { fixedClock } from "./clock.js";
-import { canaryTrialBlockId, type CanaryRun, type CanaryTrialBlock } from "./model-canary-metrics.js";
-import { retentionCanaryProtocol, executeRetentionCanary } from "./model-canary-retention.js";
+import { canaryTrialBlockId, type CanaryRun } from "./model-canary-metrics.js";
+import { retentionCanaryProtocol, executeRetentionCanary, type CanaryRetentionContract } from "./model-canary-retention.js";
 import type { CanaryPin } from "./model-canary-runner.js";
 import type { CanarySlot, CanarySchedulePorts } from "./model-canary-schedule.js";
 
-export interface CanaryRetentionContract {
-  version: "canary-retention-slot-v1";
-  turns: 25 | 50;
-  protocolDigest: string;
-  day: string;
-  seed: string;
-  pins: CanaryPin[];
-  aa: boolean;
-  trial: CanaryTrialBlock;
-}
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 /** All arms use the same whole-conversation protocol. Arm order is deterministically interleaved. */

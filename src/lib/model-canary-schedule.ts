@@ -4,7 +4,7 @@ import { fixedClock } from "./clock.js";
 import { canarySuiteDigest, type CanaryCase } from "./model-canary-suite.js";
 import { executeCanary, type CanaryPin, type CanaryExecutionPorts } from "./model-canary-runner.js";
 import { canaryTrialBlockId, type CanaryTrialBlock } from "./model-canary-metrics.js";
-import type { CanaryRetentionContract } from "./model-canary-retention-schedule.js";
+import type { CanaryRetentionContract } from "./model-canary-retention.js";
 
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
 export interface CanarySlot { id: string; caseId: string; pin: CanaryPin; aaLabel: "A" | "B" | null;

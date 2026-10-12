@@ -2,7 +2,19 @@
 import { createHash, randomUUID } from "node:crypto";
 import { canarySuiteDigest, type CanaryCase } from "./model-canary-suite.js";
 import { executeCanary, type CanaryPin, type CanaryExecutionPorts } from "./model-canary-runner.js";
-import type { CanaryRun } from "./model-canary-metrics.js";
+import type { CanaryRun, CanaryTrialBlock } from "./model-canary-metrics.js";
+
+/** One native whole-conversation contract shared by scheduling and durable ownership. */
+export interface CanaryRetentionContract {
+  version: "canary-retention-slot-v1";
+  turns: 25 | 50;
+  protocolDigest: string;
+  day: string;
+  seed: string;
+  pins: CanaryPin[];
+  aa: boolean;
+  trial: CanaryTrialBlock;
+}
 
 export function retentionCanaryProtocol(turns: 25 | 50) {
   if (turns !== 25 && turns !== 50) throw new Error("canary-retention-turn-bound");
