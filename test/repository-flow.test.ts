@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -132,6 +133,56 @@ test("W1-T8684: repository flow preserves latency samples censoring and coverage
 });
 
 test("W1-T8684: bounded flow refuses incompatible sources without losing Analytics", async t => {
+  await t.test("the default reader keeps its checked descriptor when the path is replaced", () => {
+    const { root } = world(t, []);
+    const path = boardOpenSnapshotPath(root, "fixture", "repo");
+    const stat = fs.statSync, fstat = fs.fstatSync;
+    const statDescriptor = Object.getOwnPropertyDescriptor(fs, "statSync")!;
+    let swapped = false;
+    const swap = () => {
+      if (swapped) return;
+      swapped = true;
+      fs.renameSync(path, path + ".checked");
+      writeFileSync(path, "replacement is not the checked snapshot");
+    };
+    Object.defineProperty(fs, "statSync", { ...statDescriptor,
+      value: ((p: fs.PathLike) => { const s = stat(p); if (p === path) swap(); return s; }) as typeof stat });
+    fs.fstatSync = ((fd: number) => { const s = fstat(fd); swap(); return s; }) as typeof fstat;
+    try {
+      const result = readOpenBoardSnapshot(root, "fixture", "repo");
+      assert.equal(swapped, true, "the real size check must occur before replacement");
+      assert.equal(result.ok, true, "read the checked object, not the replaced pathname");
+      if (result.ok) assert.deepEqual(result.snapshot.rows, []);
+      assert.equal(readFileSync(path, "utf8"), "replacement is not the checked snapshot");
+    } finally { Object.defineProperty(fs, "statSync", statDescriptor); fs.fstatSync = fstat; }
+  });
+  await t.test("the default reader refuses non-files oversized files and growth after its descriptor check", () => {
+    const { root } = world(t, []);
+    const path = boardOpenSnapshotPath(root, "fixture", "repo");
+    const original = readFileSync(path, "utf8");
+    const limit = 128 * 1024 * 1024;
+    const refused = () => {
+      const result = readOpenBoardSnapshot(root, "fixture", "repo");
+      assert.equal(result.ok, false);
+      if (!result.ok) assert.match(result.reason, /oversized/);
+    };
+    fs.truncateSync(path, limit + 1);
+    refused();
+    writeFileSync(path, original);
+    const fstat = fs.fstatSync;
+    let grew = false;
+    fs.fstatSync = ((fd: number) => {
+      const stat = fstat(fd);
+      fs.truncateSync(path, limit + 1);
+      grew = true;
+      return stat;
+    }) as typeof fstat;
+    try { refused(); assert.equal(grew, true); }
+    finally { fs.fstatSync = fstat; }
+    fs.unlinkSync(path);
+    mkdirSync(path);
+    assert.equal(readOpenBoardSnapshot(root, "fixture", "repo").ok, false);
+  });
   const { captureRepositoryFlow, publicRepositoryFlow } = await load();
   const { root, state } = world(t, []);
   const result = await captureRepositoryFlow(root, state, repository, fixedClock(now));

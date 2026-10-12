@@ -280,8 +280,26 @@ export function readOpenBoardSnapshot(
   owner: string,
   repo: string,
   read: (path: string) => string = (path) => {
-    if (fs.statSync(path).size > DEFAULT_MAX_BYTES) throw new SnapshotRefusal("oversized");
-    return fs.readFileSync(path, "utf8");
+    const fd = fs.openSync(path, "r");
+    try {
+      // Check and read the same opened object; a renamed/replaced path cannot change the input.
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile()) throw new SnapshotRefusal("invalid_schema");
+      if (stat.size > DEFAULT_MAX_BYTES) throw new SnapshotRefusal("oversized");
+      const chunks: Buffer[] = [];
+      let bytes = 0;
+      for (;;) {
+        // BACKSTOP: include one sentinel byte to refuse growth after fstat, without unbounded allocation.
+        const chunk = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, DEFAULT_MAX_BYTES - bytes + 1));
+        const n = fs.readSync(fd, chunk, 0, chunk.length, null);
+        if (n === 0) return Buffer.concat(chunks, bytes).toString("utf8");
+        bytes += n;
+        if (bytes > DEFAULT_MAX_BYTES) throw new SnapshotRefusal("oversized");
+        chunks.push(chunk.subarray(0, n));
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
   },
 ): { ok: true; snapshot: OpenBoardSnapshot } | { ok: false; reason: string } {
   const repository = `${owner}/${repo}`;
