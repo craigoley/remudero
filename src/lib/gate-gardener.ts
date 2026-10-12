@@ -71,7 +71,7 @@ interface ShiftedSuiteOptions {
 interface DefuseJudge {
   prepareJudgedRun(options: { makeDir: () => string }): { args: string[]; env: Record<string, string>; read(): { tallyText: string; markerText: string } };
   judgedNodeTestArgs(args: readonly string[], judgedArgs: readonly string[]): string[];
-  judgeRun(files: readonly string[], opts: { status: number; pool: boolean; root: string; tallyText: string; markerText: string }): { complete: boolean; given: number; reported: number };
+  judgeRun(files: readonly string[], opts: { status: number; pool: boolean; root: string; tallyText: string; markerText: string }): { complete: boolean; given: number; reported: number; tests: number | null; failed: number | null };
   describeJudgedRun(role: string, verdict: { complete: boolean }, opts: { prefix: string }): string;
 }
 const loadDefuseJudge = (): DefuseJudge => createRequire(import.meta.url)("../../scripts/pure-test-pool.mjs") as DefuseJudge;
@@ -126,6 +126,9 @@ export function runSuiteShifted(repoRoot: string, file: string, shiftDays: numbe
       throw new Error(`shifted suite ${file}: no named tests in TAP verdict`);
     }
     const verdict = judge.judgeRun([file], { status, pool: false, root: repoRoot, ...judged.read() });
+    if (verdict.tests !== tests || verdict.failed !== fail) {
+      throw new Error(`shifted suite ${file}: TAP counts disagree with the end-of-run tally (tests ${verdict.tests}, fail ${verdict.failed})`);
+    }
     if (!verdict.complete && (status === 0 || verdict.reported !== verdict.given)) {
       throw new Error(`the run reaches no verdict: ${judge.describeJudgedRun("defuse", verdict, { prefix: "test-judge" })}`);
     }

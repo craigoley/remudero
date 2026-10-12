@@ -264,3 +264,32 @@ test("W1-T7812: incomplete TAP counts block as run_error and clean the private r
     for (const temp of roots) assert.equal(existsSync(temp), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("W1-T7812: inconsistent or missing end-of-run tallies block as run_error", () => {
+  const root = fixture();
+  const file = join(root, "test", "tally.test.ts");
+  writeFileSync(file, 'import { test } from "node:test";\ntest("measured", () => {});\n');
+  try {
+    for (const failed of [0, 1]) {
+      const output = `# Subtest: measured\n# tests 1\n# pass ${1 - failed}\n# fail ${failed}\n# cancelled 0\n# skipped 0\n# todo 0\n`;
+      for (const summary of [null, { tests: 2, failed }, { tests: 1, failed: 1 - failed }]) {
+        let calls = 0;
+        const result = check(() => {
+          if (calls++ === 0) return green;
+          return measured(root, file, 2, {
+            execFile: (_command: string, args: string[]) => {
+              const destination = args.find((arg) => arg.startsWith("--test-reporter-destination=") && arg.endsWith("tally.json"));
+              assert.ok(destination);
+              writeFileSync(destination.slice(destination.indexOf("=") + 1), JSON.stringify({ summary, fileSummaries: [file] }));
+              if (failed) throw Object.assign(new Error("exit 1"), { status: 1, stdout: output });
+              return output;
+            },
+          });
+        });
+        assert.equal(result.code, 1);
+        assert.match(result.report, /run_error/);
+        assert.doesNotMatch(result.report, /expiring-fixture: exempt/);
+      }
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
