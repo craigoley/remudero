@@ -1,0 +1,101 @@
+- id: W1-T8396
+  title: "A RED THE PR'S OWN CHANGE CAUSED IS FIXED, NOT REFRESHED — on 2026-10-12 PR #11017 (W1-T8008) failed a test its src change broke by design, and the fleet merged main into it twice (04:31:59Z by the fix rung, 04:55:28Z by the fixed-on-main arm, the second over a main delta of three plan files) with no fix worker dispatched, spending two ~16-min CI runs on a deterministic own red"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — a branch refresh needs base evidence that the refresh can clear the red, and is never repeated on a red it already failed to clear
+  band_meaning: span
+  origin: "operator approval 2026-10-12 (\"go with your recommended follow ups\"): PR #11017 refreshed twice on its own red, hand-fixed by the session in 83aa463a0"
+  plan_refs: [W1-T2671, W1-T2789, W1-T5528, W1-T6024, W1-T6405, W1-T6433, W1-T7445, W1-T8038, W1-T8042, W1-T8086, W1-T100]
+  files: [src/lib/sweep.ts, src/run-task.ts, src/lib/base-reproduction.ts, test/a-red-the-pr-caused-is-fixed-not-refreshed.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED in the core daemon's ledger (state/ledger.ndjson and its 2026-10-12T05-08 rotation, read 2026-10-12)
+    and on the branch run-W1-T8008-1791773782381:
+      - #11017 changed src/run-task.ts so a checkpoint outside the declared scope hands off instead of ending
+        no_pr. test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts ("a checkpoint outside the declared
+        scope records failure…") still asserted no_pr, so coverage-shard (4/8) went red. The PR did not touch
+        that test file. It is a deterministic own red: the session fixed it by hand in 83aa463a0 (a test edit).
+      - 04:31:58.900Z `fix.base_refresh_checked`, strike 1, behind_by 22, failing_test_files [],
+        failing_source_files [], matching_base_files [scripts/pure-test-pool.mjs, scripts/test-tier-manifest.json],
+        refresh true. The round's failures named no test file (red_class coverage-ratchet+coverage-shard), so
+        W1-T8038's fileless arm in `decideRedBaseRefresh` matched two harness paths main had changed.
+        04:32:00Z `fix.base_refreshed`; GitHub merged main as 11d4621ba ("Merge branch 'main' into …", 04:31:59Z).
+        (Main's 22 commits also changed the failing test file itself, so an exact-path match would have
+        refreshed too.)
+      - 04:50-04:55Z the head 11d4621 was still red on coverage-shard (4/8): seven `sweep.disposed` rows read
+        "NOT DISPATCHED this pass: deferred to full sweep (light pass)" (W1-T8086 owns that wait).
+      - 04:55:27.784Z `sweep.base_reproduction`, head 11d4621, main 38470cc40, files
+        [test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts passes], verdict clear. One second later
+        GitHub merged main again as 345e683fd (04:55:28Z). Main had moved two commits since 11d4621, touching only
+        plan/feedback/evidence-coverage-daemon-tokens.yaml and two plan/tasks.d shards.
+    THE PATHS, read on origin/main 38470cc40 (symbol names, not line numbers):
+      - The second refresh is W1-T6405's fixed-on-main arm in `runSweep`'s blocked-fixable case (src/lib/sweep.ts):
+        `verdict === "clear" && (previouslyReproduced || fixedOnMain) && !baseRedHistory.refreshed.has(key)`, where
+        `fixedOnMain` is only `behindMainByPr > 0`. A failing test that PASSES on main is read as "main fixed it".
+        It is just as consistent with "the PR broke it": main never had the PR's change. Nothing checks that
+        main's delta since the head's own base could reach the failing test, or that merging main clears it.
+        `fixedOnMainTestFiles` (the stalled-stage arm, W1-T6433) makes the same inference.
+      - Neither arm sees the other's refresh. `baseRedHistoryFromLedger` keys `refreshed` by `pr@head` and reads
+        only `sweep.base_red.refresh` / `sweep.base_fixed.refresh`; the fix rung's `fix.base_refreshed` is not in
+        it. A refresh MAKES a new head, so every arm is once per head, never once per red. Here the second arm
+        refreshed the very head the first arm's refresh produced, on the same check and the same failing file.
+    W1-T8042 is the opposite case (a red inherited from main worked as each PR's own) and must stay working.
+    OVERLAP WITH W1-T100 (same files): W1-T100 routes blocked_ci to the ci-log fix path. This task does not change that
+    path or its ladder. It changes only WHEN a refresh arm may merge main instead of letting that path run.
+  design: |
+    1. A REFRESH NEEDS EVIDENCE IT CAN CLEAR THE RED. Before any refresh arm acts on a red whose failing test
+       files are known (the fix rung's `decideRedBaseRefresh` exact-path arm, the sweep's fixed-on-main and
+       base-red refresh arms, and the stalled-stage `fixedOnMainTestFiles` arm), decide whether merging main can
+       change the outcome:
+       a. CHEAP PRE-FILTER. Read main's changed paths since the head's merge base with main. When none of them
+          is a failing test file, a module in a failing test file's import closure (the existing import graph
+          in src/lib/affected-suites.ts), or a CI harness path (`isCiHarnessPath`), main cannot change the
+          result. No refresh, no probe. (The #11017 second refresh: three plan files.)
+       b. PROBE THE MERGED TREE. Otherwise run the failing test files on a local trial merge of the head with
+          main's tip, reusing the base-reproduction probe machinery (`buildBaseReproductionProbe`, its cache and
+          its `BASE_REPRODUCTION_MAX_FILES` refusal). Red on the merged tree: the refresh cannot clear it, so do
+          not refresh. Clear: refresh as today. Unrunnable or partial: keep today's behaviour and name why.
+       Each decision writes one ledger row naming the arm, the files, main's sha and which evidence decided.
+    2. A RED THE REFRESH CANNOT CLEAR IS THE PR'S OWN. When step 1 refuses a refresh, the round proceeds as an
+       own red: the fix rung spends its strike and dispatches its worker, and the sweep routes the head to the
+       fix lane, exactly as for any own red. Add no new strike rule.
+    3. A REFRESH THAT LEFT THE SAME RED IS NEVER REPEATED. Key refreshes by PR and red signature (check name plus
+       failing test files, or the harness-path set for a fileless red), not by `pr@head`, and read every refresh
+       step (`fix.base_refreshed`, `sweep.base_red.refresh`, `sweep.base_fixed.refresh`). After a refresh, a head
+       red on the same signature gets no further refresh from any arm until main changes a path step 1a would
+       count. A fileless red (W1-T8038's harness arm) is bound by this rule too.
+    4. KEEP THE BASE CASES. A red that reproduces on main still stands down with no strike (W1-T5528, W1-T6024).
+       A red main really fixed (the test fails at the head's merge base and passes on the merged tree) still
+       takes main once with no strike (W1-T6405). W1-T7445's PR-added coverage lines still take a strike.
+    5. NO FIXED BOUNDS. The pre-filter is a path test, the probe an observed outcome. Add no count, timer or
+       wall-clock threshold.
+    Tests go in the new file test/a-red-the-pr-caused-is-fixed-not-refreshed.test.ts, with `test(` titles exactly
+    as in the proofs below. Build the #11017 shape: a head whose own src change breaks an untouched test, main
+    ahead by commits that touch only plan/ files, and a recorded clear probe at main's tip.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-red-the-pr-caused-is-fixed-not-refreshed.test.ts"
+    - claim: "a head behind main only by paths outside its failing test's import closure gets no refresh and goes to the fix lane (the #11017 second refresh)"
+      proof: 'grep: test("W1-T8396: main changed nothing the failing test reaches, so no refresh and the fix lane takes the red" in test/a-red-the-pr-caused-is-fixed-not-refreshed.test.ts'
+    - claim: "a failing test still red on a trial merge with main gets no refresh from any arm"
+      proof: 'grep: test("W1-T8396: a red the trial merge keeps is not refreshed" in test/a-red-the-pr-caused-is-fixed-not-refreshed.test.ts'
+    - claim: "a head a refresh left red on the same signature is not refreshed again by another arm"
+      proof: 'grep: test("W1-T8396: a refresh that left the same red is not repeated by another arm" in test/a-red-the-pr-caused-is-fixed-not-refreshed.test.ts'
+    - claim: "a red main really fixed still takes main once with no strike, and a red that reproduces on main still stands down"
+      proof: 'grep: test("W1-T8396: a red main fixed still refreshes and a base red still stands down" in test/a-red-the-pr-caused-is-fixed-not-refreshed.test.ts'
+  falsifier: |
+    Leave `fixedOnMain` as `behindMainByPr > 0` alone. The plan-only-delta head then refreshes and never reaches
+    the fix lane, so the first test fails. Skip the trial-merge probe and the second test refreshes a red the
+    merge keeps. Keep `refreshed` keyed by `pr@head` and reading only the sweep's own steps, and the third test
+    sees the fixed-on-main arm refresh the head the fix rung's refresh produced. Gate every refresh off and the
+    fourth test fails.
+  note: |
+    EFFECT, measured after merge from the ledger (no numeric pass mark): the share of `fix.base_refreshed`,
+    `sweep.base_fixed.refresh` and `sweep.base_red.refresh` rows followed by a red on the same check at the
+    refreshed head should fall, and so should merge-main commits on run- branches per own-red PR.

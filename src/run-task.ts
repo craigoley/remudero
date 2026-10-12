@@ -222,7 +222,7 @@ import { realThreadDecider, registryThreadItems, type ThreadDecisionContext } fr
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
-import { checkpointRemaining, isWipSubject, judgeCheckpointStop, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
+import { checkpointRemaining, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
 import { PREOPEN_GATE_STEP, renderPreopenGatePrompt, runPreopenGate, type PreopenGateResult } from "./lib/preopen-gate.js";
 import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
@@ -1225,7 +1225,7 @@ import {
   taskRecordPath,
   readBlobsAtRef,
   mergePlanBlobs,
-  loadPlanAtRef,
+  loadPlanAtRefAsync,
 } from "./lib/plan.js";
 import { exitCodeFor, GENERIC_EXIT_CODE, RmdError } from "./lib/errors.js";
 import { flushThenExit } from "./lib/flush-exit.js";
@@ -1494,6 +1494,7 @@ import {
   reviewLedgerLegibilityFields,
   reviewLedgerReasons,
   resolvePlanCriteriaAtHead,
+  resolvePlanCriteriaAtHeadAsync,
   type PlanCriteriaAtHeadDivergence,
   type PlanCriteriaAtHeadResult,
   parseWhitelistedProof,
@@ -2619,7 +2620,7 @@ export function buildSweepEffects(
     dispatchFixPreflightStandDownImpl: dispatchFixPreflightStandDown,
     ghLiveStateImpl: ghLiveState,
     fixRungTaskForImpl: fixRungTaskFor,
-    resolveTaskContractAtHeadImpl: resolveFixRungTaskContractAtHead,
+    resolveTaskContractAtHeadImpl: resolveFixRungTaskContractAtHeadAsync,
     createFixRungWorktreeImpl: createFixRungWorktreeWithToolchain,
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit,
     runFixRungImpl: (opts) => {
@@ -3420,22 +3421,26 @@ export function watchDispatchSpawn(
     endRound: async (reason, trigger) => {
       if ((spawnArgs.workerClass ?? "implement") !== "implement") return { ended: false, reason: "not an implement worker" };
       const cwd = spawnArgs.cwd;
+      let undeclaredPaths: readonly string[] = [];
       try {
         // The W1-T7697 checkpoint path (yieldAtWorkerBoundary): retain the disk work, push it, then release the lane.
         if ((seams.hasUncommittedChanges ?? worktreeHasUncommittedChanges)(cwd)) {
           const checkpoint = (seams.commit ?? commitWorkerEdits)(cwd, task.files ?? [],
             `wip: yield at ${trigger === "recycle" ? "container recycle" : "quiet worker"}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume\nfailed: none\n\nRemudero-Task: ${taskId}`,
-            {}, task.acceptance);
-          if (!checkpoint.committed || checkpoint.undeclared.length > 0) {
+            {}, task.acceptance, { checkpoint: true });
+          // W1-T8008: a checkpoint keeps undeclared work too; only what git forces (markers, unresolved paths) refuses.
+          if (!checkpoint.committed) {
             return { ended: false, reason: `checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}` };
           }
+          undeclaredPaths = checkpoint.undeclared;
         }
         await (seams.push ?? gitPushRunBranchAsync)(cwd);
       } catch (error) {
         return { ended: false, reason: `checkpoint failed: ${String((error as Error)?.message ?? error)}` };
       }
       const checkpointSha = (seams.headSha ?? ((dir: string) => hostWorktreeGit(dir, ["rev-parse", "HEAD"]).trim()))(cwd);
-      state.ended = new QuietRoundEndedError({ checkpointSha, reason, ...(trigger ? { trigger } : {}) });
+      state.ended = new QuietRoundEndedError({ checkpointSha, reason, ...(trigger ? { trigger } : {}),
+        ...(undeclaredPaths.length > 0 ? { undeclaredPaths: [...undeclaredPaths] } : {}) });
       abort.abort();
       return { ended: true, checkpointSha };
     },
@@ -3450,17 +3455,57 @@ export function watchDispatchSpawn(
 /** The rows a round ended mid-stream writes. A recycle's is the W1-T7697 freshness yield taken mid-round: the same
  * `run.freshness_handoff` receipt and `freshness_yield` verdict as `yieldAtWorkerBoundary`, so the next run restores the
  * pushed checkpoint (`pendingWorkerBoundaryHandoffs`) instead of starting over. */
+/** W1-T8008: the exact undeclared paths a restart checkpoint kept (`undeclared_paths`), absent when there are none. */
+export function checkpointUndeclaredFields(undeclared: readonly string[]): { undeclared_paths?: string[] } {
+  return undeclared.length === 0 ? {} : { undeclared_paths: [...undeclared] };
+}
+
+/** W1-T8008: the W1-T7697 restart checkpoint of `yieldAtWorkerBoundary`, as one seamed step: commit EVERY worker change
+ * (declared or not), then push the branch. Resolves to the undeclared paths it kept; throws on what git forces. */
+export async function commitAndPushRestartCheckpoint(
+  worktreePath: string,
+  task: { files?: readonly string[]; acceptance?: readonly AcceptanceCriterion[] },
+  taskId: string,
+  waitingOn: string,
+  seams: { push?: typeof gitPushRunBranchAsync; hasUncommittedChanges?: typeof worktreeHasUncommittedChanges } = {},
+): Promise<{ undeclared: readonly string[] }> {
+  let undeclared: readonly string[] = [];
+  if ((seams.hasUncommittedChanges ?? worktreeHasUncommittedChanges)(worktreePath)) {
+    const checkpoint = commitWorkerEdits(worktreePath, task.files ?? [],
+      `wip: yield at ${waitingOn}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume ${waitingOn}\nfailed: none\n\nRemudero-Task: ${taskId}`,
+      {}, task.acceptance, { checkpoint: true });
+    if (!checkpoint.committed) throw new Error(`restart checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}`);
+    undeclared = checkpoint.undeclared;
+  }
+  await (seams.push ?? gitPushRunBranchAsync)(worktreePath, { prGates: false }); // a checkpoint opens no PR: see worktreePushExecAsync
+  return { undeclared };
+}
+
+/** W1-T8008: the `run.freshness_handoff` and `freshness_yield` verdict fields of a boundary yield, naming the undeclared paths. */
+export function freshnessYieldRows(a: {
+  waitingOn: string; branch: string; headSha: string; undeclared: readonly string[];
+  freshness?: { oldSha: string; newSha: string }; recycle?: string;
+}): Array<{ step: string; fields: Record<string, unknown> }> {
+  const undeclared = checkpointUndeclaredFields(a.undeclared);
+  return [
+    { step: "run.freshness_handoff", fields: { waiting_on: a.waitingOn, branch: a.branch, head_sha: a.headSha,
+      ...(a.freshness ? { old_sha: a.freshness.oldSha, new_sha: a.freshness.newSha } : { trigger: "recycle", detail: a.recycle }), ...undeclared } },
+    { step: "verdict", fields: { verdict: "handed_off", reason: "freshness_yield", waiting_on: a.waitingOn, branch: a.branch, head_sha: a.headSha, ...undeclared } },
+  ];
+}
+
 export function roundEndedHandoffRows(
   detail: QuietRoundEndedError["detail"],
   branch: string,
 ): Array<{ step: string; fields: Record<string, unknown> }> {
   const headSha = detail.checkpointSha ?? null;
+  const undeclared = checkpointUndeclaredFields(detail.undeclaredPaths ?? []);
   if (detail.trigger !== "recycle") {
-    return [{ step: "verdict", fields: { verdict: "handed_off", reason: "quiet_worker_round_ended", branch, head_sha: headSha, detail: detail.reason } }];
+    return [{ step: "verdict", fields: { verdict: "handed_off", reason: "quiet_worker_round_ended", branch, head_sha: headSha, detail: detail.reason, ...undeclared } }];
   }
   return [
-    { step: "run.freshness_handoff", fields: { waiting_on: "worker_round", branch, head_sha: headSha, trigger: "recycle", detail: detail.reason } },
-    { step: "verdict", fields: { verdict: "handed_off", reason: "freshness_yield", waiting_on: "worker_round", branch, head_sha: headSha, detail: detail.reason } },
+    { step: "run.freshness_handoff", fields: { waiting_on: "worker_round", branch, head_sha: headSha, trigger: "recycle", detail: detail.reason, ...undeclared } },
+    { step: "verdict", fields: { verdict: "handed_off", reason: "freshness_yield", waiting_on: "worker_round", branch, head_sha: headSha, detail: detail.reason, ...undeclared } },
   ];
 }
 
@@ -5029,15 +5074,18 @@ export function lastCommitSubject(worktreePath: string): string | undefined {
   }
 }
 
-/** A build PR's title: the branch's newest non-checkpoint subject, never a `wip:` one (#10482). */
-export function branchPrTitle(worktreePath: string): string | undefined {
+/** A build PR's title, never a `wip:` one (#10482). With its filed task it is the task's own title (W1-T7952),
+ *  so a checkpoint-only branch never opens as "chore: yield at worker" and no merge commit (`--no-merges`, so
+ *  the restore merge too, #10936) lends it words or a type; with no task, the newest non-checkpoint subject. */
+export function branchPrTitle(worktreePath: string, task?: { id: string; title?: string }): string | undefined {
   try {
-    const subjects = hostWorktreeGit(worktreePath, ["log", "--format=%s", "origin/main..HEAD"]).split("\n");
-    return prTitleFromBranchCommits(subjects) ?? lastCommitSubject(worktreePath);
+    const subjects = hostWorktreeGit(worktreePath, ["log", "--format=%s", ...(task ? ["--no-merges"] : []), "origin/main..HEAD"]).split("\n");
+    return (task && prTitleForTask(subjects, task)) || (prTitleFromBranchCommits(subjects) ?? lastCommitSubject(worktreePath));
   } catch (e) {
-    // An unreadable range falls back to the tip subject, the pre-#10482 behaviour.
+    // An unreadable range falls back to the tip subject, the pre-#10482 behaviour; a filed task still names its PR.
     void e;
-    return lastCommitSubject(worktreePath);
+    const tip = lastCommitSubject(worktreePath);
+    return (task && prTitleForTask(tip ? [tip] : [], task)) || tip;
   }
 }
 
@@ -5087,7 +5135,7 @@ export async function restoreBoundaryCheckpoint(
       ...(probe.verdict === "unreadable" ? { reason: probe.reason } : {}) };
   }
   const merged = (await git(["commit-tree", probe.tree, "-p", checkpoint.headSha, "-p", mainSha, "-m",
-    `wip: merge main into the restored checkpoint\n\nRemudero-Task: ${taskId}`])).trim();
+    `chore(wip): merge main into the restored checkpoint\n\nRemudero-Task: ${taskId}`])).trim();
   await git(["reset", "--hard", "--quiet", merged]);
   return { base: "main", headSha: merged };
 }
@@ -16469,6 +16517,7 @@ interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   claimReserver?: DispatchClaimReserverAsync;
   containmentExec?: ProbeExecutor;
   externalWaitFreshness?: ExternalWaitFreshness;
+  restartAtWorkerBoundary?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
   externalWaitRecycle?: () => string | undefined;
   handOffAtPrOpen?: boolean;
   isolationExec?: IsolationProbeExecutor;
@@ -17372,6 +17421,9 @@ async function runTask(
      *  spawning a real sandboxed worker. Default: the real spawn-backed executor. */
     containmentExec?: ProbeExecutor;
     externalWaitFreshness?: ExternalWaitFreshness;
+    /** W1-T7806: the daemon's latched restart, read at each worker boundary; reading it releases this lane's hold
+     *  on refill. A set latch yields the run even when its own `externalWaitFreshness` read would not. Daemon only. */
+    restartAtWorkerBoundary?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
     externalWaitRecycle?: () => string | undefined;
     /** W1-T5345: hand the PR to the sweep at the first CI poll ({@link PollDeps.handOffAtPrOpen}). Daemon only. */
     handOffAtPrOpen?: boolean;
@@ -19721,29 +19773,22 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     let impl!: WorkerResult;
     // W1-T7697: retain disk work before releasing a lane; a failed checkpoint is never a handoff.
     const yieldAtWorkerBoundary = async (waitingOn: string): Promise<RunResult | undefined> => {
-      const freshness = await opts.externalWaitFreshness?.();
+      const freshness = opts.restartAtWorkerBoundary?.() ?? await opts.externalWaitFreshness?.();
       const recycle = freshness ? undefined : opts.externalWaitRecycle?.();
       if (!freshness && !recycle) return undefined;
+      let undeclared: readonly string[] = [];
       try {
-        if (worktreeHasUncommittedChanges(worktreePath)) {
-          const checkpoint = commitWorkerEdits(worktreePath, task.files ?? [],
-            `wip: yield at ${waitingOn}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume ${waitingOn}\nfailed: none\n\nRemudero-Task: ${taskId}`,
-            {}, task.acceptance);
-          if (!checkpoint.committed || checkpoint.undeclared.length > 0) {
-            throw new Error(`restart checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}`);
-          }
-        }
-        await gitPushRunBranchAsync(worktreePath, { prGates: false }); // a checkpoint opens no PR: see worktreePushExecAsync
+        ({ undeclared } = await commitAndPushRestartCheckpoint(worktreePath, task, taskId, waitingOn));
       } catch (error) {
         log("verdict", { verdict: "no_pr", reason: "restart_checkpoint_failed", waiting_on: waitingOn,
           detail: String((error as Error)?.message ?? error), branch, cost_usd: costUsd, ...terminalVerdictFields(impl) });
         return { taskId, runId, merged: false, costUsd, verdict: "no_pr" };
       }
       const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
-      log("run.freshness_handoff", { waiting_on: waitingOn, branch, head_sha: headSha,
-        ...(freshness ? { old_sha: freshness.oldSha, new_sha: freshness.newSha } : { trigger: "recycle", detail: recycle }) });
-      log("verdict", { verdict: "handed_off", reason: "freshness_yield", waiting_on: waitingOn,
-        branch, head_sha: headSha, cost_usd: costUsd, ...terminalVerdictFields(impl) });
+      for (const row of freshnessYieldRows({ waitingOn, branch, headSha, undeclared,
+        ...(freshness ? { freshness: { oldSha: freshness.oldSha, newSha: freshness.newSha } } : { recycle }) })) {
+        log(row.step, row.step === "verdict" ? { ...row.fields, cost_usd: costUsd, ...terminalVerdictFields(impl) } : row.fields);
+      }
       return { taskId, runId, merged: false, costUsd, verdict: "handed_off" };
     };
     const attemptImplement = async (findings?: string): Promise<AttemptOutcome> => {
@@ -20536,8 +20581,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     if (!prUrl) {
       let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
       try {
-        // W1-T6034: the filed proofs run as awaited children, off the daemon loop.
-        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, branchPrTitle(worktreePath), opts.prOpenProofRunner, true);
+        // W1-T6034: the filed proofs run as awaited children, off the daemon loop. W1-T7952: titled after the task.
+        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true);
       } catch (err) {
         if (!(err instanceof PrOpenRefusedError)) throw err;
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
@@ -20822,7 +20867,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // W1-T3557: ALWAYS wired in production — `worktreePath` is this rung's own checkout,
           // the SAME one `headCheckoutDir` above already points at, so no extra fetch is spent
           // resolving the plan at whatever head this round's push just landed.
-          resolveTaskContractAtHead: (prUrlArg, taskIdArg) => resolveFixRungTaskContractAtHead(prUrlArg, taskIdArg, worktreePath),
+          resolveTaskContractAtHead: (prUrlArg, taskIdArg) => resolveFixRungTaskContractAtHeadAsync(prUrlArg, taskIdArg, worktreePath),
           runReview,
           fetchPrBody: fetchPrBodyViaGh,
           // W1-T3506: the SAME worktree this round pushes to, run through the SAME proof
@@ -22529,6 +22574,26 @@ export function resolveFixRungTaskContractAtHead(
 }
 
 /**
+ * W1-T7743: {@link resolveFixRungTaskContractAtHead} through AWAITED git — the form the daemon's fix rung and the
+ * sweep's fix dispatch wire, because the sync one parks the daemon loop on `execFileSync` for every read. The head sha
+ * read stays `readHeadSha` (injectable); only the plan read at that head is awaited.
+ */
+export async function resolveFixRungTaskContractAtHeadAsync(
+  prUrl: string,
+  taskId: string,
+  repoDir: string,
+  readHeadSha: (prUrl: string) => string = readHeadShaRest,
+): Promise<PlanCriteriaAtHeadResult | undefined> {
+  let headSha: string;
+  try {
+    headSha = readHeadSha(prUrl);
+  } catch {
+    return undefined; // an unreadable HEAD is unreadable regardless of which read failed first
+  }
+  return resolvePlanCriteriaAtHeadAsync(`Remudero-Task: ${taskId}`, repoDir, "plan/tasks.yaml", headSha);
+}
+
+/**
  * A DIVERGENCE between the two independent resolvers that decide whether a trailered PR body gets
  * judged: the CI gate's `declaredPlanTaskIds` (scripts/acceptance-author-gate.mjs, a line scan
  * over `- id:` — deliberately NOT `loadPlan`, so a plan defect elsewhere never red-lights a body
@@ -22862,7 +22927,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // `reportBody` still carries the real PR body unchanged to the fallback and reviewer below.
   if (taskId && !reviewTaskIdFromBody(body)) body = `Remudero-Task: ${taskId}`;
   if (taskId) {
-    const resolved = resolvePlanCriteriaAtHead(body, subjectRepoDir, "plan/tasks.yaml", view.headRefOid);
+    const resolved = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", view.headRefOid);
     criteria = resolved.criteria;
     if (resolved.source) source = resolved.source;
     taskDeclaredFiles = resolved.taskDeclaredFiles;
@@ -36888,10 +36953,10 @@ export function planReloader(
   allowStale: boolean,
   log: (step: string, extra?: Record<string, unknown>) => void,
   deps: {
-    treeSha?: () => string;
-    load?: (planPath: string) => Plan;
+    treeSha?: () => string | Promise<string>;
+    load?: (planPath: string) => Plan | Promise<Plan>;
   } = {},
-): (() => Plan | null) | undefined {
+): (() => Promise<Plan | null>) | undefined {
   if (!target.isSelf) return undefined;
   // `-C` IS LOAD-BEARING. Without it this ran in the DAEMON PROCESS's working directory, which is
   // not the checkout, so every tick threw `fatal: not a git repository` — caught and ledgered as
@@ -36906,16 +36971,16 @@ export function planReloader(
   const planRepoRoot = dirname(dirname(target.planPath));
   const planRelativePath = relative(planRepoRoot, target.planPath) || "plan/tasks.yaml";
   const repoDirForGit = planRepoRoot;
+  // W1-T7743: AWAITED children, never `execFileSync` — the tick awaits this reload, so a slow git (10.7 s measured)
+  // no longer parks the daemon's event loop.
   const treeSha =
     deps.treeSha ??
-    (() =>
-      execFileSync("git", ["-C", repoDirForGit, "rev-parse", "origin/main:plan"], {
-        encoding: "utf8",
-      }).trim());
-  const load = deps.load ?? (() => loadPlanAtRef(planRepoRoot, planRelativePath, "origin/main"));
+    (async () =>
+      (await execFilePromise("git", ["-C", repoDirForGit, "rev-parse", "origin/main:plan"], { encoding: "utf8" })).stdout.trim());
+  const load = deps.load ?? (() => loadPlanAtRefAsync(planRepoRoot, planRelativePath, "origin/main"));
   let lastSha: string | undefined;
-  return () => {
-    const sha = treeSha();
+  return async () => {
+    const sha = await treeSha();
     if (lastSha === undefined) {
       // First tick: record the boot's sha WITHOUT reloading. The plan we were handed already came
       // from this sha, so reporting a reload here would be a lie and would log a no-op every boot.
@@ -36942,7 +37007,7 @@ export function planReloader(
     // Do not advance the observed sha until the committed ref has parsed successfully. A transient
     // fetch/object/read failure must be retried on the next tick, rather than permanently pinning
     // the daemon to the old plan while claiming it observed the new one.
-    const fresh = load(target.planPath);
+    const fresh = await load(target.planPath);
     lastSha = sha;
     log("daemon.plan_changed", { tree_sha: sha.slice(0, 12), allow_stale: allowStale });
     return fresh;
@@ -36970,12 +37035,12 @@ export function dedicatedTargetPlanReloader(
   target: { isSelf: boolean; planPath: string },
   log: (step: string, extra?: Record<string, unknown>) => void,
   deps: {
-    fetch?: () => void;
-    treeSha?: () => string;
-    resetWorkingTree?: () => void;
-    load?: (planPath: string) => Plan;
+    fetch?: () => unknown;
+    treeSha?: () => string | Promise<string>;
+    resetWorkingTree?: () => unknown;
+    load?: (planPath: string) => Plan | Promise<Plan>;
   } = {},
-): (() => Plan | null) | undefined {
+): (() => Promise<Plan | null>) | undefined {
   // Mirrors `planReloader`'s own early return, inverted: THIS reloader exists only for the arm
   // `planReloader` refuses. Wiring (below) never hands a self target here, but the guard keeps
   // this function correct in isolation, not merely correct-by-caller-discipline.
@@ -36987,13 +37052,13 @@ export function dedicatedTargetPlanReloader(
   // WHILE a worker runs) — an idle dedicated daemon would otherwise never see a merged change.
   const fetch =
     deps.fetch ??
-    (() => execFileSync("git", ["-C", repoDirForGit, "fetch", "--quiet", "origin"], { stdio: "pipe" }));
+    (async () => {
+      await execFilePromise("git", ["-C", repoDirForGit, "fetch", "--quiet", "origin"]);
+    });
   const treeSha =
     deps.treeSha ??
-    (() =>
-      execFileSync("git", ["-C", repoDirForGit, "rev-parse", "origin/main:plan"], {
-        encoding: "utf8",
-      }).trim());
+    (async () =>
+      (await execFilePromise("git", ["-C", repoDirForGit, "rev-parse", "origin/main:plan"], { encoding: "utf8" })).stdout.trim());
   // RESETS THE WORKING TREE, UNLIKE `planReloader`: `load` below is a plain filesystem read, never
   // a `git show <ref>:<path>`, so a fetched ref alone leaves it reading whatever boot's own
   // `git reset --hard origin/main` (the `!target.isSelf` branch above) last checked out. Self gets
@@ -37004,15 +37069,17 @@ export function dedicatedTargetPlanReloader(
   // content forever, which is worse than never reloading: it would look fixed.
   const resetWorkingTree =
     deps.resetWorkingTree ??
-    (() => execFileSync("git", ["-C", repoDirForGit, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" }));
+    (async () => {
+      await execFilePromise("git", ["-C", repoDirForGit, "reset", "--hard", "--quiet", "origin/main"]);
+    });
   const load = deps.load ?? ((pp: string) => loadPlan(pp));
   let lastSha: string | undefined;
-  return () => {
+  return async () => {
     // A failed fetch propagates — caught by `runDaemon`'s own `daemon.plan_reload_failed` wrapper
     // (the SAME generic catch `planReloader`'s own treeSha throw already relies on), never
     // swallowed here. Keeping the plan we already have is the correct degrade either way.
-    fetch();
-    const sha = treeSha();
+    await fetch();
+    const sha = await treeSha();
     if (lastSha === undefined) {
       // First tick: record the boot's sha without reloading — see `planReloader`'s identical
       // comment for why reporting a reload here would be a lie. The working tree already matches
@@ -37023,7 +37090,7 @@ export function dedicatedTargetPlanReloader(
     }
     if (sha === lastSha) return null;
     lastSha = sha;
-    resetWorkingTree();
+    await resetWorkingTree();
     log("daemon.target_plan_changed", { tree_sha: sha.slice(0, 12) });
     return load(target.planPath);
   };
@@ -37042,7 +37109,7 @@ export function resolveReloadPlan(
   target: { isSelf: boolean; planPath: string },
   allowStale: boolean,
   log: (step: string, extra?: Record<string, unknown>) => void,
-): (() => Plan | null) | undefined {
+): (() => Promise<Plan | null>) | undefined {
   return target.isSelf ? planReloader(target, allowStale, log) : dedicatedTargetPlanReloader(target, log);
 }
 
@@ -39684,7 +39751,7 @@ export async function daemonCommand(
         // opening its PR against the WRONG owner. That partial fix is worse than today's honest
         // self-owner-only behaviour and is exactly what test/owner-dispatch-threading.test.ts
         // refuses.
-        runOne: (taskId) =>
+        runOne: (taskId, runOptions) =>
           runTaskFn(taskId, {
             planPath: target.planPath,
             config,
@@ -39708,6 +39775,7 @@ export async function daemonCommand(
             // existing adapter is material-and-clean only; unassessed, dirty, and degraded
             // readings remain undefined and therefore cannot manufacture a restart.
             externalWaitFreshness: daemonFreshnessReads(effectiveRepoRoot).externalWaitFreshness,
+            restartAtWorkerBoundary: runOptions?.restartAtWorkerBoundary,
             externalWaitRecycle: () => recyclePauseDetail(config.root),
             // W1-T5345: a daemon lane is free once its PR is open — the sweep owns CI wait and review.
             handOffAtPrOpen: true,
@@ -45425,7 +45493,9 @@ export function commitWorkerEdits(
   // exists to prevent, and there is nothing this verb needs that the push verb did not.
   deps: PublishAbandonedFixOwnerAheadDeps = {},
   acceptance: readonly AcceptanceCriterion[] = [],
-  options: { admitTests?: boolean; priorHeadSha?: string; branch?: string } = {},
+  // `checkpoint` (W1-T8008): a restart checkpoint keeps EVERY worker change, declared or not -- the undeclared paths are
+  // staged too and returned in `undeclared` (named, never dropped); scope is judged later, on the ordinary push path.
+  options: { admitTests?: boolean; priorHeadSha?: string; branch?: string; checkpoint?: boolean } = {},
 ): WorkerEditCommit {
   const runGit = deps.runGit ?? ((args: string[]) => hostWorktreeGit(
     repoDir,
@@ -45435,7 +45505,7 @@ export function commitWorkerEdits(
   if (message.trim().length === 0) {
     return { committed: false, undeclared: [], reason: "refusing to commit with an empty message" };
   }
-  if (declaredPaths.length === 0) {
+  if (declaredPaths.length === 0 && !options.checkpoint) {
     return { committed: false, undeclared: [], reason: "the task declares no files, so there is no surface to stage" };
   }
 
@@ -45489,6 +45559,9 @@ export function commitWorkerEdits(
   const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths) ||
     regenerable.includes(path) || proofMatchedTests.includes(path) || admittedTests.includes(path) || admittedRegistrations.includes(path));
   const undeclared = changed.filter((path) => !declared.includes(path));
+  // A checkpoint stages the undeclared paths as well; git itself still forces the refusals below.
+  const staged = options.checkpoint ? changed : declared;
+  const commitMessage = options.checkpoint && undeclared.length > 0 ? withUndeclaredContext(message, undeclared) : message;
   // W1-T5868: a path still UNMERGED outside what this commit stages cannot be committed — `git commit`
   // throws on it, and the guarded tree would carry its conflict stages. A merge of current main can
   // conflict in files the task never declared. REFUSE by name (a strike), before anything is staged.
@@ -45498,13 +45571,13 @@ export function commitWorkerEdits(
     return { committed: false, undeclared, conflictMarkerFiles: unresolvedOutside,
       reason: `${UNRESOLVED_CONFLICT_REFUSAL_PREFIX} ${unresolvedOutside.join(", ")}; nothing was staged` };
   }
-  if (declared.length === 0) {
+  if (staged.length === 0) {
     return { committed: false, undeclared, reason: "every change the worker made is outside its declared files" +
       registrationChanges.filter((change) => change.error).map((change) => `; ${change.path}: ${change.error}`).join("") };
   }
 
   // W1-T5227: BEFORE any add — `git add` marks a conflicted path resolved whatever it holds.
-  const markerFiles = leftoverConflictMarkerPaths(runGit, declared);
+  const markerFiles = leftoverConflictMarkerPaths(runGit, staged);
   if (markerFiles.length > 0) {
     return { committed: false, undeclared, conflictMarkerFiles: markerFiles,
       reason: `${CONFLICT_MARKER_REFUSAL_PREFIX} ${markerFiles.join(", ")}; nothing was staged` };
@@ -45515,25 +45588,25 @@ export function commitWorkerEdits(
   // in the index and is committed as the deletion it already is; a worktree-only ` D` is still added.
   const alreadyStagedDeletion = new Set(status.split("\0").filter((entry) => entry.startsWith("D ") && entry.length > 3)
     .map((entry) => entry.slice(3)).filter((path) => !existsSync(join(repoDir, path))));
-  const withoutStagedDeletions = declared.filter((path) => !alreadyStagedDeletion.has(path));
+  const withoutStagedDeletions = staged.filter((path) => !alreadyStagedDeletion.has(path));
 
   let sha: string;
   if (roundRef === undefined) {
     if (withoutStagedDeletions.length > 0) runGit(["add", "-A", "--", ...withoutStagedDeletions]);
-    runGit(["commit", "-m", message]);
+    runGit(["commit", "-m", commitMessage]);
     sha = runGit(["rev-parse", "HEAD"]).trim();
   } else {
     const mergeHead = mergeHeadPresent(runGit) ? runGit(["rev-parse", "MERGE_HEAD"]).trim() : undefined;
     // Only a merge's index is seeded from the real one, so only there is a staged deletion already in it;
     // an unseeded temporary index starts from the prior head, where `add -A` must still stage the removal.
-    const addable = mergeHead === undefined ? declared : withoutStagedDeletions;
+    const addable = mergeHead === undefined ? staged : withoutStagedDeletions;
     const tree = temporaryIndexTree(repoDir, options.priorHeadSha!, (env) => {
       if (addable.length > 0) hostWorktreeGit(repoDir, ["add", "-A", "--", ...addable], { env });
     }, mergeHead === undefined ? undefined : resolve(repoDir, runGit(["rev-parse", "--git-path", "index"]).trim()));
     if (mergeHead === undefined && tree === runGit(["rev-parse", `${options.priorHeadSha}^{tree}`]).trim()) {
       return { committed: false, undeclared, reason: "the worker changed nothing" };
     }
-    sha = runGit(["commit-tree", tree, "-p", options.priorHeadSha!, ...(mergeHead === undefined ? [] : ["-p", mergeHead]), "-m", message]).trim();
+    sha = runGit(["commit-tree", tree, "-p", options.priorHeadSha!, ...(mergeHead === undefined ? [] : ["-p", mergeHead]), "-m", commitMessage]).trim();
     try {
       runGit(["update-ref", roundRef, sha, options.priorHeadSha!]);
     } catch (error) {
@@ -45555,6 +45628,13 @@ export function commitWorkerEdits(
     ...(admittedTests.length > 0 ? { admittedTests } : {}),
     ...(admittedRegistrations.length > 0 ? { admittedRegistrations } : {}),
   };
+}
+
+/** W1-T8008: name the undeclared paths a checkpoint kept inside the commit's `[remudero-context]` block (before the trailer). */
+function withUndeclaredContext(message: string, undeclared: readonly string[]): string {
+  const line = `undeclared: ${undeclared.join(", ")}`;
+  const at = message.lastIndexOf("\n\nRemudero-Task:");
+  return at < 0 ? `${message}\n${line}` : `${message.slice(0, at)}\n${line}${message.slice(at)}`;
 }
 
 /** Inspect declarations rather than comments or string examples; never execute worker content.

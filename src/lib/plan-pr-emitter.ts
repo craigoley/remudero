@@ -16,6 +16,7 @@
 
 import type { AcceptanceCriterion } from "./plan.js";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { promisify } from "node:util";
@@ -525,13 +526,14 @@ function inTreeEnv(): NodeJS.ProcessEnv {
   delete env.NODE_TEST_CONTEXT; // a nested `node --test` under a test runner otherwise reports to the parent, not to stdout
   return env;
 }
-function inTreeCommand(cwd: string, relPath: string, argv: string[]) {
+function inTreeCommand(cwd: string, relPath: string, argv: string[], judged?: JudgedRun) {
   const env = inTreeEnv();
   if (relPath !== SHARD_CENSUS_TEST) return { file: process.execPath, args: argv, env };
   delete env.RMD_SELF_SYNC_DONE;
   const setup = "./test/setup/tmp-hygiene.ts";
-  const args = existsSync(join(cwd, setup)) ? [...argv.slice(0, 2), "--import", setup, ...argv.slice(2)] : argv;
-  return { ...lowPriorityCommand(process.execPath, testRunArgv(args, 1)), env };
+  let args = existsSync(join(cwd, setup)) ? [...argv.slice(0, 2), "--import", setup, ...argv.slice(2)] : argv;
+  if (judged) args = loadCensusJudge().judgedNodeTestArgs(args, judged.args);
+  return { ...lowPriorityCommand(process.execPath, testRunArgv(args, 1)), env: { ...env, ...judged?.env } };
 }
 const absentFromTree = (relPath: string): PlanPrPreflightReading => ({ status: null, output: `${relPath} is absent from the tree` });
 const taskIdReading = (r: PlanPrPreflightReading): PlanPrPreflightReading =>
@@ -539,10 +541,50 @@ const taskIdReading = (r: PlanPrPreflightReading): PlanPrPreflightReading =>
 const shardCensusReading = (r: PlanPrPreflightReading): PlanPrPreflightReading =>
   r.status === 1 && !/^# fail [1-9]/m.test(r.output) ? { ...r, status: null } : r; // no `# fail N`: a load error, not a result
 
+interface JudgedRun {
+  args: string[];
+  env: Record<string, string>;
+  read(): { tallyText: string; markerText: string };
+  cleanup(): void;
+}
+interface CensusJudge {
+  prepareJudgedRun(): JudgedRun;
+  judgedNodeTestArgs(args: readonly string[], judgedArgs: readonly string[]): string[];
+  judgeRun(files: readonly string[], opts: { status: number; pool: boolean; root: string; tallyText: string; markerText: string }): { complete: boolean; status: number };
+  describeJudgedRun(role: string, verdict: { complete: boolean }, opts: { prefix: string }): string;
+}
+const loadCensusJudge = (): CensusJudge => createRequire(import.meta.url)("../../scripts/pure-test-pool.mjs") as CensusJudge;
+
+function judgedCensusReading(cwd: string, judged: JudgedRun, r: PlanPrPreflightReading): PlanPrPreflightReading {
+  if (r.status !== 0 || r.timedOutMs !== undefined) return r;
+  const judge = loadCensusJudge();
+  const verdict = judge.judgeRun([SHARD_CENSUS_TEST], { status: 0, pool: false, root: cwd, ...judged.read() });
+  if (verdict.complete) return r;
+  return { status: verdict.status, output: `${judge.describeJudgedRun("shard census", verdict, { prefix: "test-judge" })}\n${r.output}` };
+}
+function runShardCensus(cwd: string, budgetMs: number): PlanPrPreflightReading {
+  if (!existsSync(join(cwd, SHARD_CENSUS_TEST))) return absentFromTree(SHARD_CENSUS_TEST);
+  const judged = loadCensusJudge().prepareJudgedRun();
+  try {
+    return judgedCensusReading(cwd, judged, shardCensusReading(runInTree(cwd, SHARD_CENSUS_TEST, SHARD_CENSUS_ARGV, budgetMs, judged)));
+  } finally {
+    judged.cleanup();
+  }
+}
+async function runShardCensusAsync(cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> {
+  if (!existsSync(join(cwd, SHARD_CENSUS_TEST))) return absentFromTree(SHARD_CENSUS_TEST);
+  const judged = loadCensusJudge().prepareJudgedRun();
+  try {
+    return judgedCensusReading(cwd, judged, shardCensusReading(await runInTreeAsync(cwd, SHARD_CENSUS_TEST, SHARD_CENSUS_ARGV, budgetMs, judged)));
+  } finally {
+    judged.cleanup();
+  }
+}
+
 /** Run a script the tree itself carries; a tree without it is a check that cannot run. Killed at `budgetMs`. */
-function runInTree(cwd: string, relPath: string, argv: string[], budgetMs: number): PlanPrPreflightReading {
+function runInTree(cwd: string, relPath: string, argv: string[], budgetMs: number, judged?: JudgedRun): PlanPrPreflightReading {
   if (!existsSync(join(cwd, relPath))) return absentFromTree(relPath);
-  const { file, args, env } = inTreeCommand(cwd, relPath, argv);
+  const { file, args, env } = inTreeCommand(cwd, relPath, argv, judged);
   const r = spawnSync(file, args, { cwd, encoding: "utf8", maxBuffer: 1 << 26, env, ...budgetedSpawn(budgetMs) });
   const output = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
   if ((r.error as NodeJS.ErrnoException | undefined)?.code !== "ETIMEDOUT") return { status: r.status, output };
@@ -568,9 +610,9 @@ async function runChildAsync(file: string, args: string[], cwd: string, env?: No
     return { status: null, output, timedOutMs: budgetMs };
   }
 }
-async function runInTreeAsync(cwd: string, relPath: string, argv: string[], budgetMs: number): Promise<PlanPrPreflightReading> {
+async function runInTreeAsync(cwd: string, relPath: string, argv: string[], budgetMs: number, judged?: JudgedRun): Promise<PlanPrPreflightReading> {
   if (!existsSync(join(cwd, relPath))) return absentFromTree(relPath);
-  const { file, args, env } = inTreeCommand(cwd, relPath, argv);
+  const { file, args, env } = inTreeCommand(cwd, relPath, argv, judged);
   return runChildAsync(file, args, cwd, env, budgetMs);
 }
 
@@ -581,7 +623,7 @@ const defaultPreflightChecks = {
   lintPlan: (cwd: string, budgetMs: number): PlanPrPreflightReading => runInTree(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV, budgetMs),
   taskIdExistence: (cwd: string, headRef: string | undefined, budgetMs: number): PlanPrPreflightReading =>
     taskIdReading(runInTree(cwd, TASK_ID_SCRIPT, taskIdArgv(headRef), budgetMs)),
-  shardCensus: (cwd: string, budgetMs: number): PlanPrPreflightReading => shardCensusReading(runInTree(cwd, SHARD_CENSUS_TEST, SHARD_CENSUS_ARGV, budgetMs)),
+  shardCensus: (cwd: string, budgetMs: number): PlanPrPreflightReading => runShardCensus(cwd, budgetMs),
   checkProof: (cwd: string, proof: string, budgetMs: number): ProofCheckStatus => proofCheckStatus(runInTree(cwd, RUN_TASK_ENTRY, checkProofArgv(proof), budgetMs)),
 };
 /** A test's stand-ins for any of {@link defaultPreflightChecks}, and for the budget each in-tree check gets. */
@@ -590,8 +632,7 @@ const defaultPreflightChecksAsync = {
   lintPlan: (cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> => runInTreeAsync(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV, budgetMs),
   taskIdExistence: async (cwd: string, headRef: string | undefined, budgetMs: number): Promise<PlanPrPreflightReading> =>
     taskIdReading(await runInTreeAsync(cwd, TASK_ID_SCRIPT, taskIdArgv(headRef), budgetMs)),
-  shardCensus: async (cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> =>
-    shardCensusReading(await runInTreeAsync(cwd, SHARD_CENSUS_TEST, SHARD_CENSUS_ARGV, budgetMs)),
+  shardCensus: (cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> => runShardCensusAsync(cwd, budgetMs),
   checkProof: async (cwd: string, proof: string, budgetMs: number): Promise<ProofCheckStatus> =>
     proofCheckStatus(await runInTreeAsync(cwd, RUN_TASK_ENTRY, checkProofArgv(proof), budgetMs)),
 };

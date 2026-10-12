@@ -179,7 +179,7 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
     count: 2,
     reason: "CHECKOUT (W1-T6136): arm-auto-merge.ts planMergeSafetyInClone binds planSafetyGitSync/Async to <root>/repos/<repo>",
   },
-  "src/lib/plan.ts": { count: 1, reason: "CHECKOUT: loadPlanAtRef reads a ref at the repo root" },
+  "src/lib/plan.ts": { count: 2, reason: "CHECKOUT: loadPlanAtRef and its awaited form read a ref at the repo root" },
   "src/lib/pr-open.ts": { count: 1, reason: "CHECKOUT: mergeBaseFor reads the repo root" },
   "src/lib/prevention-source-evidence.ts": { count: 1, reason: "CHECKOUT: captureImportedModule reads the harness module's own checkout" },
   "src/lib/replay-harness.ts": { count: 1, reason: "CHECKOUT: sourceGit reads the replay source checkout (-C sourceDir)" },
