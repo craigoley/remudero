@@ -316,7 +316,7 @@ export function readServeUpgradeThresholds(slotDir: string, read: (path: string)
  * Two pswpin reads `sampleMs` apart give the swap-in rate; MemAvailable and the PSI avg10 lines are read after
  * the second. Every read that fails or does not parse is named in `unread`.
  */
-export async function readHostPressure(ports: { read?: (path: string) => string; now: () => number; sleep: (ms: number) => Promise<void>; sampleMs?: number }): Promise<HostPressureReading> {
+export async function readHostPressure(ports: { read?: (path: string) => string; clock: Clock; sleep: (ms: number) => Promise<void>; sampleMs?: number }): Promise<HostPressureReading> {
   const read = ports.read ?? ((path: string) => readFileSync(path, "utf8"));
   const sampleMs = ports.sampleMs ?? 1_000;
   const unread: string[] = [];
@@ -335,10 +335,10 @@ export async function readHostPressure(ports: { read?: (path: string) => string;
     const raw = /^pswpin\s+(\d+)/m.exec(read("/proc/vmstat"))?.[1];
     return raw === undefined ? undefined : Number(raw);
   };
-  const firstAt = ports.now();
+  const firstAt = ports.clock.now();
   const first = attempt("/proc/vmstat pswpin", pswpin);
   await ports.sleep(sampleMs);
-  const secondAt = ports.now();
+  const secondAt = ports.clock.now();
   const second = first === undefined ? undefined : attempt("/proc/vmstat pswpin", pswpin);
   const seconds = (secondAt - firstAt) / 1000;
   let swapInPagesPerSec: number | undefined;
@@ -435,7 +435,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   const shedBackstopMs = opts.shedBackstopMs ?? SHED_BACKSTOP_MS;
   const spacingBaseMs = opts.spacingBaseMs ?? 0;
   const spacingHalfLifeMs = opts.spacingHalfLifeMs ?? SERVE_HANDOFF_PRESSURE_HALF_LIFE_MS;
-  const hostPressure = opts.hostPressure ?? (() => readHostPressure({ now: () => clock.now(), sleep }));
+  const hostPressure = opts.hostPressure ?? (() => readHostPressure({ clock, sleep }));
   const upgradeThresholds = opts.upgradeThresholds ?? ((dir: string) => readServeUpgradeThresholds(dir));
   /** A refused upgrade retries on the existing deferral, doubling per refusal; never later than the spacing base. */
   const retryCapMs = Math.max(deferMs, SERVE_HANDOFF_SPACING_BASE_MS);

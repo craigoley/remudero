@@ -21,7 +21,6 @@ import {
   SERVE_POLICY_CONTAINER,
   SERVE_POLICY_FAILED_FILE,
   SERVE_REPLACE_HELD_EXIT,
-  ServeReplaceHeld,
   realServePolicyDeps,
   serveReplaceAdmissionEnv,
   runServePolicyCycle,
@@ -317,7 +316,7 @@ const DESTRUCTIVE = /^docker (stop|rm|run|pull|network connect)\b/m;
 
 test("serve convergence cannot stop the console before pressure admission", () => {
   // Injected ports: a held launcher is a HOLD, never a failure, a back-off or an escalation.
-  const held = harness({ replaceServe: () => { throw new ServeReplaceHeld("psi", "memory PSI full avg10 2.53 (max 2)"); } });
+  const held = harness({ replaceServe: () => ({ held: "psi", detail: "memory PSI full avg10 2.53 (max 2)" }) });
   const out = runServePolicyCycle(held.deps, TICK);
   assert.equal(out.replaced, false);
   assert.match(out.reason, /fresh host pressure refused it \(psi: memory PSI full avg10 2\.53/);
@@ -341,13 +340,16 @@ test("serve convergence cannot stop the console before pressure admission", () =
       throw Object.assign(new Error("Command failed"), { status, stderr: "serve-container: HELD (host_headroom) — MemAvailable 3954 MiB < need 4096 MiB (before docker stop). remudero-serve was left untouched.\n" });
     };
     const heldSeam = realServePolicyDeps({ installPath: wired, stateRoot: wired }, refuse(SERVE_REPLACE_HELD_EXIT), undefined, () => budget).replaceServe!;
-    assert.throws(heldSeam, (err: unknown) => err instanceof ServeReplaceHeld && err.hold === "host_headroom" && /3954 MiB/.test(err.message));
+    const heldResult = heldSeam();
+    assert.equal(heldResult && heldResult.held, "host_headroom");
+    assert.match(heldResult ? heldResult.detail : "", /3954 MiB/);
     assert.deepEqual(launched[0]!.slice(0, 2 + 6), ["env", `RMD_STATE_DIR=${wired}`, ...serveReplaceAdmissionEnv(budget)]);
     const failedSeam = realServePolicyDeps({ installPath: wired, stateRoot: wired }, refuse(1), undefined, () => budget).replaceServe!;
-    assert.throws(failedSeam, (err: unknown) => !(err instanceof ServeReplaceHeld), "any other exit is still a failure");
+    assert.throws(failedSeam, /Command failed/, "any other exit is still a failure");
     const before = launched.length;
     const noPolicy = realServePolicyDeps({ installPath: wired, stateRoot: wired }, refuse(0), undefined, () => { throw new Error("policy.yaml: ENOENT"); }).replaceServe!;
-    assert.throws(noPolicy, (err: unknown) => err instanceof ServeReplaceHeld && err.hold === "policy_unread");
+    const noPolicyResult = noPolicy();
+    assert.equal(noPolicyResult && noPolicyResult.held, "policy_unread");
     assert.equal(launched.length, before, "no admission thresholds, no launch at all");
   } finally {
     rmSync(wired, { recursive: true, force: true });

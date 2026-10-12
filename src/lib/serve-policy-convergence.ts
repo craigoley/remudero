@@ -14,7 +14,7 @@
  * way, under the same holds; an UNKNOWN reading (no plan, scratch off, no inspect) is never drift.
  * W1-T8311: those holds never read the HOST. The launcher stops and removes the old console, so the
  * automatic replace passes it the host memory budget's thresholds and the launcher re-checks fresh
- * host pressure before its first destructive step. Its named refusal ({@link ServeReplaceHeld}) is a
+ * host pressure before its first destructive step. Its named refusal (a returned ServeReplaceHold) is a
  * HOLD: the old container stays, and no failure, back-off or escalation is recorded.
  */
 import { execFileSync } from "node:child_process";
@@ -57,14 +57,6 @@ const HANDOFF_CLOSED_STEPS = [
 
 /** deploy/serve-container.sh's exit when fresh host pressure refuses the replace; nothing was changed. */
 export const SERVE_REPLACE_HELD_EXIT = 75;
-
-/** The launcher held the replace on a named admission refusal: the old container is untouched. */
-export class ServeReplaceHeld extends Error {
-  constructor(readonly hold: string, detail: string) {
-    super(`${hold}: ${detail}`);
-    this.name = "ServeReplaceHeld";
-  }
-}
 
 /** The environment that makes the launcher admit the replace on fresh host pressure, from the budget's existing values. */
 export function serveReplaceAdmissionEnv(policy: HostMemoryBudgetPolicy): string[] {
@@ -211,7 +203,13 @@ export function runServePolicyCycle(
   deps.log("deploy.serve_policy_replace", { reason: decision.reason, ...rows });
   let error: string | undefined;
   try {
-    deps.replaceServe();
+    const held = deps.replaceServe();
+    if (held) {
+      // W1-T8311: an admission refusal changed nothing; the next tick asks again with a fresh reading
+      const reason = `${decision.reason}, but fresh host pressure refused it (${held.held}: ${held.detail}) — the old console was kept`;
+      deps.log("deploy.serve_policy_held", { reason, hold: held.held, ...rows });
+      return { replaced: false, reason, drift, mountDrift, imageDrift };
+    }
     // Only a reading known BEFORE the replace is re-checked: an unknown one never caused it.
     const after = drift === undefined ? [] : deps.servePolicyDrift();
     const mountsAfter = mountDrift === undefined ? [] : deps.serveMountPlanDrift?.();
@@ -225,12 +223,6 @@ export function runServePolicyCycle(
       error = `image still off the daemon after the replace (${"kind" in imageAfter ? imageAfter.reason : `expected=${imageAfter.expected} actual=${imageAfter.actual}`})`;
     }
   } catch (err) {
-    if (err instanceof ServeReplaceHeld) {
-      // W1-T8311: an admission refusal changed nothing; the next tick asks again with a fresh reading
-      const reason = `${decision.reason}, but fresh host pressure refused it (${err.message}) — the old console was kept`;
-      deps.log("deploy.serve_policy_held", { reason, hold: err.hold, ...rows });
-      return { replaced: false, reason, drift, mountDrift, imageDrift };
-    }
     // the launcher's refusal is carried to the failure row, the back-off record and the escalation below
     error = err instanceof Error ? err.message : String(err);
   }
@@ -297,7 +289,8 @@ export function realServePolicyDeps(
       try {
         admission = serveReplaceAdmissionEnv(budget());
       } catch (err) {
-        throw new ServeReplaceHeld("policy_unread", err instanceof Error ? err.message : String(err));
+        // no thresholds, no launch: a named hold, never an unguarded replace
+        return { held: "policy_unread", detail: err instanceof Error ? err.message : String(err) };
       }
       try {
         exec("env", [`RMD_STATE_DIR=${o.stateRoot}`, ...admission, "bash", join(o.installPath, "deploy", "serve-container.sh"), "--replace"]);
@@ -306,8 +299,9 @@ export function realServePolicyDeps(
         if (status !== SERVE_REPLACE_HELD_EXIT) throw err;
         const stderr = String((err as { stderr?: unknown }).stderr ?? "");
         const held = /HELD \(([a-z_]+)\) — (.*)/.exec(stderr);
-        throw new ServeReplaceHeld(held?.[1] ?? "held", held?.[2] ?? (err instanceof Error ? err.message : String(err)));
+        return { held: held?.[1] ?? "held", detail: held?.[2] ?? (err instanceof Error ? err.message : String(err)) };
       }
+      return undefined;
     },
     servePolicyLastFailedAtMs: () => {
       try {

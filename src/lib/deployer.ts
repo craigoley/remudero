@@ -1301,6 +1301,12 @@ const FETCH_LOCK_RETRY_PAUSE_MS = 250;
 
 // ── The orchestrated cycle (all side effects injected) ─────────────────────────
 
+/** W1-T8311: the serve launcher held its replace on a named admission refusal; nothing was changed. */
+export interface ServeReplaceHold {
+  held: string;
+  detail: string;
+}
+
 export interface DeployDeps {
   log: (step: string, data?: Record<string, unknown>) => void;
   now: () => number;
@@ -1343,9 +1349,9 @@ export interface DeployDeps {
   /** Is remudero-serve running and not restarting? */
   serveHealthy?: () => boolean | undefined;
   /** `deploy/serve-container.sh --replace`; throws when the launcher refuses or fails. W1-T8311: a fresh host
-   *  pressure refusal before the launcher's first destructive step throws serve-policy-convergence.ts's
-   *  `ServeReplaceHeld`, a hold that leaves the old console untouched, never a failure. */
-  replaceServe?: () => void;
+   *  pressure refusal before the launcher's first destructive step RETURNS a {@link ServeReplaceHold}: the old
+   *  console is untouched, so it is a hold, never a failure. */
+  replaceServe?: () => void | ServeReplaceHold;
   servePolicyLastFailedAtMs?: () => number | undefined;
   recordServePolicyFailure?: (message: string, atMs: number) => void;
   clearServePolicyFailure?: () => void;

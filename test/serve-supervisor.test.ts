@@ -643,13 +643,13 @@ test("serve upgrade admission preserves unknowns and genuine recovery paths", as
     if (!f) throw new Error(`ENOENT: ${path}`);
     return f();
   };
-  const measured = await readHostPressure({ read, now: () => now, sleep: async (ms) => void (now += ms), sampleMs: 500 });
+  const measured = await readHostPressure({ read, clock: { now: () => now, iso: () => "" } as never, sleep: async (ms) => void (now += ms), sampleMs: 500 });
   assert.deepEqual(measured, { atMs: 500, memAvailableBytes: 4_049_000 * 1024, swapInPagesPerSec: 100, psiSomeAvg10: 1.5, psiFullAvg10: 0.25, unread: [] });
   delete files["/proc/pressure/memory"];
-  const noPsi = await readHostPressure({ read, now: () => now, sleep: async (ms) => void (now += ms) });
+  const noPsi = await readHostPressure({ read, clock: { now: () => now, iso: () => "" } as never, sleep: async (ms) => void (now += ms) });
   assert.match(noPsi.unread.join(";"), /\/proc\/pressure\/memory: ENOENT/);
   assert.equal(hold({ ...fits, reading: noPsi, nowMs: now }), "pressure_unread");
-  const frozen = await readHostPressure({ read, now: () => 7, sleep: async () => {} });
+  const frozen = await readHostPressure({ read, clock: { now: () => 7, iso: () => "" } as never, sleep: async () => {} });
   assert.match(frozen.unread.join(";"), /no time elapsed/, "no window, no rate: never a zero swap-in");
 
   // The baked supervisor's threshold reader agrees with the validated loader on the shipped policy.
