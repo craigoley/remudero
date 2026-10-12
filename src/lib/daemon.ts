@@ -1033,7 +1033,7 @@ export interface DaemonDeps {
   refreshMerged: (plan?: Plan) => MergedSet;
   refreshMergedAsync?: (plan?: Plan) => Promise<MergedSet>;
   readLoopTelemetry?: (() => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number;
-    sync_spawn_top?: unknown[] }) & { peek?: () => unknown };
+    sync_spawn_top?: unknown[] }) & { takeLagInterval?: (consumer?: string) => { top: unknown; sync_spawn_ms: number } };
   /** W1-T6782: flat, payload-free memory fields (`sampleDaemonMemory`, daemon-memory-telemetry.ts)
    *  spread into the existing `daemon.alive` row. A throw is carried as `mem_telemetry`, never lost.
    *  W1-T7092: `afterRow` starts the worker-thread heap read once the row is written; the tick never
@@ -1667,8 +1667,14 @@ function startMemoryReadAfterRow(deps: Pick<DaemonDeps, "readMemoryTelemetry">, 
   }
 }
 
-function peekSyncSpawnTop(deps: Pick<DaemonDeps, "readLoopTelemetry">): unknown {
-  try { return deps.readLoopTelemetry?.peek?.(); } catch { return undefined; /* Reason: observability only. */ }
+/** W1-T7745: what the spawns of THIS consumer's own interval were, read and closed so the next row starts clean.
+ *  Spread into a `reportLoopLag` sample; a daemon without the sampler contributes neither field. */
+function takeSyncSpawn(deps: Pick<DaemonDeps, "readLoopTelemetry">, consumer: string):
+  { syncSpawnTop?: unknown; syncSpawnMs?: number } {
+  try {
+    const taken = deps.readLoopTelemetry?.takeLagInterval?.(consumer);
+    return taken === undefined ? {} : { syncSpawnTop: taken.top, syncSpawnMs: taken.sync_spawn_ms };
+  } catch { return {}; /* Reason: observability only. */ }
 }
 
 /**
@@ -1693,8 +1699,10 @@ function peekSyncSpawnTop(deps: Pick<DaemonDeps, "readLoopTelemetry">): unknown 
  */
 export function reportLoopLag(
   sample: { phase: string; dueAtMs: number; observedAtMs: number; intervalMs: number; lastStepBeforeBlock?: string;
-    /** W1-T5718: the longest synchronous spawn of the window this lag closes, read without closing it. */
-    syncSpawnTop?: unknown },
+    /** W1-T5718: the longest synchronous spawn of the interval this lag closes (W1-T7745: its own interval's). */
+    syncSpawnTop?: unknown;
+    /** W1-T7745: the synchronous spawn time of that same interval, so a row says how much of its lag was spawn. */
+    syncSpawnMs?: number },
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): void {
   try {
@@ -1707,6 +1715,7 @@ export function reportLoopLag(
       missed_ticks: Math.floor(lagMs / sample.intervalMs),
       last_step_before_block: sample.lastStepBeforeBlock,
       ...(sample.syncSpawnTop === undefined ? {} : { sync_spawn_top: sample.syncSpawnTop }),
+      ...(sample.syncSpawnMs === undefined ? {} : { sync_spawn_ms: sample.syncSpawnMs }),
     });
   } catch {
     // Reason: a throwing logger must cost the reading, never the tick.
@@ -1756,7 +1765,7 @@ export function startInterphaseReviewClock(
           const result = await wait(quantumMs);
           reportLoopLag(
             { phase, dueAtMs: clockDueAtMs, observedAtMs: interphaseClock.now(), intervalMs: quantumMs,
-              lastStepBeforeBlock: deps.lastStepBeforeBlock?.(), syncSpawnTop: peekSyncSpawnTop(deps) },
+              lastStepBeforeBlock: deps.lastStepBeforeBlock?.(), ...takeSyncSpawn(deps, "review_clock") },
             log,
           );
           if (result === "wake") {
@@ -2129,7 +2138,7 @@ function startInFlightTicker(
           const lastStepBeforeBlock = deps.lastStepBeforeBlock?.();
           reportLoopLag(
             { phase: owner.phase, dueAtMs: tickDueAtMs, observedAtMs: daemonClock.now(), intervalMs: pollIntervalMs, lastStepBeforeBlock,
-              syncSpawnTop: peekSyncSpawnTop(deps) },
+              ...takeSyncSpawn(deps, "ticker") },
             log,
           );
           if (waitResult === "wake") eventWakePending = true;
@@ -3238,7 +3247,7 @@ export async function runDaemon(
   };
   if (deps.livenessPulse) livenessPulse = startLivenessPulse(pollIntervalMs, idleLaneClock, log,
     (sample) => reportLoopLag({ ...sample, lastStepBeforeBlock: deps.lastStepBeforeBlock?.(),
-      syncSpawnTop: peekSyncSpawnTop(deps) }, log));
+      ...takeSyncSpawn(deps, "pulse") }, log));
   const prActionPump = startPrActionPump(deps, pollIntervalMs, log);
   prActionPumpRef.stop = prActionPump.stop;
   prActionPumpRef.isBusy = prActionPump.isBusy;
