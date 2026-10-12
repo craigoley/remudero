@@ -256,3 +256,52 @@ test("W1-T6036: the default runner throws, rather than reading red, when the run
   assert.equal(typeof runSuiteShifted, "function");
   assert.throws(() => runSuiteShifted(join(ROOT, "no-such-checkout"), FILE, 2), /ENOENT/);
 });
+
+
+test("W1-T7812: the default shifted runner rejects incomplete TAP and mismatched end tallies", () => {
+  const testFile = "test/measured.test.ts";
+  const g = garden({ files: { [testFile]: 'import { test } from "node:test";\ntest("measured", () => {});\n' } });
+  const incomplete = [
+    "# Subtest: measured",
+    "# tests 2",
+    "# pass 1",
+    "# fail 0",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0",
+  ].join("\n");
+  const complete = [
+    "# Subtest: measured",
+    "# tests 1",
+    "# pass 1",
+    "# fail 0",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0",
+  ].join("\n");
+  const fakeExec = (output: string, tally: { tests: number; failed: number }) =>
+    (_command: string, args: string[], _options: { env: NodeJS.ProcessEnv }): string => {
+      const destination = args.find((arg) => arg.startsWith("--test-reporter-destination=") && arg.endsWith("tally.json"));
+      assert.ok(destination);
+      writeFileSync(destination.slice(destination.indexOf("=") + 1), JSON.stringify({
+        summary: tally, fileSummaries: [testFile],
+      }));
+      return output;
+    };
+  try {
+    assert.throws(
+      () => gardener.runSuiteShiftedMeasured(g.repo.dir, testFile, 2, {
+        execFile: fakeExec(incomplete, { tests: 2, failed: 0 }),
+      }),
+      /incomplete TAP verdict/,
+    );
+    assert.throws(
+      () => gardener.runSuiteShiftedMeasured(g.repo.dir, testFile, 2, {
+        execFile: fakeExec(complete, { tests: 2, failed: 0 }),
+      }),
+      /TAP counts disagree with the end-of-run tally/,
+    );
+  } finally {
+    g.repo.cleanup();
+  }
+});

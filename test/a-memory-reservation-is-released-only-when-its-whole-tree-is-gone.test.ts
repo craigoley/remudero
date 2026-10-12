@@ -82,6 +82,30 @@ function firstReservation(w: ReturnType<typeof world>): any {
   return JSON.parse(reservationContents(w)[0]!);
 }
 
+test("an interrupted memory admission preserves live ownership and releases only verified claims", () => {
+  const w = world();
+  const handle = openMemoryReservation({ workerClass: "implement" }, w.deps());
+  assert.equal(handle.published, true, "an admission handle cannot certify an entry whose write was never confirmed");
+  assert.equal(firstReservation(w).owner.start, "proc:10");
+  w.clock.now += 100 * UNVERIFIED_AFTER_MS;
+  assert.equal(sweepMemoryReservations(w.deps())?.released.length, 0, "a live pre-spawn owner is not reclaimed by age");
+  assert.equal(reservationCount(w), 1);
+  const unknown = w.deps({ probe: () => ({ state: "unknown", reason: "unreadable process identity" }) });
+  assert.equal(sweepMemoryReservations(unknown)?.released.length, 0);
+  assert.equal(reservationCount(w), 1);
+  const foreign = w.deps({ gen: { containerId: "foreign", initStart: "unknown" }, inst: { name: "site", hostUnique: true } });
+  assert.equal(sweepMemoryReservations(foreign)?.released.length, 0, "foreign age and an unknown generation prove no termination");
+  w.procs.delete(OWNER);
+  const ended = sweepMemoryReservations(w.deps());
+  assert.deepEqual(ended?.released.map(e => e.rule), ["never-spawned"], "a verified owner exit settles its unbound admission");
+  assert.equal(reservationCount(w), 0);
+
+  const failed = world();
+  const unpublished = openMemoryReservation({ workerClass: "implement" }, failed.deps({ write: () => { throw new Error("EROFS"); } }));
+  assert.ok(unpublished.id, "best-effort ownership is retained for later bind or settlement");
+  assert.equal(unpublished.published, false, "a failed writer is not a visible grant");
+});
+
 test("reservation timestamps and foreign-entry ages follow the injected Clock", () => {
   const w = world();
   const openedAt = Date.parse("2026-10-10T00:00:00Z");
