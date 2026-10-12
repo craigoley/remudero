@@ -231,8 +231,12 @@ test("W1-T7746: an armed watchdog does not hold the daemon process open", () => 
   const script = `const { startReadPlaneTelemetry } = await import(${JSON.stringify(module)});
 const telemetry = startReadPlaneTelemetry();
 telemetry.sample.observeLoopLag({ lagMs: 1, intervalMs: 1000 }, (step, extra) => console.log(step, JSON.stringify(extra)));
-if (!(await telemetry.stallProfiler.ready())) console.log("watchdog not attached");
-setTimeout(() => console.log("exiting"), 300);`;
+const hold = setTimeout(() => {}, 20_000); // held only until the watchdog reports in
+telemetry.stallProfiler.ready().then((attached) => {
+  clearTimeout(hold);
+  if (!attached) console.log("watchdog not attached");
+  setTimeout(() => console.log("exiting"), 300);
+});`;
   const out = childProcess.execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script],
     { encoding: "utf8", timeout: 30_000 });
   assert.equal(out.trim(), "exiting");
