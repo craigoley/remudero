@@ -15,7 +15,7 @@ const observation = (promised = promises, records: Array<{ id: string; title: st
 function review(report = "", supplied = observation()) {
   return judgeReview(criteria, {
     diff, report: "a real change", implementationReport: report,
-    headCheckoutDir: "/unused", execProof: () => "passed",
+    headCheckoutDir: "/unused", execProof: () => "pass",
     ...({ promisedFollowUpObservation: supplied } as object),
   });
 }
