@@ -46,15 +46,16 @@ export function recordCiRemedyExecution(identity: CiRemedyComponent, callerRunId
 /** Strict projection: a name, a loaded function object or a missing field is not an execution. */
 export function ciRemedyExecutionOf(value: unknown): CiRemedyExecution {
   const r = object(value), identity = object(r?.identity), dependencies = object(identity?.dependencies), inputs = object(r?.inputs);
-  const caller = importedModuleOf(identity?.caller);
+  if (!r || !identity || !dependencies || !inputs) return { state: "unavailable", reason: "qualifying-component-execution-not-recorded" };
+  const caller = importedModuleOf(identity.caller);
   if (r?.state !== "observed" || r.version !== "ci-remedy-execution-v1" || r.component !== COMPONENT
     || r.lineageTask !== "W1-T5801" || !UUID.test(String(r.invocationId)) || !UUID.test(String(r.processInstanceId))
     || !count(r.pid) || r.pid === 0 || !token(r.callerRunId) || !time(r.at)
     || caller.state !== "observed" || caller.path !== "src/run-task.ts" || Date.parse(caller.capturedAt) > Date.parse(r.at)
-    || !SHA256.test(String(identity?.functionSha256)) || !SHA256.test(String(dependencies?.existsSyncSha256))
-    || !SHA256.test(String(dependencies?.joinSha256)) || typeof dependencies?.nodeVersion !== "string"
+    || !SHA256.test(String(identity.functionSha256)) || !SHA256.test(String(dependencies.existsSyncSha256))
+    || !SHA256.test(String(dependencies.joinSha256)) || typeof dependencies.nodeVersion !== "string"
     || !/^v\d+\.\d+\.\d+$/.test(dependencies.nodeVersion)
-    || !count(inputs?.failingChecks) || !count(inputs?.matchedPaths) || !count(inputs?.reachablePaths)
+    || !count(inputs.failingChecks) || !count(inputs.matchedPaths) || !count(inputs.reachablePaths)
     || inputs.matchedPaths > 5 || inputs.reachablePaths > inputs.matchedPaths
     || (inputs.failingChecks === 0 && inputs.matchedPaths !== 0)
     || !["compared", "no-base", "unreadable"].includes(String(inputs.ownership))
