@@ -54188,6 +54188,14 @@ export function checkMainRepairWorkerBody(
   return { body: rewritten, defect, inert, resolution: "rewritten" };
 }
 
+/** W1-T8572 — the defect row for a no-test-file worker that opened its own PR instead of leaving the open to the
+ *  dispatcher: the body was never checked before it opened, so this records the breach and the body file's inert
+ *  proofs (`body === undefined` when the worker removed that file). */
+export function mainRepairWorkerOpenedDefect(prUrl: string, body: string | undefined): Record<string, unknown> {
+  const inert = body === undefined ? [] : inertAcceptanceProofs(body);
+  return { defect: "worker-opened", count: inert.length, inert_proofs: inert, resolution: "opened-unchecked", pr_url: prUrl, body_file_read: body !== undefined };
+}
+
 /** W1-T8572 — the fix dispatch's own seams beside the alert-fix ones: how it opens a no-test-file PR over REST, and
  *  how it reads the pushed branch's diff and head subject. Optional, so a fake that omits them gets the real reads. */
 export interface MainRepairFixDispatchDeps extends AlertFixDispatchDeps {
@@ -54249,7 +54257,12 @@ export async function dispatchMainRepairFixRun(
     });
     log("main-repair.dispatched_worker", { session_id: worker.sessionId, subtype: worker.subtype, ...workerLedgerFields(worker) });
     let prUrl = parseReport(workerTranscript(worker))?.prUrl;
-    if (!prUrl && request.testFiles.length === 0) prUrl = await openCheckedMainRepairPr(owner, repo, request, branch, worktreePath, bodyFile, log, deps);
+    if (request.testFiles.length === 0) {
+      // A no-test-file worker that opened its own PR broke the contract: its body reached GitHub unchecked, so the
+      // breach is ledgered with whatever the body file holds. The PR exists, so it is still returned for review.
+      if (prUrl) log(MAIN_REPAIR_ACCEPTANCE_DEFECT_STEP, mainRepairWorkerOpenedDefect(prUrl, existsSync(bodyFile) ? readFileSync(bodyFile, "utf8") : undefined));
+      else prUrl = await openCheckedMainRepairPr(owner, repo, request, branch, worktreePath, bodyFile, log, deps);
+    }
     if (!prUrl) {
       log("main-repair.no_pr", { subtype: worker.subtype });
       return undefined;

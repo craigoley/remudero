@@ -271,6 +271,27 @@ test("W1-T8572: a no-test-file body whose proofs all execute opens with no defec
   }
 });
 
+test("W1-T8572: a no-test-file worker that opens its own PR is ledgered as an unchecked open", async () => {
+  const PROSE = `${SPENT_CHECK_TEST} passes`;
+  const h = harness((bodyFile) => {
+    writeFileSync(bodyFile, readFileSync(bodyFile, "utf8").replace(MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER, `- main is green | ${PROSE}`));
+    return `REPORT\nPR_URL: ${FIX_PR}\n`;
+  });
+  try {
+    assert.equal(await h.run(request([])), FIX_PR, "the PR exists, so it is still returned for review");
+    assert.deepEqual(h.opened, [], "the dispatcher opens no second PR");
+    const [row, ...more] = rowsOf(h.ledgerPath, MAIN_REPAIR_ACCEPTANCE_DEFECT_STEP);
+    assert.equal(more.length, 0);
+    assert.equal(row?.defect, "worker-opened");
+    assert.equal(row?.resolution, "opened-unchecked");
+    assert.equal(row?.pr_url, FIX_PR);
+    assert.deepEqual(row?.inert_proofs, [PROSE]);
+    assert.equal(row?.count, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("W1-T8572: the revert body proves the revert with executable proofs", () => {
   const revert: MainRepairRevertRequest = {
     branch: "main",
