@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as gardener from "../src/lib/gate-gardener.js";
+import * as precheck from "../scripts/census-precheck.mjs";
 import { makeTempDir } from "../src/lib/tmp.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -143,6 +144,23 @@ test("W1-T7812: a crossing beyond the 24 h tier runs no suite and keeps the attr
   assert.doesNotMatch(inherited.report, /confirmed|run_error|shifted_passed|control_failed/);
   assert.equal(census.NEAR_CROSSING_HOURS, 24);
   assert.equal(check(never, 1, true).code, 0, "exactly 24 h is outside the strictly inside tier");
+});
+
+test("W1-T7812: pre-push runs the shifted-crossing proof when its implementation or roster changes", () => {
+  const testFile = "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts";
+  const dependencies = [
+    "scripts/expiring-fixture-census.mjs", "src/lib/gate-gardener.ts", "scripts/clock-shift.mjs",
+    "src/lib/ci-parity.ts", "scripts/census-precheck.mjs", "package.json", testFile,
+  ];
+  for (const changedPath of dependencies) {
+    const runs: string[][] = [];
+    const result = precheck.evaluateAdmittedCensusSuites({
+      changed: [changedPath], loadMembers: () => [],
+      runSuites: (files: string[]) => { runs.push(files); return []; },
+    }) as { violations: string[]; unmeasured: string | null };
+    assert.deepEqual(runs, [[testFile]], changedPath);
+    assert.deepEqual(result, { violations: [], unmeasured: null }, changedPath);
+  }
 });
 
 function fixture() {
