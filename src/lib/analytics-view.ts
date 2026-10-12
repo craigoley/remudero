@@ -28,7 +28,7 @@ import {
   type ConsoleV1MetricKey,
   type ConsoleV1Projection,
 } from "./analytics-route.js";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { cacheHitRatio, type CacheHitTokens } from "./digest.js";
 import { readSourceSnapshotBody, sourceSnapshotStates, type ReadModelDb } from "./read-model-db.js";
 import type { ViewDefinition, ViewSource } from "./views.js";
@@ -42,7 +42,9 @@ export const ANALYTICS_DETAILS_MAX_BYTES = 256 * 1024;
 export const ANALYTICS_DETAILS_TOTAL_BYTES = 1536 * 1024;
 
 export const HOST_MODEL_APPROVALS_VERSION = "host-model-approvals-v1";
+/** BACKSTOP: a malformed loaded configuration cannot expand the cached response without limit. */
 export const HOST_MODEL_APPROVALS_MAX_ROWS = 100;
+/** BACKSTOP: reserve the rest of the existing Analytics transport budget for repository measurements. */
 export const HOST_MODEL_APPROVALS_MAX_BYTES = 64 * 1024;
 type ApprovalRecord = { model: string; approvedBy: string; approvedAt: string; expiresAt?: string };
 export type HostModelApprovalConfig = { capturedAt: string | null; approvals: unknown; reason?: "invalid_source" | "over_budget" };
@@ -58,9 +60,9 @@ function approvalTimestamp(value: unknown): string | null {
   if (typeof value !== "string" || value.length > 40) return null;
   const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.exec(value);
   if (!match || Number(match[2]) < 1 || Number(match[2]) > 12 || Number(match[3]) < 1 ||
-    Number(match[3]) > new Date(Date.UTC(Number(match[1]), Number(match[2]), 0)).getUTCDate() ||
+    Number(match[3]) > fixedClock(Date.UTC(Number(match[1]), Number(match[2]), 0)).date().getUTCDate() ||
     Number(match[4]) > 23 || Number(match[5]) > 59 || Number(match[6]) > 59 || !Number.isFinite(Date.parse(value))) return null;
-  return new Date(value).toISOString();
+  return fixedClock(Date.parse(value)).iso();
 }
 
 /** Only these loaded configuration fields may cross into the worker. No file read or permission change. */
@@ -89,7 +91,8 @@ export function captureHostModelApprovals(input: HostModelApprovalConfig): HostM
       sourceKind: "loaded-config", capturedAt, state: "reported", approvals })) > HOST_MODEL_APPROVALS_MAX_BYTES
       ? refused("over_budget") : { capturedAt, approvals };
   } catch {
-    return refused("invalid_source");
+    const reason = "invalid_source" as const;
+    return refused(reason);
   }
 }
 
