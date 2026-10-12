@@ -4,8 +4,9 @@ import { CashResponsesConversation } from "./cash-responses.js";
 import { randomUUID } from "node:crypto";
 import { execFile as execFileChild, execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { constants as fsConstants, accessSync, appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { StringDecoder } from "node:string_decoder";
 import { promisify } from "node:util";
@@ -42,8 +43,11 @@ import { makeTempDir, withTempDir } from "./tmp.js";
 import { assertModelAllowed, modelAllowed } from "./model-gate.js";
 import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWindow } from "./version-switchback.js";
 import type { ModelApproval } from "./config-schema.js";
-import { hasUsableTypecheckBuildInfo, installedTypescriptVersion, seedFromCanonical, TYPECHECK_BUILDINFO_NAME, TYPECHECK_COLD_PEAK_BYTES } from "./typecheck-buildinfo.js";
-import { acquireTestSlotAsync, TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "./test-slot.js";
+import {
+  hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, seedFromCanonical, TYPECHECK_BUILDINFO_NAME, TYPECHECK_COLD_PEAK_BYTES,
+  TYPECHECK_WARM_PEAK_BYTES,
+} from "./typecheck-buildinfo.js";
+import { acquireTestSlotAsync, defaultTestSlots, readHostLoad, readMemoryHeadroom, testRunConcurrency, TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "./test-slot.js";
 import { selectFromRoutingPool, type RoutingPoolDecision, type RoutingPoolRequest, type RoutingPoolSnapshot } from "./model-pool.js";
 import {
   spawnDetachedGroup,
@@ -131,6 +135,8 @@ interface CodexWorkerResult {
   blocks: string[];
   stderr: string;
   outputTruncation?: CodexOutputTruncation;
+  /** W1-T8203: set when stderr passed its retention bound and only its head and tail were kept. */
+  stderrTruncation?: CodexStderrTruncation;
   subtype: string;
   isError: boolean;
   /** W1-T6027: the child's own `exit(code, signal)`, never derived from `subtype`. */
@@ -1986,9 +1992,69 @@ export interface CodexOutputTruncation {
 export const CODEX_WORKER_STDOUT_MAX_BYTES = 1 * 1024 * 1024;
 /** BACKSTOP (W1-T4595): the total stdout one Codex worker may STREAM, against a runaway process. */
 export const CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES = 64 * 1024 * 1024;
-/** PRIMARY CONTROL: stderr is diagnostic evidence, not protocol input, so it receives its own
- * smaller containment ceiling. */
-export const CODEX_WORKER_STDERR_MAX_BYTES = 256 * 1024;
+/** PRIMARY CONTROL (W1-T8203): a MEMORY bound on what is RETAINED of stderr, a share of the stdout retention bound. stderr is
+ * diagnostic evidence (failure tail, retro evidence), never protocol input: passing this keeps the head and the
+ * tail and records the drop. It never tears the worker down and never decides a verdict. */
+export const CODEX_WORKER_STDERR_MAX_BYTES = CODEX_WORKER_STDOUT_MAX_BYTES / 4;
+
+export interface CodexStderrTruncation {
+  limitBytes: number;
+  retainedBytes: number;
+  droppedBytes: number;
+}
+
+/** W1-T8203: bounded stderr retention. Keeps the first quarter of the bound and the last three quarters (the tail
+ * carries the final error); everything between is counted, not held. */
+export class CodexStderrRetainer {
+  private readonly headLimit: number;
+  private readonly tailLimit: number;
+  private head: Buffer[] = [];
+  private headBytes = 0;
+  private tail: Buffer[] = [];
+  private tailBytes = 0;
+  private totalBytes = 0;
+
+  constructor(private readonly limitBytes: number = CODEX_WORKER_STDERR_MAX_BYTES) {
+    this.headLimit = Math.floor(limitBytes / 4);
+    this.tailLimit = limitBytes - this.headLimit;
+  }
+
+  push(chunk: string): void {
+    let buf = Buffer.from(chunk, "utf8");
+    this.totalBytes += buf.length;
+    if (this.headBytes < this.headLimit) {
+      const take = Math.min(buf.length, this.headLimit - this.headBytes);
+      this.head.push(buf.subarray(0, take));
+      this.headBytes += take;
+      buf = buf.subarray(take);
+    }
+    if (buf.length === 0) return;
+    this.tail.push(buf);
+    this.tailBytes += buf.length;
+    while (this.tail.length > 1 && this.tailBytes - this.tail[0].length >= this.tailLimit) {
+      this.tailBytes -= this.tail.shift()!.length;
+    }
+  }
+
+  /** The retained tail, cut to its byte limit. */
+  private tailBuffer(): Buffer {
+    const all = Buffer.concat(this.tail);
+    return all.length > this.tailLimit ? all.subarray(all.length - this.tailLimit) : all;
+  }
+
+  truncation(): CodexStderrTruncation | undefined {
+    if (this.totalBytes <= this.limitBytes) return undefined;
+    const retainedBytes = this.headBytes + this.tailBuffer().length;
+    return { limitBytes: this.limitBytes, retainedBytes, droppedBytes: this.totalBytes - retainedBytes };
+  }
+
+  text(): string {
+    const truncation = this.truncation();
+    const head = Buffer.concat(this.head).toString("utf8");
+    if (!truncation) return head + Buffer.concat(this.tail).toString("utf8");
+    return `${head}\n[... ${truncation.droppedBytes} bytes of stderr dropped ...]\n${this.tailBuffer().toString("utf8")}`;
+  }
+}
 
 /** A worker exceeded a bounded protocol or diagnostic stream before it could return a result. */
 export interface CodexWorkerOutputLimitError extends Error {
@@ -3641,15 +3707,44 @@ export function openWeightCheckSandboxArgv(
 /** The only production route for `RunCheck`: no fallback can execute an unchecked process. */
 const execFileAsync = promisify(execFileChild);
 
+interface CheckJudge {
+  inlineJudgedArgs(): string[];
+  judgedNodeTestArgs(args: readonly string[], judgedArgs: readonly string[]): string[];
+  splitInlineTally(stdout: string): { output: string; tallyText: string };
+  testFilesInArgv(args: readonly string[], cwd: string): string[];
+  judgeRun(files: readonly string[], opts: { status: number; pool: boolean; root: string; tallyText: string }): { complete: boolean; status: number };
+  describeJudgedRun(role: string, verdict: { complete: boolean }, opts: { prefix: string }): string;
+}
+// The judge comes from the ORCHESTRATOR's checkout (this module's), never the worktree the check runs in.
+const loadCheckJudge = (): CheckJudge => createRequire(import.meta.url)("../../scripts/pure-test-pool.mjs") as CheckJudge;
+
+/** W1-T8380: a `node --test` check whose exit 0 left a file short of its own summary (a real `process.exit(0)`) is thrown
+ *  as a red run: nonzero `status`, the judge's line in its output. The sandboxed child sees only the worktree, so the
+ *  judge's tally reporter rides the argv as a `data:` URL and its stdout line is taken back off. */
 export async function runOpenWeightCheck(input: OpenWeightCheckInput): Promise<string> {
-  const { stdout } = await execFileAsync(OPENWEIGHT_CHECK_SANDBOX, openWeightCheckSandboxArgv(input), {
-    cwd: realpathSync(input.cwd),
-    env: input.env,
-    encoding: "utf8",
-    timeout: OPENWEIGHT_CHECK_TIMEOUT_MS,
-    maxBuffer: 8 * 1024 * 1024,
-  });
-  return stdout;
+  const judge = input.argv.includes("--test") ? loadCheckJudge() : undefined;
+  const argv = judge ? judge.judgedNodeTestArgs(input.argv, judge.inlineJudgedArgs()) : input.argv;
+  const cwd = realpathSync(input.cwd);
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync(OPENWEIGHT_CHECK_SANDBOX, openWeightCheckSandboxArgv({ ...input, argv }), {
+      cwd,
+      env: input.env,
+      encoding: "utf8",
+      timeout: OPENWEIGHT_CHECK_TIMEOUT_MS,
+      maxBuffer: 8 * 1024 * 1024,
+    }));
+  } catch (err) {
+    const e = err as { stdout?: unknown };
+    if (judge && typeof e.stdout === "string") e.stdout = judge.splitInlineTally(e.stdout).output;
+    throw err;
+  }
+  if (!judge) return stdout;
+  const { output, tallyText } = judge.splitInlineTally(stdout);
+  const verdict = judge.judgeRun(judge.testFilesInArgv(input.argv, cwd), { status: 0, pool: false, root: cwd, tallyText });
+  if (verdict.complete) return output;
+  const line = judge.describeJudgedRun("unit_test", verdict, { prefix: "test-judge" });
+  throw Object.assign(new Error(line), { status: verdict.status, stdout: `${output}\n${line}\n`, stderr: "" });
 }
 
 /** Raised INSTEAD of executing an unlisted check, before any process spawns. */
@@ -3682,10 +3777,9 @@ export class OpenWeightUnlistedCheckError extends RmdError {
  *
  * THE COST, STATED: a lane cannot scope `unit_test` to one file. In a tree carrying the selector
  * (W1-T6091) the HARNESS scopes it instead — {@link openWeightUnitTestPlan} appends the suites
- * {@link selectOpenWeightUnitTestSuites} derives from git, never from the model. Elsewhere this
- * argv runs the whole suite under the same setup imports as `test:ci`
- * ({@link TEST_PROCESS_GUARD_IMPORTS}), and re-admitting caller arguments stays a separate,
- * deliberate decision rather than a default. */
+ * {@link selectOpenWeightUnitTestSuites} derives from git, never from the model. Consumer trees
+ * use changed tests and source basename matches instead. This argv is only the prefix;
+ * {@link openWeightUnitTestPlan} must append an explicit suite list before it runs. */
 export function openWeightCheckArgv(check: unknown, paths: unknown, cwd?: string): string[] {
   if (typeof check !== "string" || !Object.prototype.hasOwnProperty.call(OPENWEIGHT_CHECKS, check)) {
     throw new OpenWeightUnlistedCheckError(typeof check === "string" ? check : String(check));
@@ -3717,10 +3811,7 @@ export function openWeightIncrementalTypecheck(argv: readonly string[], cwd: str
 // MEASURED 2026-10-06: the whole suite is ~21 min against OPENWEIGHT_CHECK_TIMEOUT_MS's 10, so a
 // whole-tree unit_test always timed out, at ~70 core-minutes a call, and left no ledger row.
 
-/** The file whose presence says a tree carries the affected-suites model (the census and
- *  plan-reading listings the selector reads). A consumer repo has none, and keeps the fixed
- *  whole-tree argv: it has no model to narrow by, its suite is its own size, and the wall-clock
- *  bound still ends the call — now ledgered, so its cost is visible rather than assumed. */
+/** A tree with this marker uses the affected-suites model; consumers use the basename rule. */
 export const OPENWEIGHT_UNIT_TEST_SELECTOR_MARKER = "scripts/diff-class.mjs";
 /** PRIMARY CONTROL: above this many selected suites the check refuses rather than run. At the
  *  cap below, forty suites is the most that plausibly finishes inside OPENWEIGHT_CHECK_TIMEOUT_MS. */
@@ -3741,6 +3832,8 @@ export const OPENWEIGHT_RUN_CHECK_LEDGER_STEP = "cash.run_check";
 export const OPENWEIGHT_UNIT_TEST_TOO_BROAD = "selection too broad for an open-weight check — run in CI";
 
 const UNIT_TEST_SUITE = /^test\/[^\0\n]*\.test\.ts$/;
+const CONSUMER_UNIT_TEST_SUITE = /(?:^|\/)[^/\0\n]+\.(?:test|spec)\.(?:[cm]?[jt]s|[jt]sx)$/;
+const CONSUMER_UNIT_TEST_SCOPE_RULE = "consumer: changed tests + changed source basenames";
 /** This module's own checkout: the selector's helper scripts run from HERE, never from the
  *  worktree, whose files the model writes and which therefore run only inside the sandbox. */
 const HARNESS_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -3778,14 +3871,36 @@ export function selectOpenWeightUnitTestSuites(cwd: string, spawn: PreflightSpaw
     return r.stdout;
   };
   const lines = (text: string) => text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const consumer = !existsSync(join(root, OPENWEIGHT_UNIT_TEST_SELECTOR_MARKER));
   let base: string;
   let changed: string[];
+  let tracked: string[];
   try {
     base = run("git", ["merge-base", "origin/main", "HEAD"]).trim();
+    const paths = consumer ? (text: string) => text.split("\0").filter(Boolean) : lines;
+    const untracked = paths(run("git", ["ls-files", ...(consumer ? ["-z"] : []), "--others", "--exclude-standard"]));
     changed = [...new Set([
-      ...lines(run("git", ["diff", "--name-only", base])),
-      ...lines(run("git", ["ls-files", "--others", "--exclude-standard"])),
+      ...paths(run("git", ["diff", "--name-only", ...(consumer ? ["-z", "--diff-filter=ACMRT"] : []), base])),
+      ...untracked,
     ])].sort();
+    tracked = paths(run("git", ["ls-files", ...(consumer ? ["-z"] : ["--", "src", "scripts", "bin", "test"])]));
+    if (consumer) {
+      const sourceNames = new Set(changed.filter((path) => !CONSUMER_UNIT_TEST_SUITE.test(path) && /\.(?:[cm]?[jt]s|[jt]sx)$/.test(path))
+        .map((path) => basename(path).replace(/\.[^.]+$/, "")));
+      const candidates = [...new Set([...tracked, ...untracked])];
+      const suites = candidates.filter((path) => CONSUMER_UNIT_TEST_SUITE.test(path) && existsSync(join(root, path)) &&
+        (changed.includes(path) || sourceNames.has(basename(path).replace(/\.(?:test|spec)\.[^.]+$/, "")))).sort();
+      for (const suite of suites) openWeightContainedPath(root, suite);
+      if (suites.length > 0 && existsSync(join(root, "package.json"))) {
+        const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { scripts?: { test?: unknown } };
+        if (pkg.scripts?.test !== undefined &&
+          (typeof pkg.scripts.test !== "string" || !/\bnode\b[^\n]*\s--test(?:\s|$)/.test(pkg.scripts.test))) {
+          return fullSelection("consumer unit_test requires node --test suites; the declared test runner is unsupported");
+        }
+      }
+      return { suites: suites.map((path) => path.startsWith("-") ? `./${path}` : path),
+        fullRun: false, reasons: [CONSUMER_UNIT_TEST_SCOPE_RULE], recentOnly: { floor: [] } };
+    }
   } catch (err) {
     // No readable diff means no narrow answer: a FULL selection naming why, which then refuses.
     return fullSelection(`the worktree's diff could not be read — ${(err as Error).message}`);
@@ -3796,7 +3911,7 @@ export function selectOpenWeightUnitTestSuites(cwd: string, spawn: PreflightSpaw
     const symbolless = symbollessSourceFiles(changed, diff, readFile);
     const symbols = symbolless.length > 0 ? [] : changedSymbols(diff, readFile);
     const files = new Map<string, string>();
-    for (const path of lines(run("git", ["ls-files", "--", "src", "scripts", "bin", "test"]))) {
+    for (const path of tracked) {
       if (!/\.(?:ts|mts|mjs|js|cjs)$/.test(path) || !existsSync(join(root, path))) continue;
       files.set(path, readFile(path));
     }
@@ -3827,14 +3942,17 @@ export type OpenWeightUnitTestPlan =
   | { kind: "empty"; reasons: string[] }
   | { kind: "refused"; reason: string; suites: number };
 
-/** Pure: `baseArgv` is {@link openWeightCheckArgv}'s unit_test argv. Suites are kept only when
- *  they are `test/…​.test.ts` files present under `cwd`, so no entry can read as a flag. */
-export function openWeightUnitTestPlan(selection: AffectedSelection, baseArgv: readonly string[], cwd: string): OpenWeightUnitTestPlan {
+/** `baseArgv` is the fixed prefix. Only present suites matching the tree's naming rule run. */
+export function openWeightUnitTestPlan(
+  selection: AffectedSelection, baseArgv: readonly string[], cwd: string,
+  concurrency = OPENWEIGHT_UNIT_TEST_CONCURRENCY,
+): OpenWeightUnitTestPlan {
   if (selection.fullRun) {
     return { kind: "refused", reason: `${OPENWEIGHT_UNIT_TEST_TOO_BROAD}: ${selection.reasons.join("; ")}`, suites: 0 };
   }
+  const suitePattern = existsSync(join(cwd, OPENWEIGHT_UNIT_TEST_SELECTOR_MARKER)) ? UNIT_TEST_SUITE : CONSUMER_UNIT_TEST_SUITE;
   const suites = [...new Set(selection.narrow ?? selection.suites)]
-    .filter((s) => UNIT_TEST_SUITE.test(s) && existsSync(join(cwd, s)))
+    .filter((s) => suitePattern.test(s) && existsSync(join(cwd, s)))
     .sort();
   if (suites.length > OPENWEIGHT_UNIT_TEST_MAX_SUITES) {
     return {
@@ -3844,7 +3962,7 @@ export function openWeightUnitTestPlan(selection: AffectedSelection, baseArgv: r
     };
   }
   if (suites.length === 0) return { kind: "empty", reasons: selection.reasons };
-  const argv = [...OPENWEIGHT_UNIT_TEST_NICE, ...baseArgv, `--test-concurrency=${OPENWEIGHT_UNIT_TEST_CONCURRENCY}`, ...suites];
+  const argv = [...OPENWEIGHT_UNIT_TEST_NICE, ...baseArgv, `--test-concurrency=${concurrency}`, ...suites];
   return { kind: "run", argv, suites };
 }
 
@@ -3880,7 +3998,7 @@ export interface OpenWeightRunCheckLedger {
 
 function ledgerRunCheck(
   ledger: OpenWeightRunCheckLedger,
-  row: { check: unknown; outcome: "ran" | "empty" | "refused"; suites: number | null; startedAt: number; exitCode?: number; timedOut?: boolean; reason?: string },
+  row: { check: unknown; outcome: "ran" | "empty" | "refused"; suites: number | null; startedAt: number; exitCode?: number; timedOut?: boolean; reason?: string; scopeRule?: string },
 ): void {
   appendLedger(ledgerPathFor(ledger.config), {
     run_id: ledger.runId ?? "unattributed",
@@ -3892,6 +4010,7 @@ function ledgerRunCheck(
     duration_ms: ledger.clock.now() - row.startedAt,
     exit_code: row.exitCode ?? null,
     timed_out: row.timedOut ?? false,
+    ...(row.scopeRule !== undefined ? { scope_rule: row.scopeRule } : {}),
     ...(row.reason !== undefined ? { reason: row.reason.slice(0, 500) } : {}),
   });
 }
@@ -4022,18 +4141,23 @@ async function executeOpenWeightTool(
       const startedAt = ledger.clock.now();
       let argv = openWeightCheckArgv(args.check, args.paths, cwd);
       if (args.check === "typecheck") argv = openWeightIncrementalTypecheck(argv, cwd, workerHome);
-      // W1-T6091: in a tree carrying the selector, unit_test runs the HARNESS-derived affected
-      // suites as explicit files, or nothing, or refuses — never the whole tree.
+      // Every unit_test runs a harness-derived file list, or nothing, or refuses.
       let suites: number | null = null;
-      if (args.check === "unit_test" && existsSync(join(cwd, OPENWEIGHT_UNIT_TEST_SELECTOR_MARKER))) {
-        const plan = openWeightUnitTestPlan(await selectOpenWeightUnitTestSuitesOffLoop(cwd, checkEnv), argv, cwd);
+      let scopeRule: string | undefined;
+      if (args.check === "unit_test") {
+        scopeRule = existsSync(join(cwd, OPENWEIGHT_UNIT_TEST_SELECTOR_MARKER))
+          ? "harness: affected suites" : CONSUMER_UNIT_TEST_SCOPE_RULE;
+        const load = readHostLoad();
+        const concurrency = scopeRule === CONSUMER_UNIT_TEST_SCOPE_RULE
+          ? testRunConcurrency(load, defaultTestSlots(load.cores)) : OPENWEIGHT_UNIT_TEST_CONCURRENCY;
+        const plan = openWeightUnitTestPlan(await selectOpenWeightUnitTestSuitesOffLoop(cwd, checkEnv), argv, cwd, concurrency);
         if (plan.kind === "refused") {
-          ledgerRunCheck(ledger, { check: args.check, outcome: "refused", suites: plan.suites, startedAt, reason: plan.reason });
+          ledgerRunCheck(ledger, { check: args.check, outcome: "refused", suites: plan.suites, startedAt, reason: plan.reason, scopeRule });
           return { check: args.check, ran: false, suites: plan.suites, refused: plan.reason };
         }
         if (plan.kind === "empty") {
           const output = `no suite is affected by this worktree's diff; nothing ran (${plan.reasons.join("; ") || "no changed file reaches a suite"})`;
-          ledgerRunCheck(ledger, { check: args.check, outcome: "empty", suites: 0, startedAt });
+          ledgerRunCheck(ledger, { check: args.check, outcome: "empty", suites: 0, startedAt, reason: plan.reasons.join("; "), scopeRule });
           return { check: args.check, ran: false, suites: 0, output };
         }
         argv = plan.argv;
@@ -4043,6 +4167,7 @@ async function executeOpenWeightTool(
       const slot = args.check === "typecheck" &&
         !hasUsableTypecheckBuildInfo(join(workerHome, TYPECHECK_BUILDINFO_NAME), installedTypescriptVersion(cwd))
         ? await acquireTestSlotAsync("typecheck:bwrap", { memoryBytes: TYPECHECK_COLD_PEAK_BYTES }) : undefined;
+      if (args.check === "typecheck") argv = [...argv, ...lowMemoryTypecheckArgs(readMemoryHeadroom(), slot ? TYPECHECK_COLD_PEAK_BYTES : TYPECHECK_WARM_PEAK_BYTES)];
       try {
         const stdout = await (runCheck ?? runOpenWeightCheck)({
           argv,
@@ -4050,7 +4175,7 @@ async function executeOpenWeightTool(
           workerHome,
           env: checkEnv,
         });
-        ledgerRunCheck(ledger, { check: args.check, outcome: "ran", suites, startedAt, exitCode: 0 });
+        ledgerRunCheck(ledger, { check: args.check, outcome: "ran", suites, startedAt, exitCode: 0, scopeRule });
         return { check: args.check, exitCode: 0, output: stdout.slice(-20_000), ...scoped };
       } catch (err) {
         // A FAILING CHECK IS A RESULT, NOT AN ERROR — the lane must read its own red. A refusal above
@@ -4058,7 +4183,7 @@ async function executeOpenWeightTool(
         const e = err as { status?: number; code?: number | string; killed?: boolean; stdout?: string | Buffer; stderr?: string | Buffer };
         const out = `${String(e.stdout ?? "")}${String(e.stderr ?? "")}`;
         const exitCode = typeof e.status === "number" ? e.status : typeof e.code === "number" ? e.code : 1;
-        ledgerRunCheck(ledger, { check: args.check, outcome: "ran", suites, startedAt, exitCode, timedOut: e.killed === true });
+        ledgerRunCheck(ledger, { check: args.check, outcome: "ran", suites, startedAt, exitCode, timedOut: e.killed === true, scopeRule });
         return { check: args.check, exitCode, output: out.slice(-20_000), ...scoped };
       } finally {
         slot?.release();
@@ -4926,8 +5051,7 @@ async function spawnCodexWorkerInPrivateTemp(
   const stdout = new CodexJsonlAccumulator(startedAt, join(privateTmpDir, "stdout-pending.jsonl"), raw => observeWorkerToolLineage(toolLineage, raw));
   const stdoutDecoder = new StringDecoder("utf8");
   let stdoutBytes = 0;
-  let stderrBytes = 0;
-  let stderr = "";
+  const stderrRetainer = new CodexStderrRetainer();
   let outputLimit: CodexWorkerOutputLimitError | undefined;
   const pidRef: { pid?: number } = {};
   const spawn = args.containment?.spawn ?? spawnDetachedGroup;
@@ -4955,12 +5079,8 @@ async function spawnCodexWorkerInPrivateTemp(
     { command: bin, args: codexExecArgs(args, config, selection), cwd: args.cwd, env: childEnv },
     (chunk) => {
       if (outputLimit || timedOut) return;
-      stderrBytes += Buffer.byteLength(chunk, "utf8");
-      if (stderrBytes > CODEX_WORKER_STDERR_MAX_BYTES) {
-        exceedOutputBudget("stderr", CODEX_WORKER_STDERR_MAX_BYTES, stderrBytes);
-        return;
-      }
-      stderr += chunk;
+      // W1-T8203: stderr past its bound is truncated (head + tail), never a teardown and never a verdict.
+      stderrRetainer.push(chunk);
     },
     args.onSpawnError,
   );
@@ -5016,6 +5136,8 @@ async function spawnCodexWorkerInPrivateTemp(
       step: "worker.output_truncated",
       output_truncation: parsed.outputTruncation,
     });
+    const stderr = stderrRetainer.text();
+    const stderrTruncation = stderrRetainer.truncation();
     // A signal is an error whatever the stream parsed, so is an end with no code: only an observed exit 0 is clean.
     const exitCode = exit.kind === "exit" ? exit.code : null;
     const isError = parsed.isError || exitCode !== 0;
@@ -5033,6 +5155,7 @@ async function spawnCodexWorkerInPrivateTemp(
       text: parsed.text,
       blocks: parsed.blocks,
       ...(parsed.outputTruncation ? { outputTruncation: parsed.outputTruncation } : {}),
+      ...(stderrTruncation ? { stderrTruncation } : {}),
       stderr,
       subtype: isError ? (parsed.isError ? parsed.subtype : `error_exit_${exitCode}`) : "success",
       isError,
@@ -5057,6 +5180,14 @@ async function spawnCodexWorkerInPrivateTemp(
       workerDurationMs: Date.now() - startedAt,
     };
   } finally {
+    // W1-T8203: ledgered beside output_truncation, on success and on a failure that never parsed a result alike.
+    const droppedStderr = stderrRetainer.truncation();
+    if (droppedStderr && args.runId) appendLedger(ledgerPathFor(config), {
+      run_id: args.runId,
+      task_id: args.taskId ?? "unattributed",
+      step: "worker.stderr_truncated",
+      stderr_truncation: droppedStderr,
+    });
     toolLineage.finish(lineageEnd);
     if (timer) clearTimeout(timer);
   }

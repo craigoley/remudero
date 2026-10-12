@@ -148,6 +148,8 @@ export function markLedgerProcessActor(actor: "daemon" | "service" | "host_autom
  *  {@link markDaemonProcessActor}. Nothing else ever sets this. */
 const DAEMON_PROCESS_ACTOR_ENV = "REMUDERO_DAEMON_PROCESS";
 
+export const DAEMON_PID_ENV = "REMUDERO_DAEMON_PID";
+
 /** Mark THIS process as the daemon. Call once, at the top of `daemonCommand` (run-task.ts),
  *  before its first `appendLedger` call. Every ledger row this process (or anything it calls
  *  in-process, e.g. a wired sweep tick) writes from here on reports `actor: "daemon"` — UNLESS
@@ -156,6 +158,7 @@ const DAEMON_PROCESS_ACTOR_ENV = "REMUDERO_DAEMON_PROCESS";
 export function markDaemonProcessActor(): void {
   markLedgerProcessActor("daemon");
   process.env[DAEMON_PROCESS_ACTOR_ENV] = "1";
+  process.env[DAEMON_PID_ENV] = String(process.pid); // children read the daemon's /proc growth (host-memory-shadow.ts)
 }
 
 /**
@@ -557,6 +560,7 @@ export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number
  */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "run.start",
+  "memory_read.recovered", // W1-T7720: past recovery durations derive the sustained-unreadable bound.
   "sweep.fix.owner_residue_preserved", // W1-T6434: the next fix round reads the preserved patch it names.
   "automerge.rearmed_after_disarm",
   "automerge.rearm_exhausted",
@@ -588,6 +592,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // both read it as forward progress, resetting a halted task's breaker. Rotated away, a released
   // task's next restart would seed straight back from the still-live `dispatch.circuit_broken` row above.
   "dispatch.breaker_released",
+  "dispatch.breaker_judged", // W1-T7742: a judge's continue resets the streak like a release; its rulings dedup.
+  "run.freshness_handoff", // W1-T7747: a parked checkpoint's resume receipt (daemon.ts pendingWorkerBoundaryHandoffs).
   // W1-T2910: `status.ts`'s projection reads this row to derive an independent-failure block and
   // clears it on a later dispatch (src/lib/status.ts, the `line.step === "dispatch.blocked_independent"`
   // arm). Rotated away, a block that was recorded stops being visible and the subtree is re-dispatched
@@ -604,6 +610,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "dispatch.lifetime_pressure.infra_only",
   "dispatch.cost_of_delay.fallback", // W1-T4064: dispatchValueContextForSelection dedups on the last of
   "dispatch.cost_of_delay.ready", // these two; rotated away, a restart re-logs the same fallback.
+  // W1-T7814: the memory governor's history read calibrates the dispatch memory floor.
+  // Losing its observations would make it relearn from an empty window after each rotation.
+  "dispatch_memory_observed",
   // W1-T316: `escalateLifetimeCapExceeded`'s (run-task.ts) dedup marker, written whether or not
   // delivery succeeds; dropping it re-opens a duplicate lifetime-cap escalation.
   "dispatch.lifetime_capped.escalated",
@@ -656,6 +665,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.actions_incident_hold.escalated",
   "sweep.base_reproduction", // W1-T5528: sweep.ts's probe cache and prior reproduced verdict
   "sweep.reviewer_freshness_probe", // W1-T5771: freshnessBackoff's held re-probe backoff; lost, it resets
+  "sweep.capped_host_gap_rereview", // W1-T7837: priorActionsFromLedger releases the delivered-review key on it; hostGapRereviewFacts paces by it
   "sweep.fix.checkout_claim_declined",
   "sweep.fix.dispatch_failed",
   "fix.strike_refunded", // W1-T5528: `fixLedgerRowsForHead` drops each refunded strike by this row
@@ -719,6 +729,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.check_requeue.deferred", // W1-T5920: voids a spent key in that same fold.
   "sweep.ci_gate_reaggregated", // W1-T5958: reaggregatedCiGateKeysFromLedger, once per head and sibling run.
   "main.run_gap.dispatched", // mainRunGapHistoryFromLedger: lost, a gap commit's workflows dispatch again.
+  "main.repair.bisecting", // W1-T7760 mainBisectionFromLedger: lost, a probe in flight is dispatched a second time.
+  "main.repair.probe_concluded", // W1-T7760 mainBisectionFromLedger: lost, a concluded probe is re-run and the bisection restarts.
   "refusal_amendment.drafted", // noPrVerdictRowsFromLedger: lost, a settled no_pr refusal is re-drafted.
   "sre.governor", // governorTiersFromLedger: lost, a stopped runbook re-pauses and re-pages; on change only.
   "sweep.plan_repair", // planRepairHistoryFromLedger: the per-head repair and once-per-PR stale-base key.

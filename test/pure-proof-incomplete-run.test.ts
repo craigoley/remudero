@@ -12,6 +12,7 @@ import {
   type WhitelistedProof,
 } from "../src/lib/review.js";
 import { loadDefaultPolicy } from "../src/lib/policy.js";
+import { inlineJudgedTally } from "./helpers/judged-pool-run.js";
 
 // ── W1-T2740 ─────────────────────────────────────────────────────────────────
 //
@@ -237,7 +238,8 @@ test("W1-T2740 (acceptance 4b): an empty stream is not 'incomplete' — the synt
 // ── acceptance 5: the timeout policy, the complete-pass path and the sibling classifier stand ──
 
 test("W1-T2740 (acceptance 5a): a COMPLETE passing run is still 'pass' — the classifier is only ever consulted on a nonzero exit", () => {
-  const passingSpawner: ProofSpawner = () => ["TAP version 13", "ok 1 - fine", "# duration_ms 12"].join("\n");
+  const passingSpawner: ProofSpawner = (_command, args, cwd) =>
+    ["TAP version 13", "ok 1 - fine", "# duration_ms 12"].join("\n") + inlineJudgedTally(args, cwd);
   assert.equal(execWhitelistedProof(PURE_PATH_WP, "/nonexistent", 60_000, passingSpawner), "pass");
 });
 

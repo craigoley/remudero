@@ -157,7 +157,7 @@ test("a failed fresh read on refill is ledgered and admits nothing", async () =>
   assert.equal(held?.extra?.reason, "refill read failed: projection unreadable");
 });
 
-test("a governed refill names the governor and admits nothing", async () => {
+test("a governed refill names the governor on its park row and admits nothing", async () => {
   let governed = false;
   const h = harness({
     checkQueueGovernor: () => (governed ? { deferred: true, observedOpenCount: 9, wipLimit: 9 } : undefined),
@@ -167,8 +167,10 @@ test("a governed refill names the governor and admits nothing", async () => {
   h.release.B.resolve(okResult("B"));
   await drainMicrotasks();
   assert.deepEqual(h.startedWhileARan, ["B"]);
-  const held = h.steps.find((l) => l.step === "dispatch.lane_refill_held");
-  assert.equal(held?.extra?.reason, "governor: queue");
+  // 2026-10-12: a governor reading is re-taken each dispatch tick, so the lane parks rather than holding for good.
+  const parked = h.steps.find((l) => l.step === "dispatch.lane_parked");
+  assert.equal(parked?.extra?.reason, "governor: queue");
+  assert.equal(h.steps.some((l) => l.step === "dispatch.lane_refill_held"), false);
   governed = false;
   h.settleA();
   await h.run;

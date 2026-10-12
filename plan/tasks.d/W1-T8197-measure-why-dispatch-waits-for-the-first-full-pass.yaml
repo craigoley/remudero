@@ -1,0 +1,59 @@
+- id: W1-T8197
+  title: "MEASURE WHY DISPATCH WAITS FOR THE FIRST FULL PASS AFTER EVERY BOOT, BEFORE CHANGING IT — boot to first dispatch cost ~16.5 lane-min per boot on 2026-10-11 (280 lane-min over 17 boots: 210 boot gate, 53 gate-to-first-run, 17 down), because tick 1 awaits W1-T5720's boot gate before it reaches dispatch"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium  # Rule 19: one concern — evidence and a design choice for boot-to-dispatch; no source change
+  band_meaning: span
+  origin: "operator approval 2026-10-11 (Craig: go with your recommendations): restart-churn measurement, ~/Remudero-notes/restart-churn-2026-10-11"
+  plan_refs: [W1-T5720, W1-T5724, W1-T4998, W1-T5722, W1-T7747, W1-T8170]
+  files: [docs/recon/boot-to-first-dispatch.md]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-11 (core daemon ledger, copied read-only to ~/Remudero-notes/restart-churn-2026-10-11/ledger-copy;
+    timeline.txt). Each boot: `daemon.boot` -> `daemon.boot_gate.opened` -> first `run.start`:
+    00:03:28 -> 00:05:42 -> 00:06:08; 04:08:26 -> 04:12:30 -> 04:12:58; 05:13:24 -> 05:17:01 -> 05:17:49;
+    06:36:08 -> 06:41:59 -> 06:43:14; 08:31:10 -> 08:34:45 -> 08:35:29; 09:06:09 -> 09:11:02 -> 09:11:28;
+    10:01:07 -> 10:03:35 -> 10:04:18; 13:07:04 -> 13:14:45 -> 13:16:13; 14:01:45 -> 14:10:08 -> 14:12:48;
+    14:30:17 -> 14:37:04 -> 14:38:32; 16:06:38 -> 16:11:31 -> 16:12:47; 17:22:40 -> 17:27:10 -> 17:27:41;
+    18:14:58 -> 18:18:55 -> 18:19:24. The gate takes 2.2-8.4 min, and the first run starts 0.4-2.7 min after it.
+    Over the day's 17 boots: 210 lane-min boot gate, 53 lane-min gate to first run, 17 lane-min down.
+    READ on origin/main 233304449 (src/lib/daemon.ts):
+      - W1-T5720's boot gate (:3237-3267) holds the gated cadences until the first full pass returns or the backstop
+        `BOOT_CADENCE_GATE_BOUND_MS` fires. Tick 1 admits a restricted boot review pass (:4366) and then
+        `await bootGateOpened` (:4528-4532) BEFORE it starts the due-rungs timer, the orphan sweep and, later in the
+        tick, dispatch. So dispatch also waits for the first full pass. The gate's own comment speaks of cadences
+        ("holds its cadences"), not dispatch, so it is unclear whether dispatch was meant to wait at all.
+      - W1-T5724 (queued, branch run-W1-T5724-1791517156762 pushed 10-09) makes the boot path LOAD less before the
+        first pass. It shortens the wait. It does not ask whether dispatch needs the wait. The two are complementary.
+    The answer decides between "dispatch may start beside the first pass" and "dispatch needs one input the pass
+    produces, which can be read cheaply first". That needs measurement first, so this is a recon. Its output is a
+    recommendation, not a fixed wait.
+  design: |
+    A recon, no source change. Operator rulings: no hard thresholds; any recommendation is adaptive or LLM-judged.
+    (1) Reproduce the table above for the last 7 days of boots from `rmd ledger-grep` (live ledger plus every rotation
+        form), with a positive control that each rotation form was read. Split each boot's idle time into down, boot
+        gate, gate to first run, and first run.
+    (2) For every input tick 1's dispatch reads (merged set, run-branch state and resumable handoffs, plan sync, parked
+        blockers, open-PR ownership, the run-length history behind the refill bound), name whether the first full pass
+        produces or refreshes it, and whether it is already valid at boot without the pass.
+    (3) For each candidate (dispatch beside the first pass; dispatch after one cheap input read; today's wait), name the
+        failure it risks, using the incidents the boot gate was built for (W1-T5720's 10-05 first-pass measurements),
+        and the correctness oracle that would prove it safe in a test.
+    (4) Recommend at most one implementation task, with its measured lane-min saving and its oracle. A section headed
+        "Recommendation:" holds it.
+  acceptance:
+    - claim: "the recon tabulates boot to first dispatch over at least 7 days with a per-rotation-form positive control"
+      proof: "grep: Positive control: in docs/recon/boot-to-first-dispatch.md"
+    - claim: "every dispatch input is classified by whether the first full pass is needed for it"
+      proof: "grep: needed from the first pass in docs/recon/boot-to-first-dispatch.md"
+    - claim: "the recon ends with one recommendation naming its saving and its oracle"
+      proof: "grep: Recommendation: in docs/recon/boot-to-first-dispatch.md"
+  falsifier: |
+    A recommendation without a measured saving, or a fixed wait or count in place of an adaptive rule, fails review.
+    A table built from the live ledger alone (compaction prunes it) fails the positive-control criterion.

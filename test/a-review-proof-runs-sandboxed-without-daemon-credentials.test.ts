@@ -25,6 +25,7 @@ const {
   judgeReview,
   judgeReviewAsync,
   probeProofSandbox,
+  ProofCwdMissingError,
   proofCheckoutGitDirs,
   proofInstallEnv,
   proofLinkedModuleRoots,
@@ -203,7 +204,7 @@ test("a sandbox that cannot start reads as not_executable, never a pass or a fai
   assert.throws(() => defaultProofSpawner("grep", ["needle", "x.txt"], dir, 30_000),
     (e: unknown) => e instanceof ProofSandboxUnavailableError && /not installed/.test(e.sandboxReason));
   assert.throws(() => defaultProofSpawner("grep", ["needle", "x.txt"], join(dir, "missing"), 30_000),
-    ProofSandboxUnavailableError, "a checkout the sandbox cannot resolve is a start failure too");
+    ProofCwdMissingError, "a checkout that no longer exists is named as such (W1-T7822), not as a sandbox failure");
   assert.throws(() => defaultProofSpawner("grep", ["needle", "x.txt"], "/", 30_000), ProofSandboxUnavailableError);
 });
 

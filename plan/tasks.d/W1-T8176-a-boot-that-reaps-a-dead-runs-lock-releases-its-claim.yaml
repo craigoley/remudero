@@ -1,0 +1,77 @@
+- id: W1-T8176
+  title: "A BOOT THAT REAPS A DEAD RUN'S LOCK RELEASES THAT RUN'S DISPATCH CLAIM, AND AN UNEXPLAINED RESTART GETS AN EXIT ROW — the 2026-10-11 14:30Z boot (same host, new pid, no exit row) left 9 claims as an operator call one second before its own lock sweep reaped 3 of those runs as orphaned-by-process-exit, so W1-T5902, W1-T7959 and W1-T7998 were refused blocked_inflight 4 times"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a dispatch claim whose run this boot proved dead is released by the same boot
+  band_meaning: blast-radius
+  origin: "operator approval 2026-10-11 (Craig: go with your recommendations): restart-churn measurement, ~/Remudero-notes/restart-churn-2026-10-11"
+  plan_refs: [W1-T1268, W1-T2784, W1-T5047, W1-T396, W1-T461, W1-T4201]
+  files: [src/run-task.ts, src/lib/dispatch-claim.ts, test/a-boot-that-reaps-a-dead-runs-lock-releases-its-claim.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-11 (core daemon ledger, copied read-only to ~/Remudero-notes/restart-churn-2026-10-11/ledger-copy):
+      - Daemon pid 111 on host b530f7a3fea8 (booted 14:01:45) wrote its last row at 14:27:36 and no `daemon.summary`
+        or exit row. Pid 112 on the SAME host wrote `daemon.boot` at 14:30:17.579.
+      - 14:30:17.210, before that boot row: the boot claim sweep logged 9 `dispatch.claim_released` rows, surface
+        boot-sweep, arm operator, release false ("held by another lane with no landed work observed yet — leaving it"),
+        for W1-T5902, W1-T6369, W1-T7092, W1-T7727, W1-T7753, W1-T7754, W1-T7755, W1-T7959 and W1-T7998.
+      - 14:30:18.35-.38: the stale-lock sweep reaped W1-T5902, W1-T7959 and W1-T7998 (`worker.attempt`
+        worker_failure orphaned-by-process-exit, orphan_detected_by inflight-lock-sweep; `daemon.lock_sweep` reaped 3).
+      - Their claims stayed: `verdict` blocked_inflight for W1-T5902 at 14:39:46, W1-T7959 at 14:56:48 and 15:13:50,
+        and W1-T7998 at 15:13:50 ("is already claimed by another lane"). The restart-churn analysis puts the resulting
+        governor holds at about 57 lane-min. Earlier refusals the same day (W1-T7754 10:05:50, W1-T7755 13:17:47) came
+        from claims that the earlier boots' sweeps also left.
+    READ on origin/main 233304449:
+      - src/run-task.ts runs the boot claim sweep, `releaseReplacedContainerClaims` (:39115-39123), right after it takes
+        the drain lock. It runs before `daemonBoot`, whose stale-lock sweep is `sweepInflightLocksWithReceipts`
+        (wired at :39318, logged by src/lib/daemon.ts as `daemon.lock_sweep` :2678). So the claim decision cannot see the
+        sweep that proves the runs dead.
+      - src/lib/dispatch-claim.ts decideDispatchClaimRelease (:217) releases a claim on arm 1 (holder), arm 2
+        (landed evidence) or arm 3 (dead-claimant). Arm 3 needs a mint BEFORE this host's PID namespace started with the
+        pid absent (W1-T2784), or a mint on ANOTHER host by a replaced container (W1-T5047). A same-host process
+        restart in the same namespace meets neither. A restarted namespace also fails arm 3 when the anchor's low pid
+        has been reused, so the arm declines safely (it can never release on a guess) and falls through to "operator"
+        (:264-271).
+      - Nothing ledgers an exit for a daemon that died without `daemon.summary`. The next boot's rows are the only
+        trace.
+    NOT COVERED ELSEWHERE: W1-T4201 (queued) releases the INFLIGHT LOCK of a run whose final report is recorded. It does
+    not touch dispatch claims. No open task names `releaseReplacedContainerClaims` or the operator arm.
+    No depends_on: the edits are the boot block of src/run-task.ts (far from the worker code W1-T8139, W1-T8141 and
+    W1-T8008 edit) and src/lib/dispatch-claim.ts, which no queued task declares.
+  design: |
+    Operator rulings: no hard thresholds (no expiry or age below), lean into automation.
+    1. ONE BOOT, ONE PROOF. Run the stale-lock reap before the claim sweep, or hand its reaped set to the claim sweep,
+       so the claim decision sees which runs this boot proved dead.
+    2. A NEW RELEASE ARM, `reaped-holder`: a claim whose task's in-flight lock THIS boot reaped as a dead holder on THIS
+       host (orphaned-by-process-exit) is released. When the claim's anchor and the reaped lock both name a run, they
+       must name the same run. The proof is the reap, never elapsed time, so cross-host liveness (W1-T396) stays
+       undecided, and a claim with no reaped lock stays an operator call. The arm is loud by construction, like arm 3:
+       its reason names the ref, the anchor, the reaped lock's pid and host, and the boot that reaped it.
+    3. AN EXIT ROW FOR AN UNEXPLAINED RESTART. At boot, when the newest earlier `daemon.boot` on this host has no
+       `daemon.summary` after it, ledger `daemon.prior_exit_unrecorded` with that generation's pid, run_id, boot time,
+       last row time, and whether the drain lock was reclaimed from a dead holder. Read only the rows since that boot
+       (the boot already reads prior boots for the crash-loop check). Never re-read the whole ledger.
+    Tests (new file, `test(` titles verbatim as in the proofs below) drive decideDispatchClaimRelease purely, and the
+    boot ordering with a gitRepo() fixture and injected reserver, lock sweep and ledger.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-boot-that-reaps-a-dead-runs-lock-releases-its-claim.test.ts"
+    - claim: "a claim whose run's lock this boot reaped as orphaned on this host is released with arm reaped-holder"
+      proof: 'grep: test("W1-T8176: a claim whose lock this boot reaped is released" in test/a-boot-that-reaps-a-dead-runs-lock-releases-its-claim.test.ts'
+    - claim: "a claim with no reaped lock still falls to the operator arm"
+      proof: 'grep: test("W1-T8176: a claim with no reaped lock stays an operator call" in test/a-boot-that-reaps-a-dead-runs-lock-releases-its-claim.test.ts'
+    - claim: "an anchor naming a different run than the reaped lock is not released"
+      proof: 'grep: test("W1-T8176: a reaped lock for a different run releases nothing" in test/a-boot-that-reaps-a-dead-runs-lock-releases-its-claim.test.ts'
+    - claim: "a boot after a generation with no daemon.summary writes daemon.prior_exit_unrecorded"
+      proof: 'grep: test("W1-T8176: an unexplained restart gets an exit row" in test/a-boot-that-reaps-a-dead-runs-lock-releases-its-claim.test.ts'
+  falsifier: |
+    Keep the boot order and arms as on main: replaying the 14:30 shape (same host, a claim for a run whose lock the
+    sweep reaps as orphaned), the first test sees `dispatch.claim_released` arm operator, release false, and the next
+    dispatch of that task refused blocked_inflight. Release on host match alone: the second test releases a claim
+    with no reaped lock.

@@ -17,7 +17,7 @@
  * A change the graph cannot model — config, the lockfile, a workflow, a test helper or fixture —
  * selects the FULL suite and says which file forced it.
  */
-import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { execFile, spawnSync, type ExecFileOptionsWithStringEncoding } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, normalize } from "node:path";
@@ -33,7 +33,7 @@ import {
   type ImpactArmInput,
 } from "./test-impact-map.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
-import { hostWorktreeGit } from "./worktree-git.js";
+import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 
 export { stripComments };
 
@@ -41,6 +41,10 @@ export interface AffectedSelection {
   /** THE FLOOR: suites to run, sorted. Empty when `fullRun` — the full suite needs no list. */
   suites: string[];
   fullRun: boolean;
+  /** W1-T7809 — the author lane's plan-only arm: `suites` are the readers of a changed shard plus the
+   *  plan-integrity suites, and plan lint (`lint-plan:fast`) is part of the selection. */
+  planOnly?: boolean;
+  lintPlanFast?: boolean;
   /** One line per decision: why each suite was selected, or which file forced a full run. */
   reasons: string[];
   /** THE NARROW CANDIDATE, measured in shadow only: the floor's import-graph arm replaced by the
@@ -517,6 +521,16 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(wallClockBound) && files.some((f) => wallClockBoundEdges.includes(f))) {
     pathReaders.push(wallClockBound);
   }
+  // W1-T7763: a coverage shard failed on this suite (run 38063468054, PR #10671) and the narrow selector missed it.
+  const refusalAmendment = "test/a-worker-refusal-becomes-a-plan-amendment.test.ts";
+  const refusalAmendmentEdges = [
+    "src/lib/in-tree-budget.ts",
+    "src/lib/plan-pr-emitter.ts",
+    "test/a-starved-plan-pr-preflight-leg-times-out-and-is-asked-again.test.ts",
+  ];
+  if (input.files.has(refusalAmendment) && files.some((f) => refusalAmendmentEdges.includes(f))) {
+    pathReaders.push(refusalAmendment);
+  }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");
   // W1-T6084: the OBSERVED readers and census readers, beside the source-text rules above (which still
@@ -669,7 +683,15 @@ export function affectedListingEnv(home: string, parent: NodeJS.ProcessEnv = pro
   return env;
 }
 
-function listingLines(r: SpawnSyncReturns<string>, what: string): string[] {
+/** One listing child's result: spawnSync's own fields, or the same fields from its awaited sibling. */
+interface ListingChild {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  error?: Error;
+}
+
+function listingLines(r: ListingChild, what: string): string[] {
   if (r.status !== 0) throw new Error(`${what} exited ${r.status}: ${(r.error?.message ?? r.stderr ?? "").trim().slice(0, 200)}`);
   return r.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
 }
@@ -686,9 +708,29 @@ export function readAffectedSuitesInput(
 ): AffectedSuitesInput {
   const run = (cmd: string, args: string[]) =>
     listingLines(spawnSync(cmd, args, { cwd: repoRoot, encoding: "utf8" }), `${cmd} ${args.join(" ")}`);
-  const files = new Map<string, string>();
   // W1-T6136: coveragePrecheck (run-task.ts) passes a WORKER worktree, so the listing goes through the leaf.
-  const tracked = hostWorktreeGit(repoRoot, ["ls-files", "--", "src", "scripts", "bin", "test"], { maxBuffer: 1 << 26 });
+  const tracked = hostWorktreeGit(repoRoot, TRACKED_CODE_ARGS, { maxBuffer: 1 << 26 });
+  const files = trackedCodeFiles(repoRoot, tracked);
+  return { files, pathReaders: readAffectedListings(repoRoot, changed), ...extra };
+}
+
+/** W1-T7744 — {@link readAffectedSuitesInput} with its git and listing children awaited, for the build lane the
+ *  daemon runs on its own loop. The same reads in the same order; a failure THROWS (rejects) the same way. */
+export async function readAffectedSuitesInputAsync(
+  repoRoot: string,
+  changed: readonly string[],
+  extra: { recentFailures?: readonly string[]; symbolSuites?: readonly string[] } = {},
+): Promise<AffectedSuitesInput> {
+  const tracked = await hostWorktreeGitAsync(repoRoot, TRACKED_CODE_ARGS, { maxBuffer: 1 << 26 });
+  const files = trackedCodeFiles(repoRoot, tracked);
+  return { files, pathReaders: await readAffectedListingsAsync(repoRoot, changed), ...extra };
+}
+
+const TRACKED_CODE_ARGS = ["ls-files", "--", "src", "scripts", "bin", "test"];
+
+/** The tracked code files in an `ls-files` listing, with their contents. */
+function trackedCodeFiles(repoRoot: string, tracked: string): Map<string, string> {
+  const files = new Map<string, string>();
   for (const path of tracked.split("\n").map((l) => l.trim()).filter(Boolean)) {
     if (!CODE_FILE.test(path)) continue;
     try {
@@ -698,7 +740,7 @@ export function readAffectedSuitesInput(
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
   }
-  return { files, pathReaders: readAffectedListings(repoRoot, changed), ...extra };
+  return files;
 }
 
 /** diff-class's census and plan-reading listings for `repoRoot`, from {@link HARNESS_ROOT}'s copy
@@ -706,21 +748,114 @@ export function readAffectedSuitesInput(
 export function readAffectedListings(repoRoot: string, changed: readonly string[]): string[] {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}affected-`));
   try {
+    const job = affectedListingJob(dir, repoRoot, changed);
+    const listing = (flag: string) => listingLines(spawnSync(process.execPath, job.argv(flag), job.options), `diff-class ${flag}`);
+    return job.flags.flatMap(listing);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** W1-T7744 — {@link readAffectedListings} with each listing child awaited: the same children, the same
+ *  bound and the same listing; a listing that fails or overruns REJECTS with the same message shape. */
+export async function readAffectedListingsAsync(repoRoot: string, changed: readonly string[]): Promise<string[]> {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}affected-`));
+  try {
+    const job = affectedListingJob(dir, repoRoot, changed);
+    const out: string[] = [];
+    for (const flag of job.flags) out.push(...listingLines(await listingChildAsync(job.argv(flag), job.options), `diff-class ${flag}`));
+    return out;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** The listings one changed set needs (the census set; the plan-reading set too when a non-code path changed),
+ *  each child's argv and its options, with the changed list written under `dir`. */
+function affectedListingJob(dir: string, repoRoot: string, changed: readonly string[]) {
+  const list = join(dir, "changed.txt");
+  writeFileSync(list, changed.join("\n") + "\n");
+  const env = affectedListingEnv(join(dir, "home"));
+  const diffClass = join(HARNESS_ROOT, "scripts", "diff-class.mjs");
+  const prose = changed.some((f) => !/^(?:src|scripts|bin|test)\//.test(f));
+  return {
+    flags: ["--list-census-suites", ...(prose ? ["--list-plan-reading-suites"] : [])],
+    argv: (flag: string) => ["--import", "tsx", diffClass, flag, "--changed-files", list, "--plan-reading-root", realpathSync(repoRoot)],
+    options: { cwd: HARNESS_ROOT, env, encoding: "utf8" as const, timeout: AFFECTED_LISTING_TIMEOUT_MS },
+  };
+}
+
+/** One listing child through `execFile`, in spawnSync's result shape: a non-zero exit is its `status`; a child
+ *  that could not start, or was killed at its bound, has a null status and carries the `error`. */
+function listingChildAsync(args: string[], options: ExecFileOptionsWithStringEncoding): Promise<ListingChild> {
+  return new Promise((resolveChild) => {
+    execFile(process.execPath, args, options, (error, stdout, stderr) => {
+      const code = (error as { code?: unknown } | null)?.code;
+      const status = error === null ? 0 : typeof code === "number" ? code : null;
+      resolveChild({ status, stdout: String(stdout), stderr: String(stderr), ...(error !== null && status === null ? { error } : {}) });
+    });
+  });
+}
+
+/** W1-T7809 — whether every changed path is under plan/: the diff the author lane sizes by shard reach. */
+export function isPlanOnlyDiff(changed: readonly string[]): boolean {
+  return changed.length > 0 && changed.every((f) => f.startsWith("plan/"));
+}
+
+/** diff-class's plan-only listing for `repoRoot`: the suites that read a changed shard plus the
+ *  plan-integrity suites. Reads no git; a listing that fails or overruns THROWS. */
+export function readPlanOnlyListing(repoRoot: string, changed: readonly string[]): string[] {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-only-`));
+  try {
     const list = join(dir, "changed.txt");
     writeFileSync(list, changed.join("\n") + "\n");
     const env = affectedListingEnv(join(dir, "home"));
     const diffClass = join(HARNESS_ROOT, "scripts", "diff-class.mjs");
-    const listing = (flag: string) => listingLines(spawnSync(
+    return listingLines(spawnSync(
       process.execPath,
-      ["--import", "tsx", diffClass, flag, "--changed-files", list, "--plan-reading-root", realpathSync(repoRoot)],
+      ["--import", "tsx", diffClass, "--list-plan-only-suites", "--changed-files", list, "--plan-reading-root", realpathSync(repoRoot)],
       { cwd: HARNESS_ROOT, env, encoding: "utf8", timeout: AFFECTED_LISTING_TIMEOUT_MS },
-    ), `diff-class ${flag}`);
-    const census = listing("--list-census-suites");
-    const prose = changed.some((f) => !/^(?:src|scripts|bin|test)\//.test(f)) ? listing("--list-plan-reading-suites") : [];
-    return [...census, ...prose];
+    ), "diff-class --list-plan-only-suites");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+/** W1-T7809 — the AUTHOR selection for a plan-only diff: plan lint (`lintPlanFast`) plus the suites in
+ *  `listing`. Unlike {@link affectedSelectionOrFull} it is not the census floor plus every `loadPlan` caller,
+ *  and an unreadable listing is a named FULL run, never a narrower guess. */
+export function planOnlySelectionOrFull(changed: readonly string[], readListing: () => string[]): AffectedSelection {
+  try {
+    const suites = [...new Set(readListing())].sort();
+    return {
+      suites,
+      fullRun: false,
+      planOnly: true,
+      lintPlanFast: true,
+      reasons: [
+        `plan-only: every changed path is under plan/ — lint-plan:fast plus ${suites.length} suite(s) that read a changed shard or are plan-integrity suites`,
+        ...changed.map((f) => `plan-only: ${f}`),
+      ],
+      recentOnly: { floor: [] },
+    };
+  } catch (err) {
+    // An unreadable listing is a FULL run that names its cause — never an empty or narrower plan-only guess.
+    return {
+      suites: [],
+      fullRun: true,
+      reasons: [`full run: the plan-only listing could not be read — ${(err as Error).message}`],
+      recentOnly: { floor: [] },
+    };
+  }
+}
+
+/** W1-T7744 — {@link affectedSelectionOrFull} over an awaited read: a rejected read is the same named FULL run. */
+export async function affectedSelectionOrFullAsync(
+  changed: readonly string[],
+  readInput: () => Promise<AffectedSuitesInput>,
+): Promise<AffectedSelection> {
+  const read = await readInput().then((input) => () => input, (err: unknown) => (): AffectedSuitesInput => { throw err; });
+  return affectedSelectionOrFull(changed, read);
 }
 
 /** The selection, or a FULL run naming why its input could not be read — never a narrower guess. */

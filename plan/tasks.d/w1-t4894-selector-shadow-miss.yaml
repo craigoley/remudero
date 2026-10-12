@@ -6,7 +6,7 @@
   verify: auto
   priority: 2.5
   risk: low
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "selector-shadow:cca5b26ac87707eaa1591bae64552bc228033cca:narrow:test/a-wall-clock-bound-declares-itself.test.ts"

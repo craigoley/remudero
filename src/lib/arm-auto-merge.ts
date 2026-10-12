@@ -23,7 +23,7 @@
  * decomposition step that lifts those shared REST readings into their own lib module could then
  * have both run-task.ts and this file import the ONE copy; noted as a follow-up, not done here.
  */
-import { systemClock } from "./clock.js";
+import { systemClock, type Clock } from "./clock.js";
 import { createHash } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
@@ -45,7 +45,14 @@ import {
   type PlanMergeSafetyReadings,
 } from "./plan-pr-merge-safety.js";
 import { readLedgerLines } from "./status.js";
+import {
+  closingReferenceGuardSteps,
+  recordClosingReferenceToLedger,
+  type ClosingReferenceGuardResult,
+} from "./closing-reference-guard.js";
 import { ghExec, ghJsonAsync, ghTextAsync } from "./github-transport.js";
+import { classifyContribution, contributorAdmissionSteps, readAdmissionRest, readAdmissionRestAsync,
+  type AdmissionRead, type AdmissionSettings, type AdmissionTarget, type AdmissionAction, type AdmissionRecord } from "./contributor-admission.js";
 import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
 import {
   ghJson,
@@ -529,6 +536,7 @@ type MaybeAsync<T, A extends boolean> = A extends true ? T | Promise<T> : T;
  *  same gh calls the function always made. W1-T5284: `ArmDeps<true>` is the same seam whose gh
  *  calls and retry sleep may be awaited by {@link attemptArmAsync}. */
 export interface ArmDeps<A extends boolean = false> {
+  contributorAdmission?: (prUrl: string, expectedHead?: string) => MaybeAsync<void, A>;
   /** W1-T2347 — see {@link REAL_ARM_DEPS_MARKER}'s own doc. Optional and never set by a fixture. */
   [REAL_ARM_DEPS_MARKER]?: true;
   /** The PR's live head sha — read over REST, never `gh --json`. */
@@ -576,6 +584,10 @@ export interface ArmDeps<A extends boolean = false> {
   enqueue?: (prUrl: string) => MaybeAsync<void, A>;
   /** W1-T4581 — explicit stack parents must all be merged before either arm or direct-merge path. */
   stackPrerequisite?: (prUrl: string) => MaybeAsync<StackPrerequisiteCheck, A>;
+  /** OPTIONAL. Rewrites each closing keyword in the PR's body that names another OPEN pull request,
+   *  before any arm, enqueue or merge: GitHub closes that PR when this one merges (core #10856,
+   *  closed by console #2035's merge on 2026-10-11). See lib/closing-reference-guard.ts. */
+  closingReferences?: (prUrl: string) => MaybeAsync<ClosingReferenceGuardResult, A>;
   say: (msg: string) => void;
 }
 
@@ -584,7 +596,12 @@ export function realArmDeps(
   // `ledgerLines` below is the whole reason arming survives a host that cannot resolve a config.
   loadConfigImpl: typeof loadConfig = loadConfig,
 ): ArmDeps {
+  // One existing synchronous CLI transport port; daemon actions replace these methods with
+  // awaited ports in realArmDepsAsync, including contributor admission.
+  const runGh = ghExec;
   return {
+    contributorAdmission: (prUrl, head) => runStepsSync(armAdmissionSteps(prUrl, head, loadConfigImpl,
+      (path) => readAdmissionRest(path, runGh))),
     [REAL_ARM_DEPS_MARKER]: true,
     headSha: (prUrl) => readHeadShaRest(prUrl),
     ledgerLines: () => {
@@ -598,7 +615,7 @@ export function realArmDeps(
     },
     armAuto: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
-      ghExec(["pr", "merge", prUrl, "--auto", "--squash"], {
+      runGh(["pr", "merge", prUrl, "--auto", "--squash"], {
         encoding: "utf8",
         stdio: "pipe",
       });
@@ -609,7 +626,7 @@ export function realArmDeps(
     },
     disableAuto: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `disabling auto-merge on ${prUrl}`);
-      ghExec(["pr", "merge", prUrl, "--disable-auto"], {
+      runGh(["pr", "merge", prUrl, "--disable-auto"], {
         encoding: "utf8",
         stdio: "pipe",
       });
@@ -635,9 +652,13 @@ export function realArmDeps(
     mergeQueue: (prUrl) => runStepsSync(cachedMergeQueueSteps(prUrl, ghJson)),
     enqueue: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `adding ${prUrl} to the merge queue`);
-      ghExec(["pr", "merge", prUrl], { encoding: "utf8", stdio: "pipe" });
+      runGh(["pr", "merge", prUrl], { encoding: "utf8", stdio: "pipe" });
     },
     stackPrerequisite: (prUrl) => stackPrerequisiteFromRest(prUrl),
+    closingReferences: (prUrl) => runStepsSync(closingReferenceGuardSteps(prUrl, ghJson, (args) => {
+      assertLiveWriteAllowed("gh-pr-merge", `rewriting a closing keyword in the body of ${prUrl} before merging it`);
+      return runGh(args, { encoding: "utf8", stdio: "pipe" });
+    }, recordClosingReferenceToLedger(loadConfigImpl))),
     say: (msg) => console.log(msg),
   };
 }
@@ -651,6 +672,7 @@ export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig)
   const { sleepSync: _sleepSync, ...shared } = realArmDeps(loadConfigImpl);
   return {
     ...shared,
+    contributorAdmission: (prUrl, head) => runStepsAsync(armAdmissionSteps(prUrl, head, loadConfigImpl, readAdmissionRestAsync)),
     headSha: (prUrl) => runStepsAsync(headShaSteps(prUrl, ghJsonAsync)),
     isMerged: (prUrl) => runStepsAsync(isMergedSteps(prUrl, ghJsonAsync)),
     readMergeFacts: async (prUrl) => {
@@ -664,6 +686,10 @@ export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig)
     },
     readPlanTouch: (prUrl, headSha) => runStepsAsync(cachedPlanTouchSteps(prUrl, headSha, ghJsonAsync)),
     stackPrerequisite: (prUrl) => runStepsAsync(stackPrerequisiteSteps(prUrl, ghJsonAsync)),
+    closingReferences: (prUrl) => runStepsAsync(closingReferenceGuardSteps(prUrl, ghJsonAsync, async (args) => {
+      assertLiveWriteAllowed("gh-pr-merge", `rewriting a closing keyword in the body of ${prUrl} before merging it`);
+      return ghTextAsync(args);
+    }, recordClosingReferenceToLedger(loadConfigImpl))),
     sleep: async (ms) => { if (ms > 0) await delay(ms); },
     armAuto: async (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
@@ -684,6 +710,36 @@ export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig)
       await ghTextAsync(["pr", "merge", prUrl]);
     },
   };
+}
+
+function* armAdmissionSteps(prUrl: string, head: string | undefined, getConfig: typeof loadConfig, read: AdmissionRead): Steps<void> {
+  const target = mergeTargetFromPrUrl(prUrl);
+  if (!target) return;
+  let config: Config;
+  try { config = getConfig(); }
+  catch {
+    // Unavailable config cannot opt into shadow reads or replace an existing quality gate.
+    console.log("contributor_admission.shadow: config-unavailable; existing arm gates unchanged"); return;
+  }
+  yield* contributorAdmissionSteps(config.contributorAdmission, { ...target, headSha: head }, "auto-merge",
+    (event, fields) => console.log(`${event} ${JSON.stringify(fields)}`), read, undefined,
+    (...args) => classifyContribution(...args));
+}
+
+// Drivers live at this existing effect boundary, not in the origin mapper: importing git-push
+// from contributor-admission closes a review -> open-prs-rest -> origin-mapper import ring.
+export async function observeContributorAdmission(
+  settings: AdmissionSettings | undefined, target: AdmissionTarget, action: AdmissionAction, log: AdmissionRecord,
+  read: AdmissionRead = readAdmissionRestAsync, clock?: Pick<Clock, "now">,
+): Promise<void> {
+  await runStepsAsync(contributorAdmissionSteps(settings, target, action, log, read, clock));
+}
+
+export function observeContributorAdmissionSync(
+  settings: AdmissionSettings | undefined, target: AdmissionTarget, action: AdmissionAction, log: AdmissionRecord,
+  read: AdmissionRead, classify?: typeof classifyContribution,
+): void {
+  runStepsSync(contributorAdmissionSteps(settings, target, action, log, read, undefined, classify));
 }
 
 /** W1-T5748 — the merge-safety readings, with git run in the repo clone the merge probe uses. */
@@ -1215,7 +1271,7 @@ export const REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS = 2_000;
 export function attemptArm(
   prUrl: string,
   deps: Pick<ArmDeps<false>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<false>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">>,
+    Partial<Pick<ArmDeps<false>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
   priorHeadSha?: string,
   // W1-T3551: read off `OpenPrView.isDraft` (POSITIVE match only — `undefined`/`false` both fall
   // through unchanged). This is the ONE shared call site {@link armAutoMergeDetailed} (ledger-gated
@@ -1232,7 +1288,7 @@ export function attemptArm(
 export function attemptArmAsync(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Promise<ArmAttemptResult> {
@@ -1242,7 +1298,7 @@ export function attemptArmAsync(
 function* attemptArmSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "checksGreenReviewed" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "checksGreenReviewed" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Steps<ArmAttemptResult> {
@@ -1287,6 +1343,32 @@ function* attemptArmSteps(
       return { outcome: "stack-parent-refused", error: detail };
     }
   }
+  // Before every arm, enqueue and merge below: a closing keyword naming another open PR would
+  // close it when this one merges. A body that cannot be read or rewritten withholds the arm, and
+  // the next pass retries it.
+  if (deps.closingReferences) {
+    let guard: ClosingReferenceGuardResult;
+    try {
+      guard = yield* step(() => deps.closingReferences!(prUrl));
+    } catch (e) {
+      // A guard that threw proves nothing about the body, so it withholds the arm like a failed one.
+      guard = { state: "failed", defused: [], detail: `closing-reference guard threw: ${String((e as Error)?.message ?? e)}` };
+    }
+    if (guard.state === "failed") {
+      const detail = guard.detail ?? "the closing-reference guard failed";
+      deps.say(
+        `automerge.closing_reference_refused: ${detail} — merging could close an open pull request this body names; ` +
+          `arm withheld: ${prUrl}`,
+      );
+      return { outcome: "arm-error-ignored", error: detail };
+    }
+    if (guard.state === "defused") {
+      deps.say(
+        `automerge.closing_reference_defused: rewrote ${guard.defused.map((d) => `"${d.reference}"`).join(", ")} so ` +
+          `merging never closes ${guard.defused.map((d) => d.url).join(", ")}: ${prUrl}`,
+      );
+    }
+  }
   if (yield* step(() => deps.mergeQueue?.(prUrl))) return yield* attemptQueueArmSteps(prUrl, deps);
   // W1-T5615: A PLAN PR IS NEVER ARMED. GitHub merges an armed PR the moment its checks go green,
   // behind or not, and those checks linted a plan that may not be the one landing: #8996 and
@@ -1296,6 +1378,7 @@ function* attemptArmSteps(
   const planTouch = deps.armStanding ? undefined : yield* readPlanTouchOrUnreadable(prUrl, deps, priorHeadSha);
   if (planTouch === "touched" || planTouch === "unreadable") return yield* attemptPlanPrMergeSteps(prUrl, deps, planTouch, priorHeadSha);
   try {
+    yield* step(() => deps.contributorAdmission?.(prUrl, priorHeadSha));
     yield* step(() => deps.armAuto(prUrl));
     return { outcome: "armed" };
   } catch (e) {
@@ -1321,6 +1404,7 @@ function* attemptArmSteps(
       const preflight = yield* directMergePreflightSteps(prUrl, deps, priorHeadSha, { error: msg, rateLimit: quota });
       if (!preflight.proceed) return preflight.result;
       try {
+        yield* step(() => deps.contributorAdmission?.(prUrl, priorHeadSha));
         yield* step(() => deps.mergeDirect(prUrl));
         deps.say(`automerge.rate_limited_rest_merge (W1-T1255; arm refused on quota, PR already green): ${prUrl}`);
         return { outcome: "direct-merged", error: msg, rateLimit: quota, directMergePreflight: preflight.evidence };
@@ -1353,6 +1437,7 @@ function* attemptArmSteps(
               });
               if (!retryPreflight.proceed) return retryPreflight.result;
               try {
+                yield* step(() => deps.contributorAdmission?.(prUrl, priorHeadSha));
                 yield* step(() => deps.mergeDirect(prUrl));
                 deps.say(
                   `automerge.rate_limited_rest_merge (W1-T1255; settled mergeable on retry ${read}): ${prUrl}`,
@@ -1396,10 +1481,11 @@ function* attemptArmSteps(
 /** The REST merge once {@link directMergePreflight} has let it through. */
 function* mergeDirectAfterPreflightSteps(
   prUrl: string,
-  deps: Pick<ArmDeps<true>, "mergeDirect" | "isMerged" | "say">,
+  deps: Pick<ArmDeps<true>, "mergeDirect" | "isMerged" | "say" | "contributorAdmission">,
   evidence: DirectMergePreflightEvidence | undefined,
 ): Steps<ArmAttemptResult> {
   try {
+    yield* step(() => deps.contributorAdmission?.(prUrl));
     yield* step(() => deps.mergeDirect(prUrl));
     deps.say(`automerge.clean_status_direct_merge (already green — merged now): ${prUrl}`);
     return { outcome: "direct-merged", directMergePreflight: evidence };
@@ -1537,9 +1623,10 @@ function* attemptPlanPrMergeSteps(
  */
 function* attemptQueueArmSteps(
   prUrl: string,
-  deps: Pick<ArmDeps<true>, "armAuto" | "isMerged" | "say"> & Partial<Pick<ArmDeps<true>, "enqueue">>,
+  deps: Pick<ArmDeps<true>, "armAuto" | "isMerged" | "say"> & Partial<Pick<ArmDeps<true>, "enqueue" | "contributorAdmission">>,
 ): Steps<ArmAttemptResult> {
   try {
+    yield* step(() => deps.contributorAdmission?.(prUrl));
     yield* step(() => deps.armAuto(prUrl));
     deps.say(`automerge.queued (W1-T4405): auto-merge armed on a merge-queue branch — the queue merges it: ${prUrl}`);
     return { outcome: "armed" };
@@ -1552,6 +1639,7 @@ function* attemptQueueArmSteps(
     const enqueue = deps.enqueue;
     if (armFailureAction(msg) === "direct-merge" && enqueue) {
       try {
+        yield* step(() => deps.contributorAdmission?.(prUrl));
         yield* step(() => enqueue(prUrl));
         deps.say(`automerge.enqueued (W1-T4405): already green — added to the merge queue, never merged around it: ${prUrl}`);
         return { outcome: "armed" };
@@ -1577,7 +1665,7 @@ function* attemptQueueArmSteps(
 export function armAutoMergeAtOpen(
   prUrl: string,
   deps: (Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "sleepSync" | "stackPrerequisite">>) = realArmDeps(),
+    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "sleepSync" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>) = realArmDeps(),
   irreversible = false,
   // W1-T3551: threaded straight through to {@link attemptArm}'s shared gate — see that function's
   // own doc. Defaults false, so every existing call site (which predates this parameter and never
@@ -1593,7 +1681,7 @@ export function armAutoMergeAtOpen(
 export async function armAutoMergeAtOpenAsync(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite">> = realArmDepsAsync(),
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">> = realArmDepsAsync(),
   irreversible = false,
   isDraft = false,
 ): Promise<ArmOutcome> {
@@ -1604,7 +1692,7 @@ export async function armAutoMergeAtOpenAsync(
 function* armAtOpenSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
   irreversible: boolean,
   isDraft: boolean,
 ): Steps<ArmOutcome> {

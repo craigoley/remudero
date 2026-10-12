@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -56,6 +57,8 @@ export interface GardenState<C extends string> {
   pendingRecordedAt?: string;
   /** The current streak of passes whose filing threw, which defers the next attempt ({@link gardenFilingRetryAt}). */
   filingFailures?: { count: number; lastAt: string; reason: string };
+  /** The bytes of the last drafted change a guard or the plan-PR preflight refused: never landed again. */
+  refusedLanding?: { digest: string; at: string };
   /** Ids of overseer effect verdicts already folded into `classes` (newest last), so a replay credits once. */
   foldedEffects?: string[];
   /** Legacy verdicts have no ordered watermark, so their receipts must not age out. */
@@ -494,6 +497,45 @@ export async function freshMergedPlanLintAsync(root: string, paths: readonly str
   return lintMergedPlanChange({ base, changes });
 }
 
+export type GardenTaskIdMinter = ((branch: string) => string) & { async?: (branch: string) => Promise<string> };
+
+/** CLI preparation stays synchronous; the daemon awaits every reservation before any tree write. */
+export function prepareGardenTaskIds(ws: Pick<GardenCheckout, "branch">, count: number, mint: GardenTaskIdMinter, async = false): string[] | Promise<string[]> {
+  if (count === 0) return [];
+  if (!ws.branch) throw new Error("gardener: filing workspace has no branch for task-id reservation (no reservation branch)");
+  const branch = ws.branch;
+  if (!async) return Array.from({ length: count }, () => mint(branch));
+  return (async () => {
+    const ids: string[] = [];
+    for (let i = 0; i < count; i++) ids.push(await (mint.async ?? mint)(branch));
+    return ids;
+  })();
+}
+
+/** Rolling p95 with three times the observed duration; first use inherits the poll cadence. */
+export class GardenMintBudget {
+  private durations: number[] = [];
+  constructor(private readonly pollIntervalMs: () => number) {}
+  boundMs(): number {
+    const sorted = [...this.durations].sort((a, b) => a - b);
+    return sorted.length ? 3 * sorted[Math.ceil(sorted.length * 0.95) - 1]! : this.pollIntervalMs();
+  }
+  observe(elapsedMs: number): void {
+    if (elapsedMs > 0) this.durations = [...this.durations.slice(-31), elapsedMs];
+  }
+}
+
+export class GardenMintTimedOutError extends RmdError {
+  constructor(readonly elapsedMs: number, readonly boundMs: number) {
+    super("gardener", GENERIC_EXIT_CODE, `task-id reservation exceeded its ${boundMs} ms bound`, { elapsedMs, boundMs });
+    this.name = "GardenMintTimedOutError";
+  }
+}
+
+export function recordGardenMintTimeout(error: unknown, name: string, log: GardenerDeps["log"]): void {
+  if (error instanceof GardenMintTimedOutError) log("garden.mint_timed_out", { spec: name, elapsed_ms: error.elapsedMs, bound_ms: error.boundMs });
+}
+
 export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout> {
   /** Ledger prefix, state-file stem and off-switch prefix (upper-cased). */
   name: string;
@@ -516,8 +558,9 @@ export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W ex
   /** Every action any class could take now. Called after the class draws, with the same rng. */
   candidates: (inventory: I, rng: () => number) => A[];
   scorecard: (inventory: I, plan: GardenPlan<C, A>) => Record<string, unknown>;
-  /** Make the plan's changes in the workspace; return what to land, or undefined if nothing changed. */
-  apply: (workspace: W, plan: GardenPlan<C, A>, scorecard: Record<string, unknown>) => { paths: string[]; title: string; body: string } | undefined;
+  /** Reserve the plan's IDs before apply; actions that file nothing reserve nothing. */
+  prepare?(workspace: W, plan: GardenPlan<C, A>, async: boolean): readonly string[] | Promise<readonly string[]>;
+  apply: (workspace: W, plan: GardenPlan<C, A>, scorecard: Record<string, unknown>, heldIds?: readonly string[]) => { paths: string[]; title: string; body: string } | undefined;
   /** A garden that files plan shards names lint-plan's verdict on its landing here, normally
    *  machine-filing.ts's `machineShardLandingRefusal`. A refusal is a recorded filing failure, so a
    *  draft lint-plan would refuse never opens as a red PR (#10446, #10457). */
@@ -563,7 +606,7 @@ function gardenStateFault(parsed: unknown): string | undefined {
   for (const [name, c] of Object.entries(parsed.classes)) {
     if (!isRecord(c) || !isCount(c.alpha) || !isCount(c.beta)) return `class \`${name}\` has no numeric alpha and beta`;
   }
-  const { pending, lastPass, lastCheap, filingFailures, foldedEffects, foldedLegacyEffects, foldedEffectThrough } = parsed;
+  const { pending, lastPass, lastCheap, filingFailures, refusedLanding, foldedEffects, foldedLegacyEffects, foldedEffectThrough } = parsed;
   if (pending !== undefined) {
     if (!isRecord(pending) || typeof pending.prUrl !== "string") return "`pending` has no PR url";
     if (typeof pending.actionClass !== "string" || !(pending.actionClass in parsed.classes)) return "`pending` names a class the record does not hold";
@@ -574,6 +617,7 @@ function gardenStateFault(parsed: unknown): string | undefined {
   if (lastPass !== undefined && (!isRecord(lastPass) || typeof lastPass.fingerprint !== "string" || (lastPass.landed !== undefined && typeof lastPass.landed !== "string"))) return "`lastPass` is not a fingerprint";
   if (lastCheap !== undefined && typeof lastCheap !== "string") return "`lastCheap` is not a string";
   if (filingFailures !== undefined && (!isRecord(filingFailures) || !isCount(filingFailures.count) || typeof filingFailures.lastAt !== "string" || typeof filingFailures.reason !== "string")) return "`filingFailures` is malformed";
+  if (refusedLanding !== undefined && (!isRecord(refusedLanding) || typeof refusedLanding.digest !== "string" || typeof refusedLanding.at !== "string")) return "`refusedLanding` is malformed";
   if (foldedEffects !== undefined && (!Array.isArray(foldedEffects) || foldedEffects.some((id) => typeof id !== "string"))) return "`foldedEffects` is not a list of ids";
   if (foldedLegacyEffects !== undefined && (!Array.isArray(foldedLegacyEffects) || foldedLegacyEffects.some((id) => typeof id !== "string"))) return "`foldedLegacyEffects` is not a list of ids";
   if (foldedEffectThrough !== undefined && (!Number.isSafeInteger(foldedEffectThrough) || (foldedEffectThrough as number) < 0)) return "`foldedEffectThrough` is not a sequence";
@@ -881,7 +925,7 @@ function gardenFilingEscalation(name: string,failures: NonNullable<GardenState<s
     class: "BLOCKED",
     taskId: `${name}-gardener`,
     summary: `the ${name} gardener's filing has failed ${failures.count} times in a row`,
-    detail: `Each pass had work, but opening its PR threw, so nothing landed. Latest reason:\n\n${failures.reason}\n\nIt keeps retrying with a doubling wait; the ledger's \`${name}.garden_filing_failed\` rows carry each attempt.`,
+    detail: `Each pass had work, but nothing landed: opening its PR failed, or a guard or the plan-PR preflight refused the draft. Latest reason:\n\n${failures.reason}\n\nIt keeps retrying with a doubling wait and never lands a refused draft's bytes again; the ledger's \`${name}.garden_filing_failed\` and \`${name}.landing_repeat_skipped\` rows carry each attempt.`,
     options: [
       { label: "fix-filing", detail: "repair what the latest reason names; the next retry then lands on its own" },
       { label: "switch-off", detail: `touch state/${name.toUpperCase()}_OFF-<class> to stop the class` },
@@ -971,15 +1015,16 @@ export function runGardenAsync<C extends string, I, A extends GardenAction<C>, W
   spec: GardenSpec<C, I, A, W>,
   deps: GardenerDeps<W, PrState | Promise<PrState>>,
 ): Promise<GardenPassResult<C, A>> {
-  return runStepsAsync(gardenPassSteps(spec, { ...deps, mergedPlanLint: deps.mergedPlanLint ?? freshMergedPlanLintAsync }));
+  return runStepsAsync(gardenPassSteps(spec, { ...deps, mergedPlanLint: deps.mergedPlanLint ?? freshMergedPlanLintAsync }, true));
 }
 
 function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
   spec: GardenSpec<C, I, A, W>,
   deps: GardenerDeps<W, PrState | Promise<PrState>>,
+  async = false,
 ): Steps<GardenPassResult<C, A>> {
   try {
-    return yield* gardenPassBody(spec, deps);
+    return yield* gardenPassBody(spec, deps, async);
   } finally {
     notePendingWatch(spec.name, spec.classes, deps);
   }
@@ -988,6 +1033,7 @@ function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W exte
 function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
   spec: GardenSpec<C, I, A, W>,
   deps: GardenerDeps<W, PrState | Promise<PrState>>,
+  async: boolean,
 ): Steps<GardenPassResult<C, A>> {
   const statePath = gardenStatePath(deps.stateDir, spec.name);
   let state = readGardenState(statePath, spec.classes);
@@ -1091,9 +1137,14 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
       const ws = yield* step<W | GardenCheckoutAsync<W>>(() => deps.openWorkspace());
       try {
         // A spec's apply only writes the tree; landing and disposal stay with the pass, awaited or not.
-        const landing = spec.apply(ws as unknown as W, plan, scorecard);
+        const heldIds = yield* step(() => spec.prepare?.(ws as unknown as W, plan, async));
+        const landing = spec.apply(ws as unknown as W, plan, scorecard, heldIds);
+        const digest = landing && landingDigest(ws.root, landing.paths);
+        // 2026-10-10: the backlog lane re-drafted one refused change every ~20 min (17:17-18:09Z), each a new
+        // worktree and a full plan-PR preflight. Bytes once refused are never landed again; a new draft is.
+        if (digest && digest === state.refusedLanding?.digest) throw new GardenLandingRefusedError(digest, "repeat", `the drafted change is byte-identical to the one refused at ${state.refusedLanding.at}`);
         const refused = landing && spec.landingRefusal?.(ws.root, landing.paths);
-        if (refused) throw new Error(`${spec.name} gardener: drafted shard failed lint-plan's machine-filing admission (${refused})`);
+        if (refused) throw new GardenLandingRefusedError(digest!, "guard", `${spec.name} gardener: drafted shard failed lint-plan's machine-filing admission (${refused})`);
         if (landing) {
           let lint: MergedPlanLintFailure | undefined;
           try {
@@ -1110,17 +1161,26 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
           }
           const why = spec.review?.[acting];
           prUrl = yield* step(() => ws.land(why ? { ...landing, body: judgedByOutcomeNote(spec.name, acting, why) + landing.body } : landing));
+          if (prUrl === undefined) throw new GardenLandingRefusedError(digest!, "not_opened", `${spec.name} gardener: the landing's PR did not open (plan_pr.preflight_refused or _timed_out names why)`);
         }
       } finally {
         yield* step(() => ws.dispose());
       }
     } catch (e) {
+      recordGardenMintTimeout(e, spec.name, deps.log);
+      if (e instanceof GardenMintTimedOutError) {
+        deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: plan.acting, actions: plan.actions.length, pr_url: null, mint_timed_out: true });
+        return { ran: true, plan, scorecard };
+      }
       // A failed filing is not a pass: no fingerprint is recorded, so the same work is retried once
       // the doubling wait elapses, and a streak is raised to a person instead of going silent.
       const reason = String((e as Error)?.message ?? e);
       const failures = { count: (state.filingFailures?.count ?? 0) + 1, lastAt: clock.iso(), reason };
-      writeAtomic(statePath, JSON.stringify({ ...state, filingFailures: failures }, null, 2) + "\n");
-      deps.log(`${spec.name}.garden_filing_failed`, { attempt: failures.count, reason, retry_after_ms: gardenFilingRetryAt(failures)! - clock.now() });
+      const refusal = e instanceof GardenLandingRefusedError ? e : undefined;
+      // A repeat keeps the first refusal's time; only a newly refused draft replaces it.
+      const refusedLanding = refusal?.outcome === "repeat" ? state.refusedLanding : refusal ? { digest: refusal.digest, at: clock.iso() } : state.refusedLanding;
+      writeAtomic(statePath, JSON.stringify({ ...state, filingFailures: failures, refusedLanding }, null, 2) + "\n");
+      deps.log(`${spec.name}.${refusal?.outcome === "repeat" ? "landing_repeat_skipped" : "garden_filing_failed"}`, { attempt: failures.count, reason, retry_after_ms: gardenFilingRetryAt(failures)! - clock.now(), ...(refusal ? { refusal: refusal.outcome, digest: refusal.digest } : {}) });
       if (failures.count === GARDEN_FILING_ESCALATE_AT && deps.escalate) {
         deps.log(`${spec.name}.garden_filing_escalated`, { attempt: failures.count, issue_url: deps.escalate(gardenFilingEscalation(spec.name, failures)) });
       }
@@ -1138,6 +1198,21 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
   const lastPass = prUrl ? { fingerprint, landed: prUrl } : { fingerprint };
   writeAtomic(statePath, JSON.stringify({ ...state, pending, pendingRecordedAt, lastCheap: cheap, lastPass, filingFailures: undefined }, null, 2) + "\n");
   return { ran: true, plan, prUrl, scorecard };
+}
+
+/** A drafted landing that was not landed: a guard refused it, its PR did not open, or it repeats refused bytes. */
+export class GardenLandingRefusedError extends RmdError {
+  constructor(readonly digest: string, readonly outcome: "guard" | "not_opened" | "repeat", message: string) {
+    super("gardener", GENERIC_EXIT_CODE, message, { digest, outcome });
+    this.name = "GardenLandingRefusedError";
+  }
+}
+
+/** The drafted change's identity: each landed path and its bytes in the checkout (absent reads as absent). */
+export function landingDigest(root: string, paths: readonly string[]): string {
+  const h = createHash("sha256");
+  for (const p of [...paths].sort()) h.update(`${p}\0${existsSync(join(root, p)) ? readFileSync(join(root, p), "utf8") : "\u0001absent"}\0`);
+  return h.digest("hex");
 }
 
 /** Run passes on their own timer beside the main loop, never two at once. */

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: W1-T5934's build (#9474) follow-up"
   plan_refs: [W1-T5934, W1-T5921, W1-T5939, W1-T1275]
   files: [src/lib/sweep.ts, test/a-ci-gate-timeout-names-a-required-check-that-never-registered.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -2,6 +2,7 @@ import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
@@ -13,7 +14,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { combinedStatusRestArgs, prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
 // W1-T2895: review.ts imports "src/lib/plan-scope" through the leaf module below.
 import { isInPlanScope } from "./plan-scope.js";
-import { loadPlanAtRef, readBlobsAtRef, readBlobsAtRefAsync, visibleCriteria, type AcceptanceCriterion, type GitBlobRunner, type TaskRisk } from "./plan.js";
+import { defaultGitRunnerAsync, loadPlanAtRef, loadPlanAtRefAsync, readBlobsAtRef, readBlobsAtRefAsync, visibleCriteria, type AcceptanceCriterion, type GitBlobRunner, type Task, type TaskRisk } from "./plan.js";
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
@@ -278,6 +279,7 @@ export async function claimReviewDecision(opts: {
  * `dialect-parse-error` an authoring error; `prose-no-match` zero candidates on a prose body (W1-T161/#349);
  * `exec-error` threw or timed out; `runner-absent` names an unavailable checkout-local tool; `runtime-broken` the only
  * `not ok` names the FILE ITSELF (W1-T1077); `incomplete-run` results then no `# duration_ms` summary (W1-T2740);
+ * `cwd-missing` the proof's checkout was deleted before the child could start (W1-T7822);
  * `no-exec-context` no PR-head checkout; `forward-reference` absent at head but declared by this diff's own shard — see {@link
  * shardDeclaredFilesInDiff} — or, on a filing head, any target the diff does not change ({@link FILING_FORWARD_ADVISORY}). */
 export type ProofSkipReason =
@@ -289,6 +291,7 @@ export type ProofSkipReason =
   | "cannot-load"
   | "incomplete-run"
   | "runner-absent"
+  | "cwd-missing"
   | "no-exec-context"
   | "forward-reference"
   | "proof-form";
@@ -1673,6 +1676,15 @@ export class ProofSandboxUnavailableError extends RmdError {
   }
 }
 
+/** The proof's working directory no longer exists (W1-T7822) — a reclaimed review worktree, say. Node raises ENOENT for a
+ *  missing cwd exactly as for a missing binary, so it is named BEFORE any spawn: {@link spawnFailureText} would call it
+ *  a missing sandbox. {@link judgeCriterion} grades it `not_executable` / `cwd-missing`, never a pass. */
+export class ProofCwdMissingError extends RmdError {
+  constructor(readonly missingCwd: string) {
+    super("usage", GENERIC_EXIT_CODE, `proof cwd no longer exists: ${missingCwd}`, { missingCwd });
+  }
+}
+
 let proofSandboxMemo: ProofSandboxStatus | undefined;
 let unsandboxedProofSpawns = 0;
 
@@ -1983,6 +1995,7 @@ interface PreparedProofChild {
 
 /** One proof child's argv and env, with its throwaway HOME made (`rmd-proof-home-*`) and the cleanup that removes it. */
 function prepareProofChild(command: string, args: readonly string[], cwd: string): PreparedProofChild {
+  if (!existsSync(cwd)) throw new ProofCwdMissingError(cwd);
   const child = proofChildCommand(command, args);
   const home = makeTempDir("proof-home");
   const cleanup = () => rmSync(home, { recursive: true, force: true });
@@ -2003,11 +2016,15 @@ function prepareProofChild(command: string, args: readonly string[], cwd: string
     };
   } catch (error) {
     cleanup();
-    throw error instanceof ProofSandboxUnavailableError ? error : new ProofSandboxUnavailableError(spawnFailureText(error));
+    if (error instanceof ProofSandboxUnavailableError || error instanceof ProofCwdMissingError) throw error;
+    // W1-T7822: a cwd that vanished after the check above still raises ENOENT from realpath — name it, not the sandbox.
+    if (!existsSync(cwd)) throw new ProofCwdMissingError(cwd);
+    throw new ProofSandboxUnavailableError(spawnFailureText(error));
   }
 }
 
 function startCheckSync(child: PreparedProofChild, cwd: string): void {
+  if (!existsSync(cwd)) throw new ProofCwdMissingError(cwd);
   try {
     execFileSync(child.startCheck!.file, child.startCheck!.args, {
       cwd,
@@ -2023,6 +2040,7 @@ function startCheckSync(child: PreparedProofChild, cwd: string): void {
 }
 
 async function startCheckAsync(child: PreparedProofChild, cwd: string): Promise<void> {
+  if (!existsSync(cwd)) throw new ProofCwdMissingError(cwd);
   try {
     await execFileAsync(child.startCheck!.file, child.startCheck!.args, {
       cwd,
@@ -2925,6 +2943,63 @@ function assertGrepTargetIsFile(args: readonly string[], cwd: string): void {
   if (isDirectory) throw new ProofTargetIsDirectoryError(target);
 }
 
+// ── A PROOF RUN IS JUDGED BY ITS PER-FILE SUMMARIES (2026-10-12, after #10894/#10918) ──────────────────────────
+// node reports a test file whose own child exits 0 part-way — a test calling the real `process.exit(0)` — as `ok N -
+// <file>` with every test it would have run lost, still prints its trailing summary, and exits 0; a file that registers
+// no tests reads the same. Both were a passing `unit test:` proof. Every node `--test` proof now carries the CI judge's
+// tally reporter and passes only when each file it named reached its own per-file summary. The reporter rides the argv
+// as a `data:` URL because the sandboxed child sees only the PR head. NOT JUDGED: a name-filtered run over the whole
+// {@link TEST_GLOB} (no candidate file resolved), whose many files without a matching title cannot be told apart from
+// a file that died; and a run that exits nonzero, which the classifiers below already read.
+
+/** The slice of scripts/pure-test-pool.mjs (the test judge) the proof runner uses. A plain .mjs, so no types. */
+interface ProofJudge {
+  inlineJudgedArgs(): string[];
+  hasInlineJudge(args: readonly string[]): boolean;
+  splitInlineTally(stdout: string): { output: string; tallyText: string };
+  judgedNodeTestArgs(args: readonly string[], judgedArgs: readonly string[]): string[];
+  testFilesInArgv(args: readonly string[], cwd: string): string[];
+  judgeRun(files: readonly string[], opts: { status: number; pool: boolean; root: string; tallyText: string }): { complete: boolean };
+  describeJudgedRun(role: string, verdict: { complete: boolean }, opts: { prefix: string }): string;
+}
+
+// Loaded when a proof runs, never at import, for the reason src/lib/ci-parity.ts gives: sandboxes copy only src/.
+function loadProofJudge(): ProofJudge {
+  return createRequire(import.meta.url)("../../scripts/pure-test-pool.mjs") as ProofJudge;
+}
+
+/** `args` with the judge's inline tally reporter, for a node `--test` proof; any other argv unchanged. Idempotent. */
+function withProofJudge(whitelisted: WhitelistedProof, args: readonly string[]): readonly string[] {
+  if (whitelisted.kind !== "test" || whitelisted.runner === "vitest" || !args.includes("--test")) return args;
+  const judge = loadProofJudge();
+  return judge.hasInlineJudge(args) ? args : judge.judgedNodeTestArgs(args, judge.inlineJudgedArgs());
+}
+
+/** `args` without {@link withProofJudge}'s two flags (the async executor hands the sync one an already-judged argv). */
+function withoutProofJudge(args: readonly string[]): readonly string[] {
+  const at = args.findIndex((arg) => arg.startsWith("--test-reporter=data:"));
+  return at < 0 ? args : [...args.slice(0, at), ...args.slice(at + 2)];
+}
+
+/** A judged proof run's stdout without the tally line, and that line ("" when the argv carried no judge). */
+function splitProofOutput(args: readonly string[], raw: string): { stdout: string; tallyText: string } {
+  const judge = loadProofJudge();
+  if (!judge.hasInlineJudge(args)) return { stdout: raw, tallyText: "" };
+  const { output, tallyText } = judge.splitInlineTally(raw);
+  return { stdout: output, tallyText };
+}
+
+/** The judge's line for an exit-0 proof run that did not finish every file it named; `undefined` when it did, or
+ *  when the run is one this judge does not read (see the block comment above). */
+function unfinishedProofRun(args: readonly string[], cwd: string, tallyText: string): string | undefined {
+  const judge = loadProofJudge();
+  if (!judge.hasInlineJudge(args) || args.includes(TEST_GLOB)) return undefined;
+  const at = args.indexOf("--test-name-pattern");
+  const files = judge.testFilesInArgv(at < 0 ? args : [...args.slice(0, at), ...args.slice(at + 2)], cwd);
+  const verdict = judge.judgeRun(files, { status: 0, pool: false, root: cwd, tallyText });
+  return verdict.complete ? undefined : judge.describeJudgedRun("proof", verdict, { prefix: "test-judge" });
+}
+
 export function execWhitelistedProof(
   whitelisted: WhitelistedProof,
   cwd: string,
@@ -2985,15 +3060,21 @@ export function execWhitelistedProof(
     assertGrepTargetsInsideCheckout(args, cwd);
     assertGrepTargetIsFile(args, cwd); // R-12: same placement, same reason — a refusal, not an outcome
   }
+  // The excerpt names the proof's own argv: the judge's inline reporter is ~2 KB of base64 that reproduces nothing.
+  const shownArgs = withoutProofJudge(args);
+  args = withProofJudge(whitelisted, args);
   delete whitelisted.failureOutput;
   const recordFailure = (status: number, stdout: string, stderr = ""): "fail" => {
-    whitelisted.failureOutput = proofFailureExcerpt(whitelisted.command, args, status, stdout, stderr);
+    whitelisted.failureOutput = proofFailureExcerpt(whitelisted.command, shownArgs, status, stdout, stderr);
     return "fail";
   };
   try {
-    const stdout = spawn(whitelisted.command, args, cwd, timeoutMs);
+    const { stdout, tallyText } = splitProofOutput(args, spawn(whitelisted.command, args, cwd, timeoutMs));
+    // Read before every verdict: an unfinished file can hide the very failure, or the very title, the verdict reads.
+    const unfinished = whitelisted.kind === "test" ? unfinishedProofRun(args, cwd, tallyText) : undefined;
     if (whitelisted.nameFiltered) {
       const outcome = vitestNameFiltered ? vitestNameFilteredOutcome(stdout) : nameFilteredOutcome(stdout);
+      if (unfinished !== undefined && (outcome === "pass" || outcome === "no-match")) return recordFailure(0, `${stdout}\n${unfinished}`);
       if (outcome === "fail") return recordFailure(0, stdout);
       if (outcome === "cannot-load" && !deps.loadRetried) {
         recordLoadError(whitelisted, stdout);
@@ -3006,6 +3087,7 @@ export function execWhitelistedProof(
       }
       return outcome;
     }
+    if (unfinished !== undefined) return recordFailure(0, `${stdout}\n${unfinished}`);
     // W1-T3208: a dialect grep's own compiled pattern/path names the exact self-declaration text to
     // exclude. `dialectGrepTargetPath` returning a path
     // confirms both the dialect shape (not the legacy fenced, author-selected argv) AND that
@@ -3031,7 +3113,7 @@ export function execWhitelistedProof(
     // A clean nonzero exit. For a name-filtered proof this does NOT necessarily mean OUR named test failed — read the
     // TAP stream node still attaches to the error rather than trusting the code.
     if (whitelisted.nameFiltered) {
-      const stdout = typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? "");
+      const { stdout } = splitProofOutput(args, outputText(err.stdout));
       const stderr = typeof err.stderr === "string" ? err.stderr : (err.stderr?.toString("utf8") ?? "");
       const outcome = vitestNameFiltered ? vitestNameFilteredOutcome(stdout, stderr) : nameFilteredOutcome(stdout, stderr);
       if (outcome === "cannot-load" && !deps.loadRetried) {
@@ -3053,7 +3135,7 @@ export function execWhitelistedProof(
     // Read the SAME stdout the name-filtered branch reads; only when every `not ok` is the file's own wrapper name
     // does the run count as never-executed. An ABSENT file reports no TAP lines and falls through to `"fail"`.
     if (whitelisted.kind === "test" && !whitelisted.nameFiltered) {
-      const stdout = typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? "");
+      const { stdout } = splitProofOutput(args, outputText(err.stdout));
       // AN INCOMPLETE RUN IS NOT A FAILING ONE (W1-T2740), read BEFORE the wrapper-name classifier on purpose: the two
       // discriminators are orthogonal and this one is stronger. `runtime-broken` describes a run that COMPLETED and
       // whose only `not ok` names the file itself; a stream with NO summary did not finish at all. NOT a request to
@@ -3066,7 +3148,7 @@ export function execWhitelistedProof(
       if (wrapperName !== undefined) throw new PureProofNeverExecutedError(wrapperName, stdout);
     }
     // a single-file/grep proof's own nonzero exit is a genuine fail
-    return recordFailure(err.status, outputText(err.stdout), outputText(err.stderr));
+    return recordFailure(err.status, splitProofOutput(args, outputText(err.stdout)).stdout, outputText(err.stderr));
   }
 }
 
@@ -3130,6 +3212,7 @@ export async function execWhitelistedProofAsync(
     assertGrepTargetsInsideCheckout(args, cwd);
     assertGrepTargetIsFile(args, cwd);
   }
+  args = withProofJudge(whitelisted, args);
   let output: string | undefined;
   let failure: unknown;
   try {
@@ -3935,6 +4018,11 @@ export function judgeCriterion(
             loadError = e.loadError;
             met = false;
             reason = `proof cannot-evaluate: test files failed to load after one toolchain refresh (${e.loadError})`;
+          } else if (e instanceof ProofCwdMissingError) {
+            // W1-T7822: the checkout was deleted under the proof; the sandbox is not the problem.
+            proofExec = "not_executable";
+            proofSkip = "cwd-missing";
+            reason = `${reason} — NOTE: ${e.message}; not executed, keyword floor applied`;
           } else if (e instanceof ProofSandboxUnavailableError) {
             // W1-T6124: the proof's code never ran, so this is a host gap, not an outcome — and never a pass.
             proofExec = "not_executable";
@@ -5954,6 +6042,63 @@ export interface AutomergeHold {
   by: string;
   /** Why — mirroring {@link CappedOverride.reason}. */
   reason: string;
+  /** W1-T7721 — the evidence the WRITER gathered about who really ran the command (never typed by the caller).
+   *  Absent on rows older than the field, which every surface reads as "actor unrecorded". */
+  actor?: MergeHoldActor;
+}
+
+/** W1-T7721 — verifiable provenance of a merge-hold write, gathered by the writer beside the free-text `by`. */
+export interface MergeHoldActor {
+  /** `agent` when an agent/session marker was present or the process ran inside a container; else `human`. */
+  kind: "human" | "agent";
+  os_user: string;
+  host: string;
+  /** Container id when the writer ran inside one. */
+  container_id?: string;
+  /** Agent/session identity when one was present in the environment. */
+  session?: string;
+  /** Names of the agent/session env markers found (CLAUDECODE, REMUDERO_RUN_ID, ...). */
+  agent_markers: string[];
+  tty: { stdin: boolean; stdout: boolean };
+  /** Parent process names, nearest first. */
+  parents: string[];
+}
+
+function readMergeHoldActor(raw: unknown): MergeHoldActor | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const a = raw as Record<string, unknown>;
+  if ((a.kind !== "human" && a.kind !== "agent") || typeof a.os_user !== "string" || typeof a.host !== "string") {
+    return undefined;
+  }
+  const tty = (a.tty ?? {}) as Record<string, unknown>;
+  return {
+    kind: a.kind,
+    os_user: a.os_user,
+    host: a.host,
+    ...(typeof a.container_id === "string" ? { container_id: a.container_id } : {}),
+    ...(typeof a.session === "string" ? { session: a.session } : {}),
+    agent_markers: Array.isArray(a.agent_markers) ? a.agent_markers.filter((m): m is string => typeof m === "string") : [],
+    tty: { stdin: tty.stdin === true, stdout: tty.stdout === true },
+    parents: Array.isArray(a.parents) ? a.parents.filter((m): m is string => typeof m === "string") : [],
+  };
+}
+
+/** W1-T7721 — true when the recorded actor contradicts the claimed `by`: an agent wrote a row naming something
+ *  other than its own `agent:<session>` identity. An unrecorded actor is not a mismatch, merely unknown. */
+export function holdClaimMismatch(hold: Pick<AutomergeHold, "by" | "actor">): boolean {
+  return hold.actor !== undefined && hold.actor.kind === "agent" && !/^agent:\S+/.test(hold.by);
+}
+
+/** W1-T7721 — who set a hold, for every surface that names it. Never the bare claimed name when an actor exists. */
+export function describeHoldSetter(hold: Pick<AutomergeHold, "by" | "actor">): string {
+  const actor = hold.actor;
+  if (!actor) return `${hold.by} (actor unrecorded)`;
+  const where = actor.container_id ? `${actor.host} (container ${actor.container_id})` : actor.host;
+  if (actor.kind === "agent") {
+    const who = `agent session ${actor.session ?? "unidentified"} as ${actor.os_user} on ${where}`;
+    return holdClaimMismatch(hold) ? `${hold.by} (claimed); written by ${who}` : `${hold.by} (${who})`;
+  }
+  return `${hold.by} (human ${actor.os_user} on ${where})`;
 }
 
 /** Recover the current auto-merge hold for `prNumber`, last one wins, over the WHOLE ledger rather than a sha-bound
@@ -5978,7 +6123,8 @@ export function automergeHoldFromLedger(
     if (!scopedToThisPr) continue;
     if (line.step === "automerge.hold_engaged" && isConfirmedHumanAuthority(line)) {
       if (typeof line.by === "string" && typeof line.reason === "string" && line.by && line.reason) {
-        held = { by: line.by, reason: line.reason };
+        const actor = readMergeHoldActor(line.hold_actor);
+        held = { by: line.by, reason: line.reason, ...(actor ? { actor } : {}) };
       }
       continue;
     }
@@ -7015,31 +7161,105 @@ export function resolvePlanCriteriaAtHead(
     // W1-T2623: the read-identity probes only run when there is a `source` line to append them to — no extra git
     // calls spent naming bytes nobody is about to be told were read.
     const identity = criteria.length ? formatPlanReadIdentityAtHead(gitRunner, headSha, planRelPath) : undefined;
-    return {
-      criteria,
-      taskId,
-      taskDeclaredFiles: t?.files,
-      taskRisk: t?.risk,
-      taskBudgetUsd: t?.budget_usd,
-      source: criteria.length
-        ? `plan at ${headSha} task ${taskId} (${criteria.length} criteria)` + (identity ? ` — read: ${identity}` : "")
-        : undefined,
-    };
+    return planCriteriaAtHeadResult(t, taskId, headSha, criteria, identity);
   } catch (e) {
     // A duplicate id or an unreadable git object at headSha — named, never swallowed into a silent empty plan
     // (mirrors resolvePlanCriteriaForReview's own divergence shape). W1-T2511: the reason ALONE cannot say which it
     // was, because git will not, so one extra `cat-file -e` separates the two causes and the next reader need not
     // re-run probes.
-    return {
-      criteria: [],
-      taskId,
-      divergence: {
-        taskId,
-        reason: String((e as Error)?.message ?? e),
-        cause: classifyHeadShaAvailability(repoRoot, headSha, runGit),
-      },
-    };
+    return planCriteriaAtHeadDivergence(taskId, e, classifyHeadShaAvailability(repoRoot, headSha, runGit));
   }
+}
+
+function planCriteriaAtHeadResult(
+  t: Task | undefined,
+  taskId: string,
+  headSha: string,
+  criteria: AcceptanceCriterion[],
+  identity: string | undefined,
+): PlanCriteriaAtHeadResult {
+  return {
+    criteria,
+    taskId,
+    taskDeclaredFiles: t?.files,
+    taskRisk: t?.risk,
+    taskBudgetUsd: t?.budget_usd,
+    source: criteria.length
+      ? `plan at ${headSha} task ${taskId} (${criteria.length} criteria)` + (identity ? ` — read: ${identity}` : "")
+      : undefined,
+  };
+}
+
+function planCriteriaAtHeadDivergence(
+  taskId: string,
+  e: unknown,
+  cause: PlanCriteriaAtHeadDivergence["cause"],
+): PlanCriteriaAtHeadResult {
+  return { criteria: [], taskId, divergence: { taskId, reason: String((e as Error)?.message ?? e), cause } };
+}
+
+/** {@link resolvePlanCriteriaAtHead} through AWAITED git (W1-T7743): the same trailer extraction, plan read, criteria,
+ *  read-identity and divergence classification, with no `execFileSync` on the caller's event loop. The sync form stays
+ *  for CLI callers off the loop. */
+export async function resolvePlanCriteriaAtHeadAsync(
+  body: string,
+  repoRoot: string,
+  planRelPath: string,
+  headSha: string,
+  runGit?: (args: string[], stdin?: string) => Promise<string>,
+): Promise<PlanCriteriaAtHeadResult> {
+  const taskId = extractTaskTrailerId(body ?? "");
+  if (taskId === undefined) return { criteria: [] };
+  const gitRunner = runGit ?? defaultGitRunnerAsync(repoRoot);
+  try {
+    const plan = await loadPlanAtRefAsync(repoRoot, planRelPath, headSha, gitRunner);
+    const t = plan.byId.get(taskId);
+    const criteria = t?.acceptance?.length ? t.acceptance : [];
+    const identity = criteria.length ? await formatPlanReadIdentityAtHeadAsync(gitRunner, headSha, planRelPath) : undefined;
+    return planCriteriaAtHeadResult(t, taskId, headSha, criteria, identity);
+  } catch (e) {
+    // Named, never swallowed into an empty plan: the divergence carries git's message and the awaited cause probe.
+    return planCriteriaAtHeadDivergence(taskId, e, await classifyHeadShaAvailabilityAsync(headSha, gitRunner));
+  }
+}
+
+/** {@link classifyHeadShaAvailability} through an awaited runner: the same one `cat-file -e` probe and the same verdicts. */
+export async function classifyHeadShaAvailabilityAsync(
+  headSha: string,
+  runGit: (args: string[], stdin?: string) => Promise<string>,
+): Promise<"absent-object" | "readable-object" | "undetermined"> {
+  try {
+    await runGit(["cat-file", "-e", `${headSha}^{commit}`]);
+    return "readable-object";
+  } catch (e) {
+    const status = (e as { status?: unknown; code?: unknown } | null);
+    // execFile reports a non-zero exit as a numeric `code`; a spawn failure carries a string code (ENOENT) instead.
+    return typeof status?.status === "number" || typeof status?.code === "number" ? "absent-object" : "undetermined";
+  }
+}
+
+/** {@link formatPlanReadIdentityAtHead} through an awaited runner. NEVER THROWS. */
+async function formatPlanReadIdentityAtHeadAsync(
+  runGit: (args: string[], stdin?: string) => Promise<string>,
+  headSha: string,
+  planRelPath: string,
+): Promise<string | undefined> {
+  let blobOid: string;
+  try {
+    blobOid = (await runGit(["rev-parse", `${headSha}:${planRelPath}`])).trim();
+  } catch {
+    // Identity is optional legibility: the criteria bytes already resolved, so a failed OID probe keeps the bare source.
+    return undefined;
+  }
+  const shardRelDir = join(dirname(planRelPath), "tasks.d");
+  let shardSuffix = "";
+  try {
+    const treeOid = (await runGit(["rev-parse", `${headSha}:${shardRelDir}`])).trim();
+    shardSuffix = ` + ${shardRelDir}/@${treeOid.slice(0, 12)}`;
+  } catch {
+    // No tasks.d/ at this ref — the same tolerance as the sync form.
+  }
+  return `${planRelPath}@${blobOid.slice(0, 12)}${shardSuffix}`;
 }
 
 /** One PR-authoring path's coverage — design item (i), W1-T952: "write down which the fix COVERS and which it
@@ -7960,6 +8180,9 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
   "scripts/typecheck.mjs":
     "local dev/worker convenience (`npm run typecheck`, and `npm run check`'s tsc), never invoked by any CI workflow — " +
     "CI's ci job runs its own `npx tsc -p tsconfig.json --noEmit`, so no edit to this wrapper changes what a gate measures",
+  "scripts/test-run.mjs":
+    "local dev/worker convenience (`npm test`), never invoked by any CI workflow — CI runs `npm run test:ci` — and it " +
+    "only sets --test-concurrency on the caller's own node --test argv and returns node's exit code, so it cannot turn a red suite green",
   "scripts/test-duration-reporter.mjs":
     "VERIFIED NON-INSTRUMENT (W1-T5923) — a node --test reporter that only writes per-file durations; the " +
     "coverage shard names it to record instrumented timings for the shard split, never reads them back, and " +
@@ -10308,6 +10531,8 @@ export interface PostReviewPendingOpts {
   lockOpts?: AcquireReviewStatusLockOpts;
   /** Injectable only so the durable owner record is deterministic in tests. */
   ownerIdentity?: { pid: number; startedAt: string };
+  /** Only proof of death overrides a readable young claim's TTL (W1-T8088). */
+  assessPendingOwner?: (record: PendingReviewStatusRecord) => PendingReviewOwnerAssessment;
   /** The wall clock the TTL is measured against. Defaults to {@link systemClock}, so production
    *  reads real time and nothing is handed a frozen instant it did not ask for — this is a CLOCK,
    *  not the fixed `now` field the comment below rules out. Present so the TTL boundary is
@@ -10331,8 +10556,8 @@ export interface PostReviewPendingResult {
  * `no_evidence`, so a prior `no_evidence` TERMINAL verdict for this head would sail through; a changed body is a fresh
  * input and may post again. (2) IDEMPOTENT PER INPUT, BUT ONLY INSIDE {@link REVIEW_LOCK_TTL_MS} (W1-T3647): a
  * `review.pending_posted` line for this exact head+body digest is a no-op while its own `ts` reads younger than the
- * TTL, OR while its age cannot be read at all — an unreadable clock FAILS TOWARD HOLDING, never toward reclaim, since
- * the alternative is two reviewers judging the same head. Only a READABLE age at or past the TTL reclaims: this call
+ * TTL unless its owner is proven dead (W1-T8088). An unreadable clock FAILS TOWARD HOLDING, never toward reclaim, since
+ * the alternative is two reviewers judging the same head. A READABLE age at or past the TTL also reclaims: this call
  * posts itself as the new holder and names the run it took over from, rather than deferring forever to a claim its
  * own owning run may already be dead. The posted status carries the posting `run_id`, which is what sweep.ts's
  * `OpenPrView.reviewPendingSince` producer derives its staleness clock from. */
@@ -10377,17 +10602,20 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       break;
     }
   }
-  // W1-T3647: a same-sha claim is a no-op ONLY while it is inside the TTL. Age is read off the
-  // claim's OWN ledger `ts` (`priorPending.postedAt`) against the wall clock right now — never a
-  // fixed field on the OPTS, so nothing here can be handed a stale "now" by a caller.
+  // W1-T3647/W1-T8088: read the claim's own ledger `ts` against the current clock. A young
+  // claim holds unless its owner is proven dead; an unreadable age always holds.
   let takenOverFrom: PendingReviewStatusRecord | undefined;
+  let ownerProvenDead = false;
+  const assessOwner = opts.assessPendingOwner ??
+    ((record: PendingReviewStatusRecord) => assessPendingReviewOwner(record, { isPidAlive: defaultIsPidAlive }));
   if (priorPending && priorPending.headSha === opts.sha) {
     const claimedAtMs = Date.parse(priorPending.postedAt);
     const ageMs = Number.isNaN(claimedAtMs) ? undefined : (opts.clock ?? systemClock).now() - claimedAtMs;
     // FAIL TOWARD HOLDING (design (c)): an age this process cannot read (missing/garbled `ts`) is
     // treated exactly like a FRESH, live claim — never like a stale one — because the alternative
     // is two reviewers judging the same head and posting conflicting verdicts.
-    if (ageMs === undefined || ageMs < REVIEW_LOCK_TTL_MS) {
+    ownerProvenDead = ageMs !== undefined && ageMs < REVIEW_LOCK_TTL_MS && assessOwner(priorPending) === "dead";
+    if (ageMs === undefined || (ageMs < REVIEW_LOCK_TTL_MS && !ownerProvenDead)) {
       return {
         posted: false,
         reason:
@@ -10417,7 +10645,12 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       if (foreignRun !== opts.runId) {
         const claimedAtMs = Date.parse(status.created_at ?? "");
         const ageMs = (opts.clock ?? systemClock).now() - claimedAtMs;
-        if (!Number.isFinite(ageMs) || ageMs < REVIEW_LOCK_TTL_MS) {
+        const foreignLine = lines.findLast(line => line.step === "review.pending_posted" &&
+          line.run_id === foreignRun && line.head_sha === opts.sha);
+        const foreignPending = foreignLine && pendingReviewStatusRecord(foreignLine);
+        ownerProvenDead = Number.isFinite(ageMs) && ageMs < REVIEW_LOCK_TTL_MS &&
+          foreignPending !== undefined && assessOwner(foreignPending) === "dead";
+        if (!Number.isFinite(ageMs) || (ageMs < REVIEW_LOCK_TTL_MS && !ownerProvenDead)) {
           return {
             posted: false,
             reason: `remudero-review is already pending (owned by run ${foreignRun}) — host-independent claim; no-op`,
@@ -10430,7 +10663,9 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     return { posted: false, reason: `holding review: shared remudero-review status unreadable — ${String(error)}` };
   }
   const description = (
-    takenOverFrom
+    takenOverFrom && ownerProvenDead
+      ? `pending (owned by run ${opts.runId}) — took over run ${takenOverFrom.runId}: owner proven dead`
+      : takenOverFrom
       ? `remudero-review: review in progress (owned by run ${opts.runId}) — took over a stale claim ` +
         `(>= ${Math.round(REVIEW_LOCK_TTL_MS / 60_000)}m old) from run ${takenOverFrom.runId} (W1-T3647)`
       : `remudero-review: review in progress (owned by run ${opts.runId})`

@@ -7,6 +7,7 @@
  * resume the worker to finish, and never title a PR after a checkpoint. The first stop always
  * resumes; whether a later stop resumes again is the W1-T7096 progress judge's call.
  */
+import { checkCommitMessage, CONVENTIONAL_LIMITS, fitConventionalTitle } from "./commit-message.js";
 import type { FixProgressInput, FixProgressJudge } from "./fix-progress-judge.js";
 
 /** One stop on a checkpoint tip: its 1-based ordinal, the checkpoint subject and its `remaining` line. */
@@ -130,4 +131,38 @@ export function prTitleFromBranchCommits(subjects: readonly string[]): string | 
   const real = subjects.map((s) => s.trim()).filter((s) => s.length > 0);
   if (real.length === 0) return undefined;
   return real.find((s) => !isWipSubject(s)) ?? stripWipMarker(real[0]!);
+}
+
+const CONVENTIONAL_HEAD = /^([a-z]+)(\([^)]*\))?(!?):\s*/;
+
+/** A merge's subject: git's own `Merge branch …` / `Merge remote-tracking branch …`, or a conventional one
+ *  whose description merges something INTO the branch, as the harness's restore merge does (#10936). */
+function isMergeSubject(subject: string): boolean {
+  if (/^Merge\b/.test(subject)) return true;
+  const head = CONVENTIONAL_HEAD.exec(subject);
+  return /^merge\b.*\binto\b/i.test(head ? subject.slice(head[0].length) : subject);
+}
+
+/** The `type(scope)!: ` of the newest real conventional subject (newest first), else `feat: `. A checkpoint
+ *  and a merge lend nothing: their words and their type are the harness's, never the change's. */
+function taskTitlePrefix(subjects: readonly string[]): string {
+  for (const subject of subjects.map((s) => s.trim())) {
+    if (!subject || isWipSubject(subject) || isMergeSubject(subject)) continue;
+    const head = CONVENTIONAL_HEAD.exec(subject);
+    if (head && !checkCommitMessage(`${head[1]}: x`).some((v) => v.rule === "type-enum")) return `${head[1]}${head[2] ?? ""}${head[3]}: `;
+  }
+  return "feat: ";
+}
+
+/** W1-T7952: a filed build PR's title, from its task and never from a checkpoint's or a merge's words. The
+ *  subject is the shard title's lead clause (before the first " — "), lower-cased for subject-case, then
+ *  " (<task id>)"; the type and scope come from the branch's newest real conventional subject, else `feat`.
+ *  Fitted to header-max-length with the id kept. Undefined when the task has no title or id. */
+export function prTitleForTask(subjects: readonly string[], task: { id: string; title?: string }): string | undefined {
+  const lead = (task.title ?? "").split(" — ")[0]!.replace(/\s+/g, " ").trim().replace(/[\s.]+$/, "").toLowerCase();
+  const id = task.id.trim();
+  if (!lead || !id) return undefined;
+  const suffix = ` (${id})`;
+  const { header } = fitConventionalTitle(`${taskTitlePrefix(subjects)}${lead}`, CONVENTIONAL_LIMITS.headerMaxLength - suffix.length);
+  return `${header}${suffix}`;
 }

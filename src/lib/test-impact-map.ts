@@ -52,58 +52,116 @@ export function maskLiterals(content: string): string {
   return scanSource(content, true, false);
 }
 
+/** `scanSource` walks CODE; a template literal's text is a literal, but each `${...}` substitution inside
+ *  it is code again (W1-T6158) — nested strings, templates, comments, regexes and braces are scanned until
+ *  the matching `}`, so a backtick inside a substitution cannot close the outer template. */
 function scanSource(content: string, mask: boolean, keepLines: boolean): string {
   const literal = (text: string) => (mask && text.length > 1 ? text[0] + text.slice(1, -1).replace(/[^\n]/g, " ") + text.slice(-1) : text);
+  const blank = (text: string) => (mask ? text.replace(/[^\n]/g, " ") : text);
   let out = "";
   let last = ""; // the last significant (non-space, non-comment) character emitted
-  let i = 0;
   const n = content.length;
-  while (i < n) {
-    const c = content[i]!;
-    const next = content[i + 1];
-    if (c === "/" && next === "/") {
-      while (i < n && content[i] !== "\n") i += 1;
-      continue;
-    }
-    if (c === "/" && next === "*") {
-      const end = content.indexOf("*/", i + 2);
-      const stop = end < 0 ? n : end + 2;
-      out += keepLines ?content.slice(i, stop).replace(/[^\n]/g, "") || " " : " ";
-      i = stop;
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      let j = i + 1;
-      while (j < n && content[j] !== c) {
-        if (content[j] === "\\") j += 1;
-        else if (c !== "`" && content[j] === "\n") break;
-        j += 1;
+
+  /** Scan a template literal whose opening backtick is at `start`; returns the index after its close. */
+  const scanTemplate = (start: number): number => {
+    out += "`";
+    let i = start + 1;
+    let text = "";
+    const flush = () => {
+      out += blank(text);
+      text = "";
+    };
+    while (i < n) {
+      const d = content[i]!;
+      if (d === "\\") {
+        text += content.slice(i, i + 2);
+        i += 2;
+      } else if (d === "`") {
+        flush();
+        out += "`";
+        return i + 1;
+      } else if (d === "$" && content[i + 1] === "{") {
+        flush();
+        out += "${";
+        last = "{";
+        i = scanCode(i + 2, true);
+        if (i < n) out += "}";
+        i += 1;
+      } else {
+        text += d;
+        i += 1;
       }
-      out += literal(content.slice(i, j + 1));
-      i = j + 1;
-      last = c;
-      continue;
     }
-    if (c === "/" && (last === "" || REGEX_PRECEDERS.includes(last))) {
-      let j = i + 1;
-      let inClass = false;
-      while (j < n && content[j] !== "\n") {
-        const d = content[j]!;
-        if (d === "\\") j += 1;
-        else if (d === "[") inClass = true;
-        else if (d === "]") inClass = false;
-        else if (d === "/" && !inClass) break;
-        j += 1;
+    flush();
+    return n;
+  };
+
+  /** Scan code from `from`; with `untilBrace`, stop at the `}` that closes the substitution (not consumed). */
+  const scanCode = (from: number, untilBrace: boolean): number => {
+    let i = from;
+    let depth = 0;
+    while (i < n) {
+      const c = content[i]!;
+      const next = content[i + 1];
+      if (c === "/" && next === "/") {
+        while (i < n && content[i] !== "\n") i += 1;
+        continue;
       }
-      out += literal(content.slice(i, j + 1));
-      i = j + 1;
-      last = "/";
-      continue;
+      if (c === "/" && next === "*") {
+        const end = content.indexOf("*/", i + 2);
+        const stop = end < 0 ? n : end + 2;
+        out += keepLines ? content.slice(i, stop).replace(/[^\n]/g, "") || " " : " ";
+        i = stop;
+        continue;
+      }
+      if (c === "`") {
+        i = scanTemplate(i);
+        last = "`";
+        continue;
+      }
+      if (c === '"' || c === "'") {
+        let j = i + 1;
+        while (j < n && content[j] !== c) {
+          if (content[j] === "\\") j += 1;
+          else if (content[j] === "\n") break;
+          j += 1;
+        }
+        out += literal(content.slice(i, j + 1));
+        i = j + 1;
+        last = c;
+        continue;
+      }
+      if (c === "/" && (last === "" || REGEX_PRECEDERS.includes(last))) {
+        let j = i + 1;
+        let inClass = false;
+        while (j < n && content[j] !== "\n") {
+          const d = content[j]!;
+          if (d === "\\") j += 1;
+          else if (d === "[") inClass = true;
+          else if (d === "]") inClass = false;
+          else if (d === "/" && !inClass) break;
+          j += 1;
+        }
+        out += literal(content.slice(i, j + 1));
+        i = j + 1;
+        last = "/";
+        continue;
+      }
+      if (untilBrace) {
+        if (c === "{") depth += 1;
+        else if (c === "}") {
+          if (depth === 0) return i;
+          depth -= 1;
+        }
+      }
+      out += c;
+      if (!/\s/.test(c)) last = c;
+      i += 1;
     }
-    out += c;
-    if (!/\s/.test(c)) last = c;
-    i += 1;
-  }
+    return n;
+  };
+
+  scanCode(0, false);
   return out;
 }
 

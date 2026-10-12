@@ -1,0 +1,58 @@
+- id: W1-T8262
+  title: "A PAUSE AN OPERATOR RULING FORBIDS IS RESUMED BY A GOVERNED RUNBOOK — after the 2026-10-11 ruling that serve work never pauses core, a session still had to run `rmd resume --instance core` by hand twice and poll the PAUSE flag every minute to catch the script re-pausing"
+  repo: remudero
+  depends_on: [W1-T8245, W1-T8241]  # answers W1-T8245's foreign-pause finding and extends its pausePolicy; shares sre-runbooks.ts with W1-T8241
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the reversible remedy for a dispatch hold an operator ruling forbids
+  band_meaning: blast-radius
+  origin: "operator ruling 2026-10-11 (\"Release the pause on core. Pause should only impact serve until it's back.\") — make the ruling self-enforcing"
+  plan_refs: [W1-T4386, W1-T4390, W1-T4429, W1-T7727, W1-T7839]
+  files: [src/lib/sre-runbooks.ts, plan/policy.yaml, test/a-pause-an-operator-ruling-forbids-is-resumed-by-a-runbook.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-11 (core ledger and the session tracker, read-only): after the operator's ruling at about 12:3xZ,
+    an operator session resumed core by hand (`fleet.resume` 12:29:30). The serve-restoration supervisor v5 paused
+    it again at 12:44:08. The session's own 60-second PAUSE poll caught that, and it resumed again at 12:46:51.
+    `cli.invoked` rows: 5 `pause` and 5 `resume`, all actor "unknown". The ruling lives only in a hand-off note
+    (~/Remudero-notes/codex-handoff-2026-10-11.md, Part B). Nothing in rmd knows it.
+    W1-T4429's tiers lapse a hold only at its expiry. W1-T7839 records who set it, and never refuses a pause for
+    its actor. W1-T8245 makes such a hold an incident. This task lets a recorded operator ruling act on it.
+  design: |
+    1. THE RULING IS DATA. W1-T8245's `pausePolicy` gains, per instance, `forbiddenHolds`. Each entry has a matcher
+       over the hold's recorded fields (actor class, the reason text's stated scope, the setter's claimed session
+       prefix), the ruling's date and text as origin, and nothing else. The first entry is the 2026-10-11 ruling: a
+       hold whose reason scopes it to serve restoration never holds core.
+    2. THE RUNBOOK `resume-forbidden-hold` answers W1-T8245's `foreign-pause` incident.
+       - precheck: re-read the instance PAUSE flag. Proceed only when it is the same hold the incident names (same
+         setAt and setter, so a newer deliberate pause is never cleared), it matches a `forbiddenHolds` entry, and
+         no fleet-wide shared hold stands.
+       - act: resume that one instance through the same fleet-control resume the CLI uses, with the ledger row's
+         actor `sre-runbook:resume-forbidden-hold` and the ruling's origin in its reason.
+       - verify: the PAUSE flag is absent and dispatch is no longer held for that cause.
+       Reversible: the setter can pause again, and a re-pause is a new hold, a new incident and a new receipt.
+    3. GOVERNED and paced like every runbook. The governor holds it in shadow first. A hold re-set by the same
+       setter after a resume counts toward the governor's flapping evidence, so a script that keeps re-pausing
+       pages the operator through the existing needs-human issue instead of looping.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below, with an injected host.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-pause-an-operator-ruling-forbids-is-resumed-by-a-runbook.test.ts"
+    - claim: "a hold matching a forbidden-hold ruling is resumed"
+      proof: 'grep: test("W1-T8262: a hold an operator ruling forbids is resumed" in test/a-pause-an-operator-ruling-forbids-is-resumed-by-a-runbook.test.ts'
+    - claim: "a foreign hold no ruling forbids is left in place"
+      proof: 'grep: test("W1-T8262: a foreign hold no ruling forbids is left in place" in test/a-pause-an-operator-ruling-forbids-is-resumed-by-a-runbook.test.ts'
+    - claim: "a newer hold than the one the incident named is never cleared"
+      proof: 'grep: test("W1-T8262: a newer hold is never cleared" in test/a-pause-an-operator-ruling-forbids-is-resumed-by-a-runbook.test.ts'
+    - claim: "a setter that re-pauses after a resume becomes flapping evidence, not a loop"
+      proof: 'grep: test("W1-T8262: a re-pause after a resume is flapping evidence" in test/a-pause-an-operator-ruling-forbids-is-resumed-by-a-runbook.test.ts'
+    - claim: "the 2026-10-11 ruling is recorded as a forbidden hold for core"
+      proof: 'grep: forbiddenHolds: in plan/policy.yaml'
+  falsifier: |
+    Without the runbook, the replayed 12:44 re-pause stands until its 4-hour TTL, so the first test sees the PAUSE
+    flag still present. Without the setAt/setter recheck, a deliberate operator pause set after the incident is
+    cleared and the third test fails.

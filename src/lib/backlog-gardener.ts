@@ -7,10 +7,12 @@ import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { gardenLedgerBucket, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
 import { readMainHistory, type MainCommit } from "./hot-file-gardener.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
-import { planCheapFingerprint, planInventory, planShards, retirementCandidates, type PlanInventory } from "./plan-gardener.js";
+import { machineShardLandingRefusal, reparkStaleRuling } from "./machine-filing.js";
+import { grepProofHolds, planCheapFingerprint, planInventory, planShards, retirementCandidates, type PlanInventory } from "./plan-gardener.js";
 import { PR_OPEN_SATISFIED_BY_MAIN_STEP } from "./pr-open.js";
-import type { Task } from "./plan.js";
+import { parseTasksFromYaml, type Task } from "./plan.js";
 import { deriveTaskClass } from "./task-class.js";
+import { lintTask } from "./task-linter.js";
 
 /** W1-T4941: evidence-backed placement of the queue's unprioritized tasks. */
 export type BacklogClass = "place" | "retire";
@@ -54,6 +56,8 @@ export interface BacklogSources {
   proofsHolding: (plan: PlanInventory) => ReadonlySet<string>;
   /** Tasks a build showed main already satisfies, from `pr.open_satisfied_by_main` rows. */
   satisfiedByMain?: () => ReadonlyMap<string, SatisfiedByMain>;
+  /** Whether every acceptance proof the task filed holds on main; default {@link ownProofsHoldOnMain}. */
+  ownProofsHold?: (task: Task, shard: string | undefined) => boolean;
 }
 
 /** The newest `pr.open_satisfied_by_main` row per task. */
@@ -90,14 +94,29 @@ export function readBacklogLedgerRecords(stateDir: string, steps: readonly strin
   return result.rows;
 }
 
-/** A shared surface is a lead for review only when a recent merged PR covered at least two declared files. */
-function overtakenBy(task: Task, history: readonly MainCommit[]): BacklogEvidence["overtaken"] {
+/**
+ * Whether the task's OWN acceptance proofs all hold on main, each `grep:` proof read the way check-proof reads it
+ * (`grep -arn` over the checkout). A proof that is not a grep, or a task with no proof beyond a grep of its own
+ * shard, cannot be read here and never counts as holding.
+ */
+export function ownProofsHoldOnMain(repoRoot: string, task: Task, shard: string | undefined): boolean {
+  const proofs = (task.acceptance ?? []).map((c) => c.proof ?? "");
+  const outside = proofs.filter((p) => shard === undefined || !p.trim().endsWith(` in ${shard}`));
+  return outside.length > 0 && proofs.every((p) => grepProofHolds(repoRoot, p));
+}
+
+/**
+ * A merged PR that covered every declared file is a lead, never proof: every selector-edge task declares the same
+ * two files, so one selector fix "covered" all of them (#10740 withdrew W1-T5161 and W1-T6007 on #10699, which
+ * added neither edge). So the task's own acceptance proofs must also hold on main.
+ */
+function overtakenBy(task: Task, history: readonly MainCommit[], ownProofsHold: () => boolean): BacklogEvidence["overtaken"] {
   const files = physicalFiles(task);
   if (files.length < 2) return undefined;
   for (const commit of history) {
     if (!/\(#\d+\)$/.test(commit.subject)) continue;
     const shared = files.filter((p) => commit.files.includes(p));
-    if (shared.length >= 2 && shared.length === files.length) return { sha: commit.sha, files: shared };
+    if (shared.length >= 2 && shared.length === files.length) return ownProofsHold() ? { sha: commit.sha, files: shared } : undefined;
   }
   return undefined;
 }
@@ -114,6 +133,7 @@ export function backlogEvidence(
   fileExists: (path: string) => boolean,
   proofsHold: boolean,
   satisfiedByMain?: SatisfiedByMain,
+  ownProofsHold: () => boolean = () => false,
 ): BacklogEvidence {
   const since = now.getTime() - 24 * 3_600_000;
   const previousSince = since - 24 * 3_600_000;
@@ -137,7 +157,7 @@ export function backlogEvidence(
   }).join("\n");
   const presentSymbols = symbols.filter((s) => source.includes(s));
   const missingSymbols = symbols.filter((s) => !source.includes(s));
-  const overtaken = overtakenBy(task, history);
+  const overtaken = overtakenBy(task, history, ownProofsHold);
   const classValue = [...rows].reverse().find((r) => r.step === BACKLOG_CLASS_VALUE_STEP && r.task_class === deriveTaskClass(task) && typeof r.mean === "number" && typeof r.attempts === "number");
   const value = classValue ? { mean: classValue.mean as number, attempts: classValue.attempts as number } : undefined;
   const facts = { fanout: fanout.get(task.id) ?? 0, symptoms, missingFiles, presentFiles, missingSymbols, presentSymbols, overtaken, proofsHold, ...(satisfiedByMain ? { satisfiedByMain } : {}), classValue: value };
@@ -148,7 +168,7 @@ export function backlogEvidence(
 export function judgeBacklog(e: BacklogEvidence): { disposition: BacklogDisposition; reason: string } {
   if (e.satisfiedByMain) return { disposition: { kind: "retire", retirement: "closed" }, reason: `Its build on ${e.satisfiedByMain.branch} (${e.satisfiedByMain.headSha.slice(0, 12)}) changed only tests (${e.satisfiedByMain.files.join(", ")}) and its filed proof already passed at the merge base: main ships the behaviour.` };
   if (e.proofsHold) return { disposition: { kind: "retire", retirement: "closed" }, reason: "Acceptance proofs now hold on main and did not at filing." };
-  if (e.overtaken) return { disposition: { kind: "retire", retirement: "withdrawn" }, reason: `Merged commit ${e.overtaken.sha} covered its declared surface: ${e.overtaken.files.join(", ")}.` };
+  if (e.overtaken) return { disposition: { kind: "retire", retirement: "withdrawn" }, reason: `Merged commit ${e.overtaken.sha} covered its declared surface: ${e.overtaken.files.join(", ")}, and every acceptance proof it filed holds on main.` };
   if (e.fanout > 0 || e.symptoms.some((s) => s.recent > s.previousDay && s.recent > 0)) return { disposition: { kind: "band", band: 2 }, reason: e.fanout > 0 ? `Unblocks ${e.fanout} open dependent(s).` : "Its cited symptom is growing against the previous day." };
   if (e.symptoms.some((s) => s.recent > 0)) return { disposition: { kind: "band", band: 3 }, reason: "Its cited symptom remains live." };
   return { disposition: { kind: "band", band: 4 }, reason: "No observed live symptom or open dependent; the task remains valid." };
@@ -195,7 +215,8 @@ export function backlogInventory(sources: BacklogSources): BacklogInventory {
   let examined = 0;
   for (const { task, marker } of eligible) {
     if (examined >= mergeBudget) break;
-    const evidence = backlogEvidence(task, sources.repoRoot, fanout, rows, history, now, sources.fileExists, proofsHolding.has(task.id), satisfied.get(task.id));
+    const ownProofsHold = () => (sources.ownProofsHold ?? ((t, shard) => ownProofsHoldOnMain(sources.repoRoot, t, shard)))(task, plan.shards.get(task.id));
+    const evidence = backlogEvidence(task, sources.repoRoot, fanout, rows, history, now, sources.fileExists, proofsHolding.has(task.id), satisfied.get(task.id), ownProofsHold);
     const judged = judgeBacklog(evidence);
     // A new evidence sample is not a new placement decision. In particular, rolling ledger
     // counts change every day even while the chosen band remains the same.
@@ -221,8 +242,10 @@ export function applyBacklogActions(root: string, shards: ReadonlyMap<string, st
     const old = MARKER.exec(text);
     const oldBand = old ? Number(old[1]) : undefined;
     // W1-T6307: any numeric value is a declared priority — the machine-filing judge writes `2.5`.
+    const priorities = text.match(/^ {2}(?:priority|["']priority["'])[ \t]*:[^\r\n]*$/gm) ?? [];
     const declared = DECLARED_PRIORITY.exec(text);
     if (!/^ {2}status: queued[ \t]*$/m.test(text) || /^ {2}retirement:/m.test(text)) continue;
+    if (priorities.length && (priorities.length !== 1 || !declared)) continue;
     if (declared && (!old || Number(declared[1]) !== oldBand) && action.evidence.satisfiedByMain === undefined) continue;
     let next = old ? text.replace(/^ {2}# backlog gardener: band=(?:2|3|4) evidence=[a-f0-9]{16}\r?\n?/m, "") : text;
     if (action.disposition.kind === "band") {
@@ -233,11 +256,55 @@ export function applyBacklogActions(root: string, shards: ReadonlyMap<string, st
       next = next.replace(DECLARED_PRIORITY_LINE, "");
       next = next.replace(/^ {2}status: queued[ \t]*$/m, `  status: blocked\n  retirement: ${action.disposition.retirement}\n  # backlog gardener: retirement evidence=${action.evidence.signature}`);
     }
+    // A band or retirement edits a pinned field (`priority`); a judged machine record goes back to the judge.
+    next = reparkStaleRuling(next, rel);
     if (next === text) continue;
     writeFileSync(path, next);
     paths.push(rel);
   }
   return paths.sort();
+}
+
+/**
+ * What lint-plan and the shard census (test/every-shard-on-main-is-lintable.test.ts) would refuse in a backlog
+ * landing, checked before its PR is drafted: #10474's machine-filing admission and lint for machine records, and
+ * for every record in a landed shard, a blocking lint violation its copy in `deps.repoRoot` did not carry.
+ * 2026-10-10: four landings in a row were refused by the plan-PR preflight on machine-author-verify and the census.
+ */
+export function backlogLandingGuard(deps: Pick<GardenerDeps, "repoRoot" | "landingRefusal">): (root: string, paths: readonly string[]) => string | undefined {
+  if (deps.landingRefusal) return deps.landingRefusal;
+  const parse = (dir: string, rel: string): Task[] | Error => {
+    try {
+      return existsSync(join(dir, rel)) ? parseTasksFromYaml(readFileSync(join(dir, rel), "utf8"), rel) : [];
+    } catch (e) {
+      // Not erased: the caller compares it with the base copy and refuses a shard only this landing broke.
+      return e as Error;
+    }
+  };
+  return (root, paths) => {
+    const reasons: string[] = [];
+    const blocks = (task: Task | undefined): Map<string, string> => new Map((task === undefined ? [] : lintTask(task, { moduleExists: (p) => existsSync(join(root, p)) }).violations)
+      .filter((v) => v.severity === "block").map((v) => [v.check, v.message]));
+    for (const rel of paths.filter((p) => /(^|\/)tasks\.d\/[^/]+\.ya?ml$/.test(p) && existsSync(join(root, p)))) {
+      const head = parse(root, rel);
+      const base = parse(deps.repoRoot, rel);
+      // Only what this change introduces: a shard that already failed to load is not this landing's doing.
+      if (head instanceof Error) {
+        if (!(base instanceof Error)) reasons.push(`${rel}: does not load: ${head.message}`);
+        continue;
+      }
+      if (head.some((t) => t.author_class === "machine")) {
+        const machine = machineShardLandingRefusal(root, [rel], (p) => existsSync(join(deps.repoRoot, p)));
+        if (machine !== undefined) reasons.push(machine);
+      }
+      for (const task of head) {
+        if (task.author_class === "machine") continue; // linted whole, with admission, above
+        const had = blocks(base instanceof Error ? undefined : base.find((b) => b.id === task.id));
+        for (const [check, message] of blocks(task)) if (!had.has(check)) reasons.push(`${rel}: ${task.id}: ${check}: ${message}`);
+      }
+    }
+    return reasons.length > 0 ? reasons.join("; ") : undefined;
+  };
 }
 
 export function backlogGardenSpec(
@@ -261,6 +328,7 @@ export function backlogGardenSpec(
     name: "backlog",
     classes: BACKLOG_CLASSES,
     review: { place: "priority placement is a judgement call.", retire: "retirement is a judgement call." },
+    landingRefusal: backlogLandingGuard(deps),
     cheapFingerprint: () => `${planCheapFingerprint(deps.repoRoot, deps.stateDir)}:${gardenLedgerBucket(deps.clock ?? systemClock)}`,
     inventory: () => backlogInventory(sources),
     fingerprint: (i) => i.candidates.map((a) => `${a.target}:${a.evidence.signature}`).join("|") + `:${i.mergeBudget}`,

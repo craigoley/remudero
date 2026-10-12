@@ -252,5 +252,5 @@ test("checkSharedPause: a hold minted long ago still reads held — attribution 
   const detail = checkSharedPause(`/tmp/does-not-exist-${process.pid}-4`, remote.deps);
   assert.ok(detail, "an old anchor is still a HELD anchor — no expiry");
   assert.match(detail!, /ancient-host/);
-  assert.match(detail!, /run `rmd resume`/, "clearing it remains an explicit act, never automatic");
+  assert.match(detail!, /run `rmd resume --fleet`/, "clearing it remains an explicit act, never automatic — and names the fleet-wide verb (W1-T7727)");
 });

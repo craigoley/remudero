@@ -57,7 +57,12 @@ export function evaluateRatchet(actualBytes, baseline) {
  *  an entry already on disk for this file at this size is reported as filed rather than duplicated,
  *  so a gate running on every CI job opens one entry, not one per run. */
 export function fileFoldDebt(file, actualBytes, ceiling, violations, deps = {}) {
-  const dir = deps.dir ?? "plan/feedback";
+  // W1-T7841: NO DEFAULT DIRECTORY. A fallback to the cwd's plan/feedback made every caller that forgot
+  // to name one a writer into the checkout; the caller now has to say where the entry goes.
+  const dir = deps.dir;
+  if (typeof dir !== "string" || dir === "") {
+    throw new Error("fileFoldDebt: deps.dir is required — a caller must name the directory it files into");
+  }
   const write = deps.write ?? writeFileSync;
   const mkdir = deps.mkdir ?? mkdirSync;
   const nowIso = deps.nowIso ?? new Date().toISOString();
@@ -81,6 +86,19 @@ export function fileFoldDebt(file, actualBytes, ceiling, violations, deps = {}) 
     // one routing failure that must not land silently.
     return null;
   }
+}
+
+/** W1-T7841 — WHERE A RUN FILES FOLD DEBT, or `null` when it is only a check run.
+ *
+ *  ONLY A RECORDING RUN WRITES. A run records when `--feedback-dir` is given explicitly, or when it is
+ *  the real CI gate step: GITHUB_ACTIONS is "true" AND the test runner's NODE_TEST_CONTEXT marker is
+ *  unset (the suite spawns this script inside CI too, so GITHUB_ACTIONS alone cannot tell the two apart —
+ *  the same reason scripts/coverage-ratchet.mjs refuses to key on it). Anything else — a test, a
+ *  preflight, a hand run — measures and reports but never writes the checkout. */
+export function resolveFeedbackDir(explicitDir, env = process.env) {
+  if (typeof explicitDir === "string" && explicitDir !== "") return explicitDir;
+  if (env.GITHUB_ACTIONS === "true" && !env.NODE_TEST_CONTEXT) return "plan/feedback";
+  return null;
 }
 
 /** W1-T3320 — THE FOLD-DEBT CEILING: the point at which routing stops and the run really refuses.
@@ -246,7 +264,9 @@ function main(argv) {
       // now WRITES, and its own suite spawns it against fixture files — without an override, a
       // fixture run over budget files a real entry into the repo's real inbox. MEASURED: two
       // entries landed in plan/feedback/ from a single test run before this existed.
-      "feedback-dir": { type: "string", default: "plan/feedback" },
+      // W1-T7841: NO DEFAULT. Giving the flag is what makes a run a recording run (see
+      // `resolveFeedbackDir`); a default made every invocation write into the cwd.
+      "feedback-dir": { type: "string" },
     },
   });
 
@@ -313,7 +333,16 @@ function main(argv) {
   if (decision.outcome === "route") {
     console.error(`claude-md-budget-ratchet: OVER BUDGET -- ${values.file} does not fit, and the change LANDS anyway:`);
     for (const v of violations) console.error(`  - ${v}`);
-    const filed = fileFoldDebt(values.file, actualBytes, decision.ceiling, violations, { dir: values["feedback-dir"] });
+    const feedbackDir = resolveFeedbackDir(values["feedback-dir"]);
+    if (feedbackDir === null) {
+      // A CHECK RUN: the finding printed above is the whole product, and the change still lands.
+      console.error(
+        "  fold debt NOT filed: not a recording run (the CI gate step files it; pass --feedback-dir to file locally)",
+      );
+      process.exitCode = 0;
+      return;
+    }
+    const filed = fileFoldDebt(values.file, actualBytes, decision.ceiling, violations, { dir: feedbackDir });
     if (filed === null) {
       // A ROUTER THAT CANNOT FILE ITS OWN ROUTING IS THE ORIGINAL DEFECT WITH EXTRA STEPS: the
       // change would land and the fold would be remembered by nobody. That is the one routing

@@ -1,0 +1,86 @@
+- id: W1-T8401
+  title: "THE DAEMON'S OWN SLACK HOLDS DISPATCH — on 2026-10-11 from 22:59Z the WIP governor held refills container-short with 3 open PRs and measured_bound 0, while the daemon sat at 2.79 GB RSS on a 0.81 GB main-heap live set under an 8 GiB heap ceiling; the governor treats the daemon's reclaimable memory as fixed and never asks it to give any back before holding"
+  repo: remudero
+  depends_on: []
+  dispatch_hold: true  # operator 2026-10-12: held for a session build — the core container's memory (daemon RSS ~2.85 GB + 0.9 GB swap) holds dispatch to one lane since 09:00Z (governor container-short); release after the session PR merges or if the session hands it back
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — the daemon reclaims its own slack before container pressure holds dispatch; ceiling derivation ships shadow
+  band_meaning: span
+  origin: "operator approval 2026-10-12 (\"go with your recommended follow ups\"): core memory census 2026-10-10 lever A follow-up; operator rule 2026-10-10 never raise core memory.max, reduce usage"
+  plan_refs: [W1-T3335, W1-T6782, W1-T7092, W1-T7093, W1-T7094, W1-T7243, W1-T321, W1-T100]
+  files: [src/lib/daemon-memory-policy.ts, src/lib/sweep.ts, src/run-task.ts, test/the-daemon-reclaims-its-own-slack-before-holding-dispatch.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED in the core daemon's ledger (rotation ledger.2026-10-12T00-02-42-665Z, read 2026-10-12):
+      - 2026-10-11T22:59:05.728Z `dispatch_deferred_wip`: observed_open_count 3, wip_limit 21, tier draining,
+        measured_bound 0, pressure_binding container, pressure_tier container-short, pressure_available_mib 3198,
+        pressure_floor_mib 1610, pressure_host_available_mib 6655. The host had room; core's container did not.
+      - 2026-10-11T23:00:11.342Z `daemon.alive`: rss_bytes 2,786,250,752; main heap_used 809,478,184 of
+        heap_total 935,182,336; heap_size_limit 8,791,261,184 (the registry's max_old_space_mb 8192);
+        vm_swap 441,225,216; worker threads about 0.19 GB (read-plane 170 MB); unattributed_bytes_approx
+        1,573,202,926; cg_memory_current 4,989,747,200 plus cg_swap 1,156,186,112 against cg_memory_max
+        9,248,440,320 (8820 MiB); cg_events_high 4174; active_workers 1.
+    So the daemon held about 2.8 GB resident plus 0.44 GB swapped for about 1 GB of V8 heaps, and the container
+    was short by less than one implement worker. The 2026-10-10 census (operator notes core-mem-2026-10-10) found
+    RSS 4-4.5 GB on a 0.7 GB live set; #10695 (lever A) cut the high-water mark to 2.3-2.9 GB, and this row is
+    that residue.
+    THE PATHS, read on origin/main 38470cc40 (symbol names, not line numbers):
+      - `readFixHostPressure` and `checkMemoryGovernor` (src/lib/sweep.ts) defer a dispatch container-short
+        whenever headroom less the container-sized floor is under one worker and `ownWorkLive()`. They read the
+        daemon's own footprint as a fixed cost. Nothing asks the daemon to reclaim before the hold.
+      - `createDaemonMemoryGovernor` (src/lib/daemon-memory-policy.ts, #10695) lowers `--heap-growing-percent` as
+        the daemon's RSS+swap share rises, from fixed `tightenShare` 0.3 / `restartShare` 0.5 policy rows. It acts
+        on the daemon's own share, never on a dispatch the container is about to hold, never forces a collection,
+        and cannot see the 1.57 GB outside V8's heaps.
+      - The daemon's own ceiling is the launch-time `--max-old-space-size=8192` from the host registry, a constant
+        about ten times its observed live set. `applyDaemonMemoryPolicy` removes it from children only.
+    The operator ruled on 2026-10-10 that core's memory.max is never raised: the remedy is using less.
+    OVERLAP WITH W1-T100 (same files): W1-T100 routes blocked_ci to the ci-log fix path. This task touches only the
+    memory readings that admit or hold a dispatch, never that path.
+  design: |
+    1. RECLAIM BEFORE HOLDING. When a dispatch would be deferred container-short (the WIP governor's measured
+       bound, `checkMemoryGovernor`, and the fix admission's `readFixHostPressure`), the daemon first reclaims
+       its own slack once: a full collection under the tightest growth factor (expose the collector at entry
+       through `v8.setFlagsFromString`, or an equivalent the implementer measures), plus releasing any cache a
+       worker thread can drop. Then it re-reads the container and decides on the fresh reading. Ledger the reclaim
+       on the hold row: rss and container bytes before and after, and the bytes it freed.
+    2. RECLAIM IS EVIDENCE-PACED, NOT TIMED. A reclaim that freed nothing measurable (inside the sample's own
+       variance) is not repeated until the daemon's live set or the container reading has moved by more than that
+       variance. Add no fixed interval, count or byte threshold.
+    3. ATTRIBUTE BEFORE CLAIMING. Measure what part of `unattributed_bytes_approx` a collection returns. If it
+       returns little, ledger that on the reclaim row and say so in the PR: a native or allocator cause is a
+       separate task, not a widening of this one.
+    4. DERIVE THE CEILING, IN SHADOW. Each boot and on each reclaim, compute the heap ceiling the daemon would
+       want: its observed post-collection live set times a headroom learned from that live set's own spread over
+       the retained samples (the daemon already keeps footprint samples, #10891). Ledger it beside the ceiling in
+       force and how often the live set came near it. Do not change the launcher or the registry here; promoting
+       the derived ceiling is the operator's call on that evidence.
+    5. The governor's existing tiers, the drain-and-restart path (W1-T3335) and the shadow memory budget
+       (W1-T7093/W1-T7094) are unchanged.
+    Tests go in the new file test/the-daemon-reclaims-its-own-slack-before-holding-dispatch.test.ts, with `test(`
+    titles exactly as in the proofs below. Inject the readings, the reclaim and the re-read; use the 22:59Z row's
+    numbers as the container-short fixture.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-daemon-reclaims-its-own-slack-before-holding-dispatch.test.ts"
+    - claim: "a container-short hold reclaims the daemon's slack and re-reads before deferring, and admits when the reclaim frees a worker's room"
+      proof: 'grep: test("W1-T8401: a container-short hold reclaims first and admits when the reclaim frees room" in test/the-daemon-reclaims-its-own-slack-before-holding-dispatch.test.ts'
+    - claim: "the hold row names the bytes the reclaim freed, and a hold that still applies after the reclaim still defers"
+      proof: 'grep: test("W1-T8401: the hold row names what the reclaim freed and a real shortfall still defers" in test/the-daemon-reclaims-its-own-slack-before-holding-dispatch.test.ts'
+    - claim: "a reclaim that freed nothing is not repeated until the live set or the container reading moves"
+      proof: 'grep: test("W1-T8401: a reclaim that freed nothing waits for the reading to move" in test/the-daemon-reclaims-its-own-slack-before-holding-dispatch.test.ts'
+    - claim: "the derived heap ceiling follows the observed live set and its spread, never a constant, and is ledgered in shadow"
+      proof: 'grep: test("W1-T8401: the derived heap ceiling follows the live set and is ledgered in shadow" in test/the-daemon-reclaims-its-own-slack-before-holding-dispatch.test.ts'
+  falsifier: |
+    Leave the container-short arms deferring on the first reading. The 22:59Z fixture then defers with no reclaim
+    call, and the first test fails. Reclaim on every hold and the third test sees a repeated reclaim on an
+    unmoved reading. Return the registry's 8192 as the ceiling and the fourth test fails.
+  note: |
+    EFFECT, measured after merge from the governor's own rows (no numeric pass mark): the share of
+    `dispatch_deferred_wip` and fix-admission rows with pressure_tier container-short, and the reclaim rows'
+    freed bytes. Both should show the daemon's slack being returned before a hold.

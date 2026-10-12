@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import * as ciParity from "../src/lib/ci-parity.js";
+import { finishJudgedRun } from "./helpers/judged-pool-run.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PINNED_BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -67,6 +68,7 @@ function coverageSpawn(onShard: (call: Call, shard: number) => void = () => {}) 
       const rawDir = opts!.env!.NODE_V8_COVERAGE!;
       mkdirSync(rawDir, { recursive: true });
       writeFileSync(join(rawDir, `coverage-${shard}-0000000000000-0.json`), "{}\n");
+      finishJudgedRun(args, opts);
       return { status: 0, stdout: "# tests 1\n# pass 1\n# fail 0\n", stderr: "" };
     }
     if (args.some((a) => a.endsWith("coverage-merge-ratchet.mjs"))) {
@@ -102,7 +104,8 @@ test("coverage shard argv carries an explicit --test-concurrency below the host 
   const dir = slotDir();
   const { calls, spawn } = coverageSpawn();
   try {
-    const result = runCoverage(root, spawn, { dir, slots: 2, load: IDLE_8_CORES, binaryExists: NO_PRIORITY_BINARIES, log: () => {} });
+    // No memory reading: this pins the CPU-derived count (memory sizing is a-worker-test-run-is-sized-by-memory-headroom).
+    const result = runCoverage(root, spawn, { dir, slots: 2, load: IDLE_8_CORES, memoryHeadroom: () => undefined, binaryExists: NO_PRIORITY_BINARIES, log: () => {} });
     assert.equal(result.ok, true, result.detail);
     const shards = calls.filter(isShard);
     assert.equal(shards.length, ciParity.CI_COVERAGE_SHARD_COUNT, "every coverage shard must be inspected");
@@ -197,6 +200,10 @@ test("the host-wide test slot lives on the shared scratch mount, not the contain
   const root = fixtureRoot();
   const dir = slotDir();
   const saved = process.env[TEST_SLOT_DIR_ENV];
+  const savedParent = process.env.RMD_TEST_SLOT_PARENT;
+  // A deliberate private configured directory must not be suppressed by the
+  // enclosing author's production admission claim. Never touch its on-disk lease.
+  delete process.env.RMD_TEST_SLOT_PARENT;
   process.env[TEST_SLOT_DIR_ENV] = dir;
   const seen: string[][] = [];
   const { spawn } = coverageSpawn(() => seen.push(readdirSync(dir)));
@@ -207,6 +214,8 @@ test("the host-wide test slot lives on the shared scratch mount, not the contain
     for (const entries of seen) assert.ok(entries.some((e) => /^slot-\d+\.json$/.test(e)), "each shard runs holding a slot in the shared dir");
     assert.match(result.detail, new RegExp(`host-wide test slot 1/\\d+ \\(configured: ${dir}\\)`));
   } finally {
+    if (savedParent === undefined) delete process.env.RMD_TEST_SLOT_PARENT;
+    else process.env.RMD_TEST_SLOT_PARENT = savedParent;
     if (saved === undefined) delete process.env[TEST_SLOT_DIR_ENV];
     else process.env[TEST_SLOT_DIR_ENV] = saved;
     cleanup(root, dir, ciParity.coverageScratchDir(root));

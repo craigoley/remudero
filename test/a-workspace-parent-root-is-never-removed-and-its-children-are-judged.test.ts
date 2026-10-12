@@ -28,7 +28,7 @@ test("test/a-workspace-parent-root-is-never-removed-and-its-children-are-judged.
   assert.equal(existsSync(kept), true);
   assert.ok(r.stdout.includes(`KEEP ${parent}: workspace parent root`), r.stdout);
   assert.ok(r.stdout.includes(`REMOVE ${idle}`), r.stdout);
-  assert.ok(r.stdout.includes(`KEEP ${fresh}: written within 720 min`), r.stdout);
+  assert.ok(r.stdout.includes(`KEEP ${fresh}: written within 360 min`), r.stdout);
   assert.ok(r.stdout.includes(`KEEP ${kept}: scratch keep marker`), r.stdout);
 });
 

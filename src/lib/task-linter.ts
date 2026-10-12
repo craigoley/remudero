@@ -199,6 +199,28 @@ export function isDataArtifact(
   return classes.some((c) => c.pathPattern.test(path) && c.extPattern.test(path));
 }
 
+export function proofTargetPaths(task: Task): string[] {
+  const out: string[] = [];
+  for (const c of task.acceptance ?? []) {
+    const proof = (c.proof ?? "").trim();
+    const grep = /^grep: .+ in (\S+)$/.exec(proof)?.[1];
+    const unit = /^unit test: (\S+\/\S+\.[A-Za-z0-9]+)$/.exec(proof)?.[1];
+    for (const p of [grep, unit]) if (p !== undefined) out.push(p);
+  }
+  return out;
+}
+
+/** Criteria text with each declared or proof-target path blanked (plain or escaped): the files: tally counts that file. */
+export function sizedCriteriaText(task: Task): string {
+  let text = (task.acceptance ?? []).map((c) => `${c.claim ?? ""} ${c.proof ?? ""}`).join("\n");
+  const paths = [...new Set([...(task.files ?? []), ...proofTargetPaths(task)])].filter((p) => p.includes("/"));
+  for (const path of paths.sort((a, b) => b.length - a.length)) {
+    const source = [...path].map((ch) => (/[A-Za-z0-9_-]/.test(ch) ? ch : `\\\\?${ch.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}`)).join("");
+    text = text.replace(new RegExp(source, "g"), " ");
+  }
+  return text;
+}
+
 /** The distinct subsystems/concerns a task spans. `ownFalsifierSlug` is this task's own shard
  *  filename slug, the fact {@link LintOpts.duplicateSlug} carries: a `test/` path whose {@link
  *  moduleIdFromPath} equals it is the task's own falsifier and is discounted, and any other is
@@ -230,7 +252,7 @@ export function subsystemsOf(
   // A task declaring ONLY companions (a test-only change) still counts them — otherwise it would
   // score zero concerns and pass sizing vacuously, which is a worse answer than the one being fixed.
   if (ids.size === 0) for (const id of companions) ids.add(id);
-  const text = (task.acceptance ?? []).map((c) => `${c.claim ?? ""} ${c.proof ?? ""}`).join("\n");
+  const text = sizedCriteriaText(task);
   for (const entry of SUBSYSTEM_LEXICON) {
     if (entry.pattern.test(text)) ids.add(entry.tag);
   }

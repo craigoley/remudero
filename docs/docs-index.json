@@ -638,6 +638,12 @@
       "grepHint": "Gate garden log"
     },
     {
+      "path": "docs/heavy-new-build-reservation.md",
+      "title": "Bounded heavy READY reservations, v2",
+      "summary": "This is an opt-in, host-local, single-account reader/producer foundation, not a",
+      "grepHint": "Bounded heavy READY reservations, v2"
+    },
+    {
       "path": "docs/knowledge-garden-log.md",
       "title": "Knowledge garden log",
       "summary": "Each section is one pass of the knowledge gardener (W1-T4095): what it changed and how the knowledge base scored.",
@@ -768,6 +774,12 @@
       "title": "Review-enforced merge gate (W1-T1C + W1-T1D + W1-T24 + W1-T24b)",
       "summary": "`remudero-review` is a REQUIRED status check on `main`, alongside `ci-gate`.",
       "grepHint": "Review-enforced merge gate (W1-T1C + W1-T1D + W1-T24 + W1-T24b)"
+    },
+    {
+      "path": "docs/semgrep-native-ce.md",
+      "title": "Native hash-locked Semgrep Community Edition",
+      "summary": "Scan avoids Docker Hub container initialization with an isolated, fully hash-locked native installation.",
+      "grepHint": "Native hash-locked Semgrep Community Edition"
     },
     {
       "path": "docs/system-diagrams.md",

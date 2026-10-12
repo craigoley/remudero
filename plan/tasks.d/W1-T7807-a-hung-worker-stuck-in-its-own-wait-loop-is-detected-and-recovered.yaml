@@ -1,0 +1,99 @@
+- id: W1-T7807
+  title: "A HUNG WORKER STUCK IN ITS OWN WAIT LOOP IS DETECTED AND RECOVERED — W1-T7734's implement worker polled for a reporter line its finished test output never printed, sat quiet ~55 min and held a restart, because quiet is only escalated at a fixed 60 min and only aborted at a fixed 2 h"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — a worker blocked on a wait that can never end is found and unblocked by a judged action
+  band_meaning: span
+  origin: "operator session 2026-10-10: W1-T7734 run W1-T7734-1791660796008 on the core fleet host (read-only)"
+  plan_refs: [W1-T943, W1-T942, W1-T1045, W1-T1066, W1-T7697, W1-T7806, W1-T7096]
+  files: [src/lib/quiet-worker-watchdog.ts, src/lib/worker.ts, src/run-task.ts, test/a-hung-worker-in-its-own-wait-loop-is-recovered.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-10 on the core fleet host (read-only). W1-T7734's implement worker (run
+    W1-T7734-1791660796008, worker.assignment 19:35:18Z, maxTurns 400) logged `worker.state quiet` at 19:58:28Z.
+    Its live shell, inside bwrap since about 19:47:36Z, was
+    `until grep -q "^ℹ duration_ms" .../tasks/<id>.output; do sleep 15; done`. The awaited output file was
+    finished at 19:48Z: it ends `tests 179 / pass 179 / fail 0` and `[exited with code 0]` and has no
+    `duration_ms` line, so the loop can never exit. A freshness restart waited on that lane about 55 min, and no
+    run.start happened from 19:35Z to 20:33Z (W1-T7806 covers the refill half).
+    READ on origin/main d57884498, the quiet-worker machinery that exists and why none of it ended this:
+      - src/lib/worker.ts `WorkerStateTracker` (:3432) folds the stream into working / tool-executing / quiet,
+        quiet after `DEFAULT_WORKER_QUIET_FLOOR_MS` (:3426, 30 s) with no message. It is an activity sensor only.
+      - src/run-task.ts `findStalledWorkers` (:46809) / `runWorkerStallDetectorRung` (:46875, wired in
+        buildSweepHook at :47220) append `worker.stalled` and escalate once a run is quiet past policy
+        `workerStall` (plan/policy.yaml:114, a fixed 3600000 ms, `DEFAULT_WORKER_STALL_MS` :46778). By its own
+        design note iv it NEVER acts on the run: no kill, no signal.
+      - src/lib/worker.ts `createWorkerClockBoundWatchdog` (:3529) aborts the SDK stream with
+        `WorkerAbandonedError` (:3504) once quiet passes policy `workerAbandon` (plan/policy.yaml:138, a fixed
+        7200000 ms), attached at src/run-task.ts:17300. It ends the whole worker, keeps no checkpoint, and fires
+        at 2 h whatever the worker is waiting on.
+      - hooks/deny-floor.sh rule 6 (comment :252, predicate :260) refuses a loop + sleep + `gh` poll, and by
+        design ALLOWS a loop that waits on a local file (W1-T1066 (4)), which is exactly this loop's shape.
+    So a worker blocked in a local wait that can never end is invisible for 60 min, escalated to a person at
+    60 min, and killed outright at 2 h. Nothing reads what the worker is actually waiting on.
+    REUSABLE PIECES: the worker's root pid is already bound at spawn (`buildContainedSpawnFn`, worker.ts:2105,
+    and `pidRef` :3017). Process listings exist in src/lib/doctor.ts (`defaultPs` :515, `readWorkerProcesses`
+    :527) and src/lib/host-memory-ledger.ts (`defaultListProcesses` :259, `walkDescendants` :546). The LLM
+    judge pattern to copy is `productionFixProgressJudge` (src/lib/sweep.ts:1803, also the checkpoint-resume
+    judge of W1-T7096). The checkpoint path is W1-T7697's `yieldAtWorkerBoundary` (src/run-task.ts:19427).
+  design: |
+    Operator rulings: no hard thresholds (the quiet bound is derived from observed data, with tiers, never a new
+    fixed constant); lean into automation; an LLM judge decides the remedy, not a rule table.
+    1. ADAPTIVE QUIET BOUND. Derive the bound per worker provider (the run's worker.assignment mount provider)
+       from that provider's observed quiet-gap distribution: the length of each `worker.state quiet` episode
+       that ended with the worker speaking again, read from the ledger (union, per the ledger rules), e.g. a
+       high quantile of the recent episodes. Two histories must give two bounds. With no history for a provider,
+       fall back to the policy `workerStall` row and record `bound_source: "no_history_fallback"`. Ledger the
+       bound once per worker spawn (`worker.quiet_bound`, with sample count and source).
+    2. INSPECT, THEN JUDGE. When a worker is quiet past its bound, read its process tree under the bound root
+       pid. Classify the leaf: a POLL LOOP (a shell whose command carries a loop keyword with sleep, grep, test
+       or similar) and what it awaits: a file whose content already shows a finished run (an exit marker such
+       as `[exited with code N]`, or a runner summary) or a file/pid that has not changed across two reads (no
+       progress); versus a process that is progressing (CPU time or output growing). Only a poll loop that is
+       finished-but-waiting or making no progress goes to the judge; a progressing process is left alone and
+       re-checked at the next bound.
+    3. THE LLM JUDGE DECIDES, from the evidence (quiet time, bound and its source, leaf argv, awaited path and
+       its tail, exit marker, the worker's last activity): `nudge` (tell the worker what the harness saw, where
+       the SDK session accepts streamed input; otherwise this degrades to `wait` and says so), `kill_poll_child`
+       (signal only the poll shell, never the worker, so the tool call returns and the worker resumes with its
+       result), `end_round` (stop the worker and take the W1-T7697 checkpoint path so the work is pushed and
+       resumable), or `wait`. A judge that cannot answer takes no action and records `judge_unavailable`; the
+       W1-T943 escalation and the W1-T1045 clock bound remain the backstops, unchanged.
+    4. LEDGER EVERY DECISION as `worker.quiet_judged` with the evidence above, the verdict, the reason, and what
+       was done (pid signalled, checkpoint sha). This relaxes W1-T943 design note iv for the judged case only;
+       the detector itself is unchanged.
+    5. PREVENT THE SHAPE. Add one line to the implement worker's prompt contract (beside
+       IMPLEMENT_REFUSAL_REPORT_CONTRACT, src/run-task.ts:271): a wait on a background test run waits on the
+       runner's exit (the process, or the `[exited with code N]` marker), never on a reporter-specific line.
+       A deny-floor rule for local wait loops is NOT in scope (hooks/ is a containment path); if the judge rows
+       show the shape recurring, file it separately.
+    Put the bound, the classifier and the rung in a new module src/lib/quiet-worker-watchdog.ts, exported as
+    `runQuietWorkerWatchdog`, called from src/run-task.ts where the clock bound is attached, with injectable
+    process-listing, kill, judge and clock seams. Tests (new file, `test(` titles verbatim as in the proofs below)
+    replay 10-10: a fixture output file ending `tests 179 / pass 179 / fail 0` and `[exited with code 0]`, a leaf
+    `sleep 15` under the `until grep -q "^ℹ duration_ms" ...` shell, the worker quiet past its bound.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-hung-worker-in-its-own-wait-loop-is-recovered.test.ts"
+    - claim: "the watchdog is called from the run path, not only defined"
+      proof: "grep: runQuietWorkerWatchdog( in src/run-task.ts"
+    - claim: "the quiet bound is derived from the provider's observed quiet gaps, so two histories give two bounds"
+      proof: 'grep: test("W1-T7807: the quiet bound follows the provider observed quiet gaps" in test/a-hung-worker-in-its-own-wait-loop-is-recovered.test.ts'
+    - claim: "a poll loop whose awaited file already shows a finished run is classified as a dead wait, and a progressing process is not"
+      proof: 'grep: test("W1-T7807: a poll loop waiting on a finished file is a dead wait" in test/a-hung-worker-in-its-own-wait-loop-is-recovered.test.ts'
+    - claim: "on the judge's kill verdict only the poll child is signalled and the worker resumes"
+      proof: 'grep: test("W1-T7807: the judge kill verdict signals only the poll child" in test/a-hung-worker-in-its-own-wait-loop-is-recovered.test.ts'
+    - claim: "every quiet-worker decision is ledgered with its evidence, including a judge that cannot answer"
+      proof: 'grep: test("W1-T7807: every quiet-worker decision is ledgered with its evidence" in test/a-hung-worker-in-its-own-wait-loop-is-recovered.test.ts'
+    - claim: "the implement prompt tells a test wait to watch the runner's exit, not a reporter line"
+      proof: 'grep: test("W1-T7807: the implement prompt names the runner exit as the wait target" in test/a-hung-worker-in-its-own-wait-loop-is-recovered.test.ts'
+  falsifier: |
+    Leave quiet handling as it is on main: at the replayed 10-10 shape no `worker.quiet_judged` row is written,
+    the poll shell is never signalled, the bound test reads the same fixed policy value for both histories, and
+    the prompt test finds no exit-marker line, so every named test fails.

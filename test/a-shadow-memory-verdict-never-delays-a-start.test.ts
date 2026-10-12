@@ -2,7 +2,8 @@
  * W1-T7094: every real worker start yields one counterfactual `memory_budget.shadow` row and starts identically whether
  * the verdict is admit, defer or error. The verdict counts only a reservation's UNREALIZED memory (resident tree memory is
  * already inside MemAvailable), widens and names every uncertainty, gives swap-in and PSI their own reasons, tells the
- * four serve scenarios apart, never pools serve-stopped samples with serve-running ones, and its mode is off or shadow.
+ * four serve scenarios apart, never pools serve-stopped samples with serve-running ones, and its mode is off, shadow or
+ * enforce, shipped as shadow.
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -131,6 +132,9 @@ function ports(over: Partial<ShadowMemoryPorts> & { rows?: LedgerLine[] } = {}):
     policy: () => POLICY,
     write: (_path, row) => void rows.push(row),
     stderr: () => undefined,
+    // The default reads <test slot dir>/host-memory/review-demand, ONE dir per process: in the pure-test pool a
+    // sibling file's sweep publishes demand there and this start reads would-yield-to-review (#10829).
+    readReviewDemand: () => ({ state: "present", rows: [], unreadableRows: 0 }),
     ...over,
   };
 }
@@ -323,7 +327,7 @@ test("a scenario with no samples is reported unvalidated and serve-stopped rows 
   assert.equal(last["serve-stopped"].validity, "unvalidated");
 });
 
-test("the policy mode accepts only off or shadow", () => {
+test("the policy mode accepts only off, shadow or enforce, and ships shadow", () => {
   const shipped = loadHostMemoryBudgetPolicy();
   assert.equal(shipped.mode, "shadow", "the shipped block parses and runs in shadow");
   const raw = (mode: unknown, origin = "proposal") => ({
@@ -333,8 +337,10 @@ test("the policy mode accepts only off or shadow", () => {
   });
   assert.equal(parseHostMemoryBudgetPolicy(raw("off")).mode, "off");
   assert.equal(parseHostMemoryBudgetPolicy(raw("shadow")).mode, "shadow");
-  for (const mode of ["enforce", "block", "defer", "", undefined]) {
-    assert.throws(() => parseHostMemoryBudgetPolicy(raw(mode)), /accepts only "off" or "shadow"/, String(mode));
+  // The operator ruled (2026-10-10) that an enforce mode be BUILT and the shipped mode stay shadow.
+  assert.equal(parseHostMemoryBudgetPolicy(raw("enforce")).mode, "enforce");
+  for (const mode of ["block", "defer", "", undefined]) {
+    assert.throws(() => parseHostMemoryBudgetPolicy(raw(mode)), /accepts only "off", "shadow" or "enforce"/, String(mode));
   }
   assert.throws(() => parseHostMemoryBudgetPolicy(raw("shadow", "net-new")), /must be "proposal"/);
 

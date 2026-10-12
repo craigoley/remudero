@@ -247,6 +247,12 @@ test("W1-T4708: the refused-run verdicts leave the re-offer latch and the dispat
       };
     };
     assert.deepEqual(read(false), { latch: true, streak: 2, tripped: true }, `${verdict}/${stage}: the verdict-less ledger's readings`);
+    if (stage === "dispatch.claim") {
+      // W1-T7742 (deliberate): a claim refusal ends before any worker runs, so its verdict no longer spends the
+      // streak breaker; the re-offer latch reads it exactly as before.
+      assert.deepEqual(read(true), { latch: true, streak: 0, tripped: false }, `${verdict}/${stage}: a claim refusal spends no breaker budget`);
+      continue;
+    }
     assert.deepEqual(read(true), read(false), `${verdict}/${stage}: the new verdict rows change no re-dispatch reading`);
   }
 });

@@ -93,13 +93,18 @@ function runnerWith(over: {
 } = {}) {
   const gitCalls: string[][] = [];
   const spawns: Array<{ worktree: string; args: string[] }> = [];
+  const created = new Set<string>();
   const runner = buildFreshTreeReviewRunner("/repo", {
     git: over.git ?? ((a) => { gitCalls.push(a); return ""; }),
     // Recorded through the SAME channel as the git calls, so the "no ref is moved" assertion sees
     // the worktree creation too rather than going blind to it.
-    addWorktree: over.addWorktree ?? ((d, p, r) => { gitCalls.push(["-C", d, "worktree", "add", "--detach", p, r]); }),
+    addWorktree: (d, p, r) => {
+      (over.addWorktree ?? ((dir, path, revision) => { gitCalls.push(["-C", dir, "worktree", "add", "--detach", path, revision]); }))(d, p, r);
+      created.add(p);
+    },
     spawnReview: over.spawn ?? (async (worktree, args) => { spawns.push({ worktree, args }); return 0; }),
-    inspectExistingWorktree: over.inspectExistingWorktree ?? (() => "absent"),
+    inspectExistingWorktree: over.inspectExistingWorktree ?? ((_d, path) => created.has(path) ? "reusable" : "absent"),
+    withWorktreeLease: async (_path, action) => action(),
     prepareWorktree: over.prepareWorktree ?? (() => true),
     worktreeRoot: "/wt",
   });

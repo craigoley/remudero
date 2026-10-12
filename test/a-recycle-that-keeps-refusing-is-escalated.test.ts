@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
   REFUSAL_ESCALATE_AT,
@@ -14,6 +14,8 @@ import {
 } from "../src/lib/deployer.js";
 import { escalatePersistingRefusal, refusalEscalationFor, refusalEscalationOrNone } from "../src/lib/deploy-refusal-escalation.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
+import { fixedClock } from "../src/lib/clock.js";
+import { escalationSpoolDir, escalationSpoolDrain } from "../src/lib/host-escalation-spool.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // MEASURED 2026-10-04..06: site and console refused every image recycle for two days while their
@@ -325,4 +327,93 @@ test("W1-T6062: a failed issue close is logged with the issue and the verified r
   assert.equal(row?.data.issue, url);
   assert.equal(row?.data.error, "gateway down");
   assert.equal(h.streak(), undefined, "the streak is forgotten even though the close failed");
+});
+
+// 2026-10-11: the Azure host's service user has no GitHub credential, so `rmd deploy-run` on the host
+// opened nothing: the dedup read failed and the refusal was only logged. With a spool, nothing drops.
+const NO_AUTH = "gh: To get started with GitHub CLI, please run:  gh auth login";
+const unauthenticated: IssueGateway = {
+  create: () => { throw new Error(NO_AUTH); },
+  listOpen: () => { throw new Error(NO_AUTH); },
+  closeWithComment: () => { throw new Error(NO_AUTH); },
+};
+
+function spooledEntries(stateDir: string): Array<{ kind: string; url?: string }> {
+  const dir = escalationSpoolDir(stateDir);
+  return existsSync(dir) ? readdirSync(dir).filter((n) => n.endsWith(".json")).map((n) => JSON.parse(readFileSync(join(dir, n), "utf8")) as { kind: string }) : [];
+}
+
+test("a host with no GitHub credential spools a persisting refusal, the daemon posts it, and the recovery's close rides the spool", async (t) => {
+  const ledgerPath = scratch(t);
+  const stateDir = dirname(ledgerPath);
+  const h = harness(ledgerPath, false);
+  Object.assign(h.deps, refusalEscalationOrNone(() => ({ owner: "o", repo: "r" }), () => unauthenticated, ledgerPath, { stateDir, host: "fleet-host", clock: fixedClock(Date.parse("2026-10-11T00:00:00Z")) }));
+  for (let i = 0; i < REFUSAL_ESCALATE_AT; i += 1) runDeployCycle(h.deps);
+  assert.equal(h.streak()!.issueUrl, undefined, "the host could not open the issue");
+  assert.deepEqual(spooledEntries(stateDir).map((e) => e.kind), ["escalate"], "so it spooled it, never dropped it");
+
+  const drain = escalationSpoolDrain({ stateDir, ledgerPath, issues: () => h.gateway, clock: fixedClock(Date.parse("2026-10-11T00:01:00Z")) });
+  assert.deepEqual(await drain(), { delivered: 1, failed: 0 });
+  assert.equal(h.issues.length, 1, "the daemon opened it");
+  assert.match(h.issues[0]!.body ?? "", /Remedy: stop the workers or raise --wait/);
+  assert.match(h.issues[0]!.body ?? "", /direct escalation opened no issue \(its dedup read failed/);
+
+  runDeployCycle(h.deps);
+  assert.equal(h.streak()!.issueUrl, h.issues[0]!.url, "the next window learns the issue the daemon opened");
+  assert.deepEqual(spooledEntries(stateDir).map((e) => e.kind), ["escalate"], "and its newer observation is spooled");
+
+  h.setRefusing(undefined);
+  assert.equal(runDeployCycle(h.deps).deployed, true);
+  assert.deepEqual(spooledEntries(stateDir).map((e) => e.kind), ["close"], "the close replaces the stale observation, which would only reopen it");
+  await drain();
+  assert.equal(h.issues.length, 1, "no second issue");
+  assert.equal(h.issues[0]!.open, false);
+  assert.match(h.issues[0]!.closedWith ?? "", /verified healthy/);
+  assert.deepEqual(spooledEntries(stateDir), []);
+});
+
+test("a verified recycle withdraws a refusal that was only ever spooled, and a failed withdrawal never breaks the cycle", (t) => {
+  const ledgerPath = scratch(t);
+  const stateDir = dirname(ledgerPath);
+  const h = harness(ledgerPath, false);
+  Object.assign(h.deps, refusalEscalationOrNone(() => { throw new Error("not a git checkout"); }, () => unauthenticated, ledgerPath, { stateDir, host: "fleet-host" }));
+  for (let i = 0; i < REFUSAL_ESCALATE_AT; i += 1) runDeployCycle(h.deps);
+  assert.equal(spooledEntries(stateDir).length, 1, "a checkout with no owner/repo still spools");
+  h.setRefusing(undefined);
+  runDeployCycle(h.deps);
+  assert.deepEqual(spooledEntries(stateDir), [], "the cleared refusal is withdrawn before anyone is paged for it");
+
+  const again = harness(scratch(t), false);
+  (again.deps as { withdrawRefusal?: unknown }).withdrawRefusal = () => { throw new Error("EROFS"); };
+  for (let i = 0; i < REFUSAL_ESCALATE_AT; i += 1) runDeployCycle(again.deps);
+  again.setRefusing(undefined);
+  assert.equal(runDeployCycle(again.deps).deployed, true);
+  assert.equal(again.rows.find((r) => r.step === "deploy.refusal_withdraw_failed")?.data.error, "EROFS");
+  assert.equal(again.streak(), undefined);
+});
+
+test("with a working credential the spooling halves post directly and spool nothing", (t) => {
+  const ledgerPath = scratch(t);
+  const stateDir = dirname(ledgerPath);
+  const h = harness(ledgerPath, false);
+  Object.assign(h.deps, refusalEscalationOrNone(() => ({ owner: "o", repo: "r" }), () => h.gateway, ledgerPath, { stateDir, host: "fleet-host" }));
+  for (let i = 0; i < REFUSAL_ESCALATE_AT; i += 1) runDeployCycle(h.deps);
+  assert.equal(h.issues.length, 1);
+  assert.equal(h.streak()!.issueUrl, h.issues[0]!.url);
+  h.setRefusing(undefined);
+  runDeployCycle(h.deps);
+  assert.equal(h.issues[0]!.open, false);
+  assert.deepEqual(spooledEntries(stateDir), []);
+
+  const quiet: IssueGateway = { create: () => "", listOpen: () => [] };
+  const halves = refusalEscalationOrNone(() => ({ owner: "o", repo: "r" }), () => quiet, ledgerPath, { stateDir, host: "fleet-host" });
+  const refusal = { instance: "site", key: "k", count: 3, firstAtIso: "a", lastAtIso: "b", lagCommits: undefined, message: REFUSAL, remedy: "r", toHead: "h", backend: "recycle-container" };
+  assert.equal(halves.escalateRefusal!(refusal), undefined, "a direct escalation that opened nothing is spooled");
+  assert.deepEqual(spooledEntries(stateDir).map((e) => e.kind), ["escalate"]);
+
+  const failing: IssueGateway = { create: () => { throw new Error("HTTP 502 from issues"); }, listOpen: () => [] };
+  const thrown = refusalEscalationOrNone(() => ({ owner: "o", repo: "r" }), () => failing, ledgerPath, { stateDir, host: "fleet-host" });
+  assert.equal(thrown.escalateRefusal!({ ...refusal, instance: "console" }), undefined, "a direct escalation that throws is spooled");
+  const entries = spooledEntries(stateDir) as Array<{ kind: string; directError?: string }>;
+  assert.ok(entries.some((e) => e.directError === "HTTP 502 from issues"), JSON.stringify(entries));
 });

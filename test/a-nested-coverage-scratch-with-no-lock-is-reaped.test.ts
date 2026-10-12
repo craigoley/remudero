@@ -76,7 +76,7 @@ test("a fresh, symlinked, held-open or live-holder nested scratch is kept", () =
   for (const p of [fresh, open, live, foreign, join(target, "raw-shards", "shard-1", "coverage-1.json")]) {
     assert.equal(existsSync(p), true, `${p} is kept: ${r.stdout}`);
   }
-  assert.ok(r.stdout.includes(`KEEP ${fresh}: written within 720 min`), r.stdout);
+  assert.ok(r.stdout.includes(`KEEP ${fresh}: written within 360 min`), r.stdout);
   assert.ok(r.stdout.includes(`KEEP ${open}: held open by a process`), r.stdout);
   assert.ok(r.stdout.includes(`is held by live pid ${process.pid}`), r.stdout);
   assert.ok(r.stdout.includes("is held from host another-host.invalid"), r.stdout);

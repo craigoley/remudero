@@ -10,8 +10,8 @@
   risk: high
   band_meaning: blast-radius
   origin: "Operator-approved admission brief and 2026-10-10 filing/start instruction; owner override and existing trusted PR flow are required, not optional."
-  files: [src/lib/contributor-admission.ts, src/lib/sweep.ts, src/lib/arm-auto-merge.ts, src/lib/config-schema.ts, src/run-task.ts, test/action-time-pr-admission.test.ts]
-  status: queued
+  files: [src/lib/contributor-admission.ts, src/lib/sweep.ts, src/lib/arm-auto-merge.ts, src/lib/config-schema.ts, src/run-task.ts, test/action-time-pr-admission.test.ts, test/config-schema.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts, test/commitlint-mode.test.ts]
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

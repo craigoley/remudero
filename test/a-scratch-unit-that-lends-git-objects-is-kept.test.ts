@@ -77,7 +77,7 @@ test("test/a-scratch-unit-that-lends-git-objects-is-kept.test.ts", () => {
   assert.equal(headType(held.repo), "commit", "the borrower still reads HEAD after the pass");
   assert.equal(headType(relative.repo), "commit", "the relative borrower still reads HEAD too");
   assert.ok(r.stdout.includes(`KEEP ${held.unit}: held open by a process`), r.stdout);
-  assert.ok(r.stdout.includes(`KEEP ${relative.unit}: written within 720 min`), r.stdout);
+  assert.ok(r.stdout.includes(`KEEP ${relative.unit}: written within 360 min`), r.stdout);
 
   assert.ok(r.stdout.includes(`KEEP ${broken.unit}: borrows from missing ${missingTarget}`), r.stdout);
   assert.equal(existsSync(broken.repo), true, "the orphaned borrower is kept for an operator");

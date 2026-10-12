@@ -14,7 +14,7 @@ import { resolveHostPole, type HostPole } from "./host-parity.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { shortPathWhenTooLong } from "./short-path-root.js";
-import { acquireTestSlot, lowPriorityCommand, testRunArgv, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
+import { acquireTestSlot, lowPriorityCommand, TEST_FILE_PEAK_BYTES, testRunArgv, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
 // W1-T3099: the judge's own two primitives, imported rather than re-derived.
 import { criterionFieldTampered, planOnlyDiff } from "./review.js";
 
@@ -920,8 +920,8 @@ function coverageShardSelectionArgs(repoRoot: string, shard: number, base: strin
   ];
 }
 
-function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly string[], concurrency: number): string[] {
-  return testRunArgv([
+function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly string[], concurrency: number, judge: TestJudge, judgedArgs: readonly string[]): string[] {
+  return testRunArgv(judge.judgedNodeTestArgs([
     "--enable-source-maps",
     "--experimental-test-coverage",
     "--test-coverage-exclude=test/**",
@@ -937,7 +937,22 @@ function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly
     "--import",
     TMP_HYGIENE_IMPORT,
     ...testFiles,
-  ], concurrency);
+  ], judgedArgs), concurrency);
+}
+
+// The slice of scripts/pure-test-pool.mjs (the test judge) a coverage shard uses.
+interface JudgedRun { args: string[]; env: Record<string, string>; cleanup: () => void }
+interface TestJudge {
+  prepareJudgedRun(opts: { makeDir: () => string }): JudgedRun;
+  judgedNodeTestArgs(args: readonly string[], judgedArgs: readonly string[]): string[];
+  closeJudgedRun(judged: JudgedRun, files: readonly string[], opts: { status: number; root: string; role: string; prefix: string; log: (line: string) => void }):
+    { verdict: { complete: boolean }; line: string };
+}
+
+// Loaded when a coverage leaf runs, never at import: a sandbox that copies only src/ (the mutation
+// detectors in test/ledger-rotation.test.ts) still imports this module. A plain .mjs, so no types.
+function loadTestJudge(): TestJudge {
+  return require("../../scripts/pure-test-pool.mjs") as TestJudge;
 }
 
 function coverageRawDirHasArtifact(rawDir: string): boolean {
@@ -1006,15 +1021,24 @@ function testWithCoverageShards(
     }
     // Low priority, bounded concurrency, and a heartbeat on the host-wide slot at every shard (W1 test-slot).
     slot.refresh();
-    const child = lowPriorityCommand(process.execPath, coverageShardArgs(shardRoot, shard, testFiles, slot.concurrency), testSlot.binaryExists);
+    // Judged (scripts/pure-test-pool.mjs): node reports a file whose own child exits 0 part-way as
+    // `ok`, so a shard passes only when every file it was given reached its own summary.
+    // Its files live in this run's own scratch, not os.tmpdir(): the shard's TMPDIR is scratchDir too.
+    const judge = loadTestJudge();
+    const judged = judge.prepareJudgedRun({ makeDir: () => mkdtempSync(join(scratchDir, "rmd-pool-run-")) });
+    const child = lowPriorityCommand(process.execPath, coverageShardArgs(shardRoot, shard, testFiles, slot.concurrency, judge, judged.args), testSlot.binaryExists);
     const res = spawn(child.file, child.args, {
       cwd: repoRoot,
-      env: { TMPDIR: scratchDir, NODE_V8_COVERAGE: rawDir },
+      env: { TMPDIR: scratchDir, NODE_V8_COVERAGE: rawDir, ...judged.env },
+    });
+    const verdict = judge.closeJudgedRun(judged, testFiles, {
+      status: res.status ?? 1, root: repoRoot, role: `coverage shard ${shard}/${CI_COVERAGE_SHARD_COUNT}`, prefix: "coverage-ratchet", log: () => {},
     });
     const spawnFailed = spawnFailureDetail(label, res);
     if (spawnFailed) return { ok: false, detail: spawnFailed };
     const output = `${res.stdout ?? ""}${res.stderr ?? ""}`;
-    if (res.status !== 0) return { ok: false, detail: `FAIL — ${label}\n${output.trim()}` };
+    if (res.status !== 0) return { ok: false, detail: `FAIL — ${label}\n${output.trim()}\n${verdict.line}` };
+    if (!verdict.verdict.complete) return { ok: false, detail: `FAIL — ${label}\n${verdict.line}` };
     if (!coverageOutputHasTestSummary(output)) {
       return { ok: false, detail: `FAIL — coverage-ratchet: shard ${shard}/${CI_COVERAGE_SHARD_COUNT} produced no # tests summary; refusing to fold an unverified shard into the coverage total.` };
     }
@@ -1156,7 +1180,7 @@ export function testWithCoverageLeaf(
     }
     writeFileSync(join(lockDir, "holder.json"), JSON.stringify({ ...holder, scratch: scratchDir }));
     // The per-checkout lock above guards THIS scratch; the host-wide slot bounds every checkout's runs.
-    slot = acquireTestSlot("coverage-ratchet:test-with-coverage", testSlot);
+    slot = acquireTestSlot("coverage-ratchet:test-with-coverage", { perFileBytes: TEST_FILE_PEAK_BYTES, ...testSlot });
     const shards = testWithCoverageShards(repoRoot, spawn, lcovPath, scratchDir, join(scratchDir, "raw-shards"), slot, testSlot, chosen.note);
     // A pass already names the root; a refusal names it too, so the operator sees which volume was weighed.
     return shards.ok ? shards : { ...shards, detail: `${shards.detail}\n(${chosen.note})` };
@@ -2720,30 +2744,6 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     "a",
     "listTrackedTestFiles shells `git ls-files -- test` — test/ only; src/ is the PROTECTED target this suite guards, not the " +
       "population it walks and asserts over",
-  ),
-  // W1-T2643's OWN proof file. Its prose and its own recognizer-exercising tests inevitably
-  // mention "ls-files" and "src/" (the same self-reference test/nothing-tells-you-which-census-
-  // suites-your-change-joins.test.ts already has above), which trips the text-substring
-  // recognizer — proven by the drift-guard test below catching itself before this entry existed.
-  // It never shells `git ls-files` itself (only `git grep`, via censusPopulationDrift), so it
-  // fails clause (a) exactly like its W1-T2523 sibling.
-  refusedForPredicate(
-    "test/the-census-admission-set-is-derived-not-enumerated.test.ts",
-    "a",
-    "this file — meta-tests CENSUS_POPULATION/censusPopulationDrift/FAST_GATE_STEPS themselves; its one real git call is " +
-      "`git grep`, never `git ls-files`, so it is not itself a src-population walk",
-  ),
-  // W1-T2644's OWN proof file, the same self-reference shape its sibling directly above already
-  // has: it discusses (and, for the UNCLASSIFIED test, fabricates fixture text containing) both
-  // "ls-files" and "src/", which trips the recognizer's text-substring match. It never shells
-  // `git ls-files` itself — only `censusPopulationDrift`'s own `git grep` seam, under a mock —
-  // so it fails clause (a) exactly like the entry above it.
-  refusedForPredicate(
-    "test/the-census-roster-is-named-not-numbered.test.ts",
-    "a",
-    "this file — asserts CENSUS_SUITE_ROSTER/CENSUS_POPULATION/censusPopulationDrift/FAST_GATE_STEPS stay one consistent " +
-      "source; every git call it makes is through a mocked PreflightSpawn, never a real `git ls-files`, so it is not itself " +
-      "a src-population walk",
   ),
   // W1-T2647's OWN proof file — self-reference shape as its siblings above; only real git call
   // is `git grep`, never `git ls-files`, so it fails clause (a).

@@ -102,3 +102,11 @@
     payload naming `~DEFAULT_BRANCH` and the harness writes it. Drop the `finally`: the teardown test throws
     from a failing group and finds the ruleset still present in the fake. Omit the selection field: the report
     test finds no `affected`/`full` entry for a group.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares scripts/merge-queue-canary.mjs, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-10T19:18:07.740Z"
+    pin: "b204e22218e4fb9e804f4665b5c6d7b0db1a2e85af6d2f94ada17d879a159e18"

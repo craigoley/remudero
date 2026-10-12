@@ -28,7 +28,7 @@ test("test/a-top-level-scratch-workspace-idle-for-12-hours-is-removed.test.ts", 
   const r = run(fx, { RMD_CLEANUP_SCRATCH_ROOTS: fx.scratch, RMD_CLEANUP_TMP_ROOTS: "", RMD_CLEANUP_ONLY_TMP: "1" });
   assert.equal(r.status, 0, r.stderr + r.stdout);
   assert.equal(existsSync(idle), false, r.stdout);
-  for (const [p, reason] of [[fresh, "written within 720 min"], [partly, "written within 720 min"], [keep, "scratch keep marker"], [cwd, "held open by a process"], [fd, "held open by a process"], [mount, "running container mount"], ...never.map(p => [p, "protected scratch name"])]) {
+  for (const [p, reason] of [[fresh, "written within 360 min"], [partly, "written within 360 min"], [keep, "scratch keep marker"], [cwd, "held open by a process"], [fd, "held open by a process"], [mount, "running container mount"], ...never.map(p => [p, "protected scratch name"])]) {
     assert.equal(existsSync(p), true, p);
     assert.ok(r.stdout.includes(`KEEP ${p}: ${reason}`), r.stdout);
   }

@@ -3,13 +3,14 @@
   repo: remudero
   depends_on: [W1-T6083]
   type: implement
-  verify: human  # a .github/workflows path: an operator build, as W1-T6088 and W1-T5940 park theirs
+  # a .github/workflows path: an operator build, as W1-T6088 and W1-T5940 park theirs
+  verify: human
   principles: {tdd: strict}
   budget_usd: 10.00
   risk: high  # Rule 19: one concern — the impact map is produced on main and handed to the shadow selector
   band_meaning: blast-radius
   origin: "operator session 2026-10-06: follow-up found while building W1-T6083 (PR #9760)"
-  plan_refs: [W1-T6083, W1-T4404, W1-T4406, W1-T6088]
+  plan_refs: [W1-T6083, W1-T4404, W1-T4406, W1-T6088, W1-T5940]
   files: [.github/workflows/ci.yml, test/main-builds-the-test-impact-map-the-shadow-arm-reads.test.ts]
   status: queued
   priority: 2
@@ -48,3 +49,11 @@
     OPERATOR BUILD: a .github/workflows path routes this to operator-build. Depends on W1-T6083 (#9760,
     open at filing): build after it merges. If W1-T6083 merges WITH a producer after all, retire this as a
     duplicate. The impact arm stays SHADOW; flipping it live is a separate ruling on the shadow record.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/ci.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-10T22:08:30.203Z"
+    pin: "98f8e91bfc907dd14b9503272064cef28d31988f40eaf2bca661167402eaca4e"

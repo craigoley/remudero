@@ -353,10 +353,11 @@ test("W1-T3762 criterion 1: routing telemetry joins the immutable assignment to 
       totalTokens: 125,
       totalDurationMs: 1500,
       totalCostUsd: 0,
+      unpricedCostRows: 0,
       fallbackReasons: [],
     },
   ]);
-  assert.deepEqual(snap.routingTelemetry.daily, [{ day: "2026-09-18", terminalResults: 1, totalTokens: 125, totalCostUsd: 0 }]);
+  assert.deepEqual(snap.routingTelemetry.daily, [{ day: "2026-09-18", terminalResults: 1, totalTokens: 125, totalCostUsd: 0, unpricedCostRows: 0 }]);
 });
 
 test("W1-T3762 criterion 2: routing telemetry names incomplete joins instead of inventing a success, a cost, or a provider receipt", () => {
