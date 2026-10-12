@@ -7,7 +7,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { invalidateDraft, loadProposalRegistry, parseDraftAttemptCache, parseDraftCache, parseProposalRegistryResult, writeDraftAttemptPair } from "./inbox.js";
 import { inboxKind } from "./inbox-owner.js";
 import { appendLedger } from "./ledger.js";
-import { createIncrementalLedgerUnion, type LedgerUnionRecordRead, type LedgerUnionRecordReadOptions } from "./ledger-union.js";
+import { createIncrementalLedgerUnion } from "./ledger-union.js";
 
 /**
  * lib/inbox-replay.ts (W1-T8714) — a one-shot replay of the proposals the band split lost.
@@ -51,14 +51,13 @@ export interface BandMeaningReplayStore {
   proposals: Record<string, BandMeaningReplayEntry>;
 }
 
-export interface BandMeaningReplayDeps {
+export interface BandMeaningReplayInput {
   stateDir: string;
   ledgerPath: string;
   /** Each proposal's classification state, as serve's slow lane last wrote it (fleet-lane.ts's
    *  `readClassificationSnapshot`); undefined when none is readable, and the state check is then skipped. */
   classificationStates: () => Record<string, string> | undefined;
   clock?: Clock;
-  readUnion?: (stateDir: string, opts: LedgerUnionRecordReadOptions) => LedgerUnionRecordRead;
 }
 
 export interface BandMeaningReplayPass {
@@ -70,7 +69,7 @@ export interface BandMeaningReplayPass {
   complete: boolean;
 }
 
-const defaultUnion = createIncrementalLedgerUnion({ holder: "inbox-replay-band-meaning", reducerVersion: "1" });
+const bandMeaningUnion = createIncrementalLedgerUnion({ holder: "inbox-replay-band-meaning", reducerVersion: "1" });
 /** The last deferral reason written per state dir, so an unchanged reason is not re-written every pass. */
 const lastDeferral = new Map<string, string>();
 
@@ -190,7 +189,7 @@ function invalidateDrafts(stateDir: string, ids: readonly string[]): boolean {
   }
 }
 
-function deferred(deps: BandMeaningReplayDeps, reason: string, seeded: boolean): BandMeaningReplayPass {
+function deferred(deps: BandMeaningReplayInput, reason: string, seeded: boolean): BandMeaningReplayPass {
   if (lastDeferral.get(deps.stateDir) !== reason) {
     lastDeferral.set(deps.stateDir, reason);
     const clock = deps.clock ?? systemClock;
@@ -200,7 +199,7 @@ function deferred(deps: BandMeaningReplayDeps, reason: string, seeded: boolean):
 }
 
 /** One replay pass. Never throws: a failure is a deferral with its reason, and the next pass tries again. */
-export function replayBandMeaningRefusals(deps: BandMeaningReplayDeps): BandMeaningReplayPass {
+export function replayBandMeaningRefusals(deps: BandMeaningReplayInput): BandMeaningReplayPass {
   try {
     return replayPass(deps);
   } catch (e) {
@@ -208,15 +207,14 @@ export function replayBandMeaningRefusals(deps: BandMeaningReplayDeps): BandMean
   }
 }
 
-function replayPass(deps: BandMeaningReplayDeps): BandMeaningReplayPass {
+function replayPass(deps: BandMeaningReplayInput): BandMeaningReplayPass {
   const clock = deps.clock ?? systemClock;
-  const readUnion = deps.readUnion ?? defaultUnion;
   const storePath = bandMeaningReplayStorePath(deps.stateDir);
   const writeStore = (s: BandMeaningReplayStore) => writeAtomic(storePath, JSON.stringify(s, null, 2) + "\n");
   let store = readBandMeaningReplayStore(deps.stateDir);
   if (store && Object.values(store.proposals).every((e) => e.outcome)) return { seeded: false, invalidated: [], recorded: [], complete: true };
 
-  const read = readUnion(deps.stateDir, { step: [...REPLAY_STEPS], refuseIncomplete: true });
+  const read = bandMeaningUnion(deps.stateDir, { step: [...REPLAY_STEPS], refuseIncomplete: true });
   if (!read.ok) return deferred(deps, `incomplete ledger union: ${read.unread.length} file(s) unread`, false);
   let seeded = false;
   if (!store) {
