@@ -12,7 +12,7 @@
   plan_refs: [W1-T7729, W1-T7728, W1-T8776]
   files: [scripts/build-child-entries.mjs, src/lib/child-entry-argv.ts, src/lib/plan-pr-emitter.ts, test/a-check-proof-child-runs-the-precompiled-entry-when-current.test.ts, test/a-daemon-child-entry-is-precompiled.test.ts, test/a-check-proof-child-loads-a-narrow-entry.test.ts, test/the-plan-pr-shard-check-runs-with-the-setup-preload.test.ts]
   status: queued
-  priority: 1.2 # operator-2026-10-12: core container hits memory.high; tsx children cost 250-570 MB each (lever E)
+  priority: 0.95 # operator-2026-10-12: core is the container that keeps hitting memory.high; no memory is saved until these two land; W1-T7729's bundle is baked but unused
   attempts: 0
   rationale: |
     MEASURED 2026-10-12, read-only on the Azure host. W1-T7729 (#11136, 4001d1932) shipped ADR 0006 and the image build
