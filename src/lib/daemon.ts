@@ -251,13 +251,19 @@ export function dispatchRunHistory(rawLines: readonly string[], runs?: MeasuredR
 export const HANDOFF_RECEIPT_STEP = "run.freshness_handoff";
 
 /** A pre-PR handoff's exact pushed head is resumable; any later verdict replaces that receipt, except a failed
- *  restore, which consumed nothing (W1-T7806). A `run.freshness_handoff` row is a receipt too (W1-T7747). */
+ *  restore, which consumed nothing (W1-T7806). A matching checkpoint drop consumes the receipt;
+ *  a `run.freshness_handoff` row is a receipt too (W1-T7747). */
 export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<string, { branch: string; headSha: string }> {
   const pending = new Map<string, { branch: string; headSha: string }>();
   for (const raw of rawLines) {
     let row: Record<string, unknown>;
     try { row = JSON.parse(raw); } catch (error) { /* malformed rows establish no ownership */ continue; }
     if (!row || typeof row.task_id !== "string") continue;
+    if (row.step === "implement.checkpoint_dropped") {
+      const prior = pending.get(row.task_id);
+      if (prior && row.source_branch === prior.branch && row.head_sha === prior.headSha) pending.delete(row.task_id);
+      continue;
+    }
     const receipt = row.step === HANDOFF_RECEIPT_STEP ? row.waiting_on !== "pr" && row.waiting_on !== "ci"
       : row.step === "verdict" && row.verdict === "handed_off" && row.reason === "freshness_yield" && !row.pr_url;
     if (row.step !== "verdict" && !receipt) continue;
