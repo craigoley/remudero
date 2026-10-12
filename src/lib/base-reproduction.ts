@@ -138,3 +138,166 @@ export function strikesToRefund(
     return true;
   });
 }
+
+// ── W1-T8396 — a refresh needs evidence it can clear the red ────────────────────────────────────
+// OBSERVED 2026-10-12 on #11017: a test the PR's own src change broke was "fixed on main" because it
+// passed there, and main was merged in twice — once over a main delta of three plan files — with no
+// fix worker ever dispatched. A test that passes on main is as consistent with "the PR broke it" as
+// with "main fixed it"; only main's delta, or the merged tree itself, can tell them apart.
+
+/** The one ledger step every refresh arm writes when it decides whether merging main can clear a red. */
+export const REFRESH_CLEARANCE_STEP = "refresh.clearance";
+export type RefreshArm = "fix-rung" | "base-fixed" | "base-red" | "stalled-stage";
+/** Which evidence decided: main's delta (`prefilter`), a refresh that already left this red
+ *  (`repeat`), the trial-merge probe, or why today's refresh is kept (`partial`, `unrunnable`, `fileless`). */
+export type RefreshEvidence = "prefilter" | "repeat" | "merged-probe" | "partial" | "unrunnable" | "fileless";
+
+export interface RefreshClearance {
+  refresh: boolean;
+  evidence: RefreshEvidence;
+  /** Main's paths since the head's merge base that could change the red; absent when main's delta was unread. */
+  countedPaths?: string[];
+  mergedVerdict?: BaseReproductionVerdict;
+  mergedFiles?: BaseProbeFile[];
+  reason: string;
+}
+
+/** W1-T8396 — each failing test file's import closure (itself included) over main's and the head's trees.
+ *  A test file with no entry has an unknown closure; `undefined` means none could be read. */
+export type ImportClosureRead = (
+  pr: { prNumber: number; headSha: string }, testFiles: readonly string[], mainSha: string,
+) => Promise<ReadonlyMap<string, ReadonlySet<string>> | undefined>;
+
+/** GitHub's compare endpoint lists at most this many files: a list this long may be truncated, so it
+ *  never proves main changed nothing else. A fact of the API, not a policy bound. */
+export const GITHUB_COMPARE_FILES_LISTED = 300;
+
+/** Paths whose readers the import graph cannot see: a root-level file (package.json, its lockfile,
+ *  tsconfig, .nvmrc) changes every suite, and a test/ file that is not a suite is a helper or fixture. */
+function graphBlindPath(path: string): boolean {
+  return !path.includes("/") || (path.startsWith("test/") && !/\.test\.[cm]?[jt]sx?$/.test(path));
+}
+
+/** W1-T8396 step 1a — main's changed paths (since the head's merge base) that could change a failing
+ *  test's outcome: a failing test file, a module in its import closure, a CI harness path, a path the
+ *  graph cannot see, or a path the arm's own evidence already matched. `complete` is true only when the
+ *  list is untruncated and every failing test's closure is known — only then does an empty `counted`
+ *  prove main cannot change the result. `undefined` when main's delta is unread. */
+export function mainPathsReachingRed(input: {
+  failingTestFiles: readonly string[];
+  mainChangedFiles: readonly string[] | undefined;
+  closure: ReadonlyMap<string, ReadonlySet<string>> | undefined;
+  isHarnessPath: (path: string) => boolean;
+  matchedPaths?: readonly string[];
+}): { counted: string[]; complete: boolean } | undefined {
+  const changed = input.mainChangedFiles;
+  if (changed === undefined) return undefined;
+  const reached = new Set([...input.failingTestFiles, ...(input.matchedPaths ?? [])]);
+  for (const file of input.failingTestFiles) for (const dep of input.closure?.get(file) ?? []) reached.add(dep);
+  const counted = changed.filter((path) => reached.has(path) || input.isHarnessPath(path) || graphBlindPath(path));
+  const complete = changed.length < GITHUB_COMPARE_FILES_LISTED && input.failingTestFiles.every((file) => input.closure?.has(file) === true);
+  return { counted, complete };
+}
+
+/** W1-T8396 — whether merging main may clear this red. Rule 3 first: a refresh that already left the same
+ *  red is never repeated until main changes a counted path. Then step 1a, the path pre-filter, and step 1b,
+ *  the trial-merge probe. Red on the merged tree refuses; clear refreshes; partial or unrunnable keeps
+ *  today's refresh and says why. No count, timer or clock decides anything here. */
+export async function assessRefreshClearance(
+  input: { failingTestFiles: readonly string[]; reach: { counted: string[]; complete: boolean } | undefined; priorRefresh: boolean },
+  probeMerge: (() => Promise<BaseProbeResult>) | undefined,
+): Promise<RefreshClearance> {
+  const countedPaths = input.reach?.counted;
+  const counted = countedPaths === undefined ? {} : { countedPaths };
+  if (input.priorRefresh && (countedPaths === undefined || countedPaths.length === 0)) {
+    return { refresh: false, evidence: "repeat", ...counted, reason: countedPaths === undefined
+      ? "a refresh already left this red, and main's changes since the head's merge base are unread"
+      : "a refresh already left this red, and main has changed nothing since that could reach it" };
+  }
+  if (input.failingTestFiles.length === 0) {
+    return { refresh: true, evidence: "fileless", ...counted, reason: "the red names no test file to probe; the arm's own path evidence decides" };
+  }
+  if (input.reach?.complete && input.reach.counted.length === 0) {
+    return { refresh: false, evidence: "prefilter", countedPaths: [], reason:
+      "main changed no failing test file, no module the failing tests import, and no CI harness path since the head's merge base" };
+  }
+  if (probeMerge === undefined) return { refresh: true, evidence: "unrunnable", ...counted, reason: "the trial-merge probe is unwired; keeping today's refresh" };
+  // A probe that throws is a setup failure carrying its reason, the same shape main's probe records.
+  const probed: BaseProbeResult = await probeMerge().then((result) => result,
+    (error: unknown) => baseProbeSetupFailure(input.failingTestFiles, error));
+  const mergedFiles = [...probed];
+  const mergedVerdict = probed.reason === undefined ? decideBaseReproduction(input.failingTestFiles, mergedFiles) : "unrunnable";
+  const merged = { ...counted, mergedVerdict, mergedFiles };
+  if (mergedVerdict === "reproduced") {
+    return { refresh: false, evidence: "merged-probe", ...merged, reason: "every failing test file still fails on a trial merge with main" };
+  }
+  if (mergedVerdict === "clear") return { refresh: true, evidence: "merged-probe", ...merged, reason: "the failing test files pass on a trial merge with main" };
+  const why = probed.setup_error ?? probed.reason;
+  return { refresh: true, evidence: mergedVerdict, ...merged, reason: mergedVerdict === "partial"
+    ? "some failing test files still fail on the trial merge; keeping today's refresh"
+    : `the trial merge is unrunnable${why === undefined ? "" : ` (${boundedBaseProbeReason(why)})`}; keeping today's refresh` };
+}
+
+/** One refresh that merged main into a red head: the checks it was red on, and its failing test files
+ *  (empty for a fileless red). `checks` is absent on a legacy sweep row, which then matches any check. */
+export interface RefreshRecord { checks?: string[]; testFiles: string[] }
+
+const strings = (value: unknown): string[] => (Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : []);
+
+/** W1-T8396 rule 3 — every refresh step, keyed by PR rather than `pr@head`: a refresh MAKES a new head,
+ *  so a per-head key lets each arm refresh once per head, forever. A `fix.base_refreshed` row older
+ *  than this task names no red, so it is skipped; a sweep row counts only when the update took. */
+export function refreshRecordsFromLedger(lines: readonly Row[]): Map<number, RefreshRecord[]> {
+  const records = new Map<number, RefreshRecord[]>();
+  for (const line of lines) {
+    if (typeof line.pr_number !== "number") continue;
+    let record: RefreshRecord | undefined;
+    if (line.step === "fix.base_refreshed" && Array.isArray(line.red_checks)) {
+      record = { checks: strings(line.red_checks), testFiles: strings(line.test_files) };
+    } else if ((line.step === "sweep.base_fixed.refresh" || line.step === "sweep.base_red.refresh") && line.outcome === "updated") {
+      const files = line.step === "sweep.base_fixed.refresh" ? strings(line.test_files)
+        : Array.isArray(line.files) ? line.files.flatMap((probe) => (typeof probe?.file === "string" ? [probe.file as string] : [])) : [];
+      record = { ...(Array.isArray(line.check_names) ? { checks: strings(line.check_names) } : {}), testFiles: files };
+    }
+    if (record === undefined) continue;
+    records.set(line.pr_number, [...(records.get(line.pr_number) ?? []), record]);
+  }
+  return records;
+}
+
+/** The same red: a shared check, and failing test files the record already named — a fileless record
+ *  saw less than any later red on its check, so it matches whatever that red names. */
+export function refreshedOnSameRed(
+  records: ReadonlyMap<number, readonly RefreshRecord[]>, prNumber: number, checks: readonly string[], testFiles: readonly string[],
+): boolean {
+  return (records.get(prNumber) ?? []).some((record) =>
+    (record.checks === undefined || record.checks.some((check) => checks.includes(check))) &&
+    (record.testFiles.length === 0 || (testFiles.length > 0 && testFiles.every((file) => record.testFiles.includes(file)))));
+}
+
+/** One decision's memo key: the same head, main and failing files decide the same way on a later pass. */
+export function refreshClearanceKey(prNumber: number, headSha: string, mainSha: string | undefined, testFiles: readonly string[]): string {
+  return `${prNumber}@${headSha}@${mainSha ?? ""}@${[...testFiles].sort().join(",")}`;
+}
+
+/** Refusals already decided, with the evidence that decided each, so a later pass re-reads and re-probes nothing. */
+export function refusedRefreshClearancesFromLedger(lines: readonly Row[]): Map<string, RefreshEvidence> {
+  return new Map(lines.filter((line) => line.step === REFRESH_CLEARANCE_STEP && line.refresh === false &&
+    typeof line.pr_number === "number" && typeof line.head_sha === "string")
+    .map((line) => [refreshClearanceKey(line.pr_number as number, line.head_sha as string,
+      typeof line.main_sha === "string" ? line.main_sha : undefined, strings(line.test_files)),
+    typeof line.evidence === "string" ? line.evidence as RefreshEvidence : "repeat"]));
+}
+
+/** The fields of one {@link REFRESH_CLEARANCE_STEP} row: the arm, the files, main's sha and the evidence. */
+export function refreshClearanceFields(
+  head: { arm: RefreshArm; pr_number: number; head_sha: string; main_sha?: string; checks: readonly string[]; test_files: readonly string[] },
+  clearance: RefreshClearance,
+): Row {
+  return {
+    ...head, checks: [...head.checks], test_files: [...head.test_files], refresh: clearance.refresh, evidence: clearance.evidence,
+    reason: clearance.reason,
+    ...(clearance.countedPaths === undefined ? {} : { counted_paths: clearance.countedPaths }),
+    ...(clearance.mergedVerdict === undefined ? {} : { merged_verdict: clearance.mergedVerdict, merged_files: clearance.mergedFiles }),
+  };
+}

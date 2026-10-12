@@ -1,0 +1,45 @@
+- id: W1-T5434
+  title: "Read and validate a competing frozen calibration population instead of throwing on creation"
+  repo: remudero
+  depends_on: [W1-T5341]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: "2026-10-03 approved benchmark follow-ups; measured concurrent population creation after merged readiness driver"
+  plan_refs: [W1-T5341, W1-T4647]
+  files: [src/lib/benchmark-aa-readiness.ts, test/benchmark-aa-readiness.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at a92ce44653eb9201ba6a1003c03c6e09a18a61bd: freezePopulation reads
+    population.json at src/lib/benchmark-aa-readiness.ts:192, then creates with flag wx
+    at line 215 outside its error-handling arm. A disposable pinned-runtime interleaving
+    installed a valid winner between those operations: the first driver threw EEXIST with
+    zero attempts, preserved the winner and later resumed one pair. The real paired seam
+    positive control ran two fake attempts. No production concurrency, worker or cash ran.
+  design: |
+    Keep exclusive creation. Handle EEXIST by reading the actual winner and applying the
+    same immutable population validation as the existing-population path: schema, digest,
+    allocation identity, eligibility denominator and criteria anchors remain trustworthy.
+    Never replace, re-derive or widen the winner. A conflicting, partial or unreadable winner
+    becomes a named refusal/pending outcome with zero pre-validation dispatch, not an
+    uncaught exception or an empty population. Reuse the existing shared pair slot so valid
+    competing drivers cannot double-dispatch a completed or in-flight pair. Tests synchronize
+    two drivers at creation, and include valid, conflicting, partial and restart controls.
+    Refusal affects this calibration only; no ordinary PR hold, paid activation, publication,
+    arbitrary sample bound or blanket retry is added.
+    Research: https://nodejs.org/docs/latest-v22.x/api/fs.html#file-system-flags
+  acceptance:
+    - claim: "a valid concurrent winner is preserved and safely reused"
+      proof: 'grep: calibration reuses a valid concurrent population winner in test/benchmark-aa-readiness.test.ts'
+    - claim: "a conflicting or partial winner refuses before any attempt"
+      proof: 'grep: calibration refuses conflicting and partial population winners in test/benchmark-aa-readiness.test.ts'
+    - claim: "two drivers and restart do not replay a completed pair"
+      proof: 'grep: concurrent calibration drivers resume without pair replay in test/benchmark-aa-readiness.test.ts'
+  falsifier: |
+    Remove EEXIST winner handling: the valid competing driver rejects instead of resuming.
+    Overwrite the winner or dispatch before digest/allocation validation: the conflict and
+    partial-write fixtures fail. Remove the existing pair slot: the two-driver fixture fails.

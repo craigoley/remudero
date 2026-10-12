@@ -29,6 +29,7 @@ import { promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
 import { mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync } from "node:fs/promises";
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
+import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, type ImportClosureRead } from "./lib/base-reproduction.js";
 import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/adaptive-wip.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { fixRoundBaseHead } from "./lib/fix-round-base.js";
@@ -706,6 +707,7 @@ import { runCensusFix, type CensusFixResult } from "./lib/census-fix.js";
 // src module".
 import {
   affectedSelectionOrFullAsync,
+  buildAffectedSuitesGraph,
   readAffectedSuitesInput,
   readAffectedSuitesInputAsync,
   selectAffectedSuites,
@@ -1649,6 +1651,7 @@ import {
   readyDraftPullRequest,
   DEFAULT_SWEEP_POLICY,
   decideRedBaseRefresh,
+  isCiHarnessPath,
   RUNNER_TIMEOUT_LINE,
   prAddedLinesFromPullFiles,
   failingSourceFilesFromCiFailures,
@@ -2204,22 +2207,28 @@ export function buildBaseReproductionProbe(
     execute?: typeof execWhitelistedProofAsync;
     timeout?: () => number;
     clock?: Clock;
+    /** W1-T8396: probe a trial merge of the PR's head into `mainSha` instead of `mainSha` alone. Its
+     *  outcomes are cached per head and main, never read from or mixed with main's own probe rows. */
+    merge?: boolean;
+    /** W1-T8396: git run inside the probe tree (the trial merge); the default is the hardened leaf. */
+    treeGit?: (tree: string, args: string[], timeoutMs: number) => Promise<unknown>;
   } = {},
 ): NonNullable<SweepDeps["reproduceFailingTestsOnMain"]> {
-  return (_pr, candidates, mainSha) => {
+  return (pr, candidates, mainSha) => {
     const files = [...new Set(candidates.filter((file) => file.endsWith(".test.ts")))];
     const pending = baseReproductionQueue.then(async () => {
       if (files.length > BASE_REPRODUCTION_MAX_FILES) return Object.assign([], { reason: "too many test files" });
       const results = new Map<string, BaseProbeFile>();
-      const key = (file: string) => `${repoDir}:${probeCacheKey(mainSha, file)}`;
-      const cache = probeCacheFromLedger((deps.readLedger ?? readLedgerLines)(ledgerPath));
+      const key = (file: string) => `${repoDir}:${deps.merge ? `merge:${pr.headSha}:` : ""}${probeCacheKey(mainSha, file)}`;
+      const cache = deps.merge ? new Map<string, BaseProbeFile>() : probeCacheFromLedger((deps.readLedger ?? readLedgerLines)(ledgerPath));
       for (const file of files) {
         const cached = baseReproductionHostCache.get(key(file)) ?? cache.get(probeCacheKey(mainSha, file));
         if (cached) results.set(file, { ...cached, cached: true });
       }
       const missing = files.filter((file) => !results.has(file));
       if (missing.length === 0) return files.map((file) => results.get(file)!);
-      const worktreePath = join(worktreesDir(config), `base-repro-${mainSha.slice(0, 12)}`);
+      const worktreePath = join(worktreesDir(config),
+        `base-repro-${mainSha.slice(0, 12)}${deps.merge ? `-merge-${pr.headSha.slice(0, 12)}` : ""}`);
       const clock = deps.clock ?? systemClock;
       const started = clock.now();
       let setupError: string | undefined;
@@ -2246,6 +2255,16 @@ export function buildBaseReproductionProbe(
           detachedAsync: { path: worktreePath, revision: mainSha, run: (args) => git(["-C", repoDir, ...args], timeoutMs!) },
         }).pendingCheckout;
         created = true;
+        if (deps.merge) {
+          // W1-T8396: the head the trial merge needs — fetched only when this checkout lacks it — merged into
+          // the probe tree through the hardened leaf pinned to that tree.
+          const treeGit = deps.treeGit ?? ((tree: string, args: string[], timeout: number) =>
+            hostWorktreeGitAsync(tree, args, { stdio: "ignore", timeout, killSignal: "SIGKILL", maxBuffer: 1 << 26 }));
+          const present = await treeGit(worktreePath, ["cat-file", "-e", `${pr.headSha}^{commit}`], timeoutMs).then(() => true, () => false);
+          if (!present) await treeGit(worktreePath, ["fetch", "--no-tags", "origin", `+refs/pull/${pr.prNumber}/head`], timeoutMs);
+          await treeGit(worktreePath, ["-c", "user.name=remudero trial merge", "-c", "user.email=trial-merge@remudero.invalid",
+            "merge", "--no-edit", "--no-ff", "--no-verify", pr.headSha], timeoutMs);
+        }
         const linked = (deps.link ?? linkWorktreeNodeModules)(repoDir, worktreePath);
         if (linked !== "linked" && linked !== "already-present") throw new Error(`probe node_modules: ${linked}`);
         const read = deps.readFile ?? readFileAsync;
@@ -2291,6 +2310,70 @@ export function buildBaseReproductionProbe(
     baseReproductionQueue = pending.then(() => {}, (error) => { log("sweep.base_reproduction.queue_failed", { reason: String(error) }); });
     return pending;
   };
+}
+
+/** W1-T8396 — the lines of a tree that can name a module: an import, a re-export, a require, or a repo
+ *  path literal. One `git grep` per tree instead of a read per file. POSIX ERE: no `\s` here. */
+const MODULE_EDGE_LINE = "(from[[:space:]]*['\"]|import[[:space:]]*\\(|import[[:space:]]+['\"]|require[[:space:]]*\\(|['\"`](src|scripts|bin|test)/)";
+const CLOSURE_ROOTS = ["src", "scripts", "bin", "test"];
+
+/** W1-T8396 — each test file's import closure over `revs`, unioned: the affected-suites graph built from
+ *  the edge lines of each tree. A multi-line import's `} from "x"` line is re-read as an import. A test on
+ *  no tree has no entry — an unknown closure, never an empty one. */
+async function importClosureAt(
+  gitText: (args: string[]) => Promise<string>, revs: readonly string[], testFiles: readonly string[],
+): Promise<Map<string, Set<string>>> {
+  const closure = new Map<string, Set<string>>();
+  for (const rev of revs) {
+    const paths = (await gitText(["ls-tree", "-r", "--name-only", rev, "--", ...CLOSURE_ROOTS])).split("\n").filter(Boolean);
+    const edges = await gitText(["grep", "-I", "-E", MODULE_EDGE_LINE, rev, "--", ...CLOSURE_ROOTS]);
+    const files = new Map<string, string>();
+    for (const line of edges.split("\n")) {
+      const rest = line.startsWith(`${rev}:`) ? line.slice(rev.length + 1) : undefined;
+      const at = rest?.indexOf(":") ?? -1;
+      if (rest === undefined || at < 0) continue;
+      const text = rest.slice(at + 1);
+      const reread = [...text.matchAll(/\bfrom\s*["']([^"']+)["']/g)].map((m) => `import "${m[1]}";`).join("\n");
+      files.set(rest.slice(0, at), `${files.get(rest.slice(0, at)) ?? ""}${text}\n${reread}\n`);
+    }
+    const { dependencies } = buildAffectedSuitesGraph(files, paths);
+    const known = new Set(paths);
+    for (const test of testFiles.filter((file) => known.has(file))) {
+      const visited = new Set<string>();
+      const queue = [test];
+      while (queue.length > 0) {
+        const file = queue.shift()!;
+        if (visited.has(file)) continue;
+        visited.add(file);
+        queue.push(...(dependencies.get(file) ?? []));
+      }
+      closure.set(test, new Set([...(closure.get(test) ?? []), ...visited]));
+    }
+  }
+  return closure;
+}
+
+/** W1-T8396 — the production {@link ImportClosureRead} against `repoDir`: the failing tests' import closure
+ *  over main's and the head's trees, fetching the head only when the checkout lacks it. A read that fails
+ *  is logged and unknown, never an empty closure. */
+export function buildImportClosureRead(repoDir: string, log: (step: string, extra?: Record<string, unknown>) => void): ImportClosureRead {
+  const gitText = (args: string[]) => hostWorktreeGitAsync(repoDir, args, { maxBuffer: 1 << 26 });
+  return async (pr, testFiles, mainSha) => {
+    try {
+      const present = await gitText(["cat-file", "-e", `${pr.headSha}^{commit}`]).then(() => true, () => false);
+      if (!present) await gitText(["fetch", "--no-tags", "origin", `+refs/pull/${pr.prNumber}/head`]);
+      return await importClosureAt(gitText, [mainSha, pr.headSha], testFiles);
+    } catch (error) {
+      log("refresh.clearance.closure_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha, error: boundedBaseProbeReason(error) });
+      return undefined;
+    }
+  };
+}
+
+/** W1-T8396 — main's tip as `repoDir` fetches it, for a fix rung given no `readMainTip`. */
+export async function mainTipViaGit(repoDir: string): Promise<string> {
+  await hostWorktreeGitAsync(repoDir, ["fetch", "--no-tags", "origin", "main"], { maxBuffer: 1 << 26 });
+  return (await hostWorktreeGitAsync(repoDir, ["rev-parse", "origin/main"])).trim();
 }
 
 export function buildSweepEffects(
@@ -2606,6 +2689,8 @@ export function buildSweepEffects(
   };
   const effects = buildSweepEffectsFromLib({
     reproduceFailingTestsOnMainImpl: buildBaseReproductionProbe(deps.config, reviewRepoDir, deps.ledgerPath, deps.log),
+    readTestImportClosureImpl: buildImportClosureRead(reviewRepoDir, deps.log),
+    reproduceFailingTestsOnMergeImpl: buildBaseReproductionProbe(deps.config, reviewRepoDir, deps.ledgerPath, deps.log, { merge: true }),
     repoRoot,
     localRepoName: deps.localRepoName ?? resolveOwnerRepo().repo,
     nowMsImpl: Date.now,
@@ -11665,6 +11750,9 @@ export async function runFixRung(opts: {
      * path unchanged.
      */
     readRedBaseRefreshFacts?: (prNumber: number) => RedBaseRefreshFacts | Promise<RedBaseRefreshFacts>;
+    /** W1-T8396: the trial-merge probe the exact-path refresh decides from. Unwired, the refresh is kept
+     *  as today and its `refresh.clearance` row says why. */
+    reproduceFailingTestsOnMerge?: NonNullable<SweepDeps["reproduceFailingTestsOnMerge"]>;
     /**
      * W1-T1095 (capability 3): the ledger rows the ONE-rebase-per-pull-request bound is folded
      * from ({@link fixRebaseAlreadySpent}). Defaults to reading `deps.ledgerPath`, the same
@@ -12184,7 +12272,31 @@ export async function runFixRung(opts: {
             : {}),
           refresh: decision.refresh,
         });
-        if (decision.refresh) {
+        // W1-T8396: an exact-path match says main touched the red's files, not that merging main clears
+        // the red — a failing test file that still fails on a trial merge is the PR's own. Rule 3 (no
+        // repeat on the same red) needs no read here: this arm's matched paths are themselves counted.
+        const refreshTestFiles = baseReproductionFiles(currentCiFailures);
+        const refreshChecks = [...new Set(currentCiFailures.map((failure) => failure.name))];
+        let refreshMainSha: string | undefined;
+        const probeMerge = deps.reproduceFailingTestsOnMerge;
+        if (decision.refresh && refreshTestFiles.length > 0 && probeMerge) {
+          // An unreadable main tip leaves the probe unrunnable, which keeps today's refresh.
+          refreshMainSha = await Promise.resolve(deps.readMainTip ? deps.readMainTip() : mainTipViaGit(opts.worktreePath)).then(
+            (sha) => sha, (error: unknown) => { deps.log("refresh.clearance.main_tip_unreadable", { error: boundedBaseProbeReason(error) }); return undefined; });
+        }
+        const clearance = decision.refresh ? await assessRefreshClearance({
+          failingTestFiles: refreshTestFiles,
+          reach: mainPathsReachingRed({ failingTestFiles: refreshTestFiles, mainChangedFiles: facts.baseChangedFiles, closure: undefined,
+            isHarnessPath: isCiHarnessPath, matchedPaths: decision.matchingBaseFiles }),
+          priorRefresh: false,
+        }, probeMerge && refreshMainSha !== undefined
+          ? () => probeMerge({ prNumber, headSha: review.headSha } as OpenPrView, refreshTestFiles, refreshMainSha!) : undefined)
+          : undefined;
+        if (clearance !== undefined) {
+          deps.log(REFRESH_CLEARANCE_STEP, refreshClearanceFields({ arm: "fix-rung", pr_number: prNumber, head_sha: review.headSha,
+            ...(refreshMainSha === undefined ? {} : { main_sha: refreshMainSha }), checks: refreshChecks, test_files: refreshTestFiles }, clearance));
+        }
+        if (decision.refresh && clearance?.refresh !== false) {
           const updated = await deps.updateBranch(prNumber);
           if (updated.ok) {
             const reason =
@@ -12193,6 +12305,10 @@ export async function runFixRung(opts: {
             deps.log("fix.base_refreshed", {
               strike: strikes + 1,
               pr_number: prNumber,
+              // W1-T8396: the red this refresh was taken on, so no arm repeats it on the head it makes.
+              head_sha: review.headSha,
+              red_checks: refreshChecks,
+              test_files: refreshTestFiles,
               behind_by: decision.behindBy,
               matching_base_files: decision.matchingBaseFiles,
               method: "merge",
@@ -20988,6 +21104,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // `readMergeFacts` so ordinary pre-strike mergeability checks do not pay for or confuse
           // this ci-log-only file-overlap optimization.
           readRedBaseRefreshFacts: (n) => redBaseRefreshFactsFromRest(owner, task.repo, n),
+          // W1-T8396: this rung's own checkout already holds the head, so its trial merge needs no fetch of it.
+          reproduceFailingTestsOnMerge: buildBaseReproductionProbe(config, worktreePath, ledgerPath, (s, extra) => log(s, extra), { merge: true }),
           updateBranch: (n) => ghUpdateBranch(owner, task.repo, n),
           // W1-T1044: the wall-clock bound on this rung's own worker spawn, and the best-effort
           // reclaim of whatever it abandoned — see runFixRung's own deps doc. W1-T1219: reads
