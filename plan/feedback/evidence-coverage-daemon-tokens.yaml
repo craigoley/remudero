@@ -18,8 +18,19 @@ attachments: []
 origin: cli
 status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/11019
+summary:
+  headline: Resolve the daemon token evidence gap
+  what_happened: Only 24 of 38 joined daemon worker calls (63.2%) included token
+    evidence in the past week, below the 90% floor. The gap has persisted since
+    September 28 and does not block work or PRs.
+  decision: Restore token evidence at the daemon ledger write site, or record why
+    the lane legitimately lacks it.
+  options:
+    - label: Restore evidence
+      consequence: Bring token coverage up to the 90% floor.
+    - label: Record a valid reason
+      consequence: Document why daemon calls legitimately lack token evidence.
 expansion: null
 submission_key: null
 thread_id: null
