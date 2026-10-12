@@ -2875,7 +2875,7 @@
     "test/the-knowledge-gardener-pins-its-own-retirement-golden.test.ts": 1600,
     "test/the-knowledge-gardener-tends-rules-and-skills.test.ts": 5,
     "test/the-lane-budget-counts-only-fleet-owned-prs.test.ts": 7200,
-    "test/the-lane-budget-follows-the-queue-governor-admission.test.ts": 4800,
+    "test/the-lane-budget-follows-the-queue-governor-admission.test.ts": 5000,
     "test/the-lane-reaper-says-why-it-keeps.test.ts": 2000,
     "test/the-last-attempt-steps-up-to-opus-or-sol.test.ts": 280,
     "test/the-ledger-archive-is-compacted-never-truncated.test.ts": 7,
