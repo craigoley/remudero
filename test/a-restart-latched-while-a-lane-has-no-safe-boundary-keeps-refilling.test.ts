@@ -125,9 +125,10 @@ test("W1-T7806: refill stays open under a latch with no run history", async () =
   } finally { await h.cleanup(); }
 });
 
-function worker(text: string): WorkerResult {
-  return { sessionId: "fixture", costUsd: 0, numTurns: 1, text, blocks: [], stderr: "", subtype: "success",
-    isError: false, apiError: false, permissionDenials: [], childEnvKeys: [], model: "test", effort: "test",
+function worker(text: string, isError = false): WorkerResult {
+  return { sessionId: "fixture", costUsd: 0, numTurns: 1, text, blocks: [], stderr: "",
+    subtype: isError ? "error_max_turns" : "success",
+    isError, apiError: false, permissionDenials: [], childEnvKeys: [], model: "test", effort: "test",
     tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false };
 }
 
@@ -163,6 +164,7 @@ async function boundaryRun(t: TestContext, restartAtWorkerBoundary: BoundaryOpti
     externalWaitFreshness: ownRead,
     spawn: async (args) => {
       if (++calls === 1) return worker("RECON REPORT\nOBSERVED: fixture\n");
+      if (calls > 2) return worker("fixture stops after reaching the preopen gate", true);
       mkdirSync(join(args.cwd, "src"), { recursive: true });
       writeFileSync(join(args.cwd, "src/D.ts"), "export const value = 42;\n");
       return worker("REPORT\nCOMMIT_MESSAGE: fix(test): retain boundary work\n");
@@ -198,13 +200,18 @@ test("W1-T7806: a refill admitted under the latch yields at its first boundary",
   } finally { await h.cleanup(); }
 });
 
-// W1-T7806 adds the latch to the boundary read; replacing the run's own read is W1-T8198's separate decision.
-test("W1-T7806: a clear latch leaves the run's own freshness read at the boundary", async (t) => {
+test("W1-T8198: a clear daemon latch continues past the worker boundary without its own freshness read", async (t) => {
   const ownStale = { ...stale, newSha: "c".repeat(40) };
-  const { outcome, gates, rows } = await boundaryRun(t, () => undefined, () => ownStale);
-  assert.equal(outcome.verdict, "handed_off");
-  assert.equal(gates, 0);
-  assert.equal(rows.find(({ step }) => step === "run.freshness_handoff")?.new_sha, ownStale.newSha);
+  let ownReads = 0;
+  const { outcome, calls, gates, rows } = await boundaryRun(t, () => undefined, () => {
+    ownReads++;
+    return ownStale;
+  });
+  assert.equal(gates, 1, "the clear daemon latch lets the worker reach the preopen gate");
+  assert.equal(calls, 3, "the run continues to the injected gate repair worker");
+  assert.equal(outcome.verdict, "failed", "the injected repair worker stops the fixture");
+  assert.equal(ownReads, 0, "the daemon latch is the sole freshness authority");
+  assert.equal(rows.some(({ step }) => step === "run.freshness_handoff"), false);
 });
 
 test("W1-T7806: refill closes as stale code once every holdout can yield", async () => {
