@@ -502,9 +502,9 @@ test("--run adds a second event reporter only when a duration output is requeste
   let capturedArgs: string[] = [];
   const code = main(["--root", root, "--run", "fast"], {
     env: { RMD_TEST_DURATION_OUTPUT: output },
-    spawn: (_cmd: string, args: string[]) => {
+    spawn: (_cmd: string, args: string[], spawnOpts?: unknown) => {
       capturedArgs = args;
-      return { status: 0 };
+      return finishJudgedRun(args, spawnOpts);
     },
   });
   assert.equal(code, 0);

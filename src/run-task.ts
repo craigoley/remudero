@@ -192,7 +192,7 @@ import { mergedInLastDayAsync } from "./lib/fleet-lane.js";
 import { startDaemonSreLane } from "./lib/daemon.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
+import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDue, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { gardenSchedule } from "./lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "./lib/gardener-runtime.js";
@@ -210,7 +210,7 @@ import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputs, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, evidenceCoveragePassDue, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
-import { daemonSreLaneInput, openIncidentFeedbackOrigins } from "./lib/sre-lane.js";
+import { daemonSreLaneInput, openIncidentFeedbackOrigins, resolveSreLaneInstance, sreLaneEnabled, sreLaneStartRow } from "./lib/sre-lane.js";
 import { fileConsumerVia, gitHeartbeatSource, HOST_RESOURCE, runHostResourcePassAsync } from "./lib/host-resource-gardener.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreOperatorEscalation, sreRunbookCatalog } from "./lib/sre-runbooks.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
@@ -463,6 +463,7 @@ import {
   v8HeapStatistics,
 } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree, sweepStrandedReviewWorktrees } from "./lib/review-worktree-reclaim.js";
+import { withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
 import { sweepReclaimableArtifacts } from "./lib/disk-artifact-reclaim.js";
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
 // (readGhRateLimitRemaining, unrelated cadence, unchanged) — reads BOTH gh api rate_limit
@@ -1639,6 +1640,7 @@ import {
   readyDraftPullRequest,
   DEFAULT_SWEEP_POLICY,
   decideRedBaseRefresh,
+  RUNNER_TIMEOUT_LINE,
   prAddedLinesFromPullFiles,
   failingSourceFilesFromCiFailures,
   failingTestFilesFromCiFailures,
@@ -1859,6 +1861,8 @@ export type FreshTreeReviewSeams = {
   /** Run `rmd review <pr> …` with `cwd` at the fresh worktree. Resolves to the exit code; on a
    *  non-zero exit it first hands `onFailure` the child's bounded stderr tail (W1-T4055). */
   spawnReview: (worktree: string, args: string[], onFailure?: (failure: string) => void) => Promise<number>;
+  /** Tests may replace ownership; production holds the general reaper's real run-lock token. */
+  withWorktreeLease?: <T>(worktree: string, action: () => Promise<T>) => Promise<T>;
   /**
    * Classify the stable reviewer path before an add. `unsafe` deliberately combines a registered
    * path with a wrong ref, a branch checkout, dirt, a missing checkout, or an unreadable registry:
@@ -1984,8 +1988,19 @@ export function buildFreshTreeReviewRunner(
       }
       // RMD_SELF_SYNC_DONE keeps the child from trying to sync a checkout of its own: it is
       // already AT origin/main, and a self-sync attempt there is a refusal and a wasted fetch.
-      return await deps.spawnReview(worktree, [prArg, ...rest], onFailure);
+      const reviewerTree = worktree;
+      const run = async () => {
+        const existing = (deps.inspectExistingWorktree ?? ((dir, path, revision) =>
+          inspectFreshReviewerWorktree(dir, path, revision, deps.git)))(repoDir, reviewerTree, sha);
+        if (existing !== "reusable") {
+          prepared.delete(sha);
+          throw new Error(`cached reviewer worktree at ${reviewerTree} is no longer an exact clean detached checkout of ${sha}`);
+        }
+        return deps.spawnReview(reviewerTree, [prArg, ...rest], onFailure);
+      };
+      return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(reviewerTree, run);
     } catch (err) {
+      prepared.delete(sha);
       // Never a verdict (see the doc above): swallow the failure, but carry WHY so a reader of
       // stderr — not just the caller's silent `undefined` — can tell a fetch/worktree/spawn
       // refusal from the ordinary "no runner wired" case. W1-T4055: and so can the ledger.
@@ -3368,6 +3383,8 @@ export function watchDispatchSpawn(
     task: Pick<ReturnType<typeof selectTask>, "files" | "acceptance">;
     provider: () => string | undefined;
     log: (step: string, fields: Record<string, unknown>) => void;
+    /** The daemon's recycle-PAUSE reader: a pending recycle ends the round on the checkpoint path. */
+    recyclePending?: () => string | undefined;
   },
   seams: {
     runWatchdog?: typeof runQuietWorkerWatchdog;
@@ -3399,14 +3416,15 @@ export function watchDispatchSpawn(
     judge: seams.judge ?? productionQuietWorkerJudge({ cwd: spawnArgs.cwd, settingsFile: spawnArgs.settingsFile }),
     nudge: (message) => (seams.deliver ?? deliverOperatorAnswerToRunningWorker)(taskId, message, { ledger: (event, fields) => log(event, fields ?? {}) })
       === "delivered" ? "delivered" : "unsupported",
-    endRound: async (reason) => {
+    ...(watch.recyclePending ? { recyclePending: watch.recyclePending } : {}),
+    endRound: async (reason, trigger) => {
       if ((spawnArgs.workerClass ?? "implement") !== "implement") return { ended: false, reason: "not an implement worker" };
       const cwd = spawnArgs.cwd;
       try {
         // The W1-T7697 checkpoint path (yieldAtWorkerBoundary): retain the disk work, push it, then release the lane.
         if ((seams.hasUncommittedChanges ?? worktreeHasUncommittedChanges)(cwd)) {
           const checkpoint = (seams.commit ?? commitWorkerEdits)(cwd, task.files ?? [],
-            `wip: yield at quiet worker\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume\nfailed: none\n\nRemudero-Task: ${taskId}`,
+            `wip: yield at ${trigger === "recycle" ? "container recycle" : "quiet worker"}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume\nfailed: none\n\nRemudero-Task: ${taskId}`,
             {}, task.acceptance);
           if (!checkpoint.committed || checkpoint.undeclared.length > 0) {
             return { ended: false, reason: `checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}` };
@@ -3417,7 +3435,7 @@ export function watchDispatchSpawn(
         return { ended: false, reason: `checkpoint failed: ${String((error as Error)?.message ?? error)}` };
       }
       const checkpointSha = (seams.headSha ?? ((dir: string) => hostWorktreeGit(dir, ["rev-parse", "HEAD"]).trim()))(cwd);
-      state.ended = new QuietRoundEndedError({ checkpointSha, reason });
+      state.ended = new QuietRoundEndedError({ checkpointSha, reason, ...(trigger ? { trigger } : {}) });
       abort.abort();
       return { ended: true, checkpointSha };
     },
@@ -3427,6 +3445,23 @@ export function watchDispatchSpawn(
   return guardSpawnWithQuietWatchdog(rawSpawn, {
     watchdog, abort, onRootPid: (pid) => { state.rootPid = pid; }, ended: () => state.ended,
   });
+}
+
+/** The rows a round ended mid-stream writes. A recycle's is the W1-T7697 freshness yield taken mid-round: the same
+ * `run.freshness_handoff` receipt and `freshness_yield` verdict as `yieldAtWorkerBoundary`, so the next run restores the
+ * pushed checkpoint (`pendingWorkerBoundaryHandoffs`) instead of starting over. */
+export function roundEndedHandoffRows(
+  detail: QuietRoundEndedError["detail"],
+  branch: string,
+): Array<{ step: string; fields: Record<string, unknown> }> {
+  const headSha = detail.checkpointSha ?? null;
+  if (detail.trigger !== "recycle") {
+    return [{ step: "verdict", fields: { verdict: "handed_off", reason: "quiet_worker_round_ended", branch, head_sha: headSha, detail: detail.reason } }];
+  }
+  return [
+    { step: "run.freshness_handoff", fields: { waiting_on: "worker_round", branch, head_sha: headSha, trigger: "recycle", detail: detail.reason } },
+    { step: "verdict", fields: { verdict: "handed_off", reason: "freshness_yield", waiting_on: "worker_round", branch, head_sha: headSha, detail: detail.reason } },
+  ];
 }
 
 const WORKER_TELEMETRY_TEXT_MAX_CHARS = 240;
@@ -17527,7 +17562,7 @@ async function runTask(
     // W1-T7807: the quiet-worker watchdog rides every REAL dispatch spawn (an injected spawn has no process tree to read).
     const watchedSpawn = watchDispatchSpawn(rawSpawn, {
       enabled: !opts.spawn, taskId, runId, ledgerPath, fallbackBoundMs: workerStallFallbackMs, spawnArgs: effectiveSpawnArgs, task, log,
-      provider: () => selectionAssignment?.selected.provider,
+      provider: () => selectionAssignment?.selected.provider, recyclePending: opts.externalWaitRecycle,
     });
     return recordBenchmarkWorkerAttempt(() => watchedSpawn({
       ...effectiveSpawnArgs,
@@ -21332,12 +21367,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     say(`verdict: ${terminalVerdict} (${outcome.reason}) — PR left OPEN: ${prUrl}`);
     return { taskId, runId, prUrl, merged: false, costUsd, verdict: terminalVerdict };
   } catch (err) {
-    // W1-T7807: the quiet-worker watchdog's `end_round` verdict stopped this round AFTER pushing a checkpoint. That is a
-    // handoff (resumable from the branch), never a failure, and the worktree is kept exactly as the freshness yield keeps it.
+    // W1-T7807: the quiet-worker watchdog's `end_round` verdict (or a pending recycle) stopped this round AFTER pushing a
+    // checkpoint. That is a handoff, never a failure, and the worktree is kept exactly as the freshness yield keeps it.
     if (err instanceof QuietRoundEndedError) {
-      log("verdict", { verdict: "handed_off", reason: "quiet_worker_round_ended", branch, head_sha: err.detail.checkpointSha ?? null,
-        detail: err.detail.reason, cost_usd: costUsd, ...terminalVerdictFields(null) });
-      say(`verdict: handed_off — the quiet-worker watchdog ended the round (${err.detail.reason})`);
+      for (const row of roundEndedHandoffRows(err.detail, branch)) {
+        log(row.step, row.step === "verdict" ? { ...row.fields, cost_usd: costUsd, ...terminalVerdictFields(null) } : row.fields);
+      }
+      say(`verdict: handed_off — ${err.detail.trigger === "recycle" ? "a pending recycle" : "the quiet-worker watchdog"} ended the round (${err.detail.reason})`);
       return { taskId, runId, merged: false, costUsd, verdict: "handed_off" };
     }
     // W1-T1045: the clock-bound watchdog (worker.ts) aborted a silent dispatch spawn — NAME it
@@ -26238,15 +26274,41 @@ export function ciLearningPlanOrigins(root: string): string[] {
   }
 }
 
-/** THE RESERVATION PATH, never a counter: the same `reserveTaskIdRemote` + `gitRemoteRefReserver`
- *  pair `next-task-id --reserve` uses, so a machine-filed id races the fleet's own ids correctly.
- *  FAIL-CLOSED by inheritance — an unreachable origin throws here rather than minting optimistically. */
+const gardenMintBudgets = new Map<string, GardenMintBudget>();
+
+/** The shared reservation path, with a learned deadline for CLI pushes and daemon children.
+ *  Budgets survive rebuilding a spec; a timeout never releases an id that may already be held. */
+
 export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields: Record<string, unknown>) => void,
-  executeAsync: (file: string, args: string[], options: { maxBuffer: number }) => Promise<{ stdout: string; stderr?: string }> = execFilePromise):
+  executeAsync: (file: string, args: string[], options: { maxBuffer: number; timeout: number; killSignal: "SIGKILL"; signal: AbortSignal }) => Promise<{ stdout: string; stderr?: string }> = execFilePromise,
+  opts: { budget?: GardenMintBudget; clock?: Pick<Clock, "now">; pollIntervalMs?: () => number;
+    loadPolicy?: () => { values: Pick<Policy["values"], "pollIntervalMs"> } } = {}):
   ((filingBranch?: string) => string) & { async: (filingBranch: string) => Promise<string> } {
+  let budget = opts.budget ?? gardenMintBudgets.get(root);
+  if (!budget) {
+    const readPolicy = opts.loadPolicy ?? loadDefaultPolicy;
+    budget = new GardenMintBudget(opts.pollIntervalMs ?? (() => readPolicy().values.pollIntervalMs));
+    gardenMintBudgets.set(root, budget);
+  }
+  const mintBudget = budget;
+  const clock = opts.clock ?? clockFromMillisFn(() => performance.now());
+  const now = () => clock.now();
   const mintSync = (filingBranch?: string) => {
-    const mint = mintNextTaskIdWithHistory({ planPath: join(root, "plan", "tasks.yaml"), repoRoot: root });
-    const runGit = (args: string[]) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
+    const started = now();
+    const bound = mintBudget.boundMs();
+    const runGit = (args: string[]) => {
+      const remaining = bound - (now() - started);
+      if (remaining <= 0) throw new GardenMintTimedOutError(now() - started, bound);
+      const result = spawnSync("git", args, { cwd: root, encoding: "utf8", timeout: Math.ceil(remaining), killSignal: "SIGKILL" });
+      if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") throw new GardenMintTimedOutError(now() - started, bound);
+      return result;
+    };
+    const mint = mintNextTaskIdWithHistory({ planPath: join(root, "plan", "tasks.yaml"), repoRoot: root,
+      gitRunner: (args) => {
+        const result = runGit(args);
+        if (result.status !== 0) throw new Error(result.stderr || String(result.error));
+        return result.stdout;
+      } });
     // The bridge supplies its actual landing identity, even when this manual command starts from
     // main. Reserving under the checkout's source branch would create a holder claim its true
     // landing branch cannot satisfy.
@@ -26254,31 +26316,61 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
       mint.n,
       gatedRemoteRefReserver({ run: gitRunAdapter(runGit), filingBranch, lane: "ci-learning", log }),
     );
+    if (now() - started >= bound) throw new GardenMintTimedOutError(now() - started, bound);
+    mintBudget.observe(now() - started);
     return held.taskId;
   };
   return Object.assign(mintSync, {
     async: async (filingBranch: string): Promise<string> => {
-      const { stdout, stderr } = await executeAsync(process.execPath, ["--import", import.meta.resolve("tsx"),
-        "--input-type=module", "--eval",
-        `import { format } from "node:util";
-         const rows = [];
-         console.log = (...args) => rows.push({ say: format(...args) });
-         const { ciLearningTaskIdMinter } = await import(${JSON.stringify(import.meta.url)});
-         try {
-           const id = ciLearningTaskIdMinter(process.argv[1], (step, fields) => rows.push({ step, fields }))(process.argv[2]);
-           process.stdout.write(JSON.stringify({ id, rows }));
-         } catch (error) {
-           process.stdout.write(JSON.stringify({ error: String(error?.message ?? error), rows }));
-         }`, root, filingBranch], { maxBuffer: 1 << 26 });
-      const result = JSON.parse(stdout) as { id: string; error?: string;
-        rows: Array<{ say: string } | { step: string; fields: Record<string, unknown> }> };
-      if (stderr) process.stderr.write(stderr);
-      for (const row of result.rows) {
-        if ("say" in row) console.log(row.say);
-        else log?.(row.step, row.fields);
+      const started = now();
+      const bound = mintBudget.boundMs();
+      const controller = new AbortController();
+      let timer: ReturnType<typeof setTimeout>;
+      const expired = new Promise<never>((_, reject) => {
+        const expire = () => {
+          const remaining = bound - (now() - started);
+          if (remaining > 0) {
+            timer = setTimeout(expire, Math.ceil(remaining));
+            return;
+          }
+          reject(new GardenMintTimedOutError(now() - started, bound));
+          controller.abort();
+        };
+        timer = setTimeout(expire, Math.ceil(bound));
+      });
+      try {
+        const { stdout, stderr } = await Promise.race([executeAsync(process.execPath, ["--import", import.meta.resolve("tsx"),
+          "--input-type=module", "--eval",
+          `import { format } from "node:util";
+           const rows = [];
+           console.log = (...args) => rows.push({ say: format(...args) });
+           const { ciLearningTaskIdMinter } = await import(${JSON.stringify(import.meta.url)});
+           const { GardenMintBudget } = await import(${JSON.stringify(new URL("./lib/gardener.js", import.meta.url).href)});
+           try {
+             const id = ciLearningTaskIdMinter(process.argv[1], (step, fields) => rows.push({ step, fields }), undefined,
+               { budget: new GardenMintBudget(() => ${JSON.stringify(bound)}) })(process.argv[2]);
+             process.stdout.write(JSON.stringify({ id, rows }));
+           } catch (error) {
+             process.stdout.write(JSON.stringify({ error: String(error?.message ?? error), timedOut: error?.name === "GardenMintTimedOutError", rows }));
+           }`, root, filingBranch], { maxBuffer: 1 << 26, timeout: Math.ceil(bound), killSignal: "SIGKILL", signal: controller.signal }), expired]);
+        const result = JSON.parse(stdout) as { id: string; error?: string; timedOut?: boolean;
+          rows: Array<{ say: string } | { step: string; fields: Record<string, unknown> }> };
+        if (stderr) process.stderr.write(stderr);
+        for (const row of result.rows) {
+          if ("say" in row) console.log(row.say);
+          else log?.(row.step, row.fields);
+        }
+        if (now() - started >= bound) throw new GardenMintTimedOutError(now() - started, bound);
+        if (result.timedOut) throw new GardenMintTimedOutError(now() - started, bound);
+        if (result.error !== undefined) throw new Error(result.error);
+        mintBudget.observe(now() - started);
+        return result.id;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code === "ETIMEDOUT" || (error as { killed?: boolean })?.killed) throw new GardenMintTimedOutError(now() - started, bound);
+        throw error;
+      } finally {
+        clearTimeout(timer!);
       }
-      if (result.error !== undefined) throw new Error(result.error);
-      return result.id;
     },
   });
 }
@@ -37965,6 +38057,7 @@ function refreshKnowledgeAssertions(root: string): string[] {
 
 /** What {@link buildRegisteredGarden} builds a garden over: the daemon's own config, repo and ledger writers. */
 export interface GardenBuildContext {
+  pollIntervalMs?: number;
   config: Config;
   repoRoot: string;
   owner: string;
@@ -37984,6 +38077,9 @@ export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => 
 export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBuildContext, opts: { hourly?: boolean } = {}): RegisteredGardenPass | Promise<RegisteredGardenPass> {
   const { config, repoRoot, owner, repo, log, raiseDuplicate } = ctx;
   const stateDir = join(config.root, "state");
+  const mintOptions = {
+    pollIntervalMs: ctx.pollIntervalMs === undefined ? undefined : () => ctx.pollIntervalMs!,
+  };
   const deps = (garden: Parameters<typeof gardenCheckout>[0]["name"], escalate?: (e: Escalation) => string): GardenerDeps => ({
     stateDir,
     repoRoot,
@@ -38021,14 +38117,14 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // or scorecard covers is filed through the machine-filing path, bounded by the queue and the day's merges.
     case "scout": {
       const d = deps("scout");
-      return gardenPass(scoutGardenSpec(d, { mintTaskId: ciLearningTaskIdMinter(repoRoot, log) }), d);
+      return gardenPass(scoutGardenSpec(d, { mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions) }), d);
     }
     // W1-T4116: the gates tighten, refresh and propose demoting themselves from their own
     // measurements. The ratchets are ES modules, so the garden starts once they have loaded.
     case "gate": {
       const d = deps("gate");
       return loadGateProbes(repoRoot).then(
-        (probes) => gardenPass(gateGardenSpec(d, probes), d),
+        (probes) => gardenPass(gateGardenSpec(d, probes, { mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions) }), d),
         (e: unknown) => {
           log("gate.gardener_failed", { error: String((e as Error)?.message ?? e) });
           return noPass;
@@ -38111,14 +38207,15 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         gateFireRates: () => readGateFireRateReport(stateDir),
         planState: () => readCiFrictionPlanState(repoRoot),
         ownerSearch: gitCiFrictionOwnerSearch((args) => execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 })),
-        mintTaskId: ciLearningTaskIdMinter(repoRoot, log),
+        mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
       };
       return gardenPass(ciFrictionGardenSpec(d, sources), d);
     }
     case "flow-remedy": {
       const d = deps("flow-remedy", raiseDuplicate);
       return gardenPass(flowGardenSpec(d, {
-        owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot, log),
+        owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
+        admission: { owner, repo, settings: config.contributorAdmission },
         escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log }),
       }), d);
     }
@@ -38127,7 +38224,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "fix-lane": {
       const d = deps("fix-lane", raiseDuplicate);
       return gardenPass(fixLaneGardenSpec(d, {
-        owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot, log),
+        owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
         escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log }),
       }), d);
     }
@@ -38140,10 +38237,11 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         openWorkspace: daemonGardenWorkspace(ctx, "selector-shadow"),
         log,
       };
-      return selectorShadowGardenPass(d, owner, repo, ciLearningTaskIdMinter(repoRoot, log));
+      return selectorShadowGardenPass(d, owner, repo, ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions));
     }
     case "flow":
-      return flowGardenPass(deps("flow"), owner, repo, ciLearningTaskIdMinter(repoRoot, log));
+      return flowGardenPass(deps("flow"), owner, repo, ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
+        { admission: { owner, repo, settings: config.contributorAdmission } });
     case "evidence-coverage":
       return withDue(() => {
         try {
@@ -38170,7 +38268,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
         mainHistory: (sinceIso) => readMainHistory(repoRoot, sinceIso),
         planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
-        mintTaskId: ciLearningTaskIdMinter(repoRoot, log),
+        mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
         fileExists: (file) => existsSync(join(repoRoot, file)),
       };
       return gardenPass(hotFileGardenSpec(d, sources), d);
@@ -38196,7 +38294,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // W1-T4804: host disk, swap and inodes are projected to full from the heartbeat history and
     // answered in tiers against each host's own janitor cadence. Off: state/HOST_RESOURCE_OFF.
     case "host-resource": {
-      const mintTaskId = ciLearningTaskIdMinter(repoRoot, log);
+      const mintTaskId = ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions);
       const ports = {
         stateDir,
         log,
@@ -38205,7 +38303,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         openIncidentOrigins: () => openIncidentFeedbackOrigins(repoRoot),
         escalate: raiseDuplicate,
         planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
-        fileConsumer: fileConsumerVia(daemonGardenWorkspace(ctx, "host-resource"), mintTaskId),
+        fileConsumer: fileConsumerVia(daemonGardenWorkspace(ctx, "host-resource"), mintTaskId, log),
       };
       return async () => {
         try {
@@ -38859,7 +38957,7 @@ export async function daemonCommand(
     escalate({ ...e, runId }, { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId });
   const requestShardRepair = shardRepairRequester(join(config.root, "state"), log);
   const reportPlanQuarantine = quarantineReporter(log, raiseDuplicate, requestShardRepair);
-  const gardenContext: GardenBuildContext = { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate };
+  const gardenContext: GardenBuildContext = { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate, pollIntervalMs: opts.pollIntervalMs };
   const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
     ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
   const gardenPassSpawn = daemonGardenPassSpawn(log, injectedPassSpawn);
@@ -39752,12 +39850,12 @@ export async function daemonCommand(
                 // W1-T5361: the machine-filing judge is one of them, so its git work runs in a child too.
                 ...REGISTERED_GARDEN_NAMES.map(offLoopGarden),
                 // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
-                // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). "Only on the SRE
-                // registry instance" has no selector yet -- `RegistryInstance` carries no role or
-                // state_dir a daemon can identify itself by -- so `RMD_SRE_LANE=1` is a safe-default-
-                // OFF opt-in an operator sets on the ONE instance meant to run it until one exists.
-                // The starter is inert until called, so it is built on every start and dropped
-                // unless opted in.
+                // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). W1-T8232: it runs on
+                // the registry's live `primary: true` instance, resolved from this daemon's own
+                // state root (`sreLaneEnabled`); `RMD_SRE_LANE=0` turns it off and `=1` still turns
+                // it on anywhere. The starter is inert until called, so it is built on every start
+                // and dropped when off; either way one `sre_lane.started`/`sre_lane.disabled` row
+                // says so. `state/SRE_LANE_OFF` stays the pause switch.
                 ...[
                   startDaemonSreLane(
                     (mergedLastDay) => daemonSreLaneInput({
@@ -39783,7 +39881,18 @@ export async function daemonCommand(
                     () => mergedInLastDayAsync(repoRoot),
                     log,
                   ),
-                ].filter(() => process.env.RMD_SRE_LANE === "1"),
+                ].filter(() => {
+                  const sreLane = {
+                    instance: resolveSreLaneInstance({
+                      stateRoot: config.root,
+                      registryPath: process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(repoRoot),
+                    }),
+                    env: { RMD_SRE_LANE: process.env.RMD_SRE_LANE },
+                  };
+                  const row = sreLaneStartRow(sreLane);
+                  log(row.step, row.fields);
+                  return sreLaneEnabled(sreLane);
+                }),
               ],
             }
           : {}),
@@ -42079,6 +42188,12 @@ function stepErrorContext(lines: readonly string[]): number[] {
 }
 
 export function extractCiFailureRegion(log: string, tailLines: number): string {
+  const pool = poolVerdictRetention();
+  for (const line of log.split("\n")) pool.push(line);
+  return pool.wrap(extractCiFailureRegionBase(log, tailLines));
+}
+
+function extractCiFailureRegionBase(log: string, tailLines: number): string {
   const lines = log.split("\n").map((line) => line.replace(ACTIONS_LOG_TIMESTAMP, ""));
   const kept = new Set<number>();
   const isRetryLine = (line: string) => CI_FLAKE_RETRY_LINE.test(line);
@@ -42175,6 +42290,31 @@ export function gateVerdictRetention(): { push(line: string): void; wrap(region:
   };
 }
 
+/** W1-T8038: the pure-test-pool verdict lines — pool failed, also fails isolated, passes isolated, POOL DEFECT
+ *  with its leaker and victim, and each judged run's complete/FAILED line. Locate-probe chatter is not one. */
+const CI_POOL_VERDICT_LINE =
+  /^pure-test-pool: (?:the pool of \d+ file\(s\) failed|the pooled files also fail|every pooled file passes|POOL DEFECT|[A-Za-z]+ run complete|[A-Za-z]+ RUN )/;
+/** PRIMARY CONTROL: pool verdict lines kept, one copy each. A shard prints a handful; this only bounds a runaway. */
+export const MAX_RETAINED_POOL_LINES = 24;
+export const RETAINED_POOL_HEADER = "--- pure-test-pool verdict line(s) retained from earlier in this job ---";
+
+/** Like {@link gateVerdictRetention}: the pool's verdict lines ride along wherever they sit in the job, because
+ *  a shard cancelled at its ceiling prints them far above the runner's own cancel marker. */
+export function poolVerdictRetention(): { push(line: string): void; wrap(region: string): string } {
+  const kept: string[] = [];
+  return {
+    push(line) {
+      const trimmed = line.replace(ACTIONS_LOG_TIMESTAMP, "").trim();
+      if (CI_POOL_VERDICT_LINE.test(trimmed) && kept.length < MAX_RETAINED_POOL_LINES && !kept.includes(trimmed)) kept.push(trimmed);
+    },
+    wrap(region) {
+      const have = new Set(region.split("\n").map((l) => l.trim()));
+      const missing = kept.filter((line) => !have.has(line));
+      return missing.length === 0 ? region : [RETAINED_POOL_HEADER, ...missing, "", region].join("\n");
+    },
+  };
+}
+
 export function ciFailureRegionReducer(tailLines: number): { push(rawLine: string): void; finish(): string } {
   const regionCap = Math.max(1, tailLines);
   const remedyCap = MAX_RETAINED_REMEDY_LINES + regionCap;
@@ -42190,6 +42330,7 @@ export function ciFailureRegionReducer(tailLines: number): { push(rawLine: strin
   let inTapFailure = false;
   let failingTestsState: "unseen" | "open" | "closed" = "unseen";
   const verdict = gateVerdictRetention();
+  const pool = poolVerdictRetention();
   const select = (at: number, line: string): void => {
     let slot = selected.length;
     while (slot > 0 && selected[slot - 1].index >= at) {
@@ -42204,6 +42345,7 @@ export function ciFailureRegionReducer(tailLines: number): { push(rawLine: strin
       index += 1;
       const line = rawLine.replace(ACTIONS_LOG_TIMESTAMP, "");
       verdict.push(line);
+      pool.push(line);
       const trimmedRaw = rawLine.trim();
       if (remedies.length < remedyCap && remedyGeneratorNamedInLog(rawLine) !== undefined && !remedies.includes(trimmedRaw)) {
         remedies.push(trimmedRaw);
@@ -42239,7 +42381,7 @@ export function ciFailureRegionReducer(tailLines: number): { push(rawLine: strin
             : tail.join("\n").trim();
       const seen = new Set(region.split("\n").map((l) => l.trim()).filter((l) => remedyGeneratorNamedInLog(l) !== undefined));
       const retained = remedies.filter((l) => !seen.has(l)).slice(0, MAX_RETAINED_REMEDY_LINES);
-      return verdict.wrap(retained.length === 0 ? region : [RETAINED_REMEDY_HEADER, ...retained, "", region].join("\n"));
+      return verdict.wrap(pool.wrap(retained.length === 0 ? region : [RETAINED_REMEDY_HEADER, ...retained, "", region].join("\n")));
     },
   };
 }
@@ -42320,13 +42462,22 @@ function* ciFailuresSteps(
     // Hoisted out of the `try` so the fallback can reach it after the read has already failed.
     const jobId = checkJobId(c);
     let annotationFallback: CiAnnotationFallback | undefined;
+    let runnerTimeoutLines: string | undefined;
     if (jobId && annotationReads < fetch.annotationReadLimit) {
       try {
         annotationReads += 1;
         const messages = (yield* step(() => fetch.fetchAnnotations(owner, repo, jobId))).filter((m) => m.trim() !== "");
         const evidence = messages.filter((m) => !isBareExitCodeAnnotation(m));
         const bareExitOnly = messages.length > 0 && evidence.length === 0;
-        if (evidence.length > 0) {
+        // W1-T8038: a job killed at its ceiling annotates only the runner's own timeout lines, which name no test.
+        // They are kept, and the job log is read beside them below.
+        if (evidence.length > 0 && evidence.every((m) => RUNNER_TIMEOUT_LINE.test(m))) {
+          runnerTimeoutLines = evidence.join("\n").split("\n").slice(-tailLines).join("\n");
+          logTail = runnerTimeoutLines;
+          logUnavailable = undefined;
+          tailSource = "annotations";
+          annotationFallback = { outcome: "runner-timeout-only" };
+        } else if (evidence.length > 0) {
           logTail = evidence.join("\n").split("\n").slice(-tailLines).join("\n");
           logUnavailable = undefined;
           tailSource = "annotations";
@@ -42353,7 +42504,7 @@ function* ciFailuresSteps(
     } else if (jobId) {
       annotationFallback = { outcome: "skipped-limit" };
     }
-    if (jobId && (logTail.trim() === "" || annotationFallback?.outcome === "bare-exit-code")) {
+    if (jobId && (logTail.trim() === "" || annotationFallback?.outcome === "bare-exit-code" || runnerTimeoutLines !== undefined)) {
       try {
         const readRegion = fetch.readJobLogRegion;
         if (readRegion) logTail = yield* step(() => readRegion(owner, repo, jobId, tailLines));
@@ -42366,8 +42517,15 @@ function* ciFailuresSteps(
           for (const line of out.split("\n")) verdict.push(line.replace(ACTIONS_LOG_TIMESTAMP, ""));
           logTail = verdict.wrap(retainGeneratorRemediesForRegion(out, extracted));
         }
-        logUnavailable = logTail.trim() === "" ? { kind: "empty-log" } : undefined;
-        if (logUnavailable === undefined) tailSource = "log";
+        if (runnerTimeoutLines !== undefined) {
+          // The runner line stays beside the region so the timeout stays visible; an empty log keeps the annotations.
+          logTail = logTail.trim() === "" ? runnerTimeoutLines : `${runnerTimeoutLines}\n${logTail}`;
+          logUnavailable = undefined;
+          tailSource = logTail === runnerTimeoutLines ? "annotations" : "log";
+        } else {
+          logUnavailable = logTail.trim() === "" ? { kind: "empty-log" } : undefined;
+          if (logUnavailable === undefined) tailSource = "log";
+        }
       } catch (err) {
         let detail = "unknown error";
         try {
@@ -42378,8 +42536,15 @@ function* ciFailuresSteps(
         } catch {
           /* keep the placeholder — a cause is still named, which is the whole point */
         }
-        logUnavailable = { kind: "fetch-failed", detail };
-        logTail = "";
+        if (runnerTimeoutLines !== undefined) {
+          // The log could not be read, but the runner's own timeout lines were: keep exactly what was read before.
+          logTail = runnerTimeoutLines;
+          logUnavailable = undefined;
+          tailSource = "annotations";
+        } else {
+          logUnavailable = { kind: "fetch-failed", detail };
+          logTail = "";
+        }
       }
     }
     failures.push({

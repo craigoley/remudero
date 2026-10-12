@@ -2,6 +2,7 @@
   title: "A BUILD PR IS TITLED AFTER ITS TASK, NEVER AFTER A CHECKPOINT — when every subject on a run branch is a `wip:` checkpoint, `prTitleFromBranchCommits` strips the marker and titles the PR after the checkpoint, so W1-T7807's 700-line watchdog merged as \"chore: tests and census repairs\" (#10785) and W1-T6085 as \"chore: yield at worker\" (#10834)"
   repo: remudero
   depends_on: []
+  dispatch_hold: true  # operator 2026-10-12: held for a session build — restart churn keeps interrupting it; release after the session PR merges or if the session hands it back
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -12,7 +13,7 @@
   plan_refs: [W1-T7807, W1-T6085, W1-T7697, W1-T7096, W1-T1012]
   files: [src/lib/unfinished-checkpoint.ts, src/run-task.ts, test/a-build-pr-is-titled-after-its-task.test.ts]
   status: queued
-  priority: 2
+  priority: 1
   attempts: 0
   rationale: |
     READ on origin/main cb58d3155 (2026-10-11).
@@ -43,6 +44,16 @@
       - head re-home, which copies the old title (src/lib/head-rehome.ts:156);
       - the feedback lane (src/lib/feedback.ts:658).
     The fix lane never edits a title. So the defect is the open-time title, and that is where this task fixes it.
+    AMENDED 2026-10-11 (operator approval): priority 2 -> 1. W1-T7957 (priority 1) depends on this task. This task's last
+    build branch, run-W1-T7952-1791724959460, stopped at "wip: yield at checkpoint" (13:29:55Z). A THIRD INSTANCE,
+    read on origin/main 233304449: "chore: merge main into the restored checkpoint (#10936)", Remudero-Task
+    W1-T8047. Its newest commit is the harness's own restore merge. `restoreBoundaryCheckpoint` (src/run-task.ts:5076)
+    writes it with `commit-tree -m "wip: merge main into the restored checkpoint"` when a fresh run resumes a
+    boundary checkpoint on current main (#10862). Every other subject on that branch is "wip: yield at worker" or
+    "wip: yield at checkpoint", so `prTitleFromBranchCommits` (src/lib/unfinished-checkpoint.ts:129) found no
+    non-checkpoint subject and returned `stripWipMarker` of the newest one, the merge. So a harness MERGE commit
+    named the PR. The design below covers it because the merge subject carries the `wip:` marker. A test pins it,
+    so an unmarked harness merge subject can never become the title or supply its type.
   design: |
     1. A TASK TITLE FOR A FILED BUILD. Add `prTitleForTask(subjects, task)` to src/lib/unfinished-checkpoint.ts:
        - The subject is the shard title's lead clause: the text before the first " — ", or the whole title
@@ -51,7 +62,9 @@
          the type is `feat` with no scope. A stripped checkpoint's `chore` is never used.
        - The result goes through `fitConventionalTitle` (src/lib/commit-message.ts:75), so it never exceeds
          header-max-length 100.
-       It never returns a checkpoint's words.
+       It never returns a checkpoint's words. A merge commit's subject (the restore merge from
+       `restoreBoundaryCheckpoint`, or any other merge subject) never supplies the words or the type. It is
+       skipped the same way a checkpoint is.
     2. WIRE IT AT THE ONE OPEN SITE. `branchPrTitle` takes the task. At src/run-task.ts:20435, a filed run
        branch titles its PR with `prTitleForTask`. `prTitleFromBranchCommits` keeps its current behaviour for
        callers with no task (the retro open at :33948 and the plan-filing sites), so nothing outside filed builds
@@ -69,10 +82,13 @@
       proof: 'grep: test("W1-T7952: the #10785 and #10834 branches get their tasks titles" in test/a-build-pr-is-titled-after-its-task.test.ts'
     - claim: "a branch whose newest subject is a fix round's keeps the task title"
       proof: 'grep: test("W1-T7952: a fix round commit does not replace the task title" in test/a-build-pr-is-titled-after-its-task.test.ts'
+    - claim: "a branch whose newest commit is the harness's restore merge (#10936) is titled after its task, never 'merge main into the restored checkpoint'"
+      proof: 'grep: test("W1-T7952: a restored checkpoint merge subject never titles the PR" in test/a-build-pr-is-titled-after-its-task.test.ts'
     - claim: "a derived title passes checkCommitMessage, including header-max-length 100 for a long shard title"
       proof: 'grep: test("W1-T7952: a task-derived title passes the conventional header checks" in test/a-build-pr-is-titled-after-its-task.test.ts'
   falsifier: |
     Leave runTask calling `branchPrTitle(worktreePath)` with no task. The subjects "wip: yield at worker" then title
-    the PR "chore: yield at worker", as #10834 merged, and the first two tests fail. Take the type from a stripped
+    the PR "chore: yield at worker", as #10834 merged, and the first two tests fail. The subjects of #10936's branch then
+    title it "chore: merge main into the restored checkpoint", and the restore-merge test fails. Take the type from a stripped
     checkpoint, and a checkpoint-only branch reads `chore:`, so the first test fails. Skip `fitConventionalTitle`,
-    and the long-title case exceeds 100 characters, so the fourth test fails.
+    and the long-title case exceeds 100 characters, so the conventional-header test fails.

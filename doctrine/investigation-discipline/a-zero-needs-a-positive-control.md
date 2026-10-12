@@ -3,8 +3,12 @@
   answers, check the corpus's newest ts covers the window, and re-run a surprise in another ENVIRONMENT.**
   The four W1-T3323 bullets below are the measurements behind each clause, in order: the control
   itself, (d) the wrong question, (e) the wrong corpus or environment, (i) the uncovered window.
-  The lettered items still in the index — (a)-(c), (f)-(h), (j), (k) — are further traps of the
-  same family.
+  The lettered items still in the index — (a), (b), (f)-(h) — are further traps of the same family;
+  (c) and (j) now carry their instruction as headlines of their own.
+
+  *(Index line retired 2026-10-11: (k), the last bullet below, is this rule applied to a function
+  call — `[]` from a dead call and from a real zero look alike, and its control is a deliberately
+  violating row in the same call shape. Kept verbatim; its id resolves here.)*
 
   *(Index lines merged 2026-10-11: four headlines restated "a control proves visibility, not the right answer". They are kept verbatim; their ids resolve here through `doctrine/merged-rules.json`.)*
 
@@ -50,3 +54,8 @@
   corpus's newest row is 2026-08-12 and the feature merged 2026-08-23. Before acting on a ledger
   zero, print the corpus's NEWEST ts beside the event's own date; a control says nothing about that
   gap. *(W1-T1280/#2651)*
+- **(k) A RULE 21 protocol run passing `{ baseTask }` ALONE reports THREE INDISTINGUISHABLE ZEROS.**
+  `postMergeAmendmentViolations` (`src/lib/review.ts`) returns `[]` at `!ctx.statusResolvable`, at
+  `!ctx.merged`, and when the rule truly does not apply: a dead call and a real zero have the same
+  return value. Pass `statusResolvable: true`, `merged: true` and `baseAcceptance`; only a
+  deliberately violating row in the same call shape separates a real zero from a dead call. *(#3211)*

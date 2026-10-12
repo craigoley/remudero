@@ -2,6 +2,7 @@ import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
@@ -2942,6 +2943,63 @@ function assertGrepTargetIsFile(args: readonly string[], cwd: string): void {
   if (isDirectory) throw new ProofTargetIsDirectoryError(target);
 }
 
+// ── A PROOF RUN IS JUDGED BY ITS PER-FILE SUMMARIES (2026-10-12, after #10894/#10918) ──────────────────────────
+// node reports a test file whose own child exits 0 part-way — a test calling the real `process.exit(0)` — as `ok N -
+// <file>` with every test it would have run lost, still prints its trailing summary, and exits 0; a file that registers
+// no tests reads the same. Both were a passing `unit test:` proof. Every node `--test` proof now carries the CI judge's
+// tally reporter and passes only when each file it named reached its own per-file summary. The reporter rides the argv
+// as a `data:` URL because the sandboxed child sees only the PR head. NOT JUDGED: a name-filtered run over the whole
+// {@link TEST_GLOB} (no candidate file resolved), whose many files without a matching title cannot be told apart from
+// a file that died; and a run that exits nonzero, which the classifiers below already read.
+
+/** The slice of scripts/pure-test-pool.mjs (the test judge) the proof runner uses. A plain .mjs, so no types. */
+interface ProofJudge {
+  inlineJudgedArgs(): string[];
+  hasInlineJudge(args: readonly string[]): boolean;
+  splitInlineTally(stdout: string): { output: string; tallyText: string };
+  judgedNodeTestArgs(args: readonly string[], judgedArgs: readonly string[]): string[];
+  testFilesInArgv(args: readonly string[], cwd: string): string[];
+  judgeRun(files: readonly string[], opts: { status: number; pool: boolean; root: string; tallyText: string }): { complete: boolean };
+  describeJudgedRun(role: string, verdict: { complete: boolean }, opts: { prefix: string }): string;
+}
+
+// Loaded when a proof runs, never at import, for the reason src/lib/ci-parity.ts gives: sandboxes copy only src/.
+function loadProofJudge(): ProofJudge {
+  return createRequire(import.meta.url)("../../scripts/pure-test-pool.mjs") as ProofJudge;
+}
+
+/** `args` with the judge's inline tally reporter, for a node `--test` proof; any other argv unchanged. Idempotent. */
+function withProofJudge(whitelisted: WhitelistedProof, args: readonly string[]): readonly string[] {
+  if (whitelisted.kind !== "test" || whitelisted.runner === "vitest" || !args.includes("--test")) return args;
+  const judge = loadProofJudge();
+  return judge.hasInlineJudge(args) ? args : judge.judgedNodeTestArgs(args, judge.inlineJudgedArgs());
+}
+
+/** `args` without {@link withProofJudge}'s two flags (the async executor hands the sync one an already-judged argv). */
+function withoutProofJudge(args: readonly string[]): readonly string[] {
+  const at = args.findIndex((arg) => arg.startsWith("--test-reporter=data:"));
+  return at < 0 ? args : [...args.slice(0, at), ...args.slice(at + 2)];
+}
+
+/** A judged proof run's stdout without the tally line, and that line ("" when the argv carried no judge). */
+function splitProofOutput(args: readonly string[], raw: string): { stdout: string; tallyText: string } {
+  const judge = loadProofJudge();
+  if (!judge.hasInlineJudge(args)) return { stdout: raw, tallyText: "" };
+  const { output, tallyText } = judge.splitInlineTally(raw);
+  return { stdout: output, tallyText };
+}
+
+/** The judge's line for an exit-0 proof run that did not finish every file it named; `undefined` when it did, or
+ *  when the run is one this judge does not read (see the block comment above). */
+function unfinishedProofRun(args: readonly string[], cwd: string, tallyText: string): string | undefined {
+  const judge = loadProofJudge();
+  if (!judge.hasInlineJudge(args) || args.includes(TEST_GLOB)) return undefined;
+  const at = args.indexOf("--test-name-pattern");
+  const files = judge.testFilesInArgv(at < 0 ? args : [...args.slice(0, at), ...args.slice(at + 2)], cwd);
+  const verdict = judge.judgeRun(files, { status: 0, pool: false, root: cwd, tallyText });
+  return verdict.complete ? undefined : judge.describeJudgedRun("proof", verdict, { prefix: "test-judge" });
+}
+
 export function execWhitelistedProof(
   whitelisted: WhitelistedProof,
   cwd: string,
@@ -3002,15 +3060,21 @@ export function execWhitelistedProof(
     assertGrepTargetsInsideCheckout(args, cwd);
     assertGrepTargetIsFile(args, cwd); // R-12: same placement, same reason — a refusal, not an outcome
   }
+  // The excerpt names the proof's own argv: the judge's inline reporter is ~2 KB of base64 that reproduces nothing.
+  const shownArgs = withoutProofJudge(args);
+  args = withProofJudge(whitelisted, args);
   delete whitelisted.failureOutput;
   const recordFailure = (status: number, stdout: string, stderr = ""): "fail" => {
-    whitelisted.failureOutput = proofFailureExcerpt(whitelisted.command, args, status, stdout, stderr);
+    whitelisted.failureOutput = proofFailureExcerpt(whitelisted.command, shownArgs, status, stdout, stderr);
     return "fail";
   };
   try {
-    const stdout = spawn(whitelisted.command, args, cwd, timeoutMs);
+    const { stdout, tallyText } = splitProofOutput(args, spawn(whitelisted.command, args, cwd, timeoutMs));
+    // Read before every verdict: an unfinished file can hide the very failure, or the very title, the verdict reads.
+    const unfinished = whitelisted.kind === "test" ? unfinishedProofRun(args, cwd, tallyText) : undefined;
     if (whitelisted.nameFiltered) {
       const outcome = vitestNameFiltered ? vitestNameFilteredOutcome(stdout) : nameFilteredOutcome(stdout);
+      if (unfinished !== undefined && (outcome === "pass" || outcome === "no-match")) return recordFailure(0, `${stdout}\n${unfinished}`);
       if (outcome === "fail") return recordFailure(0, stdout);
       if (outcome === "cannot-load" && !deps.loadRetried) {
         recordLoadError(whitelisted, stdout);
@@ -3023,6 +3087,7 @@ export function execWhitelistedProof(
       }
       return outcome;
     }
+    if (unfinished !== undefined) return recordFailure(0, `${stdout}\n${unfinished}`);
     // W1-T3208: a dialect grep's own compiled pattern/path names the exact self-declaration text to
     // exclude. `dialectGrepTargetPath` returning a path
     // confirms both the dialect shape (not the legacy fenced, author-selected argv) AND that
@@ -3048,7 +3113,7 @@ export function execWhitelistedProof(
     // A clean nonzero exit. For a name-filtered proof this does NOT necessarily mean OUR named test failed — read the
     // TAP stream node still attaches to the error rather than trusting the code.
     if (whitelisted.nameFiltered) {
-      const stdout = typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? "");
+      const { stdout } = splitProofOutput(args, outputText(err.stdout));
       const stderr = typeof err.stderr === "string" ? err.stderr : (err.stderr?.toString("utf8") ?? "");
       const outcome = vitestNameFiltered ? vitestNameFilteredOutcome(stdout, stderr) : nameFilteredOutcome(stdout, stderr);
       if (outcome === "cannot-load" && !deps.loadRetried) {
@@ -3070,7 +3135,7 @@ export function execWhitelistedProof(
     // Read the SAME stdout the name-filtered branch reads; only when every `not ok` is the file's own wrapper name
     // does the run count as never-executed. An ABSENT file reports no TAP lines and falls through to `"fail"`.
     if (whitelisted.kind === "test" && !whitelisted.nameFiltered) {
-      const stdout = typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? "");
+      const { stdout } = splitProofOutput(args, outputText(err.stdout));
       // AN INCOMPLETE RUN IS NOT A FAILING ONE (W1-T2740), read BEFORE the wrapper-name classifier on purpose: the two
       // discriminators are orthogonal and this one is stronger. `runtime-broken` describes a run that COMPLETED and
       // whose only `not ok` names the file itself; a stream with NO summary did not finish at all. NOT a request to
@@ -3083,7 +3148,7 @@ export function execWhitelistedProof(
       if (wrapperName !== undefined) throw new PureProofNeverExecutedError(wrapperName, stdout);
     }
     // a single-file/grep proof's own nonzero exit is a genuine fail
-    return recordFailure(err.status, outputText(err.stdout), outputText(err.stderr));
+    return recordFailure(err.status, splitProofOutput(args, outputText(err.stdout)).stdout, outputText(err.stderr));
   }
 }
 
@@ -3147,6 +3212,7 @@ export async function execWhitelistedProofAsync(
     assertGrepTargetsInsideCheckout(args, cwd);
     assertGrepTargetIsFile(args, cwd);
   }
+  args = withProofJudge(whitelisted, args);
   let output: string | undefined;
   let failure: unknown;
   try {
@@ -10391,6 +10457,8 @@ export interface PostReviewPendingOpts {
   lockOpts?: AcquireReviewStatusLockOpts;
   /** Injectable only so the durable owner record is deterministic in tests. */
   ownerIdentity?: { pid: number; startedAt: string };
+  /** Only proof of death overrides a readable young claim's TTL (W1-T8088). */
+  assessPendingOwner?: (record: PendingReviewStatusRecord) => PendingReviewOwnerAssessment;
   /** The wall clock the TTL is measured against. Defaults to {@link systemClock}, so production
    *  reads real time and nothing is handed a frozen instant it did not ask for — this is a CLOCK,
    *  not the fixed `now` field the comment below rules out. Present so the TTL boundary is
@@ -10414,8 +10482,8 @@ export interface PostReviewPendingResult {
  * `no_evidence`, so a prior `no_evidence` TERMINAL verdict for this head would sail through; a changed body is a fresh
  * input and may post again. (2) IDEMPOTENT PER INPUT, BUT ONLY INSIDE {@link REVIEW_LOCK_TTL_MS} (W1-T3647): a
  * `review.pending_posted` line for this exact head+body digest is a no-op while its own `ts` reads younger than the
- * TTL, OR while its age cannot be read at all — an unreadable clock FAILS TOWARD HOLDING, never toward reclaim, since
- * the alternative is two reviewers judging the same head. Only a READABLE age at or past the TTL reclaims: this call
+ * TTL unless its owner is proven dead (W1-T8088). An unreadable clock FAILS TOWARD HOLDING, never toward reclaim, since
+ * the alternative is two reviewers judging the same head. A READABLE age at or past the TTL also reclaims: this call
  * posts itself as the new holder and names the run it took over from, rather than deferring forever to a claim its
  * own owning run may already be dead. The posted status carries the posting `run_id`, which is what sweep.ts's
  * `OpenPrView.reviewPendingSince` producer derives its staleness clock from. */
@@ -10460,17 +10528,20 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       break;
     }
   }
-  // W1-T3647: a same-sha claim is a no-op ONLY while it is inside the TTL. Age is read off the
-  // claim's OWN ledger `ts` (`priorPending.postedAt`) against the wall clock right now — never a
-  // fixed field on the OPTS, so nothing here can be handed a stale "now" by a caller.
+  // W1-T3647/W1-T8088: read the claim's own ledger `ts` against the current clock. A young
+  // claim holds unless its owner is proven dead; an unreadable age always holds.
   let takenOverFrom: PendingReviewStatusRecord | undefined;
+  let ownerProvenDead = false;
+  const assessOwner = opts.assessPendingOwner ??
+    ((record: PendingReviewStatusRecord) => assessPendingReviewOwner(record, { isPidAlive: defaultIsPidAlive }));
   if (priorPending && priorPending.headSha === opts.sha) {
     const claimedAtMs = Date.parse(priorPending.postedAt);
     const ageMs = Number.isNaN(claimedAtMs) ? undefined : (opts.clock ?? systemClock).now() - claimedAtMs;
     // FAIL TOWARD HOLDING (design (c)): an age this process cannot read (missing/garbled `ts`) is
     // treated exactly like a FRESH, live claim — never like a stale one — because the alternative
     // is two reviewers judging the same head and posting conflicting verdicts.
-    if (ageMs === undefined || ageMs < REVIEW_LOCK_TTL_MS) {
+    ownerProvenDead = ageMs !== undefined && ageMs < REVIEW_LOCK_TTL_MS && assessOwner(priorPending) === "dead";
+    if (ageMs === undefined || (ageMs < REVIEW_LOCK_TTL_MS && !ownerProvenDead)) {
       return {
         posted: false,
         reason:
@@ -10500,7 +10571,12 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       if (foreignRun !== opts.runId) {
         const claimedAtMs = Date.parse(status.created_at ?? "");
         const ageMs = (opts.clock ?? systemClock).now() - claimedAtMs;
-        if (!Number.isFinite(ageMs) || ageMs < REVIEW_LOCK_TTL_MS) {
+        const foreignLine = lines.findLast(line => line.step === "review.pending_posted" &&
+          line.run_id === foreignRun && line.head_sha === opts.sha);
+        const foreignPending = foreignLine && pendingReviewStatusRecord(foreignLine);
+        ownerProvenDead = Number.isFinite(ageMs) && ageMs < REVIEW_LOCK_TTL_MS &&
+          foreignPending !== undefined && assessOwner(foreignPending) === "dead";
+        if (!Number.isFinite(ageMs) || (ageMs < REVIEW_LOCK_TTL_MS && !ownerProvenDead)) {
           return {
             posted: false,
             reason: `remudero-review is already pending (owned by run ${foreignRun}) — host-independent claim; no-op`,
@@ -10513,7 +10589,9 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     return { posted: false, reason: `holding review: shared remudero-review status unreadable — ${String(error)}` };
   }
   const description = (
-    takenOverFrom
+    takenOverFrom && ownerProvenDead
+      ? `pending (owned by run ${opts.runId}) — took over run ${takenOverFrom.runId}: owner proven dead`
+      : takenOverFrom
       ? `remudero-review: review in progress (owned by run ${opts.runId}) — took over a stale claim ` +
         `(>= ${Math.round(REVIEW_LOCK_TTL_MS / 60_000)}m old) from run ${takenOverFrom.runId} (W1-T3647)`
       : `remudero-review: review in progress (owned by run ${opts.runId})`

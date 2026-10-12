@@ -9,6 +9,7 @@ import { callerReachableSuites } from '../src/lib/ci-parity.ts';
 import { acquireTestSlot, lowPriorityCommand, memoryTestConcurrency, readHostLoad, readMemoryHeadroom,
   TEST_FILE_PEAK_BYTES, testRunArgv, testRunConcurrency } from '../src/lib/test-slot.ts';
 import { listTestFiles, medianMeasuredDurationMs, weightedDurationMs } from './test-tier-manifest.mjs';
+import { closeJudgedRun, judgedNodeTestArgs, prepareJudgedRun } from './pure-test-pool.mjs';
 import { isMainModule, parseArgv } from './lib/argv.mjs';
 import { REPO_ROOT } from './lib/repo-root.mjs';
 import { captureStepSync, AUTHOR_OUTPUT_LIMIT_BYTES, AUTHOR_STEP_RUNTIME_MS } from './lib/author-step-capture.mjs';
@@ -380,13 +381,20 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             const durationArgs = !hasDurationReporter ? [] : ['--test-reporter-destination=stdout',
               `--test-reporter=${join(root, 'scripts/test-duration-reporter.mjs')}`,
               `--test-reporter-destination=${join(diagnosticsRoot, 'durations.json')}`];
-            const child = lowPriorityCommand(process.execPath, testRunArgv(['--test', '--test-reporter=tap', ...durationArgs,
-              '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...ranSuites], Math.min(4, slot.concurrency)));
-            const tests = runStep(testsName, child.args, child.file);
-            report(testsName, tests, completeTestResult(tests));
+            // Judged (scripts/pure-test-pool.mjs): a suite whose own child exits 0 part-way is reported
+            // `ok` with a whole summary, so the step passes only when every suite reached its own summary.
+            const judged = prepareJudgedRun();
+            const child = lowPriorityCommand(process.execPath, testRunArgv(judgedNodeTestArgs(['--test', '--test-reporter=tap', ...durationArgs,
+              '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...ranSuites], judged.args), Math.min(4, slot.concurrency)));
+            const tests = runStep(testsName, child.args, child.file, judged.env);
+            const judge = closeJudgedRun(judged, ranSuites, { status: tests.status ?? 1, root, role: testsName, prefix: 'preflight-author' });
+            const testsOk = completeTestResult(tests) && judge.verdict.complete;
+            report(testsName, tests, testsOk, { judge: { complete: judge.verdict.complete, given: judge.verdict.given,
+              reported: judge.verdict.reported, unreported: judge.verdict.missing.slice(0, 20), lastStarted: judge.verdict.lastStarted,
+              exitSite: judge.verdict.exitSite } });
             receipt.runtimeEvidence = { state: 'not-collected', reason: 'duration reporter unavailable in this root' };
             if (hasDurationReporter) {
-              if (!completeTestResult(tests)) receipt.runtimeEvidence = { state: 'incomplete', reason: 'affected-tests did not complete successfully' };
+              if (!testsOk) receipt.runtimeEvidence = { state: 'incomplete', reason: 'affected-tests did not complete successfully' };
               else {
                 try {
                   receipt.runtimeEvidence = closedDurationEvidence(root, relative(root, join(diagnosticsRoot, 'durations.json')),

@@ -8,7 +8,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { checkoutHeadStamp } from "./checkout-head.js";
 import type { Escalation } from "./escalate.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
-import { gardenLedgerBucket } from "./gardener.js";
+import { prepareGardenTaskIds, gardenLedgerBucket, type GardenTaskIdMinter } from "./gardener.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { ghExec } from "./github-transport.js";
 import { gateFireRatesPath, type GateFireRateReport } from "./gate-fire-rate.js";
@@ -339,6 +339,8 @@ function causeFromDispatchMode(mode: unknown): CiFrictionCause {
  *  removed so two rounds of the same failure share one signature. `undefined` when neither exists. */
 export function ciFailureSignature(logTail: string): string | undefined {
   const lines = logTail.split("\n");
+  const pooled = poolOrTimeoutSignature(lines);
+  if (pooled !== undefined) return pooled;
   // A test runner's log speaks only through its own failure markers: a line a passing test printed
   // on purpose (a fixture's "worktree materialization failed", #10392) is never its failure.
   const runner = testRunnerFailureSignature(lines);
@@ -356,6 +358,46 @@ export function ciFailureSignature(logTail: string): string | undefined {
     .replace(/\d+/g, "N")
     .trim();
   return first ? first.slice(0, 120) : undefined;
+}
+
+/** W1-T8038: the runner's own words for a job killed at its ceiling or cancelled (sweep.ts keeps the
+ *  same pattern as RUNNER_TIMEOUT_LINE; this module must not import it, so it is stated twice). */
+const CI_RUNNER_TIMEOUT_LINE =
+  /exceeded the maximum execution time|The (?:operation|job|run) was canceled|received a shutdown signal|SHARD HANG\W+the matrix was cancelled/i;
+
+/** W1-T8038: the signature of a pool defect, a pooled failure that passes isolated, or a job killed at
+ *  its ceiling — the shapes whose red names no test on its own. `undefined` when the tail is none of them
+ *  (or is a timeout that nevertheless names a real failing test), so the ordinary arms decide. */
+export function poolOrTimeoutSignature(lines: readonly string[]): string | undefined {
+  const bodies = lines.map((l) => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, "").trim());
+  const defect = bodies.map((b) => /^pure-test-pool: POOL DEFECT\b.*?leaking file: (not isolated to one file|\S+)(?: \(first failing alongside it: ([^)]+)\))?/.exec(b)).find((m) => m);
+  if (defect) {
+    const leaker = defect[1]!;
+    return leaker === "not isolated to one file"
+      ? "pool defect: leak not isolated to one file"
+      : `pool defect: ${leaker} leaks${defect[2] ? ` into ${defect[2]}` : ""}`;
+  }
+  const poolFailed = bodies.some((b) => /^pure-test-pool: the pool of \d+ file\(s\) failed/.test(b));
+  const isolatedPassed = bodies.some((b) => /^pure-test-pool: (?:every pooled file passes isolated|rerun run complete)/.test(b));
+  const alsoFailsIsolated = bodies.some((b) => /^pure-test-pool: the pooled files also fail isolated/.test(b));
+  const testFileRe = /(test\/[\w./-]+\.test\.[mc]?[jt]s)/;
+  if (poolFailed && isolatedPassed && !alsoFailsIsolated) {
+    const firstNotOk = bodies.findIndex((b) => /^not ok \d+ - /.test(b));
+    const named = firstNotOk < 0 ? undefined : bodies.slice(firstNotOk).map((b) => testFileRe.exec(b)?.[1]).find((f) => f !== undefined);
+    return `pool failure: ${named ?? "pooled not ok"} fails pooled, passes isolated`;
+  }
+  if (!bodies.some((b) => CI_RUNNER_TIMEOUT_LINE.test(b))) return undefined;
+  const runner = testRunnerFailureSignature(lines);
+  if (runner !== undefined && runner !== RED_WITH_NO_FAILING_TEST) return runner;
+  const failZero = bodies.some((b) => /^(?:#|ℹ) fail 0\b/.test(b) || /^pure-test-pool: \w+ run complete\b.*# fail 0\b/.test(b));
+  const ran = bodies.some((b) => /^(?:#|ℹ) (?:tests|pass) [1-9]/.test(b) || /^pure-test-pool: \w+ run complete\b/.test(b));
+  if (failZero && ran) return "timed out after a passing summary";
+  for (let i = bodies.length - 1; i >= 0; i -= 1) {
+    const unfinished = /Last started unfinished test: (?!unavailable)(.+?)(?: \(.*\))?\.?$/.exec(bodies[i]!)?.[1]
+      ?? /Last test started: (?!none\b)(.+?)\.?$/.exec(bodies[i]!)?.[1];
+    if (unfinished) return `timed out during ${unfinished}`.slice(0, 120);
+  }
+  return "timed out with no test result";
 }
 
 /** The signature of a red check whose log is a test runner's but names no failing test. */
@@ -1066,7 +1108,7 @@ export interface CiFrictionGardenSources {
   ownerSearch: OwnerSearch;
   /** THE RESERVATION PATH (task-id-reservation.ts via `ciLearningTaskIdMinter`, run-task.ts),
    *  never `max(id)+1` — see that minter's own doc for why. */
-  mintTaskId: (filingBranch?: string) => string;
+  mintTaskId: GardenTaskIdMinter;
 }
 
 /** How many of the costliest causes the ladder reports and the pass considers. */
@@ -1277,7 +1319,8 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
         ...(inv.degraded ? { degraded: inv.degraded } : {}),
       };
     },
-    apply: (ws, plan) => {
+    prepare: (ws, plan, async) => prepareGardenTaskIds(ws, plan.actions[0] && plan.actions[0].decision.kind !== "escalate" ? 1 : 0, sources.mintTaskId, async),
+    apply: (ws, plan, _scorecard, heldIds) => {
       const action = plan.actions[0];
       if (!action) return undefined;
       if (action.decision.kind === "escalate") {
@@ -1288,7 +1331,7 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
         return undefined;
       }
       if (!ws.branch) throw new Error("ci-friction gardener: filing workspace has no branch for task-id reservation");
-      const taskId = sources.mintTaskId(ws.branch);
+      const taskId = (heldIds ?? prepareGardenTaskIds(ws, 1, sources.mintTaskId) as string[])[0]!;
       const records = sources.ledgerRecords();
       const contents = ciFrictionShardYaml(
         { price: action.price, rung: action.rung, owner: action.decision.owner, rounds: remedyRoundsOf([

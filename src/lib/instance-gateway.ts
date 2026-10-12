@@ -48,6 +48,7 @@ import {
   buildAssistantControlRoute,
   buildAssistantControlCapabilityRoute,
   buildAssistantControlReceiptRoute,
+  buildAssistantActionDiscoveryRoute,
   buildPauseRoute,
   buildResumeRoute,
   buildStopRoute,
@@ -220,7 +221,8 @@ export function instanceRouteSet(
     // The answer routes `now` names for this instance's own escalations (now-decisions.ts).
     buildApproveManualRoute(panel),
     buildEscalationMarkHandledRoute(panel),
-    ...(assistantControl ? [buildAssistantControlRoute(assistantControl), buildAssistantControlCapabilityRoute(assistantControl), buildAssistantControlReceiptRoute(assistantControl)] : []),
+    ...(assistantControl ? [buildAssistantControlRoute(assistantControl), buildAssistantControlCapabilityRoute(assistantControl),
+      buildAssistantControlReceiptRoute(assistantControl), buildAssistantActionDiscoveryRoute(assistantControl)] : []),
   ];
 }
 
