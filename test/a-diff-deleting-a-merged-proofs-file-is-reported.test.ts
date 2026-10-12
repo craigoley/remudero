@@ -31,16 +31,17 @@ function put(repo: GitRepo, path: string, text: string) {
 
 function fixture(options: { planOnly?: boolean; rename?: boolean; unit?: boolean; blocking?: boolean; addedPath?: string } = {}) {
   const repo = gitRepo({ kind: "merged-proof-orphan" });
+  repo.addRemote("origin", "https://github.com/craigoley/remudero.git");
   const removed = options.planOnly ? "plan/old-evidence.yaml" : oldPath;
   const added = options.addedPath ?? (options.planOnly ? "plan/new-evidence.yaml" : newPath);
   const criteria = [{ claim, proof: options.unit ? `unit test: ${removed}` : `grep: ^needle[0-9][0-9]$ in ${removed}` }];
-  const tasks = [task("W1-T1", "merged", criteria)];
+  const tasks = [task("W1-T1", "queued", criteria)];
   if (options.blocking) tasks.push(task("W1-T2", "queued", [{ claim: "a new test", proof: "unit test: test/missing.test.ts" }]));
   put(repo, "plan/tasks.yaml", stringify(tasks));
   const source = options.unit ? 'test("owner [literal] records its cause", () => {});\n' : "needle42\n";
   put(repo, removed, options.unit ? `// test("comment-only ownership", () => {});\n${source}` : source);
   repo.git("add", ".");
-  repo.git("commit", "-qm", "base");
+  repo.git("commit", "-qm", "base (#1)\n\nRemudero-Task: W1-T1");
   repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
   if (options.rename) renameSync(join(repo.dir, removed), join(repo.dir, added));
   else {
@@ -124,6 +125,67 @@ test("W1-T8001: only merged tasks are reported", () => {
   const rows = precheck.mergedProofOrphans({ plan: plan(tasks), removedPaths: [oldPath], addedFiles: [] });
   assert.deepEqual(rows.map((row: { taskId: string }) => row.taskId), ["W1-T1"]);
   assert.deepEqual(precheck.mergedProofOrphans({ plan: plan(), removedPaths: ["test/unrelated.test.ts"], addedFiles: [] }), []);
+  const queried: string[] = [];
+  const projected = precheck.mergedProofPlan({ plan: plan([
+    task("W1-T1", "queued"), task("W1-T2", "merged"),
+    task("W1-T3", "merged", [{ claim, proof: "grep: needle in test/untouched.test.ts" }]),
+  ]), removedPaths: [oldPath] }, (id: string) => { queried.push(id); return id === "W1-T1"; });
+  assert.deepEqual(queried, ["W1-T1", "W1-T2"]);
+  assert.deepEqual(precheck.mergedProofOrphans({ plan: projected, removedPaths: [oldPath], addedFiles: [] })
+    .map((row: { taskId: string }) => row.taskId), ["W1-T1"]);
+});
+
+test("merge evidence unions anchored PR trailers and owned merged branches", () => {
+  const pr = { url: "https://github.com/craigoley/remudero/pull/1", state: "MERGED", headRefName: "feature" };
+  const queries: string[] = [];
+  const github = {
+    findMergedByTrailerAll: (id: string) => { queries.push(`trailer:${id}`); return [pr]; },
+    headRefName: () => "feature",
+    prBody: () => "Remudero-Task: W1-T1\n",
+    findMergedByHeadBranch: (id: string) => {
+      queries.push(`branch:${id}`);
+      return [
+        { ...pr, headRefName: "run-W1-T2-123" },
+        { ...pr, headRefName: "run-W1-T3-123", state: "OPEN" },
+        { ...pr, headRefName: "run-W1-T30-123" },
+      ];
+    },
+    readFailed: () => false,
+  };
+  const merged = precheck.mergedTaskResolver("unused", "unused", { commitCredits: new Map([["W1-T4", [pr]]]), github });
+  assert.equal(merged("W1-T4"), true);
+  assert.deepEqual([...queries], [], "the committed trailer index needs no GitHub reads");
+  assert.equal(merged("W1-T1"), true);
+  assert.deepEqual([...queries], ["trailer:W1-T1"], "an anchored trailer needs no branch fallback");
+  assert.equal(merged("W1-T2"), true, "a merged branch credits a task without its trailer");
+  assert.equal(merged("W1-T3"), false, "an open or prefix-colliding branch cannot credit a task");
+  assert.ok(queries.includes("branch:W1-T2") && queries.includes("branch:W1-T3"));
+  assert.equal(precheck.mergedTaskResolver("unused", "unused", {
+    commitCredits: new Map(), github: { ...github, prBody: () => "mentions Remudero-Task: W1-T1 in prose\n" },
+  })("W1-T1"), false, "a fuzzy body-search hit must carry the exact anchored trailer");
+});
+
+test("unavailable merge evidence is named rather than reported as an unmerged task", () => {
+  const github = {
+    findMergedByTrailerAll: () => [], headRefName: () => "feature", prBody: () => "",
+    findMergedByHeadBranch: () => [], readFailed: () => false,
+  };
+  for (const broken of [
+    { ...github, findMergedByTrailerAll: () => null },
+    { ...github, readFailed: () => true },
+    { ...github, findMergedByHeadBranch: () => null },
+    { ...github, findMergedByTrailerAll: () => [{ state: "MERGED", url: "unreadable" }], headRefName: () => undefined },
+    { ...github, findMergedByTrailerAll: () => [{ state: "MERGED", url: "unreadable" }], prBody: () => undefined },
+  ]) {
+    assert.throws(() => precheck.mergedTaskResolver("unused", "unused", {
+      commitCredits: new Map(), github: broken,
+    })("W1-T1"), /cannot (read|verify) merged PR/);
+  }
+  const repo = gitRepo({ kind: "unreadable-merge-credit" });
+  try {
+    repo.addRemote("origin", "https://github.com/craigoley/remudero.git");
+    assert.throws(() => precheck.mergedTaskResolver(repo.dir, "refs/heads/absent")("W1-T1"), /cannot read merged commit trailers/);
+  } finally { repo.cleanup(); }
 });
 
 test("a removed unit-test suite gets a candidate from literal test titles", () => {

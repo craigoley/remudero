@@ -30,7 +30,7 @@ import { join } from "node:path";
 import { loadPlanAtRef, visibleCriteria } from "../src/lib/plan.js";
 import { certainHeadRefusals, extractTaskTrailerId, parseWhitelistedProof, planOnlyDiff, resolvePlanCriteriaAtHead } from "../src/lib/review.js";
 import { certainStaleProofs } from "../src/lib/proof-base-stale.js";
-import { taskIdFromRunBranch } from "../src/lib/status.js";
+import { buildCommitTrailerIndex, creditsByAnchoredTrailer, ghGateway, taskIdFromRunBranch } from "../src/lib/status.js";
 import { literalTestTitlesIn } from "../src/lib/task-linter.js";
 import { stripComments } from "../src/lib/test-impact-map.js";
 import { isMainModule } from "./lib/argv.mjs";
@@ -58,6 +58,46 @@ export function mergedProofOrphans({ plan, removedPaths, addedFiles }) {
     }
   }
   return rows;
+}
+
+/** Resolve only tasks whose proofs name removed paths. Shard status is decorative, not merge evidence. */
+export function mergedProofPlan({ plan, removedPaths }, isMerged) {
+  const possible = mergedProofOrphans({
+    plan: { tasks: plan.tasks.map((task) => ({ ...task, status: "merged" })) }, removedPaths, addedFiles: [],
+  });
+  const affected = new Set(possible.map((row) => row.taskId));
+  return { ...plan, tasks: plan.tasks.map((task) => ({
+    ...task, status: affected.has(task.id) && isMerged(task.id) ? "merged" : "queued",
+  })) };
+}
+
+/** Main's committed trailer index is cheap; missing credits use the installed PR trailer/branch resolver. */
+export function mergedTaskResolver(repoRoot, baseSha, { commitCredits, github } = {}) {
+  return (taskId) => {
+    if (commitCredits === undefined) {
+      const origin = gitOrThrow(["config", "--get", "remote.origin.url"], { cwd: repoRoot });
+      const slug = origin.replace(/\.git$/, "").replace(/^.*[:/]([^/]+\/[^/]+)$/, "$1");
+      commitCredits = buildCommitTrailerIndex({ slug, ref: baseSha, cwd: repoRoot })();
+      if (commitCredits === null) throw new Error("cannot read merged commit trailers");
+      const [owner, repo] = slug.split("/");
+      github ??= ghGateway(owner, repo, { commitTrailerIndex: () => commitCredits });
+    }
+    if (commitCredits.has(taskId)) return true;
+    const trailers = github.findMergedByTrailerAll(taskId);
+    if (trailers === null || github.readFailed()) throw new Error(`cannot read merged PR trailers for ${taskId}`);
+    for (const pr of trailers) {
+      if (pr.state.toUpperCase() !== "MERGED") continue;
+      const head = github.headRefName(pr.url);
+      const body = github.prBody(pr.url);
+      if (github.readFailed() || head === undefined || body === undefined) {
+        throw new Error(`cannot verify merged PR ${pr.url}`);
+      }
+      if (creditsByAnchoredTrailer(pr.state, head, body, taskId)) return true;
+    }
+    const branches = github.findMergedByHeadBranch(taskId);
+    if (branches === null || github.readFailed()) throw new Error(`cannot read merged PR branches for ${taskId}`);
+    return branches.some((pr) => pr.state.toUpperCase() === "MERGED" && taskIdFromRunBranch(pr.headRefName ?? "") === taskId);
+  };
 }
 
 function changedProofPaths(nameStatus) {
@@ -162,8 +202,9 @@ function main() {
     const repoRoot = gitOrThrow(["rev-parse", "--show-toplevel"]);
     const headSha = gitOrThrow(["rev-parse", "HEAD"]);
     const baseSha = gitOrThrow(["merge-base", base, "HEAD"]);
-    const plan = loadPlanAtRef(repoRoot, PLAN, headSha);
+    const headPlan = loadPlanAtRef(repoRoot, PLAN, headSha);
     const { removedPaths, addedPaths } = changedProofPaths(gitOrThrow(["diff", "--name-status", "-z", "-M", `${baseSha}...HEAD`]));
+    const plan = mergedProofPlan({ plan: headPlan, removedPaths }, mergedTaskResolver(repoRoot, baseSha));
     const orphans = mergedProofOrphans({ plan, removedPaths, addedFiles: [] });
     const addedFiles = addedProofEvidence(orphans, addedPaths, repoRoot, baseSha);
     const orphanLines = mergedProofOrphans({ plan, removedPaths, addedFiles }).map((row) =>
