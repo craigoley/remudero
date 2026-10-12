@@ -755,10 +755,7 @@ export interface ShadowMemoryPorts {
   write: ((ledgerPath: string, row: LedgerLine) => void) | undefined;
   /** W1-T7095: every instance's published review demand, from the shared ledger directory. */
   readReviewDemand: () => ReviewDemandReading;
-  /**
-   * W1-T8711: what serve's shared producer evidence says at `now`. Absent (a caller that installed no reader): the local
-   * ledger tail alone decides, as it always did. Present: it is the authority for a host-wide store.
-   */
+  /** W1-T8711: serve's shared producer evidence at `now`; absent, the local ledger tail alone decides, as it always did. */
   readHostServe?: (now: number) => HostServeReading;
   priorityPolicy: () => HostMemoryPriorityPolicy;
   stderr: (line: string) => void;
@@ -1337,12 +1334,8 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
   };
 }
 
-/**
- * The serve scenario for one start. A shared host store is the authority: a current reading is used as it stands, and one
- * that establishes nothing is UNKNOWN. This state root's own serve-row silence (a peer instance's ledger holds none) never
- * becomes serve-stopped there. Only a host with no shared store at all ("local-only"), or a caller with no reader
- * installed, keeps the local ledger tail as the single piece of evidence.
- */
+/** The serve scenario: a shared host store is the authority, and one that establishes nothing is UNKNOWN, never this
+ *  ledger's silence read as stopped. Only a host with no shared store ("local-only") keeps the local tail alone. */
 function serveOf(ports: ShadowMemoryPorts, tail: ReturnType<typeof readTailRows>, now: number, root: string): ShadowInputs["serve"] {
   const local = (): ShadowInputs["serve"] => "unread" in tail
     ? { scenario: "unknown", basis: `ledger tail unreadable: ${tail.unread}` }
