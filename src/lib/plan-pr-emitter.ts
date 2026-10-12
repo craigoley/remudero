@@ -879,8 +879,13 @@ export function planPrPreflightAtCommit(
     borrowNodeModules(repoDir, tree);
     return planPrPreflight({ cwd: tree, ...pr }, checks);
   } finally {
-    const removed = spawnSync("git", ["-C", repoDir, "worktree", "remove", "--force", "--force", realTree], { stdio: "pipe" }); // twice: a killed add leaves it locked
-    if (removed.status !== 0 && existsSync(join(tree, ".git"))) {
+    let removed = true;
+    try {
+      hostWorktreeGit(repoDir, ["worktree", "remove", "--force", "--force", realTree]); // twice: a killed add leaves it locked
+    } catch {
+      removed = false; // the orphaned-admin fallback below decides what is left
+    }
+    if (!removed && existsSync(join(tree, ".git"))) {
       const common = hostWorktreeGit(repoDir, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim();
       dropOrphanedWorktreeAdmin(tree, realTree, common);
     }

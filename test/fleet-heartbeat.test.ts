@@ -596,6 +596,10 @@ function watchGitStub(): string {
     '    for e in ${STUB_SPOOL:-}; do',
     '      if [ "${e%%:*}" = "$ref" ]; then printf "escalation_spool_verdict=%s — 1 host-side escalation(s)\\n" "${e#*:}"; fi',
     "    done",
+    // 2026-10-11: a branch named in STUB_CRASH carries the launcher's crash-loop marker.
+    '    for b in ${STUB_CRASH:-}; do',
+    '      if [ "$b" = "$ref" ]; then printf "crash_loop_verdict=CRASH_LOOP — 2026-10-11T07:00:00Z 6 consecutive revivals from exit 1\\n"; fi',
+    "    done",
     "    ;;",
     "esac",
     "exit 0",
@@ -623,6 +627,8 @@ function runWatch(opts: {
   stalledBranches?: string;
   /** `name:verdict` pairs: the escalation spool verdict each branch's beat carries. */
   spool?: string;
+  /** Branches whose beat carries the launcher's crash-loop marker. */
+  crash?: string;
   mutate?: [string, string];
 }): Watch {
   const dir = mkdtempSync(join(tmpdir(), "heartbeat-watch-"));
@@ -658,6 +664,7 @@ function runWatch(opts: {
       STUB_BRANCHES: opts.stub,
       STUB_STALLED: opts.stalledBranches ?? "",
       STUB_SPOOL: opts.spool ?? "",
+      STUB_CRASH: opts.crash ?? "",
     },
   });
   const reportPath = join(dir, "heartbeat-report.txt");
@@ -1132,6 +1139,20 @@ test("a fresh beat carrying UNDELIVERED host-side escalations raises its own arm
   assert.equal(pending.state, `${HOST_A}\tFRESH\n`);
   const { calls } = runDeliver(`${HOST_A}\tSPOOL_UNDELIVERED\n`, { branchReports: { [HOST_A]: "a\n" } });
   assert.ok(calls.some((c) => c.includes(`fleet-heartbeat:${HOST_A}`) && c.includes("host-side escalations are not reaching GitHub")), JSON.stringify(calls));
+});
+
+test("a fresh beat carrying the launcher's crash-loop marker raises its own arm on a daemon host, under a stale beat only", () => {
+  const w = runWatch({ branches: HOST_A, stub: `${HOST_A}:60`, daemonExpectedBranches: HOST_A, crash: HOST_A, stalledBranches: HOST_A });
+  assert.equal(w.status, 1, "a crash-looping daemon is a finding even while its beat is fresh");
+  assert.match(w.stderr, /DAEMON CRASH LOOP — 'heartbeat-azure': CRASH_LOOP — .*6 consecutive revivals from exit 1/);
+  assert.equal(w.state, `${HOST_A}\tCRASH_LOOP\n`, "it outranks the build stall a crash loop also causes");
+  assert.match(w.branchReports[HOST_A] ?? "", /^Condition: DAEMON CRASH LOOP/m);
+  const stale = runWatch({ branches: HOST_A, stub: `${HOST_A}:9000`, daemonExpectedBranches: HOST_A, crash: HOST_A });
+  assert.equal(stale.state, `${HOST_A}\tBEAT_STALE\n`, "a silent machine still leads");
+  const noDaemon = runWatch({ branches: HOST_A, stub: `${HOST_A}:60`, crash: HOST_A });
+  assert.equal(noDaemon.state, `${HOST_A}\tFRESH\n`, "only a branch expected to run a daemon is armed");
+  const { calls } = runDeliver(`${HOST_A}\tCRASH_LOOP\n`, { branchReports: { [HOST_A]: "a\n" } });
+  assert.ok(calls.some((c) => c.includes(`fleet-heartbeat:${HOST_A}`) && c.includes("the daemon is crash-looping")), JSON.stringify(calls));
 });
 
 // ── W1-T4804: swap, inodes, total size and the janitor's last result ───────────────────────────

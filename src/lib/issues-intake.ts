@@ -1,6 +1,8 @@
 import { ghExec } from "./github-transport.js";
 import { appendLedger } from "./ledger.js";
-import { captureFeedback, feedbackEntryPath, type FeedbackEntry } from "./feedback.js";
+import { captureFeedback, feedbackEntryPath, type FeedbackAdmissionContext, type FeedbackEntry } from "./feedback.js";
+import { contributionOriginFromRest, feedbackContentDigest, readAdmissionRestAsync, type ContributionOrigin,
+  type FeedbackAdmissionSubject, type RestContributionOrigin } from "./contributor-admission.js";
 import { existsSync } from "node:fs";
 import type { ManagedRepo } from "./managed-repos.js";
 
@@ -26,8 +28,7 @@ import type { ManagedRepo } from "./managed-repos.js";
  * feedback id is DETERMINISTIC ({@link issueFeedbackId}) — `existsSync` on that one path IS the
  * dedup check, so a prior run's entry is directly visible to the next one with no extra bookkeeping.
  *
- * remudero's OWN public issues stay OFF this lane until WS-4 (G-6, operator standing decision) —
- * enforced simply by NOT listing this repo in `.remudero/managed-repos.json`, not by code here.
+ * G-6 keeps remudero's public issues off this lane until WS-4: omit it from `.remudero/managed-repos.json`.
  */
 
 // ── Issues, normalized across the one GitHub issues-list API ───────────────
@@ -43,6 +44,9 @@ export interface RawIssue {
   createdAt: string;
   url: string;
   labels: string[];
+  origin?: ContributionOrigin;
+  itemId?: number;
+  revision?: FeedbackAdmissionSubject["revision"];
 }
 
 /**
@@ -62,11 +66,13 @@ export function issueFeedbackId(owner: string, repo: string, number: number): st
 // ── Normalizer: GitHub's issues-list response shape → RawIssue ─────────────
 
 interface GhIssueJson {
+  id?: number;
   number?: number;
   title?: string;
   body?: string | null;
   state?: string;
   created_at?: string;
+  updated_at?: string;
   html_url?: string;
   labels?: Array<string | { name?: string }>;
   /**
@@ -75,9 +81,12 @@ interface GhIssueJson {
    * them apart; only entries WITHOUT it are real issues.
    */
   pull_request?: unknown;
+  user?: RestContributionOrigin["user"];
+  author_association?: string;
 }
 
 export function normalizeIssue(owner: string, repo: string, raw: GhIssueJson): RawIssue {
+  const origin = contributionOriginFromRest({ user: raw.user, author_association: raw.author_association });
   return {
     owner,
     repo,
@@ -88,6 +97,11 @@ export function normalizeIssue(owner: string, repo: string, raw: GhIssueJson): R
     createdAt: raw.created_at ?? "",
     url: raw.html_url ?? "",
     labels: (raw.labels ?? []).map((l) => (typeof l === "string" ? l : (l.name ?? ""))).filter((l) => l.length > 0),
+    ...(origin === undefined ? {} : { origin }),
+    ...(raw.id === undefined ? {} : { itemId: raw.id }),
+    ...(raw.updated_at === undefined ? {} : {
+      revision: { updatedAt: raw.updated_at, contentDigest: feedbackContentDigest([raw.title, raw.body, raw.labels]) },
+    }),
   };
 }
 
@@ -95,6 +109,7 @@ export function normalizeIssue(owner: string, repo: string, raw: GhIssueJson): R
 
 export interface IssueListGateway {
   list(owner: string, repo: string): RawIssue[];
+  repository?(owner: string, repo: string): FeedbackAdmissionSubject["repository"] | Promise<FeedbackAdmissionSubject["repository"]>;
 }
 
 /**
@@ -105,6 +120,12 @@ export interface IssueListGateway {
  */
 export function ghIssueListGateway(): IssueListGateway {
   return {
+    async repository(owner, repo) {
+      const response = await readAdmissionRestAsync(`repos/${owner}/${repo}`);
+      if (response.status !== 200 || typeof response.body !== "object" || response.body === null) return undefined;
+      const row = response.body as { id?: number; full_name?: string; private?: boolean };
+      return { id: row.id, fullName: row.full_name, private: row.private };
+    },
     list(owner, repo) {
       try {
         const raw = ghExec(["api", `repos/${owner}/${repo}/issues?state=open`, "--paginate"], {
@@ -158,6 +179,8 @@ export interface IssuesIntakeDeps {
   now?: () => number;
   /** Preview only: fetch + summarize, create NOTHING, write no ledger line. Mirrors rmd ops --dry-run. */
   dryRun?: boolean;
+  /** W1-T7754: explicit shadow only; absent preserves legacy capture and selection. */
+  admission?: FeedbackAdmissionContext;
 }
 
 export interface IssuesIntakeResult {
@@ -197,13 +220,30 @@ export async function pollIssues(managedRepos: ManagedRepo[], deps: IssuesIntake
 
   const created: FeedbackEntry[] = [];
   if (!deps.dryRun) {
+    const repositories = new Map<string, FeedbackAdmissionSubject["repository"]>();
     for (const issue of newIssues) {
       const id = issueFeedbackId(issue.owner, issue.repo, issue.number);
+      const sourceRef = `${issue.owner}/${issue.repo}#${issue.number}`;
+      if (deps.admission?.mode === "shadow" && !repositories.has(`${issue.owner}/${issue.repo}`)) {
+        let repository: FeedbackAdmissionSubject["repository"];
+        try { repository = await deps.issues.repository?.(issue.owner, issue.repo); }
+        catch { /* Unreadable repository identity stays unknown; capture still proceeds. */ }
+        repositories.set(`${issue.owner}/${issue.repo}`, repository);
+      }
+      const subject: FeedbackAdmissionSubject = {
+        kind: "issue", sourceRef, observedAtMs: now, issueNumber: issue.number,
+        itemId: issue.itemId, revision: issue.revision, origin: issue.origin,
+        repository: repositories.get(`${issue.owner}/${issue.repo}`),
+      };
       created.push(
         captureFeedback(deps.root, {
           id,
           raw: renderIssueRaw(issue),
           origin: `issue#${issue.number}`,
+          ...(deps.admission?.mode === "shadow" ? {
+            contribution: { ...subject, ...(issue.url ? { url: issue.url } : {}) },
+            admission: { ...deps.admission, nowMs: now, currentSubject: subject },
+          } : {}),
         }),
       );
     }

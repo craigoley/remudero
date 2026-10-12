@@ -127,6 +127,9 @@ export const CLI_ONLY = {
       // 2026-10-11: the host watchdog's rung of the live-edit ladder over a checkout on that host; the
       // console sees its effect as the daemon's needs-human issue.
       "live-edits",
+      // 2026-10-11: the host watchdog's own alarms, counted and spooled under the host's state dir; the
+      // console sees them as the needs-human issue the daemon posts from the spool.
+      "host-alert",
       // W1-T4627: an operator measurement that spawns a sealed grader on the daemon host; not a console action.
       "impossible-canary",
       "benchmark-aa",

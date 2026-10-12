@@ -71,6 +71,7 @@ function hookFixture(files: Record<string, number>): { root: string; cleanup: ()
   mkdirSync(join(root, "scripts"), { recursive: true });
   copyFileSync(join(REPO_ROOT, "hooks", "pre-commit"), join(root, "hooks", "pre-commit"));
   copyFileSync(SCRIPT, join(root, "scripts", "test-tier-manifest.mjs"));
+  copyFileSync(join(REPO_ROOT, "scripts", "pure-test-pool.mjs"), join(root, "scripts", "pure-test-pool.mjs")); // W1-T6085: sibling import
   // Every row named in `files` needs a REAL file on disk too, or `--check`'s own W1-T4430 ghost-row
   // refusal would fire on this fixture's setup, never on the behaviour the test means to observe.
   for (const file of Object.keys(files)) {
@@ -82,7 +83,11 @@ function hookFixture(files: Record<string, number>): { root: string; cleanup: ()
   git(root, ["config", "core.hooksPath", "hooks"]);
   execFileSync("chmod", ["+x", join(root, "hooks", "pre-commit")]);
   git(root, ["add", "-A"]);
-  git(root, ["commit", "-q", "-m", "fixture base"]);
+  // The base commit is setup, not the commit under test: it stages the copied scripts, and the hook's
+  // mkdtemp half would then run over them (scripts/pure-test-pool.mjs makes its judged-run temp dir
+  // with mkdtempSync) without the mkdtemp checker this fixture does not carry. The hook runs on the
+  // test's own commit below.
+  git(root, ["commit", "-q", "--no-verify", "-m", "fixture base"]);
   return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 

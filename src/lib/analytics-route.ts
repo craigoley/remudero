@@ -725,6 +725,7 @@ type AnalyticsCheckpointState = {
   tokensTotal: CacheHitTokens & { output: number };
   routingTelemetry: {
     benchmarkVersion?: typeof BENCHMARK_QUALITY_VERSION;
+    pricingVersion?: 1;
     benchmarkCounters?: {
       assignmentRowsSeen: number;
       terminalRowsSeen: number;
@@ -1239,6 +1240,7 @@ function routingBucketFor(
     totalTokens: 0,
     totalDurationMs: 0,
     totalCostUsd: 0,
+    unpricedCostRows: 0,
     fallbackReasons: new Map(),
   };
   acc.bucketsByKey.set(key, created);
@@ -1409,7 +1411,7 @@ function applyRoutingTerminal(
     bucket.fallbackReasons.set(reason, (bucket.fallbackReasons.get(reason) ?? 0) + 1);
   }
   if (terminal.day) {
-    const current = acc.daysByDay.get(terminal.day) ?? { day: terminal.day, terminalResults: 0, totalTokens: 0, totalCostUsd: 0 };
+    const current = acc.daysByDay.get(terminal.day) ?? { day: terminal.day, terminalResults: 0, totalTokens: 0, totalCostUsd: 0, unpricedCostRows: 0 };
     current.terminalResults += 1;
     current.totalTokens += terminal.tokens;
     if (terminal.costUsd === undefined) current.unpricedCostRows = (current.unpricedCostRows ?? 0) + 1;
@@ -2016,7 +2018,8 @@ function resumeRefusal(prior: AnalyticsResumePoint | undefined, current: Analyti
   if (prior === undefined) return "no-checkpoint";
   const state = prior.state;
   if (!(state.goalAccountingVersion === 1 && state.usage?.costAccountingVersion === 1 && state.usage?.cashAccountingVersion === 1 &&
-    state.usage?.trialAccountingVersion === 1 && state.routingTelemetry?.benchmarkVersion === BENCHMARK_QUALITY_VERSION)) return "checkpoint-version";
+    state.usage?.trialAccountingVersion === 1 && state.routingTelemetry?.benchmarkVersion === BENCHMARK_QUALITY_VERSION &&
+    state.routingTelemetry.pricingVersion === 1)) return "checkpoint-version";
   if (state.routingTelemetry.benchmarkCounters === undefined || !Array.isArray(state.routingTelemetry.malformedSources) ||
     (state.workIntegrityFold === undefined && !Array.isArray(state.workIntegrityRows)) ||
     (state.judgeCalibrationFold === undefined && !Array.isArray(state.judgeCalibrationRows))) return "checkpoint-incomplete";
@@ -2043,6 +2046,7 @@ function serializeCheckpointState(acc: AnalyticsAccumulator): AnalyticsCheckpoin
     tokensTotal: { ...acc.tokensTotal },
     routingTelemetry: {
       benchmarkVersion: BENCHMARK_QUALITY_VERSION,
+      pricingVersion: 1,
       benchmarkCounters: { ...acc.routingTelemetry.benchmarkCounters },
       malformedSources: [...acc.routingTelemetry.malformedSources.entries()].map(([path, finding]) => [path, { ...finding }]),
       taskTypesByRun: [...acc.routingTelemetry.taskTypesByRun.entries()],

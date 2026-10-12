@@ -132,6 +132,9 @@ function ports(over: Partial<ShadowMemoryPorts> & { rows?: LedgerLine[] } = {}):
     policy: () => POLICY,
     write: (_path, row) => void rows.push(row),
     stderr: () => undefined,
+    // The default reads <test slot dir>/host-memory/review-demand, ONE dir per process: in the pure-test pool a
+    // sibling file's sweep publishes demand there and this start reads would-yield-to-review (#10829).
+    readReviewDemand: () => ({ state: "present", rows: [], unreadableRows: 0 }),
     ...over,
   };
 }

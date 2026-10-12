@@ -870,10 +870,14 @@ sweep:
     origin: "net-new"
     min: 0
     max: 8192
-  # W1-T7094 — the REPORT-ONLY host-wide memory budget (src/lib/host-memory-shadow.ts). Every row is
-  # a PROPOSAL to calibrate from `memory_budget.shadow` rows, not a ruling. `mode` accepts only off
-  # or shadow: no enforce mode exists, a later task must add one with operator approval, and nothing
-  # switches it on a timer. Read by host-memory-shadow.ts itself, never by validatePolicy.
+  # W1-T7094 — the host-wide memory budget (src/lib/host-memory-shadow.ts). Every row is a PROPOSAL
+  # to calibrate from `memory_budget.shadow` rows, not a ruling. mode accepts off, shadow or enforce.
+  # "shadow" (shipped) records a verdict per start and delays nothing. "enforce"
+  # (src/lib/host-memory-admission.ts, #10730) makes a start that would not fit wait, tiered: one
+  # re-read when only uncertainty tipped it; back-off while reserved work that can free memory still
+  # runs; admitted and named when nothing is left to wait for. Switching to enforce is an operator ruling made by editing this row;
+  # nothing switches it on a timer. Read by host-memory-shadow.ts
+  # itself, never by validatePolicy.
   hostMemoryBudget:
     mode:
       value: "shadow"
@@ -1644,6 +1648,14 @@ risk:
   confidenceThreshold:
     value: 0.7
     origin: "lifted:src/lib/risk-judge.ts:593 (DEFAULT_CONFIDENCE_THRESHOLD, as measured at 855dcb0b6)"
+    min: 0
+    max: 1
+  # W1-T7724: how far ABOVE confidenceThreshold a `low` verdict is still uncertain. A `low` verdict below the
+  # threshold, or inside [threshold, threshold + borderlineBand), is judged a second time with the diff before
+  # it may escalate. 0 = no band: only a verdict below the threshold is re-judged.
+  borderlineBand:
+    value: 0
+    origin: "net-new"
     min: 0
     max: 1
   verifyHumanReleaseEnabled:

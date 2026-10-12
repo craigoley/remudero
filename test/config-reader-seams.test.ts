@@ -367,7 +367,10 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // daemon's prospective pair passes. It is SEAMED from the moment it was written
   // (`workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon`), so it is NOT allowlisted, and
   // the file set is UNCHANGED (`src/run-task.ts` already carried the other reads above).
-  assert.equal(readers.length, 33, `expected 33 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // THIRTY-FOUR since the quiet-worker watchdog's no-history fallback bound (run-task.ts, W1-T7807) started reading
+  // `policy.values.workerStall`. It is SEAMED from the moment it was written
+  // (`workerStallMs ?? loadDefaultPolicy().values.workerStall`), so it is NOT allowlisted, and the file set is UNCHANGED.
+  assert.equal(readers.length, 34, `expected 34 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —

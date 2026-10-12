@@ -1,0 +1,72 @@
+- id: W1-T8198
+  title: "A DAEMON RUN YIELDS ON THE DAEMON'S RESTART LATCH, NOT ON ITS OWN FRESHNESS READ — ciWaitFreshness judges every read with staleSinceMs now and empty coalescing state, so on 2026-10-11 more than half of 56 freshness yields came BEFORE the daemon decided to restart (09:29-09:55: nine runs yielded before its decision)"
+  repo: remudero
+  depends_on: [W1-T7806, W1-T8139]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — one restart predicate: a daemon-dispatched run yields only when the daemon has latched
+  band_meaning: span
+  origin: "operator approval 2026-10-11 (Craig: go with your recommendations): restart-churn measurement, ~/Remudero-notes/restart-churn-2026-10-11. Filed as its own task instead of amending W1-T7806, which is in flight and whose shard another filing PR is amending the same day."
+  plan_refs: [W1-T7806, W1-T8139, W1-T7697, W1-T3793, W1-T5282, W1-T6093, W1-T4945]
+  files: [src/run-task.ts, test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-11 (core daemon ledger, copied read-only to ~/Remudero-notes/restart-churn-2026-10-11/ledger-copy;
+    timeline.txt). 56 implement runs ended handed_off with reason freshness_yield. The restart-churn analysis counts 32
+    of them yielding a median 28 min before the daemon itself decided to restart. A recount from timeline.txt's
+    daemon restart decisions (no decision yet in that daemon generation when the run yielded) gives 33 of 56, a median
+    19 min before the next decision. Example: between 09:29 and
+    09:55, W1-T5670 (09:30:55), W1-T7651 (09:31:32), W1-T7898 (09:34:04), W1-T7699 (09:34:43), W1-T7748 (09:39:56),
+    W1-T6001 (09:40:02), W1-T6013 (09:47:03), W1-T6012 (09:51:43) and W1-T7721 (09:54:42) each yielded at a worker
+    boundary or checkpoint, and the daemon's decision ("restart window_quiet") came at 09:54:44. Every early yield
+    freed a lane that refilled with a run that could yield again (W1-T7651, W1-T7898 and W1-T7748 each yielded twice
+    between 08:57 and 09:40), so a lane re-paid a run's setup for no restart.
+    READ on origin/main 233304449 (src/run-task.ts):
+      - The daemon wires each lane's `externalWaitFreshness` to `daemonFreshnessReads(effectiveRepoRoot).externalWaitFreshness`
+        (:39636), which is `ciWaitFreshness(read)` (:7307).
+      - ciWaitFreshness (:7290-7299) judges each reading with `decideFreshnessRestart({ changes, busy: true,
+        staleSinceMs: nowMs, nowMs, state: { total: 0, scoredShas: [] } })`. Every read is a fresh, stateless decision.
+        It has none of the daemon's pressure state and none of W1-T6093's quiet coalescing window
+        (`FRESHNESS_COALESCE_WINDOW_MS`, src/lib/deploy-judge.ts). So any single advance that scores the whole threshold
+        (the daemon's own paths, image-baked paths) yields the run at once, while the daemon defers the same advance.
+      - Both yield sites read it: yieldAtWorkerBoundary (:19709-19712) and the CI-wait handoff (:7808).
+    WHAT THE SIBLING TASKS COVER, AND WHAT THEY DO NOT:
+      - W1-T7806 design 2 (in flight) threads the daemon's restart latch into the run so that a run admitted under the
+        latch yields at its first boundary "even if its own freshness read would not": the latched -> yield direction.
+      - W1-T8139 (queued) makes the mid-worker watchdog read "recycle PAUSE pending OR restart latch set": the same
+        predicate, inside a worker.
+      - Neither stops a run from yielding on its OWN reading while the daemon has not latched, which is the 32 early
+        yields above. This task is that direction: the latch is the one predicate.
+    DEPENDENCIES: W1-T7806 provides the latch predicate. W1-T8139 edits the same watchDispatchSpawn/yield code in
+    src/run-task.ts. Serialized after both.
+  design: |
+    Operator rulings: no hard thresholds, lean into automation.
+    1. ONE PREDICATE. For a daemon-dispatched run, the freshness half of a yield (at a worker boundary and at the CI-wait
+       handoff) is the daemon's restart latch, read through the predicate W1-T7806 threads from runOne. A run yields
+       when the latch is set or a recycle PAUSE is pending (unchanged). Its own freshness reading is never a yield
+       trigger. When the latch is set, the receipt carries the latched old/new sha, as today's freshness handoff
+       carries the read one.
+    2. A run with no daemon (rmd run, no latch predicate wired) keeps ciWaitFreshness as today.
+    3. The run's own reading may still be logged as an observation (`run.freshness_observed` with the sha and the
+       daemon's latch state) so that a disagreement between the two stays visible. It never yields.
+    Tests (new file, `test(` titles verbatim as in the proofs below) drive the implement boundary and the CI-wait
+    handoff with an injected latch predicate and an injected freshness read that reports a full-weight advance.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts"
+    - claim: "a daemon run whose own read reports a full-weight advance does not yield at a worker boundary while the latch is clear"
+      proof: 'grep: test("W1-T8198: a stale own read with no latch does not yield at a boundary" in test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts'
+    - claim: "the same run yields at its next boundary once the latch is set"
+      proof: 'grep: test("W1-T8198: a set latch yields at the next boundary" in test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts'
+    - claim: "the CI-wait handoff follows the same latch"
+      proof: 'grep: test("W1-T8198: the CI-wait handoff follows the latch" in test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts'
+    - claim: "a run with no daemon latch keeps its own freshness judgement"
+      proof: 'grep: test("W1-T8198: a run with no daemon keeps its own judgement" in test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts'
+  falsifier: |
+    Keep the daemon lane wired to ciWaitFreshness, as on main: in the first test the injected full-weight read makes
+    yieldAtWorkerBoundary return a freshness handoff with the latch clear. Drop the read entirely: the last test's
+    standalone run never yields.

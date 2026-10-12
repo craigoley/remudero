@@ -1,0 +1,77 @@
+- id: W1-T8042
+  title: "A RED INHERITED FROM MAIN IS WORKED AS EACH PR'S OWN — on 2026-10-11, after #10834 merged at 11:10Z, eight open PRs went red on ci-shards with the same pure-test-pool hang, each held own-red / blocker_owner fix-lane, with fix strikes and job re-runs spent per PR and no cross-check against the same check and signature on the other PRs or on main"
+  repo: remudero
+  depends_on: [W1-T8038, W1-T8041]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — a red shared across PRs is classified as main's and repaired once
+  band_meaning: blast-radius
+  origin: "operator approval 2026-10-11: file the fix-lane follow-ups from the PR #10829 / #10852 ci-shard (7/8)|(8/8) timeouts after the W1-T6085 pure-test pool (#10834)"
+  plan_refs: [W1-T5490, W1-T5528, W1-T6024, W1-T6403, W1-T1014, W1-T8038, W1-T8041]
+  files: [src/lib/sweep.ts, src/lib/main-health-rung.ts, test/a-red-shared-across-prs-is-repaired-on-main-once.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-11 in the core daemon's live ledger (/mnt/rmd/state2/state/ledger.ndjson on the host).
+    sweep.disposed rows whose reason names "ci-shard (N/8) failed", 11:00-14:10Z, first seen per PR:
+      #10787 11:30Z (1,5,7) · #10852 12:48Z (7,8) · #10765 13:10Z (5) · #10854 13:10Z (7,8) · #10829 13:11Z (7,8)
+      · #10863 13:12Z (1) · #10864 13:45Z (5) · #10858 14:05Z (5).
+    Every one is disposed `blocker: own-red, blocker_owner: fix-lane`. #10880's commit message ties #10765,
+    #10854 and #10858 to the same cause from the job logs. The W1-T6085 pure-test pool (#10834, merged 11:10Z)
+    failed one pooled test, then locateLeak ran until the 35-minute cancel. Spent on it: #10829 fix round 1
+    (NEEDS_DESIGN), #10852 fix round 1 (NEEDS_SCOPE for scripts/pure-test-pool.mjs and
+    scripts/test-tier-manifest.mjs, files its own diff does not touch), and #10852's two shard re-runs.
+    WHY THE EXISTING GUARDS MISSED IT. READ on origin/main 90034ae2d:
+      - W1-T5490 base-red stand-down (decideBaseRed, src/lib/sweep.ts) reads main's health from main's own
+        runs (src/lib/main-health-rung.ts). Main's push runs are cancelled while pending and rarely
+        conclude (doctrine cancelled-is-not-red), so main read undetermined.
+      - W1-T5528 / W1-T6024 base reproduction ran the named file at main (#10852, 13:47:46Z
+        sweep.base_reproduction verdict "clear"). A pool-composition red does not reproduce file-by-file.
+      - Nothing compares one PR's red with the same check and signature on the OTHER open PRs. That is the
+        one observation that was plentiful here.
+    The repair lane exists: #10731 keys main repair by red signature (mainRedSignature,
+    mainRepairRecordsFromLedger, src/lib/main-health-rung.ts). It is fed only from main's own red.
+    W1-T1014 (blocked) is about two PRs that are jointly red on main. This is the reverse: main's red
+    spreading to every PR.
+  design: |
+    Operator ruling: no hard thresholds. "Shared" is structural, not a tuned count.
+    1. CORRELATE. Each full sweep pass computes, for every red open PR, the signature of each failing check:
+       the check family (shard index folded, as mainRedSignature does) plus its W1-T8038 ciFailureSignature.
+       A signature is MAIN-INHERITED when both of these hold:
+       a. It is red on more than one open PR, and none of those PRs' own diffs (vs merge base) touches a file
+          the signature names (the failing test, a pool leaker or victim, a BLOCKED gate's input).
+       b. Every affected head's merge base already contains one main commit that none of the green-on-that-
+          check heads of the same PRs (or main's last concluded run on that check) contained.
+       A PR whose own diff touches a named file is never classified main-inherited. It may be the cause, and
+       it keeps its own lane.
+    2. STAND DOWN. A PR whose every red is main-inherited is disposed `blocker: main-inherited,
+       blocker_owner: main-repair`. It spends no fix strike and gets no job re-run or base refresh for that
+       red. The stand-down reason names the signature and the other PRs sharing it.
+    3. ONE REPAIR. Hand the signature to the #10731 main-repair lane once, as a red signature with its PR
+       evidence (PR numbers, heads, first-seen times, the candidate main commit from 1b). That lane's
+       signature-keyed dedupe means a second pass, or a sixth PR, advances the same record and never opens
+       another. If main's own run later concludes red on the same signature, that is the same record.
+    4. RELEASE. When a PR's check goes green or its signature changes (after a main refresh or the repair
+       merging), it returns to its ordinary lane on the next pass. Nothing in this task holds a PR longer than
+       its signature stays shared.
+    Tests go in a new file, test/a-red-shared-across-prs-is-repaired-on-main-once.test.ts, with `test(`
+    titles verbatim as in the proofs below. Drive runSweep with three open PRs replaying the 10-11 shape:
+    disjoint diffs, the same ci-shard signature, a recording dispatchFix, requeueCheck and main-repair
+    handoff. Add a fourth PR whose own diff touches the named test file.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-red-shared-across-prs-is-repaired-on-main-once.test.ts"
+    - claim: "a check and signature red on several PRs with disjoint diffs stands each PR down as main-inherited, with no strike or re-run"
+      proof: 'grep: test("W1-T8042: a red shared by PRs with disjoint diffs is main-inherited and spends no strike" in test/a-red-shared-across-prs-is-repaired-on-main-once.test.ts'
+    - claim: "the shared signature opens exactly one main-repair record however many PRs carry it"
+      proof: 'grep: test("W1-T8042: a shared red signature opens one main-repair record" in test/a-red-shared-across-prs-is-repaired-on-main-once.test.ts'
+    - claim: "a PR whose own diff touches a file the signature names keeps its own fix lane"
+      proof: 'grep: test("W1-T8042: a PR whose diff touches the named file keeps its own lane" in test/a-red-shared-across-prs-is-repaired-on-main-once.test.ts'
+  falsifier: |
+    Remove the correlation. Each fixture PR then disposes own-red / fix-lane and the recording dispatchFix
+    receives three strikes, so the first test fails. Key the repair handoff by PR rather than by signature,
+    and the second test sees three records. Classify regardless of diff overlap, and the fourth PR is stood
+    down, so the third test fails.

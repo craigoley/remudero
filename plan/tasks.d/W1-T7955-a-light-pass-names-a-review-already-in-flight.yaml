@@ -1,0 +1,65 @@
+- id: W1-T7955
+  title: "A LIGHT PASS NAMES A REVIEW ALREADY IN FLIGHT — a head another light pass has reserved is dropped from this pass's selection and refill tail, then falls into the not-admitted branch, which writes \"not admitted this pass: semantic post-review admission bound N\" and counts up repeat_streak for a review that is running"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the light pass's stand-down reason for a head reserved by an overlapping pass
+  band_meaning: span
+  origin: "operator approval 2026-10-11: file the recommended follow-ups (phantom light-pass deferrals were reviews already in flight)"
+  plan_refs: [W1-T4732, W1-T2426, W1-T5931, W1-T5491, W1-T2345]
+  files: [src/lib/sweep.ts, test/a-light-pass-names-a-review-already-in-flight.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main cb58d3155 (2026-10-11), src/lib/sweep.ts.
+    THE PATH. Overlapping light passes share review admissions through the process-wide set
+    `lightPassReservedHeads` (:17933), keyed `<pr>@<head>` by `lightPassHeadKey` (:17936, W1-T4732). In
+    `runSweepLightPass` (:17954):
+      - A head another pass has reserved is filtered out of this pass's selection (:18004) and its refill
+        tail (:18017).
+      - This pass then reserves its own picks (:18012).
+      - The reserved head is in neither `selectedNumbers` (:18081) nor `outcomeDedupedNumbers` (:18088).
+        So it gets the not-selected `scopedDeps` (:18114-18137). That makes `post-review` non-actionable and
+        sets `standDownReasonFor("post-review")` to "not admitted this pass: semantic post-review admission
+        bound N" (:18133), plus the in-flight note and "admitted #x ahead".
+      - The sweep writes that as the row's `stand_down_reason` (:14969), with `repeat_streak` (:14975).
+    The row reads as if the PR lost admission. In fact its review was admitted by the overlapping pass and is
+    running.
+    The pass already captures the reservation state before its own (:17998). `demandCandidates` is read
+    "BEFORE this pass reserves its own spawning heads" (W1-T7095). So the heads other passes hold are known at
+    that point. Nothing passes them to the stand-down reason.
+    EVIDENCE, from the operator session's read of the core daemon's ledger, 2026-10-11. It was not re-read for this
+    filing, because the Azure host is read-only to it. Three "not admitted this pass" deferrals at 04:04Z and
+    05:20Z were heads whose review an overlapping light pass had admitted and was still running. They inflated
+    the deferral count and repeat_streak for PRs that were not waiting on admission.
+  design: |
+    1. CAPTURE WHAT OTHER PASSES HOLD. At the point `demandCandidates` is read (:17998), before this pass's own
+       reservations (:18012), record the open PRs whose `lightPassHeadKey` is already in `lightPassReservedHeads`.
+       This pass did not reserve them, so they are in flight elsewhere.
+    2. NAME IT. For such a PR, the not-selected branch's `standDownReasonFor("post-review")` returns
+       "review already in flight for this head (admitted by an overlapping light pass)". It never begins
+       "not admitted this pass". Other dispositions keep the base reason. A PR that is not held elsewhere keeps
+       today's admission-bound text unchanged, including the plan-filing variant.
+    3. THE KEY IS THE HEAD. A PR held at an older head is not this head's review. It gets the ordinary text, so a
+       push during a review still reads as a new admission decision.
+    Tests go in the new file test/a-light-pass-names-a-review-already-in-flight.test.ts, with `test(` titles exactly
+    as in the proofs below. Drive two overlapping `runSweepLightPass` calls whose first holds a review open. The
+    existing W1-T4732 overlap tests and sweep-review-admission suites must stay green.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-light-pass-names-a-review-already-in-flight.test.ts"
+    - claim: "an overlapping light pass writes a stand_down_reason that names the in-flight review and does not begin not admitted this pass"
+      proof: 'grep: test("W1-T7955: an overlapping light pass names the review already in flight" in test/a-light-pass-names-a-review-already-in-flight.test.ts'
+    - claim: "a truly unadmitted PR keeps the semantic post-review admission bound text"
+      proof: 'grep: test("W1-T7955: a PR that lost admission keeps the admission-bound text" in test/a-light-pass-names-a-review-already-in-flight.test.ts'
+    - claim: "a PR reserved at an older head is not named in flight for its new head"
+      proof: 'grep: test("W1-T7955: a reservation for an older head is not this head in flight" in test/a-light-pass-names-a-review-already-in-flight.test.ts'
+  falsifier: |
+    Leave the not-selected branch as it is. The second pass's row for the head the first pass holds then reads
+    "not admitted this pass: semantic post-review admission bound", as the 04:04Z and 05:20Z rows did, and the first
+    test fails. Name every non-selected PR in flight, and the lost-admission test fails. Key the held set by PR number
+    alone, and the older-head test fails.

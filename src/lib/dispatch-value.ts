@@ -4,6 +4,7 @@
  */
 import { createHash } from "node:crypto";
 import { deriveTaskClass } from "./task-class.js";
+import { streakRefusal } from "./non-worker-verdict.js";
 
 /** Keeps the pooled prior strictly inside (0, 1) so a zero-merge fleet still yields a proper Beta. */
 const PRIOR_RATE_EPSILON = 1e-3;
@@ -334,6 +335,7 @@ function costOfDelayContext(
   if (!snapshot.planTreeSha || !Number.isFinite(nowMs)) return { kind: "refused", reasons: ["unreadable-snapshot"] };
   const starts = new Map<string, { id: string; at: number }>();
   const outcomes = new Map<string, { at: number; stale: boolean }>();
+  const lastVerdicts = new Map<string, { at: number; row: Record<string, unknown> }>();
   for (const row of rows) {
     const at = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
     if (!Number.isFinite(at) || at > nowMs || typeof row.run_id !== "string" || typeof row.task_id !== "string") continue;
@@ -346,11 +348,19 @@ function costOfDelayContext(
       const previous = outcomes.get(row.run_id);
       if (!previous || at > previous.at) outcomes.set(row.run_id, { at, stale });
     }
+    if (row.step === "verdict") {
+      const previous = lastVerdicts.get(row.run_id);
+      if (!previous || at > previous.at) lastVerdicts.set(row.run_id, { at, row });
+    }
   }
   const ages = new Map<number, { valid: number; total: number }>();
   const counts = new Map<string, number>();
   for (const [runId, start] of [...starts].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
-    counts.set(start.id, (counts.get(start.id) ?? 0) + 1);
+    // A run no worker tried (restart yield, claim race, infra refusal, failed harness checkpoint) spends no
+    // stride: the breaker's own set, {@link streakRefusal}. MEASURED 2026-10-11: W1-T7742's 7 starts were all
+    // non-worker, so its pass was 8/score and every fresh priority-1 task outranked it.
+    const verdict = lastVerdicts.get(runId);
+    if (!verdict || streakRefusal(verdict.row) === undefined) counts.set(start.id, (counts.get(start.id) ?? 0) + 1);
     const filedAt = snapshot.filedAtByTaskId.get(start.id);
     const outcome = outcomes.get(runId);
     if (filedAt === undefined || !Number.isFinite(filedAt) || filedAt > start.at || !outcome || outcome.at < start.at) continue;
