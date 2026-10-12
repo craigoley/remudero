@@ -8,13 +8,15 @@
  * already-high draft, and a one-shot replay sends the lost proposals back through the ordinary inbox path.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 
 import { fixedClock } from "../src/lib/clock.js";
+import { acquireDrainLock } from "../src/lib/drain-lock.js";
 import { readClassificationSnapshot, triageFleetLane, writeClassificationSnapshot } from "../src/lib/fleet-lane.js";
 import * as inbox from "../src/lib/inbox.js";
 import {
@@ -26,7 +28,7 @@ import {
   writeRatificationShards,
   type Proposal,
 } from "../src/lib/inbox.js";
-import { BAND_MEANING_REPLAY_STORE, replayBandMeaningRefusals, type BandMeaningReplayStore } from "../src/lib/inbox-replay.js";
+import { BAND_MEANING_REPLAY_STORE, readBandMeaningReplayStore, replayBandMeaningRefusals, type BandMeaningReplayStore } from "../src/lib/inbox-replay.js";
 import { relintGuidanceLines } from "../src/lib/relint.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { WorkerResult } from "../src/lib/worker.js";
@@ -325,4 +327,130 @@ test("W1-T8714: an incomplete ledger read seeds no replay", () => {
   const none = empty.rows().filter((r) => r.step === "inbox.replay_deferred");
   assert.equal(none.length, 1);
   assert.match(String(none[0].reason), /no approve/);
+});
+
+test("W1-T8714: a malformed replay store defers without reseeding and retries after repair", () => {
+  const f = fixture();
+  const storePath = join(f.stateDir, BAND_MEANING_REPLAY_STORE);
+  const malformed = JSON.stringify({ seededAt: SEED_MS, proposals: {} });
+  writeFileSync(storePath, malformed);
+  const message = `inbox-replay: ${storePath} is not a replay store`;
+  assert.throws(() => readBandMeaningReplayStore(f.stateDir), { message });
+  const drafts = f.drafts();
+  const attempts = f.attempts();
+  const expected = { seeded: false, invalidated: [], recorded: [], deferred: `error: ${message}`, complete: false };
+  assert.deepEqual(f.pass(), expected);
+  assert.deepEqual(f.pass(SEED_MS + 1000), expected);
+  assert.equal(readFileSync(storePath, "utf8"), malformed);
+  assert.deepEqual(f.drafts(), drafts);
+  assert.deepEqual(f.attempts(), attempts);
+  const rows = f.rows().filter((r) => r.step === "inbox.replay_deferred");
+  assert.equal(rows.length, 1, "an unchanged failure is recorded once");
+  assert.equal(rows[0].reason, expected.deferred);
+
+  rmSync(storePath);
+  assert.equal(f.pass(SEED_MS + 2000).seeded, true);
+  assert.equal(f.drafts()[REFILE], undefined);
+});
+
+test("W1-T8714: an approve duplicate refusal records the filed task or the fallback reason", () => {
+  for (const [text, reason] of [
+    ["a task record already on origin/main against W1-T100 — same subject", "duplicate of W1-T100"],
+    ["a task record already on origin/main", "duplicate of a filed task"],
+  ]) {
+    const f = fixture();
+    f.pass();
+    f.append({ ts: AFTER, task_id: DUPLICATE, step: "approve.error", error: text });
+    const pass = f.pass(SEED_MS + 7_200_000);
+    assert.deepEqual(pass.recorded, [{ proposalId: DUPLICATE, outcome: "skipped_superseded" }]);
+    assert.deepEqual(f.store().proposals[DUPLICATE].outcome, {
+      outcome: "skipped_superseded", at: new Date(SEED_MS + 7_200_000).toISOString(), reason,
+    });
+    const rows = replayed(f).filter((r) => r.proposal_id === DUPLICATE);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].outcome, "skipped_superseded");
+    assert.equal(rows[0].reason, reason);
+    assert.deepEqual(f.pass(SEED_MS + 7_200_001).recorded, []);
+  }
+});
+
+test("W1-T8714: colliding registry shards cannot declare a proposal absent", () => {
+  const f = fixture();
+  const shardDir = join(f.stateDir, "inbox-proposals.d");
+  mkdirSync(shardDir);
+  const proposal = JSON.stringify({ id: REFILE, summary: "collision", evidenceAnchors: [] });
+  writeFileSync(join(shardDir, "one.json"), proposal);
+  writeFileSync(join(shardDir, "two.json"), proposal);
+  assert.throws(() => inbox.loadProposalRegistry(join(f.stateDir, "inbox-proposals.json")), /duplicate proposal id/);
+  const pass = f.pass();
+  assert.equal(pass.deferred, undefined);
+  assert.ok(pass.invalidated.includes(GONE), "a faulted registry cannot prove GONE was superseded");
+  assert.equal(f.store().proposals[GONE].outcome, undefined);
+  assert.equal(replayed(f).some((r) => r.proposal_id === GONE), false);
+  assert.equal(f.drafts()[REFILE], undefined, "live proposals still get re-drafted");
+
+  rmSync(join(shardDir, "two.json"));
+  assert.deepEqual(f.pass(SEED_MS + 1000).recorded, [{ proposalId: GONE, outcome: "skipped_superseded" }]);
+  assert.equal(f.store().proposals[GONE].outcome?.reason, "no longer in the registry");
+});
+
+test("W1-T8714: a live draft lock leaves caches intact until the next pass", () => {
+  const f = fixture();
+  const drafts = f.drafts();
+  const attempts = f.attempts();
+  const lock = acquireDrainLock(join(f.stateDir, "inbox-draft.lock"));
+  try {
+    const pass = f.pass();
+    assert.equal(pass.seeded, true);
+    assert.equal(pass.deferred, undefined);
+    assert.deepEqual(pass.invalidated, []);
+    assert.equal(f.store().proposals[REFILE].invalidatedAt, undefined);
+    assert.deepEqual(f.drafts(), drafts);
+    assert.deepEqual(f.attempts(), attempts);
+    assert.equal(existsSync(lock.path), true, "the replay must not release another holder's lock");
+  } finally {
+    lock.release();
+  }
+  assert.ok(f.pass(SEED_MS + 1000).invalidated.includes(REFILE));
+  assert.equal(f.drafts()[REFILE], undefined);
+  assert.equal(f.attempts()[REFILE], undefined);
+  assert.equal(existsSync(lock.path), false, "the real default releases its lock after invalidating");
+});
+
+test("W1-T8714: a draft lock io failure defers with its reason and retries", (t) => {
+  const f = fixture();
+  const drafts = f.drafts();
+  const attempts = f.attempts();
+  const lockPath = join(f.stateDir, "inbox-draft.lock");
+  const original = fs.openSync;
+  const failure = Object.assign(new Error("draft lock io failure"), { code: "EIO" });
+  let failedCalls = 0;
+  const mocked = t.mock.method(fs, "openSync", (...args: Parameters<typeof fs.openSync>) => {
+    if (args[0] === lockPath) {
+      failedCalls++;
+      throw failure;
+    }
+    return original(...args);
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.deepEqual(f.pass(), {
+      seeded: false, invalidated: [], recorded: [], deferred: "error: draft lock io failure", complete: false,
+    });
+    assert.equal(failedCalls, 1, "the replay reached the failing lock dependency");
+    assert.equal(f.store().proposals[REFILE].invalidatedAt, undefined);
+    assert.deepEqual(f.drafts(), drafts);
+    assert.deepEqual(f.attempts(), attempts);
+    const rows = f.rows().filter((r) => r.step === "inbox.replay_deferred");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].reason, "error: draft lock io failure");
+  } finally {
+    mocked.mock.restore();
+    syncBuiltinESMExports();
+  }
+  const retry = f.pass(SEED_MS + 1000);
+  assert.equal(retry.seeded, false, "the population saved before the failure is reused");
+  assert.ok(retry.invalidated.includes(REFILE));
+  assert.equal(f.drafts()[REFILE], undefined);
+  assert.equal(f.attempts()[REFILE], undefined);
 });
