@@ -25,6 +25,8 @@ import { resolveRepoLayout } from "./repo-layout.js";
 import { execWhitelistedProof, INSTRUMENT_SURFACE, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
 import type { ProofDiscriminationEvidence } from "./sweep.js";
 import { renderAcceptanceBlock } from "./plan-pr-emitter.js";
+import { parseTasksFromYaml, type Task } from "./plan.js";
+import { lintTask, type LintViolation } from "./task-linter.js";
 import { taskIdFromRunBranch } from "./status.js";
 import { isTaskShardName } from "./task-shard-name.js";
 
@@ -488,6 +490,72 @@ export function addedFilesEntryPattern(path: string, flow: boolean, singleLineFl
   return singleLineFlow ? `^ *files: \\[.*${quoted}` : `, ${quoted}`;
 }
 
+/** W1-T7959: the blocking lint violations an amended shard introduces for `taskId`, judged the way
+ *  lint-plan's diff-scoped run judges them (the base task is the `riskTransition` base). A violation
+ *  is NEW when it blocks on the amended task and the base task has no counterpart (same check and
+ *  message). `undefined` means no verdict: the base shard does not load as a plan, so there is no
+ *  baseline to attribute a violation against and the lint stays silent, as it does everywhere a fact
+ *  is absent. */
+export function newAmendedBlockers(baseText: string, amendedText: string, label: string, taskId: string):
+  { blockers: LintViolation[]; task: Task | undefined } | undefined {
+  const load = (text: string): { task?: Task; error?: string } => {
+    try { return { task: parseTasksFromYaml(text, label).find((t) => t.id === taskId) }; }
+    catch (e) { return { error: (e as Error).message }; }
+  };
+  const baseTask = load(baseText).task;
+  if (!baseTask) return undefined;
+  const { task, error } = load(amendedText);
+  if (!task) {
+    return { task, blockers: [{ check: "shard-shape", severity: "block",
+      message: `the amended shard no longer loads as a plan task${error ? `: ${error}` : ""}` }] };
+  }
+  const had = new Set(lintTask(baseTask).violations.filter((v) => v.severity === "block").map((v) => `${v.check}\0${v.message}`));
+  const blockers = lintTask(task, { riskTransition: { baseTask } }).violations
+    .filter((v) => v.severity === "block" && !had.has(`${v.check}\0${v.message}`));
+  return { task, blockers };
+}
+
+/** Rule 19's own remedy for a sizing block, applied as a line edit: `risk:` becomes `high` (its
+ *  trailing comment replaced to name the subsystems and the amendment PR), and `band_meaning: span`
+ *  is added only when the task declares none. Returns `undefined` when the task's mapping is not in
+ *  an editable block shape. */
+function raiseRiskToHigh(source: string, taskId: string, subsystems: string, prNumber: number): string | undefined {
+  let text = source;
+  const find = () => {
+    const doc = parseDocument(text);
+    const task = (isSeq(doc.contents) ? doc.contents.items : []).find((item) =>
+      isMap(item) && isScalar(item.get("id", true)) && String((item.get("id", true) as { value: unknown }).value) === taskId);
+    return isMap(task) && !task.flow ? task : undefined;
+  };
+  const lineEnd = (at: number) => { const i = text.indexOf("\n", at); return i < 0 ? text.length : i; };
+  const lineStart = (at: number) => text.lastIndexOf("\n", at - 1) + 1;
+  const comment = `# Rule 19 span: widened to ${subsystems} by a scope amendment for #${prNumber}`;
+  let task = find();
+  if (!task) return undefined;
+  const risk = task.get("risk", true);
+  if (isScalar(risk) && risk.range) {
+    const [start, end] = risk.range;
+    text = `${text.slice(0, start)}high  ${comment}${text.slice(lineEnd(end))}`;
+  } else if (risk === undefined || risk === null) {
+    const id = task.get("id", true);
+    const firstKey = task.items[0]?.key;
+    if (!isScalar(id) || !id.range || !isScalar(firstKey) || !firstKey.range) return undefined;
+    const col = firstKey.range[0] - lineStart(firstKey.range[0]);
+    text = `${text.slice(0, lineEnd(id.range[1]))}\n${" ".repeat(col)}risk: high  ${comment}${text.slice(lineEnd(id.range[1]))}`;
+  } else return undefined;
+  task = find();
+  if (!task) return undefined;
+  if (task.get("band_meaning", true) === undefined) {
+    const at = task.get("risk", true);
+    const key = task.items.find((pair) => isScalar(pair.key) && pair.key.value === "risk")?.key;
+    if (!isScalar(at) || !at.range || !isScalar(key) || !key.range) return undefined;
+    const col = key.range[0] - lineStart(key.range[0]);
+    const eol = lineEnd(at.range[1]);
+    text = `${text.slice(0, eol)}\n${" ".repeat(col)}band_meaning: span${text.slice(eol)}`;
+  }
+  return text;
+}
+
 export interface ScopeAmendmentRequest {
   readonly taskId: string;
   readonly prNumber: number;
@@ -570,8 +638,28 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
     const indent = shard.text.slice(lineStart, start).match(/^ */)![0];
     extra = `${shard.text[insert - 1] === "\n" ? "" : "\n"}${additions.map((path) => `${indent}- ${JSON.stringify(path)}\n`).join("")}`;
   }
-  const text = shard.text.slice(0, insert) + extra + shard.text.slice(insert);
+  let text = shard.text.slice(0, insert) + extra + shard.text.slice(insert);
   if (parseDocument(text).errors.length > 0) return refuse("shard-drifted", "appending paths would invalidate the files sequence");
+  // W1-T7959: lint what this writer writes BEFORE any worktree exists. Widening files: is the edit that
+  // adds a subsystem, so Rule 19 sizing is the violation it produces by construction, and the linter's
+  // own remedy for it (raise to risk:high) is applied; anything else new that blocks is refused.
+  let riskRaise: { subsystems: string } | undefined;
+  let verdict = newAmendedBlockers(shard.text, text, shard.path, request.taskId);
+  if (verdict && verdict.blockers.length > 0) {
+    const sizing = verdict.blockers.filter((v) => v.check === "sizing" && verdict!.task !== undefined && verdict!.task.risk !== "high");
+    if (sizing.length === verdict.blockers.length) {
+      const subsystems = /\((.*?)\) at risk:/.exec(sizing[0]!.message)?.[1] ?? "more than one subsystem";
+      const raised = raiseRiskToHigh(text, request.taskId, subsystems, request.prNumber);
+      if (raised !== undefined && parseDocument(raised).errors.length === 0) {
+        text = raised;
+        riskRaise = { subsystems };
+        verdict = newAmendedBlockers(shard.text, text, shard.path, request.taskId);
+      }
+    }
+  }
+  if (verdict && verdict.blockers.length > 0) {
+    return refuse("amended-shard-lint", verdict.blockers.map((v) => `${v.check}: ${v.message}`).join("; "));
+  }
   const wp = deps.worktreePathFor(request.taskId, request.prNumber);
   deps.worktreeAdd(deps.repoDir, wp, branch);
   try {
@@ -582,12 +670,19 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
     deps.writeFile(join(wp, shard.path), text);
     deps.gitAdd(wp, shard.path);
     const title = `fix(plan): extend ${request.taskId.toLowerCase()}'s files for #${request.prNumber}`;
-    const sha = deps.gitCommit(wp, `${title}\n\nAppend validated worker paths to files only.`);
+    const sha = deps.gitCommit(wp, riskRaise
+      ? `${title}\n\nAppend validated worker paths to files and raise risk to high: the task linter counted ` +
+        `${riskRaise.subsystems} (Rule 19 sizing). band_meaning: span is added only when none was declared.`
+      : `${title}\n\nAppend validated worker paths to files only.`);
     deps.gitPush(wp, branch, sha);
     const created = deps.createPr({ title, head: branch, base: "main",
-      body: `Scope amendment for #${request.prNumber}. Only ${shard.path}'s files list changes.\n\n` +
-        renderAcceptanceBlock(additions.map((path) => ({ claim: `files includes ${path}`,
-          proof: `grep: ${addedFilesEntryPattern(path, files.flow === true, !shard.text.slice(start, end).includes("\n"))} in ${shard.path}` }))) });
+      body: (riskRaise
+        ? `Scope amendment for #${request.prNumber}. ${shard.path}'s files list changes and its risk is raised to high ` +
+          `because the task linter counted ${riskRaise.subsystems} (Rule 19 sizing); band_meaning: span is added only when none was declared.\n\n`
+        : `Scope amendment for #${request.prNumber}. Only ${shard.path}'s files list changes.\n\n`) +
+        renderAcceptanceBlock([...additions.map((path) => ({ claim: `files includes ${path}`,
+          proof: `grep: ${addedFilesEntryPattern(path, files.flow === true, !shard.text.slice(start, end).includes("\n"))} in ${shard.path}` })),
+          ...(riskRaise ? [{ claim: `risk is raised to high for ${riskRaise.subsystems}`, proof: `grep: ^ *risk: high in ${shard.path}` }] : [])]) });
     deps.recordIdentity(key, { amendmentUrl: created.prUrl, amendmentNumber: created.prNumber, merged: false });
     return { kind: "created", amendmentUrl: created.prUrl, amendmentNumber: created.prNumber };
   } finally {
