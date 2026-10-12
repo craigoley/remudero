@@ -32,6 +32,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { cacheHitRatio, type CacheHitTokens } from "./digest.js";
 import { readSourceSnapshotBody, sourceSnapshotStates, type ReadModelDb } from "./read-model-db.js";
 import type { ViewDefinition, ViewSource } from "./views.js";
+import { foldGardenerSpend, GARDENER_SPEND_MAX_BYTES, GARDENER_SPEND_MAX_GARDENS, type GardenerSpend, type GardenerSpendSource } from "./gardener-spend.js";
 
 export const ANALYTICS_VIEW_NAME = "analytics";
 export const ANALYTICS_VIEW_VERSION = 1;
@@ -155,6 +156,7 @@ export const ANALYTICS_STALE_AFTER_MS = 2 * ANALYTICS_REFRESH_INTERVAL_MS + ANAL
 
 /** What one instance's `console-v1` row holds: the projection, and the terms a cross-instance merge needs. */
 export interface AnalyticsConsoleSource {
+  gardenerSpendSource?: GardenerSpendSource;
   projection: ConsoleV1Projection;
   /** Registry/config-owned identity captured with this snapshot; older rows carry none. */
   repository?: string;
@@ -205,7 +207,7 @@ export interface AnalyticsViewData {
   /** How many instances the overview counts, of how many serve projects, and which have no snapshot yet. */
   coverage: { counted: number; of: number; missing: string[] };
   /** Each instance's own metrics; `reason` instead when it has no snapshot yet. */
-  instances: Array<{ instanceId: string; repository?: string; metrics?: ConsoleV1Metric[]; details?: AnalyticsDetails; reason?: string }>;
+  instances: Array<{ instanceId: string; repository?: string; gardenerSpend?: GardenerSpend; metrics?: ConsoleV1Metric[]; details?: AnalyticsDetails; reason?: string }>;
 }
 
 /** One instance's input to the merge: its last committed snapshot, and a refresh failure newer than it. */
@@ -396,7 +398,23 @@ export function createAnalyticsView(opts: { modelApprovalConfig?: HostModelAppro
           ...(failed?.error ? { failure: { error: failed.error, atMs: Number(failed.errorMs) } } : {}),
         };
       });
-      return [{ key: "", ...withHostModelApprovals(mergeAnalytics(inputs, now), opts.modelApprovalConfig, now) }];
+      const merged = mergeAnalytics(inputs, now);
+      let spendGardens = 0, spendBytes = 0;
+      merged.data.instances = merged.data.instances.map((instance, index) => {
+        const snapshot = inputs[index]?.snapshot;
+        if (snapshot === undefined || snapshot.console.gardenerSpendSource === undefined) return instance;
+        let gardenerSpend = foldGardenerSpend(snapshot.console.gardenerSpendSource, instance.repository, snapshot.asOf);
+        if (spendGardens + gardenerSpend.gardens.length > GARDENER_SPEND_MAX_GARDENS ||
+          spendBytes + Buffer.byteLength(JSON.stringify(gardenerSpend)) > GARDENER_SPEND_MAX_BYTES) {
+          gardenerSpend = foldGardenerSpend({ reason: "over_budget" }, instance.repository, snapshot.asOf);
+        }
+        spendGardens += gardenerSpend.gardens.length;
+        const bytes = Buffer.byteLength(JSON.stringify(gardenerSpend));
+        if (spendBytes + bytes > GARDENER_SPEND_MAX_BYTES) return instance;
+        spendBytes += bytes;
+        return { ...instance, gardenerSpend };
+      });
+      return [{ key: "", ...withHostModelApprovals(merged, opts.modelApprovalConfig, now) }];
     },
   };
 }

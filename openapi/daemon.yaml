@@ -7417,6 +7417,49 @@ components:
         value: {type: [number, "null"]}
         notCollectedReason: {type: string}
 
+    GardenerSpend:
+      type: object
+      description: >
+        Optional cached gardener cost evidence (W1-T8484). Until a versioned child correlation
+        producer is installed, spend and receipt counts are unknown, including disabled gardeners.
+        Runtime observation time does not establish ledger coverage or historical zero cost.
+      required: [version, state, reason, observedAt, materializedAt, totalUsd, pricedSubtotalUsd, counts, window, coverage, gardens]
+      properties:
+        version: {type: string, enum: [gardener-spend-v1]}
+        state: {type: string, enum: [not_collected]}
+        reason:
+          type: string
+          enum: [missing_registry, invalid_registry, over_budget, missing_materialization, scope_mismatch, correlation_not_available]
+        observedAt: {type: [string, "null"], format: date-time}
+        materializedAt: {type: [string, "null"], format: date-time}
+        totalUsd: {type: "null"}
+        pricedSubtotalUsd: {type: "null"}
+        counts:
+          type: object
+          required: [priced, unpriced, unlinked]
+          properties:
+            priced: {type: "null"}
+            unpriced: {type: "null"}
+            unlinked: {type: "null"}
+        window: {type: "null"}
+        coverage:
+          type: object
+          required: [retainedCorpus, truncated]
+          properties:
+            retainedCorpus: {type: string, enum: [not_collected]}
+            truncated: {type: "null"}
+        gardens:
+          type: array
+          maxItems: 32
+          items:
+            type: object
+            required: [name, enabled, scope, totalUsd, pricedSubtotalUsd]
+            properties:
+              name: {type: string, maxLength: 64}
+              enabled: {type: boolean}
+              scope: {type: string, enum: [repository, host, fleet]}
+              totalUsd: {type: "null"}
+              pricedSubtotalUsd: {type: "null"}
     AnalyticsView:
       type: object
       description: >
@@ -7491,6 +7534,8 @@ components:
                     type: array
                     items:
                       $ref: "#/components/schemas/AnalyticsViewMetric"
+                  gardenerSpend:
+                    $ref: "#/components/schemas/GardenerSpend"
                   reason: {type: string}
                   details:
                     $ref: "#/components/schemas/AnalyticsStoredDetails"
