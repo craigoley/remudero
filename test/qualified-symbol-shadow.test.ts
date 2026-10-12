@@ -64,6 +64,15 @@ test("qualified shadow reports an oracle miss instead of claiming a smaller sele
   ]);
 });
 
+test("qualified shadow never mislabels a full-run fallback as a floor miss", () => {
+  const record = qualifiedSymbolShadow(["package-lock.json"], input(), raw);
+  assert.equal(record.fullRun, true);
+  assert.ok(record.fallback);
+  assert.deepEqual(qualifiedShadowFailures(record, ["test/namesake.test.ts"]), [
+    { file: "test/namesake.test.ts", floor: "selected", proposed: "unknown" },
+  ]);
+});
+
 test("qualified shadow CLI emits a real Git-backed proposal and names an unreadable corpus", (t) => {
   const repo = gitRepo();
   t.after(() => repo.cleanup());

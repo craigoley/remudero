@@ -3,6 +3,7 @@ import { buildAffectedSuitesGraph, selectAffectedSuites, type AffectedSuitesInpu
 export interface QualifiedSymbolShadow {
   mode: "shadow";
   skipsNothing: true;
+  fullRun: boolean;
   floor: string[];
   proposed: string[];
   qualified: string[];
@@ -18,7 +19,7 @@ export function qualifiedSymbolShadow(
   const baseline = selectAffectedSuites(changed, { ...input, symbolSuites: rawSymbolSuites });
   const floor = [...baseline.suites];
   const fallback = (reason: string): QualifiedSymbolShadow => ({
-    mode: "shadow", skipsNothing: true, floor,
+    mode: "shadow", skipsNothing: true, fullRun: baseline.fullRun, floor,
     proposed: [...(baseline.narrow ?? baseline.suites)], qualified: [], excludedNamesakes: [], fallback: reason,
   });
   if (baseline.fullRun) return fallback(baseline.reasons.join("; "));
@@ -41,7 +42,7 @@ export function qualifiedSymbolShadow(
   // Anything the existing floor protects remains, even if its only name hit is unrelated.
   const protectedSuites = new Set(floor);
   return {
-    mode: "shadow", skipsNothing: true, floor, qualified,
+    mode: "shadow", skipsNothing: true, fullRun: false, floor, qualified,
     proposed: [...new Set([...floor, ...qualified])].sort(),
     excludedNamesakes: raw.filter((path) => !reachable.has(path) && !protectedSuites.has(path)),
   };
@@ -53,7 +54,7 @@ export function qualifiedShadowFailures(record: QualifiedSymbolShadow, failed: r
 }> {
   const floor = new Set(record.floor), proposed = new Set(record.proposed);
   return [...new Set(failed)].sort().map((file) => ({
-    file, floor: floor.has(file) ? "selected" : "missed",
+    file, floor: record.fullRun || floor.has(file) ? "selected" : "missed",
     proposed: record.fallback ? "unknown" : proposed.has(file) ? "selected" : "missed",
   }));
 }
