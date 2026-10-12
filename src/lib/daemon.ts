@@ -250,6 +250,11 @@ export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<
     let row: Record<string, unknown>;
     try { row = JSON.parse(raw); } catch (error) { /* malformed rows establish no ownership */ continue; }
     if (!row || typeof row.task_id !== "string") continue;
+    if (row.step === "implement.checkpoint_dropped") {
+      const prior = pending.get(row.task_id);
+      if (prior && row.source_branch === prior.branch && row.head_sha === prior.headSha) pending.delete(row.task_id);
+      continue;
+    }
     const receipt = row.step === HANDOFF_RECEIPT_STEP ? row.waiting_on !== "pr" && row.waiting_on !== "ci"
       : row.step === "verdict" && row.verdict === "handed_off" && row.reason === "freshness_yield" && !row.pr_url;
     if (row.step !== "verdict" && !receipt) continue;

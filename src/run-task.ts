@@ -5212,8 +5212,8 @@ export function branchPrTitle(worktreePath: string, task?: { id: string; title?:
 /** Where {@link restoreBoundaryCheckpoint} left a fresh run's branch: on current main, or on the checkpoint's
  *  own base when main conflicts with it (naming those paths, or why the merge could not be read). */
 export type BoundaryCheckpointRestore =
-  | { base: "main"; headSha: string }
-  | { base: "checkpoint"; headSha: string; mainConflicts: string[]; reason?: string };
+  (| { base: "main"; headSha: string; dropped?: true }
+  | { base: "checkpoint"; headSha: string; mainConflicts: string[]; reason?: string }) & { sourceBranchAbsent?: true };
 
 /**
  * A restart checkpoint is RESTORED BY MERGE, never replayed: the fresh branch becomes the checkpoint's
@@ -5227,18 +5227,43 @@ export async function restoreBoundaryCheckpoint(
   checkpoint: { branch: string; headSha: string },
   taskId: string,
   git: (args: string[]) => Promise<string>,
+  log: (step: string, data: Record<string, unknown>) => void = () => {},
 ): Promise<BoundaryCheckpointRestore> {
   const remoteHead = (await git(["ls-remote", "origin", `refs/heads/${checkpoint.branch}`])).trim().split(/\s+/)[0];
-  if (remoteHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved; refusing to replay a different worker's work");
-  await git(["fetch", "origin", checkpoint.branch]);
+  if (remoteHead && remoteHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved; refusing to replay a different worker's work");
+  const absence = remoteHead ? {} : { sourceBranchAbsent: true as const };
+  const mainSha = (await git(["rev-parse", "HEAD"])).trim();
+  if (!remoteHead) {
+    try {
+      await git(["merge-base", "--is-ancestor", checkpoint.headSha, mainSha]);
+      return { base: "main", headSha: mainSha, ...absence };
+    } catch (error) {
+      // A missing local object or non-ancestor needs the remote fetch before deciding whether work is lost.
+    }
+    const drop = (reason: string): BoundaryCheckpointRestore => {
+      log("implement.checkpoint_dropped", { source_branch: checkpoint.branch, head_sha: checkpoint.headSha, reason });
+      return { base: "main", headSha: mainSha, dropped: true, ...absence };
+    };
+    try {
+      await git(["fetch", "origin", checkpoint.headSha]);
+    } catch (error) {
+      const detail = String((error as { stderr?: unknown }).stderr ?? (error as Error).message ?? error);
+      if (!/not our ref|unadvertised object|couldn't find remote ref/.test(detail)) throw error;
+      return drop(`checkpoint object unavailable on origin: ${detail}`);
+    }
+    if ((await git(["rev-parse", "FETCH_HEAD"])).trim() !== checkpoint.headSha) return drop("fetched object does not match the checkpoint head");
+    await git(["push", `--force-with-lease=refs/heads/${checkpoint.branch}:`, "origin", `${checkpoint.headSha}:refs/heads/${checkpoint.branch}`]);
+    log("implement.checkpoint_branch_recreated", { source_branch: checkpoint.branch, head_sha: checkpoint.headSha });
+  } else {
+    await git(["fetch", "origin", checkpoint.branch]);
+  }
   const fetchedHead = (await git(["rev-parse", "FETCH_HEAD"])).trim();
   if (fetchedHead !== checkpoint.headSha) throw new Error("the checkpoint's remote head moved during fetch");
-  const mainSha = (await git(["rev-parse", "HEAD"])).trim();
   const base = (await git(["merge-base", checkpoint.headSha, mainSha])).trim();
-  if (base === checkpoint.headSha) return { base: "main", headSha: mainSha }; // main already carries it
+  if (base === checkpoint.headSha) return { base: "main", headSha: mainSha, ...absence }; // main already carries it
   if (base === mainSha) {
     await git(["reset", "--hard", "--quiet", checkpoint.headSha]); // it already sits on current main
-    return { base: "main", headSha: checkpoint.headSha };
+    return { base: "main", headSha: checkpoint.headSha, ...absence };
   }
   const probe = await probeMerge({ headSha: checkpoint.headSha, mainSha, git: async (args) => {
     try {
@@ -5252,12 +5277,12 @@ export async function restoreBoundaryCheckpoint(
   if (probe.verdict !== "clean") {
     await git(["reset", "--hard", "--quiet", checkpoint.headSha]);
     return { base: "checkpoint", headSha: checkpoint.headSha, mainConflicts: probe.verdict === "conflict" ? probe.paths : [],
-      ...(probe.verdict === "unreadable" ? { reason: probe.reason } : {}) };
+      ...(probe.verdict === "unreadable" ? { reason: probe.reason } : {}), ...absence };
   }
   const merged = (await git(["commit-tree", probe.tree, "-p", checkpoint.headSha, "-p", mainSha, "-m",
     `chore(wip): merge main into the restored checkpoint\n\nRemudero-Task: ${taskId}`])).trim();
   await git(["reset", "--hard", "--quiet", merged]);
-  return { base: "main", headSha: merged };
+  return { base: "main", headSha: merged, ...absence };
 }
 
 /**
@@ -19544,9 +19569,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const checkpoint = pendingWorkerBoundaryHandoffs(readLedgerRawLines(ledgerPath)).get(taskId);
     if (checkpoint) {
       try {
-        const restored = await restoreBoundaryCheckpoint(checkpoint, taskId, (args) => hostWorktreeGitAsync(worktreePath, args));
-        log("implement.checkpoint_restored", { source_branch: checkpoint.branch, source_head_sha: checkpoint.headSha, branch,
+        const restored = await restoreBoundaryCheckpoint(checkpoint, taskId, (args) => hostWorktreeGitAsync(worktreePath, args), log);
+        if (!(restored.base === "main" && restored.dropped)) log("implement.checkpoint_restored", { source_branch: checkpoint.branch, source_head_sha: checkpoint.headSha, branch,
           base: restored.base, restored_head_sha: restored.headSha,
+          ...(restored.sourceBranchAbsent ? { source_branch_absent: true } : {}),
           ...(restored.base === "checkpoint" ? { main_conflicts: restored.mainConflicts, merge_unreadable: restored.reason } : {}) });
       } catch (error) {
         log("verdict", { verdict: "no_pr", reason: "restart_checkpoint_restore_failed", branch,
@@ -25543,6 +25569,19 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
     const sourcePath = opts.creditLedgerPath ?? opts.ledgerPath ?? configuredLedgerPathOrUndefined();
     return sourcePath === undefined ? undefined : readLedgerLines(sourcePath);
   });
+  let receiptBranches = new Set<string>();
+  const receiptLedgerPath = opts.creditLedgerPath ?? opts.ledgerPath;
+  try {
+    if (receiptLedgerPath !== undefined && existsSync(receiptLedgerPath)) {
+      const rawLines = readFileSync(receiptLedgerPath, "utf8").split("\n");
+      receiptBranches = new Set([...pendingWorkerBoundaryHandoffs(rawLines).values()].map((receipt) => receipt.branch));
+    }
+  } catch (error) {
+    receiptBranches = new Set(plan.deletable.filter((name) => /^run-.+-[0-9]+$/.test(name)));
+    printError(`rmd reap-branches: keeping every run-shaped head — the handoff ledger could not be read (${String(error)})`);
+  }
+  const keptHandoffReceipts = plan.deletable.filter((name) => receiptBranches.has(name));
+  plan.deletable = plan.deletable.filter((name) => !receiptBranches.has(name));
 
   // THE REVERSE COMPARISONS (W1-T2226): ONE additional pattern grep, not one per branch — the
   // 274-subprocess cost above is the per-branch forward direction; this is the single extra call
@@ -25659,6 +25698,7 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
       missing_branches: deadDeclaredGuards,
       held_branches: plan.hold,
       kept_reversible_close_branches: keptReversibleClose,
+      kept_handoff_receipt_branches: keptHandoffReceipts,
       reasons: plan.reasons,
     });
   }
