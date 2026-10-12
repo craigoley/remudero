@@ -85,6 +85,37 @@ test("W1-T7743: loadPlanAtRefAsync equals loadPlanAtRef on a real fixture with s
   }
 });
 
+test("W1-T7743: async plan loading tolerates a ref with no shard tree", async () => {
+  const commands: string[] = [];
+  const runGit = async (args: string[]): Promise<string> => {
+    commands.push(args[0] ?? "");
+    if (args[0] === "show") return taskYaml("MONO-ONLY");
+    if (args[0] === "ls-tree") throw new Error("tasks.d is absent at this ref");
+    throw new Error("unexpected git command " + args[0]);
+  };
+
+  const plan = await loadPlanAtRefAsync("fixture-root", "plan/tasks.yaml", "HEAD", runGit);
+  assert.deepEqual(ids(plan), ["MONO-ONLY"]);
+  assert.deepEqual(commands, ["show", "ls-tree"], "an absent shard tree is tolerated without a cat-file call");
+});
+
+test("W1-T7743: async plan loading wraps a listed-shard read failure as PlanError", async () => {
+  const commands: string[] = [];
+  const runGit = async (args: string[]): Promise<string> => {
+    commands.push(args[0] ?? "");
+    if (args[0] === "show") return taskYaml("MONO-1");
+    if (args[0] === "ls-tree") return "plan/tasks.d/SHARD-1.yaml\\n";
+    if (args[0] === "cat-file") throw new Error("cat-file unavailable");
+    throw new Error("unexpected git command " + args[0]);
+  };
+
+  await assert.rejects(
+    () => loadPlanAtRefAsync("fixture-root", "plan/tasks.yaml", "HEAD", runGit),
+    /cannot read plan shard at HEAD in fixture-root: Error: cat-file unavailable/,
+  );
+  assert.deepEqual(commands, ["show", "ls-tree", "cat-file"]);
+});
+
 test("W1-T7743: planReloader returns the fresh plan after origin/main moves with sync spawns trapped", async () => {
   const { repo, commitPlan } = planFixture();
   try {
