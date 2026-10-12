@@ -279,7 +279,7 @@ test("W1-T8401: a collection that throws is named unavailable and restores the g
   assert.match(record.reason ?? "", /gc is not defined/);
   assert.deepEqual(flags, ["--heap-growing-percent=10", "--heap-growing-percent=50"]);
   // No reread after a failed collection: the first reading stands.
-  const short = { tier: "container-short" as const, container: containerAt(3198) };
+  const short: { tier: "container-short"; container: ContainerMemoryHeadroom; reclaim?: SlackReclaimRecord } = { tier: "container-short", container: containerAt(3198) };
   const kept = reclaimBeforeHold(short, () => { throw new Error("no reread"); }, (ws, reread) => reclaimer.reclaim(ws, reread));
   assert.equal(kept.reclaim?.outcome, "unavailable");
   assert.equal(kept.container, short.container);

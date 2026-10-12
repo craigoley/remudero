@@ -27,6 +27,7 @@ import { getHeapStatistics, setFlagsFromString } from "node:v8";
 import { runInNewContext } from "node:vm";
 import { parse as parseYaml } from "yaml";
 
+import { systemClock, type Clock } from "./clock.js";
 import { FOOTPRINT_MAX_SAMPLES, FOOTPRINT_RETAIN_MS } from "./daemon-footprint.js";
 
 /** `plan/policy.yaml`'s optional `daemonMemory:` section, resolved. */
@@ -461,7 +462,7 @@ export interface DaemonSlackReclaimerOptions {
   inForcePercent?: () => number;
   /** The daemon's rss+swap samples (daemon-footprint.ts), whose spread is the noise a reclaim must beat. */
   footprintBytes?: () => readonly number[];
-  now?: () => number;
+  clock?: Clock;
   log?: (record: SlackReclaimRecord) => void;
 }
 
@@ -473,7 +474,8 @@ export function createDaemonSlackReclaimer(opts: DaemonSlackReclaimerOptions = {
   const snapshot = opts.snapshot ?? (() => readSlackSnapshot());
   const setFlags = opts.setFlags ?? setFlagsFromString;
   const inForcePercent = opts.inForcePercent ?? (() => Math.round(policy.heapGrowingPercent));
-  const now = opts.now ?? Date.now;
+  const clock = opts.clock ?? systemClock;
+  const now = () => clock.now();
   const lives: LiveSetSample[] = [];
   const containerSeen: Array<{ at: number; mib: number }> = [];
   let futile: { liveBytes: number; containerMib?: number } | undefined;
