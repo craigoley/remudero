@@ -1,0 +1,130 @@
+- id: W1-T8514
+  title: "A LOWER-PRIORITY TASK DOES NOT TAKE A FILE A WAITING HIGHER-PRIORITY TASK NEEDS — on 2026-10-12 P1 W1-T7735 (sweep.ts + run-task.ts) was runnable from 04:33Z but lost run-task.ts to P1 W1-T8139, and P2 W1-T7850 took sweep.ts in the same 05:35:54Z tick and held it over three runs until 08:47:48Z, so W1-T7735 waited on both and started only at 08:50:08Z"
+  repo: remudero
+  depends_on: [W1-T8502]  # same files (src/lib/drain.ts, src/lib/daemon.ts); this builds on its `inFlight` pack input
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — a candidate the pack skips for file overlap reserves its files against strictly lower-priority candidates, released by a measured backfill bound
+  band_meaning: span
+  origin: "operator approval 2026-10-12 (\"good with your recommendation\"): the priority-reservation question W1-T8502's rationale left open"
+  plan_refs: [W1-T8502, W1-T476, W1-T4416, W1-T4064, W1-T171, W1-T2286, W1-T5805]
+  files: [src/lib/drain.ts, src/lib/daemon.ts, test/a-lower-priority-task-does-not-take-a-file-a-waiting-higher-priority-task-needs.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED in the core daemon's ledger on host remudero (~/rmd-state2/state, the 2026-10-12 rotations
+    T05-08, T06-07, T07-17, T07-55 and T09-22, read 2026-10-12 ~12:10Z; run.start, verdict,
+    dispatch.concurrent_set, dispatch.lane_refilled, dispatch.lane_refill_held, dispatch.serialized rows):
+      - W1-T7735 (P1; src/lib/refresh-value.ts, src/lib/sweep.ts, src/run-task.ts, src/lib/ledger.ts) had its
+        dependencies merged by 2026-10-11T05:03Z and logged `dispatch.lifetime_pressure` at every tick and refill
+        from 04:33:11Z to 08:49:50Z, so it was eligible the whole window.
+      - 05:35:54Z `dispatch.concurrent_set` [W1-T8139, W1-T7850, W1-T7745]. W1-T8139 is P1 on src/run-task.ts,
+        so the pack skipped W1-T7735 (same tier, lost on order). W1-T7850 is P2 on src/lib/sweep.ts. It was
+        disjoint from W1-T8139, so it took the next slot and the sweep.ts file W1-T7735 also needed.
+      - W1-T7850 then held sweep.ts across three runs: 05:36:03-06:22:10 (freshness_yield), 06:29:40-07:42:55
+        (freshness_yield) and 07:48:08-08:47:48 (pr_open_yield). Both re-dispatches were TICK picks
+        (06:28:54Z [W1-T8139, W1-T7850, W1-T7745]; 07:47:48Z [W1-T5432, W1-T7850, W1-T7746]), each with a P1
+        run-task.ts holder in slot 1 and the P2 in the slot W1-T7735's other file needed.
+      - Refills chose run-task.ts P1s (06:50:26Z W1-T5432) or P2s (08:28:15Z W1-T7812) while sweep.ts stayed
+        taken. The 08:49:51Z refill that followed W1-T7850's verdict was the first to pick W1-T7735
+        (run.start 08:50:08Z).
+      - There were 0 `dispatch.serialized` rows in 05:30-09:30Z. Overlap losers are dropped by the pack, not
+        serialized by the partition, so none of this is legible in the ledger.
+    CORRECTION to the brief: the inversion is not refill-only. Here it came from the TICK path's
+    `packDisjointFirst`. The skipped P1's holder was a co-collected P1 (W1-T8139), not an in-flight lane.
+    THE PATHS, read on origin/main 46cfb1469 (symbols, not line numbers):
+      - `runnableCandidates` (src/lib/drain.ts) packs with `packDisjointFirst`. A slot takes the first remaining
+        candidate for which `isDisjointFromEvery(collected, candidate)` holds. A skipped candidate's files
+        constrain nothing, so a later lower-priority candidate can take any file the skipped one needs.
+      - The tick path (`runnableCandidates(planForBatch, isMerged, budget, dispatchOpts)` then
+        `partitionByFileOverlap`) and `chooseRefill`'s `decide` (src/lib/daemon.ts) both consume that pack.
+      - `compareDispatch` orders by `priority` before the stride pass (W1-T4064), so priority only decides
+        WHO IS LOOKED AT FIRST. Nothing reserves a file for a higher-priority candidate that cannot start yet.
+    HOW THIS DIVIDES WITH W1-T8502 (filed #11074; implementation claimed, unmerged): W1-T8502 makes the pack SEE
+    the in-flight lanes, through a new `inFlight` input to `packDisjointFirst`. A head that an in-flight lane
+    blocks is then skipped instead of filling slot 1 and evicting its peers, and the refill logs
+    `dispatch.serialized`. That is pure placement and is priority-blind: after it, a skipped P1's files are
+    still free for a P2. THIS task adds the reservation on top: a candidate skipped for overlap, whether with
+    an in-flight lane or with a collected candidate, holds its effective files against STRICTLY lower-priority
+    candidates for the rest of the pack. Same files, so it serializes behind W1-T8502 and reuses its
+    `inFlight` input instead of adding a second one.
+    WHY THE BACKFILL BOUND, NOT STRIDE AGING: `compareDispatch` compares `priority` before
+    `stridePassByTaskId`, so the cost-of-delay stride (src/lib/dispatch-value.ts) never crosses a priority
+    tier. Aging a deferred P2 there could never release it from behind a P1. Making it cross a tier would
+    rewrite the operator's priority semantics fleet-wide, which is a separate decision. The backfill bound is
+    EASY backfilling. A deferred task may still start when it is expected to finish before the waiting task
+    could start anyway, so the waiting task loses nothing. Both sides are measured run lengths, so no number is
+    fixed, per the operator's no-hard-thresholds rule. It also releases on its own when a holder overruns
+    every measured run, which is the case where holding a file for a waiter buys nothing measurable.
+    src/lib/dispatch-value.ts is therefore NOT in files.
+  design: |
+    1. Reservation in the pack (src/lib/drain.ts). In `packDisjointFirst`, after W1-T8502's change, walk
+       `remaining` in dispatch order. A candidate W that is not disjoint from `[...inFlight, ...collected]`
+       records a reservation: W's effective scope (declared `files:` unioned with `observedByTask`, the same
+       map the partition gets), W's priority, and the holders it overlaps. A later candidate C whose
+       `priority` is STRICTLY lower than W's, with absent priority counted as lowest like `compareDispatch`
+       does, and whose effective scope overlaps a reservation is DEFERRED FOR PRIORITY. Overlap is checked
+       through `partitionByFileOverlap`, never a second glob comparison. A deferred C is removed from
+       `remaining`, so neither a later slot nor the `pickIndex = 0` fallback can place it, and it is never in
+       the pool the refill's partition sees. Candidates in the same priority tier keep today's behaviour.
+    2. Backfill release (pure, in drain.ts). The deferral is lifted, and C stays eligible for the pack, when
+       `expectedDurationMs(C) < expectedStartMs(W)`, with the comparison STRICT so that equal estimates hold.
+       `expectedStartMs(W)` is the max over W's holders of `expectedRemainingMs(holder)`.
+       `expectedRemainingMs(h)` is the mean residual life of the measured run lengths that exceed h's elapsed
+       time: elapsed from the refill's `laneStartedAtMs` for an in-flight holder, and 0 for a collected one.
+       Use h's own run-length samples when any exceed elapsed, else the fleet's. When no sample exceeds
+       elapsed, the holder has outrun every measured run. W's start is then unpredictable and the reservation
+       is RELEASED, and that release is logged. `expectedDurationMs(C)` is the mean of C's own samples, else the
+       fleet's. With no samples at all the reservation HOLDS, so declared priority wins, and C's wait is bounded
+       by the holder's run. The estimates come in through an optional `NextRunnableOpts` field. When it is
+       absent the reservation holds without release, and with no strictly-higher waiting candidate the pack is
+       byte-identical to W1-T8502's.
+    3. Measurement (src/lib/daemon.ts). Extend `dispatchRunHistory` and the live `runLengths` accumulator to
+       also keep each run's length and its task id. They pair run.start with verdict by run_id, exactly as
+       now, and `refillBoundMs` keeps its current mean. Wire the estimator into both the tick path's
+       `dispatchOpts` and `chooseRefill`'s `runnableCandidates` call.
+    4. Named rows. A new `NextRunnableOpts` callback fires once per deferral, and daemon.ts logs it as
+       `dispatch.deferred_for_priority` {task, priority, waiting_task, waiting_priority, holders, paths,
+       expected_duration_ms, expected_start_ms}. A release logs `dispatch.priority_reservation_released`
+       {task, waiting_task, reason: "finishes_before_waiting_start" | "holder_outran_history"}. When a refill
+       holds only because of deferrals, its `dispatch.lane_refill_held` reason names the reservation and the
+       waiting task instead of "no disjoint runnable task within the lane budget".
+    5. Unchanged: dispatch order, eligibility, overlap admission in dispatch-overlap.ts, W1-T8502's in-flight
+       placement, and same-tier contention.
+    Tests go in the new file
+    test/a-lower-priority-task-does-not-take-a-file-a-waiting-higher-priority-task-needs.test.ts, with
+    `test(` titles exactly as in the proofs below. Build injected plans, and drive the refill through the
+    harness the existing refill tests use (for example test/a-freed-lane-refills-while-its-sibling-runs.test.ts).
+    No live ledger and no network.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-lower-priority-task-does-not-take-a-file-a-waiting-higher-priority-task-needs.test.ts"
+    - claim: "with in-flight A holding X and waiting P1 B needing X and Y, a refill does not start P2 C needing Y, and does start a disjoint P2 D"
+      proof: 'grep: test("W1-T8514: a refill does not start a P2 on a file a waiting P1 needs and starts a disjoint P2" in test/a-lower-priority-task-does-not-take-a-file-a-waiting-higher-priority-task-needs.test.ts'
+    - claim: "the tick pack reserves a skipped P1's files, so a P2 does not take the file a P1 lost on another file needs (the 05:35:54Z shape)"
+      proof: 'grep: test("W1-T8514: a tick pack keeps a P2 off the files of a P1 it skipped for overlap" in test/a-lower-priority-task-does-not-take-a-file-a-waiting-higher-priority-task-needs.test.ts'
+    - claim: "a deferred task starts when it is expected to finish before the waiting task can start, and the reservation releases when the holder outruns every measured run"
+      proof: 'grep: test("W1-T8514: a priority reservation releases on the measured backfill bound" in test/a-lower-priority-task-does-not-take-a-file-a-waiting-higher-priority-task-needs.test.ts'
+    - claim: "each deferral writes a dispatch.deferred_for_priority row naming the waiting task and the contended files"
+      proof: 'grep: test("W1-T8514: a priority deferral logs dispatch\.deferred_for_priority with the waiting task and paths" in test/a-lower-priority-task-does-not-take-a-file-a-waiting-higher-priority-task-needs.test.ts'
+    - claim: "the daemon writes the named deferral row"
+      proof: 'grep: dispatch\.deferred_for_priority in src/lib/daemon.ts'
+  falsifier: |
+    In-flight A holds X. Dispatch order is [P1 B (X + Y), P2 C (Y), P2 D (Z)]. After W1-T8502 alone, the pack
+    skips B for its overlap with A and takes C, and the refill starts C, so B now waits on A AND C. With this
+    task the pack defers C for B and the refill starts D. Remove the reservation and the first test starts C.
+    Tick shape, with nothing in flight and three lanes: dispatch order [P1 H (R), P1 W (R + S), P2 C (S),
+    P2 D (T)] dispatches [H, C, D] today. With the fix it dispatches [H, D], and W is serialized behind H. Make the release comparison non-strict, or drop the outran-history
+    arm, and the release test reads the wrong pick. Drop the callback wiring and the log test sees no
+    dispatch.deferred_for_priority row.
+  note: |
+    EFFECT, measured after merge from the core ledger with no numeric pass mark: count
+    `dispatch.deferred_for_priority` and `dispatch.priority_reservation_released` rows. For each P1 that was
+    eligible but unstarted, compare the time from its first `dispatch.lifetime_pressure` to its `run.start`,
+    and the share of that wait spent while a lower-priority run held one of its files, before and after.
+    Healthy shape: no lower-priority `run.start` takes a file a waiting higher-priority task needs, unless a
+    release row precedes it. Rows to watch: `dispatch.lane_refill_held` with a reservation reason, held at a
+    tick where only reserved work was runnable, and whether the lane-idle share grew.
