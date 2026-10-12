@@ -16,7 +16,7 @@
     - test/a-restart-checkpoint-keeps-undeclared-work.test.ts
     - src/lib/quiet-worker-watchdog.ts  # operator 2026-10-12: one-line widening of QuietRoundEndedError detail with undeclaredPaths (design item 2: the quiet-worker receipt carries the list)
     - test/a-hung-worker-in-its-own-wait-loop-is-recovered.test.ts  # operator 2026-10-12: asserted the old refusal (the 10-11 15:09Z refused checkpoint file), so it must change
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
