@@ -29,12 +29,12 @@ function put(repo: GitRepo, path: string, text: string) {
   writeFileSync(join(repo.dir, path), text);
 }
 
-function fixture(options: { planOnly?: boolean; rename?: boolean; unit?: boolean; blocking?: boolean; addedPath?: string } = {}) {
+function fixture(options: { planOnly?: boolean; rename?: boolean; unit?: boolean; blocking?: boolean; addedPath?: string; proofPath?: string } = {}) {
   const repo = gitRepo({ kind: "merged-proof-orphan" });
   repo.addRemote("origin", "https://github.com/craigoley/remudero.git");
   const removed = options.planOnly ? "plan/old-evidence.yaml" : oldPath;
   const added = options.addedPath ?? (options.planOnly ? "plan/new-evidence.yaml" : newPath);
-  const criteria = [{ claim, proof: options.unit ? `unit test: ${removed}` : `grep: ^needle[0-9][0-9]$ in ${removed}` }];
+  const criteria = [{ claim, proof: options.unit ? `unit test: ${removed}` : `grep: ^needle[0-9][0-9]$ in ${options.proofPath ?? removed}` }];
   const tasks = [task("W1-T1", "queued", criteria)];
   if (options.blocking) tasks.push(task("W1-T2", "queued", [{ claim: "a new test", proof: "unit test: test/missing.test.ts" }]));
   put(repo, "plan/tasks.yaml", stringify(tasks));
@@ -78,6 +78,13 @@ test("W1-T8001: a deleted file a merged proof names is reported", () => {
     { taskId: "W1-T1", claim, proof, removedPath: oldPath, candidates: [] },
     { taskId: "W1-T1", claim: criteria[1].claim, proof: criteria[1].proof, removedPath: oldPath, candidates: [] },
   ]);
+  for (const path of [`./${oldPath}`, "test//old-census.test.ts"]) {
+    const aliasedProof = `grep: ^needle[0-9][0-9]$ in ${path}`;
+    assert.deepEqual(precheck.mergedProofOrphans({
+      plan: plan([task("W1-T1", "merged", [{ claim, proof: aliasedProof }])]),
+      removedPaths: [oldPath], addedFiles: [],
+    }), [{ taskId: "W1-T1", claim, proof: aliasedProof, removedPath: oldPath, candidates: [] }]);
+  }
   const { repo, removed, added } = fixture({ rename: true });
   try {
     assert.match(repo.git("diff", "--name-status", "-M", "origin/main...HEAD"), /R100/);
@@ -86,6 +93,13 @@ test("W1-T8001: a deleted file a merged proof names is reported", () => {
     assert.ok(result.output.includes(removed) && result.output.includes(added), result.output);
     assert.ok(result.output.includes(claim) && result.output.includes("W1-T1"), result.output);
   } finally { repo.cleanup(); }
+  const aliased = fixture({ proofPath: `./${oldPath}` });
+  try {
+    const result = run(aliased.repo);
+    assert.equal(result.status, 0, result.output);
+    assert.ok(result.output.includes(`removed: ${oldPath}`), result.output);
+    assert.ok(result.output.includes(`candidates: ${newPath}`), result.output);
+  } finally { aliased.repo.cleanup(); }
 });
 
 test("W1-T8001: the added file carrying the pattern is named as the re-point candidate", () => {

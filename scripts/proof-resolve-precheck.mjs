@@ -26,7 +26,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { loadPlanAtRef, visibleCriteria } from "../src/lib/plan.js";
 import { certainHeadRefusals, extractTaskTrailerId, parseWhitelistedProof, planOnlyDiff, resolvePlanCriteriaAtHead } from "../src/lib/review.js";
 import { certainStaleProofs } from "../src/lib/proof-base-stale.js";
@@ -48,8 +48,10 @@ export function mergedProofOrphans({ plan, removedPaths, addedFiles }) {
     for (const criterion of visibleCriteria(task.acceptance ?? [])) {
       const parsed = parseWhitelistedProof(criterion.proof ?? "");
       if (!parsed) continue;
-      const path = parsed.kind === "test" && !parsed.nameFiltered ? parsed.label
+      const target = parsed.kind === "test" && !parsed.nameFiltered ? parsed.label
         : parsed.kind === "grep" && !parsed.authorSelectedArgv ? parsed.args[3] : undefined;
+      if (target === undefined) continue;
+      const path = posix.normalize(target);
       if (!removed.has(path)) continue;
       rows.push({
         taskId: task.id, claim: criterion.claim, proof: criterion.proof, removedPath: path,
