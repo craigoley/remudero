@@ -175,6 +175,14 @@ test("repository flow refuses real identity and snapshot input overflow without 
   assert.equal(refused.reason, "over_budget");
   assert.equal(refused.windows[0]!.summary.repairRounds, null);
   assert.ok(Buffer.byteLength(JSON.stringify(refused)) < 65536);
+  const capacityRows = Array.from({ length: 65536 }, (_, i) => JSON.stringify({ ts: iso(now - 1000),
+    step: "fix.dispatch", pr_number: 1, pr_url: pr(1).url, head_sha: "b".repeat(40), round_id: `round-${i}` }));
+  writeFileSync(join(state, `ledger.${iso(now).replace(/[:.]/g, "-")}.ndjson.gz`), gzipSync(capacityRows.join("\n") + "\n"));
+  writeFileSync(join(state, "ledger.ndjson"), capacityRows[0]! + "\n");
+  const exactReplay = (await captureRepositoryFlow(root, state, repository, fixedClock(now)))!;
+  assert.equal(exactReplay.reason, null, "a live replay of a fully counted rotation cannot spend another identity slot");
+  assert.equal(exactReplay.windows[0]!.summary.repairRounds, 65536);
+  rmSync(join(state, `ledger.${iso(now).replace(/[:.]/g, "-")}.ndjson.gz`));
   writeFileSync(join(state, "ledger.ndjson"), JSON.stringify({ ts: iso(now - 29 * day), step: "daemon.tick" }) + "\n");
   const oldCorpus = (await captureRepositoryFlow(root, state, repository, fixedClock(now)))!;
   assert.equal(oldCorpus.windows[1]!.summary.repairRounds, null, "an old positive corpus row cannot prove current historical absence");
