@@ -12,7 +12,7 @@
   plan_refs: [W1-T7806, W1-T8139, W1-T7697, W1-T3793, W1-T5282, W1-T6093, W1-T4945]
   files: [src/run-task.ts, test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts]
   status: queued
-  priority: 1.5
+  priority: 0.9 # operator-2026-10-12: 160 freshness handoffs in the live ledger; W1-T7729 yielded 5x, W1-T8472 3x, W1-T7735 6x today without a PR; this gates every long build
   attempts: 0
   rationale: |
     MEASURED 2026-10-11 (core daemon ledger, copied read-only to ~/Remudero-notes/restart-churn-2026-10-11/ledger-copy;
