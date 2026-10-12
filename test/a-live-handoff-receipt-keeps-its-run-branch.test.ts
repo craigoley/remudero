@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { pendingWorkerBoundaryHandoffs, handoffReceiptsToCarry } from "../src/lib/daemon.js";
+import { rotateLedger } from "../src/lib/ledger.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { DECLARED_BRANCH_GUARDS, reapBranchesCommand, restoreBoundaryCheckpoint, runTask } from "./helpers/run-task-test.js";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -14,7 +15,7 @@ const receipt = (headSha = sha) => ({ task_id: taskId, step: "verdict", verdict:
   reason: "freshness_yield", branch, head_sha: headSha });
 const lines = (rows: Record<string, unknown>[]) => rows.map((row) => JSON.stringify(row));
 
-function reap(rows: Record<string, unknown>[], unreadable: boolean | "denied" | "missing" | "unconfigured" = false, prState = "none") {
+function reap(rows: Record<string, unknown>[], unreadable: boolean | "denied" | "missing" | "unconfigured" = false, prState = "none", prune = true) {
   const repo = gitRepo();
   const ledgerPath = join(repo.dir, "ledger.ndjson");
   writeFileSync(ledgerPath, lines(rows).join("\n") + "\n");
@@ -37,7 +38,7 @@ function reap(rows: Record<string, unknown>[], unreadable: boolean | "denied" | 
     return "";
   };
   try {
-    reapBranchesCommand(["--prune"], { exec, root: repo.dir, quiet: true, ownerRepo: { owner: "fixture", repo: "fixture" },
+    reapBranchesCommand(prune ? ["--prune"] : [], { exec, root: repo.dir, quiet: true, ownerRepo: { owner: "fixture", repo: "fixture" },
       ledgerPath: unreadable === "unconfigured" ? undefined : ledgerPath,
       creditLedgerPath: unreadable === true ? repo.dir : unreadable === "missing" ? join(repo.dir, "missing.ndjson") : undefined,
       readFile: unreadable === "denied" ? (path) => {
@@ -51,11 +52,12 @@ function reap(rows: Record<string, unknown>[], unreadable: boolean | "denied" | 
 }
 
 test("W1-T8503: the branch reap keeps a run branch a live handoff receipt names", () => {
-  for (const state of ["none", "merged", "closed"]) for (const step of ["verdict", "run.freshness_handoff"]) {
-    const result = reap([{ ...receipt(), step }], false, state);
+  for (const state of ["none", "merged", "closed"]) for (const step of ["verdict", "run.freshness_handoff"]) for (const prune of [false, true]) {
+    const result = reap([{ ...receipt(), step }], false, state, prune);
     assert.deepEqual(result.report.kept_handoff_receipt_branches, [branch]);
+    assert.equal(result.report.deletable, 2, "dry run and prune report the same protected manifest");
     assert.equal(result.deleted.includes(branch), false);
-    assert.ok(result.deleted.includes("run-W1-T99-2"), "unrelated run heads remain reapable");
+    assert.deepEqual(result.deleted, prune ? ["run-W1-T99-2", "finished"] : [], "only prune deletes the unrelated heads");
     assert.equal(result.report.reasons[branch], state === "none" ? "tip_in_main" : state === "merged" ? "merged" : "closed_unmerged");
   }
 });
@@ -87,6 +89,27 @@ test("W1-T8503: a consumed receipt no longer protects its branch", () => {
   }
   const failed = reap([receipt(), { task_id: taskId, step: "verdict", verdict: "no_pr", reason: "restart_checkpoint_restore_failed" }]);
   assert.deepEqual(failed.report.kept_handoff_receipt_branches, [branch]);
+});
+
+test("W1-T8503: a dropped receipt stays consumed after ledger rotation", () => {
+  const repo = gitRepo();
+  try {
+    const ledgerPath = join(repo.dir, "ledger.ndjson");
+    const rows = [
+      { ...receipt(), step: "run.freshness_handoff" },
+      { task_id: taskId, step: "implement.checkpoint_dropped", source_branch: branch, head_sha: sha, reason: "object unavailable" },
+      { task_id: "W1-T99", step: "run.freshness_handoff", branch: "run-W1-T99-2", head_sha: sha },
+      { task_id: taskId, step: "worker.output", text: "noise".repeat(2_000) },
+    ];
+    writeFileSync(ledgerPath, lines(rows).join("\n") + "\n");
+    assert.deepEqual([...pendingWorkerBoundaryHandoffs(lines(rows)).keys()], ["W1-T99"]);
+    assert.equal(rotateLedger(ledgerPath, { ceilingBytes: 2_000 }).rotated, true);
+    const rotated = readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean);
+    assert.deepEqual([...pendingWorkerBoundaryHandoffs(rotated).keys()], ["W1-T99"], "rotation must not resurrect the dropped checkpoint");
+    assert.deepEqual(handoffReceiptsToCarry(rotated), []);
+    assert.ok(rotated.some((raw) => JSON.parse(raw).step === "implement.checkpoint_dropped"));
+    assert.equal(rotated.some((raw) => JSON.parse(raw).step === "worker.output"), false, "the rotation really discarded noise");
+  } finally { repo.cleanup(); }
 });
 
 function fixture(inMain = false) {
@@ -142,7 +165,8 @@ test("W1-T8503: a gone checkpoint branch with a fetchable head is recreated", as
     assert.match(f.repo.git("ls-remote", "origin", `refs/heads/${branch}`), new RegExp(`^${f.headSha}`));
     assert.equal(readFileSync(join(f.repo.dir, "paid-work.txt"), "utf8"), "checkpoint work\n");
     f.repo.git("merge-base", "--is-ancestor", f.headSha, "HEAD");
-    assert.ok(calls.some((args) => args.includes(`--force-with-lease=refs/heads/${branch}:`)));
+    assert.deepEqual(calls.filter((args) => args[0] === "push"), [["push",
+      `--force-with-lease=refs/heads/${branch}:`, "origin", `${f.headSha}:refs/heads/${branch}`]]);
     assert.deepEqual(f.rows, [{ task_id: taskId, step: "implement.checkpoint_branch_recreated", source_branch: branch, head_sha: f.headSha }]);
   } finally { f.cleanup(); }
 });
@@ -203,6 +227,60 @@ test("W1-T8503: a concurrent branch recreation is never overwritten", async () =
   } finally { f.cleanup(); }
 });
 
+test("W1-T8503: a transient fetch failure keeps the receipt recoverable on retry", async () => {
+  const f = fixture();
+  try {
+    const main = f.repo.git("rev-parse", "HEAD");
+    const failure = Object.assign(new Error("fetch failed"), { stderr: "connection timed out" });
+    await assert.rejects(restoreBoundaryCheckpoint({ branch, headSha: f.headSha }, taskId, async (args) => {
+      if (args[0] === "fetch") throw failure;
+      return f.repo.git(...args);
+    }, f.log), (error) => error === failure);
+    assert.equal(f.repo.git("rev-parse", "HEAD"), main);
+    assert.equal(f.repo.git("ls-remote", "origin", `refs/heads/${branch}`), "");
+    assert.equal(f.rows.length, 0);
+    const pending = pendingWorkerBoundaryHandoffs(lines([receipt(f.headSha), {
+      task_id: taskId, step: "verdict", verdict: "no_pr", reason: "restart_checkpoint_restore_failed",
+    }])).get(taskId);
+    assert.deepEqual(pending, { branch, headSha: f.headSha });
+    const restored = await restoreBoundaryCheckpoint(pending!, taskId, async (args) => f.repo.git(...args), f.log);
+    assert.equal(restored.base, "main");
+    assert.equal(restored.sourceBranchAbsent, true);
+    assert.equal(f.origin.git("rev-parse", branch), f.headSha);
+    assert.equal(readFileSync(join(f.repo.dir, "paid-work.txt"), "utf8"), "checkpoint work\n");
+    assert.deepEqual(f.rows.map((row) => row.step), ["implement.checkpoint_branch_recreated"]);
+  } finally { f.cleanup(); }
+});
+
+test("W1-T8503: a delayed checkpoint drop does not consume a newer receipt", () => {
+  const newer = { ...receipt("b".repeat(40)), branch: `run-${taskId}-2`, step: "run.freshness_handoff" };
+  const rows = lines([receipt(), newer, {
+    task_id: taskId, step: "implement.checkpoint_dropped", source_branch: branch, head_sha: sha,
+  }]);
+  assert.deepEqual(pendingWorkerBoundaryHandoffs(rows).get(taskId), { branch: newer.branch, headSha: newer.head_sha });
+  assert.deepEqual(handoffReceiptsToCarry(rows), []);
+  rows.push(...lines([{
+    task_id: taskId, step: "implement.checkpoint_dropped", source_branch: newer.branch, head_sha: newer.head_sha,
+  }]));
+  assert.equal(pendingWorkerBoundaryHandoffs(rows).size, 0);
+});
+
+test("W1-T8503: a checkpoint head that moves during fetch is refused", async () => {
+  const f = fixture();
+  try {
+    const main = f.repo.git("rev-parse", "HEAD");
+    f.origin.git("update-ref", `refs/heads/${branch}`, f.headSha);
+    await assert.rejects(restoreBoundaryCheckpoint({ branch, headSha: f.headSha }, taskId, async (args) => {
+      if (args[0] === "fetch") f.origin.git("update-ref", `refs/heads/${branch}`, main);
+      return f.repo.git(...args);
+    }, f.log), /remote head moved during fetch/);
+    assert.equal(f.repo.git("rev-parse", "HEAD"), main);
+    assert.equal(f.origin.git("rev-parse", branch), main);
+    assert.deepEqual(f.rows, [], "a moved head must neither drop the receipt nor claim recovery");
+    assert.equal(pendingWorkerBoundaryHandoffs(lines([receipt(f.headSha)])).size, 1);
+  } finally { f.cleanup(); }
+});
+
 test("W1-T8503: a mismatched fetched object is dropped without recreating a branch", async () => {
   const f = fixture();
   try {
@@ -222,11 +300,12 @@ test("W1-T8503: a mismatched fetched object is dropped without recreating a bran
 });
 
 test("W1-T8503: absent checkpoint recovery reaches recon in the same dispatch", async () => {
-  for (const inMain of [true, false]) {
+  for (const recoveryMode of ["in_main", "fetchable", "unfetchable"]) {
+    const inMain = recoveryMode === "in_main";
     const f = fixture(inMain);
     const root = gitRepo();
     try {
-      if (!inMain) { f.origin.git("reflog", "expire", "--expire=now", "--all"); f.origin.git("gc", "--prune=now"); }
+      if (recoveryMode === "unfetchable") { f.origin.git("reflog", "expire", "--expire=now", "--all"); f.origin.git("gc", "--prune=now"); }
       mkdirSync(join(root.dir, "repos"));
       renameSync(f.repo.dir, join(root.dir, "repos", "remudero"));
       mkdirSync(join(root.dir, "state"));
@@ -248,17 +327,30 @@ test("W1-T8503: absent checkpoint recovery reaches recon in the same dispatch", 
         spawn: async (args) => {
           calls++;
           observed = readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).map((raw) => JSON.parse(raw));
-          assert.equal(f.origin.git("-C", args.cwd, "rev-parse", "HEAD"), f.origin.git("rev-parse", "main"));
+          const workerHead = f.origin.git("-C", args.cwd, "rev-parse", "HEAD");
+          if (recoveryMode === "fetchable") {
+            assert.equal(readFileSync(join(args.cwd, "paid-work.txt"), "utf8"), "checkpoint work\n");
+            f.origin.git("-C", args.cwd, "merge-base", "--is-ancestor", f.headSha, workerHead);
+            f.origin.git("-C", args.cwd, "merge-base", "--is-ancestor", "origin/main", workerHead);
+            assert.equal(f.origin.git("rev-parse", branch), f.headSha);
+            const recreated = observed.filter((row) => row.step === "implement.checkpoint_branch_recreated");
+            assert.deepEqual(recreated.map((row) => [row.task_id, row.source_branch, row.head_sha]), [[taskId, branch, f.headSha]]);
+          } else assert.equal(workerHead, f.origin.git("rev-parse", "main"));
           throw stopped;
         },
       })), (error) => error === stopped);
       assert.equal(calls, 1, "this dispatch starts a worker after recovering the absent branch");
       assert.equal(observed.some((row) => row.step === "verdict"), false, "recovery does not burn a no_pr dispatch");
-      const recovery = observed.filter((row) => row.step === (inMain ? "implement.checkpoint_restored" : "implement.checkpoint_dropped"));
+      const recovery = observed.filter((row) => row.step === (recoveryMode === "unfetchable" ? "implement.checkpoint_dropped" : "implement.checkpoint_restored"));
       assert.equal(recovery.length, 1);
       assert.equal(recovery[0].task_id, taskId);
       assert.equal(recovery[0].source_branch, branch);
-      if (inMain) assert.equal(recovery[0].source_branch_absent, true);
+      if (recoveryMode !== "unfetchable") {
+        assert.equal(recovery[0].source_branch_absent, true);
+        assert.equal(recovery[0].source_head_sha, f.headSha);
+        assert.equal(recovery[0].base, "main");
+        assert.ok(recovery[0].restored_head_sha);
+      }
       else {
         assert.equal(recovery[0].head_sha, f.headSha);
         assert.equal(pendingWorkerBoundaryHandoffs(lines(observed)).size, 0);

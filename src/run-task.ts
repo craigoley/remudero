@@ -25387,7 +25387,7 @@ export type ReapBranchesOpts = {
   plan?: () => Plan | undefined;
   loadPlan?: (path: string) => Plan;
   readMergeCreditedTaskIds?: typeof readMergeCreditedTaskIds;
-  /** Overrides only the merge-credit source. `ledgerPath` remains the optional report sink. */
+  /** Overrides the merge-credit and handoff-receipt source. `ledgerPath` remains the optional report sink. */
   creditLedgerPath?: string;
   /** W1-T4476 design (iii): (branch name -> tip sha) already PROVEN merged by an earlier pass.
    *  A hit at the SAME tip sha skips `perHeadPrState` for that branch entirely; a miss (absent
