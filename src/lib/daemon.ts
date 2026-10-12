@@ -1028,7 +1028,7 @@ export interface DaemonDeps {
   /** Re-read the plan from the same source the boot used, returning the fresh plan or `null` when
    *  nothing changed; omitted means the plan stays frozen at boot. The dep owns change detection
    *  because the cheap signal is caller-specific: a plan tree sha costs ~8ms, the parse ~60ms (impl-FZ). */
-  reloadPlan?: () => Plan | null;
+  reloadPlan?: () => Plan | null | Promise<Plan | null>;
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
   refreshMerged: (plan?: Plan) => MergedSet;
   refreshMergedAsync?: (plan?: Plan) => Promise<MergedSet>;
@@ -3702,10 +3702,11 @@ export async function runDaemon(
   };
 
   // Shared by the top of tick and a lane refill (W1-T4416).
-  const reloadPlanBinding = (): void => {
+  const reloadPlanBinding = async (): Promise<void> => {
     if (!deps.reloadPlan) return;
     try {
-      const fresh = deps.reloadPlan();
+      // W1-T7743: awaited, so the production reloader's git runs off the loop; a sync fake resolves at once.
+      const fresh = await deps.reloadPlan();
       if (fresh) {
         plan = fresh;
         deps.onPlanReload?.(fresh);
@@ -4225,7 +4226,7 @@ export async function runDaemon(
     // landing on origin/main and the daemon next booting is 106 minutes (impl-FZ). Position is the safety argument:
     // after the stop check, so a halted fleet does no I/O, and before any dispatch decision reads the plan. A throw
     // is caught and ledgered, never fatal. Forensics: docs/forensics/daemon.md.
-    reloadPlanBinding();
+    if (deps.reloadPlan) await reloadPlanBinding();
     // One snapshot per admission (W1-T340, W1-T4416; MASTER-PLAN §4B). The plan binding is mutable and reassigned by the
     // reload above, so code closing over the NAME reads whatever the most recent reload produced. That is invisible
     // at one lane and stops being invisible the moment a batch holds more than one: a lane's later reasoning would be
@@ -5673,9 +5674,8 @@ export async function runDaemon(
           attempted.push(next.id);
           return next;
         };
-        if (reason === undefined) {
+        const decideFromPlan = (): Task | undefined | Promise<Task | undefined> => {
           try {
-            reloadPlanBinding();
             const refillPlan = plan;
             // W1-T5846: with the async port wired the merged set is read through it, never `refreshMerged`, whose
             // stale-generation fallback (W1-T5762) is a synchronous live read on the event loop. Only a deps
@@ -5694,8 +5694,11 @@ export async function runDaemon(
             // the failure is carried as the held reason, logged by `dispatch.lane_refill_held`
             readFailed(e);
           }
-        }
-        return conclude();
+          return conclude();
+        };
+        if (reason !== undefined) return conclude();
+        // W1-T7743: the reload is awaited (its git runs off the loop); a deps object with no reloader stays synchronous.
+        return deps.reloadPlan ? reloadPlanBinding().then(decideFromPlan) : decideFromPlan();
       };
       const runBranchRead = reason === undefined ? readRunBranchesFor("lane-refill", tickRunBranchListing) : undefined;
       return runBranchRead instanceof Promise ? runBranchRead.then(chooseRefill) : chooseRefill(runBranchRead);
