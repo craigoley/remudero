@@ -62,6 +62,10 @@
       proof: 'unit test: host serve evidence fences stop by current generation'
     - claim: "actual default publication and gathering use the shared contract without delaying starts or counting resident memory twice"
       proof: 'unit test: default host serve publication and shadow gathering preserve nonblocking starts'
+    - claim: "the default host-memory consumer calls the shared producer-evidence reader"
+      proof: 'grep: readHostServeEvidence( in src/lib/host-memory-shadow.ts'
+    - claim: "the existing serve memory sample assembly calls the shared producer-evidence publisher"
+      proof: 'grep: publishHostServeEvidence( in src/lib/serve.ts'
   falsifier: |
     Restore peer-local silence to stopped, erase host or generation identity, accept a
     stale or future timestamp, let an older stop win, suppress a reader/publisher failure,
