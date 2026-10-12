@@ -207,3 +207,27 @@ export function* closingReferenceGuardSteps(
   for (const d of defused) record(rowFor(d, "defused"));
   return { state: "defused", defused };
 }
+
+// Bodies of armed PRs the guard already found clean, keyed by PR URL. A body that names only issues
+// or closed PRs is otherwise re-read on every sweep pass for as long as its PR stays armed.
+const cleanArmedBodies = new Map<string, string>();
+
+/**
+ * Whether an armed PR's listed body needs the guard again. attemptArm guards a body when the fleet
+ * arms it, but GitHub merges an armed PR with whatever body it holds at that moment, so an edit made
+ * after the arm can still name another open PR. A body the sweep did not list (`undefined`) needs it;
+ * so does one that names any other PR or issue, unless the guard already found that same body clean.
+ */
+export function armedBodyNeedsGuard(prUrl: string, body: string | undefined): boolean {
+  if (body === undefined) return true;
+  const self = prTarget(prUrl);
+  if (!self) return true;
+  if (cleanArmedBodies.get(prUrl) === body) return false;
+  return closingReferencesInBody(body, self).some((r) => !(sameRepo(r, self) && r.number === self.number));
+}
+
+/** Remember that the guard found `body` clean, so the next pass does not read it again. */
+export function rememberCleanArmedBody(prUrl: string, body: string): void {
+  if (cleanArmedBodies.size >= 256) cleanArmedBodies.clear(); // BACKSTOP on memory, not a control
+  cleanArmedBodies.set(prUrl, body);
+}

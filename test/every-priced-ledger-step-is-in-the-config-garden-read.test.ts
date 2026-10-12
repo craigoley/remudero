@@ -64,6 +64,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "sweep.absent_repush": A_LANE_RUN_ID,
   "sweep.action_failed": A_LANE_RUN_ID,
   "sweep.capped_host_gap_rereview": A_LANE_RUN_ID, // W1-T7837: a sweep-lane row; its run_id is the sweep pass
+  "sweep.armed_body_guarded": A_LANE_RUN_ID, // a sweep-lane row: an armed PR's edited body re-guarded
   "sweep.armed_stalled": A_LANE_RUN_ID,
   "sweep.check_requeued": A_LANE_RUN_ID,
   "sweep.check_requeue.deferred": A_LANE_RUN_ID,
