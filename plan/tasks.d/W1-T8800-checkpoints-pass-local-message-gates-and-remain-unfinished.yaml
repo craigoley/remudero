@@ -61,6 +61,6 @@
       proof: 'unit test: checkpoint prompt and continuation agree with local range and hosted title contracts'
     - claim: Real checkpoint emitters use the shared conventional subject builder
       proof: 'grep: function checkpointCommitSubject in src/lib/unfinished-checkpoint.ts'
-  files: [src/lib/compaction.ts, src/lib/unfinished-checkpoint.ts, src/run-task.ts, test/worker-checkpoint-contract.test.ts, test/checkpoint-publication-contract.test.ts, test/a-quiet-worker-checkpoint-push-skips-the-pr-gates.test.ts, test/a-latched-restart-ends-a-worker-round-with-no-boundary.test.ts, test/a-recycle-ends-a-round-that-has-no-boundary-yet.test.ts, test/a-hung-worker-in-its-own-wait-loop-is-recovered.test.ts]
+  files: [src/lib/compaction.ts, src/lib/unfinished-checkpoint.ts, src/run-task.ts, test/worker-checkpoint-contract.test.ts, test/checkpoint-publication-contract.test.ts, test/a-quiet-worker-checkpoint-push-skips-the-pr-gates.test.ts, test/a-latched-restart-ends-a-worker-round-with-no-boundary.test.ts, test/a-recycle-ends-a-round-that-has-no-boundary-yet.test.ts, test/a-hung-worker-in-its-own-wait-loop-is-recovered.test.ts, test/prompt-render.test.ts]
   status: queued
   attempts: 0
