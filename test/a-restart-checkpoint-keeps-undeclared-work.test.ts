@@ -133,4 +133,24 @@ test("W1-T8008: a conflicted file still refuses the checkpoint", async () => {
   const ended = await withLiveWritesAllowed(() => quietEndRound(work.dir).endRound());
   assert.equal(ended.ended, false);
   assert.match(String(ended.reason), /checkpoint refused: leftover conflict markers in src\/other\.ts/);
+
+  // An undeclared path a merge left UNMERGED refuses by name too, even once its markers are gone from disk:
+  // the checkpoint never resolves a conflict on the worker's behalf (design item 4).
+  const merged = rig();
+  merged.work.git("checkout", "--quiet", "-b", "side", "main");
+  write(merged.work.dir, "src/shared.ts", "theirs\n");
+  merged.work.git("add", "src/shared.ts");
+  merged.work.git("commit", "--quiet", "-m", "side");
+  merged.work.git("checkout", "--quiet", merged.branch);
+  write(merged.work.dir, "src/shared.ts", "ours\n");
+  merged.work.git("add", "src/shared.ts");
+  merged.work.git("commit", "--quiet", "-m", "ours");
+  assert.throws(() => merged.work.git("merge", "--quiet", "side"));
+  write(merged.work.dir, "src/shared.ts", "resolved on disk, still unmerged in the index\n");
+  write(merged.work.dir, "src/declared.ts", "export const a = 1;\n");
+  const mergedBefore = merged.origin.git("rev-parse", merged.branch);
+  await assert.rejects(
+    withLiveWritesAllowed(() => runTask.commitAndPushRestartCheckpoint(merged.work.dir, { files: ["src/declared.ts"], acceptance: [] }, TASK, "worker")),
+    /restart checkpoint refused: unresolved merge conflict outside the declared paths in src\/shared\.ts/);
+  assert.equal(merged.origin.git("rev-parse", merged.branch), mergedBefore, "nothing was pushed");
 });
