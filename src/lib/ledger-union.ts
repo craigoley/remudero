@@ -454,12 +454,15 @@ export interface LedgerUnionStreamIO {
   readdirSync: (dir: string) => string[];
   existsSync: (path: string) => boolean;
   createReadStream: (path: string, options?: { start?: number }) => Readable;
+  /** Reads the two small producer metadata files; omitted, they stay unclassified (never silently excluded). */
+  readFileSync?: (path: string) => Buffer;
 }
 
 const realLedgerUnionStreamIO: LedgerUnionStreamIO = {
   readdirSync: (dir) => nodeReaddirSync(dir),
   existsSync: (path) => nodeExistsSync(path),
   createReadStream: (path, options) => nodeCreateReadStream(path, options),
+  readFileSync: (path) => nodeReadFileSync(path),
 };
 
 export async function* openLedgerUnion(
