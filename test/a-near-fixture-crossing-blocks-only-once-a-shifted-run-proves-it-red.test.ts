@@ -270,8 +270,7 @@ test("W1-T7812: shifted proof children do not inherit outer coverage instrumenta
   } finally {
     if (previousOptions === undefined) delete process.env.NODE_OPTIONS;
     else process.env.NODE_OPTIONS = previousOptions;
-    if (previousCoverage === undefined) delete process.env.NODE_V8_COVERAGE;
-    else process.env.NODE_V8_COVERAGE = previousCoverage;
+    process.env.NODE_V8_COVERAGE = previousCoverage ?? "";
     rmSync(root, { recursive: true, force: true });
   }
 });
