@@ -1110,10 +1110,12 @@ import { repairReceiptFields, type RepairReceiptContext } from "./lib/repair-cos
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
 // Prompt, tools, scorer and environment remain unavailable until immutable trial artifacts exist.
 import { captureImportedModule } from "./lib/prevention-source-evidence.js";
+import { captureCiRemedyComponent, recordCiRemedyExecution, type CiRemedyExecution } from "./lib/ci-remedy-execution.js";
 const workerBoundaryStack: BenchmarkStackEvidence & { loadedModule?: import("./lib/prevention-source-evidence.js").ImportedModuleEvidence } = {
   harnessRevision: executingHarnessRevision(fileURLToPath(import.meta.url)),
 };
 workerBoundaryStack.loadedModule = captureImportedModule(fileURLToPath(import.meta.url), workerBoundaryStack.harnessRevision);
+const ciRemedyComponent = captureCiRemedyComponent(workerBoundaryStack.loadedModule, ciLogNamedSourcePaths, existsSync, join);
 import { runBenchmarkCohortPass, type BenchmarkCohortPassResult } from "./lib/benchmark-cohort.js";
 import { benchmarkAaCommand, buildBenchmarkAaReport } from "./lib/benchmark-aa.js";
 import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand } from "./lib/benchmark-paid-pilot.js";
@@ -11013,6 +11015,7 @@ export function fixWorkerReceipt(
   /** When given, the round mirrors its worker's output onto the SAME bounded, retained tail a build run
    *  keeps (`<root>/state/runs/<workerRunId>.tail`, W1-T942), so a failed round can be replayed. */
   tail?: { root: string },
+  remedyExecution?: CiRemedyExecution,
 ): {
   spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
   joinFields: () => Record<string, unknown>;
@@ -11021,11 +11024,13 @@ export function fixWorkerReceipt(
   let assignment: WorkerSelectionAssignment | undefined;
   let receiptFailure: string | undefined;
   const repairFields = repairReceiptFields(repair);
+  const executionFields = remedyExecution ? { prevention_execution: remedyExecution,
+    ...(remedyExecution.state === "observed" ? { run_id: remedyExecution.callerRunId } : {}) } : {};
   const joinFields = () => ({ ...repairFields, worker_run_id: workerRunId,
     ...(assignment ? { selection_assignment_id: assignment.id } : {}) });
   const receipt = benchmarkRunLedgerLogger((step, fields) => {
     try {
-      log(step, { ...fields, ...repairFields, worker_run_id: workerRunId, worker_rung: "fix" });
+      log(step, { ...fields, ...repairFields, ...executionFields, worker_run_id: workerRunId, worker_rung: "fix" });
     } catch (error) {
       receiptFailure ??= `${step}-ledger-write-failed`;
       throw error;
@@ -12726,10 +12731,19 @@ export async function runFixRung(opts: {
       deps.log("fix.remedy_path_main_owned", { outcome: logNamedMain.outcome, paths: logNamedMain.owned,
         ...(logNamedMain.reason === undefined ? {} : { detail: logNamedMain.reason }) });
     }
+    const namedReachablePaths = logNamedPaths.filter((file) => !logNamedMain.owned.includes(file.path));
+    const remedyExecution = recordCiRemedyExecution(ciRemedyComponent, opts.runId, {
+      failingChecks: (currentCiFailures ?? []).length, matchedPaths: logNamedPaths.length,
+      reachablePaths: namedReachablePaths.length, ownership: logNamedMain.outcome,
+    });
+    try {
+      deps.log("fix.remedy_path_execution", { prevention_execution: remedyExecution,
+        run_id: opts.runId, repair_pr_url: opts.prUrl });
+    } catch { /* A missing observation cannot change the repair's authority or result. */ }
     const reachableRemedyFiles = [
       ...remedyFilesForFailingChecks((currentCiFailures ?? []).map((f) => f.name)),
       ...offeredCensusBaselines().map((path) => ({ path, job: "census-precheck" })),
-      ...logNamedPaths.filter((file) => !logNamedMain.owned.includes(file.path)),
+      ...namedReachablePaths,
     ];
     if (deps.fetchPrDiffFiles && baselineDiffFiles !== undefined) {
       let currentDiffFiles: string[] | undefined;
@@ -13429,7 +13443,7 @@ export async function runFixRung(opts: {
     const fixRoundStartedAtMs = systemClock.now();
     const roundId = `${opts.runId}:${attempt + retriggers}:${fixRoundStartedAtMs}`;
     const fixReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs), fixLaneBenchmarkWork(opts.task, deps.ledgerPath),
-      { prUrl: opts.prUrl, roundId }, { root: opts.config.root });
+      { prUrl: opts.prUrl, roundId }, { root: opts.config.root }, remedyExecution);
     let fixResult: WorkerResult;
     // W1-T1219: the spawn's elapsed ms on the SUCCESS path, the field `fix.spawn_abandoned` carries
     // on failure, folded into `fix.dispatch` so a completed spawn's duration is measurable at all.
