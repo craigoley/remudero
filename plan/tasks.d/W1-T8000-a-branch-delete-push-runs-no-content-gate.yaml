@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-11: file the follow-ups (pre-push hook refused a branch-delete push from the operator checkout)"
   plan_refs: [W1-T3059, W1-T3222, W1-T4214, W1-T6120, W1-T3225]
   files: [hooks/pre-push, test/a-branch-delete-push-runs-no-content-gate.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
