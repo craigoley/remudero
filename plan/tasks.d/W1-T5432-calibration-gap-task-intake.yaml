@@ -12,7 +12,7 @@
   origin: "2026-10-03 approved benchmark follow-ups; successor to merged readiness driver"
   plan_refs: [W1-T5341, W1-T4949, W1-T965]
   files: [src/lib/benchmark-readiness-intake.ts, src/lib/benchmark-aa-readiness.ts, src/lib/opportunity-intake.ts, src/run-task.ts, docs/cli-reference.md, test/benchmark-readiness-intake.test.ts, test/benchmark-aa-readiness.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at a92ce44653eb9201ba6a1003c03c6e09a18a61bd: readiness implementation #8852

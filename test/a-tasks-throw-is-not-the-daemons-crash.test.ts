@@ -79,18 +79,25 @@ test("W1-T3319: the stale, blocked and environmental mappings are unchanged, so 
 });
 
 // @source-text-subject — the census's own remedy (2). This suite's SUBJECT is drain.ts's text: it
-// counts the `summary("error", …)` call sites and asserts every one leads with a task id, so a
-// third site that does not is caught here rather than silently classifying a real crash as blocked.
+// enumerates the `summary("error", …)` emitters, distinguishing task failures from the
+// phase-prefixed owned admission/reporting fault rather than classifying a real crash as blocked.
 // Importing the symbol cannot answer "how many call sites are there and do all of them conform".
 test("W1-T3319: the discriminator matches the shape drain.ts really emits — asserted against drain.ts itself", () => {
-  // THE CLAIM THIS WHOLE CHANGE RESTS ON: both `summary("error", ...)` sites build their detail as
-  // `${taskId}: ${message}`. If a third site is added that does NOT, this fails here rather than
-  // silently classifying a real crash as blocked.
+  // Pin every real emitter, not just a larger count. Infrastructure failures deliberately
+  // include a phase; only the two legacy worker failures have the spawned-command prefix.
   const drain = readFileSync(new URL("../src/lib/drain.ts", import.meta.url), "utf8");
   const errorSites = [...drain.matchAll(/summary\("error",\s*`([^`]*)`/g)].map((m) => m[1] ?? "");
-  assert.equal(errorSites.length, 2, `drain.ts's error sites changed: ${JSON.stringify(errorSites)}`);
-  for (const tpl of errorSites) {
-    assert.match(tpl, /^\$\{\w+(?:\.\w+)*\}: /, `an error detail that does not lead with a task id: ${tpl}`);
+  assert.deepEqual(errorSites, [
+    '${next.id}: ${String((e as Error)?.message ?? e)}',
+    '${taskId ?? "dispatch"}: ${phase}: ${String((reason as Error)?.message ?? reason)}',
+    '${failure.taskId}: ${failure.message}',
+  ], "drain error emitters must preserve worker versus infrastructure identity");
+  for (const detail of [
+    "W1-T1: admit: Command failed: a receipt sink",
+    "dispatch: lifetime_pressure: Command failed: a reporter",
+  ]) {
+    assert.equal(PER_TASK_FAILURE_RE.test(detail), false, "a phase fault is not a spawned worker failure");
+    assert.equal(daemonExitCodeForSummary({ stopReason: "error", stopDetail: detail }), 1);
   }
 });
 

@@ -27,10 +27,14 @@
 
 import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
+import { require as tsRequire } from "tsx/cjs/api";
 
 /** Days of warning before a fixture actually expires. One CI-week: long enough that the failure
  *  lands as a named warning someone can act on, short enough not to flag half the corpus. */
 export const MARGIN_DAYS = 7;
+
+/** W1-T7812: the operator's 24 h tier requires a measured verdict before charging a crossing. */
+export const NEAR_CROSSING_HOURS = 24;
 
 const MS_PER_DAY = 86_400_000;
 
@@ -536,15 +540,38 @@ export function refusePopulationDrop(currentByFile, recordedByFile = RECORDED_PO
   return drops.sort((a, b) => a.file.localeCompare(b.file));
 }
 
-/**
- * The ONE place "does this run block" is decided (W1-T3839). `formatReport`'s headline and
- * `main()`'s exit code both call this rather than each re-deriving `introduced` themselves, so a
- * BLOCKED headline and a zero exit cannot drift apart again the way they did before this existed:
- * a crossing this diff introduced, or a population drop, blocks; an inherited-only crossing does
- * not (W1-T3655) -- see the header note (iv) for why that boundary itself is unchanged.
- */
+export function proveNearCrossings(reported, runSuite, controlShiftDays) {
+  const byFile = new Map();
+  for (const row of reported) {
+    if (row.daysLeft > 0 && row.daysLeft * 24 < NEAR_CROSSING_HOURS) {
+      const rows = byFile.get(row.file) ?? [];
+      rows.push(row);
+      byFile.set(row.file, rows);
+    }
+  }
+  for (const [file, rows] of byFile) {
+    const shiftDays = Math.ceil(Math.max(...rows.map((r) => r.daysLeft))) + 1;
+    let verification;
+    try {
+      const control = runSuite(file, controlShiftDays);
+      if (!control.passed) {
+        verification = { verdict: "control_failed", reason: "file is red without any shift", ...control };
+      } else {
+        const shifted = runSuite(file, shiftDays);
+        verification = { verdict: shifted.passed ? "shifted_passed" : "confirmed", shiftDays, ...shifted };
+      }
+    } catch (error) {
+      verification = { verdict: "run_error", reason: String(error) };
+    }
+    for (const row of rows) row.verification = verification;
+  }
+}
+
+/** Headline and exit share this decision: near crossings need verdicts; further crossings keep attribution. */
 export function isBlocked({ reported, populationDrop = [] }) {
-  const introduced = reported.filter((r) => r.inherited !== true);
+  const introduced = reported.filter((r) => r.verification
+    ? r.verification.verdict !== "shifted_passed"
+    : r.inherited !== true);
   return introduced.length > 0 || populationDrop.length > 0;
 }
 
@@ -567,25 +594,29 @@ export function formatReport({ population, reported, exempt, alreadyExpired = []
     if (out.length > 0) out.push("");
     const introduced = reported.filter((r) => r.inherited !== true);
     const inherited = reported.filter((r) => r.inherited === true);
-    // W1-T3839: THE HEADLINE STATES WHAT THIS RUN DECIDED, NOT WHAT EXISTS. `introduced` is the
-    // only thing THIS run charges -- see `isBlocked`, the single place that decision is made, which
-    // `main()` also calls for the exit code so the two can never read this tree differently. When
-    // every crossing here is inherited (introduced.length === 0) this run charges nothing, so the
-    // headline must not say BLOCKED even though crossings are still reported below (iii) -- a
-    // BLOCKED headline next to a zero exit is exactly the contradiction this task exists to close.
-    if (introduced.length > 0) {
+    // W1-T3839: the headline states the same decision as the exit code.
+    if (isBlocked({ reported, populationDrop })) {
       out.push(`expiring-fixture-census: BLOCKED -- ${reported.length} fixture(s) CROSS their threshold within ${marginDays} day(s):`);
-    } else {
+    } else if (reported.every((r) => r.inherited === true && !r.verification)) {
       out.push(
         `expiring-fixture-census: CLEAR -- this run charges nothing; ${reported.length} inherited crossing(s) reported below, owned ` +
           `by the base and warned ahead of its red date on the push-to-main lane (${CENSUS_MAIN_BRANCH_RUN}):`,
       );
+    } else {
+      out.push(`expiring-fixture-census: CLEAR -- near crossings stayed green in their shifted re-runs; ${reported.length} crossing(s) reported below:`);
     }
     for (const r of [...reported].sort((a, b) => a.daysLeft - b.daysLeft)) {
       const owner = r.inherited === true ? "  [inherited from the base -- NOT this diff]" : "";
       out.push(`  - ${r.file}:${r.line}  ${r.field}="${r.stamp}" vs ${r.threshold}  --  goes red ${expiryDay(r.expiresAt)} (${r.daysLeft.toFixed(1)}d)${owner}`);
+      const proof = r.verification;
+      if (proof) {
+        out.push(`    ${proof.verdict}${proof.reason ? ` -- ${proof.reason}` : ` -- ${proof.pass}/${proof.tests} pass with Date.now shifted +${proof.shiftDays}d`}`);
+        if (proof.verdict === "shifted_passed") {
+          out.push(`    ${EXEMPT_MARKER} -- suite remains green across the crossing; ${proof.pass}/${proof.tests} pass with Date.now shifted +${proof.shiftDays}d`);
+        }
+      }
     }
-    if (introduced.length > 0) {
+    if (introduced.some((r) => !r.verification || r.verification.verdict === "confirmed")) {
       out.push(`  TO FIX: stamp the fixture from the clock (see test/stale-ci-gate-wiring.test.ts), or, if it must`);
       out.push(`  stay fixed, age it past the threshold, re-run, and if nothing fails say so: ${EXEMPT_MARKER} -- <why>.`);
       out.push(`  Moving the constant forward only re-arms the same bomb on a later date.`);
@@ -697,6 +728,8 @@ export function main({
   baseRefOverride = baseArg(argv),
   env = process.env,
   append = null,
+  runSuite,
+  repoRoot = process.cwd(),
 } = {}) {
   assertAged();
   assertComplete();
@@ -717,17 +750,16 @@ export function main({
     thresholdDays: policy.staleDays,
     readBaseFile,
   });
+  if (result.reported.some((r) => r.daysLeft > 0 && r.daysLeft * 24 < NEAR_CROSSING_HOURS)) {
+    const shared = tsRequire("../src/lib/gate-gardener.ts", import.meta.url);
+    proveNearCrossings(result.reported, runSuite ?? ((file, days) => shared.runSuiteShiftedMeasured(repoRoot, file, days)), shared.DEFUSE_CONTROL_SHIFT_DAYS);
+  }
   const populationDrop = refusePopulationDrop(result.populationByFile, recordedPopulationByFile);
   const report = formatReport({ ...result, populationDrop });
   log(report);
-  // ATTRIBUTION NAMES THE OWNER, AND MOVES THE GATE FOR THE HALF IT CAN PROVE IS NOT THIS DIFF'S
-  // (W1-T3655). A crossing marked `inherited === true` is reported -- never hidden -- but charged to
-  // no PR that did not plant it; only a crossing this diff introduced, or a population drop, blocks.
-  // W1-T5826 (operator design, 2026-10-05): the push-to-main lane reads the same way against the
-  // push's parent. A crossing no push planted is the CALENDAR's -- it turned main red on 10-01 and
-  // 10-05 with no diff involved -- so there it is a `::warning` naming its red date, ahead of it.
+  // W1-T7812: near verdicts decide the block; W1-T5826 warnings remain for further inherited crossings.
   const blocked = isBlocked({ reported: result.reported, populationDrop });
-  const warnings = mainLane ? result.reported.filter((r) => r.inherited === true) : [];
+  const warnings = mainLane ? result.reported.filter((r) => r.inherited === true && !r.verification) : [];
   emitCiReport("expiring-fixture-census", report, { blocked, warnings, env, log, append });
   return blocked ? 1 : 0;
 }
