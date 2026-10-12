@@ -4891,7 +4891,8 @@ export async function actOnMergeRefusal(
     try {
       rollup = await deps.readCiGateRollup(pr);
     } catch (e) {
-      rollupError = String((e as Error)?.message ?? e);
+      const reason = String((e as Error)?.message ?? e);
+      rollupError = reason; // carried into the escalation an unreadable rollup earns
     }
   }
   const verdict = classifyMergeRefusal(refusal, rollup, deps.readCiGateRequired?.() ?? []);
