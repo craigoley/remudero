@@ -12106,6 +12106,8 @@ export interface SweepDeps {
   /** W1-T3471 — bounded archive∪live reader for the arm predicate, consulted only after the
    *  live-file verdict miss. An incomplete result preserves the historical fail-open. */
   readLedgerUnion?: () => { complete: boolean; lines: ReadonlyArray<Record<string, unknown>> } | undefined;
+  /** W1-T8533: per-PR refresh history, read only when the live span cannot cover the PR's life. */
+  readRefreshLedgerUnion?: typeof resolveLedgerUnion;
   /** Ledger appender; defaults to appendLedger. Injectable for tests. */
   appendLine?: (path: string, line: Record<string, unknown> & { run_id: string; task_id: string; step: string }) => void;
   /** Injected clock for the stale window (default Date.now). */
@@ -14387,7 +14389,7 @@ export async function runSweep(
       ? fixedOnMainTestFiles(pr, mainTipSha, deps.behindMainByPr, reproductionCache) : undefined;
     if (fixedFiles !== undefined && mainTipSha !== undefined) {
       const refreshKey = `${pr.prNumber}@${pr.headSha}`;
-      const prior = currentRows.findLast(row => (row.step === BASE_FIXED_REFRESH_STEP || row.step === BASE_RED_REFRESH_STEP) &&
+      const prior = [...refreshHistoryFor(pr).rows, ...currentRows].findLast(row => (row.step === BASE_FIXED_REFRESH_STEP || row.step === BASE_RED_REFRESH_STEP) &&
         row.pr_number === pr.prNumber && row.head_sha === pr.headSha);
       let outcome = typeof prior?.outcome === "string" ? prior.outcome : undefined;
       if (prior === undefined && !baseRedHistory.refreshed.has(refreshKey) && deps.updateBranch) {
@@ -14712,12 +14714,53 @@ export async function runSweep(
   // W1-T8396 — every refresh step, keyed by PR and red, and the refusals already decided.
   const refreshRecords = refreshRecordsFromLedger(ledgerLines);
   const refusedClearances = refusedRefreshClearancesFromLedger(ledgerLines);
+  const refreshSteps = ["fix.base_refreshed", BASE_RED_REFRESH_STEP, BASE_FIXED_REFRESH_STEP, REFRESH_CLEARANCE_STEP];
+  const oldestRefreshRows = new Map<string, number>();
+  for (const row of ledgerLines) {
+    if (typeof row.step !== "string" || !refreshSteps.includes(row.step)) continue;
+    const ts = Date.parse(String(row.ts));
+    if (Number.isFinite(ts)) oldestRefreshRows.set(row.step, Math.min(oldestRefreshRows.get(row.step) ?? Infinity, ts));
+  }
+  type RefreshHistory = { history: "live" | "union" | "unreadable"; rows: Record<string, unknown>[];
+    unread?: string[]; unclassified?: string[]; history_reason?: string };
+  const refreshHistories = new Map<number, RefreshHistory>();
+  const refreshHistoryFor = (pr: OpenPrView): RefreshHistory => {
+    const cached = refreshHistories.get(pr.prNumber);
+    if (cached) return cached;
+    const created = Date.parse(pr.createdAt ?? "");
+    let history: RefreshHistory = { history: "live", rows: [] };
+    if (!Number.isFinite(created) || !refreshSteps.every(step => (oldestRefreshRows.get(step) ?? Infinity) <= created)) {
+      try {
+        const union = (deps.readRefreshLedgerUnion ?? resolveLedgerUnion)(dirname(deps.ledgerPath),
+          `"pr_number":${pr.prNumber}[,}]`, undefined, { step: refreshSteps });
+        if (!union.ok || union.unread.length > 0 || (union.unclassified?.length ?? 0) > 0) {
+          history = { history: "unreadable", rows: [], unread: union.unread,
+            unclassified: union.unclassified ?? [], history_reason: "refresh ledger union is incomplete" };
+        } else {
+          const rows = parseLedger(union.matches.join("\n")).filter(row => row.pr_number === pr.prNumber);
+          history = { history: "union", rows };
+          for (const [number, records] of refreshRecordsFromLedger(rows))
+            refreshRecords.set(number, [...records, ...(refreshRecords.get(number) ?? [])]);
+          for (const [key, evidence] of refusedRefreshClearancesFromLedger(rows))
+            if (!refusedClearances.has(key)) refusedClearances.set(key, evidence);
+          for (const key of baseRedHistoryFromLedger(rows).refreshed) baseRedHistory.refreshed.add(key);
+        }
+      } catch (error) {
+        const reason = boundedBaseProbeReason(error);
+        history = { history: "unreadable", rows: [], unread: [dirname(deps.ledgerPath)],
+          history_reason: reason };
+      }
+    }
+    refreshHistories.set(pr.prNumber, history);
+    return history;
+  };
   /** W1-T8396 — may merging main clear this head's red? Main's delta since the head's merge base, each
    *  failing test's import closure, the refresh history and a trial merge decide; one row records it.
    *  A refusal already recorded for this head and main is reused, never re-read or re-probed. */
   const assessRefresh = async (
     pr: OpenPrView, arm: RefreshArm, checks: readonly string[], testFiles: readonly string[], mainSha: string,
   ): Promise<RefreshClearance> => {
+    const { rows: _historyRows, ...history } = refreshHistoryFor(pr);
     const memo = refreshClearanceKey(pr.prNumber, pr.headSha, mainSha, testFiles);
     const decided = refusedClearances.get(memo);
     if (decided !== undefined) return { refresh: false, evidence: decided, reason: "this head's refusal at this main is already recorded" };
@@ -14738,9 +14781,11 @@ export async function runSweep(
     const clearance = await assessRefreshClearance({
       failingTestFiles: testFiles,
       reach: mainPathsReachingRed({ failingTestFiles: testFiles, mainChangedFiles, closure, isHarnessPath: isCiHarnessPath }),
-      priorRefresh: refreshedOnSameRed(refreshRecords, pr.prNumber, checks, testFiles),
+      priorRefresh: refreshedOnSameRed(refreshRecords, pr.prNumber, checks, testFiles) ? true
+        : history.history === "unreadable" ? undefined : false,
     }, deps.reproduceFailingTestsOnMerge ? () => deps.reproduceFailingTestsOnMerge!(pr, testFiles, mainSha) : undefined);
     appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: REFRESH_CLEARANCE_STEP,
+      ...history,
       ...refreshClearanceFields({ arm, pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainSha, checks, test_files: testFiles }, clearance) });
     if (!clearance.refresh) refusedClearances.set(memo, clearance.evidence);
     return clearance;
@@ -15888,6 +15933,7 @@ export async function runSweep(
           checks: (pr.ciFailures ?? []).map((f) => f.name), run_id: deps.runId, task_id: pr.taskId ?? "SWEEP" };
         repair.repaired = true;
         repair.reason = "plan-scoped round deferred";
+        refreshHistoryFor(pr);
         const base = decideBaseRed(pr, mainLatestRun, baseRedHistory);
         if (base.kind !== "own") {
           baseRedStandDownPrs.add(pr.prNumber);
@@ -17097,6 +17143,7 @@ export async function runSweep(
               }
               // W1-T4351 — A RED MAIN ALSO CARRIES IS NOT THIS DIFF'S. Stand down while main is red,
               // then spend this pass's ONE update-branch press once main is green; never a fix.
+              refreshHistoryFor(pr);
               const baseRed = decideBaseRed(pr, mainLatestRun, baseRedHistory);
               if (baseRed.kind !== "own") {
                 baseRedStandDownPrs.add(pr.prNumber);
