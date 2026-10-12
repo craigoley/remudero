@@ -391,6 +391,7 @@ export interface EnvRegistryEntry {
 }
 
 export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
+  envEntry("RMD_HEAVY_READY_DIR", "Opt-in canonical private single-account heavy READY directory. Unset disables only NEW-implement reservation admission; configured unreadable state defers it.", ["src/run-task.ts"]),
   envEntry("REMUDERO_CLAUDE_BIN", "Overrides the Claude binary path for worker spawn tests and diagnostics.", ["src/lib/worker.ts"]),
   envEntry("REMUDERO_DAEMON_PID", "The daemon main process's pid, inherited by its children so they can read the daemon's memory growth.", ["src/lib/ledger.ts", "src/lib/host-memory-shadow.ts"]),
   envEntry("REMUDERO_DAEMON_PROCESS", "Marks this process as the daemon actor for ledger attribution.", ["src/lib/ledger.ts"]),
