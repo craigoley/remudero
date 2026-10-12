@@ -102,6 +102,8 @@ test("W1-T8575: a body-scoped red is the PR own while a tree red still waits", (
 });
 
 // Checks that trigger on `edited` for a reason other than judging the PR's own body or title.
+// Empty today: ci-gate.yml's `edited` job (`ci-gate`) is not in its own REQUIRED list, and ci.yml and
+// unwired-gate.yml take the default pull_request types, which exclude `edited`.
 const EDITED_EXEMPT: Record<string, string> = {};
 
 test("W1-T8575: every edited-triggered required check is classified", () => {
