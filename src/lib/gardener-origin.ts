@@ -1,6 +1,7 @@
 /** A passive correlation carrier, never an authorization, outcome, or cost receipt. Its
  * parent is the exact garden.lifecycle/garden.pass row with the same name and passId. */
 export const GARDENER_ORIGIN_ENV = "REMUDERO_GARDENER_ORIGIN";
+/** PRIMARY CONTROL: a carrier holds only the version, garden name, and UUID. */
 export const GARDENER_ORIGIN_MAX_BYTES = 256;
 export type GardenerOrigin =
   | { state: "linked"; version: 1; name: string; passId: string }
