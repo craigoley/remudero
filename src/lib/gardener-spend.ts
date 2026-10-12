@@ -9,15 +9,26 @@ export const GARDENER_SPEND_VERSION = "gardener-spend-v1";
 export const GARDENER_SPEND_MAX_BYTES = 64 * 1024;
 /** BACKSTOP: matches the registered runtime inventory's maximum population. */
 export const GARDENER_SPEND_MAX_GARDENS = 32;
+/** BACKSTOP: at most 1 MiB of SHA-256 text; refuse when exact replay accounting cannot fit. */
+const GARDENER_SPEND_MAX_IDENTITIES = 16384;
 type RegistryReason = "missing_registry" | "invalid_registry" | "over_budget";
 interface Receipt {
   identity: string; ts: string; step: string; name?: string; passId?: string;
   repository?: string; daemonRunId?: string; phase?: string; exit?: number;
   origin?: GardenerOrigin; cost?: number; runId?: string; taskId?: string;
 }
+interface PassCost {
+  name: string; passId: string; parent: boolean; complete: boolean; interrupted: boolean;
+  priced: number; unpriced: number; usd: number;
+}
+interface CompactCosts {
+  version: 1; correlated: boolean; unlinked: number; passes: PassCost[];
+  repository: string; daemonRunId: string; from: string; through: string;
+}
 export interface GardenerSpendSource {
   runtime?: unknown; reason?: RegistryReason | "ledger_unavailable";
   receipts?: Receipt[]; observedAt?: string; corpusComplete?: boolean;
+  compact?: CompactCosts;
 }
 export interface GardenerSpend {
   version: typeof GARDENER_SPEND_VERSION;
@@ -43,6 +54,62 @@ function carrier(raw: unknown): GardenerOrigin | undefined {
   return readGardenerOrigin({ [GARDENER_ORIGIN_ENV]: JSON.stringify({ version: value.version, name: value.name, passId: value.passId }) });
 }
 
+function costAccumulator(runtime: ReturnType<typeof parseGardenerRuntime>, observedAt: string) {
+  const compact: CompactCosts = { version: 1, correlated: false, unlinked: 0, passes: [],
+    repository: runtime.repository, daemonRunId: runtime.daemonRunId, from: runtime.configuredAt, through: observedAt };
+  const passes = new Map<string, PassCost>();
+  let bytes = 0;
+  const from = Date.parse(runtime.configuredAt), through = Date.parse(observedAt);
+  return { compact, get bytes() { return bytes; }, add(row: Receipt) {
+    if (row.origin !== undefined) compact.correlated = true;
+    const stamp = Date.parse(row.ts);
+    if (!Number.isFinite(stamp) || stamp < from || stamp > through) return;
+    const parent = row.step === "garden.lifecycle" || row.step === "garden.pass";
+    const name = parent ? row.name : row.origin?.state === "linked" ? row.origin.name : undefined;
+    const passId = parent ? row.passId : row.origin?.state === "linked" ? row.origin.passId : undefined;
+    const scoped = parent ? row.repository === runtime.repository && row.daemonRunId === runtime.daemonRunId
+      : (row.repository === undefined || row.repository === runtime.repository) &&
+        (row.daemonRunId === undefined || row.daemonRunId === runtime.daemonRunId);
+    if (!scoped || !name || !passId || !runtime.gardens.some(g => g.name === name)) {
+      if (!parent) compact.unlinked++;
+      return;
+    }
+    const key = JSON.stringify([name, passId]);
+    let pass = passes.get(key);
+    const before = pass ? Buffer.byteLength(JSON.stringify(pass)) : -1;
+    if (!pass) {
+      pass = { name, passId, parent: false, complete: false, interrupted: false, priced: 0, unpriced: 0, usd: 0 };
+      passes.set(key, pass);
+      compact.passes.push(pass);
+    }
+    if (parent) {
+      pass.parent = true;
+      pass.interrupted ||= ["failed", "cancelled"].includes(row.phase ?? "") || row.exit !== undefined && row.exit !== 0;
+      pass.complete = !pass.interrupted && (pass.complete || row.phase === "completed" && row.exit === 0 ||
+        row.step === "garden.pass" && row.exit === 0);
+    } else if (row.cost === undefined || row.cost < 0) pass.unpriced++;
+    else { pass.priced++; pass.usd += row.cost; }
+    bytes += Buffer.byteLength(JSON.stringify(pass)) - before;
+    if (!Number.isFinite(pass.usd)) bytes = Infinity;
+  } };
+}
+
+function validateCompact(compact: CompactCosts): void {
+  const count = (n: number) => Number.isSafeInteger(n) && n >= 0;
+  const keys = new Set<string>();
+  if (compact.version !== 1 || typeof compact.correlated !== "boolean" || !count(compact.unlinked) ||
+    !Array.isArray(compact.passes)) throw new Error("malformed compact gardener costs");
+  for (const pass of compact.passes) {
+    const key = JSON.stringify([pass.name, pass.passId]);
+    if (typeof pass.name !== "string" || typeof pass.passId !== "string" || !pass.passId ||
+      pass.passId.length > 128 || keys.has(key) || typeof pass.parent !== "boolean" ||
+      typeof pass.complete !== "boolean" || typeof pass.interrupted !== "boolean" ||
+      pass.complete && (!pass.parent || pass.interrupted) || !count(pass.priced) || !count(pass.unpriced) ||
+      !Number.isFinite(pass.usd) || pass.usd < 0) throw new Error("malformed compact gardener pass");
+    keys.add(key);
+  }
+}
+
 export async function captureGardenerSpendSource(stateDir: string, clock: Clock = systemClock): Promise<GardenerSpendSource> {
   let runtime: ReturnType<typeof parseGardenerRuntime>;
   try {
@@ -53,9 +120,9 @@ export async function captureGardenerSpendSource(stateDir: string, clock: Clock 
       ? "over_budget" : "invalid_registry" };
   }
   const observedAt = clock.iso();
-  const receipts: Receipt[] = [];
+  const costs = costAccumulator(runtime, observedAt);
   const seen = new Set<string>();
-  let complete = true, liveObserved = false, bytes = Buffer.byteLength(JSON.stringify(runtime));
+  let complete = true, liveObserved = false, overflow = false;
   const small = (value: unknown): string | undefined => typeof value === "string" && value.length <= 128 ? value : undefined;
   // Keep canonical raw-line fingerprints, never raw lines or provider/config payloads (W1-T8484).
   const stream = openLedgerUnion(stateDir, { since: runtime.configuredAt, dedupe: false,
@@ -65,7 +132,8 @@ export async function captureGardenerSpendSource(stateDir: string, clock: Clock 
       const parent = row.step === "garden.lifecycle" || row.step === "garden.pass";
       if (!parent && spendRoleOf(row) !== "produced") return;
       const identity = fingerprintLedgerLine(raw);
-      if (seen.has(identity) || bytes > GARDENER_SPEND_MAX_BYTES) return;
+      if (seen.has(identity) || overflow) return;
+      if (seen.size >= GARDENER_SPEND_MAX_IDENTITIES) { overflow = true; return; }
       if (!Number.isFinite(Date.parse(String(row.ts))) || Date.parse(String(row.ts)) > Date.parse(observedAt)) complete = false;
       const receipt: Receipt = { identity, ts: small(row.ts) ?? "", step: small(row.step) ?? "",
         repository: small(row.repository), daemonRunId: small(row.daemon_run_id),
@@ -75,15 +143,16 @@ export async function captureGardenerSpendSource(stateDir: string, clock: Clock 
               row.daemon_run_id !== undefined && small(row.daemon_run_id) === undefined)
               ? { state: "invalid", reason: "malformed" } : carrier(row.gardener_origin), cost: spendAmountUsd(row),
             runId: small(row.run_id), taskId: small(row.task_id) }) };
-      bytes += Buffer.byteLength(JSON.stringify(receipt));
       seen.add(identity);
-      receipts.push(receipt);
+      costs.add(receipt);
+      overflow = costs.bytes > GARDENER_SPEND_MAX_BYTES;
     } });
   for await (const row of stream) {
     void row;
-    if (bytes > GARDENER_SPEND_MAX_BYTES) return { reason: "over_budget" };
+    if (overflow) return { reason: "over_budget" };
   }
-  return { runtime, receipts, observedAt, corpusComplete: complete && liveObserved };
+  const source = { runtime, compact: costs.compact, observedAt, corpusComplete: complete && liveObserved };
+  return Buffer.byteLength(JSON.stringify(source)) > GARDENER_SPEND_MAX_BYTES ? { reason: "over_budget" } : source;
 }
 
 export function foldGardenerSpend(source: GardenerSpendSource | undefined, repository: string | undefined,
@@ -104,44 +173,35 @@ export function foldGardenerSpend(source: GardenerSpendSource | undefined, repos
     result.observedAt = source.observedAt ?? runtime.observedAt;
     result.gardens = runtime.gardens.map(({ name, enabled, scope }) => ({ name, enabled, scope,
       totalUsd: null, pricedSubtotalUsd: null }));
-    if (!source.receipts) return result;
-    if (!source.receipts.some(row => row.origin !== undefined)) {
+    let compact = source.compact;
+    if (!compact && source.receipts) {
+      const costs = costAccumulator(runtime, result.observedAt);
+      const seen = new Set<string>();
+      for (const row of source.receipts) {
+        if (seen.has(row.identity)) continue;
+        seen.add(row.identity);
+        costs.add(row);
+      }
+      compact = costs.compact;
+    }
+    if (!compact) return result;
+    validateCompact(compact);
+    if (compact.repository !== repository || compact.daemonRunId !== runtime.daemonRunId ||
+      compact.from !== runtime.configuredAt || compact.through !== result.observedAt) return unknown("scope_mismatch");
+    if (!compact.correlated) {
       if (source.corpusComplete === false) return unknown("ledger_unavailable");
       return result;
     }
-    const from = Date.parse(runtime.configuredAt), through = Date.parse(result.observedAt);
-    const seen = new Set<string>();
-    const rows = source.receipts.filter(row => {
-      const stamp = Date.parse(row.ts);
-      if (seen.has(row.identity)) return false;
-      seen.add(row.identity);
-      return Number.isFinite(stamp) && stamp >= from && stamp <= through;
-    });
-    const parents = new Map<string, { complete: boolean; interrupted: boolean }>();
-    for (const row of rows) {
-      if ((row.step !== "garden.lifecycle" && row.step !== "garden.pass") ||
-        row.repository !== repository || row.daemonRunId !== runtime.daemonRunId || !row.name || !row.passId) continue;
-      const key = JSON.stringify([row.name, row.passId]);
-      const previous = parents.get(key);
-      const terminal = row.phase === "completed" && row.exit === 0 || row.step === "garden.pass" && row.exit === 0;
-      const interrupted = ["failed", "cancelled"].includes(row.phase ?? "") || row.exit !== undefined && row.exit !== 0;
-      const broken = interrupted || previous?.interrupted === true;
-      parents.set(key, { complete: !broken && (terminal || previous?.complete === true), interrupted: broken });
-    }
-    const stats = new Map(runtime.gardens.map(g => [g.name, { priced: 0, unpriced: 0, usd: 0, passes: new Set<string>() }]));
-    let unlinked = 0;
-    for (const row of rows) {
-      if (row.step === "garden.lifecycle" || row.step === "garden.pass") continue;
-      const origin = row.origin;
-      const garden = origin?.state === "linked" ? runtime.gardens.find(g => g.name === origin.name) : undefined;
-      const parent = origin?.state === "linked" ? parents.get(JSON.stringify([origin.name, origin.passId])) : undefined;
-      if (!garden || !parent || row.repository !== undefined && row.repository !== repository ||
-        row.daemonRunId !== undefined && row.daemonRunId !== runtime.daemonRunId) { unlinked++; continue; }
-      if (garden.scope !== "repository") continue;
+    const stats = new Map(runtime.gardens.map(g => [g.name,
+      { priced: 0, unpriced: 0, usd: 0, passes: 0, complete: true }]));
+    let unlinked = compact.unlinked;
+    for (const pass of compact.passes) {
+      const garden = runtime.gardens.find(g => g.name === pass.name);
+      if (!garden || !pass.parent) { unlinked += pass.priced + pass.unpriced; continue; }
+      if (garden.scope !== "repository" || pass.priced + pass.unpriced === 0) continue;
       const stat = stats.get(garden.name)!;
-      if (origin?.state === "linked") stat.passes.add(origin.passId);
-      if (row.cost === undefined || row.cost < 0) stat.unpriced++;
-      else { stat.priced++; stat.usd += row.cost; }
+      stat.passes++; stat.complete &&= pass.complete;
+      stat.priced += pass.priced; stat.unpriced += pass.unpriced; stat.usd += pass.usd;
     }
     let priced = 0, unpriced = 0, subtotal = 0;
     for (const garden of result.gardens) {
@@ -151,8 +211,7 @@ export function foldGardenerSpend(source: GardenerSpendSource | undefined, repos
       priced += stat.priced; unpriced += stat.unpriced; subtotal += stat.usd;
       garden.pricedSubtotalUsd = stat.priced > 0 ? stat.usd : null;
       const complete = source.corpusComplete === true && unlinked === 0 && stat.unpriced === 0 &&
-        stat.priced > 0 && stat.passes.size === entry.attempts && entry.attempts === entry.completions &&
-        [...stat.passes].every(id => parents.get(JSON.stringify([garden.name, id]))?.complete === true);
+        stat.priced > 0 && stat.passes === entry.attempts && entry.attempts === entry.completions && stat.complete;
       garden.totalUsd = complete ? stat.usd : null;
     }
     const repositoryGardens = result.gardens.filter(g => g.scope === "repository");
