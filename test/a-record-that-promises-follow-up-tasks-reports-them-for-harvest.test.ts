@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { promisedFollowUps, unreportedFollowUps, parseHarvestableFollowUps } from "../src/lib/promised-follow-ups.js";
-import { judgeReview, observePromisedFollowUps, reviewDecisionDigest, reviewInputDigest, REVIEW_ENGINE_REVISION } from "../src/lib/review.js";
+import { judgeReview, observePromisedFollowUps, recoverPromisedFollowUpReports, reviewDecisionDigest, reviewInputDigest, REVIEW_ENGINE_REVISION } from "../src/lib/review.js";
 import { parseFollowups } from "../src/lib/worker.js";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gitRepo } from "./helpers/git-repo.js";
+import { gzipSync } from "node:zlib";
 
 const path = "docs/adr/0007-example.md";
 const adr = "# Decision\n\n- Follow-up tasks this record files:\n  - source-keyed child bundle store\n    with atomic publication;\n  - bounded heavy READY escalation\n\n## Other\n- not promised\n";
@@ -142,4 +143,34 @@ test("production observes promises before claiming, then supplies that same obse
   assert.ok(body.indexOf("reviewDecisionDigest({") < body.indexOf("await claimReviewDecision({"));
   const judge = body.slice(body.indexOf("await judgeReviewAsync(criteria"));
   assert.match(judge, /promisedFollowUpObservation,/);
+  assert.ok(body.indexOf("await recoverPromisedFollowUpReports(") < body.indexOf("reviewDecisionDigest({"));
+  assert.match(source, /report: reviewReport,\n\s+implementationReport: workerTranscript\(fixResult\),/);
+});
+
+test("a later review recovers actual harvested entries across gzip, plain and live forms without trusting another task or PR", async t => {
+  const repo = gitRepo(); t.after(() => repo.cleanup()); const state = join(repo.dir, "state"); mkdirSync(state);
+  const identity = { task_id: "W1-T7729", pr_url: "https://github.com/o/r/pull/7", step: "report.followups" };
+  const row = (text: string, extra = {}) => JSON.stringify({ ...identity, ...extra, entries: [{ type: "task", text }] }) + "\n";
+  writeFileSync(join(state, "ledger.2026-10-10T00-00-00-000Z.ndjson.gz"), gzipSync(row(promises[0]!.text)));
+  writeFileSync(join(state, "ledger.2026-10-11T00-00-00-000Z.ndjson"), row(promises[1]!.text, { task_id: "foreign-task" }));
+  writeFileSync(join(state, "ledger.ndjson"), row(promises[1]!.text, { pr_url: "https://github.com/o/r/pull/8" }));
+  const args = { ledgerPath: join(state, "ledger.ndjson"), taskId: identity.task_id, prUrl: identity.pr_url };
+  const first = await recoverPromisedFollowUpReports(observation(), args);
+  assert.equal(first.state, "complete"); if (first.state !== "complete") return;
+  assert.equal(first.harvestCorpusComplete, true); assert.deepEqual(first.harvested, [{ type: "task", text: promises[0]!.text }]);
+  assert.equal(review("", first).state, "failure");
+  writeFileSync(join(state, "ledger.ndjson"), row(promises[1]!.text));
+  const second = await recoverPromisedFollowUpReports(observation(), args);
+  assert.equal(second.state, "complete"); if (second.state !== "complete") return;
+  assert.equal(second.harvested?.length, 2); assert.equal(review("", second).state, "success");
+  const material = { headSha: "a".repeat(40), diff, report: "same body", acceptance: criteria };
+  assert.notEqual(reviewDecisionDigest({ ...material, promisedFollowUpObservation: first }), reviewDecisionDigest({ ...material, promisedFollowUpObservation: second }));
+});
+
+test("an unreadable harvest is UNKNOWN, while a no-promise or already-reported review performs no ledger read", async () => {
+  const args = { ledgerPath: "/absent/promise-fixture/state/ledger.ndjson", taskId: "W1-T7729", prUrl: "https://github.com/o/r/pull/7" };
+  assert.equal((await recoverPromisedFollowUpReports(observation(), args)).state, "unknown");
+  const empty = observation([]); assert.equal(await recoverPromisedFollowUpReports(empty, args), empty);
+  const reported = "## Follow-ups\ntask: source-keyed child bundle store with atomic publication;\naction: bounded heavy READY escalation\n";
+  const current = observation(); assert.equal(await recoverPromisedFollowUpReports(current, { ...args, implementationReport: reported }), current);
 });

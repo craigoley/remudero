@@ -1499,6 +1499,7 @@ import {
   claimReviewDecision,
   reviewDecisionDigest,
   observePromisedFollowUps,
+  recoverPromisedFollowUpReports,
   reviewTaskIdEvidenceAsync,
   bodyReviewContractDigest,
   reviewContractDigest,
@@ -8482,8 +8483,11 @@ async function runReview(args: {
   const criteria = task.acceptance ?? [];
   const taskIdEvidence = await reviewTaskIdEvidenceAsync(diff, args.headRefName, args.headCheckoutDir);
   const ownership = taskIdEvidence.ownership;
-  const promisedFollowUpObservation = await observePromisedFollowUps({
+  const promiseSources = await observePromisedFollowUps({
     diff, headSha, headCheckoutDir: args.headCheckoutDir, task,
+  });
+  const promisedFollowUpObservation = await recoverPromisedFollowUpReports(promiseSources, {
+    ledgerPath: args.ledgerPath, taskId: task.id, prUrl, implementationReport: args.implementationReport,
   });
   const decisionDigest = reviewDecisionDigest({
     headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership, promisedFollowUpObservation,
@@ -14333,6 +14337,7 @@ export async function runFixRung(opts: {
       prUrl: opts.prUrl,
       task: reviewTask,
       report: reviewReport,
+      implementationReport: workerTranscript(fixResult),
       reportIsSubstitute: reviewReportIsSubstitute,
       reportSubstituteCause: reviewReportSubstituteCause,
       reviewInputBody,

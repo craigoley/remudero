@@ -2,7 +2,7 @@ import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import { createHash } from "node:crypto";
-import { promisedFollowUps, unreportedFollowUps, followUpPlanRecords, type PromisedFollowUp, type FollowUpPlanRecord } from "./promised-follow-ups.js";
+import { promisedFollowUps, unreportedFollowUps, followUpPlanRecords, parseHarvestableFollowUps, type HarvestableFollowUp, type PromisedFollowUp, type FollowUpPlanRecord } from "./promised-follow-ups.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { createRequire } from "node:module";
 import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
@@ -20,7 +20,7 @@ import { defaultGitRunnerAsync, loadPlanAtRef, loadPlanAtRefAsync, readBlobsAtRe
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { readLedgerUnionRecordsSync, openLedgerUnion } from "./ledger-union.js";
 import { killAfterGrace } from "./git-fetch-retry.js";
 import { playwrightCacheRoot } from "./worker-home.js";
 import { makeTempDir } from "./tmp.js";
@@ -119,7 +119,8 @@ export function reviewDecisionDigest(input: ReviewDecisionDigestInput): string {
       (input.promisedFollowUpObservation.state === "unknown" || input.promisedFollowUpObservation.promised.length > 0)
       ? { promisedFollowUps: input.promisedFollowUpObservation.state === "unknown" ? { state: "unknown" }
         : { state: "complete", promised: input.promisedFollowUpObservation.promised,
-          unfiled: unreportedFollowUps(input.promisedFollowUpObservation.promised, "", input.promisedFollowUpObservation.planRecords) } } : {}),
+          unfiled: unreportedFollowUps(input.promisedFollowUpObservation.promised, "", input.promisedFollowUpObservation.planRecords),
+          harvested: input.promisedFollowUpObservation.harvested ?? [] } } : {}),
     body: input.body ?? null,
     acceptance,
     declaredFiles: input.declaredFiles ?? [],
@@ -442,7 +443,8 @@ export type ReportSubstituteCause =
 
 /** The evidence the JUDGE reads: the PR diff, the implement REPORT, optional LLM verdicts. */
 export type PromisedFollowUpObservation =
-  | { state: "complete"; headSha?: string; baseSha?: string; promised: PromisedFollowUp[]; planRecords: FollowUpPlanRecord[] }
+  | { state: "complete"; headSha?: string; baseSha?: string; promised: PromisedFollowUp[]; planRecords: FollowUpPlanRecord[];
+      harvested?: HarvestableFollowUp[]; harvestCorpusComplete?: boolean }
   | { state: "unknown"; reason: string };
 
 export interface ReviewEvidence {
@@ -4825,6 +4827,43 @@ export async function observePromisedFollowUps(args: {
   } catch (error) { return { state: "unknown", reason: `promise source unavailable: ${String(error)}` }; }
 }
 
+const followUpReport = (entries: readonly HarvestableFollowUp[]): string =>
+  `## Follow-ups\n${entries.map(entry => `${entry.type}: ${entry.text}`).join("\n")}\n`;
+
+/** Recover an already-harvested declaration for this exact task/PR, including rotated history. No write or model. */
+export async function recoverPromisedFollowUpReports(observation: PromisedFollowUpObservation, args: {
+  ledgerPath: string; taskId: string; prUrl: string; implementationReport?: string;
+}): Promise<PromisedFollowUpObservation> {
+  if (observation.state === "unknown" || observation.promised.length === 0 ||
+      unreportedFollowUps(observation.promised, args.implementationReport ?? "", observation.planRecords).length === 0) return observation;
+  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 30_000), entries = new Map<string, HarvestableFollowUp>();
+  let incomplete = false;
+  try {
+    for await (const row of openLedgerUnion(dirname(args.ledgerPath), {
+      step: "report.followups", dedupe: false, signal: controller.signal,
+      onUnreadArchive: () => { incomplete = true; }, onUnreadLive: () => { incomplete = true; }, onMalformedRow: () => { incomplete = true; },
+    })) {
+      if (row.task_id !== args.taskId || row.pr_url !== args.prUrl) continue;
+      if (!Array.isArray(row.entries)) { incomplete = true; continue; }
+      for (const raw of row.entries as Array<{ type?: unknown; text?: unknown } | null>) {
+        if (!raw || !["research", "task", "action"].includes(String(raw.type)) || typeof raw.text !== "string" || !raw.text.trim() || /[\r\n]/.test(raw.text)) {
+          incomplete = true; continue;
+        }
+        const entry: HarvestableFollowUp = { type: raw.type as HarvestableFollowUp["type"], text: raw.text };
+        entries.set(JSON.stringify(entry), entry);
+        if (entries.size > 256) throw new Error("promise harvest exceeds its bounded entry limit");
+      }
+    }
+    const harvested = [...entries.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    const report = followUpReport([...(parseHarvestableFollowUps(args.implementationReport ?? "") ?? []), ...harvested]);
+    if (incomplete && unreportedFollowUps(observation.promised, report, observation.planRecords).length > 0) {
+      return { state: "unknown", reason: "promise harvest corpus is unreadable or malformed; absence is unproved" };
+    }
+    return { ...observation, harvested, harvestCorpusComplete: !incomplete };
+  } catch (error) { return { state: "unknown", reason: `promise harvest unavailable: ${String(error)}` }; }
+  finally { clearTimeout(timer); }
+}
+
 /** IMPLEMENTATION-SHAPED (W1-T458 design (ii)): `src/` or `test/` only. Narrowing to these two prefixes is what turns
  *  the raw "touches ANY declared path" false-positive rate — 52%, inflated by plan filings and docs PRs — into the
  *  honest ~11% the advisory-not-refusal call rests on. */
@@ -5114,7 +5153,8 @@ export function judgeReview(
     verdicts.push({ claim: "promised follow-ups reported for harvest", proof: "", met: false, floorMet: false,
       reason: promiseObservation.reason, proof_exec: "cannot_evaluate", loadError: promiseObservation.reason });
   } else if (promiseObservation && promiseObservation.promised.length > 0) {
-    const missing = unreportedFollowUps(promiseObservation.promised, evidence.implementationReport ?? "", promiseObservation.planRecords);
+    const report = followUpReport([...(parseHarvestableFollowUps(evidence.implementationReport ?? "") ?? []), ...(promiseObservation.harvested ?? [])]);
+    const missing = unreportedFollowUps(promiseObservation.promised, report, promiseObservation.planRecords);
     verdicts.push({ claim: "promised follow-ups reported for harvest", proof: "", met: missing.length === 0, floorMet: missing.length === 0,
       reason: missing.length ? `unreported promised follow-ups (copy each into a typed ## Follow-ups entry): ${missing.map(p => `${p.path}: ${p.text}`).join("; ")}`
         : "every promised follow-up is harvestable or named in a linked origin/main plan record", proof_exec: "not_executable" });
