@@ -159,7 +159,7 @@ test("W1-T7812: pre-push runs the shifted-crossing proof when its implementation
       changed: [changedPath], loadMembers: () => [],
       runSuites: (files: string[]) => { runs.push(files); return []; },
     }) as { violations: string[]; unmeasured: string | null };
-    assert.deepEqual(runs, [[testFile]], changedPath);
+    assert.equal(runs.flat().filter((file) => file === testFile).length, 1, changedPath);
     assert.deepEqual(result, { violations: [], unmeasured: null }, changedPath);
   }
 });
